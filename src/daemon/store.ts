@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync, renameSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { paths, ensureHome, sanitizeId } from '../shared/paths.ts';
@@ -20,6 +20,23 @@ import type {
 } from '../shared/types.ts';
 
 const PERSIST_DEBOUNCE_MS = 400;
+
+/**
+ * Retention bounds.
+ *
+ * The daemon is started once by a hook and can then run for weeks, and it
+ * loads every session it has ever recorded on boot. Without these, resident
+ * memory is a function of how long the user has had the plugin installed
+ * rather than of what they are doing right now.
+ */
+/** Sessions older than this are dropped from memory and from disk on boot. */
+const SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+/** Hard cap on sessions held in memory, newest first. */
+const MAX_SESSIONS = 60;
+/** Resolved gates retained per session; each one carries its full verdict. */
+const MAX_GATES = 40;
+/** Parsed diffs cached in memory. Each can be several megabytes. */
+const MAX_CACHED_DIFFS = 12;
 
 export function newSession(sessionId: string, cwd: string): SessionState {
   const now = Date.now();
@@ -79,13 +96,28 @@ export class SessionStore extends EventEmitter {
   private loadFromDisk(): void {
     const dir = paths.sessionsDir();
     if (!existsSync(dir)) return;
+
+    const loaded: SessionState[] = [];
+    const expired: string[] = [];
+    const cutoff = Date.now() - SESSION_TTL_MS;
+
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      const file = path.join(dir, entry.name, 'state.json');
-      if (!existsSync(file)) continue;
+      const sessionDir = path.join(dir, entry.name);
+      const file = path.join(sessionDir, 'state.json');
+      if (!existsSync(file)) {
+        // A directory with no state was created by `ensure` for a session
+        // that never produced one. It is dead weight either way.
+        if (mtimeOf(sessionDir) < cutoff) expired.push(sessionDir);
+        continue;
+      }
       try {
         const state = JSON.parse(readFileSync(file, 'utf8')) as SessionState;
         if (!state.sessionId) continue;
+        if ((state.updatedAt ?? 0) < cutoff) {
+          expired.push(sessionDir);
+          continue;
+        }
         // Sessions written by an older build predate some fields.
         state.reviewRound ??= 0;
         state.threads ??= [];
@@ -95,11 +127,67 @@ export class SessionStore extends EventEmitter {
         if (state.status === 'active') state.status = 'idle';
         // Any gate that was parked has lost its waiter.
         for (const gate of state.gates) gate.waiting = false;
-        this.sessions.set(state.sessionId, state);
+        trimGates(state);
+        loaded.push(state);
       } catch {
         /* skip unreadable session */
       }
     }
+
+    // Newest first, then cap. Anything past the cap stays on disk — it is not
+    // stale, just cold, and a later `harness status` should still find it.
+    loaded.sort((a, b) => b.updatedAt - a.updatedAt);
+    for (const state of loaded.slice(0, MAX_SESSIONS)) {
+      this.sessions.set(state.sessionId, state);
+    }
+    for (const sessionDir of expired) discardDir(sessionDir);
+  }
+
+  /**
+   * Forget a session: memory, cached diff, and any pending write.
+   *
+   * On-disk state is left alone — this is eviction, not deletion — so the
+   * session is still there if the daemon restarts and the user goes looking.
+   */
+  drop(id: string): boolean {
+    const timer = this.persistTimers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      this.persistTimers.delete(id);
+      // The pending write was carrying real changes; do not lose them.
+      this.persistNow(id);
+    }
+    this.diffs.delete(id);
+    const removed = this.sessions.delete(id);
+    if (removed) this.broadcastSessionList();
+    return removed;
+  }
+
+  /**
+   * Evict sessions that ended a while ago, and trim gate history on the rest.
+   *
+   * Called on a timer by the daemon. A long-lived daemon accumulates finished
+   * sessions the user will never look at again; each one holds its timeline,
+   * every gate verdict, and its cached diff.
+   */
+  sweep(opts: { endedTtlMs: number; now?: number } = { endedTtlMs: 60 * 60 * 1000 }): number {
+    const now = opts.now ?? Date.now();
+    let dropped = 0;
+    for (const state of [...this.sessions.values()]) {
+      trimGates(state);
+      const finished = state.status === 'ended';
+      if (finished && now - (state.endedAt ?? state.updatedAt) > opts.endedTtlMs) {
+        this.drop(state.sessionId);
+        dropped++;
+      }
+    }
+    // Oldest-first eviction once the cap is exceeded, regardless of status.
+    const overflow = this.all().slice(MAX_SESSIONS);
+    for (const state of overflow) {
+      this.drop(state.sessionId);
+      dropped++;
+    }
+    return dropped;
   }
 
   private persistSoon(id: string): void {
@@ -295,6 +383,7 @@ export class SessionStore extends EventEmitter {
       ...(meta && Object.keys(meta).length ? { meta } : {}),
     };
     state.gates.push(gate);
+    trimGates(state);
     state.activeGateId = gate.id;
     state.updatedAt = gate.createdAt;
     this.persistSoon(id);
@@ -430,7 +519,7 @@ export class SessionStore extends EventEmitter {
    * ---------------------------------------------------------------- */
 
   setDiff(id: string, diff: DiffPayload): void {
-    this.diffs.set(id, diff);
+    this.cacheDiff(id, diff);
     // Persisted so a daemon restart mid-review does not leave the session
     // intact but the Review tab empty.
     try {
@@ -452,7 +541,7 @@ export class SessionStore extends EventEmitter {
       const file = path.join(paths.sessionDir(id), 'diff.json');
       if (!existsSync(file)) return undefined;
       const diff = JSON.parse(readFileSync(file, 'utf8')) as DiffPayload;
-      this.diffs.set(id, diff);
+      this.cacheDiff(id, diff);
       return diff;
     } catch {
       return undefined;
@@ -489,6 +578,24 @@ export class SessionStore extends EventEmitter {
     return updated;
   }
 
+  /**
+   * Keep the diff cache bounded, evicting least-recently-used.
+   *
+   * Every entry is a fully parsed diff — up to `maxDiffFileBytes` per file —
+   * and the previous behaviour kept one per session forever. Re-inserting
+   * moves a key to the end of the Map's iteration order, which is the LRU
+   * position we evict from the front of.
+   */
+  private cacheDiff(id: string, diff: DiffPayload): void {
+    this.diffs.delete(id);
+    this.diffs.set(id, diff);
+    while (this.diffs.size > MAX_CACHED_DIFFS) {
+      const oldest = this.diffs.keys().next();
+      if (oldest.done) break;
+      this.diffs.delete(oldest.value);
+    }
+  }
+
   /* ---------------------------------------------------------------- *
    * Fan-out
    * ---------------------------------------------------------------- */
@@ -499,6 +606,44 @@ export class SessionStore extends EventEmitter {
 
   broadcastSessionList(): void {
     this.emitEvent({ type: 'sessions', sessions: this.summaries() });
+  }
+}
+
+/**
+ * Cap a session's gate history.
+ *
+ * Every gate retains its full `GateResult` — the comment, the edited plan, and
+ * each review thread with its source excerpt. A session that goes through many
+ * review rounds would otherwise carry all of them in memory and rewrite the
+ * lot to disk on every persist. Open and undelivered gates are never dropped:
+ * something is still waiting on them.
+ */
+function trimGates(state: SessionState): void {
+  if (state.gates.length <= MAX_GATES) return;
+  const keep = new Set<Gate>();
+  for (const gate of state.gates) {
+    if (gate.status === 'open' || (gate.result && !gate.deliveredAt)) keep.add(gate);
+  }
+  const droppable = state.gates.filter((g) => !keep.has(g));
+  const surplus = state.gates.length - MAX_GATES;
+  const drop = new Set(droppable.slice(0, Math.max(0, surplus)));
+  if (drop.size === 0) return;
+  state.gates = state.gates.filter((g) => !drop.has(g));
+}
+
+function mtimeOf(dir: string): number {
+  try {
+    return statSync(dir).mtimeMs;
+  } catch {
+    return Date.now();
+  }
+}
+
+function discardDir(dir: string): void {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* a session directory we cannot remove is not worth failing boot over */
   }
 }
 

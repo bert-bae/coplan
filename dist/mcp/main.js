@@ -322,6 +322,8 @@ async function startDaemon() {
       stdio: "ignore",
       env: process.env
     });
+    child.on("error", () => {
+    });
     child.unref();
   } catch {
     return null;

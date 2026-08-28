@@ -20,7 +20,9 @@ import {
   tasksFromPlan,
   updateTask,
 } from './tasks.ts';
-import { addCheck, runAllChecks, runCheck, seedChecks, cancelCheck } from './checks.ts';
+import { addCheck, runAllChecks, runCheck, seedChecks, cancelCheck, cancelAllChecks } from './checks.ts';
+import { shutdownChildren, killAllChildren, liveChildCount, liveChildLabels } from './proc.ts';
+import { clearBaseline, pruneBaselines } from './tasks.ts';
 import { composeShip, executeShip } from './ship.ts';
 import { loadConfig, stageInstructions, type HarnessConfig } from '../shared/config.ts';
 import { excerptFor } from '../shared/diffparse.ts';
@@ -96,26 +98,77 @@ async function main(): Promise<void> {
   log(`listening on ${baseUrl(lock)} (pid ${process.pid}, v${VERSION})`);
   process.stdout.write(`${JSON.stringify({ started: true, ...lock })}\n`);
 
+  /**
+   * Release everything this process owns, in dependency order.
+   *
+   * Runs at most once — a second signal while the first shutdown is in flight
+   * must not re-enter it — and is deliberately bounded: a shutdown that can
+   * hang is a shutdown that leaves orphans behind, which is the exact failure
+   * it exists to prevent.
+   */
+  let shuttingDown = false;
   const shutdown = (signal: string) => {
+    if (shuttingDown) {
+      // Second signal: the user is insisting. Take the fast path.
+      log(`second signal (${signal}); exiting now`);
+      killAllChildren();
+      process.exit(0);
+    }
+    shuttingDown = true;
     log(`shutting down (${signal})`);
-    store.persistAll();
+
+    // Children are spawned detached so they can survive a wedged shell being
+    // killed — which means they also survive this process unless reaped.
+    const straggling = liveChildCount();
+    if (straggling) log(`terminating ${straggling} child process tree(s): ${liveChildLabels().join(', ')}`);
+    cancelAllChecks();
+
     for (const t of tailers.values()) t.close();
+    tailers.clear();
+    reaper.stop();
+    store.persistAll();
+
+    // Stop accepting work, then drop the long-poll and SSE connections that
+    // would otherwise hold `close` open for their full window.
+    server.close();
+    server.closeAllConnections?.();
+
     try {
       const live = readLiveLock();
       if (live?.pid === process.pid) unlinkSync(paths.lockFile());
     } catch {
       /* ignore */
     }
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 1000).unref();
+
+    void shutdownChildren(SHUTDOWN_GRACE_MS)
+      .catch(() => 0)
+      .finally(() => process.exit(0));
+
+    // Backstop: never let a stuck reap keep the daemon alive indefinitely.
+    setTimeout(() => {
+      killAllChildren();
+      process.exit(0);
+    }, SHUTDOWN_GRACE_MS + 1_500).unref();
   };
+
+  const reaper = startReaper(store, tailers);
   startIdleWatch(store, config, clients, () => shutdown('idle'));
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGHUP', () => shutdown('SIGHUP'));
+  // The terminal that started us going away must not leave the tree running.
+  process.on('exit', () => killAllChildren());
   process.on('uncaughtException', (err) => log(`uncaught: ${err?.stack ?? err}`));
   process.on('unhandledRejection', (err) => log(`unhandled: ${String(err)}`));
 }
+
+/** SIGTERM-to-SIGKILL window for child process trees at shutdown. */
+const SHUTDOWN_GRACE_MS = 800;
+/** Sessions remembered as "already opened a browser tab for". */
+const MAX_TRACKED_OPENS = 200;
+/** Per-project resolved configs held in memory. */
+const MAX_CACHED_CONFIGS = 50;
 
 function listen(server: http.Server, port: number): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -247,10 +300,17 @@ function buildRouter(deps: Deps): Router {
   // The plugin is installed globally, so a browser tab per session start
   // would be noise. Open once, the first time a session actually uses the
   // harness — a stage transition, or a gate that needs an answer.
+  // Bounded: session ids are unique per session, so an unbounded set here
+  // would grow for the daemon's whole life. Forgetting the oldest entries only
+  // risks re-opening a tab for a session nobody has touched in a long time.
   const opened = new Set<string>();
   const revealUi = (sessionId: string) => {
     if (!config.autoOpen || opened.has(sessionId)) return;
     opened.add(sessionId);
+    if (opened.size > MAX_TRACKED_OPENS) {
+      const oldest = opened.values().next();
+      if (!oldest.done) opened.delete(oldest.value);
+    }
     openInBrowser(authedUrl(sessionId));
   };
 
@@ -260,6 +320,8 @@ function buildRouter(deps: Deps): Router {
     let resolved = configCache.get(key);
     if (!resolved) {
       resolved = loadConfig({ configDir: paths.configDir(), projectDir: key });
+      // Keyed by repo, so this is small — but "small" is not "bounded".
+      if (configCache.size > MAX_CACHED_CONFIGS) configCache.clear();
       configCache.set(key, resolved);
     }
     return resolved;
@@ -623,16 +685,19 @@ function buildRouter(deps: Deps): Router {
   const resolveSession = async (ctx: Ctx, body: { sessionId?: string; cwd?: string; pid?: number }) => {
     const headerId = ctx.req.headers['x-harness-session'];
     const id = body.sessionId ?? (typeof headerId === 'string' ? headerId : undefined);
-    if (id) return store.ensure(id, body.cwd);
-    if (body.pid) {
-      const byPid = store.findByPid(body.pid);
-      if (byPid) return byPid;
+    let session: SessionState | null = null;
+    if (id) session = store.ensure(id, body.cwd);
+    else if (body.pid) session = store.findByPid(body.pid) ?? null;
+    if (!session && body.cwd) session = store.findByCwd(body.cwd) ?? null;
+    if (!session) return null;
+    // Remember which CLI process this session belongs to. The `SessionEnd`
+    // hook is the happy path, but it does not fire when the CLI is killed or
+    // crashes — and then a liveness check on this pid is the only thing that
+    // tells the reaper the session's tailer can be closed.
+    if (body.pid && session.claudePid !== body.pid) {
+      store.update(session.sessionId, { claudePid: body.pid });
     }
-    if (body.cwd) {
-      const byCwd = store.findByCwd(body.cwd);
-      if (byCwd) return byCwd;
-    }
-    return null;
+    return session;
   };
 
   router.post('/mcp/:tool', async (ctx) => {
@@ -1020,6 +1085,9 @@ function startIdleWatch(
 
   const timer = setInterval(() => {
     if (clients.count > 0) return;
+    // Never exit out from under a check or a ship command still running: the
+    // shutdown would kill the tree the user is waiting on.
+    if (liveChildCount() > 0) return;
     const sessions = store.all();
     const busy = sessions.some((s) => s.status !== 'ended' && Date.now() - s.updatedAt < idleMs);
     if (busy) return;
@@ -1028,6 +1096,72 @@ function startIdleWatch(
     stop();
   }, 60_000);
   timer.unref?.();
+}
+
+/**
+ * Periodic cleanup of per-session resources the hooks did not get to.
+ *
+ * `SessionEnd` closes a session's transcript tailer and drops its file
+ * baseline, and that covers the normal case. It does not fire when the CLI is
+ * SIGKILLed, crashes, or the machine sleeps through it — and a leaked tailer
+ * is a 700ms interval plus an `fs.watch` descriptor held for the rest of the
+ * daemon's life, while a leaked baseline retains a fingerprint of every dirty
+ * file in the repo. Over a daemon that runs for weeks, that is the leak.
+ *
+ * A session is considered gone when the store has forgotten it, the hook
+ * marked it ended, the CLI process behind it is no longer alive, or nothing
+ * has touched it in `STALE_SESSION_MS` (the tailer itself refreshes
+ * `updatedAt` whenever the transcript grows, so silence means silence).
+ */
+const REAP_INTERVAL_MS = 5 * 60 * 1000;
+const STALE_SESSION_MS = 6 * 60 * 60 * 1000;
+/** Ended sessions are dropped from memory this long after they finished. */
+const ENDED_SESSION_TTL_MS = 60 * 60 * 1000;
+
+interface Reaper {
+  stop(): void;
+  /** Exposed for tests and for `shutdown` to run one final pass. */
+  runOnce(now?: number): number;
+}
+
+function startReaper(store: SessionStore, tailers: Map<string, TranscriptTailer>): Reaper {
+  const runOnce = (now = Date.now()): number => {
+    let closed = 0;
+    for (const [sessionId, tailer] of tailers) {
+      const session = store.get(sessionId);
+      const dead =
+        !session ||
+        session.status === 'ended' ||
+        (typeof session.claudePid === 'number' && !isPidAlive(session.claudePid)) ||
+        now - session.updatedAt > STALE_SESSION_MS;
+      if (!dead) continue;
+      tailer.close();
+      tailers.delete(sessionId);
+      clearBaseline(sessionId);
+      closed++;
+    }
+    // Baselines outlive their tailer when a session is attributed files but
+    // never tailed, so sweep them against the store as well.
+    pruneBaselines((id) => {
+      const session = store.get(id);
+      return Boolean(session && session.status !== 'ended' && now - session.updatedAt <= STALE_SESSION_MS);
+    });
+
+    const dropped = store.sweep({ endedTtlMs: ENDED_SESSION_TTL_MS, now });
+    if (closed || dropped) log(`reaped ${closed} tailer(s), evicted ${dropped} session(s)`);
+    return closed + dropped;
+  };
+
+  const timer = setInterval(() => {
+    try {
+      runOnce();
+    } catch (err) {
+      log(`reaper failed: ${(err as Error)?.message}`);
+    }
+  }, REAP_INTERVAL_MS);
+  timer.unref?.();
+
+  return { stop: () => clearInterval(timer), runOnce };
 }
 
 /* ------------------------------------------------------------------ *
