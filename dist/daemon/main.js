@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 
 // src/daemon/store.ts
 import { EventEmitter } from "node:events";
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, readdirSync, existsSync as existsSync2, renameSync } from "node:fs";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, readdirSync, existsSync as existsSync2, renameSync, rmSync, statSync } from "node:fs";
 import path2 from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -72,6 +72,10 @@ function baseUrl(lock) {
 
 // src/daemon/store.ts
 var PERSIST_DEBOUNCE_MS = 400;
+var SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1e3;
+var MAX_SESSIONS = 60;
+var MAX_GATES = 40;
+var MAX_CACHED_DIFFS = 12;
 function newSession(sessionId, cwd) {
   const now = Date.now();
   return {
@@ -122,23 +126,83 @@ var SessionStore = class extends EventEmitter {
   loadFromDisk() {
     const dir = paths.sessionsDir();
     if (!existsSync2(dir)) return;
+    const loaded = [];
+    const expired = [];
+    const cutoff = Date.now() - SESSION_TTL_MS;
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      const file = path2.join(dir, entry.name, "state.json");
-      if (!existsSync2(file)) continue;
+      const sessionDir = path2.join(dir, entry.name);
+      const file = path2.join(sessionDir, "state.json");
+      if (!existsSync2(file)) {
+        if (mtimeOf(sessionDir) < cutoff) expired.push(sessionDir);
+        continue;
+      }
       try {
         const state = JSON.parse(readFileSync2(file, "utf8"));
         if (!state.sessionId) continue;
+        if ((state.updatedAt ?? 0) < cutoff) {
+          expired.push(sessionDir);
+          continue;
+        }
         state.reviewRound ??= 0;
         state.threads ??= [];
         state.roundHistory ??= [];
         state.tasks ??= [];
         if (state.status === "active") state.status = "idle";
         for (const gate of state.gates) gate.waiting = false;
-        this.sessions.set(state.sessionId, state);
+        trimGates(state);
+        loaded.push(state);
       } catch {
       }
     }
+    loaded.sort((a, b) => b.updatedAt - a.updatedAt);
+    for (const state of loaded.slice(0, MAX_SESSIONS)) {
+      this.sessions.set(state.sessionId, state);
+    }
+    for (const sessionDir of expired) discardDir(sessionDir);
+  }
+  /**
+   * Forget a session: memory, cached diff, and any pending write.
+   *
+   * On-disk state is left alone — this is eviction, not deletion — so the
+   * session is still there if the daemon restarts and the user goes looking.
+   */
+  drop(id) {
+    const timer = this.persistTimers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      this.persistTimers.delete(id);
+      this.persistNow(id);
+    }
+    this.diffs.delete(id);
+    const removed = this.sessions.delete(id);
+    if (removed) this.broadcastSessionList();
+    return removed;
+  }
+  /**
+   * Evict sessions that ended a while ago, and trim gate history on the rest.
+   *
+   * Called on a timer by the daemon. A long-lived daemon accumulates finished
+   * sessions the user will never look at again; each one holds its timeline,
+   * every gate verdict, and its cached diff.
+   */
+  sweep(opts = { endedTtlMs: 60 * 60 * 1e3 }) {
+    const now = opts.now ?? Date.now();
+    let dropped = 0;
+    for (const state of [...this.sessions.values()]) {
+      trimGates(state);
+      const finished = state.status === "ended";
+      if (finished && now - (state.endedAt ?? state.updatedAt) > opts.endedTtlMs) {
+        this.drop(state.sessionId);
+        dropped++;
+      }
+    }
+    const overflow = this.all().slice(MAX_SESSIONS);
+    for (const state of overflow) {
+      this.drop(state.sessionId);
+      dropped++;
+    }
+    return dropped;
   }
   persistSoon(id) {
     const existing = this.persistTimers.get(id);
@@ -307,6 +371,7 @@ var SessionStore = class extends EventEmitter {
       ...meta && Object.keys(meta).length ? { meta } : {}
     };
     state.gates.push(gate);
+    trimGates(state);
     state.activeGateId = gate.id;
     state.updatedAt = gate.createdAt;
     this.persistSoon(id);
@@ -365,8 +430,8 @@ var SessionStore = class extends EventEmitter {
     const state = this.sessions.get(id);
     if (state) {
       for (const delivered of gate.result?.threads ?? []) {
-        const live = state.threads.find((t) => t.id === delivered.id);
-        if (live && !live.deliveredAt) live.deliveredAt = now;
+        const live2 = state.threads.find((t) => t.id === delivered.id);
+        if (live2 && !live2.deliveredAt) live2.deliveredAt = now;
       }
       this.emitEvent({ type: "state", sessionId: id, patch: { gates: state.gates, threads: state.threads } });
     }
@@ -413,8 +478,8 @@ var SessionStore = class extends EventEmitter {
     const now = Date.now();
     for (const item of drained) {
       for (const t of item.threads ?? []) {
-        const live = state.threads.find((x) => x.id === t.id);
-        if (live) live.deliveredAt = now;
+        const live2 = state.threads.find((x) => x.id === t.id);
+        if (live2) live2.deliveredAt = now;
       }
     }
     state.updatedAt = now;
@@ -427,7 +492,7 @@ var SessionStore = class extends EventEmitter {
    * Diffs
    * ---------------------------------------------------------------- */
   setDiff(id, diff) {
-    this.diffs.set(id, diff);
+    this.cacheDiff(id, diff);
     try {
       const dir = paths.sessionDir(id);
       mkdirSync2(dir, { recursive: true });
@@ -445,7 +510,7 @@ var SessionStore = class extends EventEmitter {
       const file = path2.join(paths.sessionDir(id), "diff.json");
       if (!existsSync2(file)) return void 0;
       const diff = JSON.parse(readFileSync2(file, "utf8"));
-      this.diffs.set(id, diff);
+      this.cacheDiff(id, diff);
       return diff;
     } catch {
       return void 0;
@@ -475,6 +540,23 @@ var SessionStore = class extends EventEmitter {
     });
     return updated;
   }
+  /**
+   * Keep the diff cache bounded, evicting least-recently-used.
+   *
+   * Every entry is a fully parsed diff — up to `maxDiffFileBytes` per file —
+   * and the previous behaviour kept one per session forever. Re-inserting
+   * moves a key to the end of the Map's iteration order, which is the LRU
+   * position we evict from the front of.
+   */
+  cacheDiff(id, diff) {
+    this.diffs.delete(id);
+    this.diffs.set(id, diff);
+    while (this.diffs.size > MAX_CACHED_DIFFS) {
+      const oldest = this.diffs.keys().next();
+      if (oldest.done) break;
+      this.diffs.delete(oldest.value);
+    }
+  }
   /* ---------------------------------------------------------------- *
    * Fan-out
    * ---------------------------------------------------------------- */
@@ -485,6 +567,31 @@ var SessionStore = class extends EventEmitter {
     this.emitEvent({ type: "sessions", sessions: this.summaries() });
   }
 };
+function trimGates(state) {
+  if (state.gates.length <= MAX_GATES) return;
+  const keep = /* @__PURE__ */ new Set();
+  for (const gate of state.gates) {
+    if (gate.status === "open" || gate.result && !gate.deliveredAt) keep.add(gate);
+  }
+  const droppable = state.gates.filter((g) => !keep.has(g));
+  const surplus = state.gates.length - MAX_GATES;
+  const drop = new Set(droppable.slice(0, Math.max(0, surplus)));
+  if (drop.size === 0) return;
+  state.gates = state.gates.filter((g) => !drop.has(g));
+}
+function mtimeOf(dir) {
+  try {
+    return statSync(dir).mtimeMs;
+  } catch {
+    return Date.now();
+  }
+}
+function discardDir(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+  }
+}
 function describeVerdict(result) {
   const bits = [];
   switch (result.verdict) {
@@ -507,7 +614,7 @@ function describeVerdict(result) {
 }
 
 // src/daemon/http.ts
-import { createReadStream, statSync, existsSync as existsSync3 } from "node:fs";
+import { createReadStream, statSync as statSync2, existsSync as existsSync3 } from "node:fs";
 import path3 from "node:path";
 var Router = class {
   routes = [];
@@ -597,7 +704,7 @@ function serveStatic(res, rootDir, relPath) {
   if (!existsSync3(file)) return false;
   let stat;
   try {
-    stat = statSync(file);
+    stat = statSync2(file);
   } catch {
     return false;
   }
@@ -607,12 +714,25 @@ function serveStatic(res, rootDir, relPath) {
     "content-length": stat.size,
     "cache-control": "no-cache"
   });
-  createReadStream(file).pipe(res);
+  const stream = createReadStream(file);
+  const done = () => stream.destroy();
+  res.on("close", done);
+  res.on("error", done);
+  stream.on("error", () => {
+    res.off("close", done);
+    if (!res.writableEnded) res.end();
+  });
+  stream.on("end", () => res.off("close", done));
+  stream.pipe(res);
   return true;
 }
 function requestSignal(req) {
   const controller = new AbortController();
-  const abort = () => controller.abort();
+  const abort = () => {
+    req.off("close", abort);
+    req.off("aborted", abort);
+    if (!controller.signal.aborted) controller.abort();
+  };
   req.on("close", abort);
   req.on("aborted", abort);
   return controller.signal;
@@ -623,10 +743,11 @@ import { randomUUID as randomUUID3 } from "node:crypto";
 import path4 from "node:path";
 
 // src/daemon/transcript.ts
-import { createReadStream as createReadStream2, existsSync as existsSync4, statSync as statSync2, watch } from "node:fs";
+import { createReadStream as createReadStream2, existsSync as existsSync4, statSync as statSync3, watch } from "node:fs";
 var MAX_TEXT = 4e3;
 var MAX_THINKING = 600;
 var POLL_MS = 700;
+var MAX_CARRY = 4 * 1024 * 1024;
 var TranscriptTailer = class {
   constructor(file, onUpdate) {
     this.file = file;
@@ -651,7 +772,7 @@ var TranscriptTailer = class {
   start(fromStart = false) {
     if (!fromStart && existsSync4(this.file)) {
       try {
-        this.offset = statSync2(this.file).size;
+        this.offset = statSync3(this.file).size;
       } catch {
         this.offset = 0;
       }
@@ -671,9 +792,16 @@ var TranscriptTailer = class {
     }
     this.scheduleRead();
   }
+  /** Idempotent: releases the watch descriptor and the poll interval. */
   close() {
+    if (this.closed) return;
     this.closed = true;
-    this.watcher?.close();
+    this.pending = false;
+    this.carry = "";
+    try {
+      this.watcher?.close();
+    } catch {
+    }
     this.watcher = null;
     if (this.poller) clearInterval(this.poller);
     this.poller = null;
@@ -687,11 +815,12 @@ var TranscriptTailer = class {
     void this.read();
   }
   async read() {
+    if (this.closed) return;
     this.reading = true;
     try {
       let size = 0;
       try {
-        size = statSync2(this.file).size;
+        size = statSync3(this.file).size;
       } catch {
         return;
       }
@@ -705,6 +834,9 @@ var TranscriptTailer = class {
       const text2 = this.carry + chunk;
       const lines = text2.split("\n");
       this.carry = lines.pop() ?? "";
+      if (this.carry.length > MAX_CARRY) {
+        this.carry = "";
+      }
       const update = { events: [] };
       for (const line of lines) {
         if (!line.trim()) continue;
@@ -713,10 +845,11 @@ var TranscriptTailer = class {
         } catch {
         }
       }
+      if (this.closed) return;
       if (update.events.length > 0 || update.title || update.usage) this.onUpdate(update);
     } finally {
       this.reading = false;
-      if (this.pending) {
+      if (this.pending && !this.closed) {
         this.pending = false;
         this.scheduleRead();
       }
@@ -844,12 +977,20 @@ function truncate(text2, max) {
 function readRange(file, start, end) {
   return new Promise((resolve) => {
     let out = "";
+    let settled = false;
     const stream = createReadStream2(file, { start, end, encoding: "utf8" });
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      stream.destroy();
+      resolve(out);
+    };
     stream.on("data", (c) => {
       out += c;
     });
-    stream.on("end", () => resolve(out));
-    stream.on("error", () => resolve(out));
+    stream.on("end", finish);
+    stream.on("close", finish);
+    stream.on("error", finish);
   });
 }
 
@@ -1403,13 +1544,13 @@ function createTasks(store, sessionId, specs, opts = {}) {
 function tasksFromPlan(store, sessionId, steps) {
   const session = store.get(sessionId);
   if (!session) return [];
-  const live = steps.filter((s) => s.status !== "dropped" && s.title.trim());
+  const live2 = steps.filter((s) => s.status !== "dropped" && s.title.trim());
   const started = session.tasks.some((t) => t.status !== "todo");
   if (started) return session.tasks;
   return createTasks(
     store,
     sessionId,
-    live.map((step) => ({
+    live2.map((step) => ({
       title: step.title,
       ...step.detail ? { detail: step.detail } : {},
       planStepId: step.id
@@ -1449,6 +1590,15 @@ async function reconcileFiles(store, sessionId) {
 var baselines = /* @__PURE__ */ new Map();
 function clearBaseline(sessionId) {
   baselines.delete(sessionId);
+}
+function pruneBaselines(isLive) {
+  let removed = 0;
+  for (const sessionId of [...baselines.keys()]) {
+    if (isLive(sessionId)) continue;
+    baselines.delete(sessionId);
+    removed++;
+  }
+  return removed;
 }
 function updateTask(store, sessionId, taskId, patch) {
   let updated;
@@ -1635,6 +1785,8 @@ var HOOK_NOOP = { suppressOutput: true };
 
 // src/daemon/hookIngest.ts
 var EDIT_TOOLS = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+var MAX_COMMANDS = 200;
+var MAX_TOUCHED_FILES = 500;
 async function ingestHook(event, input, ctx) {
   const sessionId = input.session_id;
   if (!sessionId) return HOOK_NOOP;
@@ -1732,6 +1884,7 @@ async function onPostToolUse(sessionId, input, ctx) {
           if (!existing.tools.includes(tool)) existing.tools.push(tool);
         } else {
           s.files.push({ path: rel, edits: 1, firstTouchedAt: now, lastTouchedAt: now, tools: [tool] });
+          if (s.files.length > MAX_TOUCHED_FILES) s.files.splice(0, s.files.length - MAX_TOUCHED_FILES);
         }
         s.stats.edits++;
         touched = rel;
@@ -1749,7 +1902,7 @@ async function onPostToolUse(sessionId, input, ctx) {
         ok: true,
         preview: previewOutput(input.tool_output ?? input.tool_response)
       });
-      if (s.commands.length > 200) s.commands.splice(0, s.commands.length - 200);
+      if (s.commands.length > MAX_COMMANDS) s.commands.splice(0, s.commands.length - MAX_COMMANDS);
     }
   });
   if (touched) attributeFile(ctx.store, sessionId, touched);
@@ -1768,6 +1921,7 @@ async function onPostToolUseFailure(sessionId, input, ctx) {
         ok: false,
         preview: (input.error ?? "").slice(0, 400)
       });
+      if (s.commands.length > MAX_COMMANDS) s.commands.splice(0, s.commands.length - MAX_COMMANDS);
     });
   }
   ctx.store.addTimeline(sessionId, "error", `${tool} failed: ${(input.error ?? "").slice(0, 300)}`, {
@@ -1902,8 +2056,144 @@ function summarizeNotification(input) {
 }
 
 // src/daemon/checks.ts
-import { spawn } from "node:child_process";
 import { randomUUID as randomUUID4 } from "node:crypto";
+
+// src/daemon/proc.ts
+import { spawn } from "node:child_process";
+var FLUSH_GRACE_MS = 250;
+var KILL_ESCALATION_MS = 4e3;
+var live = /* @__PURE__ */ new Set();
+function liveChildCount() {
+  return live.size;
+}
+function signalTree(child, signal) {
+  const pid = child.pid;
+  if (!pid || child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    if (process.platform === "win32") child.kill(signal);
+    else process.kill(-pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+    }
+  }
+}
+function run(command, opts) {
+  const maxOutput = opts.maxOutput ?? Number.POSITIVE_INFINITY;
+  let settled = false;
+  let output = "";
+  let timedOut = false;
+  let cancelled = false;
+  let escalation = null;
+  let flush = null;
+  let timer = null;
+  let resolveResult;
+  const result = new Promise((resolve) => {
+    resolveResult = resolve;
+  });
+  const child = spawn(command, {
+    cwd: opts.cwd,
+    shell: true,
+    // A new process group, so the whole tree can be signalled at once.
+    detached: process.platform !== "win32",
+    // stdin is /dev/null on purpose. The default is a pipe the daemon never
+    // writes to and never closes, so a command that prompts for a password
+    // blocks forever on a read that can never be answered.
+    stdio: ["ignore", "pipe", "pipe"],
+    env: opts.env ?? process.env
+  });
+  const entry = { child, label: opts.label ?? command, kill: () => {
+  } };
+  const terminate = (reason) => {
+    if (settled) return;
+    if (reason === "timeout") timedOut = true;
+    else cancelled = true;
+    signalTree(child, "SIGTERM");
+    if (escalation) return;
+    escalation = setTimeout(() => {
+      escalation = null;
+      signalTree(child, "SIGKILL");
+      settle(-1, "SIGKILL");
+    }, KILL_ESCALATION_MS);
+    escalation.unref?.();
+  };
+  entry.kill = terminate;
+  const settle = (code, signal) => {
+    if (settled) return;
+    settled = true;
+    if (escalation) clearTimeout(escalation);
+    if (flush) clearTimeout(flush);
+    if (timer) clearTimeout(timer);
+    live.delete(entry);
+    child.stdout?.removeAllListeners("data");
+    child.stderr?.removeAllListeners("data");
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    resolveResult({
+      ok: code === 0 && !timedOut && !cancelled,
+      code: code ?? -1,
+      signal,
+      output,
+      timedOut,
+      cancelled
+    });
+  };
+  const append = (buf) => {
+    const chunk = buf.toString("utf8");
+    output += chunk;
+    if (output.length > maxOutput) output = `\u2026
+${output.slice(-maxOutput)}`;
+    opts.onOutput?.(output);
+  };
+  child.stdout?.on("data", append);
+  child.stderr?.on("data", append);
+  child.stdout?.on("error", () => {
+  });
+  child.stderr?.on("error", () => {
+  });
+  timer = setTimeout(() => terminate("timeout"), opts.timeoutMs);
+  timer.unref?.();
+  child.on("error", (err) => {
+    output += `
+[cc-harness] ${err.message}`;
+    settle(-1, null);
+  });
+  child.on("exit", (code, signal) => {
+    if (flush) clearTimeout(flush);
+    flush = setTimeout(() => settle(code, signal), FLUSH_GRACE_MS);
+    flush.unref?.();
+  });
+  child.on("close", (code, signal) => settle(code, signal));
+  live.add(entry);
+  return { result, cancel: () => terminate("cancel") };
+}
+async function shutdownChildren(graceMs = 800) {
+  const entries = [...live];
+  if (entries.length === 0) return 0;
+  for (const entry of entries) signalTree(entry.child, "SIGTERM");
+  const deadline = Date.now() + graceMs;
+  while (Date.now() < deadline && entries.some((e) => e.child.exitCode === null && e.child.signalCode === null)) {
+    await new Promise((r) => {
+      const t = setTimeout(r, 50);
+      t.unref?.();
+    });
+  }
+  for (const entry of entries) signalTree(entry.child, "SIGKILL");
+  live.clear();
+  return entries.length;
+}
+function killAllChildren() {
+  const entries = [...live];
+  for (const entry of entries) signalTree(entry.child, "SIGKILL");
+  live.clear();
+  return entries.length;
+}
+function liveChildLabels() {
+  return [...live].map((e) => e.label);
+}
+
+// src/daemon/checks.ts
 var MAX_OUTPUT = 4e4;
 var DEFAULT_TIMEOUT_MS = 15 * 60 * 1e3;
 var running = /* @__PURE__ */ new Map();
@@ -1920,11 +2210,11 @@ function seedChecks(store, sessionId, commands) {
   return runs;
 }
 function addCheck(store, sessionId, command, label) {
-  const run = { id: randomUUID4(), command, status: "pending", output: "", ...label ? { label } : {} };
+  const run2 = { id: randomUUID4(), command, status: "pending", output: "", ...label ? { label } : {} };
   store.mutate(sessionId, (s) => {
-    s.checks.push(run);
+    s.checks.push(run2);
   });
-  return run;
+  return run2;
 }
 async function runCheck(store, sessionId, checkId) {
   const session = store.get(sessionId);
@@ -1934,69 +2224,55 @@ async function runCheck(store, sessionId, checkId) {
   const cwd = session.repoRoot ?? session.cwd;
   const started = Date.now();
   patchCheck(store, sessionId, checkId, { status: "running", startedAt: started, output: "" });
-  return new Promise((resolve) => {
-    let output = "";
-    let settled = false;
-    const child = spawn(check.command, {
-      cwd,
-      shell: true,
-      env: { ...process.env, CI: "1", FORCE_COLOR: "0", NO_COLOR: "1" }
-    });
-    running.set(checkId, child);
-    const append = (buf) => {
-      output += buf.toString("utf8");
-      if (output.length > MAX_OUTPUT) output = `\u2026
-${output.slice(-MAX_OUTPUT)}`;
-      patchCheck(store, sessionId, checkId, { output });
-    };
-    child.stdout?.on("data", append);
-    child.stderr?.on("data", append);
-    const timer = setTimeout(() => {
-      output += "\n[cc-harness] timed out";
-      child.kill("SIGKILL");
-    }, DEFAULT_TIMEOUT_MS);
-    timer.unref?.();
-    const finish = (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      running.delete(checkId);
-      const status = code === 0 ? "passed" : "failed";
-      const updated = patchCheck(store, sessionId, checkId, {
-        status,
-        exitCode: code ?? -1,
-        finishedAt: Date.now(),
-        output
-      });
-      store.addTimeline(sessionId, "check", `${check.command} \u2014 ${status}`, {
-        label: status,
-        meta: { checkId, exitCode: code }
-      });
-      resolve(updated);
-    };
-    child.on("error", (err) => {
-      output += `
-[cc-harness] ${err.message}`;
-      finish(-1);
-    });
-    child.on("close", (code) => finish(code));
+  const handle2 = run(check.command, {
+    cwd,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    maxOutput: MAX_OUTPUT,
+    label: `check: ${check.command}`,
+    env: { ...process.env, CI: "1", FORCE_COLOR: "0", NO_COLOR: "1" },
+    onOutput: (output) => patchCheck(store, sessionId, checkId, { output })
   });
+  running.set(checkId, handle2);
+  let outcome;
+  try {
+    outcome = await handle2.result;
+  } finally {
+    running.delete(checkId);
+  }
+  const note = outcome.timedOut ? "\n[cc-harness] timed out" : outcome.cancelled ? "\n[cc-harness] cancelled" : "";
+  const status = outcome.ok ? "passed" : "failed";
+  const updated = patchCheck(store, sessionId, checkId, {
+    status,
+    exitCode: outcome.code,
+    finishedAt: Date.now(),
+    output: outcome.output + note
+  });
+  store.addTimeline(sessionId, "check", `${check.command} \u2014 ${status}`, {
+    label: status,
+    meta: { checkId, exitCode: outcome.code }
+  });
+  return updated;
 }
 async function runAllChecks(store, sessionId) {
   const session = store.get(sessionId);
   if (!session) return [];
   const results = [];
   for (const check of [...session.checks]) {
-    const run = await runCheck(store, sessionId, check.id);
-    if (run) results.push(run);
+    const run2 = await runCheck(store, sessionId, check.id);
+    if (run2) results.push(run2);
   }
   return results;
 }
 function cancelCheck(checkId) {
-  const child = running.get(checkId);
-  if (!child) return false;
-  child.kill("SIGTERM");
+  const handle2 = running.get(checkId);
+  if (!handle2) return false;
+  handle2.cancel();
   return true;
+}
+function cancelAllChecks() {
+  const handles = [...running.values()];
+  for (const handle2 of handles) handle2.cancel();
+  return handles.length;
 }
 function patchCheck(store, sessionId, checkId, patch) {
   let updated;
@@ -2020,8 +2296,7 @@ function checksSummary(checks) {
 }
 
 // src/daemon/ship.ts
-import { spawn as spawn2 } from "node:child_process";
-import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync2, rmSync as rmSync2 } from "node:fs";
 import { tmpdir } from "node:os";
 import path6 from "node:path";
 
@@ -2183,6 +2458,8 @@ async function shipBody(session, cwd) {
   }
   return parts.join("\n").trim();
 }
+var SHIP_COMMAND_TIMEOUT_MS = 3 * 60 * 1e3;
+var MAX_SHIP_OUTPUT = 4e4;
 async function executeShip(store, sessionId, config, ship) {
   const session = store.get(sessionId);
   if (!session) return { ok: false, output: "unknown session" };
@@ -2217,7 +2494,12 @@ async function executeShip(store, sessionId, config, ship) {
       const messageFile = path6.join(tmpdir(), `cc-harness-commit-${Date.now()}.txt`);
       writeFileSync2(messageFile, `${ship.commitMessage}
 `);
-      const commit = await git(cwd, ["commit", "-F", messageFile]);
+      let commit;
+      try {
+        commit = await git(cwd, ["commit", "-F", messageFile]);
+      } finally {
+        discard(messageFile);
+      }
       if (!commit.ok) return fail(record, log2, `git commit failed: ${commit.stderr || commit.stdout}`);
       record(`committed: ${ship.commitMessage.split("\n")[0]}`);
     } else {
@@ -2254,7 +2536,12 @@ async function executeShip(store, sessionId, config, ship) {
         branch: shellQuote(vars.branch),
         base: shellQuote(vars.base)
       });
-      const result = await runShell(command, cwd);
+      let result;
+      try {
+        result = await runShell(command, cwd);
+      } finally {
+        discard(bodyFile);
+      }
       log2.push(result.output.trim());
       if (!result.ok) return fail(record, log2, `PR command failed (exit ${result.code})`);
       url = extractUrl(result.output);
@@ -2321,15 +2608,23 @@ function writeSummary(cwd, config, ship, session) {
     return void 0;
   }
 }
-function runShell(command, cwd) {
-  return new Promise((resolve) => {
-    let output = "";
-    const child = spawn2(command, { cwd, shell: true, env: { ...process.env, NO_COLOR: "1" } });
-    child.stdout?.on("data", (b) => output += b.toString("utf8"));
-    child.stderr?.on("data", (b) => output += b.toString("utf8"));
-    child.on("error", (err) => resolve({ ok: false, code: -1, output: output + err.message }));
-    child.on("close", (code) => resolve({ ok: code === 0, code: code ?? -1, output }));
-  });
+async function runShell(command, cwd) {
+  const outcome = await run(command, {
+    cwd,
+    timeoutMs: SHIP_COMMAND_TIMEOUT_MS,
+    maxOutput: MAX_SHIP_OUTPUT,
+    label: "ship: pr command",
+    env: { ...process.env, NO_COLOR: "1", GIT_TERMINAL_PROMPT: "0" }
+  }).result;
+  const note = outcome.timedOut ? `
+[cc-harness] timed out after ${Math.round(SHIP_COMMAND_TIMEOUT_MS / 1e3)}s and was killed` : "";
+  return { ok: outcome.ok, code: outcome.code, output: outcome.output + note };
+}
+function discard(file) {
+  try {
+    rmSync2(file, { force: true });
+  } catch {
+  }
 }
 function extractUrl(text2) {
   const match = text2.match(/https?:\/\/\S+/);
@@ -2340,13 +2635,13 @@ function shellQuote(value) {
 }
 
 // src/daemon/browser.ts
-import { spawn as spawn3 } from "node:child_process";
+import { spawn as spawn2 } from "node:child_process";
 import { existsSync as existsSync6, readFileSync as readFileSync4 } from "node:fs";
 function openInBrowser(url) {
   if (!/^https?:\/\//.test(url)) return;
   for (const opener of candidates()) {
     try {
-      const child = spawn3(opener.command, [...opener.args, url], {
+      const child = spawn2(opener.command, [...opener.args, url], {
         stdio: "ignore",
         detached: true,
         ...opener.cwd ? { cwd: opener.cwd } : {}
@@ -2423,24 +2718,47 @@ async function main() {
   log(`listening on ${baseUrl(lock)} (pid ${process.pid}, v${VERSION})`);
   process.stdout.write(`${JSON.stringify({ started: true, ...lock })}
 `);
+  let shuttingDown = false;
   const shutdown = (signal) => {
+    if (shuttingDown) {
+      log(`second signal (${signal}); exiting now`);
+      killAllChildren();
+      process.exit(0);
+    }
+    shuttingDown = true;
     log(`shutting down (${signal})`);
-    store.persistAll();
+    const straggling = liveChildCount();
+    if (straggling) log(`terminating ${straggling} child process tree(s): ${liveChildLabels().join(", ")}`);
+    cancelAllChecks();
     for (const t of tailers.values()) t.close();
+    tailers.clear();
+    reaper.stop();
+    store.persistAll();
+    server.close();
+    server.closeAllConnections?.();
     try {
-      const live = readLiveLock();
-      if (live?.pid === process.pid) unlinkSync(paths.lockFile());
+      const live2 = readLiveLock();
+      if (live2?.pid === process.pid) unlinkSync(paths.lockFile());
     } catch {
     }
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 1e3).unref();
+    void shutdownChildren(SHUTDOWN_GRACE_MS).catch(() => 0).finally(() => process.exit(0));
+    setTimeout(() => {
+      killAllChildren();
+      process.exit(0);
+    }, SHUTDOWN_GRACE_MS + 1500).unref();
   };
+  const reaper = startReaper(store, tailers);
   startIdleWatch(store, config, clients, () => shutdown("idle"));
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGHUP", () => shutdown("SIGHUP"));
+  process.on("exit", () => killAllChildren());
   process.on("uncaughtException", (err) => log(`uncaught: ${err?.stack ?? err}`));
   process.on("unhandledRejection", (err) => log(`unhandled: ${String(err)}`));
 }
+var SHUTDOWN_GRACE_MS = 800;
+var MAX_TRACKED_OPENS = 200;
+var MAX_CACHED_CONFIGS = 50;
 function listen(server, port) {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -2528,6 +2846,10 @@ function buildRouter(deps) {
   const revealUi = (sessionId) => {
     if (!config.autoOpen || opened.has(sessionId)) return;
     opened.add(sessionId);
+    if (opened.size > MAX_TRACKED_OPENS) {
+      const oldest = opened.values().next();
+      if (!oldest.done) opened.delete(oldest.value);
+    }
     openInBrowser(authedUrl(sessionId));
   };
   const configCache = /* @__PURE__ */ new Map();
@@ -2536,6 +2858,7 @@ function buildRouter(deps) {
     let resolved = configCache.get(key);
     if (!resolved) {
       resolved = loadConfig({ configDir: paths.configDir(), projectDir: key });
+      if (configCache.size > MAX_CACHED_CONFIGS) configCache.clear();
       configCache.set(key, resolved);
     }
     return resolved;
@@ -2833,16 +3156,15 @@ function buildRouter(deps) {
   const resolveSession = async (ctx, body) => {
     const headerId = ctx.req.headers["x-harness-session"];
     const id = body.sessionId ?? (typeof headerId === "string" ? headerId : void 0);
-    if (id) return store.ensure(id, body.cwd);
-    if (body.pid) {
-      const byPid = store.findByPid(body.pid);
-      if (byPid) return byPid;
+    let session = null;
+    if (id) session = store.ensure(id, body.cwd);
+    else if (body.pid) session = store.findByPid(body.pid) ?? null;
+    if (!session && body.cwd) session = store.findByCwd(body.cwd) ?? null;
+    if (!session) return null;
+    if (body.pid && session.claudePid !== body.pid) {
+      store.update(session.sessionId, { claudePid: body.pid });
     }
-    if (body.cwd) {
-      const byCwd = store.findByCwd(body.cwd);
-      if (byCwd) return byCwd;
-    }
-    return null;
+    return session;
   };
   router.post("/mcp/:tool", async (ctx) => {
     const body = await readJson(ctx.req);
@@ -3158,6 +3480,7 @@ function startIdleWatch(store, config, clients, stop) {
   const idleMs = minutes * 6e4;
   const timer = setInterval(() => {
     if (clients.count > 0) return;
+    if (liveChildCount() > 0) return;
     const sessions = store.all();
     const busy = sessions.some((s) => s.status !== "ended" && Date.now() - s.updatedAt < idleMs);
     if (busy) return;
@@ -3166,6 +3489,39 @@ function startIdleWatch(store, config, clients, stop) {
     stop();
   }, 6e4);
   timer.unref?.();
+}
+var REAP_INTERVAL_MS = 5 * 60 * 1e3;
+var STALE_SESSION_MS = 6 * 60 * 60 * 1e3;
+var ENDED_SESSION_TTL_MS = 60 * 60 * 1e3;
+function startReaper(store, tailers) {
+  const runOnce = (now = Date.now()) => {
+    let closed = 0;
+    for (const [sessionId, tailer] of tailers) {
+      const session = store.get(sessionId);
+      const dead = !session || session.status === "ended" || typeof session.claudePid === "number" && !isPidAlive(session.claudePid) || now - session.updatedAt > STALE_SESSION_MS;
+      if (!dead) continue;
+      tailer.close();
+      tailers.delete(sessionId);
+      clearBaseline(sessionId);
+      closed++;
+    }
+    pruneBaselines((id) => {
+      const session = store.get(id);
+      return Boolean(session && session.status !== "ended" && now - session.updatedAt <= STALE_SESSION_MS);
+    });
+    const dropped = store.sweep({ endedTtlMs: ENDED_SESSION_TTL_MS, now });
+    if (closed || dropped) log(`reaped ${closed} tailer(s), evicted ${dropped} session(s)`);
+    return closed + dropped;
+  };
+  const timer = setInterval(() => {
+    try {
+      runOnce();
+    } catch (err) {
+      log(`reaper failed: ${err?.message}`);
+    }
+  }, REAP_INTERVAL_MS);
+  timer.unref?.();
+  return { stop: () => clearInterval(timer), runOnce };
 }
 function tailOf(output, lines = 12) {
   return output.split("\n").filter(Boolean).slice(-lines).map((l) => `    ${l}`).join("\n");

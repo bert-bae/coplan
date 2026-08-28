@@ -20,6 +20,13 @@ export interface TranscriptUpdate {
 const MAX_TEXT = 4000;
 const MAX_THINKING = 600;
 const POLL_MS = 700;
+/**
+ * Cap on the partial trailing line held between reads. A transcript entry is
+ * one JSON object per line and can legitimately be large, but an unterminated
+ * line — a truncated write, a corrupted file — would otherwise accumulate for
+ * as long as the tailer lives.
+ */
+const MAX_CARRY = 4 * 1024 * 1024;
 
 export class TranscriptTailer {
   private offset = 0;
@@ -71,9 +78,17 @@ export class TranscriptTailer {
     this.scheduleRead();
   }
 
+  /** Idempotent: releases the watch descriptor and the poll interval. */
   close(): void {
+    if (this.closed) return;
     this.closed = true;
-    this.watcher?.close();
+    this.pending = false;
+    this.carry = '';
+    try {
+      this.watcher?.close();
+    } catch {
+      /* already gone */
+    }
     this.watcher = null;
     if (this.poller) clearInterval(this.poller);
     this.poller = null;
@@ -89,6 +104,7 @@ export class TranscriptTailer {
   }
 
   private async read(): Promise<void> {
+    if (this.closed) return;
     this.reading = true;
     try {
       let size = 0;
@@ -109,6 +125,10 @@ export class TranscriptTailer {
       const text = this.carry + chunk;
       const lines = text.split('\n');
       this.carry = lines.pop() ?? '';
+      if (this.carry.length > MAX_CARRY) {
+        // Nothing parseable is coming; drop it rather than grow forever.
+        this.carry = '';
+      }
 
       const update: TranscriptUpdate = { events: [] };
       for (const line of lines) {
@@ -119,10 +139,13 @@ export class TranscriptTailer {
           /* a partially-written line; the carry handles the common case */
         }
       }
+      // A close that landed mid-read must not push state into a session the
+      // daemon has already finished with.
+      if (this.closed) return;
       if (update.events.length > 0 || update.title || update.usage) this.onUpdate(update);
     } finally {
       this.reading = false;
-      if (this.pending) {
+      if (this.pending && !this.closed) {
         this.pending = false;
         this.scheduleRead();
       }
@@ -267,12 +290,22 @@ function truncate(text: string, max: number): string {
 function readRange(file: string, start: number, end: number): Promise<string> {
   return new Promise((resolve) => {
     let out = '';
+    let settled = false;
     const stream = createReadStream(file, { start, end, encoding: 'utf8' });
+    // Resolve once and always destroy: an error mid-stream would otherwise
+    // leave the descriptor open until GC got around to it.
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      stream.destroy();
+      resolve(out);
+    };
     stream.on('data', (c) => {
       out += c;
     });
-    stream.on('end', () => resolve(out));
-    stream.on('error', () => resolve(out));
+    stream.on('end', finish);
+    stream.on('close', finish);
+    stream.on('error', finish);
   });
 }
 

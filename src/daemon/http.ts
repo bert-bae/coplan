@@ -129,14 +129,36 @@ export function serveStatic(res: ServerResponse, rootDir: string, relPath: strin
     'content-length': stat.size,
     'cache-control': 'no-cache',
   });
-  createReadStream(file).pipe(res);
+
+  // `pipe` does not tear the source down when the destination closes early,
+  // so a browser that navigates away mid-response would leave the descriptor
+  // open until the whole file had been read. Close it explicitly.
+  const stream = createReadStream(file);
+  const done = () => stream.destroy();
+  res.on('close', done);
+  res.on('error', done);
+  stream.on('error', () => {
+    res.off('close', done);
+    if (!res.writableEnded) res.end();
+  });
+  stream.on('end', () => res.off('close', done));
+  stream.pipe(res);
   return true;
 }
 
-/** An AbortSignal that fires when the client hangs up mid-long-poll. */
+/**
+ * An AbortSignal that fires when the client hangs up mid-long-poll.
+ *
+ * This is what stops a killed hook relay or a closed browser tab from leaving
+ * a waiter parked in the daemon for its full nine-minute window.
+ */
 export function requestSignal(req: IncomingMessage): AbortSignal {
   const controller = new AbortController();
-  const abort = () => controller.abort();
+  const abort = () => {
+    req.off('close', abort);
+    req.off('aborted', abort);
+    if (!controller.signal.aborted) controller.abort();
+  };
   req.on('close', abort);
   req.on('aborted', abort);
   return controller.signal;

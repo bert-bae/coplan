@@ -50,7 +50,7 @@ __export(store_exports, {
   sanitizeId: () => sanitizeId
 });
 import { EventEmitter } from "node:events";
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, readdirSync, existsSync as existsSync2, renameSync } from "node:fs";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, readdirSync, existsSync as existsSync2, renameSync, rmSync, statSync } from "node:fs";
 import path2 from "node:path";
 import { randomUUID } from "node:crypto";
 function newSession(sessionId, cwd) {
@@ -85,6 +85,31 @@ function newSession(sessionId, cwd) {
     stats: { turns: 0, toolCalls: 0, edits: 0 }
   };
 }
+function trimGates(state) {
+  if (state.gates.length <= MAX_GATES) return;
+  const keep = /* @__PURE__ */ new Set();
+  for (const gate of state.gates) {
+    if (gate.status === "open" || gate.result && !gate.deliveredAt) keep.add(gate);
+  }
+  const droppable = state.gates.filter((g) => !keep.has(g));
+  const surplus = state.gates.length - MAX_GATES;
+  const drop = new Set(droppable.slice(0, Math.max(0, surplus)));
+  if (drop.size === 0) return;
+  state.gates = state.gates.filter((g) => !drop.has(g));
+}
+function mtimeOf(dir) {
+  try {
+    return statSync(dir).mtimeMs;
+  } catch {
+    return Date.now();
+  }
+}
+function discardDir(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+  }
+}
 function describeVerdict(result) {
   const bits = [];
   switch (result.verdict) {
@@ -105,12 +130,16 @@ function describeVerdict(result) {
   if (result.comment) bits.push(result.comment);
   return bits.join(" \u2014 ");
 }
-var PERSIST_DEBOUNCE_MS, SessionStore;
+var PERSIST_DEBOUNCE_MS, SESSION_TTL_MS, MAX_SESSIONS, MAX_GATES, MAX_CACHED_DIFFS, SessionStore;
 var init_store = __esm({
   "src/daemon/store.ts"() {
     "use strict";
     init_paths();
     PERSIST_DEBOUNCE_MS = 400;
+    SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1e3;
+    MAX_SESSIONS = 60;
+    MAX_GATES = 40;
+    MAX_CACHED_DIFFS = 12;
     SessionStore = class extends EventEmitter {
       sessions = /* @__PURE__ */ new Map();
       diffs = /* @__PURE__ */ new Map();
@@ -129,23 +158,83 @@ var init_store = __esm({
       loadFromDisk() {
         const dir = paths.sessionsDir();
         if (!existsSync2(dir)) return;
+        const loaded = [];
+        const expired = [];
+        const cutoff = Date.now() - SESSION_TTL_MS;
         for (const entry of readdirSync(dir, { withFileTypes: true })) {
           if (!entry.isDirectory()) continue;
-          const file = path2.join(dir, entry.name, "state.json");
-          if (!existsSync2(file)) continue;
+          const sessionDir = path2.join(dir, entry.name);
+          const file = path2.join(sessionDir, "state.json");
+          if (!existsSync2(file)) {
+            if (mtimeOf(sessionDir) < cutoff) expired.push(sessionDir);
+            continue;
+          }
           try {
             const state = JSON.parse(readFileSync2(file, "utf8"));
             if (!state.sessionId) continue;
+            if ((state.updatedAt ?? 0) < cutoff) {
+              expired.push(sessionDir);
+              continue;
+            }
             state.reviewRound ??= 0;
             state.threads ??= [];
             state.roundHistory ??= [];
             state.tasks ??= [];
             if (state.status === "active") state.status = "idle";
             for (const gate of state.gates) gate.waiting = false;
-            this.sessions.set(state.sessionId, state);
+            trimGates(state);
+            loaded.push(state);
           } catch {
           }
         }
+        loaded.sort((a, b) => b.updatedAt - a.updatedAt);
+        for (const state of loaded.slice(0, MAX_SESSIONS)) {
+          this.sessions.set(state.sessionId, state);
+        }
+        for (const sessionDir of expired) discardDir(sessionDir);
+      }
+      /**
+       * Forget a session: memory, cached diff, and any pending write.
+       *
+       * On-disk state is left alone — this is eviction, not deletion — so the
+       * session is still there if the daemon restarts and the user goes looking.
+       */
+      drop(id) {
+        const timer = this.persistTimers.get(id);
+        if (timer) {
+          clearTimeout(timer);
+          this.persistTimers.delete(id);
+          this.persistNow(id);
+        }
+        this.diffs.delete(id);
+        const removed = this.sessions.delete(id);
+        if (removed) this.broadcastSessionList();
+        return removed;
+      }
+      /**
+       * Evict sessions that ended a while ago, and trim gate history on the rest.
+       *
+       * Called on a timer by the daemon. A long-lived daemon accumulates finished
+       * sessions the user will never look at again; each one holds its timeline,
+       * every gate verdict, and its cached diff.
+       */
+      sweep(opts = { endedTtlMs: 60 * 60 * 1e3 }) {
+        const now = opts.now ?? Date.now();
+        let dropped = 0;
+        for (const state of [...this.sessions.values()]) {
+          trimGates(state);
+          const finished = state.status === "ended";
+          if (finished && now - (state.endedAt ?? state.updatedAt) > opts.endedTtlMs) {
+            this.drop(state.sessionId);
+            dropped++;
+          }
+        }
+        const overflow = this.all().slice(MAX_SESSIONS);
+        for (const state of overflow) {
+          this.drop(state.sessionId);
+          dropped++;
+        }
+        return dropped;
       }
       persistSoon(id) {
         const existing = this.persistTimers.get(id);
@@ -314,6 +403,7 @@ var init_store = __esm({
           ...meta && Object.keys(meta).length ? { meta } : {}
         };
         state.gates.push(gate);
+        trimGates(state);
         state.activeGateId = gate.id;
         state.updatedAt = gate.createdAt;
         this.persistSoon(id);
@@ -434,7 +524,7 @@ var init_store = __esm({
        * Diffs
        * ---------------------------------------------------------------- */
       setDiff(id, diff) {
-        this.diffs.set(id, diff);
+        this.cacheDiff(id, diff);
         try {
           const dir = paths.sessionDir(id);
           mkdirSync2(dir, { recursive: true });
@@ -452,7 +542,7 @@ var init_store = __esm({
           const file = path2.join(paths.sessionDir(id), "diff.json");
           if (!existsSync2(file)) return void 0;
           const diff = JSON.parse(readFileSync2(file, "utf8"));
-          this.diffs.set(id, diff);
+          this.cacheDiff(id, diff);
           return diff;
         } catch {
           return void 0;
@@ -482,6 +572,23 @@ var init_store = __esm({
         });
         return updated;
       }
+      /**
+       * Keep the diff cache bounded, evicting least-recently-used.
+       *
+       * Every entry is a fully parsed diff — up to `maxDiffFileBytes` per file —
+       * and the previous behaviour kept one per session forever. Re-inserting
+       * moves a key to the end of the Map's iteration order, which is the LRU
+       * position we evict from the front of.
+       */
+      cacheDiff(id, diff) {
+        this.diffs.delete(id);
+        this.diffs.set(id, diff);
+        while (this.diffs.size > MAX_CACHED_DIFFS) {
+          const oldest = this.diffs.keys().next();
+          if (oldest.done) break;
+          this.diffs.delete(oldest.value);
+        }
+      }
       /* ---------------------------------------------------------------- *
        * Fan-out
        * ---------------------------------------------------------------- */
@@ -498,7 +605,7 @@ var init_store = __esm({
 // src/test/store.test.ts
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync as rmSync2 } from "node:fs";
 import { tmpdir } from "node:os";
 import path3 from "node:path";
 var home;
@@ -506,7 +613,7 @@ before(() => {
   home = mkdtempSync(path3.join(tmpdir(), "cc-harness-test-"));
   process.env["CC_HARNESS_HOME"] = home;
 });
-after(() => rmSync(home, { recursive: true, force: true }));
+after(() => rmSync2(home, { recursive: true, force: true }));
 async function freshStore() {
   const { SessionStore: SessionStore2 } = await Promise.resolve().then(() => (init_store(), store_exports));
   return new SessionStore2();

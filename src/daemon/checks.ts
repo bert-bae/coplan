@@ -1,12 +1,13 @@
-import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { run, type RunHandle } from './proc.ts';
 import type { SessionStore } from './store.ts';
 import type { CheckRun } from '../shared/types.ts';
 
 const MAX_OUTPUT = 40_000;
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 
-const running = new Map<string, ReturnType<typeof spawn>>();
+/** Handles for checks currently executing, so they can be cancelled. */
+const running = new Map<string, RunHandle>();
 
 /** Register the configured verification commands without running them. */
 export function seedChecks(store: SessionStore, sessionId: string, commands: string[]): CheckRun[] {
@@ -51,56 +52,42 @@ export async function runCheck(
 
   patchCheck(store, sessionId, checkId, { status: 'running', startedAt: started, output: '' });
 
-  return new Promise((resolve) => {
-    let output = '';
-    let settled = false;
-
-    const child = spawn(check.command, {
-      cwd,
-      shell: true,
-      env: { ...process.env, CI: '1', FORCE_COLOR: '0', NO_COLOR: '1' },
-    });
-    running.set(checkId, child);
-
-    const append = (buf: Buffer) => {
-      output += buf.toString('utf8');
-      if (output.length > MAX_OUTPUT) output = `…\n${output.slice(-MAX_OUTPUT)}`;
-      patchCheck(store, sessionId, checkId, { output });
-    };
-    child.stdout?.on('data', append);
-    child.stderr?.on('data', append);
-
-    const timer = setTimeout(() => {
-      output += '\n[cc-harness] timed out';
-      child.kill('SIGKILL');
-    }, DEFAULT_TIMEOUT_MS);
-    timer.unref?.();
-
-    const finish = (code: number | null) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      running.delete(checkId);
-      const status: CheckRun['status'] = code === 0 ? 'passed' : 'failed';
-      const updated = patchCheck(store, sessionId, checkId, {
-        status,
-        exitCode: code ?? -1,
-        finishedAt: Date.now(),
-        output,
-      });
-      store.addTimeline(sessionId, 'check', `${check.command} — ${status}`, {
-        label: status,
-        meta: { checkId, exitCode: code },
-      });
-      resolve(updated);
-    };
-
-    child.on('error', (err) => {
-      output += `\n[cc-harness] ${err.message}`;
-      finish(-1);
-    });
-    child.on('close', (code) => finish(code));
+  const handle = run(check.command, {
+    cwd,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    maxOutput: MAX_OUTPUT,
+    label: `check: ${check.command}`,
+    env: { ...process.env, CI: '1', FORCE_COLOR: '0', NO_COLOR: '1' },
+    onOutput: (output) => patchCheck(store, sessionId, checkId, { output }),
   });
+  running.set(checkId, handle);
+
+  let outcome;
+  try {
+    outcome = await handle.result;
+  } finally {
+    // Always, on every path — a stale handle here would let `cancelCheck`
+    // signal a pid that has since been recycled.
+    running.delete(checkId);
+  }
+
+  const note = outcome.timedOut
+    ? '\n[cc-harness] timed out'
+    : outcome.cancelled
+      ? '\n[cc-harness] cancelled'
+      : '';
+  const status: CheckRun['status'] = outcome.ok ? 'passed' : 'failed';
+  const updated = patchCheck(store, sessionId, checkId, {
+    status,
+    exitCode: outcome.code,
+    finishedAt: Date.now(),
+    output: outcome.output + note,
+  });
+  store.addTimeline(sessionId, 'check', `${check.command} — ${status}`, {
+    label: status,
+    meta: { checkId, exitCode: outcome.code },
+  });
+  return updated;
 }
 
 export async function runAllChecks(store: SessionStore, sessionId: string): Promise<CheckRun[]> {
@@ -116,10 +103,18 @@ export async function runAllChecks(store: SessionStore, sessionId: string): Prom
 }
 
 export function cancelCheck(checkId: string): boolean {
-  const child = running.get(checkId);
-  if (!child) return false;
-  child.kill('SIGTERM');
+  const handle = running.get(checkId);
+  if (!handle) return false;
+  // Terminates the whole process group and escalates to SIGKILL on its own.
+  handle.cancel();
   return true;
+}
+
+/** Cancel everything in flight. Used on daemon shutdown. */
+export function cancelAllChecks(): number {
+  const handles = [...running.values()];
+  for (const handle of handles) handle.cancel();
+  return handles.length;
 }
 
 function patchCheck(

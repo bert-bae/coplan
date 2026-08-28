@@ -1,5 +1,4 @@
-import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { SessionStore } from './store.ts';
@@ -7,6 +6,7 @@ import type { HarnessConfig } from '../shared/config.ts';
 import { renderTemplate } from '../shared/config.ts';
 import { git, currentBranch, defaultBranch, shortLog } from './git.ts';
 import { checksSummary } from './checks.ts';
+import { run } from './proc.ts';
 import type { SessionState, ShipState, ShipStep } from '../shared/types.ts';
 
 /**
@@ -96,6 +96,10 @@ async function shipBody(session: SessionState, cwd: string): Promise<string> {
  * Execution
  * ------------------------------------------------------------------ */
 
+/** A PR command that has not finished in this long is not going to. */
+const SHIP_COMMAND_TIMEOUT_MS = 3 * 60 * 1000;
+const MAX_SHIP_OUTPUT = 40_000;
+
 export interface ShipOutcome {
   ok: boolean;
   output: string;
@@ -156,7 +160,13 @@ export async function executeShip(
       if (reviewed.length) record(`staged ${reviewed.length} reviewed path(s)`);
       const messageFile = path.join(tmpdir(), `cc-harness-commit-${Date.now()}.txt`);
       writeFileSync(messageFile, `${ship.commitMessage}\n`);
-      const commit = await git(cwd, ['commit', '-F', messageFile]);
+      let commit;
+      try {
+        commit = await git(cwd, ['commit', '-F', messageFile]);
+      } finally {
+        // The message can carry the whole PR body; do not leave it in /tmp.
+        discard(messageFile);
+      }
       if (!commit.ok) return fail(record, log, `git commit failed: ${commit.stderr || commit.stdout}`);
       record(`committed: ${ship.commitMessage.split('\n')[0]}`);
     } else {
@@ -200,7 +210,12 @@ export async function executeShip(
         branch: shellQuote(vars.branch),
         base: shellQuote(vars.base),
       });
-      const result = await runShell(command, cwd);
+      let result;
+      try {
+        result = await runShell(command, cwd);
+      } finally {
+        discard(bodyFile);
+      }
       log.push(result.output.trim());
       if (!result.ok) return fail(record, log, `PR command failed (exit ${result.code})`);
       url = extractUrl(result.output);
@@ -284,15 +299,37 @@ function writeSummary(
   }
 }
 
-function runShell(command: string, cwd: string): Promise<{ ok: boolean; code: number; output: string }> {
-  return new Promise((resolve) => {
-    let output = '';
-    const child = spawn(command, { cwd, shell: true, env: { ...process.env, NO_COLOR: '1' } });
-    child.stdout?.on('data', (b: Buffer) => (output += b.toString('utf8')));
-    child.stderr?.on('data', (b: Buffer) => (output += b.toString('utf8')));
-    child.on('error', (err) => resolve({ ok: false, code: -1, output: output + err.message }));
-    child.on('close', (code) => resolve({ ok: code === 0, code: code ?? -1, output }));
-  });
+/**
+ * Run a provider command (`gh pr create` and friends) under supervision.
+ *
+ * Bounded on purpose. A PR command that stalls on a credential prompt or a
+ * hung network call would otherwise park this HTTP request — and the model's
+ * turn behind it — with no way to recover and no process to reap. `run()`
+ * gives it no stdin to block on, kills the whole process group on expiry, and
+ * always settles.
+ */
+async function runShell(command: string, cwd: string): Promise<{ ok: boolean; code: number; output: string }> {
+  const outcome = await run(command, {
+    cwd,
+    timeoutMs: SHIP_COMMAND_TIMEOUT_MS,
+    maxOutput: MAX_SHIP_OUTPUT,
+    label: 'ship: pr command',
+    env: { ...process.env, NO_COLOR: '1', GIT_TERMINAL_PROMPT: '0' },
+  }).result;
+
+  const note = outcome.timedOut
+    ? `\n[cc-harness] timed out after ${Math.round(SHIP_COMMAND_TIMEOUT_MS / 1000)}s and was killed`
+    : '';
+  return { ok: outcome.ok, code: outcome.code, output: outcome.output + note };
+}
+
+/** Best-effort removal of a scratch file; never worth failing a ship over. */
+function discard(file: string): void {
+  try {
+    rmSync(file, { force: true });
+  } catch {
+    /* ignore */
+  }
 }
 
 function extractUrl(text: string): string | undefined {

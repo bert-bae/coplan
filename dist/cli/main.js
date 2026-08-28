@@ -261,6 +261,8 @@ async function ensureDaemon() {
   const existing = readLiveLock();
   if (existing) return existing;
   const child = spawn(process.execPath, [DAEMON_ENTRY], { detached: true, stdio: "ignore", env: process.env });
+  child.on("error", () => {
+  });
   child.unref();
   for (let i = 0; i < 60; i++) {
     await sleep(100);
@@ -334,6 +336,8 @@ async function ensureDaemon2() {
     detached: true,
     stdio: "ignore",
     env: process.env
+  });
+  child.on("error", () => {
   });
   child.unref();
   for (let i = 0; i < 60; i++) {

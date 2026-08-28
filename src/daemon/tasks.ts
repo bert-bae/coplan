@@ -135,6 +135,29 @@ export function clearBaseline(sessionId: string): void {
   baselines.delete(sessionId);
 }
 
+/**
+ * Drop baselines whose session is no longer live.
+ *
+ * Each entry holds a fingerprint for every dirty file in the repo, and the
+ * only thing that removed one was the `SessionEnd` hook — which does not fire
+ * if the CLI is killed. The daemon's reaper calls this with a liveness
+ * predicate so the map cannot outgrow the sessions it describes.
+ */
+export function pruneBaselines(isLive: (sessionId: string) => boolean): number {
+  let removed = 0;
+  for (const sessionId of [...baselines.keys()]) {
+    if (isLive(sessionId)) continue;
+    baselines.delete(sessionId);
+    removed++;
+  }
+  return removed;
+}
+
+/** For diagnostics and tests. */
+export function baselineCount(): number {
+  return baselines.size;
+}
+
 export function updateTask(
   store: SessionStore,
   sessionId: string,

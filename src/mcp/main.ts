@@ -54,6 +54,12 @@ async function startDaemon(): Promise<DaemonLock | null> {
       stdio: 'ignore',
       env: process.env,
     });
+    // `spawn` reports ENOENT asynchronously, on the child's `error` event. With
+    // no listener that is an unhandled `'error'`, which would take this process
+    // down mid-session — so attach one even though the failure is recoverable.
+    child.on('error', () => {
+      /* the lock-file poll below reports the failure */
+    });
     child.unref();
   } catch {
     return null;

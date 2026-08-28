@@ -23,6 +23,11 @@ import {
 import type { TodoItem } from '../shared/types.ts';
 
 const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+/** Ring buffer for the recorded shell history, on both the ok and error paths. */
+const MAX_COMMANDS = 200;
+/** Distinct files tracked per session. A repo-wide refactor is not a leak,
+ *  but an unbounded list persisted on every mutation is. */
+const MAX_TOUCHED_FILES = 500;
 
 export interface IngestContext {
   store: SessionStore;
@@ -177,6 +182,7 @@ async function onPostToolUse(
           if (!existing.tools.includes(tool)) existing.tools.push(tool);
         } else {
           s.files.push({ path: rel, edits: 1, firstTouchedAt: now, lastTouchedAt: now, tools: [tool] });
+          if (s.files.length > MAX_TOUCHED_FILES) s.files.splice(0, s.files.length - MAX_TOUCHED_FILES);
         }
         s.stats.edits++;
         touched = rel;
@@ -195,7 +201,7 @@ async function onPostToolUse(
         ok: true,
         preview: previewOutput(input.tool_output ?? input.tool_response),
       });
-      if (s.commands.length > 200) s.commands.splice(0, s.commands.length - 200);
+      if (s.commands.length > MAX_COMMANDS) s.commands.splice(0, s.commands.length - MAX_COMMANDS);
     }
   });
 
@@ -223,6 +229,9 @@ async function onPostToolUseFailure(
         ok: false,
         preview: (input.error ?? '').slice(0, 400),
       });
+      // Same ring buffer as the success path, which used to be the only one
+      // that trimmed — a session with many failing commands grew unbounded.
+      if (s.commands.length > MAX_COMMANDS) s.commands.splice(0, s.commands.length - MAX_COMMANDS);
     });
   }
   ctx.store.addTimeline(sessionId, 'error', `${tool} failed: ${(input.error ?? '').slice(0, 300)}`, {
