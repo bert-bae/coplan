@@ -87,13 +87,81 @@ test('a command whose child holds stdout open still settles', async () => {
     timeoutMs: 10_000,
     label: 'orphan pipe test',
   });
-  const outcome = await Promise.race([
-    handle.result,
-    sleep(6_000).then(() => null),
-  ]);
+  const outcome = await Promise.race([handle.result, sleep(6_000).then(() => null)]);
   assert.notEqual(outcome, null, 'the promise must settle without waiting on the orphan');
   assert.match(outcome!.output, /done/);
-  handle.cancel();
+});
+
+test('the orphan holding the pipes is reaped, not merely stepped around', async () => {
+  // Settling without waiting on the orphan is only half the job: the whole
+  // point of the module is that nothing it starts outlives it. `cancel()` is
+  // a no-op once settled, so if settling does not reap the group the process
+  // survives — which is how this test used to leak a 30-second sleep.
+  const pidFile = path.join(home, 'orphan.pid');
+  const handle = run(`sh -c '(sleep 30 & echo $! > ${pidFile}) ; echo done'`, {
+    cwd: home,
+    timeoutMs: 10_000,
+    label: 'orphan reap test',
+  });
+
+  const outcome = await Promise.race([handle.result, sleep(6_000).then(() => null)]);
+  assert.notEqual(outcome, null, 'the promise must settle');
+
+  const orphan = readPid(pidFile);
+  assert.ok(orphan > 0, 'the background process should have recorded its pid');
+  assert.equal(
+    await until(() => !isPidAlive(orphan)),
+    true,
+    'the background process must not survive the command that started it',
+  );
+  assert.equal(liveChildCount(), 0, 'and the registry must not still be holding it');
+});
+
+test('a child started during shutdown is still reaped', async () => {
+  // `shutdownChildren` used to signal a snapshot and then clear the registry.
+  // Anything spawned inside the grace window — a sequential runner advancing
+  // to its next command — was neither signalled nor left visible to the
+  // exit-time sweep, so it outlived the daemon.
+  //
+  // The first child ignores SIGTERM so the grace period actually elapses;
+  // otherwise it dies at once, the wait loop exits, and the latecomer arrives
+  // after the sweep rather than during it.
+  // The first child has to survive SIGTERM, or the wait loop ends before the
+  // latecomer is spawned and the race under test never happens. A shell with
+  // `trap "" TERM` is not enough — the group signal kills the `sleep` it is
+  // blocked on and the shell falls through — so use a process that genuinely
+  // installs a handler and stays up. `exec` matters: without it the shell is
+  // the group leader, and the shell has no handler — it dies to the SIGTERM,
+  // the wait loop ends, and the latecomer is spawned after the sweep instead
+  // of during it.
+  const first = run(`exec node -e 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'`, {
+    cwd: home,
+    timeoutMs: 60_000,
+    label: 'shutdown stubborn',
+  });
+  // Let the handler be installed before anything signals it.
+  await sleep(400);
+
+  const shutdown = shutdownChildren(1_500);
+
+  await sleep(200);
+  const late = run('sleep 30', { cwd: home, timeoutMs: 60_000, label: 'shutdown latecomer' });
+  const latePid = late.pid;
+
+  try {
+    await shutdown;
+    assert.ok(latePid && latePid > 0, 'the latecomer should have a pid to check');
+    assert.equal(
+      await until(() => !isPidAlive(latePid!)),
+      true,
+      'a child spawned during the grace window must still be killed',
+    );
+  } finally {
+    // Leave the registry empty even if an assertion failed, or the next test
+    // inherits this one's children and fails for the wrong reason.
+    killAllChildren();
+    await Promise.all([first.result, late.result]);
+  }
 });
 
 test('output is capped rather than accumulated without limit', async () => {
@@ -215,6 +283,73 @@ test('dropping a session releases its cached diff', async () => {
   assert.ok(store.getDiff('withdiff'));
   store.drop('withdiff');
   assert.equal(store.get('withdiff'), undefined);
+});
+
+test('an evicted session is rehydrated, not silently blanked', async () => {
+  // `sweep` evicts from memory but leaves state.json on disk. If the next
+  // hook for that id created a fresh session, its first persist would write
+  // straight over the top — so a `--resume` an hour later would find the
+  // whole recorded history gone.
+  const store = await freshStore();
+  store.ensure('evicted', process.cwd());
+  store.setStage('evicted', 'code_review', 'most of the way through');
+  store.addTimeline('evicted', 'note', 'something worth keeping');
+  store.mutate('evicted', (state) => {
+    state.status = 'ended';
+    state.endedAt = Date.now() - 2 * 60 * 60 * 1000;
+    state.updatedAt = Date.now() - 2 * 60 * 60 * 1000;
+  });
+  store.persistNow('evicted');
+
+  // Other tests share this home, so assert on this session rather than a count.
+  store.sweep({ endedTtlMs: 60 * 60 * 1000 });
+  assert.equal(store.get('evicted'), undefined, 'the cold session is gone from memory');
+
+  const revived = store.ensure('evicted', process.cwd());
+  assert.equal(revived.stage, 'code_review', 'the stage came back');
+  assert.ok(
+    revived.timeline.some((e) => e.text === 'something worth keeping'),
+    'and so did the history',
+  );
+});
+
+test('a session that never existed is created fresh rather than failing', async () => {
+  const store = await freshStore();
+  const made = store.ensure('brand-new', process.cwd());
+  assert.equal(made.stage, 'idle');
+  assert.equal(made.timeline.length, 0);
+});
+
+test('reading a cached diff refreshes its place in the LRU', async () => {
+  // Eviction was insertion-ordered, so the diff being actively reviewed —
+  // the one read on every render — was the likeliest to be thrown out.
+  const store = await freshStore();
+  const diff = (ref: string) =>
+    ({ baseRef: ref, files: [], additions: 0, deletions: 0, generatedAt: Date.now() }) as never;
+
+  const { MAX_CACHED_DIFFS } = await import('../daemon/store.ts');
+  const ids: string[] = [];
+  for (let i = 0; i < MAX_CACHED_DIFFS; i++) {
+    const id = `s${i}`;
+    ids.push(id);
+    store.ensure(id, process.cwd());
+    store.setDiff(id, diff(id));
+  }
+
+  // `getDiff` falls back to the persisted copy, which would mask eviction
+  // entirely. Remove the files so memory is the only source of truth.
+  for (const id of ids) rmSync(path.join(home, 'sessions', id, 'diff.json'), { force: true });
+
+  // Touch the oldest, so recency and insertion order disagree.
+  const oldest = ids[0]!;
+  assert.ok(store.getDiff(oldest), 'the oldest entry is still cached');
+
+  store.ensure('newcomer', process.cwd());
+  store.setDiff('newcomer', diff('newcomer'));
+  rmSync(path.join(home, 'sessions', 'newcomer', 'diff.json'), { force: true });
+
+  assert.ok(store.getDiff(oldest), 'the entry just read survives the eviction');
+  assert.equal(store.getDiff(ids[1]!), undefined, 'the genuinely least-recent one is evicted');
 });
 
 test('sessions older than the retention window are not loaded from disk', async () => {

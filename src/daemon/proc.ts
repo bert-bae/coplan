@@ -56,6 +56,8 @@ export interface RunResult {
 
 export interface RunHandle {
   readonly result: Promise<RunResult>;
+  /** The shell's pid, which is also its process-group id. For diagnostics. */
+  readonly pid: number | undefined;
   /** Terminate the whole process group, escalating to SIGKILL. */
   cancel(): void;
 }
@@ -81,6 +83,26 @@ export function liveChildCount(): number {
  * gone (ESRCH) or the platform has no such concept, fall back to the direct
  * child so the common case still works.
  */
+/**
+ * Kill a process group whose leader has already exited.
+ *
+ * `signalTree` refuses to signal once the direct child is gone, which is
+ * correct for the cancel and timeout paths but leaves exactly the orphan this
+ * module exists to prevent: the shell exits, a background grandchild inherits
+ * the pipes, and nothing ever reaps it. Only called when `close` failed to
+ * arrive, which is the signature of that case — so the pgid is known to still
+ * have a live member, and the happy path never signals anything.
+ */
+function reapGroup(child: ChildProcess): void {
+  const pid = child.pid;
+  if (!pid || process.platform === 'win32') return;
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    /* the group is already gone, which is the outcome we wanted */
+  }
+}
+
 function signalTree(child: ChildProcess, signal: NodeJS.Signals): void {
   const pid = child.pid;
   if (!pid || child.exitCode !== null || child.signalCode !== null) return;
@@ -199,7 +221,12 @@ export function run(command: string, opts: RunOptions): RunHandle {
     // Give the pipes a beat to flush what is already buffered, but never wait
     // on them: an orphan holding the write end would stall this forever.
     if (flush) clearTimeout(flush);
-    flush = setTimeout(() => settle(code, signal), FLUSH_GRACE_MS);
+    flush = setTimeout(() => {
+      // `close` did not arrive, so something in the group still holds the
+      // pipes. Settling alone would drop it from the registry and leak it.
+      reapGroup(child);
+      settle(code, signal);
+    }, FLUSH_GRACE_MS);
     flush.unref?.();
   });
 
@@ -207,7 +234,7 @@ export function run(command: string, opts: RunOptions): RunHandle {
   child.on('close', (code, signal) => settle(code, signal));
 
   live.add(entry);
-  return { result, cancel: () => terminate('cancel') };
+  return { result, pid: child.pid, cancel: () => terminate('cancel') };
 }
 
 /**
@@ -220,29 +247,43 @@ export function run(command: string, opts: RunOptions): RunHandle {
  * the final signal has been sent, so shutdown can safely exit afterwards.
  */
 export async function shutdownChildren(graceMs = 800): Promise<number> {
-  const entries = [...live];
-  if (entries.length === 0) return 0;
+  if (live.size === 0) return 0;
 
-  for (const entry of entries) signalTree(entry.child, 'SIGTERM');
+  const signalled = new Set<Entry>();
+  // Always sweep the registry itself, never a snapshot of it. A sequential
+  // runner advancing to its next command mid-shutdown adds an entry after the
+  // snapshot was taken; signalling only the snapshot would leave that one
+  // running, and clearing the registry afterwards would hide it from the
+  // exit-time `killAllChildren` as well.
+  const sweep = (signal: NodeJS.Signals): void => {
+    for (const entry of live) {
+      signalTree(entry.child, signal);
+      signalled.add(entry);
+    }
+  };
+
+  sweep('SIGTERM');
 
   const deadline = Date.now() + graceMs;
-  while (Date.now() < deadline && entries.some((e) => e.child.exitCode === null && e.child.signalCode === null)) {
+  const stillRunning = (): boolean =>
+    [...live].some((e) => e.child.exitCode === null && e.child.signalCode === null);
+  while (Date.now() < deadline && stillRunning()) {
     await new Promise((r) => {
       const t = setTimeout(r, 50);
       t.unref?.();
     });
   }
 
-  for (const entry of entries) signalTree(entry.child, 'SIGKILL');
-  live.clear();
-  return entries.length;
+  sweep('SIGKILL');
+  // Entries remove themselves as they settle; clearing here would drop any
+  // late arrival before it had been signalled.
+  return signalled.size;
 }
 
 /** Synchronous last resort, for exit paths that cannot await. */
 export function killAllChildren(): number {
   const entries = [...live];
   for (const entry of entries) signalTree(entry.child, 'SIGKILL');
-  live.clear();
   return entries.length;
 }
 

@@ -144,13 +144,7 @@ var SessionStore = class extends EventEmitter {
           expired.push(sessionDir);
           continue;
         }
-        state.reviewRound ??= 0;
-        state.threads ??= [];
-        state.roundHistory ??= [];
-        state.tasks ??= [];
-        if (state.status === "active") state.status = "idle";
-        for (const gate of state.gates) gate.waiting = false;
-        trimGates(state);
+        migrate(state);
         loaded.push(state);
       } catch {
       }
@@ -160,6 +154,19 @@ var SessionStore = class extends EventEmitter {
       this.sessions.set(state.sessionId, state);
     }
     for (const sessionDir of expired) discardDir(sessionDir);
+  }
+  /** Read one session from disk, or undefined if there is nothing to read. */
+  readSession(id) {
+    try {
+      const file = paths.sessionState(id);
+      if (!existsSync2(file)) return void 0;
+      const state = JSON.parse(readFileSync2(file, "utf8"));
+      if (!state.sessionId) return void 0;
+      migrate(state);
+      return state;
+    } catch {
+      return void 0;
+    }
   }
   /**
    * Forget a session: memory, cached diff, and any pending write.
@@ -239,7 +246,7 @@ var SessionStore = class extends EventEmitter {
   ensure(id, cwd) {
     let state = this.sessions.get(id);
     if (!state) {
-      state = newSession(id, cwd || process.cwd());
+      state = this.readSession(id) ?? newSession(id, cwd || process.cwd());
       this.sessions.set(id, state);
       mkdirSync2(paths.sessionDir(id), { recursive: true });
       this.emitEvent({ type: "snapshot", session: state });
@@ -505,7 +512,10 @@ var SessionStore = class extends EventEmitter {
   }
   getDiff(id) {
     const cached = this.diffs.get(id);
-    if (cached) return cached;
+    if (cached) {
+      this.cacheDiff(id, cached);
+      return cached;
+    }
     try {
       const file = path2.join(paths.sessionDir(id), "diff.json");
       if (!existsSync2(file)) return void 0;
@@ -567,6 +577,15 @@ var SessionStore = class extends EventEmitter {
     this.emitEvent({ type: "sessions", sessions: this.summaries() });
   }
 };
+function migrate(state) {
+  state.reviewRound ??= 0;
+  state.threads ??= [];
+  state.roundHistory ??= [];
+  state.tasks ??= [];
+  if (state.status === "active") state.status = "idle";
+  for (const gate of state.gates) gate.waiting = false;
+  trimGates(state);
+}
 function trimGates(state) {
   if (state.gates.length <= MAX_GATES) return;
   const keep = /* @__PURE__ */ new Set();
@@ -2066,6 +2085,14 @@ var live = /* @__PURE__ */ new Set();
 function liveChildCount() {
   return live.size;
 }
+function reapGroup(child) {
+  const pid = child.pid;
+  if (!pid || process.platform === "win32") return;
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+  }
+}
 function signalTree(child, signal) {
   const pid = child.pid;
   if (!pid || child.exitCode !== null || child.signalCode !== null) return;
@@ -2161,32 +2188,40 @@ ${output.slice(-maxOutput)}`;
   });
   child.on("exit", (code, signal) => {
     if (flush) clearTimeout(flush);
-    flush = setTimeout(() => settle(code, signal), FLUSH_GRACE_MS);
+    flush = setTimeout(() => {
+      reapGroup(child);
+      settle(code, signal);
+    }, FLUSH_GRACE_MS);
     flush.unref?.();
   });
   child.on("close", (code, signal) => settle(code, signal));
   live.add(entry);
-  return { result, cancel: () => terminate("cancel") };
+  return { result, pid: child.pid, cancel: () => terminate("cancel") };
 }
 async function shutdownChildren(graceMs = 800) {
-  const entries = [...live];
-  if (entries.length === 0) return 0;
-  for (const entry of entries) signalTree(entry.child, "SIGTERM");
+  if (live.size === 0) return 0;
+  const signalled = /* @__PURE__ */ new Set();
+  const sweep = (signal) => {
+    for (const entry of live) {
+      signalTree(entry.child, signal);
+      signalled.add(entry);
+    }
+  };
+  sweep("SIGTERM");
   const deadline = Date.now() + graceMs;
-  while (Date.now() < deadline && entries.some((e) => e.child.exitCode === null && e.child.signalCode === null)) {
+  const stillRunning = () => [...live].some((e) => e.child.exitCode === null && e.child.signalCode === null);
+  while (Date.now() < deadline && stillRunning()) {
     await new Promise((r) => {
       const t = setTimeout(r, 50);
       t.unref?.();
     });
   }
-  for (const entry of entries) signalTree(entry.child, "SIGKILL");
-  live.clear();
-  return entries.length;
+  sweep("SIGKILL");
+  return signalled.size;
 }
 function killAllChildren() {
   const entries = [...live];
   for (const entry of entries) signalTree(entry.child, "SIGKILL");
-  live.clear();
   return entries.length;
 }
 function liveChildLabels() {

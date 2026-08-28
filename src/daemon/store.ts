@@ -36,7 +36,9 @@ const MAX_SESSIONS = 60;
 /** Resolved gates retained per session; each one carries its full verdict. */
 const MAX_GATES = 40;
 /** Parsed diffs cached in memory. Each can be several megabytes. */
-const MAX_CACHED_DIFFS = 12;
+/** Exported so tests can assert eviction at the real boundary rather than
+ *  duplicating the number and drifting from it. */
+export const MAX_CACHED_DIFFS = 12;
 
 export function newSession(sessionId: string, cwd: string): SessionState {
   const now = Date.now();
@@ -118,16 +120,7 @@ export class SessionStore extends EventEmitter {
           expired.push(sessionDir);
           continue;
         }
-        // Sessions written by an older build predate some fields.
-        state.reviewRound ??= 0;
-        state.threads ??= [];
-        state.roundHistory ??= [];
-        state.tasks ??= [];
-        // A session cannot still be mid-turn across a daemon restart.
-        if (state.status === 'active') state.status = 'idle';
-        // Any gate that was parked has lost its waiter.
-        for (const gate of state.gates) gate.waiting = false;
-        trimGates(state);
+        migrate(state);
         loaded.push(state);
       } catch {
         /* skip unreadable session */
@@ -141,6 +134,20 @@ export class SessionStore extends EventEmitter {
       this.sessions.set(state.sessionId, state);
     }
     for (const sessionDir of expired) discardDir(sessionDir);
+  }
+
+  /** Read one session from disk, or undefined if there is nothing to read. */
+  private readSession(id: string): SessionState | undefined {
+    try {
+      const file = paths.sessionState(id);
+      if (!existsSync(file)) return undefined;
+      const state = JSON.parse(readFileSync(file, 'utf8')) as SessionState;
+      if (!state.sessionId) return undefined;
+      migrate(state);
+      return state;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -231,7 +238,10 @@ export class SessionStore extends EventEmitter {
   ensure(id: string, cwd?: string): SessionState {
     let state = this.sessions.get(id);
     if (!state) {
-      state = newSession(id, cwd || process.cwd());
+      // A swept session still has its state on disk. Creating a blank one
+      // here would persist straight over the top of it, so a `--resume` an
+      // hour later would find its whole history gone.
+      state = this.readSession(id) ?? newSession(id, cwd || process.cwd());
       this.sessions.set(id, state);
       mkdirSync(paths.sessionDir(id), { recursive: true });
       this.emitEvent({ type: 'snapshot', session: state });
@@ -536,7 +546,13 @@ export class SessionStore extends EventEmitter {
 
   getDiff(id: string): DiffPayload | undefined {
     const cached = this.diffs.get(id);
-    if (cached) return cached;
+    if (cached) {
+      // Re-insert on a hit. Without this the eviction order is insertion
+      // order, not recency, so the diff being actively reviewed is the one
+      // most likely to be thrown out while colder entries survive.
+      this.cacheDiff(id, cached);
+      return cached;
+    }
     try {
       const file = path.join(paths.sessionDir(id), 'diff.json');
       if (!existsSync(file)) return undefined;
@@ -607,6 +623,25 @@ export class SessionStore extends EventEmitter {
   broadcastSessionList(): void {
     this.emitEvent({ type: 'sessions', sessions: this.summaries() });
   }
+}
+
+/**
+ * Bring a session read from disk up to date.
+ *
+ * Shared by the startup scan and the single-session rehydrate, so the two can
+ * never drift into applying different fixups to the same file.
+ */
+function migrate(state: SessionState): void {
+  // Sessions written by an older build predate some fields.
+  state.reviewRound ??= 0;
+  state.threads ??= [];
+  state.roundHistory ??= [];
+  state.tasks ??= [];
+  // A session cannot still be mid-turn across a daemon restart.
+  if (state.status === 'active') state.status = 'idle';
+  // Any gate that was parked has lost its waiter.
+  for (const gate of state.gates) gate.waiting = false;
+  trimGates(state);
 }
 
 /**
