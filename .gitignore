@@ -1,0 +1,10 @@
+node_modules/
+*.log
+.DS_Store
+/tmp/
+.build/
+.build-previous/
+
+# Build output is committed so the plugin needs no install step, but
+# sourcemaps churn on every build and would dominate the history.
+dist/**/*.map

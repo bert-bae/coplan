@@ -1,0 +1,47 @@
+{
+  "autoOpen": false,
+  "maxTimelineEvents": 500,
+  "stopHoldSeconds": 540,
+  "awaitSeconds": 120,
+  "holdIdleSessions": false,
+  "maxDiffFileBytes": 400000,
+  "idleShutdownMinutes": 120,
+  "stages": {
+    "planning": {},
+    "plan_review": {},
+    "implementing": {},
+    "code_review": {},
+    "verification": {
+      "checks": []
+    },
+    "ship": {}
+  },
+  "ship": {
+    "steps": [
+      "checks",
+      "commit",
+      "push",
+      "pr",
+      "summary"
+    ],
+    "provider": "gh",
+    "providers": {
+      "gh": {
+        "kind": "command",
+        "label": "GitHub (gh CLI)",
+        "command": "gh pr create --base {{base}} --head {{branch}} --title {{title}} --body-file {{bodyFile}}"
+      },
+      "bitbucket": {
+        "kind": "mcp",
+        "label": "Bitbucket (MCP)",
+        "directive": "Open a pull request using the connected Bitbucket MCP server. Use the title and body below verbatim, source branch {{branch}}, destination branch {{base}}. Report the resulting PR URL back with harness_note."
+      },
+      "none": {
+        "kind": "none",
+        "label": "No PR \u2014 commit and push only"
+      }
+    },
+    "summaryPath": "docs/reviews/{{branch}}.md",
+    "commitTemplate": "{{title}}\n\n{{body}}"
+  }
+}

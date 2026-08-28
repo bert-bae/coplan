@@ -1,0 +1,494 @@
+import { useSyncExternalStore } from 'react';
+import { api } from './lib/api.ts';
+import type {
+  DiffPayload,
+  Gate,
+  ReviewThread,
+  ServerEvent,
+  SessionState,
+  SessionSummary,
+} from '../shared/types.ts';
+
+export type Tab = 'timeline' | 'plan' | 'board' | 'review' | 'verify' | 'ship';
+
+export type ConnectionState = 'connecting' | 'live' | 'reconnecting';
+
+/** A comment the user is composing. It is theirs until they submit the review. */
+export interface DraftComment extends ReviewThread {
+  /** Local-only: never sent, used to distinguish drafts from delivered threads. */
+  draft: true;
+}
+
+export interface Toast {
+  id: string;
+  kind: 'info' | 'success' | 'error';
+  text: string;
+}
+
+export interface UiState {
+  sessions: SessionSummary[];
+  sessionId: string | null;
+  session: SessionState | null;
+  diff: DiffPayload | null;
+  diffLoading: boolean;
+  tab: Tab;
+  connection: ConnectionState;
+  /** Unsubmitted line comments, keyed by session so switching never loses them. */
+  drafts: Record<string, DraftComment[]>;
+  diffMode: 'unified' | 'split';
+  selectedFile: string | null;
+  /** Files the user has ticked off while reviewing, per session. */
+  viewedFiles: Record<string, string[]>;
+  collapsedSidebar: boolean;
+  toasts: Toast[];
+  error: string | null;
+}
+
+const initial: UiState = {
+  sessions: [],
+  sessionId: null,
+  session: null,
+  diff: null,
+  diffLoading: false,
+  tab: 'timeline',
+  connection: 'connecting',
+  drafts: {},
+  diffMode: 'unified',
+  selectedFile: null,
+  viewedFiles: {},
+  collapsedSidebar: false,
+  toasts: [],
+  error: null,
+};
+
+const DRAFTS_KEY = 'cc-harness:drafts';
+const PREFS_KEY = 'cc-harness:prefs';
+
+/**
+ * A tiny external store read through `useSyncExternalStore`.
+ *
+ * Deliberately not a reducer library: the daemon owns nearly all state and
+ * pushes it over SSE, so the client's job is to hold the server snapshot plus
+ * a small amount of genuinely local state — unsubmitted comments, which tab
+ * is open, which files have been marked viewed.
+ */
+class Store {
+  private state: UiState = { ...initial, ...loadPrefs(), drafts: loadDrafts() };
+  private listeners = new Set<() => void>();
+  private source: EventSource | null = null;
+  private reconnectTimer: number | undefined;
+
+  getState = (): UiState => this.state;
+
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
+
+  private emit(): void {
+    for (const listener of this.listeners) listener();
+  }
+
+  /** Every mutation goes through here so the snapshot identity always changes. */
+  set(patch: Partial<UiState>): void {
+    this.state = { ...this.state, ...patch };
+    this.emit();
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Boot
+   * ---------------------------------------------------------------- */
+
+  async init(): Promise<void> {
+    // The token arrives once in the query string and the daemon swaps it for a
+    // cookie; drop it from the address bar so links the user copies are clean.
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('token')) {
+      url.searchParams.delete('token');
+      window.history.replaceState({}, '', `${url.pathname}${url.hash}`);
+    }
+
+    try {
+      const { sessions } = await api.sessions();
+      this.set({ sessions });
+      const target = readHash() ?? pickDefaultSession(sessions);
+      if (target) await this.selectSession(target, false);
+    } catch (err) {
+      this.set({ error: describeError(err) });
+    }
+
+    this.connect();
+    window.addEventListener('hashchange', () => {
+      const id = readHash();
+      if (id && id !== this.state.sessionId) void this.selectSession(id, false);
+    });
+  }
+
+  async selectSession(id: string, updateHash = true): Promise<void> {
+    if (updateHash) window.location.hash = `#/session/${id}`;
+    this.set({ sessionId: id, session: null, diff: null, selectedFile: null, error: null });
+    try {
+      const { session, diff } = await api.session(id);
+      this.set({ session, diff, tab: tabForSession(session) });
+      if (!diff && session.stage === 'code_review') void this.refreshDiff(false);
+    } catch (err) {
+      this.set({ error: describeError(err) });
+    }
+    this.connect();
+  }
+
+  async refreshDiff(force = true): Promise<void> {
+    const id = this.state.sessionId;
+    if (!id) return;
+    this.set({ diffLoading: true });
+    try {
+      const { diff } = await api.diff(id, force);
+      this.set({ diff, diffLoading: false });
+    } catch (err) {
+      this.set({ diffLoading: false, error: describeError(err) });
+    }
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Live connection
+   * ---------------------------------------------------------------- */
+
+  private connect(): void {
+    this.source?.close();
+    window.clearTimeout(this.reconnectTimer);
+
+    const query = this.state.sessionId ? `?session=${encodeURIComponent(this.state.sessionId)}` : '';
+    const source = new EventSource(`/api/events${query}`);
+    this.source = source;
+
+    source.onopen = () => this.set({ connection: 'live' });
+    source.onerror = () => {
+      this.set({ connection: 'reconnecting' });
+      // EventSource retries on its own, but a daemon restart changes the port
+      // it was pointed at, so re-resolve the session after a beat.
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = window.setTimeout(() => void this.resync(), 5000);
+    };
+    source.onmessage = (message) => {
+      try {
+        this.apply(JSON.parse(message.data as string) as ServerEvent);
+      } catch {
+        /* a malformed frame is not worth breaking the UI over */
+      }
+    };
+  }
+
+  private async resync(): Promise<void> {
+    if (this.state.connection === 'live' || !this.state.sessionId) return;
+    try {
+      const { session, diff } = await api.session(this.state.sessionId);
+      this.set({ session, diff, connection: 'live' });
+    } catch {
+      /* the EventSource keeps retrying */
+    }
+  }
+
+  private apply(event: ServerEvent): void {
+    const current = this.state.session;
+    switch (event.type) {
+      case 'ping':
+        return;
+
+      case 'sessions':
+        this.set({ sessions: event.sessions });
+        return;
+
+      case 'snapshot':
+        if (event.session.sessionId !== this.state.sessionId) return;
+        this.announceGate(current, event.session);
+        this.set({ session: event.session });
+        return;
+
+      case 'state': {
+        if (event.sessionId !== this.state.sessionId || !current) return;
+        const next = { ...current, ...event.patch };
+        this.announceGate(current, next);
+        this.set({ session: next });
+        return;
+      }
+
+      case 'timeline': {
+        if (event.sessionId !== this.state.sessionId || !current) return;
+        const timeline = [...current.timeline, ...event.events].slice(-800);
+        this.set({ session: { ...current, timeline } });
+        return;
+      }
+
+      case 'diff':
+        if (event.sessionId !== this.state.sessionId) return;
+        this.set({ diff: event.diff, diffLoading: false });
+        return;
+
+      case 'tasks': {
+        if (event.sessionId !== this.state.sessionId || !current) return;
+        this.set({ session: { ...current, tasks: event.tasks } });
+        return;
+      }
+
+      case 'check': {
+        if (event.sessionId !== this.state.sessionId || !current) return;
+        const checks = current.checks.some((c) => c.id === event.check.id)
+          ? current.checks.map((c) => (c.id === event.check.id ? event.check : c))
+          : [...current.checks, event.check];
+        this.set({ session: { ...current, checks } });
+        return;
+      }
+    }
+  }
+
+  /** A newly opened gate is the one thing that should pull the user in. */
+  private announceGate(before: SessionState | null, after: SessionState): void {
+    const wasOpen = before?.gates.find((g) => g.status === 'open')?.id;
+    const nowOpen = after.gates.find((g) => g.status === 'open');
+    if (!nowOpen || nowOpen.id === wasOpen) return;
+    this.set({ tab: tabForGate(nowOpen) });
+    this.toast('info', gateHeadline(nowOpen));
+    notify(gateHeadline(nowOpen), after.title);
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Draft comments
+   * ---------------------------------------------------------------- */
+
+  drafts(sessionId = this.state.sessionId): DraftComment[] {
+    return (sessionId && this.state.drafts[sessionId]) || [];
+  }
+
+  private setDrafts(sessionId: string, drafts: DraftComment[]): void {
+    const next = { ...this.state.drafts, [sessionId]: drafts };
+    if (drafts.length === 0) delete next[sessionId];
+    this.set({ drafts: next });
+    saveDrafts(next);
+  }
+
+  addDraft(comment: Omit<DraftComment, 'draft'>): void {
+    const id = this.state.sessionId;
+    if (!id) return;
+    this.setDrafts(id, [...this.drafts(id), { ...comment, draft: true }]);
+  }
+
+  updateDraft(commentId: string, body: string): void {
+    const id = this.state.sessionId;
+    if (!id) return;
+    this.setDrafts(
+      id,
+      this.drafts(id).map((c) => (c.id === commentId ? { ...c, body } : c)),
+    );
+  }
+
+  removeDraft(commentId: string): void {
+    const id = this.state.sessionId;
+    if (!id) return;
+    this.setDrafts(
+      id,
+      this.drafts(id).filter((c) => c.id !== commentId),
+    );
+  }
+
+  clearDrafts(sessionId = this.state.sessionId): void {
+    if (!sessionId) return;
+    this.setDrafts(sessionId, []);
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Local preferences
+   * ---------------------------------------------------------------- */
+
+  setTab(tab: Tab): void {
+    this.set({ tab });
+  }
+
+  setDiffMode(diffMode: 'unified' | 'split'): void {
+    this.set({ diffMode });
+    savePrefs({ diffMode, collapsedSidebar: this.state.collapsedSidebar });
+  }
+
+  toggleSidebar(): void {
+    const collapsedSidebar = !this.state.collapsedSidebar;
+    this.set({ collapsedSidebar });
+    savePrefs({ diffMode: this.state.diffMode, collapsedSidebar });
+  }
+
+  toggleViewed(file: string): void {
+    const id = this.state.sessionId;
+    if (!id) return;
+    const current = this.state.viewedFiles[id] ?? [];
+    const next = current.includes(file) ? current.filter((f) => f !== file) : [...current, file];
+    this.set({ viewedFiles: { ...this.state.viewedFiles, [id]: next } });
+  }
+
+  isViewed(file: string): boolean {
+    const id = this.state.sessionId;
+    return Boolean(id && (this.state.viewedFiles[id] ?? []).includes(file));
+  }
+
+  selectFile(path: string | null): void {
+    this.set({ selectedFile: path });
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Notices
+   * ---------------------------------------------------------------- */
+
+  toast(kind: Toast['kind'], text: string): void {
+    const toast: Toast = { id: `t${Date.now()}${Math.random().toString(36).slice(2, 6)}`, kind, text };
+    this.set({ toasts: [...this.state.toasts, toast] });
+    window.setTimeout(() => this.dismissToast(toast.id), kind === 'error' ? 8000 : 4000);
+  }
+
+  dismissToast(id: string): void {
+    this.set({ toasts: this.state.toasts.filter((t) => t.id !== id) });
+  }
+
+  fail(err: unknown): void {
+    this.toast('error', describeError(err));
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Helpers
+ * ------------------------------------------------------------------ */
+
+export function describeError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
+function readHash(): string | null {
+  const match = /^#\/session\/([^/?]+)/.exec(window.location.hash);
+  return match ? decodeURIComponent(match[1]!) : null;
+}
+
+/** Prefer a session that is waiting on the user over the merely most recent. */
+function pickDefaultSession(sessions: SessionSummary[]): string | null {
+  const waiting = sessions.find((s) => s.openGates > 0);
+  return (waiting ?? sessions[0])?.sessionId ?? null;
+}
+
+export function tabForGate(gate: Gate): Tab {
+  switch (gate.kind) {
+    case 'plan':
+      return 'plan';
+    case 'code_review':
+      return 'review';
+    case 'verification':
+      return 'verify';
+    case 'ship':
+      return 'ship';
+    default:
+      return 'timeline';
+  }
+}
+
+export function tabForSession(session: SessionState): Tab {
+  const gate = session.gates.find((g) => g.status === 'open');
+  if (gate) return tabForGate(gate);
+  switch (session.stage) {
+    case 'planning':
+    case 'plan_review':
+      return 'plan';
+    case 'implementing':
+      return 'board';
+    case 'code_review':
+      return 'review';
+    case 'verification':
+      return 'verify';
+    case 'ship':
+    case 'done':
+      return 'ship';
+    default:
+      return 'timeline';
+  }
+}
+
+export function gateHeadline(gate: Gate): string {
+  switch (gate.kind) {
+    case 'plan':
+      return 'Claude is waiting on your review of the plan';
+    case 'code_review':
+      return 'Claude is waiting on your review of the code';
+    case 'verification':
+      return 'Claude is waiting on your sign-off of the checks';
+    case 'ship':
+      return 'Claude is waiting on your confirmation to ship';
+    default:
+      return 'Claude is waiting on you';
+  }
+}
+
+function notify(title: string, body: string): void {
+  try {
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+    new Notification(title, { body, tag: 'cc-harness-gate' });
+  } catch {
+    /* notifications are a nicety */
+  }
+}
+
+/** Drafts are unsubmitted user writing: they must survive a reload. */
+function loadDrafts(): Record<string, DraftComment[]> {
+  try {
+    const raw = window.localStorage.getItem(DRAFTS_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, DraftComment[]>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveDrafts(drafts: Record<string, DraftComment[]>): void {
+  try {
+    window.localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
+  } catch {
+    /* private mode, quota — the drafts still live in memory */
+  }
+}
+
+function loadPrefs(): Partial<UiState> {
+  try {
+    const raw = window.localStorage.getItem(PREFS_KEY);
+    return raw ? (JSON.parse(raw) as Partial<UiState>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePrefs(prefs: { diffMode: string; collapsedSidebar: boolean }): void {
+  try {
+    window.localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    /* ignore */
+  }
+}
+
+export const store = new Store();
+
+/* ------------------------------------------------------------------ *
+ * React bindings
+ * ------------------------------------------------------------------ */
+
+export function useStore<T>(select: (state: UiState) => T): T {
+  return useSyncExternalStore(
+    store.subscribe,
+    () => select(store.getState()),
+    () => select(store.getState()),
+  );
+}
+
+export function useSession(): SessionState | null {
+  return useStore((s) => s.session);
+}
+
+export function useOpenGate(): Gate | null {
+  return useStore((s) => s.session?.gates.find((g) => g.status === 'open') ?? null);
+}
+
+export function useDrafts(): DraftComment[] {
+  return useStore((s) => (s.sessionId ? (s.drafts[s.sessionId] ?? EMPTY_DRAFTS) : EMPTY_DRAFTS));
+}
+
+const EMPTY_DRAFTS: DraftComment[] = [];

@@ -1,0 +1,11 @@
+{
+  "name": "cc-harness-local",
+  "owner": { "name": "Elbert B." },
+  "plugins": [
+    {
+      "name": "cc-harness",
+      "source": "./",
+      "description": "A live browser UI for a Claude Code session: plan review, progress, line-level diff review, verification and ship — with every response fed back into the same session."
+    }
+  ]
+}
