@@ -45,6 +45,7 @@ var init_paths = __esm({
 // src/daemon/store.ts
 var store_exports = {};
 __export(store_exports, {
+  MAX_CACHED_DIFFS: () => MAX_CACHED_DIFFS,
   SessionStore: () => SessionStore,
   newSession: () => newSession,
   sanitizeId: () => sanitizeId
@@ -84,6 +85,15 @@ function newSession(sessionId, cwd) {
     pendingFeedback: [],
     stats: { turns: 0, toolCalls: 0, edits: 0 }
   };
+}
+function migrate(state) {
+  state.reviewRound ??= 0;
+  state.threads ??= [];
+  state.roundHistory ??= [];
+  state.tasks ??= [];
+  if (state.status === "active") state.status = "idle";
+  for (const gate of state.gates) gate.waiting = false;
+  trimGates(state);
 }
 function trimGates(state) {
   if (state.gates.length <= MAX_GATES) return;
@@ -176,13 +186,7 @@ var init_store = __esm({
               expired.push(sessionDir);
               continue;
             }
-            state.reviewRound ??= 0;
-            state.threads ??= [];
-            state.roundHistory ??= [];
-            state.tasks ??= [];
-            if (state.status === "active") state.status = "idle";
-            for (const gate of state.gates) gate.waiting = false;
-            trimGates(state);
+            migrate(state);
             loaded.push(state);
           } catch {
           }
@@ -192,6 +196,19 @@ var init_store = __esm({
           this.sessions.set(state.sessionId, state);
         }
         for (const sessionDir of expired) discardDir(sessionDir);
+      }
+      /** Read one session from disk, or undefined if there is nothing to read. */
+      readSession(id) {
+        try {
+          const file = paths.sessionState(id);
+          if (!existsSync2(file)) return void 0;
+          const state = JSON.parse(readFileSync2(file, "utf8"));
+          if (!state.sessionId) return void 0;
+          migrate(state);
+          return state;
+        } catch {
+          return void 0;
+        }
       }
       /**
        * Forget a session: memory, cached diff, and any pending write.
@@ -271,7 +288,7 @@ var init_store = __esm({
       ensure(id, cwd) {
         let state = this.sessions.get(id);
         if (!state) {
-          state = newSession(id, cwd || process.cwd());
+          state = this.readSession(id) ?? newSession(id, cwd || process.cwd());
           this.sessions.set(id, state);
           mkdirSync2(paths.sessionDir(id), { recursive: true });
           this.emitEvent({ type: "snapshot", session: state });
@@ -537,7 +554,10 @@ var init_store = __esm({
       }
       getDiff(id) {
         const cached = this.diffs.get(id);
-        if (cached) return cached;
+        if (cached) {
+          this.cacheDiff(id, cached);
+          return cached;
+        }
         try {
           const file = path2.join(paths.sessionDir(id), "diff.json");
           if (!existsSync2(file)) return void 0;

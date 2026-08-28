@@ -54,6 +54,7 @@ var init_paths = __esm({
 // src/daemon/store.ts
 var store_exports = {};
 __export(store_exports, {
+  MAX_CACHED_DIFFS: () => MAX_CACHED_DIFFS,
   SessionStore: () => SessionStore,
   newSession: () => newSession,
   sanitizeId: () => sanitizeId
@@ -93,6 +94,15 @@ function newSession(sessionId, cwd) {
     pendingFeedback: [],
     stats: { turns: 0, toolCalls: 0, edits: 0 }
   };
+}
+function migrate(state) {
+  state.reviewRound ??= 0;
+  state.threads ??= [];
+  state.roundHistory ??= [];
+  state.tasks ??= [];
+  if (state.status === "active") state.status = "idle";
+  for (const gate of state.gates) gate.waiting = false;
+  trimGates(state);
 }
 function trimGates(state) {
   if (state.gates.length <= MAX_GATES) return;
@@ -185,13 +195,7 @@ var init_store = __esm({
               expired.push(sessionDir);
               continue;
             }
-            state.reviewRound ??= 0;
-            state.threads ??= [];
-            state.roundHistory ??= [];
-            state.tasks ??= [];
-            if (state.status === "active") state.status = "idle";
-            for (const gate of state.gates) gate.waiting = false;
-            trimGates(state);
+            migrate(state);
             loaded.push(state);
           } catch {
           }
@@ -201,6 +205,19 @@ var init_store = __esm({
           this.sessions.set(state.sessionId, state);
         }
         for (const sessionDir of expired) discardDir(sessionDir);
+      }
+      /** Read one session from disk, or undefined if there is nothing to read. */
+      readSession(id) {
+        try {
+          const file = paths.sessionState(id);
+          if (!existsSync3(file)) return void 0;
+          const state = JSON.parse(readFileSync2(file, "utf8"));
+          if (!state.sessionId) return void 0;
+          migrate(state);
+          return state;
+        } catch {
+          return void 0;
+        }
       }
       /**
        * Forget a session: memory, cached diff, and any pending write.
@@ -280,7 +297,7 @@ var init_store = __esm({
       ensure(id, cwd) {
         let state = this.sessions.get(id);
         if (!state) {
-          state = newSession(id, cwd || process.cwd());
+          state = this.readSession(id) ?? newSession(id, cwd || process.cwd());
           this.sessions.set(id, state);
           mkdirSync2(paths.sessionDir(id), { recursive: true });
           this.emitEvent({ type: "snapshot", session: state });
@@ -546,7 +563,10 @@ var init_store = __esm({
       }
       getDiff(id) {
         const cached = this.diffs.get(id);
-        if (cached) return cached;
+        if (cached) {
+          this.cacheDiff(id, cached);
+          return cached;
+        }
         try {
           const file = path2.join(paths.sessionDir(id), "diff.json");
           if (!existsSync3(file)) return void 0;
@@ -962,6 +982,14 @@ var live = /* @__PURE__ */ new Set();
 function liveChildCount() {
   return live.size;
 }
+function reapGroup(child) {
+  const pid = child.pid;
+  if (!pid || process.platform === "win32") return;
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+  }
+}
 function signalTree(child, signal) {
   const pid = child.pid;
   if (!pid || child.exitCode !== null || child.signalCode !== null) return;
@@ -1057,32 +1085,40 @@ ${output.slice(-maxOutput)}`;
   });
   child.on("exit", (code, signal) => {
     if (flush) clearTimeout(flush);
-    flush = setTimeout(() => settle(code, signal), FLUSH_GRACE_MS);
+    flush = setTimeout(() => {
+      reapGroup(child);
+      settle(code, signal);
+    }, FLUSH_GRACE_MS);
     flush.unref?.();
   });
   child.on("close", (code, signal) => settle(code, signal));
   live.add(entry);
-  return { result, cancel: () => terminate("cancel") };
+  return { result, pid: child.pid, cancel: () => terminate("cancel") };
 }
 async function shutdownChildren(graceMs = 800) {
-  const entries = [...live];
-  if (entries.length === 0) return 0;
-  for (const entry of entries) signalTree(entry.child, "SIGTERM");
+  if (live.size === 0) return 0;
+  const signalled = /* @__PURE__ */ new Set();
+  const sweep = (signal) => {
+    for (const entry of live) {
+      signalTree(entry.child, signal);
+      signalled.add(entry);
+    }
+  };
+  sweep("SIGTERM");
   const deadline = Date.now() + graceMs;
-  while (Date.now() < deadline && entries.some((e) => e.child.exitCode === null && e.child.signalCode === null)) {
+  const stillRunning = () => [...live].some((e) => e.child.exitCode === null && e.child.signalCode === null);
+  while (Date.now() < deadline && stillRunning()) {
     await new Promise((r) => {
       const t = setTimeout(r, 50);
       t.unref?.();
     });
   }
-  for (const entry of entries) signalTree(entry.child, "SIGKILL");
-  live.clear();
-  return entries.length;
+  sweep("SIGKILL");
+  return signalled.size;
 }
 function killAllChildren() {
   const entries = [...live];
   for (const entry of entries) signalTree(entry.child, "SIGKILL");
-  live.clear();
   return entries.length;
 }
 
@@ -1395,13 +1431,51 @@ test("a command whose child holds stdout open still settles", async () => {
     timeoutMs: 1e4,
     label: "orphan pipe test"
   });
-  const outcome = await Promise.race([
-    handle.result,
-    sleep(6e3).then(() => null)
-  ]);
+  const outcome = await Promise.race([handle.result, sleep(6e3).then(() => null)]);
   assert.notEqual(outcome, null, "the promise must settle without waiting on the orphan");
   assert.match(outcome.output, /done/);
-  handle.cancel();
+});
+test("the orphan holding the pipes is reaped, not merely stepped around", async () => {
+  const pidFile = path3.join(home, "orphan.pid");
+  const handle = run(`sh -c '(sleep 30 & echo $! > ${pidFile}) ; echo done'`, {
+    cwd: home,
+    timeoutMs: 1e4,
+    label: "orphan reap test"
+  });
+  const outcome = await Promise.race([handle.result, sleep(6e3).then(() => null)]);
+  assert.notEqual(outcome, null, "the promise must settle");
+  const orphan = readPid(pidFile);
+  assert.ok(orphan > 0, "the background process should have recorded its pid");
+  assert.equal(
+    await until(() => !isPidAlive(orphan)),
+    true,
+    "the background process must not survive the command that started it"
+  );
+  assert.equal(liveChildCount(), 0, "and the registry must not still be holding it");
+});
+test("a child started during shutdown is still reaped", async () => {
+  const first = run(`exec node -e 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'`, {
+    cwd: home,
+    timeoutMs: 6e4,
+    label: "shutdown stubborn"
+  });
+  await sleep(400);
+  const shutdown = shutdownChildren(1500);
+  await sleep(200);
+  const late = run("sleep 30", { cwd: home, timeoutMs: 6e4, label: "shutdown latecomer" });
+  const latePid = late.pid;
+  try {
+    await shutdown;
+    assert.ok(latePid && latePid > 0, "the latecomer should have a pid to check");
+    assert.equal(
+      await until(() => !isPidAlive(latePid)),
+      true,
+      "a child spawned during the grace window must still be killed"
+    );
+  } finally {
+    killAllChildren();
+    await Promise.all([first.result, late.result]);
+  }
 });
 test("output is capped rather than accumulated without limit", async () => {
   const handle = run(`sh -c 'i=0; while [ $i -lt 400 ]; do echo 0123456789012345678901234567890123456789; i=$((i+1)); done'`, {
@@ -1501,6 +1575,52 @@ test("dropping a session releases its cached diff", async () => {
   assert.ok(store.getDiff("withdiff"));
   store.drop("withdiff");
   assert.equal(store.get("withdiff"), void 0);
+});
+test("an evicted session is rehydrated, not silently blanked", async () => {
+  const store = await freshStore();
+  store.ensure("evicted", process.cwd());
+  store.setStage("evicted", "code_review", "most of the way through");
+  store.addTimeline("evicted", "note", "something worth keeping");
+  store.mutate("evicted", (state) => {
+    state.status = "ended";
+    state.endedAt = Date.now() - 2 * 60 * 60 * 1e3;
+    state.updatedAt = Date.now() - 2 * 60 * 60 * 1e3;
+  });
+  store.persistNow("evicted");
+  store.sweep({ endedTtlMs: 60 * 60 * 1e3 });
+  assert.equal(store.get("evicted"), void 0, "the cold session is gone from memory");
+  const revived = store.ensure("evicted", process.cwd());
+  assert.equal(revived.stage, "code_review", "the stage came back");
+  assert.ok(
+    revived.timeline.some((e) => e.text === "something worth keeping"),
+    "and so did the history"
+  );
+});
+test("a session that never existed is created fresh rather than failing", async () => {
+  const store = await freshStore();
+  const made = store.ensure("brand-new", process.cwd());
+  assert.equal(made.stage, "idle");
+  assert.equal(made.timeline.length, 0);
+});
+test("reading a cached diff refreshes its place in the LRU", async () => {
+  const store = await freshStore();
+  const diff = (ref) => ({ baseRef: ref, files: [], additions: 0, deletions: 0, generatedAt: Date.now() });
+  const { MAX_CACHED_DIFFS: MAX_CACHED_DIFFS2 } = await Promise.resolve().then(() => (init_store(), store_exports));
+  const ids = [];
+  for (let i = 0; i < MAX_CACHED_DIFFS2; i++) {
+    const id = `s${i}`;
+    ids.push(id);
+    store.ensure(id, process.cwd());
+    store.setDiff(id, diff(id));
+  }
+  for (const id of ids) rmSync2(path3.join(home, "sessions", id, "diff.json"), { force: true });
+  const oldest = ids[0];
+  assert.ok(store.getDiff(oldest), "the oldest entry is still cached");
+  store.ensure("newcomer", process.cwd());
+  store.setDiff("newcomer", diff("newcomer"));
+  rmSync2(path3.join(home, "sessions", "newcomer", "diff.json"), { force: true });
+  assert.ok(store.getDiff(oldest), "the entry just read survives the eviction");
+  assert.equal(store.getDiff(ids[1]), void 0, "the genuinely least-recent one is evicted");
 });
 test("sessions older than the retention window are not loaded from disk", async () => {
   const stale = path3.join(home, "sessions", "ancient");
