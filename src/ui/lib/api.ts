@@ -35,6 +35,10 @@ export const api = {
 
   session: (id: string) => request<{ session: SessionState; diff: DiffPayload | null }>(`/api/session/${id}`),
 
+  /** Permanent: the daemon removes the session's on-disk directory too. */
+  deleteSession: (id: string) =>
+    request<{ deleted: boolean }>(`/api/session/${id}`, { method: 'DELETE' }),
+
   diff: (id: string, refresh = false) =>
     request<{ diff: DiffPayload }>(`/api/session/${id}/diff${refresh ? '?refresh=1' : ''}`),
 

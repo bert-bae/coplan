@@ -389,6 +389,9 @@ export interface SessionSummary {
   title: string;
   cwd: string;
   repoName: string | null;
+  /** Absolute repo root, or null outside a repo. The session list groups on
+   *  this, so two checkouts of the same repo stay separate accordions. */
+  repoRoot: string | null;
   branch: string | null;
   stage: Stage;
   status: SessionStatus;

@@ -40,6 +40,11 @@ export interface UiState {
   /** Files the user has ticked off while reviewing, per session. */
   viewedFiles: Record<string, string[]>;
   collapsedSidebar: boolean;
+  /** Session ids the user pinned to the top of the sidebar. Local-only: which
+   *  sessions matter to *this* reader is not something the daemon can know. */
+  pinned: string[];
+  /** Project groups the user has folded shut, keyed by repo root (or cwd). */
+  collapsedProjects: string[];
   toasts: Toast[];
   error: string | null;
 }
@@ -57,6 +62,8 @@ const initial: UiState = {
   selectedFile: null,
   viewedFiles: {},
   collapsedSidebar: false,
+  pinned: [],
+  collapsedProjects: [],
   toasts: [],
   error: null,
 };
@@ -303,15 +310,81 @@ class Store {
     this.set({ tab });
   }
 
+  /** Persist the slice of state that is a preference rather than a snapshot. */
+  private persistPrefs(): void {
+    savePrefs({
+      diffMode: this.state.diffMode,
+      collapsedSidebar: this.state.collapsedSidebar,
+      pinned: this.state.pinned,
+      collapsedProjects: this.state.collapsedProjects,
+    });
+  }
+
   setDiffMode(diffMode: 'unified' | 'split'): void {
     this.set({ diffMode });
-    savePrefs({ diffMode, collapsedSidebar: this.state.collapsedSidebar });
+    this.persistPrefs();
   }
 
   toggleSidebar(): void {
-    const collapsedSidebar = !this.state.collapsedSidebar;
-    this.set({ collapsedSidebar });
-    savePrefs({ diffMode: this.state.diffMode, collapsedSidebar });
+    this.set({ collapsedSidebar: !this.state.collapsedSidebar });
+    this.persistPrefs();
+  }
+
+  /** Pinned sessions sort to the top of their project, and above every other
+   *  project. Purely a reading aid, so it lives in localStorage. */
+  togglePin(sessionId: string): void {
+    const pinned = this.state.pinned.includes(sessionId)
+      ? this.state.pinned.filter((id) => id !== sessionId)
+      : [...this.state.pinned, sessionId];
+    this.set({ pinned });
+    this.persistPrefs();
+  }
+
+  toggleProject(key: string): void {
+    const collapsedProjects = this.state.collapsedProjects.includes(key)
+      ? this.state.collapsedProjects.filter((k) => k !== key)
+      : [...this.state.collapsedProjects, key];
+    this.set({ collapsedProjects });
+    this.persistPrefs();
+  }
+
+  /**
+   * Delete a session for good.
+   *
+   * The daemon broadcasts a new session list, but the local state that hangs
+   * off this id — drafts, viewed files, the pin — is the client's own and has
+   * to be cleaned up here or it leaks forever in localStorage.
+   */
+  async deleteSession(sessionId: string): Promise<void> {
+    try {
+      await api.deleteSession(sessionId);
+    } catch (err) {
+      this.fail(err);
+      return;
+    }
+
+    const drafts = { ...this.state.drafts };
+    delete drafts[sessionId];
+    const viewedFiles = { ...this.state.viewedFiles };
+    delete viewedFiles[sessionId];
+    const sessions = this.state.sessions.filter((s) => s.sessionId !== sessionId);
+
+    this.set({
+      sessions,
+      drafts,
+      viewedFiles,
+      pinned: this.state.pinned.filter((id) => id !== sessionId),
+    });
+    saveDrafts(drafts);
+    this.persistPrefs();
+
+    if (this.state.sessionId === sessionId) {
+      this.set({ sessionId: null, session: null, diff: null, selectedFile: null });
+      window.location.hash = '';
+      const next = pickDefaultSession(sessions);
+      if (next) await this.selectSession(next);
+    }
+    this.toast('success', 'Session deleted.');
   }
 
   toggleViewed(file: string): void {
@@ -448,16 +521,32 @@ function saveDrafts(drafts: Record<string, DraftComment[]>): void {
   }
 }
 
+/** Only known keys, only the right shapes: a corrupt or stale prefs blob must
+ *  not be able to put `undefined` where the UI expects an array. */
 function loadPrefs(): Partial<UiState> {
   try {
     const raw = window.localStorage.getItem(PREFS_KEY);
-    return raw ? (JSON.parse(raw) as Partial<UiState>) : {};
+    if (!raw) return {};
+    const saved = JSON.parse(raw) as Record<string, unknown>;
+    const prefs: Partial<UiState> = {};
+    if (saved['diffMode'] === 'unified' || saved['diffMode'] === 'split') prefs.diffMode = saved['diffMode'];
+    if (typeof saved['collapsedSidebar'] === 'boolean') prefs.collapsedSidebar = saved['collapsedSidebar'];
+    if (Array.isArray(saved['pinned'])) prefs.pinned = saved['pinned'].filter((v) => typeof v === 'string');
+    if (Array.isArray(saved['collapsedProjects'])) {
+      prefs.collapsedProjects = saved['collapsedProjects'].filter((v) => typeof v === 'string');
+    }
+    return prefs;
   } catch {
     return {};
   }
 }
 
-function savePrefs(prefs: { diffMode: string; collapsedSidebar: boolean }): void {
+function savePrefs(prefs: {
+  diffMode: string;
+  collapsedSidebar: boolean;
+  pinned: string[];
+  collapsedProjects: string[];
+}): void {
   try {
     window.localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   } catch {

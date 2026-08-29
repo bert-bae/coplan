@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -96,4 +96,47 @@ test('state survives a daemon restart', async () => {
   assert.equal(session!.stage, 'implementing');
   assert.equal(session!.gates.length, 1);
   assert.equal(session!.gates[0]!.waiting, false, 'a parked waiter does not survive a restart');
+});
+
+test('purge removes a session from memory and from disk', async () => {
+  const store = await freshStore();
+  store.ensure('s7', process.cwd());
+  store.setStage('s7', 'implementing', 'building');
+  store.persistNow('s7');
+  assert.ok(existsSync(path.join(home, 'sessions', 's7', 'state.json')));
+
+  assert.equal(store.purge('s7'), true);
+  assert.equal(store.get('s7'), undefined);
+  assert.ok(!existsSync(path.join(home, 'sessions', 's7')), 'the directory goes too');
+
+  // `ensure` reads state back off disk for swept sessions. Purge has to beat
+  // that, or the next hook mentioning this id would resurrect it.
+  const revived = store.ensure('s7', process.cwd());
+  assert.equal(revived.stage, 'idle', 'a purged session does not come back');
+});
+
+test('a purged session does not reappear after a restart', async () => {
+  const store = await freshStore();
+  store.ensure('s8', process.cwd());
+  store.persistNow('s8');
+  store.purge('s8');
+
+  const reloaded = await freshStore();
+  assert.equal(reloaded.get('s8'), undefined);
+});
+
+test('purge reports whether there was anything to delete', async () => {
+  const store = await freshStore();
+  assert.equal(store.purge('never-existed'), false);
+});
+
+test('drop is eviction, not deletion: the state stays on disk', async () => {
+  const store = await freshStore();
+  store.ensure('s9', process.cwd());
+  store.setStage('s9', 'planning', 'thinking');
+  store.drop('s9');
+
+  assert.equal(store.get('s9'), undefined, 'evicted from memory');
+  const reloaded = await freshStore();
+  assert.equal(reloaded.get('s9')?.stage, 'planning', 'but still recoverable');
 });

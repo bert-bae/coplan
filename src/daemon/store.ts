@@ -171,6 +171,28 @@ export class SessionStore extends EventEmitter {
   }
 
   /**
+   * Delete a session for good: memory, cached diff, pending write, and the
+   * whole on-disk directory.
+   *
+   * Unlike `drop`, this is not eviction. `ensure` reads state back off disk
+   * when a swept session reappears, so anything short of removing the
+   * directory would resurrect the session the next time a hook mentioned it —
+   * which is exactly what a user who clicked "delete" did not ask for.
+   */
+  purge(id: string): boolean {
+    const timer = this.persistTimers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      this.persistTimers.delete(id);
+    }
+    this.diffs.delete(id);
+    const removed = this.sessions.delete(id);
+    discardDir(paths.sessionDir(id));
+    if (removed) this.broadcastSessionList();
+    return removed;
+  }
+
+  /**
    * Evict sessions that ended a while ago, and trim gate history on the rest.
    *
    * Called on a timer by the daemon. A long-lived daemon accumulates finished
@@ -262,6 +284,7 @@ export class SessionStore extends EventEmitter {
       title: s.title,
       cwd: s.cwd,
       repoName: s.repoRoot ? path.basename(s.repoRoot) : null,
+      repoRoot: s.repoRoot,
       branch: s.branch,
       stage: s.stage,
       status: s.status,

@@ -37,13 +37,14 @@ export function App() {
   const error = useStore((s) => s.error);
   const gate = useOpenGate();
   const drafts = useDrafts();
+  const sidebarCollapsed = useStore((s) => s.collapsedSidebar);
 
   useDocumentTitle(session, Boolean(gate));
   useUnsavedGuard(drafts.length);
   useShortcuts();
 
   return (
-    <div className="app">
+    <div className={classNames('app', sidebarCollapsed && 'is-sidebar-collapsed')}>
       <Sidebar />
       <main className="main">
         {!sessionId || !session ? (
