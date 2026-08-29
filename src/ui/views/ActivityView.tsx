@@ -118,8 +118,25 @@ export function ActivityView() {
   );
 }
 
+/**
+ * Kinds whose text is written for a human and may carry markdown or the
+ * XML-ish blocks Claude Code injects. Everything else — tool payloads, check
+ * output, stack traces — is machine text, where preserving the exact bytes
+ * matters more than formatting them.
+ */
+const PROSE_KINDS = new Set<TimelineEvent['kind']>([
+  'assistant',
+  'user',
+  'feedback',
+  'thinking',
+  'note',
+  'notification',
+  'gate',
+  'ship',
+]);
+
 function Event({ event }: { event: TimelineEvent }) {
-  const prose = event.kind === 'assistant' || event.kind === 'user' || event.kind === 'feedback';
+  const prose = PROSE_KINDS.has(event.kind);
   return (
     <article className={classNames('event', `is-${event.kind}`)}>
       <span className="event-icon" title={event.kind}>{ICON[event.kind] ?? '·'}</span>

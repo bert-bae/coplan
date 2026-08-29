@@ -229,6 +229,27 @@ var init_store = __esm({
         return removed;
       }
       /**
+       * Delete a session for good: memory, cached diff, pending write, and the
+       * whole on-disk directory.
+       *
+       * Unlike `drop`, this is not eviction. `ensure` reads state back off disk
+       * when a swept session reappears, so anything short of removing the
+       * directory would resurrect the session the next time a hook mentioned it —
+       * which is exactly what a user who clicked "delete" did not ask for.
+       */
+      purge(id) {
+        const timer = this.persistTimers.get(id);
+        if (timer) {
+          clearTimeout(timer);
+          this.persistTimers.delete(id);
+        }
+        this.diffs.delete(id);
+        const removed = this.sessions.delete(id);
+        discardDir(paths.sessionDir(id));
+        if (removed) this.broadcastSessionList();
+        return removed;
+      }
+      /**
        * Evict sessions that ended a while ago, and trim gate history on the rest.
        *
        * Called on a timer by the daemon. A long-lived daemon accumulates finished
@@ -307,6 +328,7 @@ var init_store = __esm({
           title: s.title,
           cwd: s.cwd,
           repoName: s.repoRoot ? path2.basename(s.repoRoot) : null,
+          repoRoot: s.repoRoot,
           branch: s.branch,
           stage: s.stage,
           status: s.status,
@@ -625,7 +647,7 @@ var init_store = __esm({
 // src/test/store.test.ts
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync as rmSync2 } from "node:fs";
+import { mkdtempSync, rmSync as rmSync2, existsSync as existsSync3 } from "node:fs";
 import { tmpdir } from "node:os";
 import path3 from "node:path";
 var home;
@@ -705,5 +727,38 @@ test("state survives a daemon restart", async () => {
   assert.equal(session.stage, "implementing");
   assert.equal(session.gates.length, 1);
   assert.equal(session.gates[0].waiting, false, "a parked waiter does not survive a restart");
+});
+test("purge removes a session from memory and from disk", async () => {
+  const store = await freshStore();
+  store.ensure("s7", process.cwd());
+  store.setStage("s7", "implementing", "building");
+  store.persistNow("s7");
+  assert.ok(existsSync3(path3.join(home, "sessions", "s7", "state.json")));
+  assert.equal(store.purge("s7"), true);
+  assert.equal(store.get("s7"), void 0);
+  assert.ok(!existsSync3(path3.join(home, "sessions", "s7")), "the directory goes too");
+  const revived = store.ensure("s7", process.cwd());
+  assert.equal(revived.stage, "idle", "a purged session does not come back");
+});
+test("a purged session does not reappear after a restart", async () => {
+  const store = await freshStore();
+  store.ensure("s8", process.cwd());
+  store.persistNow("s8");
+  store.purge("s8");
+  const reloaded = await freshStore();
+  assert.equal(reloaded.get("s8"), void 0);
+});
+test("purge reports whether there was anything to delete", async () => {
+  const store = await freshStore();
+  assert.equal(store.purge("never-existed"), false);
+});
+test("drop is eviction, not deletion: the state stays on disk", async () => {
+  const store = await freshStore();
+  store.ensure("s9", process.cwd());
+  store.setStage("s9", "planning", "thinking");
+  store.drop("s9");
+  assert.equal(store.get("s9"), void 0, "evicted from memory");
+  const reloaded = await freshStore();
+  assert.equal(reloaded.get("s9")?.stage, "planning", "but still recoverable");
 });
 //# sourceMappingURL=store.test.js.map

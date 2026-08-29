@@ -187,6 +187,27 @@ var SessionStore = class extends EventEmitter {
     return removed;
   }
   /**
+   * Delete a session for good: memory, cached diff, pending write, and the
+   * whole on-disk directory.
+   *
+   * Unlike `drop`, this is not eviction. `ensure` reads state back off disk
+   * when a swept session reappears, so anything short of removing the
+   * directory would resurrect the session the next time a hook mentioned it —
+   * which is exactly what a user who clicked "delete" did not ask for.
+   */
+  purge(id) {
+    const timer = this.persistTimers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      this.persistTimers.delete(id);
+    }
+    this.diffs.delete(id);
+    const removed = this.sessions.delete(id);
+    discardDir(paths.sessionDir(id));
+    if (removed) this.broadcastSessionList();
+    return removed;
+  }
+  /**
    * Evict sessions that ended a while ago, and trim gate history on the rest.
    *
    * Called on a timer by the daemon. A long-lived daemon accumulates finished
@@ -265,6 +286,7 @@ var SessionStore = class extends EventEmitter {
       title: s.title,
       cwd: s.cwd,
       repoName: s.repoRoot ? path2.basename(s.repoRoot) : null,
+      repoRoot: s.repoRoot,
       branch: s.branch,
       stage: s.stage,
       status: s.status,
@@ -646,6 +668,9 @@ var Router = class {
   }
   post(pattern, handler) {
     return this.add("POST", pattern, handler);
+  }
+  delete(pattern, handler) {
+    return this.add("DELETE", pattern, handler);
   }
   match(method, pathname) {
     const parts = pathname.split("/").filter(Boolean);
@@ -2918,6 +2943,17 @@ function buildRouter(deps) {
   router.get("/api/session/:id", (ctx) => {
     const session = sessionOr404(ctx);
     if (session) json(ctx.res, 200, { session, diff: store.getDiff(session.sessionId) ?? null });
+  });
+  router.delete("/api/session/:id", (ctx) => {
+    const id = ctx.params["id"] ?? "";
+    if (!store.get(id)) {
+      json(ctx.res, 404, { error: "unknown session" });
+      return;
+    }
+    tailers.get(id)?.close();
+    tailers.delete(id);
+    const deleted = store.purge(id);
+    json(ctx.res, 200, { deleted });
   });
   router.get("/api/session/:id/diff", async (ctx) => {
     const session = sessionOr404(ctx);

@@ -34,6 +34,10 @@ export class Router {
     return this.add('POST', pattern, handler);
   }
 
+  delete(pattern: string, handler: Handler): this {
+    return this.add('DELETE', pattern, handler);
+  }
+
   match(method: string, pathname: string): { handler: Handler; params: Record<string, string> } | null {
     const parts = pathname.split('/').filter(Boolean);
     for (const route of this.routes) {

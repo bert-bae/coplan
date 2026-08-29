@@ -2,9 +2,15 @@
  * A deliberately small markdown renderer.
  *
  * It covers what actually appears in a Claude session — fenced code, inline
- * code, headings, lists, bold/italic, links — and escapes everything first,
- * so untrusted assistant output can never inject markup.
+ * code, headings, nested lists, task lists, tables, rules, bold/italic/strike,
+ * links — plus the XML-ish blocks Claude Code injects into a transcript
+ * (`<command-name>`, `<system-reminder>`, …), which would otherwise show up as
+ * raw angle-bracket noise.
+ *
+ * Everything is escaped before it is formatted, so untrusted assistant output
+ * can never inject markup.
  */
+
 /** Escape before formatting, so assistant output can never inject markup. */
 function escapeHtml(value: string): string {
   return value
@@ -14,28 +20,157 @@ function escapeHtml(value: string): string {
     .replace(/"/g, '&quot;');
 }
 
+/* ------------------------------------------------------------------ *
+ * XML-ish transcript blocks
+ * ------------------------------------------------------------------ */
+
+/**
+ * How each recognised tag renders.
+ *
+ * `command` tags are collected into a single chip, because Claude Code emits
+ * the trio together and they describe one thing: the slash command that was
+ * run. Everything else is machinery the reader mostly wants folded away, so it
+ * renders as a `<details>` they can open when it matters.
+ */
+type XmlMode = 'command' | 'details';
+
+interface XmlBlockSpec {
+  mode: XmlMode;
+  /** Summary text for `details`; the field name for `command`. */
+  label: string;
+}
+
+const XML_BLOCKS: Record<string, XmlBlockSpec> = {
+  'command-name': { mode: 'command', label: 'name' },
+  'command-args': { mode: 'command', label: 'args' },
+  'command-message': { mode: 'command', label: 'message' },
+  'system-reminder': { mode: 'details', label: 'system reminder' },
+  'local-command-stdout': { mode: 'details', label: 'command output' },
+  'local-command-stderr': { mode: 'details', label: 'command error output' },
+  'user-prompt-submit-hook': { mode: 'details', label: 'hook output' },
+  'ide_selection': { mode: 'details', label: 'editor selection' },
+  'ide-selection': { mode: 'details', label: 'editor selection' },
+  'function_results': { mode: 'details', label: 'tool result' },
+  'task-notification': { mode: 'details', label: 'task notification' },
+};
+
+interface XmlBlock {
+  tag: string;
+  body: string;
+  /** Index of the last source line the block consumed. */
+  endLine: number;
+}
+
+/**
+ * Recognise a block opening on `lines[i]`.
+ *
+ * Only known tags match: prose and code are full of angle brackets that are
+ * not markup (`a < b`, `Array<string>`), and swallowing them would lose text.
+ * An unterminated block is not a block either — returning null leaves the line
+ * to the normal escaping path, so nothing is ever silently dropped.
+ */
+function matchXmlBlock(lines: string[], i: number): XmlBlock | null {
+  const open = /^\s*<([A-Za-z][\w:.-]*)\s*>(.*)$/.exec(lines[i] ?? '');
+  if (!open) return null;
+  const raw = open[1]!;
+  const tag = raw.toLowerCase();
+  if (!Object.prototype.hasOwnProperty.call(XML_BLOCKS, tag)) return null;
+
+  const close = `</${raw}>`;
+  const rest = open[2] ?? '';
+  const inline = rest.indexOf(close);
+  if (inline >= 0) return { tag, body: rest.slice(0, inline), endLine: i };
+
+  const body: string[] = rest ? [rest] : [];
+  for (let j = i + 1; j < lines.length; j++) {
+    const line = lines[j]!;
+    const at = line.indexOf(close);
+    if (at >= 0) {
+      if (line.slice(0, at)) body.push(line.slice(0, at));
+      return { tag, body: body.join('\n'), endLine: j };
+    }
+    body.push(line);
+  }
+  return null;
+}
+
+/** The `command-*` trio, rendered as one chip. */
+function renderCommandGroup(fields: Map<string, string>): string {
+  const name = fields.get('command-name')?.trim();
+  const args = fields.get('command-args')?.trim();
+  const message = fields.get('command-message')?.trim();
+
+  const head: string[] = [];
+  if (name) head.push(`<span class="md-command-name">${escapeHtml(name)}</span>`);
+  if (args) head.push(`<span class="md-command-args">${escapeHtml(args)}</span>`);
+  // The message repeats the command name often enough that showing both is
+  // just noise; only surface it when it actually says something else.
+  const extra = message && message !== name && `/${message}` !== name ? message : '';
+
+  return (
+    `<div class="md-command">` +
+    (head.length ? `<div class="md-command-head">${head.join('')}</div>` : '') +
+    (extra ? `<div class="md-command-message">${escapeHtml(extra)}</div>` : '') +
+    `</div>`
+  );
+}
+
+function renderDetailsBlock(spec: XmlBlockSpec, tag: string, body: string): string {
+  const text = body.replace(/^\n+|\n+$/g, '');
+  return (
+    `<details class="md-xml is-${escapeHtml(tag)}">` +
+    `<summary>${escapeHtml(spec.label)}</summary>` +
+    `<pre class="md-xml-body">${escapeHtml(text)}</pre>` +
+    `</details>`
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Markdown
+ * ------------------------------------------------------------------ */
+
 export function renderMarkdown(source: string): string {
   const lines = source.replace(/\r\n/g, '\n').split('\n');
   const out: string[] = [];
   let inCode = false;
   let codeLang = '';
   let codeBuffer: string[] = [];
-  let listType: 'ul' | 'ol' | null = null;
   let paragraph: string[] = [];
+
+  /** Open lists, outermost first. A `<li>` is always open at the deepest. */
+  const lists: { type: 'ul' | 'ol'; indent: number }[] = [];
+  /** Buffered `command-*` fields awaiting a flush. */
+  let command: Map<string, string> | null = null;
 
   const flushParagraph = () => {
     if (paragraph.length === 0) return;
     out.push(`<p>${inline(paragraph.join(' '))}</p>`);
     paragraph = [];
   };
-  const closeList = () => {
-    if (listType) {
-      out.push(`</${listType}>`);
-      listType = null;
-    }
+  const closeDeepestList = () => {
+    const list = lists.pop();
+    if (!list) return;
+    out.push('</li>');
+    out.push(`</${list.type}>`);
+  };
+  const closeLists = () => {
+    while (lists.length) closeDeepestList();
+  };
+  const flushCommand = () => {
+    if (!command) return;
+    out.push(renderCommandGroup(command));
+    command = null;
+  };
+  /** Anything that is not a list item ends the list, and so on. */
+  const flushBlocks = () => {
+    flushParagraph();
+    closeLists();
+    flushCommand();
   };
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+
     const fence = /^```(\w*)\s*$/.exec(line);
     if (fence) {
       if (inCode) {
@@ -47,8 +182,7 @@ export function renderMarkdown(source: string): string {
         inCode = false;
         codeLang = '';
       } else {
-        flushParagraph();
-        closeList();
+        flushBlocks();
         inCode = true;
         codeLang = fence[1] ?? '';
       }
@@ -59,48 +193,63 @@ export function renderMarkdown(source: string): string {
       continue;
     }
 
+    // Transcript machinery. Checked inside the loop rather than as a pre-pass
+    // so a fenced code block that quotes one of these tags stays code.
+    const xml = matchXmlBlock(lines, i);
+    if (xml) {
+      const spec = XML_BLOCKS[xml.tag]!;
+      if (spec.mode === 'command') {
+        flushParagraph();
+        closeLists();
+        command ??= new Map();
+        command.set(xml.tag, xml.body);
+      } else {
+        flushBlocks();
+        out.push(renderDetailsBlock(spec, xml.tag, xml.body));
+      }
+      i = xml.endLine;
+      continue;
+    }
+
     if (!line.trim()) {
-      flushParagraph();
-      closeList();
+      flushBlocks();
       continue;
     }
 
     const heading = /^(#{1,4})\s+(.*)$/.exec(line);
     if (heading) {
-      flushParagraph();
-      closeList();
+      flushBlocks();
       const level = heading[1]!.length + 1;
       out.push(`<h${level}>${inline(heading[2] ?? '')}</h${level}>`);
       continue;
     }
 
-    const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
-    if (bullet) {
-      flushParagraph();
-      if (listType !== 'ul') {
-        closeList();
-        out.push('<ul>');
-        listType = 'ul';
-      }
-      out.push(`<li>${inline(bullet[1] ?? '')}</li>`);
+    // Tables before rules: a delimiter row is made of the same characters as
+    // a horizontal rule.
+    const table = matchTable(lines, i);
+    if (table) {
+      flushBlocks();
+      out.push(table.html);
+      i = table.endLine;
       continue;
     }
 
-    const ordered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
-    if (ordered) {
+    if (/^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      flushBlocks();
+      out.push('<hr />');
+      continue;
+    }
+
+    const item = matchListItem(line);
+    if (item) {
       flushParagraph();
-      if (listType !== 'ol') {
-        closeList();
-        out.push('<ol>');
-        listType = 'ol';
-      }
-      out.push(`<li>${inline(ordered[1] ?? '')}</li>`);
+      flushCommand();
+      pushListItem(out, lists, item);
       continue;
     }
 
     if (/^\s*>/.test(line)) {
-      flushParagraph();
-      closeList();
+      flushBlocks();
       out.push(`<blockquote>${inline(line.replace(/^\s*>\s?/, ''))}</blockquote>`);
       continue;
     }
@@ -111,17 +260,148 @@ export function renderMarkdown(source: string): string {
   if (inCode && codeBuffer.length) {
     out.push(`<pre class="md-code"><code>${escapeHtml(codeBuffer.join('\n'))}</code></pre>`);
   }
-  flushParagraph();
-  closeList();
+  flushBlocks();
   return out.join('\n');
 }
 
+/* ------------------------------------------------------------------ *
+ * Lists
+ * ------------------------------------------------------------------ */
+
+interface ListItem {
+  type: 'ul' | 'ol';
+  indent: number;
+  content: string;
+  /** `- [ ]` / `- [x]`, rendered as a disabled checkbox. */
+  task?: boolean;
+  checked?: boolean;
+}
+
+function matchListItem(line: string): ListItem | null {
+  const bullet = /^(\s*)[-*+]\s+(.*)$/.exec(line);
+  const ordered = bullet ? null : /^(\s*)\d+[.)]\s+(.*)$/.exec(line);
+  const match = bullet ?? ordered;
+  if (!match) return null;
+
+  const indent = (match[1] ?? '').replace(/\t/g, '  ').length;
+  let content = match[2] ?? '';
+  const item: ListItem = { type: bullet ? 'ul' : 'ol', indent, content };
+
+  const task = /^\[([ xX])\]\s+(.*)$/.exec(content);
+  if (task && bullet) {
+    item.task = true;
+    item.checked = task[1] !== ' ';
+    content = task[2] ?? '';
+    item.content = content;
+  }
+  return item;
+}
+
+/**
+ * Place one item, opening and closing lists so nesting follows indentation.
+ *
+ * The deepest `<li>` is always left open, which is what lets a nested list be
+ * emitted inside its parent item rather than as a sibling of it.
+ */
+function pushListItem(out: string[], lists: { type: 'ul' | 'ol'; indent: number }[], item: ListItem): void {
+  const closeDeepest = () => {
+    const list = lists.pop();
+    if (!list) return;
+    out.push('</li>');
+    out.push(`</${list.type}>`);
+  };
+
+  while (lists.length > 1 && item.indent < lists[lists.length - 1]!.indent) closeDeepest();
+
+  const top = lists[lists.length - 1];
+  if (!top || item.indent > top.indent) {
+    out.push(`<${item.type}>`);
+    lists.push({ type: item.type, indent: item.indent });
+  } else if (top.type !== item.type) {
+    closeDeepest();
+    out.push(`<${item.type}>`);
+    lists.push({ type: item.type, indent: item.indent });
+  } else {
+    out.push('</li>');
+  }
+
+  const box = item.task
+    ? `<input type="checkbox" disabled${item.checked ? ' checked' : ''} /> `
+    : '';
+  const cls = item.task ? ` class="md-task${item.checked ? ' is-done' : ''}"` : '';
+  out.push(`<li${cls}>${box}${inline(item.content)}`);
+}
+
+/* ------------------------------------------------------------------ *
+ * Tables
+ * ------------------------------------------------------------------ */
+
+/** `| a | b |` over `| --- | :-: |`, then rows until the block ends. */
+function matchTable(lines: string[], i: number): { html: string; endLine: number } | null {
+  const header = lines[i] ?? '';
+  const divider = lines[i + 1] ?? '';
+  if (!/\|/.test(header)) return null;
+  if (!/^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/.test(divider)) return null;
+
+  const cells = (line: string): string[] =>
+    line
+      .trim()
+      .replace(/^\|/, '')
+      .replace(/\|$/, '')
+      .split('|')
+      .map((c) => c.trim());
+
+  const heads = cells(header);
+  const aligns = cells(divider).map((c) =>
+    c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'right' : c.startsWith(':') ? 'left' : '',
+  );
+  const align = (n: number) => (aligns[n] ? ` style="text-align:${aligns[n]}"` : '');
+
+  const body: string[] = [];
+  let end = i + 1;
+  for (let j = i + 2; j < lines.length; j++) {
+    const row = lines[j] ?? '';
+    if (!row.trim() || !row.includes('|')) break;
+    const tds = cells(row)
+      .map((c, n) => `<td${align(n)}>${inline(c)}</td>`)
+      .join('');
+    body.push(`<tr>${tds}</tr>`);
+    end = j;
+  }
+
+  const ths = heads.map((c, n) => `<th${align(n)}>${inline(c)}</th>`).join('');
+  const html =
+    `<div class="md-table-wrap"><table class="md-table">` +
+    `<thead><tr>${ths}</tr></thead>` +
+    (body.length ? `<tbody>${body.join('')}</tbody>` : '') +
+    `</table></div>`;
+  return { html, endLine: end };
+}
+
+/* ------------------------------------------------------------------ *
+ * Inline
+ * ------------------------------------------------------------------ */
+
+/** Placeholder for a code span, so emphasis never fires inside one. */
+const CODE_MARK = '\u0000';
+
 function inline(text: string): string {
   let html = escapeHtml(text);
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  // Lift code spans out first. `**` inside backticks is literal, and running
+  // the emphasis passes over them would mangle real code.
+  const spans: string[] = [];
+  html = html.replace(/`([^`]+)`/g, (_all, body: string) => {
+    spans.push(`<code>${body}</code>`);
+    return `${CODE_MARK}${spans.length - 1}${CODE_MARK}`;
+  });
+
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/(^|[\s(])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>');
+  html = html.replace(/(^|[\s(])_([^_\s][^_]*)_(?=$|[\s).,;:!?])/g, '$1<em>$2</em>');
+  html = html.replace(/~~([^~]+)~~/g, '<del>$1</del>');
   html = html.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
   html = html.replace(/(^|\s)(https?:\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noreferrer">$2</a>');
-  return html;
+
+  return html.replace(new RegExp(`${CODE_MARK}(\\d+)${CODE_MARK}`, 'g'), (_all, n: string) => spans[Number(n)] ?? '');
 }

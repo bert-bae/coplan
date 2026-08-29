@@ -358,6 +358,25 @@ function buildRouter(deps: Deps): Router {
     if (session) json(ctx.res, 200, { session, diff: store.getDiff(session.sessionId) ?? null });
   });
 
+  /**
+   * Delete a session for good.
+   *
+   * The transcript tailer has to go with it: it holds an open watcher and
+   * would keep calling `store.ensure`, which reads state back from disk and
+   * would recreate the very session the user just deleted.
+   */
+  router.delete('/api/session/:id', (ctx) => {
+    const id = ctx.params['id'] ?? '';
+    if (!store.get(id)) {
+      json(ctx.res, 404, { error: 'unknown session' });
+      return;
+    }
+    tailers.get(id)?.close();
+    tailers.delete(id);
+    const deleted = store.purge(id);
+    json(ctx.res, 200, { deleted });
+  });
+
   router.get('/api/session/:id/diff', async (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;

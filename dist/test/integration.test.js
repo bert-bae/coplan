@@ -2,7 +2,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, appendFileSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, appendFileSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, existsSync as existsSync2 } from "node:fs";
 import { tmpdir } from "node:os";
 import path2 from "node:path";
 import { fileURLToPath } from "node:url";
@@ -700,5 +700,51 @@ test("SessionEnd closes the session out", async () => {
   const s = await session();
   assert.equal(s.status, "ended");
   assert.ok(s.endedAt);
+});
+test("a session can be deleted, and stays deleted", async () => {
+  const doomed = "doomed-session";
+  await hookFor(doomed, "SessionStart", { start_reason: "startup" });
+  const before2 = await call("/api/sessions");
+  assert.ok(before2.sessions.some((s) => s.sessionId === doomed), "the session is listed first");
+  const dir = path2.join(home, "sessions", doomed);
+  assert.ok(existsSync2(dir), "and has state on disk");
+  const res = await call(`/api/session/${doomed}`, { method: "DELETE" });
+  assert.equal(res.deleted, true);
+  const after2 = await call("/api/sessions");
+  assert.ok(!after2.sessions.some((s) => s.sessionId === doomed), "gone from the list");
+  assert.ok(!existsSync2(dir), "and gone from disk \u2014 this is deletion, not eviction");
+  const missing = await fetch(`${baseUrl(lock)}/api/session/${doomed}`, {
+    headers: { authorization: `Bearer ${lock.token}` }
+  });
+  assert.equal(missing.status, 404);
+});
+test("deleting an unknown session is a 404, not a silent success", async () => {
+  const res = await fetch(`${baseUrl(lock)}/api/session/no-such-session`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${lock.token}` }
+  });
+  assert.equal(res.status, 404);
+});
+test("deleting a session takes its transcript tailer with it", async () => {
+  const tailed = "tailed-session";
+  const ownTranscript = path2.join(home, "tailed.jsonl");
+  writeFileSync(ownTranscript, "");
+  await hookFor(tailed, "SessionStart", { start_reason: "startup", transcript_path: ownTranscript });
+  appendFileSync(
+    ownTranscript,
+    JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "hello" }] } }) + "\n"
+  );
+  await until(async () => {
+    const r = await call(`/api/session/${tailed}`);
+    return r.session?.timeline?.some((e) => e.text.includes("hello"));
+  });
+  await call(`/api/session/${tailed}`, { method: "DELETE" });
+  appendFileSync(
+    ownTranscript,
+    JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "after" }] } }) + "\n"
+  );
+  await sleep(600);
+  const list = await call("/api/sessions");
+  assert.ok(!list.sessions.some((s) => s.sessionId === tailed), "it does not come back");
 });
 //# sourceMappingURL=integration.test.js.map

@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, appendFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, appendFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -792,4 +792,65 @@ test('SessionEnd closes the session out', async () => {
   const s = await session();
   assert.equal(s.status, 'ended');
   assert.ok(s.endedAt);
+});
+
+test('a session can be deleted, and stays deleted', async () => {
+  const doomed = 'doomed-session';
+  await hookFor(doomed, 'SessionStart', { start_reason: 'startup' });
+
+  const before = await call<{ sessions: { sessionId: string }[] }>('/api/sessions');
+  assert.ok(before.sessions.some((s) => s.sessionId === doomed), 'the session is listed first');
+  const dir = path.join(home, 'sessions', doomed);
+  assert.ok(existsSync(dir), 'and has state on disk');
+
+  const res = await call<{ deleted: boolean }>(`/api/session/${doomed}`, { method: 'DELETE' });
+  assert.equal(res.deleted, true);
+
+  const after = await call<{ sessions: { sessionId: string }[] }>('/api/sessions');
+  assert.ok(!after.sessions.some((s) => s.sessionId === doomed), 'gone from the list');
+  assert.ok(!existsSync(dir), 'and gone from disk — this is deletion, not eviction');
+
+  const missing = await fetch(`${baseUrl(lock)}/api/session/${doomed}`, {
+    headers: { authorization: `Bearer ${lock.token}` },
+  });
+  assert.equal(missing.status, 404);
+});
+
+test('deleting an unknown session is a 404, not a silent success', async () => {
+  const res = await fetch(`${baseUrl(lock)}/api/session/no-such-session`, {
+    method: 'DELETE',
+    headers: { authorization: `Bearer ${lock.token}` },
+  });
+  assert.equal(res.status, 404);
+});
+
+test('deleting a session takes its transcript tailer with it', async () => {
+  // The tailer calls `store.ensure`, which reads state back from disk. Left
+  // running, it would recreate the session moments after it was deleted.
+  const tailed = 'tailed-session';
+  const ownTranscript = path.join(home, 'tailed.jsonl');
+  writeFileSync(ownTranscript, '');
+  await hookFor(tailed, 'SessionStart', { start_reason: 'startup', transcript_path: ownTranscript });
+
+  appendFileSync(
+    ownTranscript,
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'hello' }] } }) +
+      '\n',
+  );
+  await until(async () => {
+    const r = await call<{ session: SessionState }>(`/api/session/${tailed}`);
+    return r.session?.timeline?.some((e) => e.text.includes('hello'));
+  });
+
+  await call<{ deleted: boolean }>(`/api/session/${tailed}`, { method: 'DELETE' });
+
+  appendFileSync(
+    ownTranscript,
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'after' }] } }) +
+      '\n',
+  );
+  await sleep(600);
+
+  const list = await call<{ sessions: { sessionId: string }[] }>('/api/sessions');
+  assert.ok(!list.sessions.some((s) => s.sessionId === tailed), 'it does not come back');
 });

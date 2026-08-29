@@ -125,6 +125,7 @@ function mount(state: SessionState = makeSession()) {
             title: 'demo',
             cwd: '/repo',
             repoName: 'repo',
+            repoRoot: '/repo',
             branch: 'feature/x',
             stage: session.stage,
             status: session.status,
@@ -176,7 +177,10 @@ after(() => cleanup());
 
 test('the shell renders the session and lands on the tab the gate needs', async () => {
   await boot();
-  assert.ok(screen.getByText('demo'));
+  assert.equal(document.querySelector('.head-title')?.textContent, 'demo');
+  // The rail names the session; the project it belongs to is the group header.
+  assert.equal(document.querySelector('.session-row .session-name')?.textContent, 'demo');
+  assert.equal(document.querySelector('.session-group-name')?.textContent, 'repo');
   assert.equal(store.getState().tab, 'review', 'a code-review gate opens the Review tab');
   cleanup();
 });

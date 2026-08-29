@@ -32,6 +32,8 @@ var init_api = __esm({
     api = {
       sessions: () => request("/api/sessions"),
       session: (id) => request(`/api/session/${id}`),
+      /** Permanent: the daemon removes the session's on-disk directory too. */
+      deleteSession: (id) => request(`/api/session/${id}`, { method: "DELETE" }),
       diff: (id, refresh = false) => request(`/api/session/${id}/diff${refresh ? "?refresh=1" : ""}`),
       resolveGate: (id, gateId, body) => request(`/api/session/${id}/gate/${gateId}/resolve`, {
         method: "POST",
@@ -182,7 +184,16 @@ function saveDrafts(drafts) {
 function loadPrefs() {
   try {
     const raw = window.localStorage.getItem(PREFS_KEY);
-    return raw ? JSON.parse(raw) : {};
+    if (!raw) return {};
+    const saved = JSON.parse(raw);
+    const prefs = {};
+    if (saved["diffMode"] === "unified" || saved["diffMode"] === "split") prefs.diffMode = saved["diffMode"];
+    if (typeof saved["collapsedSidebar"] === "boolean") prefs.collapsedSidebar = saved["collapsedSidebar"];
+    if (Array.isArray(saved["pinned"])) prefs.pinned = saved["pinned"].filter((v) => typeof v === "string");
+    if (Array.isArray(saved["collapsedProjects"])) {
+      prefs.collapsedProjects = saved["collapsedProjects"].filter((v) => typeof v === "string");
+    }
+    return prefs;
   } catch {
     return {};
   }
@@ -227,6 +238,8 @@ var init_store = __esm({
       selectedFile: null,
       viewedFiles: {},
       collapsedSidebar: false,
+      pinned: [],
+      collapsedProjects: [],
       toasts: [],
       error: null
     };
@@ -421,14 +434,69 @@ var init_store = __esm({
       setTab(tab) {
         this.set({ tab });
       }
+      /** Persist the slice of state that is a preference rather than a snapshot. */
+      persistPrefs() {
+        savePrefs({
+          diffMode: this.state.diffMode,
+          collapsedSidebar: this.state.collapsedSidebar,
+          pinned: this.state.pinned,
+          collapsedProjects: this.state.collapsedProjects
+        });
+      }
       setDiffMode(diffMode) {
         this.set({ diffMode });
-        savePrefs({ diffMode, collapsedSidebar: this.state.collapsedSidebar });
+        this.persistPrefs();
       }
       toggleSidebar() {
-        const collapsedSidebar = !this.state.collapsedSidebar;
-        this.set({ collapsedSidebar });
-        savePrefs({ diffMode: this.state.diffMode, collapsedSidebar });
+        this.set({ collapsedSidebar: !this.state.collapsedSidebar });
+        this.persistPrefs();
+      }
+      /** Pinned sessions sort to the top of their project, and above every other
+       *  project. Purely a reading aid, so it lives in localStorage. */
+      togglePin(sessionId) {
+        const pinned = this.state.pinned.includes(sessionId) ? this.state.pinned.filter((id) => id !== sessionId) : [...this.state.pinned, sessionId];
+        this.set({ pinned });
+        this.persistPrefs();
+      }
+      toggleProject(key) {
+        const collapsedProjects = this.state.collapsedProjects.includes(key) ? this.state.collapsedProjects.filter((k) => k !== key) : [...this.state.collapsedProjects, key];
+        this.set({ collapsedProjects });
+        this.persistPrefs();
+      }
+      /**
+       * Delete a session for good.
+       *
+       * The daemon broadcasts a new session list, but the local state that hangs
+       * off this id — drafts, viewed files, the pin — is the client's own and has
+       * to be cleaned up here or it leaks forever in localStorage.
+       */
+      async deleteSession(sessionId) {
+        try {
+          await api.deleteSession(sessionId);
+        } catch (err) {
+          this.fail(err);
+          return;
+        }
+        const drafts = { ...this.state.drafts };
+        delete drafts[sessionId];
+        const viewedFiles = { ...this.state.viewedFiles };
+        delete viewedFiles[sessionId];
+        const sessions = this.state.sessions.filter((s) => s.sessionId !== sessionId);
+        this.set({
+          sessions,
+          drafts,
+          viewedFiles,
+          pinned: this.state.pinned.filter((id) => id !== sessionId)
+        });
+        saveDrafts(drafts);
+        this.persistPrefs();
+        if (this.state.sessionId === sessionId) {
+          this.set({ sessionId: null, session: null, diff: null, selectedFile: null });
+          window.location.hash = "";
+          const next = pickDefaultSession(sessions);
+          if (next) await this.selectSession(next);
+        }
+        this.toast("success", "Session deleted.");
       }
       toggleViewed(file) {
         const id = this.state.sessionId;
@@ -507,12 +575,16 @@ var init_format = __esm({
 });
 
 // src/ui/components/Sidebar.tsx
+import { useState } from "react";
 import { jsx, jsxs } from "react/jsx-runtime";
 function Sidebar() {
   const sessions = useStore((s) => s.sessions);
   const current = useStore((s) => s.sessionId);
   const connection = useStore((s) => s.connection);
   const collapsed = useStore((s) => s.collapsedSidebar);
+  const pinned = useStore((s) => s.pinned);
+  const collapsedProjects = useStore((s) => s.collapsedProjects);
+  const groups = groupSessions(sessions, pinned);
   return /* @__PURE__ */ jsxs("aside", { className: classNames("sidebar", collapsed && "is-collapsed"), children: [
     /* @__PURE__ */ jsxs("header", { className: "sidebar-head", children: [
       /* @__PURE__ */ jsx("span", { className: "logo", "aria-hidden": "true", children: "cc" }),
@@ -531,46 +603,170 @@ function Sidebar() {
         }
       )
     ] }),
-    /* @__PURE__ */ jsx("nav", { className: "session-list", children: sessions.length === 0 ? /* @__PURE__ */ jsx("p", { className: "sidebar-empty", children: "No sessions yet." }) : sessions.map((s) => /* @__PURE__ */ jsx(SessionRow, { session: s, active: s.sessionId === current }, s.sessionId)) }),
+    /* @__PURE__ */ jsx("nav", { className: "session-list", children: sessions.length === 0 ? /* @__PURE__ */ jsx("p", { className: "sidebar-empty", children: "No sessions yet." }) : groups.map((group) => /* @__PURE__ */ jsx(
+      ProjectGroup,
+      {
+        group,
+        current,
+        open: !collapsedProjects.includes(group.key),
+        showRepo: group.key === PINNED_KEY
+      },
+      group.key
+    )) }),
     /* @__PURE__ */ jsx("footer", { className: "sidebar-foot", children: /* @__PURE__ */ jsxs("span", { children: [
       "v",
       true ? "0.1.0" : "dev"
     ] }) })
   ] });
 }
-function SessionRow({ session: session2, active }) {
-  const drafts = useStore((s) => s.drafts[session2.sessionId]?.length ?? 0);
-  return /* @__PURE__ */ jsxs(
-    "button",
-    {
-      type: "button",
-      className: classNames("session-row", active && "is-active"),
-      onClick: () => void store.selectSession(session2.sessionId),
-      children: [
-        /* @__PURE__ */ jsxs("span", { className: "session-name", children: [
-          session2.openGates > 0 && /* @__PURE__ */ jsx("span", { className: "dot is-gate", title: "Claude is waiting on you", "aria-label": "waiting on you" }),
-          session2.repoName ?? session2.title
-        ] }),
-        /* @__PURE__ */ jsxs("span", { className: "session-sub", children: [
-          /* @__PURE__ */ jsx("span", { className: "session-stage", children: STAGE_LABEL[session2.stage] ?? session2.stage }),
-          session2.branch && /* @__PURE__ */ jsx("span", { className: "session-branch", children: session2.branch })
-        ] }),
-        /* @__PURE__ */ jsxs("span", { className: "session-foot", children: [
-          /* @__PURE__ */ jsx("span", { children: relativeTime(session2.updatedAt) }),
-          drafts > 0 && /* @__PURE__ */ jsxs("span", { className: "pill is-draft", children: [
-            drafts,
-            " draft"
-          ] }),
-          session2.pendingFeedback > 0 && /* @__PURE__ */ jsxs("span", { className: "pill is-queued", children: [
-            session2.pendingFeedback,
-            " queued"
-          ] })
-        ] })
-      ]
+function groupSessions(sessions, pinned) {
+  const pinnedSet = new Set(pinned);
+  const groups = /* @__PURE__ */ new Map();
+  for (const session2 of sessions) {
+    const key = pinnedSet.has(session2.sessionId) ? PINNED_KEY : session2.repoRoot ?? session2.cwd;
+    let group = groups.get(key);
+    if (!group) {
+      group = key === PINNED_KEY ? { key, label: "Pinned", path: "", sessions: [], openGates: 0 } : {
+        key,
+        label: session2.repoName ?? basename(session2.cwd) ?? "Unknown project",
+        path: session2.repoRoot ?? session2.cwd,
+        sessions: [],
+        openGates: 0
+      };
+      groups.set(key, group);
     }
-  );
+    group.sessions.push(session2);
+    group.openGates += session2.openGates;
+  }
+  return [...groups.values()].sort((a, b) => {
+    if (a.key === PINNED_KEY) return -1;
+    if (b.key === PINNED_KEY) return 1;
+    return (b.sessions[0]?.updatedAt ?? 0) - (a.sessions[0]?.updatedAt ?? 0);
+  });
 }
-var STAGE_LABEL;
+function basename(p) {
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? p;
+}
+function ProjectGroup({
+  group,
+  current,
+  open,
+  showRepo
+}) {
+  const holdsCurrent = group.sessions.some((s) => s.sessionId === current);
+  const expanded = open || holdsCurrent;
+  return /* @__PURE__ */ jsxs("section", { className: classNames("session-group", expanded && "is-open"), children: [
+    /* @__PURE__ */ jsxs(
+      "button",
+      {
+        type: "button",
+        className: "session-group-head",
+        "aria-expanded": expanded,
+        title: group.path || void 0,
+        onClick: () => store.toggleProject(group.key),
+        children: [
+          /* @__PURE__ */ jsx("span", { className: "session-group-chevron", "aria-hidden": "true", children: expanded ? "\u25BE" : "\u25B8" }),
+          /* @__PURE__ */ jsx("span", { className: "session-group-name", children: group.label }),
+          group.openGates > 0 && /* @__PURE__ */ jsx("span", { className: "dot is-gate", title: "A session here is waiting on you", "aria-label": "waiting on you" }),
+          /* @__PURE__ */ jsx("span", { className: "session-group-count", children: group.sessions.length })
+        ]
+      }
+    ),
+    expanded && /* @__PURE__ */ jsx("div", { className: "session-group-body", children: group.sessions.map((s) => /* @__PURE__ */ jsx(
+      SessionRow,
+      {
+        session: s,
+        active: s.sessionId === current,
+        showRepo
+      },
+      s.sessionId
+    )) })
+  ] });
+}
+function SessionRow({
+  session: session2,
+  active,
+  showRepo
+}) {
+  const drafts = useStore((s) => s.drafts[session2.sessionId]?.length ?? 0);
+  const pinned = useStore((s) => s.pinned.includes(session2.sessionId));
+  const [confirming, setConfirming] = useState(false);
+  return /* @__PURE__ */ jsxs("div", { className: classNames("session-row", active && "is-active", confirming && "is-confirming"), children: [
+    /* @__PURE__ */ jsxs(
+      "button",
+      {
+        type: "button",
+        className: "session-open",
+        onClick: () => void store.selectSession(session2.sessionId),
+        children: [
+          /* @__PURE__ */ jsxs("span", { className: "session-name", children: [
+            session2.openGates > 0 && /* @__PURE__ */ jsx("span", { className: "dot is-gate", title: "Claude is waiting on you", "aria-label": "waiting on you" }),
+            session2.title
+          ] }),
+          /* @__PURE__ */ jsxs("span", { className: "session-sub", children: [
+            /* @__PURE__ */ jsx("span", { className: "session-stage", children: STAGE_LABEL[session2.stage] ?? session2.stage }),
+            session2.branch && /* @__PURE__ */ jsx("span", { className: "session-branch", children: session2.branch })
+          ] }),
+          /* @__PURE__ */ jsxs("span", { className: "session-foot", children: [
+            showRepo && session2.repoName && /* @__PURE__ */ jsx("span", { className: "session-repo", children: session2.repoName }),
+            /* @__PURE__ */ jsx("span", { children: relativeTime(session2.updatedAt) }),
+            drafts > 0 && /* @__PURE__ */ jsxs("span", { className: "pill is-draft", children: [
+              drafts,
+              " draft"
+            ] }),
+            session2.pendingFeedback > 0 && /* @__PURE__ */ jsxs("span", { className: "pill is-queued", children: [
+              session2.pendingFeedback,
+              " queued"
+            ] })
+          ] })
+        ]
+      }
+    ),
+    /* @__PURE__ */ jsxs("div", { className: "session-actions", children: [
+      /* @__PURE__ */ jsx(
+        "button",
+        {
+          type: "button",
+          className: classNames("icon-btn", "is-tiny", pinned && "is-active"),
+          "aria-pressed": pinned,
+          title: pinned ? "Unpin session" : "Pin session",
+          onClick: () => store.togglePin(session2.sessionId),
+          children: pinned ? "\u2605" : "\u2606"
+        }
+      ),
+      /* @__PURE__ */ jsx(
+        "button",
+        {
+          type: "button",
+          className: "icon-btn is-tiny is-danger",
+          title: "Delete session",
+          onClick: () => setConfirming(true),
+          children: "\xD7"
+        }
+      )
+    ] }),
+    confirming && /* @__PURE__ */ jsxs("div", { className: "session-confirm", children: [
+      /* @__PURE__ */ jsx("span", { children: "Delete permanently?" }),
+      /* @__PURE__ */ jsxs("div", { className: "row-actions", children: [
+        /* @__PURE__ */ jsx(
+          "button",
+          {
+            type: "button",
+            className: "link is-danger",
+            onClick: () => {
+              setConfirming(false);
+              void store.deleteSession(session2.sessionId);
+            },
+            children: "Delete"
+          }
+        ),
+        /* @__PURE__ */ jsx("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Cancel" })
+      ] })
+    ] })
+  ] });
+}
+var STAGE_LABEL, PINNED_KEY;
 var init_Sidebar = __esm({
   "src/ui/components/Sidebar.tsx"() {
     "use strict";
@@ -586,6 +782,7 @@ var init_Sidebar = __esm({
       ship: "Shipping",
       done: "Done"
     };
+    PINNED_KEY = "\0pinned";
   }
 });
 
@@ -654,7 +851,7 @@ var init_primitives = __esm({
 });
 
 // src/ui/components/GateBanner.tsx
-import { useEffect, useState } from "react";
+import { useEffect, useState as useState2 } from "react";
 import { Fragment, jsx as jsx3, jsxs as jsxs3 } from "react/jsx-runtime";
 function GateBanner() {
   const gate = useOpenGate();
@@ -694,7 +891,7 @@ function GateBanner() {
   ] });
 }
 function useElapsed(since) {
-  const [now, setNow] = useState(() => Date.now());
+  const [now, setNow] = useState2(() => Date.now());
   useEffect(() => {
     if (!since) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1e3);
@@ -713,14 +910,14 @@ var init_GateBanner = __esm({
 });
 
 // src/ui/components/Composer.tsx
-import { useState as useState2 } from "react";
+import { useState as useState3 } from "react";
 import { jsx as jsx4, jsxs as jsxs4 } from "react/jsx-runtime";
 function Composer() {
   const session2 = useSession();
   const gate = useOpenGate();
   const drafts = useDrafts();
-  const [text, setText] = useState2("");
-  const [sending, setSending] = useState2(false);
+  const [text, setText] = useState3("");
+  const [sending, setSending] = useState3(false);
   if (!session2) return null;
   const send = async () => {
     const body = text.trim();
@@ -832,12 +1029,12 @@ var init_Toasts = __esm({
 });
 
 // src/ui/components/ConnectionBar.tsx
-import { useEffect as useEffect2, useState as useState3 } from "react";
+import { useEffect as useEffect2, useState as useState4 } from "react";
 import { jsx as jsx6, jsxs as jsxs6 } from "react/jsx-runtime";
 function ConnectionBar() {
   const connection = useStore((s) => s.connection);
-  const [since, setSince] = useState3(null);
-  const [now, setNow] = useState3(Date.now());
+  const [since, setSince] = useState4(null);
+  const [now, setNow] = useState4(Date.now());
   useEffect2(() => {
     if (connection === "live") {
       setSince(null);
@@ -866,10 +1063,10 @@ var init_ConnectionBar = __esm({
 });
 
 // src/ui/components/ThemeToggle.tsx
-import { useEffect as useEffect3, useState as useState4 } from "react";
+import { useEffect as useEffect3, useState as useState5 } from "react";
 import { jsx as jsx7 } from "react/jsx-runtime";
 function ThemeToggle() {
-  const [theme, setTheme] = useState4(() => {
+  const [theme, setTheme] = useState5(() => {
     try {
       return window.localStorage.getItem(KEY) || "system";
     } catch {
@@ -910,26 +1107,77 @@ var init_ThemeToggle = __esm({
 function escapeHtml(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
+function matchXmlBlock(lines, i) {
+  const open = /^\s*<([A-Za-z][\w:.-]*)\s*>(.*)$/.exec(lines[i] ?? "");
+  if (!open) return null;
+  const raw = open[1];
+  const tag = raw.toLowerCase();
+  if (!Object.prototype.hasOwnProperty.call(XML_BLOCKS, tag)) return null;
+  const close = `</${raw}>`;
+  const rest = open[2] ?? "";
+  const inline2 = rest.indexOf(close);
+  if (inline2 >= 0) return { tag, body: rest.slice(0, inline2), endLine: i };
+  const body = rest ? [rest] : [];
+  for (let j = i + 1; j < lines.length; j++) {
+    const line = lines[j];
+    const at = line.indexOf(close);
+    if (at >= 0) {
+      if (line.slice(0, at)) body.push(line.slice(0, at));
+      return { tag, body: body.join("\n"), endLine: j };
+    }
+    body.push(line);
+  }
+  return null;
+}
+function renderCommandGroup(fields) {
+  const name = fields.get("command-name")?.trim();
+  const args = fields.get("command-args")?.trim();
+  const message = fields.get("command-message")?.trim();
+  const head = [];
+  if (name) head.push(`<span class="md-command-name">${escapeHtml(name)}</span>`);
+  if (args) head.push(`<span class="md-command-args">${escapeHtml(args)}</span>`);
+  const extra = message && message !== name && `/${message}` !== name ? message : "";
+  return `<div class="md-command">` + (head.length ? `<div class="md-command-head">${head.join("")}</div>` : "") + (extra ? `<div class="md-command-message">${escapeHtml(extra)}</div>` : "") + `</div>`;
+}
+function renderDetailsBlock(spec, tag, body) {
+  const text = body.replace(/^\n+|\n+$/g, "");
+  return `<details class="md-xml is-${escapeHtml(tag)}"><summary>${escapeHtml(spec.label)}</summary><pre class="md-xml-body">${escapeHtml(text)}</pre></details>`;
+}
 function renderMarkdown(source) {
   const lines = source.replace(/\r\n/g, "\n").split("\n");
   const out = [];
   let inCode = false;
   let codeLang = "";
   let codeBuffer = [];
-  let listType = null;
   let paragraph = [];
+  const lists = [];
+  let command = null;
   const flushParagraph = () => {
     if (paragraph.length === 0) return;
     out.push(`<p>${inline(paragraph.join(" "))}</p>`);
     paragraph = [];
   };
-  const closeList = () => {
-    if (listType) {
-      out.push(`</${listType}>`);
-      listType = null;
-    }
+  const closeDeepestList = () => {
+    const list = lists.pop();
+    if (!list) return;
+    out.push("</li>");
+    out.push(`</${list.type}>`);
   };
-  for (const line of lines) {
+  const closeLists = () => {
+    while (lists.length) closeDeepestList();
+  };
+  const flushCommand = () => {
+    if (!command) return;
+    out.push(renderCommandGroup(command));
+    command = null;
+  };
+  const flushBlocks = () => {
+    flushParagraph();
+    closeLists();
+    flushCommand();
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const fence = /^```(\w*)\s*$/.exec(line);
     if (fence) {
       if (inCode) {
@@ -940,8 +1188,7 @@ function renderMarkdown(source) {
         inCode = false;
         codeLang = "";
       } else {
-        flushParagraph();
-        closeList();
+        flushBlocks();
         inCode = true;
         codeLang = fence[1] ?? "";
       }
@@ -951,44 +1198,53 @@ function renderMarkdown(source) {
       codeBuffer.push(line);
       continue;
     }
+    const xml = matchXmlBlock(lines, i);
+    if (xml) {
+      const spec = XML_BLOCKS[xml.tag];
+      if (spec.mode === "command") {
+        flushParagraph();
+        closeLists();
+        command ??= /* @__PURE__ */ new Map();
+        command.set(xml.tag, xml.body);
+      } else {
+        flushBlocks();
+        out.push(renderDetailsBlock(spec, xml.tag, xml.body));
+      }
+      i = xml.endLine;
+      continue;
+    }
     if (!line.trim()) {
-      flushParagraph();
-      closeList();
+      flushBlocks();
       continue;
     }
     const heading = /^(#{1,4})\s+(.*)$/.exec(line);
     if (heading) {
-      flushParagraph();
-      closeList();
+      flushBlocks();
       const level = heading[1].length + 1;
       out.push(`<h${level}>${inline(heading[2] ?? "")}</h${level}>`);
       continue;
     }
-    const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
-    if (bullet) {
-      flushParagraph();
-      if (listType !== "ul") {
-        closeList();
-        out.push("<ul>");
-        listType = "ul";
-      }
-      out.push(`<li>${inline(bullet[1] ?? "")}</li>`);
+    const table = matchTable(lines, i);
+    if (table) {
+      flushBlocks();
+      out.push(table.html);
+      i = table.endLine;
       continue;
     }
-    const ordered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
-    if (ordered) {
+    if (/^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      flushBlocks();
+      out.push("<hr />");
+      continue;
+    }
+    const item = matchListItem(line);
+    if (item) {
       flushParagraph();
-      if (listType !== "ol") {
-        closeList();
-        out.push("<ol>");
-        listType = "ol";
-      }
-      out.push(`<li>${inline(ordered[1] ?? "")}</li>`);
+      flushCommand();
+      pushListItem(out, lists, item);
       continue;
     }
     if (/^\s*>/.test(line)) {
-      flushParagraph();
-      closeList();
+      flushBlocks();
       out.push(`<blockquote>${inline(line.replace(/^\s*>\s?/, ""))}</blockquote>`);
       continue;
     }
@@ -997,22 +1253,106 @@ function renderMarkdown(source) {
   if (inCode && codeBuffer.length) {
     out.push(`<pre class="md-code"><code>${escapeHtml(codeBuffer.join("\n"))}</code></pre>`);
   }
-  flushParagraph();
-  closeList();
+  flushBlocks();
   return out.join("\n");
+}
+function matchListItem(line) {
+  const bullet = /^(\s*)[-*+]\s+(.*)$/.exec(line);
+  const ordered = bullet ? null : /^(\s*)\d+[.)]\s+(.*)$/.exec(line);
+  const match = bullet ?? ordered;
+  if (!match) return null;
+  const indent = (match[1] ?? "").replace(/\t/g, "  ").length;
+  let content = match[2] ?? "";
+  const item = { type: bullet ? "ul" : "ol", indent, content };
+  const task = /^\[([ xX])\]\s+(.*)$/.exec(content);
+  if (task && bullet) {
+    item.task = true;
+    item.checked = task[1] !== " ";
+    content = task[2] ?? "";
+    item.content = content;
+  }
+  return item;
+}
+function pushListItem(out, lists, item) {
+  const closeDeepest = () => {
+    const list = lists.pop();
+    if (!list) return;
+    out.push("</li>");
+    out.push(`</${list.type}>`);
+  };
+  while (lists.length > 1 && item.indent < lists[lists.length - 1].indent) closeDeepest();
+  const top = lists[lists.length - 1];
+  if (!top || item.indent > top.indent) {
+    out.push(`<${item.type}>`);
+    lists.push({ type: item.type, indent: item.indent });
+  } else if (top.type !== item.type) {
+    closeDeepest();
+    out.push(`<${item.type}>`);
+    lists.push({ type: item.type, indent: item.indent });
+  } else {
+    out.push("</li>");
+  }
+  const box = item.task ? `<input type="checkbox" disabled${item.checked ? " checked" : ""} /> ` : "";
+  const cls = item.task ? ` class="md-task${item.checked ? " is-done" : ""}"` : "";
+  out.push(`<li${cls}>${box}${inline(item.content)}`);
+}
+function matchTable(lines, i) {
+  const header = lines[i] ?? "";
+  const divider = lines[i + 1] ?? "";
+  if (!/\|/.test(header)) return null;
+  if (!/^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/.test(divider)) return null;
+  const cells = (line) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+  const heads = cells(header);
+  const aligns = cells(divider).map(
+    (c) => c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : ""
+  );
+  const align = (n) => aligns[n] ? ` style="text-align:${aligns[n]}"` : "";
+  const body = [];
+  let end = i + 1;
+  for (let j = i + 2; j < lines.length; j++) {
+    const row = lines[j] ?? "";
+    if (!row.trim() || !row.includes("|")) break;
+    const tds = cells(row).map((c, n) => `<td${align(n)}>${inline(c)}</td>`).join("");
+    body.push(`<tr>${tds}</tr>`);
+    end = j;
+  }
+  const ths = heads.map((c, n) => `<th${align(n)}>${inline(c)}</th>`).join("");
+  const html = `<div class="md-table-wrap"><table class="md-table"><thead><tr>${ths}</tr></thead>` + (body.length ? `<tbody>${body.join("")}</tbody>` : "") + `</table></div>`;
+  return { html, endLine: end };
 }
 function inline(text) {
   let html = escapeHtml(text);
-  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+  const spans = [];
+  html = html.replace(/`([^`]+)`/g, (_all, body) => {
+    spans.push(`<code>${body}</code>`);
+    return `${CODE_MARK}${spans.length - 1}${CODE_MARK}`;
+  });
   html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   html = html.replace(/(^|[\s(])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
+  html = html.replace(/(^|[\s(])_([^_\s][^_]*)_(?=$|[\s).,;:!?])/g, "$1<em>$2</em>");
+  html = html.replace(/~~([^~]+)~~/g, "<del>$1</del>");
   html = html.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
   html = html.replace(/(^|\s)(https?:\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noreferrer">$2</a>');
-  return html;
+  return html.replace(new RegExp(`${CODE_MARK}(\\d+)${CODE_MARK}`, "g"), (_all, n) => spans[Number(n)] ?? "");
 }
+var XML_BLOCKS, CODE_MARK;
 var init_markdown = __esm({
   "src/ui/lib/markdown.ts"() {
     "use strict";
+    XML_BLOCKS = {
+      "command-name": { mode: "command", label: "name" },
+      "command-args": { mode: "command", label: "args" },
+      "command-message": { mode: "command", label: "message" },
+      "system-reminder": { mode: "details", label: "system reminder" },
+      "local-command-stdout": { mode: "details", label: "command output" },
+      "local-command-stderr": { mode: "details", label: "command error output" },
+      "user-prompt-submit-hook": { mode: "details", label: "hook output" },
+      "ide_selection": { mode: "details", label: "editor selection" },
+      "ide-selection": { mode: "details", label: "editor selection" },
+      "function_results": { mode: "details", label: "tool result" },
+      "task-notification": { mode: "details", label: "task notification" }
+    };
+    CODE_MARK = "\0";
   }
 });
 
@@ -1031,11 +1371,11 @@ var init_Markdown = __esm({
 });
 
 // src/ui/views/ActivityView.tsx
-import { useEffect as useEffect4, useRef, useState as useState5 } from "react";
+import { useEffect as useEffect4, useRef, useState as useState6 } from "react";
 import { Fragment as Fragment2, jsx as jsx9, jsxs as jsxs7 } from "react/jsx-runtime";
 function ActivityView() {
   const session2 = useSession();
-  const [showThinking, setShowThinking] = useState5(false);
+  const [showThinking, setShowThinking] = useState6(false);
   const feed = useRef(null);
   const pinned = useRef(true);
   const events = (session2?.timeline ?? []).filter((e) => showThinking || e.kind !== "thinking");
@@ -1096,7 +1436,7 @@ function ActivityView() {
   ] });
 }
 function Event({ event }) {
-  const prose = event.kind === "assistant" || event.kind === "user" || event.kind === "feedback";
+  const prose = PROSE_KINDS.has(event.kind);
   return /* @__PURE__ */ jsxs7("article", { className: classNames("event", `is-${event.kind}`), children: [
     /* @__PURE__ */ jsx9("span", { className: "event-icon", title: event.kind, children: ICON[event.kind] ?? "\xB7" }),
     /* @__PURE__ */ jsxs7("div", { className: "event-body", children: [
@@ -1109,8 +1449,8 @@ function Event({ event }) {
   ] });
 }
 function QuestionCard({ gate, sessionId }) {
-  const [answer, setAnswer] = useState5("");
-  const [busy, setBusy] = useState5(false);
+  const [answer, setAnswer] = useState6("");
+  const [busy, setBusy] = useState6(false);
   const options = gate.meta?.options ?? [];
   const send = async (text) => {
     const body = text.trim();
@@ -1146,7 +1486,7 @@ function QuestionCard({ gate, sessionId }) {
     /* @__PURE__ */ jsx9("div", { className: "row-actions", children: /* @__PURE__ */ jsx9(Button, { variant: "primary", onClick: () => void send(answer), disabled: !answer.trim() || busy, children: "Send answer" }) })
   ] });
 }
-var ICON;
+var ICON, PROSE_KINDS;
 var init_ActivityView = __esm({
   "src/ui/views/ActivityView.tsx"() {
     "use strict";
@@ -1170,11 +1510,21 @@ var init_ActivityView = __esm({
       ship: "\u21E7",
       error: "\u2717"
     };
+    PROSE_KINDS = /* @__PURE__ */ new Set([
+      "assistant",
+      "user",
+      "feedback",
+      "thinking",
+      "note",
+      "notification",
+      "gate",
+      "ship"
+    ]);
   }
 });
 
 // src/ui/views/PlanView.tsx
-import { useEffect as useEffect5, useMemo as useMemo2, useRef as useRef2, useState as useState6 } from "react";
+import { useEffect as useEffect5, useMemo as useMemo2, useRef as useRef2, useState as useState7 } from "react";
 import {
   DndContext,
   KeyboardSensor,
@@ -1197,11 +1547,11 @@ function PlanView() {
   const gate = useOpenGate();
   const sessionId = useStore((s) => s.sessionId);
   const plan = session2?.plan ?? null;
-  const [steps, setSteps] = useState6(() => plan?.steps.map(clone) ?? []);
-  const [baseRevision, setBaseRevision] = useState6(plan?.revision ?? 0);
-  const [summary, setSummary] = useState6("");
-  const [busy, setBusy] = useState6(false);
-  const [announcement, setAnnouncement] = useState6("");
+  const [steps, setSteps] = useState7(() => plan?.steps.map(clone) ?? []);
+  const [baseRevision, setBaseRevision] = useState7(plan?.revision ?? 0);
+  const [summary, setSummary] = useState7("");
+  const [busy, setBusy] = useState7(false);
+  const [announcement, setAnnouncement] = useState7("");
   const dirty = useRef2(false);
   const incoming = plan && plan.revision !== baseRevision ? plan : null;
   useEffect5(() => {
@@ -1487,7 +1837,7 @@ var init_types = __esm({
 });
 
 // src/ui/views/BoardView.tsx
-import { useMemo as useMemo3, useState as useState7 } from "react";
+import { useMemo as useMemo3, useState as useState8 } from "react";
 import {
   DndContext as DndContext2,
   DragOverlay,
@@ -1504,8 +1854,8 @@ import { Fragment as Fragment4, jsx as jsx11, jsxs as jsxs9 } from "react/jsx-ru
 function BoardView() {
   const session2 = useSession();
   const sessionId = useStore((s) => s.sessionId);
-  const [dragging, setDragging] = useState7(null);
-  const [expanded, setExpanded] = useState7(null);
+  const [dragging, setDragging] = useState8(null);
+  const [expanded, setExpanded] = useState8(null);
   const tasks = session2?.tasks ?? [];
   const byStatus = useMemo3(() => {
     const map = new Map(TASK_STATUSES.map((s) => [s, []]));
@@ -1719,14 +2069,14 @@ var init_BoardView = __esm({
 });
 
 // src/ui/views/review/FileTree.tsx
-import { useMemo as useMemo4, useState as useState8 } from "react";
+import { useMemo as useMemo4, useState as useState9 } from "react";
 import { jsx as jsx12, jsxs as jsxs10 } from "react/jsx-runtime";
 function FileTree({
   files,
   selected,
   onSelect
 }) {
-  const [filter, setFilter] = useState8("");
+  const [filter, setFilter] = useState9("");
   const drafts = useDrafts();
   const threads = useStore((s) => s.session?.threads ?? EMPTY);
   const viewed = useStore((s) => s.sessionId ? s.viewedFiles[s.sessionId] ?? EMPTY_STR : EMPTY_STR);
@@ -1849,16 +2199,16 @@ var init_FileTree = __esm({
 });
 
 // src/ui/views/review/CommentThread.tsx
-import { useState as useState9 } from "react";
+import { useState as useState10 } from "react";
 import { Fragment as Fragment5, jsx as jsx13, jsxs as jsxs11 } from "react/jsx-runtime";
 function CommentThread({ thread }) {
   const isDraft = !thread.deliveredAt;
   const sessionId = useStore((s) => s.sessionId);
-  const [editing, setEditing] = useState9(false);
-  const [body, setBody] = useState9(thread.body);
-  const [confirmingDelete, setConfirmingDelete] = useState9(false);
-  const [replying, setReplying] = useState9(false);
-  const [reply, setReply] = useState9("");
+  const [editing, setEditing] = useState10(false);
+  const [body, setBody] = useState10(thread.body);
+  const [confirmingDelete, setConfirmingDelete] = useState10(false);
+  const [replying, setReplying] = useState10(false);
+  const [reply, setReply] = useState10("");
   const sendReply = async () => {
     const text = reply.trim();
     if (!text || !sessionId) return;
@@ -2002,10 +2352,10 @@ var init_diffparse = __esm({
 });
 
 // src/ui/views/review/CommentComposer.tsx
-import { useEffect as useEffect6, useRef as useRef3, useState as useState10 } from "react";
+import { useEffect as useEffect6, useRef as useRef3, useState as useState11 } from "react";
 import { jsx as jsx14, jsxs as jsxs12 } from "react/jsx-runtime";
 function CommentComposer({ selection, onDone }) {
-  const [body, setBody] = useState10("");
+  const [body, setBody] = useState11("");
   const diff = useStore((s) => s.diff);
   const ref = useRef3(null);
   useEffect6(() => {
@@ -2304,7 +2654,7 @@ var init_Reconciliation = __esm({
 });
 
 // src/ui/views/review/PendingPanel.tsx
-import { useMemo as useMemo7, useState as useState11 } from "react";
+import { useMemo as useMemo7, useState as useState12 } from "react";
 import { jsx as jsx17, jsxs as jsxs15 } from "react/jsx-runtime";
 function PendingPanel({
   gate,
@@ -2313,9 +2663,9 @@ function PendingPanel({
 }) {
   const drafts = useDrafts();
   const sessionId = useStore((s) => s.sessionId);
-  const [summary, setSummary] = useState11("");
-  const [busy, setBusy] = useState11(false);
-  const [confirming, setConfirming] = useState11(null);
+  const [summary, setSummary] = useState12("");
+  const [busy, setBusy] = useState12(false);
+  const [confirming, setConfirming] = useState12(null);
   const grouped = useMemo7(() => groupByFile(drafts), [drafts]);
   const submit = async (verdict) => {
     if (!sessionId || busy) return;
@@ -2436,7 +2786,7 @@ var init_PendingPanel = __esm({
 });
 
 // src/ui/views/ReviewView.tsx
-import { useCallback, useEffect as useEffect7, useRef as useRef4, useState as useState12 } from "react";
+import { useCallback, useEffect as useEffect7, useRef as useRef4, useState as useState13 } from "react";
 import { Fragment as Fragment7, jsx as jsx18, jsxs as jsxs16 } from "react/jsx-runtime";
 function ReviewView() {
   const diff = useStore((s) => s.diff);
@@ -2445,9 +2795,9 @@ function ReviewView() {
   const diffMode = useStore((s) => s.diffMode);
   const gate = useOpenGate();
   const drafts = useDrafts();
-  const [selection, setSelection] = useState12(null);
-  const [panelOpen, setPanelOpen] = useState12(true);
-  const [onlyChanged, setOnlyChanged] = useState12(false);
+  const [selection, setSelection] = useState13(null);
+  const [panelOpen, setPanelOpen] = useState13(true);
+  const [onlyChanged, setOnlyChanged] = useState13(false);
   const anchors = useRef4(/* @__PURE__ */ new Map());
   const scroller = useRef4(null);
   const registerAnchor = useCallback((path, node) => {
@@ -2690,15 +3040,15 @@ var init_ReviewView = __esm({
 });
 
 // src/ui/views/VerifyView.tsx
-import { useEffect as useEffect8, useRef as useRef5, useState as useState13 } from "react";
+import { useEffect as useEffect8, useRef as useRef5, useState as useState14 } from "react";
 import { Fragment as Fragment8, jsx as jsx19, jsxs as jsxs17 } from "react/jsx-runtime";
 function VerifyView() {
   const session2 = useSession();
   const gate = useOpenGate();
   const sessionId = useStore((s) => s.sessionId);
-  const [command, setCommand] = useState13("");
-  const [notes, setNotes] = useState13("");
-  const [busy, setBusy] = useState13(false);
+  const [command, setCommand] = useState14("");
+  const [notes, setNotes] = useState14("");
+  const [busy, setBusy] = useState14(false);
   if (!session2 || !sessionId) return null;
   const failing = session2.checks.filter((c) => c.status === "failed");
   const running = session2.checks.some((c) => c.status === "running");
@@ -2795,7 +3145,7 @@ function VerifyView() {
   ] });
 }
 function Check({ check, sessionId }) {
-  const [open, setOpen] = useState13(check.status === "failed");
+  const [open, setOpen] = useState14(check.status === "failed");
   const log = useRef5(null);
   const pinned = useRef5(true);
   useEffect8(() => {
@@ -2854,18 +3204,18 @@ var init_VerifyView = __esm({
 });
 
 // src/ui/views/ShipView.tsx
-import { useEffect as useEffect9, useState as useState14 } from "react";
+import { useEffect as useEffect9, useState as useState15 } from "react";
 import { Fragment as Fragment9, jsx as jsx20, jsxs as jsxs18 } from "react/jsx-runtime";
 function ShipView() {
   const session2 = useSession();
   const gate = useOpenGate();
   const sessionId = useStore((s) => s.sessionId);
-  const [ship, setShip] = useState14(null);
-  const [providers, setProviders] = useState14([]);
-  const [loading, setLoading] = useState14(true);
-  const [busy, setBusy] = useState14(false);
-  const [confirming, setConfirming] = useState14(false);
-  const [outcome, setOutcome] = useState14(
+  const [ship, setShip] = useState15(null);
+  const [providers, setProviders] = useState15([]);
+  const [loading, setLoading] = useState15(true);
+  const [busy, setBusy] = useState15(false);
+  const [confirming, setConfirming] = useState15(false);
+  const [outcome, setOutcome] = useState15(
     null
   );
   useEffect9(() => {
@@ -3034,10 +3384,11 @@ function App() {
   const error = useStore((s) => s.error);
   const gate = useOpenGate();
   const drafts = useDrafts();
+  const sidebarCollapsed = useStore((s) => s.collapsedSidebar);
   useDocumentTitle(session2, Boolean(gate));
   useUnsavedGuard(drafts.length);
   useShortcuts();
-  return /* @__PURE__ */ jsxs19("div", { className: "app", children: [
+  return /* @__PURE__ */ jsxs19("div", { className: classNames("app", sidebarCollapsed && "is-sidebar-collapsed"), children: [
     /* @__PURE__ */ jsx21(Sidebar, {}),
     /* @__PURE__ */ jsx21("main", { className: "main", children: !sessionId || !session2 ? /* @__PURE__ */ jsx21(NoSession, { error }) : /* @__PURE__ */ jsxs19(Fragment10, { children: [
       /* @__PURE__ */ jsx21(Header, { session: session2 }),
@@ -3481,6 +3832,7 @@ function mount(state = makeSession()) {
             title: "demo",
             cwd: "/repo",
             repoName: "repo",
+            repoRoot: "/repo",
             branch: "feature/x",
             stage: session.stage,
             status: session.status,
@@ -3526,7 +3878,9 @@ beforeEach(() => {
 after(() => cleanup());
 test("the shell renders the session and lands on the tab the gate needs", async () => {
   await boot();
-  assert.ok(screen.getByText("demo"));
+  assert.equal(document.querySelector(".head-title")?.textContent, "demo");
+  assert.equal(document.querySelector(".session-row .session-name")?.textContent, "demo");
+  assert.equal(document.querySelector(".session-group-name")?.textContent, "repo");
   assert.equal(store2.getState().tab, "review", "a code-review gate opens the Review tab");
   cleanup();
 });
