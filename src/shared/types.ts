@@ -484,3 +484,38 @@ export interface DaemonLock {
   startedAt: number;
   host: string;
 }
+
+/* ------------------------------------------------------------------ *
+ * Housekeeping
+ * ------------------------------------------------------------------ */
+
+/** The kinds of reclaimable file the harness knows how to describe. */
+export const CLEANUP_GROUPS = ['sessions', 'partial-writes', 'scratch', 'log', 'lock'] as const;
+export type CleanupGroupId = (typeof CLEANUP_GROUPS)[number];
+
+export interface StorageGroup {
+  id: CleanupGroupId;
+  /** Names the thing being lost, not the mechanism that leaves it behind. */
+  label: string;
+  detail: string;
+  count: number;
+  bytes: number;
+}
+
+export interface StorageReport {
+  home: string;
+  /** The system temp directory, where ship scratch files land. */
+  scratchDir: string;
+  scannedAt: number;
+  groups: StorageGroup[];
+  totalBytes: number;
+}
+
+export interface CleanupOutcome {
+  dryRun: boolean;
+  groups: { id: CleanupGroupId; label: string; count: number; bytes: number }[];
+  removed: number;
+  freedBytes: number;
+  /** Paths the harness was not allowed to remove. */
+  failed: string[];
+}

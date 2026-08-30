@@ -1,8 +1,10 @@
 import http from 'node:http';
+import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { openSync, writeSync, closeSync, unlinkSync, appendFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { SessionStore } from './store.ts';
 import { Router, json, text, readJson, serveStatic, requestSignal, type Ctx } from './http.ts';
 import { ingestHook } from './hookIngest.ts';
@@ -21,6 +23,7 @@ import {
   updateTask,
 } from './tasks.ts';
 import { addCheck, runAllChecks, runCheck, seedChecks, cancelCheck, cancelAllChecks } from './checks.ts';
+import { cleanStorage, scanStorage } from './housekeeping.ts';
 import { shutdownChildren, killAllChildren, liveChildCount, liveChildLabels } from './proc.ts';
 import { clearBaseline, pruneBaselines } from './tasks.ts';
 import { composeShip, executeShip } from './ship.ts';
@@ -30,6 +33,7 @@ import { ensureHome, paths, readLiveLock, isPidAlive, baseUrl } from '../shared/
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
 import type {
+  CleanupGroupId,
   DaemonLock,
   GateKind,
   GateQuestion,
@@ -71,11 +75,31 @@ async function main(): Promise<void> {
   const store = new SessionStore({ maxTimelineEvents: baseConfig.maxTimelineEvents });
   const config = baseConfig;
   const tailers = new Map<string, TranscriptTailer>();
-  const token = randomBytes(24).toString('hex');
+
+  // A restart hands its successor the token and the port, so the browser tab
+  // that asked for the restart is still looking at the right address with a
+  // cookie that still works. Take them out of the environment immediately:
+  // every check and ship command the daemon runs inherits it, and this token
+  // authorizes an endpoint that runs shell commands.
+  const inheritedToken = process.env['CC_HARNESS_TOKEN'];
+  const inheritedPort = Number(process.env['CC_HARNESS_PORT'] ?? 0);
+  delete process.env['CC_HARNESS_TOKEN'];
+  const token = inheritedToken || randomBytes(24).toString('hex');
 
   const clients = { count: 0 };
   const server = http.createServer();
-  const router = buildRouter({ store, config, tailers, token, clients });
+
+  /**
+   * Set once `shutdown` exists. The router is built first — it is what the
+   * server needs to start — so the restart route reaches the lifecycle
+   * through this rather than the other way round.
+   */
+  const lifecycle = {
+    restart(): boolean {
+      return false;
+    },
+  };
+  const router = buildRouter({ store, config, tailers, token, clients, lifecycle });
 
   server.on('request', (req, res) => {
     void handle(req, res, router, token).catch((err: unknown) => {
@@ -90,7 +114,7 @@ async function main(): Promise<void> {
   server.headersTimeout = 0;
   server.requestTimeout = 0;
 
-  const port = await listen(server, Number(process.env['CC_HARNESS_PORT'] ?? 0));
+  const port = await listen(server, inheritedPort);
   const lock: DaemonLock = {
     pid: process.pid,
     port,
@@ -112,7 +136,7 @@ async function main(): Promise<void> {
    * it exists to prevent.
    */
   let shuttingDown = false;
-  const shutdown = (signal: string) => {
+  const shutdown = (signal: string, respawn = false) => {
     if (shuttingDown) {
       // Second signal: the user is insisting. Take the fast path.
       log(`second signal (${signal}); exiting now`);
@@ -145,15 +169,34 @@ async function main(): Promise<void> {
       /* ignore */
     }
 
-    void shutdownChildren(SHUTDOWN_GRACE_MS)
-      .catch(() => 0)
-      .finally(() => process.exit(0));
+    const leave = () => {
+      if (respawn) respawnDaemon(lock);
+      process.exit(0);
+    };
+
+    void shutdownChildren(SHUTDOWN_GRACE_MS).catch(() => 0).finally(leave);
 
     // Backstop: never let a stuck reap keep the daemon alive indefinitely.
     setTimeout(() => {
       killAllChildren();
-      process.exit(0);
+      leave();
     }, SHUTDOWN_GRACE_MS + 1_500).unref();
+  };
+
+  /**
+   * Replace this daemon with one running the current build.
+   *
+   * The whole point is picking up a rebuild, so the successor is started from
+   * the entry file on disk rather than from anything this process is holding
+   * in memory. It inherits the port and the token, which is what lets an open
+   * browser tab reconnect to it without being sent back to a dead address.
+   */
+  lifecycle.restart = () => {
+    if (shuttingDown) return false;
+    log('restart requested; handing over to a fresh daemon');
+    // Let the response reach the client before the socket goes away.
+    setTimeout(() => shutdown('restart', true), RESTART_DELAY_MS).unref();
+    return true;
   };
 
   const reaper = startReaper(store, tailers);
@@ -170,19 +213,86 @@ async function main(): Promise<void> {
 
 /** SIGTERM-to-SIGKILL window for child process trees at shutdown. */
 const SHUTDOWN_GRACE_MS = 800;
+/** Grace for the restart response to flush before the socket is torn down. */
+const RESTART_DELAY_MS = 120;
+/** How long a successor keeps trying to claim its predecessor's port. */
+const PORT_CLAIM_MS = 5_000;
 /** Sessions remembered as "already opened a browser tab for". */
 const MAX_TRACKED_OPENS = 200;
 /** Per-project resolved configs held in memory. */
 const MAX_CACHED_CONFIGS = 50;
 
-function listen(server: http.Server, port: number): Promise<number> {
+/**
+ * Bind, retrying a requested port while its previous owner lets go.
+ *
+ * A restarting daemon asks for the port its predecessor was on, and spawns
+ * before that process has finished exiting — so the first attempt often loses
+ * the race by a few hundred milliseconds. Keeping the address is what makes
+ * the open browser tab reconnect on its own; falling back to an ephemeral
+ * port after `PORT_CLAIM_MS` is what stops that preference from being able to
+ * keep the harness down.
+ */
+async function listen(server: http.Server, port: number): Promise<number> {
+  const deadline = Date.now() + PORT_CLAIM_MS;
+  for (;;) {
+    try {
+      return await bind(server, port);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EADDRINUSE' || port === 0) throw err;
+      if (Date.now() >= deadline) {
+        log(`port ${port} still busy; taking an ephemeral one`);
+        return bind(server, 0);
+      }
+      await sleep(150);
+    }
+  }
+}
+
+function bind(server: http.Server, port: number): Promise<number> {
   return new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => {
+    const onError = (err: Error) => {
+      server.off('listening', onListening);
+      reject(err);
+    };
+    const onListening = () => {
+      server.off('error', onError);
       const addr = server.address();
       resolve(typeof addr === 'object' && addr ? addr.port : port);
-    });
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(port, '127.0.0.1');
   });
+}
+
+/**
+ * Start the replacement daemon, detached, on the way out.
+ *
+ * Detached and with its streams released, so it is not a child of a process
+ * that is about to exit — and started from `process.argv[1]`, which is the
+ * bundle on disk and therefore the newly built one.
+ */
+function respawnDaemon(lock: DaemonLock): void {
+  const entry = process.argv[1];
+  if (!entry) return;
+  try {
+    const child = spawn(process.execPath, [entry], {
+      detached: true,
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        CC_HARNESS_PORT: String(lock.port),
+        CC_HARNESS_TOKEN: lock.token,
+      },
+    });
+    child.on('error', () => {
+      /* nothing left to report to: this process is already exiting */
+    });
+    child.unref();
+  } catch {
+    /* a failed respawn leaves no daemon; the next hook starts one */
+  }
 }
 
 /** Atomic claim, with recovery from a lock left behind by a dead daemon. */
@@ -279,10 +389,12 @@ interface Deps {
   token: string;
   /** Live SSE connections, so an open browser counts as "in use". */
   clients: { count: number };
+  /** Process-level actions the UI can ask for. */
+  lifecycle: { restart(): boolean };
 }
 
 function buildRouter(deps: Deps): Router {
-  const { store, config, tailers, token, clients } = deps;
+  const { store, config, tailers, token, clients, lifecycle } = deps;
   const router = new Router();
 
   /** For the browser and the CLI: carries the token, which the daemon
@@ -331,6 +443,9 @@ function buildRouter(deps: Deps): Router {
     }
     return resolved;
   };
+
+  /** Sessions the daemon is holding, which housekeeping must never touch. */
+  const residentIds = (): string[] => store.all().map((s) => s.sessionId);
 
   const sessionOr404 = (ctx: Ctx): SessionState | null => {
     const id = ctx.params['id'] ?? '';
@@ -416,6 +531,59 @@ function buildRouter(deps: Deps): Router {
       store.setDiff(session.sessionId, diff);
     }
     json(ctx.res, 200, { diff });
+  });
+
+  /* --------------------------- Maintenance ------------------------- */
+
+  /**
+   * Global actions: they belong to the daemon, not to any one session, and
+   * both of them are things a user previously had to leave the browser and
+   * open a terminal to do.
+   */
+
+  router.get('/api/storage', (ctx) => {
+    json(ctx.res, 200, { report: scanStorage({ liveSessionIds: residentIds() }) });
+  });
+
+  /**
+   * Remove reclaimable files, and hand back a fresh report.
+   *
+   * The report is recomputed from the post-clean state rather than subtracted
+   * from the one the browser was holding, so a session that came back to life
+   * mid-request shows up as still occupying space instead of silently
+   * disappearing from the total.
+   */
+  router.post('/api/storage/clean', async (ctx) => {
+    const body = await readJson<{ groups?: CleanupGroupId[]; dryRun?: boolean }>(ctx.req);
+    const result = cleanStorage({
+      liveSessionIds: residentIds(),
+      ...(body.groups ? { groups: body.groups } : {}),
+      ...(body.dryRun ? { dryRun: true } : {}),
+    });
+    if (!result.dryRun && result.removed) {
+      log(`housekeeping removed ${result.removed} item(s), ${result.freedBytes} bytes`);
+    }
+    json(ctx.res, 200, { result, report: scanStorage({ liveSessionIds: residentIds() }) });
+  });
+
+  /**
+   * Restart the daemon in place, so a rebuilt plugin takes effect.
+   *
+   * Answered before the handover starts: the connection this response travels
+   * on is one of the ones the shutdown is about to close.
+   */
+  router.post('/api/daemon/restart', (ctx) => {
+    const running = liveChildLabels();
+    const started = lifecycle.restart();
+    json(ctx.res, started ? 200 : 409, {
+      restarting: started,
+      port: readLiveLock()?.port ?? null,
+      // Checks and ship commands are killed by the shutdown. Say which, so
+      // the UI can report what the restart interrupted rather than leaving a
+      // check that simply stopped.
+      interrupted: running,
+      ...(started ? {} : { error: 'already shutting down' }),
+    });
   });
 
   /* --------------------------- SSE --------------------------------- */

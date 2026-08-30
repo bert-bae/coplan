@@ -1,4 +1,6 @@
 import type {
+  CleanupGroupId,
+  CleanupOutcome,
   DiffPayload,
   GateResult,
   PlanStep,
@@ -6,6 +8,7 @@ import type {
   SessionState,
   SessionSummary,
   ShipState,
+  StorageReport,
   Task,
   TaskStatus,
 } from '../../shared/types.ts';
@@ -129,4 +132,25 @@ export const api = {
       `/api/session/${id}/ship`,
       { method: 'POST', body: JSON.stringify({ ship }) },
     ),
+
+  /* ---------------------- daemon-wide actions ---------------------- */
+
+  storage: () => request<{ report: StorageReport }>('/api/storage'),
+
+  cleanStorage: (groups: CleanupGroupId[]) =>
+    request<{ result: CleanupOutcome; report: StorageReport }>('/api/storage/clean', {
+      method: 'POST',
+      body: JSON.stringify({ groups }),
+    }),
+
+  restartDaemon: () =>
+    request<{ restarting: boolean; interrupted: string[] }>('/api/daemon/restart', {
+      method: 'POST',
+      body: '{}',
+    }),
+
+  /** Unauthenticated liveness, used to watch a restart complete. `pid`
+   *  identifies the process, so a caller can tell a survivor from a
+   *  successor rather than only knowing that something answered. */
+  health: () => request<{ ok: boolean; version: string; pid: number }>('/health'),
 };
