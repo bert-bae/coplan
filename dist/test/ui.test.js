@@ -762,7 +762,7 @@ function groupSessions(sessions, pinned) {
     if (!group) {
       group = key === PINNED_KEY ? { key, label: "Pinned / Action required", path: "", sessions: [], openGates: 0 } : {
         key,
-        label: session2.repoName ?? basename(session2.cwd) ?? "Unknown project",
+        label: groupLabel(session2),
         path: session2.repoRoot ?? session2.cwd,
         sessions: [],
         openGates: 0
@@ -777,6 +777,10 @@ function groupSessions(sessions, pinned) {
     if (b.key === PINNED_KEY) return 1;
     return (b.sessions[0]?.updatedAt ?? 0) - (a.sessions[0]?.updatedAt ?? 0);
   });
+}
+function groupLabel(session2) {
+  const repo = session2.repoName ?? basename(session2.cwd) ?? "Unknown project";
+  return session2.worktree ? `${repo} \u2442 ${session2.worktree}` : repo;
 }
 function basename(p) {
   const parts = p.split(/[\\/]/).filter(Boolean);
@@ -848,7 +852,7 @@ Double-click to rename`,
             session2.branch && /* @__PURE__ */ jsx("span", { className: "session-branch", children: session2.branch })
           ] }),
           /* @__PURE__ */ jsxs("span", { className: "session-foot", children: [
-            showRepo && session2.repoName && /* @__PURE__ */ jsx("span", { className: "session-repo", children: session2.repoName }),
+            showRepo && session2.repoName && /* @__PURE__ */ jsx("span", { className: "session-repo", children: groupLabel(session2) }),
             /* @__PURE__ */ jsx("span", { children: relativeTime(session2.updatedAt) }),
             drafts > 0 && /* @__PURE__ */ jsxs("span", { className: "pill is-draft", children: [
               drafts,
@@ -3811,6 +3815,10 @@ function Header({ session: session2 }) {
   return /* @__PURE__ */ jsxs20("header", { className: "head", children: [
     /* @__PURE__ */ jsxs20("div", { className: "head-main", children: [
       /* @__PURE__ */ jsx22("h1", { className: "head-title", title: session2.cwd, children: session2.title }),
+      session2.worktree && /* @__PURE__ */ jsxs20("code", { className: "head-worktree", title: `Working in worktree ${session2.worktree.path}`, children: [
+        "\u2442 ",
+        session2.worktree.name
+      ] }),
       session2.branch && /* @__PURE__ */ jsx22("code", { className: "head-branch", children: session2.branch }),
       /* @__PURE__ */ jsx22("span", { className: classNames("head-status", `is-${session2.status}`), children: statusLabel(session2) }),
       /* @__PURE__ */ jsx22("span", { className: "spacer" }),

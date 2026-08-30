@@ -52,13 +52,20 @@ function makeSession(): SessionState {
 }
 
 /** A summary row for the rail. */
-function summary(sessionId: string, repo: string, updatedAt: number): SessionSummary {
+function summary(
+  sessionId: string,
+  repo: string,
+  updatedAt: number,
+  worktree: string | null = null,
+): SessionSummary {
   return {
     sessionId,
     title: `${sessionId} title`,
     cwd: `/${repo}`,
     repoName: repo,
-    repoRoot: `/${repo}`,
+    // A worktree is its own checkout, so it groups under its own root.
+    repoRoot: worktree ? `/${repo}/.claude/worktrees/${worktree}` : `/${repo}`,
+    worktree,
     branch: 'main',
     stage: 'implementing',
     status: 'active',
@@ -76,9 +83,10 @@ const SESSIONS = () => {
   return [summary('s1', 'repo', now), summary('s2', 'other', now - 1000), summary('s3', 'other', now - 2000)];
 };
 
-async function boot(): Promise<void> {
+async function boot(sessions?: () => SessionSummary[]): Promise<void> {
+  const list = sessions ?? SESSIONS;
   ({ posts } = stubFetch((route) => {
-    if (route.startsWith('/api/sessions')) return { sessions: SESSIONS(), version: 'test' };
+    if (route.startsWith('/api/sessions')) return { sessions: list(), version: 'test' };
     if (route.startsWith('/api/session/')) return { session: makeSession(), diff: null };
     return { ok: true };
   }));
@@ -131,6 +139,20 @@ test('sessions are grouped by the project they run in', async () => {
   const counts = [...document.querySelectorAll('.session-group-count')].map((el) => el.textContent);
   assert.deepEqual(counts, ['1', '2']);
   assert.deepEqual(rowNames(), ['s1 title', 's2 title', 's3 title']);
+});
+
+test('each worktree of a repo is its own group, named for the worktree', async () => {
+  // A worktree is a separate checkout, so it groups on its own root. Without
+  // naming it, every worktree of one repo renders the same header.
+  const now = Date.now();
+  await boot(() => [
+    summary('w1', 'repo', now, 'feature/ui'),
+    summary('w2', 'repo', now - 1000, 'fix/parser'),
+    summary('m1', 'repo', now - 2000),
+  ]);
+
+  assert.deepEqual(groupNames(), ['repo ⑂ feature/ui', 'repo ⑂ fix/parser', 'repo']);
+  assert.deepEqual(rowNames(), ['w1 title', 'w2 title', 'm1 title']);
 });
 
 test('a project group folds away, and the fold is remembered', async () => {

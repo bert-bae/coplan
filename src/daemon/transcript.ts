@@ -1,4 +1,5 @@
 import { createReadStream, existsSync, statSync, watch, type FSWatcher } from 'node:fs';
+import { WorktreeResolver, type WorktreeRecord } from './worktree.ts';
 import type { TimelineEvent, TimelineKind } from '../shared/types.ts';
 
 /**
@@ -15,6 +16,9 @@ export interface TranscriptUpdate {
   title?: string;
   /** Token usage seen in this batch, to roll up per stage. */
   usage?: { inputTokens: number; outputTokens: number };
+  /** Present only when the session entered or left a worktree in this batch;
+   *  `null` means it left one. Absent means nothing about it changed. */
+  worktree?: WorktreeRecord | null;
 }
 
 const MAX_TEXT = 4000;
@@ -36,6 +40,7 @@ export class TranscriptTailer {
   private reading = false;
   private pending = false;
   private closed = false;
+  private worktree = new WorktreeResolver();
 
   constructor(
     private readonly file: string,
@@ -142,7 +147,9 @@ export class TranscriptTailer {
       // A close that landed mid-read must not push state into a session the
       // daemon has already finished with.
       if (this.closed) return;
-      if (update.events.length > 0 || update.title || update.usage) this.onUpdate(update);
+      if (update.events.length > 0 || update.title || update.usage || 'worktree' in update) {
+        this.onUpdate(update);
+      }
     } finally {
       this.reading = false;
       if (this.pending && !this.closed) {
@@ -154,6 +161,14 @@ export class TranscriptTailer {
 
   private consume(entry: Record<string, unknown>, update: TranscriptUpdate): void {
     const type = entry['type'];
+
+    // Relocation into (or out of) a worktree moves the ground every git
+    // operation for this session stands on, so it is watched continuously
+    // rather than only read once when the session registers.
+    if (type === 'worktree-state' || type === 'relocated') {
+      if (this.worktree.consume(entry)) update.worktree = this.worktree.current;
+      return;
+    }
 
     if (type === 'ai-title') {
       const title = firstString(entry['title'], entry['text'], entry['value']);
@@ -310,4 +325,5 @@ function readRange(file: string, start: number, end: number): Promise<string> {
 }
 
 export const _internals = { describeToolInput, extractUserText, truncate };
+export type { WorktreeRecord };
 export type { TimelineKind };

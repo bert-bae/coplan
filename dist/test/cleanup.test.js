@@ -10,10 +10,10 @@ var __export = (target, all) => {
 
 // src/shared/paths.ts
 import { homedir } from "node:os";
-import path from "node:path";
+import path2 from "node:path";
 import { mkdirSync, readFileSync, existsSync as existsSync2 } from "node:fs";
 function harnessHome() {
-  return process.env.CC_HARNESS_HOME || path.join(homedir(), ".claude", "cc-harness");
+  return process.env.CC_HARNESS_HOME || path2.join(homedir(), ".claude", "cc-harness");
 }
 function sanitizeId(id) {
   return id.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 128) || "unknown";
@@ -21,7 +21,7 @@ function sanitizeId(id) {
 function ensureHome() {
   const home2 = harnessHome();
   mkdirSync(home2, { recursive: true });
-  mkdirSync(path.join(home2, "sessions"), { recursive: true });
+  mkdirSync(path2.join(home2, "sessions"), { recursive: true });
   return home2;
 }
 function isPidAlive(pid) {
@@ -39,14 +39,14 @@ var init_paths = __esm({
     "use strict";
     paths = {
       home: harnessHome,
-      lockFile: () => path.join(harnessHome(), "daemon.json"),
-      logFile: () => path.join(harnessHome(), "daemon.log"),
-      sessionsDir: () => path.join(harnessHome(), "sessions"),
-      sessionDir: (id) => path.join(harnessHome(), "sessions", sanitizeId(id)),
-      sessionState: (id) => path.join(harnessHome(), "sessions", sanitizeId(id), "state.json"),
-      sessionEvents: (id) => path.join(harnessHome(), "sessions", sanitizeId(id), "events.jsonl"),
+      lockFile: () => path2.join(harnessHome(), "daemon.json"),
+      logFile: () => path2.join(harnessHome(), "daemon.log"),
+      sessionsDir: () => path2.join(harnessHome(), "sessions"),
+      sessionDir: (id) => path2.join(harnessHome(), "sessions", sanitizeId(id)),
+      sessionState: (id) => path2.join(harnessHome(), "sessions", sanitizeId(id), "state.json"),
+      sessionEvents: (id) => path2.join(harnessHome(), "sessions", sanitizeId(id), "events.jsonl"),
       configDir: harnessHome,
-      instructionsDir: () => path.join(harnessHome(), "instructions")
+      instructionsDir: () => path2.join(harnessHome(), "instructions")
     };
   }
 });
@@ -61,7 +61,7 @@ __export(store_exports, {
 });
 import { EventEmitter } from "node:events";
 import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, readdirSync, existsSync as existsSync3, renameSync, rmSync, statSync as statSync2 } from "node:fs";
-import path2 from "node:path";
+import path3 from "node:path";
 import { randomUUID } from "node:crypto";
 function newSession(sessionId, cwd) {
   const now = Date.now();
@@ -69,9 +69,10 @@ function newSession(sessionId, cwd) {
     sessionId,
     cwd,
     repoRoot: null,
+    worktree: null,
     branch: null,
     transcriptPath: null,
-    title: path2.basename(cwd) || sessionId.slice(0, 8),
+    title: path3.basename(cwd) || sessionId.slice(0, 8),
     stage: "idle",
     status: "active",
     createdAt: now,
@@ -97,6 +98,7 @@ function newSession(sessionId, cwd) {
 }
 function migrate(state) {
   state.reviewRound ??= 0;
+  state.worktree ??= null;
   state.threads ??= [];
   state.roundHistory ??= [];
   state.tasks ??= [];
@@ -115,6 +117,10 @@ function trimGates(state) {
   const drop = new Set(droppable.slice(0, Math.max(0, surplus)));
   if (drop.size === 0) return;
   state.gates = state.gates.filter((g) => !drop.has(g));
+}
+function repoNameOf(state) {
+  const root = state.worktree?.mainRoot ?? state.repoRoot;
+  return root ? path3.basename(root) : null;
 }
 function mtimeOf(dir) {
   try {
@@ -182,8 +188,8 @@ var init_store = __esm({
         const cutoff = Date.now() - SESSION_TTL_MS;
         for (const entry of readdirSync(dir, { withFileTypes: true })) {
           if (!entry.isDirectory()) continue;
-          const sessionDir = path2.join(dir, entry.name);
-          const file = path2.join(sessionDir, "state.json");
+          const sessionDir = path3.join(dir, entry.name);
+          const file = path3.join(sessionDir, "state.json");
           if (!existsSync3(file)) {
             if (mtimeOf(sessionDir) < cutoff) expired.push(sessionDir);
             continue;
@@ -299,9 +305,9 @@ var init_store = __esm({
         try {
           const dir = paths.sessionDir(id);
           mkdirSync2(dir, { recursive: true });
-          const tmp = path2.join(dir, `.state.${process.pid}.tmp`);
+          const tmp = path3.join(dir, `.state.${process.pid}.tmp`);
           writeFileSync(tmp, JSON.stringify(state, null, 2));
-          renameSync(tmp, path2.join(dir, "state.json"));
+          renameSync(tmp, path3.join(dir, "state.json"));
         } catch {
         }
       }
@@ -336,8 +342,11 @@ var init_store = __esm({
           sessionId: s.sessionId,
           title: s.title,
           cwd: s.cwd,
-          repoName: s.repoRoot ? path2.basename(s.repoRoot) : null,
+          // In a worktree `repoRoot` is the worktree itself, whose basename is the
+          // branch. The switcher wants the repository it belongs to.
+          repoName: repoNameOf(s),
           repoRoot: s.repoRoot,
+          worktree: s.worktree?.name ?? null,
           branch: s.branch,
           stage: s.stage,
           status: s.status,
@@ -353,9 +362,13 @@ var init_store = __esm({
       }
       /** Most recently updated session rooted at (or under) `cwd`. */
       findByCwd(cwd) {
-        const normalized = path2.resolve(cwd);
+        const normalized = path3.resolve(cwd);
+        const matches = (value) => !!value && path3.resolve(value) === normalized;
         return this.all().find(
-          (s) => path2.resolve(s.cwd) === normalized || s.repoRoot && path2.resolve(s.repoRoot) === normalized
+          (s) => matches(s.cwd) || matches(s.repoRoot) || // A session that moved into a worktree is anchored there, but the MCP
+          // server it started with still reports the directory it was launched
+          // in — so that has to keep resolving to the same session.
+          matches(s.worktree?.originalCwd) || matches(s.worktree?.path)
         );
       }
       findByPid(pid) {
@@ -576,12 +589,25 @@ var init_store = __esm({
         try {
           const dir = paths.sessionDir(id);
           mkdirSync2(dir, { recursive: true });
-          const tmp = path2.join(dir, `.diff.${process.pid}.tmp`);
+          const tmp = path3.join(dir, `.diff.${process.pid}.tmp`);
           writeFileSync(tmp, JSON.stringify(diff));
-          renameSync(tmp, path2.join(dir, "diff.json"));
+          renameSync(tmp, path3.join(dir, "diff.json"));
         } catch {
         }
         this.emitEvent({ type: "diff", sessionId: id, diff });
+      }
+      /**
+       * Forget a session's diff, in memory and on disk.
+       *
+       * Used when the ground moves under a session — it relocates into or out of a
+       * worktree — because the cached diff describes a tree it is no longer in.
+       */
+      clearDiff(id) {
+        this.diffs.delete(id);
+        try {
+          rmSync(path3.join(paths.sessionDir(id), "diff.json"), { force: true });
+        } catch {
+        }
       }
       getDiff(id) {
         const cached = this.diffs.get(id);
@@ -590,7 +616,7 @@ var init_store = __esm({
           return cached;
         }
         try {
-          const file = path2.join(paths.sessionDir(id), "diff.json");
+          const file = path3.join(paths.sessionDir(id), "diff.json");
           if (!existsSync3(file)) return void 0;
           const diff = JSON.parse(readFileSync2(file, "utf8"));
           this.cacheDiff(id, diff);
@@ -677,6 +703,9 @@ async function git(cwd, args, timeout = 2e4) {
     };
   }
 }
+function isFilePath(entry) {
+  return !entry.endsWith("/");
+}
 async function workingTreeFingerprints(cwd) {
   const status = await git(cwd, ["status", "--porcelain", "-z"]);
   if (!status.ok) return {};
@@ -686,16 +715,24 @@ async function workingTreeFingerprints(cwd) {
     const entry = entries[i];
     if (entry.length < 4) continue;
     const code = entry.slice(0, 2);
-    paths2.push(entry.slice(3));
+    const file = entry.slice(3);
+    if (isFilePath(file)) paths2.push(file);
     if (code[0] === "R" || code[1] === "R") i++;
   }
   if (paths2.length === 0) return {};
+  const out = {};
   const hashed = await git(cwd, ["hash-object", "--", ...paths2]);
   const hashes = hashed.stdout.split("\n").filter(Boolean);
-  const out = {};
-  paths2.forEach((file, i) => {
-    out[file] = hashes[i] ?? "absent";
-  });
+  if (hashes.length === paths2.length) {
+    paths2.forEach((file, i) => {
+      out[file] = hashes[i];
+    });
+    return out;
+  }
+  for (const file of paths2) {
+    const one = await git(cwd, ["hash-object", "--", file]);
+    out[file] = one.ok && one.stdout.trim() || "absent";
+  }
   return out;
 }
 function changedBetween(before2, after2) {
@@ -993,7 +1030,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync as rmSync2, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync3 } from "node:fs";
 import { tmpdir } from "node:os";
-import path3 from "node:path";
+import path4 from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 // src/daemon/proc.ts
@@ -1146,6 +1183,70 @@ function killAllChildren() {
 
 // src/daemon/transcript.ts
 import { createReadStream, existsSync, statSync, watch } from "node:fs";
+
+// src/daemon/worktree.ts
+import path from "node:path";
+var WorktreeResolver = class {
+  resolved = null;
+  context = null;
+  /** The worktree the session is in as of the last entry fed in. */
+  get current() {
+    return this.resolved;
+  }
+  /** Feed one transcript entry. True when the resolved worktree changed. */
+  consume(entry) {
+    const before2 = this.resolved?.path ?? null;
+    switch (entry["type"]) {
+      case "worktree-state": {
+        const record = parseWorktreeSession(entry["worktreeSession"]);
+        this.context = record;
+        this.resolved = record;
+        break;
+      }
+      case "relocated": {
+        const to = asPath(entry["relocatedCwd"]);
+        if (!to) break;
+        if (this.context && to === this.context.originalCwd) {
+          this.resolved = null;
+          break;
+        }
+        this.resolved = this.context && this.context.path === to ? this.context : {
+          path: to,
+          name: path.basename(to),
+          originalCwd: null,
+          originalBranch: null,
+          originalHeadCommit: null
+        };
+        break;
+      }
+      default:
+        return false;
+    }
+    return (this.resolved?.path ?? null) !== before2;
+  }
+};
+function parseWorktreeSession(value) {
+  if (!value || typeof value !== "object") return null;
+  const rec = value;
+  const worktreePath = asPath(rec["worktreePath"]);
+  if (!worktreePath) return null;
+  return {
+    path: worktreePath,
+    name: asString(rec["worktreeName"]) ?? path.basename(worktreePath),
+    originalCwd: asPath(rec["originalCwd"]) ?? asPath(rec["preEnterOriginalCwd"]),
+    originalBranch: asString(rec["originalBranch"]),
+    originalHeadCommit: asString(rec["originalHeadCommit"])
+  };
+}
+function asString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+function asPath(value) {
+  const str = asString(value);
+  return str && path.isAbsolute(str) ? path.normalize(str) : null;
+}
+
+// src/daemon/transcript.ts
 var MAX_TEXT = 4e3;
 var MAX_THINKING = 600;
 var POLL_MS = 700;
@@ -1162,6 +1263,7 @@ var TranscriptTailer = class {
   reading = false;
   pending = false;
   closed = false;
+  worktree = new WorktreeResolver();
   /**
    * Start tailing. `fromStart` replays the whole file, which is what a fresh
    * daemon needs when it attaches to a session already in progress.
@@ -1248,7 +1350,9 @@ var TranscriptTailer = class {
         }
       }
       if (this.closed) return;
-      if (update.events.length > 0 || update.title || update.usage) this.onUpdate(update);
+      if (update.events.length > 0 || update.title || update.usage || "worktree" in update) {
+        this.onUpdate(update);
+      }
     } finally {
       this.reading = false;
       if (this.pending && !this.closed) {
@@ -1259,6 +1363,10 @@ var TranscriptTailer = class {
   }
   consume(entry, update) {
     const type = entry["type"];
+    if (type === "worktree-state" || type === "relocated") {
+      if (this.worktree.consume(entry)) update.worktree = this.worktree.current;
+      return;
+    }
     if (type === "ai-title") {
       const title = firstString(entry["title"], entry["text"], entry["value"]);
       if (title) update.title = title;
@@ -1400,7 +1508,7 @@ function readRange(file, start, end) {
 init_paths();
 var home;
 before(() => {
-  home = mkdtempSync(path3.join(tmpdir(), "cc-harness-cleanup-"));
+  home = mkdtempSync(path4.join(tmpdir(), "cc-harness-cleanup-"));
   process.env["CC_HARNESS_HOME"] = home;
 });
 after(() => {
@@ -1416,7 +1524,7 @@ async function until(predicate, timeoutMs = 5e3) {
   return predicate();
 }
 test("a cancelled command kills the whole process tree, not just the shell", async () => {
-  const pidFile = path3.join(home, "grandchild.pid");
+  const pidFile = path4.join(home, "grandchild.pid");
   const handle = run(`sh -c 'sleep 120 & echo $! > ${pidFile}; wait'`, {
     cwd: home,
     timeoutMs: 6e4,
@@ -1458,7 +1566,7 @@ test("a command whose child holds stdout open still settles", async () => {
   assert.match(outcome.output, /done/);
 });
 test("the orphan holding the pipes is reaped, not merely stepped around", async () => {
-  const pidFile = path3.join(home, "orphan.pid");
+  const pidFile = path4.join(home, "orphan.pid");
   const handle = run(`sh -c '(sleep 30 & echo $! > ${pidFile}) ; echo done'`, {
     cwd: home,
     timeoutMs: 1e4,
@@ -1529,7 +1637,7 @@ test("a successful command reports its exit code and is deregistered", async () 
   assert.equal(liveChildCount(), before2, "finished children must not stay registered");
 });
 test("closing a tailer stops its poller and is idempotent", async () => {
-  const file = path3.join(home, "tail.jsonl");
+  const file = path4.join(home, "tail.jsonl");
   writeFileSync2(file, "");
   let updates = 0;
   const tailer = new TranscriptTailer(file, () => updates++);
@@ -1635,20 +1743,20 @@ test("reading a cached diff refreshes its place in the LRU", async () => {
     store.ensure(id, process.cwd());
     store.setDiff(id, diff(id));
   }
-  for (const id of ids) rmSync2(path3.join(home, "sessions", id, "diff.json"), { force: true });
+  for (const id of ids) rmSync2(path4.join(home, "sessions", id, "diff.json"), { force: true });
   const oldest = ids[0];
   assert.ok(store.getDiff(oldest), "the oldest entry is still cached");
   store.ensure("newcomer", process.cwd());
   store.setDiff("newcomer", diff("newcomer"));
-  rmSync2(path3.join(home, "sessions", "newcomer", "diff.json"), { force: true });
+  rmSync2(path4.join(home, "sessions", "newcomer", "diff.json"), { force: true });
   assert.ok(store.getDiff(oldest), "the entry just read survives the eviction");
   assert.equal(store.getDiff(ids[1]), void 0, "the genuinely least-recent one is evicted");
 });
 test("sessions older than the retention window are not loaded from disk", async () => {
-  const stale = path3.join(home, "sessions", "ancient");
+  const stale = path4.join(home, "sessions", "ancient");
   mkdirSync3(stale, { recursive: true });
   writeFileSync2(
-    path3.join(stale, "state.json"),
+    path4.join(stale, "state.json"),
     JSON.stringify({
       sessionId: "ancient",
       cwd: process.cwd(),

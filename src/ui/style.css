@@ -244,6 +244,10 @@ a { color: var(--text-link); }
 .head-main { display: flex; align-items: baseline; gap: var(--sp-3); min-width: 0; }
 .head-title { margin: 0; font-size: var(--fs-lg); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .head-branch { font-size: var(--fs-sm); color: var(--text-secondary); }
+.head-worktree {
+  font-size: var(--fs-sm); padding: 1px 8px; border-radius: var(--r-full);
+  background: var(--accent-subtle); color: var(--accent-fg);
+}
 .head-status {
   font-size: var(--fs-micro); padding: 1px 8px; border-radius: var(--r-full);
   background: var(--surface-hover); color: var(--text-secondary);

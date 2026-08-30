@@ -46,6 +46,7 @@ export function newSession(sessionId: string, cwd: string): SessionState {
     sessionId,
     cwd,
     repoRoot: null,
+    worktree: null,
     branch: null,
     transcriptPath: null,
     title: path.basename(cwd) || sessionId.slice(0, 8),
@@ -283,8 +284,11 @@ export class SessionStore extends EventEmitter {
       sessionId: s.sessionId,
       title: s.title,
       cwd: s.cwd,
-      repoName: s.repoRoot ? path.basename(s.repoRoot) : null,
+      // In a worktree `repoRoot` is the worktree itself, whose basename is the
+      // branch. The switcher wants the repository it belongs to.
+      repoName: repoNameOf(s),
       repoRoot: s.repoRoot,
+      worktree: s.worktree?.name ?? null,
       branch: s.branch,
       stage: s.stage,
       status: s.status,
@@ -302,8 +306,17 @@ export class SessionStore extends EventEmitter {
   /** Most recently updated session rooted at (or under) `cwd`. */
   findByCwd(cwd: string): SessionState | undefined {
     const normalized = path.resolve(cwd);
+    const matches = (value: string | null | undefined): boolean =>
+      !!value && path.resolve(value) === normalized;
     return this.all().find(
-      (s) => path.resolve(s.cwd) === normalized || (s.repoRoot && path.resolve(s.repoRoot) === normalized),
+      (s) =>
+        matches(s.cwd) ||
+        matches(s.repoRoot) ||
+        // A session that moved into a worktree is anchored there, but the MCP
+        // server it started with still reports the directory it was launched
+        // in — so that has to keep resolving to the same session.
+        matches(s.worktree?.originalCwd) ||
+        matches(s.worktree?.path),
     );
   }
 
@@ -567,6 +580,21 @@ export class SessionStore extends EventEmitter {
     this.emitEvent({ type: 'diff', sessionId: id, diff });
   }
 
+  /**
+   * Forget a session's diff, in memory and on disk.
+   *
+   * Used when the ground moves under a session — it relocates into or out of a
+   * worktree — because the cached diff describes a tree it is no longer in.
+   */
+  clearDiff(id: string): void {
+    this.diffs.delete(id);
+    try {
+      rmSync(path.join(paths.sessionDir(id), 'diff.json'), { force: true });
+    } catch {
+      /* best effort */
+    }
+  }
+
   getDiff(id: string): DiffPayload | undefined {
     const cached = this.diffs.get(id);
     if (cached) {
@@ -657,6 +685,7 @@ export class SessionStore extends EventEmitter {
 function migrate(state: SessionState): void {
   // Sessions written by an older build predate some fields.
   state.reviewRound ??= 0;
+  state.worktree ??= null;
   state.threads ??= [];
   state.roundHistory ??= [];
   state.tasks ??= [];
@@ -687,6 +716,11 @@ function trimGates(state: SessionState): void {
   const drop = new Set(droppable.slice(0, Math.max(0, surplus)));
   if (drop.size === 0) return;
   state.gates = state.gates.filter((g) => !drop.has(g));
+}
+
+function repoNameOf(state: SessionState): string | null {
+  const root = state.worktree?.mainRoot ?? state.repoRoot;
+  return root ? path.basename(root) : null;
 }
 
 function mtimeOf(dir: string): number {
