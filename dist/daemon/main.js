@@ -2049,7 +2049,9 @@ function attachTailer(sessionId, ctx, fromStart = false) {
   const session = ctx.store.get(sessionId);
   if (!session?.transcriptPath || ctx.tailers.has(sessionId)) return;
   const tailer = new TranscriptTailer(session.transcriptPath, (update) => {
-    if (update.title) ctx.store.update(sessionId, { title: update.title });
+    if (update.title && !ctx.store.get(sessionId)?.titleLocked) {
+      ctx.store.update(sessionId, { title: update.title });
+    }
     if (update.events.length) ctx.store.addTimelineBatch(sessionId, update.events);
     if (update.usage) {
       ctx.store.mutate(sessionId, (s) => {
@@ -2739,6 +2741,7 @@ function isWsl() {
 // src/daemon/main.ts
 var VERSION = true ? "0.1.0" : "0.0.0";
 var UI_DIR = path7.resolve(path7.dirname(fileURLToPath(import.meta.url)), "..", "ui");
+var MAX_TITLE_LENGTH = 120;
 async function main() {
   ensureHome();
   const existing = readLiveLock();
@@ -2955,6 +2958,18 @@ function buildRouter(deps) {
     const deleted = store.purge(id);
     json(ctx.res, 200, { deleted });
   });
+  router.post("/api/session/:id/title", async (ctx) => {
+    const session = sessionOr404(ctx);
+    if (!session) return;
+    const body = await readJson(ctx.req);
+    const title = (body.title ?? "").trim().slice(0, MAX_TITLE_LENGTH);
+    if (!title) {
+      json(ctx.res, 400, { error: "title required" });
+      return;
+    }
+    store.update(session.sessionId, { title, titleLocked: true });
+    json(ctx.res, 200, { title });
+  });
   router.get("/api/session/:id/diff", async (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
@@ -3020,10 +3035,12 @@ function buildRouter(deps) {
     const session = sessionOr404(ctx);
     if (!session) return;
     const body = await readJson(ctx.req);
+    const asked = store.getGate(session.sessionId, ctx.params["gateId"] ?? "");
+    const comment = body.comment ?? (body.answers && asked?.kind === "question" ? composeAnswerComment(asked.meta?.questions ?? [], body.answers) : void 0);
     const result = {
       verdict: body.verdict ?? "approved",
       resolvedAt: Date.now(),
-      ...body.comment ? { comment: body.comment } : {},
+      ...comment ? { comment } : {},
       ...body.steps ? { steps: body.steps } : {},
       ...body.threads ? { threads: hydrateThreads(store, session.sessionId, body.threads) } : {},
       ...body.ship ? { ship: body.ship } : {},
@@ -3371,8 +3388,12 @@ Call harness_await({ gate_id: "${gate?.id}" }). If they pick an MCP provider, yo
           json(ctx.res, 200, { ok: false, text: "[cc-harness] A question is required." });
           return;
         }
-        const options = Array.isArray(body["options"]) ? body["options"].filter((o) => typeof o === "string").slice(0, 6) : [];
-        const gate = store.openGate(id, "question", question, { options });
+        const questions = normalizeQuestions(body, question);
+        const options = simpleOptions(body);
+        const gate = store.openGate(id, "question", question, {
+          ...options.length ? { options } : {},
+          ...questions ? { questions } : {}
+        });
         json(ctx.res, 200, {
           ok: true,
           gateId: gate?.id,
@@ -3488,8 +3509,12 @@ Start one with harness_task_update({ task_id, status: "in_progress" }).`
         }
         revealUi(id);
         await reconcileFiles(store, id);
-        const options = Array.isArray(body["options"]) ? body["options"].filter((o) => typeof o === "string").slice(0, 6) : [];
-        const gate = store.openGate(id, "question", question, { options });
+        const options = simpleOptions(body);
+        const questions = normalizeQuestions(body, question);
+        const gate = store.openGate(id, "question", question, {
+          ...options.length ? { options } : {},
+          ...questions ? { questions } : {}
+        });
         updateTask(store, id, taskId, {
           status: "blocked",
           blockedBy: gate?.id ?? null,
@@ -3633,6 +3658,75 @@ function buildPlan(body, previous) {
     revision: (previous?.revision ?? 0) + 1,
     updatedAt: Date.now()
   };
+}
+var MAX_OPTIONS = 6;
+var MAX_QUESTIONS = 4;
+function simpleOptions(body) {
+  const raw = Array.isArray(body["options"]) ? body["options"] : [];
+  return raw.map((o) => {
+    if (typeof o === "string") return o;
+    if (o && typeof o === "object") return String(o["label"] ?? "");
+    return "";
+  }).filter((o) => o.trim()).slice(0, MAX_OPTIONS);
+}
+function normalizeQuestions(body, fallback) {
+  const raw = Array.isArray(body["questions"]) ? body["questions"] : null;
+  if (!raw) {
+    const opts = Array.isArray(body["options"]) ? body["options"] : [];
+    const rich = opts.some((o) => Boolean(o) && typeof o === "object");
+    const multi = body["multi_select"] === true || body["multiSelect"] === true;
+    if (!rich && !multi) return void 0;
+    return [
+      {
+        id: "q1",
+        question: fallback,
+        ...multi ? { multiSelect: true } : {},
+        options: toOptions(opts)
+      }
+    ];
+  }
+  const questions = raw.map((entry, i) => {
+    if (typeof entry === "string") return { id: `q${i + 1}`, question: entry, options: [] };
+    if (!entry || typeof entry !== "object") return null;
+    const rec = entry;
+    const question = String(rec["question"] ?? rec["text"] ?? "").trim();
+    if (!question) return null;
+    const header = String(rec["header"] ?? "").trim();
+    const multi = rec["multiSelect"] === true || rec["multi_select"] === true;
+    return {
+      id: typeof rec["id"] === "string" && rec["id"] ? rec["id"] : `q${i + 1}`,
+      question,
+      ...header ? { header } : {},
+      ...multi ? { multiSelect: true } : {},
+      options: toOptions(Array.isArray(rec["options"]) ? rec["options"] : [])
+    };
+  }).filter((q) => q !== null).slice(0, MAX_QUESTIONS);
+  return questions.length ? questions : void 0;
+}
+function toOptions(raw) {
+  return raw.map((o) => {
+    if (typeof o === "string") return { label: o };
+    if (!o || typeof o !== "object") return null;
+    const rec = o;
+    const label = String(rec["label"] ?? rec["value"] ?? rec["title"] ?? "").trim();
+    if (!label) return null;
+    const description = String(rec["description"] ?? rec["detail"] ?? "").trim();
+    return { label, ...description ? { description } : {} };
+  }).filter((o) => o !== null).slice(0, MAX_OPTIONS);
+}
+function composeAnswerComment(questions, answers) {
+  const lines = [];
+  const many = questions.length > 1;
+  for (const q of questions) {
+    const answer = (answers[q.id] ?? "").trim();
+    if (!answer) continue;
+    lines.push(many ? `${q.header ? `[${q.header}] ` : ""}${q.question}
+\u2192 ${answer}` : answer);
+  }
+  for (const [key, value] of Object.entries(answers)) {
+    if (!questions.some((q) => q.id === key) && value.trim()) lines.push(value.trim());
+  }
+  return lines.join("\n\n");
 }
 function hydrateThreads(store, sessionId, threads) {
   const diff = store.getDiff(sessionId);

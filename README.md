@@ -109,7 +109,15 @@ is never a verdict: answering a gate is always a separate, deliberate action.
 **Questions.** When Claude needs an answer it calls `harness_ask` (or blocks a
 card) rather than writing a question into the terminal, so the question appears
 in the UI as a gate you can answer — with one-click options where it offered
-them.
+them, or as a form with described choices and multi-select when it asked
+several things at once. The question card sits above the tab strip, so it is
+answerable while you read the plan, the diff or the board underneath it.
+
+**Waiting sessions come to you.** Anything Claude has stopped on is lifted into
+the rail's *Pinned / Action required* group, whether or not you pinned it, and a
+chime plays when a session starts waiting — mute it with the bell in the sidebar
+header. Rename a session from the rail (the pencil, or double-click it) when its
+auto-generated name does not say what it is about.
 
 **Threads.** Line comments are a conversation: Claude replies in the thread
 saying what it changed or why it disagrees, and you can reply back or reopen a

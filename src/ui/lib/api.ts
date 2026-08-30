@@ -39,6 +39,12 @@ export const api = {
   deleteSession: (id: string) =>
     request<{ deleted: boolean }>(`/api/session/${id}`, { method: 'DELETE' }),
 
+  renameSession: (id: string, title: string) =>
+    request<{ title: string }>(`/api/session/${id}/title`, {
+      method: 'POST',
+      body: JSON.stringify({ title }),
+    }),
+
   diff: (id: string, refresh = false) =>
     request<{ diff: DiffPayload }>(`/api/session/${id}/diff${refresh ? '?refresh=1' : ''}`),
 
@@ -51,6 +57,7 @@ export const api = {
       steps?: PlanStep[];
       threads?: ReviewThread[];
       ship?: GateResult['ship'];
+      answers?: Record<string, string>;
     },
   ) =>
     request<{ gate: unknown }>(`/api/session/${id}/gate/${gateId}/resolve`, {

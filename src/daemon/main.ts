@@ -32,6 +32,7 @@ import { openInBrowser } from './browser.ts';
 import type {
   DaemonLock,
   GateKind,
+  GateQuestion,
   GateResult,
   Plan,
   PlanStep,
@@ -46,6 +47,10 @@ declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
 
 const UI_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'ui');
+
+/** Session names the user types. Long enough for a real sentence, short
+ *  enough to stay one line in the rail. */
+const MAX_TITLE_LENGTH = 120;
 
 /* ------------------------------------------------------------------ *
  * Bootstrap
@@ -377,6 +382,26 @@ function buildRouter(deps: Deps): Router {
     json(ctx.res, 200, { deleted });
   });
 
+  /**
+   * Rename a session.
+   *
+   * `titleLocked` is what makes the rename stick: the transcript tailer picks
+   * up the CLI's own auto-generated title and would otherwise overwrite the
+   * user's within seconds.
+   */
+  router.post('/api/session/:id/title', async (ctx) => {
+    const session = sessionOr404(ctx);
+    if (!session) return;
+    const body = await readJson<{ title?: string }>(ctx.req);
+    const title = (body.title ?? '').trim().slice(0, MAX_TITLE_LENGTH);
+    if (!title) {
+      json(ctx.res, 400, { error: 'title required' });
+      return;
+    }
+    store.update(session.sessionId, { title, titleLocked: true });
+    json(ctx.res, 200, { title });
+  });
+
   router.get('/api/session/:id/diff', async (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
@@ -461,10 +486,19 @@ function buildRouter(deps: Deps): Router {
       answers?: Record<string, string>;
     }>(ctx.req);
 
+    // A structured question answers per question id. Everything downstream
+    // reads `comment`, so fold the answers into one before they get there.
+    const asked = store.getGate(session.sessionId, ctx.params['gateId'] ?? '');
+    const comment =
+      body.comment ??
+      (body.answers && asked?.kind === 'question'
+        ? composeAnswerComment(asked.meta?.questions ?? [], body.answers)
+        : undefined);
+
     const result: GateResult = {
       verdict: body.verdict ?? 'approved',
       resolvedAt: Date.now(),
-      ...(body.comment ? { comment: body.comment } : {}),
+      ...(comment ? { comment } : {}),
       ...(body.steps ? { steps: body.steps } : {}),
       ...(body.threads ? { threads: hydrateThreads(store, session.sessionId, body.threads) } : {}),
       ...(body.ship ? { ship: body.ship } : {}),
@@ -877,10 +911,12 @@ function buildRouter(deps: Deps): Router {
           json(ctx.res, 200, { ok: false, text: '[cc-harness] A question is required.' });
           return;
         }
-        const options = Array.isArray(body['options'])
-          ? (body['options'] as unknown[]).filter((o): o is string => typeof o === 'string').slice(0, 6)
-          : [];
-        const gate = store.openGate(id, 'question', question, { options });
+        const questions = normalizeQuestions(body, question);
+        const options = simpleOptions(body);
+        const gate = store.openGate(id, 'question', question, {
+          ...(options.length ? { options } : {}),
+          ...(questions ? { questions } : {}),
+        });
         json(ctx.res, 200, {
           ok: true,
           gateId: gate?.id,
@@ -1018,10 +1054,12 @@ function buildRouter(deps: Deps): Router {
         }
         revealUi(id);
         await reconcileFiles(store, id);
-        const options = Array.isArray(body['options'])
-          ? (body['options'] as unknown[]).filter((o): o is string => typeof o === 'string').slice(0, 6)
-          : [];
-        const gate = store.openGate(id, 'question', question, { options });
+        const options = simpleOptions(body);
+        const questions = normalizeQuestions(body, question);
+        const gate = store.openGate(id, 'question', question, {
+          ...(options.length ? { options } : {}),
+          ...(questions ? { questions } : {}),
+        });
         updateTask(store, id, taskId, {
           status: 'blocked',
           blockedBy: gate?.id ?? null,
@@ -1239,6 +1277,118 @@ function buildPlan(body: Record<string, unknown>, previous: Plan | null): Plan {
     revision: (previous?.revision ?? 0) + 1,
     updatedAt: Date.now(),
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * Questions
+ * ------------------------------------------------------------------ */
+
+/** Caps taken from the CLI's own question UI: past these a choice stops
+ *  being a choice. */
+const MAX_OPTIONS = 6;
+const MAX_QUESTIONS = 4;
+
+/** The flat `options: string[]` form, kept because it is the cheapest thing
+ *  the model can write and most questions need nothing more. */
+function simpleOptions(body: Record<string, unknown>): string[] {
+  const raw = Array.isArray(body['options']) ? (body['options'] as unknown[]) : [];
+  return raw
+    .map((o) => {
+      if (typeof o === 'string') return o;
+      if (o && typeof o === 'object') return String((o as Record<string, unknown>)['label'] ?? '');
+      return '';
+    })
+    .filter((o) => o.trim())
+    .slice(0, MAX_OPTIONS);
+}
+
+/**
+ * Normalize whatever the model sent into the structured form the UI renders.
+ *
+ * Returns `undefined` for the plain `question` + `options: string[]` case so
+ * the UI keeps its one-click fast path; anything richer — option
+ * descriptions, multi-select, more than one question — becomes a `questions`
+ * array the UI renders as a form.
+ */
+function normalizeQuestions(body: Record<string, unknown>, fallback: string): GateQuestion[] | undefined {
+  const raw = Array.isArray(body['questions']) ? (body['questions'] as unknown[]) : null;
+
+  if (!raw) {
+    // A flat options list is only "structured" if an option carries a
+    // description; otherwise the simple form renders it better.
+    const opts = Array.isArray(body['options']) ? (body['options'] as unknown[]) : [];
+    const rich = opts.some((o) => Boolean(o) && typeof o === 'object');
+    const multi = body['multi_select'] === true || body['multiSelect'] === true;
+    if (!rich && !multi) return undefined;
+    return [
+      {
+        id: 'q1',
+        question: fallback,
+        ...(multi ? { multiSelect: true } : {}),
+        options: toOptions(opts),
+      },
+    ];
+  }
+
+  const questions = raw
+    .map((entry, i): GateQuestion | null => {
+      if (typeof entry === 'string') return { id: `q${i + 1}`, question: entry, options: [] };
+      if (!entry || typeof entry !== 'object') return null;
+      const rec = entry as Record<string, unknown>;
+      const question = String(rec['question'] ?? rec['text'] ?? '').trim();
+      if (!question) return null;
+      const header = String(rec['header'] ?? '').trim();
+      const multi = rec['multiSelect'] === true || rec['multi_select'] === true;
+      return {
+        id: typeof rec['id'] === 'string' && rec['id'] ? rec['id'] : `q${i + 1}`,
+        question,
+        ...(header ? { header } : {}),
+        ...(multi ? { multiSelect: true } : {}),
+        options: toOptions(Array.isArray(rec['options']) ? (rec['options'] as unknown[]) : []),
+      };
+    })
+    .filter((q): q is GateQuestion => q !== null)
+    .slice(0, MAX_QUESTIONS);
+
+  return questions.length ? questions : undefined;
+}
+
+function toOptions(raw: unknown[]): GateQuestion['options'] {
+  return raw
+    .map((o) => {
+      if (typeof o === 'string') return { label: o };
+      if (!o || typeof o !== 'object') return null;
+      const rec = o as Record<string, unknown>;
+      const label = String(rec['label'] ?? rec['value'] ?? rec['title'] ?? '').trim();
+      if (!label) return null;
+      const description = String(rec['description'] ?? rec['detail'] ?? '').trim();
+      return { label, ...(description ? { description } : {}) };
+    })
+    .filter((o): o is { label: string; description?: string } => o !== null)
+    .slice(0, MAX_OPTIONS);
+}
+
+/**
+ * Collapse per-question answers into the single block of prose the model
+ * reads.
+ *
+ * The rest of the pipeline — `renderGateResult`, and `recordDecision`, which
+ * writes the answer onto the task that asked — only understands `comment`, so
+ * a structured answer has to reduce to one here or it would be dropped.
+ */
+function composeAnswerComment(questions: GateQuestion[], answers: Record<string, string>): string {
+  const lines: string[] = [];
+  const many = questions.length > 1;
+  for (const q of questions) {
+    const answer = (answers[q.id] ?? '').trim();
+    if (!answer) continue;
+    lines.push(many ? `${q.header ? `[${q.header}] ` : ''}${q.question}\n→ ${answer}` : answer);
+  }
+  // An answer keyed to a question the gate no longer carries still counts.
+  for (const [key, value] of Object.entries(answers)) {
+    if (!questions.some((q) => q.id === key) && value.trim()) lines.push(value.trim());
+  }
+  return lines.join('\n\n');
 }
 
 /** Fill in ids, timestamps and the source excerpt the user selected. */

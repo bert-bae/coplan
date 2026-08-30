@@ -265,6 +265,31 @@ var TOOLS = [
           type: "array",
           items: { type: "string" },
           description: "Up to 6 suggested answers, offered as one-click buttons. The user can still type their own."
+        },
+        questions: {
+          type: "array",
+          description: "Ask up to 4 related questions at once, each with its own options \u2014 use this instead of `question` when the answers are separate decisions, or when an option needs explaining.",
+          items: {
+            type: "object",
+            properties: {
+              header: { type: "string", description: 'Two or three words, shown as a chip. e.g. "Auth method".' },
+              question: { type: "string" },
+              multiSelect: { type: "boolean", description: "Allow more than one option. Default false." },
+              options: {
+                type: "array",
+                description: "Up to 6 choices.",
+                items: {
+                  type: "object",
+                  properties: {
+                    label: { type: "string", description: "The choice itself, 1-5 words." },
+                    description: { type: "string", description: "What picking this means, or its trade-off." }
+                  },
+                  required: ["label"]
+                }
+              }
+            },
+            required: ["question", "options"]
+          }
         }
       },
       required: ["question"],

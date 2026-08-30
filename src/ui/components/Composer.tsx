@@ -50,8 +50,17 @@ export function Composer() {
             Claude is waiting at the <strong>{gateLabel(gate.kind)}</strong> gate. A message here does{' '}
             <em>not</em> answer it.
           </span>
-          <button type="button" className="link" onClick={() => store.setTab(tabForGate(gate))}>
-            Go answer the gate →
+          <button
+            type="button"
+            className="link"
+            onClick={() => {
+              // A question is answered in place, above the tabs; every other
+              // gate is answered in its own tab.
+              if (gate.kind === 'question') store.focusGate();
+              else store.setTab(tabForGate(gate));
+            }}
+          >
+            {gate.kind === 'question' ? 'Answer it above →' : 'Go answer the gate →'}
           </button>
         </div>
       )}

@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { api } from './lib/api.ts';
+import { armAudio, playAlert } from './lib/sound.ts';
 import type {
   DiffPayload,
   Gate,
@@ -45,6 +46,10 @@ export interface UiState {
   pinned: string[];
   /** Project groups the user has folded shut, keyed by repo root (or cwd). */
   collapsedProjects: string[];
+  /** Play a chime when a session starts waiting on the user. */
+  soundEnabled: boolean;
+  /** Bumped to pull the question card into view from anywhere in the app. */
+  gateFocus: number;
   toasts: Toast[];
   error: string | null;
 }
@@ -64,6 +69,8 @@ const initial: UiState = {
   collapsedSidebar: false,
   pinned: [],
   collapsedProjects: [],
+  soundEnabled: true,
+  gateFocus: 0,
   toasts: [],
   error: null,
 };
@@ -84,6 +91,7 @@ class Store {
   private listeners = new Set<() => void>();
   private source: EventSource | null = null;
   private reconnectTimer: number | undefined;
+  private lastAlertAt = 0;
 
   getState = (): UiState => this.state;
 
@@ -107,6 +115,10 @@ class Store {
    * ---------------------------------------------------------------- */
 
   async init(): Promise<void> {
+    // Browsers will not let a page make noise before it has been touched, so
+    // the audio context waits for the first click or keypress.
+    armAudio();
+
     // The token arrives once in the query string and the daemon swaps it for a
     // cookie; drop it from the address bar so links the user copies are clean.
     const url = new URL(window.location.href);
@@ -202,6 +214,10 @@ class Store {
         return;
 
       case 'sessions':
+        // The session list is the only signal for a gate opening in a
+        // session the user is not currently looking at — which, with several
+        // sessions in the rail, is most of them.
+        this.announceOtherSessions(this.state.sessions, event.sessions);
         this.set({ sessions: event.sessions });
         return;
 
@@ -253,9 +269,34 @@ class Store {
     const wasOpen = before?.gates.find((g) => g.status === 'open')?.id;
     const nowOpen = after.gates.find((g) => g.status === 'open');
     if (!nowOpen || nowOpen.id === wasOpen) return;
-    this.set({ tab: tabForGate(nowOpen) });
+    // A question is answerable from every tab, so do not yank the user out of
+    // whatever they were reading to answer it.
+    if (nowOpen.kind !== 'question') this.set({ tab: tabForGate(nowOpen) });
     this.toast('info', gateHeadline(nowOpen));
     notify(gateHeadline(nowOpen), after.title);
+    this.alert();
+  }
+
+  /** The same announcement for sessions the user is not watching. */
+  private announceOtherSessions(before: SessionSummary[], after: SessionSummary[]): void {
+    if (before.length === 0) return; // the first list is not news
+    const previous = new Map(before.map((s) => [s.sessionId, s.openGates]));
+    for (const summary of after) {
+      if (summary.sessionId === this.state.sessionId) continue; // announceGate has it
+      const was = previous.get(summary.sessionId);
+      if (was === undefined || summary.openGates <= was) continue;
+      this.toast('info', `${summary.title} is waiting on you`);
+      notify('Claude is waiting on you', summary.title);
+      this.alert();
+    }
+  }
+
+  /** One chime per burst: several sessions parking at once is one event. */
+  private alert(): void {
+    if (!this.state.soundEnabled) return;
+    if (Date.now() - this.lastAlertAt < 1500) return;
+    this.lastAlertAt = Date.now();
+    playAlert();
   }
 
   /* ---------------------------------------------------------------- *
@@ -317,6 +358,7 @@ class Store {
       collapsedSidebar: this.state.collapsedSidebar,
       pinned: this.state.pinned,
       collapsedProjects: this.state.collapsedProjects,
+      soundEnabled: this.state.soundEnabled,
     });
   }
 
@@ -338,6 +380,37 @@ class Store {
       : [...this.state.pinned, sessionId];
     this.set({ pinned });
     this.persistPrefs();
+  }
+
+  toggleSound(): void {
+    const soundEnabled = !this.state.soundEnabled;
+    this.set({ soundEnabled });
+    this.persistPrefs();
+    // Play the chime being switched on, so the user hears what they enabled.
+    if (soundEnabled) playAlert();
+  }
+
+  /** Bring the open question into view from wherever the user is. */
+  focusGate(): void {
+    this.set({ gateFocus: this.state.gateFocus + 1 });
+  }
+
+  async renameSession(sessionId: string, title: string): Promise<void> {
+    const next = title.trim();
+    if (!next) return;
+    // Optimistic: the rail is the thing being edited, and waiting a round
+    // trip to redraw it makes the input feel broken.
+    this.set({
+      sessions: this.state.sessions.map((s) => (s.sessionId === sessionId ? { ...s, title: next } : s)),
+      ...(this.state.session?.sessionId === sessionId
+        ? { session: { ...this.state.session, title: next } }
+        : {}),
+    });
+    try {
+      await api.renameSession(sessionId, next);
+    } catch (err) {
+      this.fail(err);
+    }
   }
 
   toggleProject(key: string): void {
@@ -481,6 +554,8 @@ export function tabForSession(session: SessionState): Tab {
 
 export function gateHeadline(gate: Gate): string {
   switch (gate.kind) {
+    case 'question':
+      return 'Claude is asking you a question';
     case 'plan':
       return 'Claude is waiting on your review of the plan';
     case 'code_review':
@@ -535,6 +610,7 @@ function loadPrefs(): Partial<UiState> {
     if (Array.isArray(saved['collapsedProjects'])) {
       prefs.collapsedProjects = saved['collapsedProjects'].filter((v) => typeof v === 'string');
     }
+    if (typeof saved['soundEnabled'] === 'boolean') prefs.soundEnabled = saved['soundEnabled'];
     return prefs;
   } catch {
     return {};
@@ -546,6 +622,7 @@ function savePrefs(prefs: {
   collapsedSidebar: boolean;
   pinned: string[];
   collapsedProjects: string[];
+  soundEnabled: boolean;
 }): void {
   try {
     window.localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
@@ -574,6 +651,14 @@ export function useSession(): SessionState | null {
 
 export function useOpenGate(): Gate | null {
   return useStore((s) => s.session?.gates.find((g) => g.status === 'open') ?? null);
+}
+
+/** The open question, if there is one. Rendered above the tabs, so every view
+ *  can be read while it is answered. */
+export function useQuestionGate(): Gate | null {
+  return useStore(
+    (s) => s.session?.gates.find((g) => g.status === 'open' && g.kind === 'question') ?? null,
+  );
 }
 
 export function useDrafts(): DraftComment[] {

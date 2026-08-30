@@ -30,6 +30,10 @@ var init_api = __esm({
       session: (id) => request(`/api/session/${id}`),
       /** Permanent: the daemon removes the session's on-disk directory too. */
       deleteSession: (id) => request(`/api/session/${id}`, { method: "DELETE" }),
+      renameSession: (id, title) => request(`/api/session/${id}/title`, {
+        method: "POST",
+        body: JSON.stringify({ title })
+      }),
       diff: (id, refresh = false) => request(`/api/session/${id}/diff${refresh ? "?refresh=1" : ""}`),
       resolveGate: (id, gateId, body) => request(`/api/session/${id}/gate/${gateId}/resolve`, {
         method: "POST",
@@ -82,6 +86,60 @@ var init_api = __esm({
   }
 });
 
+// src/ui/lib/sound.ts
+function audioCtor() {
+  const w = window;
+  return w.AudioContext ?? w.webkitAudioContext ?? null;
+}
+function armAudio() {
+  if (armed) return;
+  armed = true;
+  const events = ["pointerdown", "keydown"];
+  const unlock = () => {
+    try {
+      const Ctor = audioCtor();
+      if (!Ctor) return;
+      context ??= new Ctor();
+      void context.resume();
+    } catch {
+    }
+    for (const event of events) window.removeEventListener(event, unlock);
+  };
+  for (const event of events) window.addEventListener(event, unlock, { once: false });
+}
+function playAlert() {
+  const ctx = context;
+  if (!ctx || ctx.state !== "running") return;
+  try {
+    const now = ctx.currentTime;
+    const master = ctx.createGain();
+    master.gain.value = 0.12;
+    master.connect(ctx.destination);
+    for (const [index, frequency] of [659.25, 987.77].entries()) {
+      const at = now + index * 0.13;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = frequency;
+      gain.gain.setValueAtTime(1e-4, at);
+      gain.gain.exponentialRampToValueAtTime(1, at + 0.015);
+      gain.gain.exponentialRampToValueAtTime(1e-4, at + 0.28);
+      osc.connect(gain).connect(master);
+      osc.start(at);
+      osc.stop(at + 0.3);
+    }
+  } catch {
+  }
+}
+var context, armed;
+var init_sound = __esm({
+  "src/ui/lib/sound.ts"() {
+    "use strict";
+    context = null;
+    armed = false;
+  }
+});
+
 // src/ui/store.ts
 var store_exports = {};
 __export(store_exports, {
@@ -92,6 +150,7 @@ __export(store_exports, {
   tabForSession: () => tabForSession,
   useDrafts: () => useDrafts,
   useOpenGate: () => useOpenGate,
+  useQuestionGate: () => useQuestionGate,
   useSession: () => useSession,
   useStore: () => useStore
 });
@@ -144,6 +203,8 @@ function tabForSession(session) {
 }
 function gateHeadline(gate) {
   switch (gate.kind) {
+    case "question":
+      return "Claude is asking you a question";
     case "plan":
       return "Claude is waiting on your review of the plan";
     case "code_review":
@@ -189,6 +250,7 @@ function loadPrefs() {
     if (Array.isArray(saved["collapsedProjects"])) {
       prefs.collapsedProjects = saved["collapsedProjects"].filter((v) => typeof v === "string");
     }
+    if (typeof saved["soundEnabled"] === "boolean") prefs.soundEnabled = saved["soundEnabled"];
     return prefs;
   } catch {
     return {};
@@ -213,6 +275,11 @@ function useSession() {
 function useOpenGate() {
   return useStore((s) => s.session?.gates.find((g) => g.status === "open") ?? null);
 }
+function useQuestionGate() {
+  return useStore(
+    (s) => s.session?.gates.find((g) => g.status === "open" && g.kind === "question") ?? null
+  );
+}
 function useDrafts() {
   return useStore((s) => s.sessionId ? s.drafts[s.sessionId] ?? EMPTY_DRAFTS : EMPTY_DRAFTS);
 }
@@ -221,6 +288,7 @@ var init_store = __esm({
   "src/ui/store.ts"() {
     "use strict";
     init_api();
+    init_sound();
     initial = {
       sessions: [],
       sessionId: null,
@@ -236,6 +304,8 @@ var init_store = __esm({
       collapsedSidebar: false,
       pinned: [],
       collapsedProjects: [],
+      soundEnabled: true,
+      gateFocus: 0,
       toasts: [],
       error: null
     };
@@ -246,6 +316,7 @@ var init_store = __esm({
       listeners = /* @__PURE__ */ new Set();
       source = null;
       reconnectTimer;
+      lastAlertAt = 0;
       getState = () => this.state;
       subscribe = (listener) => {
         this.listeners.add(listener);
@@ -263,6 +334,7 @@ var init_store = __esm({
        * Boot
        * ---------------------------------------------------------------- */
       async init() {
+        armAudio();
         const url = new URL(window.location.href);
         if (url.searchParams.has("token")) {
           url.searchParams.delete("token");
@@ -341,6 +413,7 @@ var init_store = __esm({
           case "ping":
             return;
           case "sessions":
+            this.announceOtherSessions(this.state.sessions, event.sessions);
             this.set({ sessions: event.sessions });
             return;
           case "snapshot":
@@ -383,9 +456,30 @@ var init_store = __esm({
         const wasOpen = before?.gates.find((g) => g.status === "open")?.id;
         const nowOpen = after2.gates.find((g) => g.status === "open");
         if (!nowOpen || nowOpen.id === wasOpen) return;
-        this.set({ tab: tabForGate(nowOpen) });
+        if (nowOpen.kind !== "question") this.set({ tab: tabForGate(nowOpen) });
         this.toast("info", gateHeadline(nowOpen));
         notify(gateHeadline(nowOpen), after2.title);
+        this.alert();
+      }
+      /** The same announcement for sessions the user is not watching. */
+      announceOtherSessions(before, after2) {
+        if (before.length === 0) return;
+        const previous = new Map(before.map((s) => [s.sessionId, s.openGates]));
+        for (const summary2 of after2) {
+          if (summary2.sessionId === this.state.sessionId) continue;
+          const was = previous.get(summary2.sessionId);
+          if (was === void 0 || summary2.openGates <= was) continue;
+          this.toast("info", `${summary2.title} is waiting on you`);
+          notify("Claude is waiting on you", summary2.title);
+          this.alert();
+        }
+      }
+      /** One chime per burst: several sessions parking at once is one event. */
+      alert() {
+        if (!this.state.soundEnabled) return;
+        if (Date.now() - this.lastAlertAt < 1500) return;
+        this.lastAlertAt = Date.now();
+        playAlert();
       }
       /* ---------------------------------------------------------------- *
        * Draft comments
@@ -436,7 +530,8 @@ var init_store = __esm({
           diffMode: this.state.diffMode,
           collapsedSidebar: this.state.collapsedSidebar,
           pinned: this.state.pinned,
-          collapsedProjects: this.state.collapsedProjects
+          collapsedProjects: this.state.collapsedProjects,
+          soundEnabled: this.state.soundEnabled
         });
       }
       setDiffMode(diffMode) {
@@ -453,6 +548,29 @@ var init_store = __esm({
         const pinned = this.state.pinned.includes(sessionId) ? this.state.pinned.filter((id) => id !== sessionId) : [...this.state.pinned, sessionId];
         this.set({ pinned });
         this.persistPrefs();
+      }
+      toggleSound() {
+        const soundEnabled = !this.state.soundEnabled;
+        this.set({ soundEnabled });
+        this.persistPrefs();
+        if (soundEnabled) playAlert();
+      }
+      /** Bring the open question into view from wherever the user is. */
+      focusGate() {
+        this.set({ gateFocus: this.state.gateFocus + 1 });
+      }
+      async renameSession(sessionId, title) {
+        const next = title.trim();
+        if (!next) return;
+        this.set({
+          sessions: this.state.sessions.map((s) => s.sessionId === sessionId ? { ...s, title: next } : s),
+          ...this.state.session?.sessionId === sessionId ? { session: { ...this.state.session, title: next } } : {}
+        });
+        try {
+          await api.renameSession(sessionId, next);
+        } catch (err) {
+          this.fail(err);
+        }
       }
       toggleProject(key) {
         const collapsedProjects = this.state.collapsedProjects.includes(key) ? this.state.collapsedProjects.filter((k) => k !== key) : [...this.state.collapsedProjects, key];
@@ -571,8 +689,11 @@ var init_format = __esm({
 });
 
 // src/ui/components/Sidebar.tsx
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { jsx, jsxs } from "react/jsx-runtime";
+function needsAttention(session) {
+  return session.openGates > 0 || session.status === "waiting";
+}
 function Sidebar() {
   const sessions = useStore((s) => s.sessions);
   const current = useStore((s) => s.sessionId);
@@ -580,6 +701,7 @@ function Sidebar() {
   const collapsed = useStore((s) => s.collapsedSidebar);
   const pinned = useStore((s) => s.pinned);
   const collapsedProjects = useStore((s) => s.collapsedProjects);
+  const soundEnabled = useStore((s) => s.soundEnabled);
   const groups = groupSessions(sessions, pinned);
   return /* @__PURE__ */ jsxs("aside", { className: classNames("sidebar", collapsed && "is-collapsed"), children: [
     /* @__PURE__ */ jsxs("header", { className: "sidebar-head", children: [
@@ -588,6 +710,17 @@ function Sidebar() {
         /* @__PURE__ */ jsx("strong", { children: "harness" }),
         /* @__PURE__ */ jsx("span", { className: classNames("conn", `is-${connection}`), children: connection === "live" ? "live" : connection === "connecting" ? "connecting\u2026" : "reconnecting\u2026" })
       ] }),
+      /* @__PURE__ */ jsx(
+        "button",
+        {
+          type: "button",
+          className: classNames("icon-btn", !soundEnabled && "is-muted"),
+          title: soundEnabled ? "Mute the alert chime" : "Play a chime when Claude needs you",
+          "aria-pressed": soundEnabled,
+          onClick: () => store.toggleSound(),
+          children: soundEnabled ? "\u{1F514}" : "\u{1F515}"
+        }
+      ),
       /* @__PURE__ */ jsx(
         "button",
         {
@@ -619,10 +752,11 @@ function groupSessions(sessions, pinned) {
   const pinnedSet = new Set(pinned);
   const groups = /* @__PURE__ */ new Map();
   for (const session of sessions) {
-    const key = pinnedSet.has(session.sessionId) ? PINNED_KEY : session.repoRoot ?? session.cwd;
+    const lift = pinnedSet.has(session.sessionId) || needsAttention(session);
+    const key = lift ? PINNED_KEY : session.repoRoot ?? session.cwd;
     let group = groups.get(key);
     if (!group) {
-      group = key === PINNED_KEY ? { key, label: "Pinned", path: "", sessions: [], openGates: 0 } : {
+      group = key === PINNED_KEY ? { key, label: "Pinned / Action required", path: "", sessions: [], openGates: 0 } : {
         key,
         label: session.repoName ?? basename(session.cwd) ?? "Unknown project",
         path: session.repoRoot ?? session.cwd,
@@ -688,13 +822,18 @@ function SessionRow({
   const drafts = useStore((s) => s.drafts[session.sessionId]?.length ?? 0);
   const pinned = useStore((s) => s.pinned.includes(session.sessionId));
   const [confirming, setConfirming] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   return /* @__PURE__ */ jsxs("div", { className: classNames("session-row", active && "is-active", confirming && "is-confirming"), children: [
-    /* @__PURE__ */ jsxs(
+    renaming ? /* @__PURE__ */ jsx(RenameField, { session, onDone: () => setRenaming(false) }) : /* @__PURE__ */ jsxs(
       "button",
       {
         type: "button",
         className: "session-open",
         onClick: () => void store.selectSession(session.sessionId),
+        onDoubleClick: () => setRenaming(true),
+        title: `${session.title}
+${session.cwd}
+Double-click to rename`,
         children: [
           /* @__PURE__ */ jsxs("span", { className: "session-name", children: [
             session.openGates > 0 && /* @__PURE__ */ jsx("span", { className: "dot is-gate", title: "Claude is waiting on you", "aria-label": "waiting on you" }),
@@ -720,6 +859,16 @@ function SessionRow({
       }
     ),
     /* @__PURE__ */ jsxs("div", { className: "session-actions", children: [
+      /* @__PURE__ */ jsx(
+        "button",
+        {
+          type: "button",
+          className: "icon-btn is-tiny",
+          title: "Rename this session",
+          onClick: () => setRenaming(true),
+          children: "\u270E"
+        }
+      ),
       /* @__PURE__ */ jsx(
         "button",
         {
@@ -761,6 +910,42 @@ function SessionRow({
       ] })
     ] })
   ] });
+}
+function RenameField({ session, onDone }) {
+  const [value, setValue] = useState(session.title);
+  const input = useRef(null);
+  const done = useRef(false);
+  useEffect(() => {
+    input.current?.select();
+  }, []);
+  const commit = () => {
+    if (done.current) return;
+    done.current = true;
+    const next = value.trim();
+    if (next && next !== session.title) void store.renameSession(session.sessionId, next);
+    onDone();
+  };
+  const abandon = () => {
+    if (done.current) return;
+    done.current = true;
+    onDone();
+  };
+  return /* @__PURE__ */ jsx(
+    "input",
+    {
+      ref: input,
+      className: "session-rename",
+      value,
+      "aria-label": `Rename ${session.title}`,
+      maxLength: 120,
+      onChange: (e) => setValue(e.target.value),
+      onBlur: commit,
+      onKeyDown: (e) => {
+        if (e.key === "Enter") commit();
+        if (e.key === "Escape") abandon();
+      }
+    }
+  );
 }
 var STAGE_LABEL, PINNED_KEY;
 var init_Sidebar = __esm({
@@ -846,8 +1031,26 @@ var init_primitives = __esm({
   }
 });
 
+// src/ui/lib/hooks.ts
+import { useEffect as useEffect2, useState as useState2 } from "react";
+function useElapsed(since) {
+  const [now, setNow] = useState2(() => Date.now());
+  useEffect2(() => {
+    if (!since) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1e3);
+    return () => window.clearInterval(timer);
+  }, [since]);
+  if (!since) return "";
+  return duration(now - since);
+}
+var init_hooks = __esm({
+  "src/ui/lib/hooks.ts"() {
+    "use strict";
+    init_format();
+  }
+});
+
 // src/ui/components/GateBanner.tsx
-import { useEffect, useState as useState2 } from "react";
 import { Fragment, jsx as jsx3, jsxs as jsxs3 } from "react/jsx-runtime";
 function GateBanner() {
   const gate = useOpenGate();
@@ -869,6 +1072,7 @@ function GateBanner() {
       ] })
     ] });
   }
+  if (gate.kind === "question") return null;
   const parked = gate.waiting;
   return /* @__PURE__ */ jsxs3("div", { className: parked ? "gate-banner is-blocking" : "gate-banner is-open", role: "alert", "aria-live": "assertive", children: [
     /* @__PURE__ */ jsx3("span", { className: "gate-icon", "aria-hidden": "true", children: parked ? "\u23F8" : "\u25F7" }),
@@ -883,37 +1087,208 @@ function GateBanner() {
         " ago. Your answer is still delivered when it next runs."
       ] }) })
     ] }),
-    /* @__PURE__ */ jsx3(Button, { variant: "primary", onClick: () => store.setTab(tabForGate(gate)), children: "Answer" })
+    /* @__PURE__ */ jsx3(
+      Button,
+      {
+        variant: "primary",
+        onClick: () => gate.kind === "question" ? store.focusGate() : store.setTab(tabForGate(gate)),
+        children: "Answer"
+      }
+    )
   ] });
-}
-function useElapsed(since) {
-  const [now, setNow] = useState2(() => Date.now());
-  useEffect(() => {
-    if (!since) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1e3);
-    return () => window.clearInterval(timer);
-  }, [since]);
-  if (!since) return "";
-  return duration(now - since);
 }
 var init_GateBanner = __esm({
   "src/ui/components/GateBanner.tsx"() {
     "use strict";
     init_store();
     init_primitives();
+    init_hooks();
+  }
+});
+
+// src/ui/components/QuestionGate.tsx
+import { useEffect as useEffect3, useRef as useRef2, useState as useState3 } from "react";
+import { Fragment as Fragment2, jsx as jsx4, jsxs as jsxs4 } from "react/jsx-runtime";
+function QuestionGate() {
+  const gate = useQuestionGate();
+  const sessionId = useStore((s) => s.sessionId);
+  const focus = useStore((s) => s.gateFocus);
+  const root = useRef2(null);
+  const elapsed = useElapsed(gate?.createdAt);
+  useEffect3(() => {
+    if (focus > 0) root.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [focus]);
+  if (!gate || !sessionId) return null;
+  const questions = gate.meta?.questions ?? [];
+  return /* @__PURE__ */ jsxs4("div", { className: "question-card", ref: root, role: "region", "aria-label": "Question from Claude", children: [
+    /* @__PURE__ */ jsxs4("h3", { children: [
+      gate.waiting ? "Claude is asking \u2014 the session is parked" : "Claude is asking",
+      /* @__PURE__ */ jsx4("span", { className: "question-elapsed", children: gate.waiting ? `waiting ${elapsed}` : `asked ${elapsed} ago` })
+    ] }),
+    questions.length > 0 ? /* @__PURE__ */ jsx4(QuestionForm, { gate, questions, sessionId }, gate.id) : /* @__PURE__ */ jsx4(QuickAnswer, { gate, sessionId }, gate.id)
+  ] });
+}
+function QuickAnswer({ gate, sessionId }) {
+  const [answer, setAnswer] = useState3("");
+  const [busy, setBusy] = useState3(false);
+  const options = gate.meta?.options ?? [];
+  const send = async (text) => {
+    const body = text.trim();
+    if (!body || busy) return;
+    setBusy(true);
+    try {
+      await api.resolveGate(sessionId, gate.id, { verdict: "answered", comment: body });
+      store.toast("success", "Answer sent \u2014 Claude is resuming.");
+      setAnswer("");
+    } catch (err) {
+      store.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return /* @__PURE__ */ jsxs4(Fragment2, { children: [
+    /* @__PURE__ */ jsx4("p", { className: "question-text", children: gate.prompt }),
+    options.length > 0 && /* @__PURE__ */ jsx4("div", { className: "question-options", children: options.map((option) => /* @__PURE__ */ jsx4(Button, { onClick: () => void send(option), disabled: busy, children: option }, option)) }),
+    /* @__PURE__ */ jsx4(
+      "textarea",
+      {
+        className: "input",
+        rows: 3,
+        value: answer,
+        placeholder: options.length ? "Or answer in your own words\u2026" : "Your answer\u2026",
+        onChange: (e) => setAnswer(e.target.value),
+        onKeyDown: (e) => {
+          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") void send(answer);
+        }
+      }
+    ),
+    /* @__PURE__ */ jsxs4("div", { className: "row-actions", children: [
+      /* @__PURE__ */ jsx4(Button, { variant: "primary", onClick: () => void send(answer), disabled: !answer.trim() || busy, children: "Send answer" }),
+      /* @__PURE__ */ jsx4("span", { className: "muted", children: "\u2318\u21B5" })
+    ] })
+  ] });
+}
+function QuestionForm({
+  gate,
+  questions,
+  sessionId
+}) {
+  const [picked, setPicked] = useState3({});
+  const [other, setOther] = useState3({});
+  const [busy, setBusy] = useState3(false);
+  const answerFor = (q) => {
+    const labels = (picked[q.id] ?? []).filter((l) => l !== OTHER);
+    const free = (picked[q.id] ?? []).includes(OTHER) ? (other[q.id] ?? "").trim() : "";
+    return [...labels, free].filter(Boolean).join(", ");
+  };
+  const answers = Object.fromEntries(questions.map((q) => [q.id, answerFor(q)]));
+  const complete = questions.every((q) => answers[q.id]);
+  const toggle = (q, label) => {
+    setPicked((current) => {
+      const existing = current[q.id] ?? [];
+      if (!q.multiSelect) return { ...current, [q.id]: existing[0] === label ? [] : [label] };
+      return {
+        ...current,
+        [q.id]: existing.includes(label) ? existing.filter((l) => l !== label) : [...existing, label]
+      };
+    });
+  };
+  const submit = async () => {
+    if (!complete || busy) return;
+    setBusy(true);
+    try {
+      await api.resolveGate(sessionId, gate.id, { verdict: "answered", answers });
+      store.toast("success", "Answers sent \u2014 Claude is resuming.");
+    } catch (err) {
+      store.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return /* @__PURE__ */ jsxs4(Fragment2, { children: [
+    questions.map((q) => {
+      const selected = picked[q.id] ?? [];
+      return /* @__PURE__ */ jsxs4("fieldset", { className: "qblock", children: [
+        /* @__PURE__ */ jsxs4("legend", { className: "qblock-legend", children: [
+          q.header && /* @__PURE__ */ jsx4("span", { className: "qblock-chip", children: q.header }),
+          /* @__PURE__ */ jsx4("span", { className: "question-text", children: q.question }),
+          q.multiSelect && /* @__PURE__ */ jsx4("span", { className: "muted", children: " \xB7 pick any" })
+        ] }),
+        /* @__PURE__ */ jsxs4("div", { className: "qoptions", children: [
+          q.options.map((option) => /* @__PURE__ */ jsxs4(
+            "button",
+            {
+              type: "button",
+              className: classNames("qoption", selected.includes(option.label) && "is-selected"),
+              "aria-pressed": selected.includes(option.label),
+              disabled: busy,
+              onClick: () => toggle(q, option.label),
+              children: [
+                /* @__PURE__ */ jsx4("span", { className: "qoption-mark", "aria-hidden": "true", children: selected.includes(option.label) ? "\u25CF" : "\u25CB" }),
+                /* @__PURE__ */ jsxs4("span", { className: "qoption-body", children: [
+                  /* @__PURE__ */ jsx4("span", { className: "qoption-label", children: option.label }),
+                  option.description && /* @__PURE__ */ jsx4("span", { className: "qoption-desc", children: option.description })
+                ] })
+              ]
+            },
+            option.label
+          )),
+          /* @__PURE__ */ jsxs4(
+            "button",
+            {
+              type: "button",
+              className: classNames("qoption", "is-other", selected.includes(OTHER) && "is-selected"),
+              "aria-pressed": selected.includes(OTHER),
+              disabled: busy,
+              onClick: () => toggle(q, OTHER),
+              children: [
+                /* @__PURE__ */ jsx4("span", { className: "qoption-mark", "aria-hidden": "true", children: selected.includes(OTHER) ? "\u25CF" : "\u25CB" }),
+                /* @__PURE__ */ jsx4("span", { className: "qoption-body", children: /* @__PURE__ */ jsx4("span", { className: "qoption-label", children: "Something else" }) })
+              ]
+            }
+          )
+        ] }),
+        selected.includes(OTHER) && /* @__PURE__ */ jsx4(
+          "input",
+          {
+            className: "input",
+            autoFocus: true,
+            value: other[q.id] ?? "",
+            placeholder: "Your answer\u2026",
+            "aria-label": `Your own answer to: ${q.question}`,
+            onChange: (e) => setOther((current) => ({ ...current, [q.id]: e.target.value }))
+          }
+        )
+      ] }, q.id);
+    }),
+    /* @__PURE__ */ jsxs4("div", { className: "row-actions", children: [
+      /* @__PURE__ */ jsx4(Button, { variant: "primary", onClick: () => void submit(), disabled: !complete || busy, children: busy ? "Sending\u2026" : questions.length > 1 ? "Send answers" : "Send answer" }),
+      !complete && /* @__PURE__ */ jsx4("span", { className: "muted", children: questions.length > 1 ? "Answer every question to send." : "Pick an option to send." })
+    ] })
+  ] });
+}
+var OTHER;
+var init_QuestionGate = __esm({
+  "src/ui/components/QuestionGate.tsx"() {
+    "use strict";
+    init_store();
+    init_api();
+    init_primitives();
     init_format();
+    init_hooks();
+    OTHER = "__other__";
   }
 });
 
 // src/ui/components/Composer.tsx
-import { useState as useState3 } from "react";
-import { jsx as jsx4, jsxs as jsxs4 } from "react/jsx-runtime";
+import { useState as useState4 } from "react";
+import { jsx as jsx5, jsxs as jsxs5 } from "react/jsx-runtime";
 function Composer() {
   const session = useSession();
   const gate = useOpenGate();
   const drafts = useDrafts();
-  const [text, setText] = useState3("");
-  const [sending, setSending] = useState3(false);
+  const [text, setText] = useState4("");
+  const [sending, setSending] = useState4(false);
   if (!session) return null;
   const send = async () => {
     const body = text.trim();
@@ -932,20 +1307,31 @@ function Composer() {
       setSending(false);
     }
   };
-  return /* @__PURE__ */ jsxs4("div", { className: "composer", children: [
-    gate && /* @__PURE__ */ jsxs4("div", { className: "composer-notice", children: [
-      /* @__PURE__ */ jsxs4("span", { children: [
+  return /* @__PURE__ */ jsxs5("div", { className: "composer", children: [
+    gate && /* @__PURE__ */ jsxs5("div", { className: "composer-notice", children: [
+      /* @__PURE__ */ jsxs5("span", { children: [
         "Claude is waiting at the ",
-        /* @__PURE__ */ jsx4("strong", { children: gateLabel(gate.kind) }),
+        /* @__PURE__ */ jsx5("strong", { children: gateLabel(gate.kind) }),
         " gate. A message here does",
         " ",
-        /* @__PURE__ */ jsx4("em", { children: "not" }),
+        /* @__PURE__ */ jsx5("em", { children: "not" }),
         " answer it."
       ] }),
-      /* @__PURE__ */ jsx4("button", { type: "button", className: "link", onClick: () => store.setTab(tabForGate(gate)), children: "Go answer the gate \u2192" })
+      /* @__PURE__ */ jsx5(
+        "button",
+        {
+          type: "button",
+          className: "link",
+          onClick: () => {
+            if (gate.kind === "question") store.focusGate();
+            else store.setTab(tabForGate(gate));
+          },
+          children: gate.kind === "question" ? "Answer it above \u2192" : "Go answer the gate \u2192"
+        }
+      )
     ] }),
-    /* @__PURE__ */ jsxs4("div", { className: "composer-row", children: [
-      /* @__PURE__ */ jsx4(
+    /* @__PURE__ */ jsxs5("div", { className: "composer-row", children: [
+      /* @__PURE__ */ jsx5(
         "textarea",
         {
           className: "composer-input",
@@ -958,12 +1344,12 @@ function Composer() {
           }
         }
       ),
-      /* @__PURE__ */ jsxs4("div", { className: "composer-side", children: [
-        /* @__PURE__ */ jsx4(Button, { variant: "primary", onClick: () => void send(), disabled: !text.trim() || sending, children: sending ? "Sending\u2026" : "Send message" }),
-        /* @__PURE__ */ jsx4("span", { className: "composer-hint", children: deliveryHint(session.status) })
+      /* @__PURE__ */ jsxs5("div", { className: "composer-side", children: [
+        /* @__PURE__ */ jsx5(Button, { variant: "primary", onClick: () => void send(), disabled: !text.trim() || sending, children: sending ? "Sending\u2026" : "Send message" }),
+        /* @__PURE__ */ jsx5("span", { className: "composer-hint", children: deliveryHint(session.status) })
       ] })
     ] }),
-    drafts.length > 0 && /* @__PURE__ */ jsxs4("p", { className: "composer-warn", children: [
+    drafts.length > 0 && /* @__PURE__ */ jsxs5("p", { className: "composer-warn", children: [
       "You have ",
       drafts.length,
       " unsent line comment",
@@ -998,13 +1384,13 @@ var init_Composer = __esm({
 });
 
 // src/ui/components/Toasts.tsx
-import { jsx as jsx5, jsxs as jsxs5 } from "react/jsx-runtime";
+import { jsx as jsx6, jsxs as jsxs6 } from "react/jsx-runtime";
 function Toasts() {
   const toasts = useStore((s) => s.toasts);
   if (toasts.length === 0) return null;
-  return /* @__PURE__ */ jsx5("div", { className: "toasts", role: "status", "aria-live": "polite", children: toasts.map((toast) => /* @__PURE__ */ jsxs5("div", { className: classNames("toast", `is-${toast.kind}`), children: [
-    /* @__PURE__ */ jsx5("span", { children: toast.text }),
-    /* @__PURE__ */ jsx5(
+  return /* @__PURE__ */ jsx6("div", { className: "toasts", role: "status", "aria-live": "polite", children: toasts.map((toast) => /* @__PURE__ */ jsxs6("div", { className: classNames("toast", `is-${toast.kind}`), children: [
+    /* @__PURE__ */ jsx6("span", { children: toast.text }),
+    /* @__PURE__ */ jsx6(
       "button",
       {
         type: "button",
@@ -1025,13 +1411,13 @@ var init_Toasts = __esm({
 });
 
 // src/ui/components/ConnectionBar.tsx
-import { useEffect as useEffect2, useState as useState4 } from "react";
-import { jsx as jsx6, jsxs as jsxs6 } from "react/jsx-runtime";
+import { useEffect as useEffect4, useState as useState5 } from "react";
+import { jsx as jsx7, jsxs as jsxs7 } from "react/jsx-runtime";
 function ConnectionBar() {
   const connection = useStore((s) => s.connection);
-  const [since, setSince] = useState4(null);
-  const [now, setNow] = useState4(Date.now());
-  useEffect2(() => {
+  const [since, setSince] = useState5(null);
+  const [now, setNow] = useState5(Date.now());
+  useEffect4(() => {
     if (connection === "live") {
       setSince(null);
       return;
@@ -1041,9 +1427,9 @@ function ConnectionBar() {
     return () => window.clearInterval(timer);
   }, [connection]);
   if (connection === "live" || !since || now - since < 2e3) return null;
-  return /* @__PURE__ */ jsxs6("div", { className: "conn-bar", role: "status", children: [
-    /* @__PURE__ */ jsx6("span", { "aria-hidden": "true", children: "\u26A0" }),
-    /* @__PURE__ */ jsxs6("span", { children: [
+  return /* @__PURE__ */ jsxs7("div", { className: "conn-bar", role: "status", children: [
+    /* @__PURE__ */ jsx7("span", { "aria-hidden": "true", children: "\u26A0" }),
+    /* @__PURE__ */ jsxs7("span", { children: [
       "Reconnecting \u2014 last update ",
       duration(now - since),
       " ago. What you see may be out of date."
@@ -1059,17 +1445,17 @@ var init_ConnectionBar = __esm({
 });
 
 // src/ui/components/ThemeToggle.tsx
-import { useEffect as useEffect3, useState as useState5 } from "react";
-import { jsx as jsx7 } from "react/jsx-runtime";
+import { useEffect as useEffect5, useState as useState6 } from "react";
+import { jsx as jsx8 } from "react/jsx-runtime";
 function ThemeToggle() {
-  const [theme, setTheme] = useState5(() => {
+  const [theme, setTheme] = useState6(() => {
     try {
       return window.localStorage.getItem(KEY) || "system";
     } catch {
       return "system";
     }
   });
-  useEffect3(() => {
+  useEffect5(() => {
     const root = document.documentElement;
     if (theme === "system") root.removeAttribute("data-theme");
     else root.setAttribute("data-theme", theme);
@@ -1080,7 +1466,7 @@ function ThemeToggle() {
   }, [theme]);
   const next = { system: "light", light: "dark", dark: "system" };
   const label = { system: "Auto", light: "Light", dark: "Dark" };
-  return /* @__PURE__ */ jsx7(
+  return /* @__PURE__ */ jsx8(
     "button",
     {
       type: "button",
@@ -1354,10 +1740,10 @@ var init_markdown = __esm({
 
 // src/ui/components/Markdown.tsx
 import { useMemo } from "react";
-import { jsx as jsx8 } from "react/jsx-runtime";
+import { jsx as jsx9 } from "react/jsx-runtime";
 function Markdown({ source, className }) {
   const html = useMemo(() => renderMarkdown(source), [source]);
-  return /* @__PURE__ */ jsx8("div", { className: className ? `md ${className}` : "md", dangerouslySetInnerHTML: { __html: html } });
+  return /* @__PURE__ */ jsx9("div", { className: className ? `md ${className}` : "md", dangerouslySetInnerHTML: { __html: html } });
 }
 var init_Markdown = __esm({
   "src/ui/components/Markdown.tsx"() {
@@ -1367,32 +1753,30 @@ var init_Markdown = __esm({
 });
 
 // src/ui/views/ActivityView.tsx
-import { useEffect as useEffect4, useRef, useState as useState6 } from "react";
-import { Fragment as Fragment2, jsx as jsx9, jsxs as jsxs7 } from "react/jsx-runtime";
+import { useEffect as useEffect6, useRef as useRef3, useState as useState7 } from "react";
+import { Fragment as Fragment3, jsx as jsx10, jsxs as jsxs8 } from "react/jsx-runtime";
 function ActivityView() {
   const session = useSession();
-  const [showThinking, setShowThinking] = useState6(false);
-  const feed = useRef(null);
-  const pinned = useRef(true);
+  const [showThinking, setShowThinking] = useState7(false);
+  const feed = useRef3(null);
+  const pinned = useRef3(true);
   const events = (session?.timeline ?? []).filter((e) => showThinking || e.kind !== "thinking");
-  useEffect4(() => {
+  useEffect6(() => {
     if (pinned.current && feed.current) feed.current.scrollTop = feed.current.scrollHeight;
   }, [events.length]);
   if (!session) return null;
-  const gate = session.gates.find((g) => g.status === "open" && g.kind === "question");
   const done = session.todos.filter((t) => t.status === "completed").length;
   const percent = session.todos.length ? Math.round(done / session.todos.length * 100) : 0;
-  return /* @__PURE__ */ jsxs7("div", { className: "activity", children: [
-    /* @__PURE__ */ jsxs7("div", { className: "activity-main", children: [
-      gate && /* @__PURE__ */ jsx9(QuestionCard, { gate, sessionId: session.sessionId }),
-      /* @__PURE__ */ jsxs7("div", { className: "feed-head", children: [
-        /* @__PURE__ */ jsx9("strong", { children: "Activity" }),
-        /* @__PURE__ */ jsxs7("label", { className: "toggle", children: [
-          /* @__PURE__ */ jsx9("input", { type: "checkbox", checked: showThinking, onChange: (e) => setShowThinking(e.target.checked) }),
+  return /* @__PURE__ */ jsxs8("div", { className: "activity", children: [
+    /* @__PURE__ */ jsxs8("div", { className: "activity-main", children: [
+      /* @__PURE__ */ jsxs8("div", { className: "feed-head", children: [
+        /* @__PURE__ */ jsx10("strong", { children: "Activity" }),
+        /* @__PURE__ */ jsxs8("label", { className: "toggle", children: [
+          /* @__PURE__ */ jsx10("input", { type: "checkbox", checked: showThinking, onChange: (e) => setShowThinking(e.target.checked) }),
           "show reasoning"
         ] })
       ] }),
-      /* @__PURE__ */ jsx9(
+      /* @__PURE__ */ jsx10(
         "div",
         {
           className: "feed",
@@ -1401,85 +1785,47 @@ function ActivityView() {
             const el = e.currentTarget;
             pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
           },
-          children: events.length === 0 ? /* @__PURE__ */ jsx9(EmptyState, { title: "Nothing yet", hint: "Claude's output appears here as it works." }) : events.map((event) => /* @__PURE__ */ jsx9(Event, { event }, event.id))
+          children: events.length === 0 ? /* @__PURE__ */ jsx10(EmptyState, { title: "Nothing yet", hint: "Claude's output appears here as it works." }) : events.map((event) => /* @__PURE__ */ jsx10(Event, { event }, event.id))
         }
       )
     ] }),
-    /* @__PURE__ */ jsxs7("aside", { className: "activity-side", children: [
-      /* @__PURE__ */ jsx9(Panel, { title: "Progress", children: session.todos.length === 0 ? /* @__PURE__ */ jsx9("p", { className: "muted", children: "No task list yet." }) : /* @__PURE__ */ jsxs7(Fragment2, { children: [
-        /* @__PURE__ */ jsx9("div", { className: "progress-bar", children: /* @__PURE__ */ jsx9("div", { className: "progress-fill", style: { width: `${percent}%` } }) }),
-        /* @__PURE__ */ jsxs7("p", { className: "progress-label", children: [
+    /* @__PURE__ */ jsxs8("aside", { className: "activity-side", children: [
+      /* @__PURE__ */ jsx10(Panel, { title: "Progress", children: session.todos.length === 0 ? /* @__PURE__ */ jsx10("p", { className: "muted", children: "No task list yet." }) : /* @__PURE__ */ jsxs8(Fragment3, { children: [
+        /* @__PURE__ */ jsx10("div", { className: "progress-bar", children: /* @__PURE__ */ jsx10("div", { className: "progress-fill", style: { width: `${percent}%` } }) }),
+        /* @__PURE__ */ jsxs8("p", { className: "progress-label", children: [
           done,
           " of ",
           session.todos.length,
           " tasks complete"
         ] }),
-        /* @__PURE__ */ jsx9("ul", { className: "todo-list", children: session.todos.map((todo, i) => /* @__PURE__ */ jsxs7("li", { className: classNames("todo", `is-${todo.status}`), children: [
-          /* @__PURE__ */ jsx9("span", { className: "todo-mark", children: todo.status === "completed" ? "\u2713" : todo.status === "in_progress" ? "\u25D0" : "\u25CB" }),
-          /* @__PURE__ */ jsx9("span", { children: todo.content })
+        /* @__PURE__ */ jsx10("ul", { className: "todo-list", children: session.todos.map((todo, i) => /* @__PURE__ */ jsxs8("li", { className: classNames("todo", `is-${todo.status}`), children: [
+          /* @__PURE__ */ jsx10("span", { className: "todo-mark", children: todo.status === "completed" ? "\u2713" : todo.status === "in_progress" ? "\u25D0" : "\u25CB" }),
+          /* @__PURE__ */ jsx10("span", { children: todo.content })
         ] }, i)) })
       ] }) }),
-      /* @__PURE__ */ jsx9(Panel, { title: `Files touched \xB7 ${session.files.length}`, children: session.files.length === 0 ? /* @__PURE__ */ jsx9("p", { className: "muted", children: "Nothing changed yet." }) : /* @__PURE__ */ jsx9("ul", { className: "touch-list", children: [...session.files].sort((a, b) => b.lastTouchedAt - a.lastTouchedAt).map((file) => /* @__PURE__ */ jsxs7("li", { children: [
-        /* @__PURE__ */ jsx9("code", { title: file.path, children: file.path }),
-        /* @__PURE__ */ jsxs7("span", { className: "muted", children: [
+      /* @__PURE__ */ jsx10(Panel, { title: `Files touched \xB7 ${session.files.length}`, children: session.files.length === 0 ? /* @__PURE__ */ jsx10("p", { className: "muted", children: "Nothing changed yet." }) : /* @__PURE__ */ jsx10("ul", { className: "touch-list", children: [...session.files].sort((a, b) => b.lastTouchedAt - a.lastTouchedAt).map((file) => /* @__PURE__ */ jsxs8("li", { children: [
+        /* @__PURE__ */ jsx10("code", { title: file.path, children: file.path }),
+        /* @__PURE__ */ jsxs8("span", { className: "muted", children: [
           pluralize(file.edits, "edit"),
           " \xB7 ",
           relativeTime(file.lastTouchedAt)
         ] })
       ] }, file.path)) }) }),
-      /* @__PURE__ */ jsx9(Panel, { title: `Commands \xB7 ${session.commands.length}`, children: session.commands.length === 0 ? /* @__PURE__ */ jsx9("p", { className: "muted", children: "No shell commands yet." }) : /* @__PURE__ */ jsx9("ul", { className: "cmd-list", children: [...session.commands].slice(-25).reverse().map((run) => /* @__PURE__ */ jsx9("li", { className: run.ok ? "is-ok" : "is-failed", children: /* @__PURE__ */ jsx9("code", { children: run.command }) }, run.id)) }) })
+      /* @__PURE__ */ jsx10(Panel, { title: `Commands \xB7 ${session.commands.length}`, children: session.commands.length === 0 ? /* @__PURE__ */ jsx10("p", { className: "muted", children: "No shell commands yet." }) : /* @__PURE__ */ jsx10("ul", { className: "cmd-list", children: [...session.commands].slice(-25).reverse().map((run) => /* @__PURE__ */ jsx10("li", { className: run.ok ? "is-ok" : "is-failed", children: /* @__PURE__ */ jsx10("code", { children: run.command }) }, run.id)) }) })
     ] })
   ] });
 }
 function Event({ event }) {
   const prose = PROSE_KINDS.has(event.kind);
-  return /* @__PURE__ */ jsxs7("article", { className: classNames("event", `is-${event.kind}`), children: [
-    /* @__PURE__ */ jsx9("span", { className: "event-icon", title: event.kind, children: ICON[event.kind] ?? "\xB7" }),
-    /* @__PURE__ */ jsxs7("div", { className: "event-body", children: [
-      /* @__PURE__ */ jsxs7("div", { className: "event-meta", children: [
-        event.label && /* @__PURE__ */ jsx9("span", { className: "event-label", children: event.label }),
-        /* @__PURE__ */ jsx9("time", { children: clockTime(event.ts) })
+  return /* @__PURE__ */ jsxs8("article", { className: classNames("event", `is-${event.kind}`), children: [
+    /* @__PURE__ */ jsx10("span", { className: "event-icon", title: event.kind, children: ICON[event.kind] ?? "\xB7" }),
+    /* @__PURE__ */ jsxs8("div", { className: "event-body", children: [
+      /* @__PURE__ */ jsxs8("div", { className: "event-meta", children: [
+        event.label && /* @__PURE__ */ jsx10("span", { className: "event-label", children: event.label }),
+        /* @__PURE__ */ jsx10("time", { children: clockTime(event.ts) })
       ] }),
-      prose ? /* @__PURE__ */ jsx9(Markdown, { source: event.text }) : /* @__PURE__ */ jsx9("pre", { className: "event-text", children: event.text })
+      prose ? /* @__PURE__ */ jsx10(Markdown, { source: event.text }) : /* @__PURE__ */ jsx10("pre", { className: "event-text", children: event.text })
     ] })
-  ] });
-}
-function QuestionCard({ gate, sessionId }) {
-  const [answer, setAnswer] = useState6("");
-  const [busy, setBusy] = useState6(false);
-  const options = gate.meta?.options ?? [];
-  const send = async (text) => {
-    const body = text.trim();
-    if (!body || busy) return;
-    setBusy(true);
-    try {
-      await api.resolveGate(sessionId, gate.id, { verdict: "answered", comment: body });
-      store.toast("success", "Answer sent \u2014 Claude is resuming.");
-      setAnswer("");
-    } catch (err) {
-      store.fail(err);
-    } finally {
-      setBusy(false);
-    }
-  };
-  return /* @__PURE__ */ jsxs7("div", { className: "question-card", children: [
-    /* @__PURE__ */ jsx9("h3", { children: "Claude is asking" }),
-    /* @__PURE__ */ jsx9("p", { className: "question-text", children: gate.prompt }),
-    options.length > 0 && /* @__PURE__ */ jsx9("div", { className: "question-options", children: options.map((option) => /* @__PURE__ */ jsx9(Button, { onClick: () => void send(option), disabled: busy, children: option }, option)) }),
-    /* @__PURE__ */ jsx9(
-      "textarea",
-      {
-        className: "input",
-        rows: 3,
-        value: answer,
-        placeholder: "Your answer\u2026",
-        onChange: (e) => setAnswer(e.target.value),
-        onKeyDown: (e) => {
-          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") void send(answer);
-        }
-      }
-    ),
-    /* @__PURE__ */ jsx9("div", { className: "row-actions", children: /* @__PURE__ */ jsx9(Button, { variant: "primary", onClick: () => void send(answer), disabled: !answer.trim() || busy, children: "Send answer" }) })
   ] });
 }
 var ICON, PROSE_KINDS;
@@ -1488,8 +1834,6 @@ var init_ActivityView = __esm({
     "use strict";
     init_store();
     init_Markdown();
-    init_primitives();
-    init_api();
     init_primitives();
     init_format();
     ICON = {
@@ -1520,7 +1864,7 @@ var init_ActivityView = __esm({
 });
 
 // src/ui/views/PlanView.tsx
-import { useEffect as useEffect5, useMemo as useMemo2, useRef as useRef2, useState as useState7 } from "react";
+import { useEffect as useEffect7, useMemo as useMemo2, useRef as useRef4, useState as useState8 } from "react";
 import {
   DndContext,
   KeyboardSensor,
@@ -1537,20 +1881,20 @@ import {
   verticalListSortingStrategy
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Fragment as Fragment3, jsx as jsx10, jsxs as jsxs8 } from "react/jsx-runtime";
+import { Fragment as Fragment4, jsx as jsx11, jsxs as jsxs9 } from "react/jsx-runtime";
 function PlanView() {
   const session = useSession();
   const gate = useOpenGate();
   const sessionId = useStore((s) => s.sessionId);
   const plan = session?.plan ?? null;
-  const [steps, setSteps] = useState7(() => plan?.steps.map(clone) ?? []);
-  const [baseRevision, setBaseRevision] = useState7(plan?.revision ?? 0);
-  const [summary2, setSummary] = useState7("");
-  const [busy, setBusy] = useState7(false);
-  const [announcement, setAnnouncement] = useState7("");
-  const dirty = useRef2(false);
+  const [steps, setSteps] = useState8(() => plan?.steps.map(clone) ?? []);
+  const [baseRevision, setBaseRevision] = useState8(plan?.revision ?? 0);
+  const [summary2, setSummary] = useState8("");
+  const [busy, setBusy] = useState8(false);
+  const [announcement, setAnnouncement] = useState8("");
+  const dirty = useRef4(false);
   const incoming = plan && plan.revision !== baseRevision ? plan : null;
-  useEffect5(() => {
+  useEffect7(() => {
     if (!plan) return;
     if (plan.revision === baseRevision) return;
     if (dirty.current) return;
@@ -1563,15 +1907,15 @@ function PlanView() {
   );
   const ids = useMemo2(() => steps.map((s) => s.id), [steps]);
   if (!plan) {
-    return /* @__PURE__ */ jsx10("div", { className: "view-pad", children: /* @__PURE__ */ jsx10(
+    return /* @__PURE__ */ jsx11("div", { className: "view-pad", children: /* @__PURE__ */ jsx11(
       EmptyState,
       {
         title: "No plan published yet",
-        hint: /* @__PURE__ */ jsxs8(Fragment3, { children: [
+        hint: /* @__PURE__ */ jsxs9(Fragment4, { children: [
           "Ask Claude to run ",
-          /* @__PURE__ */ jsx10("code", { children: "/harness" }),
+          /* @__PURE__ */ jsx11("code", { children: "/harness" }),
           ", or call ",
-          /* @__PURE__ */ jsx10("code", { children: "harness_publish_plan" }),
+          /* @__PURE__ */ jsx11("code", { children: "harness_publish_plan" }),
           ". The plan appears here for you to edit and approve before it starts building."
         ] })
       }
@@ -1619,25 +1963,25 @@ function PlanView() {
     }
   };
   const live = steps.filter((s) => s.status !== "dropped");
-  return /* @__PURE__ */ jsxs8("div", { className: "plan", children: [
-    /* @__PURE__ */ jsxs8("div", { className: "plan-main", children: [
-      /* @__PURE__ */ jsxs8("header", { className: "plan-head", children: [
-        /* @__PURE__ */ jsx10("h2", { children: plan.title }),
-        /* @__PURE__ */ jsxs8("span", { className: "muted", children: [
+  return /* @__PURE__ */ jsxs9("div", { className: "plan", children: [
+    /* @__PURE__ */ jsxs9("div", { className: "plan-main", children: [
+      /* @__PURE__ */ jsxs9("header", { className: "plan-head", children: [
+        /* @__PURE__ */ jsx11("h2", { children: plan.title }),
+        /* @__PURE__ */ jsxs9("span", { className: "muted", children: [
           "revision ",
           plan.revision
         ] })
       ] }),
-      plan.summary && /* @__PURE__ */ jsx10("p", { className: "plan-summary", children: plan.summary }),
-      plan.markdown && /* @__PURE__ */ jsx10(Markdown, { source: plan.markdown }),
-      incoming && /* @__PURE__ */ jsxs8("div", { className: "plan-incoming", children: [
-        /* @__PURE__ */ jsxs8("span", { children: [
+      plan.summary && /* @__PURE__ */ jsx11("p", { className: "plan-summary", children: plan.summary }),
+      plan.markdown && /* @__PURE__ */ jsx11(Markdown, { source: plan.markdown }),
+      incoming && /* @__PURE__ */ jsxs9("div", { className: "plan-incoming", children: [
+        /* @__PURE__ */ jsxs9("span", { children: [
           "Claude published revision ",
           incoming.revision,
           " while you were editing. Your edits are still here."
         ] }),
-        /* @__PURE__ */ jsxs8("div", { className: "row-actions", children: [
-          /* @__PURE__ */ jsx10(
+        /* @__PURE__ */ jsxs9("div", { className: "row-actions", children: [
+          /* @__PURE__ */ jsx11(
             Button,
             {
               size: "sm",
@@ -1650,17 +1994,17 @@ function PlanView() {
               children: "Load the new revision"
             }
           ),
-          /* @__PURE__ */ jsx10(Button, { size: "sm", variant: "ghost", onClick: () => setBaseRevision(incoming.revision), children: "Keep my edits" })
+          /* @__PURE__ */ jsx11(Button, { size: "sm", variant: "ghost", onClick: () => setBaseRevision(incoming.revision), children: "Keep my edits" })
         ] })
       ] }),
-      /* @__PURE__ */ jsx10(
+      /* @__PURE__ */ jsx11(
         DndContext,
         {
           sensors,
           collisionDetection: closestCenter,
           modifiers: [restrictToVerticalAxis, restrictToParentElement],
           onDragEnd,
-          children: /* @__PURE__ */ jsx10(SortableContext, { items: ids, strategy: verticalListSortingStrategy, children: /* @__PURE__ */ jsx10("ol", { className: "plan-steps", children: steps.map((step, index) => /* @__PURE__ */ jsx10(
+          children: /* @__PURE__ */ jsx11(SortableContext, { items: ids, strategy: verticalListSortingStrategy, children: /* @__PURE__ */ jsx11("ol", { className: "plan-steps", children: steps.map((step, index) => /* @__PURE__ */ jsx11(
             SortableStep,
             {
               step,
@@ -1673,7 +2017,7 @@ function PlanView() {
           )) }) })
         }
       ),
-      /* @__PURE__ */ jsx10(
+      /* @__PURE__ */ jsx11(
         Button,
         {
           variant: "ghost",
@@ -1681,18 +2025,18 @@ function PlanView() {
           children: "+ Add a step"
         }
       ),
-      /* @__PURE__ */ jsx10("p", { className: "sr-only", role: "status", "aria-live": "polite", children: announcement })
+      /* @__PURE__ */ jsx11("p", { className: "sr-only", role: "status", "aria-live": "polite", children: announcement })
     ] }),
-    /* @__PURE__ */ jsxs8("aside", { className: "plan-side", children: [
-      /* @__PURE__ */ jsx10("h3", { className: "panel-title", children: "Your response" }),
-      gate ? /* @__PURE__ */ jsxs8(Explain, { children: [
+    /* @__PURE__ */ jsxs9("aside", { className: "plan-side", children: [
+      /* @__PURE__ */ jsx11("h3", { className: "panel-title", children: "Your response" }),
+      gate ? /* @__PURE__ */ jsxs9(Explain, { children: [
         "Claude is parked here. Approving resumes it with the plan exactly as you have edited it \u2014",
         " ",
         pluralize(live.length, "step"),
         steps.length !== live.length && `, ${steps.length - live.length} dropped`,
         "."
-      ] }) : /* @__PURE__ */ jsx10(Explain, { children: "No gate is open, so this is queued and reaches Claude at the end of its next turn." }),
-      /* @__PURE__ */ jsx10(
+      ] }) : /* @__PURE__ */ jsx11(Explain, { children: "No gate is open, so this is queued and reaches Claude at the end of its next turn." }),
+      /* @__PURE__ */ jsx11(
         "textarea",
         {
           className: "input",
@@ -1702,10 +2046,10 @@ function PlanView() {
           onChange: (e) => setSummary(e.target.value)
         }
       ),
-      /* @__PURE__ */ jsxs8("div", { className: "plan-actions", children: [
-        /* @__PURE__ */ jsx10(Button, { variant: "primary", onClick: () => void submit("approved"), disabled: busy, children: "Approve plan" }),
-        /* @__PURE__ */ jsx10(Button, { onClick: () => void submit("changes_requested"), disabled: busy, children: "Request changes" }),
-        /* @__PURE__ */ jsx10(Button, { variant: "danger", onClick: () => void submit("rejected"), disabled: busy, children: "Reject" })
+      /* @__PURE__ */ jsxs9("div", { className: "plan-actions", children: [
+        /* @__PURE__ */ jsx11(Button, { variant: "primary", onClick: () => void submit("approved"), disabled: busy, children: "Approve plan" }),
+        /* @__PURE__ */ jsx11(Button, { onClick: () => void submit("changes_requested"), disabled: busy, children: "Request changes" }),
+        /* @__PURE__ */ jsx11(Button, { variant: "danger", onClick: () => void submit("rejected"), disabled: busy, children: "Reject" })
       ] })
     ] })
   ] });
@@ -1721,15 +2065,15 @@ function SortableStep({
     id: step.id
   });
   const dropped = step.status === "dropped";
-  return /* @__PURE__ */ jsxs8(
+  return /* @__PURE__ */ jsxs9(
     "li",
     {
       ref: setNodeRef,
       className: classNames("plan-step", dropped && "is-dropped", isDragging && "is-dragging"),
       style: { transform: CSS.Transform.toString(transform), transition },
       children: [
-        /* @__PURE__ */ jsxs8("div", { className: "step-handle-col", children: [
-          /* @__PURE__ */ jsx10(
+        /* @__PURE__ */ jsxs9("div", { className: "step-handle-col", children: [
+          /* @__PURE__ */ jsx11(
             "button",
             {
               type: "button",
@@ -1740,10 +2084,10 @@ function SortableStep({
               children: "\u283F"
             }
           ),
-          /* @__PURE__ */ jsx10("span", { className: "step-index", children: index + 1 })
+          /* @__PURE__ */ jsx11("span", { className: "step-index", children: index + 1 })
         ] }),
-        /* @__PURE__ */ jsxs8("div", { className: "step-main", children: [
-          /* @__PURE__ */ jsx10(
+        /* @__PURE__ */ jsxs9("div", { className: "step-main", children: [
+          /* @__PURE__ */ jsx11(
             "input",
             {
               className: "step-title",
@@ -1752,8 +2096,8 @@ function SortableStep({
               onChange: (e) => onChange({ title: e.target.value })
             }
           ),
-          step.detail && /* @__PURE__ */ jsx10("p", { className: "step-detail", children: step.detail }),
-          /* @__PURE__ */ jsx10(
+          step.detail && /* @__PURE__ */ jsx11("p", { className: "step-detail", children: step.detail }),
+          /* @__PURE__ */ jsx11(
             "input",
             {
               className: "step-comment",
@@ -1763,10 +2107,10 @@ function SortableStep({
             }
           )
         ] }),
-        /* @__PURE__ */ jsxs8("div", { className: "step-actions", children: [
-          /* @__PURE__ */ jsx10("button", { type: "button", className: "icon-btn", title: "Move up", onClick: () => onMove(index, index - 1), children: "\u2191" }),
-          /* @__PURE__ */ jsx10("button", { type: "button", className: "icon-btn", title: "Move down", onClick: () => onMove(index, index + 1), children: "\u2193" }),
-          /* @__PURE__ */ jsx10(
+        /* @__PURE__ */ jsxs9("div", { className: "step-actions", children: [
+          /* @__PURE__ */ jsx11("button", { type: "button", className: "icon-btn", title: "Move up", onClick: () => onMove(index, index - 1), children: "\u2191" }),
+          /* @__PURE__ */ jsx11("button", { type: "button", className: "icon-btn", title: "Move down", onClick: () => onMove(index, index + 1), children: "\u2193" }),
+          /* @__PURE__ */ jsx11(
             "button",
             {
               type: "button",
@@ -1777,7 +2121,7 @@ function SortableStep({
             }
           )
         ] }),
-        /* @__PURE__ */ jsx10("span", { className: "sr-only", children: `Step ${index + 1} of ${total}` })
+        /* @__PURE__ */ jsx11("span", { className: "sr-only", children: `Step ${index + 1} of ${total}` })
       ]
     }
   );
@@ -1833,7 +2177,7 @@ var init_types = __esm({
 });
 
 // src/ui/views/BoardView.tsx
-import { useMemo as useMemo3, useState as useState8 } from "react";
+import { useMemo as useMemo3, useState as useState9 } from "react";
 import {
   DndContext as DndContext2,
   DragOverlay,
@@ -1846,12 +2190,12 @@ import {
 } from "@dnd-kit/core";
 import { SortableContext as SortableContext2, useSortable as useSortable2, verticalListSortingStrategy as verticalListSortingStrategy2 } from "@dnd-kit/sortable";
 import { CSS as CSS2 } from "@dnd-kit/utilities";
-import { Fragment as Fragment4, jsx as jsx11, jsxs as jsxs9 } from "react/jsx-runtime";
+import { Fragment as Fragment5, jsx as jsx12, jsxs as jsxs10 } from "react/jsx-runtime";
 function BoardView() {
   const session = useSession();
   const sessionId = useStore((s) => s.sessionId);
-  const [dragging, setDragging] = useState8(null);
-  const [expanded, setExpanded] = useState8(null);
+  const [dragging, setDragging] = useState9(null);
+  const [expanded, setExpanded] = useState9(null);
   const tasks = session?.tasks ?? [];
   const byStatus = useMemo3(() => {
     const map = new Map(TASK_STATUSES.map((s) => [s, []]));
@@ -1866,11 +2210,11 @@ function BoardView() {
   );
   if (!session || !sessionId) return null;
   if (tasks.length === 0) {
-    return /* @__PURE__ */ jsx11("div", { className: "view-pad", children: /* @__PURE__ */ jsx11(
+    return /* @__PURE__ */ jsx12("div", { className: "view-pad", children: /* @__PURE__ */ jsx12(
       EmptyState,
       {
         title: "No task board yet",
-        hint: /* @__PURE__ */ jsx11(Fragment4, { children: "Approving a plan fills the board automatically \u2014 one card per step. Claude can also add subtasks it discovers while working." })
+        hint: /* @__PURE__ */ jsx12(Fragment5, { children: "Approving a plan fills the board automatically \u2014 one card per step. Claude can also add subtasks it discovers while working." })
       }
     ) });
   }
@@ -1898,20 +2242,20 @@ function BoardView() {
   };
   const done = byStatus.get("done")?.length ?? 0;
   const blocked = byStatus.get("blocked") ?? [];
-  return /* @__PURE__ */ jsxs9("div", { className: "board", children: [
-    /* @__PURE__ */ jsxs9("div", { className: "board-bar", children: [
-      /* @__PURE__ */ jsx11("strong", { children: "Task board" }),
-      /* @__PURE__ */ jsxs9("span", { className: "muted", children: [
+  return /* @__PURE__ */ jsxs10("div", { className: "board", children: [
+    /* @__PURE__ */ jsxs10("div", { className: "board-bar", children: [
+      /* @__PURE__ */ jsx12("strong", { children: "Task board" }),
+      /* @__PURE__ */ jsxs10("span", { className: "muted", children: [
         done,
         "/",
         tasks.length,
         " done",
         blocked.length > 0 && ` \xB7 ${blocked.length} blocked`
       ] }),
-      /* @__PURE__ */ jsx11("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx11(Explain, { children: "Drag a card to redirect Claude \u2014 it is told when you move one." })
+      /* @__PURE__ */ jsx12("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx12(Explain, { children: "Drag a card to redirect Claude \u2014 it is told when you move one." })
     ] }),
-    /* @__PURE__ */ jsxs9(
+    /* @__PURE__ */ jsxs10(
       DndContext2,
       {
         sensors,
@@ -1919,7 +2263,7 @@ function BoardView() {
         onDragStart,
         onDragEnd,
         children: [
-          /* @__PURE__ */ jsx11("div", { className: "board-columns", children: COLUMNS.map((column) => /* @__PURE__ */ jsx11(
+          /* @__PURE__ */ jsx12("div", { className: "board-columns", children: COLUMNS.map((column) => /* @__PURE__ */ jsx12(
             Column,
             {
               status: column.status,
@@ -1931,7 +2275,7 @@ function BoardView() {
             },
             column.status
           )) }),
-          /* @__PURE__ */ jsx11(DragOverlay, { children: dragging ? /* @__PURE__ */ jsx11(Card, { task: dragging, overlay: true }) : null })
+          /* @__PURE__ */ jsx12(DragOverlay, { children: dragging ? /* @__PURE__ */ jsx12(Card, { task: dragging, overlay: true }) : null })
         ]
       }
     )
@@ -1946,13 +2290,13 @@ function Column({
   onExpand
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: status });
-  return /* @__PURE__ */ jsxs9("section", { className: classNames("board-column", `is-${status}`, isOver && "is-over"), ref: setNodeRef, children: [
-    /* @__PURE__ */ jsxs9("header", { className: "board-column-head", children: [
-      /* @__PURE__ */ jsx11("span", { className: "board-column-name", children: label }),
-      /* @__PURE__ */ jsx11("span", { className: "board-count", children: tasks.length })
+  return /* @__PURE__ */ jsxs10("section", { className: classNames("board-column", `is-${status}`, isOver && "is-over"), ref: setNodeRef, children: [
+    /* @__PURE__ */ jsxs10("header", { className: "board-column-head", children: [
+      /* @__PURE__ */ jsx12("span", { className: "board-column-name", children: label }),
+      /* @__PURE__ */ jsx12("span", { className: "board-count", children: tasks.length })
     ] }),
-    /* @__PURE__ */ jsx11("p", { className: "board-column-hint", children: hint }),
-    /* @__PURE__ */ jsx11(SortableContext2, { items: tasks.map((t) => t.id), strategy: verticalListSortingStrategy2, children: /* @__PURE__ */ jsx11("div", { className: "board-cards", children: tasks.length === 0 ? /* @__PURE__ */ jsx11("p", { className: "board-empty", children: "Nothing here" }) : tasks.map((task) => /* @__PURE__ */ jsx11(
+    /* @__PURE__ */ jsx12("p", { className: "board-column-hint", children: hint }),
+    /* @__PURE__ */ jsx12(SortableContext2, { items: tasks.map((t) => t.id), strategy: verticalListSortingStrategy2, children: /* @__PURE__ */ jsx12("div", { className: "board-cards", children: tasks.length === 0 ? /* @__PURE__ */ jsx12("p", { className: "board-empty", children: "Nothing here" }) : tasks.map((task) => /* @__PURE__ */ jsx12(
       SortableCard,
       {
         task,
@@ -1971,7 +2315,7 @@ function SortableCard({
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable2({
     id: task.id
   });
-  return /* @__PURE__ */ jsx11(
+  return /* @__PURE__ */ jsx12(
     "div",
     {
       ref: setNodeRef,
@@ -1979,7 +2323,7 @@ function SortableCard({
       className: classNames(isDragging && "is-source"),
       ...attributes,
       ...listeners,
-      children: /* @__PURE__ */ jsx11(Card, { task, expanded, onExpand })
+      children: /* @__PURE__ */ jsx12(Card, { task, expanded, onExpand })
     }
   );
 }
@@ -1991,23 +2335,23 @@ function Card({
 }) {
   const changes = task.notes.filter((n) => n.kind === "change");
   const elapsed = task.status === "in_progress" && task.startedAt ? duration(Date.now() - task.startedAt) : null;
-  return /* @__PURE__ */ jsxs9("article", { className: classNames("board-card", `is-${task.status}`, overlay && "is-overlay"), children: [
-    /* @__PURE__ */ jsxs9("header", { className: "board-card-head", children: [
-      /* @__PURE__ */ jsx11("span", { className: "board-card-title", children: task.title }),
-      elapsed && /* @__PURE__ */ jsx11("span", { className: "board-card-elapsed", children: elapsed })
+  return /* @__PURE__ */ jsxs10("article", { className: classNames("board-card", `is-${task.status}`, overlay && "is-overlay"), children: [
+    /* @__PURE__ */ jsxs10("header", { className: "board-card-head", children: [
+      /* @__PURE__ */ jsx12("span", { className: "board-card-title", children: task.title }),
+      elapsed && /* @__PURE__ */ jsx12("span", { className: "board-card-elapsed", children: elapsed })
     ] }),
-    task.detail && /* @__PURE__ */ jsx11("p", { className: "board-card-detail", children: task.detail }),
-    task.status === "blocked" && task.blockedReason && /* @__PURE__ */ jsxs9("p", { className: "board-card-blocked", children: [
-      /* @__PURE__ */ jsx11("strong", { children: "Waiting on you:" }),
+    task.detail && /* @__PURE__ */ jsx12("p", { className: "board-card-detail", children: task.detail }),
+    task.status === "blocked" && task.blockedReason && /* @__PURE__ */ jsxs10("p", { className: "board-card-blocked", children: [
+      /* @__PURE__ */ jsx12("strong", { children: "Waiting on you:" }),
       " ",
       task.blockedReason
     ] }),
-    /* @__PURE__ */ jsxs9("div", { className: "board-card-meta", children: [
-      task.files.length > 0 && /* @__PURE__ */ jsx11("span", { title: task.files.join("\n"), children: pluralize(task.files.length, "file") }),
-      changes.length > 0 && /* @__PURE__ */ jsx11("span", { children: pluralize(changes.length, "note") }),
-      task.decisions.length > 0 && /* @__PURE__ */ jsx11("span", { className: "board-card-decisions", children: pluralize(task.decisions.length, "decision") }),
-      task.completedAt && /* @__PURE__ */ jsx11("span", { className: "muted", children: relativeTime(task.completedAt) }),
-      onExpand && (task.files.length > 0 || task.notes.length > 0) && /* @__PURE__ */ jsx11(
+    /* @__PURE__ */ jsxs10("div", { className: "board-card-meta", children: [
+      task.files.length > 0 && /* @__PURE__ */ jsx12("span", { title: task.files.join("\n"), children: pluralize(task.files.length, "file") }),
+      changes.length > 0 && /* @__PURE__ */ jsx12("span", { children: pluralize(changes.length, "note") }),
+      task.decisions.length > 0 && /* @__PURE__ */ jsx12("span", { className: "board-card-decisions", children: pluralize(task.decisions.length, "decision") }),
+      task.completedAt && /* @__PURE__ */ jsx12("span", { className: "muted", children: relativeTime(task.completedAt) }),
+      onExpand && (task.files.length > 0 || task.notes.length > 0) && /* @__PURE__ */ jsx12(
         "button",
         {
           type: "button",
@@ -2021,25 +2365,25 @@ function Card({
         }
       )
     ] }),
-    expanded && /* @__PURE__ */ jsxs9("div", { className: "board-card-body", children: [
-      task.files.length > 0 && /* @__PURE__ */ jsxs9(Fragment4, { children: [
-        /* @__PURE__ */ jsx11("h4", { children: "Files changed" }),
-        /* @__PURE__ */ jsx11("ul", { className: "board-files", children: task.files.map((file) => /* @__PURE__ */ jsx11("li", { children: /* @__PURE__ */ jsx11("code", { children: file }) }, file)) })
+    expanded && /* @__PURE__ */ jsxs10("div", { className: "board-card-body", children: [
+      task.files.length > 0 && /* @__PURE__ */ jsxs10(Fragment5, { children: [
+        /* @__PURE__ */ jsx12("h4", { children: "Files changed" }),
+        /* @__PURE__ */ jsx12("ul", { className: "board-files", children: task.files.map((file) => /* @__PURE__ */ jsx12("li", { children: /* @__PURE__ */ jsx12("code", { children: file }) }, file)) })
       ] }),
-      task.decisions.length > 0 && /* @__PURE__ */ jsxs9(Fragment4, { children: [
-        /* @__PURE__ */ jsx11("h4", { children: "Decisions" }),
-        /* @__PURE__ */ jsx11("ul", { className: "board-decisions", children: task.decisions.map((d) => /* @__PURE__ */ jsxs9("li", { children: [
-          /* @__PURE__ */ jsx11("span", { className: "board-question", children: d.question }),
-          /* @__PURE__ */ jsxs9("span", { className: "board-answer", children: [
+      task.decisions.length > 0 && /* @__PURE__ */ jsxs10(Fragment5, { children: [
+        /* @__PURE__ */ jsx12("h4", { children: "Decisions" }),
+        /* @__PURE__ */ jsx12("ul", { className: "board-decisions", children: task.decisions.map((d) => /* @__PURE__ */ jsxs10("li", { children: [
+          /* @__PURE__ */ jsx12("span", { className: "board-question", children: d.question }),
+          /* @__PURE__ */ jsxs10("span", { className: "board-answer", children: [
             "\u2192 ",
             d.answer
           ] })
         ] }, d.id)) })
       ] }),
-      task.notes.length > 0 && /* @__PURE__ */ jsxs9(Fragment4, { children: [
-        /* @__PURE__ */ jsx11("h4", { children: "Record" }),
-        /* @__PURE__ */ jsx11("ul", { className: "board-notes", children: task.notes.map((note) => /* @__PURE__ */ jsxs9("li", { className: `is-${note.kind}`, children: [
-          /* @__PURE__ */ jsx11("span", { className: "board-note-kind", children: note.kind }),
+      task.notes.length > 0 && /* @__PURE__ */ jsxs10(Fragment5, { children: [
+        /* @__PURE__ */ jsx12("h4", { children: "Record" }),
+        /* @__PURE__ */ jsx12("ul", { className: "board-notes", children: task.notes.map((note) => /* @__PURE__ */ jsxs10("li", { className: `is-${note.kind}`, children: [
+          /* @__PURE__ */ jsx12("span", { className: "board-note-kind", children: note.kind }),
           note.text
         ] }, note.id)) })
       ] })
@@ -2065,22 +2409,22 @@ var init_BoardView = __esm({
 });
 
 // src/ui/views/review/FileTree.tsx
-import { useMemo as useMemo4, useState as useState9 } from "react";
-import { jsx as jsx12, jsxs as jsxs10 } from "react/jsx-runtime";
+import { useMemo as useMemo4, useState as useState10 } from "react";
+import { jsx as jsx13, jsxs as jsxs11 } from "react/jsx-runtime";
 function FileTree({
   files,
   selected,
   onSelect
 }) {
-  const [filter, setFilter] = useState9("");
+  const [filter, setFilter] = useState10("");
   const drafts = useDrafts();
   const threads = useStore((s) => s.session?.threads ?? EMPTY);
   const viewed = useStore((s) => s.sessionId ? s.viewedFiles[s.sessionId] ?? EMPTY_STR : EMPTY_STR);
   const groups = useMemo4(() => groupByDirectory(files, filter), [files, filter]);
   const viewedCount = files.filter((f) => viewed.includes(f.path)).length;
-  return /* @__PURE__ */ jsxs10("nav", { className: "file-rail", "aria-label": "Changed files", children: [
-    /* @__PURE__ */ jsxs10("div", { className: "file-rail-head", children: [
-      /* @__PURE__ */ jsx12(
+  return /* @__PURE__ */ jsxs11("nav", { className: "file-rail", "aria-label": "Changed files", children: [
+    /* @__PURE__ */ jsxs11("div", { className: "file-rail-head", children: [
+      /* @__PURE__ */ jsx13(
         "input",
         {
           className: "file-filter",
@@ -2090,18 +2434,18 @@ function FileTree({
           onChange: (e) => setFilter(e.target.value)
         }
       ),
-      /* @__PURE__ */ jsxs10("span", { className: "file-rail-progress", children: [
+      /* @__PURE__ */ jsxs11("span", { className: "file-rail-progress", children: [
         viewedCount,
         "/",
         files.length,
         " viewed"
       ] })
     ] }),
-    /* @__PURE__ */ jsxs10("div", { className: "file-rail-body", children: [
-      groups.length === 0 && /* @__PURE__ */ jsx12("p", { className: "sidebar-empty", children: "No files match." }),
-      groups.map((group) => /* @__PURE__ */ jsxs10("div", { className: "file-group", children: [
-        group.dir && /* @__PURE__ */ jsx12("div", { className: "file-group-head", children: group.dir }),
-        group.files.map((file) => /* @__PURE__ */ jsx12(
+    /* @__PURE__ */ jsxs11("div", { className: "file-rail-body", children: [
+      groups.length === 0 && /* @__PURE__ */ jsx13("p", { className: "sidebar-empty", children: "No files match." }),
+      groups.map((group) => /* @__PURE__ */ jsxs11("div", { className: "file-group", children: [
+        group.dir && /* @__PURE__ */ jsx13("div", { className: "file-group-head", children: group.dir }),
+        group.files.map((file) => /* @__PURE__ */ jsx13(
           FileRow,
           {
             file,
@@ -2124,7 +2468,7 @@ function FileRow({
   onSelect
 }) {
   const { name } = splitPath(file.path);
-  return /* @__PURE__ */ jsxs10(
+  return /* @__PURE__ */ jsxs11(
     "div",
     {
       className: classNames(
@@ -2134,7 +2478,7 @@ function FileRow({
         file.changedSinceLastReview === false && "is-unchanged"
       ),
       children: [
-        /* @__PURE__ */ jsx12("label", { className: "file-viewed", title: viewed ? "Mark as not viewed" : "Mark as viewed", children: /* @__PURE__ */ jsx12(
+        /* @__PURE__ */ jsx13("label", { className: "file-viewed", title: viewed ? "Mark as not viewed" : "Mark as viewed", children: /* @__PURE__ */ jsx13(
           "input",
           {
             type: "checkbox",
@@ -2143,18 +2487,18 @@ function FileRow({
             "aria-label": `Mark ${file.path} viewed`
           }
         ) }),
-        /* @__PURE__ */ jsxs10("button", { type: "button", className: "file-open", onClick: onSelect, title: file.path, children: [
-          /* @__PURE__ */ jsx12("span", { className: classNames("file-status", `is-${file.status}`), "aria-hidden": "true", children: file.status[0].toUpperCase() }),
-          /* @__PURE__ */ jsx12("span", { className: "file-name", children: name }),
-          file.changedSinceLastReview && /* @__PURE__ */ jsx12("span", { className: "pill is-moved", title: "Changed since your last review", children: "new" }),
-          comments.draft > 0 && /* @__PURE__ */ jsx12("span", { className: "pill is-draft", title: `${comments.draft} unsent comment(s)`, children: comments.draft }),
-          comments.sent > 0 && /* @__PURE__ */ jsx12("span", { className: "pill is-sent", title: `${comments.sent} comment(s) already sent`, children: comments.sent }),
-          /* @__PURE__ */ jsxs10("span", { className: "file-counts", children: [
-            file.additions > 0 && /* @__PURE__ */ jsxs10("span", { className: "add", children: [
+        /* @__PURE__ */ jsxs11("button", { type: "button", className: "file-open", onClick: onSelect, title: file.path, children: [
+          /* @__PURE__ */ jsx13("span", { className: classNames("file-status", `is-${file.status}`), "aria-hidden": "true", children: file.status[0].toUpperCase() }),
+          /* @__PURE__ */ jsx13("span", { className: "file-name", children: name }),
+          file.changedSinceLastReview && /* @__PURE__ */ jsx13("span", { className: "pill is-moved", title: "Changed since your last review", children: "new" }),
+          comments.draft > 0 && /* @__PURE__ */ jsx13("span", { className: "pill is-draft", title: `${comments.draft} unsent comment(s)`, children: comments.draft }),
+          comments.sent > 0 && /* @__PURE__ */ jsx13("span", { className: "pill is-sent", title: `${comments.sent} comment(s) already sent`, children: comments.sent }),
+          /* @__PURE__ */ jsxs11("span", { className: "file-counts", children: [
+            file.additions > 0 && /* @__PURE__ */ jsxs11("span", { className: "add", children: [
               "+",
               file.additions
             ] }),
-            file.deletions > 0 && /* @__PURE__ */ jsxs10("span", { className: "del", children: [
+            file.deletions > 0 && /* @__PURE__ */ jsxs11("span", { className: "del", children: [
               "\u2212",
               file.deletions
             ] })
@@ -2195,16 +2539,16 @@ var init_FileTree = __esm({
 });
 
 // src/ui/views/review/CommentThread.tsx
-import { useState as useState10 } from "react";
-import { Fragment as Fragment5, jsx as jsx13, jsxs as jsxs11 } from "react/jsx-runtime";
+import { useState as useState11 } from "react";
+import { Fragment as Fragment6, jsx as jsx14, jsxs as jsxs12 } from "react/jsx-runtime";
 function CommentThread({ thread }) {
   const isDraft = !thread.deliveredAt;
   const sessionId = useStore((s) => s.sessionId);
-  const [editing, setEditing] = useState10(false);
-  const [body, setBody] = useState10(thread.body);
-  const [confirmingDelete, setConfirmingDelete] = useState10(false);
-  const [replying, setReplying] = useState10(false);
-  const [reply, setReply] = useState10("");
+  const [editing, setEditing] = useState11(false);
+  const [body, setBody] = useState11(thread.body);
+  const [confirmingDelete, setConfirmingDelete] = useState11(false);
+  const [replying, setReplying] = useState11(false);
+  const [reply, setReply] = useState11("");
   const sendReply = async () => {
     const text = reply.trim();
     if (!text || !sessionId) return;
@@ -2231,26 +2575,26 @@ function CommentThread({ thread }) {
     store.updateDraft(thread.id, next);
     setEditing(false);
   };
-  return /* @__PURE__ */ jsx13("div", { className: classNames("dthread", isDraft ? "is-draft" : "is-sent", thread.resolved && "is-resolved"), children: /* @__PURE__ */ jsxs11("article", { className: "dthread-card", children: [
-    /* @__PURE__ */ jsxs11("header", { className: "dthread-head", children: [
-      /* @__PURE__ */ jsx13("span", { className: "dthread-ref", children: lineRef(thread.file, thread.startLine, thread.endLine) }),
-      isDraft ? /* @__PURE__ */ jsx13("span", { className: "pill is-draft", children: "Not sent yet" }) : /* @__PURE__ */ jsxs11("span", { className: "pill is-sent", title: new Date(thread.deliveredAt).toLocaleString(), children: [
+  return /* @__PURE__ */ jsx14("div", { className: classNames("dthread", isDraft ? "is-draft" : "is-sent", thread.resolved && "is-resolved"), children: /* @__PURE__ */ jsxs12("article", { className: "dthread-card", children: [
+    /* @__PURE__ */ jsxs12("header", { className: "dthread-head", children: [
+      /* @__PURE__ */ jsx14("span", { className: "dthread-ref", children: lineRef(thread.file, thread.startLine, thread.endLine) }),
+      isDraft ? /* @__PURE__ */ jsx14("span", { className: "pill is-draft", children: "Not sent yet" }) : /* @__PURE__ */ jsxs12("span", { className: "pill is-sent", title: new Date(thread.deliveredAt).toLocaleString(), children: [
         "Sent ",
         relativeTime(thread.deliveredAt)
       ] }),
-      thread.resolved && /* @__PURE__ */ jsx13("span", { className: "pill is-resolved", children: "Addressed in a later revision" }),
-      /* @__PURE__ */ jsx13("span", { className: "spacer" }),
-      isDraft && !editing && /* @__PURE__ */ jsxs11(Fragment5, { children: [
-        /* @__PURE__ */ jsx13("button", { type: "button", className: "link", onClick: () => setEditing(true), children: "Edit" }),
-        /* @__PURE__ */ jsx13("button", { type: "button", className: "link is-danger", onClick: () => setConfirmingDelete(true), children: "Delete" })
+      thread.resolved && /* @__PURE__ */ jsx14("span", { className: "pill is-resolved", children: "Addressed in a later revision" }),
+      /* @__PURE__ */ jsx14("span", { className: "spacer" }),
+      isDraft && !editing && /* @__PURE__ */ jsxs12(Fragment6, { children: [
+        /* @__PURE__ */ jsx14("button", { type: "button", className: "link", onClick: () => setEditing(true), children: "Edit" }),
+        /* @__PURE__ */ jsx14("button", { type: "button", className: "link is-danger", onClick: () => setConfirmingDelete(true), children: "Delete" })
       ] }),
-      !isDraft && /* @__PURE__ */ jsxs11(Fragment5, { children: [
-        /* @__PURE__ */ jsx13("button", { type: "button", className: "link", onClick: () => setReplying((v) => !v), children: "Reply" }),
-        /* @__PURE__ */ jsx13("button", { type: "button", className: "link", onClick: () => void toggleResolved(), children: thread.resolved ? "Reopen" : "Resolve" })
+      !isDraft && /* @__PURE__ */ jsxs12(Fragment6, { children: [
+        /* @__PURE__ */ jsx14("button", { type: "button", className: "link", onClick: () => setReplying((v) => !v), children: "Reply" }),
+        /* @__PURE__ */ jsx14("button", { type: "button", className: "link", onClick: () => void toggleResolved(), children: thread.resolved ? "Reopen" : "Resolve" })
       ] })
     ] }),
-    editing ? /* @__PURE__ */ jsxs11("div", { className: "dthread-edit", children: [
-      /* @__PURE__ */ jsx13(
+    editing ? /* @__PURE__ */ jsxs12("div", { className: "dthread-edit", children: [
+      /* @__PURE__ */ jsx14(
         "textarea",
         {
           className: "input",
@@ -2267,9 +2611,9 @@ function CommentThread({ thread }) {
           }
         }
       ),
-      /* @__PURE__ */ jsxs11("div", { className: "row-actions", children: [
-        /* @__PURE__ */ jsx13(Button, { size: "sm", variant: "primary", onClick: save, disabled: !body.trim(), children: "Save" }),
-        /* @__PURE__ */ jsx13(
+      /* @__PURE__ */ jsxs12("div", { className: "row-actions", children: [
+        /* @__PURE__ */ jsx14(Button, { size: "sm", variant: "primary", onClick: save, disabled: !body.trim(), children: "Save" }),
+        /* @__PURE__ */ jsx14(
           Button,
           {
             size: "sm",
@@ -2282,13 +2626,13 @@ function CommentThread({ thread }) {
           }
         )
       ] })
-    ] }) : /* @__PURE__ */ jsx13(Markdown, { source: thread.body, className: "dthread-body" }),
-    (thread.replies?.length ?? 0) > 0 && /* @__PURE__ */ jsx13("ul", { className: "dthread-replies", children: thread.replies.map((r) => /* @__PURE__ */ jsxs11("li", { className: classNames("dthread-reply", `is-${r.author}`), children: [
-      /* @__PURE__ */ jsx13("span", { className: "dthread-author", children: r.author === "claude" ? "Claude" : "You" }),
-      /* @__PURE__ */ jsx13(Markdown, { source: r.text, className: "dthread-reply-body" })
+    ] }) : /* @__PURE__ */ jsx14(Markdown, { source: thread.body, className: "dthread-body" }),
+    (thread.replies?.length ?? 0) > 0 && /* @__PURE__ */ jsx14("ul", { className: "dthread-replies", children: thread.replies.map((r) => /* @__PURE__ */ jsxs12("li", { className: classNames("dthread-reply", `is-${r.author}`), children: [
+      /* @__PURE__ */ jsx14("span", { className: "dthread-author", children: r.author === "claude" ? "Claude" : "You" }),
+      /* @__PURE__ */ jsx14(Markdown, { source: r.text, className: "dthread-reply-body" })
     ] }, r.id)) }),
-    replying && /* @__PURE__ */ jsxs11("div", { className: "dthread-edit", children: [
-      /* @__PURE__ */ jsx13(
+    replying && /* @__PURE__ */ jsxs12("div", { className: "dthread-edit", children: [
+      /* @__PURE__ */ jsx14(
         "textarea",
         {
           className: "input",
@@ -2303,15 +2647,15 @@ function CommentThread({ thread }) {
           }
         }
       ),
-      /* @__PURE__ */ jsxs11("div", { className: "row-actions", children: [
-        /* @__PURE__ */ jsx13(Button, { size: "sm", variant: "primary", onClick: () => void sendReply(), disabled: !reply.trim(), children: "Send reply" }),
-        /* @__PURE__ */ jsx13(Button, { size: "sm", variant: "ghost", onClick: () => setReplying(false), children: "Cancel" })
+      /* @__PURE__ */ jsxs12("div", { className: "row-actions", children: [
+        /* @__PURE__ */ jsx14(Button, { size: "sm", variant: "primary", onClick: () => void sendReply(), disabled: !reply.trim(), children: "Send reply" }),
+        /* @__PURE__ */ jsx14(Button, { size: "sm", variant: "ghost", onClick: () => setReplying(false), children: "Cancel" })
       ] })
     ] }),
-    confirmingDelete && /* @__PURE__ */ jsxs11("div", { className: "dthread-confirm", children: [
-      /* @__PURE__ */ jsx13("span", { children: "Delete this comment? It has not been sent." }),
-      /* @__PURE__ */ jsx13(Button, { size: "sm", variant: "danger", onClick: () => store.removeDraft(thread.id), children: "Delete" }),
-      /* @__PURE__ */ jsx13(Button, { size: "sm", variant: "ghost", onClick: () => setConfirmingDelete(false), children: "Keep" })
+    confirmingDelete && /* @__PURE__ */ jsxs12("div", { className: "dthread-confirm", children: [
+      /* @__PURE__ */ jsx14("span", { children: "Delete this comment? It has not been sent." }),
+      /* @__PURE__ */ jsx14(Button, { size: "sm", variant: "danger", onClick: () => store.removeDraft(thread.id), children: "Delete" }),
+      /* @__PURE__ */ jsx14(Button, { size: "sm", variant: "ghost", onClick: () => setConfirmingDelete(false), children: "Keep" })
     ] })
   ] }) });
 }
@@ -2348,13 +2692,13 @@ var init_diffparse = __esm({
 });
 
 // src/ui/views/review/CommentComposer.tsx
-import { useEffect as useEffect6, useRef as useRef3, useState as useState11 } from "react";
-import { jsx as jsx14, jsxs as jsxs12 } from "react/jsx-runtime";
+import { useEffect as useEffect8, useRef as useRef5, useState as useState12 } from "react";
+import { jsx as jsx15, jsxs as jsxs13 } from "react/jsx-runtime";
 function CommentComposer({ selection, onDone }) {
-  const [body, setBody] = useState11("");
+  const [body, setBody] = useState12("");
   const diff = useStore((s) => s.diff);
-  const ref = useRef3(null);
-  useEffect6(() => {
+  const ref = useRef5(null);
+  useEffect8(() => {
     ref.current?.focus();
   }, []);
   const submit = () => {
@@ -2375,12 +2719,12 @@ function CommentComposer({ selection, onDone }) {
     setBody("");
     onDone();
   };
-  return /* @__PURE__ */ jsx14("div", { className: "dcomposer", children: /* @__PURE__ */ jsxs12("div", { className: "dcomposer-card", children: [
-    /* @__PURE__ */ jsxs12("header", { className: "dcomposer-head", children: [
-      /* @__PURE__ */ jsx14("strong", { children: lineRef(selection.file, selection.start, selection.end) }),
-      /* @__PURE__ */ jsx14("span", { className: "muted", children: "shift-click another line to extend the range" })
+  return /* @__PURE__ */ jsx15("div", { className: "dcomposer", children: /* @__PURE__ */ jsxs13("div", { className: "dcomposer-card", children: [
+    /* @__PURE__ */ jsxs13("header", { className: "dcomposer-head", children: [
+      /* @__PURE__ */ jsx15("strong", { children: lineRef(selection.file, selection.start, selection.end) }),
+      /* @__PURE__ */ jsx15("span", { className: "muted", children: "shift-click another line to extend the range" })
     ] }),
-    /* @__PURE__ */ jsx14(
+    /* @__PURE__ */ jsx15(
       "textarea",
       {
         ref,
@@ -2395,11 +2739,11 @@ function CommentComposer({ selection, onDone }) {
         }
       }
     ),
-    /* @__PURE__ */ jsxs12("div", { className: "dcomposer-foot", children: [
-      /* @__PURE__ */ jsx14("span", { className: "explain", children: "Saved to your review \u2014 Claude sees it when you submit." }),
-      /* @__PURE__ */ jsxs12("div", { className: "row-actions", children: [
-        /* @__PURE__ */ jsx14(Button, { size: "sm", variant: "primary", onClick: submit, disabled: !body.trim(), children: "Add to review" }),
-        /* @__PURE__ */ jsx14(Button, { size: "sm", variant: "ghost", onClick: onDone, children: "Cancel" })
+    /* @__PURE__ */ jsxs13("div", { className: "dcomposer-foot", children: [
+      /* @__PURE__ */ jsx15("span", { className: "explain", children: "Saved to your review \u2014 Claude sees it when you submit." }),
+      /* @__PURE__ */ jsxs13("div", { className: "row-actions", children: [
+        /* @__PURE__ */ jsx15(Button, { size: "sm", variant: "primary", onClick: submit, disabled: !body.trim(), children: "Add to review" }),
+        /* @__PURE__ */ jsx15(Button, { size: "sm", variant: "ghost", onClick: onDone, children: "Cancel" })
       ] })
     ] })
   ] }) });
@@ -2419,7 +2763,7 @@ var init_CommentComposer = __esm({
 
 // src/ui/views/review/DiffFile.tsx
 import { memo, useMemo as useMemo5 } from "react";
-import { Fragment as Fragment6, jsx as jsx15, jsxs as jsxs13 } from "react/jsx-runtime";
+import { Fragment as Fragment7, jsx as jsx16, jsxs as jsxs14 } from "react/jsx-runtime";
 function Row({
   file,
   line,
@@ -2449,8 +2793,8 @@ function Row({
     }
   };
   const isSelectionEnd = selected && selection?.end === lineNo;
-  return /* @__PURE__ */ jsxs13(Fragment6, { children: [
-    /* @__PURE__ */ jsxs13(
+  return /* @__PURE__ */ jsxs14(Fragment7, { children: [
+    /* @__PURE__ */ jsxs14(
       "div",
       {
         className: classNames(
@@ -2469,18 +2813,18 @@ function Row({
           if (lineNo !== null) onSelect({ file, side, start: lineNo, end: lineNo });
         },
         children: [
-          /* @__PURE__ */ jsx15("span", { className: "dnum", children: line.oldLine ?? "" }),
-          /* @__PURE__ */ jsx15("span", { className: "dnum", children: line.newLine ?? "" }),
-          /* @__PURE__ */ jsxs13("span", { className: "dmark", "aria-hidden": "true", children: [
+          /* @__PURE__ */ jsx16("span", { className: "dnum", children: line.oldLine ?? "" }),
+          /* @__PURE__ */ jsx16("span", { className: "dnum", children: line.newLine ?? "" }),
+          /* @__PURE__ */ jsxs14("span", { className: "dmark", "aria-hidden": "true", children: [
             line.kind === "add" ? "+" : line.kind === "del" ? "\u2212" : "",
-            /* @__PURE__ */ jsx15("span", { className: "dadd-hint", title: "Comment on this line", children: "+" })
+            /* @__PURE__ */ jsx16("span", { className: "dadd-hint", title: "Comment on this line", children: "+" })
           ] }),
-          /* @__PURE__ */ jsx15("span", { className: "dcode", children: line.text || " " })
+          /* @__PURE__ */ jsx16("span", { className: "dcode", children: line.text || " " })
         ]
       }
     ),
-    endsHere.map((thread) => /* @__PURE__ */ jsx15(CommentThread, { thread }, thread.id)),
-    isSelectionEnd && selection && /* @__PURE__ */ jsx15(CommentComposer, { selection, onDone: onCancelSelection })
+    endsHere.map((thread) => /* @__PURE__ */ jsx16(CommentThread, { thread }, thread.id)),
+    isSelectionEnd && selection && /* @__PURE__ */ jsx16(CommentComposer, { selection, onDone: onCancelSelection })
   ] });
 }
 function gutterDigits(file) {
@@ -2515,7 +2859,7 @@ var init_DiffFile = __esm({
       );
       const digits = useMemo5(() => gutterDigits(file), [file]);
       const { dir, name } = splitPath(file.path);
-      return /* @__PURE__ */ jsxs13(
+      return /* @__PURE__ */ jsxs14(
         "section",
         {
           className: classNames("dfile", viewed && "is-viewed"),
@@ -2523,42 +2867,42 @@ var init_DiffFile = __esm({
           "data-path": file.path,
           style: { "--gut": `calc(${digits}ch + 16px)` },
           children: [
-            /* @__PURE__ */ jsxs13("header", { className: "dfile-head", children: [
-              /* @__PURE__ */ jsx15("span", { className: classNames("file-status", `is-${file.status}`), children: file.status[0].toUpperCase() }),
-              /* @__PURE__ */ jsxs13("span", { className: "dfile-path", title: file.path, children: [
-                /* @__PURE__ */ jsx15("span", { className: "dfile-dir", children: dir }),
-                /* @__PURE__ */ jsx15("span", { className: "dfile-name", children: name })
+            /* @__PURE__ */ jsxs14("header", { className: "dfile-head", children: [
+              /* @__PURE__ */ jsx16("span", { className: classNames("file-status", `is-${file.status}`), children: file.status[0].toUpperCase() }),
+              /* @__PURE__ */ jsxs14("span", { className: "dfile-path", title: file.path, children: [
+                /* @__PURE__ */ jsx16("span", { className: "dfile-dir", children: dir }),
+                /* @__PURE__ */ jsx16("span", { className: "dfile-name", children: name })
               ] }),
-              file.oldPath && file.oldPath !== file.path && /* @__PURE__ */ jsxs13("span", { className: "muted", children: [
+              file.oldPath && file.oldPath !== file.path && /* @__PURE__ */ jsxs14("span", { className: "muted", children: [
                 "renamed from ",
                 file.oldPath
               ] }),
-              /* @__PURE__ */ jsxs13("span", { className: "dfile-counts", children: [
-                file.additions > 0 && /* @__PURE__ */ jsxs13("span", { className: "add", children: [
+              /* @__PURE__ */ jsxs14("span", { className: "dfile-counts", children: [
+                file.additions > 0 && /* @__PURE__ */ jsxs14("span", { className: "add", children: [
                   "+",
                   file.additions
                 ] }),
-                file.deletions > 0 && /* @__PURE__ */ jsxs13("span", { className: "del", children: [
+                file.deletions > 0 && /* @__PURE__ */ jsxs14("span", { className: "del", children: [
                   "\u2212",
                   file.deletions
                 ] })
               ] }),
-              threads.length > 0 && /* @__PURE__ */ jsxs13("span", { className: "pill is-draft", children: [
+              threads.length > 0 && /* @__PURE__ */ jsxs14("span", { className: "pill is-draft", children: [
                 threads.length,
                 " comment",
                 threads.length === 1 ? "" : "s"
               ] }),
-              /* @__PURE__ */ jsxs13("label", { className: "dfile-viewed", children: [
-                /* @__PURE__ */ jsx15("input", { type: "checkbox", checked: viewed, onChange: () => store.toggleViewed(file.path) }),
+              /* @__PURE__ */ jsxs14("label", { className: "dfile-viewed", children: [
+                /* @__PURE__ */ jsx16("input", { type: "checkbox", checked: viewed, onChange: () => store.toggleViewed(file.path) }),
                 "Viewed"
               ] })
             ] }),
-            file.binary ? /* @__PURE__ */ jsx15("p", { className: "dfile-note", children: "Binary file \u2014 content not shown. It is still part of the change." }) : file.truncated || !file.hunks ? /* @__PURE__ */ jsx15("p", { className: "dfile-note", children: "This file is too large to render here. It is still part of the change \u2014 review it in your editor." }) : viewed ? /* @__PURE__ */ jsxs13("p", { className: "dfile-note", children: [
+            file.binary ? /* @__PURE__ */ jsx16("p", { className: "dfile-note", children: "Binary file \u2014 content not shown. It is still part of the change." }) : file.truncated || !file.hunks ? /* @__PURE__ */ jsx16("p", { className: "dfile-note", children: "This file is too large to render here. It is still part of the change \u2014 review it in your editor." }) : viewed ? /* @__PURE__ */ jsxs14("p", { className: "dfile-note", children: [
               "Marked viewed.",
               " ",
-              /* @__PURE__ */ jsx15("button", { type: "button", className: "link", onClick: () => store.toggleViewed(file.path), children: "Show the diff again" })
-            ] }) : /* @__PURE__ */ jsx15("div", { className: classNames("dtable", wrap ? "is-wrap" : "is-nowrap"), children: file.hunks.map((hunk, hunkIndex) => /* @__PURE__ */ jsxs13("div", { className: "dhunk", children: [
-              /* @__PURE__ */ jsxs13("div", { className: "dhunk-head", children: [
+              /* @__PURE__ */ jsx16("button", { type: "button", className: "link", onClick: () => store.toggleViewed(file.path), children: "Show the diff again" })
+            ] }) : /* @__PURE__ */ jsx16("div", { className: classNames("dtable", wrap ? "is-wrap" : "is-nowrap"), children: file.hunks.map((hunk, hunkIndex) => /* @__PURE__ */ jsxs14("div", { className: "dhunk", children: [
+              /* @__PURE__ */ jsxs14("div", { className: "dhunk-head", children: [
                 "@@ \u2212",
                 hunk.oldStart,
                 ",",
@@ -2568,12 +2912,12 @@ var init_DiffFile = __esm({
                 ",",
                 hunk.newCount,
                 " @@",
-                hunk.header && /* @__PURE__ */ jsxs13("span", { className: "dhunk-ctx", children: [
+                hunk.header && /* @__PURE__ */ jsxs14("span", { className: "dhunk-ctx", children: [
                   " ",
                   hunk.header
                 ] })
               ] }),
-              hunk.lines.map((line, lineIndex) => /* @__PURE__ */ jsx15(
+              hunk.lines.map((line, lineIndex) => /* @__PURE__ */ jsx16(
                 Row,
                 {
                   file: file.path,
@@ -2596,7 +2940,7 @@ var init_DiffFile = __esm({
 
 // src/ui/views/review/Reconciliation.tsx
 import { useMemo as useMemo6 } from "react";
-import { jsx as jsx16, jsxs as jsxs14 } from "react/jsx-runtime";
+import { jsx as jsx17, jsxs as jsxs15 } from "react/jsx-runtime";
 function Reconciliation() {
   const session = useSession();
   const diff = useStore((s) => s.diff);
@@ -2612,25 +2956,25 @@ function Reconciliation() {
   const attributed = new Set(rows.flatMap((r) => r.task.files));
   const unattributed = (diff?.files ?? []).filter((f) => !attributed.has(f.path));
   const suspect = rows.filter((r) => r.task.status === "done" && r.matched.length === 0);
-  return /* @__PURE__ */ jsxs14("section", { className: "reconcile", children: [
-    /* @__PURE__ */ jsxs14("header", { className: "reconcile-head", children: [
-      /* @__PURE__ */ jsx16("strong", { children: "Plan vs. what changed" }),
-      suspect.length > 0 && /* @__PURE__ */ jsxs14("span", { className: "pill is-draft", children: [
+  return /* @__PURE__ */ jsxs15("section", { className: "reconcile", children: [
+    /* @__PURE__ */ jsxs15("header", { className: "reconcile-head", children: [
+      /* @__PURE__ */ jsx17("strong", { children: "Plan vs. what changed" }),
+      suspect.length > 0 && /* @__PURE__ */ jsxs15("span", { className: "pill is-draft", children: [
         pluralize(suspect.length, "task"),
         " marked done with no visible change"
       ] })
     ] }),
-    /* @__PURE__ */ jsx16("ul", { className: "reconcile-list", children: rows.map(({ task, matched }) => /* @__PURE__ */ jsxs14("li", { className: classNames("reconcile-row", `is-${task.status}`), children: [
-      /* @__PURE__ */ jsx16("span", { className: "reconcile-status", children: glyph(task) }),
-      /* @__PURE__ */ jsx16("span", { className: "reconcile-title", children: task.title }),
-      /* @__PURE__ */ jsx16("span", { className: "reconcile-files", children: matched.length === 0 ? /* @__PURE__ */ jsx16("em", { className: "muted", children: "no files" }) : matched.map((file) => /* @__PURE__ */ jsx16("code", { title: file, children: file }, file)) })
+    /* @__PURE__ */ jsx17("ul", { className: "reconcile-list", children: rows.map(({ task, matched }) => /* @__PURE__ */ jsxs15("li", { className: classNames("reconcile-row", `is-${task.status}`), children: [
+      /* @__PURE__ */ jsx17("span", { className: "reconcile-status", children: glyph(task) }),
+      /* @__PURE__ */ jsx17("span", { className: "reconcile-title", children: task.title }),
+      /* @__PURE__ */ jsx17("span", { className: "reconcile-files", children: matched.length === 0 ? /* @__PURE__ */ jsx17("em", { className: "muted", children: "no files" }) : matched.map((file) => /* @__PURE__ */ jsx17("code", { title: file, children: file }, file)) })
     ] }, task.id)) }),
-    unattributed.length > 0 && /* @__PURE__ */ jsxs14("p", { className: "reconcile-extra", children: [
+    unattributed.length > 0 && /* @__PURE__ */ jsxs15("p", { className: "reconcile-extra", children: [
       pluralize(unattributed.length, "changed file"),
       " not attributed to any task:",
       " ",
-      unattributed.slice(0, 6).map((f) => /* @__PURE__ */ jsx16("code", { children: f.path }, f.path)),
-      unattributed.length > 6 && /* @__PURE__ */ jsxs14("span", { className: "muted", children: [
+      unattributed.slice(0, 6).map((f) => /* @__PURE__ */ jsx17("code", { children: f.path }, f.path)),
+      unattributed.length > 6 && /* @__PURE__ */ jsxs15("span", { className: "muted", children: [
         " +",
         unattributed.length - 6,
         " more"
@@ -2650,8 +2994,8 @@ var init_Reconciliation = __esm({
 });
 
 // src/ui/views/review/PendingPanel.tsx
-import { useMemo as useMemo7, useState as useState12 } from "react";
-import { jsx as jsx17, jsxs as jsxs15 } from "react/jsx-runtime";
+import { useMemo as useMemo7, useState as useState13 } from "react";
+import { jsx as jsx18, jsxs as jsxs16 } from "react/jsx-runtime";
 function PendingPanel({
   gate,
   onJump,
@@ -2659,9 +3003,9 @@ function PendingPanel({
 }) {
   const drafts = useDrafts();
   const sessionId = useStore((s) => s.sessionId);
-  const [summary2, setSummary] = useState12("");
-  const [busy, setBusy] = useState12(false);
-  const [confirming, setConfirming] = useState12(null);
+  const [summary2, setSummary] = useState13("");
+  const [busy, setBusy] = useState13(false);
+  const [confirming, setConfirming] = useState13(null);
   const grouped = useMemo7(() => groupByFile(drafts), [drafts]);
   const submit = async (verdict) => {
     if (!sessionId || busy) return;
@@ -2698,27 +3042,27 @@ function PendingPanel({
     if (verdict === "approved" && drafts.length > 0) setConfirming("approved");
     else void submit(verdict);
   };
-  return /* @__PURE__ */ jsxs15("aside", { className: "pending", "aria-label": "Your review", children: [
-    /* @__PURE__ */ jsxs15("header", { className: "pending-head", children: [
-      /* @__PURE__ */ jsx17("strong", { children: "Your review" }),
-      /* @__PURE__ */ jsx17("span", { className: "muted", children: drafts.length === 0 ? "no comments yet" : pluralize(drafts.length, "comment") }),
-      /* @__PURE__ */ jsx17("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn", onClick: onClose, title: "Hide this panel", children: "\u203A" })
+  return /* @__PURE__ */ jsxs16("aside", { className: "pending", "aria-label": "Your review", children: [
+    /* @__PURE__ */ jsxs16("header", { className: "pending-head", children: [
+      /* @__PURE__ */ jsx18("strong", { children: "Your review" }),
+      /* @__PURE__ */ jsx18("span", { className: "muted", children: drafts.length === 0 ? "no comments yet" : pluralize(drafts.length, "comment") }),
+      /* @__PURE__ */ jsx18("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx18("button", { type: "button", className: "icon-btn", onClick: onClose, title: "Hide this panel", children: "\u203A" })
     ] }),
-    /* @__PURE__ */ jsxs15("div", { className: "pending-body", children: [
-      /* @__PURE__ */ jsx17(Reconciliation, {}),
-      drafts.length === 0 ? /* @__PURE__ */ jsx17("p", { className: "pending-empty", children: "Click a line in the diff to comment on it. Comments collect here and are sent together when you submit." }) : grouped.map(([file, threads]) => /* @__PURE__ */ jsxs15("div", { className: "pending-group", children: [
-        /* @__PURE__ */ jsx17("div", { className: "pending-file", title: file, children: file }),
-        threads.map((thread) => /* @__PURE__ */ jsxs15("div", { className: "pending-item", children: [
-          /* @__PURE__ */ jsxs15("button", { type: "button", className: "pending-jump", onClick: () => onJump(thread), children: [
-            /* @__PURE__ */ jsxs15("span", { className: "pending-ref", children: [
+    /* @__PURE__ */ jsxs16("div", { className: "pending-body", children: [
+      /* @__PURE__ */ jsx18(Reconciliation, {}),
+      drafts.length === 0 ? /* @__PURE__ */ jsx18("p", { className: "pending-empty", children: "Click a line in the diff to comment on it. Comments collect here and are sent together when you submit." }) : grouped.map(([file, threads]) => /* @__PURE__ */ jsxs16("div", { className: "pending-group", children: [
+        /* @__PURE__ */ jsx18("div", { className: "pending-file", title: file, children: file }),
+        threads.map((thread) => /* @__PURE__ */ jsxs16("div", { className: "pending-item", children: [
+          /* @__PURE__ */ jsxs16("button", { type: "button", className: "pending-jump", onClick: () => onJump(thread), children: [
+            /* @__PURE__ */ jsxs16("span", { className: "pending-ref", children: [
               "L",
               thread.startLine,
               thread.endLine !== thread.startLine ? `\u2013${thread.endLine}` : ""
             ] }),
-            /* @__PURE__ */ jsx17("span", { className: "pending-body-text", children: thread.body })
+            /* @__PURE__ */ jsx18("span", { className: "pending-body-text", children: thread.body })
           ] }),
-          /* @__PURE__ */ jsx17(
+          /* @__PURE__ */ jsx18(
             "button",
             {
               type: "button",
@@ -2731,9 +3075,9 @@ function PendingPanel({
         ] }, thread.id))
       ] }, file))
     ] }),
-    /* @__PURE__ */ jsxs15("footer", { className: "pending-foot", children: [
-      gate ? /* @__PURE__ */ jsx17("p", { className: "explain", children: "Submitting resumes the parked session. Claude receives your summary and every comment above, each with the lines you selected." }) : /* @__PURE__ */ jsx17("p", { className: "explain", children: "No gate is open, so this is queued and reaches Claude at the end of its next turn." }),
-      /* @__PURE__ */ jsx17(
+    /* @__PURE__ */ jsxs16("footer", { className: "pending-foot", children: [
+      gate ? /* @__PURE__ */ jsx18("p", { className: "explain", children: "Submitting resumes the parked session. Claude receives your summary and every comment above, each with the lines you selected." }) : /* @__PURE__ */ jsx18("p", { className: "explain", children: "No gate is open, so this is queued and reaches Claude at the end of its next turn." }),
+      /* @__PURE__ */ jsx18(
         "textarea",
         {
           className: "input",
@@ -2743,19 +3087,19 @@ function PendingPanel({
           onChange: (e) => setSummary(e.target.value)
         }
       ),
-      confirming === "approved" ? /* @__PURE__ */ jsxs15("div", { className: "pending-confirm", children: [
-        /* @__PURE__ */ jsxs15("span", { children: [
+      confirming === "approved" ? /* @__PURE__ */ jsxs16("div", { className: "pending-confirm", children: [
+        /* @__PURE__ */ jsxs16("span", { children: [
           "Approve with ",
           pluralize(drafts.length, "unsent comment"),
           "? They will be sent, but approving tells Claude to move on."
         ] }),
-        /* @__PURE__ */ jsxs15("div", { className: "row-actions", children: [
-          /* @__PURE__ */ jsx17(Button, { size: "sm", variant: "primary", onClick: () => void submit("approved"), disabled: busy, children: "Approve anyway" }),
-          /* @__PURE__ */ jsx17(Button, { size: "sm", variant: "ghost", onClick: () => setConfirming(null), children: "Cancel" })
+        /* @__PURE__ */ jsxs16("div", { className: "row-actions", children: [
+          /* @__PURE__ */ jsx18(Button, { size: "sm", variant: "primary", onClick: () => void submit("approved"), disabled: busy, children: "Approve anyway" }),
+          /* @__PURE__ */ jsx18(Button, { size: "sm", variant: "ghost", onClick: () => setConfirming(null), children: "Cancel" })
         ] })
-      ] }) : /* @__PURE__ */ jsxs15("div", { className: "pending-actions", children: [
-        /* @__PURE__ */ jsx17(Button, { onClick: () => request2("changes_requested"), disabled: busy, children: busy ? "Sending\u2026" : "Request changes" }),
-        /* @__PURE__ */ jsx17(Button, { variant: "primary", onClick: () => request2("approved"), disabled: busy, children: "Approve" })
+      ] }) : /* @__PURE__ */ jsxs16("div", { className: "pending-actions", children: [
+        /* @__PURE__ */ jsx18(Button, { onClick: () => request2("changes_requested"), disabled: busy, children: busy ? "Sending\u2026" : "Request changes" }),
+        /* @__PURE__ */ jsx18(Button, { variant: "primary", onClick: () => request2("approved"), disabled: busy, children: "Approve" })
       ] })
     ] })
   ] });
@@ -2782,8 +3126,8 @@ var init_PendingPanel = __esm({
 });
 
 // src/ui/views/ReviewView.tsx
-import { useCallback, useEffect as useEffect7, useRef as useRef4, useState as useState13 } from "react";
-import { Fragment as Fragment7, jsx as jsx18, jsxs as jsxs16 } from "react/jsx-runtime";
+import { useCallback, useEffect as useEffect9, useRef as useRef6, useState as useState14 } from "react";
+import { Fragment as Fragment8, jsx as jsx19, jsxs as jsxs17 } from "react/jsx-runtime";
 function ReviewView() {
   const diff = useStore((s) => s.diff);
   const loading = useStore((s) => s.diffLoading);
@@ -2791,11 +3135,11 @@ function ReviewView() {
   const diffMode = useStore((s) => s.diffMode);
   const gate = useOpenGate();
   const drafts = useDrafts();
-  const [selection, setSelection] = useState13(null);
-  const [panelOpen, setPanelOpen] = useState13(true);
-  const [onlyChanged, setOnlyChanged] = useState13(false);
-  const anchors = useRef4(/* @__PURE__ */ new Map());
-  const scroller = useRef4(null);
+  const [selection, setSelection] = useState14(null);
+  const [panelOpen, setPanelOpen] = useState14(true);
+  const [onlyChanged, setOnlyChanged] = useState14(false);
+  const anchors = useRef6(/* @__PURE__ */ new Map());
+  const scroller = useRef6(null);
   const registerAnchor = useCallback((path, node) => {
     if (node) anchors.current.set(path, node);
     else anchors.current.delete(path);
@@ -2827,58 +3171,58 @@ function ReviewView() {
     onRefresh: () => void store.refreshDiff(true)
   });
   if (loading && !diff) {
-    return /* @__PURE__ */ jsx18("div", { className: "review-empty", children: /* @__PURE__ */ jsx18(Spinner, { label: "Computing the diff\u2026" }) });
+    return /* @__PURE__ */ jsx19("div", { className: "review-empty", children: /* @__PURE__ */ jsx19(Spinner, { label: "Computing the diff\u2026" }) });
   }
   if (!diff) {
-    return /* @__PURE__ */ jsx18("div", { className: "review-empty", children: /* @__PURE__ */ jsx18(
+    return /* @__PURE__ */ jsx19("div", { className: "review-empty", children: /* @__PURE__ */ jsx19(
       EmptyState,
       {
         title: "No diff published yet",
         hint: "Claude publishes one when it reaches the review stage. You can also compute the current diff now.",
-        action: /* @__PURE__ */ jsx18(Button, { variant: "primary", onClick: () => void store.refreshDiff(true), children: "Compute diff now" })
+        action: /* @__PURE__ */ jsx19(Button, { variant: "primary", onClick: () => void store.refreshDiff(true), children: "Compute diff now" })
       }
     ) });
   }
   if (diff.files.length === 0) {
-    return /* @__PURE__ */ jsx18("div", { className: "review-empty", children: /* @__PURE__ */ jsx18(
+    return /* @__PURE__ */ jsx19("div", { className: "review-empty", children: /* @__PURE__ */ jsx19(
       EmptyState,
       {
         title: "No changes against this base",
-        hint: /* @__PURE__ */ jsxs16(Fragment7, { children: [
+        hint: /* @__PURE__ */ jsxs17(Fragment8, { children: [
           "Diffed against ",
-          /* @__PURE__ */ jsx18("code", { children: shortRef(diff.baseRef) }),
+          /* @__PURE__ */ jsx19("code", { children: shortRef(diff.baseRef) }),
           ". Either nothing has changed yet, or the base is wrong."
         ] }),
-        action: /* @__PURE__ */ jsx18(Button, { onClick: () => void store.refreshDiff(true), children: "Recompute" })
+        action: /* @__PURE__ */ jsx19(Button, { onClick: () => void store.refreshDiff(true), children: "Recompute" })
       }
     ) });
   }
-  return /* @__PURE__ */ jsxs16("div", { className: classNames("review", panelOpen && "has-panel"), children: [
-    /* @__PURE__ */ jsxs16("div", { className: "review-bar", children: [
-      /* @__PURE__ */ jsxs16("div", { className: "review-bar-info", children: [
-        /* @__PURE__ */ jsx18("strong", { children: pluralize(diff.files.length, "file") }),
-        /* @__PURE__ */ jsxs16("span", { className: "add", children: [
+  return /* @__PURE__ */ jsxs17("div", { className: classNames("review", panelOpen && "has-panel"), children: [
+    /* @__PURE__ */ jsxs17("div", { className: "review-bar", children: [
+      /* @__PURE__ */ jsxs17("div", { className: "review-bar-info", children: [
+        /* @__PURE__ */ jsx19("strong", { children: pluralize(diff.files.length, "file") }),
+        /* @__PURE__ */ jsxs17("span", { className: "add", children: [
           "+",
           diff.additions
         ] }),
-        /* @__PURE__ */ jsxs16("span", { className: "del", children: [
+        /* @__PURE__ */ jsxs17("span", { className: "del", children: [
           "\u2212",
           diff.deletions
         ] }),
-        /* @__PURE__ */ jsxs16("span", { className: "muted", title: `base ${diff.baseRef}`, children: [
+        /* @__PURE__ */ jsxs17("span", { className: "muted", title: `base ${diff.baseRef}`, children: [
           "since ",
           shortRef(diff.baseRef),
           diff.includesWorkingTree && " \xB7 includes uncommitted work"
         ] }),
-        diff.round > 1 && /* @__PURE__ */ jsxs16("span", { className: "pill is-sent", children: [
+        diff.round > 1 && /* @__PURE__ */ jsxs17("span", { className: "pill is-sent", children: [
           "round ",
           diff.round
         ] })
       ] }),
-      /* @__PURE__ */ jsxs16("div", { className: "review-bar-actions", children: [
+      /* @__PURE__ */ jsxs17("div", { className: "review-bar-actions", children: [
         moved && // Round three should not be a cold read of the whole change.
-        /* @__PURE__ */ jsxs16("div", { className: "segmented", role: "group", "aria-label": "Scope", children: [
-          /* @__PURE__ */ jsx18(
+        /* @__PURE__ */ jsxs17("div", { className: "segmented", role: "group", "aria-label": "Scope", children: [
+          /* @__PURE__ */ jsx19(
             "button",
             {
               type: "button",
@@ -2887,7 +3231,7 @@ function ReviewView() {
               children: "All files"
             }
           ),
-          /* @__PURE__ */ jsxs16(
+          /* @__PURE__ */ jsxs17(
             "button",
             {
               type: "button",
@@ -2903,8 +3247,8 @@ function ReviewView() {
             }
           )
         ] }),
-        /* @__PURE__ */ jsxs16("div", { className: "segmented", role: "group", "aria-label": "Diff layout", children: [
-          /* @__PURE__ */ jsx18(
+        /* @__PURE__ */ jsxs17("div", { className: "segmented", role: "group", "aria-label": "Diff layout", children: [
+          /* @__PURE__ */ jsx19(
             "button",
             {
               type: "button",
@@ -2913,7 +3257,7 @@ function ReviewView() {
               children: "Wrap"
             }
           ),
-          /* @__PURE__ */ jsx18(
+          /* @__PURE__ */ jsx19(
             "button",
             {
               type: "button",
@@ -2923,22 +3267,22 @@ function ReviewView() {
             }
           )
         ] }),
-        /* @__PURE__ */ jsx18(Button, { variant: "ghost", onClick: () => void store.refreshDiff(true), children: "Refresh" }),
-        /* @__PURE__ */ jsxs16(Button, { variant: drafts.length ? "primary" : "default", onClick: () => setPanelOpen((v) => !v), children: [
+        /* @__PURE__ */ jsx19(Button, { variant: "ghost", onClick: () => void store.refreshDiff(true), children: "Refresh" }),
+        /* @__PURE__ */ jsxs17(Button, { variant: drafts.length ? "primary" : "default", onClick: () => setPanelOpen((v) => !v), children: [
           "Your review",
           drafts.length > 0 ? ` \xB7 ${drafts.length}` : ""
         ] })
       ] })
     ] }),
-    /* @__PURE__ */ jsxs16("div", { className: "review-body", children: [
-      /* @__PURE__ */ jsx18(FileTree, { files: visible, selected: selectedFile, onSelect: scrollToFile }),
-      /* @__PURE__ */ jsxs16("div", { className: "diff-pane", ref: scroller, children: [
-        onlyChanged && visible.length === 0 && /* @__PURE__ */ jsxs16("p", { className: "dfile-note", children: [
+    /* @__PURE__ */ jsxs17("div", { className: "review-body", children: [
+      /* @__PURE__ */ jsx19(FileTree, { files: visible, selected: selectedFile, onSelect: scrollToFile }),
+      /* @__PURE__ */ jsxs17("div", { className: "diff-pane", ref: scroller, children: [
+        onlyChanged && visible.length === 0 && /* @__PURE__ */ jsxs17("p", { className: "dfile-note", children: [
           "Nothing changed since round ",
           diff.previousRound,
           "."
         ] }),
-        visible.map((file) => /* @__PURE__ */ jsx18(
+        visible.map((file) => /* @__PURE__ */ jsx19(
           DiffFileView,
           {
             file,
@@ -2950,14 +3294,14 @@ function ReviewView() {
           file.path
         ))
       ] }),
-      panelOpen && /* @__PURE__ */ jsx18(PendingPanel, { gate, onJump: jumpToThread, onClose: () => setPanelOpen(false) })
+      panelOpen && /* @__PURE__ */ jsx19(PendingPanel, { gate, onJump: jumpToThread, onClose: () => setPanelOpen(false) })
     ] })
   ] });
 }
 function useReviewShortcuts(opts) {
-  const ref = useRef4(opts);
+  const ref = useRef6(opts);
   ref.current = opts;
-  useEffect7(() => {
+  useEffect9(() => {
     const handler = (event) => {
       const target = event.target;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
@@ -3005,7 +3349,7 @@ function useReviewShortcuts(opts) {
   }, []);
 }
 function useTrackVisibleFile(scroller, anchors) {
-  useEffect7(() => {
+  useEffect9(() => {
     const root = scroller.current;
     if (!root) return;
     const observer = new IntersectionObserver(
@@ -3036,15 +3380,15 @@ var init_ReviewView = __esm({
 });
 
 // src/ui/views/VerifyView.tsx
-import { useEffect as useEffect8, useRef as useRef5, useState as useState14 } from "react";
-import { Fragment as Fragment8, jsx as jsx19, jsxs as jsxs17 } from "react/jsx-runtime";
+import { useEffect as useEffect10, useRef as useRef7, useState as useState15 } from "react";
+import { Fragment as Fragment9, jsx as jsx20, jsxs as jsxs18 } from "react/jsx-runtime";
 function VerifyView() {
   const session = useSession();
   const gate = useOpenGate();
   const sessionId = useStore((s) => s.sessionId);
-  const [command, setCommand] = useState14("");
-  const [notes, setNotes] = useState14("");
-  const [busy, setBusy] = useState14(false);
+  const [command, setCommand] = useState15("");
+  const [notes, setNotes] = useState15("");
+  const [busy, setBusy] = useState15(false);
   if (!session || !sessionId) return null;
   const failing = session.checks.filter((c) => c.status === "failed");
   const running = session.checks.some((c) => c.status === "running");
@@ -3076,16 +3420,16 @@ function VerifyView() {
       setBusy(false);
     }
   };
-  return /* @__PURE__ */ jsxs17("div", { className: "verify", children: [
-    /* @__PURE__ */ jsxs17("div", { className: "verify-main", children: [
-      /* @__PURE__ */ jsxs17("div", { className: "verify-bar", children: [
-        /* @__PURE__ */ jsx19("strong", { children: "Checks" }),
-        /* @__PURE__ */ jsx19("span", { className: "muted", children: session.checks.length === 0 ? "none configured" : failing.length ? `${failing.length} failing` : running ? "running\u2026" : unrun.length ? `${unrun.length} not run` : "all passing" }),
-        /* @__PURE__ */ jsx19("span", { className: "spacer" }),
-        /* @__PURE__ */ jsx19(Button, { onClick: () => void api.runChecks(sessionId).catch((e) => store.fail(e)), children: "Run all" })
+  return /* @__PURE__ */ jsxs18("div", { className: "verify", children: [
+    /* @__PURE__ */ jsxs18("div", { className: "verify-main", children: [
+      /* @__PURE__ */ jsxs18("div", { className: "verify-bar", children: [
+        /* @__PURE__ */ jsx20("strong", { children: "Checks" }),
+        /* @__PURE__ */ jsx20("span", { className: "muted", children: session.checks.length === 0 ? "none configured" : failing.length ? `${failing.length} failing` : running ? "running\u2026" : unrun.length ? `${unrun.length} not run` : "all passing" }),
+        /* @__PURE__ */ jsx20("span", { className: "spacer" }),
+        /* @__PURE__ */ jsx20(Button, { onClick: () => void api.runChecks(sessionId).catch((e) => store.fail(e)), children: "Run all" })
       ] }),
-      /* @__PURE__ */ jsxs17("div", { className: "check-add", children: [
-        /* @__PURE__ */ jsx19(
+      /* @__PURE__ */ jsxs18("div", { className: "check-add", children: [
+        /* @__PURE__ */ jsx20(
           "input",
           {
             className: "input",
@@ -3097,33 +3441,33 @@ function VerifyView() {
             }
           }
         ),
-        /* @__PURE__ */ jsx19(Button, { variant: "ghost", onClick: () => void add(), disabled: !command.trim(), children: "Add check" })
+        /* @__PURE__ */ jsx20(Button, { variant: "ghost", onClick: () => void add(), disabled: !command.trim(), children: "Add check" })
       ] }),
-      session.checks.length === 0 ? /* @__PURE__ */ jsx19(
+      session.checks.length === 0 ? /* @__PURE__ */ jsx20(
         EmptyState,
         {
           title: "No checks configured",
-          hint: /* @__PURE__ */ jsxs17(Fragment8, { children: [
+          hint: /* @__PURE__ */ jsxs18(Fragment9, { children: [
             "Add one above, or set them per repo in ",
-            /* @__PURE__ */ jsx19("code", { children: ".claude/harness.json" }),
+            /* @__PURE__ */ jsx20("code", { children: ".claude/harness.json" }),
             " under",
             " ",
-            /* @__PURE__ */ jsx19("code", { children: "stages.verification.checks" }),
+            /* @__PURE__ */ jsx20("code", { children: "stages.verification.checks" }),
             "."
           ] })
         }
-      ) : session.checks.map((check) => /* @__PURE__ */ jsx19(Check, { check, sessionId }, check.id))
+      ) : session.checks.map((check) => /* @__PURE__ */ jsx20(Check, { check, sessionId }, check.id))
     ] }),
-    /* @__PURE__ */ jsxs17("aside", { className: "verify-side", children: [
-      /* @__PURE__ */ jsx19("h3", { className: "panel-title", children: "Sign-off" }),
-      failing.length > 0 && /* @__PURE__ */ jsxs17("p", { className: "warn-note", children: [
+    /* @__PURE__ */ jsxs18("aside", { className: "verify-side", children: [
+      /* @__PURE__ */ jsx20("h3", { className: "panel-title", children: "Sign-off" }),
+      failing.length > 0 && /* @__PURE__ */ jsxs18("p", { className: "warn-note", children: [
         failing.length,
         " check",
         failing.length === 1 ? "" : "s",
         " failing. Signing off anyway tells Claude to move on."
       ] }),
-      gate ? /* @__PURE__ */ jsx19(Explain, { children: "Claude is parked here. Your verdict resumes it." }) : /* @__PURE__ */ jsx19(Explain, { children: "No gate is open, so this is queued for Claude's next turn." }),
-      /* @__PURE__ */ jsx19(
+      gate ? /* @__PURE__ */ jsx20(Explain, { children: "Claude is parked here. Your verdict resumes it." }) : /* @__PURE__ */ jsx20(Explain, { children: "No gate is open, so this is queued for Claude's next turn." }),
+      /* @__PURE__ */ jsx20(
         "textarea",
         {
           className: "input",
@@ -3133,36 +3477,36 @@ function VerifyView() {
           onChange: (e) => setNotes(e.target.value)
         }
       ),
-      /* @__PURE__ */ jsxs17("div", { className: "row-actions", children: [
-        /* @__PURE__ */ jsx19(Button, { variant: "primary", onClick: () => void submit("approved"), disabled: busy, children: "Looks verified" }),
-        /* @__PURE__ */ jsx19(Button, { onClick: () => void submit("changes_requested"), disabled: busy, children: "Not ready" })
+      /* @__PURE__ */ jsxs18("div", { className: "row-actions", children: [
+        /* @__PURE__ */ jsx20(Button, { variant: "primary", onClick: () => void submit("approved"), disabled: busy, children: "Looks verified" }),
+        /* @__PURE__ */ jsx20(Button, { onClick: () => void submit("changes_requested"), disabled: busy, children: "Not ready" })
       ] })
     ] })
   ] });
 }
 function Check({ check, sessionId }) {
-  const [open, setOpen] = useState14(check.status === "failed");
-  const log = useRef5(null);
-  const pinned = useRef5(true);
-  useEffect8(() => {
+  const [open, setOpen] = useState15(check.status === "failed");
+  const log = useRef7(null);
+  const pinned = useRef7(true);
+  useEffect10(() => {
     if (pinned.current && log.current) log.current.scrollTop = log.current.scrollHeight;
   }, [check.output]);
-  useEffect8(() => {
+  useEffect10(() => {
     if (check.status === "failed") setOpen(true);
   }, [check.status]);
   const elapsed = check.startedAt && check.finishedAt ? duration(check.finishedAt - check.startedAt) : null;
-  return /* @__PURE__ */ jsxs17("section", { className: classNames("check", `is-${check.status}`), children: [
-    /* @__PURE__ */ jsxs17("header", { className: "check-head", children: [
-      /* @__PURE__ */ jsx19("span", { className: "check-mark", children: mark(check.status) }),
-      /* @__PURE__ */ jsx19("code", { className: "check-cmd", children: check.command }),
-      /* @__PURE__ */ jsx19("span", { className: "spacer" }),
-      elapsed && /* @__PURE__ */ jsx19("span", { className: "muted", children: elapsed }),
-      check.exitCode !== void 0 && check.status === "failed" && /* @__PURE__ */ jsxs17("span", { className: "muted", children: [
+  return /* @__PURE__ */ jsxs18("section", { className: classNames("check", `is-${check.status}`), children: [
+    /* @__PURE__ */ jsxs18("header", { className: "check-head", children: [
+      /* @__PURE__ */ jsx20("span", { className: "check-mark", children: mark(check.status) }),
+      /* @__PURE__ */ jsx20("code", { className: "check-cmd", children: check.command }),
+      /* @__PURE__ */ jsx20("span", { className: "spacer" }),
+      elapsed && /* @__PURE__ */ jsx20("span", { className: "muted", children: elapsed }),
+      check.exitCode !== void 0 && check.status === "failed" && /* @__PURE__ */ jsxs18("span", { className: "muted", children: [
         "exit ",
         check.exitCode
       ] }),
-      check.status === "running" ? /* @__PURE__ */ jsx19("button", { className: "link", onClick: () => void api.cancelCheck(sessionId, check.id).catch(() => {
-      }), children: "cancel" }) : /* @__PURE__ */ jsx19(
+      check.status === "running" ? /* @__PURE__ */ jsx20("button", { className: "link", onClick: () => void api.cancelCheck(sessionId, check.id).catch(() => {
+      }), children: "cancel" }) : /* @__PURE__ */ jsx20(
         "button",
         {
           className: "link",
@@ -3170,9 +3514,9 @@ function Check({ check, sessionId }) {
           children: "run"
         }
       ),
-      check.output && /* @__PURE__ */ jsx19("button", { className: "link", onClick: () => setOpen((v) => !v), children: open ? "hide output" : "show output" })
+      check.output && /* @__PURE__ */ jsx20("button", { className: "link", onClick: () => setOpen((v) => !v), children: open ? "hide output" : "show output" })
     ] }),
-    open && check.output && /* @__PURE__ */ jsx19(
+    open && check.output && /* @__PURE__ */ jsx20(
       "pre",
       {
         className: "check-output",
@@ -3200,21 +3544,21 @@ var init_VerifyView = __esm({
 });
 
 // src/ui/views/ShipView.tsx
-import { useEffect as useEffect9, useState as useState15 } from "react";
-import { Fragment as Fragment9, jsx as jsx20, jsxs as jsxs18 } from "react/jsx-runtime";
+import { useEffect as useEffect11, useState as useState16 } from "react";
+import { Fragment as Fragment10, jsx as jsx21, jsxs as jsxs19 } from "react/jsx-runtime";
 function ShipView() {
   const session = useSession();
   const gate = useOpenGate();
   const sessionId = useStore((s) => s.sessionId);
-  const [ship, setShip] = useState15(null);
-  const [providers, setProviders] = useState15([]);
-  const [loading, setLoading] = useState15(true);
-  const [busy, setBusy] = useState15(false);
-  const [confirming, setConfirming] = useState15(false);
-  const [outcome, setOutcome] = useState15(
+  const [ship, setShip] = useState16(null);
+  const [providers, setProviders] = useState16([]);
+  const [loading, setLoading] = useState16(true);
+  const [busy, setBusy] = useState16(false);
+  const [confirming, setConfirming] = useState16(false);
+  const [outcome, setOutcome] = useState16(
     null
   );
-  useEffect9(() => {
+  useEffect11(() => {
     if (!sessionId) return;
     let live = true;
     setLoading(true);
@@ -3228,9 +3572,9 @@ function ShipView() {
     };
   }, [sessionId]);
   if (!session || !sessionId) return null;
-  if (loading) return /* @__PURE__ */ jsx20("div", { className: "view-pad", children: /* @__PURE__ */ jsx20(Spinner, { label: "Composing from the plan and review\u2026" }) });
+  if (loading) return /* @__PURE__ */ jsx21("div", { className: "view-pad", children: /* @__PURE__ */ jsx21(Spinner, { label: "Composing from the plan and review\u2026" }) });
   if (!ship) {
-    return /* @__PURE__ */ jsx20("div", { className: "view-pad", children: /* @__PURE__ */ jsx20(EmptyState, { title: "Nothing to ship yet", hint: "The ship payload is built once there is a plan and a diff." }) });
+    return /* @__PURE__ */ jsx21("div", { className: "view-pad", children: /* @__PURE__ */ jsx21(EmptyState, { title: "Nothing to ship yet", hint: "The ship payload is built once there is a plan and a diff." }) });
   }
   const onBase = Boolean(ship.branch && ship.branch === ship.baseBranch);
   const failing = session.checks.filter((c) => c.status === "failed");
@@ -3249,12 +3593,12 @@ function ShipView() {
       setBusy(false);
     }
   };
-  return /* @__PURE__ */ jsxs18("div", { className: "ship", children: [
-    /* @__PURE__ */ jsxs18("div", { className: "ship-main", children: [
-      /* @__PURE__ */ jsx20(Panel, { title: "What will happen", children: /* @__PURE__ */ jsx20("ul", { className: "ship-steps", children: ALL_STEPS.map((step) => {
+  return /* @__PURE__ */ jsxs19("div", { className: "ship", children: [
+    /* @__PURE__ */ jsxs19("div", { className: "ship-main", children: [
+      /* @__PURE__ */ jsx21(Panel, { title: "What will happen", children: /* @__PURE__ */ jsx21("ul", { className: "ship-steps", children: ALL_STEPS.map((step) => {
         const on = ship.steps.includes(step);
-        return /* @__PURE__ */ jsx20("li", { className: classNames("ship-step", on && "is-on"), children: /* @__PURE__ */ jsxs18("label", { children: [
-          /* @__PURE__ */ jsx20(
+        return /* @__PURE__ */ jsx21("li", { className: classNames("ship-step", on && "is-on"), children: /* @__PURE__ */ jsxs19("label", { children: [
+          /* @__PURE__ */ jsx21(
             "input",
             {
               type: "checkbox",
@@ -3264,23 +3608,23 @@ function ShipView() {
               })
             }
           ),
-          /* @__PURE__ */ jsx20("span", { className: "ship-step-name", children: step }),
-          /* @__PURE__ */ jsx20("span", { className: "muted", children: STEP_HELP[step] })
+          /* @__PURE__ */ jsx21("span", { className: "ship-step-name", children: step }),
+          /* @__PURE__ */ jsx21("span", { className: "muted", children: STEP_HELP[step] })
         ] }) }, step);
       }) }) }),
-      /* @__PURE__ */ jsxs18(Panel, { title: "Pull request", children: [
-        /* @__PURE__ */ jsxs18("label", { className: "field", children: [
-          /* @__PURE__ */ jsx20("span", { children: "Provider" }),
-          /* @__PURE__ */ jsx20("select", { value: ship.provider, onChange: (e) => patch({ provider: e.target.value }), children: providers.map((p) => /* @__PURE__ */ jsx20("option", { value: p.id, children: p.label }, p.id)) })
+      /* @__PURE__ */ jsxs19(Panel, { title: "Pull request", children: [
+        /* @__PURE__ */ jsxs19("label", { className: "field", children: [
+          /* @__PURE__ */ jsx21("span", { children: "Provider" }),
+          /* @__PURE__ */ jsx21("select", { value: ship.provider, onChange: (e) => patch({ provider: e.target.value }), children: providers.map((p) => /* @__PURE__ */ jsx21("option", { value: p.id, children: p.label }, p.id)) })
         ] }),
-        provider?.kind === "mcp" && /* @__PURE__ */ jsx20(Explain, { children: "This provider runs through an MCP server connected to the Claude session, not the harness. Claude performs the PR call itself and reports the URL back." }),
-        /* @__PURE__ */ jsxs18("label", { className: "field", children: [
-          /* @__PURE__ */ jsx20("span", { children: "Title" }),
-          /* @__PURE__ */ jsx20("input", { className: "input", value: ship.title, onChange: (e) => patch({ title: e.target.value }) })
+        provider?.kind === "mcp" && /* @__PURE__ */ jsx21(Explain, { children: "This provider runs through an MCP server connected to the Claude session, not the harness. Claude performs the PR call itself and reports the URL back." }),
+        /* @__PURE__ */ jsxs19("label", { className: "field", children: [
+          /* @__PURE__ */ jsx21("span", { children: "Title" }),
+          /* @__PURE__ */ jsx21("input", { className: "input", value: ship.title, onChange: (e) => patch({ title: e.target.value }) })
         ] }),
-        /* @__PURE__ */ jsxs18("label", { className: "field", children: [
-          /* @__PURE__ */ jsx20("span", { children: "Body" }),
-          /* @__PURE__ */ jsx20(
+        /* @__PURE__ */ jsxs19("label", { className: "field", children: [
+          /* @__PURE__ */ jsx21("span", { children: "Body" }),
+          /* @__PURE__ */ jsx21(
             "textarea",
             {
               className: "input ship-body",
@@ -3291,7 +3635,7 @@ function ShipView() {
           )
         ] })
       ] }),
-      /* @__PURE__ */ jsx20(Panel, { title: "Commit message", children: /* @__PURE__ */ jsx20(
+      /* @__PURE__ */ jsx21(Panel, { title: "Commit message", children: /* @__PURE__ */ jsx21(
         "textarea",
         {
           className: "input mono",
@@ -3300,50 +3644,50 @@ function ShipView() {
           onChange: (e) => patch({ commitMessage: e.target.value })
         }
       ) }),
-      outcome && /* @__PURE__ */ jsxs18(Panel, { title: outcome.ok ? "Result" : "Ship failed", className: outcome.ok ? "is-ok" : "is-failed", children: [
-        outcome.url && /* @__PURE__ */ jsx20("p", { children: /* @__PURE__ */ jsx20("a", { href: outcome.url, target: "_blank", rel: "noreferrer", children: outcome.url }) }),
-        outcome.directive && /* @__PURE__ */ jsxs18("p", { className: "explain", children: [
+      outcome && /* @__PURE__ */ jsxs19(Panel, { title: outcome.ok ? "Result" : "Ship failed", className: outcome.ok ? "is-ok" : "is-failed", children: [
+        outcome.url && /* @__PURE__ */ jsx21("p", { children: /* @__PURE__ */ jsx21("a", { href: outcome.url, target: "_blank", rel: "noreferrer", children: outcome.url }) }),
+        outcome.directive && /* @__PURE__ */ jsxs19("p", { className: "explain", children: [
           "Handed to Claude to finish through its MCP server: ",
           outcome.directive
         ] }),
-        /* @__PURE__ */ jsx20("pre", { className: "check-output", children: outcome.output })
+        /* @__PURE__ */ jsx21("pre", { className: "check-output", children: outcome.output })
       ] })
     ] }),
-    /* @__PURE__ */ jsxs18("aside", { className: "ship-side", children: [
-      /* @__PURE__ */ jsx20("h3", { className: "panel-title", children: "Confirm" }),
-      /* @__PURE__ */ jsxs18("dl", { className: "ship-facts", children: [
-        /* @__PURE__ */ jsx20("dt", { children: "Branch" }),
-        /* @__PURE__ */ jsx20("dd", { children: /* @__PURE__ */ jsx20("code", { children: ship.branch ?? "detached" }) }),
-        /* @__PURE__ */ jsx20("dt", { children: "Base" }),
-        /* @__PURE__ */ jsx20("dd", { children: /* @__PURE__ */ jsx20("code", { children: ship.baseBranch ?? "unknown" }) })
+    /* @__PURE__ */ jsxs19("aside", { className: "ship-side", children: [
+      /* @__PURE__ */ jsx21("h3", { className: "panel-title", children: "Confirm" }),
+      /* @__PURE__ */ jsxs19("dl", { className: "ship-facts", children: [
+        /* @__PURE__ */ jsx21("dt", { children: "Branch" }),
+        /* @__PURE__ */ jsx21("dd", { children: /* @__PURE__ */ jsx21("code", { children: ship.branch ?? "detached" }) }),
+        /* @__PURE__ */ jsx21("dt", { children: "Base" }),
+        /* @__PURE__ */ jsx21("dd", { children: /* @__PURE__ */ jsx21("code", { children: ship.baseBranch ?? "unknown" }) })
       ] }),
-      onBase && /* @__PURE__ */ jsxs18("p", { className: "warn-note", children: [
+      onBase && /* @__PURE__ */ jsxs19("p", { className: "warn-note", children: [
         "The session is on ",
-        /* @__PURE__ */ jsx20("code", { children: ship.branch }),
+        /* @__PURE__ */ jsx21("code", { children: ship.branch }),
         ", which is this repository's default branch. The harness will refuse to commit or push here \u2014 create a feature branch first."
       ] }),
-      failing.length > 0 && ship.steps.includes("checks") && /* @__PURE__ */ jsxs18("p", { className: "warn-note", children: [
+      failing.length > 0 && ship.steps.includes("checks") && /* @__PURE__ */ jsxs19("p", { className: "warn-note", children: [
         failing.length,
         " check(s) failing \u2014 the checks step will stop the ship."
       ] }),
-      gate ? /* @__PURE__ */ jsx20(Explain, { children: "Claude is parked here. Shipping resolves the gate and reports the result back to it." }) : /* @__PURE__ */ jsx20(Explain, { children: "This runs git commands against your working tree right now." }),
-      confirming ? /* @__PURE__ */ jsxs18("div", { className: "ship-confirm", children: [
-        /* @__PURE__ */ jsxs18("p", { children: [
+      gate ? /* @__PURE__ */ jsx21(Explain, { children: "Claude is parked here. Shipping resolves the gate and reports the result back to it." }) : /* @__PURE__ */ jsx21(Explain, { children: "This runs git commands against your working tree right now." }),
+      confirming ? /* @__PURE__ */ jsxs19("div", { className: "ship-confirm", children: [
+        /* @__PURE__ */ jsxs19("p", { children: [
           "Run ",
-          /* @__PURE__ */ jsx20("strong", { children: ship.steps.join(" \u2192 ") }),
+          /* @__PURE__ */ jsx21("strong", { children: ship.steps.join(" \u2192 ") }),
           " on ",
-          /* @__PURE__ */ jsx20("code", { children: ship.branch }),
-          ship.steps.includes("pr") && ship.baseBranch ? /* @__PURE__ */ jsxs18(Fragment9, { children: [
+          /* @__PURE__ */ jsx21("code", { children: ship.branch }),
+          ship.steps.includes("pr") && ship.baseBranch ? /* @__PURE__ */ jsxs19(Fragment10, { children: [
             " into ",
-            /* @__PURE__ */ jsx20("code", { children: ship.baseBranch })
+            /* @__PURE__ */ jsx21("code", { children: ship.baseBranch })
           ] }) : null,
           "?"
         ] }),
-        /* @__PURE__ */ jsxs18("div", { className: "row-actions", children: [
-          /* @__PURE__ */ jsx20(Button, { variant: "primary", onClick: () => void run(), disabled: busy, children: busy ? "Running\u2026" : "Yes, ship it" }),
-          /* @__PURE__ */ jsx20(Button, { variant: "ghost", onClick: () => setConfirming(false), children: "Cancel" })
+        /* @__PURE__ */ jsxs19("div", { className: "row-actions", children: [
+          /* @__PURE__ */ jsx21(Button, { variant: "primary", onClick: () => void run(), disabled: busy, children: busy ? "Running\u2026" : "Yes, ship it" }),
+          /* @__PURE__ */ jsx21(Button, { variant: "ghost", onClick: () => setConfirming(false), children: "Cancel" })
         ] })
-      ] }) : /* @__PURE__ */ jsx20("div", { className: "row-actions", children: /* @__PURE__ */ jsx20(Button, { variant: "primary", onClick: () => setConfirming(true), disabled: busy || onBase, children: "Ship\u2026" }) })
+      ] }) : /* @__PURE__ */ jsx21("div", { className: "row-actions", children: /* @__PURE__ */ jsx21(Button, { variant: "primary", onClick: () => setConfirming(true), disabled: busy || onBase, children: "Ship\u2026" }) })
     ] })
   ] });
 }
@@ -3371,8 +3715,8 @@ var App_exports = {};
 __export(App_exports, {
   App: () => App
 });
-import { useEffect as useEffect10 } from "react";
-import { Fragment as Fragment10, jsx as jsx21, jsxs as jsxs19 } from "react/jsx-runtime";
+import { useEffect as useEffect12 } from "react";
+import { Fragment as Fragment11, jsx as jsx22, jsxs as jsxs20 } from "react/jsx-runtime";
 function App() {
   const session = useSession();
   const sessionId = useStore((s) => s.sessionId);
@@ -3384,24 +3728,25 @@ function App() {
   useDocumentTitle(session, Boolean(gate));
   useUnsavedGuard(drafts.length);
   useShortcuts();
-  return /* @__PURE__ */ jsxs19("div", { className: classNames("app", sidebarCollapsed && "is-sidebar-collapsed"), children: [
-    /* @__PURE__ */ jsx21(Sidebar, {}),
-    /* @__PURE__ */ jsx21("main", { className: "main", children: !sessionId || !session ? /* @__PURE__ */ jsx21(NoSession, { error }) : /* @__PURE__ */ jsxs19(Fragment10, { children: [
-      /* @__PURE__ */ jsx21(Header, { session }),
-      /* @__PURE__ */ jsx21(ConnectionBar, {}),
-      /* @__PURE__ */ jsx21(GateBanner, {}),
-      /* @__PURE__ */ jsx21("nav", { className: "tabs", role: "tablist", children: TABS.map((t) => /* @__PURE__ */ jsx21(TabButton, { id: t.id, label: t.label, active: tab === t.id, session }, t.id)) }),
-      /* @__PURE__ */ jsxs19("div", { className: "view", children: [
-        tab === "timeline" && /* @__PURE__ */ jsx21(ActivityView, {}),
-        tab === "plan" && /* @__PURE__ */ jsx21(PlanView, {}),
-        tab === "board" && /* @__PURE__ */ jsx21(BoardView, {}),
-        tab === "review" && /* @__PURE__ */ jsx21(ReviewView, {}),
-        tab === "verify" && /* @__PURE__ */ jsx21(VerifyView, {}),
-        tab === "ship" && /* @__PURE__ */ jsx21(ShipView, {})
+  return /* @__PURE__ */ jsxs20("div", { className: classNames("app", sidebarCollapsed && "is-sidebar-collapsed"), children: [
+    /* @__PURE__ */ jsx22(Sidebar, {}),
+    /* @__PURE__ */ jsx22("main", { className: "main", children: !sessionId || !session ? /* @__PURE__ */ jsx22(NoSession, { error }) : /* @__PURE__ */ jsxs20(Fragment11, { children: [
+      /* @__PURE__ */ jsx22(Header, { session }),
+      /* @__PURE__ */ jsx22(ConnectionBar, {}),
+      /* @__PURE__ */ jsx22(GateBanner, {}),
+      /* @__PURE__ */ jsx22(QuestionGate, {}),
+      /* @__PURE__ */ jsx22("nav", { className: "tabs", role: "tablist", children: TABS.map((t) => /* @__PURE__ */ jsx22(TabButton, { id: t.id, label: t.label, active: tab === t.id, session }, t.id)) }),
+      /* @__PURE__ */ jsxs20("div", { className: "view", children: [
+        tab === "timeline" && /* @__PURE__ */ jsx22(ActivityView, {}),
+        tab === "plan" && /* @__PURE__ */ jsx22(PlanView, {}),
+        tab === "board" && /* @__PURE__ */ jsx22(BoardView, {}),
+        tab === "review" && /* @__PURE__ */ jsx22(ReviewView, {}),
+        tab === "verify" && /* @__PURE__ */ jsx22(VerifyView, {}),
+        tab === "ship" && /* @__PURE__ */ jsx22(ShipView, {})
       ] }, tab),
-      /* @__PURE__ */ jsx21(Composer, {})
+      /* @__PURE__ */ jsx22(Composer, {})
     ] }) }),
-    /* @__PURE__ */ jsx21(Toasts, {})
+    /* @__PURE__ */ jsx22(Toasts, {})
   ] });
 }
 function TabButton({
@@ -3412,7 +3757,7 @@ function TabButton({
 }) {
   const drafts = useDrafts();
   const badge = tabBadge(id, session, drafts.length);
-  return /* @__PURE__ */ jsxs19(
+  return /* @__PURE__ */ jsxs20(
     "button",
     {
       type: "button",
@@ -3422,7 +3767,7 @@ function TabButton({
       onClick: () => store.setTab(id),
       children: [
         label,
-        badge && /* @__PURE__ */ jsx21("span", { className: classNames("tab-badge", `is-${badge.tone}`), children: badge.text })
+        badge && /* @__PURE__ */ jsx22("span", { className: classNames("tab-badge", `is-${badge.tone}`), children: badge.text })
       ]
     }
   );
@@ -3459,27 +3804,27 @@ function tabBadge(id, session, draftCount) {
 }
 function Header({ session }) {
   const done = session.todos.filter((t) => t.status === "completed").length;
-  return /* @__PURE__ */ jsxs19("header", { className: "head", children: [
-    /* @__PURE__ */ jsxs19("div", { className: "head-main", children: [
-      /* @__PURE__ */ jsx21("h1", { className: "head-title", title: session.cwd, children: session.title }),
-      session.branch && /* @__PURE__ */ jsx21("code", { className: "head-branch", children: session.branch }),
-      /* @__PURE__ */ jsx21("span", { className: classNames("head-status", `is-${session.status}`), children: statusLabel(session) }),
-      /* @__PURE__ */ jsx21("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx21(ThemeToggle, {})
+  return /* @__PURE__ */ jsxs20("header", { className: "head", children: [
+    /* @__PURE__ */ jsxs20("div", { className: "head-main", children: [
+      /* @__PURE__ */ jsx22("h1", { className: "head-title", title: session.cwd, children: session.title }),
+      session.branch && /* @__PURE__ */ jsx22("code", { className: "head-branch", children: session.branch }),
+      /* @__PURE__ */ jsx22("span", { className: classNames("head-status", `is-${session.status}`), children: statusLabel(session) }),
+      /* @__PURE__ */ jsx22("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx22(ThemeToggle, {})
     ] }),
-    /* @__PURE__ */ jsxs19("div", { className: "head-meta", children: [
-      session.todos.length > 0 && /* @__PURE__ */ jsxs19("span", { className: "head-stat", children: [
+    /* @__PURE__ */ jsxs20("div", { className: "head-meta", children: [
+      session.todos.length > 0 && /* @__PURE__ */ jsxs20("span", { className: "head-stat", children: [
         done,
         "/",
         session.todos.length,
         " tasks"
       ] }),
-      session.files.length > 0 && /* @__PURE__ */ jsx21("span", { className: "head-stat", children: pluralize(session.files.length, "file") }),
-      session.usage && session.usage.outputTokens > 0 && /* @__PURE__ */ jsxs19("span", { className: "head-stat", title: usageTooltip(session), children: [
+      session.files.length > 0 && /* @__PURE__ */ jsx22("span", { className: "head-stat", children: pluralize(session.files.length, "file") }),
+      session.usage && session.usage.outputTokens > 0 && /* @__PURE__ */ jsxs20("span", { className: "head-stat", title: usageTooltip(session), children: [
         formatTokens(session.usage.outputTokens),
         " out"
       ] }),
-      /* @__PURE__ */ jsx21("span", { className: "head-path", title: session.cwd, children: session.cwd })
+      /* @__PURE__ */ jsx22("span", { className: "head-path", title: session.cwd, children: session.cwd })
     ] })
   ] });
 }
@@ -3510,36 +3855,36 @@ function statusLabel(session) {
   }
 }
 function NoSession({ error }) {
-  return /* @__PURE__ */ jsx21("div", { className: "view", children: /* @__PURE__ */ jsx21(
+  return /* @__PURE__ */ jsx22("div", { className: "view", children: /* @__PURE__ */ jsx22(
     EmptyState,
     {
       title: "No session yet",
-      hint: /* @__PURE__ */ jsxs19(Fragment10, { children: [
+      hint: /* @__PURE__ */ jsxs20(Fragment11, { children: [
         "Start Claude Code in a project with the harness enabled, then run ",
-        /* @__PURE__ */ jsx21("code", { children: "/harness" }),
+        /* @__PURE__ */ jsx22("code", { children: "/harness" }),
         ". Sessions appear here the moment they register.",
-        error && /* @__PURE__ */ jsxs19("span", { className: "error-text", children: [
+        error && /* @__PURE__ */ jsxs20("span", { className: "error-text", children: [
           " \xB7 ",
           error
         ] })
       ] }),
-      action: /* @__PURE__ */ jsxs19("p", { className: "empty-hint", children: [
+      action: /* @__PURE__ */ jsxs20("p", { className: "empty-hint", children: [
         "If a session is running and nothing shows up, the hooks are not firing \u2014 run",
         " ",
-        /* @__PURE__ */ jsx21("code", { children: "harness doctor" }),
+        /* @__PURE__ */ jsx22("code", { children: "harness doctor" }),
         "."
       ] })
     }
   ) });
 }
 function useDocumentTitle(session, blocked) {
-  useEffect10(() => {
+  useEffect12(() => {
     const name = session?.title ?? "cc-harness";
     document.title = blocked ? `\u25CF ${name} \u2014 waiting on you` : name;
   }, [session?.title, blocked]);
 }
 function useUnsavedGuard(draftCount) {
-  useEffect10(() => {
+  useEffect12(() => {
     if (draftCount === 0) return;
     const handler = (event) => {
       event.preventDefault();
@@ -3550,7 +3895,7 @@ function useUnsavedGuard(draftCount) {
   }, [draftCount]);
 }
 function useShortcuts() {
-  useEffect10(() => {
+  useEffect12(() => {
     const handler = (event) => {
       const target = event.target;
       const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
@@ -3580,6 +3925,7 @@ var init_App = __esm({
     init_store();
     init_Sidebar();
     init_GateBanner();
+    init_QuestionGate();
     init_Composer();
     init_Toasts();
     init_ConnectionBar();
@@ -3720,7 +4066,7 @@ function stubFetch(handler) {
 }
 
 // src/test/sidebar.test.tsx
-import { jsx as jsx22 } from "react/jsx-runtime";
+import { jsx as jsx23 } from "react/jsx-runtime";
 setupDom();
 var { render, fireEvent, within, cleanup, act, screen } = await import("@testing-library/react");
 var { App: App2 } = await Promise.resolve().then(() => (init_App(), App_exports));
@@ -3784,7 +4130,7 @@ async function boot() {
     if (route.startsWith("/api/session/")) return { session: makeSession(), diff: null };
     return { ok: true };
   }));
-  render(/* @__PURE__ */ jsx22(App2, {}));
+  render(/* @__PURE__ */ jsx23(App2, {}));
   await act(async () => {
     await store2.init();
   });
@@ -3809,7 +4155,8 @@ beforeEach(() => {
     toasts: [],
     pinned: [],
     collapsedProjects: [],
-    collapsedSidebar: false
+    collapsedSidebar: false,
+    soundEnabled: true
   });
 });
 after(() => cleanup());
@@ -3846,7 +4193,7 @@ test("a pinned session moves to its own group at the top", async () => {
   await act(async () => {
     fireEvent.click(within(rowFor("s3 title")).getByTitle("Pin session"));
   });
-  assert.deepEqual(groupNames(), ["Pinned", "repo", "other"]);
+  assert.deepEqual(groupNames(), ["Pinned / Action required", "repo", "other"]);
   assert.deepEqual(store2.getState().pinned, ["s3"]);
   assert.match(document.querySelector(".session-group")?.textContent ?? "", /s3 title/);
   const saved = JSON.parse(window.localStorage.getItem("cc-harness:prefs") ?? "{}");
@@ -3932,5 +4279,70 @@ test("collapsing the sidebar narrows the column it sits in", async () => {
     fireEvent.click(screen.getByTitle("Collapse sidebar"));
   });
   assert.ok(document.querySelector(".app")?.classList.contains("is-sidebar-collapsed"));
+});
+test("a session waiting on the user is lifted to the top group unpinned", async () => {
+  ({ posts } = stubFetch((route) => {
+    if (route.startsWith("/api/sessions")) {
+      const now = Date.now();
+      const blocked = { ...summary("s3", "other", now - 2e3), openGates: 1, status: "waiting" };
+      return { sessions: [summary("s1", "repo", now), summary("s2", "other", now - 1e3), blocked], version: "test" };
+    }
+    if (route.startsWith("/api/session/")) return { session: makeSession(), diff: null };
+    return { ok: true };
+  }));
+  render(/* @__PURE__ */ jsx23(App2, {}));
+  await act(async () => {
+    await store2.init();
+  });
+  assert.deepEqual(store2.getState().pinned, []);
+  assert.deepEqual(groupNames(), ["Pinned / Action required", "repo", "other"]);
+  assert.match(document.querySelector(".session-group")?.textContent ?? "", /s3 title/);
+  assert.deepEqual(rowNames().filter((n) => n.includes("s3 title")).length, 1);
+});
+test("a session can be renamed from the rail", async () => {
+  await boot();
+  posts.length = 0;
+  await act(async () => {
+    fireEvent.click(within(rowFor("s1 title")).getByTitle("Rename this session"));
+  });
+  const field = document.querySelector(".session-rename");
+  assert.ok(field, "the row becomes an input");
+  await act(async () => {
+    fireEvent.change(field, { target: { value: "Cache rewrite" } });
+  });
+  await act(async () => {
+    fireEvent.keyDown(field, { key: "Enter" });
+  });
+  const call = posts.find((p) => p.route.includes("/title"));
+  assert.ok(call, "the new name is saved");
+  assert.equal(call.body["title"], "Cache rewrite");
+  assert.ok(rowNames().some((n) => n.includes("Cache rewrite")));
+});
+test("abandoning a rename leaves the name alone", async () => {
+  await boot();
+  posts.length = 0;
+  await act(async () => {
+    fireEvent.click(within(rowFor("s1 title")).getByTitle("Rename this session"));
+  });
+  const field = document.querySelector(".session-rename");
+  await act(async () => {
+    fireEvent.change(field, { target: { value: "Discard me" } });
+  });
+  await act(async () => {
+    fireEvent.keyDown(field, { key: "Escape" });
+  });
+  assert.equal(posts.find((p) => p.route.includes("/title")), void 0, "nothing was saved");
+  assert.ok(rowNames().some((n) => n.includes("s1 title")), "the original name is still there");
+});
+test("the alert chime can be muted, and the choice is remembered", async () => {
+  await boot();
+  assert.equal(store2.getState().soundEnabled, true, "on by default");
+  await act(async () => {
+    fireEvent.click(screen.getByTitle("Mute the alert chime"));
+  });
+  assert.equal(store2.getState().soundEnabled, false);
+  const saved = JSON.parse(window.localStorage.getItem("cc-harness:prefs") ?? "{}");
+  assert.equal(saved.soundEnabled, false, "a mute outlives the tab");
+  assert.ok(screen.getByTitle("Play a chime when Claude needs you"), "the control inverts");
 });
 //# sourceMappingURL=sidebar.test.js.map

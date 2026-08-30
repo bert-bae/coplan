@@ -1,7 +1,6 @@
-import { useEffect, useState } from 'react';
 import { store, useOpenGate, useSession, gateHeadline, tabForGate } from '../store.ts';
 import { Button } from './primitives.tsx';
-import { duration } from '../lib/format.ts';
+import { useElapsed } from '../lib/hooks.ts';
 
 /**
  * The single most important state in the product: Claude has stopped and is
@@ -40,6 +39,11 @@ export function GateBanner() {
     );
   }
 
+  // A question renders its own card directly below, carrying the same
+  // headline and timer plus the controls to answer it. Two banners saying the
+  // same thing is one banner too many.
+  if (gate.kind === 'question') return null;
+
   const parked = gate.waiting;
 
   return (
@@ -62,21 +66,12 @@ export function GateBanner() {
           )}
         </span>
       </div>
-      <Button variant="primary" onClick={() => store.setTab(tabForGate(gate))}>
+      <Button
+        variant="primary"
+        onClick={() => (gate.kind === 'question' ? store.focusGate() : store.setTab(tabForGate(gate)))}
+      >
         Answer
       </Button>
     </div>
   );
-}
-
-/** Counts up, so a parked session visibly costs the user time. */
-function useElapsed(since?: number): string {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!since) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [since]);
-  if (!since) return '';
-  return duration(now - since);
 }
