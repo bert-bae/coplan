@@ -408,8 +408,9 @@ var commands = {
           s.openGates ? `${s.openGates} open gate` : "",
           s.pendingFeedback ? `${s.pendingFeedback} unread` : ""
         ].filter(Boolean).join(", ");
+        const where = s.worktree ? `${s.repoName ?? path3.basename(s.cwd)} \u2442${s.worktree}` : s.repoName ?? path3.basename(s.cwd);
         console.log(
-          `  ${s.sessionId.slice(0, 8)}  ${pad(s.stage, 14)} ${pad(s.status, 8)} ${pad(s.repoName ?? path3.basename(s.cwd), 20)} ${s.branch ?? ""}${flags ? `  [${flags}]` : ""}`
+          `  ${s.sessionId.slice(0, 8)}  ${pad(s.stage, 14)} ${pad(s.status, 8)} ${pad(where, 28)} ${s.branch ?? ""}${flags ? `  [${flags}]` : ""}`
         );
       }
     } catch (err) {

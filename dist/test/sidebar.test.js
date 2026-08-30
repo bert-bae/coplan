@@ -758,7 +758,7 @@ function groupSessions(sessions, pinned) {
     if (!group) {
       group = key === PINNED_KEY ? { key, label: "Pinned / Action required", path: "", sessions: [], openGates: 0 } : {
         key,
-        label: session.repoName ?? basename(session.cwd) ?? "Unknown project",
+        label: groupLabel(session),
         path: session.repoRoot ?? session.cwd,
         sessions: [],
         openGates: 0
@@ -773,6 +773,10 @@ function groupSessions(sessions, pinned) {
     if (b.key === PINNED_KEY) return 1;
     return (b.sessions[0]?.updatedAt ?? 0) - (a.sessions[0]?.updatedAt ?? 0);
   });
+}
+function groupLabel(session) {
+  const repo = session.repoName ?? basename(session.cwd) ?? "Unknown project";
+  return session.worktree ? `${repo} \u2442 ${session.worktree}` : repo;
 }
 function basename(p) {
   const parts = p.split(/[\\/]/).filter(Boolean);
@@ -844,7 +848,7 @@ Double-click to rename`,
             session.branch && /* @__PURE__ */ jsx("span", { className: "session-branch", children: session.branch })
           ] }),
           /* @__PURE__ */ jsxs("span", { className: "session-foot", children: [
-            showRepo && session.repoName && /* @__PURE__ */ jsx("span", { className: "session-repo", children: session.repoName }),
+            showRepo && session.repoName && /* @__PURE__ */ jsx("span", { className: "session-repo", children: groupLabel(session) }),
             /* @__PURE__ */ jsx("span", { children: relativeTime(session.updatedAt) }),
             drafts > 0 && /* @__PURE__ */ jsxs("span", { className: "pill is-draft", children: [
               drafts,
@@ -3807,6 +3811,10 @@ function Header({ session }) {
   return /* @__PURE__ */ jsxs20("header", { className: "head", children: [
     /* @__PURE__ */ jsxs20("div", { className: "head-main", children: [
       /* @__PURE__ */ jsx22("h1", { className: "head-title", title: session.cwd, children: session.title }),
+      session.worktree && /* @__PURE__ */ jsxs20("code", { className: "head-worktree", title: `Working in worktree ${session.worktree.path}`, children: [
+        "\u2442 ",
+        session.worktree.name
+      ] }),
       session.branch && /* @__PURE__ */ jsx22("code", { className: "head-branch", children: session.branch }),
       /* @__PURE__ */ jsx22("span", { className: classNames("head-status", `is-${session.status}`), children: statusLabel(session) }),
       /* @__PURE__ */ jsx22("span", { className: "spacer" }),
@@ -4103,13 +4111,15 @@ function makeSession() {
     stats: { turns: 0, toolCalls: 0, edits: 0 }
   };
 }
-function summary(sessionId, repo, updatedAt) {
+function summary(sessionId, repo, updatedAt, worktree = null) {
   return {
     sessionId,
     title: `${sessionId} title`,
     cwd: `/${repo}`,
     repoName: repo,
-    repoRoot: `/${repo}`,
+    // A worktree is its own checkout, so it groups under its own root.
+    repoRoot: worktree ? `/${repo}/.claude/worktrees/${worktree}` : `/${repo}`,
+    worktree,
     branch: "main",
     stage: "implementing",
     status: "active",
@@ -4124,9 +4134,10 @@ var SESSIONS = () => {
   const now = Date.now();
   return [summary("s1", "repo", now), summary("s2", "other", now - 1e3), summary("s3", "other", now - 2e3)];
 };
-async function boot() {
+async function boot(sessions) {
+  const list = sessions ?? SESSIONS;
   ({ posts } = stubFetch((route) => {
-    if (route.startsWith("/api/sessions")) return { sessions: SESSIONS(), version: "test" };
+    if (route.startsWith("/api/sessions")) return { sessions: list(), version: "test" };
     if (route.startsWith("/api/session/")) return { session: makeSession(), diff: null };
     return { ok: true };
   }));
@@ -4166,6 +4177,16 @@ test("sessions are grouped by the project they run in", async () => {
   const counts = [...document.querySelectorAll(".session-group-count")].map((el) => el.textContent);
   assert.deepEqual(counts, ["1", "2"]);
   assert.deepEqual(rowNames(), ["s1 title", "s2 title", "s3 title"]);
+});
+test("each worktree of a repo is its own group, named for the worktree", async () => {
+  const now = Date.now();
+  await boot(() => [
+    summary("w1", "repo", now, "feature/ui"),
+    summary("w2", "repo", now - 1e3, "fix/parser"),
+    summary("m1", "repo", now - 2e3)
+  ]);
+  assert.deepEqual(groupNames(), ["repo \u2442 feature/ui", "repo \u2442 fix/parser", "repo"]);
+  assert.deepEqual(rowNames(), ["w1 title", "w2 title", "m1 title"]);
 });
 test("a project group folds away, and the fold is remembered", async () => {
   await boot();

@@ -361,12 +361,40 @@ export interface FeedbackItem {
   threads?: ReviewThread[];
 }
 
+/**
+ * Where a session actually works, when that is not where it was launched.
+ *
+ * A worktree-isolated session runs in `<repo>/.claude/worktrees/<name>`, but
+ * every hook payload keeps reporting the directory the CLI was started in.
+ * Anchoring git on that would point the diff, the checks and the ship stage at
+ * the wrong tree, so the resolved worktree is recorded separately.
+ */
+export interface WorktreeInfo {
+  /** Absolute path of the worktree the session is working in. */
+  path: string;
+  /** The worktree's name as the CLI knows it, e.g. `feature/improvements`. */
+  name: string;
+  /** Root of the repository the worktree belongs to, for naming and grouping. */
+  mainRoot: string | null;
+  /** Directory the session was launched in, before it was relocated. */
+  originalCwd: string | null;
+  /** Branch that was checked out there. */
+  originalBranch: string | null;
+  /** HEAD in the original tree when the session moved in. The worktree's
+   *  branch was forked from it, so it is the base its review diffs against —
+   *  and it is still the right base for the original tree on the way back. */
+  originalHeadCommit: string | null;
+}
+
 export interface SessionState {
   sessionId: string;
   /** pid of the owning `claude` process, when known. */
   claudePid?: number;
+  /** The directory the session is working in — the worktree, once relocated. */
   cwd: string;
   repoRoot: string | null;
+  /** Set while the session is isolated in a git worktree. */
+  worktree?: WorktreeInfo | null;
   branch: string | null;
   transcriptPath: string | null;
   title: string;
@@ -415,8 +443,12 @@ export interface SessionSummary {
   cwd: string;
   repoName: string | null;
   /** Absolute repo root, or null outside a repo. The session list groups on
-   *  this, so two checkouts of the same repo stay separate accordions. */
+   *  this, so two checkouts of the same repo stay separate accordions — and so
+   *  does each worktree, whose root is the worktree itself. */
   repoRoot: string | null;
+  /** Worktree name when the session is isolated in one, so two sessions on the
+   *  same repo are told apart in the switcher. */
+  worktree: string | null;
   branch: string | null;
   stage: Stage;
   status: SessionStatus;

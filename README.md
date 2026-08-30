@@ -92,6 +92,24 @@ You can drag cards yourself; Claude is told when you do.
 The Review tab reconciles the board against the diff — a card marked done that
 touched nothing gets flagged, and so does a changed file no card claims.
 
+## Worktrees
+
+A session can be isolated in a git worktree — `EnterWorktree`, or `claude` run
+with worktree isolation — and then it works in `<repo>/.claude/worktrees/<name>`
+while every hook payload keeps reporting the directory it was *launched* in.
+
+The harness reads the relocation out of the transcript, which is the only place
+the CLI records it, and re-anchors the session on the worktree: the diff, the
+observed-file attribution, the checks and the commit-and-push in the ship stage
+all run against the tree the session is actually editing. Relocation is watched
+continuously, so entering or leaving a worktree mid-session moves the harness
+with it, and a daemon that starts up mid-session catches up by scanning the
+transcript once.
+
+Sessions keep the name of the repository they belong to and are told apart by
+their worktree, so several sessions on the same repo are distinguishable in the
+switcher, in the header, and in `harness status`.
+
 ## How feedback reaches the session
 
 Two paths, both landing in the session transcript:

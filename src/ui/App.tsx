@@ -155,6 +155,11 @@ function Header({ session }: { session: SessionState }) {
         <h1 className="head-title" title={session.cwd}>
           {session.title}
         </h1>
+        {session.worktree && (
+          <code className="head-worktree" title={`Working in worktree ${session.worktree.path}`}>
+            ⑂ {session.worktree.name}
+          </code>
+        )}
         {session.branch && <code className="head-branch">{session.branch}</code>}
         <span className={classNames('head-status', `is-${session.status}`)}>{statusLabel(session)}</span>
         <span className="spacer" />

@@ -60,6 +60,7 @@ function newSession(sessionId, cwd) {
     sessionId,
     cwd,
     repoRoot: null,
+    worktree: null,
     branch: null,
     transcriptPath: null,
     title: path2.basename(cwd) || sessionId.slice(0, 8),
@@ -88,6 +89,7 @@ function newSession(sessionId, cwd) {
 }
 function migrate(state) {
   state.reviewRound ??= 0;
+  state.worktree ??= null;
   state.threads ??= [];
   state.roundHistory ??= [];
   state.tasks ??= [];
@@ -106,6 +108,10 @@ function trimGates(state) {
   const drop = new Set(droppable.slice(0, Math.max(0, surplus)));
   if (drop.size === 0) return;
   state.gates = state.gates.filter((g) => !drop.has(g));
+}
+function repoNameOf(state) {
+  const root = state.worktree?.mainRoot ?? state.repoRoot;
+  return root ? path2.basename(root) : null;
 }
 function mtimeOf(dir) {
   try {
@@ -327,8 +333,11 @@ var init_store = __esm({
           sessionId: s.sessionId,
           title: s.title,
           cwd: s.cwd,
-          repoName: s.repoRoot ? path2.basename(s.repoRoot) : null,
+          // In a worktree `repoRoot` is the worktree itself, whose basename is the
+          // branch. The switcher wants the repository it belongs to.
+          repoName: repoNameOf(s),
           repoRoot: s.repoRoot,
+          worktree: s.worktree?.name ?? null,
           branch: s.branch,
           stage: s.stage,
           status: s.status,
@@ -345,8 +354,12 @@ var init_store = __esm({
       /** Most recently updated session rooted at (or under) `cwd`. */
       findByCwd(cwd) {
         const normalized = path2.resolve(cwd);
+        const matches = (value) => !!value && path2.resolve(value) === normalized;
         return this.all().find(
-          (s) => path2.resolve(s.cwd) === normalized || s.repoRoot && path2.resolve(s.repoRoot) === normalized
+          (s) => matches(s.cwd) || matches(s.repoRoot) || // A session that moved into a worktree is anchored there, but the MCP
+          // server it started with still reports the directory it was launched
+          // in — so that has to keep resolving to the same session.
+          matches(s.worktree?.originalCwd) || matches(s.worktree?.path)
         );
       }
       findByPid(pid) {
@@ -573,6 +586,19 @@ var init_store = __esm({
         } catch {
         }
         this.emitEvent({ type: "diff", sessionId: id, diff });
+      }
+      /**
+       * Forget a session's diff, in memory and on disk.
+       *
+       * Used when the ground moves under a session — it relocates into or out of a
+       * worktree — because the cached diff describes a tree it is no longer in.
+       */
+      clearDiff(id) {
+        this.diffs.delete(id);
+        try {
+          rmSync(path2.join(paths.sessionDir(id), "diff.json"), { force: true });
+        } catch {
+        }
       }
       getDiff(id) {
         const cached = this.diffs.get(id);

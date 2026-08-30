@@ -5,7 +5,7 @@
 import http from "node:http";
 import { randomBytes, randomUUID as randomUUID5 } from "node:crypto";
 import { openSync, writeSync, closeSync, unlinkSync, appendFileSync } from "node:fs";
-import path7 from "node:path";
+import path9 from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/daemon/store.ts
@@ -82,6 +82,7 @@ function newSession(sessionId, cwd) {
     sessionId,
     cwd,
     repoRoot: null,
+    worktree: null,
     branch: null,
     transcriptPath: null,
     title: path2.basename(cwd) || sessionId.slice(0, 8),
@@ -285,8 +286,11 @@ var SessionStore = class extends EventEmitter {
       sessionId: s.sessionId,
       title: s.title,
       cwd: s.cwd,
-      repoName: s.repoRoot ? path2.basename(s.repoRoot) : null,
+      // In a worktree `repoRoot` is the worktree itself, whose basename is the
+      // branch. The switcher wants the repository it belongs to.
+      repoName: repoNameOf(s),
       repoRoot: s.repoRoot,
+      worktree: s.worktree?.name ?? null,
       branch: s.branch,
       stage: s.stage,
       status: s.status,
@@ -303,8 +307,12 @@ var SessionStore = class extends EventEmitter {
   /** Most recently updated session rooted at (or under) `cwd`. */
   findByCwd(cwd) {
     const normalized = path2.resolve(cwd);
+    const matches = (value) => !!value && path2.resolve(value) === normalized;
     return this.all().find(
-      (s) => path2.resolve(s.cwd) === normalized || s.repoRoot && path2.resolve(s.repoRoot) === normalized
+      (s) => matches(s.cwd) || matches(s.repoRoot) || // A session that moved into a worktree is anchored there, but the MCP
+      // server it started with still reports the directory it was launched
+      // in — so that has to keep resolving to the same session.
+      matches(s.worktree?.originalCwd) || matches(s.worktree?.path)
     );
   }
   findByPid(pid) {
@@ -532,6 +540,19 @@ var SessionStore = class extends EventEmitter {
     }
     this.emitEvent({ type: "diff", sessionId: id, diff });
   }
+  /**
+   * Forget a session's diff, in memory and on disk.
+   *
+   * Used when the ground moves under a session — it relocates into or out of a
+   * worktree — because the cached diff describes a tree it is no longer in.
+   */
+  clearDiff(id) {
+    this.diffs.delete(id);
+    try {
+      rmSync(path2.join(paths.sessionDir(id), "diff.json"), { force: true });
+    } catch {
+    }
+  }
   getDiff(id) {
     const cached = this.diffs.get(id);
     if (cached) {
@@ -601,6 +622,7 @@ var SessionStore = class extends EventEmitter {
 };
 function migrate(state) {
   state.reviewRound ??= 0;
+  state.worktree ??= null;
   state.threads ??= [];
   state.roundHistory ??= [];
   state.tasks ??= [];
@@ -619,6 +641,10 @@ function trimGates(state) {
   const drop = new Set(droppable.slice(0, Math.max(0, surplus)));
   if (drop.size === 0) return;
   state.gates = state.gates.filter((g) => !drop.has(g));
+}
+function repoNameOf(state) {
+  const root = state.worktree?.mainRoot ?? state.repoRoot;
+  return root ? path2.basename(root) : null;
 }
 function mtimeOf(dir) {
   try {
@@ -784,10 +810,98 @@ function requestSignal(req) {
 
 // src/daemon/hookIngest.ts
 import { randomUUID as randomUUID3 } from "node:crypto";
-import path4 from "node:path";
+import path6 from "node:path";
 
 // src/daemon/transcript.ts
-import { createReadStream as createReadStream2, existsSync as existsSync4, statSync as statSync3, watch } from "node:fs";
+import { createReadStream as createReadStream3, existsSync as existsSync4, statSync as statSync3, watch } from "node:fs";
+
+// src/daemon/worktree.ts
+import { createReadStream as createReadStream2 } from "node:fs";
+import { createInterface } from "node:readline";
+import path4 from "node:path";
+var WorktreeResolver = class {
+  resolved = null;
+  context = null;
+  /** The worktree the session is in as of the last entry fed in. */
+  get current() {
+    return this.resolved;
+  }
+  /** Feed one transcript entry. True when the resolved worktree changed. */
+  consume(entry) {
+    const before = this.resolved?.path ?? null;
+    switch (entry["type"]) {
+      case "worktree-state": {
+        const record = parseWorktreeSession(entry["worktreeSession"]);
+        this.context = record;
+        this.resolved = record;
+        break;
+      }
+      case "relocated": {
+        const to = asPath(entry["relocatedCwd"]);
+        if (!to) break;
+        if (this.context && to === this.context.originalCwd) {
+          this.resolved = null;
+          break;
+        }
+        this.resolved = this.context && this.context.path === to ? this.context : {
+          path: to,
+          name: path4.basename(to),
+          originalCwd: null,
+          originalBranch: null,
+          originalHeadCommit: null
+        };
+        break;
+      }
+      default:
+        return false;
+    }
+    return (this.resolved?.path ?? null) !== before;
+  }
+};
+async function scanTranscriptForWorktree(file) {
+  const resolver = new WorktreeResolver();
+  try {
+    const input = createReadStream2(file, { encoding: "utf8" });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    try {
+      for await (const line of lines) {
+        if (!line.includes('"relocated') && !line.includes('"worktree-state"')) continue;
+        try {
+          resolver.consume(JSON.parse(line));
+        } catch {
+        }
+      }
+    } finally {
+      lines.close();
+      input.destroy();
+    }
+  } catch {
+    return null;
+  }
+  return resolver.current;
+}
+function parseWorktreeSession(value) {
+  if (!value || typeof value !== "object") return null;
+  const rec = value;
+  const worktreePath = asPath(rec["worktreePath"]);
+  if (!worktreePath) return null;
+  return {
+    path: worktreePath,
+    name: asString(rec["worktreeName"]) ?? path4.basename(worktreePath),
+    originalCwd: asPath(rec["originalCwd"]) ?? asPath(rec["preEnterOriginalCwd"]),
+    originalBranch: asString(rec["originalBranch"]),
+    originalHeadCommit: asString(rec["originalHeadCommit"])
+  };
+}
+function asString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+function asPath(value) {
+  const str = asString(value);
+  return str && path4.isAbsolute(str) ? path4.normalize(str) : null;
+}
+
+// src/daemon/transcript.ts
 var MAX_TEXT = 4e3;
 var MAX_THINKING = 600;
 var POLL_MS = 700;
@@ -804,6 +918,7 @@ var TranscriptTailer = class {
   reading = false;
   pending = false;
   closed = false;
+  worktree = new WorktreeResolver();
   /**
    * Start tailing. `fromStart` replays the whole file, which is what a fresh
    * daemon needs when it attaches to a session already in progress.
@@ -890,7 +1005,9 @@ var TranscriptTailer = class {
         }
       }
       if (this.closed) return;
-      if (update.events.length > 0 || update.title || update.usage) this.onUpdate(update);
+      if (update.events.length > 0 || update.title || update.usage || "worktree" in update) {
+        this.onUpdate(update);
+      }
     } finally {
       this.reading = false;
       if (this.pending && !this.closed) {
@@ -901,6 +1018,10 @@ var TranscriptTailer = class {
   }
   consume(entry, update) {
     const type = entry["type"];
+    if (type === "worktree-state" || type === "relocated") {
+      if (this.worktree.consume(entry)) update.worktree = this.worktree.current;
+      return;
+    }
     if (type === "ai-title") {
       const title = firstString(entry["title"], entry["text"], entry["value"]);
       if (title) update.title = title;
@@ -1022,7 +1143,7 @@ function readRange(file, start, end) {
   return new Promise((resolve) => {
     let out = "";
     let settled = false;
-    const stream = createReadStream2(file, { start, end, encoding: "utf8" });
+    const stream = createReadStream3(file, { start, end, encoding: "utf8" });
     const finish = () => {
       if (settled) return;
       settled = true;
@@ -1216,6 +1337,7 @@ Then report the resulting URL with harness_note.`
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
+import path5 from "node:path";
 
 // src/shared/diffparse.ts
 var HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
@@ -1380,6 +1502,13 @@ async function repoRoot(cwd) {
   const res = await git(cwd, ["rev-parse", "--show-toplevel"]);
   return res.ok ? res.stdout.trim() || null : null;
 }
+async function mainWorktreeRoot(cwd) {
+  const res = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const dir = res.stdout.trim();
+  if (!res.ok || !dir) return null;
+  const base = path5.basename(dir);
+  return base === ".git" ? path5.dirname(dir) : null;
+}
 async function currentBranch(cwd) {
   const res = await git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
   const name = res.stdout.trim();
@@ -1425,7 +1554,10 @@ var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 async function untrackedFiles(cwd) {
   const res = await git(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]);
   if (!res.ok) return [];
-  return res.stdout.split("\0").filter(Boolean);
+  return res.stdout.split("\0").filter(Boolean).filter(isFilePath);
+}
+function isFilePath(entry) {
+  return !entry.endsWith("/");
 }
 async function computeDiff(cwd, opts = {}) {
   const root = await repoRoot(cwd) ?? cwd;
@@ -1531,16 +1663,24 @@ async function workingTreeFingerprints(cwd) {
     const entry = entries[i];
     if (entry.length < 4) continue;
     const code = entry.slice(0, 2);
-    paths2.push(entry.slice(3));
+    const file = entry.slice(3);
+    if (isFilePath(file)) paths2.push(file);
     if (code[0] === "R" || code[1] === "R") i++;
   }
   if (paths2.length === 0) return {};
+  const out = {};
   const hashed = await git(cwd, ["hash-object", "--", ...paths2]);
   const hashes = hashed.stdout.split("\n").filter(Boolean);
-  const out = {};
-  paths2.forEach((file, i) => {
-    out[file] = hashes[i] ?? "absent";
-  });
+  if (hashes.length === paths2.length) {
+    paths2.forEach((file, i) => {
+      out[file] = hashes[i];
+    });
+    return out;
+  }
+  for (const file of paths2) {
+    const one = await git(cwd, ["hash-object", "--", file]);
+    out[file] = one.ok && one.stdout.trim() || "absent";
+  }
   return out;
 }
 function changedBetween(before, after) {
@@ -1831,6 +1971,8 @@ var HOOK_NOOP = { suppressOutput: true };
 var EDIT_TOOLS = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 var MAX_COMMANDS = 200;
 var MAX_TOUCHED_FILES = 500;
+var worktreeScanned = /* @__PURE__ */ new Set();
+var MAX_SCANNED = 500;
 async function ingestHook(event, input, ctx) {
   const sessionId = input.session_id;
   if (!sessionId) return HOOK_NOOP;
@@ -1855,13 +1997,15 @@ async function ingestHook(event, input, ctx) {
   }
 }
 async function onSessionStart(sessionId, input, ctx) {
-  const cwd = input.cwd || process.cwd();
-  const session = ctx.store.ensure(sessionId, cwd);
+  const launchedIn = input.cwd || process.cwd();
+  const session = ctx.store.ensure(sessionId, launchedIn);
+  const cwd = session.worktree?.path ?? launchedIn;
   const root = await repoRoot(cwd);
   const [branch, head] = await Promise.all([
     currentBranch(root ?? cwd),
     headCommit(root ?? cwd)
   ]);
+  const named = session.worktree?.mainRoot ?? root ?? cwd;
   ctx.store.update(sessionId, {
     cwd,
     repoRoot: root,
@@ -1870,9 +2014,10 @@ async function onSessionStart(sessionId, input, ctx) {
     startCommit: session.startCommit ?? head,
     transcriptPath: input.transcript_path ?? session.transcriptPath,
     status: "active",
-    title: session.title === sessionId.slice(0, 8) ? path4.basename(root ?? cwd) : session.title,
+    title: session.title === sessionId.slice(0, 8) ? path6.basename(named) : session.title,
     ...input.start_reason === "clear" ? { stage: "idle" } : {}
   });
+  await resolveWorktree(sessionId, ctx);
   attachTailer(sessionId, ctx, input.start_reason === "resume");
   ctx.store.addTimeline(sessionId, "note", `Session ${input.start_reason ?? "started"}`, {
     label: "session"
@@ -1882,6 +2027,7 @@ async function onSessionStart(sessionId, input, ctx) {
 async function onSessionEnd(sessionId, input, ctx) {
   ctx.tailers.get(sessionId)?.close();
   ctx.tailers.delete(sessionId);
+  worktreeScanned.delete(sessionId);
   clearBaseline(sessionId);
   ctx.store.update(sessionId, { status: "ended", endedAt: Date.now() });
   ctx.store.addTimeline(sessionId, "note", `Session ended (${input.end_reason ?? "unknown"})`, {
@@ -1919,7 +2065,7 @@ async function onPostToolUse(sessionId, input, ctx) {
     if (EDIT_TOOLS.has(tool)) {
       const file = typeof toolInput["file_path"] === "string" ? toolInput["file_path"] : typeof toolInput["notebook_path"] === "string" ? toolInput["notebook_path"] : null;
       if (file) {
-        const rel = s.repoRoot ? path4.relative(s.repoRoot, file) || file : file;
+        const rel = s.repoRoot ? relativeWithin(s.repoRoot, file) : file;
         const existing = s.files.find((f) => f.path === rel);
         const now = Date.now();
         if (existing) {
@@ -2045,6 +2191,56 @@ async function onStop(sessionId, input, ctx) {
     `[cc-harness] Still waiting on the user at the "${gate.kind}" gate. Call harness_await({ gate_id: "${gate.id}" }) to keep waiting. Do not start new work.`
   );
 }
+async function resolveWorktree(sessionId, ctx) {
+  if (worktreeScanned.has(sessionId)) return;
+  const transcript = ctx.store.get(sessionId)?.transcriptPath;
+  if (!transcript) return;
+  if (worktreeScanned.size >= MAX_SCANNED) worktreeScanned.clear();
+  worktreeScanned.add(sessionId);
+  await applyWorktree(sessionId, ctx, await scanTranscriptForWorktree(transcript));
+}
+async function applyWorktree(sessionId, ctx, worktree) {
+  const session = ctx.store.get(sessionId);
+  if (!session) return;
+  const previous = session.worktree ?? null;
+  if ((worktree?.path ?? null) === (previous?.path ?? null)) return;
+  const target = worktree?.path ?? previous?.originalCwd ?? session.cwd;
+  const root = await repoRoot(target) ?? target;
+  const [branch, head, mainRoot] = await Promise.all([
+    currentBranch(root),
+    headCommit(root),
+    worktree ? mainWorktreeRoot(root) : Promise.resolve(null)
+  ]);
+  ctx.store.update(sessionId, {
+    cwd: target,
+    repoRoot: root,
+    branch,
+    // The commit the worktree forked from is the right base for its review;
+    // the one recorded at session start belongs to the tree it just left.
+    startCommit: worktree ? worktree.originalHeadCommit ?? head : previous?.originalHeadCommit ?? session.startCommit ?? head,
+    worktree: worktree ? {
+      path: worktree.path,
+      name: worktree.name,
+      mainRoot,
+      originalCwd: worktree.originalCwd ?? previous?.originalCwd ?? session.cwd,
+      originalBranch: worktree.originalBranch ?? previous?.originalBranch ?? null,
+      originalHeadCommit: worktree.originalHeadCommit ?? previous?.originalHeadCommit ?? session.startCommit
+    } : null
+  });
+  ctx.store.addTimeline(
+    sessionId,
+    "note",
+    worktree ? `Working in worktree ${worktree.name} (${target})` : `Left the worktree; back in ${target}`,
+    { label: "worktree" }
+  );
+  ctx.store.clearDiff(sessionId);
+  clearBaseline(sessionId);
+}
+function relativeWithin(root, file) {
+  const rel = path6.relative(root, file);
+  if (!rel) return file;
+  return rel.startsWith("..") || path6.isAbsolute(rel) ? file : rel;
+}
 function attachTailer(sessionId, ctx, fromStart = false) {
   const session = ctx.store.get(sessionId);
   if (!session?.transcriptPath || ctx.tailers.has(sessionId)) return;
@@ -2052,6 +2248,7 @@ function attachTailer(sessionId, ctx, fromStart = false) {
     if (update.title && !ctx.store.get(sessionId)?.titleLocked) {
       ctx.store.update(sessionId, { title: update.title });
     }
+    if ("worktree" in update) void applyWorktree(sessionId, ctx, update.worktree ?? null);
     if (update.events.length) ctx.store.addTimelineBatch(sessionId, update.events);
     if (update.usage) {
       ctx.store.mutate(sessionId, (s) => {
@@ -2065,6 +2262,8 @@ function attachTailer(sessionId, ctx, fromStart = false) {
   });
   ctx.tailers.set(sessionId, tailer);
   tailer.start(fromStart);
+  void resolveWorktree(sessionId, ctx).catch(() => {
+  });
 }
 function normalizeTodos(value) {
   if (!Array.isArray(value)) return null;
@@ -2360,11 +2559,11 @@ function checksSummary(checks) {
 // src/daemon/ship.ts
 import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync2, rmSync as rmSync2 } from "node:fs";
 import { tmpdir } from "node:os";
-import path6 from "node:path";
+import path8 from "node:path";
 
 // src/shared/config.ts
 import { readFileSync as readFileSync3, existsSync as existsSync5 } from "node:fs";
-import path5 from "node:path";
+import path7 from "node:path";
 var DEFAULT_CONFIG = {
   autoOpen: false,
   maxTimelineEvents: 500,
@@ -2432,9 +2631,9 @@ function readJson2(file) {
 }
 function loadConfig(opts) {
   let cfg = DEFAULT_CONFIG;
-  cfg = mergeConfig(cfg, readJson2(path5.join(opts.configDir, "config.json")));
+  cfg = mergeConfig(cfg, readJson2(path7.join(opts.configDir, "config.json")));
   if (opts.projectDir) {
-    cfg = mergeConfig(cfg, readJson2(path5.join(opts.projectDir, ".claude", "harness.json")));
+    cfg = mergeConfig(cfg, readJson2(path7.join(opts.projectDir, ".claude", "harness.json")));
   }
   return cfg;
 }
@@ -2442,8 +2641,8 @@ function stageInstructions(cfg, stage, opts) {
   const rel = cfg.stages[stage]?.instructions;
   if (!rel) return void 0;
   const candidates2 = [
-    path5.resolve(opts.configDir, rel),
-    ...opts.projectDir ? [path5.resolve(opts.projectDir, rel)] : []
+    path7.resolve(opts.configDir, rel),
+    ...opts.projectDir ? [path7.resolve(opts.projectDir, rel)] : []
   ];
   for (const file of candidates2) {
     try {
@@ -2553,7 +2752,7 @@ async function executeShip(store, sessionId, config, ship) {
       const add = reviewed.length ? await git(cwd, ["add", "--", ...reviewed]) : await git(cwd, ["add", "-A"]);
       if (!add.ok) return fail(record, log2, `git add failed: ${add.stderr}`);
       if (reviewed.length) record(`staged ${reviewed.length} reviewed path(s)`);
-      const messageFile = path6.join(tmpdir(), `cc-harness-commit-${Date.now()}.txt`);
+      const messageFile = path8.join(tmpdir(), `cc-harness-commit-${Date.now()}.txt`);
       writeFileSync2(messageFile, `${ship.commitMessage}
 `);
       let commit;
@@ -2589,7 +2788,7 @@ async function executeShip(store, sessionId, config, ship) {
       base: ship.baseBranch ?? ""
     };
     if (provider.kind === "command") {
-      const bodyFile = path6.join(tmpdir(), `cc-harness-pr-${Date.now()}.md`);
+      const bodyFile = path8.join(tmpdir(), `cc-harness-pr-${Date.now()}.md`);
       writeFileSync2(bodyFile, ship.body);
       const command = renderTemplate(provider.command, {
         title: shellQuote(ship.title),
@@ -2618,7 +2817,7 @@ async function executeShip(store, sessionId, config, ship) {
   let summaryPath;
   if (steps.has("summary") && config.ship.summaryPath) {
     summaryPath = writeSummary(cwd, config, ship, session);
-    if (summaryPath) record(`summary written to ${path6.relative(cwd, summaryPath)}`);
+    if (summaryPath) record(`summary written to ${path8.relative(cwd, summaryPath)}`);
   }
   const outcome = { ok: true, output: log2.join("\n") };
   if (url) outcome.url = url;
@@ -2654,8 +2853,8 @@ function writeSummary(cwd, config, ship, session) {
       date: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10)
     });
     if (!rel) return void 0;
-    const file = path6.resolve(cwd, rel);
-    mkdirSync3(path6.dirname(file), { recursive: true });
+    const file = path8.resolve(cwd, rel);
+    mkdirSync3(path8.dirname(file), { recursive: true });
     const lines = [`# ${ship.title}`, "", ship.body, ""];
     if (session.threads.length) {
       lines.push("## Review threads", "");
@@ -2740,7 +2939,7 @@ function isWsl() {
 
 // src/daemon/main.ts
 var VERSION = true ? "0.1.0" : "0.0.0";
-var UI_DIR = path7.resolve(path7.dirname(fileURLToPath(import.meta.url)), "..", "ui");
+var UI_DIR = path9.resolve(path9.dirname(fileURLToPath(import.meta.url)), "..", "ui");
 var MAX_TITLE_LENGTH = 120;
 async function main() {
   ensureHome();

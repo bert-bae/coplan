@@ -123,7 +123,7 @@ export function groupSessions(sessions: SessionSummary[], pinned: string[]): Gro
           ? { key, label: 'Pinned / Action required', path: '', sessions: [], openGates: 0 }
           : {
               key,
-              label: session.repoName ?? basename(session.cwd) ?? 'Unknown project',
+              label: groupLabel(session),
               path: session.repoRoot ?? session.cwd,
               sessions: [],
               openGates: 0,
@@ -141,6 +141,15 @@ export function groupSessions(sessions: SessionSummary[], pinned: string[]): Gro
     if (b.key === PINNED_KEY) return 1;
     return (b.sessions[0]?.updatedAt ?? 0) - (a.sessions[0]?.updatedAt ?? 0);
   });
+}
+
+/**
+ * A worktree gets its own group — its `repoRoot` is the worktree itself — so
+ * without naming it, every worktree of one repo would render the same header.
+ */
+function groupLabel(session: SessionSummary): string {
+  const repo = session.repoName ?? basename(session.cwd) ?? 'Unknown project';
+  return session.worktree ? `${repo} ⑂ ${session.worktree}` : repo;
 }
 
 function basename(p: string): string {
@@ -236,7 +245,7 @@ function SessionRow({
           {session.branch && <span className="session-branch">{session.branch}</span>}
         </span>
         <span className="session-foot">
-          {showRepo && session.repoName && <span className="session-repo">{session.repoName}</span>}
+          {showRepo && session.repoName && <span className="session-repo">{groupLabel(session)}</span>}
           <span>{relativeTime(session.updatedAt)}</span>
           {drafts > 0 && <span className="pill is-draft">{drafts} draft</span>}
           {session.pendingFeedback > 0 && (

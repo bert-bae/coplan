@@ -36,6 +36,22 @@ export async function repoRoot(cwd: string): Promise<string | null> {
   return res.ok ? res.stdout.trim() || null : null;
 }
 
+/**
+ * Root of the repository a worktree belongs to.
+ *
+ * `--show-toplevel` inside a linked worktree returns the worktree itself, which
+ * is what git operations want but makes every worktree look like its own
+ * project. The common git dir points back at the repo that owns it.
+ */
+export async function mainWorktreeRoot(cwd: string): Promise<string | null> {
+  const res = await git(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  const dir = res.stdout.trim();
+  if (!res.ok || !dir) return null;
+  // `<main>/.git` for a normal repo; a bare repo has no working tree to name.
+  const base = path.basename(dir);
+  return base === '.git' ? path.dirname(dir) : null;
+}
+
 export async function currentBranch(cwd: string): Promise<string | null> {
   const res = await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
   const name = res.stdout.trim();
@@ -105,7 +121,17 @@ export const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 async function untrackedFiles(cwd: string): Promise<string[]> {
   const res = await git(cwd, ['ls-files', '--others', '--exclude-standard', '-z']);
   if (!res.ok) return [];
-  return res.stdout.split('\0').filter(Boolean);
+  return res.stdout.split('\0').filter(Boolean).filter(isFilePath);
+}
+
+/**
+ * git reports a directory it will not descend into — a nested repository, and
+ * so every worktree under `.claude/worktrees/` — as a single entry with a
+ * trailing slash. Those are not files: they cannot be diffed or hashed, and a
+ * worktree's contents belong to its own session, not to the parent repo's.
+ */
+function isFilePath(entry: string): boolean {
+  return !entry.endsWith('/');
 }
 
 /**
@@ -257,18 +283,32 @@ export async function workingTreeFingerprints(cwd: string): Promise<Record<strin
     const entry = entries[i]!;
     if (entry.length < 4) continue;
     const code = entry.slice(0, 2);
-    paths.push(entry.slice(3));
+    const file = entry.slice(3);
+    // An unhashable directory entry would abort the batch below part-way
+    // through, and every hash after it would land on the wrong file.
+    if (isFilePath(file)) paths.push(file);
     if (code[0] === 'R' || code[1] === 'R') i++; // skip the rename source
   }
   if (paths.length === 0) return {};
 
+  const out: Record<string, string> = {};
   const hashed = await git(cwd, ['hash-object', '--', ...paths]);
   const hashes = hashed.stdout.split('\n').filter(Boolean);
-  const out: Record<string, string> = {};
-  paths.forEach((file, i) => {
-    // A deleted file has no blob to hash; mark it so its removal still counts.
-    out[file] = hashes[i] ?? 'absent';
-  });
+  if (hashes.length === paths.length) {
+    paths.forEach((file, i) => {
+      out[file] = hashes[i]!;
+    });
+    return out;
+  }
+
+  // Counts disagree, so the output cannot be zipped back onto the inputs.
+  // A deleted file has no blob to hash, which is the ordinary reason; fall
+  // back to hashing one at a time rather than misattributing the rest.
+  for (const file of paths) {
+    const one = await git(cwd, ['hash-object', '--', file]);
+    // 'absent' still differs from a real hash, so a removal counts as a change.
+    out[file] = (one.ok && one.stdout.trim()) || 'absent';
+  }
   return out;
 }
 

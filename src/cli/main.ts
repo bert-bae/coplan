@@ -113,9 +113,14 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
         ]
           .filter(Boolean)
           .join(', ');
+        // Sessions on the same repo are told apart by their worktree, so the
+        // repo column carries it when there is one.
+        const where = s.worktree
+          ? `${s.repoName ?? path.basename(s.cwd)} ⑂${s.worktree}`
+          : s.repoName ?? path.basename(s.cwd);
         console.log(
           `  ${s.sessionId.slice(0, 8)}  ${pad(s.stage, 14)} ${pad(s.status, 8)} ` +
-            `${pad(s.repoName ?? path.basename(s.cwd), 20)} ${s.branch ?? ''}${flags ? `  [${flags}]` : ''}`,
+            `${pad(where, 28)} ${s.branch ?? ''}${flags ? `  [${flags}]` : ''}`,
         );
       }
     } catch (err) {

@@ -4,7 +4,8 @@ import type { SessionStore } from './store.ts';
 import type { HarnessConfig } from '../shared/config.ts';
 import { TranscriptTailer } from './transcript.ts';
 import { waitForFeedback, waitForGate, renderFeedback, renderGateResult } from './gates.ts';
-import { currentBranch, headCommit, repoRoot } from './git.ts';
+import { currentBranch, headCommit, mainWorktreeRoot, repoRoot } from './git.ts';
+import { scanTranscriptForWorktree, type WorktreeRecord } from './worktree.ts';
 import { attributeFile, clearBaseline, reconcileFiles } from './tasks.ts';
 import {
   HOOK_NOOP,
@@ -36,6 +37,12 @@ export interface IngestContext {
   tailers: Map<string, TranscriptTailer>;
   signal?: AbortSignal;
 }
+
+/** Sessions whose transcript has already been scanned for a relocation, so a
+ *  full scan happens at most once per session per daemon. */
+const worktreeScanned = new Set<string>();
+/** Bound it: the daemon can run for weeks and session ids are never reused. */
+const MAX_SCANNED = 500;
 
 /**
  * Translate one hook payload into state changes, and decide what (if
@@ -80,14 +87,20 @@ async function onSessionStart(
   input: SessionStartInput,
   ctx: IngestContext,
 ): Promise<HookOutput> {
-  const cwd = input.cwd || process.cwd();
-  const session = ctx.store.ensure(sessionId, cwd);
+  const launchedIn = input.cwd || process.cwd();
+  const session = ctx.store.ensure(sessionId, launchedIn);
 
+  // `SessionStart` fires again on resume, compact and `/clear`, and its `cwd`
+  // is always the directory the session was launched in — never the worktree a
+  // long-running session has since moved into. Re-anchoring on it here would
+  // undo the relocation every time the context was compacted.
+  const cwd = session.worktree?.path ?? launchedIn;
   const root = await repoRoot(cwd);
   const [branch, head] = await Promise.all([
     currentBranch(root ?? cwd),
     headCommit(root ?? cwd),
   ]);
+  const named = session.worktree?.mainRoot ?? root ?? cwd;
 
   ctx.store.update(sessionId, {
     cwd,
@@ -97,9 +110,15 @@ async function onSessionStart(
     startCommit: session.startCommit ?? head,
     transcriptPath: input.transcript_path ?? session.transcriptPath,
     status: 'active',
-    title: session.title === sessionId.slice(0, 8) ? path.basename(root ?? cwd) : session.title,
+    title: session.title === sessionId.slice(0, 8) ? path.basename(named) : session.title,
     ...(input.start_reason === 'clear' ? { stage: 'idle' as const } : {}),
   });
+
+  // The transcript is the only place a relocation is recorded, so a session
+  // resumed from inside a worktree is only recognised here. Await it:
+  // everything the session goes on to diff, check and ship runs against
+  // whichever tree wins.
+  await resolveWorktree(sessionId, ctx);
 
   attachTailer(sessionId, ctx, input.start_reason === 'resume');
 
@@ -117,6 +136,7 @@ async function onSessionEnd(
 ): Promise<HookOutput> {
   ctx.tailers.get(sessionId)?.close();
   ctx.tailers.delete(sessionId);
+  worktreeScanned.delete(sessionId);
   clearBaseline(sessionId);
   ctx.store.update(sessionId, { status: 'ended', endedAt: Date.now() });
   ctx.store.addTimeline(sessionId, 'note', `Session ended (${input.end_reason ?? 'unknown'})`, {
@@ -173,7 +193,10 @@ async function onPostToolUse(
           ? toolInput['notebook_path']
           : null;
       if (file) {
-        const rel = s.repoRoot ? path.relative(s.repoRoot, file) || file : file;
+        // Anything outside the session's tree keeps its absolute path: a
+        // `../../…` relative path matches nothing in the diff and would be
+        // attributed to a file that does not exist.
+        const rel = s.repoRoot ? relativeWithin(s.repoRoot, file) : file;
         const existing = s.files.find((f) => f.path === rel);
         const now = Date.now();
         if (existing) {
@@ -357,6 +380,96 @@ async function onStop(sessionId: string, input: StopInput, ctx: IngestContext): 
  * Helpers
  * ------------------------------------------------------------------ */
 
+/**
+ * Find out whether the session is working somewhere other than where it was
+ * launched, and re-anchor it if so.
+ *
+ * Runs at most once per session: after this the tailer keeps the answer
+ * current, and re-reading a multi-megabyte transcript on every hook would not.
+ */
+async function resolveWorktree(sessionId: string, ctx: IngestContext): Promise<void> {
+  if (worktreeScanned.has(sessionId)) return;
+  const transcript = ctx.store.get(sessionId)?.transcriptPath;
+  // Nothing to scan yet — a brand-new session's transcript is written after
+  // `SessionStart`. The tailer sees the relocation live in that case.
+  if (!transcript) return;
+  if (worktreeScanned.size >= MAX_SCANNED) worktreeScanned.clear();
+  worktreeScanned.add(sessionId);
+  await applyWorktree(sessionId, ctx, await scanTranscriptForWorktree(transcript));
+}
+
+/**
+ * Point a session's git state at the tree it is actually working in.
+ *
+ * `repoRoot` is what every git operation in the daemon runs against — the
+ * diff, the working-tree fingerprints behind task attribution, the checks, and
+ * the commit and push in the ship stage. Leaving it on the launch directory
+ * while the session edits a worktree does not merely show the wrong diff: the
+ * ship stage would commit and push the wrong branch.
+ */
+async function applyWorktree(
+  sessionId: string,
+  ctx: IngestContext,
+  worktree: WorktreeRecord | null,
+): Promise<void> {
+  const session = ctx.store.get(sessionId);
+  if (!session) return;
+  const previous = session.worktree ?? null;
+  if ((worktree?.path ?? null) === (previous?.path ?? null)) return;
+
+  // Leaving a worktree puts the session back where it came from.
+  const target = worktree?.path ?? previous?.originalCwd ?? session.cwd;
+  const root = (await repoRoot(target)) ?? target;
+  const [branch, head, mainRoot] = await Promise.all([
+    currentBranch(root),
+    headCommit(root),
+    worktree ? mainWorktreeRoot(root) : Promise.resolve(null),
+  ]);
+
+  ctx.store.update(sessionId, {
+    cwd: target,
+    repoRoot: root,
+    branch,
+    // The commit the worktree forked from is the right base for its review;
+    // the one recorded at session start belongs to the tree it just left.
+    startCommit: worktree
+      ? worktree.originalHeadCommit ?? head
+      : previous?.originalHeadCommit ?? session.startCommit ?? head,
+    worktree: worktree
+      ? {
+          path: worktree.path,
+          name: worktree.name,
+          mainRoot,
+          originalCwd: worktree.originalCwd ?? previous?.originalCwd ?? session.cwd,
+          originalBranch: worktree.originalBranch ?? previous?.originalBranch ?? null,
+          originalHeadCommit:
+            worktree.originalHeadCommit ?? previous?.originalHeadCommit ?? session.startCommit,
+        }
+      : null,
+  });
+
+  ctx.store.addTimeline(
+    sessionId,
+    'note',
+    worktree
+      ? `Working in worktree ${worktree.name} (${target})`
+      : `Left the worktree; back in ${target}`,
+    { label: 'worktree' },
+  );
+
+  // The old tree's diff and the file baseline both describe somewhere else.
+  ctx.store.clearDiff(sessionId);
+  clearBaseline(sessionId);
+}
+
+/** `path.relative` outside `root` yields `../…`, which names nothing in the
+ *  diff. Such a file keeps its absolute path instead. */
+function relativeWithin(root: string, file: string): string {
+  const rel = path.relative(root, file);
+  if (!rel) return file;
+  return rel.startsWith('..') || path.isAbsolute(rel) ? file : rel;
+}
+
 function attachTailer(sessionId: string, ctx: IngestContext, fromStart = false): void {
   const session = ctx.store.get(sessionId);
   if (!session?.transcriptPath || ctx.tailers.has(sessionId)) return;
@@ -366,6 +479,9 @@ function attachTailer(sessionId: string, ctx: IngestContext, fromStart = false):
     if (update.title && !ctx.store.get(sessionId)?.titleLocked) {
       ctx.store.update(sessionId, { title: update.title });
     }
+    // An `EnterWorktree` or `ExitWorktree` mid-session moves the whole tree
+    // out from under the harness, so it is applied before anything else.
+    if ('worktree' in update) void applyWorktree(sessionId, ctx, update.worktree ?? null);
     if (update.events.length) ctx.store.addTimelineBatch(sessionId, update.events);
     if (update.usage) {
       ctx.store.mutate(sessionId, (s) => {
@@ -380,6 +496,11 @@ function attachTailer(sessionId: string, ctx: IngestContext, fromStart = false):
   });
   ctx.tailers.set(sessionId, tailer);
   tailer.start(fromStart);
+
+  // A daemon that starts mid-session attaches at the end of the transcript and
+  // so never sees a relocation that already happened. This catches up on it
+  // without blocking the hook that got us here.
+  void resolveWorktree(sessionId, ctx).catch(() => {});
 }
 
 function normalizeTodos(value: unknown): TodoItem[] | null {
