@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { store, useStore } from '../store.ts';
+import { GlobalActions } from './GlobalActions.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
 import type { SessionSummary } from '../../shared/types.ts';
-
-declare const __HARNESS_VERSION__: string;
 
 const STAGE_LABEL: Record<string, string> = {
   idle: 'Idle',
@@ -94,7 +93,7 @@ export function Sidebar() {
       </nav>
 
       <footer className="sidebar-foot">
-        <span>v{typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : 'dev'}</span>
+        <GlobalActions />
       </footer>
     </aside>
   );

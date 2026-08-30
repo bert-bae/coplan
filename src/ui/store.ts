@@ -2,12 +2,14 @@ import { useSyncExternalStore } from 'react';
 import { api } from './lib/api.ts';
 import { armAudio, playAlert } from './lib/sound.ts';
 import type {
+  CleanupGroupId,
   DiffPayload,
   Gate,
   ReviewThread,
   ServerEvent,
   SessionState,
   SessionSummary,
+  StorageReport,
 } from '../shared/types.ts';
 
 export type Tab = 'timeline' | 'plan' | 'board' | 'review' | 'verify' | 'ship';
@@ -50,6 +52,11 @@ export interface UiState {
   soundEnabled: boolean;
   /** Bumped to pull the question card into view from anywhere in the app. */
   gateFocus: number;
+  /** What the harness has left on disk. Null until the panel asks for it. */
+  storage: StorageReport | null;
+  storageBusy: boolean;
+  /** A handover is in flight; every request will fail until it lands. */
+  restarting: boolean;
   toasts: Toast[];
   error: string | null;
 }
@@ -71,6 +78,9 @@ const initial: UiState = {
   collapsedProjects: [],
   soundEnabled: true,
   gateFocus: 0,
+  storage: null,
+  storageBusy: false,
+  restarting: false,
   toasts: [],
   error: null,
 };
@@ -460,6 +470,95 @@ class Store {
     this.toast('success', 'Session deleted.');
   }
 
+  /* ---------------------------------------------------------------- *
+   * Daemon-wide actions
+   * ---------------------------------------------------------------- */
+
+  async loadStorage(): Promise<void> {
+    this.set({ storageBusy: true });
+    try {
+      const { report } = await api.storage();
+      this.set({ storage: report });
+    } catch (err) {
+      this.fail(err);
+    } finally {
+      this.set({ storageBusy: false });
+    }
+  }
+
+  /**
+   * Remove the selected groups of stale files.
+   *
+   * The daemon answers with a freshly scanned report, so the panel redraws
+   * from what is actually left rather than from an optimistic subtraction —
+   * which matters because the daemon can legitimately decline to remove
+   * something the report offered.
+   */
+  async cleanStorage(groups: CleanupGroupId[]): Promise<void> {
+    if (groups.length === 0) return;
+    this.set({ storageBusy: true });
+    try {
+      const { result, report } = await api.cleanStorage(groups);
+      this.set({ storage: report });
+      if (result.failed.length) {
+        this.toast('error', `${result.failed.length} item(s) could not be removed.`);
+      } else if (result.removed === 0) {
+        this.toast('info', 'Nothing left to clean up.');
+      } else {
+        this.toast('success', `Reclaimed ${formatBytes(result.freedBytes)}.`);
+      }
+    } catch (err) {
+      this.fail(err);
+    } finally {
+      this.set({ storageBusy: false });
+    }
+  }
+
+  /**
+   * Restart the daemon, then reload once its replacement answers.
+   *
+   * The successor inherits the port and the token, so the page it reloads is
+   * the same address with the same cookie. Waiting for a *different* pid is
+   * what makes that safe: reloading against the outgoing process would just
+   * race the handover and land on a closed socket.
+   */
+  async restartDaemon(waitMs = 20_000): Promise<void> {
+    if (this.state.restarting) return;
+    let previousPid = 0;
+    try {
+      previousPid = (await api.health()).pid;
+    } catch {
+      /* if health is unreachable, fall back to waiting for any answer */
+    }
+
+    try {
+      const { restarting, interrupted } = await api.restartDaemon();
+      if (!restarting) {
+        this.toast('error', 'The daemon is already shutting down.');
+        return;
+      }
+      this.set({ restarting: true, connection: 'reconnecting' });
+      if (interrupted.length) {
+        this.toast('info', `Restarting — ${interrupted.length} running command(s) will stop.`);
+      }
+    } catch (err) {
+      this.fail(err);
+      return;
+    }
+
+    const arrived = await waitForDaemon(previousPid, waitMs);
+    if (!arrived) {
+      this.set({ restarting: false });
+      this.toast('error', 'The daemon did not come back. Run `harness start` in a terminal.');
+      return;
+    }
+    this.reloadPage();
+  }
+
+  /** The seam between deciding to reload and reloading. Overridable because
+   *  jsdom will not let a test redefine `location.reload`. */
+  reloadPage = (): void => window.location.reload();
+
   toggleViewed(file: string): void {
     const id = this.state.sessionId;
     if (!id) return;
@@ -503,6 +602,34 @@ class Store {
 export function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/**
+ * Wait for a daemon that is not the one we just asked to stand down.
+ *
+ * `/health` needs no credentials, which is what makes it usable here: the
+ * successor has to be answering *before* the page reloads, and every other
+ * route would be a redirect to a login the harness does not have.
+ */
+async function waitForDaemon(previousPid: number, timeoutMs = 20_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+    try {
+      const health = await api.health();
+      if (health.ok && health.pid !== previousPid) return true;
+    } catch {
+      /* the socket is down mid-handover; that is the expected state here */
+    }
+  }
+  return false;
+}
+
+/** Sizes in a sentence the user is reading, not a column to be aligned. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function readHash(): string | null {

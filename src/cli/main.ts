@@ -14,7 +14,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { readLiveLock, baseUrl, paths, ensureHome } from '../shared/paths.ts';
 import { runDoctor } from './doctor.ts';
 import { openInBrowser } from '../daemon/browser.ts';
-import type { DaemonLock, SessionSummary } from '../shared/types.ts';
+import { cleanStorage, scanStorage } from '../daemon/housekeeping.ts';
+import { CLEANUP_GROUPS, type CleanupGroupId, type CleanupOutcome, type DaemonLock, type SessionSummary, type StorageReport } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
@@ -86,48 +87,99 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
     return 0;
   },
 
+  /**
+   * Restart, keeping the address when there is a daemon to ask.
+   *
+   * The daemon hands its port and token to its own successor, so an open
+   * browser tab reconnects by itself. Stopping and starting from out here
+   * would move it to a fresh port and strand every tab that was watching.
+   */
   async restart(args) {
+    const lock = readLiveLock();
+    if (!lock) return commands['start']!(args);
+
+    try {
+      const result = await api<{ restarting?: boolean; interrupted?: string[] }>(
+        lock,
+        '/api/daemon/restart',
+        { method: 'POST', body: '{}' },
+      );
+      if (result.restarting) {
+        for (const label of result.interrupted ?? []) console.log(`interrupted: ${label}`);
+        const next = await waitForNewDaemon(lock.pid);
+        if (next) {
+          console.log(`cc-harness restarted on ${baseUrl(next)} (pid ${next.pid})`);
+          return 0;
+        }
+        console.error('the daemon stopped but did not come back; see', paths.logFile());
+        return 1;
+      }
+    } catch {
+      // Fall through: an unreachable daemon is still one we can stop.
+    }
+
     await commands['stop']!(args);
     await sleep(400);
     return commands['start']!(args);
   },
 
-  async status() {
+  /**
+   * Report — and, unless asked not to, remove — the files the harness has
+   * left behind.
+   *
+   *   harness clean [--dry-run] [--all] [group ...]
+   *
+   * Recorded session history is excluded unless it is asked for by name or
+   * with `--all`, which is the same default the browser panel offers: every
+   * other group is unambiguously garbage, and that one is the only one whose
+   * removal loses something a user might want back.
+   *
+   * Routed through the daemon when one is running, so that the sessions it is
+   * holding are excluded by id rather than guessed at from mtimes.
+   */
+  async clean(args) {
+    const dryRun = args.includes('--dry-run') || args.includes('-n');
+    const named = args.filter((a) => !a.startsWith('-'));
+    const unknown = named.filter((a) => !CLEANUP_GROUPS.includes(a as CleanupGroupId));
+    if (unknown.length) {
+      console.error(`unknown group(s): ${unknown.join(', ')}`);
+      console.error(`known groups: ${CLEANUP_GROUPS.join(', ')}`);
+      return 2;
+    }
+
+    const groups: CleanupGroupId[] = named.length
+      ? (named as CleanupGroupId[])
+      : args.includes('--all')
+        ? [...CLEANUP_GROUPS]
+        : CLEANUP_GROUPS.filter((id) => id !== 'sessions');
     const lock = readLiveLock();
-    if (!lock) {
-      console.log('cc-harness: not running');
-      return 1;
+    if (!lock) console.log('(no daemon running: live sessions are identified by age alone)');
+
+    const outcome = lock
+      ? await api<{ result: CleanupOutcome }>(lock, '/api/storage/clean', {
+          method: 'POST',
+          body: JSON.stringify({ groups, dryRun }),
+        }).then((r) => r.result)
+      : cleanStorage({ groups, dryRun });
+
+    for (const group of outcome.groups) {
+      if (!group.count) continue;
+      console.log(
+        `  ${pad(group.label, 22)} ${pad(String(group.count), 5)} ${pad(formatBytes(group.bytes), 9)}` +
+          (dryRun ? ' would be removed' : ' removed'),
+      );
     }
-    console.log(`cc-harness v${lock.version} · pid ${lock.pid} · ${baseUrl(lock)}`);
-    try {
-      const { sessions } = await api<{ sessions: SessionSummary[] }>(lock, '/api/sessions');
-      if (sessions.length === 0) {
-        console.log('no sessions registered yet');
-        return 0;
-      }
-      console.log('');
-      for (const s of sessions) {
-        const flags = [
-          s.openGates ? `${s.openGates} open gate` : '',
-          s.pendingFeedback ? `${s.pendingFeedback} unread` : '',
-        ]
-          .filter(Boolean)
-          .join(', ');
-        // Sessions on the same repo are told apart by their worktree, so the
-        // repo column carries it when there is one.
-        const where = s.worktree
-          ? `${s.repoName ?? path.basename(s.cwd)} ⑂${s.worktree}`
-          : s.repoName ?? path.basename(s.cwd);
-        console.log(
-          `  ${s.sessionId.slice(0, 8)}  ${pad(s.stage, 14)} ${pad(s.status, 8)} ` +
-            `${pad(where, 28)} ${s.branch ?? ''}${flags ? `  [${flags}]` : ''}`,
-        );
-      }
-    } catch (err) {
-      console.error(`could not query the daemon: ${(err as Error).message}`);
-      return 1;
+    for (const file of outcome.failed) console.error(`  could not remove ${file}`);
+
+    if (!outcome.removed) console.log('nothing to clean up');
+    else console.log(dryRun ? `would reclaim ${formatBytes(outcome.freedBytes)}` : `reclaimed ${formatBytes(outcome.freedBytes)}`);
+
+    // Say what was deliberately left out, so the number is not read as a total.
+    if (!groups.includes('sessions')) {
+      const held = await heldSessionBytes(lock);
+      if (held) console.log(`recorded session history not touched (${formatBytes(held)}) — add "sessions" to include it`);
     }
-    return 0;
+    return outcome.failed.length ? 1 : 0;
   },
 
   async open(args) {
@@ -172,6 +224,34 @@ function pad(value: string, width: number): string {
   return value.length >= width ? value : value + ' '.repeat(width - value.length);
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** How much recorded history a default `clean` deliberately left alone. */
+async function heldSessionBytes(lock: DaemonLock | null): Promise<number> {
+  try {
+    const report = lock
+      ? await api<{ report: StorageReport }>(lock, '/api/storage').then((r) => r.report)
+      : scanStorage();
+    return report.groups.find((g) => g.id === 'sessions')?.bytes ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Wait for the lock to be claimed by a process other than the one that had it. */
+async function waitForNewDaemon(previousPid: number): Promise<DaemonLock | null> {
+  for (let i = 0; i < 100; i++) {
+    await sleep(100);
+    const lock = readLiveLock();
+    if (lock && lock.pid !== previousPid) return lock;
+  }
+  return null;
+}
+
 function usage(): void {
   console.log(`cc-harness v${VERSION}
 
@@ -179,8 +259,11 @@ usage: harness <command>
 
   start      start the daemon (idempotent)
   stop       stop the daemon
-  restart    stop then start
+  restart    restart the daemon in place, keeping its address
   status     show the daemon and every registered session
+  clean      remove stale harness files (--dry-run to only list them)
+             recorded session history is kept unless you pass --all or name it
+             groups: sessions, partial-writes, scratch, log, lock
   open [id]  open the UI in a browser
   url  [id]  print the UI url (with auth token)
   logs       tail the daemon log

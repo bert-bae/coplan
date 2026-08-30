@@ -14,7 +14,7 @@ import type { SessionState, SessionSummary } from '../shared/types.ts';
 
 setupDom();
 
-const { render, fireEvent, within, cleanup, act, screen } = await import('@testing-library/react');
+const { render, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
 const { store } = await import('../ui/store.ts');
 
@@ -83,10 +83,55 @@ const SESSIONS = () => {
   return [summary('s1', 'repo', now), summary('s2', 'other', now - 1000), summary('s3', 'other', now - 2000)];
 };
 
+/** A storage report with one group of each consequence. `scale` of 0 is the
+ *  shape the daemon answers with once everything has been removed. */
+function storageReport(scale = 1) {
+  return {
+    home: '/home/u/.claude/cc-harness',
+    scratchDir: '/tmp',
+    scannedAt: Date.now(),
+    groups: [
+      {
+        id: 'sessions',
+        label: 'Finished sessions',
+        detail: 'Recorded history for sessions the harness no longer lists.',
+        count: 12 * scale,
+        bytes: 4_000_000 * scale,
+      },
+      {
+        id: 'partial-writes',
+        label: 'Interrupted writes',
+        detail: 'Half-written state.',
+        count: 2 * scale,
+        bytes: 2048 * scale,
+      },
+      { id: 'scratch', label: 'Scratch files', detail: 'Commit messages.', count: 3 * scale, bytes: 1024 * scale },
+      { id: 'log', label: 'Daemon log', detail: 'The older part of the log.', count: 0, bytes: 0 },
+      { id: 'lock', label: 'Stale lock file', detail: 'A dead address.', count: 0, bytes: 0 },
+    ],
+    totalBytes: 4_003_072 * scale,
+  };
+}
+
+/** Daemon pids handed back by `/health`, in order; the last one sticks, the
+ *  way a real daemon's pid does once the handover has settled. */
+let pids: number[];
+const nextPid = (): number => (pids.length > 1 ? pids.shift()! : (pids[0] ?? 0));
+
 async function boot(sessions?: () => SessionSummary[]): Promise<void> {
   const list = sessions ?? SESSIONS;
+  pids = [100, 100, 200];
   ({ posts } = stubFetch((route) => {
     if (route.startsWith('/api/sessions')) return { sessions: list(), version: 'test' };
+    if (route === '/api/storage') return { report: storageReport() };
+    if (route === '/api/storage/clean') {
+      return {
+        result: { dryRun: false, groups: [], removed: 5, freedBytes: 3072, failed: [] },
+        report: storageReport(0),
+      };
+    }
+    if (route === '/api/daemon/restart') return { restarting: true, interrupted: ['npm test'] };
+    if (route === '/health') return { ok: true, version: 'test', pid: nextPid() };
     if (route.startsWith('/api/session/')) return { session: makeSession(), diff: null };
     return { ok: true };
   }));
@@ -126,6 +171,9 @@ beforeEach(() => {
     collapsedProjects: [],
     collapsedSidebar: false,
     soundEnabled: true,
+    storage: null,
+    storageBusy: false,
+    restarting: false,
   });
 });
 
@@ -383,3 +431,126 @@ test('the alert chime can be muted, and the choice is remembered', async () => {
   assert.equal(saved.soundEnabled, false, 'a mute outlives the tab');
   assert.ok(screen.getByTitle('Play a chime when Claude needs you'), 'the control inverts');
 });
+
+/* ------------------------------------------------------------------ *
+ * Global actions
+ * ------------------------------------------------------------------ */
+
+const openCleanup = async (): Promise<void> => {
+  await act(async () => {
+    fireEvent.click(screen.getByTitle('Clean up stale harness files'));
+  });
+};
+
+test('the cleanup panel lists only what is actually holding space', async () => {
+  await boot();
+  await openCleanup();
+
+  const labels = [...document.querySelectorAll('.global-group-name')].map((el) => el.textContent);
+  assert.deepEqual(
+    labels,
+    ['Finished sessions', 'Interrupted writes', 'Scratch files'],
+    'empty groups are decisions the user does not have to make',
+  );
+});
+
+test('recorded history is the one group not ticked by default', async () => {
+  // Everything else the panel offers is unambiguously garbage. Session
+  // history is the only thing whose removal loses something a user might
+  // want back, so removing it has to be a deliberate tick.
+  await boot();
+  await openCleanup();
+
+  const boxes = [...document.querySelectorAll('.global-group input')] as HTMLInputElement[];
+  assert.deepEqual(
+    boxes.map((b) => b.checked),
+    [false, true, true],
+  );
+  // The button offers the total of what is ticked, not of everything found.
+  assert.match(screen.getByText(/^Clean up/).textContent ?? '', /3 KB/);
+});
+
+test('only the ticked groups are sent to be removed', async () => {
+  await boot();
+  await openCleanup();
+  posts.length = 0;
+
+  await act(async () => {
+    fireEvent.click(screen.getByText(/^Clean up/));
+  });
+
+  const call = posts.find((p) => p.route === '/api/storage/clean');
+  assert.ok(call, 'the clean request was sent');
+  assert.deepEqual(call!.body['groups'], ['partial-writes', 'scratch']);
+  assert.ok(
+    store.getState().toasts.some((t) => /Reclaimed/.test(t.text)),
+    'the user is told how much came back',
+  );
+  // The daemon answers with a freshly scanned report, and the panel redraws
+  // from that rather than from an optimistic subtraction.
+  assert.equal(document.querySelector('.global-empty')?.textContent, 'Nothing to clean up.');
+});
+
+test('ticking history in adds it to the request', async () => {
+  await boot();
+  await openCleanup();
+  posts.length = 0;
+
+  const first = document.querySelector('.global-group input') as HTMLInputElement;
+  await act(async () => {
+    fireEvent.click(first);
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByText(/^Clean up/));
+  });
+
+  const call = posts.find((p) => p.route === '/api/storage/clean');
+  assert.deepEqual(call!.body['groups'], ['sessions', 'partial-writes', 'scratch']);
+});
+
+test('a restart is confirmed first, and says what it will interrupt', async () => {
+  await boot();
+  const reloaded = stubReload();
+
+  await act(async () => {
+    fireEvent.click(screen.getByTitle('Restart the daemon to pick up a new build'));
+  });
+  assert.ok(document.querySelector('.global-confirm'), 'the click asks before it acts');
+  assert.equal(posts.find((p) => p.route === '/api/daemon/restart'), undefined, 'and sends nothing yet');
+
+  await act(async () => {
+    fireEvent.click(screen.getByText('Restart'));
+  });
+  assert.ok(posts.find((p) => p.route === '/api/daemon/restart'), 'confirming sends the request');
+  assert.ok(
+    store.getState().toasts.some((t) => /1 running command/.test(t.text)),
+    'a check the restart kills is not left to look like it simply stopped',
+  );
+
+  // The page reloads only once a *different* daemon answers: reloading against
+  // the outgoing one would race the handover onto a closed socket.
+  await waitFor(() => assert.equal(reloaded.count, 1));
+});
+
+test('a restart that never lands says so instead of hanging', async () => {
+  await boot();
+  const reloaded = stubReload();
+  pids = [100]; // `/health` keeps answering with the outgoing pid
+
+  await act(async () => {
+    await store.restartDaemon(600);
+  });
+
+  assert.equal(reloaded.count, 0, 'nothing is reloaded onto a daemon that is not there');
+  assert.equal(store.getState().restarting, false, 'and the UI is usable again');
+  assert.ok(store.getState().toasts.some((t) => /did not come back/.test(t.text)));
+});
+
+/** Count reloads instead of performing one, which jsdom cannot do. */
+function stubReload(): { count: number } {
+  const calls = { count: 0 };
+  store.reloadPage = () => {
+    calls.count++;
+  };
+  return calls;
+}

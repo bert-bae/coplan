@@ -3,8 +3,8 @@
 
 // src/cli/main.ts
 import { spawn as spawn3 } from "node:child_process";
-import { readFileSync as readFileSync4, existsSync as existsSync4 } from "node:fs";
-import path3 from "node:path";
+import { readFileSync as readFileSync5, existsSync as existsSync5 } from "node:fs";
+import path4 from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { setTimeout as sleep2 } from "node:timers/promises";
 
@@ -325,9 +325,238 @@ function isWsl() {
   }
 }
 
+// src/daemon/housekeeping.ts
+import { readdirSync, statSync, existsSync as existsSync4, rmSync, readFileSync as readFileSync4, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path3 from "node:path";
+var STALE_SESSION_MS = 24 * 60 * 60 * 1e3;
+var PARTIAL_WRITE_MS = 5 * 60 * 1e3;
+var SCRATCH_MS = 60 * 60 * 1e3;
+var LOG_LIMIT_BYTES = 1024 * 1024;
+var LOG_KEEP_BYTES = 256 * 1024;
+var SCRATCH_PREFIX = "cc-harness-";
+function scanStorage(opts = {}) {
+  const now = opts.now ?? Date.now();
+  const live = /* @__PURE__ */ new Set();
+  for (const id of opts.liveSessionIds ?? []) live.add(sanitizeId(id));
+  const scratchDir = opts.scratchDir ?? tmpdir();
+  const plans = buildPlans(live, now, scratchDir);
+  const groups = plans.map((plan) => ({
+    id: plan.id,
+    label: plan.label,
+    detail: plan.detail,
+    count: plan.candidates.length,
+    bytes: plan.candidates.reduce((sum, c) => sum + reclaimable(c), 0)
+  }));
+  return {
+    home: harnessHome(),
+    scratchDir,
+    scannedAt: now,
+    groups,
+    totalBytes: groups.reduce((sum, g) => sum + g.bytes, 0)
+  };
+}
+function cleanStorage(opts = {}) {
+  const now = opts.now ?? Date.now();
+  const live = /* @__PURE__ */ new Set();
+  for (const id of opts.liveSessionIds ?? []) live.add(sanitizeId(id));
+  const scratchDir = opts.scratchDir ?? tmpdir();
+  const wanted = opts.groups && opts.groups.length ? new Set(opts.groups) : null;
+  const plans = buildPlans(live, now, scratchDir).filter((p) => !wanted || wanted.has(p.id));
+  const groups = [];
+  const failed = [];
+  let freedBytes = 0;
+  let removed = 0;
+  for (const plan of plans) {
+    let groupBytes = 0;
+    let groupCount = 0;
+    for (const candidate of plan.candidates) {
+      const gain = reclaimable(candidate);
+      if (opts.dryRun) {
+        groupBytes += gain;
+        groupCount++;
+        continue;
+      }
+      if (!discard(candidate, scratchDir)) {
+        failed.push(candidate.path);
+        continue;
+      }
+      groupBytes += gain;
+      groupCount++;
+    }
+    groups.push({ id: plan.id, label: plan.label, count: groupCount, bytes: groupBytes });
+    freedBytes += groupBytes;
+    removed += groupCount;
+  }
+  return { dryRun: Boolean(opts.dryRun), groups, removed, freedBytes, failed };
+}
+function buildPlans(live, now, scratchDir) {
+  return [
+    {
+      id: "sessions",
+      label: "Finished sessions",
+      detail: "Recorded history for sessions the harness no longer lists, untouched for over a day.",
+      candidates: staleSessionDirs(live, now)
+    },
+    {
+      id: "partial-writes",
+      label: "Interrupted writes",
+      detail: "Half-written state files left behind when a daemon was killed mid-save.",
+      candidates: partialWrites(now)
+    },
+    {
+      id: "scratch",
+      label: "Scratch files",
+      detail: "Commit messages and PR bodies a shipped change wrote to the temp directory.",
+      candidates: scratchFiles(now, scratchDir)
+    },
+    {
+      id: "log",
+      label: "Daemon log",
+      detail: "The older part of the log. The most recent entries are kept.",
+      candidates: oversizedLog()
+    },
+    {
+      id: "lock",
+      label: "Stale lock file",
+      detail: "A daemon address left behind by a process that is no longer running.",
+      candidates: staleLock()
+    }
+  ];
+}
+function staleSessionDirs(live, now) {
+  const root = paths.sessionsDir();
+  if (!existsSync4(root)) return [];
+  const out = [];
+  for (const entry of safeReaddir(root)) {
+    if (!entry.isDirectory()) continue;
+    if (live.has(sanitizeId(entry.name))) continue;
+    const dir = path3.join(root, entry.name);
+    if (now - touchedAt(dir) < STALE_SESSION_MS) continue;
+    out.push({ path: dir, bytes: sizeOf(dir) });
+  }
+  return out;
+}
+function touchedAt(dir) {
+  let latest = mtimeOf(dir);
+  for (const entry of safeReaddir(dir)) {
+    if (!entry.isFile()) continue;
+    latest = Math.max(latest, mtimeOf(path3.join(dir, entry.name)));
+  }
+  return latest;
+}
+function partialWrites(now) {
+  const root = paths.sessionsDir();
+  if (!existsSync4(root)) return [];
+  const out = [];
+  for (const entry of safeReaddir(root)) {
+    if (!entry.isDirectory()) continue;
+    const dir = path3.join(root, entry.name);
+    for (const file of safeReaddir(dir)) {
+      if (!file.isFile()) continue;
+      if (!/^\.(state|diff)\..*\.tmp$/.test(file.name)) continue;
+      const full = path3.join(dir, file.name);
+      if (now - mtimeOf(full) < PARTIAL_WRITE_MS) continue;
+      out.push({ path: full, bytes: sizeOf(full) });
+    }
+  }
+  return out;
+}
+function scratchFiles(now, root) {
+  const home = path3.resolve(harnessHome());
+  const out = [];
+  for (const entry of safeReaddir(root)) {
+    if (!entry.name.startsWith(SCRATCH_PREFIX)) continue;
+    const full = path3.join(root, entry.name);
+    const resolved = path3.resolve(full);
+    if (resolved === home || home.startsWith(resolved + path3.sep)) continue;
+    if (holdsLiveDaemon(resolved)) continue;
+    if (now - mtimeOf(full) < SCRATCH_MS) continue;
+    out.push({ path: full, bytes: sizeOf(full) });
+  }
+  return out;
+}
+function holdsLiveDaemon(dir) {
+  try {
+    const lock = JSON.parse(readFileSync4(path3.join(dir, "daemon.json"), "utf8"));
+    return typeof lock.pid === "number" && isPidAlive(lock.pid);
+  } catch {
+    return false;
+  }
+}
+function oversizedLog() {
+  const file = paths.logFile();
+  const bytes = sizeOf(file);
+  if (bytes <= LOG_LIMIT_BYTES) return [];
+  return [{ path: file, bytes, trimTo: LOG_KEEP_BYTES }];
+}
+function staleLock() {
+  const lock = readLock();
+  if (!lock || isPidAlive(lock.pid)) return [];
+  const file = paths.lockFile();
+  return [{ path: file, bytes: sizeOf(file) }];
+}
+function reclaimable(candidate) {
+  return candidate.trimTo === void 0 ? candidate.bytes : Math.max(0, candidate.bytes - candidate.trimTo);
+}
+function discard(candidate, scratchDir) {
+  const target = path3.resolve(candidate.path);
+  const home = path3.resolve(harnessHome());
+  const scratch = path3.resolve(scratchDir);
+  const inside = (root) => target.startsWith(root + path3.sep);
+  if (!inside(home) && !inside(scratch)) return false;
+  if (!inside(home) && !path3.basename(target).startsWith(SCRATCH_PREFIX)) return false;
+  try {
+    if (candidate.trimTo !== void 0) {
+      trimFile(target, candidate.trimTo);
+      return true;
+    }
+    rmSync(target, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function trimFile(file, keepBytes) {
+  const content = readFileSync4(file, "utf8");
+  const tail = content.slice(Math.max(0, content.length - keepBytes));
+  const from = tail.indexOf("\n");
+  writeFileSync(file, from === -1 ? tail : tail.slice(from + 1));
+}
+function safeReaddir(dir) {
+  try {
+    return readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+function mtimeOf(target) {
+  try {
+    return statSync(target).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+function sizeOf(target) {
+  let stat;
+  try {
+    stat = statSync(target);
+  } catch {
+    return 0;
+  }
+  if (stat.isFile()) return stat.size;
+  if (!stat.isDirectory()) return 0;
+  let total = 0;
+  for (const entry of safeReaddir(target)) total += sizeOf(path3.join(target, entry.name));
+  return total;
+}
+
+// src/shared/types.ts
+var CLEANUP_GROUPS = ["sessions", "partial-writes", "scratch", "log", "lock"];
+
 // src/cli/main.ts
 var VERSION = true ? "0.1.0" : "0.0.0";
-var DAEMON_ENTRY2 = path3.resolve(path3.dirname(fileURLToPath2(import.meta.url)), "..", "daemon", "main.js");
+var DAEMON_ENTRY2 = path4.resolve(path4.dirname(fileURLToPath2(import.meta.url)), "..", "daemon", "main.js");
 async function ensureDaemon2() {
   const existing = readLiveLock();
   if (existing) return existing;
@@ -384,40 +613,82 @@ var commands = {
     }
     return 0;
   },
+  /**
+   * Restart, keeping the address when there is a daemon to ask.
+   *
+   * The daemon hands its port and token to its own successor, so an open
+   * browser tab reconnects by itself. Stopping and starting from out here
+   * would move it to a fresh port and strand every tab that was watching.
+   */
   async restart(args) {
+    const lock = readLiveLock();
+    if (!lock) return commands["start"](args);
+    try {
+      const result = await api(
+        lock,
+        "/api/daemon/restart",
+        { method: "POST", body: "{}" }
+      );
+      if (result.restarting) {
+        for (const label of result.interrupted ?? []) console.log(`interrupted: ${label}`);
+        const next = await waitForNewDaemon(lock.pid);
+        if (next) {
+          console.log(`cc-harness restarted on ${baseUrl(next)} (pid ${next.pid})`);
+          return 0;
+        }
+        console.error("the daemon stopped but did not come back; see", paths.logFile());
+        return 1;
+      }
+    } catch {
+    }
     await commands["stop"](args);
     await sleep2(400);
     return commands["start"](args);
   },
-  async status() {
+  /**
+   * Report — and, unless asked not to, remove — the files the harness has
+   * left behind.
+   *
+   *   harness clean [--dry-run] [--all] [group ...]
+   *
+   * Recorded session history is excluded unless it is asked for by name or
+   * with `--all`, which is the same default the browser panel offers: every
+   * other group is unambiguously garbage, and that one is the only one whose
+   * removal loses something a user might want back.
+   *
+   * Routed through the daemon when one is running, so that the sessions it is
+   * holding are excluded by id rather than guessed at from mtimes.
+   */
+  async clean(args) {
+    const dryRun = args.includes("--dry-run") || args.includes("-n");
+    const named = args.filter((a) => !a.startsWith("-"));
+    const unknown = named.filter((a) => !CLEANUP_GROUPS.includes(a));
+    if (unknown.length) {
+      console.error(`unknown group(s): ${unknown.join(", ")}`);
+      console.error(`known groups: ${CLEANUP_GROUPS.join(", ")}`);
+      return 2;
+    }
+    const groups = named.length ? named : args.includes("--all") ? [...CLEANUP_GROUPS] : CLEANUP_GROUPS.filter((id) => id !== "sessions");
     const lock = readLiveLock();
-    if (!lock) {
-      console.log("cc-harness: not running");
-      return 1;
+    if (!lock) console.log("(no daemon running: live sessions are identified by age alone)");
+    const outcome = lock ? await api(lock, "/api/storage/clean", {
+      method: "POST",
+      body: JSON.stringify({ groups, dryRun })
+    }).then((r) => r.result) : cleanStorage({ groups, dryRun });
+    for (const group of outcome.groups) {
+      if (!group.count) continue;
+      console.log(
+        `  ${pad(group.label, 22)} ${pad(String(group.count), 5)} ${pad(formatBytes(group.bytes), 9)}` + (dryRun ? " would be removed" : " removed")
+      );
     }
-    console.log(`cc-harness v${lock.version} \xB7 pid ${lock.pid} \xB7 ${baseUrl(lock)}`);
-    try {
-      const { sessions } = await api(lock, "/api/sessions");
-      if (sessions.length === 0) {
-        console.log("no sessions registered yet");
-        return 0;
-      }
-      console.log("");
-      for (const s of sessions) {
-        const flags = [
-          s.openGates ? `${s.openGates} open gate` : "",
-          s.pendingFeedback ? `${s.pendingFeedback} unread` : ""
-        ].filter(Boolean).join(", ");
-        const where = s.worktree ? `${s.repoName ?? path3.basename(s.cwd)} \u2442${s.worktree}` : s.repoName ?? path3.basename(s.cwd);
-        console.log(
-          `  ${s.sessionId.slice(0, 8)}  ${pad(s.stage, 14)} ${pad(s.status, 8)} ${pad(where, 28)} ${s.branch ?? ""}${flags ? `  [${flags}]` : ""}`
-        );
-      }
-    } catch (err) {
-      console.error(`could not query the daemon: ${err.message}`);
-      return 1;
+    for (const file of outcome.failed) console.error(`  could not remove ${file}`);
+    if (!outcome.removed) console.log("nothing to clean up");
+    else console.log(dryRun ? `would reclaim ${formatBytes(outcome.freedBytes)}` : `reclaimed ${formatBytes(outcome.freedBytes)}`);
+    if (!groups.includes("sessions")) {
+      const held = await heldSessionBytes(lock);
+      if (held) console.log(`recorded session history not touched (${formatBytes(held)}) \u2014 add "sessions" to include it`);
     }
-    return 0;
+    return outcome.failed.length ? 1 : 0;
   },
   async open(args) {
     const lock = await ensureDaemon2();
@@ -436,11 +707,11 @@ var commands = {
   },
   async logs() {
     const file = paths.logFile();
-    if (!existsSync4(file)) {
+    if (!existsSync5(file)) {
       console.log("(no log yet)");
       return 0;
     }
-    const lines = readFileSync4(file, "utf8").trimEnd().split("\n");
+    const lines = readFileSync5(file, "utf8").trimEnd().split("\n");
     console.log(lines.slice(-80).join("\n"));
     return 0;
   },
@@ -455,6 +726,27 @@ var commands = {
 function pad(value, width) {
   return value.length >= width ? value : value + " ".repeat(width - value.length);
 }
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+async function heldSessionBytes(lock) {
+  try {
+    const report = lock ? await api(lock, "/api/storage").then((r) => r.report) : scanStorage();
+    return report.groups.find((g) => g.id === "sessions")?.bytes ?? 0;
+  } catch {
+    return 0;
+  }
+}
+async function waitForNewDaemon(previousPid) {
+  for (let i = 0; i < 100; i++) {
+    await sleep2(100);
+    const lock = readLiveLock();
+    if (lock && lock.pid !== previousPid) return lock;
+  }
+  return null;
+}
 function usage() {
   console.log(`cc-harness v${VERSION}
 
@@ -462,8 +754,11 @@ usage: harness <command>
 
   start      start the daemon (idempotent)
   stop       stop the daemon
-  restart    stop then start
+  restart    restart the daemon in place, keeping its address
   status     show the daemon and every registered session
+  clean      remove stale harness files (--dry-run to only list them)
+             recorded session history is kept unless you pass --all or name it
+             groups: sessions, partial-writes, scratch, log, lock
   open [id]  open the UI in a browser
   url  [id]  print the UI url (with auth token)
   logs       tail the daemon log

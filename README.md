@@ -62,6 +62,7 @@ In any session with the plugin enabled:
 - `/harness-ship` — verification and PR
 - `/harness-open` — open the UI
 - `/harness-doctor` — check the wiring
+- `/harness-restart` — restart the daemon after a rebuild
 
 `./bin/harness url` prints the address; `./bin/harness open` opens it in a
 browser; `./bin/harness status` lists every live session. The UI does not open
@@ -109,6 +110,41 @@ transcript once.
 Sessions keep the name of the repository they belong to and are told apart by
 their worktree, so several sessions on the same repo are distinguishable in the
 switcher, in the header, and in `harness status`.
+
+## Housekeeping
+
+The rail's footer holds the two actions that belong to the harness itself
+rather than to any one session.
+
+**Restart.** The daemon runs whatever was in `dist/` when it started, so a
+rebuilt plugin does nothing until it is replaced. Restarting hands the
+successor the port *and* the token, so the tab that asked for the restart
+reconnects to it by itself instead of being stranded on a dead address —
+`harness restart` and `/harness-restart` do the same thing from a terminal or
+a session. Checks and ship commands still running are killed; the UI says how
+many.
+
+**Clean up.** The harness leaves files in two places, and neither empties
+itself: session directories under `~/.claude/cc-harness` outlive their session
+by design, so a `--resume` can still find its history, and a ship writes its
+commit message and PR body to the temp directory in a `finally` that a SIGKILL
+never reaches. The panel reports what could go, grouped by what losing it would
+cost, and removes only what you tick:
+
+| Group | What it is |
+| --- | --- |
+| Finished sessions | Recorded history the daemon no longer lists, untouched for over a day |
+| Interrupted writes | `.state.*.tmp` files from a daemon killed mid-save |
+| Scratch files | Commit messages and PR bodies from a finished ship |
+| Daemon log | The older part of `daemon.log`, trimmed rather than deleted |
+| Stale lock file | An address left behind by a process that is gone |
+
+Nothing the daemon is currently holding is ever offered up, and the candidate
+list is re-derived at the moment you press the button rather than trusted from
+the report on screen — a session that came back to life in between is excluded
+by id, not by luck. Only recorded history is unticked by default; everything
+else is unambiguously garbage. `harness clean` does the same from a terminal,
+with `--dry-run` to only list, and an optional group name to narrow it.
 
 ## How feedback reaches the session
 
@@ -190,7 +226,8 @@ npm test
 npm run check          # all three
 ```
 
-- `src/daemon` — the singleton server: state, gates, board, git, checks, ship
+- `src/daemon` — the singleton server: state, gates, board, git, checks, ship,
+  housekeeping
 - `src/mcp` — the stdio MCP server (hand-rolled JSON-RPC, no dependencies)
 - `src/ui` — the browser client (React, `@dnd-kit` for reordering)
 - `src/shared` — types, config, the diff parser, the hook contract

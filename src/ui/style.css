@@ -234,6 +234,37 @@ a { color: var(--text-link); }
   font-size: var(--fs-micro); color: var(--text-tertiary);
 }
 
+/* Actions that belong to the daemon rather than to any one session. The
+   panel grows upward out of the footer, so it never pushes the session list
+   around while it is open. */
+.global { display: flex; flex-direction: column-reverse; gap: var(--sp-2); }
+.global-bar { display: flex; align-items: center; gap: var(--sp-2); }
+.global-version { font-variant-numeric: tabular-nums; }
+.global-note { color: var(--attention-fg); }
+.global-confirm {
+  display: flex; flex-direction: column; gap: var(--sp-1);
+  padding: var(--sp-2); border: 1px solid var(--attention-border); border-radius: var(--r-md);
+  background: var(--attention-bg); color: var(--attention-fg);
+}
+.global-panel {
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  max-height: 46vh; overflow-y: auto;
+  padding: var(--sp-2); border: 1px solid var(--border-default); border-radius: var(--r-md);
+  background: var(--surface-base);
+}
+.global-empty { margin: 0; }
+.global-groups { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.global-group-head { display: flex; align-items: center; gap: var(--sp-2); cursor: pointer; }
+.global-group-name { flex: 1; min-width: 0; color: var(--text-primary); font-weight: 600; }
+.global-group-size { font-variant-numeric: tabular-nums; }
+.global-group-detail { margin: 2px 0 0 22px; line-height: 15px; }
+.global-panel-foot { display: flex; align-items: center; gap: var(--sp-2); }
+.sidebar.is-collapsed .global-panel,
+.sidebar.is-collapsed .global-confirm,
+.sidebar.is-collapsed .global-version,
+.sidebar.is-collapsed .global-note { display: none; }
+.sidebar.is-collapsed .global-bar { flex-direction: column; }
+
 /* ------------------------------------------------------- app bar */
 
 .head {

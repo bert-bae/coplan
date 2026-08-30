@@ -3,10 +3,12 @@
 
 // src/daemon/main.ts
 import http from "node:http";
+import { spawn as spawn3 } from "node:child_process";
 import { randomBytes, randomUUID as randomUUID5 } from "node:crypto";
 import { openSync, writeSync, closeSync, unlinkSync, appendFileSync } from "node:fs";
-import path9 from "node:path";
+import path10 from "node:path";
 import { fileURLToPath } from "node:url";
+import { setTimeout as sleep } from "node:timers/promises";
 
 // src/daemon/store.ts
 import { EventEmitter } from "node:events";
@@ -2556,14 +2558,240 @@ function checksSummary(checks) {
   return { ok: true, text: `${checks.length} check(s) passing` };
 }
 
-// src/daemon/ship.ts
-import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync2, rmSync as rmSync2 } from "node:fs";
+// src/daemon/housekeeping.ts
+import { readdirSync as readdirSync2, statSync as statSync4, existsSync as existsSync5, rmSync as rmSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { tmpdir } from "node:os";
-import path8 from "node:path";
+import path7 from "node:path";
+var STALE_SESSION_MS = 24 * 60 * 60 * 1e3;
+var PARTIAL_WRITE_MS = 5 * 60 * 1e3;
+var SCRATCH_MS = 60 * 60 * 1e3;
+var LOG_LIMIT_BYTES = 1024 * 1024;
+var LOG_KEEP_BYTES = 256 * 1024;
+var SCRATCH_PREFIX = "cc-harness-";
+function scanStorage(opts = {}) {
+  const now = opts.now ?? Date.now();
+  const live2 = /* @__PURE__ */ new Set();
+  for (const id of opts.liveSessionIds ?? []) live2.add(sanitizeId(id));
+  const scratchDir = opts.scratchDir ?? tmpdir();
+  const plans = buildPlans(live2, now, scratchDir);
+  const groups = plans.map((plan) => ({
+    id: plan.id,
+    label: plan.label,
+    detail: plan.detail,
+    count: plan.candidates.length,
+    bytes: plan.candidates.reduce((sum, c) => sum + reclaimable(c), 0)
+  }));
+  return {
+    home: harnessHome(),
+    scratchDir,
+    scannedAt: now,
+    groups,
+    totalBytes: groups.reduce((sum, g) => sum + g.bytes, 0)
+  };
+}
+function cleanStorage(opts = {}) {
+  const now = opts.now ?? Date.now();
+  const live2 = /* @__PURE__ */ new Set();
+  for (const id of opts.liveSessionIds ?? []) live2.add(sanitizeId(id));
+  const scratchDir = opts.scratchDir ?? tmpdir();
+  const wanted = opts.groups && opts.groups.length ? new Set(opts.groups) : null;
+  const plans = buildPlans(live2, now, scratchDir).filter((p) => !wanted || wanted.has(p.id));
+  const groups = [];
+  const failed = [];
+  let freedBytes = 0;
+  let removed = 0;
+  for (const plan of plans) {
+    let groupBytes = 0;
+    let groupCount = 0;
+    for (const candidate of plan.candidates) {
+      const gain = reclaimable(candidate);
+      if (opts.dryRun) {
+        groupBytes += gain;
+        groupCount++;
+        continue;
+      }
+      if (!discard(candidate, scratchDir)) {
+        failed.push(candidate.path);
+        continue;
+      }
+      groupBytes += gain;
+      groupCount++;
+    }
+    groups.push({ id: plan.id, label: plan.label, count: groupCount, bytes: groupBytes });
+    freedBytes += groupBytes;
+    removed += groupCount;
+  }
+  return { dryRun: Boolean(opts.dryRun), groups, removed, freedBytes, failed };
+}
+function buildPlans(live2, now, scratchDir) {
+  return [
+    {
+      id: "sessions",
+      label: "Finished sessions",
+      detail: "Recorded history for sessions the harness no longer lists, untouched for over a day.",
+      candidates: staleSessionDirs(live2, now)
+    },
+    {
+      id: "partial-writes",
+      label: "Interrupted writes",
+      detail: "Half-written state files left behind when a daemon was killed mid-save.",
+      candidates: partialWrites(now)
+    },
+    {
+      id: "scratch",
+      label: "Scratch files",
+      detail: "Commit messages and PR bodies a shipped change wrote to the temp directory.",
+      candidates: scratchFiles(now, scratchDir)
+    },
+    {
+      id: "log",
+      label: "Daemon log",
+      detail: "The older part of the log. The most recent entries are kept.",
+      candidates: oversizedLog()
+    },
+    {
+      id: "lock",
+      label: "Stale lock file",
+      detail: "A daemon address left behind by a process that is no longer running.",
+      candidates: staleLock()
+    }
+  ];
+}
+function staleSessionDirs(live2, now) {
+  const root = paths.sessionsDir();
+  if (!existsSync5(root)) return [];
+  const out = [];
+  for (const entry of safeReaddir(root)) {
+    if (!entry.isDirectory()) continue;
+    if (live2.has(sanitizeId(entry.name))) continue;
+    const dir = path7.join(root, entry.name);
+    if (now - touchedAt(dir) < STALE_SESSION_MS) continue;
+    out.push({ path: dir, bytes: sizeOf(dir) });
+  }
+  return out;
+}
+function touchedAt(dir) {
+  let latest = mtimeOf2(dir);
+  for (const entry of safeReaddir(dir)) {
+    if (!entry.isFile()) continue;
+    latest = Math.max(latest, mtimeOf2(path7.join(dir, entry.name)));
+  }
+  return latest;
+}
+function partialWrites(now) {
+  const root = paths.sessionsDir();
+  if (!existsSync5(root)) return [];
+  const out = [];
+  for (const entry of safeReaddir(root)) {
+    if (!entry.isDirectory()) continue;
+    const dir = path7.join(root, entry.name);
+    for (const file of safeReaddir(dir)) {
+      if (!file.isFile()) continue;
+      if (!/^\.(state|diff)\..*\.tmp$/.test(file.name)) continue;
+      const full = path7.join(dir, file.name);
+      if (now - mtimeOf2(full) < PARTIAL_WRITE_MS) continue;
+      out.push({ path: full, bytes: sizeOf(full) });
+    }
+  }
+  return out;
+}
+function scratchFiles(now, root) {
+  const home = path7.resolve(harnessHome());
+  const out = [];
+  for (const entry of safeReaddir(root)) {
+    if (!entry.name.startsWith(SCRATCH_PREFIX)) continue;
+    const full = path7.join(root, entry.name);
+    const resolved = path7.resolve(full);
+    if (resolved === home || home.startsWith(resolved + path7.sep)) continue;
+    if (holdsLiveDaemon(resolved)) continue;
+    if (now - mtimeOf2(full) < SCRATCH_MS) continue;
+    out.push({ path: full, bytes: sizeOf(full) });
+  }
+  return out;
+}
+function holdsLiveDaemon(dir) {
+  try {
+    const lock = JSON.parse(readFileSync3(path7.join(dir, "daemon.json"), "utf8"));
+    return typeof lock.pid === "number" && isPidAlive(lock.pid);
+  } catch {
+    return false;
+  }
+}
+function oversizedLog() {
+  const file = paths.logFile();
+  const bytes = sizeOf(file);
+  if (bytes <= LOG_LIMIT_BYTES) return [];
+  return [{ path: file, bytes, trimTo: LOG_KEEP_BYTES }];
+}
+function staleLock() {
+  const lock = readLock();
+  if (!lock || isPidAlive(lock.pid)) return [];
+  const file = paths.lockFile();
+  return [{ path: file, bytes: sizeOf(file) }];
+}
+function reclaimable(candidate) {
+  return candidate.trimTo === void 0 ? candidate.bytes : Math.max(0, candidate.bytes - candidate.trimTo);
+}
+function discard(candidate, scratchDir) {
+  const target = path7.resolve(candidate.path);
+  const home = path7.resolve(harnessHome());
+  const scratch = path7.resolve(scratchDir);
+  const inside = (root) => target.startsWith(root + path7.sep);
+  if (!inside(home) && !inside(scratch)) return false;
+  if (!inside(home) && !path7.basename(target).startsWith(SCRATCH_PREFIX)) return false;
+  try {
+    if (candidate.trimTo !== void 0) {
+      trimFile(target, candidate.trimTo);
+      return true;
+    }
+    rmSync2(target, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function trimFile(file, keepBytes) {
+  const content = readFileSync3(file, "utf8");
+  const tail = content.slice(Math.max(0, content.length - keepBytes));
+  const from = tail.indexOf("\n");
+  writeFileSync2(file, from === -1 ? tail : tail.slice(from + 1));
+}
+function safeReaddir(dir) {
+  try {
+    return readdirSync2(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+function mtimeOf2(target) {
+  try {
+    return statSync4(target).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+function sizeOf(target) {
+  let stat;
+  try {
+    stat = statSync4(target);
+  } catch {
+    return 0;
+  }
+  if (stat.isFile()) return stat.size;
+  if (!stat.isDirectory()) return 0;
+  let total = 0;
+  for (const entry of safeReaddir(target)) total += sizeOf(path7.join(target, entry.name));
+  return total;
+}
+
+// src/daemon/ship.ts
+import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync3, rmSync as rmSync3 } from "node:fs";
+import { tmpdir as tmpdir2 } from "node:os";
+import path9 from "node:path";
 
 // src/shared/config.ts
-import { readFileSync as readFileSync3, existsSync as existsSync5 } from "node:fs";
-import path7 from "node:path";
+import { readFileSync as readFileSync4, existsSync as existsSync6 } from "node:fs";
+import path8 from "node:path";
 var DEFAULT_CONFIG = {
   autoOpen: false,
   maxTimelineEvents: 500,
@@ -2622,8 +2850,8 @@ function mergeConfig(base, override) {
 }
 function readJson2(file) {
   try {
-    if (!existsSync5(file)) return void 0;
-    const raw = readFileSync3(file, "utf8").replace(/^\s*\/\/.*$/gm, "");
+    if (!existsSync6(file)) return void 0;
+    const raw = readFileSync4(file, "utf8").replace(/^\s*\/\/.*$/gm, "");
     return JSON.parse(raw);
   } catch {
     return void 0;
@@ -2631,9 +2859,9 @@ function readJson2(file) {
 }
 function loadConfig(opts) {
   let cfg = DEFAULT_CONFIG;
-  cfg = mergeConfig(cfg, readJson2(path7.join(opts.configDir, "config.json")));
+  cfg = mergeConfig(cfg, readJson2(path8.join(opts.configDir, "config.json")));
   if (opts.projectDir) {
-    cfg = mergeConfig(cfg, readJson2(path7.join(opts.projectDir, ".claude", "harness.json")));
+    cfg = mergeConfig(cfg, readJson2(path8.join(opts.projectDir, ".claude", "harness.json")));
   }
   return cfg;
 }
@@ -2641,12 +2869,12 @@ function stageInstructions(cfg, stage, opts) {
   const rel = cfg.stages[stage]?.instructions;
   if (!rel) return void 0;
   const candidates2 = [
-    path7.resolve(opts.configDir, rel),
-    ...opts.projectDir ? [path7.resolve(opts.projectDir, rel)] : []
+    path8.resolve(opts.configDir, rel),
+    ...opts.projectDir ? [path8.resolve(opts.projectDir, rel)] : []
   ];
   for (const file of candidates2) {
     try {
-      if (existsSync5(file)) return readFileSync3(file, "utf8").trim();
+      if (existsSync6(file)) return readFileSync4(file, "utf8").trim();
     } catch {
     }
   }
@@ -2752,14 +2980,14 @@ async function executeShip(store, sessionId, config, ship) {
       const add = reviewed.length ? await git(cwd, ["add", "--", ...reviewed]) : await git(cwd, ["add", "-A"]);
       if (!add.ok) return fail(record, log2, `git add failed: ${add.stderr}`);
       if (reviewed.length) record(`staged ${reviewed.length} reviewed path(s)`);
-      const messageFile = path8.join(tmpdir(), `cc-harness-commit-${Date.now()}.txt`);
-      writeFileSync2(messageFile, `${ship.commitMessage}
+      const messageFile = path9.join(tmpdir2(), `cc-harness-commit-${Date.now()}.txt`);
+      writeFileSync3(messageFile, `${ship.commitMessage}
 `);
       let commit;
       try {
         commit = await git(cwd, ["commit", "-F", messageFile]);
       } finally {
-        discard(messageFile);
+        discard2(messageFile);
       }
       if (!commit.ok) return fail(record, log2, `git commit failed: ${commit.stderr || commit.stdout}`);
       record(`committed: ${ship.commitMessage.split("\n")[0]}`);
@@ -2788,8 +3016,8 @@ async function executeShip(store, sessionId, config, ship) {
       base: ship.baseBranch ?? ""
     };
     if (provider.kind === "command") {
-      const bodyFile = path8.join(tmpdir(), `cc-harness-pr-${Date.now()}.md`);
-      writeFileSync2(bodyFile, ship.body);
+      const bodyFile = path9.join(tmpdir2(), `cc-harness-pr-${Date.now()}.md`);
+      writeFileSync3(bodyFile, ship.body);
       const command = renderTemplate(provider.command, {
         title: shellQuote(ship.title),
         body: shellQuote(ship.body),
@@ -2801,7 +3029,7 @@ async function executeShip(store, sessionId, config, ship) {
       try {
         result = await runShell(command, cwd);
       } finally {
-        discard(bodyFile);
+        discard2(bodyFile);
       }
       log2.push(result.output.trim());
       if (!result.ok) return fail(record, log2, `PR command failed (exit ${result.code})`);
@@ -2817,7 +3045,7 @@ async function executeShip(store, sessionId, config, ship) {
   let summaryPath;
   if (steps.has("summary") && config.ship.summaryPath) {
     summaryPath = writeSummary(cwd, config, ship, session);
-    if (summaryPath) record(`summary written to ${path8.relative(cwd, summaryPath)}`);
+    if (summaryPath) record(`summary written to ${path9.relative(cwd, summaryPath)}`);
   }
   const outcome = { ok: true, output: log2.join("\n") };
   if (url) outcome.url = url;
@@ -2853,8 +3081,8 @@ function writeSummary(cwd, config, ship, session) {
       date: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10)
     });
     if (!rel) return void 0;
-    const file = path8.resolve(cwd, rel);
-    mkdirSync3(path8.dirname(file), { recursive: true });
+    const file = path9.resolve(cwd, rel);
+    mkdirSync3(path9.dirname(file), { recursive: true });
     const lines = [`# ${ship.title}`, "", ship.body, ""];
     if (session.threads.length) {
       lines.push("## Review threads", "");
@@ -2863,7 +3091,7 @@ function writeSummary(cwd, config, ship, session) {
       }
       lines.push("");
     }
-    writeFileSync2(file, lines.join("\n"));
+    writeFileSync3(file, lines.join("\n"));
     return file;
   } catch {
     return void 0;
@@ -2881,9 +3109,9 @@ async function runShell(command, cwd) {
 [cc-harness] timed out after ${Math.round(SHIP_COMMAND_TIMEOUT_MS / 1e3)}s and was killed` : "";
   return { ok: outcome.ok, code: outcome.code, output: outcome.output + note };
 }
-function discard(file) {
+function discard2(file) {
   try {
-    rmSync2(file, { force: true });
+    rmSync3(file, { force: true });
   } catch {
   }
 }
@@ -2897,7 +3125,7 @@ function shellQuote(value) {
 
 // src/daemon/browser.ts
 import { spawn as spawn2 } from "node:child_process";
-import { existsSync as existsSync6, readFileSync as readFileSync4 } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync5 } from "node:fs";
 function openInBrowser(url) {
   if (!/^https?:\/\//.test(url)) return;
   for (const opener of candidates()) {
@@ -2920,8 +3148,8 @@ function candidates() {
   if (process.platform === "win32") return [{ command: "cmd", args: ["/c", "start", ""] }];
   const list = [];
   if (isWsl()) {
-    if (existsSync6("/usr/bin/wslview")) list.push({ command: "wslview", args: [] });
-    if (existsSync6("/mnt/c/Windows/System32/cmd.exe")) {
+    if (existsSync7("/usr/bin/wslview")) list.push({ command: "wslview", args: [] });
+    if (existsSync7("/mnt/c/Windows/System32/cmd.exe")) {
       list.push({ command: "/mnt/c/Windows/System32/cmd.exe", args: ["/c", "start", ""], cwd: "/mnt/c" });
     }
   }
@@ -2931,7 +3159,7 @@ function candidates() {
 function isWsl() {
   if (process.env["WSL_DISTRO_NAME"]) return true;
   try {
-    return existsSync6("/proc/version") && /microsoft/i.test(readFileSync4("/proc/version", "utf8"));
+    return existsSync7("/proc/version") && /microsoft/i.test(readFileSync5("/proc/version", "utf8"));
   } catch {
     return false;
   }
@@ -2939,7 +3167,7 @@ function isWsl() {
 
 // src/daemon/main.ts
 var VERSION = true ? "0.1.0" : "0.0.0";
-var UI_DIR = path9.resolve(path9.dirname(fileURLToPath(import.meta.url)), "..", "ui");
+var UI_DIR = path10.resolve(path10.dirname(fileURLToPath(import.meta.url)), "..", "ui");
 var MAX_TITLE_LENGTH = 120;
 async function main() {
   ensureHome();
@@ -2953,10 +3181,18 @@ async function main() {
   const store = new SessionStore({ maxTimelineEvents: baseConfig.maxTimelineEvents });
   const config = baseConfig;
   const tailers = /* @__PURE__ */ new Map();
-  const token = randomBytes(24).toString("hex");
+  const inheritedToken = process.env["CC_HARNESS_TOKEN"];
+  const inheritedPort = Number(process.env["CC_HARNESS_PORT"] ?? 0);
+  delete process.env["CC_HARNESS_TOKEN"];
+  const token = inheritedToken || randomBytes(24).toString("hex");
   const clients = { count: 0 };
   const server = http.createServer();
-  const router = buildRouter({ store, config, tailers, token, clients });
+  const lifecycle = {
+    restart() {
+      return false;
+    }
+  };
+  const router = buildRouter({ store, config, tailers, token, clients, lifecycle });
   server.on("request", (req, res) => {
     void handle(req, res, router, token).catch((err) => {
       log(`request error: ${err?.message}`);
@@ -2967,7 +3203,7 @@ async function main() {
   server.keepAliveTimeout = 0;
   server.headersTimeout = 0;
   server.requestTimeout = 0;
-  const port = await listen(server, Number(process.env["CC_HARNESS_PORT"] ?? 0));
+  const port = await listen(server, inheritedPort);
   const lock = {
     pid: process.pid,
     port,
@@ -2981,7 +3217,7 @@ async function main() {
   process.stdout.write(`${JSON.stringify({ started: true, ...lock })}
 `);
   let shuttingDown = false;
-  const shutdown = (signal) => {
+  const shutdown = (signal, respawn = false) => {
     if (shuttingDown) {
       log(`second signal (${signal}); exiting now`);
       killAllChildren();
@@ -3003,11 +3239,21 @@ async function main() {
       if (live2?.pid === process.pid) unlinkSync(paths.lockFile());
     } catch {
     }
-    void shutdownChildren(SHUTDOWN_GRACE_MS).catch(() => 0).finally(() => process.exit(0));
+    const leave = () => {
+      if (respawn) respawnDaemon(lock);
+      process.exit(0);
+    };
+    void shutdownChildren(SHUTDOWN_GRACE_MS).catch(() => 0).finally(leave);
     setTimeout(() => {
       killAllChildren();
-      process.exit(0);
+      leave();
     }, SHUTDOWN_GRACE_MS + 1500).unref();
+  };
+  lifecycle.restart = () => {
+    if (shuttingDown) return false;
+    log("restart requested; handing over to a fresh daemon");
+    setTimeout(() => shutdown("restart", true), RESTART_DELAY_MS).unref();
+    return true;
   };
   const reaper = startReaper(store, tailers);
   startIdleWatch(store, config, clients, () => shutdown("idle"));
@@ -3019,16 +3265,60 @@ async function main() {
   process.on("unhandledRejection", (err) => log(`unhandled: ${String(err)}`));
 }
 var SHUTDOWN_GRACE_MS = 800;
+var RESTART_DELAY_MS = 120;
+var PORT_CLAIM_MS = 5e3;
 var MAX_TRACKED_OPENS = 200;
 var MAX_CACHED_CONFIGS = 50;
-function listen(server, port) {
+async function listen(server, port) {
+  const deadline = Date.now() + PORT_CLAIM_MS;
+  for (; ; ) {
+    try {
+      return await bind(server, port);
+    } catch (err) {
+      const code = err.code;
+      if (code !== "EADDRINUSE" || port === 0) throw err;
+      if (Date.now() >= deadline) {
+        log(`port ${port} still busy; taking an ephemeral one`);
+        return bind(server, 0);
+      }
+      await sleep(150);
+    }
+  }
+}
+function bind(server, port) {
   return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(port, "127.0.0.1", () => {
+    const onError = (err) => {
+      server.off("listening", onListening);
+      reject(err);
+    };
+    const onListening = () => {
+      server.off("error", onError);
       const addr = server.address();
       resolve(typeof addr === "object" && addr ? addr.port : port);
-    });
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, "127.0.0.1");
   });
+}
+function respawnDaemon(lock) {
+  const entry = process.argv[1];
+  if (!entry) return;
+  try {
+    const child = spawn3(process.execPath, [entry], {
+      detached: true,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        CC_HARNESS_PORT: String(lock.port),
+        CC_HARNESS_TOKEN: lock.token
+      }
+    });
+    child.on("error", () => {
+    });
+    child.unref();
+  } catch {
+  }
 }
 function writeLock(lock) {
   const file = paths.lockFile();
@@ -3092,7 +3382,7 @@ function authorized(req, url, token) {
   return cookie.split(";").some((c) => c.trim() === `cc_harness=${token}`);
 }
 function buildRouter(deps) {
-  const { store, config, tailers, token, clients } = deps;
+  const { store, config, tailers, token, clients, lifecycle } = deps;
   const router = new Router();
   const authedUrl = (sessionId) => {
     const lock = readLiveLock();
@@ -3125,6 +3415,7 @@ function buildRouter(deps) {
     }
     return resolved;
   };
+  const residentIds = () => store.all().map((s) => s.sessionId);
   const sessionOr404 = (ctx) => {
     const id = ctx.params["id"] ?? "";
     const session = store.get(id);
@@ -3183,6 +3474,34 @@ function buildRouter(deps) {
       store.setDiff(session.sessionId, diff);
     }
     json(ctx.res, 200, { diff });
+  });
+  router.get("/api/storage", (ctx) => {
+    json(ctx.res, 200, { report: scanStorage({ liveSessionIds: residentIds() }) });
+  });
+  router.post("/api/storage/clean", async (ctx) => {
+    const body = await readJson(ctx.req);
+    const result = cleanStorage({
+      liveSessionIds: residentIds(),
+      ...body.groups ? { groups: body.groups } : {},
+      ...body.dryRun ? { dryRun: true } : {}
+    });
+    if (!result.dryRun && result.removed) {
+      log(`housekeeping removed ${result.removed} item(s), ${result.freedBytes} bytes`);
+    }
+    json(ctx.res, 200, { result, report: scanStorage({ liveSessionIds: residentIds() }) });
+  });
+  router.post("/api/daemon/restart", (ctx) => {
+    const running2 = liveChildLabels();
+    const started = lifecycle.restart();
+    json(ctx.res, started ? 200 : 409, {
+      restarting: started,
+      port: readLiveLock()?.port ?? null,
+      // Checks and ship commands are killed by the shutdown. Say which, so
+      // the UI can report what the restart interrupted rather than leaving a
+      // check that simply stopped.
+      interrupted: running2,
+      ...started ? {} : { error: "already shutting down" }
+    });
   });
   router.get("/api/events", (ctx) => {
     const { res } = ctx;
@@ -3786,14 +4105,14 @@ function startIdleWatch(store, config, clients, stop) {
   timer.unref?.();
 }
 var REAP_INTERVAL_MS = 5 * 60 * 1e3;
-var STALE_SESSION_MS = 6 * 60 * 60 * 1e3;
+var STALE_SESSION_MS2 = 6 * 60 * 60 * 1e3;
 var ENDED_SESSION_TTL_MS = 60 * 60 * 1e3;
 function startReaper(store, tailers) {
   const runOnce = (now = Date.now()) => {
     let closed = 0;
     for (const [sessionId, tailer] of tailers) {
       const session = store.get(sessionId);
-      const dead = !session || session.status === "ended" || typeof session.claudePid === "number" && !isPidAlive(session.claudePid) || now - session.updatedAt > STALE_SESSION_MS;
+      const dead = !session || session.status === "ended" || typeof session.claudePid === "number" && !isPidAlive(session.claudePid) || now - session.updatedAt > STALE_SESSION_MS2;
       if (!dead) continue;
       tailer.close();
       tailers.delete(sessionId);
@@ -3802,7 +4121,7 @@ function startReaper(store, tailers) {
     }
     pruneBaselines((id) => {
       const session = store.get(id);
-      return Boolean(session && session.status !== "ended" && now - session.updatedAt <= STALE_SESSION_MS);
+      return Boolean(session && session.status !== "ended" && now - session.updatedAt <= STALE_SESSION_MS2);
     });
     const dropped = store.sweep({ endedTtlMs: ENDED_SESSION_TTL_MS, now });
     if (closed || dropped) log(`reaped ${closed} tailer(s), evicted ${dropped} session(s)`);
