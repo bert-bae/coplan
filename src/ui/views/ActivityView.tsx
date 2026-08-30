@@ -1,11 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { useSession, useStore, store } from '../store.ts';
+import { useSession } from '../store.ts';
 import { Markdown } from '../components/Markdown.tsx';
 import { Panel, EmptyState } from '../components/primitives.tsx';
-import { api } from '../lib/api.ts';
-import { Button } from '../components/primitives.tsx';
 import { classNames, clockTime, pluralize, relativeTime } from '../lib/format.ts';
-import type { Gate, TimelineEvent } from '../../shared/types.ts';
+import type { TimelineEvent } from '../../shared/types.ts';
 
 const ICON: Record<string, string> = {
   assistant: '●', thinking: '◦', tool: '›', stage: '▸', note: '·', user: '»',
@@ -28,14 +26,14 @@ export function ActivityView() {
 
   if (!session) return null;
 
-  const gate = session.gates.find((g) => g.status === 'open' && g.kind === 'question');
   const done = session.todos.filter((t) => t.status === 'completed').length;
   const percent = session.todos.length ? Math.round((done / session.todos.length) * 100) : 0;
 
   return (
     <div className="activity">
       <div className="activity-main">
-        {gate && <QuestionCard gate={gate} sessionId={session.sessionId} />}
+        {/* The question card is rendered above the tab strip, by App, so it
+            stays reachable from every view. */}
         <div className="feed-head">
           <strong>Activity</strong>
           <label className="toggle">
@@ -148,56 +146,5 @@ function Event({ event }: { event: TimelineEvent }) {
         {prose ? <Markdown source={event.text} /> : <pre className="event-text">{event.text}</pre>}
       </div>
     </article>
-  );
-}
-
-/** Claude asked something. This is the path that used to dead-end in prose. */
-function QuestionCard({ gate, sessionId }: { gate: Gate; sessionId: string }) {
-  const [answer, setAnswer] = useState('');
-  const [busy, setBusy] = useState(false);
-  const options = gate.meta?.options ?? [];
-
-  const send = async (text: string) => {
-    const body = text.trim();
-    if (!body || busy) return;
-    setBusy(true);
-    try {
-      await api.resolveGate(sessionId, gate.id, { verdict: 'answered', comment: body });
-      store.toast('success', 'Answer sent — Claude is resuming.');
-      setAnswer('');
-    } catch (err) {
-      store.fail(err);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="question-card">
-      <h3>Claude is asking</h3>
-      <p className="question-text">{gate.prompt}</p>
-      {options.length > 0 && (
-        <div className="question-options">
-          {options.map((option) => (
-            <Button key={option} onClick={() => void send(option)} disabled={busy}>
-              {option}
-            </Button>
-          ))}
-        </div>
-      )}
-      <textarea
-        className="input"
-        rows={3}
-        value={answer}
-        placeholder="Your answer…"
-        onChange={(e) => setAnswer(e.target.value)}
-        onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') void send(answer); }}
-      />
-      <div className="row-actions">
-        <Button variant="primary" onClick={() => void send(answer)} disabled={!answer.trim() || busy}>
-          Send answer
-        </Button>
-      </div>
-    </div>
   );
 }

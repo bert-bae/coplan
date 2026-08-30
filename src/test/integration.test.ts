@@ -291,6 +291,88 @@ test('a question opens a gate the UI can answer', async () => {
   assert.match(out.reason ?? '', /Map/);
 });
 
+test('a structured question round-trips as one answer per question', async () => {
+  const other = 'integration-questions';
+  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
+  const asked = await mcpFor(other, 'ask', {
+    question: 'How should the cache work?',
+    questions: [
+      {
+        header: 'Backend',
+        question: 'Where should it live?',
+        options: [
+          { label: 'Redis', description: 'Shared across processes.' },
+          { label: 'In-memory', description: 'Simplest, lost on restart.' },
+        ],
+      },
+      {
+        header: 'Eviction',
+        question: 'What should it evict on?',
+        multiSelect: true,
+        options: [{ label: 'TTL' }, { label: 'LRU' }],
+      },
+    ],
+  });
+  const gateId = String(asked['gateId']);
+
+  const state = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
+  const gate = state.gates.find((g) => g.id === gateId)!;
+  assert.equal(gate.meta?.questions?.length, 2);
+  assert.equal(gate.meta?.questions?.[0]?.header, 'Backend');
+  assert.equal(gate.meta?.questions?.[0]?.options[0]?.description, 'Shared across processes.');
+  assert.equal(gate.meta?.questions?.[1]?.multiSelect, true);
+
+  // The UI answers per question id; the daemon folds those into the single
+  // comment every downstream consumer reads.
+  await call(`/api/session/${other}/gate/${gateId}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ verdict: 'answered', answers: { q1: 'Redis', q2: 'TTL, LRU' } }),
+  });
+
+  const out = await hookFor(other, 'Stop', { stop_hook_active: false });
+  assert.equal(out.decision, 'block');
+  assert.match(out.reason ?? '', /Where should it live\?/);
+  assert.match(out.reason ?? '', /Redis/);
+  assert.match(out.reason ?? '', /TTL, LRU/);
+});
+
+test('a renamed session keeps its name against the transcript title', async () => {
+  const other = 'integration-rename';
+  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
+
+  const renamed = await call<{ title: string }>(`/api/session/${other}/title`, {
+    method: 'POST',
+    body: JSON.stringify({ title: 'Cache rewrite' }),
+  });
+  assert.equal(renamed.title, 'Cache rewrite');
+
+  const list = await call<{ sessions: { sessionId: string; title: string }[] }>('/api/sessions');
+  assert.equal(list.sessions.find((s) => s.sessionId === other)?.title, 'Cache rewrite');
+
+  // The CLI names conversations itself; that must not undo the user's name.
+  appendFileSync(transcript, `${JSON.stringify({ type: 'ai-title', title: 'Auto-generated title' })}\n`);
+  await sleep(400);
+  const state = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
+  assert.equal(state.title, 'Cache rewrite');
+  assert.equal(state.titleLocked, true);
+});
+
+test('an empty rename is refused rather than blanking the session', async () => {
+  const other = 'integration-rename-empty';
+  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
+  const before = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
+
+  const res = await fetch(`${baseUrl(lock)}/api/session/${other}/title`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}` },
+    body: JSON.stringify({ title: '   ' }),
+  });
+  assert.equal(res.status, 400);
+
+  const after = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
+  assert.equal(after.title, before.title);
+});
+
 test('a superseded gate stops holding the turn', async () => {
   const other = 'integration-superseded';
   await hookFor(other, 'SessionStart', { start_reason: 'startup' });

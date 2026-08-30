@@ -113,6 +113,27 @@ Call `harness_ask({question, options?})` instead. It opens a gate, shows the
 question in the UI with your suggested answers as buttons, and `harness_await`
 returns what they chose. This applies at every stage, not just planning.
 
+When the answers are separate decisions, or an option needs explaining, pass
+`questions` instead — up to four, each with a short `header`, its own options
+as `{label, description}`, and `multiSelect` where more than one can apply:
+
+```
+harness_ask({
+  question: "How should the cache work?",
+  questions: [
+    { header: "Backend", question: "Where should it live?", options: [
+        { label: "Redis", description: "Shared across processes." },
+        { label: "In-memory", description: "Simplest, lost on restart." }] },
+    { header: "Eviction", question: "Evict on?", multiSelect: true,
+      options: [{ label: "TTL" }, { label: "LRU" }] },
+  ],
+})
+```
+
+The UI renders these as a form and answers every question in one round trip,
+which is cheaper than asking three times in a row. The user can always write
+their own answer instead of picking one.
+
 ## Rules
 
 - **While a gate is open, do not start new work.** Call `harness_await` until

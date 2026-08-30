@@ -361,7 +361,11 @@ function attachTailer(sessionId: string, ctx: IngestContext, fromStart = false):
   const session = ctx.store.get(sessionId);
   if (!session?.transcriptPath || ctx.tailers.has(sessionId)) return;
   const tailer = new TranscriptTailer(session.transcriptPath, (update) => {
-    if (update.title) ctx.store.update(sessionId, { title: update.title });
+    // The CLI names the conversation itself, but a name the user typed in
+    // the UI outranks it — otherwise a rename is undone seconds later.
+    if (update.title && !ctx.store.get(sessionId)?.titleLocked) {
+      ctx.store.update(sessionId, { title: update.title });
+    }
     if (update.events.length) ctx.store.addTimelineBatch(sessionId, update.events);
     if (update.usage) {
       ctx.store.mutate(sessionId, (s) => {

@@ -307,9 +307,31 @@ export interface GateResult {
   resolvedAt: number;
 }
 
+/** One selectable answer. `description` is the second line under the label,
+ *  the way the CLI's own question UI renders its choices. */
+export interface GateQuestionOption {
+  label: string;
+  description?: string;
+}
+
+/** A structured question, mirroring what the CLI asks in the terminal: a
+ *  short header chip, the question itself, and a set of options that may be
+ *  single- or multi-select. Free text is always allowed alongside them. */
+export interface GateQuestion {
+  id: string;
+  /** Very short label, rendered as a chip, e.g. "Auth method". */
+  header?: string;
+  question: string;
+  multiSelect?: boolean;
+  options: GateQuestionOption[];
+}
+
 export interface GateOptions {
-  /** `question` gates: suggested answers, rendered as one-click buttons. */
+  /** `question` gates, simple form: suggested answers as one-click buttons. */
   options?: string[];
+  /** `question` gates, structured form: one or more questions with rich
+   *  options. When present the UI renders these and ignores `options`. */
+  questions?: GateQuestion[];
 }
 
 export interface Gate {
@@ -348,6 +370,9 @@ export interface SessionState {
   branch: string | null;
   transcriptPath: string | null;
   title: string;
+  /** Set once the user renames the session, so the transcript's own
+   *  auto-generated title stops overwriting what they chose. */
+  titleLocked?: boolean;
   stage: Stage;
   stageNote?: string;
   status: SessionStatus;

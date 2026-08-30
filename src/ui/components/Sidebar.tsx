@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { store, useStore } from '../store.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
 import type { SessionSummary } from '../../shared/types.ts';
@@ -16,8 +16,15 @@ const STAGE_LABEL: Record<string, string> = {
   done: 'Done',
 };
 
-/** The pinned section is a group like any other, with a reserved key. */
+/** The attention section is a group like any other, with a reserved key. */
 const PINNED_KEY = '\u0000pinned';
+
+/** Sessions Claude has stopped on. These are lifted to the top group whether
+ *  or not they were pinned: the whole reason to look at the rail is to find
+ *  the one that is blocked on you. */
+function needsAttention(session: SessionSummary): boolean {
+  return session.openGates > 0 || session.status === 'waiting';
+}
 
 interface Group {
   key: string;
@@ -35,6 +42,7 @@ export function Sidebar() {
   const collapsed = useStore((s) => s.collapsedSidebar);
   const pinned = useStore((s) => s.pinned);
   const collapsedProjects = useStore((s) => s.collapsedProjects);
+  const soundEnabled = useStore((s) => s.soundEnabled);
 
   const groups = groupSessions(sessions, pinned);
 
@@ -50,6 +58,15 @@ export function Sidebar() {
             {connection === 'live' ? 'live' : connection === 'connecting' ? 'connecting…' : 'reconnecting…'}
           </span>
         </div>
+        <button
+          type="button"
+          className={classNames('icon-btn', !soundEnabled && 'is-muted')}
+          title={soundEnabled ? 'Mute the alert chime' : 'Play a chime when Claude needs you'}
+          aria-pressed={soundEnabled}
+          onClick={() => store.toggleSound()}
+        >
+          {soundEnabled ? '🔔' : '🔕'}
+        </button>
         <button
           type="button"
           className="icon-btn"
@@ -97,12 +114,13 @@ export function groupSessions(sessions: SessionSummary[], pinned: string[]): Gro
   const groups = new Map<string, Group>();
 
   for (const session of sessions) {
-    const key = pinnedSet.has(session.sessionId) ? PINNED_KEY : (session.repoRoot ?? session.cwd);
+    const lift = pinnedSet.has(session.sessionId) || needsAttention(session);
+    const key = lift ? PINNED_KEY : (session.repoRoot ?? session.cwd);
     let group = groups.get(key);
     if (!group) {
       group =
         key === PINNED_KEY
-          ? { key, label: 'Pinned', path: '', sessions: [], openGates: 0 }
+          ? { key, label: 'Pinned / Action required', path: '', sessions: [], openGates: 0 }
           : {
               key,
               label: session.repoName ?? basename(session.cwd) ?? 'Unknown project',
@@ -193,13 +211,19 @@ function SessionRow({
   const drafts = useStore((s) => s.drafts[session.sessionId]?.length ?? 0);
   const pinned = useStore((s) => s.pinned.includes(session.sessionId));
   const [confirming, setConfirming] = useState(false);
+  const [renaming, setRenaming] = useState(false);
 
   return (
     <div className={classNames('session-row', active && 'is-active', confirming && 'is-confirming')}>
+      {renaming ? (
+        <RenameField session={session} onDone={() => setRenaming(false)} />
+      ) : (
       <button
         type="button"
         className="session-open"
         onClick={() => void store.selectSession(session.sessionId)}
+        onDoubleClick={() => setRenaming(true)}
+        title={`${session.title}\n${session.cwd}\nDouble-click to rename`}
       >
         <span className="session-name">
           {session.openGates > 0 && (
@@ -220,8 +244,17 @@ function SessionRow({
           )}
         </span>
       </button>
+      )}
 
       <div className="session-actions">
+        <button
+          type="button"
+          className="icon-btn is-tiny"
+          title="Rename this session"
+          onClick={() => setRenaming(true)}
+        >
+          ✎
+        </button>
         <button
           type="button"
           className={classNames('icon-btn', 'is-tiny', pinned && 'is-active')}
@@ -262,5 +295,47 @@ function SessionRow({
         </div>
       )}
     </div>
+  );
+}
+
+/** Inline rename. Commits on Enter or blur, abandons on Escape — the same
+ *  contract as renaming a file in an editor. */
+function RenameField({ session, onDone }: { session: SessionSummary; onDone: () => void }) {
+  const [value, setValue] = useState(session.title);
+  const input = useRef<HTMLInputElement>(null);
+  const done = useRef(false);
+
+  useEffect(() => {
+    input.current?.select();
+  }, []);
+
+  const commit = () => {
+    if (done.current) return;
+    done.current = true;
+    const next = value.trim();
+    if (next && next !== session.title) void store.renameSession(session.sessionId, next);
+    onDone();
+  };
+
+  const abandon = () => {
+    if (done.current) return;
+    done.current = true;
+    onDone();
+  };
+
+  return (
+    <input
+      ref={input}
+      className="session-rename"
+      value={value}
+      aria-label={`Rename ${session.title}`}
+      maxLength={120}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commit();
+        if (e.key === 'Escape') abandon();
+      }}
+    />
   );
 }

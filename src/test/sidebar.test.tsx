@@ -117,6 +117,7 @@ beforeEach(() => {
     pinned: [],
     collapsedProjects: [],
     collapsedSidebar: false,
+    soundEnabled: true,
   });
 });
 
@@ -167,7 +168,7 @@ test('a pinned session moves to its own group at the top', async () => {
     fireEvent.click(within(rowFor('s3 title')).getByTitle('Pin session'));
   });
 
-  assert.deepEqual(groupNames(), ['Pinned', 'repo', 'other']);
+  assert.deepEqual(groupNames(), ['Pinned / Action required', 'repo', 'other']);
   assert.deepEqual(store.getState().pinned, ['s3']);
   assert.match(document.querySelector('.session-group')?.textContent ?? '', /s3 title/);
 
@@ -277,4 +278,86 @@ test('collapsing the sidebar narrows the column it sits in', async () => {
   // Without this the rail shrinks but its grid column does not, leaving a band
   // of dead space where the sidebar used to be.
   assert.ok(document.querySelector('.app')?.classList.contains('is-sidebar-collapsed'));
+});
+
+test('a session waiting on the user is lifted to the top group unpinned', async () => {
+  ({ posts } = stubFetch((route) => {
+    if (route.startsWith('/api/sessions')) {
+      const now = Date.now();
+      const blocked = { ...summary('s3', 'other', now - 2000), openGates: 1, status: 'waiting' as const };
+      return { sessions: [summary('s1', 'repo', now), summary('s2', 'other', now - 1000), blocked], version: 'test' };
+    }
+    if (route.startsWith('/api/session/')) return { session: makeSession(), diff: null };
+    return { ok: true };
+  }));
+  render(<App />);
+  await act(async () => {
+    await store.init();
+  });
+
+  // Nothing was pinned: being blocked on the user is enough on its own.
+  assert.deepEqual(store.getState().pinned, []);
+  assert.deepEqual(groupNames(), ['Pinned / Action required', 'repo', 'other']);
+  assert.match(document.querySelector('.session-group')?.textContent ?? '', /s3 title/);
+  // And it is not also listed under its project, which would double-count it.
+  assert.deepEqual(rowNames().filter((n) => n.includes('s3 title')).length, 1);
+});
+
+test('a session can be renamed from the rail', async () => {
+  await boot();
+  posts.length = 0;
+
+  await act(async () => {
+    fireEvent.click(within(rowFor('s1 title')).getByTitle('Rename this session'));
+  });
+  const field = document.querySelector('.session-rename') as HTMLInputElement;
+  assert.ok(field, 'the row becomes an input');
+
+  await act(async () => {
+    fireEvent.change(field, { target: { value: 'Cache rewrite' } });
+  });
+  await act(async () => {
+    fireEvent.keyDown(field, { key: 'Enter' });
+  });
+
+  const call = posts.find((p) => p.route.includes('/title'));
+  assert.ok(call, 'the new name is saved');
+  assert.equal(call!.body['title'], 'Cache rewrite');
+  // Shown straight away rather than after the round trip.
+  assert.ok(rowNames().some((n) => n.includes('Cache rewrite')));
+});
+
+test('abandoning a rename leaves the name alone', async () => {
+  await boot();
+  posts.length = 0;
+
+  await act(async () => {
+    fireEvent.click(within(rowFor('s1 title')).getByTitle('Rename this session'));
+  });
+  const field = document.querySelector('.session-rename') as HTMLInputElement;
+  await act(async () => {
+    fireEvent.change(field, { target: { value: 'Discard me' } });
+  });
+  await act(async () => {
+    fireEvent.keyDown(field, { key: 'Escape' });
+  });
+
+  assert.equal(posts.find((p) => p.route.includes('/title')), undefined, 'nothing was saved');
+  assert.ok(rowNames().some((n) => n.includes('s1 title')), 'the original name is still there');
+});
+
+test('the alert chime can be muted, and the choice is remembered', async () => {
+  await boot();
+  assert.equal(store.getState().soundEnabled, true, 'on by default');
+
+  await act(async () => {
+    fireEvent.click(screen.getByTitle('Mute the alert chime'));
+  });
+
+  assert.equal(store.getState().soundEnabled, false);
+  const saved = JSON.parse(window.localStorage.getItem('cc-harness:prefs') ?? '{}') as {
+    soundEnabled?: boolean;
+  };
+  assert.equal(saved.soundEnabled, false, 'a mute outlives the tab');
+  assert.ok(screen.getByTitle('Play a chime when Claude needs you'), 'the control inverts');
 });

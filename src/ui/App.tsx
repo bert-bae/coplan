@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { store, useStore, useSession, useOpenGate, useDrafts, type Tab } from './store.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { GateBanner } from './components/GateBanner.tsx';
+import { QuestionGate } from './components/QuestionGate.tsx';
 import { Composer } from './components/Composer.tsx';
 import { Toasts } from './components/Toasts.tsx';
 import { ConnectionBar } from './components/ConnectionBar.tsx';
@@ -54,6 +55,9 @@ export function App() {
             <Header session={session} />
             <ConnectionBar />
             <GateBanner />
+            {/* Above the tabs on purpose: a question must be answerable
+                without leaving whatever the user is reading. */}
+            <QuestionGate />
             <nav className="tabs" role="tablist">
               {TABS.map((t) => (
                 <TabButton key={t.id} id={t.id} label={t.label} active={tab === t.id} session={session} />

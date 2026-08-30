@@ -180,7 +180,9 @@ test('the shell renders the session and lands on the tab the gate needs', async 
   assert.equal(document.querySelector('.head-title')?.textContent, 'demo');
   // The rail names the session; the project it belongs to is the group header.
   assert.equal(document.querySelector('.session-row .session-name')?.textContent, 'demo');
-  assert.equal(document.querySelector('.session-group-name')?.textContent, 'repo');
+  // This session is parked on a code-review gate, so it is lifted out of its
+  // project group. Grouping by project is covered in sidebar.test.tsx.
+  assert.equal(document.querySelector('.session-group-name')?.textContent, 'Pinned / Action required');
   assert.equal(store.getState().tab, 'review', 'a code-review gate opens the Review tab');
   cleanup();
 });
@@ -621,5 +623,105 @@ test("a question from Claude is answerable in the UI", async () => {
   assert.ok(call, 'answering resolves the question gate');
   assert.equal(call!.body['verdict'], 'answered');
   assert.equal(call!.body['comment'], 'Map');
+  cleanup();
+});
+
+test('a question stays answerable from whatever tab is open', async () => {
+  const state = makeSession({ stage: 'implementing' });
+  state.gates = [
+    {
+      id: 'q1',
+      kind: 'question',
+      stage: 'implementing',
+      prompt: 'Should I use a Map or a plain object here?',
+      createdAt: Date.now(),
+      status: 'open',
+      waiting: true,
+      meta: { options: ['Map', 'Plain object'] },
+    },
+  ];
+  state.activeGateId = 'q1';
+  await boot(state);
+
+  // The question card lives above the tab strip, so moving around the app
+  // never takes the answer away — the thing that made a parked session feel
+  // impossible to act on.
+  for (const tab of ['plan', 'board', 'review', 'ship'] as const) {
+    await act(async () => {
+      store.setTab(tab);
+    });
+    assert.ok(document.querySelector('.question-card'), `answerable from the ${tab} tab`);
+  }
+  cleanup();
+});
+
+test('a question with described options is answered as a form', async () => {
+  const state = makeSession({ stage: 'implementing' });
+  state.gates = [
+    {
+      id: 'g-questions',
+      kind: 'question',
+      stage: 'implementing',
+      prompt: 'How should the cache work?',
+      createdAt: Date.now(),
+      status: 'open',
+      waiting: true,
+      meta: {
+        questions: [
+          {
+            id: 'q1',
+            header: 'Backend',
+            question: 'Where should it live?',
+            options: [
+              { label: 'Redis', description: 'Shared across processes.' },
+              { label: 'In-memory', description: 'Lost on restart.' },
+            ],
+          },
+          {
+            id: 'q2',
+            header: 'Eviction',
+            question: 'What should it evict on?',
+            multiSelect: true,
+            options: [{ label: 'TTL' }, { label: 'LRU' }],
+          },
+        ],
+      },
+    },
+  ];
+  state.activeGateId = 'g-questions';
+  await boot(state);
+
+  const card = document.querySelector('.question-card') as HTMLElement;
+  assert.match(card.textContent ?? '', /Shared across processes/, 'option descriptions are shown');
+  assert.match(card.textContent ?? '', /Backend/, 'the header chip is shown');
+
+  const send = within(card).getByText('Send answers').closest('button') as HTMLButtonElement;
+  assert.equal(send.disabled, true, 'an unanswered question cannot be sent');
+
+  posts.length = 0;
+  await act(async () => {
+    fireEvent.click(within(card).getByText('Redis'));
+  });
+  assert.equal(
+    posts.filter((p) => p.route.includes('/gate/')).length,
+    0,
+    'picking an option does not send on its own once there is more than one question',
+  );
+
+  // Multi-select accumulates rather than replacing.
+  await act(async () => {
+    fireEvent.click(within(card).getByText('TTL'));
+  });
+  await act(async () => {
+    fireEvent.click(within(card).getByText('LRU'));
+  });
+  await act(async () => {
+    fireEvent.click(within(card).getByText('Send answers'));
+  });
+
+  const call = posts.find((p) => p.route.includes('/gate/'));
+  assert.ok(call, 'the form resolves the gate');
+  assert.equal(call!.body['verdict'], 'answered');
+  assert.deepEqual(call!.body['answers'], { q1: 'Redis', q2: 'TTL, LRU' });
   cleanup();
 });
