@@ -208,13 +208,29 @@ function gateAsFeedback(gate: Gate): FeedbackItem[] {
  */
 export function renderFeedback(items: FeedbackItem[]): string {
   if (items.length === 0) return '';
-  const parts: string[] = ['[cc-harness] The user submitted feedback in the review UI:'];
+  // A skipped gate changes what this message *is*: not a note to fold into
+  // the current step, but a redirection away from it. Saying so first stops
+  // the model re-parking on a gate that no longer exists.
+  const skipped = items.find((item) => item.skippedGate)?.skippedGate;
+  const parts: string[] = [
+    skipped
+      ? `[cc-harness] The user skipped the ${skipped.kind.replace('_', ' ')} gate ` +
+        `("${skipped.prompt}") and sent this message instead. That gate is closed — do not wait on it:`
+      : '[cc-harness] The user submitted feedback in the review UI:',
+  ];
 
   for (const item of items) {
     if (item.text) parts.push(`\n${item.text}`);
     for (const thread of item.threads ?? []) {
       parts.push(renderThread(thread));
     }
+  }
+  if (skipped) {
+    parts.push(
+      '\nAct on the message above instead of the step you were waiting on. Publish a new gate when you ' +
+        'reach the next point that needs the user.',
+    );
+    return parts.join('\n');
   }
   parts.push(
     '\nAddress each comment, then reply to it with harness_reply({ thread_id, text }) saying what you ' +

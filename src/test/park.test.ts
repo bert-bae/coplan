@@ -137,5 +137,36 @@ test('a superseded gate releases the park instead of holding for nothing', async
   store.openGate(id, 'plan', 'Second plan');
 
   const out = await parked;
-  assert.notEqual(out.decision, 'block', 'the hook returns rather than holding its full window');
+  // Only a turn ending can re-arm the hook, so the model is sent back to end
+  // one — on the gate that is actually open now.
+  assert.match(out.reason ?? '', /replaced by a newer "plan" gate/);
+  assert.match(out.reason ?? '', /End your turn again/);
+});
+
+test('"send now" wakes the park with the message, not with a phantom verdict', async () => {
+  const id = 'park-sendnow';
+  const ctx = ctxWith({ stopHoldSeconds: 5 });
+  store.ensure(id, cwd);
+  const gate = store.openGate(id, 'plan', 'Review the plan')!;
+
+  const parked = stop(id, ctx);
+  await new Promise((r) => setTimeout(r, 50));
+  // What the "send now" route does: queue the message, then close the gate.
+  store.queueFeedback(id, {
+    text: 'Forget the plan — fix the README typo first.',
+    origin: 'timeline',
+    interrupt: true,
+    skippedGate: { kind: gate.kind, prompt: gate.prompt },
+  });
+  store.cancelGate(id, gate.id);
+
+  const out = await parked;
+  assert.equal(out.decision, 'block');
+  assert.match(out.reason ?? '', /fix the README typo first/);
+  assert.match(out.reason ?? '', /do not wait on it/i);
+  assert.doesNotMatch(
+    out.reason ?? '',
+    /gate is still open/,
+    'the message closed the gate, so nothing may claim it is still there',
+  );
 });

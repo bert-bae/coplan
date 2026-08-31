@@ -24,6 +24,10 @@ the user submits — do not poll with `harness_await`, and do not start new work
 while you wait. If a turn comes back saying you are *still parked*, they are
 still reading: end your turn again.
 
+If they press *Send now* instead, the review gate closes and their message
+arrives in its place. Act on the message; there is no verdict coming for that
+gate.
+
 ## Act on what comes back
 
 Each comment carries `file:startLine-endLine`, the source lines the user

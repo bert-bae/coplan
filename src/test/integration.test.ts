@@ -111,7 +111,9 @@ const mcpFor = (id: string, tool: string, body: Record<string, unknown> = {}) =>
 const hook = (event: string, body: Record<string, unknown> = {}) => hookFor(sessionId, event, body);
 const mcp = (tool: string, body: Record<string, unknown> = {}) => mcpFor(sessionId, tool, body);
 
-const session = () => call<{ session: SessionState }>(`/api/session/${sessionId}`).then((r) => r.session);
+const sessionFor = (id: string) =>
+  call<{ session: SessionState }>(`/api/session/${id}`).then((r) => r.session);
+const session = () => sessionFor(sessionId);
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
   let timer: NodeJS.Timeout;
@@ -393,6 +395,86 @@ test('a superseded gate stops holding the turn', async () => {
 
   const out = await withTimeout(parked, 8000);
   assert.ok(out, 'the parked Stop hook returned rather than hanging');
+});
+
+test('"send now" releases a Stop hook parked on a gate', async () => {
+  // The complaint this covers: a message typed while the session sits at a
+  // gate used to wait for that gate to be answered — up to the full hold —
+  // which is exactly backwards when the message says "stop, do this instead".
+  const other = 'integration-skip-stop';
+  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(other, 'plan', { title: 'Skip me', steps: [{ title: 'only step' }] });
+
+  const parked = hookFor(other, 'Stop', { stop_hook_active: false });
+  await until(async () => (await sessionFor(other)).status === 'waiting');
+
+  await call(`/api/session/${other}/feedback`, {
+    method: 'POST',
+    body: JSON.stringify({ text: 'Forget the plan — fix the typo in README first.', interrupt: true }),
+  });
+
+  const out = await parked;
+  assert.equal(out.decision, 'block', 'the parked turn is woken by the message');
+  assert.match(out.reason ?? '', /skipped the plan gate/);
+  assert.match(out.reason ?? '', /do not wait on it/i);
+  assert.match(out.reason ?? '', /fix the typo in README/);
+
+  const s = await sessionFor(other);
+  assert.equal(s.gates.at(-1)?.status, 'cancelled', 'the gate is closed rather than left open');
+  assert.equal(s.pendingFeedback.length, 0, 'the message was delivered, not left queued');
+});
+
+test('"send now" releases a harness_await parked on a gate', async () => {
+  const other = 'integration-skip-await';
+  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
+  const plan = await mcpFor(other, 'plan', { title: 'Skip await', steps: [{ title: 'only step' }] });
+  const gateId = String(plan['gateId']);
+
+  const parked = mcpFor(other, 'await', { gate_id: gateId, timeout_seconds: 30 });
+  await until(async () => (await sessionFor(other)).status === 'waiting');
+
+  await call(`/api/session/${other}/feedback`, {
+    method: 'POST',
+    body: JSON.stringify({ text: 'Change of direction: do the docs first.', interrupt: true }),
+  });
+
+  const out = await parked;
+  assert.equal(out['status'], 'interrupted', 'the wait ends with the message, not another poll');
+  assert.match(String(out['text']), /skipped the plan gate/);
+  assert.match(String(out['text']), /do the docs first/);
+});
+
+test('an ordinary message still queues rather than closing the gate', async () => {
+  const other = 'integration-no-skip';
+  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(other, 'plan', { title: 'Keep the gate', steps: [{ title: 'only step' }] });
+
+  const queued = await call<{ delivery: string }>(`/api/session/${other}/feedback`, {
+    method: 'POST',
+    body: JSON.stringify({ text: 'Just a note.' }),
+  });
+  assert.notEqual(queued.delivery, 'interrupted');
+
+  const s = await sessionFor(other);
+  assert.equal(s.gates.at(-1)?.status, 'open', 'the gate is untouched by a plain message');
+  assert.equal(s.pendingFeedback.length, 1);
+});
+
+test('a superseded gate tells harness_await which gate to wait on instead', async () => {
+  const other = 'integration-superseded-await';
+  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
+  const first = await mcpFor(other, 'plan', { title: 'First', steps: [{ title: 'a' }] });
+
+  const parked = mcpFor(other, 'await', { gate_id: String(first['gateId']), timeout_seconds: 30 });
+  await until(async () => (await sessionFor(other)).status === 'waiting');
+
+  // Publishing again supersedes the gate the waiter is holding.
+  const second = await mcpFor(other, 'plan', { title: 'Second', steps: [{ title: 'b' }] });
+
+  const out = await parked;
+  assert.equal(out['status'], 'cancelled');
+  assert.match(String(out['text']), /replaced by a newer/);
+  assert.match(String(out['text']), new RegExp(String(second['gateId'])), 'it names the gate to wait on');
 });
 
 test('the verification gate opens only after the checks have finished', async () => {

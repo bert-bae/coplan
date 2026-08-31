@@ -478,6 +478,34 @@ export class SessionStore extends EventEmitter {
   }
 
   /**
+   * Close an open gate without a verdict.
+   *
+   * This is what "send now" does: the user has decided the question the gate
+   * was asking is no longer the thing to answer, so anything parked on it is
+   * released and the session is free to act on the message instead. The gate
+   * is kept in the list as `cancelled` rather than deleted, so the UI can
+   * still say what was skipped and when.
+   */
+  cancelGate(id: string, gateId: string, reason?: string): Gate | undefined {
+    const state = this.sessions.get(id);
+    const gate = state?.gates.find((g) => g.id === gateId);
+    if (!state || !gate || gate.status !== 'open') return undefined;
+    gate.status = 'cancelled';
+    gate.waiting = false;
+    if (state.activeGateId === gateId) state.activeGateId = null;
+    state.updatedAt = Date.now();
+    this.persistSoon(id);
+    this.addTimeline(id, 'gate', reason ?? `The user skipped the ${gate.kind.replace('_', ' ')} gate.`, {
+      label: gate.kind,
+      meta: { gateId, cancelled: true },
+    });
+    this.emitEvent({ type: 'state', sessionId: id, patch: { gates: state.gates, activeGateId: null } });
+    this.broadcastSessionList();
+    this.emit('gate:cancelled', { sessionId: id, gate });
+    return gate;
+  }
+
+  /**
    * A gate the user has already answered but Claude has not yet been told
    * about. This happens whenever the user answers faster than the turn ends.
    */

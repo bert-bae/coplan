@@ -318,12 +318,41 @@ test('the message box never resolves a gate', async () => {
   const input = document.querySelector('.composer-input')!;
   fireEvent.change(input, { target: { value: 'looks good, go ahead' } });
   await act(async () => {
-    fireEvent.click(screen.getByText('Send message'));
+    fireEvent.click(within(document.querySelector('.composer') as HTMLElement).getByText('Queue message'));
   });
 
   assert.equal(posts.length, 1);
   assert.match(posts[0]!.route, /\/feedback$/, 'it queues a message rather than voting on the gate');
   assert.doesNotMatch(posts[0]!.route, /\/gate\//);
+  assert.ok(!posts[0]!.body['interrupt'], 'the default send never touches the gate');
+  cleanup();
+});
+
+test('"send now" skips the gate instead of queueing behind it', async () => {
+  await boot();
+  posts.length = 0;
+  fireEvent.change(document.querySelector('.composer-input')!, {
+    target: { value: 'stop — do the other thing first' },
+  });
+  const composer = document.querySelector('.composer') as HTMLElement;
+  await act(async () => {
+    fireEvent.click(within(composer).getByRole('button', { name: 'Send now' }));
+  });
+
+  assert.equal(posts.length, 1);
+  assert.match(posts[0]!.route, /\/feedback$/);
+  assert.equal(posts[0]!.body['interrupt'], true, 'the daemon is told to drop the gate and deliver now');
+  cleanup();
+});
+
+test('"send now" is only offered when there is a gate to skip', async () => {
+  const state = makeSession({ status: 'active' });
+  state.gates = [];
+  state.activeGateId = null;
+  await boot(state);
+  const composer = within(document.querySelector('.composer') as HTMLElement);
+  assert.equal(composer.queryByRole('button', { name: 'Send now' }), null);
+  assert.ok(composer.getByText('Send message'), 'the plain send keeps its name when nothing is in the way');
   cleanup();
 });
 
@@ -723,5 +752,150 @@ test('a question with described options is answered as a form', async () => {
   assert.ok(call, 'the form resolves the gate');
   assert.equal(call!.body['verdict'], 'answered');
   assert.deepEqual(call!.body['answers'], { q1: 'Redis', q2: 'TTL, LRU' });
+  cleanup();
+});
+
+
+/* ------------------------------------------------------------------ *
+ * Stage state: what happened here, and what can be done about it
+ * ------------------------------------------------------------------ */
+
+/** A session whose plan gate has been answered and closed. */
+function afterPlanVerdict(verdict: 'approved' | 'changes_requested', status: SessionState['status']) {
+  const state = makeSession({ stage: 'implementing', status });
+  state.gates = [
+    {
+      id: 'g0',
+      kind: 'plan',
+      stage: 'plan_review',
+      prompt: 'Review the plan',
+      createdAt: Date.now() - 600_000,
+      status: 'resolved',
+      waiting: false,
+      result: { verdict, resolvedAt: Date.now() - 300_000 },
+    },
+  ];
+  state.activeGateId = null;
+  return state;
+}
+
+test('an open gate names the only moves that answer it', async () => {
+  await boot();
+  const required = document.querySelector('.required')!;
+  assert.ok(required, 'the stage spells out what is required');
+  assert.match(required.textContent ?? '', /only things that move it on/i);
+  // The moves are the buttons themselves, so the list cannot drift from what
+  // is actually clickable.
+  const moves = [...required.querySelectorAll('.required-list .btn')].map((b) => b.textContent);
+  assert.deepEqual(moves, ['Approve', 'Request changes']);
+  assert.match(required.textContent ?? '', /not a verdict/i, 'the message box is ruled out explicitly');
+  cleanup();
+});
+
+test('a plan that was approved says so afterwards', async () => {
+  await boot(afterPlanVerdict('approved', 'idle'));
+  act(() => store.setTab('plan'));
+  const bar = document.querySelector('.stage-bar')!;
+  assert.ok(bar, 'the plan tab records what became of the plan');
+  assert.match(bar.textContent ?? '', /Approved/);
+  // With no gate open there is no verdict to give, so the verdict buttons go.
+  assert.equal(screen.queryByText('Approve plan'), null);
+  assert.ok(screen.getByText('Send these notes'));
+  cleanup();
+});
+
+test('a stage Claude is working on reads as working, not as untouched', async () => {
+  await boot(afterPlanVerdict('changes_requested', 'active'));
+  act(() => store.setTab('plan'));
+  const bar = document.querySelector('.stage-bar')!;
+  assert.match(bar.textContent ?? '', /Changes requested/);
+  assert.match(bar.textContent ?? '', /working through your feedback/i);
+  cleanup();
+});
+
+test('the activity tab shows an animated marker while Claude works', async () => {
+  const state = makeSession({ status: 'active' });
+  state.gates = [];
+  state.activeGateId = null;
+  await boot(state);
+  act(() => store.setTab('timeline'));
+
+  assert.ok(document.querySelector('.live-pill.is-working'), 'the feed header says the session is live');
+  assert.ok(document.querySelector('.event.is-live .working-dot'), 'the feed tail animates while it works');
+  assert.match(document.querySelector('.event.is-live')!.textContent ?? '', /Claude is working/);
+  cleanup();
+});
+
+test('an idle session is not mistaken for a working one', async () => {
+  const state = makeSession({ status: 'idle' });
+  state.gates = [];
+  state.activeGateId = null;
+  await boot(state);
+  act(() => store.setTab('timeline'));
+
+  assert.equal(document.querySelector('.event.is-live'), null);
+  assert.match(document.querySelector('.live-pill')!.textContent ?? '', /idle/i);
+  cleanup();
+});
+
+test('the stage panel records every stage, not just the open one', async () => {
+  await boot(afterPlanVerdict('approved', 'idle'));
+  act(() => store.setTab('timeline'));
+  const pipeline = document.querySelector('.pipeline')!;
+  assert.ok(pipeline);
+  assert.match(pipeline.textContent ?? '', /Plan/);
+  assert.match(pipeline.textContent ?? '', /Approved/);
+  cleanup();
+});
+
+test('a gate the user skipped is recorded as skipped rather than vanishing', async () => {
+  const state = makeSession({ status: 'active', stage: 'implementing' });
+  state.gates = [
+    {
+      id: 'g0',
+      kind: 'plan',
+      stage: 'plan_review',
+      prompt: 'Review the plan',
+      createdAt: Date.now() - 120_000,
+      status: 'cancelled',
+      waiting: false,
+    },
+  ];
+  state.activeGateId = null;
+  await boot(state);
+  act(() => store.setTab('plan'));
+  assert.match(document.querySelector('.stage-bar')!.textContent ?? '', /Skipped/);
+  cleanup();
+});
+
+test('the banner never promises a move the stage does not offer', async () => {
+  await boot();
+  const panel = [...document.querySelectorAll('.required-list .btn')].map((b) => b.textContent);
+  assert.ok(panel.length > 0);
+
+  // From another tab the banner is the only description of what answering
+  // involves, so it has to name the same moves.
+  act(() => store.setTab('timeline'));
+  const banner = [...document.querySelectorAll('.gate-choices strong')].map((b) => b.textContent);
+  assert.deepEqual(banner, panel);
+  cleanup();
+});
+
+test('the ship gate can be declined instead of leaving the session parked', async () => {
+  const state = makeSession({ stage: 'ship' });
+  state.gates[0] = { ...state.gates[0]!, kind: 'ship', prompt: 'Confirm the ship' };
+  await boot(state);
+  await act(async () => {
+    store.setTab('ship');
+  });
+
+  posts.length = 0;
+  await act(async () => {
+    fireEvent.click(screen.getByText("Don't ship"));
+  });
+
+  const call = posts.find((p) => p.route.includes('/gate/'));
+  assert.ok(call, 'declining resolves the gate rather than doing nothing');
+  assert.equal(call!.body['verdict'], 'rejected');
   cleanup();
 });

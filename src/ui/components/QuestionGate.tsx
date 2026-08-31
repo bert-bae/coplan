@@ -50,6 +50,11 @@ export function QuestionGate() {
       ) : (
         <QuickAnswer key={gate.id} gate={gate} sessionId={sessionId} />
       )}
+      {/* The message box below looks like it would do, and does not. */}
+      <p className="question-foot">
+        Answering here is the only thing that resumes the session. A message in the box at the bottom is
+        queued behind this question unless you send it with <strong>Send now</strong>.
+      </p>
     </div>
   );
 }

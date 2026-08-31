@@ -14,6 +14,8 @@ import { ReviewView } from './views/ReviewView.tsx';
 import { VerifyView } from './views/VerifyView.tsx';
 import { ShipView } from './views/ShipView.tsx';
 import { EmptyState } from './components/primitives.tsx';
+import { WorkingDot, WorkingIndicator } from './components/StageStatus.tsx';
+import { stageStatus, isWorking, type StageStatus } from './lib/stages.ts';
 import { classNames, pluralize } from './lib/format.ts';
 import type { SessionState } from '../shared/types.ts';
 
@@ -94,53 +96,81 @@ function TabButton({
   session: SessionState;
 }) {
   const drafts = useDrafts();
-  const badge = tabBadge(id, session, drafts.length);
+  const status = stageStatus(session, id);
+  const badge = tabBadge(id, session, status, drafts.length);
 
   return (
     <button
       type="button"
       role="tab"
       aria-selected={active}
-      className={classNames('tab', active && 'is-active')}
+      className={classNames('tab', active && 'is-active', `is-${status.state}`)}
+      // The tooltip carries the sentence the badge cannot: what state this
+      // stage is in and why.
+      title={status.detail ? `${label} — ${status.label}: ${status.detail}` : label}
       onClick={() => store.setTab(id)}
     >
       {label}
-      {badge && <span className={classNames('tab-badge', `is-${badge.tone}`)}>{badge.text}</span>}
+      {badge &&
+        (badge.tone === 'working' ? (
+          <WorkingDot title="Claude is working" />
+        ) : (
+          <span className={classNames('tab-badge', `is-${badge.tone}`)} aria-label={badge.label}>
+            {badge.text}
+          </span>
+        ))}
     </button>
   );
 }
 
-/** A tab should say whether it needs attention without being opened. */
+/**
+ * A tab should say, without being opened, whether it needs attention — and
+ * equally whether it has already been dealt with. An approved stage that
+ * looks identical to an untouched one is the whole reason the pipeline felt
+ * unreadable.
+ */
 function tabBadge(
   id: Tab,
   session: SessionState,
+  status: StageStatus,
   draftCount: number,
-): { text: string; tone: 'accent' | 'warning' | 'danger' | 'success' } | null {
-  const gate = session.gates.find((g) => g.status === 'open');
-  switch (id) {
-    case 'review': {
-      if (draftCount) return { text: String(draftCount), tone: 'accent' };
-      if (gate?.kind === 'code_review') return { text: '!', tone: 'warning' };
-      return null;
-    }
-    case 'plan':
-      return gate?.kind === 'plan' ? { text: '!', tone: 'warning' } : null;
-    case 'board': {
-      const blocked = session.tasks.filter((t) => t.status === 'blocked').length;
-      if (blocked) return { text: String(blocked), tone: 'warning' };
-      const open = session.tasks.filter((t) => t.status !== 'done').length;
-      return session.tasks.length > 0 ? { text: String(open), tone: 'accent' } : null;
-    }
-    case 'verify': {
-      const failed = session.checks.filter((c) => c.status === 'failed').length;
-      if (failed) return { text: String(failed), tone: 'danger' };
-      if (gate?.kind === 'verification') return { text: '!', tone: 'warning' };
-      return null;
-    }
-    case 'ship':
-      return gate?.kind === 'ship' ? { text: '!', tone: 'warning' } : null;
-    case 'timeline':
-      return gate?.kind === 'question' ? { text: '?', tone: 'warning' } : null;
+): { text: string; tone: 'accent' | 'warning' | 'danger' | 'success' | 'working'; label: string } | null {
+  // Unsent work of the user's own outranks the stage's own state: it is the
+  // only badge that means "you will lose something".
+  if (id === 'review' && draftCount) {
+    return { text: String(draftCount), tone: 'accent', label: `${draftCount} unsent comment(s)` };
+  }
+  if (id === 'verify') {
+    const failed = session.checks.filter((c) => c.status === 'failed').length;
+    if (failed) return { text: String(failed), tone: 'danger', label: `${failed} failing check(s)` };
+  }
+  if (id === 'board' && status.state !== 'awaiting' && session.tasks.length > 0) {
+    const open = session.tasks.filter((t) => t.status !== 'done').length;
+    if (open > 0) return { text: String(open), tone: 'accent', label: `${open} card(s) open` };
+  }
+  // Liveness is Activity's subject, so the animation lives on that tab alone.
+  // A stage tab pulsing for the twenty minutes after its verdict was given
+  // would say "look here" about a page with nothing on it to do.
+  if (id === 'timeline' && status.state !== 'awaiting' && isWorking(session)) {
+    return { text: '', tone: 'working', label: 'Claude is working' };
+  }
+
+  switch (status.state) {
+    case 'awaiting':
+      return { text: id === 'timeline' ? '?' : '!', tone: 'warning', label: 'waiting on you' };
+    // A stage being acted on still shows the verdict that set it going: that
+    // is the thing the reader is trying to remember.
+    case 'working':
+      return status.tone === 'warning'
+        ? { text: '↻', tone: 'warning', label: 'changes requested — Claude is working' }
+        : { text: '✓', tone: 'success', label: `${status.label.toLowerCase()} — Claude is working` };
+    case 'changes':
+      return { text: '↻', tone: 'warning', label: 'changes requested' };
+    case 'rejected':
+      return { text: '✕', tone: 'danger', label: 'rejected' };
+    case 'approved':
+    case 'done':
+      return { text: '✓', tone: 'success', label: status.label.toLowerCase() };
     default:
       return null;
   }
@@ -161,7 +191,9 @@ function Header({ session }: { session: SessionState }) {
           </code>
         )}
         {session.branch && <code className="head-branch">{session.branch}</code>}
-        <span className={classNames('head-status', `is-${session.status}`)}>{statusLabel(session)}</span>
+        <span className={classNames('head-status', `is-${session.status}`)}>
+          {isWorking(session) ? <WorkingIndicator session={session} verbose /> : statusLabel(session)}
+        </span>
         <span className="spacer" />
         <ThemeToggle />
       </div>

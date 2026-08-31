@@ -376,18 +376,38 @@ async function onStop(sessionId: string, input: StopInput, ctx: IngestContext): 
       ctx.store.update(sessionId, { status: 'active' });
       return stopBlock(renderGateResult(signal.gate));
     }
-    // Cancelled: superseded by a newer gate, or withdrawn. There is no verdict
-    // to hand over and nothing left to wait for on this one.
+
+    // Cancelled, with no verdict to hand over. "Send now" gets here when the
+    // cancellation beats the message into the queue, so look for it before
+    // deciding there is nothing to say.
+    const queued = ctx.store.drainFeedback(sessionId);
+    if (queued.length > 0) {
+      ctx.store.update(sessionId, { status: 'active' });
+      return stopBlock(renderFeedback(queued));
+    }
+    // Superseded by a newer gate: there is something to park on after all,
+    // and only a turn ending can re-arm this hook.
+    const current = ctx.store.activeGate(sessionId);
+    if (current) {
+      ctx.store.update(sessionId, { status: 'waiting' });
+      return stopBlock(
+        `[cc-harness] The "${gate.kind}" gate was replaced by a newer "${current.kind}" gate. ` +
+          `End your turn again — the harness parks on that one and resumes you with its verdict.`,
+      );
+    }
     ctx.store.update(sessionId, { status: 'idle' });
     return HOOK_NOOP;
   }
 
   // A message typed in the browser wakes the turn too, so an open gate no
-  // longer blocks the queue behind it.
+  // longer blocks the queue behind it. "Send now" closes the gate on its way
+  // through, and `renderFeedback` says so itself — appending "still parked"
+  // there would contradict it.
   if (signal?.kind === 'feedback' && signal.items.length > 0) {
     holds.delete(sessionId);
     ctx.store.update(sessionId, { status: 'active' });
-    return stopBlock(renderFeedback(signal.items) + stillParked(gate.kind));
+    const skipped = signal.items.some((item) => item.skippedGate);
+    return stopBlock(renderFeedback(signal.items) + (skipped ? '' : stillParked(gate.kind)));
   }
 
   // The window expired with the gate still open. Re-parking means ending

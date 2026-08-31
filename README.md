@@ -163,8 +163,18 @@ your next message.
 
 **Async messages.** Anything you send while Claude is working queues and is
 delivered at the next turn boundary, so you never have to interrupt — including
-while it is parked on a gate, which wakes it just as a verdict would. A message
-is never a verdict: answering a gate is always a separate, deliberate action.
+while it is parked on a gate, which wakes it rather than waiting behind the
+gate. The gate stays standing: Claude answers you and parks on it again. A
+message is never a verdict: answering a gate is always a separate, deliberate
+action.
+
+**Skipping a gate.** Sometimes the reason for typing was *stop, do this
+instead*, and having Claude answer and then go back to waiting is not what you
+meant. **Send now** closes the gate without a verdict and wakes whatever was
+parked on it with the message, and Claude is told the gate is gone rather than
+left waiting on a verdict that is not coming. It is a separate button from the
+default send, and the gate is recorded as *skipped* rather than quietly
+disappearing.
 
 **Questions.** When Claude needs an answer it calls `harness_ask` (or blocks a
 card) rather than writing a question into the terminal, so the question appears
@@ -182,6 +192,20 @@ auto-generated name does not say what it is about.
 **Threads.** Line comments are a conversation: Claude replies in the thread
 saying what it changed or why it disagrees, and you can reply back or reopen a
 thread it resolved too eagerly.
+
+**Every move a gate offers is named.** A gate's exits come from one table, read
+both by the banner — which lists them from whatever tab you are on — and by the
+stage's own panel, which renders them as the buttons themselves with what each
+one does to the session underneath. The banner cannot promise a move the tab
+does not offer, and the list says outright that a message is not on it.
+
+**Stages say what became of them.** Each tab carries the verdict it was given —
+*approved*, *changes requested*, *rejected*, *skipped* — with when it landed,
+and whether Claude is currently acting on it. A stage nobody has looked at and
+a stage that was signed off ten minutes ago no longer look identical. The
+Activity tab lists all five at once, and a working session animates: in the
+tab strip, in the header, at the tail of the feed, and in the rail, so a live
+session is never mistaken for a stale page.
 
 **Rounds.** Each published diff is a numbered round. On round two and later the
 review offers a *changed since round N* filter and marks the files that moved,

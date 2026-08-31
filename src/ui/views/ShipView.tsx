@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { store, useSession, useOpenGate, useStore } from '../store.ts';
+import { store, useSession, useGateOfKind, useStore } from '../store.ts';
 import { api } from '../lib/api.ts';
 import { Button, EmptyState, Explain, Panel, Spinner } from '../components/primitives.tsx';
+import { StageBar, RequiredAction, NoActionNeeded } from '../components/StageStatus.tsx';
 import { classNames } from '../lib/format.ts';
 import type { ShipState, ShipStep } from '../../shared/types.ts';
 
@@ -25,7 +26,7 @@ const STEP_HELP: Record<ShipStep, string> = {
  */
 export function ShipView() {
   const session = useSession();
-  const gate = useOpenGate();
+  const gate = useGateOfKind('ship');
   const sessionId = useStore((s) => s.sessionId);
 
   const [ship, setShip] = useState<ShipState | null>(null);
@@ -70,6 +71,25 @@ export function ShipView() {
   const provider = providers.find((p) => p.id === ship.provider);
   const patch = (p: Partial<ShipState>) => setShip((current) => (current ? { ...current, ...p } : current));
 
+  /** Close the ship gate without shipping, so the session is not left parked
+   *  on a stage the user has decided against. */
+  const decline = async () => {
+    if (!gate || busy) return;
+    setBusy(true);
+    setConfirming(false);
+    try {
+      await api.resolveGate(sessionId, gate.id, {
+        verdict: 'rejected',
+        comment: 'Do not ship this yet. Stop here and wait for direction.',
+      });
+      store.toast('success', 'Ship declined — Claude is told to stop and wait.');
+    } catch (err) {
+      store.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const run = async () => {
     setBusy(true);
     setConfirming(false);
@@ -87,6 +107,7 @@ export function ShipView() {
   return (
     <div className="ship">
       <div className="ship-main">
+        <StageBar tab="ship" />
         <Panel title="What will happen">
           <ul className="ship-steps">
             {ALL_STEPS.map((step) => {
@@ -191,7 +212,7 @@ export function ShipView() {
           <p className="warn-note">{failing.length} check(s) failing — the checks step will stop the ship.</p>
         )}
         {gate ? (
-          <Explain>Claude is parked here. Shipping resolves the gate and reports the result back to it.</Explain>
+          <Explain>Shipping resolves the gate and reports the result back to the parked session.</Explain>
         ) : (
           <Explain>This runs git commands against your working tree right now.</Explain>
         )}
@@ -211,12 +232,24 @@ export function ShipView() {
               </Button>
             </div>
           </div>
+        ) : gate ? (
+          /* The gate used to have exactly one exit. A user who decided not to
+             ship had no way to say so, and the session sat parked. */
+          <RequiredAction
+            gate={gate}
+            busy={busy}
+            disabled={(id) => id === 'ship' && onBase}
+            onChoose={(id) => (id === 'ship' ? setConfirming(true) : void decline())}
+          />
         ) : (
-          <div className="row-actions">
-            <Button variant="primary" onClick={() => setConfirming(true)} disabled={busy || onBase}>
-              Ship…
-            </Button>
-          </div>
+          <>
+            <NoActionNeeded tab="ship" />
+            <div className="row-actions">
+              <Button variant="primary" onClick={() => setConfirming(true)} disabled={busy || onBase}>
+                Ship…
+              </Button>
+            </div>
+          </>
         )}
       </aside>
     </div>

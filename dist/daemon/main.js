@@ -455,6 +455,33 @@ var SessionStore = class extends EventEmitter {
     return gate;
   }
   /**
+   * Close an open gate without a verdict.
+   *
+   * This is what "send now" does: the user has decided the question the gate
+   * was asking is no longer the thing to answer, so anything parked on it is
+   * released and the session is free to act on the message instead. The gate
+   * is kept in the list as `cancelled` rather than deleted, so the UI can
+   * still say what was skipped and when.
+   */
+  cancelGate(id, gateId, reason) {
+    const state = this.sessions.get(id);
+    const gate = state?.gates.find((g) => g.id === gateId);
+    if (!state || !gate || gate.status !== "open") return void 0;
+    gate.status = "cancelled";
+    gate.waiting = false;
+    if (state.activeGateId === gateId) state.activeGateId = null;
+    state.updatedAt = Date.now();
+    this.persistSoon(id);
+    this.addTimeline(id, "gate", reason ?? `The user skipped the ${gate.kind.replace("_", " ")} gate.`, {
+      label: gate.kind,
+      meta: { gateId, cancelled: true }
+    });
+    this.emitEvent({ type: "state", sessionId: id, patch: { gates: state.gates, activeGateId: null } });
+    this.broadcastSessionList();
+    this.emit("gate:cancelled", { sessionId: id, gate });
+    return gate;
+  }
+  /**
    * A gate the user has already answered but Claude has not yet been told
    * about. This happens whenever the user answers faster than the turn ends.
    */
@@ -1283,13 +1310,22 @@ function gateAsFeedback(gate) {
 }
 function renderFeedback(items) {
   if (items.length === 0) return "";
-  const parts = ["[cc-harness] The user submitted feedback in the review UI:"];
+  const skipped = items.find((item) => item.skippedGate)?.skippedGate;
+  const parts = [
+    skipped ? `[cc-harness] The user skipped the ${skipped.kind.replace("_", " ")} gate ("${skipped.prompt}") and sent this message instead. That gate is closed \u2014 do not wait on it:` : "[cc-harness] The user submitted feedback in the review UI:"
+  ];
   for (const item of items) {
     if (item.text) parts.push(`
 ${item.text}`);
     for (const thread of item.threads ?? []) {
       parts.push(renderThread(thread));
     }
+  }
+  if (skipped) {
+    parts.push(
+      "\nAct on the message above instead of the step you were waiting on. Publish a new gate when you reach the next point that needs the user."
+    );
+    return parts.join("\n");
   }
   parts.push(
     "\nAddress each comment, then reply to it with harness_reply({ thread_id, text }) saying what you changed or why you disagree. When they are all answered, call harness_publish_diff again so the user can re-review."
@@ -2232,13 +2268,26 @@ async function onStop(sessionId, input, ctx) {
       ctx.store.update(sessionId, { status: "active" });
       return stopBlock(renderGateResult(signal.gate));
     }
+    const queued = ctx.store.drainFeedback(sessionId);
+    if (queued.length > 0) {
+      ctx.store.update(sessionId, { status: "active" });
+      return stopBlock(renderFeedback(queued));
+    }
+    const current = ctx.store.activeGate(sessionId);
+    if (current) {
+      ctx.store.update(sessionId, { status: "waiting" });
+      return stopBlock(
+        `[cc-harness] The "${gate.kind}" gate was replaced by a newer "${current.kind}" gate. End your turn again \u2014 the harness parks on that one and resumes you with its verdict.`
+      );
+    }
     ctx.store.update(sessionId, { status: "idle" });
     return HOOK_NOOP;
   }
   if (signal?.kind === "feedback" && signal.items.length > 0) {
     holds.delete(sessionId);
     ctx.store.update(sessionId, { status: "active" });
-    return stopBlock(renderFeedback(signal.items) + stillParked(gate.kind));
+    const skipped = signal.items.some((item) => item.skippedGate);
+    return stopBlock(renderFeedback(signal.items) + (skipped ? "" : stillParked(gate.kind)));
   }
   const round = (holds.get(sessionId)?.gateId === gate.id ? holds.get(sessionId).rounds : 0) + 1;
   const limit = ctx.config.gateHoldRounds;
@@ -3656,12 +3705,27 @@ function buildRouter(deps) {
       json(ctx.res, 400, { error: "empty feedback" });
       return;
     }
+    const skipping = body.interrupt === true ? store.activeGate(session.sessionId) : void 0;
     const item = store.queueFeedback(session.sessionId, {
       text: body.text?.trim() ?? "",
       origin: body.origin ?? "timeline",
-      ...body.threads ? { threads: hydrateThreads(store, session.sessionId, body.threads) } : {}
+      ...body.threads ? { threads: hydrateThreads(store, session.sessionId, body.threads) } : {},
+      ...body.interrupt ? { interrupt: true } : {},
+      ...skipping ? { skippedGate: { kind: skipping.kind, prompt: skipping.prompt } } : {}
     });
-    json(ctx.res, 200, { item, delivery: session.status === "idle" ? "queued" : "pending" });
+    if (skipping) {
+      store.cancelGate(
+        session.sessionId,
+        skipping.id,
+        `The user skipped the ${skipping.kind.replace("_", " ")} gate and sent a message instead.`
+      );
+    }
+    const delivery = skipping ? skipping.waiting ? "interrupted" : "queued" : session.status === "idle" ? "queued" : "pending";
+    json(ctx.res, 200, {
+      item,
+      delivery,
+      ...skipping ? { skippedGate: skipping.kind } : {}
+    });
   });
   router.post("/api/session/:id/threads", async (ctx) => {
     const session = sessionOr404(ctx);
@@ -4013,6 +4077,27 @@ Do not guess or proceed on an assumption.`
         if (result && gate) {
           store.markGateDelivered(id, gateId);
           json(ctx.res, 200, { ok: true, status: "resolved", result, text: renderGateResult(gate) });
+          return;
+        }
+        if (gate && gate.status !== "open") {
+          const drained = store.drainFeedback(id);
+          if (drained.length > 0) {
+            store.update(id, { status: "active" });
+            json(ctx.res, 200, {
+              ok: true,
+              // "interrupted" is a redirection the user chose; a gate that was
+              // merely superseded is not, and the two want different reactions.
+              status: drained.some((item) => item.skippedGate) ? "interrupted" : "cancelled",
+              text: renderFeedback(drained)
+            });
+            return;
+          }
+          const current = store.activeGate(id);
+          json(ctx.res, 200, {
+            ok: true,
+            status: "cancelled",
+            text: current ? `[cc-harness] The "${gate.kind}" gate was replaced by a newer "${current.kind}" gate (${current.id}). End your turn \u2014 the harness parks on that one and resumes you with its verdict.` : `[cc-harness] The "${gate.kind}" gate was closed without a verdict. Do not wait on it. Continue, or publish a new gate when you next need the user.`
+          });
           return;
         }
         json(ctx.res, 200, {
