@@ -31,6 +31,16 @@ export interface HarnessConfig {
   /** How long a single `harness_await` MCP call parks, in seconds. */
   awaitSeconds: number;
   /**
+   * How many times in a row the `Stop` hook re-parks on the same gate before
+   * letting the session go idle.
+   *
+   * Re-parking costs one short turn per window — it is the only way to hold a
+   * turn past the hook's own timeout — so the total patience is
+   * `gateHoldRounds × stopHoldSeconds`. 0 means hold indefinitely, which keeps
+   * the terminal occupied until the gate is answered or the session killed.
+   */
+  gateHoldRounds: number;
+  /**
    * Hold a finished turn open even with no gate, so a message typed in the
    * browser can reach a session that would otherwise have gone idle.
    *
@@ -53,6 +63,7 @@ export const DEFAULT_CONFIG: HarnessConfig = {
   maxTimelineEvents: 500,
   stopHoldSeconds: 540,
   awaitSeconds: 120,
+  gateHoldRounds: 4,
   holdIdleSessions: false,
   maxDiffFileBytes: 400_000,
   idleShutdownMinutes: 120,

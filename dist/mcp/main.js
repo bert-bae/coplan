@@ -98,7 +98,7 @@ var TOOLS = [
   {
     name: "harness_publish_plan",
     endpoint: "plan",
-    description: "Publish your implementation plan to the review UI and open the plan gate. The user can edit, reorder, drop and comment on individual steps. Immediately call harness_await afterwards \u2014 do not start implementing until the gate resolves.",
+    description: "Publish your implementation plan to the review UI and open the plan gate. The user can edit, reorder, drop and comment on individual steps. Then end your turn: the harness parks the session and resumes you with their verdict. Do not start implementing until it does.",
     inputSchema: {
       type: "object",
       properties: {
@@ -128,7 +128,7 @@ var TOOLS = [
   {
     name: "harness_publish_diff",
     endpoint: "diff",
-    description: "Compute the current diff and open the code-review gate. The harness runs git itself \u2014 do not paste a diff. The user reviews it in the browser and can attach comments to specific line ranges. Call harness_await afterwards to receive those comments.",
+    description: "Compute the current diff and open the code-review gate. The harness runs git itself \u2014 do not paste a diff. The user reviews it in the browser and can attach comments to specific line ranges. End your turn afterwards; their comments arrive as your next input.",
     inputSchema: {
       type: "object",
       properties: {
@@ -223,7 +223,7 @@ var TOOLS = [
   {
     name: "harness_task_block",
     endpoint: "task_block",
-    description: "Stop work on a task and ask the user something you need to know. Use this the moment you would otherwise guess: it moves the card to BLOCKED with the question visible on the board, and their answer is recorded on the task as a decision automatically. Follow it with harness_await.",
+    description: "Stop work on a task and ask the user something you need to know. Use this the moment you would otherwise guess: it moves the card to BLOCKED with the question visible on the board, and their answer is recorded on the task as a decision automatically. Then end your turn \u2014 you are resumed with their answer.",
     inputSchema: {
       type: "object",
       properties: {
@@ -256,7 +256,7 @@ var TOOLS = [
   {
     name: "harness_ask",
     endpoint: "ask",
-    description: "Ask the user a question and wait for their answer in the UI. Use this INSTEAD of ending your turn with a question in prose \u2014 a question you only write in text reaches a terminal the user may not be looking at, and their reply in the browser cannot start a new turn. Opens a gate; follow it with harness_await.",
+    description: "Ask the user a question in the UI. Use this INSTEAD of asking in prose \u2014 a question you only write in text reaches a terminal the user may not be looking at, and their reply in the browser cannot start a new turn. It opens a gate: end your turn afterwards and the harness resumes you with their answer.",
     inputSchema: {
       type: "object",
       properties: {
@@ -299,7 +299,7 @@ var TOOLS = [
   {
     name: "harness_await",
     endpoint: "await",
-    description: 'Wait for the user to respond at the open gate. Returns their verdict and any line comments, or "pending" if they have not answered yet \u2014 in which case call it again. While a gate is open, do not start new work.',
+    description: 'Escape hatch: block the current turn on the open gate. You almost never need it \u2014 ending your turn parks the session in the harness for free and resumes you with the verdict, while this burns a turn per call and returns "pending" when the user is still thinking. Use it only when you must have the answer without yielding the turn.',
     inputSchema: {
       type: "object",
       properties: {

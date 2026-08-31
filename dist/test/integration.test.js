@@ -207,6 +207,8 @@ test("the plan gate parks the Stop hook and returns the edited plan", async () =
   });
   const gateId = String(plan["gateId"]);
   assert.ok(gateId);
+  assert.match(String(plan["text"]), /End your turn now/);
+  assert.doesNotMatch(String(plan["text"]), /Call harness_await/);
   const parked = hook("Stop", { stop_hook_active: false });
   await until(async () => (await session()).status === "waiting");
   await call(`/api/session/${sessionId}/gate/${gateId}/resolve`, {

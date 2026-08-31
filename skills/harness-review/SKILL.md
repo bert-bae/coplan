@@ -19,10 +19,14 @@ This opens the code review gate.
 
 ## Wait
 
-Call `harness_await`. If it returns `pending`, call it again — the user is
-still reading. If it returns `interrupted`, they closed the review gate and
-sent a message instead: act on that message rather than waiting for a verdict
-that is no longer coming.
+End your turn. The harness parks the session on the gate and resumes you when
+the user submits — do not poll with `harness_await`, and do not start new work
+while you wait. If a turn comes back saying you are *still parked*, they are
+still reading: end your turn again.
+
+If they press *Send now* instead, the review gate closes and their message
+arrives in its place. Act on the message; there is no verdict coming for that
+gate.
 
 ## Act on what comes back
 

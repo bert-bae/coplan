@@ -195,6 +195,9 @@ test('the plan gate parks the Stop hook and returns the edited plan', async () =
   });
   const gateId = String(plan['gateId']);
   assert.ok(gateId);
+  // The instruction that keeps the transcript clean: yield, don't poll.
+  assert.match(String(plan['text']), /End your turn now/);
+  assert.doesNotMatch(String(plan['text']), /Call harness_await/);
 
   // Claude ends its turn; the Stop hook holds it open.
   const parked = hook('Stop', { stop_hook_active: false });

@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { SessionStore } from './store.ts';
 import type { HarnessConfig } from '../shared/config.ts';
 import { TranscriptTailer } from './transcript.ts';
-import { waitForFeedback, waitForGate, renderFeedback, renderGateResult } from './gates.ts';
+import { waitForFeedback, waitForResume, renderFeedback, renderGateResult } from './gates.ts';
 import { currentBranch, headCommit, mainWorktreeRoot, repoRoot } from './git.ts';
 import { scanTranscriptForWorktree, type WorktreeRecord } from './worktree.ts';
 import { attributeFile, clearBaseline, reconcileFiles } from './tasks.ts';
@@ -29,6 +29,9 @@ const MAX_COMMANDS = 200;
 /** Distinct files tracked per session. A repo-wide refactor is not a leak,
  *  but an unbounded list persisted on every mutation is. */
 const MAX_TOUCHED_FILES = 500;
+/** Sessions whose park has expired, and on which gate. Keyed by session id so
+ *  a hold that rolls over is counted rather than restarted. */
+const holds = new Map<string, { gateId: string; rounds: number }>();
 
 export interface IngestContext {
   store: SessionStore;
@@ -137,6 +140,7 @@ async function onSessionEnd(
   ctx.tailers.get(sessionId)?.close();
   ctx.tailers.delete(sessionId);
   worktreeScanned.delete(sessionId);
+  holds.delete(sessionId);
   clearBaseline(sessionId);
   ctx.store.update(sessionId, { status: 'ended', endedAt: Date.now() });
   ctx.store.addTimeline(sessionId, 'note', `Session ended (${input.end_reason ?? 'unknown'})`, {
@@ -159,11 +163,19 @@ async function onUserPromptSubmit(
   });
   attachTailer(sessionId, ctx);
 
-  // Anything the user queued in the UI rides along with their prompt.
+  // Anything the user queued in the UI rides along with their prompt — and so
+  // does a verdict that landed after the harness gave up holding the turn,
+  // which is otherwise the one way an answer can sit undelivered.
   const drained = ctx.store.drainFeedback(sessionId);
-  if (drained.length > 0) {
-    return additionalContext('UserPromptSubmit', renderFeedback(drained));
-  }
+  const answered = ctx.store.undeliveredGate(sessionId);
+  if (answered) ctx.store.markGateDelivered(sessionId, answered.id);
+  const text = [
+    answered ? renderGateResult(answered) : '',
+    drained.length > 0 ? renderFeedback(drained) : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+  if (text) return additionalContext('UserPromptSubmit', text);
   return HOOK_NOOP;
 }
 
@@ -281,9 +293,12 @@ async function onNotification(
 /**
  * The turn boundary — and the harness's main injection point.
  *
- * If an open gate exists, the turn is held here until the user resolves it in
- * the UI, then Claude is resumed with their verdict. Sessions that aren't
- * using the harness fall straight through, so this is invisible to them.
+ * This is where waiting happens. When a gate is open, the model's job is to
+ * end its turn; the hook parks here on the daemon's side until the user acts
+ * in the UI, and then resumes the session with their verdict as its next
+ * input. Nothing polls, so a wait of an hour costs the same as a wait of a
+ * second. Sessions that aren't using the harness fall straight through, so
+ * this is invisible to them.
  */
 async function onStop(sessionId: string, input: StopInput, ctx: IngestContext): Promise<HookOutput> {
   const session = ctx.store.ensure(sessionId, input.cwd);
@@ -297,8 +312,10 @@ async function onStop(sessionId: string, input: StopInput, ctx: IngestContext): 
   // Feedback that arrived mid-turn goes out immediately, in every case.
   const drained = ctx.store.drainFeedback(sessionId);
   if (drained.length > 0) {
+    holds.delete(sessionId);
+    const open = ctx.store.activeGate(sessionId);
     ctx.store.update(sessionId, { status: 'active' });
-    return stopBlock(renderFeedback(drained));
+    return stopBlock(renderFeedback(drained) + (open ? stillParked(open.kind) : ''));
   }
 
   // The user may have answered the gate while Claude was still finishing its
@@ -306,6 +323,7 @@ async function onStop(sessionId: string, input: StopInput, ctx: IngestContext): 
   // so deliver it here or it would be lost.
   const answered = ctx.store.undeliveredGate(sessionId);
   if (answered) {
+    holds.delete(sessionId);
     ctx.store.markGateDelivered(sessionId, answered.id);
     ctx.store.update(sessionId, { status: 'active' });
     return stopBlock(renderGateResult(answered));
@@ -316,6 +334,7 @@ async function onStop(sessionId: string, input: StopInput, ctx: IngestContext): 
   // Already blocked once with nothing new to say: let the turn end rather
   // than burn through the CLI's consecutive-block allowance.
   if (input.stop_hook_active && !gate) {
+    holds.delete(sessionId);
     ctx.store.update(sessionId, { status: 'idle' });
     return HOOK_NOOP;
   }
@@ -335,44 +354,97 @@ async function onStop(sessionId: string, input: StopInput, ctx: IngestContext): 
         return stopBlock(renderFeedback(late));
       }
     }
+    holds.delete(sessionId);
     ctx.store.update(sessionId, { status: 'idle' });
     return HOOK_NOOP;
   }
 
-  // Park: hold the turn open while the user works through the gate in the UI.
-  // Say so in the terminal — otherwise this looks like a nine-minute hang and
-  // the user reaches for Ctrl+C.
+  // Park. The turn is over and the model is not holding anything open: the
+  // wait lives here, in the daemon, until the user acts in the UI. That is
+  // what replaced `harness_await` polling — no tool call, no token, and no
+  // "still waiting" line per minute of the user's thinking time.
   ctx.store.update(sessionId, { status: 'waiting' });
-  const result = await waitForGate(ctx.store, sessionId, gate.id, {
+  const signal = await waitForResume(ctx.store, sessionId, gate.id, {
     timeoutMs: ctx.config.stopHoldSeconds * 1000,
     ...(ctx.signal ? { signal: ctx.signal } : {}),
   });
 
-  if (result) {
-    ctx.store.markGateDelivered(sessionId, gate.id);
-    ctx.store.update(sessionId, { status: 'active' });
-    return stopBlock(renderGateResult({ ...gate, status: 'resolved', result }));
-  }
+  if (signal?.kind === 'gate') {
+    holds.delete(sessionId);
+    if (signal.gate.result) {
+      ctx.store.markGateDelivered(sessionId, gate.id);
+      ctx.store.update(sessionId, { status: 'active' });
+      return stopBlock(renderGateResult(signal.gate));
+    }
 
-
-  // Hold expired with the gate still open. Also check for feedback that
-  // landed in the same instant, then hand control back with a short nudge so
-  // the model re-parks instead of wandering off.
-  const late = ctx.store.drainFeedback(sessionId);
-  if (late.length > 0) {
-    ctx.store.update(sessionId, { status: 'active' });
-    return stopBlock(renderFeedback(late));
-  }
-
-  if (input.stop_hook_active) {
+    // Cancelled, with no verdict to hand over. "Send now" gets here when the
+    // cancellation beats the message into the queue, so look for it before
+    // deciding there is nothing to say.
+    const queued = ctx.store.drainFeedback(sessionId);
+    if (queued.length > 0) {
+      ctx.store.update(sessionId, { status: 'active' });
+      return stopBlock(renderFeedback(queued));
+    }
+    // Superseded by a newer gate: there is something to park on after all,
+    // and only a turn ending can re-arm this hook.
+    const current = ctx.store.activeGate(sessionId);
+    if (current) {
+      ctx.store.update(sessionId, { status: 'waiting' });
+      return stopBlock(
+        `[cc-harness] The "${gate.kind}" gate was replaced by a newer "${current.kind}" gate. ` +
+          `End your turn again — the harness parks on that one and resumes you with its verdict.`,
+      );
+    }
     ctx.store.update(sessionId, { status: 'idle' });
     return HOOK_NOOP;
   }
 
+  // A message typed in the browser wakes the turn too, so an open gate no
+  // longer blocks the queue behind it. "Send now" closes the gate on its way
+  // through, and `renderFeedback` says so itself — appending "still parked"
+  // there would contradict it.
+  if (signal?.kind === 'feedback' && signal.items.length > 0) {
+    holds.delete(sessionId);
+    ctx.store.update(sessionId, { status: 'active' });
+    const skipped = signal.items.some((item) => item.skippedGate);
+    return stopBlock(renderFeedback(signal.items) + (skipped ? '' : stillParked(gate.kind)));
+  }
+
+  // The window expired with the gate still open. Re-parking means ending
+  // another turn, which is the one unavoidable cost: a single short turn per
+  // window instead of a poll every couple of minutes. Bounded, so a session
+  // nobody comes back to does not hold the terminal indefinitely.
+  const round = (holds.get(sessionId)?.gateId === gate.id ? holds.get(sessionId)!.rounds : 0) + 1;
+  const limit = ctx.config.gateHoldRounds;
+  if (limit > 0 && round > limit) {
+    holds.delete(sessionId);
+    ctx.store.update(sessionId, { status: 'idle' });
+    ctx.store.addTimeline(
+      sessionId,
+      'note',
+      `Stopped holding the turn at the "${gate.kind}" gate after ` +
+        `${Math.round((limit * ctx.config.stopHoldSeconds) / 60)} minutes. Answer it in the UI — ` +
+        `the verdict is delivered with your next message to the session.`,
+      { label: 'gate' },
+    );
+    return HOOK_NOOP;
+  }
+
+  holds.set(sessionId, { gateId: gate.id, rounds: round });
   ctx.store.update(sessionId, { status: 'waiting' });
   return stopBlock(
-    `[cc-harness] Still waiting on the user at the "${gate.kind}" gate. ` +
-      `Call harness_await({ gate_id: "${gate.id}" }) to keep waiting. Do not start new work.`,
+    `[cc-harness] Still parked at the "${gate.kind}" gate — the user has not answered yet. ` +
+      `Do not call a tool and do not start new work: end your turn again, immediately. ` +
+      `The harness re-parks the session and resumes you the moment they answer.`,
+  );
+}
+
+/** Appended when feedback arrives while a gate is still open, so the model
+ *  answers the message without treating it as the verdict. */
+function stillParked(kind: string): string {
+  return (
+    `\n[cc-harness] The "${kind}" gate is still open — this message is not a verdict. ` +
+    `Respond to it, then end your turn to park again.`
   );
 }
 

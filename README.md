@@ -14,7 +14,8 @@ front of the session and wires it back in.
  │   hooks (sh + curl relay)         MCP stdio server  │
  └──────────┬─────────────────────────────┬────────────┘
             │ POST /hook/<Event>          │ tools/call
-            │ (Stop parks here)           │ (harness_await parks here)
+            │ (Stop parks here — the      │ (publishes gates, notes,
+            │  whole wait lives here)     │  replies; never waits)
             ▼                             ▼
  ┌──────────────── cc-harnessd (one per user) ─────────────────┐
  │  sessions · stage machine · transcript tailer               │
@@ -151,22 +152,29 @@ with `--dry-run` to only list, and an optional group name to narrow it.
 Two paths, both landing in the session transcript:
 
 **Gates (park and wait).** When Claude publishes a plan, a diff, or a check
-run, a gate opens. Claude calls `harness_await`, which holds. If Claude ends
-its turn instead, the `Stop` hook holds the turn open. When you submit in the
-UI, the session resumes with your verdict — including your edited plan or your
-line comments — as its next input.
+run, a gate opens and Claude ends its turn. The `Stop` hook parks in the daemon
+on an event, not a poll: waiting costs no tool calls and leaves nothing in the
+transcript. When you submit in the UI, the gate resolves, the parked hook wakes,
+and the session resumes with your verdict — your edited plan, your line comments
+— as its next input. A hook window is finite (`stopHoldSeconds`), so a long wait
+rolls over into a fresh park a few times (`gateHoldRounds`) before the session
+is allowed to go idle; answer it after that and the verdict is handed over with
+your next message.
 
 **Async messages.** Anything you send while Claude is working queues and is
-delivered at the next turn boundary, so you never have to interrupt. A message
-is never a verdict: answering a gate is always a separate, deliberate action.
+delivered at the next turn boundary, so you never have to interrupt — including
+while it is parked on a gate, which wakes it rather than waiting behind the
+gate. The gate stays standing: Claude answers you and parks on it again. A
+message is never a verdict: answering a gate is always a separate, deliberate
+action.
 
-**Skipping a gate.** A message typed while the session sits at a gate used to
-wait for that gate to be answered — up to the full hold — which is exactly
-backwards when the reason for typing was *stop, do this instead*. **Send now**
-closes the gate without a verdict and wakes whatever was parked on it with the
-message, and Claude is told the gate is gone rather than left waiting on a
-verdict that is not coming. It is a separate button from the default send, and
-the gate is recorded as *skipped* rather than quietly disappearing.
+**Skipping a gate.** Sometimes the reason for typing was *stop, do this
+instead*, and having Claude answer and then go back to waiting is not what you
+meant. **Send now** closes the gate without a verdict and wakes whatever was
+parked on it with the message, and Claude is told the gate is gone rather than
+left waiting on a verdict that is not coming. It is a separate button from the
+default send, and the gate is recorded as *skipped* rather than quietly
+disappearing.
 
 **Questions.** When Claude needs an answer it calls `harness_ask` (or blocks a
 card) rather than writing a question into the terminal, so the question appears
