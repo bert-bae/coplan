@@ -9,7 +9,7 @@ import { SessionStore } from './store.ts';
 import { Router, json, text, readJson, serveStatic, requestSignal, type Ctx } from './http.ts';
 import { ingestHook } from './hookIngest.ts';
 import { TranscriptTailer } from './transcript.ts';
-import { waitForGate, renderGateResult } from './gates.ts';
+import { waitForGate, renderFeedback, renderGateResult } from './gates.ts';
 import { computeDiff, snapshotRound } from './git.ts';
 import {
   addNote,
@@ -699,18 +699,55 @@ function buildRouter(deps: Deps): Router {
       text?: string;
       origin?: 'timeline' | 'plan' | 'diff' | 'checks' | 'ship';
       threads?: ReviewThread[];
+      /** "Send now": release whatever the session is parked on. */
+      interrupt?: boolean;
     }>(ctx.req);
 
     if (!body.text?.trim() && !body.threads?.length) {
       json(ctx.res, 400, { error: 'empty feedback' });
       return;
     }
+
+    // Without this, a message typed while the session sits at a gate waits
+    // for that gate to be answered — which is exactly what the user was
+    // trying not to do. Skipping closes the gate, and everything parked on
+    // it (the MCP await, the Stop hook) wakes and picks the message up.
+    const skipping = body.interrupt === true ? store.activeGate(session.sessionId) : undefined;
+
     const item = store.queueFeedback(session.sessionId, {
       text: body.text?.trim() ?? '',
       origin: body.origin ?? 'timeline',
       ...(body.threads ? { threads: hydrateThreads(store, session.sessionId, body.threads) } : {}),
+      ...(body.interrupt ? { interrupt: true } : {}),
+      ...(skipping ? { skippedGate: { kind: skipping.kind, prompt: skipping.prompt } } : {}),
     });
-    json(ctx.res, 200, { item, delivery: session.status === 'idle' ? 'queued' : 'pending' });
+
+    // Queue first, cancel second: the waiter wakes on the cancellation and
+    // immediately drains the queue, so the message has to already be in it.
+    if (skipping) {
+      store.cancelGate(
+        session.sessionId,
+        skipping.id,
+        `The user skipped the ${skipping.kind.replace('_', ' ')} gate and sent a message instead.`,
+      );
+    }
+
+    // Closing a gate nobody is parked on frees the UI but wakes no one, so
+    // do not claim the message was delivered: `waiting` is the only thing
+    // that means a turn is actually held open on it.
+    const delivery = skipping
+      ? skipping.waiting
+        ? 'interrupted'
+        : 'queued'
+      : session.status === 'idle'
+        ? 'queued'
+        : 'pending';
+
+    json(ctx.res, 200, {
+      item,
+      delivery,
+      ...(skipping ? { skippedGate: skipping.kind } : {}),
+    });
   });
 
   router.post('/api/session/:id/threads', async (ctx) => {
@@ -1118,6 +1155,39 @@ function buildRouter(deps: Deps): Router {
           json(ctx.res, 200, { ok: true, status: 'resolved', result, text: renderGateResult(gate) });
           return;
         }
+
+        // The gate can also end without a verdict: the user pressed "send
+        // now" and took the session off it. The message that replaced it is
+        // already queued, so hand it over here rather than telling the model
+        // to keep waiting on something that is gone.
+        if (gate && gate.status !== 'open') {
+          const drained = store.drainFeedback(id);
+          if (drained.length > 0) {
+            store.update(id, { status: 'active' });
+            json(ctx.res, 200, {
+              ok: true,
+              // "interrupted" is a redirection the user chose; a gate that was
+              // merely superseded is not, and the two want different reactions.
+              status: drained.some((item) => item.skippedGate) ? 'interrupted' : 'cancelled',
+              text: renderFeedback(drained),
+            });
+            return;
+          }
+          // A gate also ends this way when a newer one supersedes it, in
+          // which case there is something to wait on after all.
+          const current = store.activeGate(id);
+          json(ctx.res, 200, {
+            ok: true,
+            status: 'cancelled',
+            text: current
+              ? `[cc-harness] The "${gate.kind}" gate was replaced by a newer "${current.kind}" gate. ` +
+                `Call harness_await({ gate_id: "${current.id}" }) instead.`
+              : `[cc-harness] The "${gate.kind}" gate was closed without a verdict. Do not wait on it. ` +
+                `Continue, or publish a new gate when you next need the user.`,
+          });
+          return;
+        }
+
         json(ctx.res, 200, {
           ok: true,
           status: 'pending',

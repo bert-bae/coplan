@@ -33,6 +33,12 @@ the change.
 - **rejected** — stop and wait for the user's next message.
 - **pending** — they haven't answered yet. Call `harness_await` again. Keep
   waiting; do not fill the time with work they haven't approved.
+- **interrupted** — the user pressed *Send now* in the UI: they closed the gate
+  without a verdict and sent a message instead. The message is in the response.
+  Act on it; do not call `harness_await` again for that gate, and do not
+  republish the same plan expecting the old gate to answer.
+- **cancelled** — the gate was closed with nothing to hand over. Carry on and
+  publish a new gate when you next need the user.
 
 ### 2. Implement — work the board
 
@@ -139,6 +145,8 @@ their own answer instead of picking one.
 - **While a gate is open, do not start new work.** Call `harness_await` until
   it resolves. This is the whole point of the harness.
 - **`pending` is not a rejection.** It means keep waiting.
+- **`interrupted` is a redirection.** The user took the session off the gate on
+  purpose. Do the thing they asked for instead of the thing they were reviewing.
 - Use `harness_note` only for things the user cannot infer from your tool calls
   — a decision you made, a blocker you hit.
 - Call `harness_status` when you resume a session and aren't sure whether the

@@ -883,3 +883,134 @@ a { color: var(--text-link); }
 @media (max-width: 1180px) {
   .board-columns { grid-template-columns: repeat(2, minmax(240px, 1fr)); }
 }
+
+
+/* ------------------------------------- stage state and liveness */
+
+/* The animated marker. It is the one thing on screen that proves the session
+   is alive, so it must never be a static glyph. */
+.working-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--accent-solid);
+  box-shadow: 0 0 0 0 var(--accent-veil);
+  animation: working-pulse 1.4s ease-out infinite;
+}
+@keyframes working-pulse {
+  0%   { box-shadow: 0 0 0 0 var(--accent-veil); opacity: 1; }
+  70%  { box-shadow: 0 0 0 7px transparent; opacity: 0.55; }
+  100% { box-shadow: 0 0 0 0 transparent; opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .working-dot { animation: working-fade 2.4s ease-in-out infinite; }
+  @keyframes working-fade { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+}
+
+.working { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.working-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.working-doing { color: var(--text-tertiary); font-weight: 400; }
+
+.stage-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 1px 7px; border-radius: var(--r-full);
+  font-size: var(--fs-micro); font-weight: 600; white-space: nowrap;
+  background: var(--surface-hover); color: var(--text-secondary);
+}
+.stage-chip.tone-success { background: var(--success-bg); color: var(--success-fg); }
+.stage-chip.tone-warning { background: var(--attention-bg); color: var(--attention-fg); }
+.stage-chip.tone-danger  { background: var(--danger-bg); color: var(--danger-fg); }
+.stage-chip.tone-accent  { background: var(--accent-subtle); color: var(--accent-fg); }
+
+/* The strip at the top of a stage: what happened here, and when. */
+.stage-bar {
+  display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
+  padding: 6px var(--sp-3); margin-bottom: var(--sp-3);
+  border: 1px solid var(--border-default); border-left-width: 3px;
+  border-radius: var(--r-md); background: var(--surface-raised);
+  font-size: var(--fs-sm); color: var(--text-secondary);
+}
+.stage-bar.tone-success { border-left-color: var(--success-solid); }
+.stage-bar.tone-warning { border-left-color: var(--attention-solid); background: var(--attention-bg); color: var(--attention-fg); }
+.stage-bar.tone-danger  { border-left-color: var(--danger-solid); }
+.stage-bar.tone-accent  { border-left-color: var(--accent-solid); }
+.stage-bar-detail { flex: 1; min-width: 12ch; }
+.stage-bar-when { color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+
+/* The exhaustive list of moves. Deliberately loud: it exists to say that the
+   message box below is not on it. */
+.required {
+  border: 1px solid var(--attention-border); border-radius: var(--r-lg);
+  background: var(--attention-bg); color: var(--attention-fg);
+  padding: var(--sp-3); margin-bottom: var(--sp-3);
+}
+.required.is-quiet {
+  border-color: var(--border-default); background: var(--surface-sunken); color: var(--text-secondary);
+}
+.required-head { display: flex; align-items: center; gap: var(--sp-2); margin: 0 0 var(--sp-2); }
+.required-mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; flex: none; border-radius: 50%;
+  background: var(--attention-solid); color: var(--on-solid);
+  font-size: var(--fs-micro); font-weight: 700;
+}
+.required-when { font-weight: 400; opacity: 0.85; font-variant-numeric: tabular-nums; }
+.required-lede { margin: 0 0 var(--sp-2); font-size: var(--fs-sm); }
+/* The side panels are all 320px, so the effect never fits beside its button:
+   stack them, and let the button keep the visual weight. */
+.required-list { list-style: none; margin: 0 0 var(--sp-2); padding: 0; font-size: var(--fs-sm); }
+.required-list li { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; margin-bottom: var(--sp-2); }
+.required-list li > .btn { max-width: 100%; }
+.required-effect { font-size: var(--fs-micro); line-height: 15px; opacity: 0.85; }
+.required-foot { margin: 0; font-size: var(--fs-micro); opacity: 0.85; }
+
+/* The gate banner's one-line version of the same list. */
+.gate-choices { font-size: var(--fs-sm); opacity: 0.9; }
+.gate-here { font-size: var(--fs-sm); font-weight: 600; white-space: nowrap; opacity: 0.8; }
+.question-foot { margin: var(--sp-2) 0 0; font-size: var(--fs-micro); color: var(--text-tertiary); }
+.gate-banner.is-working { background: var(--surface-hover); }
+.gate-banner.is-working .gate-copy { display: flex; flex-direction: column; }
+
+/* Tabs carry the stage state as a badge; a working tab gets the dot. */
+.tab-badge.is-success { background: var(--success-solid); color: var(--on-solid); }
+
+/* Full-height views lay themselves out; the strip must not stretch or bleed
+   past the padding of the bar beneath it. */
+.review > .stage-bar,
+.board > .stage-bar {
+  flex: none;
+  margin: var(--sp-2) var(--inset) 0;
+}
+
+/* ------------------------------------------- activity liveness */
+
+.live-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 1px 8px; border-radius: var(--r-full);
+  font-size: var(--fs-micro); font-weight: 600;
+  background: var(--surface-hover); color: var(--text-secondary);
+}
+.live-pill.is-working { background: var(--accent-subtle); color: var(--accent-fg); }
+.live-pill.is-waiting { background: var(--attention-bg); color: var(--attention-fg); }
+.feed-head { gap: var(--sp-2); justify-content: flex-start; }
+
+.event.is-live, .event.is-live:nth-child(odd) { background: var(--accent-veil); }
+.event.is-live .event-icon { display: flex; align-items: center; justify-content: center; }
+.live-text { margin: 2px 0 0; color: var(--accent-fg); font-size: var(--fs-md); }
+
+.pipeline { list-style: none; margin: 0; padding: 0; }
+.pipeline-open {
+  display: flex; align-items: center; gap: var(--sp-2); width: 100%;
+  padding: 3px var(--sp-1); border: none; background: none; border-radius: var(--r-sm);
+  font-size: var(--fs-sm); text-align: left;
+}
+.pipeline-open:hover { background: var(--surface-hover); }
+.pipeline-name { flex: 1; min-width: 0; color: var(--text-primary); }
+.pipeline-row.is-not_started .pipeline-name { color: var(--text-tertiary); }
+
+/* The rail: what each session is doing, not only where it is. */
+.session-state { color: var(--text-tertiary); }
+.session-state.is-active { color: var(--accent-fg); }
+.session-state.is-waiting { color: var(--attention-fg); }
+
+/* The composer's two buttons need room side by side. */
+.composer-side { align-items: flex-end; }
+.composer-side .row-actions { gap: var(--sp-2); }

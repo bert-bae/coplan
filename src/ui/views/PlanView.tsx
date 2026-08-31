@@ -16,9 +16,10 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { store, useSession, useOpenGate, useStore } from '../store.ts';
+import { store, useSession, useGateOfKind, useStore } from '../store.ts';
 import { api } from '../lib/api.ts';
 import { Button, EmptyState, Explain } from '../components/primitives.tsx';
+import { StageBar, RequiredAction, NoActionNeeded } from '../components/StageStatus.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { classNames, pluralize } from '../lib/format.ts';
 import type { PlanStep } from '../../shared/types.ts';
@@ -32,7 +33,7 @@ import type { PlanStep } from '../../shared/types.ts';
  */
 export function PlanView() {
   const session = useSession();
-  const gate = useOpenGate();
+  const gate = useGateOfKind('plan');
   const sessionId = useStore((s) => s.sessionId);
   const plan = session?.plan ?? null;
 
@@ -127,6 +128,7 @@ export function PlanView() {
   return (
     <div className="plan">
       <div className="plan-main">
+        <StageBar tab="plan" />
         <header className="plan-head">
           <h2>{plan.title}</h2>
           <span className="muted">revision {plan.revision}</span>
@@ -198,14 +200,12 @@ export function PlanView() {
 
       <aside className="plan-side">
         <h3 className="panel-title">Your response</h3>
-        {gate ? (
+        {gate && (
           <Explain>
-            Claude is parked here. Approving resumes it with the plan exactly as you have edited it —{' '}
+            Approving resumes the parked session with the plan exactly as you have edited it —{' '}
             {pluralize(live.length, 'step')}
             {steps.length !== live.length && `, ${steps.length - live.length} dropped`}.
           </Explain>
-        ) : (
-          <Explain>No gate is open, so this is queued and reaches Claude at the end of its next turn.</Explain>
         )}
         <textarea
           className="input"
@@ -214,17 +214,27 @@ export function PlanView() {
           placeholder="Anything to add? (optional)"
           onChange={(e) => setSummary(e.target.value)}
         />
-        <div className="plan-actions">
-          <Button variant="primary" onClick={() => void submit('approved')} disabled={busy}>
-            Approve plan
-          </Button>
-          <Button onClick={() => void submit('changes_requested')} disabled={busy}>
-            Request changes
-          </Button>
-          <Button variant="danger" onClick={() => void submit('rejected')} disabled={busy}>
-            Reject
-          </Button>
-        </div>
+        {/* Without a gate there is no verdict to give: offering "Approve"
+            when nothing asked for approval is what made the pipeline feel
+            like it had invisible steps. */}
+        {gate ? (
+          <RequiredAction
+            gate={gate}
+            busy={busy}
+            onChoose={(id) =>
+              void submit(id === 'approve' ? 'approved' : id === 'reject' ? 'rejected' : 'changes_requested')
+            }
+          />
+        ) : (
+          <>
+            <NoActionNeeded tab="plan" />
+            <div className="plan-actions">
+              <Button variant="primary" onClick={() => void submit('changes_requested')} disabled={busy}>
+                Send these notes
+              </Button>
+            </div>
+          </>
+        )}
       </aside>
     </div>
   );

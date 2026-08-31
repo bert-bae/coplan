@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { store, useStore } from '../store.ts';
 import { GlobalActions } from './GlobalActions.tsx';
+import { WorkingDot } from './StageStatus.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
 import type { SessionSummary } from '../../shared/types.ts';
 
@@ -13,6 +14,15 @@ const STAGE_LABEL: Record<string, string> = {
   verification: 'Verifying',
   ship: 'Shipping',
   done: 'Done',
+};
+
+/** What the session itself is doing, alongside where in the pipeline it is.
+ *  Stage and status answer different questions and were being conflated. */
+const SESSION_STATE_LABEL: Record<string, string> = {
+  active: 'working',
+  waiting: 'needs you',
+  idle: 'stopped',
+  ended: 'ended',
 };
 
 /** The attention section is a group like any other, with a reserved key. */
@@ -234,13 +244,20 @@ function SessionRow({
         title={`${session.title}\n${session.cwd}\nDouble-click to rename`}
       >
         <span className="session-name">
-          {session.openGates > 0 && (
+          {session.openGates > 0 ? (
             <span className="dot is-gate" title="Claude is waiting on you" aria-label="waiting on you" />
+          ) : (
+            // Motion, not a word: the rail is scanned, not read, and "active"
+            // sitting still is indistinguishable from a stale page.
+            session.status === 'active' && <WorkingDot title="Claude is working" />
           )}
           {session.title}
         </span>
         <span className="session-sub">
           <span className="session-stage">{STAGE_LABEL[session.stage] ?? session.stage}</span>
+          <span className={classNames('session-state', `is-${session.status}`)}>
+            {SESSION_STATE_LABEL[session.status] ?? session.status}
+          </span>
           {session.branch && <span className="session-branch">{session.branch}</span>}
         </span>
         <span className="session-foot">

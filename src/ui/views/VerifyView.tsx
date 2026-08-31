@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { store, useSession, useOpenGate, useStore } from '../store.ts';
+import { store, useSession, useGateOfKind, useStore } from '../store.ts';
 import { api } from '../lib/api.ts';
 import { Button, EmptyState, Explain } from '../components/primitives.tsx';
+import { StageBar, RequiredAction, NoActionNeeded } from '../components/StageStatus.tsx';
 import { classNames, duration } from '../lib/format.ts';
 import type { CheckRun } from '../../shared/types.ts';
 
 /** Verification: run the project's checks and sign off on the result. */
 export function VerifyView() {
   const session = useSession();
-  const gate = useOpenGate();
+  const gate = useGateOfKind('verification');
   const sessionId = useStore((s) => s.sessionId);
   const [command, setCommand] = useState('');
   const [notes, setNotes] = useState('');
@@ -52,6 +53,7 @@ export function VerifyView() {
   return (
     <div className="verify">
       <div className="verify-main">
+        <StageBar tab="verify" />
         <div className="verify-bar">
           <strong>Checks</strong>
           <span className="muted">
@@ -107,11 +109,7 @@ export function VerifyView() {
             move on.
           </p>
         )}
-        {gate ? (
-          <Explain>Claude is parked here. Your verdict resumes it.</Explain>
-        ) : (
-          <Explain>No gate is open, so this is queued for Claude's next turn.</Explain>
-        )}
+        {gate && <Explain>Your verdict resumes the parked session.</Explain>}
         <textarea
           className="input"
           rows={4}
@@ -119,14 +117,26 @@ export function VerifyView() {
           placeholder="Testing notes (optional)"
           onChange={(e) => setNotes(e.target.value)}
         />
-        <div className="row-actions">
-          <Button variant="primary" onClick={() => void submit('approved')} disabled={busy}>
-            Looks verified
-          </Button>
-          <Button onClick={() => void submit('changes_requested')} disabled={busy}>
-            Not ready
-          </Button>
-        </div>
+        {gate ? (
+          <RequiredAction
+            gate={gate}
+            busy={busy}
+            onChoose={(id) => void submit(id === 'approve' ? 'approved' : 'changes_requested')}
+          />
+        ) : (
+          <>
+            <NoActionNeeded tab="verify" />
+            <div className="row-actions">
+              <Button
+                variant="primary"
+                onClick={() => void submit('changes_requested')}
+                disabled={busy || !notes.trim()}
+              >
+                Send these notes
+              </Button>
+            </div>
+          </>
+        )}
       </aside>
     </div>
   );

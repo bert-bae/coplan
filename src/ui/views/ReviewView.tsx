@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { store, useStore, useOpenGate, useDrafts } from '../store.ts';
+import { store, useStore, useGateOfKind, useDrafts } from '../store.ts';
 import { FileTree } from './review/FileTree.tsx';
 import { DiffFileView, type Selection } from './review/DiffFile.tsx';
 import { PendingPanel } from './review/PendingPanel.tsx';
 import { Button, EmptyState, Spinner } from '../components/primitives.tsx';
+import { StageBar } from '../components/StageStatus.tsx';
 import { classNames, pluralize } from '../lib/format.ts';
 import type { ReviewThread } from '../../shared/types.ts';
 
@@ -21,7 +22,7 @@ export function ReviewView() {
   const loading = useStore((s) => s.diffLoading);
   const selectedFile = useStore((s) => s.selectedFile);
   const diffMode = useStore((s) => s.diffMode);
-  const gate = useOpenGate();
+  const gate = useGateOfKind('code_review');
   const drafts = useDrafts();
 
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -112,6 +113,7 @@ export function ReviewView() {
 
   return (
     <div className={classNames('review', panelOpen && 'has-panel')}>
+      <StageBar tab="review" />
       <div className="review-bar">
         <div className="review-bar-info">
           <strong>{pluralize(diff.files.length, 'file')}</strong>

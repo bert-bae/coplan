@@ -16,6 +16,8 @@ import { CSS } from '@dnd-kit/utilities';
 import { store, useSession, useStore } from '../store.ts';
 import { api } from '../lib/api.ts';
 import { EmptyState, Explain } from '../components/primitives.tsx';
+import { StageBar, WorkingIndicator } from '../components/StageStatus.tsx';
+import { isWorking } from '../lib/stages.ts';
 import { classNames, duration, pluralize, relativeTime } from '../lib/format.ts';
 import { TASK_STATUSES, type Task, type TaskStatus } from '../../shared/types.ts';
 
@@ -104,12 +106,14 @@ export function BoardView() {
 
   return (
     <div className="board">
+      <StageBar tab="board" />
       <div className="board-bar">
         <strong>Task board</strong>
         <span className="muted">
           {done}/{tasks.length} done
           {blocked.length > 0 && ` · ${blocked.length} blocked`}
         </span>
+        {isWorking(session) && <WorkingIndicator session={session} verbose />}
         <span className="spacer" />
         <Explain>Drag a card to redirect Claude — it is told when you move one.</Explain>
       </div>
