@@ -1,5 +1,6 @@
-import { useEffect } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { store, useStore, useSession, useOpenGate, useDrafts, type Tab } from './store.ts';
+import { Button } from './components/primitives.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
 import { GateBanner } from './components/GateBanner.tsx';
 import { QuestionGate } from './components/QuestionGate.tsx';
@@ -23,15 +24,23 @@ import type { SessionState } from '../shared/types.ts';
  * Tabs use the same words as the stage rail. Two vocabularies for one pipeline
  * ("Build" in one place, "Progress" in another) made the user learn a mapping
  * for no reason.
+ *
+ * The first tab is called Conversation, not Activity: it is not only a log of
+ * what happened, it is the one place you can talk to the agent. Every other
+ * tab advances through its own gate.
  */
 const TABS: { id: Tab; label: string }[] = [
-  { id: 'timeline', label: 'Activity' },
+  { id: 'timeline', label: 'Conversation' },
   { id: 'plan', label: 'Plan' },
   { id: 'board', label: 'Board' },
   { id: 'review', label: 'Review' },
   { id: 'verify', label: 'Verify' },
   { id: 'ship', label: 'Ship' },
 ];
+
+/** Both halves of the ARIA tab relationship, from one id. */
+const tabId = (id: Tab) => `tab-${id}`;
+const panelId = (id: Tab) => `panel-${id}`;
 
 export function App() {
   const session = useSession();
@@ -41,15 +50,56 @@ export function App() {
   const gate = useOpenGate();
   const drafts = useDrafts();
   const sidebarCollapsed = useStore((s) => s.collapsedSidebar);
+  const drawerOpen = useStore((s) => s.drawerOpen);
+  const tabs = useRef<HTMLElement>(null);
 
   useDocumentTitle(session, Boolean(gate));
   useUnsavedGuard(drafts.length);
   useShortcuts();
+  useDrawerDismiss(drawerOpen);
+
+  /**
+   * Arrow keys move between tabs, Home and End jump to the ends. Without this
+   * a tab strip is six separate tab stops, which is both tedious and wrong:
+   * the ARIA pattern is one stop for the whole strip.
+   */
+  const onTabKeyDown = useCallback(
+    (event: React.KeyboardEvent) => {
+      const delta = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+      let next: Tab | undefined;
+      if (delta !== 0) {
+        const index = TABS.findIndex((t) => t.id === tab);
+        next = TABS[(index + delta + TABS.length) % TABS.length]?.id;
+      } else if (event.key === 'Home') next = TABS[0]?.id;
+      else if (event.key === 'End') next = TABS[TABS.length - 1]?.id;
+      if (!next) return;
+
+      event.preventDefault();
+      store.setTab(next);
+      // Selection follows focus, so focus has to follow selection too.
+      tabs.current?.querySelector<HTMLElement>(`#${tabId(next)}`)?.focus();
+    },
+    [tab],
+  );
 
   return (
-    <div className={classNames('app', sidebarCollapsed && 'is-sidebar-collapsed')}>
+    <div
+      className={classNames(
+        'app',
+        sidebarCollapsed && 'is-sidebar-collapsed',
+        drawerOpen && 'is-drawer-open',
+      )}
+    >
+      <a className="skip-link" href={`#${panelId(tab)}`}>
+        Skip to content
+      </a>
       <Sidebar />
-      <main className="main">
+      {/* Only reachable under the narrow breakpoint, where the sidebar is a
+          drawer laid over the content. */}
+      {drawerOpen && (
+        <button type="button" className="scrim" aria-label="Close the session list" onClick={() => store.setDrawer(false)} />
+      )}
+      <main className="main" aria-label="Session">
         {!sessionId || !session ? (
           <NoSession error={error} />
         ) : (
@@ -60,12 +110,19 @@ export function App() {
             {/* Above the tabs on purpose: a question must be answerable
                 without leaving whatever the user is reading. */}
             <QuestionGate />
-            <nav className="tabs" role="tablist">
+            <nav className="tabs" role="tablist" aria-label="Stages" ref={tabs} onKeyDown={onTabKeyDown}>
               {TABS.map((t) => (
                 <TabButton key={t.id} id={t.id} label={t.label} active={tab === t.id} session={session} />
               ))}
             </nav>
-            <div className="view" key={tab}>
+            <div
+              className="view"
+              key={tab}
+              id={panelId(tab)}
+              role="tabpanel"
+              aria-labelledby={tabId(tab)}
+              tabIndex={-1}
+            >
               {tab === 'timeline' && <ActivityView />}
               {tab === 'plan' && <PlanView />}
               {tab === 'board' && <BoardView />}
@@ -73,11 +130,35 @@ export function App() {
               {tab === 'verify' && <VerifyView />}
               {tab === 'ship' && <ShipView />}
             </div>
-            <Composer />
+            {/* The message box belongs to the Conversation, and only there.
+                Everywhere else it could do nothing but queue text behind a
+                gate that has its own buttons a few centimetres away, which
+                read as "this is how you reply" and was never true. */}
+            {tab === 'timeline' ? <Composer /> : <TalkHint />}
           </>
         )}
       </main>
       <Toasts />
+      <Announcer session={session} gate={Boolean(gate)} />
+    </div>
+  );
+}
+
+/** What the composer would have been, on the tabs that do not have one. */
+function TalkHint() {
+  const session = useSession();
+  const pending = session?.pendingFeedback.length ?? 0;
+
+  return (
+    <div className="talk-hint">
+      <span>
+        This stage moves on through the buttons above.
+        {pending > 0 && ` ${pending} message${pending === 1 ? '' : 's'} already queued.`}
+      </span>
+      <span className="spacer" />
+      <Button size="sm" variant="ghost" onClick={() => store.setTab('timeline')}>
+        Say something instead →
+      </Button>
     </div>
   );
 }
@@ -103,7 +184,11 @@ function TabButton({
     <button
       type="button"
       role="tab"
+      id={tabId(id)}
       aria-selected={active}
+      aria-controls={panelId(id)}
+      // One tab stop for the whole strip; the arrow keys move within it.
+      tabIndex={active ? 0 : -1}
       className={classNames('tab', active && 'is-active', `is-${status.state}`)}
       // The tooltip carries the sentence the badge cannot: what state this
       // stage is in and why.
@@ -111,13 +196,23 @@ function TabButton({
       onClick={() => store.setTab(id)}
     >
       {label}
+      {/* The badge is a glyph — a bare "✓" or "!" reads as nothing to a
+          screen reader, so the meaning is carried as text beside it and the
+          glyph itself is hidden. `aria-label` on a span cannot do this job:
+          it is ignored on a generic element. */}
       {badge &&
         (badge.tone === 'working' ? (
-          <WorkingDot title="Claude is working" />
+          <>
+            <WorkingDot title="Claude is working" />
+            <span className="sr-only">Claude is working</span>
+          </>
         ) : (
-          <span className={classNames('tab-badge', `is-${badge.tone}`)} aria-label={badge.label}>
-            {badge.text}
-          </span>
+          <>
+            <span className={classNames('tab-badge', `is-${badge.tone}`)} aria-hidden="true">
+              {badge.text}
+            </span>
+            <span className="sr-only">{badge.label}</span>
+          </>
         ))}
     </button>
   );
@@ -148,7 +243,8 @@ function tabBadge(
     const open = session.tasks.filter((t) => t.status !== 'done').length;
     if (open > 0) return { text: String(open), tone: 'accent', label: `${open} card(s) open` };
   }
-  // Liveness is Activity's subject, so the animation lives on that tab alone.
+  // Liveness is the Conversation's subject, so the animation lives on that
+  // tab alone.
   // A stage tab pulsing for the twenty minutes after its verdict was given
   // would say "look here" about a page with nothing on it to do.
   if (id === 'timeline' && status.state !== 'awaiting' && isWorking(session)) {
@@ -178,10 +274,22 @@ function tabBadge(
 
 function Header({ session }: { session: SessionState }) {
   const done = session.todos.filter((t) => t.status === 'completed').length;
+  const drawerOpen = useStore((s) => s.drawerOpen);
 
   return (
     <header className="head">
       <div className="head-main">
+        {/* CSS decides whether this exists at all: it is `display: none`
+            until the sidebar becomes a drawer. */}
+        <button
+          type="button"
+          className="icon-btn drawer-toggle"
+          aria-label="Open the session list"
+          aria-expanded={drawerOpen}
+          onClick={() => store.setDrawer(true)}
+        >
+          <span aria-hidden="true">☰</span>
+        </button>
         <h1 className="head-title" title={session.cwd}>
           {session.title}
         </h1>
@@ -294,6 +402,52 @@ function useUnsavedGuard(draftCount: number): void {
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [draftCount]);
+}
+
+/**
+ * One always-mounted polite live region.
+ *
+ * A region that is inserted at the same moment its text appears is usually
+ * missed — assistive tech watches regions it already knows about. So it is
+ * mounted empty for the life of the app and only its text changes.
+ */
+function Announcer({ session, gate }: { session: SessionState | null; gate: boolean }) {
+  const message = !session
+    ? ''
+    : gate
+      ? `${session.title}: Claude is waiting on you.`
+      : session.status === 'active'
+        ? `${session.title}: Claude is working.`
+        : '';
+
+  return (
+    <p className="sr-only" role="status" aria-live="polite">
+      {message}
+    </p>
+  );
+}
+
+/** Escape closes the drawer, and so does a resize past the breakpoint that
+ *  created it — a drawer still latched open on a wide window would sit on top
+ *  of the sidebar it duplicates. */
+function useDrawerDismiss(open: boolean): void {
+  useEffect(() => {
+    if (!open) return;
+
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') store.setDrawer(false);
+    };
+    const onResize = () => {
+      if (window.innerWidth > 900) store.setDrawer(false);
+    };
+
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onResize);
+    };
+  }, [open]);
 }
 
 function useShortcuts(): void {

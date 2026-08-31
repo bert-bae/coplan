@@ -13,7 +13,11 @@ const ICON: Record<string, string> = {
 };
 
 /** Progress and the session feed together: what has been done, and what is
- *  happening now. They were separate tabs and were always read together. */
+ *  happening now. They were separate tabs and were always read together.
+ *
+ *  Presented as the Conversation, because this is also the only tab with a
+ *  message box: every other tab moves on through its own gate, so a box there
+ *  could do nothing but queue text behind it. */
 export function ActivityView() {
   const session = useSession();
   const [showThinking, setShowThinking] = useState(false);
@@ -37,7 +41,7 @@ export function ActivityView() {
         {/* The question card is rendered above the tab strip, by App, so it
             stays reachable from every view. */}
         <div className="feed-head">
-          <strong>Activity</strong>
+          <strong>Conversation</strong>
           <LiveStatus session={session} />
           <span className="spacer" />
           <label className="toggle">

@@ -78,6 +78,7 @@ export function Composer() {
         <textarea
           className="composer-input"
           rows={2}
+          aria-label="Message this session"
           value={text}
           placeholder={gate ? 'Message this session (does not answer the gate)…' : 'Message this session…'}
           onChange={(e) => setText(e.target.value)}

@@ -44,6 +44,10 @@ export interface UiState {
   /** Files the user has ticked off while reviewing, per session. */
   viewedFiles: Record<string, string[]>;
   collapsedSidebar: boolean;
+  /** The narrow-width sidebar drawer. Never persisted: a drawer left open
+   *  across a reload would cover the app on a window that has since been
+   *  resized wide again. */
+  drawerOpen: boolean;
   /** Session ids the user pinned to the top of the sidebar. Local-only: which
    *  sessions matter to *this* reader is not something the daemon can know. */
   pinned: string[];
@@ -75,6 +79,7 @@ const initial: UiState = {
   selectedFile: null,
   viewedFiles: {},
   collapsedSidebar: false,
+  drawerOpen: false,
   pinned: [],
   collapsedProjects: [],
   soundEnabled: true,
@@ -381,6 +386,12 @@ class Store {
   toggleSidebar(): void {
     this.set({ collapsedSidebar: !this.state.collapsedSidebar });
     this.persistPrefs();
+  }
+
+  /** The drawer is the sidebar under the narrow breakpoint. Opening it is
+   *  transient state, so it is set directly rather than persisted. */
+  setDrawer(drawerOpen: boolean): void {
+    if (this.state.drawerOpen !== drawerOpen) this.set({ drawerOpen });
   }
 
   /** Pinned sessions sort to the top of their project, and above every other

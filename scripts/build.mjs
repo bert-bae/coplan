@@ -7,7 +7,8 @@
 // once every bundle has succeeded — a failed build must never leave the
 // installed plugin without a UI.
 import * as esbuild from 'esbuild';
-import { cp, mkdir, rm, readFile, writeFile, rename } from 'node:fs/promises';
+import { cp, mkdir, readdir, rm, readFile, writeFile, rename } from 'node:fs/promises';
+import * as tailwind from '@tailwindcss/node';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -77,12 +78,41 @@ if (existsSync(path.join(root, 'src/test'))) {
   });
 }
 
+/**
+ * The stylesheet is a Tailwind v4 entry, so it is compiled rather than
+ * copied: Tailwind scans src/ui for class names and emits only what is used.
+ * Run in-process rather than by shelling out to the CLI, so a failure throws
+ * here and the staged build is discarded like any other failure.
+ */
+async function buildCss() {
+  const input = path.join(root, 'src/ui/style.css');
+  const compiler = await tailwind.compile(await readFile(input, 'utf8'), {
+    base: path.dirname(input),
+    onDependency() {},
+  });
+  const candidates = await scanCandidates(path.join(root, 'src/ui'));
+  return compiler.build(candidates);
+}
+
+/**
+ * Every identifier-shaped token in the templates, handed to Tailwind as a
+ * candidate. Over-collecting is free — a candidate that is not a utility
+ * generates nothing — while under-collecting silently drops a style.
+ */
+async function scanCandidates(dir) {
+  const found = new Set();
+  for (const entry of await readdir(dir, { withFileTypes: true, recursive: true })) {
+    if (!entry.isFile() || !/\.(tsx?|html)$/.test(entry.name)) continue;
+    const text = await readFile(path.join(entry.parentPath ?? entry.path, entry.name), 'utf8');
+    for (const token of text.match(/[A-Za-z0-9!@_%+.:[\]/-]{2,}/g) ?? []) found.add(token);
+  }
+  return [...found];
+}
+
 async function copyStatic() {
   await mkdir(path.join(outRoot, 'ui'), { recursive: true });
-  for (const file of ['index.html', 'style.css']) {
-    const src = path.join(root, 'src/ui', file);
-    if (existsSync(src)) await cp(src, path.join(outRoot, 'ui', file));
-  }
+  await cp(path.join(root, 'src/ui/index.html'), path.join(outRoot, 'ui/index.html'));
+  await writeFile(path.join(outRoot, 'ui/style.css'), await buildCss());
   await writeFile(path.join(outRoot, 'version.json'), JSON.stringify({ version: pkg.version }, null, 2));
 }
 

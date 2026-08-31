@@ -31,6 +31,7 @@ export function FileTree({
         <input
           className="file-filter"
           type="search"
+          aria-label="Filter changed files"
           value={filter}
           placeholder={`Filter ${files.length} files…`}
           onChange={(e) => setFilter(e.target.value)}
@@ -94,7 +95,13 @@ function FileRow({
           aria-label={`Mark ${file.path} viewed`}
         />
       </label>
-      <button type="button" className="file-open" onClick={onSelect} title={file.path}>
+      <button
+        type="button"
+        className="file-open"
+        aria-current={active ? 'true' : undefined}
+        onClick={onSelect}
+        title={file.path}
+      >
         <span className={classNames('file-status', `is-${file.status}`)} aria-hidden="true">
           {file.status[0]!.toUpperCase()}
         </span>

@@ -5,8 +5,10 @@ import { classNames } from '../lib/format.ts';
  *  review looked identical to losing it. */
 export function Toasts() {
   const toasts = useStore((s) => s.toasts);
-  if (toasts.length === 0) return null;
 
+  // Mounted even when empty. A live region that appears at the same instant
+  // as its first message is routinely missed: assistive tech announces
+  // changes to regions it was already watching.
   return (
     <div className="toasts" role="status" aria-live="polite">
       {toasts.map((toast) => (
