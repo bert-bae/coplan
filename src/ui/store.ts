@@ -5,6 +5,7 @@ import type {
   CleanupGroupId,
   DiffPayload,
   Gate,
+  GateKind,
   ReviewThread,
   ServerEvent,
   SessionState,
@@ -783,9 +784,19 @@ export function useOpenGate(): Gate | null {
 /** The open question, if there is one. Rendered above the tabs, so every view
  *  can be read while it is answered. */
 export function useQuestionGate(): Gate | null {
-  return useStore(
-    (s) => s.session?.gates.find((g) => g.status === 'open' && g.kind === 'question') ?? null,
-  );
+  return useGateOfKind('question');
+}
+
+/**
+ * The open gate a particular stage owns.
+ *
+ * Views must not act on `useOpenGate()`: only one gate is open at a time, so
+ * while Claude has a question outstanding that is the gate the Plan tab would
+ * see — and approving the plan would have resolved the *question* with a
+ * plan-shaped verdict.
+ */
+export function useGateOfKind(kind: GateKind): Gate | null {
+  return useStore((s) => s.session?.gates.find((g) => g.status === 'open' && g.kind === kind) ?? null);
 }
 
 export function useDrafts(): DraftComment[] {

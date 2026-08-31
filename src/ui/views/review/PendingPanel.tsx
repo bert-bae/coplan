@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { store, useDrafts, useStore } from '../../store.ts';
 import { api } from '../../lib/api.ts';
 import { Button } from '../../components/primitives.tsx';
+import { RequiredAction, NoActionNeeded } from '../../components/StageStatus.tsx';
 import { lineRef, pluralize } from '../../lib/format.ts';
 import { Reconciliation } from './Reconciliation.tsx';
 import type { Gate, ReviewThread } from '../../../shared/types.ts';
@@ -123,14 +124,10 @@ export function PendingPanel({
       </div>
 
       <footer className="pending-foot">
-        {gate ? (
+        {gate && (
           <p className="explain">
             Submitting resumes the parked session. Claude receives your summary and every comment above, each
             with the lines you selected.
-          </p>
-        ) : (
-          <p className="explain">
-            No gate is open, so this is queued and reaches Claude at the end of its next turn.
           </p>
         )}
         <textarea
@@ -155,15 +152,27 @@ export function PendingPanel({
               </Button>
             </div>
           </div>
+        ) : gate ? (
+          <RequiredAction
+            gate={gate}
+            busy={busy}
+            onChoose={(id) => request(id === 'approve' ? 'approved' : 'changes_requested')}
+          />
         ) : (
-          <div className="pending-actions">
-            <Button onClick={() => request('changes_requested')} disabled={busy}>
-              {busy ? 'Sending…' : 'Request changes'}
-            </Button>
-            <Button variant="primary" onClick={() => request('approved')} disabled={busy}>
-              Approve
-            </Button>
-          </div>
+          // Nothing asked for a verdict, so there is none to give — the
+          // comments still go, as a message.
+          <>
+            <NoActionNeeded tab="review" />
+            <div className="pending-actions">
+              <Button
+                variant="primary"
+                onClick={() => request('changes_requested')}
+                disabled={busy || (drafts.length === 0 && !summary.trim())}
+              >
+                {busy ? 'Sending…' : 'Send comments'}
+              </Button>
+            </div>
+          </>
         )}
       </footer>
     </aside>

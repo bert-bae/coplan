@@ -20,7 +20,9 @@ This opens the code review gate.
 ## Wait
 
 Call `harness_await`. If it returns `pending`, call it again — the user is
-still reading.
+still reading. If it returns `interrupted`, they closed the review gate and
+sent a message instead: act on that message rather than waiting for a verdict
+that is no longer coming.
 
 ## Act on what comes back
 

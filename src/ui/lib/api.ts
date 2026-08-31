@@ -68,8 +68,13 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  feedback: (id: string, body: { text: string; origin?: string; threads?: ReviewThread[] }) =>
-    request<{ item: unknown; delivery: string }>(`/api/session/${id}/feedback`, {
+  /** `interrupt` is the "send now" path: it closes whatever gate is open so
+   *  the parked session wakes on this message instead of the verdict. */
+  feedback: (
+    id: string,
+    body: { text: string; origin?: string; threads?: ReviewThread[]; interrupt?: boolean },
+  ) =>
+    request<{ item: unknown; delivery: string; skippedGate?: string }>(`/api/session/${id}/feedback`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),

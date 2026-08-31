@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { useSession } from '../store.ts';
+import { store, useSession, type Tab } from '../store.ts';
 import { Markdown } from '../components/Markdown.tsx';
 import { Panel, EmptyState } from '../components/primitives.tsx';
+import { StageChip, WorkingDot } from '../components/StageStatus.tsx';
+import { currentActivity, isWorking, stageStatus } from '../lib/stages.ts';
 import { classNames, clockTime, pluralize, relativeTime } from '../lib/format.ts';
-import type { TimelineEvent } from '../../shared/types.ts';
+import type { SessionState, TimelineEvent } from '../../shared/types.ts';
 
 const ICON: Record<string, string> = {
   assistant: '●', thinking: '◦', tool: '›', stage: '▸', note: '·', user: '»',
@@ -36,6 +38,8 @@ export function ActivityView() {
             stays reachable from every view. */}
         <div className="feed-head">
           <strong>Activity</strong>
+          <LiveStatus session={session} />
+          <span className="spacer" />
           <label className="toggle">
             <input type="checkbox" checked={showThinking} onChange={(e) => setShowThinking(e.target.checked)} />
             show reasoning
@@ -54,10 +58,16 @@ export function ActivityView() {
           ) : (
             events.map((event) => <Event key={event.id} event={event} />)
           )}
+          {/* Pinned to the tail of the feed, where the eye already is: the
+              feed stops growing between tool calls, and without this a live
+              session and a dead one look the same. */}
+          {isWorking(session) && <LiveRow session={session} />}
         </div>
       </div>
 
       <aside className="activity-side">
+        <Pipeline session={session} />
+
         <Panel title="Progress">
           {session.todos.length === 0 ? (
             <p className="muted">No task list yet.</p>
@@ -113,6 +123,86 @@ export function ActivityView() {
         </Panel>
       </aside>
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Is anything happening?
+ * ------------------------------------------------------------------ */
+
+/** The header pill. Four states, each named in the words the user would use. */
+function LiveStatus({ session }: { session: SessionState }) {
+  if (isWorking(session)) {
+    return (
+      <span className="live-pill is-working">
+        <WorkingDot />
+        working
+      </span>
+    );
+  }
+  const gate = session.gates.find((g) => g.status === 'open');
+  if (gate) return <span className="live-pill is-waiting">waiting on you</span>;
+  if (session.status === 'ended') return <span className="live-pill is-ended">ended</span>;
+  return <span className="live-pill is-idle">idle — Claude has stopped</span>;
+}
+
+/** The animated tail of the feed, naming the tool it is on. */
+function LiveRow({ session }: { session: SessionState }) {
+  const doing = currentActivity(session);
+  return (
+    <article className="event is-live" aria-live="polite">
+      <span className="event-icon" aria-hidden="true">
+        <WorkingDot />
+      </span>
+      <div className="event-body">
+        <div className="event-meta">
+          <span className="event-label">now</span>
+        </div>
+        <p className="live-text">
+          Claude is working{doing ? ` · ${doing}` : '…'}
+        </p>
+      </div>
+    </article>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Where the session is in the pipeline
+ * ------------------------------------------------------------------ */
+
+const PIPELINE: { tab: Tab; label: string }[] = [
+  { tab: 'plan', label: 'Plan' },
+  { tab: 'board', label: 'Board' },
+  { tab: 'review', label: 'Review' },
+  { tab: 'verify', label: 'Verify' },
+  { tab: 'ship', label: 'Ship' },
+];
+
+/**
+ * Every stage and what became of it, on one screen.
+ *
+ * The tabs carry the same states as badges, but a badge cannot say "approved
+ * eleven minutes ago" — and "did I already sign this off?" is exactly the
+ * question the feed is bad at answering.
+ */
+function Pipeline({ session }: { session: SessionState }) {
+  return (
+    <Panel title="Stages">
+      <ul className="pipeline">
+        {PIPELINE.map(({ tab, label }) => {
+          const status = stageStatus(session, tab);
+          return (
+            <li key={tab} className={classNames('pipeline-row', `is-${status.state}`)}>
+              <button type="button" className="pipeline-open" onClick={() => store.setTab(tab)} title={status.detail}>
+                <span className="pipeline-name">{label}</span>
+                <StageChip status={status} />
+                {status.at && <span className="muted">{relativeTime(status.at)}</span>}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </Panel>
   );
 }
 

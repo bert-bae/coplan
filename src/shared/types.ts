@@ -359,6 +359,13 @@ export interface FeedbackItem {
   /** Where in the UI it came from, for rendering it back with context. */
   origin: 'timeline' | 'plan' | 'diff' | 'checks' | 'ship';
   threads?: ReviewThread[];
+  /** Sent with "send now": the user chose to take the session off whatever it
+   *  was parked on rather than let the message wait for a turn boundary. */
+  interrupt?: boolean;
+  /** The gate this message closed on its way through, when it skipped one.
+   *  Recorded so the model is told the gate is gone rather than left waiting
+   *  on a verdict that is never coming. */
+  skippedGate?: { kind: GateKind; prompt: string };
 }
 
 /**
