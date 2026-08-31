@@ -20,8 +20,8 @@ check has finished, and it tells you which ones failed and why — the gate only
 opens once there is a real result to sign off on.
 
 **If checks failed, fix them and call `harness_publish_checks` again.** Do not
-call `harness_await`: the user has nothing useful to say about a red check that
-you already know how to fix.
+end your turn on a red check: the user has nothing useful to say about a
+failure you already know how to fix.
 
 ## 2. Ship
 
@@ -30,7 +30,8 @@ body from the approved plan, the review threads and the check results, and
 opens the ship gate. The user picks the steps (checks, commit, push, pr,
 summary) and the provider, edits the text if they want, and confirms.
 
-Then `harness_await`.
+Then end your turn. The harness parks on the ship gate and resumes you with
+their decision.
 
 ## 3. Finish the provider call, if it is yours to make
 

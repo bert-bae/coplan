@@ -21,18 +21,20 @@ Investigate first, then call `harness_publish_plan` with a title and concrete
 steps. The title becomes the PR title later, so make it a real description of
 the change.
 
-`harness_publish_plan` opens the **plan gate**. Immediately call
-`harness_await`. Do not start implementing.
+`harness_publish_plan` opens the **plan gate**. Now **end your turn.** Do not
+start implementing, and do not poll — the harness parks the session on the gate
+and resumes you the moment the user answers, however long they take.
 
-`harness_await` returns one of:
+You come back with one of:
 
 - **approved** — with the user's final step list, which may differ from what
   you published. Their list wins. Implement exactly that.
-- **changes_requested** — revise and call `harness_publish_plan` again with the
-  new plan, then `harness_await` again.
+- **changes_requested** — revise, call `harness_publish_plan` again with the new
+  plan, and end your turn again.
 - **rejected** — stop and wait for the user's next message.
-- **pending** — they haven't answered yet. Call `harness_await` again. Keep
-  waiting; do not fill the time with work they haven't approved.
+
+If a turn ever comes back saying you are *still parked*, the user has not
+answered yet: end your turn again straight away, without a tool call.
 
 ### 2. Implement — work the board
 
@@ -49,9 +51,9 @@ truthful. For each task, in order:
    hit, an approach you rejected. Write it while the reason is fresh.
 3. **If you hit something you do not know, stop and ask.**
    `harness_task_block({task_id, question, options})` moves the card to BLOCKED
-   with your question on it, then `harness_await`. Their answer is recorded on
-   the task as a decision automatically. Do not guess and carry on — a guess
-   that turns out wrong costs more than the wait.
+   with your question on it; then end your turn. Their answer comes back as your
+   next input and is recorded on the task as a decision automatically. Do not
+   guess and carry on — a guess that turns out wrong costs more than the wait.
 4. `harness_task_update({task_id, status: "done", note})` — `note` is required
    and says what you actually changed. That record is what the user reviews
    against.
@@ -70,7 +72,7 @@ turn. Act on them when they do.
 When the work is done, call `harness_publish_diff`. The harness runs git
 itself — never paste a diff.
 
-This opens the **code review gate**. Call `harness_await`. You will receive
+This opens the **code review gate**. End your turn. You are resumed with
 comments anchored to specific line ranges, each with the source the user was
 looking at and an id in brackets.
 
@@ -88,7 +90,7 @@ files that actually moved.
 
 Call `harness_publish_checks` with the commands that prove the change works
 (`{commands: [...]}`, or omit it to use the project's configured checks). They
-run in the UI with streamed output. `harness_await` for sign-off.
+run in the UI with streamed output. End your turn to wait for sign-off.
 
 If a check fails, fix it and run again — do not ask the user to sign off on a
 red check.
@@ -110,8 +112,9 @@ not the terminal, and a reply they type in the browser cannot start a new turn
 — so a question asked in prose can sit unanswered indefinitely.
 
 Call `harness_ask({question, options?})` instead. It opens a gate, shows the
-question in the UI with your suggested answers as buttons, and `harness_await`
-returns what they chose. This applies at every stage, not just planning.
+question in the UI with your suggested answers as buttons; end your turn and
+you are resumed with what they chose. This applies at every stage, not just
+planning.
 
 When the answers are separate decisions, or an option needs explaining, pass
 `questions` instead — up to four, each with a short `header`, its own options
@@ -136,9 +139,14 @@ their own answer instead of picking one.
 
 ## Rules
 
-- **While a gate is open, do not start new work.** Call `harness_await` until
-  it resolves. This is the whole point of the harness.
-- **`pending` is not a rejection.** It means keep waiting.
+- **While a gate is open, do not start new work.** End your turn instead: the
+  wait costs nothing and the user's answer arrives as your next input. This is
+  the whole point of the harness.
+- **Do not call `harness_await`.** It is an escape hatch for the rare case
+  where you cannot yield the turn; used as a poll it spends a turn per attempt
+  to learn nothing.
+- **A message from the UI is not a verdict.** The user can write to you while a
+  gate is open — answer them, then end your turn to park again.
 - Use `harness_note` only for things the user cannot infer from your tool calls
   — a decision you made, a blocker you hit.
 - Call `harness_status` when you resume a session and aren't sure whether the

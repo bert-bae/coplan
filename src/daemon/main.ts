@@ -971,7 +971,7 @@ function buildRouter(deps: Deps): Router {
           text:
             `[cc-harness] Plan published (${plan.steps.length} steps) and the plan gate is open.\n` +
             `The user is reviewing it at ${uiUrl(id)}\n` +
-            `Call harness_await({ gate_id: "${gate?.id}" }) now and wait for their verdict.`,
+            parkNotice('answers'),
         });
         return;
       }
@@ -1012,7 +1012,7 @@ function buildRouter(deps: Deps): Router {
             `+${diff.additions}/-${diff.deletions} against ${diff.baseRef.slice(0, 12)}.` +
             (moved !== undefined ? ` ${moved} file(s) changed since the last review.` : '') +
             `\nThe user is reviewing it at ${uiUrl(id)}\n` +
-            `Call harness_await({ gate_id: "${gate?.id}" }) and wait for their line comments.`,
+            parkNotice('submits their line comments'),
         });
         return;
       }
@@ -1044,7 +1044,7 @@ function buildRouter(deps: Deps): Router {
               failed.map((c) => `  ✗ ${c.command} (exit ${c.exitCode})\n${tailOf(c.output)}`).join('\n') +
               `\nFix these and call harness_publish_checks again. Do not ask the user to sign off on a red check.`
             : `[cc-harness] All ${results.length} check(s) passed. Results are at ${uiUrl(id)}\n` +
-              `Call harness_await({ gate_id: "${gate?.id}" }) to wait for the user's sign-off.`,
+              parkNotice('signs off'),
         });
         return;
       }
@@ -1066,8 +1066,8 @@ function buildRouter(deps: Deps): Router {
             `[cc-harness] Ship stage open. Title: "${ship.title}". Provider: ${ship.provider}. ` +
             `Steps: ${ship.steps.join(' → ')}.\n` +
             `The user confirms (and can edit the title/body/provider) at ${uiUrl(id)}\n` +
-            `Call harness_await({ gate_id: "${gate?.id}" }). If they pick an MCP provider, ` +
-            `you will be handed a directive to perform the PR call yourself.`,
+            parkNotice('confirms') +
+            `\nIf they pick an MCP provider, you will be handed a directive to perform the PR call yourself.`,
         });
         return;
       }
@@ -1091,8 +1091,8 @@ function buildRouter(deps: Deps): Router {
           text:
             `[cc-harness] Question posted to the review UI: "${question}"\n` +
             `The user answers at ${uiUrl(id)}\n` +
-            `Call harness_await({ gate_id: "${gate?.id}" }) and wait for their answer. ` +
-            `Do not guess or proceed on an assumption.`,
+            parkNotice('answers') +
+            `\nDo not guess or proceed on an assumption.`,
         });
         return;
       }
@@ -1122,8 +1122,9 @@ function buildRouter(deps: Deps): Router {
           ok: true,
           status: 'pending',
           text:
-            `[cc-harness] Still waiting on the user (${seconds}s elapsed). ` +
-            `Call harness_await({ gate_id: "${gateId}" }) again. Do not start new work while a gate is open.`,
+            `[cc-harness] Still waiting on the user (${seconds}s elapsed). Do not call this again — ` +
+            `polling costs a turn per attempt and tells you nothing. End your turn instead: the harness ` +
+            `parks the session and resumes you with their verdict the moment they answer.`,
         });
         return;
       }
@@ -1241,8 +1242,8 @@ function buildRouter(deps: Deps): Router {
           text:
             `[cc-harness] Task blocked and the question is on the board: "${question}"\n` +
             `The user answers at ${uiUrl(id)}\n` +
-            `Call harness_await({ gate_id: "${gate?.id}" }). Their answer is recorded on the task as a ` +
-            `decision automatically — do not guess and carry on.`,
+            parkNotice('answers') +
+            `\nTheir answer is recorded on the task as a decision automatically — do not guess and carry on.`,
         });
         return;
       }
@@ -1589,6 +1590,21 @@ function summarizeForModel(session: SessionState) {
   };
 }
 
+/**
+ * The one instruction every gate-opening tool ends on.
+ *
+ * The wait belongs to the `Stop` hook, which parks off-turn: ending the turn
+ * is what arms it, and the session is resumed with the verdict as its next
+ * input. Polling for the same answer used to cost a tool call and a visible
+ * turn every couple of minutes and filled the transcript with "still waiting".
+ */
+function parkNotice(action: string): string {
+  return (
+    `End your turn now — do not call harness_await and do not start new work. ` +
+    `The harness holds the session at this gate and resumes you automatically when the user ${action}.`
+  );
+}
+
 function describeStatus(session: SessionState, url: string): string {
   const done = session.todos.filter((t) => t.status === 'completed').length;
   const lines = [
@@ -1596,7 +1612,12 @@ function describeStatus(session: SessionState, url: string): string {
     `todos: ${done}/${session.todos.length} complete · files touched: ${session.files.length}`,
   ];
   const gate = session.gates.find((g) => g.status === 'open');
-  if (gate) lines.push(`OPEN GATE (${gate.kind}): ${gate.id} — the user has not responded yet.`);
+  if (gate) {
+    lines.push(
+      `OPEN GATE (${gate.kind}): ${gate.id} — the user has not responded yet. ` +
+        `End your turn to park on it; you are resumed with their verdict.`,
+    );
+  }
   if (session.pendingFeedback.length) lines.push(`${session.pendingFeedback.length} unread comment(s).`);
   lines.push(`UI: ${url}`);
   return lines.join('\n');

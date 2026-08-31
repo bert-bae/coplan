@@ -19,8 +19,10 @@ This opens the code review gate.
 
 ## Wait
 
-Call `harness_await`. If it returns `pending`, call it again — the user is
-still reading.
+End your turn. The harness parks the session on the gate and resumes you when
+the user submits — do not poll with `harness_await`, and do not start new work
+while you wait. If a turn comes back saying you are *still parked*, they are
+still reading: end your turn again.
 
 ## Act on what comes back
 

@@ -4,10 +4,15 @@ import type { FeedbackItem, Gate, GateResult, ReviewThread } from '../shared/typ
 /**
  * Long-poll primitives.
  *
- * Both waiting paths — the `harness_await` MCP tool and the `Stop` hook —
- * park here. Every wait is bounded: the MCP per-call timeout is a hard wall
- * clock, so a call that never returns would be killed rather than resumed.
- * Returning `null` on expiry lets the caller decide whether to poll again.
+ * Waiting happens here, in the daemon, and never in the model's turn: the
+ * `Stop` hook parks on {@link waitForResume} once the turn ends, so a session
+ * can sit at a gate for as long as the user needs without spending a tool call
+ * or a line of transcript on it. (`harness_await` still parks on
+ * {@link waitForGate}, but it is now the escape hatch rather than the loop.)
+ *
+ * Every wait is bounded — the hook's own timeout is a hard wall clock, so a
+ * call that never returned would be killed rather than resumed. Returning
+ * `null` on expiry lets the caller decide whether to park again.
  */
 
 export interface WaitOptions {
@@ -55,6 +60,77 @@ export function waitForGate(
     timer.unref?.();
     store.on('gate:resolved', onResolved);
     store.on('gate:cancelled', onCancelled);
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+    store.setGateWaiting(sessionId, gateId, true);
+  });
+}
+
+/**
+ * What woke a parked turn up.
+ *
+ * A turn parked on a gate has two legitimate reasons to resume: the gate was
+ * answered, or the user typed something in the UI while it was open. Holding
+ * only for the gate is what made a message queued in the browser sit unread
+ * behind a step nobody had got round to answering.
+ */
+export type ResumeSignal =
+  | { kind: 'gate'; gate: Gate }
+  | { kind: 'feedback'; items: FeedbackItem[] };
+
+/**
+ * Park until the session has a reason to continue.
+ *
+ * This is the whole waiting mechanism: it is event-driven and lives in the
+ * daemon, off the model's turn, so waiting costs no tool calls and leaves no
+ * "still waiting" trail in the transcript. `null` means the window expired
+ * with nothing to say.
+ */
+export function waitForResume(
+  store: SessionStore,
+  sessionId: string,
+  gateId: string,
+  opts: WaitOptions,
+): Promise<ResumeSignal | null> {
+  const existing = store.getGate(sessionId, gateId);
+  if (existing && existing.status !== 'open') {
+    return Promise.resolve({ kind: 'gate', gate: existing });
+  }
+  const session = store.get(sessionId);
+  if (session && session.pendingFeedback.length > 0) {
+    return Promise.resolve({ kind: 'feedback', items: store.drainFeedback(sessionId) });
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: ResumeSignal | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      store.off('gate:resolved', onGate);
+      store.off('gate:cancelled', onGate);
+      store.off('feedback:queued', onQueued);
+      opts.signal?.removeEventListener('abort', onAbort);
+      store.setGateWaiting(sessionId, gateId, false);
+      resolve(value);
+    };
+
+    // Cancelled counts: a superseded gate will never resolve, and holding for
+    // it would park the turn until the window ran out.
+    const onGate = (payload: { sessionId: string; gate: Gate }) => {
+      if (payload.sessionId !== sessionId || payload.gate.id !== gateId) return;
+      finish({ kind: 'gate', gate: payload.gate });
+    };
+    const onQueued = (payload: { sessionId: string }) => {
+      if (payload.sessionId !== sessionId) return;
+      finish({ kind: 'feedback', items: store.drainFeedback(sessionId) });
+    };
+    const onAbort = () => finish(null);
+
+    const timer = setTimeout(() => finish(null), opts.timeoutMs);
+    timer.unref?.();
+    store.on('gate:resolved', onGate);
+    store.on('gate:cancelled', onGate);
+    store.on('feedback:queued', onQueued);
     opts.signal?.addEventListener('abort', onAbort, { once: true });
     store.setGateWaiting(sessionId, gateId, true);
   });

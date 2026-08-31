@@ -17,7 +17,8 @@ provider without restating everything else.
 | `autoOpen` | `false` | Open a browser window the first time a session engages the harness. Off by default: the plugin is installed globally, and a tool should not open windows you did not ask for. Use `harness open`, or the URL the tools print. |
 | `maxTimelineEvents` | `500` | Ring-buffer size for the session feed. |
 | `stopHoldSeconds` | `540` | How long one `Stop` hook holds a finished turn open while a gate is unresolved. Must stay below the hook's own `timeout` in `hooks/hooks.json` (600s). |
-| `awaitSeconds` | `120` | How long one `harness_await` call parks before returning `pending`. |
+| `awaitSeconds` | `120` | How long one `harness_await` call parks before returning `pending`. `harness_await` is the escape hatch, not the loop — waiting normally happens in the `Stop` hook. |
+| `gateHoldRounds` | `4` | How many `Stop` windows in a row the harness re-parks on the same gate before letting the session go idle. Total patience is `gateHoldRounds × stopHoldSeconds` (36 minutes by default); `0` holds indefinitely. Each rollover costs one short turn, because a turn is the only thing that can re-arm the hook. |
 | `holdIdleSessions` | `false` | Hold a finished turn open even with no gate, so a message typed in the browser reaches a session that would otherwise go idle. Costs an occupied terminal and draws on the CLI's consecutive-`Stop`-block allowance — turn it on for a session you intend to drive entirely from the browser. |
 | `maxDiffFileBytes` | `400000` | Files whose rendered diff exceeds this are shown as a stub. |
 | `idleShutdownMinutes` | `120` | Exit after this long with no live session, no open gate and no browser attached. The next hook starts a fresh daemon. `0` disables it. |
