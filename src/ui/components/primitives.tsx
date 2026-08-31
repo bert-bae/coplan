@@ -12,6 +12,9 @@ export function Button({
   disabled,
   title,
   type = 'button',
+  label,
+  expanded,
+  pressed,
 }: {
   children: ReactNode;
   onClick?: () => void;
@@ -20,6 +23,13 @@ export function Button({
   disabled?: boolean;
   title?: string;
   type?: 'button' | 'submit';
+  /** Overrides the accessible name when the visible text is not the whole
+   *  story — a count appended to a label, say. */
+  label?: string;
+  /** Set on a button that shows and hides something; omitted otherwise, since
+   *  `aria-expanded="false"` on a plain button is a lie. */
+  expanded?: boolean;
+  pressed?: boolean;
 }) {
   return (
     <button
@@ -28,6 +38,9 @@ export function Button({
       onClick={onClick}
       disabled={disabled}
       title={title}
+      aria-label={label}
+      aria-expanded={expanded}
+      aria-pressed={pressed}
     >
       {children}
     </button>

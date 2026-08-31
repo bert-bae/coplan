@@ -4,6 +4,7 @@ import { api } from '../lib/api.ts';
 import { Button } from './primitives.tsx';
 import { classNames } from '../lib/format.ts';
 import { useElapsed } from '../lib/hooks.ts';
+import { scrollBehavior } from '../lib/motion.ts';
 import type { Gate, GateQuestion } from '../../shared/types.ts';
 
 /**
@@ -28,9 +29,13 @@ export function QuestionGate() {
   const root = useRef<HTMLDivElement>(null);
   const elapsed = useElapsed(gate?.createdAt);
 
-  // The composer's link and the banner's button both ask for this.
+  // The composer's link and the banner's button both ask for this. Scrolling
+  // alone left a keyboard user exactly where they were, staring at a card
+  // they had just asked to be taken to — so focus moves with the scroll.
   useEffect(() => {
-    if (focus > 0) root.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    if (focus === 0) return;
+    root.current?.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() });
+    root.current?.focus({ preventScroll: true });
   }, [focus]);
 
   if (!gate || !sessionId) return null;
@@ -38,7 +43,7 @@ export function QuestionGate() {
   const questions = gate.meta?.questions ?? [];
 
   return (
-    <div className="question-card" ref={root} role="region" aria-label="Question from Claude">
+    <div className="question-card" ref={root} tabIndex={-1} role="region" aria-label="Question from Claude">
       <h3>
         {gate.waiting ? 'Claude is asking — the session is parked' : 'Claude is asking'}
         <span className="question-elapsed">
@@ -98,6 +103,7 @@ function QuickAnswer({ gate, sessionId }: { gate: Gate; sessionId: string }) {
       <textarea
         className="input"
         rows={3}
+        aria-label={`Your answer to: ${gate.prompt}`}
         value={answer}
         placeholder={options.length ? 'Or answer in your own words…' : 'Your answer…'}
         onChange={(e) => setAnswer(e.target.value)}

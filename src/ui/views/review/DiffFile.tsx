@@ -52,6 +52,7 @@ export const DiffFileView = memo(function DiffFileView({
   return (
     <section
       className={classNames('dfile', viewed && 'is-viewed')}
+      aria-label={`${file.status} ${file.path}`}
       ref={(node) => registerAnchor(file.path, node)}
       data-path={file.path}
       style={{ '--gut': `calc(${digits}ch + 16px)` } as React.CSSProperties}
@@ -73,7 +74,12 @@ export const DiffFileView = memo(function DiffFileView({
           <span className="pill is-draft">{threads.length} comment{threads.length === 1 ? '' : 's'}</span>
         )}
         <label className="dfile-viewed">
-          <input type="checkbox" checked={viewed} onChange={() => store.toggleViewed(file.path)} />
+          <input
+            type="checkbox"
+            checked={viewed}
+            aria-label={`Mark ${file.path} viewed`}
+            onChange={() => store.toggleViewed(file.path)}
+          />
           Viewed
         </label>
       </header>
@@ -171,6 +177,14 @@ function Row({
 
   return (
     <>
+      {/* The row itself is not a control.
+       *
+       * It used to be `role="button"` with an `aria-label`, which had two
+       * costs: the label replaced the line's own text, so a screen reader
+       * read "src/app.ts line 12, press Enter to comment" and never the code
+       * — the diff was literally unreadable — and every line of a large diff
+       * became its own tab stop. The click handler stays for the mouse, and
+       * the gutter carries a real button for everyone else. */}
       <div
         className={classNames(
           'drow',
@@ -178,23 +192,34 @@ function Row({
           selected && 'is-selected',
           anchored.length > 0 && 'has-comment',
         )}
-        role="button"
-        tabIndex={lineNo === null ? -1 : 0}
-        aria-label={lineNo === null ? undefined : `${file} line ${lineNo}. Press Enter to comment.`}
         onClick={click}
-        onKeyDown={(event) => {
-          if (event.key !== 'Enter' && event.key !== ' ') return;
-          event.preventDefault();
-          if (lineNo !== null) onSelect({ file, side, start: lineNo, end: lineNo });
-        }}
       >
-        <span className="dnum">{line.oldLine ?? ''}</span>
-        <span className="dnum">{line.newLine ?? ''}</span>
-        <span className="dmark" aria-hidden="true">
-          {line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : ''}
-          <span className="dadd-hint" title="Comment on this line">
-            +
-          </span>
+        <span className="dnum" aria-hidden="true">
+          {line.oldLine ?? ''}
+        </span>
+        <span className="dnum" aria-hidden="true">
+          {line.newLine ?? ''}
+        </span>
+        <span className="dmark">
+          <span aria-hidden="true">{line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : ''}</span>
+          {lineNo !== null && (
+            <button
+              type="button"
+              className="dadd-hint"
+              title="Comment on this line"
+              // A removed line and an added line often carry the same number
+              // on opposite sides of the diff. Naming both "line 2" leaves a
+              // screen reader user with two identical buttons that do
+              // different things.
+              aria-label={`Comment on ${file}, ${lineWord(line.kind)} ${lineNo}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onSelect({ file, side, start: lineNo, end: lineNo });
+              }}
+            >
+              <span aria-hidden="true">+</span>
+            </button>
+          )}
         </span>
         <span className="dcode">{line.text || ' '}</span>
       </div>
@@ -208,6 +233,10 @@ function Row({
       )}
     </>
   );
+}
+
+function lineWord(kind: DiffLine['kind']): string {
+  return kind === 'del' ? 'removed line' : kind === 'add' ? 'added line' : 'line';
 }
 
 function gutterDigits(file: DiffFileModel): number {

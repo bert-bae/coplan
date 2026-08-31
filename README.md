@@ -24,7 +24,7 @@ front of the session and wires it back in.
             │ GET /api/events (SSE)             │ POST /api/*
             ▼                                   │
  ┌──────────────── browser UI (React, prebuilt) ───────────────┐
- │  Activity · Plan · Board · Review · Verify · Ship           │
+ │  Conversation · Plan · Board · Review · Verify · Ship       │
  └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -34,6 +34,10 @@ front of the session and wires it back in.
 npm install
 npm run build          # writes dist/, which the plugin loads directly
 ```
+
+The build compiles `src/ui/style.css` with Tailwind — the utility engine and
+the `@theme` token vocabulary — and bundles the rest with esbuild. `dist/` is
+committed, so installing the plugin still needs no build step of its own.
 
 Then load the plugin. For a session at a time:
 
@@ -203,9 +207,30 @@ does not offer, and the list says outright that a message is not on it.
 *approved*, *changes requested*, *rejected*, *skipped* — with when it landed,
 and whether Claude is currently acting on it. A stage nobody has looked at and
 a stage that was signed off ten minutes ago no longer look identical. The
-Activity tab lists all five at once, and a working session animates: in the
+Conversation tab lists all five at once, and a working session animates: in the
 tab strip, in the header, at the tail of the feed, and in the rail, so a live
 session is never mistaken for a stale page.
+
+**Talking happens in one place.** The Conversation tab is the only one with a
+message box. Every other tab advances through its own gate, with its own
+buttons; a message box there could do nothing but queue text behind that gate
+while looking like the way to answer it. From the Conversation you can still
+talk to a session parked anywhere in the pipeline — *Send now* drops the gate
+and hands Claude the message straight away.
+
+**One theme attribute, two themes.** Light and dark are both explicit token
+sets hanging off `data-theme` on the root, and `system` is resolved to one of
+them at runtime. Choosing Dark on a machine whose OS is set to light now
+actually turns the app dark — previously the dark tokens lived only inside a
+`prefers-color-scheme` media query, so the choice changed an attribute that no
+rule matched.
+
+**Keyboard and screen reader.** The tab strip is one tab stop with arrow-key
+navigation and a real `tabpanel` relationship; a diff line is readable text
+with a named button in the gutter to comment on it, rather than a button whose
+label replaced the code. Under 900px the session rail becomes a drawer, the
+file rail floats, and a stage's response panel docks to the bottom so the
+approve button is never a page away.
 
 **Rounds.** Each published diff is a numbered round. On round two and later the
 review offers a *changed since round N* filter and marks the files that moved,

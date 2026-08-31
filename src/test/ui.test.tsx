@@ -166,6 +166,15 @@ async function boot(state?: SessionState) {
   });
 }
 
+/**
+ * The message box is on the Conversation tab and nowhere else: every other
+ * tab advances through its own gate, and a box there could only ever queue
+ * text behind that gate while looking like the way to answer it.
+ */
+function openConversation() {
+  act(() => store.setTab('timeline'));
+}
+
 beforeEach(() => {
   window.localStorage.clear();
   store.set({ drafts: {}, toasts: [], session: null, diff: null, sessionId: null, selectedFile: null });
@@ -314,6 +323,7 @@ test('approving with unsent comments asks first', async () => {
 
 test('the message box never resolves a gate', async () => {
   await boot();
+  openConversation();
   posts.length = 0;
   const input = document.querySelector('.composer-input')!;
   fireEvent.change(input, { target: { value: 'looks good, go ahead' } });
@@ -330,6 +340,7 @@ test('the message box never resolves a gate', async () => {
 
 test('"send now" skips the gate instead of queueing behind it', async () => {
   await boot();
+  openConversation();
   posts.length = 0;
   fireEvent.change(document.querySelector('.composer-input')!, {
     target: { value: 'stop — do the other thing first' },
@@ -350,6 +361,7 @@ test('"send now" is only offered when there is a gate to skip', async () => {
   state.gates = [];
   state.activeGateId = null;
   await boot(state);
+  openConversation();
   const composer = within(document.querySelector('.composer') as HTMLElement);
   assert.equal(composer.queryByRole('button', { name: 'Send now' }), null);
   assert.ok(composer.getByText('Send message'), 'the plain send keeps its name when nothing is in the way');
@@ -358,6 +370,7 @@ test('"send now" is only offered when there is a gate to skip', async () => {
 
 test('the message box explains that it does not answer the open gate', async () => {
   await boot();
+  openConversation();
   const notice = document.querySelector('.composer-notice')!;
   assert.match(notice.textContent ?? '', /does not answer it/i);
   cleanup();
@@ -368,6 +381,7 @@ test('unsent comments are called out next to the message box', async () => {
   fireEvent.click(document.querySelectorAll('.drow.is-add')[0]!);
   fireEvent.change(document.querySelector('.dcomposer textarea')!, { target: { value: 'x' } });
   fireEvent.click(screen.getByText('Add to review'));
+  openConversation();
   assert.match(document.querySelector('.composer-warn')!.textContent ?? '', /does not include them/i);
   cleanup();
 });

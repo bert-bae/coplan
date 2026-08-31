@@ -53,10 +53,14 @@ export function Sidebar() {
   const collapsedProjects = useStore((s) => s.collapsedProjects);
   const soundEnabled = useStore((s) => s.soundEnabled);
 
+  const drawerOpen = useStore((s) => s.drawerOpen);
   const groups = groupSessions(sessions, pinned);
 
   return (
-    <aside className={classNames('sidebar', collapsed && 'is-collapsed')}>
+    <aside
+      className={classNames('sidebar', collapsed && 'is-collapsed', drawerOpen && 'is-drawer-open')}
+      aria-label="Sessions"
+    >
       <header className="sidebar-head">
         <span className="logo" aria-hidden="true">
           cc
@@ -71,22 +75,25 @@ export function Sidebar() {
           type="button"
           className={classNames('icon-btn', !soundEnabled && 'is-muted')}
           title={soundEnabled ? 'Mute the alert chime' : 'Play a chime when Claude needs you'}
+          aria-label={soundEnabled ? 'Mute the alert chime' : 'Play a chime when Claude needs you'}
           aria-pressed={soundEnabled}
           onClick={() => store.toggleSound()}
         >
-          {soundEnabled ? '🔔' : '🔕'}
+          <span aria-hidden="true">{soundEnabled ? '🔔' : '🔕'}</span>
         </button>
         <button
           type="button"
           className="icon-btn"
           title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-expanded={!collapsed}
           onClick={() => store.toggleSidebar()}
         >
-          {collapsed ? '›' : '‹'}
+          <span aria-hidden="true">{collapsed ? '›' : '‹'}</span>
         </button>
       </header>
 
-      <nav className="session-list">
+      <nav className="session-list" aria-label="Live sessions">
         {sessions.length === 0 ? (
           <p className="sidebar-empty">No sessions yet.</p>
         ) : (
@@ -232,14 +239,29 @@ function SessionRow({
   const [renaming, setRenaming] = useState(false);
 
   return (
-    <div className={classNames('session-row', active && 'is-active', confirming && 'is-confirming')}>
+    <div
+      className={classNames(
+        'session-row',
+        active && 'is-active',
+        confirming && 'is-confirming',
+        needsAttention(session) && 'needs-you',
+      )}
+    >
       {renaming ? (
         <RenameField session={session} onDone={() => setRenaming(false)} />
       ) : (
       <button
         type="button"
         className="session-open"
-        onClick={() => void store.selectSession(session.sessionId)}
+        // The rail is a list of destinations; which one you are on is the
+        // thing a screen reader otherwise cannot tell from the styling.
+        aria-current={active ? 'true' : undefined}
+        onClick={() => {
+          void store.selectSession(session.sessionId);
+          // On a narrow window the rail is a drawer over the content:
+          // picking a session means you are done with the list.
+          store.setDrawer(false);
+        }}
         onDoubleClick={() => setRenaming(true)}
         title={`${session.title}\n${session.cwd}\nDouble-click to rename`}
       >
@@ -276,26 +298,29 @@ function SessionRow({
           type="button"
           className="icon-btn is-tiny"
           title="Rename this session"
+          aria-label={`Rename ${session.title}`}
           onClick={() => setRenaming(true)}
         >
-          ✎
+          <span aria-hidden="true">✎</span>
         </button>
         <button
           type="button"
           className={classNames('icon-btn', 'is-tiny', pinned && 'is-active')}
           aria-pressed={pinned}
           title={pinned ? 'Unpin session' : 'Pin session'}
+          aria-label={pinned ? `Unpin ${session.title}` : `Pin ${session.title}`}
           onClick={() => store.togglePin(session.sessionId)}
         >
-          {pinned ? '★' : '☆'}
+          <span aria-hidden="true">{pinned ? '★' : '☆'}</span>
         </button>
         <button
           type="button"
           className="icon-btn is-tiny is-danger"
           title="Delete session"
+          aria-label={`Delete ${session.title}`}
           onClick={() => setConfirming(true)}
         >
-          ×
+          <span aria-hidden="true">×</span>
         </button>
       </div>
 

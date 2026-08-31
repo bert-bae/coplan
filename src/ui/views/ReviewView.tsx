@@ -6,6 +6,7 @@ import { PendingPanel } from './review/PendingPanel.tsx';
 import { Button, EmptyState, Spinner } from '../components/primitives.tsx';
 import { StageBar } from '../components/StageStatus.tsx';
 import { classNames, pluralize } from '../lib/format.ts';
+import { scrollBehavior } from '../lib/motion.ts';
 import type { ReviewThread } from '../../shared/types.ts';
 
 /**
@@ -28,6 +29,9 @@ export function ReviewView() {
   const [selection, setSelection] = useState<Selection | null>(null);
   const [panelOpen, setPanelOpen] = useState(true);
   const [onlyChanged, setOnlyChanged] = useState(false);
+  // Only has an effect under the narrow breakpoint, where the file rail
+  // floats over the diff instead of holding a column of its own.
+  const [treeOpen, setTreeOpen] = useState(false);
   const anchors = useRef(new Map<string, HTMLElement>());
   const scroller = useRef<HTMLDivElement>(null);
 
@@ -40,16 +44,17 @@ export function ReviewView() {
   // reviewer keeps their place in the whole change.
   const scrollToFile = useCallback((path: string) => {
     store.selectFile(path);
-    anchors.current.get(path)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setTreeOpen(false);
+    anchors.current.get(path)?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
   }, []);
 
   const jumpToThread = useCallback((thread: ReviewThread) => {
     const node = anchors.current.get(thread.file);
-    node?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    node?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
     store.selectFile(thread.file);
     window.setTimeout(() => {
       const row = node?.querySelector<HTMLElement>(`[data-line="${thread.endLine}"]`);
-      row?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      row?.scrollIntoView({ behavior: scrollBehavior(), block: 'center' });
       row?.classList.add('is-flash');
       window.setTimeout(() => row?.classList.remove('is-flash'), 900);
     }, 120);
@@ -112,7 +117,7 @@ export function ReviewView() {
   }
 
   return (
-    <div className={classNames('review', panelOpen && 'has-panel')}>
+    <div className={classNames('review', panelOpen && 'has-panel', treeOpen && 'has-tree')}>
       <StageBar tab="review" />
       <div className="review-bar">
         <div className="review-bar-info">
@@ -132,6 +137,7 @@ export function ReviewView() {
               <button
                 type="button"
                 className={classNames('seg', !onlyChanged && 'is-active')}
+                aria-pressed={!onlyChanged}
                 onClick={() => setOnlyChanged(false)}
               >
                 All files
@@ -139,6 +145,7 @@ export function ReviewView() {
               <button
                 type="button"
                 className={classNames('seg', onlyChanged && 'is-active')}
+                aria-pressed={onlyChanged}
                 onClick={() => setOnlyChanged(true)}
                 title={`${moved.length} file(s) changed since round ${diff.previousRound}`}
               >
@@ -150,6 +157,7 @@ export function ReviewView() {
             <button
               type="button"
               className={classNames('seg', diffMode === 'unified' && 'is-active')}
+              aria-pressed={diffMode === 'unified'}
               onClick={() => store.setDiffMode('unified')}
             >
               Wrap
@@ -157,15 +165,27 @@ export function ReviewView() {
             <button
               type="button"
               className={classNames('seg', diffMode === 'split' && 'is-active')}
+              aria-pressed={diffMode === 'split'}
               onClick={() => store.setDiffMode('split')}
             >
               No wrap
             </button>
           </div>
+          <Button
+            variant="ghost"
+            expanded={treeOpen}
+            onClick={() => setTreeOpen((v) => !v)}
+          >
+            <span className="tree-toggle">Files · {visible.length}</span>
+          </Button>
           <Button variant="ghost" onClick={() => void store.refreshDiff(true)}>
             Refresh
           </Button>
-          <Button variant={drafts.length ? 'primary' : 'default'} onClick={() => setPanelOpen((v) => !v)}>
+          <Button
+            variant={drafts.length ? 'primary' : 'default'}
+            expanded={panelOpen}
+            onClick={() => setPanelOpen((v) => !v)}
+          >
             Your review{drafts.length > 0 ? ` · ${drafts.length}` : ''}
           </Button>
         </div>
