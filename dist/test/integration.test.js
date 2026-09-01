@@ -199,7 +199,7 @@ test("tool-result user entries are not mistaken for user prompts", async () => {
   const s = await session();
   assert.equal(s.timeline.filter((e) => e.kind === "user").length, 0);
 });
-test("the plan gate parks the Stop hook and returns the edited plan", async () => {
+test("the plan gate ends the turn, and the edited plan comes back on the next message", async () => {
   const plan = await mcp("plan", {
     title: "Add a subtract function",
     summary: "Mirror add().",
@@ -209,8 +209,9 @@ test("the plan gate parks the Stop hook and returns the edited plan", async () =
   assert.ok(gateId);
   assert.match(String(plan["text"]), /End your turn now/);
   assert.doesNotMatch(String(plan["text"]), /Call harness_await/);
-  const parked = hook("Stop", { stop_hook_active: false });
-  await until(async () => (await session()).status === "waiting");
+  const stopped = await hook("Stop", { stop_hook_active: false });
+  assert.notEqual(stopped.decision, "block", "the turn is allowed to end");
+  assert.equal((await session()).status, "waiting");
   await call(`/api/session/${sessionId}/gate/${gateId}/resolve`, {
     method: "POST",
     body: JSON.stringify({
@@ -223,11 +224,11 @@ test("the plan gate parks the Stop hook and returns the edited plan", async () =
       ]
     })
   });
-  const out = await parked;
-  assert.equal(out.decision, "block", "the turn is resumed rather than ended");
-  assert.match(out.reason ?? "", /approved at the plan gate/);
-  assert.match(out.reason ?? "", /Drop the docs step/);
-  assert.match(out.reason ?? "", /Approved plan \(2 steps\)/);
+  const resumed = await hook("UserPromptSubmit", { prompt: "carry on" });
+  const out = { reason: resumed.hookSpecificOutput?.additionalContext ?? "" };
+  assert.match(out.reason, /approved at the plan gate/);
+  assert.match(out.reason, /Drop the docs step/);
+  assert.match(out.reason, /Approved plan \(2 steps\)/);
   const s = await session();
   assert.equal(s.plan?.steps.length, 3);
   assert.equal(s.plan?.steps[2]?.status, "dropped");
@@ -367,23 +368,24 @@ test("a superseded gate stops holding the turn", async () => {
   const out = await withTimeout(parked, 8e3);
   assert.ok(out, "the parked Stop hook returned rather than hanging");
 });
-test('"send now" releases a Stop hook parked on a gate', async () => {
+test('"send now" closes the gate and overtakes it with the message', async () => {
   const other = "integration-skip-stop";
   await hookFor(other, "SessionStart", { start_reason: "startup" });
   await mcpFor(other, "plan", { title: "Skip me", steps: [{ title: "only step" }] });
-  const parked = hookFor(other, "Stop", { stop_hook_active: false });
-  await until(async () => (await sessionFor(other)).status === "waiting");
+  const stopped = await hookFor(other, "Stop", { stop_hook_active: false });
+  assert.notEqual(stopped.decision, "block", "the gate ends the turn");
   await call(`/api/session/${other}/feedback`, {
     method: "POST",
     body: JSON.stringify({ text: "Forget the plan \u2014 fix the typo in README first.", interrupt: true })
   });
-  const out = await parked;
-  assert.equal(out.decision, "block", "the parked turn is woken by the message");
-  assert.match(out.reason ?? "", /skipped the plan gate/);
-  assert.match(out.reason ?? "", /do not wait on it/i);
-  assert.match(out.reason ?? "", /fix the typo in README/);
+  const queued = await sessionFor(other);
+  assert.equal(queued.gates.at(-1)?.status, "cancelled", "the gate is closed rather than left open");
+  const resumed = await hookFor(other, "UserPromptSubmit", { prompt: "ok" });
+  const text = resumed.hookSpecificOutput?.additionalContext ?? "";
+  assert.match(text, /skipped the plan gate/);
+  assert.match(text, /do not wait on it/i);
+  assert.match(text, /fix the typo in README/);
   const s = await sessionFor(other);
-  assert.equal(s.gates.at(-1)?.status, "cancelled", "the gate is closed rather than left open");
   assert.equal(s.pendingFeedback.length, 0, "the message was delivered, not left queued");
 });
 test('"send now" releases a harness_await parked on a gate', async () => {
@@ -744,8 +746,8 @@ test("a line comment reaches the session with the source the user selected", asy
   const s = await session();
   const gate = s.gates.find((g) => g.status === "open" && g.kind === "code_review");
   assert.ok(gate, "publishing the diff opened the review gate");
-  const parked = hook("Stop", { stop_hook_active: false });
-  await until(async () => (await session()).status === "waiting");
+  const stopped = await hook("Stop", { stop_hook_active: false });
+  assert.notEqual(stopped.decision, "block", "the review gate ends the turn too");
   await call(`/api/session/${sessionId}/gate/${gate.id}/resolve`, {
     method: "POST",
     body: JSON.stringify({
@@ -765,13 +767,13 @@ test("a line comment reaches the session with the source the user selected", asy
       ]
     })
   });
-  const out = await parked;
-  assert.equal(out.decision, "block");
-  assert.match(out.reason ?? "", /app\.ts:5-6/);
-  assert.match(out.reason ?? "", /Guard against NaN here/);
-  assert.match(out.reason ?? "", /subtract/, "the excerpt is filled in from the diff");
-  assert.match(out.reason ?? "", /Address each comment above/);
-  assert.match(out.reason ?? "", /harness_reply/);
+  const resumed = await hook("UserPromptSubmit", { prompt: "go ahead" });
+  const text = resumed.hookSpecificOutput?.additionalContext ?? "";
+  assert.match(text, /app\.ts:5-6/);
+  assert.match(text, /Guard against NaN here/);
+  assert.match(text, /subtract/, "the excerpt is filled in from the diff");
+  assert.match(text, /Address each comment above/);
+  assert.match(text, /harness_reply/);
 });
 test("checks run and stream their result", async () => {
   await mcp("checks", { commands: ["echo hello-from-check"], run: true });

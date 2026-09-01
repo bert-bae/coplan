@@ -1232,46 +1232,6 @@ function waitForGate(store, sessionId, gateId, opts) {
     store.setGateWaiting(sessionId, gateId, true);
   });
 }
-function waitForResume(store, sessionId, gateId, opts) {
-  const existing = store.getGate(sessionId, gateId);
-  if (existing && existing.status !== "open") {
-    return Promise.resolve({ kind: "gate", gate: existing });
-  }
-  const session = store.get(sessionId);
-  if (session && session.pendingFeedback.length > 0) {
-    return Promise.resolve({ kind: "feedback", items: store.drainFeedback(sessionId) });
-  }
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      store.off("gate:resolved", onGate);
-      store.off("gate:cancelled", onGate);
-      store.off("feedback:queued", onQueued);
-      opts.signal?.removeEventListener("abort", onAbort);
-      store.setGateWaiting(sessionId, gateId, false);
-      resolve(value);
-    };
-    const onGate = (payload) => {
-      if (payload.sessionId !== sessionId || payload.gate.id !== gateId) return;
-      finish({ kind: "gate", gate: payload.gate });
-    };
-    const onQueued = (payload) => {
-      if (payload.sessionId !== sessionId) return;
-      finish({ kind: "feedback", items: store.drainFeedback(sessionId) });
-    };
-    const onAbort = () => finish(null);
-    const timer = setTimeout(() => finish(null), opts.timeoutMs);
-    timer.unref?.();
-    store.on("gate:resolved", onGate);
-    store.on("gate:cancelled", onGate);
-    store.on("feedback:queued", onQueued);
-    opts.signal?.addEventListener("abort", onAbort, { once: true });
-    store.setGateWaiting(sessionId, gateId, true);
-  });
-}
 function waitForFeedback(store, sessionId, opts) {
   const session = store.get(sessionId);
   if (session && session.pendingFeedback.length > 0) {
@@ -2058,7 +2018,6 @@ var HOOK_NOOP = { suppressOutput: true };
 var EDIT_TOOLS = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 var MAX_COMMANDS = 200;
 var MAX_TOUCHED_FILES = 500;
-var holds = /* @__PURE__ */ new Map();
 var worktreeScanned = /* @__PURE__ */ new Set();
 var MAX_SCANNED = 500;
 async function ingestHook(event, input, ctx) {
@@ -2116,7 +2075,6 @@ async function onSessionEnd(sessionId, input, ctx) {
   ctx.tailers.get(sessionId)?.close();
   ctx.tailers.delete(sessionId);
   worktreeScanned.delete(sessionId);
-  holds.delete(sessionId);
   clearBaseline(sessionId);
   ctx.store.update(sessionId, { status: "ended", endedAt: Date.now() });
   ctx.store.addTimeline(sessionId, "note", `Session ended (${input.end_reason ?? "unknown"})`, {
@@ -2231,21 +2189,18 @@ async function onStop(sessionId, input, ctx) {
   }
   const drained = ctx.store.drainFeedback(sessionId);
   if (drained.length > 0) {
-    holds.delete(sessionId);
     const open = ctx.store.activeGate(sessionId);
     ctx.store.update(sessionId, { status: "active" });
     return stopBlock(renderFeedback(drained) + (open ? stillParked(open.kind) : ""));
   }
   const answered = ctx.store.undeliveredGate(sessionId);
   if (answered) {
-    holds.delete(sessionId);
     ctx.store.markGateDelivered(sessionId, answered.id);
     ctx.store.update(sessionId, { status: "active" });
     return stopBlock(renderGateResult(answered));
   }
   const gate = ctx.store.activeGate(sessionId);
   if (input.stop_hook_active && !gate) {
-    holds.delete(sessionId);
     ctx.store.update(sessionId, { status: "idle" });
     return HOOK_NOOP;
   }
@@ -2261,65 +2216,15 @@ async function onStop(sessionId, input, ctx) {
         return stopBlock(renderFeedback(late));
       }
     }
-    holds.delete(sessionId);
     ctx.store.update(sessionId, { status: "idle" });
     return HOOK_NOOP;
   }
   ctx.store.update(sessionId, { status: "waiting" });
-  const signal = await waitForResume(ctx.store, sessionId, gate.id, {
-    timeoutMs: ctx.config.stopHoldSeconds * 1e3,
-    ...ctx.signal ? { signal: ctx.signal } : {}
-  });
-  if (signal?.kind === "gate") {
-    holds.delete(sessionId);
-    if (signal.gate.result) {
-      ctx.store.markGateDelivered(sessionId, gate.id);
-      ctx.store.update(sessionId, { status: "active" });
-      return stopBlock(renderGateResult(signal.gate));
-    }
-    const queued = ctx.store.drainFeedback(sessionId);
-    if (queued.length > 0) {
-      ctx.store.update(sessionId, { status: "active" });
-      return stopBlock(renderFeedback(queued));
-    }
-    const current = ctx.store.activeGate(sessionId);
-    if (current) {
-      ctx.store.update(sessionId, { status: "waiting" });
-      return stopBlock(
-        `[cc-harness] The "${gate.kind}" gate was replaced by a newer "${current.kind}" gate. End your turn again \u2014 the harness parks on that one and resumes you with its verdict.`
-      );
-    }
-    ctx.store.update(sessionId, { status: "idle" });
-    return HOOK_NOOP;
-  }
-  if (signal?.kind === "feedback" && signal.items.length > 0) {
-    holds.delete(sessionId);
-    ctx.store.update(sessionId, { status: "active" });
-    const skipped = signal.items.some((item) => item.skippedGate);
-    return stopBlock(renderFeedback(signal.items) + (skipped ? "" : stillParked(gate.kind)));
-  }
-  const round = (holds.get(sessionId)?.gateId === gate.id ? holds.get(sessionId).rounds : 0) + 1;
-  const limit = ctx.config.gateHoldRounds;
-  if (limit > 0 && round > limit) {
-    holds.delete(sessionId);
-    ctx.store.update(sessionId, { status: "idle" });
-    ctx.store.addTimeline(
-      sessionId,
-      "note",
-      `Stopped holding the turn at the "${gate.kind}" gate after ${Math.round(limit * ctx.config.stopHoldSeconds / 60)} minutes. Answer it in the UI \u2014 the verdict is delivered with your next message to the session.`,
-      { label: "gate" }
-    );
-    return HOOK_NOOP;
-  }
-  holds.set(sessionId, { gateId: gate.id, rounds: round });
-  ctx.store.update(sessionId, { status: "waiting" });
-  return stopBlock(
-    `[cc-harness] Still parked at the "${gate.kind}" gate \u2014 the user has not answered yet. Do not call a tool and do not start new work: end your turn again, immediately. The harness re-parks the session and resumes you the moment they answer.`
-  );
+  return HOOK_NOOP;
 }
 function stillParked(kind) {
   return `
-[cc-harness] The "${kind}" gate is still open \u2014 this message is not a verdict. Respond to it, then end your turn to park again.`;
+[cc-harness] The "${kind}" gate is still open \u2014 this message is not a verdict. Respond to it, then end your turn \u2014 answering it is still the user's move.`;
 }
 async function resolveWorktree(sessionId, ctx) {
   if (worktreeScanned.has(sessionId)) return;
@@ -2925,7 +2830,6 @@ var DEFAULT_CONFIG = {
   maxTimelineEvents: 500,
   stopHoldSeconds: 540,
   awaitSeconds: 120,
-  gateHoldRounds: 4,
   holdIdleSessions: false,
   maxDiffFileBytes: 4e5,
   idleShutdownMinutes: 120,
@@ -4105,14 +4009,14 @@ Do not guess or proceed on an assumption.`
           json(ctx.res, 200, {
             ok: true,
             status: "cancelled",
-            text: current ? `[cc-harness] The "${gate.kind}" gate was replaced by a newer "${current.kind}" gate (${current.id}). End your turn \u2014 the harness parks on that one and resumes you with its verdict.` : `[cc-harness] The "${gate.kind}" gate was closed without a verdict. Do not wait on it. Continue, or publish a new gate when you next need the user.`
+            text: current ? `[cc-harness] The "${gate.kind}" gate was replaced by a newer "${current.kind}" gate (${current.id}). End your turn \u2014 that one is recorded, and its verdict is handed to you when the session next runs.` : `[cc-harness] The "${gate.kind}" gate was closed without a verdict. Do not wait on it. Continue, or publish a new gate when you next need the user.`
           });
           return;
         }
         json(ctx.res, 200, {
           ok: true,
           status: "pending",
-          text: `[cc-harness] Still waiting on the user (${seconds}s elapsed). Do not call this again \u2014 polling costs a turn per attempt and tells you nothing. End your turn instead: the harness parks the session and resumes you with their verdict the moment they answer.`
+          text: `[cc-harness] Still waiting on the user (${seconds}s elapsed). Do not call this again \u2014 polling costs a turn per attempt and tells you nothing. End your turn instead: the gate is recorded, and their verdict is handed to you when the session next runs.`
         });
         return;
       }
@@ -4442,7 +4346,7 @@ function summarizeForModel(session) {
   };
 }
 function parkNotice(action) {
-  return `End your turn now \u2014 do not call harness_await and do not start new work. The harness holds the session at this gate and resumes you automatically when the user ${action}.`;
+  return `End your turn now \u2014 do not call harness_await and do not start new work. Stopping is expected here: the harness records the gate, and hands you the verdict when the user ${action} and the session next runs.`;
 }
 function describeStatus(session, url) {
   const done = session.todos.filter((t) => t.status === "completed").length;
@@ -4453,7 +4357,7 @@ function describeStatus(session, url) {
   const gate = session.gates.find((g) => g.status === "open");
   if (gate) {
     lines.push(
-      `OPEN GATE (${gate.kind}): ${gate.id} \u2014 the user has not responded yet. End your turn to park on it; you are resumed with their verdict.`
+      `OPEN GATE (${gate.kind}): ${gate.id} \u2014 the user has not responded yet. End your turn; their verdict is handed to you when the session next runs.`
     );
   }
   if (session.pendingFeedback.length) lines.push(`${session.pendingFeedback.length} unread comment(s).`);

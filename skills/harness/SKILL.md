@@ -21,9 +21,11 @@ Investigate first, then call `harness_publish_plan` with a title and concrete
 steps. The title becomes the PR title later, so make it a real description of
 the change.
 
-`harness_publish_plan` opens the **plan gate**. Now **end your turn.** Do not
-start implementing, and do not poll — the harness parks the session on the gate
-and resumes you the moment the user answers, however long they take.
+`harness_publish_plan` opens the **plan gate**. Now **end your turn.** Stopping
+is the correct move: the harness does not hold the turn open, so there is
+nothing to wait for and nothing to poll. The session stops, the user reviews at
+their own pace, and their verdict is handed to you the next time they speak to
+the session.
 
 You come back with one of:
 
@@ -37,8 +39,8 @@ You come back with one of:
   wait on that gate again, and do not republish the same plan expecting it to
   answer.
 
-If a turn ever comes back saying you are *still parked*, the user has not
-answered yet: end your turn again straight away, without a tool call.
+The verdict arrives at the top of their next message, whether they typed it in
+the terminal or answered in the UI first. You do not need to ask for it.
 
 ### 2. Implement — work the board
 
@@ -150,7 +152,8 @@ their own answer instead of picking one.
   where you cannot yield the turn; used as a poll it spends a turn per attempt
   to learn nothing.
 - **A message from the UI is not a verdict.** The user can write to you while a
-  gate is open — answer them, then end your turn to park again.
+  gate is open — answer them, then end your turn again. The gate is still
+  theirs to answer.
 - **A skipped gate is a redirection.** When the message says the gate is closed,
   the user took the session off it on purpose. Do the thing they asked for
   instead of the thing they were reviewing.

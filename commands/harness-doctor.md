@@ -9,10 +9,10 @@ Run the harness self-test and report the result:
 ```
 
 This replays real hook payloads against a live daemon and asserts the observable behaviour —
-session registration, todo capture, gate parking, `Stop`-hook feedback injection, and that
-sessions with no open gate are never held up.
+session registration, todo capture, that an open gate ends the turn, `UserPromptSubmit` verdict
+delivery, `Stop`-hook feedback injection, and that sessions with no open gate are never held up.
 
 Summarise: say whether it passed, and for any failure quote the failing line and say what it
-means. A failure in "Stop hook parks on the gate" or "the block carries the user feedback"
-means the CLI's hook contract has changed and the gate loop is broken — that is worth flagging
-loudly. A failure in the `present:` checks usually just means `npm run build` has not been run.
+means. A failure in "an open gate ends the turn" or "the verdict reaches Claude with the next
+message" means the CLI's hook contract has changed and the gate loop is broken — that is worth
+flagging loudly. A failure in the `present:` checks usually just means `npm run build` has not been run.

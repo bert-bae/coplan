@@ -719,7 +719,6 @@ var DEFAULT_CONFIG = {
   maxTimelineEvents: 500,
   stopHoldSeconds: 540,
   awaitSeconds: 120,
-  gateHoldRounds: 4,
   holdIdleSessions: false,
   maxDiffFileBytes: 4e5,
   idleShutdownMinutes: 120,
@@ -1099,46 +1098,6 @@ function readRange(file, start, end) {
 }
 
 // src/daemon/gates.ts
-function waitForResume(store2, sessionId, gateId, opts) {
-  const existing = store2.getGate(sessionId, gateId);
-  if (existing && existing.status !== "open") {
-    return Promise.resolve({ kind: "gate", gate: existing });
-  }
-  const session = store2.get(sessionId);
-  if (session && session.pendingFeedback.length > 0) {
-    return Promise.resolve({ kind: "feedback", items: store2.drainFeedback(sessionId) });
-  }
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      store2.off("gate:resolved", onGate);
-      store2.off("gate:cancelled", onGate);
-      store2.off("feedback:queued", onQueued);
-      opts.signal?.removeEventListener("abort", onAbort);
-      store2.setGateWaiting(sessionId, gateId, false);
-      resolve(value);
-    };
-    const onGate = (payload) => {
-      if (payload.sessionId !== sessionId || payload.gate.id !== gateId) return;
-      finish({ kind: "gate", gate: payload.gate });
-    };
-    const onQueued = (payload) => {
-      if (payload.sessionId !== sessionId) return;
-      finish({ kind: "feedback", items: store2.drainFeedback(sessionId) });
-    };
-    const onAbort = () => finish(null);
-    const timer = setTimeout(() => finish(null), opts.timeoutMs);
-    timer.unref?.();
-    store2.on("gate:resolved", onGate);
-    store2.on("gate:cancelled", onGate);
-    store2.on("feedback:queued", onQueued);
-    opts.signal?.addEventListener("abort", onAbort, { once: true });
-    store2.setGateWaiting(sessionId, gateId, true);
-  });
-}
 function waitForFeedback(store2, sessionId, opts) {
   const session = store2.get(sessionId);
   if (session && session.pendingFeedback.length > 0) {
@@ -1442,7 +1401,6 @@ var HOOK_NOOP = { suppressOutput: true };
 var EDIT_TOOLS = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 var MAX_COMMANDS = 200;
 var MAX_TOUCHED_FILES = 500;
-var holds = /* @__PURE__ */ new Map();
 var worktreeScanned = /* @__PURE__ */ new Set();
 var MAX_SCANNED = 500;
 async function ingestHook(event, input, ctx) {
@@ -1500,7 +1458,6 @@ async function onSessionEnd(sessionId, input, ctx) {
   ctx.tailers.get(sessionId)?.close();
   ctx.tailers.delete(sessionId);
   worktreeScanned.delete(sessionId);
-  holds.delete(sessionId);
   clearBaseline(sessionId);
   ctx.store.update(sessionId, { status: "ended", endedAt: Date.now() });
   ctx.store.addTimeline(sessionId, "note", `Session ended (${input.end_reason ?? "unknown"})`, {
@@ -1615,21 +1572,18 @@ async function onStop(sessionId, input, ctx) {
   }
   const drained = ctx.store.drainFeedback(sessionId);
   if (drained.length > 0) {
-    holds.delete(sessionId);
     const open = ctx.store.activeGate(sessionId);
     ctx.store.update(sessionId, { status: "active" });
     return stopBlock(renderFeedback(drained) + (open ? stillParked(open.kind) : ""));
   }
   const answered = ctx.store.undeliveredGate(sessionId);
   if (answered) {
-    holds.delete(sessionId);
     ctx.store.markGateDelivered(sessionId, answered.id);
     ctx.store.update(sessionId, { status: "active" });
     return stopBlock(renderGateResult(answered));
   }
   const gate = ctx.store.activeGate(sessionId);
   if (input.stop_hook_active && !gate) {
-    holds.delete(sessionId);
     ctx.store.update(sessionId, { status: "idle" });
     return HOOK_NOOP;
   }
@@ -1645,65 +1599,15 @@ async function onStop(sessionId, input, ctx) {
         return stopBlock(renderFeedback(late));
       }
     }
-    holds.delete(sessionId);
     ctx.store.update(sessionId, { status: "idle" });
     return HOOK_NOOP;
   }
   ctx.store.update(sessionId, { status: "waiting" });
-  const signal = await waitForResume(ctx.store, sessionId, gate.id, {
-    timeoutMs: ctx.config.stopHoldSeconds * 1e3,
-    ...ctx.signal ? { signal: ctx.signal } : {}
-  });
-  if (signal?.kind === "gate") {
-    holds.delete(sessionId);
-    if (signal.gate.result) {
-      ctx.store.markGateDelivered(sessionId, gate.id);
-      ctx.store.update(sessionId, { status: "active" });
-      return stopBlock(renderGateResult(signal.gate));
-    }
-    const queued = ctx.store.drainFeedback(sessionId);
-    if (queued.length > 0) {
-      ctx.store.update(sessionId, { status: "active" });
-      return stopBlock(renderFeedback(queued));
-    }
-    const current = ctx.store.activeGate(sessionId);
-    if (current) {
-      ctx.store.update(sessionId, { status: "waiting" });
-      return stopBlock(
-        `[cc-harness] The "${gate.kind}" gate was replaced by a newer "${current.kind}" gate. End your turn again \u2014 the harness parks on that one and resumes you with its verdict.`
-      );
-    }
-    ctx.store.update(sessionId, { status: "idle" });
-    return HOOK_NOOP;
-  }
-  if (signal?.kind === "feedback" && signal.items.length > 0) {
-    holds.delete(sessionId);
-    ctx.store.update(sessionId, { status: "active" });
-    const skipped = signal.items.some((item) => item.skippedGate);
-    return stopBlock(renderFeedback(signal.items) + (skipped ? "" : stillParked(gate.kind)));
-  }
-  const round = (holds.get(sessionId)?.gateId === gate.id ? holds.get(sessionId).rounds : 0) + 1;
-  const limit = ctx.config.gateHoldRounds;
-  if (limit > 0 && round > limit) {
-    holds.delete(sessionId);
-    ctx.store.update(sessionId, { status: "idle" });
-    ctx.store.addTimeline(
-      sessionId,
-      "note",
-      `Stopped holding the turn at the "${gate.kind}" gate after ${Math.round(limit * ctx.config.stopHoldSeconds / 60)} minutes. Answer it in the UI \u2014 the verdict is delivered with your next message to the session.`,
-      { label: "gate" }
-    );
-    return HOOK_NOOP;
-  }
-  holds.set(sessionId, { gateId: gate.id, rounds: round });
-  ctx.store.update(sessionId, { status: "waiting" });
-  return stopBlock(
-    `[cc-harness] Still parked at the "${gate.kind}" gate \u2014 the user has not answered yet. Do not call a tool and do not start new work: end your turn again, immediately. The harness re-parks the session and resumes you the moment they answer.`
-  );
+  return HOOK_NOOP;
 }
 function stillParked(kind) {
   return `
-[cc-harness] The "${kind}" gate is still open \u2014 this message is not a verdict. Respond to it, then end your turn to park again.`;
+[cc-harness] The "${kind}" gate is still open \u2014 this message is not a verdict. Respond to it, then end your turn \u2014 answering it is still the user's move.`;
 }
 async function resolveWorktree(sessionId, ctx) {
   if (worktreeScanned.has(sessionId)) return;
@@ -1831,96 +1735,76 @@ after(() => {
 });
 var ctxWith = (over = {}) => ({
   store,
-  config: { ...DEFAULT_CONFIG, stopHoldSeconds: 0.15, gateHoldRounds: 1, ...over },
+  config: { ...DEFAULT_CONFIG, stopHoldSeconds: 30, ...over },
   uiUrl: (id) => `http://127.0.0.1/s/${id}`,
   tailers: /* @__PURE__ */ new Map()
 });
 var stop = (id, ctx, stopHookActive = false) => ingestHook("Stop", { session_id: id, cwd, stop_hook_active: stopHookActive }, ctx);
-test("the parked turn resumes on the verdict, without the model having polled", async () => {
-  const id = "park-resolve";
-  const ctx = ctxWith({ stopHoldSeconds: 5 });
+test("an open gate ends the turn instead of holding it", async () => {
+  const id = "park-ends-turn";
+  const ctx = ctxWith();
   store.ensure(id, cwd);
   const gate = store.openGate(id, "plan", "Review the plan");
-  const parked = stop(id, ctx);
-  await new Promise((r) => setTimeout(r, 50));
-  assert.equal(store.get(id)?.status, "waiting", "the session shows as waiting while parked");
+  const started = Date.now();
+  const out = await stop(id, ctx);
+  const elapsed = Date.now() - started;
+  assert.notEqual(out.decision, "block", "Claude is allowed to stop");
+  assert.ok(elapsed < 1e3, `the hook returned in ${elapsed}ms rather than holding the turn open`);
+  assert.equal(store.get(id)?.status, "waiting", "the session reads as waiting on the user, not working");
+  assert.equal(store.getGate(id, gate.id)?.status, "open", "and the gate is still there to be answered");
+});
+test("the gate is not marked as holding a turn that has ended", async () => {
+  const id = "park-not-waiting";
+  const ctx = ctxWith();
+  store.ensure(id, cwd);
+  const gate = store.openGate(id, "code_review", "Review the diff");
+  await stop(id, ctx);
+  assert.equal(store.getGate(id, gate.id)?.waiting, false);
+});
+test("a verdict given before the turn ended is handed over on that turn", async () => {
+  const id = "park-answered-early";
+  const ctx = ctxWith();
+  store.ensure(id, cwd);
+  const gate = store.openGate(id, "plan", "Review the plan");
   store.resolveGate(id, gate.id, { verdict: "approved", resolvedAt: Date.now(), comment: "Ship it." });
-  const out = await parked;
-  assert.equal(out.decision, "block", "the turn is resumed rather than ended");
+  const out = await stop(id, ctx);
+  assert.equal(out.decision, "block", "the turn is resumed to carry the verdict");
   assert.match(out.reason ?? "", /approved at the plan gate/);
   assert.match(out.reason ?? "", /Ship it\./);
   assert.equal(store.get(id)?.status, "active");
 });
-test("a message sent while a gate is open reaches the session instead of queueing behind it", async () => {
+test("a message queued before the turn ended rides that turn, and does not read as a verdict", async () => {
   const id = "park-message";
-  const ctx = ctxWith({ stopHoldSeconds: 5 });
+  const ctx = ctxWith();
   store.ensure(id, cwd);
   const gate = store.openGate(id, "code_review", "Review the diff");
-  const parked = stop(id, ctx);
-  await new Promise((r) => setTimeout(r, 50));
   store.queueFeedback(id, { text: "Actually, check the null case first.", origin: "timeline" });
-  const out = await parked;
-  assert.equal(out.decision, "block", "the message wakes the parked turn");
+  const out = await stop(id, ctx);
+  assert.equal(out.decision, "block", "the message is delivered rather than dropped");
   assert.match(out.reason ?? "", /check the null case first/);
   assert.match(out.reason ?? "", /gate is still open/, "and is not mistaken for the verdict");
   assert.equal(store.getGate(id, gate.id)?.status, "open", "the gate itself is untouched");
 });
-test("an expired hold re-parks quietly rather than asking the model to poll", async () => {
-  const id = "park-expire";
-  const ctx = ctxWith();
-  store.ensure(id, cwd);
-  store.openGate(id, "plan", "Review the plan");
-  const out = await stop(id, ctx);
-  assert.equal(out.decision, "block");
-  assert.match(out.reason ?? "", /Still parked at the "plan" gate/);
-  assert.match(out.reason ?? "", /end your turn again/i);
-  assert.doesNotMatch(out.reason ?? "", /harness_await/, "the model is never sent back to poll");
-});
-test("the harness stops holding the terminal once its patience runs out", async () => {
-  const id = "park-giveup";
+test("a verdict given after the turn ended arrives with the next message", async () => {
+  const id = "park-answered-late";
   const ctx = ctxWith();
   store.ensure(id, cwd);
   const gate = store.openGate(id, "question", "Map or plain object?");
-  await stop(id, ctx);
-  const out = await stop(id, ctx, true);
-  assert.notEqual(out.decision, "block", "the turn is allowed to end");
-  assert.equal(store.get(id)?.status, "idle");
-  assert.match(
-    store.get(id)?.timeline.at(-1)?.text ?? "",
-    /Stopped holding the turn/,
-    "and the UI says why, so the gate does not look ignored"
-  );
+  const out = await stop(id, ctx);
+  assert.notEqual(out.decision, "block", "the turn ends with the gate unanswered");
   store.resolveGate(id, gate.id, { verdict: "answered", resolvedAt: Date.now(), comment: "A Map." });
-  const resumed = await ingestHook(
-    "UserPromptSubmit",
-    { session_id: id, cwd, prompt: "carry on" },
-    ctx
-  );
+  const resumed = await ingestHook("UserPromptSubmit", { session_id: id, cwd, prompt: "carry on" }, ctx);
   assert.match(
     resumed.hookSpecificOutput?.additionalContext ?? "",
     /A Map\./,
     "the verdict is handed over with the message that woke the session"
   );
 });
-test("a superseded gate releases the park instead of holding for nothing", async () => {
-  const id = "park-superseded";
-  const ctx = ctxWith({ stopHoldSeconds: 5 });
-  store.ensure(id, cwd);
-  store.openGate(id, "plan", "First plan");
-  const parked = stop(id, ctx);
-  await new Promise((r) => setTimeout(r, 50));
-  store.openGate(id, "plan", "Second plan");
-  const out = await parked;
-  assert.match(out.reason ?? "", /replaced by a newer "plan" gate/);
-  assert.match(out.reason ?? "", /End your turn again/);
-});
-test('"send now" wakes the park with the message, not with a phantom verdict', async () => {
+test('"send now" delivers the message, not a phantom verdict', async () => {
   const id = "park-sendnow";
-  const ctx = ctxWith({ stopHoldSeconds: 5 });
+  const ctx = ctxWith();
   store.ensure(id, cwd);
   const gate = store.openGate(id, "plan", "Review the plan");
-  const parked = stop(id, ctx);
-  await new Promise((r) => setTimeout(r, 50));
   store.queueFeedback(id, {
     text: "Forget the plan \u2014 fix the README typo first.",
     origin: "timeline",
@@ -1928,7 +1812,7 @@ test('"send now" wakes the park with the message, not with a phantom verdict', a
     skippedGate: { kind: gate.kind, prompt: gate.prompt }
   });
   store.cancelGate(id, gate.id);
-  const out = await parked;
+  const out = await stop(id, ctx);
   assert.equal(out.decision, "block");
   assert.match(out.reason ?? "", /fix the README typo first/);
   assert.match(out.reason ?? "", /do not wait on it/i);
@@ -1937,5 +1821,25 @@ test('"send now" wakes the park with the message, not with a phantom verdict', a
     /gate is still open/,
     "the message closed the gate, so nothing may claim it is still there"
   );
+});
+test("a second gate supersedes the first without holding the turn for either", async () => {
+  const id = "park-superseded";
+  const ctx = ctxWith();
+  store.ensure(id, cwd);
+  const first = store.openGate(id, "plan", "First plan");
+  const second = store.openGate(id, "plan", "Second plan");
+  const out = await stop(id, ctx);
+  assert.notEqual(out.decision, "block");
+  assert.equal(store.getGate(id, first.id)?.status, "cancelled");
+  assert.equal(store.getGate(id, second.id)?.status, "open", "the live gate is the one left to answer");
+  assert.equal(store.get(id)?.status, "waiting");
+});
+test("a session with no gate still just stops", async () => {
+  const id = "park-no-gate";
+  const ctx = ctxWith();
+  store.ensure(id, cwd);
+  const out = await stop(id, ctx);
+  assert.notEqual(out.decision, "block");
+  assert.equal(store.get(id)?.status, "idle", "no gate and nothing queued means idle, not waiting");
 });
 //# sourceMappingURL=park.test.js.map

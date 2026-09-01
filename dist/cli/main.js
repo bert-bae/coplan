@@ -171,18 +171,23 @@ async function runDoctor() {
   const gateId = String(plan["gateId"] ?? "");
   record("harness_publish_plan opens a gate", Boolean(gateId), gateId, true);
   if (gateId) {
-    const stopPromise = hook("Stop", { stop_hook_active: false });
-    await sleep(250);
+    const stopOut = await withTimeout(hook("Stop", { stop_hook_active: false }), 1e4);
+    const held = stopOut?.decision === "block" || stopOut?.hookSpecificOutput?.decision === "block";
+    const ended = stopOut !== null && !held;
+    record(
+      "an open gate ends the turn instead of holding it",
+      ended,
+      ended ? void 0 : held ? "the turn was blocked \u2014 the session cannot stop at a gate" : "the Stop hook never answered",
+      true
+    );
     await fetch(`${baseUrl(lock)}/api/session/${sessionId}/gate/${gateId}/resolve`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${lock.token}` },
       body: JSON.stringify({ verdict: "changes_requested", comment: "doctor probe feedback" })
     });
-    const stopOut = await withTimeout(stopPromise, 1e4);
-    const blocked = stopOut?.decision === "block" || stopOut?.hookSpecificOutput?.decision === "block";
-    const carries = JSON.stringify(stopOut ?? {}).includes("doctor probe feedback");
-    record("Stop hook parks on the gate and blocks when it resolves", Boolean(blocked), blocked ? void 0 : JSON.stringify(stopOut), true);
-    record("the block carries the user feedback back to Claude", carries, carries ? void 0 : "feedback text missing", true);
+    const resumed = await withTimeout(hook("UserPromptSubmit", { prompt: "doctor probe prompt" }), 1e4);
+    const carries = JSON.stringify(resumed ?? {}).includes("doctor probe feedback");
+    record("the verdict reaches Claude with the next message", carries, carries ? void 0 : "feedback text missing", true);
   }
   await fetch(`${baseUrl(lock)}/api/session/${sessionId}/feedback`, {
     method: "POST",
