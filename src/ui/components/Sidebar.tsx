@@ -150,12 +150,16 @@ export function groupSessions(sessions: SessionSummary[], pinned: string[]): Gro
     group.openGates += session.openGates;
   }
 
-  // `sessions` arrives newest-first, so each bucket is already ordered. Order
-  // the buckets themselves the same way, and keep pinned at the top.
+  // Newest session first, within a bucket and between buckets alike. Ordering
+  // on creation rather than activity is the point: a rail sorted by activity
+  // rearranges itself mid-click, every time any session takes a turn.
+  for (const group of groups.values()) {
+    group.sessions.sort((a, b) => b.createdAt - a.createdAt);
+  }
   return [...groups.values()].sort((a, b) => {
     if (a.key === PINNED_KEY) return -1;
     if (b.key === PINNED_KEY) return 1;
-    return (b.sessions[0]?.updatedAt ?? 0) - (a.sessions[0]?.updatedAt ?? 0);
+    return (b.sessions[0]?.createdAt ?? 0) - (a.sessions[0]?.createdAt ?? 0);
   });
 }
 

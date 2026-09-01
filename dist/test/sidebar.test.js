@@ -1484,10 +1484,13 @@ function groupSessions(sessions, pinned) {
     group.sessions.push(session);
     group.openGates += session.openGates;
   }
+  for (const group of groups.values()) {
+    group.sessions.sort((a, b) => b.createdAt - a.createdAt);
+  }
   return [...groups.values()].sort((a, b) => {
     if (a.key === PINNED_KEY) return -1;
     if (b.key === PINNED_KEY) return 1;
-    return (b.sessions[0]?.updatedAt ?? 0) - (a.sessions[0]?.updatedAt ?? 0);
+    return (b.sessions[0]?.createdAt ?? 0) - (a.sessions[0]?.createdAt ?? 0);
   });
 }
 function groupLabel(session) {
@@ -5160,7 +5163,7 @@ function makeSession() {
     stats: { turns: 0, toolCalls: 0, edits: 0 }
   };
 }
-function summary(sessionId, repo, updatedAt, worktree = null) {
+function summary(sessionId, repo, createdAt, worktree = null, updatedAt = createdAt) {
   return {
     sessionId,
     title: `${sessionId} title`,
@@ -5172,6 +5175,7 @@ function summary(sessionId, repo, updatedAt, worktree = null) {
     branch: "main",
     stage: "implementing",
     status: "active",
+    createdAt,
     updatedAt,
     openGates: 0,
     pendingFeedback: 0,
@@ -5264,10 +5268,27 @@ beforeEach(() => {
 after(() => cleanup());
 test("sessions are grouped by the project they run in", async () => {
   await boot();
-  assert.deepEqual(groupNames(), ["repo", "other"], "most recently active project first");
+  assert.deepEqual(groupNames(), ["repo", "other"], "newest project first");
   const counts = [...document.querySelectorAll(".session-group-count")].map((el) => el.textContent);
   assert.deepEqual(counts, ["1", "2"]);
   assert.deepEqual(rowNames(), ["s1 title", "s2 title", "s3 title"]);
+});
+test("the rail holds its order when a session takes a turn", async () => {
+  const now = Date.now();
+  await boot();
+  assert.deepEqual(groupNames(), ["repo", "other"]);
+  assert.deepEqual(rowNames(), ["s1 title", "s2 title", "s3 title"]);
+  await act(async () => {
+    store2.set({
+      sessions: [
+        summary("s1", "repo", now),
+        summary("s2", "other", now - 1e3),
+        summary("s3", "other", now - 2e3, null, now + 5e3)
+      ]
+    });
+  });
+  assert.deepEqual(groupNames(), ["repo", "other"], "activity does not reorder the projects");
+  assert.deepEqual(rowNames(), ["s1 title", "s2 title", "s3 title"], "nor the rows within one");
 });
 test("each worktree of a repo is its own group, named for the worktree", async () => {
   const now = Date.now();

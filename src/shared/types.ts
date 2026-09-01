@@ -459,6 +459,10 @@ export interface SessionSummary {
   branch: string | null;
   stage: Stage;
   status: SessionStatus;
+  /** When the session first appeared. The rail orders on this so rows hold
+   *  still: ordering on activity had sessions jumping around under the cursor
+   *  every time one of them took a turn. */
+  createdAt: number;
   updatedAt: number;
   openGates: number;
   pendingFeedback: number;

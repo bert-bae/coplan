@@ -89,6 +89,7 @@ function newSession(sessionId, cwd) {
 }
 function migrate(state) {
   state.reviewRound ??= 0;
+  state.createdAt ??= state.updatedAt ?? Date.now();
   state.worktree ??= null;
   state.threads ??= [];
   state.roundHistory ??= [];
@@ -328,8 +329,15 @@ var init_store = __esm({
       all() {
         return [...this.sessions.values()].sort((a, b) => b.updatedAt - a.updatedAt);
       }
+      /**
+       * The session list the rail renders, newest session first.
+       *
+       * Ordered on `createdAt`, not activity: an activity order reshuffles itself
+       * every time any session takes a turn, so a row the user was reaching for
+       * moves out from under the cursor. Creation order never changes.
+       */
       summaries() {
-        return this.all().map((s) => ({
+        return this.all().sort((a, b) => b.createdAt - a.createdAt).map((s) => ({
           sessionId: s.sessionId,
           title: s.title,
           cwd: s.cwd,
@@ -341,6 +349,7 @@ var init_store = __esm({
           branch: s.branch,
           stage: s.stage,
           status: s.status,
+          createdAt: s.createdAt,
           updatedAt: s.updatedAt,
           openGates: s.gates.filter((g) => g.status === "open").length,
           pendingFeedback: s.pendingFeedback.length,
