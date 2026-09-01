@@ -147,11 +147,23 @@ export async function runDoctor(): Promise<number> {
   record('harness_publish_plan opens a gate', Boolean(gateId), gateId, true);
 
   if (gateId) {
-    // Park a Stop hook, resolve the gate from "the UI", and assert that the
-    // hook comes back with a block decision carrying the verdict. This is the
-    // single most important behaviour in the whole harness.
-    const stopPromise = hook('Stop', { stop_hook_active: false });
-    await sleep(250);
+    // End a turn on the open gate, resolve it from "the UI", and assert that
+    // the verdict comes back on the next message. These two are the single
+    // most important behaviour in the whole harness: the session is allowed to
+    // stop, and nothing the user said is lost when it does.
+    const stopOut = await withTimeout(hook('Stop', { stop_hook_active: false }), 10_000);
+    const held = stopOut?.decision === 'block' || stopOut?.hookSpecificOutput?.decision === 'block';
+    const ended = stopOut !== null && !held;
+    record(
+      'an open gate ends the turn instead of holding it',
+      ended,
+      ended
+        ? undefined
+        : held
+          ? 'the turn was blocked — the session cannot stop at a gate'
+          : 'the Stop hook never answered',
+      true,
+    );
 
     await fetch(`${baseUrl(lock)}/api/session/${sessionId}/gate/${gateId}/resolve`, {
       method: 'POST',
@@ -159,11 +171,9 @@ export async function runDoctor(): Promise<number> {
       body: JSON.stringify({ verdict: 'changes_requested', comment: 'doctor probe feedback' }),
     });
 
-    const stopOut = await withTimeout(stopPromise, 10_000);
-    const blocked = stopOut?.decision === 'block' || stopOut?.hookSpecificOutput?.decision === 'block';
-    const carries = JSON.stringify(stopOut ?? {}).includes('doctor probe feedback');
-    record('Stop hook parks on the gate and blocks when it resolves', Boolean(blocked), blocked ? undefined : JSON.stringify(stopOut), true);
-    record('the block carries the user feedback back to Claude', carries, carries ? undefined : 'feedback text missing', true);
+    const resumed = await withTimeout(hook('UserPromptSubmit', { prompt: 'doctor probe prompt' }), 10_000);
+    const carries = JSON.stringify(resumed ?? {}).includes('doctor probe feedback');
+    record('the verdict reaches Claude with the next message', carries, carries ? undefined : 'feedback text missing', true);
   }
 
   /* ---------------- async injection ---------------- */

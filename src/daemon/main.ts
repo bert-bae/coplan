@@ -1181,8 +1181,8 @@ function buildRouter(deps: Deps): Router {
             status: 'cancelled',
             text: current
               ? `[cc-harness] The "${gate.kind}" gate was replaced by a newer "${current.kind}" gate ` +
-                `(${current.id}). End your turn — the harness parks on that one and resumes you with ` +
-                `its verdict.`
+                `(${current.id}). End your turn — that one is recorded, and its verdict is handed to you ` +
+                `when the session next runs.`
               : `[cc-harness] The "${gate.kind}" gate was closed without a verdict. Do not wait on it. ` +
                 `Continue, or publish a new gate when you next need the user.`,
           });
@@ -1194,8 +1194,8 @@ function buildRouter(deps: Deps): Router {
           status: 'pending',
           text:
             `[cc-harness] Still waiting on the user (${seconds}s elapsed). Do not call this again — ` +
-            `polling costs a turn per attempt and tells you nothing. End your turn instead: the harness ` +
-            `parks the session and resumes you with their verdict the moment they answer.`,
+            `polling costs a turn per attempt and tells you nothing. End your turn instead: the gate is ` +
+            `recorded, and their verdict is handed to you when the session next runs.`,
         });
         return;
       }
@@ -1664,15 +1664,16 @@ function summarizeForModel(session: SessionState) {
 /**
  * The one instruction every gate-opening tool ends on.
  *
- * The wait belongs to the `Stop` hook, which parks off-turn: ending the turn
- * is what arms it, and the session is resumed with the verdict as its next
- * input. Polling for the same answer used to cost a tool call and a visible
- * turn every couple of minutes and filled the transcript with "still waiting".
+ * Stopping is the correct move, and the only one: the harness does not hold
+ * the turn open at a gate, so waiting on it — by polling, or by any other
+ * means — burns the user's time and tokens against an answer that cannot
+ * arrive mid-turn. The verdict is handed over the moment they next speak.
  */
 function parkNotice(action: string): string {
   return (
     `End your turn now — do not call harness_await and do not start new work. ` +
-    `The harness holds the session at this gate and resumes you automatically when the user ${action}.`
+    `Stopping is expected here: the harness records the gate, and hands you the verdict ` +
+    `when the user ${action} and the session next runs.`
   );
 }
 
@@ -1686,7 +1687,7 @@ function describeStatus(session: SessionState, url: string): string {
   if (gate) {
     lines.push(
       `OPEN GATE (${gate.kind}): ${gate.id} — the user has not responded yet. ` +
-        `End your turn to park on it; you are resumed with their verdict.`,
+        `End your turn; their verdict is handed to you when the session next runs.`,
     );
   }
   if (session.pendingFeedback.length) lines.push(`${session.pendingFeedback.length} unread comment(s).`);

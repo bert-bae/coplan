@@ -279,28 +279,38 @@ export class SessionStore extends EventEmitter {
     return [...this.sessions.values()].sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
+  /**
+   * The session list the rail renders, newest session first.
+   *
+   * Ordered on `createdAt`, not activity: an activity order reshuffles itself
+   * every time any session takes a turn, so a row the user was reaching for
+   * moves out from under the cursor. Creation order never changes.
+   */
   summaries(): SessionSummary[] {
-    return this.all().map((s) => ({
-      sessionId: s.sessionId,
-      title: s.title,
-      cwd: s.cwd,
-      // In a worktree `repoRoot` is the worktree itself, whose basename is the
-      // branch. The switcher wants the repository it belongs to.
-      repoName: repoNameOf(s),
-      repoRoot: s.repoRoot,
-      worktree: s.worktree?.name ?? null,
-      branch: s.branch,
-      stage: s.stage,
-      status: s.status,
-      updatedAt: s.updatedAt,
-      openGates: s.gates.filter((g) => g.status === 'open').length,
-      pendingFeedback: s.pendingFeedback.length,
-      tasks: {
-        total: s.tasks.length,
-        done: s.tasks.filter((t) => t.status === 'done').length,
-        blocked: s.tasks.filter((t) => t.status === 'blocked').length,
-      },
-    }));
+    return this.all()
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((s) => ({
+        sessionId: s.sessionId,
+        title: s.title,
+        cwd: s.cwd,
+        // In a worktree `repoRoot` is the worktree itself, whose basename is the
+        // branch. The switcher wants the repository it belongs to.
+        repoName: repoNameOf(s),
+        repoRoot: s.repoRoot,
+        worktree: s.worktree?.name ?? null,
+        branch: s.branch,
+        stage: s.stage,
+        status: s.status,
+        createdAt: s.createdAt,
+        updatedAt: s.updatedAt,
+        openGates: s.gates.filter((g) => g.status === 'open').length,
+        pendingFeedback: s.pendingFeedback.length,
+        tasks: {
+          total: s.tasks.length,
+          done: s.tasks.filter((t) => t.status === 'done').length,
+          blocked: s.tasks.filter((t) => t.status === 'blocked').length,
+        },
+      }));
   }
 
   /** Most recently updated session rooted at (or under) `cwd`. */
@@ -713,6 +723,8 @@ export class SessionStore extends EventEmitter {
 function migrate(state: SessionState): void {
   // Sessions written by an older build predate some fields.
   state.reviewRound ??= 0;
+  // Predates `createdAt`; its last activity is the closest thing on record.
+  state.createdAt ??= state.updatedAt ?? Date.now();
   state.worktree ??= null;
   state.threads ??= [];
   state.roundHistory ??= [];

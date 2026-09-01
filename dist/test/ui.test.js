@@ -1488,10 +1488,13 @@ function groupSessions(sessions, pinned) {
     group.sessions.push(session2);
     group.openGates += session2.openGates;
   }
+  for (const group of groups.values()) {
+    group.sessions.sort((a, b) => b.createdAt - a.createdAt);
+  }
   return [...groups.values()].sort((a, b) => {
     if (a.key === PINNED_KEY) return -1;
     if (b.key === PINNED_KEY) return 1;
-    return (b.sessions[0]?.updatedAt ?? 0) - (a.sessions[0]?.updatedAt ?? 0);
+    return (b.sessions[0]?.createdAt ?? 0) - (a.sessions[0]?.createdAt ?? 0);
   });
 }
 function groupLabel(session2) {

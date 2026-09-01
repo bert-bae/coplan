@@ -19,10 +19,10 @@ This opens the code review gate.
 
 ## Wait
 
-End your turn. The harness parks the session on the gate and resumes you when
-the user submits — do not poll with `harness_await`, and do not start new work
-while you wait. If a turn comes back saying you are *still parked*, they are
-still reading: end your turn again.
+End your turn. The harness does not hold the turn open at a gate: the session
+stops, and the user's comments are handed to you when they next speak to it.
+Do not poll with `harness_await`, and do not start new work instead of
+stopping.
 
 If they press *Send now* instead, the review gate closes and their message
 arrives in its place. Act on the message; there is no verdict coming for that

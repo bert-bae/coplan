@@ -14,8 +14,8 @@ front of the session and wires it back in.
  │   hooks (sh + curl relay)         MCP stdio server  │
  └──────────┬─────────────────────────────┬────────────┘
             │ POST /hook/<Event>          │ tools/call
-            │ (Stop parks here — the      │ (publishes gates, notes,
-            │  whole wait lives here)     │  replies; never waits)
+            │ (Stop ends the turn at a    │ (publishes gates, notes,
+            │  gate; nothing is held)     │  replies; never waits)
             ▼                             ▼
  ┌──────────────── cc-harnessd (one per user) ─────────────────┐
  │  sessions · stage machine · transcript tailer               │
@@ -155,28 +155,24 @@ with `--dry-run` to only list, and an optional group name to narrow it.
 
 Two paths, both landing in the session transcript:
 
-**Gates (park and wait).** When Claude publishes a plan, a diff, or a check
-run, a gate opens and Claude ends its turn. The `Stop` hook parks in the daemon
-on an event, not a poll: waiting costs no tool calls and leaves nothing in the
-transcript. When you submit in the UI, the gate resolves, the parked hook wakes,
-and the session resumes with your verdict — your edited plan, your line comments
-— as its next input. A hook window is finite (`stopHoldSeconds`), so a long wait
-rolls over into a fresh park a few times (`gateHoldRounds`) before the session
-is allowed to go idle; answer it after that and the verdict is handed over with
-your next message.
+**Gates (stop and wait).** When Claude publishes a plan, a diff, or a check
+run, a gate opens and Claude ends its turn — genuinely ends it. The session
+stops, the terminal comes back, and the gate stands open in the UI for as long
+as you need. Nothing is held: no hook blocking, no turn kept alive, no tokens
+spent while you read. When you submit in the UI the gate resolves, and your
+verdict — your edited plan, your line comments — is handed to the session at the
+top of your next message to it. Answering in the UI and then saying "go ahead"
+in the terminal is the normal flow; answering in the terminal alone works too.
 
 **Async messages.** Anything you send while Claude is working queues and is
-delivered at the next turn boundary, so you never have to interrupt — including
-while it is parked on a gate, which wakes it rather than waiting behind the
-gate. The gate stays standing: Claude answers you and parks on it again. A
-message is never a verdict: answering a gate is always a separate, deliberate
-action.
+delivered at the next turn boundary, so you never have to interrupt. A message
+is never a verdict: answering a gate is always a separate, deliberate action,
+and a message sent while a gate is open leaves that gate standing.
 
 **Skipping a gate.** Sometimes the reason for typing was *stop, do this
-instead*, and having Claude answer and then go back to waiting is not what you
-meant. **Send now** closes the gate without a verdict and wakes whatever was
-parked on it with the message, and Claude is told the gate is gone rather than
-left waiting on a verdict that is not coming. It is a separate button from the
+instead*, and having Claude answer and then go back to the gate is not what you
+meant. **Send now** closes the gate without a verdict, and Claude is told the
+gate is gone rather than left expecting a verdict that is not coming. It is a separate button from the
 default send, and the gate is recorded as *skipped* rather than quietly
 disappearing.
 

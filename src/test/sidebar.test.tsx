@@ -51,12 +51,14 @@ function makeSession(): SessionState {
   };
 }
 
-/** A summary row for the rail. */
+/** A summary row for the rail. The rail orders on `createdAt`, so activity
+ *  (`updatedAt`) is a separate argument the ordering tests can move on its own. */
 function summary(
   sessionId: string,
   repo: string,
-  updatedAt: number,
+  createdAt: number,
   worktree: string | null = null,
+  updatedAt: number = createdAt,
 ): SessionSummary {
   return {
     sessionId,
@@ -69,6 +71,7 @@ function summary(
     branch: 'main',
     stage: 'implementing',
     status: 'active',
+    createdAt,
     updatedAt,
     openGates: 0,
     pendingFeedback: 0,
@@ -183,10 +186,33 @@ after(() => cleanup());
 
 test('sessions are grouped by the project they run in', async () => {
   await boot();
-  assert.deepEqual(groupNames(), ['repo', 'other'], 'most recently active project first');
+  assert.deepEqual(groupNames(), ['repo', 'other'], 'newest project first');
   const counts = [...document.querySelectorAll('.session-group-count')].map((el) => el.textContent);
   assert.deepEqual(counts, ['1', '2']);
   assert.deepEqual(rowNames(), ['s1 title', 's2 title', 's3 title']);
+});
+
+test('the rail holds its order when a session takes a turn', async () => {
+  // Ordering on activity reshuffled the rail under the user's cursor: whichever
+  // session last spoke jumped to the top. Creation order does not move.
+  const now = Date.now();
+  await boot();
+  assert.deepEqual(groupNames(), ['repo', 'other']);
+  assert.deepEqual(rowNames(), ['s1 title', 's2 title', 's3 title']);
+
+  // s3 — the oldest session, in the second project — becomes the busiest one.
+  await act(async () => {
+    store.set({
+      sessions: [
+        summary('s1', 'repo', now),
+        summary('s2', 'other', now - 1000),
+        summary('s3', 'other', now - 2000, null, now + 5000),
+      ],
+    });
+  });
+
+  assert.deepEqual(groupNames(), ['repo', 'other'], 'activity does not reorder the projects');
+  assert.deepEqual(rowNames(), ['s1 title', 's2 title', 's3 title'], 'nor the rows within one');
 });
 
 test('each worktree of a repo is its own group, named for the worktree', async () => {

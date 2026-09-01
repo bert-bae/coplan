@@ -98,7 +98,7 @@ var TOOLS = [
   {
     name: "harness_publish_plan",
     endpoint: "plan",
-    description: "Publish your implementation plan to the review UI and open the plan gate. The user can edit, reorder, drop and comment on individual steps. Then end your turn: the harness parks the session and resumes you with their verdict. Do not start implementing until it does.",
+    description: "Publish your implementation plan to the review UI and open the plan gate. The user can edit, reorder, drop and comment on individual steps. Then end your turn: the harness records the gate and hands you their verdict when the session next runs. Do not start implementing until it does.",
     inputSchema: {
       type: "object",
       properties: {
@@ -299,7 +299,7 @@ var TOOLS = [
   {
     name: "harness_await",
     endpoint: "await",
-    description: 'Escape hatch: block the current turn on the open gate. You almost never need it \u2014 ending your turn parks the session in the harness for free and resumes you with the verdict, while this burns a turn per call and returns "pending" when the user is still thinking. Use it only when you must have the answer without yielding the turn.',
+    description: `Escape hatch: block the current turn on the open gate. You almost never need it, and it holds the user's terminal for as long as it runs \u2014 ending your turn costs nothing and the verdict is handed to you when the session next runs, while this burns a turn per call and returns "pending" when the user is still thinking. Use it only when you must have the answer without yielding the turn.`,
     inputSchema: {
       type: "object",
       properties: {

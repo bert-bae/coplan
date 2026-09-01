@@ -8,7 +8,6 @@ var DEFAULT_CONFIG = {
   maxTimelineEvents: 500,
   stopHoldSeconds: 540,
   awaitSeconds: 120,
-  gateHoldRounds: 4,
   holdIdleSessions: false,
   maxDiffFileBytes: 4e5,
   idleShutdownMinutes: 120,
