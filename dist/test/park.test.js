@@ -98,6 +98,10 @@ function migrate(state) {
   for (const gate of state.gates) gate.waiting = false;
   trimGates(state);
 }
+function settleStatus(state, parked2) {
+  if (state.status !== "waiting") return;
+  state.status = parked2 ? "active" : "idle";
+}
 function trimGates(state) {
   if (state.gates.length <= MAX_GATES) return;
   const keep = /* @__PURE__ */ new Set();
@@ -485,10 +489,12 @@ var init_store = __esm({
         const state = this.sessions.get(id);
         const gate = state?.gates.find((g) => g.id === gateId);
         if (!state || !gate || gate.status !== "open") return void 0;
+        const parked2 = gate.waiting;
         gate.status = "resolved";
         gate.result = result;
         gate.waiting = false;
         if (state.activeGateId === gateId) state.activeGateId = null;
+        settleStatus(state, parked2);
         if (result.threads?.length) {
           const byId = new Map(state.threads.map((t) => [t.id, t]));
           for (const t of result.threads) byId.set(t.id, t);
@@ -521,16 +527,22 @@ var init_store = __esm({
         const state = this.sessions.get(id);
         const gate = state?.gates.find((g) => g.id === gateId);
         if (!state || !gate || gate.status !== "open") return void 0;
+        const parked2 = gate.waiting;
         gate.status = "cancelled";
         gate.waiting = false;
         if (state.activeGateId === gateId) state.activeGateId = null;
+        settleStatus(state, parked2);
         state.updatedAt = Date.now();
         this.persistSoon(id);
         this.addTimeline(id, "gate", reason ?? `The user skipped the ${gate.kind.replace("_", " ")} gate.`, {
           label: gate.kind,
           meta: { gateId, cancelled: true }
         });
-        this.emitEvent({ type: "state", sessionId: id, patch: { gates: state.gates, activeGateId: null } });
+        this.emitEvent({
+          type: "state",
+          sessionId: id,
+          patch: { gates: state.gates, activeGateId: null, status: state.status }
+        });
         this.broadcastSessionList();
         this.emit("gate:cancelled", { sessionId: id, gate });
         return gate;
@@ -540,7 +552,19 @@ var init_store = __esm({
        * about. This happens whenever the user answers faster than the turn ends.
        */
       undeliveredGate(id) {
-        return this.sessions.get(id)?.gates.find((g) => g.status === "resolved" && g.result && !g.deliveredAt);
+        return this.undeliveredGates(id)[0];
+      }
+      /**
+       * Every answered gate Claude has not been told about, oldest first.
+       *
+       * Usually there is at most one. More than one means an answer was given
+       * while the session was stopped and then another gate came and went before
+       * it next ran — and handing over only the first would leave the user's most
+       * recent verdict stranded behind a stale one, which reads as the click
+       * having done nothing.
+       */
+      undeliveredGates(id) {
+        return this.sessions.get(id)?.gates.filter((g) => g.status === "resolved" && g.result && !g.deliveredAt) ?? [];
       }
       markGateDelivered(id, gateId) {
         const gate = this.getGate(id, gateId);
@@ -557,6 +581,23 @@ var init_store = __esm({
         }
         this.persistSoon(id);
         return gate;
+      }
+      /**
+       * Stop marking a gate as parked, without deciding what the session is doing.
+       *
+       * {@link setGateWaiting} promotes a session off `waiting` when its wait
+       * ends, which is right for `harness_await` — the wait ending there means the
+       * turn is carrying on. It is wrong for a gate hold that simply expired:
+       * nothing is running, the turn is about to end, and broadcasting `active`
+       * first makes every unanswered gate flash the session card from "waiting"
+       * to "working" and back. The caller sets the real status straight after.
+       */
+      clearGateWaiting(id, gateId) {
+        const gate = this.getGate(id, gateId);
+        if (!gate || !gate.waiting) return;
+        gate.waiting = false;
+        const state = this.sessions.get(id);
+        if (state) this.emitEvent({ type: "state", sessionId: id, patch: { gates: state.gates } });
       }
       setGateWaiting(id, gateId, waiting) {
         const gate = this.getGate(id, gateId);
@@ -714,10 +755,12 @@ import { tmpdir } from "node:os";
 import path6 from "node:path";
 
 // src/shared/config.ts
+var CHECK_RUN_BUDGET_MS = 15 * 6e4;
 var DEFAULT_CONFIG = {
   autoOpen: false,
   maxTimelineEvents: 500,
   stopHoldSeconds: 540,
+  gateHoldSeconds: 300,
   awaitSeconds: 120,
   holdIdleSessions: false,
   maxDiffFileBytes: 4e5,
@@ -1098,6 +1141,44 @@ function readRange(file, start, end) {
 }
 
 // src/daemon/gates.ts
+function waitAtGate(store2, sessionId, gateId, opts) {
+  const existing = store2.getGate(sessionId, gateId);
+  if (existing && existing.status !== "open") {
+    return Promise.resolve({ kind: "gate", gate: existing });
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      store2.off("gate:resolved", onGate);
+      store2.off("gate:cancelled", onGate);
+      store2.off("feedback:queued", onQueued);
+      opts.signal?.removeEventListener("abort", onAbort);
+      store2.clearGateWaiting(sessionId, gateId);
+      resolve(value);
+    };
+    const onGate = (payload) => {
+      if (payload.sessionId !== sessionId || payload.gate.id !== gateId) return;
+      finish({ kind: "gate", gate: payload.gate });
+    };
+    const onQueued = (payload) => {
+      if (payload.sessionId !== sessionId) return;
+      const items = store2.drainFeedback(sessionId);
+      if (items.length === 0) return;
+      finish({ kind: "feedback", items });
+    };
+    const onAbort = () => finish(null);
+    const timer = setTimeout(() => finish(null), opts.timeoutMs);
+    timer.unref?.();
+    store2.on("gate:resolved", onGate);
+    store2.on("gate:cancelled", onGate);
+    store2.on("feedback:queued", onQueued);
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
+    store2.setGateWaiting(sessionId, gateId, true);
+  });
+}
 function waitForFeedback(store2, sessionId, opts) {
   const session = store2.get(sessionId);
   if (session && session.pendingFeedback.length > 0) {
@@ -1401,6 +1482,9 @@ var HOOK_NOOP = { suppressOutput: true };
 var EDIT_TOOLS = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 var MAX_COMMANDS = 200;
 var MAX_TOUCHED_FILES = 500;
+var MAX_HOLD_SECONDS = 540;
+var heldOnce = /* @__PURE__ */ new Map();
+var MAX_HELD = 500;
 var worktreeScanned = /* @__PURE__ */ new Set();
 var MAX_SCANNED = 500;
 async function ingestHook(event, input, ctx) {
@@ -1458,6 +1542,7 @@ async function onSessionEnd(sessionId, input, ctx) {
   ctx.tailers.get(sessionId)?.close();
   ctx.tailers.delete(sessionId);
   worktreeScanned.delete(sessionId);
+  heldOnce.delete(sessionId);
   clearBaseline(sessionId);
   ctx.store.update(sessionId, { status: "ended", endedAt: Date.now() });
   ctx.store.addTimeline(sessionId, "note", `Session ended (${input.end_reason ?? "unknown"})`, {
@@ -1475,10 +1560,10 @@ async function onUserPromptSubmit(sessionId, input, ctx) {
   });
   attachTailer(sessionId, ctx);
   const drained = ctx.store.drainFeedback(sessionId);
-  const answered = ctx.store.undeliveredGate(sessionId);
-  if (answered) ctx.store.markGateDelivered(sessionId, answered.id);
+  const answered = ctx.store.undeliveredGates(sessionId);
+  for (const gate of answered) ctx.store.markGateDelivered(sessionId, gate.id);
   const text = [
-    answered ? renderGateResult(answered) : "",
+    ...answered.map(renderGateResult),
     drained.length > 0 ? renderFeedback(drained) : ""
   ].filter(Boolean).join("\n\n");
   if (text) return additionalContext("UserPromptSubmit", text);
@@ -1570,18 +1655,8 @@ async function onStop(sessionId, input, ctx) {
     await reconcileFiles(ctx.store, sessionId).catch(() => {
     });
   }
-  const drained = ctx.store.drainFeedback(sessionId);
-  if (drained.length > 0) {
-    const open = ctx.store.activeGate(sessionId);
-    ctx.store.update(sessionId, { status: "active" });
-    return stopBlock(renderFeedback(drained) + (open ? stillParked(open.kind) : ""));
-  }
-  const answered = ctx.store.undeliveredGate(sessionId);
-  if (answered) {
-    ctx.store.markGateDelivered(sessionId, answered.id);
-    ctx.store.update(sessionId, { status: "active" });
-    return stopBlock(renderGateResult(answered));
-  }
+  const early = deliverPending(sessionId, ctx);
+  if (early) return early;
   const gate = ctx.store.activeGate(sessionId);
   if (input.stop_hook_active && !gate) {
     ctx.store.update(sessionId, { status: "idle" });
@@ -1603,7 +1678,55 @@ async function onStop(sessionId, input, ctx) {
     return HOOK_NOOP;
   }
   ctx.store.update(sessionId, { status: "waiting" });
+  const spent = heldOnce.get(sessionId) === gate.id && input.stop_hook_active === true;
+  const hold = spent ? 0 : Math.min(ctx.config.gateHoldSeconds, MAX_HOLD_SECONDS);
+  if (hold > 0) {
+    const resumed = await waitAtGate(ctx.store, sessionId, gate.id, {
+      timeoutMs: hold * 1e3,
+      ...ctx.signal ? { signal: ctx.signal } : {}
+    });
+    const delivered = resumed ? renderResume(sessionId, resumed, ctx) : null;
+    if (delivered) {
+      if (resumed?.kind === "feedback") {
+        if (heldOnce.size >= MAX_HELD) heldOnce.clear();
+        heldOnce.set(sessionId, gate.id);
+      } else {
+        heldOnce.delete(sessionId);
+      }
+      ctx.store.update(sessionId, { status: "active" });
+      return stopBlock(delivered);
+    }
+  }
+  ctx.store.update(sessionId, { status: ctx.store.activeGate(sessionId) ? "waiting" : "idle" });
   return HOOK_NOOP;
+}
+function deliverPending(sessionId, ctx) {
+  const drained = ctx.store.drainFeedback(sessionId);
+  const answered = ctx.store.undeliveredGates(sessionId);
+  if (drained.length === 0 && answered.length === 0) return null;
+  const parts = [];
+  for (const gate of answered) {
+    ctx.store.markGateDelivered(sessionId, gate.id);
+    parts.push(renderGateResult(gate));
+  }
+  if (drained.length > 0) parts.push(renderMessages(sessionId, drained, ctx));
+  ctx.store.update(sessionId, { status: "active" });
+  return stopBlock(parts.join("\n\n"));
+}
+function renderResume(sessionId, resumed, ctx) {
+  if (resumed.kind === "feedback") return renderMessages(sessionId, resumed.items, ctx);
+  const gate = resumed.gate;
+  if (gate.result) {
+    ctx.store.markGateDelivered(sessionId, gate.id);
+    return renderGateResult(gate);
+  }
+  const queued = ctx.store.drainFeedback(sessionId);
+  if (queued.length > 0) return renderMessages(sessionId, queued, ctx);
+  return null;
+}
+function renderMessages(sessionId, items, ctx) {
+  const open = ctx.store.activeGate(sessionId);
+  return renderFeedback(items) + (open ? stillParked(open.kind) : "");
 }
 function stillParked(kind) {
   return `
@@ -1733,33 +1856,145 @@ after(() => {
   rmSync2(home, { recursive: true, force: true });
   rmSync2(cwd, { recursive: true, force: true });
 });
+var HOLD_MS = 120;
 var ctxWith = (over = {}) => ({
   store,
-  config: { ...DEFAULT_CONFIG, stopHoldSeconds: 30, ...over },
+  config: { ...DEFAULT_CONFIG, stopHoldSeconds: 30, gateHoldSeconds: HOLD_MS / 1e3, ...over },
   uiUrl: (id) => `http://127.0.0.1/s/${id}`,
   tailers: /* @__PURE__ */ new Map()
 });
 var stop = (id, ctx, stopHookActive = false) => ingestHook("Stop", { session_id: id, cwd, stop_hook_active: stopHookActive }, ctx);
-test("an open gate ends the turn instead of holding it", async () => {
-  const id = "park-ends-turn";
+async function parked(id, gateId) {
+  for (let i = 0; i < 200; i++) {
+    if (store.getGate(id, gateId)?.waiting) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error("the Stop hook never parked on the gate");
+}
+async function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+test("answering the gate while the turn is held resumes the session", async () => {
+  const id = "park-answer-resumes";
   const ctx = ctxWith();
+  store.ensure(id, cwd);
+  const gate = store.openGate(id, "plan", "Review the plan");
+  const turn = stop(id, ctx);
+  await parked(id, gate.id);
+  assert.equal(store.get(id)?.status, "waiting", "the session reads as waiting while it is held");
+  assert.equal(store.getGate(id, gate.id)?.waiting, true, "and the gate says a turn is genuinely parked on it");
+  store.resolveGate(id, gate.id, { verdict: "approved", resolvedAt: Date.now(), comment: "Ship it." });
+  const out = await turn;
+  assert.equal(out.decision, "block", "the turn is resumed rather than ended");
+  assert.match(out.reason ?? "", /approved at the plan gate/);
+  assert.match(out.reason ?? "", /Ship it\./);
+  assert.equal(store.get(id)?.status, "active");
+  assert.ok(store.getGate(id, gate.id)?.deliveredAt, "and the verdict is not delivered a second time later");
+});
+test("a message typed in the browser also resumes a held turn", async () => {
+  const id = "park-message-resumes";
+  const ctx = ctxWith();
+  store.ensure(id, cwd);
+  const gate = store.openGate(id, "code_review", "Review the diff");
+  const turn = stop(id, ctx);
+  await parked(id, gate.id);
+  store.queueFeedback(id, { text: "Check the null case first.", origin: "timeline" });
+  const out = await turn;
+  assert.equal(out.decision, "block");
+  assert.match(out.reason ?? "", /Check the null case first/);
+  assert.match(out.reason ?? "", /gate is still open/, "and is not mistaken for the verdict");
+  assert.equal(store.getGate(id, gate.id)?.status, "open", "the gate itself is untouched");
+});
+test('"send now" resumes the held turn with the message, not a phantom verdict', async () => {
+  const id = "park-sendnow-resumes";
+  const ctx = ctxWith();
+  store.ensure(id, cwd);
+  const gate = store.openGate(id, "plan", "Review the plan");
+  const turn = stop(id, ctx);
+  await parked(id, gate.id);
+  store.queueFeedback(id, {
+    text: "Forget the plan \u2014 fix the README typo first.",
+    origin: "timeline",
+    interrupt: true,
+    skippedGate: { kind: gate.kind, prompt: gate.prompt }
+  });
+  store.cancelGate(id, gate.id);
+  const out = await turn;
+  assert.equal(out.decision, "block");
+  assert.match(out.reason ?? "", /fix the README typo first/);
+  assert.match(out.reason ?? "", /do not wait on it/i);
+  assert.doesNotMatch(
+    out.reason ?? "",
+    /gate is still open/,
+    "the message closed the gate, so nothing may claim it is still there"
+  );
+});
+test("a gate cancelled with nothing behind it lets the turn end", async () => {
+  const id = "park-superseded-releases";
+  const ctx = ctxWith({ gateHoldSeconds: 30 });
+  store.ensure(id, cwd);
+  const first = store.openGate(id, "plan", "First plan");
+  const turn = stop(id, ctx);
+  await parked(id, first.id);
+  const second = store.openGate(id, "plan", "Second plan");
+  const started = Date.now();
+  const out = await turn;
+  assert.notEqual(out.decision, "block", "nothing is blocked with nothing to say");
+  assert.ok(Date.now() - started < 5e3, "and the turn is released rather than serving out the window");
+  assert.equal(store.getGate(id, first.id)?.status, "cancelled");
+  assert.equal(store.getGate(id, second.id)?.status, "open", "the live gate is the one left to answer");
+  assert.equal(store.get(id)?.status, "waiting");
+});
+test("an unanswered gate lets the turn end when the window closes", async () => {
+  const id = "park-window-closes";
+  const ctx = ctxWith();
+  store.ensure(id, cwd);
+  const gate = store.openGate(id, "plan", "Review the plan");
+  const out = await stop(id, ctx);
+  assert.notEqual(out.decision, "block", "Claude is allowed to stop");
+  assert.equal(store.get(id)?.status, "waiting", "the session reads as waiting on the user, not working");
+  assert.equal(store.getGate(id, gate.id)?.status, "open", "and the gate is still there to be answered");
+  assert.equal(
+    store.getGate(id, gate.id)?.waiting,
+    false,
+    "nothing is parked on it any more, and the UI must not claim the terminal is frozen"
+  );
+});
+test("the hold never renews itself", async () => {
+  const id = "park-no-renew";
+  const ctx = ctxWith();
+  store.ensure(id, cwd);
+  store.openGate(id, "question", "Map or plain object?");
+  const first = Date.now();
+  const one = await stop(id, ctx);
+  const oneTook = Date.now() - first;
+  const second = Date.now();
+  const two = await stop(id, ctx, true);
+  const twoTook = Date.now() - second;
+  assert.notEqual(one.decision, "block", "an expired window must not block with nothing to say");
+  assert.notEqual(two.decision, "block");
+  for (const took of [oneTook, twoTook]) {
+    assert.ok(took < HOLD_MS * 3, `one window, not a rollover \u2014 took ${took}ms`);
+  }
+});
+test("gateHoldSeconds: 0 stops at the gate immediately", async () => {
+  const id = "park-hold-disabled";
+  const ctx = ctxWith({ gateHoldSeconds: 0 });
   store.ensure(id, cwd);
   const gate = store.openGate(id, "plan", "Review the plan");
   const started = Date.now();
   const out = await stop(id, ctx);
-  const elapsed = Date.now() - started;
-  assert.notEqual(out.decision, "block", "Claude is allowed to stop");
-  assert.ok(elapsed < 1e3, `the hook returned in ${elapsed}ms rather than holding the turn open`);
-  assert.equal(store.get(id)?.status, "waiting", "the session reads as waiting on the user, not working");
-  assert.equal(store.getGate(id, gate.id)?.status, "open", "and the gate is still there to be answered");
-});
-test("the gate is not marked as holding a turn that has ended", async () => {
-  const id = "park-not-waiting";
-  const ctx = ctxWith();
-  store.ensure(id, cwd);
-  const gate = store.openGate(id, "code_review", "Review the diff");
-  await stop(id, ctx);
-  assert.equal(store.getGate(id, gate.id)?.waiting, false);
+  assert.notEqual(out.decision, "block");
+  assert.ok(Date.now() - started < HOLD_MS, "nothing was held");
+  assert.equal(store.getGate(id, gate.id)?.status, "open");
 });
 test("a verdict given before the turn ended is handed over on that turn", async () => {
   const id = "park-answered-early";
@@ -1773,17 +2008,23 @@ test("a verdict given before the turn ended is handed over on that turn", async 
   assert.match(out.reason ?? "", /Ship it\./);
   assert.equal(store.get(id)?.status, "active");
 });
-test("a message queued before the turn ended rides that turn, and does not read as a verdict", async () => {
-  const id = "park-message";
+test("a verdict and a message waiting together are both delivered on one turn", async () => {
+  const id = "park-both-pending";
   const ctx = ctxWith();
   store.ensure(id, cwd);
-  const gate = store.openGate(id, "code_review", "Review the diff");
-  store.queueFeedback(id, { text: "Actually, check the null case first.", origin: "timeline" });
+  const gate = store.openGate(id, "plan", "Review the plan");
+  store.resolveGate(id, gate.id, { verdict: "approved", resolvedAt: Date.now(), comment: "Looks right." });
+  store.queueFeedback(id, { text: "One more thing: rename the flag.", origin: "timeline" });
   const out = await stop(id, ctx);
-  assert.equal(out.decision, "block", "the message is delivered rather than dropped");
-  assert.match(out.reason ?? "", /check the null case first/);
-  assert.match(out.reason ?? "", /gate is still open/, "and is not mistaken for the verdict");
-  assert.equal(store.getGate(id, gate.id)?.status, "open", "the gate itself is untouched");
+  assert.equal(out.decision, "block");
+  assert.match(out.reason ?? "", /approved at the plan gate/, "the verdict is there");
+  assert.match(out.reason ?? "", /rename the flag/, "and so is the message");
+  assert.doesNotMatch(
+    out.reason ?? "",
+    /gate is still open/,
+    "the gate it belonged to was answered, so nothing may claim it is still open"
+  );
+  assert.ok(store.getGate(id, gate.id)?.deliveredAt, "and the verdict counts as delivered");
 });
 test("a verdict given after the turn ended arrives with the next message", async () => {
   const id = "park-answered-late";
@@ -1800,40 +2041,6 @@ test("a verdict given after the turn ended arrives with the next message", async
     "the verdict is handed over with the message that woke the session"
   );
 });
-test('"send now" delivers the message, not a phantom verdict', async () => {
-  const id = "park-sendnow";
-  const ctx = ctxWith();
-  store.ensure(id, cwd);
-  const gate = store.openGate(id, "plan", "Review the plan");
-  store.queueFeedback(id, {
-    text: "Forget the plan \u2014 fix the README typo first.",
-    origin: "timeline",
-    interrupt: true,
-    skippedGate: { kind: gate.kind, prompt: gate.prompt }
-  });
-  store.cancelGate(id, gate.id);
-  const out = await stop(id, ctx);
-  assert.equal(out.decision, "block");
-  assert.match(out.reason ?? "", /fix the README typo first/);
-  assert.match(out.reason ?? "", /do not wait on it/i);
-  assert.doesNotMatch(
-    out.reason ?? "",
-    /gate is still open/,
-    "the message closed the gate, so nothing may claim it is still there"
-  );
-});
-test("a second gate supersedes the first without holding the turn for either", async () => {
-  const id = "park-superseded";
-  const ctx = ctxWith();
-  store.ensure(id, cwd);
-  const first = store.openGate(id, "plan", "First plan");
-  const second = store.openGate(id, "plan", "Second plan");
-  const out = await stop(id, ctx);
-  assert.notEqual(out.decision, "block");
-  assert.equal(store.getGate(id, first.id)?.status, "cancelled");
-  assert.equal(store.getGate(id, second.id)?.status, "open", "the live gate is the one left to answer");
-  assert.equal(store.get(id)?.status, "waiting");
-});
 test("a session with no gate still just stops", async () => {
   const id = "park-no-gate";
   const ctx = ctxWith();
@@ -1841,5 +2048,129 @@ test("a session with no gate still just stops", async () => {
   const out = await stop(id, ctx);
   assert.notEqual(out.decision, "block");
   assert.equal(store.get(id)?.status, "idle", "no gate and nothing queued means idle, not waiting");
+});
+test("a session the user has answered stops asking for their attention", async () => {
+  const id = "park-status-settles";
+  const ctx = ctxWith({ gateHoldSeconds: 0 });
+  store.ensure(id, cwd);
+  const gate = store.openGate(id, "plan", "Review the plan");
+  await stop(id, ctx);
+  assert.equal(store.get(id)?.status, "waiting");
+  store.resolveGate(id, gate.id, { verdict: "approved", resolvedAt: Date.now() });
+  const after2 = store.get(id);
+  assert.equal(after2.status, "idle", "the session has stopped, and no longer claims to want something");
+  const summary = store.summaries().find((s) => s.sessionId === id);
+  assert.equal(summary.openGates, 0);
+  assert.equal(
+    summary.openGates > 0 || summary.status === "waiting",
+    false,
+    'so the rail no longer files it under "needs you"'
+  );
+});
+test("skipping a gate also settles the session", async () => {
+  const id = "park-status-settles-cancel";
+  const ctx = ctxWith({ gateHoldSeconds: 0 });
+  store.ensure(id, cwd);
+  const gate = store.openGate(id, "code_review", "Review the diff");
+  await stop(id, ctx);
+  store.cancelGate(id, gate.id);
+  assert.equal(store.get(id)?.status, "idle");
+});
+test("a hold configured past the relay window is clamped to it", async () => {
+  const id = "park-hold-clamped";
+  const ctx = ctxWith({ gateHoldSeconds: 86400 });
+  store.ensure(id, cwd);
+  const gate = store.openGate(id, "plan", "Review the plan");
+  const turn = stop(id, ctx);
+  await parked(id, gate.id);
+  store.resolveGate(id, gate.id, { verdict: "approved", resolvedAt: Date.now() });
+  const out = await withTimeout(turn, 5e3);
+  assert.ok(out, "the hold is bounded by something, not by the config alone");
+  assert.equal(out.decision, "block");
+});
+test("a gate skipped during the hold leaves the session idle, not still asking", async () => {
+  const id = "park-skip-settles";
+  const ctx = ctxWith({ gateHoldSeconds: 30 });
+  store.ensure(id, cwd);
+  const gate = store.openGate(id, "plan", "Review the plan");
+  const turn = stop(id, ctx);
+  await parked(id, gate.id);
+  store.cancelGate(id, gate.id);
+  const out = await withTimeout(turn, 5e3);
+  assert.ok(out, "the hold was released rather than serving out its window");
+  assert.notEqual(out.decision, "block", "there is nothing to say, so nothing is blocked");
+  assert.equal(store.get(id)?.status, "idle");
+});
+test("one gate gets one hold that ends in a message, not an endless chain", async () => {
+  const id = "park-chain-bounded";
+  const ctx = ctxWith({ gateHoldSeconds: 30 });
+  store.ensure(id, cwd);
+  const gate = store.openGate(id, "plan", "Review the plan");
+  const first = stop(id, ctx);
+  await parked(id, gate.id);
+  store.queueFeedback(id, { text: "One thought.", origin: "timeline" });
+  const one = await first;
+  assert.equal(one.decision, "block", "the first message resumes the turn");
+  const started = Date.now();
+  const two = await stop(id, ctx, true);
+  assert.notEqual(two.decision, "block");
+  assert.ok(Date.now() - started < 5e3, "it stopped rather than holding for another window");
+  store.queueFeedback(id, { text: "And another.", origin: "timeline" });
+  const next = await ingestHook("UserPromptSubmit", { session_id: id, cwd, prompt: "go on" }, ctx);
+  assert.match(next.hookSpecificOutput?.additionalContext ?? "", /And another\./);
+});
+test("a verdict frees the next gate to be held again", async () => {
+  const id = "park-chain-resets";
+  const ctx = ctxWith({ gateHoldSeconds: 30 });
+  store.ensure(id, cwd);
+  const first = store.openGate(id, "plan", "Review the plan");
+  const turnOne = stop(id, ctx);
+  await parked(id, first.id);
+  store.resolveGate(id, first.id, { verdict: "approved", resolvedAt: Date.now() });
+  assert.equal((await turnOne).decision, "block");
+  const second = store.openGate(id, "code_review", "Review the diff");
+  const turnTwo = stop(id, ctx, true);
+  await parked(id, second.id);
+  store.resolveGate(id, second.id, { verdict: "approved", resolvedAt: Date.now(), comment: "Good." });
+  const out = await withTimeout(turnTwo, 5e3);
+  assert.ok(out, "the second gate was held too");
+  assert.equal(out.decision, "block");
+  assert.match(out.reason ?? "", /Good\./);
+});
+test("an expired hold does not flash the session as working on its way out", async () => {
+  const id = "park-no-flicker";
+  const ctx = ctxWith();
+  store.ensure(id, cwd);
+  const gate = store.openGate(id, "plan", "Review the plan");
+  const seen = [];
+  const listen = (event) => {
+    if (event.type === "state" && event.patch?.status) seen.push(event.patch.status);
+  };
+  store.on("event", listen);
+  try {
+    await stop(id, ctx);
+  } finally {
+    store.off("event", listen);
+  }
+  assert.equal(store.getGate(id, gate.id)?.waiting, false, "the gate is no longer marked as parked");
+  assert.ok(
+    !seen.includes("active"),
+    `nothing claimed the session was working on a turn that was ending (saw ${seen.join(", ")})`
+  );
+});
+test("two verdicts waiting are both handed over, not just the older one", async () => {
+  const id = "park-two-verdicts";
+  const ctx = ctxWith({ gateHoldSeconds: 0 });
+  store.ensure(id, cwd);
+  const first = store.openGate(id, "plan", "Review the plan");
+  await stop(id, ctx);
+  store.resolveGate(id, first.id, { verdict: "approved", resolvedAt: Date.now(), comment: "First answer." });
+  const second = store.openGate(id, "question", "Map or object?");
+  store.resolveGate(id, second.id, { verdict: "answered", resolvedAt: Date.now(), comment: "Second answer." });
+  const out = await ingestHook("UserPromptSubmit", { session_id: id, cwd, prompt: "go on" }, ctx);
+  const text = out.hookSpecificOutput?.additionalContext ?? "";
+  assert.match(text, /First answer\./);
+  assert.match(text, /Second answer\./, "the newer verdict is not stranded behind the older one");
+  assert.ok(store.undeliveredGates(id).length === 0, "and nothing is left undelivered");
 });
 //# sourceMappingURL=park.test.js.map

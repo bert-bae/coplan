@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { SessionStore } from './store.ts';
 import type { HarnessConfig } from '../shared/config.ts';
 import { TranscriptTailer } from './transcript.ts';
-import { waitForFeedback, renderFeedback, renderGateResult } from './gates.ts';
+import { waitAtGate, waitForFeedback, renderFeedback, renderGateResult, type Resume } from './gates.ts';
 import { currentBranch, headCommit, mainWorktreeRoot, repoRoot } from './git.ts';
 import { scanTranscriptForWorktree, type WorktreeRecord } from './worktree.ts';
 import { attributeFile, clearBaseline, reconcileFiles } from './tasks.ts';
@@ -21,7 +21,7 @@ import {
   type StopInput,
   type UserPromptSubmitInput,
 } from '../shared/hooks.ts';
-import type { TodoItem } from '../shared/types.ts';
+import type { FeedbackItem, TodoItem } from '../shared/types.ts';
 
 const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 /** Ring buffer for the recorded shell history, on both the ok and error paths. */
@@ -29,6 +29,30 @@ const MAX_COMMANDS = 200;
 /** Distinct files tracked per session. A repo-wide refactor is not a leak,
  *  but an unbounded list persisted on every mutation is. */
 const MAX_TOUCHED_FILES = 500;
+/**
+ * Ceiling on any `Stop` hold, in seconds.
+ *
+ * `bin/hook-relay.sh` gives `Stop` 570s of curl and `hooks/hooks.json` gives
+ * it 600s, so a hold configured past that is not a longer wait — it is a wait
+ * whose answer is thrown away, because the relay is killed before the daemon
+ * can hand the verdict back. Staying inside the relay's window means the
+ * worst case is still a clean stop.
+ */
+const MAX_HOLD_SECONDS = 540;
+/**
+ * The gate a session has already spent a hold on, keyed by session.
+ *
+ * A hold that ends in a message rather than a verdict leaves the gate open,
+ * so the next `Stop` would hold on it again — and a user chatting while they
+ * think could chain blocks indefinitely, each one drawing on the CLI's
+ * consecutive-block allowance. One hold per gate bounds that: after it the
+ * session stops properly, and what the user says next arrives as an ordinary
+ * prompt. A verdict clears the entry, because the next gate is a new question.
+ */
+const heldOnce = new Map<string, string>();
+/** Bound it: the daemon runs for weeks and session ids are never reused. */
+const MAX_HELD = 500;
+
 export interface IngestContext {
   store: SessionStore;
   config: HarnessConfig;
@@ -136,6 +160,7 @@ async function onSessionEnd(
   ctx.tailers.get(sessionId)?.close();
   ctx.tailers.delete(sessionId);
   worktreeScanned.delete(sessionId);
+  heldOnce.delete(sessionId);
   clearBaseline(sessionId);
   ctx.store.update(sessionId, { status: 'ended', endedAt: Date.now() });
   ctx.store.addTimeline(sessionId, 'note', `Session ended (${input.end_reason ?? 'unknown'})`, {
@@ -162,10 +187,10 @@ async function onUserPromptSubmit(
   // does a verdict that landed after the harness gave up holding the turn,
   // which is otherwise the one way an answer can sit undelivered.
   const drained = ctx.store.drainFeedback(sessionId);
-  const answered = ctx.store.undeliveredGate(sessionId);
-  if (answered) ctx.store.markGateDelivered(sessionId, answered.id);
+  const answered = ctx.store.undeliveredGates(sessionId);
+  for (const gate of answered) ctx.store.markGateDelivered(sessionId, gate.id);
   const text = [
-    answered ? renderGateResult(answered) : '',
+    ...answered.map(renderGateResult),
     drained.length > 0 ? renderFeedback(drained) : '',
   ]
     .filter(Boolean)
@@ -289,13 +314,17 @@ async function onNotification(
  * The turn boundary — and the harness's main injection point.
  *
  * Anything the user has already said is handed over here, and the turn is
- * resumed to carry it. What does *not* happen here is waiting: an open gate
- * ends the turn. The hook used to block until the user answered and then
- * re-block with `stopBlock` when its window expired, which held the CLI
- * in-turn for `gateHoldRounds × stopHoldSeconds` — the session could not stop,
- * and each rollover cost a real turn. A gate means the next input is the
- * user's to give, so Claude is told the turn is over and the verdict rides
- * along with whatever they type next (see {@link onUserPromptSubmit}).
+ * resumed to carry it. An open gate then holds the turn for one bounded
+ * window: a stopped CLI session cannot be woken from outside, so this is the
+ * only moment at which answering in the browser can move the session on by
+ * itself, and without it a click in the UI did nothing until the user went
+ * back to the terminal and typed.
+ *
+ * The window is single-round. The version that re-blocked on expiry, for
+ * `gateHoldRounds × stopHoldSeconds`, left the CLI structurally unable to
+ * stop for over half an hour and spent a turn per rollover; expiring into a
+ * plain stop costs one window and no turns, and the verdict still rides
+ * whatever the user types next (see {@link onUserPromptSubmit}).
  *
  * Sessions that aren't using the harness fall straight through, so this is
  * invisible to them.
@@ -309,23 +338,12 @@ async function onStop(sessionId: string, input: StopInput, ctx: IngestContext): 
     await reconcileFiles(ctx.store, sessionId).catch(() => {});
   }
 
-  // Feedback that arrived mid-turn goes out immediately, in every case.
-  const drained = ctx.store.drainFeedback(sessionId);
-  if (drained.length > 0) {
-    const open = ctx.store.activeGate(sessionId);
-    ctx.store.update(sessionId, { status: 'active' });
-    return stopBlock(renderFeedback(drained) + (open ? stillParked(open.kind) : ''));
-  }
-
-  // The user may have answered the gate while Claude was still finishing its
-  // turn. That verdict is not "feedback" and no waiter is left to receive it,
-  // so deliver it here or it would be lost.
-  const answered = ctx.store.undeliveredGate(sessionId);
-  if (answered) {
-    ctx.store.markGateDelivered(sessionId, answered.id);
-    ctx.store.update(sessionId, { status: 'active' });
-    return stopBlock(renderGateResult(answered));
-  }
+  // Anything the user has already said goes out immediately — and all of it
+  // on the same turn. Delivering only the message and leaving the verdict for
+  // the next Stop left Claude working on a comment while the answer it was
+  // waiting for sat in the store, and cost a second block to hand over.
+  const early = deliverPending(sessionId, ctx);
+  if (early) return early;
 
   const gate = ctx.store.activeGate(sessionId);
 
@@ -355,12 +373,109 @@ async function onStop(sessionId: string, input: StopInput, ctx: IngestContext): 
     return HOOK_NOOP;
   }
 
-  // A gate is open, so the next input is the user's to give: end the turn and
-  // let Claude stop. Nothing is held here — not the hook, not the terminal.
-  // The verdict reaches the session through `onUserPromptSubmit`, whether the
-  // user answers in the UI and then types, or answers in the terminal itself.
+  // A gate is open. Hold the turn for one bounded window so that answering in
+  // the browser resumes the session by itself — there is no other moment at
+  // which it can, because a stopped CLI session cannot be woken from outside.
   ctx.store.update(sessionId, { status: 'waiting' });
+  // `stop_hook_active` alone is too blunt to gate this on: it stays true for
+  // the whole continuation chain, so keying off it would give the hold to the
+  // first gate of a run and to none of the others. What has to be bounded is
+  // narrower — chatting to a session while one gate stays open would
+  // otherwise hold, block, hold, block indefinitely on that gate, and every
+  // block draws on the CLI's consecutive-block allowance. So a gate gets one
+  // hold that ends in a message; after that it stops, and the next thing the
+  // user says reaches it as an ordinary prompt.
+  const spent = heldOnce.get(sessionId) === gate.id && input.stop_hook_active === true;
+  const hold = spent ? 0 : Math.min(ctx.config.gateHoldSeconds, MAX_HOLD_SECONDS);
+  if (hold > 0) {
+    const resumed = await waitAtGate(ctx.store, sessionId, gate.id, {
+      timeoutMs: hold * 1000,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+    });
+    const delivered = resumed ? renderResume(sessionId, resumed, ctx) : null;
+    if (delivered) {
+      // A verdict closes the gate, so the next hold is a fresh question. A
+      // message leaves it open, and that is the one worth counting.
+      if (resumed?.kind === 'feedback') {
+        if (heldOnce.size >= MAX_HELD) heldOnce.clear();
+        heldOnce.set(sessionId, gate.id);
+      } else {
+        heldOnce.delete(sessionId);
+      }
+      ctx.store.update(sessionId, { status: 'active' });
+      return stopBlock(delivered);
+    }
+  }
+
+  // The window closed with nothing to say — or there is no window. Either
+  // way the turn ends here and Claude stops; nothing re-parks, because a hold
+  // that renews itself is what left the CLI unable to stop at all. The
+  // verdict reaches the session through `onUserPromptSubmit` instead.
+  //
+  // Only a gate still standing makes this `waiting`: the hold can also end
+  // because the gate was skipped, and a session with nothing left to answer
+  // must not go on asking for the user's attention.
+  ctx.store.update(sessionId, { status: ctx.store.activeGate(sessionId) ? 'waiting' : 'idle' });
   return HOOK_NOOP;
+}
+
+/**
+ * Hand over everything the user has already said, as one message.
+ *
+ * A queued message and an answered gate are separate things that can both be
+ * waiting at the same moment, and they used to be delivered by two mutually
+ * exclusive branches — so the one that lost sat undelivered for a whole extra
+ * round. Returns `null` when there is nothing pending.
+ */
+function deliverPending(sessionId: string, ctx: IngestContext): HookOutput | null {
+  const drained = ctx.store.drainFeedback(sessionId);
+  const answered = ctx.store.undeliveredGates(sessionId);
+  if (drained.length === 0 && answered.length === 0) return null;
+
+  const parts: string[] = [];
+  for (const gate of answered) {
+    ctx.store.markGateDelivered(sessionId, gate.id);
+    parts.push(renderGateResult(gate));
+  }
+  // "Still parked" only if a gate is genuinely still open after all this; a
+  // verdict just delivered means the step it belonged to is closed.
+  if (drained.length > 0) parts.push(renderMessages(sessionId, drained, ctx));
+  ctx.store.update(sessionId, { status: 'active' });
+  return stopBlock(parts.join('\n\n'));
+}
+
+/** Turn whatever ended the hold into the text that resumes the turn. */
+function renderResume(sessionId: string, resumed: Resume, ctx: IngestContext): string | null {
+  if (resumed.kind === 'feedback') return renderMessages(sessionId, resumed.items, ctx);
+
+  const gate = resumed.gate;
+  if (gate.result) {
+    ctx.store.markGateDelivered(sessionId, gate.id);
+    return renderGateResult(gate);
+  }
+
+  // The gate ended without a verdict. "Send now" queues its message before
+  // closing the gate, so look for that before concluding there is nothing to
+  // say — otherwise the message it was replaced with would be left behind.
+  const queued = ctx.store.drainFeedback(sessionId);
+  if (queued.length > 0) return renderMessages(sessionId, queued, ctx);
+
+  // Cancelled with nothing behind it, or superseded by a newer gate. Only a
+  // turn ending can re-arm this hook, so let it end rather than block with
+  // nothing to say — the newer gate gets its own window on the next Stop.
+  return null;
+}
+
+/**
+ * The user's messages, plus a note if they are not the verdict.
+ *
+ * A message that arrives with a gate still open is not an answer to it, and
+ * saying so is what stops the model treating "actually, check X first" as
+ * approval. A gate that has since been answered or skipped gets no such note.
+ */
+function renderMessages(sessionId: string, items: FeedbackItem[], ctx: IngestContext): string {
+  const open = ctx.store.activeGate(sessionId);
+  return renderFeedback(items) + (open ? stillParked(open.kind) : '');
 }
 
 /** Appended when feedback arrives while a gate is still open, so the model

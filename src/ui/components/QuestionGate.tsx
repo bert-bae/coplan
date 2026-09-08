@@ -5,6 +5,7 @@ import { Button } from './primitives.tsx';
 import { classNames } from '../lib/format.ts';
 import { useElapsed } from '../lib/hooks.ts';
 import { scrollBehavior } from '../lib/motion.ts';
+import { verdictToast } from '../lib/stages.ts';
 import type { Gate, GateQuestion } from '../../shared/types.ts';
 
 /**
@@ -57,7 +58,7 @@ export function QuestionGate() {
       )}
       {/* The message box below looks like it would do, and does not. */}
       <p className="question-foot">
-        Answering here is the only thing that resumes the session. A message in the box at the bottom is
+        Answering here is the only thing that moves this on. A message in the box at the bottom is
         queued behind this question unless you send it with <strong>Send now</strong>.
       </p>
     </div>
@@ -79,7 +80,7 @@ function QuickAnswer({ gate, sessionId }: { gate: Gate; sessionId: string }) {
     setBusy(true);
     try {
       await api.resolveGate(sessionId, gate.id, { verdict: 'answered', comment: body });
-      store.toast('success', 'Answer sent — Claude is resuming.');
+      store.toast('success', verdictToast(gate, 'Answer sent'));
       setAnswer('');
     } catch (err) {
       store.fail(err);
@@ -170,7 +171,7 @@ function QuestionForm({
     setBusy(true);
     try {
       await api.resolveGate(sessionId, gate.id, { verdict: 'answered', answers });
-      store.toast('success', 'Answers sent — Claude is resuming.');
+      store.toast('success', verdictToast(gate, 'Answers sent'));
     } catch (err) {
       store.fail(err);
     } finally {

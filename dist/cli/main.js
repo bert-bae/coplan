@@ -171,23 +171,59 @@ async function runDoctor() {
   const gateId = String(plan["gateId"] ?? "");
   record("harness_publish_plan opens a gate", Boolean(gateId), gateId, true);
   if (gateId) {
-    const stopOut = await withTimeout(hook("Stop", { stop_hook_active: false }), 1e4);
-    const held = stopOut?.decision === "block" || stopOut?.hookSpecificOutput?.decision === "block";
-    const ended = stopOut !== null && !held;
-    record(
-      "an open gate ends the turn instead of holding it",
-      ended,
-      ended ? void 0 : held ? "the turn was blocked \u2014 the session cannot stop at a gate" : "the Stop hook never answered",
-      true
+    const parked = hook("Stop", { stop_hook_active: false });
+    const held = await withTimeout(
+      (async () => {
+        for (let i = 0; i < 40; i++) {
+          const res = await fetch(`${baseUrl(lock)}/api/session/${sessionId}`, {
+            headers: { authorization: `Bearer ${lock.token}` }
+          });
+          const body = await res.json();
+          if (body.session?.gates?.find((g) => g.id === gateId)?.waiting) return true;
+          await sleep(100);
+        }
+        return false;
+      })(),
+      1e4
     );
     await fetch(`${baseUrl(lock)}/api/session/${sessionId}/gate/${gateId}/resolve`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${lock.token}` },
       body: JSON.stringify({ verdict: "changes_requested", comment: "doctor probe feedback" })
     });
-    const resumed = await withTimeout(hook("UserPromptSubmit", { prompt: "doctor probe prompt" }), 1e4);
-    const carries = JSON.stringify(resumed ?? {}).includes("doctor probe feedback");
-    record("the verdict reaches Claude with the next message", carries, carries ? void 0 : "feedback text missing", true);
+    const stopOut = await withTimeout(parked, 15e3);
+    const resumedNow = JSON.stringify(stopOut ?? {}).includes("doctor probe feedback");
+    if (held) {
+      record(
+        "answering the gate in the UI resumes the session",
+        resumedNow,
+        resumedNow ? void 0 : stopOut === null ? "the Stop hook never answered" : "the turn ended without the verdict \u2014 a click in the UI would not move the session on",
+        true
+      );
+    } else {
+      record(
+        "answering the gate in the UI resumes the session",
+        true,
+        "skipped: gateHoldSeconds is 0, so this project has the hold turned off by choice"
+      );
+    }
+    const second = await mcp("ask", { question: "doctor probe question" });
+    const secondGate = String(second["gateId"] ?? "");
+    if (secondGate) {
+      await fetch(`${baseUrl(lock)}/api/session/${sessionId}/gate/${secondGate}/resolve`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${lock.token}` },
+        body: JSON.stringify({ verdict: "answered", comment: "doctor probe answer" })
+      });
+      const resumed = await withTimeout(hook("UserPromptSubmit", { prompt: "doctor probe prompt" }), 1e4);
+      const carries = JSON.stringify(resumed ?? {}).includes("doctor probe answer");
+      record(
+        "a verdict that missed the window still arrives with the next message",
+        carries,
+        carries ? void 0 : "feedback text missing",
+        true
+      );
+    }
   }
   await fetch(`${baseUrl(lock)}/api/session/${sessionId}/feedback`, {
     method: "POST",

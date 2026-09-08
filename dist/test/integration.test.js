@@ -60,6 +60,7 @@ function baseUrl(lock2) {
 
 // src/test/integration.test.ts
 var DAEMON = path2.resolve(path2.dirname(fileURLToPath(import.meta.url)), "..", "daemon", "main.js");
+var GATE_HOLD_SECONDS = 1.5;
 var home;
 var repo;
 var daemon;
@@ -82,6 +83,10 @@ before(async () => {
   git(["checkout", "-qb", "feature/change"]);
   transcript = path2.join(home, "transcript.jsonl");
   writeFileSync(transcript, "");
+  writeFileSync(
+    path2.join(home, "config.json"),
+    JSON.stringify({ gateHoldSeconds: GATE_HOLD_SECONDS })
+  );
   daemon = spawn(process.execPath, [DAEMON], {
     env: { ...process.env, CC_HARNESS_HOME: home },
     stdio: "ignore"
@@ -199,7 +204,32 @@ test("tool-result user entries are not mistaken for user prompts", async () => {
   const s = await session();
   assert.equal(s.timeline.filter((e) => e.kind === "user").length, 0);
 });
-test("the plan gate ends the turn, and the edited plan comes back on the next message", async () => {
+test("the plan gate holds the turn, and answering in the UI resumes the session", async () => {
+  const other = "integration-plan-resume";
+  await hookFor(other, "SessionStart", { start_reason: "startup" });
+  const published = await mcpFor(other, "plan", {
+    title: "Resume on approve",
+    steps: [{ title: "only step" }]
+  });
+  const gateId = String(published["gateId"]);
+  const parked = hookFor(other, "Stop", { stop_hook_active: false });
+  await until(async () => {
+    const s = await sessionFor(other);
+    return s.gates.find((g) => g.id === gateId)?.waiting === true;
+  });
+  await call(`/api/session/${other}/gate/${gateId}/resolve`, {
+    method: "POST",
+    body: JSON.stringify({ verdict: "approved", comment: "Go ahead." })
+  });
+  const out = await withTimeout(parked, 8e3);
+  assert.ok(out, "the held Stop hook returned rather than hanging");
+  assert.equal(out.decision, "block", "the turn is resumed, not ended");
+  assert.match(out.reason ?? "", /approved at the plan gate/);
+  assert.match(out.reason ?? "", /Go ahead\./);
+  const after2 = await sessionFor(other);
+  assert.equal(after2.status, "active", "and the session is working again, not still asking for the user");
+});
+test("a verdict that misses the window comes back on the next message", async () => {
   const plan = await mcp("plan", {
     title: "Add a subtract function",
     summary: "Mirror add().",

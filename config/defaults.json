@@ -2,6 +2,7 @@
   "autoOpen": false,
   "maxTimelineEvents": 500,
   "stopHoldSeconds": 540,
+  "gateHoldSeconds": 300,
   "awaitSeconds": 120,
   "holdIdleSessions": false,
   "maxDiffFileBytes": 400000,

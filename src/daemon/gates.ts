@@ -4,12 +4,15 @@ import type { FeedbackItem, Gate, GateResult, ReviewThread } from '../shared/typ
 /**
  * Long-poll primitives.
  *
- * Nothing waits on a gate any more: an open gate ends the turn, and the
- * verdict is delivered with the user's next message. What is left here are
- * the two waits that still have a caller — {@link waitForGate}, behind the
- * `harness_await` escape hatch, and {@link waitForFeedback}, behind the
- * opt-in `holdIdleSessions`. Both hold the terminal for as long as they run,
- * which is why neither is on the default path.
+ * There is no way to wake a stopped Claude Code session from outside — no
+ * socket, no IPC, no CLI verb — so a verdict can only resume a turn while the
+ * `Stop` hook that would end that turn is still running. {@link waitAtGate}
+ * is that window, and it is what makes answering in the browser move the
+ * session on by itself. It is bounded and never renews: on expiry the turn
+ * ends for good and the verdict rides the user's next message instead.
+ *
+ * {@link waitForGate} sits behind the `harness_await` escape hatch and
+ * {@link waitForFeedback} behind the opt-in `holdIdleSessions`.
  *
  * Every wait is bounded — the hook's own timeout is a hard wall clock, so a
  * call that never returned would be killed rather than resumed. Returning
@@ -74,6 +77,76 @@ export function waitForGate(
  * only for the gate is what made a message queued in the browser sit unread
  * behind a step nobody had got round to answering.
  */
+export type Resume =
+  | { kind: 'gate'; gate: Gate }
+  | { kind: 'feedback'; items: FeedbackItem[] };
+
+/**
+ * Hold the turn open on one gate, for one bounded window.
+ *
+ * This is the only mechanism by which answering in the browser moves the
+ * session on by itself: a stopped CLI session cannot be woken from outside,
+ * so the verdict has to arrive while the `Stop` hook that would end the turn
+ * is still running. Returning `null` means the window closed with nothing to
+ * say — the caller lets the turn end, and the verdict is delivered with the
+ * user's next message instead. It must never re-park: a hold that renews
+ * itself is what made the session unable to stop at all.
+ */
+export function waitAtGate(
+  store: SessionStore,
+  sessionId: string,
+  gateId: string,
+  opts: WaitOptions,
+): Promise<Resume | null> {
+  const existing = store.getGate(sessionId, gateId);
+  if (existing && existing.status !== 'open') {
+    return Promise.resolve({ kind: 'gate', gate: existing });
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: Resume | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      store.off('gate:resolved', onGate);
+      store.off('gate:cancelled', onGate);
+      store.off('feedback:queued', onQueued);
+      opts.signal?.removeEventListener('abort', onAbort);
+      // Not `setGateWaiting(false)`: that promotes the session to `active`,
+      // which is a lie when the window merely expired. `onStop` sets the real
+      // status on every path out of here.
+      store.clearGateWaiting(sessionId, gateId);
+      resolve(value);
+    };
+
+    // Resolved and cancelled both end the wait: a superseded or skipped gate
+    // will never produce a verdict, and holding for one that cannot arrive is
+    // the whole failure this is meant to avoid.
+    const onGate = (payload: { sessionId: string; gate: Gate }) => {
+      if (payload.sessionId !== sessionId || payload.gate.id !== gateId) return;
+      finish({ kind: 'gate', gate: payload.gate });
+    };
+    // A message typed in the browser wakes the turn too, so an open gate does
+    // not leave the queue stuck behind a step nobody has answered.
+    const onQueued = (payload: { sessionId: string }) => {
+      if (payload.sessionId !== sessionId) return;
+      const items = store.drainFeedback(sessionId);
+      if (items.length === 0) return;
+      finish({ kind: 'feedback', items });
+    };
+    const onAbort = () => finish(null);
+
+    const timer = setTimeout(() => finish(null), opts.timeoutMs);
+    timer.unref?.();
+    store.on('gate:resolved', onGate);
+    store.on('gate:cancelled', onGate);
+    store.on('feedback:queued', onQueued);
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+    store.setGateWaiting(sessionId, gateId, true);
+  });
+}
+
 /**
  * Wait for any async comment. Used by the `Stop` hook to hold a finished turn
  * open long enough for the user to react to what just happened.

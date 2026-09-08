@@ -913,3 +913,46 @@ test('the ship gate can be declined instead of leaving the session parked', asyn
   assert.equal(call!.body['verdict'], 'rejected');
   cleanup();
 });
+
+test('a panel does not promise a resume the harness cannot deliver', async () => {
+  // `gate.waiting` is the difference between a turn genuinely held open on
+  // this gate — where answering resumes it there and then — and a session
+  // that has already stopped, where nothing can wake it from outside and the
+  // verdict rides the user's next message. Every panel used to claim the
+  // first unconditionally, which is what made answering look broken: the
+  // toast said "Claude is resuming" and nothing moved.
+  const stopped = makeSession({ stage: 'plan_review', status: 'idle' });
+  stopped.gates[0] = { ...stopped.gates[0]!, kind: 'plan', prompt: 'Review the plan', waiting: false };
+  await boot(stopped);
+  act(() => store.setTab('plan'));
+
+  const idleCopy = document.querySelector('.plan')!.textContent ?? '';
+  assert.match(idleCopy, /next time the session runs/i);
+  assert.doesNotMatch(idleCopy, /resumes the parked session/i);
+  cleanup();
+
+  // And when a turn really is parked on it, it says so.
+  const parked = makeSession({ stage: 'plan_review' });
+  parked.gates[0] = { ...parked.gates[0]!, kind: 'plan', prompt: 'Review the plan', waiting: true };
+  await boot(parked);
+  act(() => store.setTab('plan'));
+  assert.match(document.querySelector('.plan')!.textContent ?? '', /resumes the parked session/i);
+  cleanup();
+});
+
+test('the toast after answering says what actually happens next', async () => {
+  const stopped = makeSession({ stage: 'plan_review', status: 'idle' });
+  stopped.gates[0] = { ...stopped.gates[0]!, kind: 'plan', prompt: 'Review the plan', waiting: false };
+  await boot(stopped);
+  act(() => store.setTab('plan'));
+
+  await act(async () => {
+    fireEvent.click(screen.getByText('Approve plan'));
+  });
+
+  const toast = document.querySelector('.toast')?.textContent ?? '';
+  assert.match(toast, /Plan approved/);
+  assert.match(toast, /with your next message/i, 'the user is told the click alone does not move it on');
+  assert.doesNotMatch(toast, /Claude is resuming/i);
+  cleanup();
+});

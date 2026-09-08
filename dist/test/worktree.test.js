@@ -98,6 +98,10 @@ function migrate(state) {
   for (const gate of state.gates) gate.waiting = false;
   trimGates(state);
 }
+function settleStatus(state, parked) {
+  if (state.status !== "waiting") return;
+  state.status = parked ? "active" : "idle";
+}
 function trimGates(state) {
   if (state.gates.length <= MAX_GATES) return;
   const keep = /* @__PURE__ */ new Set();
@@ -485,10 +489,12 @@ var init_store = __esm({
         const state = this.sessions.get(id);
         const gate = state?.gates.find((g) => g.id === gateId);
         if (!state || !gate || gate.status !== "open") return void 0;
+        const parked = gate.waiting;
         gate.status = "resolved";
         gate.result = result;
         gate.waiting = false;
         if (state.activeGateId === gateId) state.activeGateId = null;
+        settleStatus(state, parked);
         if (result.threads?.length) {
           const byId = new Map(state.threads.map((t) => [t.id, t]));
           for (const t of result.threads) byId.set(t.id, t);
@@ -521,16 +527,22 @@ var init_store = __esm({
         const state = this.sessions.get(id);
         const gate = state?.gates.find((g) => g.id === gateId);
         if (!state || !gate || gate.status !== "open") return void 0;
+        const parked = gate.waiting;
         gate.status = "cancelled";
         gate.waiting = false;
         if (state.activeGateId === gateId) state.activeGateId = null;
+        settleStatus(state, parked);
         state.updatedAt = Date.now();
         this.persistSoon(id);
         this.addTimeline(id, "gate", reason ?? `The user skipped the ${gate.kind.replace("_", " ")} gate.`, {
           label: gate.kind,
           meta: { gateId, cancelled: true }
         });
-        this.emitEvent({ type: "state", sessionId: id, patch: { gates: state.gates, activeGateId: null } });
+        this.emitEvent({
+          type: "state",
+          sessionId: id,
+          patch: { gates: state.gates, activeGateId: null, status: state.status }
+        });
         this.broadcastSessionList();
         this.emit("gate:cancelled", { sessionId: id, gate });
         return gate;
@@ -540,7 +552,19 @@ var init_store = __esm({
        * about. This happens whenever the user answers faster than the turn ends.
        */
       undeliveredGate(id) {
-        return this.sessions.get(id)?.gates.find((g) => g.status === "resolved" && g.result && !g.deliveredAt);
+        return this.undeliveredGates(id)[0];
+      }
+      /**
+       * Every answered gate Claude has not been told about, oldest first.
+       *
+       * Usually there is at most one. More than one means an answer was given
+       * while the session was stopped and then another gate came and went before
+       * it next ran — and handing over only the first would leave the user's most
+       * recent verdict stranded behind a stale one, which reads as the click
+       * having done nothing.
+       */
+      undeliveredGates(id) {
+        return this.sessions.get(id)?.gates.filter((g) => g.status === "resolved" && g.result && !g.deliveredAt) ?? [];
       }
       markGateDelivered(id, gateId) {
         const gate = this.getGate(id, gateId);
@@ -557,6 +581,23 @@ var init_store = __esm({
         }
         this.persistSoon(id);
         return gate;
+      }
+      /**
+       * Stop marking a gate as parked, without deciding what the session is doing.
+       *
+       * {@link setGateWaiting} promotes a session off `waiting` when its wait
+       * ends, which is right for `harness_await` — the wait ending there means the
+       * turn is carrying on. It is wrong for a gate hold that simply expired:
+       * nothing is running, the turn is about to end, and broadcasting `active`
+       * first makes every unanswered gate flash the session card from "waiting"
+       * to "working" and back. The caller sets the real status straight after.
+       */
+      clearGateWaiting(id, gateId) {
+        const gate = this.getGate(id, gateId);
+        if (!gate || !gate.waiting) return;
+        gate.waiting = false;
+        const state = this.sessions.get(id);
+        if (state) this.emitEvent({ type: "state", sessionId: id, patch: { gates: state.gates } });
       }
       setGateWaiting(id, gateId, waiting) {
         const gate = this.getGate(id, gateId);
@@ -878,10 +919,12 @@ function changedBetween(before2, after2) {
 }
 
 // src/shared/config.ts
+var CHECK_RUN_BUDGET_MS = 15 * 6e4;
 var DEFAULT_CONFIG = {
   autoOpen: false,
   maxTimelineEvents: 500,
   stopHoldSeconds: 540,
+  gateHoldSeconds: 300,
   awaitSeconds: 120,
   holdIdleSessions: false,
   maxDiffFileBytes: 4e5,
@@ -1174,6 +1217,44 @@ function readRange(file, start, end) {
 }
 
 // src/daemon/gates.ts
+function waitAtGate(store, sessionId, gateId, opts) {
+  const existing = store.getGate(sessionId, gateId);
+  if (existing && existing.status !== "open") {
+    return Promise.resolve({ kind: "gate", gate: existing });
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      store.off("gate:resolved", onGate);
+      store.off("gate:cancelled", onGate);
+      store.off("feedback:queued", onQueued);
+      opts.signal?.removeEventListener("abort", onAbort);
+      store.clearGateWaiting(sessionId, gateId);
+      resolve(value);
+    };
+    const onGate = (payload) => {
+      if (payload.sessionId !== sessionId || payload.gate.id !== gateId) return;
+      finish({ kind: "gate", gate: payload.gate });
+    };
+    const onQueued = (payload) => {
+      if (payload.sessionId !== sessionId) return;
+      const items = store.drainFeedback(sessionId);
+      if (items.length === 0) return;
+      finish({ kind: "feedback", items });
+    };
+    const onAbort = () => finish(null);
+    const timer = setTimeout(() => finish(null), opts.timeoutMs);
+    timer.unref?.();
+    store.on("gate:resolved", onGate);
+    store.on("gate:cancelled", onGate);
+    store.on("feedback:queued", onQueued);
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
+    store.setGateWaiting(sessionId, gateId, true);
+  });
+}
 function waitForFeedback(store, sessionId, opts) {
   const session = store.get(sessionId);
   if (session && session.pendingFeedback.length > 0) {
@@ -1400,6 +1481,9 @@ var HOOK_NOOP = { suppressOutput: true };
 var EDIT_TOOLS = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 var MAX_COMMANDS = 200;
 var MAX_TOUCHED_FILES = 500;
+var MAX_HOLD_SECONDS = 540;
+var heldOnce = /* @__PURE__ */ new Map();
+var MAX_HELD = 500;
 var worktreeScanned = /* @__PURE__ */ new Set();
 var MAX_SCANNED = 500;
 async function ingestHook(event, input, ctx) {
@@ -1457,6 +1541,7 @@ async function onSessionEnd(sessionId, input, ctx) {
   ctx.tailers.get(sessionId)?.close();
   ctx.tailers.delete(sessionId);
   worktreeScanned.delete(sessionId);
+  heldOnce.delete(sessionId);
   clearBaseline(sessionId);
   ctx.store.update(sessionId, { status: "ended", endedAt: Date.now() });
   ctx.store.addTimeline(sessionId, "note", `Session ended (${input.end_reason ?? "unknown"})`, {
@@ -1474,10 +1559,10 @@ async function onUserPromptSubmit(sessionId, input, ctx) {
   });
   attachTailer(sessionId, ctx);
   const drained = ctx.store.drainFeedback(sessionId);
-  const answered = ctx.store.undeliveredGate(sessionId);
-  if (answered) ctx.store.markGateDelivered(sessionId, answered.id);
+  const answered = ctx.store.undeliveredGates(sessionId);
+  for (const gate of answered) ctx.store.markGateDelivered(sessionId, gate.id);
   const text = [
-    answered ? renderGateResult(answered) : "",
+    ...answered.map(renderGateResult),
     drained.length > 0 ? renderFeedback(drained) : ""
   ].filter(Boolean).join("\n\n");
   if (text) return additionalContext("UserPromptSubmit", text);
@@ -1569,18 +1654,8 @@ async function onStop(sessionId, input, ctx) {
     await reconcileFiles(ctx.store, sessionId).catch(() => {
     });
   }
-  const drained = ctx.store.drainFeedback(sessionId);
-  if (drained.length > 0) {
-    const open = ctx.store.activeGate(sessionId);
-    ctx.store.update(sessionId, { status: "active" });
-    return stopBlock(renderFeedback(drained) + (open ? stillParked(open.kind) : ""));
-  }
-  const answered = ctx.store.undeliveredGate(sessionId);
-  if (answered) {
-    ctx.store.markGateDelivered(sessionId, answered.id);
-    ctx.store.update(sessionId, { status: "active" });
-    return stopBlock(renderGateResult(answered));
-  }
+  const early = deliverPending(sessionId, ctx);
+  if (early) return early;
   const gate = ctx.store.activeGate(sessionId);
   if (input.stop_hook_active && !gate) {
     ctx.store.update(sessionId, { status: "idle" });
@@ -1602,7 +1677,55 @@ async function onStop(sessionId, input, ctx) {
     return HOOK_NOOP;
   }
   ctx.store.update(sessionId, { status: "waiting" });
+  const spent = heldOnce.get(sessionId) === gate.id && input.stop_hook_active === true;
+  const hold = spent ? 0 : Math.min(ctx.config.gateHoldSeconds, MAX_HOLD_SECONDS);
+  if (hold > 0) {
+    const resumed = await waitAtGate(ctx.store, sessionId, gate.id, {
+      timeoutMs: hold * 1e3,
+      ...ctx.signal ? { signal: ctx.signal } : {}
+    });
+    const delivered = resumed ? renderResume(sessionId, resumed, ctx) : null;
+    if (delivered) {
+      if (resumed?.kind === "feedback") {
+        if (heldOnce.size >= MAX_HELD) heldOnce.clear();
+        heldOnce.set(sessionId, gate.id);
+      } else {
+        heldOnce.delete(sessionId);
+      }
+      ctx.store.update(sessionId, { status: "active" });
+      return stopBlock(delivered);
+    }
+  }
+  ctx.store.update(sessionId, { status: ctx.store.activeGate(sessionId) ? "waiting" : "idle" });
   return HOOK_NOOP;
+}
+function deliverPending(sessionId, ctx) {
+  const drained = ctx.store.drainFeedback(sessionId);
+  const answered = ctx.store.undeliveredGates(sessionId);
+  if (drained.length === 0 && answered.length === 0) return null;
+  const parts = [];
+  for (const gate of answered) {
+    ctx.store.markGateDelivered(sessionId, gate.id);
+    parts.push(renderGateResult(gate));
+  }
+  if (drained.length > 0) parts.push(renderMessages(sessionId, drained, ctx));
+  ctx.store.update(sessionId, { status: "active" });
+  return stopBlock(parts.join("\n\n"));
+}
+function renderResume(sessionId, resumed, ctx) {
+  if (resumed.kind === "feedback") return renderMessages(sessionId, resumed.items, ctx);
+  const gate = resumed.gate;
+  if (gate.result) {
+    ctx.store.markGateDelivered(sessionId, gate.id);
+    return renderGateResult(gate);
+  }
+  const queued = ctx.store.drainFeedback(sessionId);
+  if (queued.length > 0) return renderMessages(sessionId, queued, ctx);
+  return null;
+}
+function renderMessages(sessionId, items, ctx) {
+  const open = ctx.store.activeGate(sessionId);
+  return renderFeedback(items) + (open ? stillParked(open.kind) : "");
 }
 function stillParked(kind) {
   return `

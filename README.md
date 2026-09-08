@@ -14,8 +14,8 @@ front of the session and wires it back in.
  │   hooks (sh + curl relay)         MCP stdio server  │
  └──────────┬─────────────────────────────┬────────────┘
             │ POST /hook/<Event>          │ tools/call
-            │ (Stop ends the turn at a    │ (publishes gates, notes,
-            │  gate; nothing is held)     │  replies; never waits)
+            │ (Stop holds the turn at a   │ (publishes gates, notes,
+            │  gate, briefly)             │  replies; never waits)
             ▼                             ▼
  ┌──────────────── cc-harnessd (one per user) ─────────────────┐
  │  sessions · stage machine · transcript tailer               │
@@ -156,13 +156,20 @@ with `--dry-run` to only list, and an optional group name to narrow it.
 Two paths, both landing in the session transcript:
 
 **Gates (stop and wait).** When Claude publishes a plan, a diff, or a check
-run, a gate opens and Claude ends its turn — genuinely ends it. The session
-stops, the terminal comes back, and the gate stands open in the UI for as long
-as you need. Nothing is held: no hook blocking, no turn kept alive, no tokens
-spent while you read. When you submit in the UI the gate resolves, and your
-verdict — your edited plan, your line comments — is handed to the session at the
-top of your next message to it. Answering in the UI and then saying "go ahead"
-in the terminal is the normal flow; answering in the terminal alone works too.
+run, a gate opens and the turn is held open for a few minutes — long enough
+that answering in the browser resumes the session there and then, which is the
+whole point of having the UI. There is no way to wake a stopped Claude Code
+session from outside, so that window is the only moment at which a click can
+move it on.
+
+Miss the window and the turn ends for good: the terminal comes back, and the
+gate stands open in the UI for as long as you need. Your verdict is then handed
+to the session at the top of your next message to it. Either way nothing polls
+and no tokens are spent while you read.
+
+The window is bounded and single-round — it never re-blocks on expiry, which is
+what once left a session structurally unable to stop for half an hour. Set
+`gateHoldSeconds` to `0` to get the terminal back the instant a gate opens.
 
 **Async messages.** Anything you send while Claude is working queues and is
 delivered at the next turn boundary, so you never have to interrupt. A message
@@ -232,7 +239,7 @@ approve button is never a page away.
 review offers a *changed since round N* filter and marks the files that moved,
 so a re-review costs you only what actually changed.
 
-Both waits are bounded and every failure path is fail-open: if the daemon is
+Every wait is bounded and every failure path is fail-open: if the daemon is
 down, hooks print nothing and exit 0, and the session is unaffected.
 
 ## What costs tokens, and what doesn't

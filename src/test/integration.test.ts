@@ -18,6 +18,9 @@ import type { HookOutput } from '../shared/hooks.ts';
  */
 
 const DAEMON = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'daemon', 'main.js');
+/** Long enough for a test to answer inside the window, short enough that a
+ *  test which does not answer is not punished for it. */
+const GATE_HOLD_SECONDS = 1.5;
 
 let home: string;
 let repo: string;
@@ -45,6 +48,14 @@ before(async () => {
 
   transcript = path.join(home, 'transcript.jsonl');
   writeFileSync(transcript, '');
+
+  // A gate holds the turn open so that answering in the browser resumes the
+  // session. Real sessions want minutes of that; a test wants just enough to
+  // prove the hold exists, and then to stop paying for it.
+  writeFileSync(
+    path.join(home, 'config.json'),
+    JSON.stringify({ gateHoldSeconds: GATE_HOLD_SECONDS }),
+  );
 
   daemon = spawn(process.execPath, [DAEMON], {
     env: { ...process.env, CC_HARNESS_HOME: home },
@@ -187,7 +198,39 @@ test('tool-result user entries are not mistaken for user prompts', async () => {
   assert.equal(s.timeline.filter((e) => e.kind === 'user').length, 0);
 });
 
-test('the plan gate ends the turn, and the edited plan comes back on the next message', async () => {
+test('the plan gate holds the turn, and answering in the UI resumes the session', async () => {
+  // The headline promise: the user clicks Approve in the browser and Claude
+  // carries on, without going back to the terminal to type anything.
+  const other = 'integration-plan-resume';
+  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
+  const published = await mcpFor(other, 'plan', {
+    title: 'Resume on approve',
+    steps: [{ title: 'only step' }],
+  });
+  const gateId = String(published['gateId']);
+
+  const parked = hookFor(other, 'Stop', { stop_hook_active: false });
+  await until(async () => {
+    const s = await sessionFor(other);
+    return s.gates.find((g) => g.id === gateId)?.waiting === true;
+  });
+
+  await call(`/api/session/${other}/gate/${gateId}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ verdict: 'approved', comment: 'Go ahead.' }),
+  });
+
+  const out = await withTimeout(parked, 8000);
+  assert.ok(out, 'the held Stop hook returned rather than hanging');
+  assert.equal(out.decision, 'block', 'the turn is resumed, not ended');
+  assert.match(out.reason ?? '', /approved at the plan gate/);
+  assert.match(out.reason ?? '', /Go ahead\./);
+
+  const after = await sessionFor(other);
+  assert.equal(after.status, 'active', 'and the session is working again, not still asking for the user');
+});
+
+test('a verdict that misses the window comes back on the next message', async () => {
   const plan = await mcp('plan', {
     title: 'Add a subtract function',
     summary: 'Mirror add().',
@@ -199,8 +242,8 @@ test('the plan gate ends the turn, and the edited plan comes back on the next me
   assert.match(String(plan['text']), /End your turn now/);
   assert.doesNotMatch(String(plan['text']), /Call harness_await/);
 
-  // Claude ends its turn and stops. The gate stays open behind it — nothing
-  // is held: not the hook, not the terminal.
+  // Nobody answers inside the hold, so the window closes and the turn ends
+  // for good. The gate stays open behind it, to be answered at leisure.
   const stopped = await hook('Stop', { stop_hook_active: false });
   assert.notEqual(stopped.decision, 'block', 'the turn is allowed to end');
   assert.equal((await session()).status, 'waiting');

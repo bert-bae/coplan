@@ -439,10 +439,12 @@ var SessionStore = class extends EventEmitter {
     const state = this.sessions.get(id);
     const gate = state?.gates.find((g) => g.id === gateId);
     if (!state || !gate || gate.status !== "open") return void 0;
+    const parked = gate.waiting;
     gate.status = "resolved";
     gate.result = result;
     gate.waiting = false;
     if (state.activeGateId === gateId) state.activeGateId = null;
+    settleStatus(state, parked);
     if (result.threads?.length) {
       const byId = new Map(state.threads.map((t) => [t.id, t]));
       for (const t of result.threads) byId.set(t.id, t);
@@ -475,16 +477,22 @@ var SessionStore = class extends EventEmitter {
     const state = this.sessions.get(id);
     const gate = state?.gates.find((g) => g.id === gateId);
     if (!state || !gate || gate.status !== "open") return void 0;
+    const parked = gate.waiting;
     gate.status = "cancelled";
     gate.waiting = false;
     if (state.activeGateId === gateId) state.activeGateId = null;
+    settleStatus(state, parked);
     state.updatedAt = Date.now();
     this.persistSoon(id);
     this.addTimeline(id, "gate", reason ?? `The user skipped the ${gate.kind.replace("_", " ")} gate.`, {
       label: gate.kind,
       meta: { gateId, cancelled: true }
     });
-    this.emitEvent({ type: "state", sessionId: id, patch: { gates: state.gates, activeGateId: null } });
+    this.emitEvent({
+      type: "state",
+      sessionId: id,
+      patch: { gates: state.gates, activeGateId: null, status: state.status }
+    });
     this.broadcastSessionList();
     this.emit("gate:cancelled", { sessionId: id, gate });
     return gate;
@@ -494,7 +502,19 @@ var SessionStore = class extends EventEmitter {
    * about. This happens whenever the user answers faster than the turn ends.
    */
   undeliveredGate(id) {
-    return this.sessions.get(id)?.gates.find((g) => g.status === "resolved" && g.result && !g.deliveredAt);
+    return this.undeliveredGates(id)[0];
+  }
+  /**
+   * Every answered gate Claude has not been told about, oldest first.
+   *
+   * Usually there is at most one. More than one means an answer was given
+   * while the session was stopped and then another gate came and went before
+   * it next ran — and handing over only the first would leave the user's most
+   * recent verdict stranded behind a stale one, which reads as the click
+   * having done nothing.
+   */
+  undeliveredGates(id) {
+    return this.sessions.get(id)?.gates.filter((g) => g.status === "resolved" && g.result && !g.deliveredAt) ?? [];
   }
   markGateDelivered(id, gateId) {
     const gate = this.getGate(id, gateId);
@@ -511,6 +531,23 @@ var SessionStore = class extends EventEmitter {
     }
     this.persistSoon(id);
     return gate;
+  }
+  /**
+   * Stop marking a gate as parked, without deciding what the session is doing.
+   *
+   * {@link setGateWaiting} promotes a session off `waiting` when its wait
+   * ends, which is right for `harness_await` — the wait ending there means the
+   * turn is carrying on. It is wrong for a gate hold that simply expired:
+   * nothing is running, the turn is about to end, and broadcasting `active`
+   * first makes every unanswered gate flash the session card from "waiting"
+   * to "working" and back. The caller sets the real status straight after.
+   */
+  clearGateWaiting(id, gateId) {
+    const gate = this.getGate(id, gateId);
+    if (!gate || !gate.waiting) return;
+    gate.waiting = false;
+    const state = this.sessions.get(id);
+    if (state) this.emitEvent({ type: "state", sessionId: id, patch: { gates: state.gates } });
   }
   setGateWaiting(id, gateId, waiting) {
     const gate = this.getGate(id, gateId);
@@ -667,6 +704,10 @@ function migrate(state) {
   if (state.status === "active") state.status = "idle";
   for (const gate of state.gates) gate.waiting = false;
   trimGates(state);
+}
+function settleStatus(state, parked) {
+  if (state.status !== "waiting") return;
+  state.status = parked ? "active" : "idle";
 }
 function trimGates(state) {
   if (state.gates.length <= MAX_GATES) return;
@@ -1228,6 +1269,44 @@ function waitForGate(store, sessionId, gateId, opts) {
     timer.unref?.();
     store.on("gate:resolved", onResolved);
     store.on("gate:cancelled", onCancelled);
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
+    store.setGateWaiting(sessionId, gateId, true);
+  });
+}
+function waitAtGate(store, sessionId, gateId, opts) {
+  const existing = store.getGate(sessionId, gateId);
+  if (existing && existing.status !== "open") {
+    return Promise.resolve({ kind: "gate", gate: existing });
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      store.off("gate:resolved", onGate);
+      store.off("gate:cancelled", onGate);
+      store.off("feedback:queued", onQueued);
+      opts.signal?.removeEventListener("abort", onAbort);
+      store.clearGateWaiting(sessionId, gateId);
+      resolve(value);
+    };
+    const onGate = (payload) => {
+      if (payload.sessionId !== sessionId || payload.gate.id !== gateId) return;
+      finish({ kind: "gate", gate: payload.gate });
+    };
+    const onQueued = (payload) => {
+      if (payload.sessionId !== sessionId) return;
+      const items = store.drainFeedback(sessionId);
+      if (items.length === 0) return;
+      finish({ kind: "feedback", items });
+    };
+    const onAbort = () => finish(null);
+    const timer = setTimeout(() => finish(null), opts.timeoutMs);
+    timer.unref?.();
+    store.on("gate:resolved", onGate);
+    store.on("gate:cancelled", onGate);
+    store.on("feedback:queued", onQueued);
     opts.signal?.addEventListener("abort", onAbort, { once: true });
     store.setGateWaiting(sessionId, gateId, true);
   });
@@ -2018,6 +2097,9 @@ var HOOK_NOOP = { suppressOutput: true };
 var EDIT_TOOLS = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 var MAX_COMMANDS = 200;
 var MAX_TOUCHED_FILES = 500;
+var MAX_HOLD_SECONDS = 540;
+var heldOnce = /* @__PURE__ */ new Map();
+var MAX_HELD = 500;
 var worktreeScanned = /* @__PURE__ */ new Set();
 var MAX_SCANNED = 500;
 async function ingestHook(event, input, ctx) {
@@ -2075,6 +2157,7 @@ async function onSessionEnd(sessionId, input, ctx) {
   ctx.tailers.get(sessionId)?.close();
   ctx.tailers.delete(sessionId);
   worktreeScanned.delete(sessionId);
+  heldOnce.delete(sessionId);
   clearBaseline(sessionId);
   ctx.store.update(sessionId, { status: "ended", endedAt: Date.now() });
   ctx.store.addTimeline(sessionId, "note", `Session ended (${input.end_reason ?? "unknown"})`, {
@@ -2092,10 +2175,10 @@ async function onUserPromptSubmit(sessionId, input, ctx) {
   });
   attachTailer(sessionId, ctx);
   const drained = ctx.store.drainFeedback(sessionId);
-  const answered = ctx.store.undeliveredGate(sessionId);
-  if (answered) ctx.store.markGateDelivered(sessionId, answered.id);
+  const answered = ctx.store.undeliveredGates(sessionId);
+  for (const gate of answered) ctx.store.markGateDelivered(sessionId, gate.id);
   const text2 = [
-    answered ? renderGateResult(answered) : "",
+    ...answered.map(renderGateResult),
     drained.length > 0 ? renderFeedback(drained) : ""
   ].filter(Boolean).join("\n\n");
   if (text2) return additionalContext("UserPromptSubmit", text2);
@@ -2187,18 +2270,8 @@ async function onStop(sessionId, input, ctx) {
     await reconcileFiles(ctx.store, sessionId).catch(() => {
     });
   }
-  const drained = ctx.store.drainFeedback(sessionId);
-  if (drained.length > 0) {
-    const open = ctx.store.activeGate(sessionId);
-    ctx.store.update(sessionId, { status: "active" });
-    return stopBlock(renderFeedback(drained) + (open ? stillParked(open.kind) : ""));
-  }
-  const answered = ctx.store.undeliveredGate(sessionId);
-  if (answered) {
-    ctx.store.markGateDelivered(sessionId, answered.id);
-    ctx.store.update(sessionId, { status: "active" });
-    return stopBlock(renderGateResult(answered));
-  }
+  const early = deliverPending(sessionId, ctx);
+  if (early) return early;
   const gate = ctx.store.activeGate(sessionId);
   if (input.stop_hook_active && !gate) {
     ctx.store.update(sessionId, { status: "idle" });
@@ -2220,7 +2293,55 @@ async function onStop(sessionId, input, ctx) {
     return HOOK_NOOP;
   }
   ctx.store.update(sessionId, { status: "waiting" });
+  const spent = heldOnce.get(sessionId) === gate.id && input.stop_hook_active === true;
+  const hold = spent ? 0 : Math.min(ctx.config.gateHoldSeconds, MAX_HOLD_SECONDS);
+  if (hold > 0) {
+    const resumed = await waitAtGate(ctx.store, sessionId, gate.id, {
+      timeoutMs: hold * 1e3,
+      ...ctx.signal ? { signal: ctx.signal } : {}
+    });
+    const delivered = resumed ? renderResume(sessionId, resumed, ctx) : null;
+    if (delivered) {
+      if (resumed?.kind === "feedback") {
+        if (heldOnce.size >= MAX_HELD) heldOnce.clear();
+        heldOnce.set(sessionId, gate.id);
+      } else {
+        heldOnce.delete(sessionId);
+      }
+      ctx.store.update(sessionId, { status: "active" });
+      return stopBlock(delivered);
+    }
+  }
+  ctx.store.update(sessionId, { status: ctx.store.activeGate(sessionId) ? "waiting" : "idle" });
   return HOOK_NOOP;
+}
+function deliverPending(sessionId, ctx) {
+  const drained = ctx.store.drainFeedback(sessionId);
+  const answered = ctx.store.undeliveredGates(sessionId);
+  if (drained.length === 0 && answered.length === 0) return null;
+  const parts = [];
+  for (const gate of answered) {
+    ctx.store.markGateDelivered(sessionId, gate.id);
+    parts.push(renderGateResult(gate));
+  }
+  if (drained.length > 0) parts.push(renderMessages(sessionId, drained, ctx));
+  ctx.store.update(sessionId, { status: "active" });
+  return stopBlock(parts.join("\n\n"));
+}
+function renderResume(sessionId, resumed, ctx) {
+  if (resumed.kind === "feedback") return renderMessages(sessionId, resumed.items, ctx);
+  const gate = resumed.gate;
+  if (gate.result) {
+    ctx.store.markGateDelivered(sessionId, gate.id);
+    return renderGateResult(gate);
+  }
+  const queued = ctx.store.drainFeedback(sessionId);
+  if (queued.length > 0) return renderMessages(sessionId, queued, ctx);
+  return null;
+}
+function renderMessages(sessionId, items, ctx) {
+  const open = ctx.store.activeGate(sessionId);
+  return renderFeedback(items) + (open ? stillParked(open.kind) : "");
 }
 function stillParked(kind) {
   return `
@@ -2489,10 +2610,108 @@ function liveChildLabels() {
   return [...live].map((e) => e.label);
 }
 
+// src/shared/config.ts
+import { readFileSync as readFileSync3, existsSync as existsSync5 } from "node:fs";
+import path7 from "node:path";
+var CHECK_RUN_BUDGET_MS = 15 * 6e4;
+var DEFAULT_CONFIG = {
+  autoOpen: false,
+  maxTimelineEvents: 500,
+  stopHoldSeconds: 540,
+  gateHoldSeconds: 300,
+  awaitSeconds: 120,
+  holdIdleSessions: false,
+  maxDiffFileBytes: 4e5,
+  idleShutdownMinutes: 120,
+  stages: {
+    verification: { checks: [] }
+  },
+  ship: {
+    steps: ["checks", "commit", "push", "pr", "summary"],
+    provider: "gh",
+    providers: {
+      gh: {
+        kind: "command",
+        label: "GitHub (gh CLI)",
+        command: "gh pr create --base {{base}} --head {{branch}} --title {{title}} --body-file {{bodyFile}}"
+      },
+      bitbucket: {
+        kind: "mcp",
+        label: "Bitbucket (MCP)",
+        directive: "Open a pull request using the connected Bitbucket MCP server. Use the title and body below verbatim, source branch {{branch}}, destination branch {{base}}. Report the resulting PR URL back with harness_note."
+      },
+      none: { kind: "none", label: "No PR \u2014 commit and push only" }
+    },
+    summaryPath: "docs/reviews/{{branch}}.md",
+    commitTemplate: "{{title}}\n\n{{body}}"
+  }
+};
+function isRecord(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function mergeConfig(base, override) {
+  if (!isRecord(override)) return base;
+  const out = { ...base, stages: { ...base.stages }, ship: { ...base.ship } };
+  for (const [key, value] of Object.entries(override)) {
+    if (key === "stages" && isRecord(value)) {
+      for (const [stage, cfg] of Object.entries(value)) {
+        if (!isRecord(cfg)) continue;
+        const s = stage;
+        out.stages[s] = { ...out.stages[s], ...cfg };
+      }
+    } else if (key === "ship" && isRecord(value)) {
+      out.ship = {
+        ...out.ship,
+        ...value,
+        providers: { ...out.ship.providers, ...value.providers ?? {} }
+      };
+    } else if (value !== void 0) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+function readJson2(file) {
+  try {
+    if (!existsSync5(file)) return void 0;
+    const raw = readFileSync3(file, "utf8").replace(/^\s*\/\/.*$/gm, "");
+    return JSON.parse(raw);
+  } catch {
+    return void 0;
+  }
+}
+function loadConfig(opts) {
+  let cfg = DEFAULT_CONFIG;
+  cfg = mergeConfig(cfg, readJson2(path7.join(opts.configDir, "config.json")));
+  if (opts.projectDir) {
+    cfg = mergeConfig(cfg, readJson2(path7.join(opts.projectDir, ".claude", "harness.json")));
+  }
+  return cfg;
+}
+function stageInstructions(cfg, stage, opts) {
+  const rel = cfg.stages[stage]?.instructions;
+  if (!rel) return void 0;
+  const candidates2 = [
+    path7.resolve(opts.configDir, rel),
+    ...opts.projectDir ? [path7.resolve(opts.projectDir, rel)] : []
+  ];
+  for (const file of candidates2) {
+    try {
+      if (existsSync5(file)) return readFileSync3(file, "utf8").trim();
+    } catch {
+    }
+  }
+  return void 0;
+}
+function renderTemplate(tpl, vars) {
+  return tpl.replace(/\{\{(\w+)\}\}/g, (_m, k) => vars[k] ?? "");
+}
+
 // src/daemon/checks.ts
 var MAX_OUTPUT = 4e4;
 var DEFAULT_TIMEOUT_MS = 15 * 60 * 1e3;
 var running = /* @__PURE__ */ new Map();
+var runsBySession = /* @__PURE__ */ new Map();
 function seedChecks(store, sessionId, commands) {
   const runs = commands.map((command) => ({
     id: randomUUID4(),
@@ -2512,7 +2731,7 @@ function addCheck(store, sessionId, command, label) {
   });
   return run2;
 }
-async function runCheck(store, sessionId, checkId) {
+async function runCheck(store, sessionId, checkId, opts = {}) {
   const session = store.get(sessionId);
   const check = session?.checks.find((c) => c.id === checkId);
   if (!session || !check) return void 0;
@@ -2522,7 +2741,7 @@ async function runCheck(store, sessionId, checkId) {
   patchCheck(store, sessionId, checkId, { status: "running", startedAt: started, output: "" });
   const handle2 = run(check.command, {
     cwd,
-    timeoutMs: DEFAULT_TIMEOUT_MS,
+    timeoutMs: Math.min(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
     maxOutput: MAX_OUTPUT,
     label: `check: ${check.command}`,
     env: { ...process.env, CI: "1", FORCE_COLOR: "0", NO_COLOR: "1" },
@@ -2549,15 +2768,37 @@ async function runCheck(store, sessionId, checkId) {
   });
   return updated;
 }
-async function runAllChecks(store, sessionId) {
+async function runAllChecks(store, sessionId, opts = {}) {
   const session = store.get(sessionId);
   if (!session) return [];
+  cancelSessionRun(sessionId);
+  const ids = /* @__PURE__ */ new Set();
+  runsBySession.set(sessionId, ids);
+  const deadline = Date.now() + (opts.budgetMs ?? CHECK_RUN_BUDGET_MS);
   const results = [];
-  for (const check of [...session.checks]) {
-    const run2 = await runCheck(store, sessionId, check.id);
-    if (run2) results.push(run2);
+  try {
+    for (const check of [...session.checks]) {
+      if (runsBySession.get(sessionId) !== ids) break;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      ids.add(check.id);
+      const run2 = await runCheck(store, sessionId, check.id, { timeoutMs: remaining });
+      if (run2) results.push(run2);
+    }
+  } finally {
+    if (runsBySession.get(sessionId) === ids) runsBySession.delete(sessionId);
   }
   return results;
+}
+function cancelSessionRun(sessionId) {
+  const ids = runsBySession.get(sessionId);
+  if (!ids) return 0;
+  let stopped = 0;
+  for (const id of ids) {
+    if (cancelCheck(id)) stopped++;
+  }
+  runsBySession.delete(sessionId);
+  return stopped;
 }
 function cancelCheck(checkId) {
   const handle2 = running.get(checkId);
@@ -2592,9 +2833,9 @@ function checksSummary(checks) {
 }
 
 // src/daemon/housekeeping.ts
-import { readdirSync as readdirSync2, statSync as statSync4, existsSync as existsSync5, rmSync as rmSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { readdirSync as readdirSync2, statSync as statSync4, existsSync as existsSync6, rmSync as rmSync2, readFileSync as readFileSync4, writeFileSync as writeFileSync2 } from "node:fs";
 import { tmpdir } from "node:os";
-import path7 from "node:path";
+import path8 from "node:path";
 var STALE_SESSION_MS = 24 * 60 * 60 * 1e3;
 var PARTIAL_WRITE_MS = 5 * 60 * 1e3;
 var SCRATCH_MS = 60 * 60 * 1e3;
@@ -2692,12 +2933,12 @@ function buildPlans(live2, now, scratchDir) {
 }
 function staleSessionDirs(live2, now) {
   const root = paths.sessionsDir();
-  if (!existsSync5(root)) return [];
+  if (!existsSync6(root)) return [];
   const out = [];
   for (const entry of safeReaddir(root)) {
     if (!entry.isDirectory()) continue;
     if (live2.has(sanitizeId(entry.name))) continue;
-    const dir = path7.join(root, entry.name);
+    const dir = path8.join(root, entry.name);
     if (now - touchedAt(dir) < STALE_SESSION_MS) continue;
     out.push({ path: dir, bytes: sizeOf(dir) });
   }
@@ -2707,21 +2948,21 @@ function touchedAt(dir) {
   let latest = mtimeOf2(dir);
   for (const entry of safeReaddir(dir)) {
     if (!entry.isFile()) continue;
-    latest = Math.max(latest, mtimeOf2(path7.join(dir, entry.name)));
+    latest = Math.max(latest, mtimeOf2(path8.join(dir, entry.name)));
   }
   return latest;
 }
 function partialWrites(now) {
   const root = paths.sessionsDir();
-  if (!existsSync5(root)) return [];
+  if (!existsSync6(root)) return [];
   const out = [];
   for (const entry of safeReaddir(root)) {
     if (!entry.isDirectory()) continue;
-    const dir = path7.join(root, entry.name);
+    const dir = path8.join(root, entry.name);
     for (const file of safeReaddir(dir)) {
       if (!file.isFile()) continue;
       if (!/^\.(state|diff)\..*\.tmp$/.test(file.name)) continue;
-      const full = path7.join(dir, file.name);
+      const full = path8.join(dir, file.name);
       if (now - mtimeOf2(full) < PARTIAL_WRITE_MS) continue;
       out.push({ path: full, bytes: sizeOf(full) });
     }
@@ -2729,13 +2970,13 @@ function partialWrites(now) {
   return out;
 }
 function scratchFiles(now, root) {
-  const home = path7.resolve(harnessHome());
+  const home = path8.resolve(harnessHome());
   const out = [];
   for (const entry of safeReaddir(root)) {
     if (!entry.name.startsWith(SCRATCH_PREFIX)) continue;
-    const full = path7.join(root, entry.name);
-    const resolved = path7.resolve(full);
-    if (resolved === home || home.startsWith(resolved + path7.sep)) continue;
+    const full = path8.join(root, entry.name);
+    const resolved = path8.resolve(full);
+    if (resolved === home || home.startsWith(resolved + path8.sep)) continue;
     if (holdsLiveDaemon(resolved)) continue;
     if (now - mtimeOf2(full) < SCRATCH_MS) continue;
     out.push({ path: full, bytes: sizeOf(full) });
@@ -2744,7 +2985,7 @@ function scratchFiles(now, root) {
 }
 function holdsLiveDaemon(dir) {
   try {
-    const lock = JSON.parse(readFileSync3(path7.join(dir, "daemon.json"), "utf8"));
+    const lock = JSON.parse(readFileSync4(path8.join(dir, "daemon.json"), "utf8"));
     return typeof lock.pid === "number" && isPidAlive(lock.pid);
   } catch {
     return false;
@@ -2766,12 +3007,12 @@ function reclaimable(candidate) {
   return candidate.trimTo === void 0 ? candidate.bytes : Math.max(0, candidate.bytes - candidate.trimTo);
 }
 function discard(candidate, scratchDir) {
-  const target = path7.resolve(candidate.path);
-  const home = path7.resolve(harnessHome());
-  const scratch = path7.resolve(scratchDir);
-  const inside = (root) => target.startsWith(root + path7.sep);
+  const target = path8.resolve(candidate.path);
+  const home = path8.resolve(harnessHome());
+  const scratch = path8.resolve(scratchDir);
+  const inside = (root) => target.startsWith(root + path8.sep);
   if (!inside(home) && !inside(scratch)) return false;
-  if (!inside(home) && !path7.basename(target).startsWith(SCRATCH_PREFIX)) return false;
+  if (!inside(home) && !path8.basename(target).startsWith(SCRATCH_PREFIX)) return false;
   try {
     if (candidate.trimTo !== void 0) {
       trimFile(target, candidate.trimTo);
@@ -2784,7 +3025,7 @@ function discard(candidate, scratchDir) {
   }
 }
 function trimFile(file, keepBytes) {
-  const content = readFileSync3(file, "utf8");
+  const content = readFileSync4(file, "utf8");
   const tail = content.slice(Math.max(0, content.length - keepBytes));
   const from = tail.indexOf("\n");
   writeFileSync2(file, from === -1 ? tail : tail.slice(from + 1));
@@ -2813,7 +3054,7 @@ function sizeOf(target) {
   if (stat.isFile()) return stat.size;
   if (!stat.isDirectory()) return 0;
   let total = 0;
-  for (const entry of safeReaddir(target)) total += sizeOf(path7.join(target, entry.name));
+  for (const entry of safeReaddir(target)) total += sizeOf(path8.join(target, entry.name));
   return total;
 }
 
@@ -2821,103 +3062,6 @@ function sizeOf(target) {
 import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync3, rmSync as rmSync3 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
 import path9 from "node:path";
-
-// src/shared/config.ts
-import { readFileSync as readFileSync4, existsSync as existsSync6 } from "node:fs";
-import path8 from "node:path";
-var DEFAULT_CONFIG = {
-  autoOpen: false,
-  maxTimelineEvents: 500,
-  stopHoldSeconds: 540,
-  awaitSeconds: 120,
-  holdIdleSessions: false,
-  maxDiffFileBytes: 4e5,
-  idleShutdownMinutes: 120,
-  stages: {
-    verification: { checks: [] }
-  },
-  ship: {
-    steps: ["checks", "commit", "push", "pr", "summary"],
-    provider: "gh",
-    providers: {
-      gh: {
-        kind: "command",
-        label: "GitHub (gh CLI)",
-        command: "gh pr create --base {{base}} --head {{branch}} --title {{title}} --body-file {{bodyFile}}"
-      },
-      bitbucket: {
-        kind: "mcp",
-        label: "Bitbucket (MCP)",
-        directive: "Open a pull request using the connected Bitbucket MCP server. Use the title and body below verbatim, source branch {{branch}}, destination branch {{base}}. Report the resulting PR URL back with harness_note."
-      },
-      none: { kind: "none", label: "No PR \u2014 commit and push only" }
-    },
-    summaryPath: "docs/reviews/{{branch}}.md",
-    commitTemplate: "{{title}}\n\n{{body}}"
-  }
-};
-function isRecord(v) {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-function mergeConfig(base, override) {
-  if (!isRecord(override)) return base;
-  const out = { ...base, stages: { ...base.stages }, ship: { ...base.ship } };
-  for (const [key, value] of Object.entries(override)) {
-    if (key === "stages" && isRecord(value)) {
-      for (const [stage, cfg] of Object.entries(value)) {
-        if (!isRecord(cfg)) continue;
-        const s = stage;
-        out.stages[s] = { ...out.stages[s], ...cfg };
-      }
-    } else if (key === "ship" && isRecord(value)) {
-      out.ship = {
-        ...out.ship,
-        ...value,
-        providers: { ...out.ship.providers, ...value.providers ?? {} }
-      };
-    } else if (value !== void 0) {
-      out[key] = value;
-    }
-  }
-  return out;
-}
-function readJson2(file) {
-  try {
-    if (!existsSync6(file)) return void 0;
-    const raw = readFileSync4(file, "utf8").replace(/^\s*\/\/.*$/gm, "");
-    return JSON.parse(raw);
-  } catch {
-    return void 0;
-  }
-}
-function loadConfig(opts) {
-  let cfg = DEFAULT_CONFIG;
-  cfg = mergeConfig(cfg, readJson2(path8.join(opts.configDir, "config.json")));
-  if (opts.projectDir) {
-    cfg = mergeConfig(cfg, readJson2(path8.join(opts.projectDir, ".claude", "harness.json")));
-  }
-  return cfg;
-}
-function stageInstructions(cfg, stage, opts) {
-  const rel = cfg.stages[stage]?.instructions;
-  if (!rel) return void 0;
-  const candidates2 = [
-    path8.resolve(opts.configDir, rel),
-    ...opts.projectDir ? [path8.resolve(opts.projectDir, rel)] : []
-  ];
-  for (const file of candidates2) {
-    try {
-      if (existsSync6(file)) return readFileSync4(file, "utf8").trim();
-    } catch {
-    }
-  }
-  return void 0;
-}
-function renderTemplate(tpl, vars) {
-  return tpl.replace(/\{\{(\w+)\}\}/g, (_m, k) => vars[k] ?? "");
-}
-
-// src/daemon/ship.ts
 async function composeShip(session, config) {
   const cwd = session.repoRoot ?? session.cwd;
   const branch = session.branch ?? await currentBranch(cwd);
@@ -3911,6 +4055,7 @@ The user is reviewing it at ${uiUrl(id)}
         store.setStage(id, "verification");
         const results = body["run"] === false ? [] : await runAllChecks(store, id);
         const failed = results.filter((c) => c.status === "failed");
+        const unrun = (store.get(id)?.checks ?? []).filter((c) => c.status === "pending");
         const gate = store.openGate(
           id,
           "verification",
@@ -3923,7 +4068,7 @@ The user is reviewing it at ${uiUrl(id)}
           text: failed.length ? `[cc-harness] ${failed.length} of ${results.length} check(s) FAILED:
 ` + failed.map((c) => `  \u2717 ${c.command} (exit ${c.exitCode})
 ${tailOf(c.output)}`).join("\n") + `
-Fix these and call harness_publish_checks again. Do not ask the user to sign off on a red check.` : `[cc-harness] All ${results.length} check(s) passed. Results are at ${uiUrl(id)}
+Fix these and call harness_publish_checks again. Do not ask the user to sign off on a red check.` : `[cc-harness] All ${results.length} check(s) passed.` + (unrun.length ? ` ${unrun.length} were not reached before the run's time budget ran out.` : "") + ` Results are at ${uiUrl(id)}
 ` + parkNotice("signs off")
         });
         return;
@@ -4346,7 +4491,7 @@ function summarizeForModel(session) {
   };
 }
 function parkNotice(action) {
-  return `End your turn now \u2014 do not call harness_await and do not start new work. Stopping is expected here: the harness records the gate, and hands you the verdict when the user ${action} and the session next runs.`;
+  return `End your turn now \u2014 do not call harness_await and do not start new work. Stopping is expected here. The harness holds the turn briefly, so if the user ${action} straight away you are resumed with their verdict; otherwise the turn ends and the verdict is handed to you when the session next runs.`;
 }
 function describeStatus(session, url) {
   const done = session.todos.filter((t) => t.status === "completed").length;

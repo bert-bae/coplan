@@ -4,6 +4,7 @@ import { api } from '../lib/api.ts';
 import { Button, EmptyState, Explain } from '../components/primitives.tsx';
 import { StageBar, RequiredAction, NoActionNeeded } from '../components/StageStatus.tsx';
 import { classNames, duration } from '../lib/format.ts';
+import { verdictExplain, verdictToast } from '../lib/stages.ts';
 import type { CheckRun } from '../../shared/types.ts';
 
 /** Verification: run the project's checks and sign off on the result. */
@@ -37,7 +38,7 @@ export function VerifyView() {
     try {
       if (gate) {
         await api.resolveGate(sessionId, gate.id, { verdict, comment: notes.trim() });
-        store.toast('success', verdict === 'approved' ? 'Signed off — Claude is resuming.' : 'Sent to Claude.');
+        store.toast('success', verdictToast(gate, verdict === 'approved' ? 'Signed off' : 'Sent to Claude'));
       } else {
         await api.feedback(sessionId, { text: notes.trim() || 'Verification notes', origin: 'checks' });
         store.toast('success', "Queued for Claude's next turn.");
@@ -109,7 +110,7 @@ export function VerifyView() {
             move on.
           </p>
         )}
-        {gate && <Explain>Your verdict resumes the parked session.</Explain>}
+        {gate && <Explain>{verdictExplain(gate, 'Your verdict')}</Explain>}
         <textarea
           className="input"
           rows={4}

@@ -463,10 +463,12 @@ export class SessionStore extends EventEmitter {
     const state = this.sessions.get(id);
     const gate = state?.gates.find((g) => g.id === gateId);
     if (!state || !gate || gate.status !== 'open') return undefined;
+    const parked = gate.waiting;
     gate.status = 'resolved';
     gate.result = result;
     gate.waiting = false;
     if (state.activeGateId === gateId) state.activeGateId = null;
+    settleStatus(state, parked);
     if (result.threads?.length) {
       const byId = new Map(state.threads.map((t) => [t.id, t]));
       for (const t of result.threads) byId.set(t.id, t);
@@ -500,16 +502,22 @@ export class SessionStore extends EventEmitter {
     const state = this.sessions.get(id);
     const gate = state?.gates.find((g) => g.id === gateId);
     if (!state || !gate || gate.status !== 'open') return undefined;
+    const parked = gate.waiting;
     gate.status = 'cancelled';
     gate.waiting = false;
     if (state.activeGateId === gateId) state.activeGateId = null;
+    settleStatus(state, parked);
     state.updatedAt = Date.now();
     this.persistSoon(id);
     this.addTimeline(id, 'gate', reason ?? `The user skipped the ${gate.kind.replace('_', ' ')} gate.`, {
       label: gate.kind,
       meta: { gateId, cancelled: true },
     });
-    this.emitEvent({ type: 'state', sessionId: id, patch: { gates: state.gates, activeGateId: null } });
+    this.emitEvent({
+      type: 'state',
+      sessionId: id,
+      patch: { gates: state.gates, activeGateId: null, status: state.status },
+    });
     this.broadcastSessionList();
     this.emit('gate:cancelled', { sessionId: id, gate });
     return gate;
@@ -520,7 +528,20 @@ export class SessionStore extends EventEmitter {
    * about. This happens whenever the user answers faster than the turn ends.
    */
   undeliveredGate(id: string): Gate | undefined {
-    return this.sessions.get(id)?.gates.find((g) => g.status === 'resolved' && g.result && !g.deliveredAt);
+    return this.undeliveredGates(id)[0];
+  }
+
+  /**
+   * Every answered gate Claude has not been told about, oldest first.
+   *
+   * Usually there is at most one. More than one means an answer was given
+   * while the session was stopped and then another gate came and went before
+   * it next ran — and handing over only the first would leave the user's most
+   * recent verdict stranded behind a stale one, which reads as the click
+   * having done nothing.
+   */
+  undeliveredGates(id: string): Gate[] {
+    return this.sessions.get(id)?.gates.filter((g) => g.status === 'resolved' && g.result && !g.deliveredAt) ?? [];
   }
 
   markGateDelivered(id: string, gateId: string): Gate | undefined {
@@ -542,6 +563,24 @@ export class SessionStore extends EventEmitter {
     }
     this.persistSoon(id);
     return gate;
+  }
+
+  /**
+   * Stop marking a gate as parked, without deciding what the session is doing.
+   *
+   * {@link setGateWaiting} promotes a session off `waiting` when its wait
+   * ends, which is right for `harness_await` — the wait ending there means the
+   * turn is carrying on. It is wrong for a gate hold that simply expired:
+   * nothing is running, the turn is about to end, and broadcasting `active`
+   * first makes every unanswered gate flash the session card from "waiting"
+   * to "working" and back. The caller sets the real status straight after.
+   */
+  clearGateWaiting(id: string, gateId: string): void {
+    const gate = this.getGate(id, gateId);
+    if (!gate || !gate.waiting) return;
+    gate.waiting = false;
+    const state = this.sessions.get(id);
+    if (state) this.emitEvent({ type: 'state', sessionId: id, patch: { gates: state.gates } });
   }
 
   setGateWaiting(id: string, gateId: string, waiting: boolean): void {
@@ -734,6 +773,24 @@ function migrate(state: SessionState): void {
   // Any gate that was parked has lost its waiter.
   for (const gate of state.gates) gate.waiting = false;
   trimGates(state);
+}
+
+/**
+ * Move a session off `waiting` once the thing it was waiting for is closed.
+ *
+ * `waiting` is what puts a session in the rail's *Action required* group and
+ * labels it "needs you". Nothing used to clear it when the user answered, so
+ * a session they had just signed off on went on asking for their attention
+ * until the next hook fired — which, with the turn already ended, meant until
+ * they went back to the terminal.
+ *
+ * Which state it lands in depends on whether a turn was actually parked on
+ * the gate: one that was is about to be resumed with the verdict, and one
+ * that was not has already stopped.
+ */
+function settleStatus(state: SessionState, parked: boolean): void {
+  if (state.status !== 'waiting') return;
+  state.status = parked ? 'active' : 'idle';
 }
 
 /**
