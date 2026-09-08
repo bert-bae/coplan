@@ -3,10 +3,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 // src/shared/config.ts
+var CHECK_RUN_BUDGET_MS = 15 * 6e4;
 var DEFAULT_CONFIG = {
   autoOpen: false,
   maxTimelineEvents: 500,
   stopHoldSeconds: 540,
+  gateHoldSeconds: 300,
   awaitSeconds: 120,
   holdIdleSessions: false,
   maxDiffFileBytes: 4e5,

@@ -1067,6 +1067,8 @@ function buildRouter(deps: Deps): Router {
         // nothing, and the skills tell Claude never to do that.
         const results = body['run'] === false ? [] : await runAllChecks(store, id);
         const failed = results.filter((c) => c.status === 'failed');
+        // The run is bounded, so it can end with commands it never reached.
+        const unrun = (store.get(id)?.checks ?? []).filter((c) => c.status === 'pending');
         const gate = store.openGate(
           id,
           'verification',
@@ -1080,7 +1082,11 @@ function buildRouter(deps: Deps): Router {
             ? `[cc-harness] ${failed.length} of ${results.length} check(s) FAILED:\n` +
               failed.map((c) => `  ✗ ${c.command} (exit ${c.exitCode})\n${tailOf(c.output)}`).join('\n') +
               `\nFix these and call harness_publish_checks again. Do not ask the user to sign off on a red check.`
-            : `[cc-harness] All ${results.length} check(s) passed. Results are at ${uiUrl(id)}\n` +
+            : `[cc-harness] All ${results.length} check(s) passed.` +
+              (unrun.length
+                ? ` ${unrun.length} were not reached before the run's time budget ran out.`
+                : '') +
+              ` Results are at ${uiUrl(id)}\n` +
               parkNotice('signs off'),
         });
         return;
@@ -1672,8 +1678,9 @@ function summarizeForModel(session: SessionState) {
 function parkNotice(action: string): string {
   return (
     `End your turn now — do not call harness_await and do not start new work. ` +
-    `Stopping is expected here: the harness records the gate, and hands you the verdict ` +
-    `when the user ${action} and the session next runs.`
+    `Stopping is expected here. The harness holds the turn briefly, so if the user ${action} ` +
+    `straight away you are resumed with their verdict; otherwise the turn ends and the verdict ` +
+    `is handed to you when the session next runs.`
   );
 }
 

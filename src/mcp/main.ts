@@ -12,7 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readLiveLock, baseUrl, ensureHome } from '../shared/paths.ts';
-import { TOOLS } from './tools.ts';
+import { TOOLS, budgetFor, timeoutText } from './tools.ts';
 import type { DaemonLock } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
@@ -77,7 +77,12 @@ interface CallResult {
   text: string;
 }
 
-async function callDaemon(tool: string, args: Record<string, unknown>, timeoutMs: number): Promise<CallResult> {
+async function callDaemon(
+  tool: string,
+  args: Record<string, unknown>,
+  timeoutMs: number,
+  onTimeout: string,
+): Promise<CallResult> {
   const lock = await daemon();
   if (!lock) {
     return {
@@ -107,9 +112,7 @@ async function callDaemon(tool: string, args: Record<string, unknown>, timeoutMs
     const aborted = (err as Error)?.name === 'AbortError';
     return {
       ok: false,
-      text: aborted
-        ? '[cc-harness] The daemon did not respond in time. Call the tool again.'
-        : `[cc-harness] Daemon call failed: ${(err as Error)?.message}`,
+      text: aborted ? onTimeout : `[cc-harness] Daemon call failed: ${(err as Error)?.message}`,
     };
   } finally {
     clearTimeout(timer);
@@ -171,10 +174,8 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
         respondError(req.id, -32602, `Unknown tool: ${name}`);
         return;
       }
-      // `await` parks on purpose; give it headroom over its own timeout so the
-      // daemon's answer wins the race rather than the transport's.
-      const budget = tool.endpoint === 'await' ? clampSeconds(args['timeout_seconds']) * 1000 + 15_000 : 30_000;
-      const result = await callDaemon(tool.endpoint, args, budget);
+      const budget = budgetFor(tool, args['timeout_seconds']);
+      const result = await callDaemon(tool.endpoint, args, budget, timeoutText(tool));
       respond(req.id, {
         content: [{ type: 'text', text: result.text }],
         isError: !result.ok,
@@ -188,12 +189,6 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
         respondError(req.id, -32601, `Method not found: ${req.method}`);
       }
   }
-}
-
-function clampSeconds(value: unknown): number {
-  const n = Number(value ?? 120);
-  if (!Number.isFinite(n)) return 120;
-  return Math.min(600, Math.max(5, n));
 }
 
 /**

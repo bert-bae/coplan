@@ -64,7 +64,13 @@ function baseUrl(lock) {
   return `http://${lock.host || "127.0.0.1"}:${lock.port}`;
 }
 
+// src/shared/config.ts
+var CHECK_RUN_BUDGET_MS = 15 * 6e4;
+var CHECK_TRANSPORT_HEADROOM_MS = 3e4;
+
 // src/mcp/tools.ts
+var DEFAULT_BUDGET_MS = 3e4;
+var CHECKS_BUDGET_MS = CHECK_RUN_BUDGET_MS + CHECK_TRANSPORT_HEADROOM_MS;
 var STAGES = [
   "planning",
   "plan_review",
@@ -138,7 +144,9 @@ var TOOLS = [
         }
       },
       additionalProperties: false
-    }
+    },
+    // `git diff` against a large tree, plus a per-untracked-file pass.
+    budgetMs: 18e4
   },
   {
     name: "harness_publish_checks",
@@ -155,7 +163,8 @@ var TOOLS = [
         run: { type: "boolean", description: "Run them immediately. Default true." }
       },
       additionalProperties: false
-    }
+    },
+    budgetMs: CHECKS_BUDGET_MS
   },
   {
     name: "harness_ship",
@@ -324,6 +333,19 @@ var TOOLS = [
     }
   }
 ];
+function timeoutText(tool) {
+  if (!tool.budgetMs) return "[cc-harness] The daemon did not respond in time. Call the tool again.";
+  return `[cc-harness] ${tool.name} is taking longer than ${Math.round(tool.budgetMs / 1e3)}s. The harness is still working on it and opens the gate when it finishes. Do NOT call it again \u2014 a second run would discard this one and close the gate the user may already be reading. End your turn; you are handed the verdict when the session next runs, and harness_status says where it got to.`;
+}
+function budgetFor(tool, timeoutSeconds) {
+  if (tool.endpoint === "await") return clampAwaitSeconds(timeoutSeconds) * 1e3 + 15e3;
+  return tool.budgetMs ?? DEFAULT_BUDGET_MS;
+}
+function clampAwaitSeconds(value) {
+  const n = Number(value ?? 120);
+  if (!Number.isFinite(n)) return 120;
+  return Math.min(600, Math.max(5, n));
+}
 
 // src/mcp/main.ts
 var VERSION = true ? "0.1.0" : "0.0.0";
@@ -360,7 +382,7 @@ async function startDaemon() {
   }
   return null;
 }
-async function callDaemon(tool, args, timeoutMs) {
+async function callDaemon(tool, args, timeoutMs, onTimeout) {
   const lock = await daemon();
   if (!lock) {
     return {
@@ -387,7 +409,7 @@ async function callDaemon(tool, args, timeoutMs) {
     const aborted = err?.name === "AbortError";
     return {
       ok: false,
-      text: aborted ? "[cc-harness] The daemon did not respond in time. Call the tool again." : `[cc-harness] Daemon call failed: ${err?.message}`
+      text: aborted ? onTimeout : `[cc-harness] Daemon call failed: ${err?.message}`
     };
   } finally {
     clearTimeout(timer);
@@ -438,8 +460,8 @@ async function handleRequest(req) {
         respondError(req.id, -32602, `Unknown tool: ${name}`);
         return;
       }
-      const budget = tool.endpoint === "await" ? clampSeconds(args["timeout_seconds"]) * 1e3 + 15e3 : 3e4;
-      const result = await callDaemon(tool.endpoint, args, budget);
+      const budget = budgetFor(tool, args["timeout_seconds"]);
+      const result = await callDaemon(tool.endpoint, args, budget, timeoutText(tool));
       respond(req.id, {
         content: [{ type: "text", text: result.text }],
         isError: !result.ok
@@ -451,11 +473,6 @@ async function handleRequest(req) {
         respondError(req.id, -32601, `Method not found: ${req.method}`);
       }
   }
-}
-function clampSeconds(value) {
-  const n = Number(value ?? 120);
-  if (!Number.isFinite(n)) return 120;
-  return Math.min(600, Math.max(5, n));
 }
 var inFlight = 0;
 var stdinClosed = false;

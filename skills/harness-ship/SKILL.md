@@ -30,8 +30,9 @@ body from the approved plan, the review threads and the check results, and
 opens the ship gate. The user picks the steps (checks, commit, push, pr,
 summary) and the provider, edits the text if they want, and confirms.
 
-Then end your turn. The session stops at the ship gate, and their decision is
-handed to you when they next speak to it.
+Then end your turn. The harness holds it open briefly, so a confirmation that
+comes straight away resumes you with the result; otherwise the session stops at
+the ship gate and their decision is handed to you when they next speak to it.
 
 ## 3. Finish the provider call, if it is yours to make
 

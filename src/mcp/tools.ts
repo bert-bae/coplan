@@ -1,3 +1,5 @@
+import { CHECK_RUN_BUDGET_MS, CHECK_TRANSPORT_HEADROOM_MS } from '../shared/config.ts';
+
 /**
  * Tool definitions exposed to Claude.
  *
@@ -12,7 +14,30 @@ export interface ToolDef {
   endpoint: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /**
+   * How long to wait for the daemon, in ms. Defaults to {@link DEFAULT_BUDGET_MS}.
+   *
+   * A tool that does real work before it answers needs a budget drawn from
+   * that work, not from what a status call costs. `harness_publish_checks`
+   * runs the project's whole check suite before it opens its gate; against
+   * the flat 30s budget every suite slower than that aborted, Claude was told
+   * to call it again, and the retry re-ran the checks and cancelled the very
+   * gate the user was looking at — so their click came back "gate is not
+   * open" and nothing moved.
+   */
+  budgetMs?: number;
 }
+
+/** Enough for anything that only reads or writes harness state. */
+export const DEFAULT_BUDGET_MS = 30_000;
+
+/**
+ * The daemon's own ceiling on one check run, plus transport headroom, so the
+ * daemon's answer wins the race rather than the transport's. Derived from the
+ * ceiling the daemon actually enforces rather than restated, so the two
+ * cannot drift apart.
+ */
+export const CHECKS_BUDGET_MS = CHECK_RUN_BUDGET_MS + CHECK_TRANSPORT_HEADROOM_MS;
 
 const STAGES = [
   'planning',
@@ -102,6 +127,8 @@ export const TOOLS: ToolDef[] = [
       },
       additionalProperties: false,
     },
+    // `git diff` against a large tree, plus a per-untracked-file pass.
+    budgetMs: 180_000,
   },
   {
     name: 'harness_publish_checks',
@@ -122,6 +149,7 @@ export const TOOLS: ToolDef[] = [
       },
       additionalProperties: false,
     },
+    budgetMs: CHECKS_BUDGET_MS,
   },
   {
     name: 'harness_ship',
@@ -322,3 +350,45 @@ export const TOOLS: ToolDef[] = [
     },
   },
 ];
+
+/**
+ * What to tell Claude when the daemon outran its budget.
+ *
+ * "Call the tool again" is right for a tool that only reads state and wrong
+ * for one that opens a gate: the daemon is still working, will open that gate
+ * when it finishes, and a second call re-does the work and cancels the gate
+ * the user is already reading — so their verdict comes back "gate is not
+ * open". For those, stopping is the correct move, exactly as it is when the
+ * call succeeds.
+ */
+export function timeoutText(tool: ToolDef): string {
+  if (!tool.budgetMs) return '[cc-harness] The daemon did not respond in time. Call the tool again.';
+  return (
+    `[cc-harness] ${tool.name} is taking longer than ${Math.round(tool.budgetMs / 1000)}s. The harness is ` +
+    `still working on it and opens the gate when it finishes. Do NOT call it again — a second run would ` +
+    `discard this one and close the gate the user may already be reading. End your turn; you are handed ` +
+    `the verdict when the session next runs, and harness_status says where it got to.`
+  );
+}
+
+/**
+ * How long to wait for the daemon on one call.
+ *
+ * This is the line that carried the bug: it used to be a flat `30_000` for
+ * everything except `harness_await`, so `harness_publish_checks` — which runs
+ * the project's whole suite before it answers — aborted on any suite slower
+ * than that, and the retry Claude was told to make cancelled the gate the
+ * user was already reading.
+ */
+export function budgetFor(tool: ToolDef, timeoutSeconds?: unknown): number {
+  // `await` parks on purpose; give it headroom over its own timeout so the
+  // daemon's answer wins the race rather than the transport's.
+  if (tool.endpoint === 'await') return clampAwaitSeconds(timeoutSeconds) * 1000 + 15_000;
+  return tool.budgetMs ?? DEFAULT_BUDGET_MS;
+}
+
+export function clampAwaitSeconds(value: unknown): number {
+  const n = Number(value ?? 120);
+  if (!Number.isFinite(n)) return 120;
+  return Math.min(600, Math.max(5, n));
+}

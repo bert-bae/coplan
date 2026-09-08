@@ -320,6 +320,39 @@ export function gateChoices(kind: GateKind): GateChoice[] {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * What answering actually does
+ * ------------------------------------------------------------------ */
+
+/**
+ * Whether a verdict submitted right now resumes the session by itself.
+ *
+ * `gate.waiting` means a turn is genuinely held open on this gate, inside the
+ * `Stop` hook, and answering resumes it there and then. Once that window has
+ * closed the session has stopped for good, and a verdict is delivered with
+ * the user's next message instead — nothing can wake a stopped session from
+ * outside. Every panel used to promise the first case unconditionally, which
+ * is what made answering look broken: the toast said "Claude is resuming" and
+ * nothing moved.
+ */
+export function resumesNow(gate: Gate | null): boolean {
+  return Boolean(gate?.waiting);
+}
+
+/** `<what you did> — <what happens next>`, true in both cases. */
+export function verdictToast(gate: Gate | null, did: string): string {
+  return resumesNow(gate)
+    ? `${did} — Claude is resuming.`
+    : `${did} — Claude has stopped, so this reaches it with your next message.`;
+}
+
+/** The same distinction, for a panel's standing explanation. */
+export function verdictExplain(gate: Gate | null, subject: string): string {
+  return resumesNow(gate)
+    ? `${subject} resumes the parked session.`
+    : `${subject} is recorded now and handed to Claude the next time the session runs.`;
+}
+
 /** The gate's name in a sentence. */
 export function gateName(kind: GateKind): string {
   switch (kind) {

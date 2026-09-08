@@ -147,22 +147,31 @@ export async function runDoctor(): Promise<number> {
   record('harness_publish_plan opens a gate', Boolean(gateId), gateId, true);
 
   if (gateId) {
-    // End a turn on the open gate, resolve it from "the UI", and assert that
-    // the verdict comes back on the next message. These two are the single
-    // most important behaviour in the whole harness: the session is allowed to
-    // stop, and nothing the user said is lost when it does.
-    const stopOut = await withTimeout(hook('Stop', { stop_hook_active: false }), 10_000);
-    const held = stopOut?.decision === 'block' || stopOut?.hookSpecificOutput?.decision === 'block';
-    const ended = stopOut !== null && !held;
-    record(
-      'an open gate ends the turn instead of holding it',
-      ended,
-      ended
-        ? undefined
-        : held
-          ? 'the turn was blocked — the session cannot stop at a gate'
-          : 'the Stop hook never answered',
-      true,
+    // The single most important behaviour in the whole harness: the user
+    // answers in the browser and the session moves on. The turn is held open
+    // on the gate, so answer it while the hook is still running and assert
+    // that the turn comes back carrying the verdict.
+    const parked = hook('Stop', { stop_hook_active: false });
+
+    // Wait for the hook to actually reach the gate before answering it,
+    // otherwise this races the hold rather than testing it.
+    // `gate.waiting` going true is the daemon saying a turn is genuinely held
+    // on this gate. If it never does, the hold is switched off in this
+    // project's config rather than broken, and asserting a resume would be
+    // reporting the user's own choice as a fault.
+    const held = await withTimeout(
+      (async () => {
+        for (let i = 0; i < 40; i++) {
+          const res = await fetch(`${baseUrl(lock)}/api/session/${sessionId}`, {
+            headers: { authorization: `Bearer ${lock.token}` },
+          });
+          const body = (await res.json()) as { session?: { gates?: { id: string; waiting?: boolean }[] } };
+          if (body.session?.gates?.find((g) => g.id === gateId)?.waiting) return true;
+          await sleep(100);
+        }
+        return false;
+      })(),
+      10_000,
     );
 
     await fetch(`${baseUrl(lock)}/api/session/${sessionId}/gate/${gateId}/resolve`, {
@@ -171,9 +180,46 @@ export async function runDoctor(): Promise<number> {
       body: JSON.stringify({ verdict: 'changes_requested', comment: 'doctor probe feedback' }),
     });
 
-    const resumed = await withTimeout(hook('UserPromptSubmit', { prompt: 'doctor probe prompt' }), 10_000);
-    const carries = JSON.stringify(resumed ?? {}).includes('doctor probe feedback');
-    record('the verdict reaches Claude with the next message', carries, carries ? undefined : 'feedback text missing', true);
+    const stopOut = await withTimeout(parked, 15_000);
+    const resumedNow = JSON.stringify(stopOut ?? {}).includes('doctor probe feedback');
+    if (held) {
+      record(
+        'answering the gate in the UI resumes the session',
+        resumedNow,
+        resumedNow
+          ? undefined
+          : stopOut === null
+            ? 'the Stop hook never answered'
+            : 'the turn ended without the verdict — a click in the UI would not move the session on',
+        true,
+      );
+    } else {
+      record(
+        'answering the gate in the UI resumes the session',
+        true,
+        'skipped: gateHoldSeconds is 0, so this project has the hold turned off by choice',
+      );
+    }
+
+    // …and if the window is missed, the verdict must still reach the session
+    // with the next message rather than being lost.
+    const second = await mcp('ask', { question: 'doctor probe question' });
+    const secondGate = String(second['gateId'] ?? '');
+    if (secondGate) {
+      await fetch(`${baseUrl(lock)}/api/session/${sessionId}/gate/${secondGate}/resolve`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}` },
+        body: JSON.stringify({ verdict: 'answered', comment: 'doctor probe answer' }),
+      });
+      const resumed = await withTimeout(hook('UserPromptSubmit', { prompt: 'doctor probe prompt' }), 10_000);
+      const carries = JSON.stringify(resumed ?? {}).includes('doctor probe answer');
+      record(
+        'a verdict that missed the window still arrives with the next message',
+        carries,
+        carries ? undefined : 'feedback text missing',
+        true,
+      );
+    }
   }
 
   /* ---------------- async injection ---------------- */

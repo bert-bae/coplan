@@ -2,6 +2,18 @@ import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import type { ShipProvider, ShipStep, Stage } from './types.ts';
 
+/**
+ * Ceiling on one whole verification run, in ms.
+ *
+ * The MCP call that starts a run waits for it before it answers and opens the
+ * gate, so the run's ceiling and the transport's budget have to be one number
+ * with headroom, not two literals that agree by hand. `src/daemon/checks.ts`
+ * enforces it; `src/mcp/tools.ts` adds {@link CHECK_TRANSPORT_HEADROOM_MS} to
+ * it so the daemon's answer wins the race rather than the transport's.
+ */
+export const CHECK_RUN_BUDGET_MS = 15 * 60_000;
+export const CHECK_TRANSPORT_HEADROOM_MS = 30_000;
+
 export interface StageConfig {
   /** Path to a markdown file (relative to the config dir) whose contents are
    *  returned to the model when this stage is entered. */
@@ -28,9 +40,25 @@ export interface HarnessConfig {
   maxTimelineEvents: number;
   /**
    * How long the opt-in `holdIdleSessions` wait holds a finished turn open,
-   * in seconds. It does not apply to gates: an open gate ends the turn.
+   * in seconds.
    */
   stopHoldSeconds: number;
+  /**
+   * How long one `Stop` holds the turn open on an open gate, in seconds.
+   *
+   * This is what makes answering in the browser move the session on by
+   * itself. There is no way to wake a stopped CLI session from outside — no
+   * socket, no IPC — so the only place a verdict can resume a turn is the
+   * `Stop` hook that is still running. Answer inside the window and Claude
+   * carries straight on; miss it and the turn ends for good, with the verdict
+   * delivered on the next message as before.
+   *
+   * Bounded and single-round on purpose. The version of this that held for
+   * `gateHoldRounds × stopHoldSeconds` and re-blocked on expiry left the CLI
+   * structurally unable to stop for over half an hour; expiring into a plain
+   * stop costs one window and nothing else. `0` disables the hold.
+   */
+  gateHoldSeconds: number;
   /** How long a single `harness_await` MCP call parks, in seconds. */
   awaitSeconds: number;
   /**
@@ -55,6 +83,7 @@ export const DEFAULT_CONFIG: HarnessConfig = {
   autoOpen: false,
   maxTimelineEvents: 500,
   stopHoldSeconds: 540,
+  gateHoldSeconds: 300,
   awaitSeconds: 120,
   holdIdleSessions: false,
   maxDiffFileBytes: 400_000,

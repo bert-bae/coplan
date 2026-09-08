@@ -22,10 +22,12 @@ steps. The title becomes the PR title later, so make it a real description of
 the change.
 
 `harness_publish_plan` opens the **plan gate**. Now **end your turn.** Stopping
-is the correct move: the harness does not hold the turn open, so there is
-nothing to wait for and nothing to poll. The session stops, the user reviews at
-their own pace, and their verdict is handed to you the next time they speak to
-the session.
+is the correct move, and it is not the same as doing nothing: the harness holds
+the turn open for a few minutes on its own side, so if the user is at the
+browser and approves straight away you are resumed with their verdict without
+them typing anything. If they take longer than that the session stops properly,
+they review at their own pace, and the verdict is handed to you the next time
+they speak to it. Either way there is nothing to poll.
 
 You come back with one of:
 
@@ -39,8 +41,9 @@ You come back with one of:
   wait on that gate again, and do not republish the same plan expecting it to
   answer.
 
-The verdict arrives at the top of their next message, whether they typed it in
-the terminal or answered in the UI first. You do not need to ask for it.
+You are either resumed with the verdict directly, or handed it at the top of
+their next message. You do not need to ask for it, and you must not poll for
+it.
 
 ### 2. Implement — work the board
 

@@ -22,6 +22,7 @@ import { Button, EmptyState, Explain } from '../components/primitives.tsx';
 import { StageBar, RequiredAction, NoActionNeeded } from '../components/StageStatus.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { classNames, pluralize } from '../lib/format.ts';
+import { verdictExplain, verdictToast } from '../lib/stages.ts';
 import type { PlanStep } from '../../shared/types.ts';
 
 /**
@@ -109,7 +110,7 @@ export function PlanView() {
     try {
       if (gate) {
         await api.resolveGate(sessionId, gate.id, { verdict, comment: summary.trim(), steps });
-        store.toast('success', verdict === 'approved' ? 'Plan approved — Claude is resuming.' : 'Sent to Claude.');
+        store.toast('success', verdictToast(gate, verdict === 'approved' ? 'Plan approved' : 'Sent to Claude'));
       } else {
         await api.feedback(sessionId, { text: describeEdits(plan.steps, steps, summary.trim()), origin: 'plan' });
         store.toast('success', "Queued for Claude's next turn.");
@@ -202,7 +203,7 @@ export function PlanView() {
         <h3 className="panel-title">Your response</h3>
         {gate && (
           <Explain>
-            Approving resumes the parked session with the plan exactly as you have edited it —{' '}
+            {verdictExplain(gate, 'Approving')} Claude gets the plan exactly as you have edited it —{' '}
             {pluralize(live.length, 'step')}
             {steps.length !== live.length && `, ${steps.length - live.length} dropped`}.
           </Explain>

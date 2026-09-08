@@ -4,6 +4,7 @@ import { api } from '../../lib/api.ts';
 import { Button } from '../../components/primitives.tsx';
 import { RequiredAction, NoActionNeeded } from '../../components/StageStatus.tsx';
 import { lineRef, pluralize } from '../../lib/format.ts';
+import { verdictExplain, verdictToast } from '../../lib/stages.ts';
 import { Reconciliation } from './Reconciliation.tsx';
 import type { Gate, ReviewThread } from '../../../shared/types.ts';
 
@@ -44,9 +45,12 @@ export function PendingPanel({
         });
         store.toast(
           'success',
-          verdict === 'approved'
-            ? `Approved${drafts.length ? ` with ${pluralize(drafts.length, 'comment')}` : ''} — Claude is resuming.`
-            : `Sent ${pluralize(drafts.length, 'comment')} — Claude is resuming.`,
+          verdictToast(
+            gate,
+            verdict === 'approved'
+              ? `Approved${drafts.length ? ` with ${pluralize(drafts.length, 'comment')}` : ''}`
+              : `Sent ${pluralize(drafts.length, 'comment')}`,
+          ),
         );
       } else {
         await api.feedback(sessionId, {
@@ -126,7 +130,7 @@ export function PendingPanel({
       <footer className="pending-foot">
         {gate && (
           <p className="explain">
-            Submitting resumes the parked session. Claude receives your summary and every comment above, each
+            {verdictExplain(gate, 'Submitting')} Claude receives your summary and every comment above, each
             with the lines you selected.
           </p>
         )}

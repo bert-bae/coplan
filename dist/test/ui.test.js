@@ -1229,6 +1229,15 @@ function gateChoices(kind) {
       ];
   }
 }
+function resumesNow(gate) {
+  return Boolean(gate?.waiting);
+}
+function verdictToast(gate, did) {
+  return resumesNow(gate) ? `${did} \u2014 Claude is resuming.` : `${did} \u2014 Claude has stopped, so this reaches it with your next message.`;
+}
+function verdictExplain(gate, subject) {
+  return resumesNow(gate) ? `${subject} resumes the parked session.` : `${subject} is recorded now and handed to Claude the next time the session runs.`;
+}
 function gateName(kind) {
   switch (kind) {
     case "plan":
@@ -1838,7 +1847,7 @@ function QuestionGate() {
     ] }),
     questions.length > 0 ? /* @__PURE__ */ jsx6(QuestionForm, { gate, questions, sessionId }, gate.id) : /* @__PURE__ */ jsx6(QuickAnswer, { gate, sessionId }, gate.id),
     /* @__PURE__ */ jsxs6("p", { className: "question-foot", children: [
-      "Answering here is the only thing that resumes the session. A message in the box at the bottom is queued behind this question unless you send it with ",
+      "Answering here is the only thing that moves this on. A message in the box at the bottom is queued behind this question unless you send it with ",
       /* @__PURE__ */ jsx6("strong", { children: "Send now" }),
       "."
     ] })
@@ -1854,7 +1863,7 @@ function QuickAnswer({ gate, sessionId }) {
     setBusy(true);
     try {
       await api.resolveGate(sessionId, gate.id, { verdict: "answered", comment: body });
-      store.toast("success", "Answer sent \u2014 Claude is resuming.");
+      store.toast("success", verdictToast(gate, "Answer sent"));
       setAnswer("");
     } catch (err) {
       store.fail(err);
@@ -1915,7 +1924,7 @@ function QuestionForm({
     setBusy(true);
     try {
       await api.resolveGate(sessionId, gate.id, { verdict: "answered", answers });
-      store.toast("success", "Answers sent \u2014 Claude is resuming.");
+      store.toast("success", verdictToast(gate, "Answers sent"));
     } catch (err) {
       store.fail(err);
     } finally {
@@ -1994,6 +2003,7 @@ var init_QuestionGate = __esm({
     init_format();
     init_hooks();
     init_motion();
+    init_stages();
     OTHER = "__other__";
   }
 });
@@ -2763,7 +2773,7 @@ function PlanView() {
     try {
       if (gate) {
         await api.resolveGate(sessionId, gate.id, { verdict, comment: summary.trim(), steps });
-        store.toast("success", verdict === "approved" ? "Plan approved \u2014 Claude is resuming." : "Sent to Claude.");
+        store.toast("success", verdictToast(gate, verdict === "approved" ? "Plan approved" : "Sent to Claude"));
       } else {
         await api.feedback(sessionId, { text: describeEdits(plan.steps, steps, summary.trim()), origin: "plan" });
         store.toast("success", "Queued for Claude's next turn.");
@@ -2845,7 +2855,8 @@ function PlanView() {
     /* @__PURE__ */ jsxs12("aside", { className: "plan-side", children: [
       /* @__PURE__ */ jsx13("h3", { className: "panel-title", children: "Your response" }),
       gate && /* @__PURE__ */ jsxs12(Explain, { children: [
-        "Approving resumes the parked session with the plan exactly as you have edited it \u2014",
+        verdictExplain(gate, "Approving"),
+        " Claude gets the plan exactly as you have edited it \u2014",
         " ",
         pluralize(live.length, "step"),
         steps.length !== live.length && `, ${steps.length - live.length} dropped`,
@@ -2986,6 +2997,7 @@ var init_PlanView = __esm({
     init_StageStatus();
     init_Markdown();
     init_format();
+    init_stages();
   }
 });
 
@@ -3873,7 +3885,10 @@ function PendingPanel({
         });
         store.toast(
           "success",
-          verdict === "approved" ? `Approved${drafts.length ? ` with ${pluralize(drafts.length, "comment")}` : ""} \u2014 Claude is resuming.` : `Sent ${pluralize(drafts.length, "comment")} \u2014 Claude is resuming.`
+          verdictToast(
+            gate,
+            verdict === "approved" ? `Approved${drafts.length ? ` with ${pluralize(drafts.length, "comment")}` : ""}` : `Sent ${pluralize(drafts.length, "comment")}`
+          )
         );
       } else {
         await api.feedback(sessionId, {
@@ -3930,7 +3945,10 @@ function PendingPanel({
       ] }, file))
     ] }),
     /* @__PURE__ */ jsxs19("footer", { className: "pending-foot", children: [
-      gate && /* @__PURE__ */ jsx20("p", { className: "explain", children: "Submitting resumes the parked session. Claude receives your summary and every comment above, each with the lines you selected." }),
+      gate && /* @__PURE__ */ jsxs19("p", { className: "explain", children: [
+        verdictExplain(gate, "Submitting"),
+        " Claude receives your summary and every comment above, each with the lines you selected."
+      ] }),
       /* @__PURE__ */ jsx20(
         "textarea",
         {
@@ -3995,6 +4013,7 @@ var init_PendingPanel = __esm({
     init_primitives();
     init_StageStatus();
     init_format();
+    init_stages();
     init_Reconciliation();
   }
 });
@@ -4311,7 +4330,7 @@ function VerifyView() {
     try {
       if (gate) {
         await api.resolveGate(sessionId, gate.id, { verdict, comment: notes.trim() });
-        store.toast("success", verdict === "approved" ? "Signed off \u2014 Claude is resuming." : "Sent to Claude.");
+        store.toast("success", verdictToast(gate, verdict === "approved" ? "Signed off" : "Sent to Claude"));
       } else {
         await api.feedback(sessionId, { text: notes.trim() || "Verification notes", origin: "checks" });
         store.toast("success", "Queued for Claude's next turn.");
@@ -4370,7 +4389,7 @@ function VerifyView() {
         failing.length === 1 ? "" : "s",
         " failing. Signing off anyway tells Claude to move on."
       ] }),
-      gate && /* @__PURE__ */ jsx22(Explain, { children: "Your verdict resumes the parked session." }),
+      gate && /* @__PURE__ */ jsx22(Explain, { children: verdictExplain(gate, "Your verdict") }),
       /* @__PURE__ */ jsx22(
         "textarea",
         {
@@ -4460,6 +4479,7 @@ var init_VerifyView = __esm({
     init_primitives();
     init_StageStatus();
     init_format();
+    init_stages();
   }
 });
 
@@ -4607,7 +4627,7 @@ function ShipView() {
         failing.length,
         " check(s) failing \u2014 the checks step will stop the ship."
       ] }),
-      gate ? /* @__PURE__ */ jsx23(Explain, { children: "Shipping resolves the gate and reports the result back to the parked session." }) : /* @__PURE__ */ jsx23(Explain, { children: "This runs git commands against your working tree right now." }),
+      gate ? /* @__PURE__ */ jsx23(Explain, { children: verdictExplain(gate, "Shipping resolves the gate, and the result") }) : /* @__PURE__ */ jsx23(Explain, { children: "This runs git commands against your working tree right now." }),
       confirming ? /* @__PURE__ */ jsxs22("div", { className: "ship-confirm", children: [
         /* @__PURE__ */ jsxs22("p", { children: [
           "Run ",
@@ -4652,6 +4672,7 @@ var init_ShipView = __esm({
     init_primitives();
     init_StageStatus();
     init_format();
+    init_stages();
     ALL_STEPS = ["checks", "commit", "push", "pr", "summary"];
     STEP_HELP = {
       checks: "Refuse to continue if any check is failing",
@@ -5959,6 +5980,36 @@ test("the ship gate can be declined instead of leaving the session parked", asyn
   const call = posts.find((p) => p.route.includes("/gate/"));
   assert.ok(call, "declining resolves the gate rather than doing nothing");
   assert.equal(call.body["verdict"], "rejected");
+  cleanup();
+});
+test("a panel does not promise a resume the harness cannot deliver", async () => {
+  const stopped = makeSession({ stage: "plan_review", status: "idle" });
+  stopped.gates[0] = { ...stopped.gates[0], kind: "plan", prompt: "Review the plan", waiting: false };
+  await boot(stopped);
+  act(() => store2.setTab("plan"));
+  const idleCopy = document.querySelector(".plan").textContent ?? "";
+  assert.match(idleCopy, /next time the session runs/i);
+  assert.doesNotMatch(idleCopy, /resumes the parked session/i);
+  cleanup();
+  const parked = makeSession({ stage: "plan_review" });
+  parked.gates[0] = { ...parked.gates[0], kind: "plan", prompt: "Review the plan", waiting: true };
+  await boot(parked);
+  act(() => store2.setTab("plan"));
+  assert.match(document.querySelector(".plan").textContent ?? "", /resumes the parked session/i);
+  cleanup();
+});
+test("the toast after answering says what actually happens next", async () => {
+  const stopped = makeSession({ stage: "plan_review", status: "idle" });
+  stopped.gates[0] = { ...stopped.gates[0], kind: "plan", prompt: "Review the plan", waiting: false };
+  await boot(stopped);
+  act(() => store2.setTab("plan"));
+  await act(async () => {
+    fireEvent.click(screen.getByText("Approve plan"));
+  });
+  const toast = document.querySelector(".toast")?.textContent ?? "";
+  assert.match(toast, /Plan approved/);
+  assert.match(toast, /with your next message/i, "the user is told the click alone does not move it on");
+  assert.doesNotMatch(toast, /Claude is resuming/i);
   cleanup();
 });
 //# sourceMappingURL=ui.test.js.map

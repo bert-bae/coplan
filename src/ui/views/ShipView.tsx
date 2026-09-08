@@ -4,6 +4,7 @@ import { api } from '../lib/api.ts';
 import { Button, EmptyState, Explain, Panel, Spinner } from '../components/primitives.tsx';
 import { StageBar, RequiredAction, NoActionNeeded } from '../components/StageStatus.tsx';
 import { classNames } from '../lib/format.ts';
+import { verdictExplain } from '../lib/stages.ts';
 import type { ShipState, ShipStep } from '../../shared/types.ts';
 
 const ALL_STEPS: ShipStep[] = ['checks', 'commit', 'push', 'pr', 'summary'];
@@ -212,7 +213,7 @@ export function ShipView() {
           <p className="warn-note">{failing.length} check(s) failing — the checks step will stop the ship.</p>
         )}
         {gate ? (
-          <Explain>Shipping resolves the gate and reports the result back to the parked session.</Explain>
+          <Explain>{verdictExplain(gate, 'Shipping resolves the gate, and the result')}</Explain>
         ) : (
           <Explain>This runs git commands against your working tree right now.</Explain>
         )}
