@@ -101,7 +101,6 @@ test("the daemon hands its address and token to its replacement", async () => {
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.restarting, true);
-  assert.deepEqual(body.interrupted, [], "nothing was running to interrupt");
   const second = await waitForLock(first.pid);
   assert.ok(second, "a replacement daemon should have claimed the lock");
   assert.notEqual(second.pid, first.pid, "it is a new process");

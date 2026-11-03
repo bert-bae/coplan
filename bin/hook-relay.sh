@@ -11,8 +11,8 @@
 #   1. Fail open. If the daemon is down, unreachable, slow, or returns
 #      garbage, this must print nothing and exit 0. A hook that errors shows
 #      up inside the user's session, and this plugin is installed globally.
-#   2. No Node startup cost. This runs on every tool call, so it is sh + curl
-#      rather than a Node process.
+#   2. No Node startup cost. This runs on every prompt and every turn end, so
+#      it is sh + curl rather than a Node process.
 
 set -u
 
@@ -25,12 +25,10 @@ PAYLOAD=$(cat)
 HOME_DIR="${CC_HARNESS_HOME:-$HOME/.claude/cc-harness}"
 LOCK="$HOME_DIR/daemon.json"
 
-# The Stop hook parks the turn while the user works through a review gate, so
-# it needs a long budget. Everything else should be effectively instant.
+# Nothing the harness does waits on the user, so every event is near instant.
 case "$EVENT" in
-  Stop) MAX_TIME=570 ;;
-  UserPromptSubmit) MAX_TIME=20 ;;
-  *) MAX_TIME=15 ;;
+  SessionStart) MAX_TIME=15 ;;
+  *) MAX_TIME=4 ;;
 esac
 
 command -v curl >/dev/null 2>&1 || exit 0

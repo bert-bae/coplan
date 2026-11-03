@@ -1,11 +1,13 @@
 {
   "name": "cc-harness-local",
-  "owner": { "name": "Elbert B." },
+  "owner": {
+    "name": "Elbert B."
+  },
   "plugins": [
     {
       "name": "cc-harness",
       "source": "./",
-      "description": "A live browser UI for a Claude Code session: plan review, progress, line-level diff review, verification and ship — with every response fed back into the same session."
+      "description": "A visual planning workspace for Claude Code: architecture diagrams, a task breakdown you can reorganize, and open questions to answer \u2014 which Claude reads back when you tell it to."
     }
   ]
 }

@@ -12,7 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readLiveLock, baseUrl, ensureHome } from '../shared/paths.ts';
-import { TOOLS, budgetFor, timeoutText } from './tools.ts';
+import { TOOLS, DEFAULT_BUDGET_MS } from './tools.ts';
 import type { DaemonLock } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
@@ -174,8 +174,12 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
         respondError(req.id, -32602, `Unknown tool: ${name}`);
         return;
       }
-      const budget = budgetFor(tool, args['timeout_seconds']);
-      const result = await callDaemon(tool.endpoint, args, budget, timeoutText(tool));
+      const result = await callDaemon(
+        tool.endpoint,
+        args,
+        DEFAULT_BUDGET_MS,
+        '[cc-harness] The daemon did not respond in time. Call the tool again.',
+      );
       respond(req.id, {
         content: [{ type: 'text', text: result.text }],
         isError: !result.ok,
@@ -191,10 +195,8 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
   }
 }
 
-/**
- * In-flight requests are tracked so that stdin closing mid-`await` does not
- * kill a parked gate before its answer has been written back.
- */
+/** In-flight requests are tracked so that stdin closing mid-call does not
+ *  drop a write before its answer has been sent back. */
 let inFlight = 0;
 let stdinClosed = false;
 

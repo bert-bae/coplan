@@ -17,7 +17,7 @@ interface Route {
   handler: Handler;
 }
 
-/** A tiny path router: `/api/session/:id/gate/:gateId/resolve`. */
+/** A tiny path router: `/api/session/:id/plan/ops`. */
 export class Router {
   private routes: Route[] = [];
 

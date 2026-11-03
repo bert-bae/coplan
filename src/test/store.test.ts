@@ -1,8 +1,13 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+
+/**
+ * The session store: persistence, eviction, deletion, and the plan edits it
+ * commits — atomically, or not at all.
+ */
 
 let home: string;
 before(() => {
@@ -16,127 +21,124 @@ async function freshStore() {
   return new SessionStore();
 }
 
-test('gates: only one is open at a time', async () => {
+const PLAN = { title: 'Plan', tasks: [{ title: 'one' }, { title: 'two' }] };
+
+test('a plan survives a daemon restart', async () => {
   const store = await freshStore();
   store.ensure('s1', process.cwd());
-  const first = store.openGate('s1', 'plan', 'Review the plan')!;
-  const second = store.openGate('s1', 'code_review', 'Review the code')!;
+  store.publishPlan('s1', PLAN);
+  store.applyOps('s1', [{ op: 'upsert_task', id: 't1', status: 'done' }], 'user');
+  store.persistNow('s1');
 
-  assert.equal(store.getGate('s1', first.id)!.status, 'cancelled');
-  assert.equal(store.activeGate('s1')!.id, second.id);
+  const reloaded = await freshStore();
+  const plan = reloaded.get('s1')?.plan;
+  assert.ok(plan, 'the plan was reloaded from disk');
+  assert.equal(plan!.tasks.find((t) => t.id === 't1')?.status, 'done');
+  assert.equal(plan!.changes.at(-1)?.author, 'user', 'and so was its change log');
 });
 
-test('gates: resolving delivers the result and clears the active gate', async () => {
+test('a refused edit changes nothing', async () => {
   const store = await freshStore();
   store.ensure('s2', process.cwd());
-  const gate = store.openGate('s2', 'plan', 'Review the plan')!;
-
-  const seen: string[] = [];
-  store.on('gate:resolved', (payload: { gate: { id: string } }) => seen.push(payload.gate.id));
-
-  store.resolveGate('s2', gate.id, { verdict: 'approved', resolvedAt: Date.now() });
-
-  assert.deepEqual(seen, [gate.id]);
-  assert.equal(store.get('s2')!.activeGateId, null);
-  assert.equal(store.getGate('s2', gate.id)!.status, 'resolved');
-  assert.equal(store.resolveGate('s2', gate.id, { verdict: 'approved', resolvedAt: 1 }), undefined);
+  store.publishPlan('s2', PLAN);
+  const before = JSON.stringify(store.get('s2')!.plan);
+  assert.throws(() => store.applyOps('s2', [{ op: 'upsert_task', title: 'ok' }, { op: 'remove', kind: 'task', id: 'nope' }], 'user'));
+  assert.equal(JSON.stringify(store.get('s2')!.plan), before);
 });
 
-test('feedback: drains exactly once', async () => {
+test('the user can start a plan before Claude publishes one', async () => {
   const store = await freshStore();
   store.ensure('s3', process.cwd());
-  store.queueFeedback('s3', { text: 'first', origin: 'timeline' });
-  store.queueFeedback('s3', { text: 'second', origin: 'diff' });
-
-  const drained = store.drainFeedback('s3');
-  assert.deepEqual(drained.map((f) => f.text), ['first', 'second']);
-  assert.deepEqual(store.drainFeedback('s3'), []);
-  assert.equal(store.get('s3')!.pendingFeedback.length, 0);
+  store.applyOps('s3', [{ op: 'set_meta', title: 'My idea' }, { op: 'upsert_task', title: 'first step' }], 'user');
+  const plan = store.get('s3')!.plan!;
+  assert.equal(plan.title, 'My idea');
+  assert.equal(plan.tasks[0]!.createdBy, 'user');
 });
 
-test('resolving a plan gate with edited steps updates the stored plan', async () => {
+test('reading moves Claude to the end of the change log', async () => {
   const store = await freshStore();
   store.ensure('s4', process.cwd());
-  store.mutate('s4', (s) => {
-    s.plan = { title: 'p', steps: [{ id: 'a', title: 'one' }], revision: 1, updatedAt: 0 };
-  });
-  const gate = store.openGate('s4', 'plan', 'Review')!;
-  store.resolveGate('s4', gate.id, {
-    verdict: 'approved',
-    resolvedAt: Date.now(),
-    steps: [{ id: 'a', title: 'one, revised' }],
-  });
-
-  const plan = store.get('s4')!.plan!;
-  assert.equal(plan.steps[0]!.title, 'one, revised');
-  assert.equal(plan.revision, 2);
+  store.publishPlan('s4', PLAN);
+  store.applyOps('s4', [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'hm' }], 'user');
+  const { summarize } = await import('../daemon/store.ts');
+  assert.equal(summarize(store.get('s4')!).unreadByClaude, 1);
+  store.markRead('s4');
+  assert.equal(summarize(store.get('s4')!).unreadByClaude, 0);
 });
 
-test('timeline is capped so a long session cannot grow without bound', async () => {
-  const { SessionStore } = await import('../daemon/store.ts');
-  const store = new SessionStore({ maxTimelineEvents: 10 });
+test('every change is broadcast as a whole-session snapshot', async () => {
+  const store = await freshStore();
   store.ensure('s5', process.cwd());
-  for (let i = 0; i < 25; i++) store.addTimeline('s5', 'note', `event ${i}`);
-
-  const timeline = store.get('s5')!.timeline;
-  assert.equal(timeline.length, 10);
-  assert.equal(timeline[0]!.text, 'event 15');
+  const seen: string[] = [];
+  store.on('event', (e: { type: string }) => seen.push(e.type));
+  store.publishPlan('s5', PLAN);
+  assert.ok(seen.includes('snapshot'));
+  assert.ok(seen.includes('sessions'), 'the rail hears about it too');
 });
 
-test('state survives a daemon restart', async () => {
+test('a session written by the old review loop is migrated to a plan', async () => {
+  const dir = path.join(home, 'sessions', 'legacy');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, 'state.json'),
+    JSON.stringify({
+      sessionId: 'legacy',
+      cwd: process.cwd(),
+      title: 'old',
+      status: 'waiting',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      stage: 'plan_review',
+      gates: [{ id: 'g' }],
+      plan: { title: 'Old plan', summary: 'why', markdown: 'notes', steps: [{ id: 's1', title: 'step one' }], revision: 1 },
+    }),
+  );
   const store = await freshStore();
-  store.ensure('s6', process.cwd());
-  store.setStage('s6', 'implementing', 'building');
-  store.openGate('s6', 'code_review', 'Review the code');
-  store.persistNow('s6');
-
-  const reloaded = await freshStore();
-  const session = reloaded.get('s6');
-  assert.ok(session, 'session was reloaded from disk');
-  assert.equal(session!.stage, 'implementing');
-  assert.equal(session!.gates.length, 1);
-  assert.equal(session!.gates[0]!.waiting, false, 'a parked waiter does not survive a restart');
+  const s = store.get('legacy')!;
+  assert.equal(s.plan?.title, 'Old plan');
+  assert.deepEqual(s.plan?.tasks.map((t) => t.title), ['step one']);
+  assert.equal(s.plan?.sections[0]?.body, 'notes');
+  assert.equal(s.status, 'idle');
+  assert.equal((s as unknown as Record<string, unknown>)['gates'], undefined, 'the review-loop state is dropped');
 });
 
-test('purge removes a session from memory and from disk', async () => {
+test('sweep evicts sessions that ended long ago and keeps live ones', async () => {
   const store = await freshStore();
-  store.ensure('s7', process.cwd());
-  store.setStage('s7', 'implementing', 'building');
-  store.persistNow('s7');
-  assert.ok(existsSync(path.join(home, 'sessions', 's7', 'state.json')));
-
-  assert.equal(store.purge('s7'), true);
-  assert.equal(store.get('s7'), undefined);
-  assert.ok(!existsSync(path.join(home, 'sessions', 's7')), 'the directory goes too');
-
-  // `ensure` reads state back off disk for swept sessions. Purge has to beat
-  // that, or the next hook mentioning this id would resurrect it.
-  const revived = store.ensure('s7', process.cwd());
-  assert.equal(revived.stage, 'idle', 'a purged session does not come back');
+  store.ensure('live', process.cwd());
+  store.ensure('finished', process.cwd());
+  store.update('finished', { status: 'ended', endedAt: Date.now() - 2 * 60 * 60 * 1000 });
+  store.sweep({ endedTtlMs: 60 * 60 * 1000 });
+  assert.equal(store.get('finished'), undefined);
+  assert.ok(store.get('live'));
 });
 
-test('a purged session does not reappear after a restart', async () => {
+test('an evicted session is read back from disk, not blanked', async () => {
   const store = await freshStore();
-  store.ensure('s8', process.cwd());
-  store.persistNow('s8');
-  store.purge('s8');
-
-  const reloaded = await freshStore();
-  assert.equal(reloaded.get('s8'), undefined);
+  store.ensure('evicted', process.cwd());
+  store.publishPlan('evicted', PLAN);
+  store.drop('evicted');
+  assert.equal(store.get('evicted'), undefined);
+  assert.equal(store.ensure('evicted', process.cwd()).plan?.title, 'Plan');
 });
 
-test('purge reports whether there was anything to delete', async () => {
+test('purge removes a session from memory and from disk, for good', async () => {
   const store = await freshStore();
+  store.ensure('gone', process.cwd());
+  store.publishPlan('gone', PLAN);
+  store.persistNow('gone');
+  assert.equal(store.purge('gone'), true);
+  assert.ok(!existsSync(path.join(home, 'sessions', 'gone')));
+  assert.equal(store.ensure('gone', process.cwd()).plan, null, 'a purged session does not come back');
   assert.equal(store.purge('never-existed'), false);
 });
 
-test('drop is eviction, not deletion: the state stays on disk', async () => {
+test('sessions older than the retention window are not loaded', async () => {
+  const dir = path.join(home, 'sessions', 'ancient');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, 'state.json'),
+    JSON.stringify({ sessionId: 'ancient', cwd: process.cwd(), updatedAt: Date.now() - 90 * 24 * 60 * 60 * 1000, status: 'ended' }),
+  );
   const store = await freshStore();
-  store.ensure('s9', process.cwd());
-  store.setStage('s9', 'planning', 'thinking');
-  store.drop('s9');
-
-  assert.equal(store.get('s9'), undefined, 'evicted from memory');
-  const reloaded = await freshStore();
-  assert.equal(reloaded.get('s9')?.stage, 'planning', 'but still recoverable');
+  assert.equal(store.get('ancient'), undefined);
 });

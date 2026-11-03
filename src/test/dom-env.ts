@@ -71,6 +71,21 @@ export function setupDom(url = 'http://127.0.0.1:1234/#/session/s1'): JSDOM {
       configurable: true,
     });
   }
+  // React Flow reads the canvas transform through this; jsdom has none.
+  if (!('DOMMatrixReadOnly' in globalThis)) {
+    Object.defineProperty(globalThis, 'DOMMatrixReadOnly', {
+      value: class {
+        m22: number;
+        constructor(transform?: string) {
+          const scale = /scale\(([\d.]+)\)/.exec(transform ?? '');
+          this.m22 = scale ? Number(scale[1]) : 1;
+        }
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+  globalThis.MutationObserver ??= dom.window.MutationObserver;
   // jsdom stubs this as a no-op that throws in some versions.
   if (!Element.prototype.scrollIntoView) {
     Element.prototype.scrollIntoView = function scrollIntoView() {};
@@ -110,8 +125,9 @@ export function stubFetch(handler: (route: string, init?: RequestInit) => unknow
         ok: true,
         status: 200,
         statusText: 'OK',
+        headers: { get: (name: string) => (name.toLowerCase() === 'content-type' ? (typeof body === 'string' ? 'text/plain' : 'application/json') : null) },
         json: async () => body,
-        text: async () => JSON.stringify(body),
+        text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),
       };
     },
     writable: true,

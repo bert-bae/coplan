@@ -4,8 +4,8 @@
  * The hook contract belongs to the Claude Code CLI, and it has changed shape
  * before. Rather than trust the docs, this replays real hook payloads against
  * a live daemon and asserts the observable result, so a future CLI release
- * that moves a field produces a clear failure here instead of a gate that
- * silently never fires.
+ * that moves a field produces a clear failure here instead of a plan that
+ * silently never reaches the browser.
  */
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readLiveLock, baseUrl, paths } from '../shared/paths.ts';
-import type { DaemonLock, Gate, SessionState } from '../shared/types.ts';
+import type { DaemonLock, SessionState } from '../shared/types.ts';
 import type { HookOutput } from '../shared/hooks.ts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -59,7 +59,7 @@ export async function runDoctor(): Promise<number> {
       hooks?: Record<string, unknown[]>;
     };
     const events = Object.keys(hooks.hooks ?? {});
-    const required = ['SessionStart', 'PostToolUse', 'Stop', 'UserPromptSubmit'];
+    const required = ['SessionStart', 'SessionEnd', 'Stop', 'UserPromptSubmit'];
     const missing = required.filter((e) => !events.includes(e));
     record('hooks.json registers the required events', missing.length === 0, missing.join(', ') || `${events.length} events`, true);
   } catch (err) {
@@ -121,180 +121,82 @@ export async function runDoctor(): Promise<number> {
   await hook('SessionStart', { start_reason: 'startup' });
   record('SessionStart registers the session', (await getSession()) !== null, sessionId, true);
 
-  await hook('PostToolUse', {
-    tool_name: 'TodoWrite',
-    tool_input: {
-      todos: [
-        { content: 'first', status: 'completed' },
-        { content: 'second', status: 'in_progress' },
-      ],
-    },
-  });
-  const afterTodos = await getSession();
-  record('PostToolUse(TodoWrite) captures the checklist', afterTodos?.todos.length === 2, `${afterTodos?.todos.length ?? 0} todos`);
+  /* ---------------- the planning loop ---------------- */
 
-  await hook('PostToolUse', { tool_name: 'Edit', tool_input: { file_path: path.join(cwd, 'example.ts') } });
-  const afterEdit = await getSession();
-  record('PostToolUse(Edit) records the touched file', (afterEdit?.files.length ?? 0) > 0, afterEdit?.files[0]?.path);
-
-  /* ---------------- the gate loop ---------------- */
-
-  const plan = await mcp('plan', {
+  // Claude publishes, the user edits in the browser, Claude reads the edits
+  // back. That round trip is the whole product, so it is what gets probed.
+  const published = await mcp('publish', {
     title: 'doctor probe',
-    steps: [{ title: 'step one' }, { title: 'step two' }],
+    summary: 'A plan written by `harness doctor`.',
+    diagrams: [{ title: 'Probe', source: 'flowchart LR\n  A --> B' }],
+    tasks: [{ title: 'parent', subtasks: [{ title: 'child' }] }],
+    questions: [{ question: 'doctor probe question?', options: ['yes', 'no'] }],
   });
-  const gateId = String(plan['gateId'] ?? '');
-  record('harness_publish_plan opens a gate', Boolean(gateId), gateId, true);
+  record('harness_plan_publish stores the plan', published['ok'] !== false, String(published['text'] ?? '').split('\n')[0], true);
 
-  if (gateId) {
-    // The single most important behaviour in the whole harness: the user
-    // answers in the browser and the session moves on. The turn is held open
-    // on the gate, so answer it while the hook is still running and assert
-    // that the turn comes back carrying the verdict.
-    const parked = hook('Stop', { stop_hook_active: false });
-
-    // Wait for the hook to actually reach the gate before answering it,
-    // otherwise this races the hold rather than testing it.
-    // `gate.waiting` going true is the daemon saying a turn is genuinely held
-    // on this gate. If it never does, the hold is switched off in this
-    // project's config rather than broken, and asserting a resume would be
-    // reporting the user's own choice as a fault.
-    const held = await withTimeout(
-      (async () => {
-        for (let i = 0; i < 40; i++) {
-          const res = await fetch(`${baseUrl(lock)}/api/session/${sessionId}`, {
-            headers: { authorization: `Bearer ${lock.token}` },
-          });
-          const body = (await res.json()) as { session?: { gates?: { id: string; waiting?: boolean }[] } };
-          if (body.session?.gates?.find((g) => g.id === gateId)?.waiting) return true;
-          await sleep(100);
-        }
-        return false;
-      })(),
-      10_000,
-    );
-
-    await fetch(`${baseUrl(lock)}/api/session/${sessionId}/gate/${gateId}/resolve`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}` },
-      body: JSON.stringify({ verdict: 'changes_requested', comment: 'doctor probe feedback' }),
-    });
-
-    const stopOut = await withTimeout(parked, 15_000);
-    const resumedNow = JSON.stringify(stopOut ?? {}).includes('doctor probe feedback');
-    if (held) {
-      record(
-        'answering the gate in the UI resumes the session',
-        resumedNow,
-        resumedNow
-          ? undefined
-          : stopOut === null
-            ? 'the Stop hook never answered'
-            : 'the turn ended without the verdict — a click in the UI would not move the session on',
-        true,
-      );
-    } else {
-      record(
-        'answering the gate in the UI resumes the session',
-        true,
-        'skipped: gateHoldSeconds is 0, so this project has the hold turned off by choice',
-      );
-    }
-
-    // …and if the window is missed, the verdict must still reach the session
-    // with the next message rather than being lost.
-    const second = await mcp('ask', { question: 'doctor probe question' });
-    const secondGate = String(second['gateId'] ?? '');
-    if (secondGate) {
-      await fetch(`${baseUrl(lock)}/api/session/${sessionId}/gate/${secondGate}/resolve`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}` },
-        body: JSON.stringify({ verdict: 'answered', comment: 'doctor probe answer' }),
-      });
-      const resumed = await withTimeout(hook('UserPromptSubmit', { prompt: 'doctor probe prompt' }), 10_000);
-      const carries = JSON.stringify(resumed ?? {}).includes('doctor probe answer');
-      record(
-        'a verdict that missed the window still arrives with the next message',
-        carries,
-        carries ? undefined : 'feedback text missing',
-        true,
-      );
-    }
-  }
-
-  /* ---------------- async injection ---------------- */
-
-  await fetch(`${baseUrl(lock)}/api/session/${sessionId}/feedback`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}` },
-    body: JSON.stringify({ text: 'doctor async comment', origin: 'timeline' }),
-  });
-  const stopAfterFeedback = await withTimeout(hook('Stop', { stop_hook_active: false }), 10_000);
-  const asyncDelivered = JSON.stringify(stopAfterFeedback ?? {}).includes('doctor async comment');
-  record('queued comments are delivered at the next turn boundary', asyncDelivered, undefined, true);
-
-  /* ---------------- non-harness sessions ---------------- */
-
-  const idleSession = `doctor-idle-${randomUUID()}`;
-  const idleRes = await fetch(`${baseUrl(lock)}/hook/Stop`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}` },
-    body: JSON.stringify({ session_id: idleSession, cwd, stop_hook_active: false }),
-  });
-  const idleOut = (await idleRes.json()) as HookOutput;
+  const afterPublish = await getSession();
+  const plan = afterPublish?.plan;
   record(
-    'sessions with no open gate are not held up',
-    idleOut.decision !== 'block',
-    idleOut.decision === 'block' ? 'a plain session would be blocked — this would affect every project' : undefined,
+    'the task tree keeps its nesting',
+    plan?.tasks.length === 2 && plan.tasks.some((t) => t.parentId !== null),
+    `${plan?.tasks.length ?? 0} task(s)`,
     true,
   );
 
-  /* ---------------- task board ---------------- */
+  const questionId = plan?.questions[0]?.id;
+  const opsRes = await fetch(`${baseUrl(lock)}/api/session/${sessionId}/plan/ops`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}` },
+    body: JSON.stringify({
+      ops: [
+        { op: 'answer', id: questionId, selected: ['yes'], text: 'doctor probe answer' },
+        { op: 'comment', target: { kind: 'plan', id: '' }, text: 'doctor probe comment' },
+      ],
+    }),
+  });
+  record('edits from the browser are accepted', opsRes.ok, opsRes.ok ? undefined : await opsRes.text(), true);
 
-  const board = await mcp('tasks', { tasks: [{ title: 'doctor probe task' }] });
-  const boardOk = String(board['text'] ?? '').includes('1 task(s) on the board');
-  record('the task board accepts tasks', boardOk, boardOk ? undefined : String(board['text']).slice(0, 120));
+  const notice = await withTimeout(hook('UserPromptSubmit', { prompt: 'doctor probe prompt' }), 10_000);
+  const noticed = JSON.stringify(notice ?? {}).includes('harness_plan_read');
+  record('the next chat message tells Claude the plan changed', noticed, noticed ? undefined : 'promptNotice may be off in config');
 
-  const created = (board['tasks'] as { id: string }[] | undefined) ?? [];
-  const probeTask = created[0]?.id;
-  if (probeTask) {
-    await mcp('task_update', { task_id: probeTask, status: 'in_progress' });
-    const afterStart = await getSession();
-    record(
-      'claiming a task moves the session to implementing',
-      afterStart?.stage === 'implementing',
-      afterStart?.stage,
-    );
+  const read = await mcp('read', {});
+  const readText = String(read['text'] ?? '');
+  record(
+    'harness_plan_read reports what the user changed',
+    readText.includes('doctor probe answer') && readText.includes('doctor probe comment'),
+    undefined,
+    true,
+  );
 
-    const refused = await mcp('task_update', { task_id: probeTask, status: 'done' });
-    record(
-      'completing a task requires a record of what changed',
-      refused['ok'] === false,
-      refused['ok'] === false ? undefined : 'a task closed with no note',
-    );
+  const reread = await mcp('read', { changes_only: true });
+  record(
+    'reading moves Claude past the changes it has seen',
+    String(reread['text'] ?? '').includes('has not changed the plan'),
+    undefined,
+    true,
+  );
 
-    const blocked = await mcp('task_block', { task_id: probeTask, question: 'doctor probe question?' });
-    const blockGate = String(blocked['gateId'] ?? '');
-    if (blockGate) {
-      await fetch(`${baseUrl(lock)}/api/session/${sessionId}/gate/${blockGate}/resolve`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}` },
-        body: JSON.stringify({ verdict: 'answered', comment: 'doctor probe answer' }),
-      });
-      const afterAnswer = await getSession();
-      const task = afterAnswer?.tasks.find((t) => t.id === probeTask);
-      record(
-        "a blocked task records the user's answer as a decision",
-        task?.decisions.some((d) => d.answer === 'doctor probe answer') ?? false,
-        task?.status,
-      );
-    }
-  }
+  const childId = plan?.tasks.find((t) => t.parentId !== null)?.id ?? '';
+  const tracked = await mcp('task', { task_id: childId, status: 'done', note: 'probe' });
+  const afterTrack = await getSession();
+  record(
+    'harness_task_update tracks progress',
+    tracked['ok'] !== false && afterTrack?.plan?.tasks.find((t) => t.id === childId)?.status === 'done',
+    undefined,
+    true,
+  );
 
-  /* ---------------- git ---------------- */
+  /* ---------------- nothing waits ---------------- */
 
-  const diff = await mcp('diff', {});
-  record('diff engine runs git', String(diff['text'] ?? '').includes('Diff published'), String(diff['text'] ?? '').slice(0, 120));
+  const stopStarted = Date.now();
+  const stopOut = await withTimeout(hook('Stop', { stop_hook_active: false }), 5_000);
+  record(
+    'the Stop hook never holds a turn',
+    stopOut !== null && stopOut.decision !== 'block' && Date.now() - stopStarted < 3_000,
+    stopOut?.decision === 'block' ? 'a turn would be blocked — this would affect every project' : undefined,
+    true,
+  );
 
   await hook('SessionEnd', { end_reason: 'other' });
 
@@ -341,4 +243,3 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null
   }
 }
 
-export type { Gate };

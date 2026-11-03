@@ -1,8 +1,8 @@
 ---
-description: Open the harness review UI for this session in a browser
+description: Open this session's plan in the harness UI
 ---
 
-Run the harness CLI to open this session's UI, then tell the user the URL in one line:
+Run the harness CLI to open this session's plan in a browser, then tell the user the URL in one line:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/harness" open

@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {
   mkdtempSync,
   mkdirSync,
-  readdirSync,
   rmSync,
   writeFileSync,
   existsSync,
@@ -21,29 +20,25 @@ import type { CleanupGroupId, StorageReport } from '../shared/types.ts';
  * The failure mode of this module is not "left something behind" — it is
  * "removed something the user wanted", and every case here is a way that
  * could happen: a session the daemon is still holding, a session evicted from
- * memory an hour ago that is about to be resumed, a temp directory belonging
- * to somebody else's daemon.
+ * memory an hour ago that is about to be resumed, a daemon that is still
+ * running.
  */
 
 let home: string;
-let scratch: string;
 
 before(() => {
   home = mkdtempSync(path.join(tmpdir(), 'cc-harness-hk-home-'));
-  scratch = mkdtempSync(path.join(tmpdir(), 'cc-harness-hk-scratch-'));
   process.env['CC_HARNESS_HOME'] = home;
 });
 
 after(() => {
   rmSync(home, { recursive: true, force: true });
-  rmSync(scratch, { recursive: true, force: true });
 });
 
 beforeEach(() => {
   rmSync(path.join(home, 'sessions'), { recursive: true, force: true });
   rmSync(path.join(home, 'daemon.log'), { force: true });
   rmSync(path.join(home, 'daemon.json'), { force: true });
-  for (const entry of readdirSync(scratch)) rmSync(path.join(scratch, entry), { recursive: true, force: true });
   mkdirSync(path.join(home, 'sessions'), { recursive: true });
 });
 
@@ -67,7 +62,7 @@ function group(report: StorageReport, id: CleanupGroupId) {
   return found;
 }
 
-const opts = () => ({ scratchDir: scratch });
+const opts = () => ({});
 
 /* ------------------------------------------------------------------ *
  * Sessions
@@ -124,11 +119,10 @@ test('a dry run reports what would go and removes nothing', () => {
 
 test('cleaning one group leaves the others alone', () => {
   const dir = session('cold', 3 * DAY);
-  const junk = path.join(scratch, 'cc-harness-commit-9.txt');
-  writeFileSync(junk, 'body');
-  age(junk, 2 * 60 * 60 * 1000);
+  const junk = path.join(home, 'daemon.json');
+  writeFileSync(junk, JSON.stringify({ pid: 0, port: 1, token: 't' }));
 
-  const result = cleanStorage({ ...opts(), groups: ['scratch'] });
+  const result = cleanStorage({ ...opts(), groups: ['lock'] });
   assert.equal(result.groups.length, 1);
   assert.equal(existsSync(dir), true, 'the session group was not selected');
   assert.equal(existsSync(junk), false);
@@ -159,56 +153,6 @@ test('a .tmp from a write still in flight is left alone', () => {
   const dir = session('live', 60_000);
   writeFileSync(path.join(dir, '.diff.99.tmp'), 'x');
   assert.equal(group(scanStorage({ ...opts(), liveSessionIds: ['live'] }), 'partial-writes').count, 0);
-});
-
-/* ------------------------------------------------------------------ *
- * Scratch
- * ------------------------------------------------------------------ */
-
-test('only harness-named scratch older than an hour is reclaimed', () => {
-  const ours = path.join(scratch, 'cc-harness-pr-1.md');
-  const fresh = path.join(scratch, 'cc-harness-commit-2.txt');
-  const theirs = path.join(scratch, 'some-other-tool.txt');
-  for (const file of [ours, fresh, theirs]) writeFileSync(file, 'body');
-  age(ours, 2 * 60 * 60 * 1000);
-  age(theirs, 30 * DAY);
-
-  const report = scanStorage(opts());
-  assert.equal(group(report, 'scratch').count, 1);
-
-  cleanStorage({ ...opts(), groups: ['scratch'] });
-  assert.equal(existsSync(ours), false);
-  assert.equal(existsSync(fresh), true, 'a scratch file a ship may still be using stays');
-  assert.equal(existsSync(theirs), true, 'files the harness did not write are not ours to remove');
-});
-
-test('a temp directory holding a running daemon is not scratch', () => {
-  // `CC_HARNESS_HOME` under /tmp is a real setup — the test suite itself uses
-  // one — and its lock file is what says somebody is home.
-  const other = path.join(scratch, 'cc-harness-other-home');
-  mkdirSync(other, { recursive: true });
-  writeFileSync(path.join(other, 'daemon.json'), JSON.stringify({ pid: process.pid, port: 1, token: 't' }));
-  age(other, 30 * DAY);
-
-  assert.equal(group(scanStorage(opts()), 'scratch').count, 0);
-
-  // The same directory once that daemon is gone: pid 1 is init, so use a pid
-  // that cannot be alive.
-  writeFileSync(path.join(other, 'daemon.json'), JSON.stringify({ pid: 0, port: 1, token: 't' }));
-  age(other, 30 * DAY);
-  assert.equal(group(scanStorage(opts()), 'scratch').count, 1);
-});
-
-test('the live harness home is never scratch, whatever it is named', () => {
-  // The home is a `cc-harness-*` directory in the temp dir throughout this
-  // suite, and it holds every session the report is describing.
-  const report = scanStorage(opts());
-  assert.equal(report.home, home);
-  const scratchDirs = scanStorage({ scratchDir: tmpdir(), now: Date.now() });
-  assert.ok(
-    scratchDirs.groups.every((g) => g.id !== 'scratch' || g.count >= 0),
-    'scanning the real temp directory must not throw',
-  );
 });
 
 /* ------------------------------------------------------------------ *
@@ -251,14 +195,13 @@ test('a lock file is reclaimable only once its process is gone', () => {
  * Containment
  * ------------------------------------------------------------------ */
 
-test('nothing outside the home or the scratch directory can be removed', () => {
+test('cleaning never reaches outside the harness home', () => {
   const outside = mkdtempSync(path.join(tmpdir(), 'cc-harness-hk-outside-'));
   const victim = path.join(outside, 'precious.txt');
   writeFileSync(victim, 'keep me');
+  age(victim, 30 * DAY);
   try {
-    // A scan rooted at a directory that is not the scratch directory finds
-    // nothing to remove there, and `discard` refuses paths under neither root.
-    const result = cleanStorage({ scratchDir: scratch, groups: ['scratch'] });
+    const result = cleanStorage({ groups: ['sessions', 'partial-writes', 'log', 'lock'] });
     assert.equal(result.failed.length, 0);
     assert.equal(existsSync(victim), true);
   } finally {

@@ -6,7 +6,7 @@
       "env": {
         "CC_HARNESS_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
       },
-      "timeoutMs": 660000
+      "timeoutMs": 60000
     }
   }
 }

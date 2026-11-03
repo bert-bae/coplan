@@ -16,6 +16,3 @@ user a new link.
 If the user has just changed the harness's own source, run `npm run build` in
 the plugin directory first; the daemon starts from `dist/`, so a restart
 without a build picks up nothing.
-
-Any checks or ship commands still running are killed by the restart. If the
-command reports interrupted work, pass that on.

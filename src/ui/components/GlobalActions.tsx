@@ -17,12 +17,11 @@ declare const __HARNESS_VERSION__: string;
 /**
  * Groups pre-selected when the panel opens.
  *
- * Everything here is unambiguously garbage: a half-written file, a scratch
- * file from a finished ship, a log tail, an address for a process that is
- * gone. Recorded session history is deliberately left unticked — it is the
- * only group whose removal loses something a user might want back.
+ * Everything here is unambiguously garbage: a half-written file, a log tail,
+ * an address for a process that is gone. Saved plans are deliberately left
+ * unticked — the only group whose removal loses something a user might want.
  */
-const DEFAULT_SELECTION: CleanupGroupId[] = ['partial-writes', 'scratch', 'log', 'lock'];
+const DEFAULT_SELECTION: CleanupGroupId[] = ['partial-writes', 'log', 'lock'];
 
 export function GlobalActions() {
   const restarting = useStore((s) => s.restarting);
@@ -68,7 +67,7 @@ export function GlobalActions() {
 
       {confirming && (
         <div className="global-confirm">
-          <span>Restart the daemon? Checks and ship commands still running will stop.</span>
+          <span>Restart the daemon? Open pages reconnect by themselves.</span>
           <div className="row-actions">
             <button
               type="button"

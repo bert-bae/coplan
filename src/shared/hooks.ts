@@ -81,12 +81,8 @@ export type HookInput =
   | StopInput;
 
 /**
- * Hook output.
- *
- * The docs and the CLI have historically disagreed on whether `Stop` decision
- * fields live at the top level or under `hookSpecificOutput`, so
- * {@link stopBlock} emits both shapes. Extra keys are ignored by the CLI, and
- * emitting both is the difference between a working gate and a silent no-op.
+ * Hook output. The harness only ever returns a no-op or extra prompt context:
+ * it never blocks a turn or holds one open.
  */
 export interface HookOutput {
   decision?: 'block' | 'approve';
@@ -105,21 +101,6 @@ export interface HookOutput {
   };
 }
 
-/** Block the Stop event and hand `reason` back to Claude as its next input. */
-export function stopBlock(reason: string): HookOutput {
-  return {
-    decision: 'block',
-    reason,
-    hookSpecificOutput: {
-      hookEventName: 'Stop',
-      decision: 'block',
-      reason,
-      additionalContext: reason,
-    },
-  };
-}
-
-/** Inject text into the current turn without blocking anything. */
 export function additionalContext(event: string, text: string): HookOutput {
   return {
     suppressOutput: true,

@@ -1,16 +1,12 @@
 import type {
+  Change,
   CleanupGroupId,
   CleanupOutcome,
-  DiffPayload,
-  GateResult,
-  PlanStep,
-  ReviewThread,
+  Plan,
+  PlanOp,
   SessionState,
   SessionSummary,
-  ShipState,
   StorageReport,
-  Task,
-  TaskStatus,
 } from '../../shared/types.ts';
 
 /**
@@ -28,115 +24,39 @@ async function request<T>(route: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`${res.status} ${res.statusText}${body ? `: ${body.slice(0, 200)}` : ''}`);
+    // The daemon's refusals are written for the reader; show them as they are.
+    let message = body;
+    try {
+      message = (JSON.parse(body) as { error?: string }).error ?? body;
+    } catch {
+      /* not JSON */
+    }
+    throw new Error(message ? message.slice(0, 300) : `${res.status} ${res.statusText}`);
   }
-  return (await res.json()) as T;
+  const type = res.headers.get('content-type') ?? '';
+  return (type.includes('json') ? await res.json() : await res.text()) as T;
 }
 
 export const api = {
   sessions: () => request<{ sessions: SessionSummary[]; version: string }>('/api/sessions'),
 
-  session: (id: string) => request<{ session: SessionState; diff: DiffPayload | null }>(`/api/session/${id}`),
+  session: (id: string) => request<{ session: SessionState }>(`/api/session/${id}`),
 
   /** Permanent: the daemon removes the session's on-disk directory too. */
-  deleteSession: (id: string) =>
-    request<{ deleted: boolean }>(`/api/session/${id}`, { method: 'DELETE' }),
+  deleteSession: (id: string) => request<{ deleted: boolean }>(`/api/session/${id}`, { method: 'DELETE' }),
 
   renameSession: (id: string, title: string) =>
-    request<{ title: string }>(`/api/session/${id}/title`, {
+    request<{ title: string }>(`/api/session/${id}/title`, { method: 'POST', body: JSON.stringify({ title }) }),
+
+  /** Every edit the user makes goes through here, as a batch applied all or nothing. */
+  ops: (id: string, ops: PlanOp[]) =>
+    request<{ plan: Plan; changes: Change[] }>(`/api/session/${id}/plan/ops`, {
       method: 'POST',
-      body: JSON.stringify({ title }),
+      body: JSON.stringify({ ops }),
     }),
 
-  diff: (id: string, refresh = false) =>
-    request<{ diff: DiffPayload }>(`/api/session/${id}/diff${refresh ? '?refresh=1' : ''}`),
-
-  resolveGate: (
-    id: string,
-    gateId: string,
-    body: {
-      verdict: GateResult['verdict'];
-      comment?: string;
-      steps?: PlanStep[];
-      threads?: ReviewThread[];
-      ship?: GateResult['ship'];
-      answers?: Record<string, string>;
-    },
-  ) =>
-    request<{ gate: unknown }>(`/api/session/${id}/gate/${gateId}/resolve`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
-
-  /** `interrupt` is the "send now" path: it closes whatever gate is open so
-   *  the parked session wakes on this message instead of the verdict. */
-  feedback: (
-    id: string,
-    body: { text: string; origin?: string; threads?: ReviewThread[]; interrupt?: boolean },
-  ) =>
-    request<{ item: unknown; delivery: string; skippedGate?: string }>(`/api/session/${id}/feedback`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
-
-  saveThreads: (id: string, threads: ReviewThread[]) =>
-    request<{ threads: ReviewThread[] }>(`/api/session/${id}/threads`, {
-      method: 'POST',
-      body: JSON.stringify({ threads }),
-    }),
-
-  updateTask: (id: string, taskId: string, patch: { status?: TaskStatus; title?: string; detail?: string }) =>
-    request<{ task: Task }>(`/api/session/${id}/tasks/${taskId}`, {
-      method: 'POST',
-      body: JSON.stringify(patch),
-    }),
-
-  reorderTasks: (id: string, ids: string[]) =>
-    request<{ tasks: Task[] }>(`/api/session/${id}/tasks/reorder`, {
-      method: 'POST',
-      body: JSON.stringify({ ids }),
-    }),
-
-  replyToThread: (id: string, threadId: string, text: string) =>
-    request<{ thread: ReviewThread }>(`/api/session/${id}/thread/${threadId}/reply`, {
-      method: 'POST',
-      body: JSON.stringify({ text }),
-    }),
-
-  resolveThread: (id: string, threadId: string, resolved: boolean) =>
-    request<{ thread: ReviewThread }>(`/api/session/${id}/thread/${threadId}/resolve`, {
-      method: 'POST',
-      body: JSON.stringify({ resolved }),
-    }),
-
-  addCheck: (id: string, command: string) =>
-    request<{ check: unknown }>(`/api/session/${id}/checks`, {
-      method: 'POST',
-      body: JSON.stringify({ command }),
-    }),
-
-  runChecks: (id: string, checkId?: string) =>
-    request<{ started: boolean }>(`/api/session/${id}/checks/run`, {
-      method: 'POST',
-      body: JSON.stringify(checkId ? { checkId } : {}),
-    }),
-
-  cancelCheck: (id: string, checkId: string) =>
-    request<{ cancelled: boolean }>(`/api/session/${id}/checks/cancel`, {
-      method: 'POST',
-      body: JSON.stringify({ checkId }),
-    }),
-
-  shipPreview: (id: string) =>
-    request<{ ship: ShipState; providers: { id: string; kind: string; label: string }[] }>(
-      `/api/session/${id}/ship`,
-    ),
-
-  executeShip: (id: string, ship: ShipState) =>
-    request<{ ok: boolean; output: string; url?: string; summaryPath?: string; directive?: string }>(
-      `/api/session/${id}/ship`,
-      { method: 'POST', body: JSON.stringify({ ship }) },
-    ),
+  /** The plan exactly as Claude reads it. */
+  planText: (id: string) => request<string>(`/api/session/${id}/plan/text`),
 
   /* ---------------------- daemon-wide actions ---------------------- */
 
@@ -148,14 +68,8 @@ export const api = {
       body: JSON.stringify({ groups }),
     }),
 
-  restartDaemon: () =>
-    request<{ restarting: boolean; interrupted: string[] }>('/api/daemon/restart', {
-      method: 'POST',
-      body: '{}',
-    }),
+  restartDaemon: () => request<{ restarting: boolean }>('/api/daemon/restart', { method: 'POST', body: '{}' }),
 
-  /** Unauthenticated liveness, used to watch a restart complete. `pid`
-   *  identifies the process, so a caller can tell a survivor from a
-   *  successor rather than only knowing that something answered. */
+  /** Unauthenticated liveness; `pid` tells a successor from a survivor. */
   health: () => request<{ ok: boolean; version: string; pid: number }>('/health'),
 };
