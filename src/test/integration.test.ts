@@ -156,7 +156,7 @@ test('publishing returns the plan as Claude will read it, with its ids', async (
   assert.match(text, /Published "Add a cache"/);
   assert.match(text, /Tell them in chat/);
   assert.match(text, /t2 Client/);
-  assert.match(text, /- api → db/);
+  assert.match(text, /- API → Postgres `api → db`/);
   assert.doesNotMatch(text, /token=/, 'the auth token never reaches the transcript');
   const s = await session();
   assert.equal(s.plan?.tasks.length, 4);
@@ -195,12 +195,34 @@ test('what the user does in the browser is what Claude reads back', async () => 
   assert.ok(res.plan, res.error);
 
   const read = String((await mcp('read', {}))['text']);
-  assert.match(read, /Since you last read — 4 change\(s\) by the user/);
-  assert.match(read, /moved "Wire up" under "Storage"/);
-  assert.match(read, /added task "Load test" under "Storage"/);
-  assert.match(read, /commented on diagram "Components"/);
-  assert.match(read, /added "Redis".*connected API → Redis/);
-  assert.match(read, /- cache: "Redis" \(datastore\)\n  tasks: t2\n  Already deployed\./);
+  assert.match(read, /Since you last read — what the user changed/);
+  assert.match(read, /Changed t4 "Wire up": moved under "Storage"/);
+  assert.match(read, /Added t5 "Load test" under "Storage"/);
+  assert.match(read, /Commented on diagram "Components": where does the cache go\?/);
+  // The diagram edit is reported as the design it produced, not the save.
+  assert.match(read, /\*\*Diagram \[d1\] "Components"\*\*\n- Added Redis \(`cache`\) — data store\./);
+  assert.match(read, /- Connected API → Redis\.\n- Connected Redis → Postgres\.\n- Disconnected API → Postgres\./);
+  assert.doesNotMatch(read, /x: |"x"|200/, 'no coordinates reach Claude');
+  // And the architecture reads in flow order, with what was decided.
+  assert.match(read, /\*\*Parts\*\*\n- \*\*API\*\* `api` — service\n- \*\*Redis\*\* `cache` — data store\n  Decisions:\n    Already deployed\.\n  Built by: \[ \] t2 Client\n- \*\*Postgres\*\* `db` — data store/);
+});
+
+test('moving boxes around is saved but is not news to Claude', async () => {
+  const before = await session();
+  const d = before.plan!.diagrams[0]!;
+  const res = await ops([{ op: 'upsert_diagram', id: d.id, nodes: d.nodes.map((n, i) => ({ ...n, x: i * 300, y: 90 })), edges: d.edges, direction: 'TB' }]);
+  assert.ok(res.plan, res.error);
+  assert.equal(res.plan!.diagrams[0]!.nodes[1]!.x, 300, 'the layout is saved');
+  const read = String((await mcp('read', { changes_only: true }))['text']);
+  assert.match(read, /has not changed the plan/);
+  const notice = await hook('UserPromptSubmit', { prompt: 'continue' });
+  assert.equal(notice.hookSpecificOutput?.additionalContext, undefined);
+});
+
+test('what Claude last read stays in the daemon', async () => {
+  const s = await session();
+  assert.ok(s.plan);
+  assert.equal('claudeBaseline' in (s.plan as object), false, 'not sent to the page');
 });
 
 test('reading once catches Claude up', async () => {
@@ -287,8 +309,12 @@ test('the session environment decides the link back to Claude', async () => {
 });
 
 test('task tracking moves statuses and reports them', async () => {
+  await ops([{ op: 'upsert_task', title: 'Profile it' }]);
   const res = await mcp('task', { task_id: 't2', status: 'done', note: 'client added' });
   assert.match(String(res['text']), /"Client" is done/);
+  // Where the user changed things, not how many saves it took.
+  assert.match(String(res['text']), /The user has changed tasks since you last read the plan/);
+  assert.doesNotMatch(String(res['text']), /time\(s\)/);
   const bad = await mcp('task', { task_id: 'nope', status: 'done' });
   assert.equal(bad['ok'], false);
   assert.match(String(bad['text']), /No task "nope"/);

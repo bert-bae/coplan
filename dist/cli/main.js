@@ -644,7 +644,7 @@ var commands = {
       return 0;
     }
     for (const s of sessions) {
-      const plan = s.planTitle ? `"${s.planTitle}" \xB7 tasks ${s.tasks.done}/${s.tasks.total}` + (s.current ? ` \xB7 now: ${s.current}` : "") + (s.waiting ? ` \xB7 WAITING ON YOU: ${s.waiting.text}` : "") + (s.unreadByClaude ? ` \xB7 ${s.unreadByClaude} change(s) unread by Claude` : "") : "no plan yet";
+      const plan = s.planTitle ? `"${s.planTitle}" \xB7 tasks ${s.tasks.done}/${s.tasks.total}` + (s.current ? ` \xB7 now: ${s.current}` : "") + (s.waiting ? ` \xB7 WAITING ON YOU: ${s.waiting.text}` : "") + (s.unreadByClaude ? ` \xB7 ${s.unreadByClaude} item(s) changed that Claude has not read` : "") : "no plan yet";
       console.log(`  ${pad(s.status, 7)} ${pad(s.title, 28)} ${plan}`);
       console.log(`          ${s.sessionId}  ${s.cwd}`);
       if (s.link) console.log(`          open: ${s.link.app}  (web: ${s.link.web})`);

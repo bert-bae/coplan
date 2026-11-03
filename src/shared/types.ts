@@ -47,6 +47,9 @@ export interface DiagramNode {
   kind: NodeKind;
   /** One line under the label on the canvas: responsibility or technology. */
   detail?: string;
+  /** What this part is and does — what it owns, how others talk to it. A
+   *  short paragraph, shown in the box's hover summary. Markdown. */
+  description?: string;
   /** The longer story, edited in the side panel: decisions taken about this
    *  part and why, interfaces, open concerns. Markdown. */
   notes?: string;
@@ -58,6 +61,11 @@ export interface DiagramNode {
   y?: number;
 }
 
+/** Which ends of an arrow carry a head. `end` — the default, and never
+ *  stored — points from source to target. */
+export const EDGE_ARROWS = ['end', 'both', 'none'] as const;
+export type EdgeArrows = (typeof EDGE_ARROWS)[number];
+
 export interface DiagramEdge {
   id: string;
   source: string;
@@ -65,6 +73,8 @@ export interface DiagramEdge {
   label?: string;
   /** Dashed for optional, async or future connections. */
   dashed?: boolean;
+  /** Absent means `end`. */
+  arrows?: Exclude<EdgeArrows, 'end'>;
 }
 
 export type DiagramDirection = 'LR' | 'TB';
@@ -81,7 +91,8 @@ export interface Diagram {
   rev: number;
   nodes: DiagramNode[];
   edges: DiagramEdge[];
-  /** Which way automatic layout flows. */
+  /** Which way automatic layout flows. When Claude leaves it out, the
+   *  harness picks the one that suits the graph's shape. */
   direction: DiagramDirection;
   caption?: string;
   updatedAt: number;
@@ -94,6 +105,7 @@ export interface DiagramNodeInput {
   label?: string;
   kind?: string;
   detail?: string;
+  description?: string;
   notes?: string;
   taskIds?: string[];
   x?: number;
@@ -106,6 +118,7 @@ export interface DiagramEdgeInput {
   target: string;
   label?: string;
   dashed?: boolean;
+  arrows?: string;
 }
 
 export interface DiagramInput {
@@ -212,13 +225,32 @@ export interface Plan {
   changes: Change[];
   /** The last `seq` handed out. */
   seq: number;
+  /** Bumped on every saved change, layout included. `seq` only counts
+   *  changes worth logging, so this is what orders two versions of a plan —
+   *  a page uses it to never roll back to an older one. */
+  version: number;
   /** The last `seq` Claude has read. Changes after it are unread by Claude. */
   claudeReadSeq: number;
   claudeReadAt: number | null;
+  /** The plan's content as of that read, without layout. "Since you last
+   *  read" is the difference between this and now — the net effect of the
+   *  user's edits, not every step they took to get there. Daemon-side only:
+   *  never sent to the browser. */
+  claudeBaseline?: PlanBaseline;
   /** Bumped each time Claude publishes the plan wholesale. */
   revision: number;
   createdAt: number;
   updatedAt: number;
+}
+
+/** A plan's content with everything that is only presentation left out:
+ *  positions, revisions, timestamps, who touched what. */
+export interface PlanBaseline {
+  title: string;
+  summary: string;
+  sections: Pick<Section, 'id' | 'title' | 'body'>[];
+  diagrams: (Pick<Diagram, 'id' | 'title' | 'caption' | 'edges'> & { nodes: Omit<DiagramNode, 'x' | 'y'>[] })[];
+  tasks: Pick<Task, 'id' | 'parentId' | 'order' | 'title' | 'detail' | 'status' | 'files' | 'note'>[];
 }
 
 /* ------------------------------------------------------------------ *
@@ -381,7 +413,7 @@ export interface SessionSummary {
   surface: SessionSurface;
   link: SessionLink | null;
   openThreads: number;
-  /** User changes Claude has not read yet. */
+  /** Items the user changed that Claude has not read yet. */
   unreadByClaude: number;
 }
 

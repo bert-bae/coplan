@@ -273,14 +273,15 @@ var init_store = __esm({
        * (the canvas's revision) need the daemon's answer, not whatever the store
        * holds by the time it arrives.
        */
-      async commit(ops) {
-        const id = this.state.sessionId;
+      async commit(ops, sessionId = this.state.sessionId) {
+        const id = sessionId;
         if (!id || ops.length === 0) return null;
         this.set({ saving: this.state.saving + 1 });
         try {
           const { plan } = await api.ops(id, ops);
           const session = this.state.session;
-          if (session && session.sessionId === id && (!session.plan || plan.seq >= session.plan.seq)) {
+          const order = (p) => p.version ?? p.seq;
+          if (session && session.sessionId === id && (!session.plan || order(plan) >= order(session.plan))) {
             this.set({ session: { ...session, plan } });
           }
           return plan;
@@ -800,10 +801,7 @@ Double-click to rename`,
                   " tasks"
                 ] }),
                 /* @__PURE__ */ jsx2("span", { children: relativeTime(session.updatedAt) }),
-                session.unreadByClaude > 0 && /* @__PURE__ */ jsxs2("span", { className: "pill is-draft", title: "Changes Claude has not read yet", children: [
-                  session.unreadByClaude,
-                  " unread"
-                ] })
+                session.unreadByClaude > 0 && /* @__PURE__ */ jsx2("span", { className: "pill is-draft", title: "You changed the plan since Claude last read it", children: "unread" })
               ] })
             ]
           }
@@ -1084,11 +1082,12 @@ var init_ThemeToggle = __esm({
 });
 
 // src/shared/types.ts
-var NODE_KINDS, TASK_STATUSES;
+var NODE_KINDS, EDGE_ARROWS, TASK_STATUSES;
 var init_types = __esm({
   "src/shared/types.ts"() {
     "use strict";
     NODE_KINDS = ["component", "service", "datastore", "queue", "external", "actor", "note"];
+    EDGE_ARROWS = ["end", "both", "none"];
     TASK_STATUSES = ["todo", "in_progress", "blocked", "done"];
   }
 });
@@ -1097,6 +1096,54 @@ var init_types = __esm({
 function unreadByClaude(plan) {
   if (!plan) return [];
   return plan.changes.filter((c) => c.seq > plan.claudeReadSeq && c.author === "user");
+}
+function unreadAreas(plan) {
+  const areas = [];
+  const add = (what) => void (areas.includes(what) || areas.push(what));
+  for (const c of unreadByClaude(plan)) {
+    if (["commented", "replied", "resolved", "reopened"].includes(c.kind)) add("comments");
+    else if (c.target.kind === "diagram") add(`the "${plan.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
+    else if (c.target.kind === "task") add("tasks");
+    else if (c.target.kind === "section") add("sections");
+    else if (c.summary.startsWith(RENAMED_PLAN)) add("the plan's title");
+    else add("the summary");
+  }
+  return areas;
+}
+function flowRanks(nodes, edges) {
+  const ids = new Set(nodes.map((n) => n.id));
+  const out = /* @__PURE__ */ new Map();
+  const connected = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const e of edges) {
+    if (e.source === e.target || !ids.has(e.source) || !ids.has(e.target)) continue;
+    out.set(e.source, [...out.get(e.source) ?? [], e.target]);
+    for (const end of [e.source, e.target]) {
+      if (!seen.has(end)) connected.push(end);
+      seen.add(end);
+    }
+  }
+  const state = /* @__PURE__ */ new Map();
+  const order = [];
+  const forward = /* @__PURE__ */ new Map();
+  const visit = (v) => {
+    state.set(v, "open");
+    const keep = [];
+    for (const w of out.get(v) ?? []) {
+      if (state.get(w) === "open") continue;
+      keep.push(w);
+      if (!state.has(w)) visit(w);
+    }
+    forward.set(v, keep);
+    state.set(v, "done");
+    order.push(v);
+  };
+  for (const v of connected) if (!state.has(v)) visit(v);
+  const rank = new Map(connected.map((v) => [v, 0]));
+  for (const v of order.reverse()) {
+    for (const w of forward.get(v) ?? []) rank.set(w, Math.max(rank.get(w) ?? 0, rank.get(v) + 1));
+  }
+  return rank;
 }
 function childrenOf(plan, parentId) {
   return plan.tasks.filter((t) => t.parentId === parentId).sort((a, b) => a.order - b.order);
@@ -1141,10 +1188,12 @@ function currentTask(plan) {
   if (!plan) return null;
   return outline(plan).find((r) => r.task.status === "in_progress" && !plan.tasks.some((t) => t.parentId === r.task.id))?.task ?? null;
 }
+var RENAMED_PLAN;
 var init_plan = __esm({
   "src/shared/plan.ts"() {
     "use strict";
     init_types();
+    RENAMED_PLAN = "renamed the plan";
   }
 });
 
@@ -1156,14 +1205,12 @@ function Handoff() {
   const plan = usePlan();
   const [viewing, setViewing] = useState5(false);
   if (!session) return null;
-  const unread = unreadByClaude(plan).length;
+  const areas = unreadAreas(plan);
+  const unread = areas.length;
   return /* @__PURE__ */ jsxs6("div", { className: "handoff", children: [
-    plan && (unread > 0 ? /* @__PURE__ */ jsxs6("span", { className: "handoff-state is-behind", title: "Changes you made that Claude has not read yet", children: [
+    plan && (unread > 0 ? /* @__PURE__ */ jsxs6("span", { className: "handoff-state is-behind", title: `You changed ${areas.join(", ")} since Claude last read the plan`, children: [
       /* @__PURE__ */ jsx6("span", { className: "dot is-attention", "aria-hidden": "true" }),
-      unread,
-      " change",
-      unread === 1 ? "" : "s",
-      " Claude hasn't read"
+      "Claude hasn't read your changes"
     ] }) : /* @__PURE__ */ jsxs6("span", { className: "handoff-state is-current", title: plan.claudeReadAt ? `Read ${new Date(plan.claudeReadAt).toLocaleString()}` : void 0, children: [
       "\u2713 Claude is up to date",
       plan.claudeReadAt ? ` \xB7 read ${relativeTime(plan.claudeReadAt)}` : ""
@@ -1445,9 +1492,9 @@ function matchListItem(line) {
   const ordered = bullet ? null : /^(\s*)\d+[.)]\s+(.*)$/.exec(line);
   const match = bullet ?? ordered;
   if (!match) return null;
-  const indent = (match[1] ?? "").replace(/\t/g, "  ").length;
+  const indent2 = (match[1] ?? "").replace(/\t/g, "  ").length;
   let content = match[2] ?? "";
-  const item = { type: bullet ? "ul" : "ol", indent, content };
+  const item = { type: bullet ? "ul" : "ol", indent: indent2, content };
   const task = /^\[([ xX])\]\s+(.*)$/.exec(content);
   if (task && bullet) {
     item.task = true;
@@ -2271,56 +2318,495 @@ var init_OverviewView = __esm({
 // src/ui/lib/layout.ts
 import dagre from "@dagrejs/dagre";
 function nodeSize(node) {
-  const longest = Math.max(node.label.length, Math.min(node.detail?.length ?? 0, 40) * 0.8);
-  const width = Math.round(Math.min(240, Math.max(140, longest * 7.5 + 40)));
-  const height = node.detail ? 64 : 44;
-  return node.kind === "datastore" ? { width, height: height + 12 } : { width, height };
+  const label = node.label.length * LABEL_CHAR;
+  const detail = node.detail ? Math.min(node.detail.length, 46) * DETAIL_CHAR : 0;
+  const raw = Math.max(label + LABEL_CHROME, detail ? detail / (node.detail.length > 34 ? 2 : 1) + DETAIL_CHROME : 0);
+  const width = Math.round(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, raw)) / 10) * 10;
+  const labelLines = Math.min(2, Math.max(1, Math.ceil(label / (width - LABEL_CHROME))));
+  const detailLines = node.detail ? Math.min(2, Math.max(1, Math.ceil(node.detail.length * DETAIL_CHAR / (width - DETAIL_CHROME)))) : 0;
+  let height = 18 + labelLines * 17 + (detailLines ? 2 + detailLines * 14 : 0) + (node.taskIds?.length ? 16 : 0);
+  if (node.kind === "datastore") height += 6;
+  return { width, height: Math.max(44, height) };
+}
+function labelSize(label) {
+  const text = label.length * 6.2;
+  const lines = Math.min(2, Math.ceil(text / 160));
+  return { width: Math.round(Math.min(172, text + 14)), height: 8 + lines * 14 };
 }
 function autoLayout(diagram, direction) {
-  const g = new dagre.graphlib.Graph();
-  g.setGraph({ rankdir: direction, nodesep: 36, ranksep: 70, marginx: 10, marginy: 10 });
-  g.setDefaultEdgeLabel(() => ({}));
-  for (const node of diagram.nodes) g.setNode(node.id, { ...nodeSize(node) });
-  for (const edge of diagram.edges) {
-    if (edge.source !== edge.target) g.setEdge(edge.source, edge.target);
-  }
-  dagre.layout(g);
-  const out = /* @__PURE__ */ new Map();
-  for (const node of diagram.nodes) {
-    const laid = g.node(node.id);
-    if (!laid) continue;
-    out.set(node.id, { x: Math.round(laid.x - laid.width / 2), y: Math.round(laid.y - laid.height / 2) });
-  }
-  return out;
+  const key = JSON.stringify([
+    direction,
+    diagram.nodes.map((n) => [n.id, n.label, n.detail ?? "", n.kind, n.taskIds?.length ? 1 : 0]),
+    diagram.edges.map((e) => [e.id, e.source, e.target, e.label ?? ""])
+  ]);
+  let hit = computed.get(key);
+  if (hit) computed.delete(key);
+  else hit = seal(computeLayout(diagram, direction));
+  computed.set(key, hit);
+  if (computed.size > COMPUTED_MAX) computed.delete(computed.keys().next().value);
+  return { positions: new Map([...hit.positions].map(([id, p]) => [id, { ...p }])), routes: new Map(hit.routes) };
 }
-function resolvePositions(diagram) {
+function seal(layout) {
+  for (const r of layout.routes.values()) {
+    for (const p of r.points) Object.freeze(p);
+    Object.freeze(r.points);
+    if (r.label) Object.freeze(r.label);
+    Object.freeze(r.from);
+    Object.freeze(r.to);
+    Object.freeze(r);
+  }
+  return layout;
+}
+function computeLayout(diagram, direction) {
+  const degree = /* @__PURE__ */ new Map();
+  for (const e of diagram.edges) {
+    if (e.source === e.target) continue;
+    degree.set(e.source, (degree.get(e.source) ?? 0) + 1);
+    degree.set(e.target, (degree.get(e.target) ?? 0) + 1);
+  }
+  const connected = diagram.nodes.filter((n) => degree.has(n.id));
+  const loose = diagram.nodes.filter((n) => !degree.has(n.id));
+  const positions = /* @__PURE__ */ new Map();
+  const routes = /* @__PURE__ */ new Map();
+  if (connected.length) {
+    const ids = new Set(connected.map((n) => n.id));
+    const g = new dagre.graphlib.Graph({ multigraph: true });
+    g.setGraph({ rankdir: direction, ...SPACING[direction], marginx: 0, marginy: 0, acyclicer: "greedy", ranker: "network-simplex" });
+    g.setDefaultEdgeLabel(() => ({}));
+    for (const n of connected) g.setNode(n.id, { ...nodeSize(n) });
+    for (const e of diagram.edges) {
+      if (e.source === e.target || !ids.has(e.source) || !ids.has(e.target)) continue;
+      g.setEdge(e.source, e.target, e.label ? { ...labelSize(e.label), labelpos: "c" } : { width: 0, height: 0 }, e.id);
+    }
+    dagre.layout(g);
+    for (const n of connected) {
+      const laid = g.node(n.id);
+      positions.set(n.id, { x: Math.round(laid.x - laid.width / 2), y: Math.round(laid.y - laid.height / 2) });
+    }
+    for (const e of diagram.edges) {
+      const laid = g.edge({ v: e.source, w: e.target, name: e.id });
+      if (!laid?.points?.length) continue;
+      routes.set(e.id, {
+        points: laid.points.map((p) => ({ x: p.x, y: p.y })),
+        ...e.label && laid.x !== void 0 && laid.y !== void 0 ? { label: { x: laid.x, y: laid.y } } : {},
+        from: positions.get(e.source),
+        to: positions.get(e.target)
+      });
+    }
+  }
+  shelve(loose, positions, new Map(diagram.nodes.map((n) => [n.id, nodeSize(n)])), direction);
+  return normalize({ positions, routes });
+}
+function shelve(loose, positions, size, direction) {
+  if (!loose.length) return;
+  const sizes = loose.map((n) => size.get(n.id));
+  const bounds = boundsOf(positions, size);
+  const gapX = 40;
+  const gapY = 32;
+  if (!bounds) {
+    const cols = Math.max(1, Math.ceil(Math.sqrt(loose.length * 1.6)));
+    let y = 0;
+    for (let row = 0; row * cols < loose.length; row++) {
+      let x = 0;
+      const items = loose.slice(row * cols, row * cols + cols);
+      let tallest = 0;
+      items.forEach((n, i) => {
+        const s = sizes[row * cols + i];
+        positions.set(n.id, { x, y });
+        x += s.width + gapX;
+        tallest = Math.max(tallest, s.height);
+      });
+      y += tallest + gapY;
+    }
+    return;
+  }
+  if (direction === "LR") {
+    const limit = Math.max(bounds.maxX, bounds.minX + 3 * (MAX_WIDTH + gapX));
+    let x = bounds.minX;
+    let y = bounds.maxY + SHELF_GAP;
+    let tallest = 0;
+    loose.forEach((n, i) => {
+      const s = sizes[i];
+      if (x > bounds.minX && x + s.width > limit) {
+        x = bounds.minX;
+        y += tallest + gapY;
+        tallest = 0;
+      }
+      positions.set(n.id, { x, y });
+      x += s.width + gapX;
+      tallest = Math.max(tallest, s.height);
+    });
+  } else {
+    const limit = Math.max(bounds.maxY, bounds.minY + 4 * (60 + gapY));
+    let x = bounds.maxX + SHELF_GAP;
+    let y = bounds.minY;
+    let widest = 0;
+    loose.forEach((n, i) => {
+      const s = sizes[i];
+      if (y > bounds.minY && y + s.height > limit) {
+        y = bounds.minY;
+        x += widest + gapX;
+        widest = 0;
+      }
+      positions.set(n.id, { x, y });
+      y += s.height + gapY;
+      widest = Math.max(widest, s.width);
+    });
+  }
+}
+function normalize(layout) {
+  let minX = Infinity;
+  let minY = Infinity;
+  for (const p of layout.positions.values()) {
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+  }
+  if (!Number.isFinite(minX) || minX === 0 && minY === 0) return layout;
+  const at = (p) => ({ x: Math.round(p.x - minX), y: Math.round(p.y - minY) });
+  const positions = new Map([...layout.positions].map(([id, p]) => [id, at(p)]));
+  const routes = new Map(
+    [...layout.routes].map(([id, r]) => [
+      id,
+      {
+        points: r.points.map((p) => ({ x: p.x - minX, y: p.y - minY })),
+        ...r.label ? { label: { x: r.label.x - minX, y: r.label.y - minY } } : {},
+        from: at(r.from),
+        to: at(r.to)
+      }
+    ])
+  );
+  return { positions, routes };
+}
+function resolveLayout(diagram) {
   const placed = diagram.nodes.filter((n) => n.x !== void 0 && n.y !== void 0);
-  const out = new Map(placed.map((n) => [n.id, { x: n.x, y: n.y }]));
-  if (placed.length === diagram.nodes.length) return out;
+  const positions = new Map(placed.map((n) => [n.id, { x: n.x, y: n.y }]));
+  if (placed.length === diagram.nodes.length && diagram.edges.length === 0) return { positions, routes: /* @__PURE__ */ new Map() };
   const auto = autoLayout(diagram, diagram.direction);
   if (placed.length === 0) return auto;
-  let farX = -Infinity;
-  let farY = -Infinity;
-  for (const n of placed) {
-    const size = nodeSize(n);
-    farX = Math.max(farX, n.x + size.width);
-    farY = Math.max(farY, n.y + size.height);
+  if (placed.length < diagram.nodes.length) placeNewcomers(diagram, positions, auto.positions);
+  const routes = /* @__PURE__ */ new Map();
+  for (const e of diagram.edges) {
+    const r = auto.routes.get(e.id);
+    if (r && samePoint(positions.get(e.source), r.from) && samePoint(positions.get(e.target), r.to)) routes.set(e.id, r);
   }
-  const fresh = diagram.nodes.filter((n) => !out.has(n.id));
-  const minX = Math.min(...fresh.map((n) => auto.get(n.id)?.x ?? 0));
-  const minY = Math.min(...fresh.map((n) => auto.get(n.id)?.y ?? 0));
-  for (const n of fresh) {
-    const p = auto.get(n.id) ?? { x: 0, y: 0 };
-    out.set(
-      n.id,
-      diagram.direction === "LR" ? { x: p.x - minX + farX + 80, y: p.y } : { x: p.x, y: p.y - minY + farY + 80 }
-    );
-  }
-  return out;
+  return { positions, routes };
 }
+function placeNewcomers(diagram, positions, auto) {
+  const lr = diagram.direction === "LR";
+  const size = new Map(diagram.nodes.map((n) => [n.id, nodeSize(n)]));
+  const fresh = diagram.nodes.filter((n) => !positions.has(n.id)).sort((a, b) => {
+    const pa = auto.get(a.id) ?? { x: 0, y: 0 };
+    const pb = auto.get(b.id) ?? { x: 0, y: 0 };
+    return lr ? pa.x - pb.x || pa.y - pb.y : pa.y - pb.y || pa.x - pb.x;
+  });
+  const strays = [];
+  for (const n of fresh) {
+    const s = size.get(n.id);
+    const sources = diagram.edges.filter((e) => e.target === n.id && e.source !== n.id && positions.has(e.source)).map((e) => e.source);
+    const targets = diagram.edges.filter((e) => e.source === n.id && e.target !== n.id && positions.has(e.target)).map((e) => e.target);
+    const anchors = sources.length ? sources : targets;
+    if (!anchors.length) {
+      strays.push(n);
+      continue;
+    }
+    const boxes = anchors.map((id) => ({ ...positions.get(id), ...size.get(id) }));
+    const centre2 = {
+      x: boxes.reduce((t, b) => t + b.x + b.width / 2, 0) / boxes.length,
+      y: boxes.reduce((t, b) => t + b.y + b.height / 2, 0) / boxes.length
+    };
+    const after2 = sources.length > 0;
+    const want = lr ? {
+      x: after2 ? Math.max(...boxes.map((b) => b.x + b.width)) + RANK_GAP : Math.min(...boxes.map((b) => b.x)) - RANK_GAP - s.width,
+      y: centre2.y - s.height / 2
+    } : {
+      x: centre2.x - s.width / 2,
+      y: after2 ? Math.max(...boxes.map((b) => b.y + b.height)) + RANK_GAP : Math.min(...boxes.map((b) => b.y)) - RANK_GAP - s.height
+    };
+    positions.set(n.id, findFreeSpot(want, s, positions, size, lr));
+  }
+  if (!strays.length) return;
+  const sub = autoLayout(
+    { nodes: strays.map((n) => ({ ...n, id: n.id })), edges: diagram.edges.filter((e) => strays.some((n) => n.id === e.source) && strays.some((n) => n.id === e.target)) },
+    diagram.direction
+  );
+  const bounds = boundsOf(positions, size);
+  for (const n of strays) {
+    const p = sub.positions.get(n.id) ?? { x: 0, y: 0 };
+    positions.set(n.id, lr ? { x: p.x + bounds.maxX + RANK_GAP, y: p.y + bounds.minY } : { x: p.x + bounds.minX, y: p.y + bounds.maxY + RANK_GAP });
+  }
+}
+function findFreeSpot(want, s, positions, size, lr) {
+  const clear = (p) => [...positions].every(([id, q]) => {
+    const b = size.get(id) ?? { width: MIN_WIDTH, height: 44 };
+    return p.x + s.width + CLEARANCE <= q.x || q.x + b.width + CLEARANCE <= p.x || p.y + s.height + CLEARANCE <= q.y || q.y + b.height + CLEARANCE <= p.y;
+  });
+  const step = lr ? 26 : 40;
+  for (let k = 0; k < 60; k++) {
+    const offset = Math.ceil(k / 2) * step * (k % 2 ? 1 : -1);
+    const p = lr ? { x: want.x, y: want.y + offset } : { x: want.x + offset, y: want.y };
+    if (clear(p)) return { x: Math.round(p.x), y: Math.round(p.y) };
+  }
+  return findFreeSpot(lr ? { x: want.x + s.width + RANK_GAP, y: want.y } : { x: want.x, y: want.y + s.height + RANK_GAP }, s, positions, size, lr);
+}
+function boundsOf(positions, size) {
+  if (positions.size === 0) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const [id, p] of positions) {
+    const s = size.get(id) ?? { width: MIN_WIDTH, height: 44 };
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x + s.width);
+    maxY = Math.max(maxY, p.y + s.height);
+  }
+  return { minX, minY, maxX, maxY };
+}
+function samePoint(a, b) {
+  return Boolean(a && b && Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5);
+}
+var LABEL_CHAR, DETAIL_CHAR, LABEL_CHROME, DETAIL_CHROME, MIN_WIDTH, MAX_WIDTH, SPACING, SHELF_GAP, computed, COMPUTED_MAX, RANK_GAP, CLEARANCE;
 var init_layout = __esm({
   "src/ui/lib/layout.ts"() {
     "use strict";
+    LABEL_CHAR = 7.4;
+    DETAIL_CHAR = 6.1;
+    LABEL_CHROME = 70;
+    DETAIL_CHROME = 25;
+    MIN_WIDTH = 170;
+    MAX_WIDTH = 250;
+    SPACING = {
+      // In LR, nodesep is the vertical gap between boxes in one rank.
+      LR: { nodesep: 30, ranksep: 72, edgesep: 14 },
+      TB: { nodesep: 44, ranksep: 58, edgesep: 14 }
+    };
+    SHELF_GAP = 72;
+    computed = /* @__PURE__ */ new Map();
+    COMPUTED_MAX = 16;
+    RANK_GAP = 90;
+    CLEARANCE = 22;
+  }
+});
+
+// src/ui/lib/geometry.ts
+function centre(r) {
+  return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+}
+function facingSides(a, b, direction = "LR") {
+  const ca = centre(a);
+  const cb = centre(b);
+  const dx = cb.x - ca.x;
+  const dy = cb.y - ca.y;
+  const gapX = Math.abs(dx) - (a.width + b.width) / 2;
+  const gapY = Math.abs(dy) - (a.height + b.height) / 2;
+  const horizontal = dx >= 0 ? ["right", "left"] : ["left", "right"];
+  const vertical = dy >= 0 ? ["bottom", "top"] : ["top", "bottom"];
+  if (gapX > 0 && gapY > 0) {
+    if (direction === "LR") return gapY > gapX * 2.5 ? vertical : horizontal;
+    return gapX > gapY * 2.5 ? horizontal : vertical;
+  }
+  if (gapX > 0) return horizontal;
+  if (gapY > 0) return vertical;
+  return Math.abs(dx) / (a.width || 1) >= Math.abs(dy) / (a.height || 1) ? horizontal : vertical;
+}
+function sidePoint(r, side, offset = 0) {
+  switch (side) {
+    case "top":
+      return { x: r.x + r.width / 2 + offset, y: r.y };
+    case "bottom":
+      return { x: r.x + r.width / 2 + offset, y: r.y + r.height };
+    case "left":
+      return { x: r.x, y: r.y + r.height / 2 + offset };
+    case "right":
+      return { x: r.x + r.width, y: r.y + r.height / 2 + offset };
+  }
+}
+function clipToRect(r, toward) {
+  const c = centre(r);
+  const dx = toward.x - c.x;
+  const dy = toward.y - c.y;
+  if (dx === 0 && dy === 0) return c;
+  const sx = dx ? r.width / 2 / Math.abs(dx) : Infinity;
+  const sy = dy ? r.height / 2 / Math.abs(dy) : Infinity;
+  const s = Math.min(sx, sy);
+  return { x: c.x + dx * s, y: c.y + dy * s };
+}
+function splinePath(points) {
+  if (points.length === 0) return "";
+  const f = (n) => Math.round(n * 10) / 10;
+  if (points.length === 1) return `M${f(points[0].x)},${f(points[0].y)}`;
+  if (points.length === 2) return `M${f(points[0].x)},${f(points[0].y)}L${f(points[1].x)},${f(points[1].y)}`;
+  let d = `M${f(points[0].x)},${f(points[0].y)}`;
+  let x0 = points[0].x;
+  let y0 = points[0].y;
+  let x1 = points[1].x;
+  let y1 = points[1].y;
+  d += `L${f((5 * x0 + x1) / 6)},${f((5 * y0 + y1) / 6)}`;
+  for (let i = 2; i < points.length; i++) {
+    const { x, y } = points[i];
+    d += `C${f((2 * x0 + x1) / 3)},${f((2 * y0 + y1) / 3)} ${f((x0 + 2 * x1) / 3)},${f((y0 + 2 * y1) / 3)} ${f((x0 + 4 * x1 + x) / 6)},${f((y0 + 4 * y1 + y) / 6)}`;
+    x0 = x1;
+    y0 = y1;
+    x1 = x;
+    y1 = y;
+  }
+  d += `C${f((2 * x0 + x1) / 3)},${f((2 * y0 + y1) / 3)} ${f((x0 + 2 * x1) / 3)},${f((y0 + 2 * y1) / 3)} ${f((x0 + 5 * x1) / 6)},${f((y0 + 5 * y1) / 6)}`;
+  d += `L${f(x1)},${f(y1)}`;
+  return d;
+}
+function midpoint(points) {
+  if (points.length === 0) return { x: 0, y: 0 };
+  const lengths = [];
+  let total = 0;
+  for (let i = 1; i < points.length; i++) {
+    const l = Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+    lengths.push(l);
+    total += l;
+  }
+  let left = total / 2;
+  for (let i = 1; i < points.length; i++) {
+    const l = lengths[i - 1];
+    if (left <= l && l > 0) {
+      const t = left / l;
+      return { x: points[i - 1].x + (points[i].x - points[i - 1].x) * t, y: points[i - 1].y + (points[i].y - points[i - 1].y) * t };
+    }
+    left -= l;
+  }
+  return points[points.length - 1];
+}
+function loopPath(r) {
+  const sx = r.x + r.width;
+  const sy = r.y + r.height * 0.35;
+  const ex = r.x + r.width * 0.75;
+  const ey = r.y;
+  return {
+    path: `M${sx},${sy} C${sx + 46},${sy} ${ex},${ey - 46} ${ex},${ey}`,
+    label: { x: sx + 22, y: ey - 22 }
+  };
+}
+function lanes(edges) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const e of edges) {
+    if (e.source === e.target) continue;
+    const key = [e.source, e.target].sort().join("\0");
+    groups.set(key, [...groups.get(key) ?? [], e.id]);
+  }
+  const out = /* @__PURE__ */ new Map();
+  for (const ids of groups.values()) {
+    if (ids.length < 2) continue;
+    ids.forEach((id, i) => out.set(id, (i - (ids.length - 1) / 2) * 14));
+  }
+  return out;
+}
+var init_geometry = __esm({
+  "src/ui/lib/geometry.ts"() {
+    "use strict";
+  }
+});
+
+// src/ui/lib/clipboard.ts
+function toClip(nodes, edges) {
+  if (!nodes.length) return null;
+  const ids = new Set(nodes.map((n) => n.id));
+  return {
+    kind: CLIP_KIND,
+    version: 1,
+    nodes: nodes.map((n) => strip({ ...n })),
+    edges: edges.filter((e) => ids.has(e.source) && ids.has(e.target)).map((e) => strip({ ...e }))
+  };
+}
+function serializeClip(clip) {
+  return JSON.stringify(clip);
+}
+function parseClip(text) {
+  if (!text || !text.includes(CLIP_KIND)) return null;
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const r = raw;
+  if (!r || r.kind !== CLIP_KIND || !Array.isArray(r.nodes) || !Array.isArray(r.edges)) return null;
+  const str = (v, max) => typeof v === "string" && v.trim() ? v.slice(0, max) : void 0;
+  const num = (v) => typeof v === "number" && Number.isFinite(v) ? v : 0;
+  const nodes = [];
+  for (const n of r.nodes.slice(0, 120)) {
+    const o = n;
+    const id = str(o?.["id"], 60);
+    if (!id || nodes.some((x) => x.id === id)) continue;
+    nodes.push(
+      strip({
+        id,
+        label: str(o["label"], 120) ?? id,
+        kind: NODE_KINDS.includes(o["kind"]) ? o["kind"] : "component",
+        detail: str(o["detail"], 400),
+        description: str(o["description"], 4e3),
+        notes: str(o["notes"], 2e4),
+        taskIds: Array.isArray(o["taskIds"]) ? o["taskIds"].filter((t) => typeof t === "string") : void 0,
+        x: num(o["x"]),
+        y: num(o["y"])
+      })
+    );
+  }
+  if (!nodes.length) return null;
+  const ids = new Set(nodes.map((n) => n.id));
+  const edges = [];
+  for (const e of r.edges.slice(0, 300)) {
+    const o = e;
+    const source = str(o?.["source"], 60);
+    const target = str(o?.["target"], 60);
+    if (!source || !target || !ids.has(source) || !ids.has(target)) continue;
+    const arrows = EDGE_ARROWS.includes(o["arrows"]) ? o["arrows"] : void 0;
+    edges.push(strip({ source, target, label: str(o["label"], 120), dashed: o["dashed"] === true ? true : void 0, arrows: arrows === "end" ? void 0 : arrows }));
+  }
+  return { kind: CLIP_KIND, version: 1, nodes, edges };
+}
+function pasteClip(clip, taken, tasks, offset) {
+  const used = new Set(taken);
+  const ids = /* @__PURE__ */ new Map();
+  for (const n of clip.nodes) {
+    const id = freeId(n.id, used);
+    used.add(id);
+    ids.set(n.id, id);
+  }
+  const nodes = clip.nodes.map(
+    (n) => strip({
+      ...n,
+      id: ids.get(n.id),
+      taskIds: n.taskIds?.filter((t) => tasks.has(t)),
+      x: Math.round(n.x + offset.x),
+      y: Math.round(n.y + offset.y)
+    })
+  );
+  const edges = clip.edges.map((e) => ({ ...e, source: ids.get(e.source), target: ids.get(e.target) }));
+  return { nodes, edges };
+}
+function clipOrigin(clip) {
+  return { x: Math.min(...clip.nodes.map((n) => n.x)), y: Math.min(...clip.nodes.map((n) => n.y)) };
+}
+function freeId(wanted, used) {
+  if (!used.has(wanted)) return wanted;
+  const base = wanted.replace(/-\d+$/, "").slice(0, 54);
+  for (let n = 2; ; n++) {
+    const id = `${base}-${n}`;
+    if (!used.has(id)) return id;
+  }
+}
+function strip(o) {
+  for (const key of Object.keys(o)) {
+    const v = o[key];
+    if (v === void 0 || Array.isArray(v) && v.length === 0) delete o[key];
+  }
+  return o;
+}
+var CLIP_KIND;
+var init_clipboard = __esm({
+  "src/ui/lib/clipboard.ts"() {
+    "use strict";
+    init_types();
+    CLIP_KIND = "cc-harness/diagram-selection";
   }
 });
 
@@ -2342,26 +2828,766 @@ var init_theme = __esm({
   }
 });
 
+// src/ui/components/flow/shared.ts
+import { createContext, useContext } from "react";
+function useCanvas() {
+  const api2 = useContext(CanvasContext);
+  if (!api2) throw new Error("useCanvas outside the diagram editor");
+  return api2;
+}
+var CanvasContext, KIND_LABEL, KIND_GLYPH, KIND_HINT;
+var init_shared = __esm({
+  "src/ui/components/flow/shared.ts"() {
+    "use strict";
+    CanvasContext = createContext(null);
+    KIND_LABEL = {
+      component: "Component",
+      service: "Service",
+      datastore: "Datastore",
+      queue: "Queue",
+      external: "External",
+      actor: "Actor",
+      note: "Note"
+    };
+    KIND_GLYPH = {
+      component: "\u25A2",
+      service: "\u2699",
+      datastore: "\u26C1",
+      queue: "\u2630",
+      external: "\u2601",
+      actor: "\u263A",
+      note: "\u270E"
+    };
+    KIND_HINT = {
+      component: "A part of the codebase: a module, a UI, a library",
+      service: "Something that runs: an API, a worker, a job",
+      datastore: "Where state lives: a database, a cache, a bucket",
+      queue: "A queue, topic or stream between parts",
+      external: "A system you depend on but do not own",
+      actor: "A person or client that uses the system",
+      note: "An annotation on the diagram, not a part of the system"
+    };
+  }
+});
+
+// src/ui/components/flow/PlanNode.tsx
+import { useEffect as useEffect9, useRef as useRef4, useState as useState11 } from "react";
+import { Handle, NodeToolbar, Position, useEdges, useNodes } from "@xyflow/react";
+import { jsx as jsx15, jsxs as jsxs14 } from "react/jsx-runtime";
+function PlanNode({ id, data, selected }) {
+  const api2 = useCanvas();
+  const editing = api2.editing === `node:${id}`;
+  const p = data.progress;
+  const state = !p ? null : p.blocked ? "blocked" : p.inProgress ? "in_progress" : p.done === p.total ? "done" : "todo";
+  const summary2 = useHoverSummary();
+  const hasStory = Boolean(data.description?.trim() || data.notes?.trim());
+  return /* @__PURE__ */ jsxs14(
+    "div",
+    {
+      className: classNames("flow-node", `kind-${data.kind}`, selected && "is-selected", state && `progress-${state}`, editing && "is-editing"),
+      style: { width: data.width, minHeight: data.height },
+      children: [
+        SIDES.map(([side, position]) => /* @__PURE__ */ jsx15(Handle, { id: side, type: "source", position, className: `handle-${side}` }, side)),
+        /* @__PURE__ */ jsxs14("div", { className: "flow-node-head", children: [
+          /* @__PURE__ */ jsx15("span", { className: "flow-node-glyph", "aria-hidden": "true", children: KIND_GLYPH[data.kind] }),
+          editing ? /* @__PURE__ */ jsx15(LabelInput, { value: data.label, onDone: (label) => api2.finishNodeLabel(id, label) }) : /* @__PURE__ */ jsx15("span", { className: "flow-node-label", children: data.label }),
+          /* @__PURE__ */ jsx15(
+            "button",
+            {
+              type: "button",
+              className: classNames("flow-node-info nodrag", hasStory && "has-story", summary2.open && "is-open"),
+              "aria-label": `About ${data.label}`,
+              "aria-expanded": summary2.open,
+              onMouseEnter: summary2.show,
+              onMouseLeave: summary2.hideSoon,
+              onFocus: summary2.show,
+              onBlur: summary2.hideNow,
+              onKeyDown: (e) => {
+                if (e.key === "Escape") summary2.hideNow();
+              },
+              children: /* @__PURE__ */ jsx15(InfoIcon, {})
+            }
+          )
+        ] }),
+        data.detail && /* @__PURE__ */ jsx15("div", { className: "flow-node-detail", children: data.detail }),
+        p && /* @__PURE__ */ jsxs14(
+          "div",
+          {
+            className: "flow-node-progress",
+            title: `${p.done} of ${p.total} tasks done${p.inProgress ? `, ${p.inProgress} in progress` : ""}${p.blocked ? `, ${p.blocked} blocked` : ""}`,
+            children: [
+              /* @__PURE__ */ jsx15(ProgressBar, { counts: p, compact: true }),
+              /* @__PURE__ */ jsxs14("span", { children: [
+                p.done,
+                "/",
+                p.total
+              ] })
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsx15(NodeToolbar, { isVisible: summary2.open, position: summary2.side, align: summary2.align, offset: 10, className: "flow-summary-layer", children: summary2.open && /* @__PURE__ */ jsx15(NodeSummary, { id, data, onEnter: summary2.keep, onLeave: summary2.hideSoon }) })
+      ]
+    }
+  );
+}
+function useHoverSummary() {
+  const [side, setSide] = useState11(null);
+  const [align, setAlign] = useState11("center");
+  const timer = useRef4(void 0);
+  useEffect9(() => () => window.clearTimeout(timer.current), []);
+  const keep = () => window.clearTimeout(timer.current);
+  const show = (e) => {
+    keep();
+    const box = e.currentTarget.closest(".react-flow__node")?.getBoundingClientRect();
+    const frame = e.currentTarget.closest(".react-flow")?.getBoundingClientRect();
+    const roomAbove = box && frame ? box.top - frame.top : 0;
+    setSide(roomAbove > 300 ? Position.Top : Position.Bottom);
+    const half = 170;
+    const centre2 = box ? box.left + box.width / 2 : 0;
+    setAlign(!box || !frame ? "center" : centre2 - frame.left < half ? "start" : frame.right - centre2 < half ? "end" : "center");
+  };
+  const hideSoon = () => {
+    keep();
+    timer.current = window.setTimeout(() => setSide(null), 140);
+  };
+  const hideNow = () => {
+    keep();
+    setSide(null);
+  };
+  return { open: side !== null, side: side ?? Position.Top, align, show, keep, hideSoon, hideNow };
+}
+function NodeSummary({ id, data, onEnter, onLeave }) {
+  const plan = usePlan();
+  const edges = useEdges();
+  const nodes = useNodes();
+  const name = (nid) => nodes.find((n) => n.id === nid)?.data.label ?? nid;
+  const out = edges.filter((e) => e.source === id && e.target !== id);
+  const into = edges.filter((e) => e.target === id && e.source !== id);
+  const tasks = (data.taskIds ?? []).map((t) => plan?.tasks.find((x) => x.id === t)).filter((t) => t !== void 0);
+  const SHOWN = 5;
+  const hidden = Math.max(0, out.length - SHOWN) + Math.max(0, into.length - SHOWN);
+  return /* @__PURE__ */ jsxs14("div", { className: "flow-summary", role: "tooltip", onMouseEnter: onEnter, onMouseLeave: onLeave, children: [
+    /* @__PURE__ */ jsxs14("header", { className: "flow-summary-head", children: [
+      /* @__PURE__ */ jsx15("span", { className: classNames("kind-swatch", `kind-${data.kind}`), "aria-hidden": "true", children: KIND_GLYPH[data.kind] }),
+      /* @__PURE__ */ jsx15("span", { className: "panel-kicker", children: KIND_LABEL[data.kind] })
+    ] }),
+    /* @__PURE__ */ jsx15("p", { className: "flow-summary-title", children: data.label }),
+    data.detail && /* @__PURE__ */ jsx15("p", { className: "flow-summary-detail", children: data.detail }),
+    data.description?.trim() ? /* @__PURE__ */ jsx15("div", { className: "flow-summary-body", children: /* @__PURE__ */ jsx15(Markdown, { source: data.description }) }) : /* @__PURE__ */ jsx15("p", { className: "flow-summary-empty", children: "No description yet. Select the box to write what it does." }),
+    data.notes?.trim() && /* @__PURE__ */ jsxs14("section", { className: "flow-summary-section", children: [
+      /* @__PURE__ */ jsx15("p", { className: "flow-summary-label", children: "Decisions" }),
+      /* @__PURE__ */ jsx15("div", { className: "flow-summary-notes", children: /* @__PURE__ */ jsx15(Markdown, { source: data.notes }) })
+    ] }),
+    tasks.length > 0 && /* @__PURE__ */ jsxs14("section", { className: "flow-summary-section", children: [
+      /* @__PURE__ */ jsxs14("p", { className: "flow-summary-label", children: [
+        "Built by",
+        data.progress && /* @__PURE__ */ jsxs14("span", { className: "flow-summary-progress", children: [
+          /* @__PURE__ */ jsx15(ProgressBar, { counts: data.progress, compact: true }),
+          " ",
+          data.progress.done,
+          "/",
+          data.progress.total
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxs14("ul", { className: "flow-summary-list", children: [
+        tasks.slice(0, SHOWN).map((t) => /* @__PURE__ */ jsxs14("li", { children: [
+          /* @__PURE__ */ jsx15("span", { className: classNames("status-dot is-static", `is-${t.status}`), "aria-label": STATUS_LABEL[t.status], children: STATUS_GLYPH[t.status] }),
+          t.title
+        ] }, t.id)),
+        tasks.length > SHOWN && /* @__PURE__ */ jsxs14("li", { className: "muted", children: [
+          "and ",
+          tasks.length - SHOWN,
+          " more"
+        ] })
+      ] })
+    ] }),
+    (out.length > 0 || into.length > 0) && /* @__PURE__ */ jsxs14("section", { className: "flow-summary-section", children: [
+      /* @__PURE__ */ jsx15("p", { className: "flow-summary-label", children: "Connections" }),
+      /* @__PURE__ */ jsxs14("ul", { className: "flow-summary-list", children: [
+        out.slice(0, SHOWN).map((e) => /* @__PURE__ */ jsxs14("li", { children: [
+          /* @__PURE__ */ jsx15("span", { "aria-hidden": "true", children: e.data?.arrows === "both" ? "\u2194" : "\u2192" }),
+          " ",
+          name(e.target),
+          e.data?.label && /* @__PURE__ */ jsxs14("span", { className: "muted", children: [
+            " \xB7 ",
+            e.data.label
+          ] })
+        ] }, e.id)),
+        into.slice(0, SHOWN).map((e) => /* @__PURE__ */ jsxs14("li", { children: [
+          /* @__PURE__ */ jsx15("span", { "aria-hidden": "true", children: e.data?.arrows === "both" ? "\u2194" : "\u2190" }),
+          " ",
+          name(e.source),
+          e.data?.label && /* @__PURE__ */ jsxs14("span", { className: "muted", children: [
+            " \xB7 ",
+            e.data.label
+          ] })
+        ] }, e.id)),
+        hidden > 0 && /* @__PURE__ */ jsxs14("li", { className: "muted", children: [
+          "and ",
+          hidden,
+          " more"
+        ] })
+      ] })
+    ] })
+  ] });
+}
+function LabelInput({ value, onDone, className = "flow-node-input", placeholder }) {
+  const [draft, setDraft] = useState11(value);
+  const done = useRef4(false);
+  const ref = useRef4(null);
+  useEffect9(() => {
+    let tries = 0;
+    let frame = 0;
+    const grab = () => {
+      const el = ref.current;
+      if (!el) return;
+      el.focus();
+      if (document.activeElement === el) el.select();
+      else if (tries++ < 20) frame = window.requestAnimationFrame(grab);
+    };
+    grab();
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+  const finish = (v) => {
+    if (done.current) return;
+    done.current = true;
+    onDone(v);
+  };
+  return /* @__PURE__ */ jsx15(
+    "input",
+    {
+      ref,
+      className: classNames(className, "nodrag nopan"),
+      value: draft,
+      "aria-label": "Rename",
+      placeholder,
+      maxLength: 120,
+      onChange: (e) => setDraft(e.target.value),
+      onBlur: () => finish(draft),
+      onKeyDown: (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") finish(draft);
+        if (e.key === "Escape") finish(null);
+      },
+      onDoubleClick: (e) => e.stopPropagation()
+    }
+  );
+}
+function InfoIcon() {
+  return /* @__PURE__ */ jsxs14("svg", { viewBox: "0 0 16 16", width: "14", height: "14", "aria-hidden": "true", children: [
+    /* @__PURE__ */ jsx15("circle", { cx: "8", cy: "8", r: "6.6", fill: "none", stroke: "currentColor", strokeWidth: "1.4" }),
+    /* @__PURE__ */ jsx15("rect", { x: "7.25", y: "7", width: "1.5", height: "4.6", rx: "0.75", fill: "currentColor" }),
+    /* @__PURE__ */ jsx15("circle", { cx: "8", cy: "4.9", r: "0.95", fill: "currentColor" })
+  ] });
+}
+var SIDES;
+var init_PlanNode = __esm({
+  "src/ui/components/flow/PlanNode.tsx"() {
+    "use strict";
+    init_store();
+    init_Markdown();
+    init_Progress();
+    init_format();
+    init_shared();
+    SIDES = [
+      ["top", Position.Top],
+      ["right", Position.Right],
+      ["bottom", Position.Bottom],
+      ["left", Position.Left]
+    ];
+  }
+});
+
+// src/ui/components/flow/PlanEdge.tsx
+import { BaseEdge, EdgeLabelRenderer, getBezierPath, Position as Position2, useInternalNode } from "@xyflow/react";
+import { Fragment as Fragment2, jsx as jsx16, jsxs as jsxs15 } from "react/jsx-runtime";
+function PlanEdge({ id, source, target, data, markerEnd, markerStart, selected, style }) {
+  const api2 = useCanvas();
+  const from = useInternalNode(source);
+  const to = useInternalNode(target);
+  if (!from || !to) return null;
+  const a = rectOf(from);
+  const b = rectOf(to);
+  if (!a.width || !b.width) return null;
+  let path;
+  let label;
+  const route = data?.route;
+  if (source === target) {
+    ({ path, label } = loopPath(a));
+  } else if (route && route.points.length >= 2 && samePoint(route.from, a) && samePoint(route.to, b)) {
+    const pts = route.points.map((p) => ({ ...p }));
+    pts[0] = clipToRect(a, pts[1]);
+    pts[pts.length - 1] = clipToRect(b, pts[pts.length - 2]);
+    path = splinePath(pts);
+    label = route.label ?? midpoint(pts);
+  } else {
+    const [sa, sb] = facingSides(a, b, api2.direction);
+    const lane = data?.lane ?? 0;
+    const s = sidePoint(a, sa, lane);
+    const t = sidePoint(b, sb, lane);
+    const [p, lx, ly] = getBezierPath({ sourceX: s.x, sourceY: s.y, sourcePosition: POSITION[sa], targetX: t.x, targetY: t.y, targetPosition: POSITION[sb], curvature: 0.3 });
+    path = p;
+    label = { x: lx, y: ly };
+  }
+  const editing = api2.editing === `edge:${id}`;
+  const text = data?.label;
+  return /* @__PURE__ */ jsxs15(Fragment2, { children: [
+    /* @__PURE__ */ jsx16(BaseEdge, { id, path, markerEnd, markerStart, style, interactionWidth: 22 }),
+    (text || editing) && /* @__PURE__ */ jsx16(EdgeLabelRenderer, { children: /* @__PURE__ */ jsx16(
+      "div",
+      {
+        className: classNames("flow-edge-label nodrag nopan", selected && "is-selected", data?.dashed && "is-dashed", editing && "is-editing"),
+        style: { transform: `translate(-50%, -50%) translate(${label.x}px, ${label.y}px)` },
+        onClick: () => api2.selectEdge(id),
+        onDoubleClick: (e) => {
+          e.stopPropagation();
+          api2.startEditing(`edge:${id}`);
+        },
+        title: "Double-click to edit",
+        children: editing ? /* @__PURE__ */ jsx16(LabelInput, { value: text ?? "", className: "flow-edge-input", placeholder: "What flows along it", onDone: (v) => api2.finishEdgeLabel(id, v) }) : text
+      }
+    ) })
+  ] });
+}
+function rectOf(n) {
+  return {
+    x: n.internals.positionAbsolute.x,
+    y: n.internals.positionAbsolute.y,
+    width: n.measured.width ?? n.width ?? n.data.width,
+    height: n.measured.height ?? n.height ?? n.data.height
+  };
+}
+var POSITION;
+var init_PlanEdge = __esm({
+  "src/ui/components/flow/PlanEdge.tsx"() {
+    "use strict";
+    init_format();
+    init_geometry();
+    init_layout();
+    init_PlanNode();
+    init_shared();
+    POSITION = { top: Position2.Top, right: Position2.Right, bottom: Position2.Bottom, left: Position2.Left };
+  }
+});
+
+// src/ui/components/flow/Panels.tsx
+import { useEffect as useEffect10, useLayoutEffect, useRef as useRef5, useState as useState12 } from "react";
+import { Fragment as Fragment3, jsx as jsx17, jsxs as jsxs16 } from "react/jsx-runtime";
+function CommitInput({
+  value,
+  label,
+  placeholder,
+  className,
+  maxLength,
+  onCommit
+}) {
+  const [draft, setDraft] = useState12(value);
+  const live = useRef5({ draft, value, onCommit });
+  live.current = { draft, value, onCommit };
+  useEffect10(() => setDraft(value), [value]);
+  useEffect10(
+    () => () => {
+      const { draft: draft2, value: value2, onCommit: onCommit2 } = live.current;
+      if (draft2.trim() !== value2) onCommit2(draft2.trim());
+    },
+    []
+  );
+  const commit = () => {
+    if (draft.trim() !== value) onCommit(draft.trim());
+  };
+  return /* @__PURE__ */ jsx17(
+    "input",
+    {
+      className: classNames("input", className),
+      value: draft,
+      "aria-label": label,
+      placeholder,
+      maxLength,
+      onChange: (e) => setDraft(e.target.value),
+      onBlur: commit,
+      onKeyDown: (e) => {
+        if (e.key === "Enter") commit();
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          setDraft(value);
+        }
+      }
+    }
+  );
+}
+function CommitTextArea({
+  value,
+  label,
+  placeholder,
+  minRows = 3,
+  maxLength,
+  onCommit
+}) {
+  const [draft, setDraft] = useState12(value);
+  const area = useRef5(null);
+  const live = useRef5({ draft, value, onCommit });
+  live.current = { draft, value, onCommit };
+  useEffect10(() => setDraft(value), [value]);
+  useEffect10(
+    () => () => {
+      const { draft: draft2, value: value2, onCommit: onCommit2 } = live.current;
+      if (draft2.trim() !== value2.trim()) onCommit2(draft2.trim());
+    },
+    []
+  );
+  useLayoutEffect(() => {
+    const el = area.current;
+    if (!el) return;
+    el.style.height = "auto";
+    if (el.scrollHeight) el.style.height = `${Math.min(el.scrollHeight + 2, 420)}px`;
+  }, [draft]);
+  const commit = () => {
+    if (draft.trim() !== value.trim()) onCommit(draft.trim());
+  };
+  return /* @__PURE__ */ jsx17(
+    "textarea",
+    {
+      ref: area,
+      className: "input text-area",
+      value: draft,
+      rows: minRows,
+      "aria-label": label,
+      placeholder,
+      maxLength,
+      onChange: (e) => setDraft(e.target.value),
+      onBlur: commit,
+      onKeyDown: (e) => {
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault();
+          commit();
+          area.current?.blur();
+        }
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          setDraft(value);
+        }
+      }
+    }
+  );
+}
+function KindPicker({ value, onChange, label }) {
+  return /* @__PURE__ */ jsxs16("div", { className: "kind-picker", role: "radiogroup", "aria-label": label, children: [
+    NODE_KINDS.map((k) => /* @__PURE__ */ jsx17(
+      "button",
+      {
+        type: "button",
+        role: "radio",
+        "aria-checked": value === k,
+        "aria-label": KIND_LABEL[k],
+        title: `${KIND_LABEL[k]} \u2014 ${KIND_HINT[k]}`,
+        className: classNames("kind-option", `kind-${k}`, value === k && "is-active"),
+        onClick: () => onChange(k),
+        children: /* @__PURE__ */ jsx17("span", { className: "kind-swatch", "aria-hidden": "true", children: KIND_GLYPH[k] })
+      },
+      k
+    )),
+    /* @__PURE__ */ jsx17("span", { className: "kind-picker-name", children: value ? KIND_LABEL[value] : "Mixed" })
+  ] });
+}
+function Segmented({ value, options, label, onChange }) {
+  return /* @__PURE__ */ jsx17("div", { className: "segmented is-small", role: "radiogroup", "aria-label": label, children: options.map(([v, text, title]) => /* @__PURE__ */ jsx17("button", { type: "button", role: "radio", "aria-checked": value === v, title, className: classNames("seg", value === v && "is-active"), onClick: () => onChange(v), children: text }, v)) });
+}
+function NodePanel({
+  node,
+  nodes,
+  edges,
+  plan,
+  onChange,
+  onSelect,
+  onConnect,
+  onDisconnect,
+  onAddConnected,
+  onDuplicate,
+  onRemove,
+  onClose
+}) {
+  const [confirming, setConfirming] = useState12(false);
+  const name = (id) => nodes.find((n) => n.id === id)?.data.label ?? id;
+  const outgoing = edges.filter((e) => e.source === node.id);
+  const incoming = edges.filter((e) => e.target === node.id && e.source !== node.id);
+  const linked = node.data.taskIds ?? [];
+  const rows = outline(plan);
+  const linkable = rows.filter((r) => !linked.includes(r.task.id));
+  const unconnected = nodes.filter((n) => n.id !== node.id && !outgoing.some((e) => e.target === n.id));
+  return /* @__PURE__ */ jsxs16("div", { className: "arch-panel-body", "aria-label": `Details of ${node.data.label}`, children: [
+    /* @__PURE__ */ jsxs16("header", { className: "panel-top", children: [
+      /* @__PURE__ */ jsx17("span", { className: classNames("kind-swatch", `kind-${node.data.kind}`), "aria-hidden": "true", children: KIND_GLYPH[node.data.kind] }),
+      /* @__PURE__ */ jsx17("span", { className: "panel-kicker", children: KIND_LABEL[node.data.kind] }),
+      /* @__PURE__ */ jsx17("span", { className: "item-id", title: "Id \u2014 how Claude refers to this box", children: node.id }),
+      /* @__PURE__ */ jsx17("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Close details", title: "Back to the diagram", onClick: onClose, children: "\xD7" })
+    ] }),
+    /* @__PURE__ */ jsx17(
+      CommitInput,
+      {
+        className: "panel-title-input",
+        value: node.data.label,
+        label: "Box label",
+        maxLength: 120,
+        onCommit: (label) => label && onChange({ label })
+      }
+    ),
+    /* @__PURE__ */ jsxs16("div", { className: "field", children: [
+      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Kind" }),
+      /* @__PURE__ */ jsx17(KindPicker, { value: node.data.kind, label: "Kind", onChange: (kind) => onChange({ kind }) })
+    ] }),
+    /* @__PURE__ */ jsxs16("label", { className: "field", children: [
+      /* @__PURE__ */ jsxs16("span", { className: "field-label", children: [
+        "On the box ",
+        /* @__PURE__ */ jsx17("span", { className: "field-aside", children: "a few words: technology or role" })
+      ] }),
+      /* @__PURE__ */ jsx17(CommitInput, { value: node.data.detail ?? "", label: "Box detail", placeholder: "e.g. Redis, read-through", maxLength: 80, onCommit: (detail) => onChange({ detail }) })
+    ] }),
+    /* @__PURE__ */ jsxs16("label", { className: "field", children: [
+      /* @__PURE__ */ jsxs16("span", { className: "field-label", children: [
+        "Description ",
+        /* @__PURE__ */ jsx17("span", { className: "field-aside", children: "shown when hovering \u24D8" })
+      ] }),
+      /* @__PURE__ */ jsx17(
+        CommitTextArea,
+        {
+          value: node.data.description ?? "",
+          label: `Description of ${node.data.label}`,
+          placeholder: "What this part does, what it owns, and how other parts talk to it.",
+          maxLength: 4e3,
+          onCommit: (description) => onChange({ description })
+        }
+      )
+    ] }),
+    /* @__PURE__ */ jsxs16("div", { className: "field", children: [
+      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Notes and decisions" }),
+      /* @__PURE__ */ jsx17(
+        MarkdownField,
+        {
+          value: node.data.notes ?? "",
+          label: `notes on ${node.data.label}`,
+          placeholder: "What was decided about this part, and why.",
+          emptyAction: "Add a decision",
+          rows: 6,
+          onSave: (notes) => onChange({ notes })
+        }
+      )
+    ] }),
+    /* @__PURE__ */ jsxs16("div", { className: "field", children: [
+      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Built by" }),
+      linked.length > 0 ? /* @__PURE__ */ jsx17("ul", { className: "panel-tasks", children: linked.map((id) => {
+        const task = plan.tasks.find((t) => t.id === id);
+        if (!task) return null;
+        return /* @__PURE__ */ jsxs16("li", { children: [
+          /* @__PURE__ */ jsx17("span", { className: classNames("status-dot is-static", `is-${task.status}`), title: STATUS_LABEL[task.status], "aria-label": STATUS_LABEL[task.status], children: STATUS_GLYPH[task.status] }),
+          /* @__PURE__ */ jsx17("button", { type: "button", className: "link panel-task", onClick: () => store.focus("task", id), children: task.title }),
+          /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn is-tiny", "aria-label": `Unlink ${task.title}`, title: "Unlink", onClick: () => onChange({ taskIds: linked.filter((t) => t !== id) }), children: "\xD7" })
+        ] }, id);
+      }) }) : /* @__PURE__ */ jsx17("p", { className: "muted panel-empty", children: "No tasks linked. Link the tasks that build this part to see its progress on the box." }),
+      linkable.length > 0 && /* @__PURE__ */ jsxs16("select", { className: "input", "aria-label": `Link a task to ${node.data.label}`, value: "", onChange: (e) => e.target.value && onChange({ taskIds: [...linked, e.target.value] }), children: [
+        /* @__PURE__ */ jsx17("option", { value: "", children: "Link a task\u2026" }),
+        linkable.map(({ task, number, depth }) => /* @__PURE__ */ jsxs16("option", { value: task.id, children: [
+          " ".repeat(depth * 3),
+          number,
+          " ",
+          task.title
+        ] }, task.id))
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxs16("div", { className: "field", children: [
+      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Connections" }),
+      outgoing.length + incoming.length > 0 ? /* @__PURE__ */ jsxs16("ul", { className: "panel-links", children: [
+        outgoing.map((e) => /* @__PURE__ */ jsxs16("li", { children: [
+          /* @__PURE__ */ jsxs16("button", { type: "button", className: "link", onClick: () => onSelect("edge", e.id), children: [
+            e.data?.arrows === "both" ? "\u2194" : "\u2192",
+            " ",
+            name(e.target)
+          ] }),
+          e.data?.label && /* @__PURE__ */ jsxs16("span", { className: "muted", children: [
+            " ",
+            e.data.label
+          ] }),
+          /* @__PURE__ */ jsx17("span", { className: "spacer" }),
+          /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn is-tiny", "aria-label": `Remove connection to ${name(e.target)}`, title: "Disconnect", onClick: () => onDisconnect(e.id), children: "\xD7" })
+        ] }, e.id)),
+        incoming.map((e) => /* @__PURE__ */ jsxs16("li", { children: [
+          /* @__PURE__ */ jsxs16("button", { type: "button", className: "link", onClick: () => onSelect("edge", e.id), children: [
+            e.data?.arrows === "both" ? "\u2194" : "\u2190",
+            " ",
+            name(e.source)
+          ] }),
+          e.data?.label && /* @__PURE__ */ jsxs16("span", { className: "muted", children: [
+            " ",
+            e.data.label
+          ] }),
+          /* @__PURE__ */ jsx17("span", { className: "spacer" }),
+          /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn is-tiny", "aria-label": `Remove connection from ${name(e.source)}`, title: "Disconnect", onClick: () => onDisconnect(e.id), children: "\xD7" })
+        ] }, e.id))
+      ] }) : /* @__PURE__ */ jsx17("p", { className: "muted panel-empty", children: "Not connected. Drag from any edge of the box to another box, or into space for a new one." }),
+      /* @__PURE__ */ jsxs16("div", { className: "row-actions", children: [
+        unconnected.length > 0 && /* @__PURE__ */ jsxs16("select", { className: "input", "aria-label": `Connect ${node.data.label} to`, value: "", onChange: (e) => e.target.value && onConnect(e.target.value), children: [
+          /* @__PURE__ */ jsx17("option", { value: "", children: "Connect to\u2026" }),
+          unconnected.map((n) => /* @__PURE__ */ jsx17("option", { value: n.id, children: n.data.label }, n.id))
+        ] }),
+        /* @__PURE__ */ jsx17("button", { type: "button", className: "btn btn-sm", onClick: onAddConnected, title: "A new box, connected from this one", children: "+ Connected box" })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxs16("footer", { className: "panel-foot", children: [
+      /* @__PURE__ */ jsx17("button", { type: "button", className: "link", onClick: onDuplicate, title: "\u2318/Ctrl+D", children: "Duplicate" }),
+      /* @__PURE__ */ jsx17("span", { className: "spacer" }),
+      confirming ? /* @__PURE__ */ jsxs16("span", { className: "item-confirm", children: [
+        "Delete this box and its arrows?",
+        /* @__PURE__ */ jsx17("button", { type: "button", className: "link is-danger", onClick: onRemove, children: "Delete" }),
+        /* @__PURE__ */ jsx17("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
+      ] }) : /* @__PURE__ */ jsx17("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Delete box" })
+    ] })
+  ] });
+}
+function EdgePanel({
+  edge,
+  nodes,
+  onChange,
+  onReverse,
+  onSelect,
+  onRemove,
+  onClose
+}) {
+  const name = (id) => nodes.find((n) => n.id === id)?.data.label ?? id;
+  const ends = (which) => /* @__PURE__ */ jsx17("select", { className: "input", "aria-label": which === "source" ? "From" : "To", value: edge[which], onChange: (e) => onChange({ [which]: e.target.value }), children: nodes.map((n) => /* @__PURE__ */ jsx17("option", { value: n.id, disabled: n.id === (which === "source" ? edge.target : edge.source), children: n.data.label }, n.id)) });
+  return /* @__PURE__ */ jsxs16("div", { className: "arch-panel-body", "aria-label": "Details of the selected arrow", children: [
+    /* @__PURE__ */ jsxs16("header", { className: "panel-top", children: [
+      /* @__PURE__ */ jsx17("span", { className: "panel-kicker", children: "Connection" }),
+      /* @__PURE__ */ jsx17("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Close details", title: "Back to the diagram", onClick: onClose, children: "\xD7" })
+    ] }),
+    /* @__PURE__ */ jsxs16("p", { className: "panel-edge", children: [
+      /* @__PURE__ */ jsx17("button", { type: "button", className: "link", onClick: () => onSelect("node", edge.source), children: name(edge.source) }),
+      /* @__PURE__ */ jsxs16("span", { "aria-hidden": "true", children: [
+        " ",
+        edge.data?.arrows === "both" ? "\u2194" : edge.data?.arrows === "none" ? "\u2014" : "\u2192",
+        " "
+      ] }),
+      /* @__PURE__ */ jsx17("button", { type: "button", className: "link", onClick: () => onSelect("node", edge.target), children: name(edge.target) })
+    ] }),
+    /* @__PURE__ */ jsxs16("label", { className: "field", children: [
+      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "What flows along it" }),
+      /* @__PURE__ */ jsx17(CommitInput, { value: edge.data?.label ?? "", label: "Arrow label", placeholder: "e.g. REST, publishes events", maxLength: 120, onCommit: (label) => onChange({ label }) })
+    ] }),
+    /* @__PURE__ */ jsxs16("div", { className: "field", children: [
+      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Joins" }),
+      /* @__PURE__ */ jsxs16("div", { className: "edge-ends", children: [
+        ends("source"),
+        /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn", "aria-label": "Reverse direction", title: "Reverse direction", onClick: onReverse, children: "\u21C4" }),
+        ends("target")
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxs16("div", { className: "field-row", children: [
+      /* @__PURE__ */ jsxs16("div", { className: "field-col", children: [
+        /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Line" }),
+        /* @__PURE__ */ jsx17(
+          Segmented,
+          {
+            label: "Line",
+            value: edge.data?.dashed ? "dashed" : "solid",
+            options: [
+              ["solid", "Solid", "A connection that is always there"],
+              ["dashed", "Dashed", "Optional, async or future"]
+            ],
+            onChange: (v) => onChange({ dashed: v === "dashed" })
+          }
+        )
+      ] }),
+      /* @__PURE__ */ jsxs16("div", { className: "field-col", children: [
+        /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Arrowheads" }),
+        /* @__PURE__ */ jsx17(
+          Segmented,
+          {
+            label: "Arrowheads",
+            value: edge.data?.arrows ?? "end",
+            options: [
+              ["end", "\u2192", "One way, from the first box to the second"],
+              ["both", "\u2194", "Both ways"],
+              ["none", "\u2014", "No direction"]
+            ],
+            onChange: (v) => onChange({ arrows: v === "end" ? void 0 : v })
+          }
+        )
+      ] })
+    ] }),
+    /* @__PURE__ */ jsx17("footer", { className: "panel-foot", children: /* @__PURE__ */ jsx17("button", { type: "button", className: "link is-danger", onClick: onRemove, children: "Delete connection" }) })
+  ] });
+}
+function SelectionPanel({
+  nodes,
+  edges,
+  onKind,
+  onCopy,
+  onDuplicate,
+  onRemove,
+  onClose
+}) {
+  const kinds = new Set(nodes.map((n) => n.data.kind));
+  const kind = kinds.size === 1 ? [...kinds][0] : null;
+  return /* @__PURE__ */ jsxs16("div", { className: "arch-panel-body", "aria-label": "Details of the selection", children: [
+    /* @__PURE__ */ jsxs16("header", { className: "panel-top", children: [
+      /* @__PURE__ */ jsx17("span", { className: "panel-kicker", children: "Selection" }),
+      /* @__PURE__ */ jsx17("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Clear selection", title: "Clear selection", onClick: onClose, children: "\xD7" })
+    ] }),
+    /* @__PURE__ */ jsxs16("p", { className: "panel-hint", children: [
+      nodes.length,
+      " box",
+      nodes.length === 1 ? "" : "es",
+      " and ",
+      edges.length,
+      " arrow",
+      edges.length === 1 ? "" : "s",
+      " selected."
+    ] }),
+    nodes.length > 0 && /* @__PURE__ */ jsxs16("div", { className: "field", children: [
+      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Kind of every box" }),
+      /* @__PURE__ */ jsx17(KindPicker, { value: kind, label: "Kind of every selected box", onChange: onKind })
+    ] }),
+    /* @__PURE__ */ jsxs16("div", { className: "row-actions", children: [
+      nodes.length > 0 && /* @__PURE__ */ jsxs16(Fragment3, { children: [
+        /* @__PURE__ */ jsx17("button", { type: "button", className: "btn btn-sm", onClick: onCopy, title: "\u2318/Ctrl+C", children: "Copy" }),
+        /* @__PURE__ */ jsx17("button", { type: "button", className: "btn btn-sm", onClick: onDuplicate, title: "\u2318/Ctrl+D", children: "Duplicate" })
+      ] }),
+      /* @__PURE__ */ jsx17("button", { type: "button", className: "btn btn-sm btn-danger", onClick: onRemove, children: "Delete selection" })
+    ] })
+  ] });
+}
+var init_Panels = __esm({
+  "src/ui/components/flow/Panels.tsx"() {
+    "use strict";
+    init_store();
+    init_Editable();
+    init_Progress();
+    init_format();
+    init_plan();
+    init_types();
+    init_shared();
+  }
+});
+
 // src/ui/components/FlowCanvas.tsx
-import { memo, useCallback, useEffect as useEffect9, useMemo as useMemo2, useRef as useRef4, useState as useState11 } from "react";
+import { useCallback, useEffect as useEffect11, useMemo as useMemo2, useRef as useRef6, useState as useState13 } from "react";
 import {
   Background,
   ConnectionMode,
   Controls,
-  Handle,
   MarkerType,
   MiniMap,
   Panel,
-  Position,
   ReactFlow,
   ReactFlowProvider,
   applyEdgeChanges,
   applyNodeChanges,
   useReactFlow
 } from "@xyflow/react";
-import { jsx as jsx15, jsxs as jsxs14 } from "react/jsx-runtime";
+import { jsx as jsx18, jsxs as jsxs17 } from "react/jsx-runtime";
 function DiagramEditor(props) {
-  return /* @__PURE__ */ jsx15(ReactFlowProvider, { children: /* @__PURE__ */ jsx15(Editor, { ...props }) });
+  return /* @__PURE__ */ jsx18(ReactFlowProvider, { children: /* @__PURE__ */ jsx18(Editor, { ...props }) });
 }
 function Editor({
   diagram,
@@ -2371,29 +3597,43 @@ function Editor({
 }) {
   const theme = useResolvedTheme();
   const flow = useReactFlow();
-  const wrapper = useRef4(null);
-  const [nodes, setNodes] = useState11(() => toFlowNodes(diagram, plan));
-  const [edges, setEdges] = useState11(() => toFlowEdges(diagram));
-  const nodesRef = useRef4(nodes);
-  const edgesRef = useRef4(edges);
+  const wrapper = useRef6(null);
+  const [initial2] = useState13(() => toFlow(diagram, plan));
+  const [nodes, setNodes] = useState13(initial2.nodes);
+  const [edges, setEdges] = useState13(initial2.edges);
+  const [editing, setEditing] = useState13(null);
+  const nodesRef = useRef6(nodes);
+  const edgesRef = useRef6(edges);
   nodesRef.current = nodes;
   edgesRef.current = edges;
-  const dragging = useRef4(false);
-  const queue = useRef4({ pending: null, busy: false });
-  const signature = useMemo2(() => JSON.stringify([diagram.nodes, diagram.edges, diagram.direction]), [diagram]);
-  const baseRev = useRef4(diagram.rev);
-  useEffect9(() => {
-    if (dragging.current || queue.current.busy || queue.current.pending) return;
-    setNodes((prev) => keepSelection(prev, toFlowNodes(diagram, plan)));
-    setEdges((prev) => keepSelection(prev, toFlowEdges(diagram)));
-    baseRev.current = diagram.rev;
-  }, [signature]);
+  const planRef = useRef6(plan);
+  planRef.current = plan;
+  const dragging = useRef6(false);
+  const queue = useRef6({ pending: null, busy: false });
+  const pointer = useRef6(null);
+  const pastes = useRef6(0);
+  const signature = useMemo2(() => signatureOf(diagram), [diagram]);
+  const loaded = useRef6(signature);
+  const nudge = useRef6(void 0);
+  const baseRev = useRef6(diagram.rev);
+  const load = useCallback((source, p) => {
+    const next = toFlow(source, p);
+    setNodes((prev) => keepSelection(prev, next.nodes));
+    setEdges((prev) => keepRoutes(prev, keepSelection(prev, next.edges), next.nodes));
+    baseRev.current = source.rev;
+    loaded.current = signatureOf(source);
+  }, []);
+  useEffect11(() => {
+    if (dragging.current || nudge.current !== void 0 || queue.current.busy || queue.current.pending) return;
+    if (loaded.current !== signature) load(diagram, plan);
+    else baseRev.current = diagram.rev;
+  }, [signature, diagram.rev]);
   const progressKey = useMemo2(() => JSON.stringify(plan.tasks.map((t) => [t.id, t.status, t.parentId])), [plan.tasks]);
-  useEffect9(() => {
+  useEffect11(() => {
     setNodes((ns) => ns.map((n) => ({ ...n, data: { ...n.data, ...progressOf(plan, n.data.taskIds) } })));
   }, [progressKey]);
   const focusTarget = useStore((s) => s.focusTarget);
-  useEffect9(() => {
+  useEffect11(() => {
     const prefix = `node:${diagram.id}:`;
     if (!focusTarget?.startsWith(prefix)) return;
     const id = focusTarget.slice(prefix.length);
@@ -2402,15 +3642,12 @@ function Editor({
     window.requestAnimationFrame(() => void flow.fitView({ nodes: [{ id }], padding: 1.2, duration: 250, maxZoom: 1.2 }));
     store.set({ focusTarget: null });
   }, [focusTarget, diagram.id, flow]);
-  const latestRev = () => store.getState().session?.plan?.diagrams.find((d) => d.id === diagram.id)?.rev;
+  const latest = () => store.getState().session?.plan?.diagrams.find((d) => d.id === diagram.id);
   const resyncFromServer = useCallback(() => {
-    const plan2 = store.getState().session?.plan;
-    const current = plan2?.diagrams.find((d) => d.id === diagram.id);
-    if (!plan2 || !current) return;
-    setNodes((prev) => keepSelection(prev, toFlowNodes(current, plan2)));
-    setEdges((prev) => keepSelection(prev, toFlowEdges(current)));
-    baseRev.current = current.rev;
-  }, [diagram.id]);
+    const p = store.getState().session?.plan;
+    const current = p?.diagrams.find((d) => d.id === diagram.id);
+    if (p && current) load(current, p);
+  }, [diagram.id, load]);
   const flush = useCallback(async () => {
     const q = queue.current;
     if (q.busy) return;
@@ -2430,7 +3667,8 @@ function Editor({
     } finally {
       q.busy = false;
     }
-    if (latestRev() !== void 0 && latestRev() !== baseRev.current) resyncFromServer();
+    const now = latest();
+    if (now && now.rev !== baseRev.current) resyncFromServer();
   }, [onSave, resyncFromServer]);
   const persist = useCallback(
     (ns, es, direction) => {
@@ -2441,6 +3679,8 @@ function Editor({
           label: n.data.label,
           kind: n.data.kind,
           ...n.data.detail ? { detail: n.data.detail } : {},
+          // Sent even when empty: leaving them out would keep the old text.
+          description: n.data.description ?? "",
           notes: n.data.notes ?? "",
           taskIds: n.data.taskIds ?? [],
           x: Math.round(n.position.x),
@@ -2450,8 +3690,11 @@ function Editor({
           id: e.id,
           source: e.source,
           target: e.target,
-          ...e.data?.label ? { label: e.data.label } : {},
-          ...e.data?.dashed ? { dashed: true } : {}
+          // Always said, even when empty: the daemon keeps an arrow's label
+          // and style when an edit leaves them out.
+          label: e.data?.label ?? "",
+          dashed: Boolean(e.data?.dashed),
+          arrows: e.data?.arrows ?? "end"
         })),
         // A patch waiting behind the one in flight is replaced, not merged —
         // except for the direction, which only the relayout ever sets.
@@ -2461,106 +3704,312 @@ function Editor({
     },
     [flush]
   );
-  const onNodesChange = useCallback((changes) => setNodes((ns) => applyNodeChanges(changes, ns)), []);
-  const onEdgesChange = useCallback((changes) => setEdges((es) => applyEdgeChanges(changes, es)), []);
-  const onConnect = useCallback(
-    (conn) => {
-      if (!conn.source || !conn.target || conn.source === conn.target) return;
-      if (edgesRef.current.some((e) => e.source === conn.source && e.target === conn.target)) return;
-      const next = [...edgesRef.current, makeEdge({ id: `${conn.source}->${conn.target}`, source: conn.source, target: conn.target })];
-      setEdges(next);
-      persist(nodesRef.current, next);
+  const commit = useCallback(
+    (ns, es, direction) => {
+      setNodes(ns);
+      setEdges(es);
+      persist(ns, es, direction);
     },
     [persist]
+  );
+  const onNodesChange = useCallback(
+    (changes) => {
+      setNodes((ns) => applyNodeChanges(changes, ns));
+      if (dragging.current || !changes.some((c) => c.type === "position" && c.position && !c.dragging)) return;
+      window.clearTimeout(nudge.current);
+      nudge.current = window.setTimeout(() => {
+        nudge.current = void 0;
+        persist(nodesRef.current, edgesRef.current);
+      }, 300);
+    },
+    [persist]
+  );
+  const persistRef = useRef6(persist);
+  persistRef.current = persist;
+  useEffect11(
+    () => () => {
+      if (nudge.current === void 0) return;
+      window.clearTimeout(nudge.current);
+      nudge.current = void 0;
+      persistRef.current(nodesRef.current, edgesRef.current);
+    },
+    []
+  );
+  const onEdgesChange = useCallback((changes) => setEdges((es) => applyEdgeChanges(changes, es)), []);
+  const connect = useCallback(
+    (source, target, base = edgesRef.current, ns = nodesRef.current) => {
+      if (source === target || base.some((e) => e.source === source && e.target === target)) return false;
+      commit(ns, [...base, makeEdge({ id: freeEdgeId(base, source, target), source, target })]);
+      return true;
+    },
+    [commit]
+  );
+  const onConnect = useCallback((conn) => conn.source && conn.target && connect(conn.source, conn.target), [connect]);
+  const addNode = useCallback(
+    (kind, opts = {}) => {
+      const ns = nodesRef.current;
+      let k = ns.length + 1;
+      while (ns.some((x) => x.id === `n${k}`)) k++;
+      const id = `n${k}`;
+      const data = sized({ label: `New ${KIND_LABEL[kind].toLowerCase()}`, kind, width: 0, height: 0 });
+      const lr = diagram.direction === "LR";
+      let want;
+      if (opts.at) want = { x: opts.at.x - data.width / 2, y: opts.at.y - data.height / 2 };
+      else if (opts.from) {
+        const src = ns.find((n) => n.id === opts.from);
+        want = lr ? { x: src.position.x + src.data.width + 90, y: src.position.y } : { x: src.position.x, y: src.position.y + src.data.height + 90 };
+      } else {
+        const rect = wrapper.current?.getBoundingClientRect();
+        const c = rect ? flow.screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }) : { x: 0, y: 0 };
+        want = { x: c.x - data.width / 2, y: c.y - data.height / 2 };
+      }
+      const position = opts.at ? round(want) : findFreeSpot(want, data, positionsOf(ns), sizesOf(ns), lr);
+      const node = { id, type: "plan", position, data, selected: true };
+      const nextNodes = [...ns.map((x) => x.selected ? { ...x, selected: false } : x), node];
+      const base = edgesRef.current.map((e) => e.selected ? { ...e, selected: false } : e);
+      const nextEdges = opts.from ? [...base, makeEdge({ id: freeEdgeId(base, opts.from, id), source: opts.from, target: id })] : base;
+      commit(nextNodes, nextEdges);
+      setEditing(`node:${id}`);
+    },
+    [commit, diagram.direction, flow]
+  );
+  const onConnectEnd = useCallback(
+    (event, state) => {
+      if (state.isValid || !state.fromNode) return;
+      const point = "changedTouches" in event ? event.changedTouches[0] : event;
+      if (!point) return;
+      const hit = document.elementFromPoint?.(point.clientX, point.clientY) ?? null;
+      const onNode = hit?.closest(".react-flow__node")?.getAttribute("data-id");
+      if (onNode) {
+        if (onNode !== state.fromNode.id) connect(state.fromNode.id, onNode);
+        return;
+      }
+      if (hit?.closest(".react-flow__pane")) {
+        addNode("component", { at: flow.screenToFlowPosition({ x: point.clientX, y: point.clientY }), from: state.fromNode.id });
+      }
+    },
+    [addNode, connect, flow]
   );
   const onDelete = useCallback(
     ({ nodes: gone, edges: cut }) => {
       const goneIds = new Set(gone.map((n) => n.id));
       const cutIds = new Set(cut.map((e) => e.id));
-      const ns = nodesRef.current.filter((n) => !goneIds.has(n.id));
-      const es = edgesRef.current.filter((e) => !cutIds.has(e.id) && !goneIds.has(e.source) && !goneIds.has(e.target));
-      setNodes(ns);
-      setEdges(es);
-      persist(ns, es);
+      commit(
+        nodesRef.current.filter((n) => !goneIds.has(n.id)),
+        edgesRef.current.filter((e) => !cutIds.has(e.id) && !goneIds.has(e.source) && !goneIds.has(e.target))
+      );
     },
-    [persist]
+    [commit]
   );
-  const onNodeDragStop = useCallback(
-    (_, __, moved) => {
+  const onDragStop = useCallback(
+    (moved) => {
       dragging.current = false;
       const at = new Map(moved.map((n) => [n.id, n.position]));
-      const ns = nodesRef.current.map((n) => at.has(n.id) ? { ...n, position: at.get(n.id) } : n);
-      persist(ns, edgesRef.current);
+      persist(
+        nodesRef.current.map((n) => at.has(n.id) ? { ...n, position: at.get(n.id) } : n),
+        edgesRef.current
+      );
     },
     [persist]
   );
-  const updateNode = (id, patch) => {
+  const onNodeDragStop = useCallback((_, __, moved) => onDragStop(moved), [onDragStop]);
+  const onSelectionDragStop = useCallback((_, moved) => onDragStop(moved), [onDragStop]);
+  const onDragStart = useCallback(() => {
+    dragging.current = true;
+  }, []);
+  const updateNodes = (ids, patch) => {
     const ns = nodesRef.current.map((n) => {
-      if (n.id !== id) return n;
+      if (!ids.has(n.id)) return n;
       const data = { ...n.data, ...patch };
-      if (!data.detail) delete data.detail;
-      return { ...n, data: { ...data, width: nodeSize(data).width, ...progressOf(plan, data.taskIds) } };
+      for (const key of ["detail", "description", "notes"]) if (!data[key]) delete data[key];
+      return { ...n, data: { ...sized(data), ...progressOf(planRef.current, data.taskIds) } };
     });
-    setNodes(ns);
-    persist(ns, edgesRef.current);
+    commit(ns, edgesRef.current);
   };
+  const updateNode = (id, patch) => updateNodes(/* @__PURE__ */ new Set([id]), patch);
   const updateEdge = (id, patch) => {
     const es = edgesRef.current.map((e) => {
       if (e.id !== id) return e;
+      const source = patch.source ?? e.source;
+      const target = patch.target ?? e.target;
       const data = { ...e.data, ...patch };
+      delete data.source;
+      delete data.target;
       if (!data.label) delete data.label;
-      return makeEdge({ id: e.id, source: e.source, target: e.target, ...data }, e.selected);
+      if (!data.arrows) delete data.arrows;
+      if (!data.dashed) delete data.dashed;
+      if (source !== e.source || target !== e.target) delete data.route;
+      return makeEdge({ id: e.id, source, target, ...data }, e.selected);
     });
-    setEdges(es);
-    persist(nodesRef.current, es);
+    commit(nodesRef.current, es);
   };
-  const select = (kind, id) => {
+  const reverseEdge = (id) => {
+    const e = edgesRef.current.find((x) => x.id === id);
+    if (e) updateEdge(id, { source: e.target, target: e.source });
+  };
+  const select = useCallback((kind, id) => {
     setNodes((ns) => ns.map((n) => ({ ...n, selected: kind === "node" && n.id === id })));
     setEdges((es) => es.map((e) => ({ ...e, selected: kind === "edge" && e.id === id })));
-  };
+  }, []);
   const clearSelection = () => {
     setNodes((ns) => ns.map((n) => n.selected ? { ...n, selected: false } : n));
     setEdges((es) => es.map((e) => e.selected ? { ...e, selected: false } : e));
   };
-  const removeSelected = () => {
+  const removeSelected = useCallback(() => {
     void flow.deleteElements({ nodes: nodesRef.current.filter((n) => n.selected), edges: edgesRef.current.filter((e) => e.selected) });
-  };
-  const addNode = (kind) => {
-    const rect = wrapper.current?.getBoundingClientRect();
-    const centre = rect ? flow.screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }) : { x: 0, y: 0 };
-    let n = nodesRef.current.length + 1;
-    while (nodesRef.current.some((x) => x.id === `n${n}`)) n++;
-    const data = { label: `New ${KIND_LABEL[kind].toLowerCase()}`, kind, direction: diagram.direction, width: 0 };
-    data.width = nodeSize(data).width;
-    const node = {
-      id: `n${n}`,
-      type: "plan",
-      position: { x: Math.round(centre.x - data.width / 2), y: Math.round(centre.y - 22) },
-      data,
-      selected: true
-    };
-    const ns = [...nodesRef.current.map((x) => ({ ...x, selected: false })), node];
-    setNodes(ns);
-    setEdges((es) => es.map((e) => ({ ...e, selected: false })));
-    persist(ns, edgesRef.current);
-  };
+  }, [flow]);
   const relayout = (direction) => {
-    const graph = {
-      nodes: nodesRef.current.map((n) => ({ id: n.id, label: n.data.label, kind: n.data.kind, ...n.data.detail ? { detail: n.data.detail } : {} })),
-      edges: edgesRef.current.map((e) => ({ id: e.id, source: e.source, target: e.target }))
-    };
-    const at = autoLayout(graph, direction);
-    const ns = nodesRef.current.map((n) => ({ ...n, position: at.get(n.id) ?? n.position, data: { ...n.data, direction } }));
-    setNodes(ns);
-    persist(ns, edgesRef.current, direction);
-    window.requestAnimationFrame(() => void flow.fitView({ padding: 0.15, duration: 250 }));
+    const at = autoLayout(graphOf(nodesRef.current, edgesRef.current), direction);
+    const ns = nodesRef.current.map((n) => ({ ...n, position: at.positions.get(n.id) ?? n.position }));
+    const es = edgesRef.current.map((e) => withRoute(e, at));
+    commit(ns, es, direction);
+    window.requestAnimationFrame(() => void flow.fitView(FIT));
   };
+  const selectionClip = useCallback(() => {
+    const picked = nodesRef.current.filter((n) => n.selected);
+    return toClip(
+      picked.map((n) => ({ id: n.id, ...contentOf(n.data), x: n.position.x, y: n.position.y })),
+      edgesRef.current.map((e) => ({ source: e.source, target: e.target, ...edgeContent(e.data) }))
+    );
+  }, []);
+  const paste = useCallback(
+    (clip, where) => {
+      const origin = clipOrigin(clip);
+      pastes.current += 1;
+      const step = 32 * pastes.current;
+      const at = where === "pointer" && pointer.current ? { x: pointer.current.x - origin.x, y: pointer.current.y - origin.y } : { x: step, y: step };
+      const tasks = new Set(planRef.current.tasks.map((t) => t.id));
+      const made = pasteClip(clip, nodesRef.current.map((n) => n.id), tasks, at);
+      const newNodes = made.nodes.map(({ id, x, y, ...content }) => ({
+        id,
+        type: "plan",
+        position: { x, y },
+        data: { ...sized({ ...content, width: 0, height: 0 }), ...progressOf(planRef.current, content.taskIds) },
+        selected: true
+      }));
+      const base = edgesRef.current.map((e) => e.selected ? { ...e, selected: false } : e);
+      const newEdges = made.edges.reduce((es, e) => [...es, makeEdge({ id: freeEdgeId(es, e.source, e.target), ...e })], base);
+      commit([...nodesRef.current.map((n) => n.selected ? { ...n, selected: false } : n), ...newNodes], newEdges);
+      return newNodes.length;
+    },
+    [commit]
+  );
+  const copySelection = useCallback(
+    (data) => {
+      const clip = selectionClip();
+      if (!clip) return false;
+      lastClip = clip;
+      pastes.current = 0;
+      const text = serializeClip(clip);
+      if (data) data.setData("text/plain", text);
+      else void navigator.clipboard?.writeText(text).catch(() => void 0);
+      store.toast("info", `Copied ${clip.nodes.length} box${clip.nodes.length === 1 ? "" : "es"}. Paste with \u2318/Ctrl+V, here or in another diagram.`);
+      return true;
+    },
+    [selectionClip]
+  );
+  const duplicate = useCallback(() => {
+    const clip = selectionClip();
+    if (!clip) return;
+    pastes.current = 0;
+    paste(clip, "offset");
+  }, [paste, selectionClip]);
+  useEffect11(() => {
+    const busy = (target) => {
+      const el = target;
+      if (!el || !(el instanceof HTMLElement)) return false;
+      return el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName);
+    };
+    const ours = (e) => {
+      if (busy(e.target) || busy(document.activeElement)) return false;
+      const active = document.activeElement;
+      const onCanvas = !active || active === document.body || Boolean(wrapper.current?.contains(active));
+      const text = window.getSelection?.()?.toString() ?? "";
+      return onCanvas && !text;
+    };
+    const onCopy = (e) => {
+      if (!ours(e) || !nodesRef.current.some((n) => n.selected)) return;
+      if (copySelection(e.clipboardData)) e.preventDefault();
+    };
+    const onCut = (e) => {
+      if (!ours(e) || !nodesRef.current.some((n) => n.selected)) return;
+      if (copySelection(e.clipboardData)) {
+        e.preventDefault();
+        removeSelected();
+      }
+    };
+    const onPaste = (e) => {
+      if (!ours(e)) return;
+      const text = e.clipboardData?.getData("text/plain");
+      const clip = text ? parseClip(text) : lastClip;
+      if (!clip) return;
+      e.preventDefault();
+      paste(clip, "pointer");
+    };
+    const onKey = (e) => {
+      if (busy(e.target)) return;
+      const active = document.activeElement;
+      if (active && active !== document.body && !wrapper.current?.contains(active)) return;
+      const mod = e.metaKey || e.ctrlKey;
+      const selected = nodesRef.current.filter((n) => n.selected);
+      if (mod && e.key.toLowerCase() === "d" && selected.length) {
+        e.preventDefault();
+        duplicate();
+      } else if (mod && e.key.toLowerCase() === "a" && !e.shiftKey) {
+        e.preventDefault();
+        setNodes((ns) => ns.map((n) => ({ ...n, selected: true })));
+        setEdges((es) => es.map((x) => ({ ...x, selected: true })));
+      } else if (e.key === "F2" && selected.length === 1) {
+        e.preventDefault();
+        setEditing(`node:${selected[0].id}`);
+      } else if (e.key === "Escape") {
+        setEditing(null);
+        clearSelection();
+      }
+    };
+    document.addEventListener("copy", onCopy);
+    document.addEventListener("cut", onCut);
+    document.addEventListener("paste", onPaste);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("copy", onCopy);
+      document.removeEventListener("cut", onCut);
+      document.removeEventListener("paste", onPaste);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [copySelection, duplicate, paste, removeSelected]);
+  const api2 = useMemo2(
+    () => ({
+      direction: diagram.direction,
+      editing,
+      startEditing: setEditing,
+      finishNodeLabel: (id, label) => {
+        setEditing(null);
+        const node = nodesRef.current.find((n) => n.id === id);
+        const next = label?.trim();
+        if (node && next && next !== node.data.label) updateNode(id, { label: next });
+      },
+      finishEdgeLabel: (id, label) => {
+        setEditing(null);
+        const edge = edgesRef.current.find((e) => e.id === id);
+        if (edge && label !== null && label.trim() !== (edge.data?.label ?? "")) updateEdge(id, { label: label.trim() });
+      },
+      selectEdge: (id) => select("edge", id)
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the updaters read live state through refs
+    [diagram.direction, editing, select]
+  );
+  const drawnEdges = useMemo2(() => {
+    const offsets = lanes(edges);
+    if (offsets.size === 0) return edges;
+    return edges.map((e) => offsets.has(e.id) ? { ...e, data: { ...e.data, lane: offsets.get(e.id) } } : e);
+  }, [edges]);
   const selectedNodes = nodes.filter((n) => n.selected);
   const selectedEdges = edges.filter((e) => e.selected);
   let panel;
   if (selectedNodes.length === 1 && selectedEdges.length === 0) {
     const node = selectedNodes[0];
-    panel = /* @__PURE__ */ jsx15(
+    panel = /* @__PURE__ */ jsx18(
       NodePanel,
       {
         node,
@@ -2569,6 +4018,10 @@ function Editor({
         plan,
         onChange: (patch) => updateNode(node.id, patch),
         onSelect: select,
+        onConnect: (target) => connect(node.id, target),
+        onDisconnect: (id) => commit(nodesRef.current, edgesRef.current.filter((e) => e.id !== id)),
+        onAddConnected: () => addNode("component", { from: node.id }),
+        onDuplicate: duplicate,
         onRemove: removeSelected,
         onClose: clearSelection
       },
@@ -2576,12 +4029,13 @@ function Editor({
     );
   } else if (selectedEdges.length === 1 && selectedNodes.length === 0) {
     const edge = selectedEdges[0];
-    panel = /* @__PURE__ */ jsx15(
+    panel = /* @__PURE__ */ jsx18(
       EdgePanel,
       {
         edge,
         nodes,
         onChange: (patch) => updateEdge(edge.id, patch),
+        onReverse: () => reverseEdge(edge.id),
         onSelect: select,
         onRemove: removeSelected,
         onClose: clearSelection
@@ -2589,98 +4043,195 @@ function Editor({
       edge.id
     );
   } else if (selectedNodes.length + selectedEdges.length > 1) {
-    panel = /* @__PURE__ */ jsxs14("div", { className: "arch-panel-body", children: [
-      /* @__PURE__ */ jsx15("p", { className: "panel-kicker", children: "Selection" }),
-      /* @__PURE__ */ jsxs14("p", { children: [
-        selectedNodes.length,
-        " box(es) and ",
-        selectedEdges.length,
-        " arrow(s) selected."
-      ] }),
-      /* @__PURE__ */ jsxs14("div", { className: "row-actions", children: [
-        /* @__PURE__ */ jsx15("button", { type: "button", className: "btn btn-sm btn-danger", onClick: removeSelected, children: "Delete selection" }),
-        /* @__PURE__ */ jsx15("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: clearSelection, children: "Clear selection" })
-      ] })
-    ] });
+    panel = /* @__PURE__ */ jsx18(
+      SelectionPanel,
+      {
+        nodes: selectedNodes,
+        edges: selectedEdges,
+        onKind: (kind) => updateNodes(new Set(selectedNodes.map((n) => n.id)), { kind }),
+        onCopy: () => copySelection(null),
+        onDuplicate: duplicate,
+        onRemove: removeSelected,
+        onClose: clearSelection
+      }
+    );
   } else {
     panel = aside;
   }
-  return /* @__PURE__ */ jsxs14("div", { className: "arch-body", children: [
-    /* @__PURE__ */ jsx15("div", { ref: wrapper, className: "flow", children: /* @__PURE__ */ jsxs14(
-      ReactFlow,
+  return /* @__PURE__ */ jsx18(CanvasContext.Provider, { value: api2, children: /* @__PURE__ */ jsxs17("div", { className: "arch-body", children: [
+    /* @__PURE__ */ jsx18(
+      "div",
       {
-        nodes,
-        edges,
-        nodeTypes,
-        onNodesChange,
-        onEdgesChange,
-        onConnect,
-        onDelete,
-        onNodeDragStart: () => {
-          dragging.current = true;
+        ref: wrapper,
+        className: "flow",
+        onMouseMove: (e) => {
+          pointer.current = flow.screenToFlowPosition({ x: e.clientX, y: e.clientY });
         },
-        onNodeDragStop,
-        connectionMode: ConnectionMode.Loose,
-        deleteKeyCode: ["Backspace", "Delete"],
-        colorMode: theme,
-        fitView: true,
-        fitViewOptions: { padding: 0.15 },
-        minZoom: 0.2,
-        maxZoom: 2,
-        defaultEdgeOptions: { type: "smoothstep" },
-        children: [
-          /* @__PURE__ */ jsx15(Background, { gap: 18, size: 1 }),
-          /* @__PURE__ */ jsx15(Controls, { showInteractive: false, position: "bottom-left" }),
-          /* @__PURE__ */ jsx15(MiniMap, { pannable: true, zoomable: true, position: "bottom-right", style: { width: 150, height: 96 }, nodeBorderRadius: 4 }),
-          /* @__PURE__ */ jsxs14(Panel, { position: "top-left", className: "flow-toolbar", children: [
-            /* @__PURE__ */ jsx15(AddMenu, { onAdd: addNode }),
-            /* @__PURE__ */ jsx15("button", { type: "button", className: "btn btn-sm", title: "Lay the whole diagram out again", onClick: () => relayout(diagram.direction), children: "Tidy layout" }),
-            /* @__PURE__ */ jsx15(
-              "button",
-              {
-                type: "button",
-                className: "btn btn-sm",
-                title: diagram.direction === "LR" ? "Flow top to bottom" : "Flow left to right",
-                onClick: () => relayout(diagram.direction === "LR" ? "TB" : "LR"),
-                children: diagram.direction === "LR" ? "\u2192 Left to right" : "\u2193 Top to bottom"
-              }
-            )
-          ] })
-        ]
+        onMouseLeave: () => {
+          pointer.current = null;
+        },
+        onDoubleClick: (e) => {
+          const el = e.target;
+          if (el.closest(".react-flow__node, .react-flow__edge, .react-flow__panel, .flow-edge-label")) return;
+          if (!el.closest(".react-flow__pane")) return;
+          addNode("component", { at: flow.screenToFlowPosition({ x: e.clientX, y: e.clientY }) });
+        },
+        children: /* @__PURE__ */ jsxs17(
+          ReactFlow,
+          {
+            nodes,
+            edges: drawnEdges,
+            nodeTypes,
+            edgeTypes,
+            onNodesChange,
+            onEdgesChange,
+            onConnect,
+            onConnectEnd,
+            onDelete,
+            onNodeDragStart: onDragStart,
+            onNodeDragStop,
+            onSelectionDragStart: onDragStart,
+            onSelectionDragStop,
+            onNodeDoubleClick: (_, node) => setEditing(`node:${node.id}`),
+            onEdgeDoubleClick: (_, edge) => setEditing(`edge:${edge.id}`),
+            connectionMode: ConnectionMode.Loose,
+            deleteKeyCode: ["Backspace", "Delete"],
+            zoomOnDoubleClick: false,
+            colorMode: theme,
+            fitView: true,
+            fitViewOptions: FIT,
+            minZoom: 0.2,
+            maxZoom: 2,
+            defaultEdgeOptions: { type: "plan" },
+            children: [
+              /* @__PURE__ */ jsx18(Background, { gap: 18, size: 1 }),
+              /* @__PURE__ */ jsx18(Controls, { showInteractive: false, position: "bottom-left", fitViewOptions: FIT }),
+              /* @__PURE__ */ jsx18(MiniMap, { pannable: true, zoomable: true, position: "bottom-right", style: { width: 150, height: 96 }, nodeBorderRadius: 4 }),
+              /* @__PURE__ */ jsxs17(Panel, { position: "top-left", className: "flow-toolbar", children: [
+                /* @__PURE__ */ jsx18(AddMenu, { onAdd: (kind) => addNode(kind) }),
+                /* @__PURE__ */ jsx18("button", { type: "button", className: "btn btn-sm", title: "Lay the whole diagram out again, along its flow", onClick: () => relayout(diagram.direction), children: "Tidy layout" }),
+                /* @__PURE__ */ jsx18(
+                  "button",
+                  {
+                    type: "button",
+                    className: "btn btn-sm",
+                    title: diagram.direction === "LR" ? "Lay it out top to bottom" : "Lay it out left to right",
+                    onClick: () => relayout(diagram.direction === "LR" ? "TB" : "LR"),
+                    children: diagram.direction === "LR" ? "\u2192 Left to right" : "\u2193 Top to bottom"
+                  }
+                )
+              ] })
+            ]
+          }
+        )
       }
-    ) }),
-    /* @__PURE__ */ jsx15("aside", { className: "arch-panel", "aria-label": "Details", children: panel })
-  ] });
+    ),
+    /* @__PURE__ */ jsx18("aside", { className: "arch-panel", "aria-label": "Details", children: panel })
+  ] }) });
 }
-function PlanNode({ data, selected }) {
-  const horizontal = data.direction === "LR";
-  const p = data.progress;
-  const state = !p ? null : p.blocked ? "blocked" : p.inProgress ? "in_progress" : p.done === p.total ? "done" : "todo";
-  return /* @__PURE__ */ jsxs14(
-    "div",
-    {
-      className: classNames("flow-node", `kind-${data.kind}`, selected && "is-selected", state && `progress-${state}`),
-      style: { width: data.width },
-      children: [
-        /* @__PURE__ */ jsx15(Handle, { type: "target", position: horizontal ? Position.Left : Position.Top }),
-        /* @__PURE__ */ jsxs14("div", { className: "flow-node-head", children: [
-          /* @__PURE__ */ jsx15("span", { className: "flow-node-glyph", "aria-hidden": "true", children: KIND_GLYPH[data.kind] }),
-          /* @__PURE__ */ jsx15("span", { className: "flow-node-label", children: data.label }),
-          data.notes && /* @__PURE__ */ jsx15("span", { className: "flow-node-flag", title: "Has notes", "aria-label": "has notes", children: "\xB6" })
-        ] }),
-        data.detail && /* @__PURE__ */ jsx15("div", { className: "flow-node-detail", children: data.detail }),
-        p && /* @__PURE__ */ jsxs14("div", { className: "flow-node-progress", title: `${p.done} of ${p.total} tasks done${p.inProgress ? `, ${p.inProgress} in progress` : ""}${p.blocked ? `, ${p.blocked} blocked` : ""}`, children: [
-          /* @__PURE__ */ jsx15(ProgressBar, { counts: p, compact: true }),
-          /* @__PURE__ */ jsxs14("span", { children: [
-            p.done,
-            "/",
-            p.total
-          ] })
-        ] }),
-        /* @__PURE__ */ jsx15(Handle, { type: "source", position: horizontal ? Position.Right : Position.Bottom })
-      ]
+function toFlow(diagram, plan) {
+  const layout = resolveLayout(diagram);
+  const nodes = diagram.nodes.map((n) => ({
+    id: n.id,
+    type: "plan",
+    position: layout.positions.get(n.id) ?? { x: 0, y: 0 },
+    data: {
+      ...sized({
+        label: n.label,
+        kind: n.kind,
+        ...n.detail ? { detail: n.detail } : {},
+        ...n.description ? { description: n.description } : {},
+        ...n.notes ? { notes: n.notes } : {},
+        ...n.taskIds?.length ? { taskIds: n.taskIds } : {},
+        width: 0,
+        height: 0
+      }),
+      ...progressOf(plan, n.taskIds)
     }
-  );
+  }));
+  const edges = diagram.edges.map((e) => withRoute(makeEdge(e), layout));
+  return { nodes, edges };
+}
+function signatureOf(d) {
+  return JSON.stringify([d.nodes, d.edges, d.direction]);
+}
+function makeEdge(e, selected) {
+  const arrows = e.arrows === "both" || e.arrows === "none" ? e.arrows : void 0;
+  const marker = { type: MarkerType.ArrowClosed, width: 16, height: 16 };
+  return {
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    type: "plan",
+    data: {
+      ...e.label ? { label: e.label } : {},
+      ...e.dashed ? { dashed: true } : {},
+      ...arrows ? { arrows } : {},
+      ...e.route ? { route: e.route } : {}
+    },
+    ...arrows !== "none" ? { markerEnd: marker } : {},
+    ...arrows === "both" ? { markerStart: marker } : {},
+    className: classNames(e.dashed && "is-dashed"),
+    ...e.dashed ? { style: { strokeDasharray: "6 4" } } : {},
+    ...selected ? { selected } : {}
+  };
+}
+function withRoute(edge, layout) {
+  const route = layout.routes.get(edge.id);
+  const data = { ...edge.data };
+  if (route) data.route = route;
+  else delete data.route;
+  return { ...edge, data };
+}
+function keepRoutes(prev, next, nodes) {
+  const at = new Map(nodes.map((n) => [n.id, n.position]));
+  return next.map((e) => {
+    if (e.data?.route) return e;
+    const old = prev.find((p) => p.id === e.id && p.source === e.source && p.target === e.target)?.data?.route;
+    if (old && samePoint(at.get(e.source), old.from) && samePoint(at.get(e.target), old.to)) return { ...e, data: { ...e.data, route: old } };
+    return e;
+  });
+}
+function keepSelection(prev, next) {
+  const selected = new Set(prev.filter((x) => x.selected).map((x) => x.id));
+  return next.map((x) => selected.has(x.id) ? { ...x, selected: true } : x);
+}
+function sized(data) {
+  const { width, height } = nodeSize(data);
+  return { ...data, width, height };
+}
+function contentOf(d) {
+  return {
+    label: d.label,
+    kind: d.kind,
+    ...d.detail ? { detail: d.detail } : {},
+    ...d.description ? { description: d.description } : {},
+    ...d.notes ? { notes: d.notes } : {},
+    ...d.taskIds?.length ? { taskIds: d.taskIds } : {}
+  };
+}
+function edgeContent(d) {
+  return { ...d?.label ? { label: d.label } : {}, ...d?.dashed ? { dashed: true } : {}, ...d?.arrows ? { arrows: d.arrows } : {} };
+}
+function graphOf(ns, es) {
+  return {
+    nodes: ns.map((n) => ({ id: n.id, ...contentOf(n.data) })),
+    edges: es.map((e) => ({ id: e.id, source: e.source, target: e.target, ...e.data?.label ? { label: e.data.label } : {} }))
+  };
+}
+function positionsOf(ns) {
+  return new Map(ns.map((n) => [n.id, n.position]));
+}
+function sizesOf(ns) {
+  return new Map(ns.map((n) => [n.id, { width: n.data.width, height: n.data.height }]));
+}
+function freeEdgeId(edges, source, target) {
+  let id = `${source}->${target}`;
+  for (let n = 2; edges.some((e) => e.id === id); n++) id = `${source}->${target}#${n}`;
+  return id;
+}
+function round(p) {
+  return { x: Math.round(p.x), y: Math.round(p.y) };
 }
 function progressOf(plan, taskIds) {
   if (!taskIds?.length) return { progress: void 0 };
@@ -2694,50 +4245,11 @@ function progressOf(plan, taskIds) {
   if (seen.size === 0) return { progress: void 0 };
   return { progress: countTasks({ tasks: [...seen.values()] }) };
 }
-function toFlowNodes(diagram, plan) {
-  const at = resolvePositions(diagram);
-  return diagram.nodes.map((n) => ({
-    id: n.id,
-    type: "plan",
-    position: at.get(n.id) ?? { x: 0, y: 0 },
-    data: {
-      label: n.label,
-      kind: n.kind,
-      ...n.detail ? { detail: n.detail } : {},
-      ...n.notes ? { notes: n.notes } : {},
-      ...n.taskIds?.length ? { taskIds: n.taskIds } : {},
-      direction: diagram.direction,
-      width: nodeSize(n).width,
-      ...progressOf(plan, n.taskIds)
-    }
-  }));
-}
-function toFlowEdges(diagram) {
-  return diagram.edges.map((e) => makeEdge(e));
-}
-function makeEdge(e, selected) {
-  return {
-    id: e.id,
-    source: e.source,
-    target: e.target,
-    type: "smoothstep",
-    ...e.label ? { label: e.label } : {},
-    data: { ...e.label ? { label: e.label } : {}, ...e.dashed ? { dashed: true } : {} },
-    markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
-    className: e.dashed ? "is-dashed" : void 0,
-    ...e.dashed ? { style: { strokeDasharray: "6 4" } } : {},
-    ...selected ? { selected } : {}
-  };
-}
-function keepSelection(prev, next) {
-  const selected = new Set(prev.filter((x) => x.selected).map((x) => x.id));
-  return next.map((x) => selected.has(x.id) ? { ...x, selected: true } : x);
-}
 function AddMenu({ onAdd }) {
-  const [open, setOpen] = useState11(false);
-  return /* @__PURE__ */ jsxs14("div", { className: "add-menu", children: [
-    /* @__PURE__ */ jsx15("button", { type: "button", className: "btn btn-sm btn-primary", "aria-expanded": open, onClick: () => setOpen((v) => !v), children: "+ Box" }),
-    open && /* @__PURE__ */ jsx15("div", { className: "add-menu-list", role: "menu", children: NODE_KINDS.map((k) => /* @__PURE__ */ jsxs14(
+  const [open, setOpen] = useState13(false);
+  return /* @__PURE__ */ jsxs17("div", { className: "add-menu", children: [
+    /* @__PURE__ */ jsx18("button", { type: "button", className: "btn btn-sm btn-primary", "aria-expanded": open, onClick: () => setOpen((v) => !v), title: "Or double-click empty canvas", children: "+ Box" }),
+    open && /* @__PURE__ */ jsx18("div", { className: "add-menu-list", role: "menu", children: NODE_KINDS.map((k) => /* @__PURE__ */ jsxs17(
       "button",
       {
         type: "button",
@@ -2748,7 +4260,7 @@ function AddMenu({ onAdd }) {
           onAdd(k);
         },
         children: [
-          /* @__PURE__ */ jsx15("span", { className: classNames("kind-swatch", `kind-${k}`), "aria-hidden": "true", children: KIND_GLYPH[k] }),
+          /* @__PURE__ */ jsx18("span", { className: classNames("kind-swatch", `kind-${k}`), "aria-hidden": "true", children: KIND_GLYPH[k] }),
           KIND_LABEL[k]
         ]
       },
@@ -2756,230 +4268,162 @@ function AddMenu({ onAdd }) {
     )) })
   ] });
 }
-function CommitInput({
-  value,
-  label,
-  placeholder,
-  className,
-  onCommit
-}) {
-  const [draft, setDraft] = useState11(value);
-  useEffect9(() => setDraft(value), [value]);
-  const commit = () => {
-    if (draft.trim() !== value) onCommit(draft.trim());
-  };
-  return /* @__PURE__ */ jsx15(
-    "input",
-    {
-      className: classNames("input", className),
-      value: draft,
-      "aria-label": label,
-      placeholder,
-      onChange: (e) => setDraft(e.target.value),
-      onBlur: commit,
-      onKeyDown: (e) => {
-        if (e.key === "Enter") commit();
-        if (e.key === "Escape") setDraft(value);
-      }
-    }
-  );
-}
-function NodePanel({
-  node,
-  nodes,
-  edges,
-  plan,
-  onChange,
-  onSelect,
-  onRemove,
-  onClose
-}) {
-  const [confirming, setConfirming] = useState11(false);
-  const name = (id) => nodes.find((n) => n.id === id)?.data.label ?? id;
-  const outgoing = edges.filter((e) => e.source === node.id);
-  const incoming = edges.filter((e) => e.target === node.id);
-  const linked = node.data.taskIds ?? [];
-  const rows = outline(plan);
-  const linkable = rows.filter((r) => !linked.includes(r.task.id));
-  return /* @__PURE__ */ jsxs14("div", { className: "arch-panel-body", "aria-label": `Details of ${node.data.label}`, children: [
-    /* @__PURE__ */ jsxs14("header", { className: "panel-top", children: [
-      /* @__PURE__ */ jsx15("span", { className: classNames("kind-swatch", `kind-${node.data.kind}`), "aria-hidden": "true", children: KIND_GLYPH[node.data.kind] }),
-      /* @__PURE__ */ jsx15("span", { className: "panel-kicker", children: KIND_LABEL[node.data.kind] }),
-      /* @__PURE__ */ jsx15("span", { className: "item-id", children: node.id }),
-      /* @__PURE__ */ jsx15("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx15("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Close details", title: "Back to the diagram", onClick: onClose, children: "\xD7" })
-    ] }),
-    /* @__PURE__ */ jsx15(CommitInput, { className: "panel-title-input", value: node.data.label, label: "Box label", onCommit: (label) => label && onChange({ label }) }),
-    /* @__PURE__ */ jsxs14("label", { className: "field", children: [
-      /* @__PURE__ */ jsx15("span", { className: "field-label", children: "Kind" }),
-      /* @__PURE__ */ jsx15("select", { className: "input", value: node.data.kind, onChange: (e) => onChange({ kind: e.target.value }), children: NODE_KINDS.map((k) => /* @__PURE__ */ jsx15("option", { value: k, children: KIND_LABEL[k] }, k)) })
-    ] }),
-    /* @__PURE__ */ jsxs14("label", { className: "field", children: [
-      /* @__PURE__ */ jsx15("span", { className: "field-label", children: "On the box" }),
-      /* @__PURE__ */ jsx15(CommitInput, { value: node.data.detail ?? "", label: "Box detail", placeholder: "One line: responsibility or technology", onCommit: (detail) => onChange({ detail }) })
-    ] }),
-    /* @__PURE__ */ jsxs14("div", { className: "field", children: [
-      /* @__PURE__ */ jsx15("span", { className: "field-label", children: "Notes and decisions" }),
-      /* @__PURE__ */ jsx15(
-        MarkdownField,
-        {
-          value: node.data.notes ?? "",
-          label: `notes on ${node.data.label}`,
-          placeholder: "Nothing decided here yet.",
-          emptyAction: "Add notes",
-          rows: 6,
-          onSave: (notes) => onChange({ notes })
-        }
-      )
-    ] }),
-    /* @__PURE__ */ jsxs14("div", { className: "field", children: [
-      /* @__PURE__ */ jsx15("span", { className: "field-label", children: "Built by" }),
-      linked.length > 0 ? /* @__PURE__ */ jsx15("ul", { className: "panel-tasks", children: linked.map((id) => {
-        const task = plan.tasks.find((t) => t.id === id);
-        if (!task) return null;
-        return /* @__PURE__ */ jsxs14("li", { children: [
-          /* @__PURE__ */ jsx15("span", { className: classNames("status-dot is-static", `is-${task.status}`), title: STATUS_LABEL[task.status], "aria-label": STATUS_LABEL[task.status], children: STATUS_GLYPH[task.status] }),
-          /* @__PURE__ */ jsx15("button", { type: "button", className: "link panel-task", onClick: () => store.focus("task", id), children: task.title }),
-          /* @__PURE__ */ jsx15(
-            "button",
-            {
-              type: "button",
-              className: "icon-btn is-tiny",
-              "aria-label": `Unlink ${task.title}`,
-              title: "Unlink",
-              onClick: () => onChange({ taskIds: linked.filter((t) => t !== id) }),
-              children: "\xD7"
-            }
-          )
-        ] }, id);
-      }) }) : /* @__PURE__ */ jsx15("p", { className: "muted panel-empty", children: "No tasks linked. Link the tasks that build this part to see its progress on the box." }),
-      linkable.length > 0 && /* @__PURE__ */ jsxs14(
-        "select",
-        {
-          className: "input",
-          "aria-label": `Link a task to ${node.data.label}`,
-          value: "",
-          onChange: (e) => e.target.value && onChange({ taskIds: [...linked, e.target.value] }),
-          children: [
-            /* @__PURE__ */ jsx15("option", { value: "", children: "Link a task\u2026" }),
-            linkable.map(({ task, number, depth }) => /* @__PURE__ */ jsxs14("option", { value: task.id, children: [
-              "\xA0".repeat(depth * 3),
-              number,
-              " ",
-              task.title
-            ] }, task.id))
-          ]
-        }
-      )
-    ] }),
-    (outgoing.length > 0 || incoming.length > 0) && /* @__PURE__ */ jsxs14("div", { className: "field", children: [
-      /* @__PURE__ */ jsx15("span", { className: "field-label", children: "Connections" }),
-      /* @__PURE__ */ jsxs14("ul", { className: "panel-links", children: [
-        outgoing.map((e) => /* @__PURE__ */ jsxs14("li", { children: [
-          /* @__PURE__ */ jsxs14("button", { type: "button", className: "link", onClick: () => onSelect("edge", e.id), children: [
-            "\u2192 ",
-            name(e.target)
-          ] }),
-          e.data?.label && /* @__PURE__ */ jsxs14("span", { className: "muted", children: [
-            " ",
-            e.data.label
-          ] })
-        ] }, e.id)),
-        incoming.map((e) => /* @__PURE__ */ jsxs14("li", { children: [
-          /* @__PURE__ */ jsxs14("button", { type: "button", className: "link", onClick: () => onSelect("edge", e.id), children: [
-            "\u2190 ",
-            name(e.source)
-          ] }),
-          e.data?.label && /* @__PURE__ */ jsxs14("span", { className: "muted", children: [
-            " ",
-            e.data.label
-          ] })
-        ] }, e.id))
-      ] })
-    ] }),
-    /* @__PURE__ */ jsx15("footer", { className: "panel-foot", children: confirming ? /* @__PURE__ */ jsxs14("span", { className: "item-confirm", children: [
-      "Delete this box and its arrows?",
-      /* @__PURE__ */ jsx15("button", { type: "button", className: "link is-danger", onClick: onRemove, children: "Delete" }),
-      /* @__PURE__ */ jsx15("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
-    ] }) : /* @__PURE__ */ jsx15("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Delete box" }) })
-  ] });
-}
-function EdgePanel({
-  edge,
-  nodes,
-  onChange,
-  onSelect,
-  onRemove,
-  onClose
-}) {
-  const name = (id) => nodes.find((n) => n.id === id)?.data.label ?? id;
-  return /* @__PURE__ */ jsxs14("div", { className: "arch-panel-body", "aria-label": "Details of the selected arrow", children: [
-    /* @__PURE__ */ jsxs14("header", { className: "panel-top", children: [
-      /* @__PURE__ */ jsx15("span", { className: "panel-kicker", children: "Arrow" }),
-      /* @__PURE__ */ jsx15("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx15("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Close details", title: "Back to the diagram", onClick: onClose, children: "\xD7" })
-    ] }),
-    /* @__PURE__ */ jsxs14("p", { className: "panel-edge", children: [
-      /* @__PURE__ */ jsx15("button", { type: "button", className: "link", onClick: () => onSelect("node", edge.source), children: name(edge.source) }),
-      /* @__PURE__ */ jsx15("span", { "aria-hidden": "true", children: " \u2192 " }),
-      /* @__PURE__ */ jsx15("button", { type: "button", className: "link", onClick: () => onSelect("node", edge.target), children: name(edge.target) })
-    ] }),
-    /* @__PURE__ */ jsxs14("label", { className: "field", children: [
-      /* @__PURE__ */ jsx15("span", { className: "field-label", children: "What flows along it" }),
-      /* @__PURE__ */ jsx15(CommitInput, { value: edge.data?.label ?? "", label: "Arrow label", placeholder: "e.g. REST, publishes events", onCommit: (label) => onChange({ label }) })
-    ] }),
-    /* @__PURE__ */ jsxs14("label", { className: "toggle", children: [
-      /* @__PURE__ */ jsx15("input", { type: "checkbox", checked: Boolean(edge.data?.dashed), onChange: (e) => onChange({ dashed: e.target.checked }) }),
-      "Dashed \u2014 optional, async or future"
-    ] }),
-    /* @__PURE__ */ jsx15("footer", { className: "panel-foot", children: /* @__PURE__ */ jsx15("button", { type: "button", className: "link is-danger", onClick: onRemove, children: "Delete arrow" }) })
-  ] });
-}
-var KIND_LABEL, KIND_GLYPH, nodeTypes;
+var nodeTypes, edgeTypes, lastClip, FIT;
 var init_FlowCanvas = __esm({
   "src/ui/components/FlowCanvas.tsx"() {
     "use strict";
     init_store();
-    init_Editable();
-    init_Progress();
     init_layout();
+    init_geometry();
+    init_clipboard();
     init_theme();
     init_format();
     init_plan();
     init_types();
-    KIND_LABEL = {
-      component: "Component",
-      service: "Service",
-      datastore: "Datastore",
-      queue: "Queue",
-      external: "External",
-      actor: "Actor",
-      note: "Note"
+    init_PlanNode();
+    init_PlanEdge();
+    init_Panels();
+    init_shared();
+    nodeTypes = { plan: PlanNode };
+    edgeTypes = { plan: PlanEdge };
+    lastClip = null;
+    FIT = { padding: 0.14, maxZoom: 1, minZoom: 0.4, duration: 0 };
+  }
+});
+
+// src/shared/architecture.ts
+function diagramToMarkdown(diagram, opts = {}) {
+  const ids = opts.ids ?? true;
+  const hashes = "#".repeat(Math.min(6, Math.max(1, opts.level ?? 3)));
+  const out = [`${hashes} ${ids ? `[${diagram.id}] ` : ""}${diagram.title}`];
+  if (opts.note) out.push(`_${opts.note}_`);
+  if (diagram.caption?.trim()) out.push("", diagram.caption.trim());
+  const nodes = diagram.nodes;
+  if (nodes.length === 0) {
+    out.push("", "_No parts yet._");
+    return out.join("\n");
+  }
+  const label = labeller(diagram);
+  const ref = (n) => ids ? `${n.label} (\`${n.id}\`)` : n.label;
+  const { ordered, notes, isolated } = flowOrder(diagram);
+  const shape = shapeOf(diagram, ordered);
+  if (shape) out.push("", shape);
+  if (ordered.length) {
+    out.push("", "**Parts**");
+    for (const n of ordered) out.push(...renderPart(n, opts, ids));
+  }
+  if (isolated.length) {
+    out.push("", `_Not connected to anything yet: ${isolated.map((n) => n.label).join(", ")}._`);
+  }
+  if (diagram.edges.length) {
+    out.push("", "**Connections**");
+    const rank = new Map(ordered.map((n, i) => [n.id, i]));
+    const edges = [...diagram.edges].sort(
+      (a, b) => (rank.get(a.source) ?? 1e9) - (rank.get(b.source) ?? 1e9) || (rank.get(a.target) ?? 1e9) - (rank.get(b.target) ?? 1e9)
+    );
+    for (const e of edges) out.push(`- ${edgePhrase(e, label)}${ids ? ` \`${e.source} ${ARROW[e.arrows ?? "end"]} ${e.target}\`` : ""}`);
+  }
+  if (notes.length) {
+    out.push("", "**Notes on the diagram**");
+    for (const n of notes) {
+      out.push(`- ${ref(n)}`);
+      for (const text of [n.detail, n.description, n.notes]) if (text?.trim()) out.push(...indent(text, 2));
+    }
+  }
+  return out.join("\n");
+}
+function renderPart(n, opts, ids) {
+  const head = `- **${n.label}**${ids ? ` \`${n.id}\`` : ""} \u2014 ${KIND_NOUN[n.kind]}${n.detail ? `: ${oneLine(n.detail)}` : ""}`;
+  const lines = [head];
+  if (n.description?.trim()) lines.push(...indent(n.description, 2));
+  if (n.notes?.trim()) lines.push("  Decisions:", ...indent(n.notes, 4));
+  if (n.taskIds?.length) {
+    const named = n.taskIds.map((id) => {
+      const task = opts.tasks?.find((t) => t.id === id);
+      if (!task) return ids ? id : null;
+      return `${STATUS_MARK[task.status]} ${ids ? `${id} ` : ""}${task.title}`;
+    });
+    const list = named.filter(Boolean);
+    if (list.length) lines.push(`  Built by: ${list.join("; ")}`);
+  }
+  return lines;
+}
+function edgePhrase(e, label) {
+  const flags = [e.dashed ? "dashed: optional, async or future" : "", e.arrows === "none" ? "no direction" : ""].filter(Boolean);
+  return `${label(e.source)} ${ARROW[e.arrows ?? "end"]} ${label(e.target)}${e.label ? `: ${oneLine(e.label)}` : ""}${flags.length ? ` (${flags.join("; ")})` : ""}`;
+}
+function shapeOf(diagram, ordered) {
+  const incoming = /* @__PURE__ */ new Set();
+  const outgoing = /* @__PURE__ */ new Set();
+  for (const e of diagram.edges) {
+    if (e.source === e.target) continue;
+    outgoing.add(e.source);
+    incoming.add(e.target);
+    if (e.arrows === "both" || e.arrows === "none") {
+      outgoing.add(e.target);
+      incoming.add(e.source);
+    }
+  }
+  const names = (pick) => ordered.filter(pick).map((n) => n.label);
+  const parts = [
+    ["Entry points", names((n) => outgoing.has(n.id) && !incoming.has(n.id))],
+    ["Data stores", names((n) => n.kind === "datastore")],
+    ["Queues", names((n) => n.kind === "queue")],
+    ["External systems", names((n) => n.kind === "external")]
+  ];
+  const said = parts.filter(([, list]) => list.length).map(([what, list]) => `${what}: ${list.join(", ")}.`);
+  return said.length ? said.join(" ") : null;
+}
+function flowOrder(diagram) {
+  const ranks = flowRanks(diagram.nodes, diagram.edges);
+  const index = new Map(diagram.nodes.map((n, i) => [n.id, i]));
+  const parts = diagram.nodes.filter((n) => n.kind !== "note");
+  const connected = parts.filter((n) => ranks.has(n.id)).sort((a, b) => ranks.get(a.id) - ranks.get(b.id) || index.get(a.id) - index.get(b.id));
+  const isolated = parts.filter((n) => !ranks.has(n.id));
+  return { ordered: [...connected, ...isolated], notes: diagram.nodes.filter((n) => n.kind === "note"), isolated };
+}
+function labeller(diagram) {
+  const names = new Map(diagram.nodes.map((n) => [n.id, n.label]));
+  return (id) => names.get(id) ?? id;
+}
+function indent(text, by) {
+  const pad = " ".repeat(by);
+  return text.trim().split("\n").map((line) => line.trim() ? `${pad}${line.trimEnd()}` : "");
+}
+function oneLine(text) {
+  return text.replace(/\s*\n\s*/g, " ").trim();
+}
+var KIND_NOUN, STATUS_MARK, ARROW;
+var init_architecture = __esm({
+  "src/shared/architecture.ts"() {
+    "use strict";
+    init_plan();
+    KIND_NOUN = {
+      component: "component",
+      service: "service",
+      datastore: "data store",
+      queue: "queue",
+      external: "external system",
+      actor: "actor",
+      note: "note"
     };
-    KIND_GLYPH = {
-      component: "\u25A2",
-      service: "\u2699",
-      datastore: "\u26C1",
-      queue: "\u2630",
-      external: "\u2601",
-      actor: "\u263A",
-      note: "\u270E"
-    };
-    nodeTypes = { plan: memo(PlanNode) };
+    STATUS_MARK = { todo: "[ ]", in_progress: "[~]", blocked: "[!]", done: "[x]" };
+    ARROW = { end: "\u2192", both: "\u2194", none: "\u2014" };
   }
 });
 
 // src/ui/views/DiagramsView.tsx
-import { useState as useState12 } from "react";
-import { jsx as jsx16, jsxs as jsxs15 } from "react/jsx-runtime";
+import { useState as useState14 } from "react";
+import { jsx as jsx19, jsxs as jsxs18 } from "react/jsx-runtime";
 function DiagramsView() {
   const plan = usePlan();
   const chosen = useStore((s) => s.diagramId);
+  const sessionId = useStore((s) => s.sessionId);
   if (!plan) return null;
   const diagram = plan.diagrams.find((d) => d.id === chosen) ?? plan.diagrams[0] ?? null;
-  return /* @__PURE__ */ jsxs15("div", { className: "arch", children: [
-    /* @__PURE__ */ jsxs15("div", { className: "arch-bar", children: [
-      /* @__PURE__ */ jsx16("nav", { className: "arch-tabs", "aria-label": "Diagrams", children: plan.diagrams.map((d) => /* @__PURE__ */ jsxs15(
+  return /* @__PURE__ */ jsxs18("div", { className: "arch", children: [
+    /* @__PURE__ */ jsxs18("div", { className: "arch-bar", children: [
+      /* @__PURE__ */ jsx19("nav", { className: "arch-tabs", "aria-label": "Diagrams", children: plan.diagrams.map((d) => /* @__PURE__ */ jsxs18(
         "button",
         {
           type: "button",
@@ -2988,28 +4432,37 @@ function DiagramsView() {
           onClick: () => store.set({ diagramId: d.id }),
           children: [
             d.title,
-            /* @__PURE__ */ jsx16("span", { className: "arch-tab-count", children: d.nodes.length })
+            /* @__PURE__ */ jsx19("span", { className: "arch-tab-count", children: d.nodes.length })
           ]
         },
         d.id
       )) }),
-      /* @__PURE__ */ jsx16(NewDiagram, {}),
-      /* @__PURE__ */ jsx16("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx16("p", { className: "toolbar-hint", children: "Drag to arrange \xB7 drag from a handle to connect \xB7 select to edit \xB7 Backspace deletes" })
+      /* @__PURE__ */ jsx19(NewDiagram, {}),
+      /* @__PURE__ */ jsx19("span", { className: "spacer" }),
+      /* @__PURE__ */ jsxs18("p", { className: "toolbar-hint", children: [
+        "Double-click to add a box \xB7 drag from a box's edge to connect \xB7 \u24D8 for a summary \xB7 ",
+        /* @__PURE__ */ jsx19("kbd", { children: "\u2318C" }),
+        " ",
+        /* @__PURE__ */ jsx19("kbd", { children: "\u2318V" }),
+        " copy and paste \xB7",
+        " ",
+        /* @__PURE__ */ jsx19("kbd", { children: "\u232B" }),
+        " deletes"
+      ] })
     ] }),
-    diagram ? /* @__PURE__ */ jsx16(
+    diagram ? /* @__PURE__ */ jsx19(
       DiagramEditor,
       {
         diagram,
         plan,
         onSave: async (patch) => {
-          const plan2 = await store.commit([{ op: "upsert_diagram", id: diagram.id, ...patch }]);
+          const plan2 = await store.commit([{ op: "upsert_diagram", id: diagram.id, ...patch }], sessionId);
           return plan2?.diagrams.find((d) => d.id === diagram.id)?.rev ?? null;
         },
-        aside: /* @__PURE__ */ jsx16(DiagramPanel, { plan, diagram })
+        aside: /* @__PURE__ */ jsx19(DiagramPanel, { plan, diagram })
       },
-      diagram.id
-    ) : /* @__PURE__ */ jsx16("div", { className: "view-pad", children: /* @__PURE__ */ jsx16(
+      `${sessionId}:${diagram.id}`
+    ) : /* @__PURE__ */ jsx19("div", { className: "view-pad", children: /* @__PURE__ */ jsx19(
       EmptyState,
       {
         title: "No diagrams yet",
@@ -3019,7 +4472,7 @@ function DiagramsView() {
   ] });
 }
 function NewDiagram() {
-  const [open, setOpen] = useState12(false);
+  const [open, setOpen] = useState14(false);
   const add = async (t) => {
     setOpen(false);
     const before = new Set(store.getState().session?.plan?.diagrams.map((d) => d.id));
@@ -3028,27 +4481,27 @@ function NewDiagram() {
       if (made) store.set({ diagramId: made.id });
     }
   };
-  return /* @__PURE__ */ jsxs15("div", { className: "add-menu", children: [
-    /* @__PURE__ */ jsx16("button", { type: "button", className: "btn btn-sm", "aria-expanded": open, onClick: () => setOpen((v) => !v), children: "+ New diagram" }),
-    open && /* @__PURE__ */ jsx16("div", { className: "add-menu-list", role: "menu", children: TEMPLATES.map((t) => /* @__PURE__ */ jsx16("button", { type: "button", role: "menuitem", className: "add-menu-item", onClick: () => void add(t), children: t.label }, t.label)) })
+  return /* @__PURE__ */ jsxs18("div", { className: "add-menu", children: [
+    /* @__PURE__ */ jsx19("button", { type: "button", className: "btn btn-sm", "aria-expanded": open, onClick: () => setOpen((v) => !v), children: "+ New diagram" }),
+    open && /* @__PURE__ */ jsx19("div", { className: "add-menu-list", role: "menu", children: TEMPLATES.map((t) => /* @__PURE__ */ jsx19("button", { type: "button", role: "menuitem", className: "add-menu-item", onClick: () => void add(t), children: t.label }, t.label)) })
   ] });
 }
 function DiagramPanel({ plan, diagram }) {
-  const [confirming, setConfirming] = useState12(false);
+  const [confirming, setConfirming] = useState14(false);
   const index = plan.diagrams.findIndex((d) => d.id === diagram.id);
   const linked = diagram.nodes.filter((n) => n.taskIds?.length).length;
-  return /* @__PURE__ */ jsxs15("div", { className: "arch-panel-body", "aria-label": `About ${diagram.title}`, children: [
-    /* @__PURE__ */ jsxs15("header", { className: "panel-top", children: [
-      /* @__PURE__ */ jsx16("span", { className: "panel-kicker", children: "Diagram" }),
-      /* @__PURE__ */ jsx16("span", { className: "item-id", children: diagram.id }),
-      /* @__PURE__ */ jsx16("span", { className: "spacer" }),
-      /* @__PURE__ */ jsxs15("span", { className: "muted panel-meta", children: [
+  return /* @__PURE__ */ jsxs18("div", { className: "arch-panel-body", "aria-label": `About ${diagram.title}`, children: [
+    /* @__PURE__ */ jsxs18("header", { className: "panel-top", children: [
+      /* @__PURE__ */ jsx19("span", { className: "panel-kicker", children: "Diagram" }),
+      /* @__PURE__ */ jsx19("span", { className: "item-id", children: diagram.id }),
+      /* @__PURE__ */ jsx19("span", { className: "spacer" }),
+      /* @__PURE__ */ jsxs18("span", { className: "muted panel-meta", children: [
         diagram.updatedBy === "user" ? "edited by you" : "by Claude",
         " \xB7 ",
         relativeTime(diagram.updatedAt)
       ] })
     ] }),
-    /* @__PURE__ */ jsx16(
+    /* @__PURE__ */ jsx19(
       InlineText,
       {
         as: "h2",
@@ -3058,7 +4511,7 @@ function DiagramPanel({ plan, diagram }) {
         onSave: (title) => store.op({ op: "upsert_diagram", id: diagram.id, title })
       }
     ),
-    /* @__PURE__ */ jsx16(
+    /* @__PURE__ */ jsx19(
       MarkdownField,
       {
         value: diagram.caption ?? "",
@@ -3069,7 +4522,7 @@ function DiagramPanel({ plan, diagram }) {
         onSave: (caption) => store.op({ op: "upsert_diagram", id: diagram.id, caption })
       }
     ),
-    /* @__PURE__ */ jsxs15("p", { className: "panel-hint", children: [
+    /* @__PURE__ */ jsxs18("p", { className: "panel-hint", children: [
       diagram.nodes.length,
       " boxes, ",
       diagram.edges.length,
@@ -3077,17 +4530,30 @@ function DiagramPanel({ plan, diagram }) {
       linked ? `, ${linked} tracking tasks` : "",
       ". Select a box to edit its details, decisions and the tasks that build it."
     ] }),
-    /* @__PURE__ */ jsx16("ul", { className: "kind-legend", "aria-label": "Box kinds", children: NODE_KINDS.map((k) => /* @__PURE__ */ jsxs15("li", { children: [
-      /* @__PURE__ */ jsx16("span", { className: classNames("kind-swatch", `kind-${k}`), "aria-hidden": "true", children: KIND_GLYPH[k] }),
+    /* @__PURE__ */ jsx19("div", { className: "row-actions", children: /* @__PURE__ */ jsx19(
+      "button",
+      {
+        type: "button",
+        className: "btn btn-sm",
+        title: "The diagram as Claude reads it: every part, what it does and what was decided, then every connection",
+        onClick: () => {
+          const text = diagramToMarkdown(diagram, { tasks: plan.tasks });
+          void navigator.clipboard?.writeText(text).then(() => store.toast("success", "Copied the diagram as Markdown.")).catch(() => store.toast("error", "The browser would not let the page use the clipboard."));
+        },
+        children: "Copy as Markdown"
+      }
+    ) }),
+    /* @__PURE__ */ jsx19("ul", { className: "kind-legend", "aria-label": "Box kinds", children: NODE_KINDS.map((k) => /* @__PURE__ */ jsxs18("li", { children: [
+      /* @__PURE__ */ jsx19("span", { className: classNames("kind-swatch", `kind-${k}`), "aria-hidden": "true", children: KIND_GLYPH[k] }),
       KIND_LABEL[k]
     ] }, k)) }),
-    /* @__PURE__ */ jsxs15("div", { className: "field", children: [
-      /* @__PURE__ */ jsx16("span", { className: "field-label", children: "Comments" }),
-      /* @__PURE__ */ jsx16(ThreadPanel, { target: { kind: "diagram", id: diagram.id }, label: diagram.title })
+    /* @__PURE__ */ jsxs18("div", { className: "field", children: [
+      /* @__PURE__ */ jsx19("span", { className: "field-label", children: "Comments" }),
+      /* @__PURE__ */ jsx19(ThreadPanel, { target: { kind: "diagram", id: diagram.id }, label: diagram.title })
     ] }),
-    /* @__PURE__ */ jsxs15("footer", { className: "panel-foot", children: [
-      /* @__PURE__ */ jsx16("button", { type: "button", className: "link", disabled: index <= 0, onClick: () => void store.op({ op: "move_diagram", id: diagram.id, index: index - 1 }), children: "Move left" }),
-      /* @__PURE__ */ jsx16(
+    /* @__PURE__ */ jsxs18("footer", { className: "panel-foot", children: [
+      /* @__PURE__ */ jsx19("button", { type: "button", className: "link", disabled: index <= 0, onClick: () => void store.op({ op: "move_diagram", id: diagram.id, index: index - 1 }), children: "Move left" }),
+      /* @__PURE__ */ jsx19(
         "button",
         {
           type: "button",
@@ -3097,12 +4563,12 @@ function DiagramPanel({ plan, diagram }) {
           children: "Move right"
         }
       ),
-      /* @__PURE__ */ jsx16("span", { className: "spacer" }),
-      confirming ? /* @__PURE__ */ jsxs15("span", { className: "item-confirm", children: [
+      /* @__PURE__ */ jsx19("span", { className: "spacer" }),
+      confirming ? /* @__PURE__ */ jsxs18("span", { className: "item-confirm", children: [
         "Remove?",
-        /* @__PURE__ */ jsx16("button", { type: "button", className: "link is-danger", onClick: () => void store.op({ op: "remove", kind: "diagram", id: diagram.id }), children: "Remove" }),
-        /* @__PURE__ */ jsx16("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
-      ] }) : /* @__PURE__ */ jsx16("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Remove diagram" })
+        /* @__PURE__ */ jsx19("button", { type: "button", className: "link is-danger", onClick: () => void store.op({ op: "remove", kind: "diagram", id: diagram.id }), children: "Remove" }),
+        /* @__PURE__ */ jsx19("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
+      ] }) : /* @__PURE__ */ jsx19("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Remove diagram" })
     ] })
   ] });
 }
@@ -3116,6 +4582,7 @@ var init_DiagramsView = __esm({
     init_FlowCanvas();
     init_primitives();
     init_format();
+    init_architecture();
     init_types();
     TEMPLATES = [
       { label: "Blank", title: "New diagram", nodes: [], edges: [] },
@@ -3123,9 +4590,9 @@ var init_DiagramsView = __esm({
         label: "Components",
         title: "Components",
         nodes: [
-          { id: "client", label: "Client", kind: "actor" },
-          { id: "api", label: "API", kind: "service" },
-          { id: "db", label: "Database", kind: "datastore" }
+          { id: "client", label: "Client", kind: "actor", description: "Whoever calls the API: a browser, an app, another service." },
+          { id: "api", label: "API", kind: "service", description: "Takes requests, applies the rules, and reads and writes the database." },
+          { id: "db", label: "Database", kind: "datastore", description: "The system of record." }
         ],
         edges: [
           { source: "client", target: "api", label: "HTTPS" },
@@ -3152,28 +4619,28 @@ var init_DiagramsView = __esm({
 });
 
 // src/ui/views/TasksView.tsx
-import { useMemo as useMemo3, useState as useState13 } from "react";
-import { Fragment as Fragment2, jsx as jsx17, jsxs as jsxs16 } from "react/jsx-runtime";
+import { useMemo as useMemo3, useState as useState15 } from "react";
+import { Fragment as Fragment4, jsx as jsx20, jsxs as jsxs19 } from "react/jsx-runtime";
 function TasksView() {
   const plan = usePlan();
   const mode = useStore((s) => s.taskMode);
   const hideDone = useStore((s) => s.hideDone);
   if (!plan) return null;
   const counts = countTasks(plan);
-  return /* @__PURE__ */ jsxs16("div", { className: "view-pad", children: [
-    /* @__PURE__ */ jsxs16("div", { className: "toolbar", children: [
-      /* @__PURE__ */ jsxs16("div", { className: "segmented", role: "group", "aria-label": "Task layout", children: [
-        /* @__PURE__ */ jsx17("button", { type: "button", className: classNames("seg", mode === "outline" && "is-active"), "aria-pressed": mode === "outline", onClick: () => store.setTaskMode("outline"), children: "Outline" }),
-        /* @__PURE__ */ jsx17("button", { type: "button", className: classNames("seg", mode === "board" && "is-active"), "aria-pressed": mode === "board", onClick: () => store.setTaskMode("board"), children: "Board" })
+  return /* @__PURE__ */ jsxs19("div", { className: "view-pad", children: [
+    /* @__PURE__ */ jsxs19("div", { className: "toolbar", children: [
+      /* @__PURE__ */ jsxs19("div", { className: "segmented", role: "group", "aria-label": "Task layout", children: [
+        /* @__PURE__ */ jsx20("button", { type: "button", className: classNames("seg", mode === "outline" && "is-active"), "aria-pressed": mode === "outline", onClick: () => store.setTaskMode("outline"), children: "Outline" }),
+        /* @__PURE__ */ jsx20("button", { type: "button", className: classNames("seg", mode === "board" && "is-active"), "aria-pressed": mode === "board", onClick: () => store.setTaskMode("board"), children: "Board" })
       ] }),
-      mode === "outline" && /* @__PURE__ */ jsxs16("label", { className: "toggle", children: [
-        /* @__PURE__ */ jsx17("input", { type: "checkbox", checked: hideDone, onChange: () => store.toggleHideDone() }),
+      mode === "outline" && /* @__PURE__ */ jsxs19("label", { className: "toggle", children: [
+        /* @__PURE__ */ jsx20("input", { type: "checkbox", checked: hideDone, onChange: () => store.toggleHideDone() }),
         "Hide done"
       ] }),
-      /* @__PURE__ */ jsx17("span", { className: "spacer" }),
-      /* @__PURE__ */ jsxs16("span", { className: "toolbar-progress", children: [
-        /* @__PURE__ */ jsx17(ProgressBar, { counts }),
-        /* @__PURE__ */ jsxs16("span", { className: "muted", children: [
+      /* @__PURE__ */ jsx20("span", { className: "spacer" }),
+      /* @__PURE__ */ jsxs19("span", { className: "toolbar-progress", children: [
+        /* @__PURE__ */ jsx20(ProgressBar, { counts }),
+        /* @__PURE__ */ jsxs19("span", { className: "muted", children: [
           counts.done,
           "/",
           counts.total,
@@ -3181,18 +4648,18 @@ function TasksView() {
         ] })
       ] })
     ] }),
-    plan.tasks.length === 0 ? /* @__PURE__ */ jsxs16(Fragment2, { children: [
-      /* @__PURE__ */ jsx17(EmptyState, { title: "No tasks yet", hint: "Break the work down here, or ask Claude to publish a task tree with the plan." }),
-      /* @__PURE__ */ jsx17(AddField, { placeholder: "Add a task\u2026", label: "New task", onAdd: (title) => store.op({ op: "upsert_task", title }) })
-    ] }) : mode === "outline" ? /* @__PURE__ */ jsx17(Outline, { plan, hideDone }) : /* @__PURE__ */ jsx17(Board, { plan })
+    plan.tasks.length === 0 ? /* @__PURE__ */ jsxs19(Fragment4, { children: [
+      /* @__PURE__ */ jsx20(EmptyState, { title: "No tasks yet", hint: "Break the work down here, or ask Claude to publish a task tree with the plan." }),
+      /* @__PURE__ */ jsx20(AddField, { placeholder: "Add a task\u2026", label: "New task", onAdd: (title) => store.op({ op: "upsert_task", title }) })
+    ] }) : mode === "outline" ? /* @__PURE__ */ jsx20(Outline, { plan, hideDone }) : /* @__PURE__ */ jsx20(Board, { plan })
   ] });
 }
 function Outline({ plan, hideDone }) {
   const collapsed = useStore((s) => s.collapsedTasks);
-  const [dragging, setDragging] = useState13(null);
-  const [hint, setHint] = useState13(null);
-  const [expanded, setExpanded] = useState13(null);
-  const [addingUnder, setAddingUnder] = useState13(null);
+  const [dragging, setDragging] = useState15(null);
+  const [hint, setHint] = useState15(null);
+  const [expanded, setExpanded] = useState15(null);
+  const [addingUnder, setAddingUnder] = useState15(null);
   const partsByTask = useMemo3(() => {
     const map = /* @__PURE__ */ new Map();
     for (const d of plan.diagrams) {
@@ -3239,8 +4706,8 @@ function Outline({ plan, hideDone }) {
     if (zone === "inside" && collapsed.includes(target.id)) store.toggleTaskCollapsed(target.id);
     void store.op(op);
   };
-  return /* @__PURE__ */ jsxs16("div", { className: "task-outline", children: [
-    /* @__PURE__ */ jsx17("div", { className: "outline-rows", role: "tree", "aria-label": "Task tree", children: rows.map(({ task, depth, number }) => /* @__PURE__ */ jsx17(
+  return /* @__PURE__ */ jsxs19("div", { className: "task-outline", children: [
+    /* @__PURE__ */ jsx20("div", { className: "outline-rows", role: "tree", "aria-label": "Task tree", children: rows.map(({ task, depth, number }) => /* @__PURE__ */ jsx20(
       TaskRow,
       {
         plan,
@@ -3271,14 +4738,14 @@ function Outline({ plan, hideDone }) {
       },
       task.id
     )) }),
-    /* @__PURE__ */ jsx17(AddField, { placeholder: "Add a top-level task\u2026", label: "New top-level task", onAdd: (title) => store.op({ op: "upsert_task", title }) }),
-    /* @__PURE__ */ jsx17("p", { className: "outline-help muted", children: "Drag a row onto another to nest it, or to its top or bottom edge to place it beside. With a row focused: Alt+\u2191/\u2193 reorders, Alt+\u2192 nests under the row above, Alt+\u2190 moves it out a level." })
+    /* @__PURE__ */ jsx20(AddField, { placeholder: "Add a top-level task\u2026", label: "New top-level task", onAdd: (title) => store.op({ op: "upsert_task", title }) }),
+    /* @__PURE__ */ jsx20("p", { className: "outline-help muted", children: "Drag a row onto another to nest it, or to its top or bottom edge to place it beside. With a row focused: Alt+\u2191/\u2193 reorders, Alt+\u2192 nests under the row above, Alt+\u2190 moves it out a level." })
   ] });
 }
 function TaskRow(props) {
   const { plan, task, depth, number, expanded } = props;
   const collapsed = useStore((s) => s.collapsedTasks.includes(task.id));
-  const [comments, setComments] = useState13(false);
+  const [comments, setComments] = useState15(false);
   const kids = childrenOf(plan, task.id);
   const sub = kids.length ? countTasks({ tasks: [task, ...descendants(plan, task.id)] }) : null;
   const threads = useThreads({ kind: "task", id: task.id });
@@ -3309,8 +4776,8 @@ function TaskRow(props) {
       window.requestAnimationFrame(() => document.querySelector(`#task-${task.id} .task-line`)?.focus());
     });
   };
-  return /* @__PURE__ */ jsxs16(Focusable, { kind: "task", id: task.id, as: "div", className: classNames("task", `is-${task.status}`, props.dragging && "is-dragging"), children: [
-    /* @__PURE__ */ jsxs16(
+  return /* @__PURE__ */ jsxs19(Focusable, { kind: "task", id: task.id, as: "div", className: classNames("task", `is-${task.status}`, props.dragging && "is-dragging"), children: [
+    /* @__PURE__ */ jsxs19(
       "div",
       {
         className: classNames("task-line", props.dropZone && `drop-${props.dropZone}`),
@@ -3328,8 +4795,8 @@ function TaskRow(props) {
         onDrop: props.onDrop,
         onKeyDown,
         children: [
-          /* @__PURE__ */ jsx17("span", { className: "drag-handle", "aria-hidden": "true", title: "Drag to move", children: "\u22EE\u22EE" }),
-          kids.length ? /* @__PURE__ */ jsx17(
+          /* @__PURE__ */ jsx20("span", { className: "drag-handle", "aria-hidden": "true", title: "Drag to move", children: "\u22EE\u22EE" }),
+          kids.length ? /* @__PURE__ */ jsx20(
             "button",
             {
               type: "button",
@@ -3338,10 +4805,10 @@ function TaskRow(props) {
               onClick: () => store.toggleTaskCollapsed(task.id),
               children: collapsed ? "\u25B8" : "\u25BE"
             }
-          ) : /* @__PURE__ */ jsx17("span", { className: "twisty is-leaf", "aria-hidden": "true" }),
-          /* @__PURE__ */ jsx17(StatusDot, { task }),
-          /* @__PURE__ */ jsx17("span", { className: "task-num", children: number }),
-          /* @__PURE__ */ jsx17(
+          ) : /* @__PURE__ */ jsx20("span", { className: "twisty is-leaf", "aria-hidden": "true" }),
+          /* @__PURE__ */ jsx20(StatusDot, { task }),
+          /* @__PURE__ */ jsx20("span", { className: "task-num", children: number }),
+          /* @__PURE__ */ jsx20(
             InlineText,
             {
               className: "task-title",
@@ -3350,19 +4817,19 @@ function TaskRow(props) {
               onSave: (title) => store.op({ op: "upsert_task", id: task.id, title })
             }
           ),
-          /* @__PURE__ */ jsxs16("span", { className: "task-badges", children: [
-            sub && /* @__PURE__ */ jsxs16("span", { className: "chip", title: `${sub.done} of ${sub.total} subtasks done`, children: [
+          /* @__PURE__ */ jsxs19("span", { className: "task-badges", children: [
+            sub && /* @__PURE__ */ jsxs19("span", { className: "chip", title: `${sub.done} of ${sub.total} subtasks done`, children: [
               sub.done,
               "/",
               sub.total
             ] }),
-            task.note && /* @__PURE__ */ jsx17("span", { className: classNames("chip is-note", task.status === "blocked" && "is-warning"), title: task.note, children: task.note }),
-            task.files?.length ? /* @__PURE__ */ jsxs16("span", { className: "chip", title: task.files.join("\n"), children: [
+            task.note && /* @__PURE__ */ jsx20("span", { className: classNames("chip is-note", task.status === "blocked" && "is-warning"), title: task.note, children: task.note }),
+            task.files?.length ? /* @__PURE__ */ jsxs19("span", { className: "chip", title: task.files.join("\n"), children: [
               task.files.length,
               " file",
               task.files.length === 1 ? "" : "s"
             ] }) : null,
-            parts.map(({ d, n }) => /* @__PURE__ */ jsxs16(
+            parts.map(({ d, n }) => /* @__PURE__ */ jsxs19(
               "button",
               {
                 type: "button",
@@ -3370,25 +4837,25 @@ function TaskRow(props) {
                 title: `Builds "${n.label}" in ${d.title} \u2014 show it`,
                 onClick: () => store.focus("node", `${d.id}:${n.id}`),
                 children: [
-                  /* @__PURE__ */ jsx17("span", { "aria-hidden": "true", children: KIND_GLYPH[n.kind] }),
+                  /* @__PURE__ */ jsx20("span", { "aria-hidden": "true", children: KIND_GLYPH[n.kind] }),
                   " ",
                   n.label
                 ]
               },
               `${d.id}:${n.id}`
             )),
-            task.createdBy === "user" && /* @__PURE__ */ jsx17("span", { className: "chip is-you", children: "added by you" })
+            task.createdBy === "user" && /* @__PURE__ */ jsx20("span", { className: "chip is-you", children: "added by you" })
           ] }),
-          /* @__PURE__ */ jsx17("span", { className: "spacer" }),
-          /* @__PURE__ */ jsxs16("span", { className: "task-actions", children: [
-            /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn is-tiny", title: "Add subtask", "aria-label": `Add a subtask to ${task.title}`, onClick: props.onAddSubtask, children: /* @__PURE__ */ jsx17("span", { "aria-hidden": "true", children: "\uFF0B" }) }),
-            /* @__PURE__ */ jsx17(MoveButton, { op: moves.outdent, glyph: "\u2190", label: `Move ${task.title} out a level` }),
-            /* @__PURE__ */ jsx17(MoveButton, { op: moves.indent, glyph: "\u2192", label: `Nest ${task.title} under the task above` }),
-            /* @__PURE__ */ jsx17(MoveButton, { op: moves.up, glyph: "\u2191", label: `Move ${task.title} up` }),
-            /* @__PURE__ */ jsx17(MoveButton, { op: moves.down, glyph: "\u2193", label: `Move ${task.title} down` })
+          /* @__PURE__ */ jsx20("span", { className: "spacer" }),
+          /* @__PURE__ */ jsxs19("span", { className: "task-actions", children: [
+            /* @__PURE__ */ jsx20("button", { type: "button", className: "icon-btn is-tiny", title: "Add subtask", "aria-label": `Add a subtask to ${task.title}`, onClick: props.onAddSubtask, children: /* @__PURE__ */ jsx20("span", { "aria-hidden": "true", children: "\uFF0B" }) }),
+            /* @__PURE__ */ jsx20(MoveButton, { op: moves.outdent, glyph: "\u2190", label: `Move ${task.title} out a level` }),
+            /* @__PURE__ */ jsx20(MoveButton, { op: moves.indent, glyph: "\u2192", label: `Nest ${task.title} under the task above` }),
+            /* @__PURE__ */ jsx20(MoveButton, { op: moves.up, glyph: "\u2191", label: `Move ${task.title} up` }),
+            /* @__PURE__ */ jsx20(MoveButton, { op: moves.down, glyph: "\u2193", label: `Move ${task.title} down` })
           ] }),
-          /* @__PURE__ */ jsx17(CommentToggle, { target, label: task.title, open: comments, onToggle: () => setComments((v) => !v) }),
-          /* @__PURE__ */ jsx17(
+          /* @__PURE__ */ jsx20(CommentToggle, { target, label: task.title, open: comments, onToggle: () => setComments((v) => !v) }),
+          /* @__PURE__ */ jsx20(
             "button",
             {
               type: "button",
@@ -3397,17 +4864,17 @@ function TaskRow(props) {
               title: "Details",
               "aria-label": `Details of ${task.title}`,
               onClick: props.onToggleExpanded,
-              children: /* @__PURE__ */ jsx17("span", { "aria-hidden": "true", children: expanded ? "\u2303" : "\u2304" })
+              children: /* @__PURE__ */ jsx20("span", { "aria-hidden": "true", children: expanded ? "\u2303" : "\u2304" })
             }
           )
         ]
       }
     ),
-    (expanded || comments) && /* @__PURE__ */ jsxs16("div", { className: "task-detail", style: { ["--depth"]: depth }, children: [
-      expanded && /* @__PURE__ */ jsx17(TaskDetail, { plan, task }),
-      comments && /* @__PURE__ */ jsx17(ThreadPanel, { target, label: task.title })
+    (expanded || comments) && /* @__PURE__ */ jsxs19("div", { className: "task-detail", style: { ["--depth"]: depth }, children: [
+      expanded && /* @__PURE__ */ jsx20(TaskDetail, { plan, task }),
+      comments && /* @__PURE__ */ jsx20(ThreadPanel, { target, label: task.title })
     ] }),
-    props.addingSubtask && /* @__PURE__ */ jsx17("div", { className: "task-add-sub", style: { ["--depth"]: depth + 1 }, children: /* @__PURE__ */ jsx17(
+    props.addingSubtask && /* @__PURE__ */ jsx20("div", { className: "task-add-sub", style: { ["--depth"]: depth + 1 }, children: /* @__PURE__ */ jsx20(
       AddField,
       {
         placeholder: `Subtask of "${task.title}"\u2026`,
@@ -3424,16 +4891,16 @@ function TaskRow(props) {
   ] });
 }
 function TaskDetail({ plan, task }) {
-  const [confirming, setConfirming] = useState13(false);
+  const [confirming, setConfirming] = useState15(false);
   const subtasks = descendants(plan, task.id).length;
-  return /* @__PURE__ */ jsxs16("div", { className: "task-detail-body", children: [
-    /* @__PURE__ */ jsxs16("div", { className: "field-row", children: [
-      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Status" }),
-      /* @__PURE__ */ jsx17(StatusPicker, { task })
+  return /* @__PURE__ */ jsxs19("div", { className: "task-detail-body", children: [
+    /* @__PURE__ */ jsxs19("div", { className: "field-row", children: [
+      /* @__PURE__ */ jsx20("span", { className: "field-label", children: "Status" }),
+      /* @__PURE__ */ jsx20(StatusPicker, { task })
     ] }),
-    /* @__PURE__ */ jsxs16("div", { className: "field-row", children: [
-      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Note" }),
-      /* @__PURE__ */ jsx17(
+    /* @__PURE__ */ jsxs19("div", { className: "field-row", children: [
+      /* @__PURE__ */ jsx20("span", { className: "field-label", children: "Note" }),
+      /* @__PURE__ */ jsx20(
         InlineText,
         {
           className: "task-note",
@@ -3444,9 +4911,9 @@ function TaskDetail({ plan, task }) {
         }
       )
     ] }),
-    /* @__PURE__ */ jsxs16("div", { className: "field-col", children: [
-      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Detail" }),
-      /* @__PURE__ */ jsx17(
+    /* @__PURE__ */ jsxs19("div", { className: "field-col", children: [
+      /* @__PURE__ */ jsx20("span", { className: "field-label", children: "Detail" }),
+      /* @__PURE__ */ jsx20(
         MarkdownField,
         {
           value: task.detail ?? "",
@@ -3457,35 +4924,35 @@ function TaskDetail({ plan, task }) {
         }
       )
     ] }),
-    /* @__PURE__ */ jsxs16("div", { className: "field-col", children: [
-      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Files" }),
-      /* @__PURE__ */ jsx17(FilesField, { task })
+    /* @__PURE__ */ jsxs19("div", { className: "field-col", children: [
+      /* @__PURE__ */ jsx20("span", { className: "field-label", children: "Files" }),
+      /* @__PURE__ */ jsx20(FilesField, { task })
     ] }),
-    /* @__PURE__ */ jsxs16("div", { className: "task-detail-foot", children: [
-      /* @__PURE__ */ jsxs16("span", { className: "muted", children: [
+    /* @__PURE__ */ jsxs19("div", { className: "task-detail-foot", children: [
+      /* @__PURE__ */ jsxs19("span", { className: "muted", children: [
         task.id,
         " \xB7 ",
         task.createdBy === "user" ? "added by you" : "added by Claude"
       ] }),
-      /* @__PURE__ */ jsx17("span", { className: "spacer" }),
-      confirming ? /* @__PURE__ */ jsxs16("span", { className: "item-confirm", children: [
+      /* @__PURE__ */ jsx20("span", { className: "spacer" }),
+      confirming ? /* @__PURE__ */ jsxs19("span", { className: "item-confirm", children: [
         "Remove",
         subtasks ? ` with ${subtasks} subtask(s)` : "",
         "?",
-        /* @__PURE__ */ jsx17("button", { type: "button", className: "link is-danger", onClick: () => void store.op({ op: "remove", kind: "task", id: task.id }), children: "Remove" }),
-        /* @__PURE__ */ jsx17("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
-      ] }) : /* @__PURE__ */ jsx17("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Remove task" })
+        /* @__PURE__ */ jsx20("button", { type: "button", className: "link is-danger", onClick: () => void store.op({ op: "remove", kind: "task", id: task.id }), children: "Remove" }),
+        /* @__PURE__ */ jsx20("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
+      ] }) : /* @__PURE__ */ jsx20("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Remove task" })
     ] })
   ] });
 }
 function FilesField({ task }) {
-  const [editing, setEditing] = useState13(false);
-  const [draft, setDraft] = useState13((task.files ?? []).join("\n"));
+  const [editing, setEditing] = useState15(false);
+  const [draft, setDraft] = useState15((task.files ?? []).join("\n"));
   if (!editing) {
-    return /* @__PURE__ */ jsxs16("div", { className: "files", children: [
-      task.files?.length ? /* @__PURE__ */ jsx17("ul", { className: "plain-list mono", children: task.files.map((f) => /* @__PURE__ */ jsx17("li", { children: f }, f)) }) : /* @__PURE__ */ jsx17("span", { className: "muted", children: "None listed." }),
+    return /* @__PURE__ */ jsxs19("div", { className: "files", children: [
+      task.files?.length ? /* @__PURE__ */ jsx20("ul", { className: "plain-list mono", children: task.files.map((f) => /* @__PURE__ */ jsx20("li", { children: f }, f)) }) : /* @__PURE__ */ jsx20("span", { className: "muted", children: "None listed." }),
       " ",
-      /* @__PURE__ */ jsx17(
+      /* @__PURE__ */ jsx20(
         "button",
         {
           type: "button",
@@ -3499,13 +4966,13 @@ function FilesField({ task }) {
       )
     ] });
   }
-  return /* @__PURE__ */ jsxs16("div", { className: "md-field is-editing", children: [
-    /* @__PURE__ */ jsx17("textarea", { className: "input mono", rows: 4, value: draft, "aria-label": "Files, one per line", onChange: (e) => setDraft(e.target.value) }),
-    /* @__PURE__ */ jsxs16("div", { className: "md-field-foot", children: [
-      /* @__PURE__ */ jsx17("span", { className: "muted", children: "One path per line" }),
-      /* @__PURE__ */ jsx17("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx17("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setEditing(false), children: "Cancel" }),
-      /* @__PURE__ */ jsx17(
+  return /* @__PURE__ */ jsxs19("div", { className: "md-field is-editing", children: [
+    /* @__PURE__ */ jsx20("textarea", { className: "input mono", rows: 4, value: draft, "aria-label": "Files, one per line", onChange: (e) => setDraft(e.target.value) }),
+    /* @__PURE__ */ jsxs19("div", { className: "md-field-foot", children: [
+      /* @__PURE__ */ jsx20("span", { className: "muted", children: "One path per line" }),
+      /* @__PURE__ */ jsx20("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx20("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setEditing(false), children: "Cancel" }),
+      /* @__PURE__ */ jsx20(
         "button",
         {
           type: "button",
@@ -3521,11 +4988,11 @@ function FilesField({ task }) {
   ] });
 }
 function MoveButton({ op, glyph, label }) {
-  return /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn is-tiny", disabled: !op, title: label, "aria-label": label, onClick: () => op && void store.op(op), children: /* @__PURE__ */ jsx17("span", { "aria-hidden": "true", children: glyph }) });
+  return /* @__PURE__ */ jsx20("button", { type: "button", className: "icon-btn is-tiny", disabled: !op, title: label, "aria-label": label, onClick: () => op && void store.op(op), children: /* @__PURE__ */ jsx20("span", { "aria-hidden": "true", children: glyph }) });
 }
 function StatusDot({ task }) {
   const next = NEXT_STATUS[task.status];
-  return /* @__PURE__ */ jsx17(
+  return /* @__PURE__ */ jsx20(
     "button",
     {
       type: "button",
@@ -3533,12 +5000,12 @@ function StatusDot({ task }) {
       title: `${STATUS_LABEL[task.status]} \u2014 click to mark ${STATUS_LABEL[next].toLowerCase()}`,
       "aria-label": `${task.title}: ${STATUS_LABEL[task.status]}. Mark ${STATUS_LABEL[next].toLowerCase()}`,
       onClick: () => void store.op({ op: "upsert_task", id: task.id, status: next }),
-      children: /* @__PURE__ */ jsx17("span", { "aria-hidden": "true", children: STATUS_GLYPH[task.status] })
+      children: /* @__PURE__ */ jsx20("span", { "aria-hidden": "true", children: STATUS_GLYPH[task.status] })
     }
   );
 }
 function StatusPicker({ task }) {
-  return /* @__PURE__ */ jsx17("div", { className: "segmented", role: "radiogroup", "aria-label": `Status of ${task.title}`, children: TASK_STATUSES.map((s) => /* @__PURE__ */ jsx17(
+  return /* @__PURE__ */ jsx20("div", { className: "segmented", role: "radiogroup", "aria-label": `Status of ${task.title}`, children: TASK_STATUSES.map((s) => /* @__PURE__ */ jsx20(
     "button",
     {
       type: "button",
@@ -3552,11 +5019,11 @@ function StatusPicker({ task }) {
   )) });
 }
 function Board({ plan }) {
-  const [over, setOver] = useState13(null);
+  const [over, setOver] = useState15(null);
   const leaves = outline(plan).map((r) => r.task).filter((t) => !hasChildren(plan, t.id));
-  return /* @__PURE__ */ jsx17("div", { className: "board", children: TASK_STATUSES.map((status) => {
+  return /* @__PURE__ */ jsx20("div", { className: "board", children: TASK_STATUSES.map((status) => {
     const cards = leaves.filter((t) => t.status === status);
-    return /* @__PURE__ */ jsxs16(
+    return /* @__PURE__ */ jsxs19(
       "section",
       {
         className: classNames("board-col", `is-${status}`, over === status && "is-over"),
@@ -3575,14 +5042,14 @@ function Board({ plan }) {
           if (task && task.status !== status) void store.op({ op: "upsert_task", id, status });
         },
         children: [
-          /* @__PURE__ */ jsxs16("header", { className: "board-col-head", children: [
-            /* @__PURE__ */ jsx17("span", { className: classNames("status-dot is-static", `is-${status}`), "aria-hidden": "true", children: STATUS_GLYPH[status] }),
-            /* @__PURE__ */ jsx17("h2", { children: STATUS_LABEL[status] }),
-            /* @__PURE__ */ jsx17("span", { className: "board-count", children: cards.length })
+          /* @__PURE__ */ jsxs19("header", { className: "board-col-head", children: [
+            /* @__PURE__ */ jsx20("span", { className: classNames("status-dot is-static", `is-${status}`), "aria-hidden": "true", children: STATUS_GLYPH[status] }),
+            /* @__PURE__ */ jsx20("h2", { children: STATUS_LABEL[status] }),
+            /* @__PURE__ */ jsx20("span", { className: "board-count", children: cards.length })
           ] }),
-          /* @__PURE__ */ jsxs16("div", { className: "board-cards", children: [
-            cards.map((task) => /* @__PURE__ */ jsx17(BoardCard, { plan, task }, task.id)),
-            cards.length === 0 && /* @__PURE__ */ jsx17("p", { className: "board-empty", children: "Drop tasks here" })
+          /* @__PURE__ */ jsxs19("div", { className: "board-cards", children: [
+            cards.map((task) => /* @__PURE__ */ jsx20(BoardCard, { plan, task }, task.id)),
+            cards.length === 0 && /* @__PURE__ */ jsx20("p", { className: "board-empty", children: "Drop tasks here" })
           ] })
         ]
       },
@@ -3598,7 +5065,7 @@ function BoardCard({ plan, task }) {
     cursor = cursor.parentId ? plan.tasks.find((t) => t.id === cursor.parentId) : void 0;
   }
   const comments = plan.threads.filter((t) => !t.resolved && t.target.kind === "task" && t.target.id === task.id).length;
-  return /* @__PURE__ */ jsxs16(
+  return /* @__PURE__ */ jsxs19(
     "article",
     {
       className: classNames("board-card", `is-${task.status}`),
@@ -3609,28 +5076,28 @@ function BoardCard({ plan, task }) {
         e.dataTransfer.effectAllowed = "move";
       },
       children: [
-        path.length > 0 && /* @__PURE__ */ jsx17("p", { className: "board-path", children: path.join(" \u203A ") }),
-        /* @__PURE__ */ jsx17("button", { type: "button", className: "board-title", onClick: () => store.focus("task", task.id), children: task.title }),
-        task.note && /* @__PURE__ */ jsx17("p", { className: "board-note", children: task.note }),
-        /* @__PURE__ */ jsxs16("footer", { className: "board-foot", children: [
-          /* @__PURE__ */ jsx17("span", { className: "item-id", children: task.id }),
-          comments > 0 && /* @__PURE__ */ jsxs16("span", { className: "chip", children: [
+        path.length > 0 && /* @__PURE__ */ jsx20("p", { className: "board-path", children: path.join(" \u203A ") }),
+        /* @__PURE__ */ jsx20("button", { type: "button", className: "board-title", onClick: () => store.focus("task", task.id), children: task.title }),
+        task.note && /* @__PURE__ */ jsx20("p", { className: "board-note", children: task.note }),
+        /* @__PURE__ */ jsxs19("footer", { className: "board-foot", children: [
+          /* @__PURE__ */ jsx20("span", { className: "item-id", children: task.id }),
+          comments > 0 && /* @__PURE__ */ jsxs19("span", { className: "chip", children: [
             "\u{1F4AC} ",
             comments
           ] }),
-          /* @__PURE__ */ jsx17("span", { className: "spacer" }),
-          /* @__PURE__ */ jsxs16("label", { className: "sr-only", htmlFor: `status-${task.id}`, children: [
+          /* @__PURE__ */ jsx20("span", { className: "spacer" }),
+          /* @__PURE__ */ jsxs19("label", { className: "sr-only", htmlFor: `status-${task.id}`, children: [
             "Status of ",
             task.title
           ] }),
-          /* @__PURE__ */ jsx17(
+          /* @__PURE__ */ jsx20(
             "select",
             {
               id: `status-${task.id}`,
               className: "board-status",
               value: task.status,
               onChange: (e) => void store.op({ op: "upsert_task", id: task.id, status: e.target.value }),
-              children: TASK_STATUSES.map((s) => /* @__PURE__ */ jsx17("option", { value: s, children: STATUS_LABEL[s] }, s))
+              children: TASK_STATUSES.map((s) => /* @__PURE__ */ jsx20("option", { value: s, children: STATUS_LABEL[s] }, s))
             }
           )
         ] })
@@ -3675,8 +5142,8 @@ var App_exports = {};
 __export(App_exports, {
   App: () => App
 });
-import { useCallback as useCallback2, useEffect as useEffect10, useRef as useRef5 } from "react";
-import { Fragment as Fragment3, jsx as jsx18, jsxs as jsxs17 } from "react/jsx-runtime";
+import { useCallback as useCallback2, useEffect as useEffect12, useRef as useRef7 } from "react";
+import { Fragment as Fragment5, jsx as jsx21, jsxs as jsxs20 } from "react/jsx-runtime";
 function App() {
   const session = useSession();
   const sessionId = useStore((s) => s.sessionId);
@@ -3684,7 +5151,7 @@ function App() {
   const error = useStore((s) => s.error);
   const sidebarCollapsed = useStore((s) => s.collapsedSidebar);
   const drawerOpen = useStore((s) => s.drawerOpen);
-  const tabs = useRef5(null);
+  const tabs = useRef7(null);
   const plan = session?.plan ?? null;
   useDocumentTitle(session);
   useShortcuts();
@@ -3703,29 +5170,29 @@ function App() {
     },
     [tab]
   );
-  return /* @__PURE__ */ jsxs17("div", { className: classNames("app", sidebarCollapsed && "is-sidebar-collapsed", drawerOpen && "is-drawer-open"), children: [
-    /* @__PURE__ */ jsx18("a", { className: "skip-link", href: `#${panelId(tab)}`, children: "Skip to content" }),
-    /* @__PURE__ */ jsx18(Sidebar, {}),
-    drawerOpen && /* @__PURE__ */ jsx18("button", { type: "button", className: "scrim", "aria-label": "Close the session list", onClick: () => store.setDrawer(false) }),
-    /* @__PURE__ */ jsx18("main", { className: "main", "aria-label": "Plan", children: !sessionId ? /* @__PURE__ */ jsx18(NoSession, { error }) : !session ? error ? /* @__PURE__ */ jsx18(SessionUnavailable, { error }) : /* @__PURE__ */ jsx18(Loading, {}) : /* @__PURE__ */ jsxs17(Fragment3, { children: [
-      /* @__PURE__ */ jsx18(Header, { session }),
-      /* @__PURE__ */ jsx18(ConnectionBar, {}),
-      /* @__PURE__ */ jsx18(WaitingBanner, { session }),
-      !plan ? /* @__PURE__ */ jsx18(NoPlan, { session }) : /* @__PURE__ */ jsxs17(Fragment3, { children: [
-        /* @__PURE__ */ jsx18("nav", { className: "tabs", role: "tablist", "aria-label": "Plan views", ref: tabs, onKeyDown: onTabKeyDown, children: TAB_IDS.map((t) => /* @__PURE__ */ jsx18(TabButton, { id: t, active: tab === t, plan }, t)) }),
-        /* @__PURE__ */ jsx18("div", { className: "view", id: panelId(tab), role: "tabpanel", "aria-labelledby": tabId(tab), tabIndex: -1, children: /* @__PURE__ */ jsxs17(ErrorBoundary, { label: `${TAB_LABEL[tab]} view`, resetKey: `${sessionId}:${tab}`, children: [
-          tab === "overview" && /* @__PURE__ */ jsx18(OverviewView, {}),
-          tab === "diagrams" && /* @__PURE__ */ jsx18(DiagramsView, {}),
-          tab === "tasks" && /* @__PURE__ */ jsx18(TasksView, {})
+  return /* @__PURE__ */ jsxs20("div", { className: classNames("app", sidebarCollapsed && "is-sidebar-collapsed", drawerOpen && "is-drawer-open"), children: [
+    /* @__PURE__ */ jsx21("a", { className: "skip-link", href: `#${panelId(tab)}`, children: "Skip to content" }),
+    /* @__PURE__ */ jsx21(Sidebar, {}),
+    drawerOpen && /* @__PURE__ */ jsx21("button", { type: "button", className: "scrim", "aria-label": "Close the session list", onClick: () => store.setDrawer(false) }),
+    /* @__PURE__ */ jsx21("main", { className: "main", "aria-label": "Plan", children: !sessionId ? /* @__PURE__ */ jsx21(NoSession, { error }) : !session ? error ? /* @__PURE__ */ jsx21(SessionUnavailable, { error }) : /* @__PURE__ */ jsx21(Loading, {}) : /* @__PURE__ */ jsxs20(Fragment5, { children: [
+      /* @__PURE__ */ jsx21(Header, { session }),
+      /* @__PURE__ */ jsx21(ConnectionBar, {}),
+      /* @__PURE__ */ jsx21(WaitingBanner, { session }),
+      !plan ? /* @__PURE__ */ jsx21(NoPlan, { session }) : /* @__PURE__ */ jsxs20(Fragment5, { children: [
+        /* @__PURE__ */ jsx21("nav", { className: "tabs", role: "tablist", "aria-label": "Plan views", ref: tabs, onKeyDown: onTabKeyDown, children: TAB_IDS.map((t) => /* @__PURE__ */ jsx21(TabButton, { id: t, active: tab === t, plan }, t)) }),
+        /* @__PURE__ */ jsx21("div", { className: "view", id: panelId(tab), role: "tabpanel", "aria-labelledby": tabId(tab), tabIndex: -1, children: /* @__PURE__ */ jsxs20(ErrorBoundary, { label: `${TAB_LABEL[tab]} view`, resetKey: `${sessionId}:${tab}`, children: [
+          tab === "overview" && /* @__PURE__ */ jsx21(OverviewView, {}),
+          tab === "diagrams" && /* @__PURE__ */ jsx21(DiagramsView, {}),
+          tab === "tasks" && /* @__PURE__ */ jsx21(TasksView, {})
         ] }) }, tab)
       ] })
     ] }) }),
-    /* @__PURE__ */ jsx18(Toasts, {})
+    /* @__PURE__ */ jsx21(Toasts, {})
   ] });
 }
 function TabButton({ id, active, plan }) {
   const badge = tabBadge(id, plan);
-  return /* @__PURE__ */ jsxs17(
+  return /* @__PURE__ */ jsxs20(
     "button",
     {
       type: "button",
@@ -3738,9 +5205,9 @@ function TabButton({ id, active, plan }) {
       onClick: () => store.setTab(id),
       children: [
         TAB_LABEL[id],
-        badge && /* @__PURE__ */ jsxs17(Fragment3, { children: [
-          /* @__PURE__ */ jsx18("span", { className: classNames("tab-badge", `is-${badge.tone}`), "aria-hidden": "true", children: badge.text }),
-          /* @__PURE__ */ jsx18("span", { className: "sr-only", children: badge.label })
+        badge && /* @__PURE__ */ jsxs20(Fragment5, { children: [
+          /* @__PURE__ */ jsx21("span", { className: classNames("tab-badge", `is-${badge.tone}`), "aria-hidden": "true", children: badge.text }),
+          /* @__PURE__ */ jsx21("span", { className: "sr-only", children: badge.label })
         ] })
       ]
     }
@@ -3762,10 +5229,10 @@ function Header({ session }) {
   const saving = useStore((s) => s.saving);
   const plan = session.plan;
   const counts = countTasks(plan);
-  return /* @__PURE__ */ jsxs17("header", { className: "head", children: [
-    /* @__PURE__ */ jsxs17("div", { className: "head-main", children: [
-      /* @__PURE__ */ jsx18(SessionsToggle, {}),
-      plan ? /* @__PURE__ */ jsx18(
+  return /* @__PURE__ */ jsxs20("header", { className: "head", children: [
+    /* @__PURE__ */ jsxs20("div", { className: "head-main", children: [
+      /* @__PURE__ */ jsx21(SessionsToggle, {}),
+      plan ? /* @__PURE__ */ jsx21(
         InlineText,
         {
           as: "h1",
@@ -3774,26 +5241,26 @@ function Header({ session }) {
           label: "Plan title",
           onSave: (title) => store.op({ op: "set_meta", title })
         }
-      ) : /* @__PURE__ */ jsx18("h1", { className: "head-title", children: session.title }),
-      saving > 0 && /* @__PURE__ */ jsx18("span", { className: "muted head-saving", children: "saving\u2026" }),
-      /* @__PURE__ */ jsx18("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx18(Handoff, {}),
-      /* @__PURE__ */ jsx18(ThemeToggle, {})
+      ) : /* @__PURE__ */ jsx21("h1", { className: "head-title", children: session.title }),
+      saving > 0 && /* @__PURE__ */ jsx21("span", { className: "muted head-saving", children: "saving\u2026" }),
+      /* @__PURE__ */ jsx21("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx21(Handoff, {}),
+      /* @__PURE__ */ jsx21(ThemeToggle, {})
     ] }),
-    /* @__PURE__ */ jsxs17("div", { className: "head-meta", children: [
-      /* @__PURE__ */ jsx18("span", { className: classNames("head-status", `is-${session.waiting ? "waiting" : session.status}`), title: "The Claude session this plan belongs to", children: session.waiting ? "Claude is waiting on you" : session.status === "active" ? "Claude is working" : session.status === "idle" ? "Claude is idle" : "session ended" }),
-      plan && plan.title !== session.title && /* @__PURE__ */ jsx18("span", { className: "head-stat", children: session.title }),
-      session.branch && /* @__PURE__ */ jsx18("code", { className: "head-branch", children: session.branch }),
-      counts.total > 0 && /* @__PURE__ */ jsxs17("span", { className: "head-progress", children: [
-        /* @__PURE__ */ jsx18(ProgressBar, { counts, compact: true }),
-        /* @__PURE__ */ jsxs17("span", { className: "head-stat", children: [
+    /* @__PURE__ */ jsxs20("div", { className: "head-meta", children: [
+      /* @__PURE__ */ jsx21("span", { className: classNames("head-status", `is-${session.waiting ? "waiting" : session.status}`), title: "The Claude session this plan belongs to", children: session.waiting ? "Claude is waiting on you" : session.status === "active" ? "Claude is working" : session.status === "idle" ? "Claude is idle" : "session ended" }),
+      plan && plan.title !== session.title && /* @__PURE__ */ jsx21("span", { className: "head-stat", children: session.title }),
+      session.branch && /* @__PURE__ */ jsx21("code", { className: "head-branch", children: session.branch }),
+      counts.total > 0 && /* @__PURE__ */ jsxs20("span", { className: "head-progress", children: [
+        /* @__PURE__ */ jsx21(ProgressBar, { counts, compact: true }),
+        /* @__PURE__ */ jsxs20("span", { className: "head-stat", children: [
           counts.done,
           "/",
           counts.total,
           " tasks"
         ] })
       ] }),
-      /* @__PURE__ */ jsx18("span", { className: "head-path", title: session.cwd, children: session.cwd })
+      /* @__PURE__ */ jsx21("span", { className: "head-path", title: session.cwd, children: session.cwd })
     ] })
   ] });
 }
@@ -3802,7 +5269,7 @@ function SessionsToggle() {
   const drawerOpen = useStore((s) => s.drawerOpen);
   const narrow = () => window.innerWidth <= 900;
   const label = collapsed ? "Show sessions" : "Hide sessions";
-  return /* @__PURE__ */ jsx18(
+  return /* @__PURE__ */ jsx21(
     "button",
     {
       type: "button",
@@ -3811,27 +5278,27 @@ function SessionsToggle() {
       "aria-label": label,
       "aria-expanded": narrow() ? drawerOpen : !collapsed,
       onClick: () => narrow() ? store.setDrawer(true) : store.toggleSidebar(),
-      children: /* @__PURE__ */ jsx18("span", { "aria-hidden": "true", children: "\u2630" })
+      children: /* @__PURE__ */ jsx21("span", { "aria-hidden": "true", children: "\u2630" })
     }
   );
 }
 function NoPlan({ session }) {
-  return /* @__PURE__ */ jsx18("div", { className: "view", children: /* @__PURE__ */ jsx18(
+  return /* @__PURE__ */ jsx21("div", { className: "view", children: /* @__PURE__ */ jsx21(
     EmptyState,
     {
       title: "No plan yet",
-      hint: /* @__PURE__ */ jsxs17(Fragment3, { children: [
+      hint: /* @__PURE__ */ jsxs20(Fragment5, { children: [
         "In Claude's chat, run ",
-        /* @__PURE__ */ jsx18("code", { children: "/harness <what you want to build>" }),
+        /* @__PURE__ */ jsx21("code", { children: "/harness <what you want to build>" }),
         ". Claude investigates the code, then publishes its plan here \u2014 the architecture, diagrams and a task breakdown \u2014 and asks what it needs to know in the chat."
       ] }),
-      action: /* @__PURE__ */ jsx18("button", { type: "button", className: "btn", onClick: () => void store.op({ op: "set_meta", title: session.title || "Untitled plan" }), children: "Start a plan by hand" })
+      action: /* @__PURE__ */ jsx21("button", { type: "button", className: "btn", onClick: () => void store.op({ op: "set_meta", title: session.title || "Untitled plan" }), children: "Start a plan by hand" })
     }
   ) });
 }
 function Loading() {
-  return /* @__PURE__ */ jsx18("div", { className: "view", children: /* @__PURE__ */ jsxs17("div", { className: "loading", role: "status", "aria-live": "polite", children: [
-    /* @__PURE__ */ jsx18("span", { className: "spinner", "aria-hidden": "true" }),
+  return /* @__PURE__ */ jsx21("div", { className: "view", children: /* @__PURE__ */ jsxs20("div", { className: "loading", role: "status", "aria-live": "polite", children: [
+    /* @__PURE__ */ jsx21("span", { className: "spinner", "aria-hidden": "true" }),
     "Loading the plan\u2026"
   ] }) });
 }
@@ -3839,22 +5306,22 @@ function SessionUnavailable({ error }) {
   const sessions = useStore((s) => s.sessions);
   const unauthorized = /401|unauthorized/i.test(error);
   const other = sessions[0];
-  return /* @__PURE__ */ jsx18("div", { className: "view", children: /* @__PURE__ */ jsx18(
+  return /* @__PURE__ */ jsx21("div", { className: "view", children: /* @__PURE__ */ jsx21(
     EmptyState,
     {
       title: unauthorized ? "This page is not signed in to the harness" : "This session is not available",
-      hint: unauthorized ? /* @__PURE__ */ jsxs17(Fragment3, { children: [
+      hint: unauthorized ? /* @__PURE__ */ jsxs20(Fragment5, { children: [
         "Open the harness with ",
-        /* @__PURE__ */ jsx18("code", { children: "/harness-open" }),
+        /* @__PURE__ */ jsx21("code", { children: "/harness-open" }),
         " in Claude, or ",
-        /* @__PURE__ */ jsx18("code", { children: "harness open" }),
+        /* @__PURE__ */ jsx21("code", { children: "harness open" }),
         " in a terminal \u2014 the link it prints carries the key this page needs."
-      ] }) : /* @__PURE__ */ jsxs17(Fragment3, { children: [
+      ] }) : /* @__PURE__ */ jsxs20(Fragment5, { children: [
         "It may have been deleted, or it ended long enough ago to be cleaned up. (",
         error,
         ")"
       ] }),
-      action: !unauthorized && other ? /* @__PURE__ */ jsxs17("button", { type: "button", className: "btn", onClick: () => void store.selectSession(other.sessionId), children: [
+      action: !unauthorized && other ? /* @__PURE__ */ jsxs20("button", { type: "button", className: "btn", onClick: () => void store.selectSession(other.sessionId), children: [
         "Open ",
         other.planTitle ?? other.title
       ] }) : void 0
@@ -3862,23 +5329,23 @@ function SessionUnavailable({ error }) {
   ) });
 }
 function NoSession({ error }) {
-  if (error && /401|unauthorized/i.test(error)) return /* @__PURE__ */ jsx18(SessionUnavailable, { error });
-  return /* @__PURE__ */ jsx18("div", { className: "view", children: /* @__PURE__ */ jsx18(
+  if (error && /401|unauthorized/i.test(error)) return /* @__PURE__ */ jsx21(SessionUnavailable, { error });
+  return /* @__PURE__ */ jsx21("div", { className: "view", children: /* @__PURE__ */ jsx21(
     EmptyState,
     {
       title: "No session yet",
-      hint: /* @__PURE__ */ jsxs17(Fragment3, { children: [
+      hint: /* @__PURE__ */ jsxs20(Fragment5, { children: [
         "Start Claude Code in a project with the harness enabled, then run ",
-        /* @__PURE__ */ jsx18("code", { children: "/harness" }),
+        /* @__PURE__ */ jsx21("code", { children: "/harness" }),
         ". Sessions appear here the moment they register.",
-        error && /* @__PURE__ */ jsxs17("span", { className: "error-text", children: [
+        error && /* @__PURE__ */ jsxs20("span", { className: "error-text", children: [
           " \xB7 ",
           error
         ] })
       ] }),
-      action: /* @__PURE__ */ jsxs17("p", { className: "empty-hint", children: [
+      action: /* @__PURE__ */ jsxs20("p", { className: "empty-hint", children: [
         "If a session is running and nothing shows up, the hooks are not firing \u2014 run ",
-        /* @__PURE__ */ jsx18("code", { children: "harness doctor" }),
+        /* @__PURE__ */ jsx21("code", { children: "harness doctor" }),
         "."
       ] })
     }
@@ -3887,12 +5354,12 @@ function NoSession({ error }) {
 function useDocumentTitle(session) {
   const title = session?.plan?.title ?? session?.title ?? "cc-harness";
   const waiting = Boolean(session?.waiting);
-  useEffect10(() => {
+  useEffect12(() => {
     document.title = waiting ? `\u25CF ${title} \u2014 Claude is waiting` : `${title} \u2014 plan`;
   }, [title, waiting]);
 }
 function useDrawerDismiss(open) {
-  useEffect10(() => {
+  useEffect12(() => {
     if (!open) return;
     const onKey = (event) => {
       if (event.key === "Escape") store.setDrawer(false);
@@ -3909,7 +5376,7 @@ function useDrawerDismiss(open) {
   }, [open]);
 }
 function useShortcuts() {
-  useEffect10(() => {
+  useEffect12(() => {
     const handler = (event) => {
       const target = event.target;
       const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
@@ -4092,7 +5559,7 @@ function stubFetch(handler) {
 }
 
 // src/test/sidebar.test.tsx
-import { jsx as jsx19 } from "react/jsx-runtime";
+import { jsx as jsx22 } from "react/jsx-runtime";
 setupDom();
 var { render, fireEvent, within, cleanup, act, screen, waitFor } = await import("@testing-library/react");
 var { App: App2 } = await Promise.resolve().then(() => (init_App(), App_exports));
@@ -4184,7 +5651,7 @@ async function boot(sessions) {
     if (route.startsWith("/api/session/")) return { session: makeSession() };
     return { ok: true };
   }));
-  render(/* @__PURE__ */ jsx19(App2, {}));
+  render(/* @__PURE__ */ jsx22(App2, {}));
   await act(async () => {
     await store2.init();
   });
@@ -4348,7 +5815,7 @@ test("a row shows the plan, its progress, and what Claude is on", async () => {
   assert.ok(row, "the plan title names the row");
   assert.match(row.textContent ?? "", /now: Read-through wrapper/);
   assert.match(row.textContent ?? "", /2\/5 tasks/);
-  assert.match(row.textContent ?? "", /3 unread/);
+  assert.match(row.textContent ?? "", /unread/);
 });
 test("a session waiting on the user is lifted to the top, with a way into Claude", async () => {
   const now = Date.now();

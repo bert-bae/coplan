@@ -199,7 +199,7 @@ test('diagram edits are described in words for Claude', () => {
   assert.match(summary, /disconnected Redis → Postgres|disconnected Cache → Postgres/);
 });
 
-test('dragging boxes is logged as a rearrangement, and positions survive a republish', () => {
+test('dragging boxes saves the layout without telling Claude, and positions survive a republish', () => {
   const base = fresh();
   const moved = applyOps(
     base,
@@ -213,10 +213,11 @@ test('dragging boxes is logged as a rearrangement, and positions survive a repub
     ],
     'user',
   ).plan;
-  assert.equal(moved.changes.at(-1)!.kind, 'moved');
-  assert.match(moved.changes.at(-1)!.summary, /rearranged 3 node/);
+  assert.equal(moved.changes.length, base.changes.length, 'layout is not a change');
+  assert.equal(unreadByClaude(moved).length, 0);
+  assert.equal(moved.diagrams[0]!.rev, base.diagrams[0]!.rev + 1, 'but it moves the revision, so a stale save is refused');
+  assert.equal(moved.diagrams[0]!.nodes[1]!.x, 200);
 
-  moved.claudeReadSeq = moved.seq;
   const republished = publishPlan(moved, { ...INPUT, diagrams: [{ id: 'd1', ...INPUT.diagrams![0]! }] }).plan;
   assert.equal(republished.diagrams[0]!.nodes.find((n) => n.id === 'cache')?.x, 200, 'Claude did not restate it, so it stays put');
 });
@@ -235,7 +236,7 @@ test('a box carries notes and the tasks that build it', () => {
   const node = plan.diagrams[0]!.nodes[0]!;
   assert.equal(node.notes, 'Redis, because we run it.');
   assert.deepEqual(node.taskIds, ['build-cache']);
-  assert.match(renderPlan(plan), /- cache: "Cache" \(datastore\)\n  tasks: build-cache\n  Redis, because we run it\./);
+  assert.match(renderPlan(plan), /- \*\*Cache\*\* `cache` — data store\n  Decisions:\n    Redis, because we run it\.\n  Built by: \[ \] build-cache Build the cache/);
 });
 
 test('a box cannot link a task that does not exist', () => {
@@ -274,8 +275,8 @@ test('the rendering leads with the changes and carries every id', () => {
   assert.match(text, /- \[ \] t2 Cache client/);
   assert.match(text, /- \[!\] t3 Invalidation/);
   assert.match(text, /\[d1\] Components/);
-  assert.match(text, /- api → cache "get"/);
-  assert.match(text, /added task "Shard it"/);
+  assert.match(text, /- API → Cache: get `api → cache`/);
+  assert.match(text, /Added t5 "Shard it" at the top level\./);
   assert.match(text, /t5 Shard it _\(added by the user\)_/);
   assert.doesNotMatch(text, /question/i, 'questions live in Claude\'s chat, not the plan');
 });
@@ -283,7 +284,7 @@ test('the rendering leads with the changes and carries every id', () => {
 test('changes-only rendering skips the document', () => {
   const plan = applyOps(fresh(), [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'looks good' }], 'user').plan;
   const text = renderPlan(plan, { changesOnly: true });
-  assert.match(text, /commented on the plan: looks good/);
+  assert.match(text, /Commented on the plan: looks good/);
   assert.match(text, /Comments waiting on you/);
   assert.doesNotMatch(text, /## Tasks/);
 });

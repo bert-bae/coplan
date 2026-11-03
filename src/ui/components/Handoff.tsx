@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { store, usePlan, useSession } from '../store.ts';
 import { api } from '../lib/api.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
-import { unreadByClaude } from '../../shared/plan.ts';
+import { unreadAreas } from '../../shared/plan.ts';
 import type { SessionLink, SessionState, WaitingState } from '../../shared/types.ts';
 
 /** What to tell Claude once the plan has been worked over. */
@@ -22,15 +22,18 @@ export function Handoff() {
   const plan = usePlan();
   const [viewing, setViewing] = useState(false);
   if (!session) return null;
-  const unread = unreadByClaude(plan).length;
+  // No count: one box edited forty times and forty boxes are both "changes",
+  // and Claude reads the net result either way. Say where instead.
+  const areas = unreadAreas(plan);
+  const unread = areas.length;
 
   return (
     <div className="handoff">
       {plan &&
         (unread > 0 ? (
-          <span className="handoff-state is-behind" title="Changes you made that Claude has not read yet">
+          <span className="handoff-state is-behind" title={`You changed ${areas.join(', ')} since Claude last read the plan`}>
             <span className="dot is-attention" aria-hidden="true" />
-            {unread} change{unread === 1 ? '' : 's'} Claude hasn't read
+            Claude hasn't read your changes
           </span>
         ) : (
           <span className="handoff-state is-current" title={plan.claudeReadAt ? `Read ${new Date(plan.claudeReadAt).toLocaleString()}` : undefined}>

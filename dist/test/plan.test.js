@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 
 // src/shared/types.ts
 var NODE_KINDS = ["component", "service", "datastore", "queue", "external", "actor", "note"];
+var EDGE_ARROWS = ["end", "both", "none"];
 var TASK_STATUSES = ["todo", "in_progress", "blocked", "done"];
 
 // src/shared/plan.ts
@@ -27,6 +28,7 @@ function emptyPlan(title = "Untitled plan", now = Date.now()) {
     threads: [],
     changes: [],
     seq: 0,
+    version: 0,
     claudeReadSeq: 0,
     claudeReadAt: null,
     revision: 0,
@@ -60,6 +62,7 @@ function claimId(plan, kind, wanted) {
 }
 function record(plan, author, kind, target, summary, now) {
   plan.seq += 1;
+  plan.version += 1;
   const change = { seq: plan.seq, ts: now, author, kind, target, summary };
   plan.changes.push(change);
   if (plan.changes.length > MAX_CHANGES) plan.changes.splice(0, plan.changes.length - MAX_CHANGES);
@@ -70,17 +73,165 @@ function unreadByClaude(plan) {
   if (!plan) return [];
   return plan.changes.filter((c) => c.seq > plan.claudeReadSeq && c.author === "user");
 }
+function unreadItems(plan) {
+  return new Set(unreadByClaude(plan).map((c) => `${c.target.kind}:${c.target.id}`)).size;
+}
+var RENAMED_PLAN = "renamed the plan";
+function unreadAreas(plan) {
+  const areas = [];
+  const add = (what) => void (areas.includes(what) || areas.push(what));
+  for (const c of unreadByClaude(plan)) {
+    if (["commented", "replied", "resolved", "reopened"].includes(c.kind)) add("comments");
+    else if (c.target.kind === "diagram") add(`the "${plan.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
+    else if (c.target.kind === "task") add("tasks");
+    else if (c.target.kind === "section") add("sections");
+    else if (c.summary.startsWith(RENAMED_PLAN)) add("the plan's title");
+    else add("the summary");
+  }
+  return areas;
+}
 function markReadByClaude(plan, now = Date.now()) {
   plan.claudeReadSeq = plan.seq;
   plan.claudeReadAt = now;
+  plan.claudeBaseline = baselineOf(plan);
 }
 function settleClaudeRead(plan) {
-  if (unreadByClaude(plan).length === 0) plan.claudeReadSeq = plan.seq;
+  if (unreadByClaude(plan).length > 0) return;
+  plan.claudeReadSeq = plan.seq;
+  plan.claudeBaseline = baselineOf(plan);
+}
+function foldClaudeEdit(base, before, after) {
+  const out = structuredClone(base);
+  if (before.title !== after.title) out.title = after.title;
+  if (before.summary !== after.summary) out.summary = after.summary;
+  out.sections = foldList(out.sections, before.sections, after.sections, foldFields);
+  out.tasks = foldList(out.tasks, before.tasks, after.tasks, foldFields);
+  out.diagrams = foldList(out.diagrams, before.diagrams, after.diagrams, (o, b, a) => {
+    const { nodes: _on, edges: _oe, ...meta } = o;
+    const { nodes: _bn, edges: _be, ...bMeta } = b;
+    const { nodes: _an, edges: _ae, ...aMeta } = a;
+    return {
+      ...foldFields(meta, bMeta, aMeta),
+      nodes: foldList(o.nodes, b.nodes, a.nodes, foldFields),
+      edges: foldEdges(o.edges, b.edges, a.edges)
+    };
+  });
+  return out;
+}
+function foldFields(o, b, a) {
+  const out = { ...o };
+  const was = b;
+  const now = a;
+  for (const key of /* @__PURE__ */ new Set([...Object.keys(was), ...Object.keys(now)])) {
+    if (JSON.stringify(was[key]) === JSON.stringify(now[key])) continue;
+    if (now[key] === void 0) delete out[key];
+    else out[key] = structuredClone(now[key]);
+  }
+  return out;
+}
+function foldList(base, before, after, merge) {
+  const has = (list, id) => list.some((x) => x.id === id);
+  let out = base.filter((x) => !(has(before, x.id) && !has(after, x.id)));
+  for (const a of after) {
+    const b = before.find((x) => x.id === a.id);
+    const i = out.findIndex((x) => x.id === a.id);
+    if (b && i >= 0 && JSON.stringify(b) !== JSON.stringify(a)) out[i] = merge(out[i], b, a);
+  }
+  const order = (list) => list.filter((x) => has(after, x.id) && has(before, x.id)).map((x) => x.id).join("\0");
+  if (order(before) !== order(after)) {
+    const at = new Map(after.map((x, i) => [x.id, i]));
+    let last = -1;
+    const rank = new Map(
+      out.map((x) => {
+        const i = at.get(x.id);
+        if (i !== void 0) last = i;
+        return [x.id, i ?? last + 0.5];
+      })
+    );
+    out = [...out].sort((x, y) => rank.get(x.id) - rank.get(y.id));
+  }
+  after.forEach((a, i) => {
+    if (has(before, a.id) || has(out, a.id)) return;
+    let at = 0;
+    for (let j = i - 1; j >= 0; j--) {
+      const k = out.findIndex((x) => x.id === after[j].id);
+      if (k >= 0) {
+        at = k + 1;
+        break;
+      }
+    }
+    out.splice(at, 0, structuredClone(a));
+  });
+  return out;
+}
+function sameContent(a, b) {
+  return canonical(a) === canonical(b);
+}
+function canonical(value, key = "") {
+  if (Array.isArray(value)) {
+    const items = value.map((v) => canonical(v));
+    if (key === "edges") items.sort();
+    return `[${items.join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const o = value;
+    const keys = Object.keys(o).filter((k) => o[k] !== void 0).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonical(o[k], k)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+function foldEdges(base, before, after) {
+  const claude = matchEdges(before, after);
+  let out = [...base];
+  for (const gone of claude.removed) {
+    const hit = matchEdges(out, [gone]).pairs[0]?.[0];
+    if (hit) out = out.filter((e) => e !== hit);
+  }
+  for (const [b, a] of claude.pairs) {
+    if (JSON.stringify(b) === JSON.stringify(a)) continue;
+    const hit = matchEdges(out, [b]).pairs[0]?.[0];
+    if (hit) out = out.map((e) => e === hit ? foldFields(e, b, a) : e);
+  }
+  return [...out, ...claude.added.map((e) => structuredClone(e))];
+}
+function validBaseline(raw) {
+  const b = raw;
+  const str = (v) => typeof v === "string";
+  const list = (v, ok) => Array.isArray(v) && v.every((x) => x !== null && typeof x === "object" && ok(x));
+  const whole = b !== null && typeof b === "object" && str(b.title) && str(b.summary) && list(b.sections, (x) => str(x["id"]) && str(x["title"]) && str(x["body"])) && list(b.tasks, (x) => str(x["id"]) && str(x["title"]) && str(x["status"]) && typeof x["order"] === "number") && list(
+    b.diagrams,
+    (x) => str(x["id"]) && str(x["title"]) && list(x["nodes"], (n) => str(n["id"]) && str(n["label"]) && str(n["kind"])) && list(x["edges"], (e) => str(e["source"]) && str(e["target"]))
+  );
+  return whole ? b : void 0;
+}
+function baselineOf(plan) {
+  return structuredClone({
+    title: plan.title,
+    summary: plan.summary,
+    sections: plan.sections.map(({ id, title, body }) => ({ id, title, body })),
+    diagrams: plan.diagrams.map((d) => ({
+      id: d.id,
+      title: d.title,
+      ...d.caption ? { caption: d.caption } : {},
+      nodes: d.nodes.map(({ x: _x, y: _y, ...node }) => node),
+      edges: d.edges
+    })),
+    tasks: plan.tasks.map(({ id, parentId, order, title, detail, status, files, note }) => ({
+      id,
+      parentId,
+      order,
+      title,
+      status,
+      ...detail ? { detail } : {},
+      ...files?.length ? { files } : {},
+      ...note ? { note } : {}
+    }))
+  });
 }
 function publishPlan(prev, input, now = Date.now()) {
   if (prev && unreadByClaude(prev).length > 0) {
     throw new PlanError(
-      `The user has made ${unreadByClaude(prev).length} change(s) to the plan since you last read it. Call harness_plan_read first, then publish again (or use harness_plan_edit for targeted changes) so their edits are not overwritten.`
+      `The user has changed ${unreadItems(prev)} item(s) in the plan since you last read it. Call harness_plan_read first, then publish again (or use harness_plan_edit for targeted changes) so their edits are not overwritten.`
     );
   }
   const title = clean(input.title, MAX_TITLE);
@@ -141,7 +292,7 @@ function publishPlan(prev, input, now = Date.now()) {
     const dTitle = clean(raw.title, MAX_TITLE) ?? "Diagram";
     const caption = clean(raw.caption, MAX_TEXT);
     const graph = buildGraph(raw.nodes ?? [], raw.edges ?? [], old, dTitle, new Set(tasks.map((t) => t.id)));
-    const direction = validDirection(raw.direction) ?? old?.direction ?? "LR";
+    const direction = validDirection(raw.direction) ?? old?.direction ?? suggestDirection(graph.nodes, graph.edges);
     const same = old && old.title === dTitle && old.caption === caption && old.direction === direction && JSON.stringify([old.nodes, old.edges]) === JSON.stringify([graph.nodes, graph.edges]);
     diagrams.push({
       id,
@@ -200,10 +351,14 @@ function normalizePlan(raw, fallbackTitle) {
     threads: list(raw.threads).map((t) => ({ ...t, replies: list(t.replies) })),
     changes: list(raw.changes),
     seq: typeof raw.seq === "number" ? raw.seq : 0,
+    version: typeof raw.version === "number" ? raw.version : typeof raw.seq === "number" ? raw.seq : 0,
     claudeReadSeq: typeof raw.claudeReadSeq === "number" ? raw.claudeReadSeq : 0,
     claudeReadAt: typeof raw.claudeReadAt === "number" ? raw.claudeReadAt : null,
     revision: typeof raw.revision === "number" ? raw.revision : 0
   };
+  const baseline = validBaseline(raw.claudeBaseline);
+  if (baseline) plan.claudeBaseline = baseline;
+  else delete plan.claudeBaseline;
   return plan;
 }
 function applyOps(plan, ops, author, now = Date.now()) {
@@ -220,7 +375,12 @@ function applyOps(plan, ops, author, now = Date.now()) {
       throw err;
     }
   });
-  if (author === "claude") settleClaudeRead(next);
+  if (author === "claude") {
+    if (next.claudeBaseline && unreadByClaude(next).length > 0) {
+      next.claudeBaseline = foldClaudeEdit(next.claudeBaseline, baselineOf(plan), baselineOf(next));
+    }
+    settleClaudeRead(next);
+  }
   return { plan: next, changes };
 }
 function applyOne(plan, op, author, now) {
@@ -231,7 +391,7 @@ function applyOne(plan, op, author, now) {
       const title = clean(op.title, MAX_TITLE);
       if (title && title !== plan.title) {
         plan.title = title;
-        out.push(log("edited", { kind: "plan", id: "" }, `renamed the plan to "${title}"`));
+        out.push(log("edited", { kind: "plan", id: "" }, `${RENAMED_PLAN} to "${title}"`));
       }
       if (typeof op.summary === "string" && op.summary !== plan.summary) {
         plan.summary = clean(op.summary, MAX_TEXT) ?? "";
@@ -277,32 +437,39 @@ function applyOne(plan, op, author, now) {
         const title2 = clean(op.title, MAX_TITLE);
         if (title2) existing.title = title2;
         if (op.nodes || op.edges) {
-          const graph = buildGraph(op.nodes ?? existing.nodes, op.edges ?? existing.edges, existing, existing.title, taskIdSet(plan));
-          existing.nodes = graph.nodes;
-          existing.edges = graph.edges;
+          const graph2 = buildGraph(op.nodes ?? existing.nodes, op.edges ?? existing.edges, existing, existing.title, taskIdSet(plan));
+          existing.nodes = graph2.nodes;
+          existing.edges = graph2.edges;
         }
         const direction = validDirection(op.direction);
         if (direction) existing.direction = direction;
         if (typeof op.caption === "string") setOptional(existing, "caption", clean(op.caption, MAX_TEXT));
         if (typeof op.index === "number") moveInList(plan.diagrams, existing.id, op.index);
         const what = describeDiagramEdit(before, existing);
-        if (!what) return [];
+        const relaid = layoutChanged(before, existing);
+        if (!what && !relaid) return [];
         existing.rev += 1;
         existing.updatedAt = now;
+        if (!what) {
+          plan.version += 1;
+          plan.updatedAt = now;
+          return [];
+        }
         existing.updatedBy = author;
-        const kind = what.startsWith("rearranged") ? "moved" : "edited";
-        return [log(kind, ref("diagram", existing.id), `${what} in diagram "${existing.title}"`)];
+        const summary = what === EDITED_DESIGN ? `edited diagram "${existing.title}"` : `${what} in diagram "${existing.title}"`;
+        return [log("edited", ref("diagram", existing.id), summary)];
       }
       if (op.id) throw new PlanError(`No diagram "${op.id}".`);
       if (plan.diagrams.length >= MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
       const title = clean(op.title, MAX_TITLE) ?? "Diagram";
       const caption = clean(op.caption, MAX_TEXT);
+      const graph = buildGraph(op.nodes ?? [], op.edges ?? [], void 0, title, taskIdSet(plan));
       const diagram = {
         id: claimId(plan, "diagram", void 0),
         title,
         rev: 1,
-        ...buildGraph(op.nodes ?? [], op.edges ?? [], void 0, title, taskIdSet(plan)),
-        direction: validDirection(op.direction) ?? "LR",
+        ...graph,
+        direction: validDirection(op.direction) ?? suggestDirection(graph.nodes, graph.edges),
         ...caption ? { caption } : {},
         updatedAt: now,
         updatedBy: author
@@ -492,6 +659,7 @@ function removeItem(plan, kind, id, log) {
 }
 var MAX_NODES = 120;
 var MAX_EDGES = 300;
+var MAX_DESCRIPTION = 4e3;
 function buildGraph(rawNodes, rawEdges, old, title, taskIds) {
   if (!Array.isArray(rawNodes) || !Array.isArray(rawEdges)) throw new PlanError(`Diagram "${title}": nodes and edges must be lists.`);
   if (rawNodes.length > MAX_NODES) throw new PlanError(`Diagram "${title}" has more than ${MAX_NODES} nodes.`);
@@ -503,6 +671,7 @@ function buildGraph(rawNodes, rawEdges, old, title, taskIds) {
     if (nodes.some((n) => n.id === id)) throw new PlanError(`Diagram "${title}": node id "${id}" is used twice.`);
     const prev = old?.nodes.find((n) => n.id === id);
     const detail = clean(raw.detail, 400);
+    const description = raw.description === void 0 ? prev?.description : clean(raw.description, MAX_DESCRIPTION);
     const notes = raw.notes === void 0 ? prev?.notes : clean(raw.notes, MAX_TEXT);
     const links = raw.taskIds === void 0 ? prev?.taskIds : cleanList(raw.taskIds);
     for (const t of links ?? []) {
@@ -515,6 +684,7 @@ function buildGraph(rawNodes, rawEdges, old, title, taskIds) {
       label: clean(raw.label, 120) ?? prev?.label ?? id,
       kind: validKind(raw.kind) ?? prev?.kind ?? "component",
       ...detail ? { detail } : {},
+      ...description ? { description } : {},
       ...notes ? { notes } : {},
       ...links?.length ? { taskIds: [...new Set(links)] } : {},
       ...x !== void 0 && y !== void 0 ? { x: Math.round(x), y: Math.round(y) } : {}
@@ -522,17 +692,32 @@ function buildGraph(rawNodes, rawEdges, old, title, taskIds) {
   }
   const ids = new Set(nodes.map((n) => n.id));
   const edges = [];
-  for (const raw of rawEdges) {
+  const cleaned = rawEdges.map((raw) => {
     const source = clean(raw?.source, 60);
     const target = clean(raw?.target, 60);
     if (!source || !target) throw new PlanError(`Diagram "${title}": every edge needs a source and a target.`);
     for (const end of [source, target]) {
       if (!ids.has(end)) throw new PlanError(`Diagram "${title}": an edge refers to node "${end}", which is not in the diagram.`);
     }
-    let id = clean(raw.id, 80) ?? `${source}->${target}`;
+    return { raw, source, target, id: clean(raw.id, 80), label: raw.label === void 0 ? void 0 : clean(raw.label, 120) ?? "" };
+  });
+  const prevOf = new Map(matchEdges(old?.edges ?? [], cleaned).pairs.map(([b, a]) => [a, b]));
+  for (const c of cleaned) {
+    const { raw, source, target } = c;
+    const prev = prevOf.get(c);
+    let id = c.id ?? `${source}->${target}`;
     for (let n = 2; edges.some((e) => e.id === id); n++) id = `${source}->${target}#${n}`;
-    const label = clean(raw.label, 120);
-    edges.push({ id, source, target, ...label ? { label } : {}, ...raw.dashed ? { dashed: true } : {} });
+    const label = c.label === void 0 ? prev?.label : c.label || void 0;
+    const dashed = raw.dashed === void 0 ? prev?.dashed : raw.dashed === true;
+    const arrows = raw.arrows === void 0 ? prev?.arrows : validArrows(raw.arrows);
+    edges.push({
+      id,
+      source,
+      target,
+      ...label ? { label } : {},
+      ...dashed ? { dashed: true } : {},
+      ...arrows && arrows !== "end" ? { arrows } : {}
+    });
   }
   return { nodes, edges };
 }
@@ -544,23 +729,16 @@ function describeDiagramEdit(before, after) {
   const removed = before.nodes.filter((n) => !after.nodes.some((a) => a.id === n.id));
   const changed = after.nodes.filter((n) => {
     const b = before.nodes.find((x) => x.id === n.id);
-    return b && (b.label !== n.label || b.kind !== n.kind || (b.detail ?? "") !== (n.detail ?? "") || (b.notes ?? "") !== (n.notes ?? ""));
+    return b && (b.label !== n.label || b.kind !== n.kind || (b.detail ?? "") !== (n.detail ?? "") || (b.description ?? "") !== (n.description ?? "") || (b.notes ?? "") !== (n.notes ?? ""));
   });
   const relinked = after.nodes.filter((n) => {
     const b = before.nodes.find((x) => x.id === n.id);
     return b && (b.taskIds ?? []).join() !== (n.taskIds ?? []).join();
   });
-  const moved = after.nodes.filter((n) => {
-    const b = before.nodes.find((x) => x.id === n.id);
-    return b && (b.x !== n.x || b.y !== n.y);
-  });
-  const edgeKey = (e) => `${e.source}->${e.target}`;
-  const linked = after.edges.filter((e) => !before.edges.some((b) => edgeKey(b) === edgeKey(e)));
-  const unlinked = before.edges.filter((e) => !after.edges.some((a) => edgeKey(a) === edgeKey(e)));
-  const relabeled = after.edges.filter((e) => {
-    const b = before.edges.find((x) => edgeKey(x) === edgeKey(e));
-    return b && ((b.label ?? "") !== (e.label ?? "") || Boolean(b.dashed) !== Boolean(e.dashed));
-  });
+  const matched = matchEdges(before.edges, after.edges);
+  const linked = matched.added;
+  const unlinked = matched.removed;
+  const relabeled = matched.pairs.filter(([b, e]) => (b.label ?? "") !== (e.label ?? "") || Boolean(b.dashed) !== Boolean(e.dashed) || (b.arrows ?? "end") !== (e.arrows ?? "end")).map(([, e]) => e);
   const list = (items) => items.length > 3 ? `${items.slice(0, 3).join(", ")} and ${items.length - 3} more` : items.join(", ");
   if (added.length) parts.push(`added ${list(added.map((n) => `"${n.label}"`))}`);
   if (removed.length) parts.push(`removed ${list(removed.map((n) => `"${n.label}"`))}`);
@@ -569,11 +747,42 @@ function describeDiagramEdit(before, after) {
   if (linked.length) parts.push(`connected ${list(linked.map((e) => `${label(after, e.source)} \u2192 ${label(after, e.target)}`))}`);
   if (unlinked.length) parts.push(`disconnected ${list(unlinked.map((e) => `${label(before, e.source)} \u2192 ${label(before, e.target)}`))}`);
   if (relabeled.length) parts.push(`relabelled ${list(relabeled.map((e) => `${label(after, e.source)} \u2192 ${label(after, e.target)}`))}`);
-  if (before.direction !== after.direction) parts.push(`turned it ${after.direction === "LR" ? "left-to-right" : "top-to-bottom"}`);
   if ((before.caption ?? "") !== (after.caption ?? "")) parts.push("edited the caption");
   if (parts.length) return parts.join("; ");
-  if (moved.length) return `rearranged ${moved.length} node(s)`;
-  return null;
+  return designOf(before) !== designOf(after) ? EDITED_DESIGN : null;
+}
+var EDITED_DESIGN = "edited";
+function designOf(d) {
+  return JSON.stringify([d.title, d.caption ?? "", d.nodes.map(({ x: _x, y: _y, ...n }) => n), d.edges]);
+}
+function matchEdges(before, after) {
+  const pairs = [];
+  const left = [...before];
+  const right = [...after];
+  const take = (same) => {
+    for (let i = 0; i < left.length; ) {
+      const j = right.findIndex((a) => same(left[i], a));
+      if (j < 0) {
+        i++;
+        continue;
+      }
+      pairs.push([left[i], right[j]]);
+      left.splice(i, 1);
+      right.splice(j, 1);
+    }
+  };
+  const ends = (b, a) => b.source === a.source && b.target === a.target;
+  take((b, a) => b.id !== void 0 && b.id === a.id && ends(b, a));
+  take((b, a) => ends(b, a) && (b.label ?? "") === (a.label ?? ""));
+  take(ends);
+  return { pairs, removed: left, added: right };
+}
+function layoutChanged(before, after) {
+  if (before.direction !== after.direction) return true;
+  return after.nodes.some((n) => {
+    const b = before.nodes.find((x) => x.id === n.id);
+    return b && (b.x !== n.x || b.y !== n.y);
+  });
 }
 function checkRev(item, expect, kind, author) {
   if (typeof expect !== "number" || expect === item.rev) return;
@@ -590,6 +799,56 @@ function validKind(value) {
 }
 function validDirection(value) {
   return value === "LR" || value === "TB" ? value : void 0;
+}
+function validArrows(value) {
+  return EDGE_ARROWS.includes(value) ? value : void 0;
+}
+function suggestDirection(nodes, edges) {
+  const ranks = flowRanks(nodes, edges);
+  if (ranks.size === 0) return "LR";
+  const perRank = /* @__PURE__ */ new Map();
+  for (const r of ranks.values()) perRank.set(r, (perRank.get(r) ?? 0) + 1);
+  const depth = Math.max(...perRank.keys()) + 1;
+  const breadth = Math.max(...perRank.values());
+  const fit = (w, h) => Math.min(1, 1e3 / w, 680 / h);
+  const lr = fit(depth * 300, breadth * 110);
+  const tb = fit(breadth * 250, depth * 150);
+  return tb > lr * 1.1 ? "TB" : "LR";
+}
+function flowRanks(nodes, edges) {
+  const ids = new Set(nodes.map((n) => n.id));
+  const out = /* @__PURE__ */ new Map();
+  const connected = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const e of edges) {
+    if (e.source === e.target || !ids.has(e.source) || !ids.has(e.target)) continue;
+    out.set(e.source, [...out.get(e.source) ?? [], e.target]);
+    for (const end of [e.source, e.target]) {
+      if (!seen.has(end)) connected.push(end);
+      seen.add(end);
+    }
+  }
+  const state = /* @__PURE__ */ new Map();
+  const order = [];
+  const forward = /* @__PURE__ */ new Map();
+  const visit = (v) => {
+    state.set(v, "open");
+    const keep = [];
+    for (const w of out.get(v) ?? []) {
+      if (state.get(w) === "open") continue;
+      keep.push(w);
+      if (!state.has(w)) visit(w);
+    }
+    forward.set(v, keep);
+    state.set(v, "done");
+    order.push(v);
+  };
+  for (const v of connected) if (!state.has(v)) visit(v);
+  const rank = new Map(connected.map((v) => [v, 0]));
+  for (const v of order.reverse()) {
+    for (const w of forward.get(v) ?? []) rank.set(w, Math.max(rank.get(w) ?? 0, rank.get(v) + 1));
+  }
+  return rank;
 }
 function finite(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : void 0;
@@ -740,8 +999,207 @@ function short(text, max = 60) {
   return line.length > max ? `${line.slice(0, max - 1)}\u2026` : line;
 }
 
-// src/daemon/render.ts
+// src/shared/architecture.ts
+var KIND_NOUN = {
+  component: "component",
+  service: "service",
+  datastore: "data store",
+  queue: "queue",
+  external: "external system",
+  actor: "actor",
+  note: "note"
+};
 var STATUS_MARK = { todo: "[ ]", in_progress: "[~]", blocked: "[!]", done: "[x]" };
+function diagramToMarkdown(diagram, opts = {}) {
+  const ids = opts.ids ?? true;
+  const hashes = "#".repeat(Math.min(6, Math.max(1, opts.level ?? 3)));
+  const out = [`${hashes} ${ids ? `[${diagram.id}] ` : ""}${diagram.title}`];
+  if (opts.note) out.push(`_${opts.note}_`);
+  if (diagram.caption?.trim()) out.push("", diagram.caption.trim());
+  const nodes = diagram.nodes;
+  if (nodes.length === 0) {
+    out.push("", "_No parts yet._");
+    return out.join("\n");
+  }
+  const label = labeller(diagram);
+  const ref2 = (n) => ids ? `${n.label} (\`${n.id}\`)` : n.label;
+  const { ordered, notes, isolated } = flowOrder(diagram);
+  const shape = shapeOf(diagram, ordered);
+  if (shape) out.push("", shape);
+  if (ordered.length) {
+    out.push("", "**Parts**");
+    for (const n of ordered) out.push(...renderPart(n, opts, ids));
+  }
+  if (isolated.length) {
+    out.push("", `_Not connected to anything yet: ${isolated.map((n) => n.label).join(", ")}._`);
+  }
+  if (diagram.edges.length) {
+    out.push("", "**Connections**");
+    const rank = new Map(ordered.map((n, i) => [n.id, i]));
+    const edges = [...diagram.edges].sort(
+      (a, b) => (rank.get(a.source) ?? 1e9) - (rank.get(b.source) ?? 1e9) || (rank.get(a.target) ?? 1e9) - (rank.get(b.target) ?? 1e9)
+    );
+    for (const e of edges) out.push(`- ${edgePhrase(e, label)}${ids ? ` \`${e.source} ${ARROW[e.arrows ?? "end"]} ${e.target}\`` : ""}`);
+  }
+  if (notes.length) {
+    out.push("", "**Notes on the diagram**");
+    for (const n of notes) {
+      out.push(`- ${ref2(n)}`);
+      for (const text of [n.detail, n.description, n.notes]) if (text?.trim()) out.push(...indent(text, 2));
+    }
+  }
+  return out.join("\n");
+}
+function renderPart(n, opts, ids) {
+  const head = `- **${n.label}**${ids ? ` \`${n.id}\`` : ""} \u2014 ${KIND_NOUN[n.kind]}${n.detail ? `: ${oneLine(n.detail)}` : ""}`;
+  const lines = [head];
+  if (n.description?.trim()) lines.push(...indent(n.description, 2));
+  if (n.notes?.trim()) lines.push("  Decisions:", ...indent(n.notes, 4));
+  if (n.taskIds?.length) {
+    const named = n.taskIds.map((id) => {
+      const task = opts.tasks?.find((t) => t.id === id);
+      if (!task) return ids ? id : null;
+      return `${STATUS_MARK[task.status]} ${ids ? `${id} ` : ""}${task.title}`;
+    });
+    const list = named.filter(Boolean);
+    if (list.length) lines.push(`  Built by: ${list.join("; ")}`);
+  }
+  return lines;
+}
+var ARROW = { end: "\u2192", both: "\u2194", none: "\u2014" };
+function edgePhrase(e, label) {
+  const flags = [e.dashed ? "dashed: optional, async or future" : "", e.arrows === "none" ? "no direction" : ""].filter(Boolean);
+  return `${label(e.source)} ${ARROW[e.arrows ?? "end"]} ${label(e.target)}${e.label ? `: ${oneLine(e.label)}` : ""}${flags.length ? ` (${flags.join("; ")})` : ""}`;
+}
+function shapeOf(diagram, ordered) {
+  const incoming = /* @__PURE__ */ new Set();
+  const outgoing = /* @__PURE__ */ new Set();
+  for (const e of diagram.edges) {
+    if (e.source === e.target) continue;
+    outgoing.add(e.source);
+    incoming.add(e.target);
+    if (e.arrows === "both" || e.arrows === "none") {
+      outgoing.add(e.target);
+      incoming.add(e.source);
+    }
+  }
+  const names = (pick) => ordered.filter(pick).map((n) => n.label);
+  const parts = [
+    ["Entry points", names((n) => outgoing.has(n.id) && !incoming.has(n.id))],
+    ["Data stores", names((n) => n.kind === "datastore")],
+    ["Queues", names((n) => n.kind === "queue")],
+    ["External systems", names((n) => n.kind === "external")]
+  ];
+  const said = parts.filter(([, list]) => list.length).map(([what, list]) => `${what}: ${list.join(", ")}.`);
+  return said.length ? said.join(" ") : null;
+}
+function flowOrder(diagram) {
+  const ranks = flowRanks(diagram.nodes, diagram.edges);
+  const index = new Map(diagram.nodes.map((n, i) => [n.id, i]));
+  const parts = diagram.nodes.filter((n) => n.kind !== "note");
+  const connected = parts.filter((n) => ranks.has(n.id)).sort((a, b) => ranks.get(a.id) - ranks.get(b.id) || index.get(a.id) - index.get(b.id));
+  const isolated = parts.filter((n) => !ranks.has(n.id));
+  return { ordered: [...connected, ...isolated], notes: diagram.nodes.filter((n) => n.kind === "note"), isolated };
+}
+function diagramChanges(before, after, opts = {}) {
+  const ids = opts.ids ?? true;
+  const out = [];
+  const label = (id) => after.nodes.find((n) => n.id === id)?.label ?? before.nodes.find((n) => n.id === id)?.label ?? id;
+  const ref2 = (n) => ids ? `${n.label} (\`${n.id}\`)` : n.label;
+  if (before.title !== after.title) out.push(`Renamed the diagram "${before.title}" \u2192 "${after.title}".`);
+  if ((before.caption ?? "") !== (after.caption ?? "")) out.push(...prose("Edited the caption", after.caption, opts));
+  const added = [];
+  const removed = [];
+  const changed = [];
+  for (const n of after.nodes) {
+    const b = before.nodes.find((x) => x.id === n.id);
+    if (!b) {
+      added.push(`Added ${ref2(n)} \u2014 ${KIND_NOUN[n.kind]}${n.detail ? `: ${oneLine(n.detail)}` : ""}.`);
+      if (opts.withText) {
+        if (n.description?.trim()) added.push(...indent(n.description, 2));
+        if (n.notes?.trim()) added.push("  Decisions:", ...indent(n.notes, 4));
+      }
+      continue;
+    }
+    const facts = [];
+    if (b.label !== n.label) facts.push(`renamed from "${b.label}"`);
+    if (b.kind !== n.kind) facts.push(`now a ${KIND_NOUN[n.kind]} (was a ${KIND_NOUN[b.kind]})`);
+    if ((b.detail ?? "") !== (n.detail ?? "")) facts.push(n.detail ? `subtitle "${oneLine(n.detail)}"` : "subtitle removed");
+    const texts = [
+      ["description", b.description, n.description],
+      ["decisions", b.notes, n.notes]
+    ];
+    const editedText = texts.filter(([, was2, now2]) => (was2 ?? "").trim() !== (now2 ?? "").trim());
+    for (const [what, , now2] of editedText) facts.push(now2?.trim() ? `${what} edited` : `${what} removed`);
+    const was = b.taskIds ?? [];
+    const now = n.taskIds ?? [];
+    if (was.join() !== now.join()) facts.push(now.length ? `built by ${now.join(", ")}${was.length ? ` (was ${was.join(", ")})` : ""}` : "no longer linked to tasks");
+    if (!facts.length) continue;
+    changed.push(`Changed ${ref2(n)}: ${facts.join("; ")}.`);
+    if (opts.withText) {
+      for (const [what, , text] of editedText) {
+        if (text?.trim()) changed.push(`  ${what[0].toUpperCase()}${what.slice(1)} now:`, ...indent(text, 4));
+      }
+    }
+  }
+  for (const b of before.nodes) {
+    if (!after.nodes.some((n) => n.id === b.id)) removed.push(`Removed ${ref2(b)}.`);
+  }
+  out.push(...added, ...removed, ...changed);
+  const { pairs, removed: cut, added: drawn } = matchEdges(before.edges, after.edges);
+  const connected = [];
+  const disconnected = [];
+  const restyled = [];
+  const unclaimed = [...drawn];
+  for (const e of cut) {
+    const back = (a) => a.source === e.target && a.target === e.source;
+    const same = unclaimed.findIndex((a) => back(a) && (a.label ?? "") === (e.label ?? ""));
+    const k = same >= 0 ? same : unclaimed.findIndex(back);
+    if (k >= 0) {
+      const [now] = unclaimed.splice(k, 1);
+      restyled.push(`Reversed ${label(e.source)} \u2192 ${label(e.target)}: it now runs ${edgePhrase(now, label)}.`);
+    } else {
+      disconnected.push(`Disconnected ${edgePhrase(e, label)}.`);
+    }
+  }
+  for (const e of unclaimed) connected.push(`Connected ${edgePhrase(e, label)}.`);
+  for (const [b, e] of pairs) {
+    const facts = [];
+    if ((b.label ?? "") !== (e.label ?? "")) facts.push(e.label ? `now labelled "${oneLine(e.label)}"` : "label removed");
+    if (Boolean(b.dashed) !== Boolean(e.dashed)) facts.push(e.dashed ? "now dashed (optional, async or future)" : "now solid");
+    if ((b.arrows ?? "end") !== (e.arrows ?? "end")) facts.push({ end: "now one way", both: "now both ways", none: "now without direction" }[e.arrows ?? "end"]);
+    if (facts.length) restyled.push(`Changed ${label(e.source)} \u2192 ${label(e.target)}: ${facts.join("; ")}.`);
+  }
+  out.push(...connected, ...disconnected, ...restyled);
+  return out;
+}
+function contentOf(diagram) {
+  return {
+    id: diagram.id,
+    title: diagram.title,
+    ...diagram.caption ? { caption: diagram.caption } : {},
+    nodes: diagram.nodes.map(({ x: _x, y: _y, ...n }) => n),
+    edges: diagram.edges
+  };
+}
+function labeller(diagram) {
+  const names = new Map(diagram.nodes.map((n) => [n.id, n.label]));
+  return (id) => names.get(id) ?? id;
+}
+function prose(what, text, opts) {
+  if (!text?.trim()) return [`${what.replace(/^Edited/, "Removed")}.`];
+  return opts.withText ? [`${what}:`, ...indent(text, 2)] : [`${what}.`];
+}
+function indent(text, by) {
+  const pad = " ".repeat(by);
+  return text.trim().split("\n").map((line) => line.trim() ? `${pad}${line.trimEnd()}` : "");
+}
+function oneLine(text) {
+  return text.replace(/\s*\n\s*/g, " ").trim();
+}
+
+// src/daemon/render.ts
+var STATUS_MARK2 = { todo: "[ ]", in_progress: "[~]", blocked: "[!]", done: "[x]" };
 function renderPlan(plan, opts = {}) {
   const unread = unreadByClaude(plan);
   const out = [];
@@ -754,7 +1212,7 @@ function renderPlan(plan, opts = {}) {
   ];
   out.push(`_${meta.join(" \xB7 ")}${opts.url ? ` \xB7 UI: ${opts.url}` : ""}_`);
   out.push("");
-  out.push(renderChanges(plan, unread));
+  out.push(renderChanges(plan, unread, Boolean(opts.changesOnly)));
   if (opts.changesOnly) {
     const touched = new Set(unread.map((c) => `${c.target.kind}:${c.target.id}`));
     const threads = plan.threads.filter((t) => !t.resolved && (touched.has(`${t.target.kind}:${t.target.id}`) || lastAuthor(t) === "user"));
@@ -769,8 +1227,10 @@ function renderPlan(plan, opts = {}) {
     }
   }
   if (plan.diagrams.length) {
-    out.push("", "## Diagrams");
-    for (const d of plan.diagrams) out.push("", ...renderDiagram(d));
+    out.push("", "## Architecture");
+    for (const d of plan.diagrams) {
+      out.push("", diagramToMarkdown(d, { tasks: plan.tasks, note: d.updatedBy === "user" ? "last edited by the user" : void 0 }));
+    }
   }
   out.push("", `## Tasks${counts.total ? ` (${counts.done}/${counts.total} done)` : ""}`);
   const rows = outline(plan);
@@ -779,7 +1239,7 @@ function renderPlan(plan, opts = {}) {
     const pad = "  ".repeat(depth);
     const by = task.createdBy === "user" ? " _(added by the user)_" : "";
     const note = task.note ? ` \u2014 ${task.note}` : "";
-    out.push(`${pad}- ${STATUS_MARK[task.status]} ${task.id} ${task.title}${by}${note}`);
+    out.push(`${pad}- ${STATUS_MARK2[task.status]} ${task.id} ${task.title}${by}${note}`);
     if (task.files?.length) out.push(`${pad}  files: ${task.files.join(", ")}`);
     if (task.detail) for (const line of task.detail.trim().split("\n")) out.push(`${pad}  ${line}`);
   }
@@ -788,34 +1248,124 @@ function renderPlan(plan, opts = {}) {
     out.push("", "## Open comments");
     for (const t of open) out.push(renderThread(plan, t));
   }
-  out.push("", `_Statuses: ${Object.entries(STATUS_MARK).map(([k, v]) => `${v} ${k}`).join(", ")}_`);
+  out.push("", `_Statuses: ${Object.entries(STATUS_MARK2).map(([k, v]) => `${v} ${k}`).join(", ")}_`);
   return out.join("\n").trim();
 }
-function renderDiagram(d) {
-  const lines = [`### [${d.id}] ${d.title} _(${d.direction === "LR" ? "left to right" : "top to bottom"}${d.updatedBy === "user" ? ", edited by the user" : ""})_`];
-  if (d.caption) lines.push(d.caption.trim());
-  lines.push("nodes:");
-  if (d.nodes.length === 0) lines.push("- _(none)_");
-  for (const n of d.nodes) {
-    lines.push(`- ${n.id}: "${n.label}" (${n.kind})${n.detail ? ` \u2014 ${n.detail.replace(/\n/g, " ")}` : ""}`);
-    if (n.taskIds?.length) lines.push(`  tasks: ${n.taskIds.join(", ")}`);
-    if (n.notes) for (const line of n.notes.trim().split("\n")) lines.push(`  ${line}`);
-  }
-  if (d.edges.length) {
-    lines.push("edges:");
-    for (const e of d.edges) {
-      lines.push(`- ${e.source} \u2192 ${e.target}${e.label ? ` "${e.label}"` : ""}${e.dashed ? " (dashed)" : ""}`);
-    }
-  }
-  return lines;
-}
-function renderChanges(plan, unread) {
+function renderChanges(plan, unread, changesOnly) {
   if (unread.length === 0) {
     return plan.claudeReadAt ? "## Since you last read\nNothing \u2014 the user has not changed the plan." : "## Since you last read\nThis is your first read of this plan.";
   }
-  const lines = [`## Since you last read \u2014 ${unread.length} change(s) by the user`];
-  for (const c of unread) lines.push(`- ${c.summary} [${c.target.kind}${c.target.id ? ` ${c.target.id}` : ""}]`);
-  return lines.join("\n");
+  const base = plan.claudeBaseline;
+  if (!base) return renderChangeLog(unread);
+  const touched = (kind) => new Set(unread.filter((c) => c.target.kind === kind).map((c) => c.target.id));
+  const opts = { withText: changesOnly };
+  const blocks = [];
+  const block = (title, lines) => {
+    if (lines.length) blocks.push(`**${title}**
+${lines.map((l) => l.startsWith(" ") || l === "" ? l : `- ${l}`).join("\n")}`);
+  };
+  const meta = [];
+  const userMeta = unread.some((c) => c.target.kind === "plan" && c.kind === "edited");
+  if (userMeta && base.title !== plan.title) meta.push(`Renamed the plan "${base.title}" \u2192 "${plan.title}".`);
+  if (userMeta && base.summary.trim() !== plan.summary.trim()) {
+    meta.push(plan.summary.trim() ? "Edited the summary." : "Removed the summary.");
+    if (changesOnly && plan.summary.trim()) meta.push(...indent(plan.summary, 2));
+  }
+  block("Plan", meta);
+  for (const id of touched("diagram")) {
+    const was = base.diagrams.find((d) => d.id === id);
+    const now = plan.diagrams.find((d) => d.id === id);
+    if (!was && now) {
+      block(`New diagram [${now.id}] "${now.title}"`, [
+        `${now.nodes.length} part(s), ${now.edges.length} connection(s)${changesOnly ? ":" : " \u2014 described in full below."}`,
+        ...changesOnly ? indent(diagramToMarkdown(contentOf(now), { tasks: plan.tasks, level: 4 }), 2) : []
+      ]);
+    } else if (was && !now) {
+      block(`Diagram "${was.title}"`, ["Removed the diagram."]);
+    } else if (was && now) {
+      block(`Diagram [${now.id}] "${now.title}"`, diagramChanges(contentOf(was), contentOf(now), opts));
+    }
+  }
+  if (unread.some((c) => c.kind === "moved" && c.target.kind === "diagram") && reordered(base.diagrams, plan.diagrams)) {
+    block("Diagrams", [`Reordered the diagrams: ${plan.diagrams.map((d) => `"${d.title}"`).join(", ")}.`]);
+  }
+  block("Tasks", taskChanges(base, plan, touched("task"), changesOnly));
+  block("Sections", sectionChanges(base, plan, touched("section"), unread, changesOnly));
+  const said = unread.filter((c) => ["commented", "replied", "resolved", "reopened"].includes(c.kind)).map((c) => `${capital(c.summary)}.`);
+  block("Comments", [...new Set(said)]);
+  const lead = changesOnly ? "_The net effect of their edits \u2014 not each step, and not where boxes were moved on the canvas._" : "_The net effect of their edits \u2014 not each step, and not where boxes were moved on the canvas. The full plan follows._";
+  if (!blocks.length) {
+    if (!sameContent(baselineOf(plan), base)) return renderChangeLog(unread);
+    return `## Since you last read
+The user made edits, but they cancel out: the plan's content is what you last read.`;
+  }
+  return ["## Since you last read \u2014 what the user changed", lead, "", blocks.join("\n\n")].join("\n");
+}
+function taskChanges(base, plan, ids, withText) {
+  const out = [];
+  const titleOf = (id) => id ? plan.tasks.find((t) => t.id === id)?.title ?? base.tasks.find((t) => t.id === id)?.title ?? id : null;
+  const where = (parentId) => parentId ? `under "${titleOf(parentId)}"` : "at the top level";
+  const place = (tasks, t) => tasks.filter((x) => x.parentId === t.parentId).sort((a, b) => a.order - b.order).findIndex((x) => x.id === t.id);
+  for (const id of ids) {
+    const was = base.tasks.find((t) => t.id === id);
+    const now = plan.tasks.find((t) => t.id === id);
+    if (!was && now) {
+      out.push(`Added ${now.id} "${now.title}" ${where(now.parentId)}.`);
+      if (withText && now.detail?.trim()) out.push(...indent(now.detail, 2));
+      continue;
+    }
+    if (was && !now) {
+      out.push(`Removed ${was.id} "${was.title}".`);
+      continue;
+    }
+    if (!was || !now) continue;
+    const facts = [];
+    if (was.title !== now.title) facts.push(`renamed from "${was.title}"`);
+    if (was.parentId !== now.parentId) facts.push(`moved ${where(now.parentId)}`);
+    else if (place(base.tasks, was) !== place(plan.tasks, now)) facts.push(`moved to position ${place(plan.tasks, now) + 1} ${where(now.parentId)}`);
+    if (was.status !== now.status) facts.push(`status ${was.status} \u2192 ${now.status}`);
+    if ((was.detail ?? "").trim() !== (now.detail ?? "").trim()) facts.push(now.detail?.trim() ? "detail edited" : "detail removed");
+    if ((was.files ?? []).join() !== (now.files ?? []).join()) facts.push(`files now ${now.files?.join(", ") || "none"}`);
+    if ((was.note ?? "") !== (now.note ?? "")) facts.push(now.note ? `note "${now.note}"` : "note removed");
+    if (!facts.length) continue;
+    out.push(`Changed ${now.id} "${now.title}": ${facts.join("; ")}.`);
+    if (withText && (was.detail ?? "").trim() !== (now.detail ?? "").trim() && now.detail?.trim()) out.push("  Detail now:", ...indent(now.detail, 4));
+  }
+  return out;
+}
+function sectionChanges(base, plan, ids, unread, withText) {
+  const out = [];
+  for (const id of ids) {
+    const was = base.sections.find((s) => s.id === id);
+    const now = plan.sections.find((s) => s.id === id);
+    if (!was && now) {
+      out.push(`Added [${now.id}] "${now.title}".`);
+      if (withText && now.body.trim()) out.push(...indent(now.body, 2));
+    } else if (was && !now) {
+      out.push(`Removed "${was.title}".`);
+    } else if (was && now) {
+      const facts = [];
+      if (was.title !== now.title) facts.push(`renamed from "${was.title}"`);
+      if (was.body.trim() !== now.body.trim()) facts.push("text edited");
+      if (facts.length) out.push(`Changed [${now.id}] "${now.title}": ${facts.join("; ")}.`);
+      if (withText && was.body.trim() !== now.body.trim()) out.push(...indent(now.body, 2));
+    }
+  }
+  if (unread.some((c) => c.kind === "moved" && c.target.kind === "section") && reordered(base.sections, plan.sections)) {
+    out.push(`Reordered the sections: ${plan.sections.map((s) => `"${s.title}"`).join(", ")}.`);
+  }
+  return out;
+}
+function reordered(was, now) {
+  const common = (list, other) => list.map((x) => x.id).filter((id) => other.some((o) => o.id === id));
+  return common(was, now).join("\0") !== common(now, was).join("\0");
+}
+function renderChangeLog(unread) {
+  const lines = [...new Set(unread.filter((c) => !/^rearranged \d+ node/.test(c.summary)).map((c) => `- ${c.summary} [${c.target.kind}${c.target.id ? ` ${c.target.id}` : ""}]`))];
+  return [`## Since you last read \u2014 ${lines.length} change(s) by the user`, ...lines].join("\n");
+}
+function capital(text) {
+  return text ? `${text[0].toUpperCase()}${text.slice(1)}` : text;
 }
 function renderThread(plan, t) {
   const lines = [`- [${t.id}] on ${describeTarget(plan, t.target)} \u2014 ${who(t.author)}: ${t.text}`];
@@ -830,12 +1380,9 @@ function lastAuthor(t) {
   return t.replies.length ? t.replies[t.replies.length - 1].author : t.author;
 }
 function unreadNotice(plan) {
-  const unread = unreadByClaude(plan);
-  if (!plan || unread.length === 0) return null;
-  const kinds = /* @__PURE__ */ new Map();
-  for (const c of unread) kinds.set(c.kind, (kinds.get(c.kind) ?? 0) + 1);
-  const parts = [...kinds.entries()].map(([k, n]) => `${n} ${k}`).join(", ");
-  return `[cc-harness] The user has changed the plan "${plan.title}" in the harness UI since you last read it (${parts}). Call harness_plan_read before acting on the plan.`;
+  const areas = unreadAreas(plan);
+  if (!plan || areas.length === 0) return null;
+  return `[cc-harness] The user has changed the plan "${plan.title}" in the harness UI since you last read it (${areas.join(", ")}). Call harness_plan_read before acting on the plan.`;
 }
 
 // src/test/plan.test.ts
@@ -1002,7 +1549,7 @@ test("diagram edits are described in words for Claude", () => {
   assert.match(summary, /connected API → Jobs/);
   assert.match(summary, /disconnected Redis → Postgres|disconnected Cache → Postgres/);
 });
-test("dragging boxes is logged as a rearrangement, and positions survive a republish", () => {
+test("dragging boxes saves the layout without telling Claude, and positions survive a republish", () => {
   const base = fresh();
   const moved = applyOps(
     base,
@@ -1016,9 +1563,10 @@ test("dragging boxes is logged as a rearrangement, and positions survive a repub
     ],
     "user"
   ).plan;
-  assert.equal(moved.changes.at(-1).kind, "moved");
-  assert.match(moved.changes.at(-1).summary, /rearranged 3 node/);
-  moved.claudeReadSeq = moved.seq;
+  assert.equal(moved.changes.length, base.changes.length, "layout is not a change");
+  assert.equal(unreadByClaude(moved).length, 0);
+  assert.equal(moved.diagrams[0].rev, base.diagrams[0].rev + 1, "but it moves the revision, so a stale save is refused");
+  assert.equal(moved.diagrams[0].nodes[1].x, 200);
   const republished = publishPlan(moved, { ...INPUT, diagrams: [{ id: "d1", ...INPUT.diagrams[0] }] }).plan;
   assert.equal(republished.diagrams[0].nodes.find((n) => n.id === "cache")?.x, 200, "Claude did not restate it, so it stays put");
 });
@@ -1036,7 +1584,7 @@ test("a box carries notes and the tasks that build it", () => {
   const node = plan.diagrams[0].nodes[0];
   assert.equal(node.notes, "Redis, because we run it.");
   assert.deepEqual(node.taskIds, ["build-cache"]);
-  assert.match(renderPlan(plan), /- cache: "Cache" \(datastore\)\n  tasks: build-cache\n  Redis, because we run it\./);
+  assert.match(renderPlan(plan), /- \*\*Cache\*\* `cache` — data store\n  Decisions:\n    Redis, because we run it\.\n  Built by: \[ \] build-cache Build the cache/);
 });
 test("a box cannot link a task that does not exist", () => {
   assert.throws(
@@ -1067,15 +1615,15 @@ test("the rendering leads with the changes and carries every id", () => {
   assert.match(text, /- \[ \] t2 Cache client/);
   assert.match(text, /- \[!\] t3 Invalidation/);
   assert.match(text, /\[d1\] Components/);
-  assert.match(text, /- api → cache "get"/);
-  assert.match(text, /added task "Shard it"/);
+  assert.match(text, /- API → Cache: get `api → cache`/);
+  assert.match(text, /Added t5 "Shard it" at the top level\./);
   assert.match(text, /t5 Shard it _\(added by the user\)_/);
   assert.doesNotMatch(text, /question/i, "questions live in Claude's chat, not the plan");
 });
 test("changes-only rendering skips the document", () => {
   const plan = applyOps(fresh(), [{ op: "comment", target: { kind: "plan", id: "" }, text: "looks good" }], "user").plan;
   const text = renderPlan(plan, { changesOnly: true });
-  assert.match(text, /commented on the plan: looks good/);
+  assert.match(text, /Commented on the plan: looks good/);
   assert.match(text, /Comments waiting on you/);
   assert.doesNotMatch(text, /## Tasks/);
 });

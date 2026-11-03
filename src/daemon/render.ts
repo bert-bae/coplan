@@ -5,8 +5,9 @@
  * from these renderings, so they carry every id it will need to quote back in
  * an edit, and they lead with what changed — the reason it is reading at all.
  */
-import type { Change, Diagram, Plan, Thread } from '../shared/types.ts';
-import { countTasks, describeTarget, outline, unreadByClaude } from '../shared/plan.ts';
+import type { Change, Plan, PlanBaseline, Thread } from '../shared/types.ts';
+import { baselineOf, countTasks, describeTarget, outline, sameContent, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import { contentOf, diagramChanges, diagramToMarkdown, indent } from '../shared/architecture.ts';
 
 const STATUS_MARK = { todo: '[ ]', in_progress: '[~]', blocked: '[!]', done: '[x]' } as const;
 
@@ -31,7 +32,7 @@ export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
   out.push(`_${meta.join(' · ')}${opts.url ? ` · UI: ${opts.url}` : ''}_`);
 
   out.push('');
-  out.push(renderChanges(plan, unread));
+  out.push(renderChanges(plan, unread, Boolean(opts.changesOnly)));
 
   if (opts.changesOnly) {
     const touched = new Set(unread.map((c) => `${c.target.kind}:${c.target.id}`));
@@ -50,8 +51,10 @@ export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
   }
 
   if (plan.diagrams.length) {
-    out.push('', '## Diagrams');
-    for (const d of plan.diagrams) out.push('', ...renderDiagram(d));
+    out.push('', '## Architecture');
+    for (const d of plan.diagrams) {
+      out.push('', diagramToMarkdown(d, { tasks: plan.tasks, note: d.updatedBy === 'user' ? 'last edited by the user' : undefined }));
+    }
   }
 
   out.push('', `## Tasks${counts.total ? ` (${counts.done}/${counts.total} done)` : ''}`);
@@ -77,38 +80,160 @@ export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
 }
 
 /**
- * A diagram as text: nodes with their ids, then edges between those ids —
- * exactly the shape `upsert_diagram` takes back, so an edit is a copy, a
- * change and a paste.
+ * What the user changed since Claude last read, as the net difference
+ * between the plan Claude read and the plan now.
+ *
+ * The change log records every step — each drag, each keystroke-sized save —
+ * which is the wrong grain for Claude: it needs where the user ended up, not
+ * how they got there. So the log is only used to find which items the user
+ * touched, and each of those is compared with what Claude last saw. Layout
+ * is never part of it.
  */
-function renderDiagram(d: Diagram): string[] {
-  const lines = [`### [${d.id}] ${d.title} _(${d.direction === 'LR' ? 'left to right' : 'top to bottom'}${d.updatedBy === 'user' ? ', edited by the user' : ''})_`];
-  if (d.caption) lines.push(d.caption.trim());
-  lines.push('nodes:');
-  if (d.nodes.length === 0) lines.push('- _(none)_');
-  for (const n of d.nodes) {
-    lines.push(`- ${n.id}: "${n.label}" (${n.kind})${n.detail ? ` — ${n.detail.replace(/\n/g, ' ')}` : ''}`);
-    if (n.taskIds?.length) lines.push(`  tasks: ${n.taskIds.join(', ')}`);
-    if (n.notes) for (const line of n.notes.trim().split('\n')) lines.push(`  ${line}`);
-  }
-  if (d.edges.length) {
-    lines.push('edges:');
-    for (const e of d.edges) {
-      lines.push(`- ${e.source} → ${e.target}${e.label ? ` "${e.label}"` : ''}${e.dashed ? ' (dashed)' : ''}`);
-    }
-  }
-  return lines;
-}
-
-function renderChanges(plan: Plan, unread: Change[]): string {
+function renderChanges(plan: Plan, unread: Change[], changesOnly: boolean): string {
   if (unread.length === 0) {
     return plan.claudeReadAt
       ? '## Since you last read\nNothing — the user has not changed the plan.'
       : '## Since you last read\nThis is your first read of this plan.';
   }
-  const lines = [`## Since you last read — ${unread.length} change(s) by the user`];
-  for (const c of unread) lines.push(`- ${c.summary} [${c.target.kind}${c.target.id ? ` ${c.target.id}` : ''}]`);
-  return lines.join('\n');
+  const base = plan.claudeBaseline;
+  if (!base) return renderChangeLog(unread);
+
+  const touched = (kind: string) => new Set(unread.filter((c) => c.target.kind === kind).map((c) => c.target.id));
+  const opts = { withText: changesOnly };
+  const blocks: string[] = [];
+  const block = (title: string, lines: string[]) => {
+    if (lines.length) blocks.push(`**${title}**\n${lines.map((l) => (l.startsWith(' ') || l === '' ? l : `- ${l}`)).join('\n')}`);
+  };
+
+  // The plan itself — only if the user edited it: Claude's own renames are
+  // folded into the baseline, but the check costs nothing.
+  const meta: string[] = [];
+  const userMeta = unread.some((c) => c.target.kind === 'plan' && c.kind === 'edited');
+  if (userMeta && base.title !== plan.title) meta.push(`Renamed the plan "${base.title}" → "${plan.title}".`);
+  if (userMeta && base.summary.trim() !== plan.summary.trim()) {
+    meta.push(plan.summary.trim() ? 'Edited the summary.' : 'Removed the summary.');
+    if (changesOnly && plan.summary.trim()) meta.push(...indent(plan.summary, 2));
+  }
+  block('Plan', meta);
+
+  // Architecture: per diagram, the design difference.
+  for (const id of touched('diagram')) {
+    const was = base.diagrams.find((d) => d.id === id);
+    const now = plan.diagrams.find((d) => d.id === id);
+    if (!was && now) {
+      block(`New diagram [${now.id}] "${now.title}"`, [
+        `${now.nodes.length} part(s), ${now.edges.length} connection(s)${changesOnly ? ':' : ' — described in full below.'}`,
+        ...(changesOnly ? indent(diagramToMarkdown(contentOf(now), { tasks: plan.tasks, level: 4 }), 2) : []),
+      ]);
+    } else if (was && !now) {
+      block(`Diagram "${was.title}"`, ['Removed the diagram.']);
+    } else if (was && now) {
+      block(`Diagram [${now.id}] "${now.title}"`, diagramChanges(contentOf(was), contentOf(now), opts));
+    }
+  }
+
+  // Which diagram comes first is part of how the plan reads.
+  if (unread.some((c) => c.kind === 'moved' && c.target.kind === 'diagram') && reordered(base.diagrams, plan.diagrams)) {
+    block('Diagrams', [`Reordered the diagrams: ${plan.diagrams.map((d) => `"${d.title}"`).join(', ')}.`]);
+  }
+
+  block('Tasks', taskChanges(base, plan, touched('task'), changesOnly));
+  block('Sections', sectionChanges(base, plan, touched('section'), unread, changesOnly));
+
+  // Comments are events, not state: each one is news.
+  const said = unread.filter((c) => ['commented', 'replied', 'resolved', 'reopened'].includes(c.kind)).map((c) => `${capital(c.summary)}.`);
+  block('Comments', [...new Set(said)]);
+
+  const lead = changesOnly
+    ? '_The net effect of their edits — not each step, and not where boxes were moved on the canvas._'
+    : '_The net effect of their edits — not each step, and not where boxes were moved on the canvas. The full plan follows._';
+  if (!blocks.length) {
+    // Only say so when it is true. If the content differs and nothing above
+    // put it into words, the log is better than silence.
+    if (!sameContent(baselineOf(plan), base)) return renderChangeLog(unread);
+    return `## Since you last read\nThe user made edits, but they cancel out: the plan's content is what you last read.`;
+  }
+  return ['## Since you last read — what the user changed', lead, '', blocks.join('\n\n')].join('\n');
+}
+
+type BaseTask = PlanBaseline['tasks'][number];
+
+function taskChanges(base: PlanBaseline, plan: Plan, ids: Set<string>, withText: boolean): string[] {
+  const out: string[] = [];
+  const titleOf = (id: string | null) => (id ? (plan.tasks.find((t) => t.id === id)?.title ?? base.tasks.find((t) => t.id === id)?.title ?? id) : null);
+  const where = (parentId: string | null) => (parentId ? `under "${titleOf(parentId)}"` : 'at the top level');
+  const place = (tasks: BaseTask[], t: BaseTask) =>
+    tasks
+      .filter((x) => x.parentId === t.parentId)
+      .sort((a, b) => a.order - b.order)
+      .findIndex((x) => x.id === t.id);
+  for (const id of ids) {
+    const was = base.tasks.find((t) => t.id === id);
+    const now = plan.tasks.find((t) => t.id === id);
+    if (!was && now) {
+      out.push(`Added ${now.id} "${now.title}" ${where(now.parentId)}.`);
+      if (withText && now.detail?.trim()) out.push(...indent(now.detail, 2));
+      continue;
+    }
+    if (was && !now) {
+      out.push(`Removed ${was.id} "${was.title}".`);
+      continue;
+    }
+    if (!was || !now) continue;
+    const facts: string[] = [];
+    if (was.title !== now.title) facts.push(`renamed from "${was.title}"`);
+    if (was.parentId !== now.parentId) facts.push(`moved ${where(now.parentId)}`);
+    else if (place(base.tasks, was) !== place(plan.tasks, now)) facts.push(`moved to position ${place(plan.tasks, now) + 1} ${where(now.parentId)}`);
+    if (was.status !== now.status) facts.push(`status ${was.status} → ${now.status}`);
+    if ((was.detail ?? '').trim() !== (now.detail ?? '').trim()) facts.push(now.detail?.trim() ? 'detail edited' : 'detail removed');
+    if ((was.files ?? []).join() !== (now.files ?? []).join()) facts.push(`files now ${now.files?.join(', ') || 'none'}`);
+    if ((was.note ?? '') !== (now.note ?? '')) facts.push(now.note ? `note "${now.note}"` : 'note removed');
+    if (!facts.length) continue;
+    out.push(`Changed ${now.id} "${now.title}": ${facts.join('; ')}.`);
+    if (withText && (was.detail ?? '').trim() !== (now.detail ?? '').trim() && now.detail?.trim()) out.push('  Detail now:', ...indent(now.detail, 4));
+  }
+  return out;
+}
+
+function sectionChanges(base: PlanBaseline, plan: Plan, ids: Set<string>, unread: Change[], withText: boolean): string[] {
+  const out: string[] = [];
+  for (const id of ids) {
+    const was = base.sections.find((s) => s.id === id);
+    const now = plan.sections.find((s) => s.id === id);
+    if (!was && now) {
+      out.push(`Added [${now.id}] "${now.title}".`);
+      if (withText && now.body.trim()) out.push(...indent(now.body, 2));
+    } else if (was && !now) {
+      out.push(`Removed "${was.title}".`);
+    } else if (was && now) {
+      const facts: string[] = [];
+      if (was.title !== now.title) facts.push(`renamed from "${was.title}"`);
+      if (was.body.trim() !== now.body.trim()) facts.push('text edited');
+      if (facts.length) out.push(`Changed [${now.id}] "${now.title}": ${facts.join('; ')}.`);
+      if (withText && was.body.trim() !== now.body.trim()) out.push(...indent(now.body, 2));
+    }
+  }
+  if (unread.some((c) => c.kind === 'moved' && c.target.kind === 'section') && reordered(base.sections, plan.sections)) {
+    out.push(`Reordered the sections: ${plan.sections.map((s) => `"${s.title}"`).join(', ')}.`);
+  }
+  return out;
+}
+
+/** Whether the items two lists share come in a different order. */
+function reordered(was: { id: string }[], now: { id: string }[]): boolean {
+  const common = (list: { id: string }[], other: { id: string }[]) => list.map((x) => x.id).filter((id) => other.some((o) => o.id === id));
+  return common(was, now).join('\u0000') !== common(now, was).join('\u0000');
+}
+
+/** For a plan saved before baselines existed: the log, without layout noise
+ *  and without repeating itself. */
+function renderChangeLog(unread: Change[]): string {
+  const lines = [...new Set(unread.filter((c) => !/^rearranged \d+ node/.test(c.summary)).map((c) => `- ${c.summary} [${c.target.kind}${c.target.id ? ` ${c.target.id}` : ''}]`))];
+  return [`## Since you last read — ${lines.length} change(s) by the user`, ...lines].join('\n');
+}
+
+function capital(text: string): string {
+  return text ? `${text[0]!.toUpperCase()}${text.slice(1)}` : text;
 }
 
 function renderThread(plan: Plan, t: Thread): string {
@@ -132,13 +257,11 @@ function lastAuthor(t: Thread): 'user' | 'claude' {
  * "go and read", not repeat what the read will say.
  */
 export function unreadNotice(plan: Plan | null): string | null {
-  const unread = unreadByClaude(plan);
-  if (!plan || unread.length === 0) return null;
-  const kinds = new Map<string, number>();
-  for (const c of unread) kinds.set(c.kind, (kinds.get(c.kind) ?? 0) + 1);
-  const parts = [...kinds.entries()].map(([k, n]) => `${n} ${k}`).join(', ');
+  // Where, not how often: one save or forty, it is the same thing to read.
+  const areas = unreadAreas(plan);
+  if (!plan || areas.length === 0) return null;
   return (
     `[cc-harness] The user has changed the plan "${plan.title}" in the harness UI since you last read it ` +
-    `(${parts}). Call harness_plan_read before acting on the plan.`
+    `(${areas.join(', ')}). Call harness_plan_read before acting on the plan.`
   );
 }

@@ -14,11 +14,13 @@ import type {
   Diagram,
   DiagramDirection,
   DiagramEdge,
+  EdgeArrows,
   DiagramEdgeInput,
   DiagramNode,
   DiagramNodeInput,
   NodeKind,
   Plan,
+  PlanBaseline,
   PlanInput,
   PlanOp,
   Section,
@@ -29,7 +31,7 @@ import type {
   TaskStatus,
   Thread,
 } from './types.ts';
-import { NODE_KINDS, TASK_STATUSES } from './types.ts';
+import { EDGE_ARROWS, NODE_KINDS, TASK_STATUSES } from './types.ts';
 
 /** Raised for an op that cannot apply. The message is shown verbatim to
  *  whoever sent it — the user in a toast, Claude in a tool result. */
@@ -59,6 +61,7 @@ export function emptyPlan(title = 'Untitled plan', now = Date.now()): Plan {
     threads: [],
     changes: [],
     seq: 0,
+    version: 0,
     claudeReadSeq: 0,
     claudeReadAt: null,
     revision: 0,
@@ -116,6 +119,7 @@ function claimId(plan: Plan, kind: IdKind, wanted: string | undefined): string {
 
 function record(plan: Plan, author: Author, kind: ChangeKind, target: Target, summary: string, now: number): Change {
   plan.seq += 1;
+  plan.version += 1;
   const change: Change = { seq: plan.seq, ts: now, author, kind, target, summary };
   plan.changes.push(change);
   if (plan.changes.length > MAX_CHANGES) plan.changes.splice(0, plan.changes.length - MAX_CHANGES);
@@ -129,9 +133,39 @@ export function unreadByClaude(plan: Plan | null): Change[] {
   return plan.changes.filter((c) => c.seq > plan.claudeReadSeq && c.author === 'user');
 }
 
+/**
+ * How many things the user changed that Claude has not read — each box,
+ * task, section or comment thread counted once however many saves it took.
+ * This is the number to show people; the log's length counts keystrokes.
+ */
+export function unreadItems(plan: Plan | null): number {
+  return new Set(unreadByClaude(plan).map((c) => `${c.target.kind}:${c.target.id}`)).size;
+}
+
+/** How set_meta words a rename — and so how a rename is told apart from a
+ *  summary edit, which shares the plan as its target. */
+const RENAMED_PLAN = 'renamed the plan';
+
+/** Where the user's unread changes are — "the "Components" diagram",
+ *  "tasks", "comments" — in the order they first touched each. */
+export function unreadAreas(plan: Plan | null): string[] {
+  const areas: string[] = [];
+  const add = (what: string) => void (areas.includes(what) || areas.push(what));
+  for (const c of unreadByClaude(plan)) {
+    if (['commented', 'replied', 'resolved', 'reopened'].includes(c.kind)) add('comments');
+    else if (c.target.kind === 'diagram') add(`the "${plan!.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
+    else if (c.target.kind === 'task') add('tasks');
+    else if (c.target.kind === 'section') add('sections');
+    else if (c.summary.startsWith(RENAMED_PLAN)) add("the plan's title");
+    else add('the summary');
+  }
+  return areas;
+}
+
 export function markReadByClaude(plan: Plan, now = Date.now()): void {
   plan.claudeReadSeq = plan.seq;
   plan.claudeReadAt = now;
+  plan.claudeBaseline = baselineOf(plan);
 }
 
 /**
@@ -140,7 +174,180 @@ export function markReadByClaude(plan: Plan, now = Date.now()): void {
  * "since you last read".
  */
 function settleClaudeRead(plan: Plan): void {
-  if (unreadByClaude(plan).length === 0) plan.claudeReadSeq = plan.seq;
+  if (unreadByClaude(plan).length > 0) return;
+  plan.claudeReadSeq = plan.seq;
+  plan.claudeBaseline = baselineOf(plan);
+}
+
+/**
+ * Claude edited the plan while the user still has changes it has not read.
+ * The baseline is "what Claude knows", so Claude's own edit belongs in it —
+ * otherwise the next read would report Claude's change as the user's. Only
+ * what Claude's ops actually changed is copied in, field by field; anything
+ * the user changed on the same item stays different, and is reported.
+ */
+function foldClaudeEdit(base: PlanBaseline, before: PlanBaseline, after: PlanBaseline): PlanBaseline {
+  const out = structuredClone(base);
+  if (before.title !== after.title) out.title = after.title;
+  if (before.summary !== after.summary) out.summary = after.summary;
+  out.sections = foldList(out.sections, before.sections, after.sections, foldFields);
+  out.tasks = foldList(out.tasks, before.tasks, after.tasks, foldFields);
+  out.diagrams = foldList(out.diagrams, before.diagrams, after.diagrams, (o, b, a) => {
+    const { nodes: _on, edges: _oe, ...meta } = o;
+    const { nodes: _bn, edges: _be, ...bMeta } = b;
+    const { nodes: _an, edges: _ae, ...aMeta } = a;
+    return {
+      ...foldFields(meta, bMeta, aMeta),
+      nodes: foldList(o.nodes, b.nodes, a.nodes, foldFields),
+      edges: foldEdges(o.edges, b.edges, a.edges),
+    };
+  });
+  return out;
+}
+
+/** Copy into `o` every field that differs between `b` and `a`. */
+function foldFields<T extends object>(o: T, b: T, a: T): T {
+  const out = { ...o } as Record<string, unknown>;
+  const was = b as Record<string, unknown>;
+  const now = a as Record<string, unknown>;
+  for (const key of new Set([...Object.keys(was), ...Object.keys(now)])) {
+    if (JSON.stringify(was[key]) === JSON.stringify(now[key])) continue;
+    if (now[key] === undefined) delete out[key];
+    else out[key] = structuredClone(now[key]);
+  }
+  return out as T;
+}
+
+/** Fold a list of items with ids: what Claude added, removed, changed or
+ *  reordered is applied to the baseline's copy of the list. */
+function foldList<T extends { id: string }>(base: T[], before: T[], after: T[], merge: (o: T, b: T, a: T) => T): T[] {
+  const has = (list: T[], id: string) => list.some((x) => x.id === id);
+  let out = base.filter((x) => !(has(before, x.id) && !has(after, x.id)));
+  for (const a of after) {
+    const b = before.find((x) => x.id === a.id);
+    const i = out.findIndex((x) => x.id === a.id);
+    if (b && i >= 0 && JSON.stringify(b) !== JSON.stringify(a)) out[i] = merge(out[i]!, b, a);
+  }
+  const order = (list: T[]) => list.filter((x) => has(after, x.id) && has(before, x.id)).map((x) => x.id).join('\u0000');
+  if (order(before) !== order(after)) {
+    // Claude moved things: its order is the one it knows. (Any reorder of the
+    // user's still unread is folded with it — Claude's move was made on top.)
+    const at = new Map(after.map((x, i) => [x.id, i]));
+    let last = -1;
+    const rank = new Map(
+      out.map((x) => {
+        const i = at.get(x.id);
+        if (i !== undefined) last = i;
+        return [x.id, i ?? last + 0.5];
+      }),
+    );
+    out = [...out].sort((x, y) => rank.get(x.id)! - rank.get(y.id)!);
+  }
+  // What Claude created goes where Claude put it: just after the item it
+  // follows in Claude's list, or first. Nothing else moves, so a reorder the
+  // user made is still there to be reported.
+  after.forEach((a, i) => {
+    if (has(before, a.id) || has(out, a.id)) return;
+    let at = 0;
+    for (let j = i - 1; j >= 0; j--) {
+      const k = out.findIndex((x) => x.id === after[j]!.id);
+      if (k >= 0) {
+        at = k + 1;
+        break;
+      }
+    }
+    out.splice(at, 0, structuredClone(a));
+  });
+  return out;
+}
+
+/**
+ * Whether two baselines say the same thing. Field order is not meaning, and
+ * neither is the order arrows are listed in — only the order of things whose
+ * order the plan shows: sections, diagrams, tasks and boxes.
+ */
+export function sameContent(a: PlanBaseline, b: PlanBaseline): boolean {
+  return canonical(a) === canonical(b);
+}
+
+function canonical(value: unknown, key = ''): string {
+  if (Array.isArray(value)) {
+    const items = value.map((v) => canonical(v));
+    if (key === 'edges') items.sort();
+    return `[${items.join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const o = value as Record<string, unknown>;
+    const keys = Object.keys(o).filter((k) => o[k] !== undefined).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonical(o[k], k)}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function foldEdges(base: DiagramEdge[], before: DiagramEdge[], after: DiagramEdge[]): DiagramEdge[] {
+  const claude = matchEdges(before, after);
+  let out = [...base];
+  for (const gone of claude.removed) {
+    const hit = matchEdges(out, [gone]).pairs[0]?.[0];
+    if (hit) out = out.filter((e) => e !== hit);
+  }
+  for (const [b, a] of claude.pairs) {
+    if (JSON.stringify(b) === JSON.stringify(a)) continue;
+    const hit = matchEdges(out, [b]).pairs[0]?.[0];
+    if (hit) out = out.map((e) => (e === hit ? foldFields(e, b, a) : e));
+  }
+  return [...out, ...claude.added.map((e) => structuredClone(e))];
+}
+
+/** A baseline read from disk, if it is whole; otherwise none, and "since you
+ *  last read" falls back to the change log rather than failing to render. */
+function validBaseline(raw: unknown): PlanBaseline | undefined {
+  const b = raw as Partial<PlanBaseline> | null;
+  const str = (v: unknown) => typeof v === 'string';
+  const list = (v: unknown, ok: (x: Record<string, unknown>) => boolean) =>
+    Array.isArray(v) && v.every((x) => x !== null && typeof x === 'object' && ok(x as Record<string, unknown>));
+  const whole =
+    b !== null &&
+    typeof b === 'object' &&
+    str(b.title) &&
+    str(b.summary) &&
+    list(b.sections, (x) => str(x['id']) && str(x['title']) && str(x['body'])) &&
+    list(b.tasks, (x) => str(x['id']) && str(x['title']) && str(x['status']) && typeof x['order'] === 'number') &&
+    list(
+      b.diagrams,
+      (x) =>
+        str(x['id']) &&
+        str(x['title']) &&
+        list(x['nodes'], (n) => str(n['id']) && str(n['label']) && str(n['kind'])) &&
+        list(x['edges'], (e) => str(e['source']) && str(e['target'])),
+    );
+  return whole ? (b as PlanBaseline) : undefined;
+}
+
+/** The plan's content, as Claude would compare it: no layout, no bookkeeping. */
+export function baselineOf(plan: Plan): PlanBaseline {
+  return structuredClone({
+    title: plan.title,
+    summary: plan.summary,
+    sections: plan.sections.map(({ id, title, body }) => ({ id, title, body })),
+    diagrams: plan.diagrams.map((d) => ({
+      id: d.id,
+      title: d.title,
+      ...(d.caption ? { caption: d.caption } : {}),
+      nodes: d.nodes.map(({ x: _x, y: _y, ...node }) => node),
+      edges: d.edges,
+    })),
+    tasks: plan.tasks.map(({ id, parentId, order, title, detail, status, files, note }) => ({
+      id,
+      parentId,
+      order,
+      title,
+      status,
+      ...(detail ? { detail } : {}),
+      ...(files?.length ? { files } : {}),
+      ...(note ? { note } : {}),
+    })),
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -159,7 +366,7 @@ function settleClaudeRead(plan: Plan): void {
 export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now()): { plan: Plan; changes: Change[] } {
   if (prev && unreadByClaude(prev).length > 0) {
     throw new PlanError(
-      `The user has made ${unreadByClaude(prev).length} change(s) to the plan since you last read it. ` +
+      `The user has changed ${unreadItems(prev)} item(s) in the plan since you last read it. ` +
         'Call harness_plan_read first, then publish again (or use harness_plan_edit for targeted changes) ' +
         'so their edits are not overwritten.',
     );
@@ -228,7 +435,7 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
     const dTitle = clean(raw.title, MAX_TITLE) ?? 'Diagram';
     const caption = clean(raw.caption, MAX_TEXT);
     const graph = buildGraph(raw.nodes ?? [], raw.edges ?? [], old, dTitle, new Set(tasks.map((t) => t.id)));
-    const direction = validDirection(raw.direction) ?? old?.direction ?? 'LR';
+    const direction = validDirection(raw.direction) ?? old?.direction ?? suggestDirection(graph.nodes, graph.edges);
     const same =
       old &&
       old.title === dTitle &&
@@ -310,10 +517,14 @@ export function normalizePlan(raw: Partial<Plan> & Record<string, unknown>, fall
     threads: list<Thread>(raw.threads).map((t) => ({ ...t, replies: list(t.replies) })),
     changes: list<Change>(raw.changes),
     seq: typeof raw.seq === 'number' ? raw.seq : 0,
+    version: typeof raw.version === 'number' ? raw.version : typeof raw.seq === 'number' ? raw.seq : 0,
     claudeReadSeq: typeof raw.claudeReadSeq === 'number' ? raw.claudeReadSeq : 0,
     claudeReadAt: typeof raw.claudeReadAt === 'number' ? raw.claudeReadAt : null,
     revision: typeof raw.revision === 'number' ? raw.revision : 0,
   };
+  const baseline = validBaseline(raw.claudeBaseline);
+  if (baseline) plan.claudeBaseline = baseline;
+  else delete plan.claudeBaseline;
   return plan;
 }
 
@@ -344,7 +555,12 @@ export function applyOps(
       throw err;
     }
   });
-  if (author === 'claude') settleClaudeRead(next);
+  if (author === 'claude') {
+    if (next.claudeBaseline && unreadByClaude(next).length > 0) {
+      next.claudeBaseline = foldClaudeEdit(next.claudeBaseline, baselineOf(plan), baselineOf(next));
+    }
+    settleClaudeRead(next);
+  }
   return { plan: next, changes };
 }
 
@@ -357,7 +573,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       const title = clean(op.title, MAX_TITLE);
       if (title && title !== plan.title) {
         plan.title = title;
-        out.push(log('edited', { kind: 'plan', id: '' }, `renamed the plan to "${title}"`));
+        out.push(log('edited', { kind: 'plan', id: '' }, `${RENAMED_PLAN} to "${title}"`));
       }
       if (typeof op.summary === 'string' && op.summary !== plan.summary) {
         plan.summary = clean(op.summary, MAX_TEXT) ?? '';
@@ -414,24 +630,35 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         if (typeof op.caption === 'string') setOptional(existing, 'caption', clean(op.caption, MAX_TEXT));
         if (typeof op.index === 'number') moveInList(plan.diagrams, existing.id, op.index);
         const what = describeDiagramEdit(before, existing);
-        if (!what) return [];
+        const relaid = layoutChanged(before, existing);
+        if (!what && !relaid) return [];
         existing.rev += 1;
         existing.updatedAt = now;
+        // Dragging boxes around, or flipping which way the diagram is drawn,
+        // is presentation, not design. It is saved — and moves the revision,
+        // so a stale editor is still refused, and the plan's version, so a
+        // page can tell it from the save before — but it is not a change
+        // anyone needs to read about.
+        if (!what) {
+          plan.version += 1;
+          plan.updatedAt = now;
+          return [];
+        }
         existing.updatedBy = author;
-        // Dragging boxes around is layout, not content: logged, but as a move.
-        const kind: ChangeKind = what.startsWith('rearranged') ? 'moved' : 'edited';
-        return [log(kind, ref('diagram', existing.id), `${what} in diagram "${existing.title}"`)];
+        const summary = what === EDITED_DESIGN ? `edited diagram "${existing.title}"` : `${what} in diagram "${existing.title}"`;
+        return [log('edited', ref('diagram', existing.id), summary)];
       }
       if (op.id) throw new PlanError(`No diagram "${op.id}".`);
       if (plan.diagrams.length >= MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
       const title = clean(op.title, MAX_TITLE) ?? 'Diagram';
       const caption = clean(op.caption, MAX_TEXT);
+      const graph = buildGraph(op.nodes ?? [], op.edges ?? [], undefined, title, taskIdSet(plan));
       const diagram: Diagram = {
         id: claimId(plan, 'diagram', undefined),
         title,
         rev: 1,
-        ...buildGraph(op.nodes ?? [], op.edges ?? [], undefined, title, taskIdSet(plan)),
-        direction: validDirection(op.direction) ?? 'LR',
+        ...graph,
+        direction: validDirection(op.direction) ?? suggestDirection(graph.nodes, graph.edges),
         ...(caption ? { caption } : {}),
         updatedAt: now,
         updatedBy: author,
@@ -650,6 +877,7 @@ function removeItem(
 
 const MAX_NODES = 120;
 const MAX_EDGES = 300;
+const MAX_DESCRIPTION = 4_000;
 
 /**
  * Validate a graph and normalize it. Node ids must be unique and every edge
@@ -676,6 +904,9 @@ function buildGraph(
     if (nodes.some((n) => n.id === id)) throw new PlanError(`Diagram "${title}": node id "${id}" is used twice.`);
     const prev = old?.nodes.find((n) => n.id === id);
     const detail = clean(raw.detail, 400);
+    // Prose survives an edit that leaves it out, so Claude can rewire a
+    // diagram without restating what the user wrote on every box.
+    const description = raw.description === undefined ? prev?.description : clean(raw.description, MAX_DESCRIPTION);
     const notes = raw.notes === undefined ? prev?.notes : clean(raw.notes, MAX_TEXT);
     const links = raw.taskIds === undefined ? prev?.taskIds : cleanList(raw.taskIds);
     for (const t of links ?? []) {
@@ -688,6 +919,7 @@ function buildGraph(
       label: clean(raw.label, 120) ?? prev?.label ?? id,
       kind: validKind(raw.kind) ?? prev?.kind ?? 'component',
       ...(detail ? { detail } : {}),
+      ...(description ? { description } : {}),
       ...(notes ? { notes } : {}),
       ...(links?.length ? { taskIds: [...new Set(links)] } : {}),
       ...(x !== undefined && y !== undefined ? { x: Math.round(x), y: Math.round(y) } : {}),
@@ -696,17 +928,35 @@ function buildGraph(
 
   const ids = new Set(nodes.map((n) => n.id));
   const edges: DiagramEdge[] = [];
-  for (const raw of rawEdges) {
+  const cleaned = rawEdges.map((raw) => {
     const source = clean(raw?.source, 60);
     const target = clean(raw?.target, 60);
     if (!source || !target) throw new PlanError(`Diagram "${title}": every edge needs a source and a target.`);
     for (const end of [source, target]) {
       if (!ids.has(end)) throw new PlanError(`Diagram "${title}": an edge refers to node "${end}", which is not in the diagram.`);
     }
-    let id = clean(raw.id, 80) ?? `${source}->${target}`;
+    return { raw, source, target, id: clean(raw.id, 80), label: raw.label === undefined ? undefined : (clean(raw.label, 120) ?? '') };
+  });
+  // Like a box's prose, an arrow's label and style survive an edit that
+  // leaves them out — so Claude can rewire a diagram from the read without
+  // undoing how the user drew each arrow. Sending them clears or sets them.
+  const prevOf = new Map(matchEdges(old?.edges ?? [], cleaned).pairs.map(([b, a]) => [a, b]));
+  for (const c of cleaned) {
+    const { raw, source, target } = c;
+    const prev = prevOf.get(c);
+    let id = c.id ?? `${source}->${target}`;
     for (let n = 2; edges.some((e) => e.id === id); n++) id = `${source}->${target}#${n}`;
-    const label = clean(raw.label, 120);
-    edges.push({ id, source, target, ...(label ? { label } : {}), ...(raw.dashed ? { dashed: true } : {}) });
+    const label = c.label === undefined ? prev?.label : c.label || undefined;
+    const dashed = raw.dashed === undefined ? prev?.dashed : raw.dashed === true;
+    const arrows = raw.arrows === undefined ? prev?.arrows : validArrows(raw.arrows);
+    edges.push({
+      id,
+      source,
+      target,
+      ...(label ? { label } : {}),
+      ...(dashed ? { dashed: true } : {}),
+      ...(arrows && arrows !== 'end' ? { arrows } : {}),
+    });
   }
   return { nodes, edges };
 }
@@ -720,23 +970,25 @@ function describeDiagramEdit(before: Diagram, after: Diagram): string | null {
   const removed = before.nodes.filter((n) => !after.nodes.some((a) => a.id === n.id));
   const changed = after.nodes.filter((n) => {
     const b = before.nodes.find((x) => x.id === n.id);
-    return b && (b.label !== n.label || b.kind !== n.kind || (b.detail ?? '') !== (n.detail ?? '') || (b.notes ?? '') !== (n.notes ?? ''));
+    return (
+      b &&
+      (b.label !== n.label ||
+        b.kind !== n.kind ||
+        (b.detail ?? '') !== (n.detail ?? '') ||
+        (b.description ?? '') !== (n.description ?? '') ||
+        (b.notes ?? '') !== (n.notes ?? ''))
+    );
   });
   const relinked = after.nodes.filter((n) => {
     const b = before.nodes.find((x) => x.id === n.id);
     return b && (b.taskIds ?? []).join() !== (n.taskIds ?? []).join();
   });
-  const moved = after.nodes.filter((n) => {
-    const b = before.nodes.find((x) => x.id === n.id);
-    return b && (b.x !== n.x || b.y !== n.y);
-  });
-  const edgeKey = (e: DiagramEdge) => `${e.source}->${e.target}`;
-  const linked = after.edges.filter((e) => !before.edges.some((b) => edgeKey(b) === edgeKey(e)));
-  const unlinked = before.edges.filter((e) => !after.edges.some((a) => edgeKey(a) === edgeKey(e)));
-  const relabeled = after.edges.filter((e) => {
-    const b = before.edges.find((x) => edgeKey(x) === edgeKey(e));
-    return b && ((b.label ?? '') !== (e.label ?? '') || Boolean(b.dashed) !== Boolean(e.dashed));
-  });
+  const matched = matchEdges(before.edges, after.edges);
+  const linked = matched.added;
+  const unlinked = matched.removed;
+  const relabeled = matched.pairs
+    .filter(([b, e]) => (b.label ?? '') !== (e.label ?? '') || Boolean(b.dashed) !== Boolean(e.dashed) || (b.arrows ?? 'end') !== (e.arrows ?? 'end'))
+    .map(([, e]) => e);
   const list = (items: string[]) => (items.length > 3 ? `${items.slice(0, 3).join(', ')} and ${items.length - 3} more` : items.join(', '));
 
   if (added.length) parts.push(`added ${list(added.map((n) => `"${n.label}"`))}`);
@@ -746,11 +998,62 @@ function describeDiagramEdit(before: Diagram, after: Diagram): string | null {
   if (linked.length) parts.push(`connected ${list(linked.map((e) => `${label(after, e.source)} → ${label(after, e.target)}`))}`);
   if (unlinked.length) parts.push(`disconnected ${list(unlinked.map((e) => `${label(before, e.source)} → ${label(before, e.target)}`))}`);
   if (relabeled.length) parts.push(`relabelled ${list(relabeled.map((e) => `${label(after, e.source)} → ${label(after, e.target)}`))}`);
-  if (before.direction !== after.direction) parts.push(`turned it ${after.direction === 'LR' ? 'left-to-right' : 'top-to-bottom'}`);
   if ((before.caption ?? '') !== (after.caption ?? '')) parts.push('edited the caption');
   if (parts.length) return parts.join('; ');
-  if (moved.length) return `rearranged ${moved.length} node(s)`;
-  return null;
+  // Anything else that differs is still a change to the design, and must
+  // move the revision and reach Claude even if it has no words of its own.
+  return designOf(before) !== designOf(after) ? EDITED_DESIGN : null;
+}
+
+/** A change to a diagram's design with no more specific words for it. */
+const EDITED_DESIGN = 'edited';
+
+/** A diagram's design, as a string to compare: everything but layout. */
+function designOf(d: Diagram): string {
+  return JSON.stringify([d.title, d.caption ?? '', d.nodes.map(({ x: _x, y: _y, ...n }) => n), d.edges]);
+}
+
+/**
+ * Pair up the arrows of two versions of a diagram. An arrow keeps its
+ * identity by id where both versions have it between the same boxes; the
+ * rest pair up by their ends — same label first — so two arrows between the
+ * same two boxes are never mistaken for each other.
+ */
+type EdgeLike = { id?: string | undefined; source: string; target: string; label?: string | undefined };
+
+export function matchEdges<B extends EdgeLike, A extends EdgeLike>(
+  before: readonly B[],
+  after: readonly A[],
+): { pairs: [B, A][]; removed: B[]; added: A[] } {
+  const pairs: [B, A][] = [];
+  const left = [...before];
+  const right = [...after];
+  const take = (same: (b: B, a: A) => boolean) => {
+    for (let i = 0; i < left.length; ) {
+      const j = right.findIndex((a) => same(left[i]!, a));
+      if (j < 0) {
+        i++;
+        continue;
+      }
+      pairs.push([left[i]!, right[j]!]);
+      left.splice(i, 1);
+      right.splice(j, 1);
+    }
+  };
+  const ends = (b: B, a: A) => b.source === a.source && b.target === a.target;
+  take((b, a) => b.id !== undefined && b.id === a.id && ends(b, a));
+  take((b, a) => ends(b, a) && (b.label ?? '') === (a.label ?? ''));
+  take(ends);
+  return { pairs, removed: left, added: right };
+}
+
+/** Whether only the drawing changed: where boxes sit, which way it flows. */
+function layoutChanged(before: Diagram, after: Diagram): boolean {
+  if (before.direction !== after.direction) return true;
+  return after.nodes.some((n) => {
+    const b = before.nodes.find((x) => x.id === n.id);
+    return b && (b.x !== n.x || b.y !== n.y);
+  });
 }
 
 /**
@@ -778,6 +1081,78 @@ function validKind(value: unknown): NodeKind | undefined {
 
 function validDirection(value: unknown): DiagramDirection | undefined {
   return value === 'LR' || value === 'TB' ? value : undefined;
+}
+
+function validArrows(value: unknown): EdgeArrows | undefined {
+  return (EDGE_ARROWS as readonly string[]).includes(value as string) ? (value as EdgeArrows) : undefined;
+}
+
+/**
+ * Which way a diagram reads best, for when nobody said.
+ *
+ * Left to right is the natural reading order, so it wins unless the graph is
+ * so long and narrow that, laid out that way, it would have to be shrunk
+ * until its labels are unreadable — then top to bottom keeps it legible.
+ * Estimated from the depth and breadth of the flow; the canvas does the real
+ * layout.
+ */
+export function suggestDirection(
+  nodes: readonly { id: string }[],
+  edges: readonly { source: string; target: string }[],
+): DiagramDirection {
+  const ranks = flowRanks(nodes, edges);
+  if (ranks.size === 0) return 'LR';
+  const perRank = new Map<number, number>();
+  for (const r of ranks.values()) perRank.set(r, (perRank.get(r) ?? 0) + 1);
+  const depth = Math.max(...perRank.keys()) + 1;
+  const breadth = Math.max(...perRank.values());
+  // Rough footprint of each layout in pixels, against a typical canvas. A
+  // rank is a box plus the gap that carries the arrows; a lane is a box plus
+  // the space beside it.
+  const fit = (w: number, h: number) => Math.min(1, 1000 / w, 680 / h);
+  const lr = fit(depth * 300, breadth * 110);
+  const tb = fit(breadth * 250, depth * 150);
+  return tb > lr * 1.1 ? 'TB' : 'LR';
+}
+
+/** Each connected node's step along the flow: the longest chain of arrows
+ *  leading to it, with arrows that close a cycle ignored. Unconnected nodes
+ *  have no rank. */
+export function flowRanks(nodes: readonly { id: string }[], edges: readonly { source: string; target: string }[]): Map<string, number> {
+  const ids = new Set(nodes.map((n) => n.id));
+  const out = new Map<string, string[]>();
+  const connected: string[] = [];
+  const seen = new Set<string>();
+  for (const e of edges) {
+    if (e.source === e.target || !ids.has(e.source) || !ids.has(e.target)) continue;
+    out.set(e.source, [...(out.get(e.source) ?? []), e.target]);
+    for (const end of [e.source, e.target]) {
+      if (!seen.has(end)) connected.push(end);
+      seen.add(end);
+    }
+  }
+  // Depth-first, dropping back edges, so the order below is topological.
+  const state = new Map<string, 'open' | 'done'>();
+  const order: string[] = [];
+  const forward = new Map<string, string[]>();
+  const visit = (v: string): void => {
+    state.set(v, 'open');
+    const keep: string[] = [];
+    for (const w of out.get(v) ?? []) {
+      if (state.get(w) === 'open') continue;
+      keep.push(w);
+      if (!state.has(w)) visit(w);
+    }
+    forward.set(v, keep);
+    state.set(v, 'done');
+    order.push(v);
+  };
+  for (const v of connected) if (!state.has(v)) visit(v);
+  const rank = new Map<string, number>(connected.map((v) => [v, 0]));
+  for (const v of order.reverse()) {
+    for (const w of forward.get(v) ?? []) rank.set(w, Math.max(rank.get(w) ?? 0, rank.get(v)! + 1));
+  }
+  return rank;
 }
 
 function finite(value: unknown): number | undefined {

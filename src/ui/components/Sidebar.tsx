@@ -265,8 +265,8 @@ function SessionRow({
           )}
           <span>{relativeTime(session.updatedAt)}</span>
           {session.unreadByClaude > 0 && (
-            <span className="pill is-draft" title="Changes Claude has not read yet">
-              {session.unreadByClaude} unread
+            <span className="pill is-draft" title="You changed the plan since Claude last read it">
+              unread
             </span>
           )}
         </span>

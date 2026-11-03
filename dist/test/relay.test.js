@@ -57,6 +57,7 @@ function relay(event, payload, env = {}) {
     let stdout = "";
     child.stdout.on("data", (c) => stdout += c.toString());
     child.on("close", (code) => resolve({ stdout, code }));
+    child.stdin.on("error", () => void 0);
     child.stdin.write(payload);
     child.stdin.end();
   });
