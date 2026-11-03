@@ -8,6 +8,7 @@ import { Handoff, WaitingBanner } from './components/Handoff.tsx';
 import { InlineText } from './components/Editable.tsx';
 import { ProgressBar } from './components/Progress.tsx';
 import { EmptyState } from './components/primitives.tsx';
+import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { OverviewView } from './views/OverviewView.tsx';
 import { DiagramsView } from './views/DiagramsView.tsx';
 import { TasksView } from './views/TasksView.tsx';
@@ -67,8 +68,10 @@ export function App() {
       <Sidebar />
       {drawerOpen && <button type="button" className="scrim" aria-label="Close the session list" onClick={() => store.setDrawer(false)} />}
       <main className="main" aria-label="Plan">
-        {!sessionId || !session ? (
+        {!sessionId ? (
           <NoSession error={error} />
+        ) : !session ? (
+          error ? <SessionUnavailable error={error} /> : <Loading />
         ) : (
           <>
             <Header session={session} />
@@ -84,9 +87,11 @@ export function App() {
                   ))}
                 </nav>
                 <div className="view" key={tab} id={panelId(tab)} role="tabpanel" aria-labelledby={tabId(tab)} tabIndex={-1}>
-                  {tab === 'overview' && <OverviewView />}
-                  {tab === 'diagrams' && <DiagramsView />}
-                  {tab === 'tasks' && <TasksView />}
+                  <ErrorBoundary label={`${TAB_LABEL[tab]} view`} resetKey={`${sessionId}:${tab}`}>
+                    {tab === 'overview' && <OverviewView />}
+                    {tab === 'diagrams' && <DiagramsView />}
+                    {tab === 'tasks' && <TasksView />}
+                  </ErrorBoundary>
                 </div>
               </>
             )}
@@ -237,7 +242,51 @@ function NoPlan({ session }: { session: SessionState }) {
   );
 }
 
+function Loading() {
+  return (
+    <div className="view">
+      <div className="loading" role="status" aria-live="polite">
+        <span className="spinner" aria-hidden="true" />
+        Loading the plan…
+      </div>
+    </div>
+  );
+}
+
+/** The session asked for cannot be shown: deleted, expired, or the page has
+ *  lost its credentials. Say which, and offer the way on. */
+function SessionUnavailable({ error }: { error: string }) {
+  const sessions = useStore((s) => s.sessions);
+  const unauthorized = /401|unauthorized/i.test(error);
+  const other = sessions[0];
+  return (
+    <div className="view">
+      <EmptyState
+        title={unauthorized ? 'This page is not signed in to the harness' : 'This session is not available'}
+        hint={
+          unauthorized ? (
+            <>
+              Open the harness with <code>/harness-open</code> in Claude, or <code>harness open</code> in a terminal — the link
+              it prints carries the key this page needs.
+            </>
+          ) : (
+            <>It may have been deleted, or it ended long enough ago to be cleaned up. ({error})</>
+          )
+        }
+        action={
+          !unauthorized && other ? (
+            <button type="button" className="btn" onClick={() => void store.selectSession(other.sessionId)}>
+              Open {other.planTitle ?? other.title}
+            </button>
+          ) : undefined
+        }
+      />
+    </div>
+  );
+}
+
 function NoSession({ error }: { error: string | null }) {
+  if (error && /401|unauthorized/i.test(error)) return <SessionUnavailable error={error} />;
   return (
     <div className="view">
       <EmptyState

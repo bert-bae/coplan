@@ -136,7 +136,8 @@ function SectionCard({ section, index, count }: { section: Section; index: numbe
         value={section.body}
         label={`section "${section.title}"`}
         rows={8}
-        onSave={(body) => store.op({ op: 'upsert_section', id: section.id, body })}
+        version={section.rev}
+        onSave={(body, rev) => store.op({ op: 'upsert_section', id: section.id, body, ...(rev !== undefined ? { expect: rev } : {}) })}
       />
       {comments && <ThreadPanel target={target} label={section.title} />}
     </Focusable>

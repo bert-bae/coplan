@@ -100,9 +100,12 @@ export function MarkdownField({
   className,
   startEditing = false,
   onCancel,
+  version,
 }: {
   value: string;
-  onSave: (next: string) => void | Promise<unknown>;
+  /** Resolves false when the save was refused; the editor then stays open
+   *  with the text intact, so nothing typed is lost. */
+  onSave: (next: string, version: number | undefined) => void | Promise<unknown>;
   label: string;
   placeholder?: string;
   emptyAction?: string;
@@ -110,9 +113,14 @@ export function MarkdownField({
   className?: string;
   startEditing?: boolean;
   onCancel?: () => void;
+  /** The item's revision. Captured when editing starts and handed back on
+   *  save, so a save over someone else's newer change is refused. */
+  version?: number;
 }) {
   const [editing, setEditing] = useState(startEditing);
   const [draft, setDraft] = useState(value);
+  const [saving, setSaving] = useState(false);
+  const startedAt = useRef<number | undefined>(version);
   const area = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -123,9 +131,31 @@ export function MarkdownField({
     if (editing) area.current?.focus();
   }, [editing]);
 
-  const save = () => {
+  const begin = () => {
+    startedAt.current = version;
+    setEditing(true);
+  };
+  const changedUnderneath = editing && version !== undefined && startedAt.current !== undefined && version !== startedAt.current;
+
+  const save = async () => {
+    if (draft === value) {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    // With the "changed while you were editing" warning on screen, saving is
+    // a deliberate choice to replace the newer version, so it is made
+    // against that version. Otherwise it is made against the one edited.
+    const base = changedUnderneath ? version : startedAt.current;
+    const result = await onSave(draft, base);
+    setSaving(false);
+    if (result === false) {
+      // Refused — most likely changed underneath. Keep the text, and start
+      // from the revision now on screen so a deliberate second save goes in.
+      startedAt.current = version;
+      return;
+    }
     setEditing(false);
-    if (draft !== value) void onSave(draft);
   };
   const cancel = () => {
     setEditing(false);
@@ -135,14 +165,13 @@ export function MarkdownField({
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      save();
+      void save();
     }
     if (e.key === 'Escape') {
       e.stopPropagation();
       cancel();
     }
   };
-
   if (editing) {
     return (
       <div className={classNames('md-field is-editing', className)}>
@@ -156,14 +185,20 @@ export function MarkdownField({
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={onKeyDown}
         />
+        {changedUnderneath && (
+          <p className="md-conflict" role="alert">
+            This changed while you were editing. Saving now replaces the newer version with your text — copy anything
+            you want to keep from it first.
+          </p>
+        )}
         <div className="md-field-foot">
           <span className="muted">Markdown · ⌘/Ctrl+Enter to save · Esc to cancel</span>
           <span className="spacer" />
           <button type="button" className="btn btn-sm btn-ghost" onClick={cancel}>
             Cancel
           </button>
-          <button type="button" className="btn btn-sm btn-primary" onClick={save}>
-            Save
+          <button type="button" className="btn btn-sm btn-primary" disabled={saving} onClick={() => void save()}>
+            {saving ? 'Saving…' : 'Save'}
           </button>
         </div>
       </div>
@@ -173,7 +208,7 @@ export function MarkdownField({
   if (!value.trim()) {
     return (
       <div className={classNames('md-field is-empty', className)}>
-        <button type="button" className="md-empty" onClick={() => setEditing(true)} aria-label={`${emptyAction}: ${label}`}>
+        <button type="button" className="md-empty" onClick={begin} aria-label={`${emptyAction}: ${label}`}>
           <span className="muted">{placeholder}</span> <span className="link">{emptyAction}</span>
         </button>
       </div>
@@ -183,7 +218,7 @@ export function MarkdownField({
   return (
     <div className={classNames('md-field', className)}>
       <Markdown source={value} />
-      <button type="button" className="md-edit icon-btn is-tiny" title={`Edit ${label}`} aria-label={`Edit ${label}`} onClick={() => setEditing(true)}>
+      <button type="button" className="md-edit icon-btn is-tiny" title={`Edit ${label}`} aria-label={`Edit ${label}`} onClick={begin}>
         <span aria-hidden="true">✎</span>
       </button>
     </div>

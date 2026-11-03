@@ -28,6 +28,9 @@ export interface Section {
   id: string;
   title: string;
   body: string;
+  /** Bumped on every change. An editor sends the revision it started from,
+   *  and a save over someone else's newer change is refused, not merged. */
+  rev: number;
   updatedAt: number;
   updatedBy: Author;
 }
@@ -74,6 +77,8 @@ export type DiagramDirection = 'LR' | 'TB';
 export interface Diagram {
   id: string;
   title: string;
+  /** Bumped on every change; see `Section.rev`. */
+  rev: number;
   nodes: DiagramNode[];
   edges: DiagramEdge[];
   /** Which way automatic layout flows. */
@@ -247,7 +252,15 @@ export interface PlanInput {
  */
 export type PlanOp =
   | { op: 'set_meta'; title?: string; summary?: string }
-  | { op: 'upsert_section'; id?: string; title?: string; body?: string; index?: number }
+  | {
+      op: 'upsert_section';
+      id?: string;
+      title?: string;
+      body?: string;
+      index?: number;
+      /** The revision the edit was made against. Refused if it moved on. */
+      expect?: number;
+    }
   | {
       op: 'upsert_diagram';
       id?: string;
@@ -260,6 +273,8 @@ export type PlanOp =
       direction?: DiagramDirection;
       caption?: string;
       index?: number;
+      /** The revision the edit was made against. Refused if it moved on. */
+      expect?: number;
     }
   | {
       op: 'upsert_task';

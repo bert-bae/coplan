@@ -27,7 +27,7 @@ export const STATUS_LABEL: Record<TaskStatus, string> = {
 
 export const STATUS_GLYPH: Record<TaskStatus, string> = {
   todo: '',
-  in_progress: '◐',
+  in_progress: '',
   blocked: '!',
   done: '✓',
 };

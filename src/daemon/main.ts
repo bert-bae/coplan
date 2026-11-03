@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { SessionStore } from './store.ts';
-import { Router, json, text, readJson, serveStatic, type Ctx } from './http.ts';
+import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from './http.ts';
 import { ingestHook } from './hookIngest.ts';
 import { PlanError } from '../shared/plan.ts';
 import { renderPlan } from './render.ts';
@@ -59,16 +59,24 @@ async function main(): Promise<void> {
 
   server.on('request', (req, res) => {
     void handle(req, res, router, token).catch((err: unknown) => {
-      log(`request error: ${(err as Error)?.message}`);
+      if (err instanceof HttpError) {
+        if (!res.headersSent) json(res, err.status, { error: err.message });
+        else res.end();
+        return;
+      }
+      log(`request error on ${req.method} ${req.url?.split('?')[0]}: ${(err as Error)?.stack ?? err}`);
       if (!res.headersSent) json(res, 500, { error: 'internal error' });
       else res.end();
     });
   });
 
-  // SSE streams stay open indefinitely by design.
-  server.keepAliveTimeout = 0;
-  server.headersTimeout = 0;
-  server.requestTimeout = 0;
+  // Requests are small and local: anything slow to arrive is not a real
+  // client. These bound receiving a request, not answering it, so the SSE
+  // stream (received in an instant, answered for hours) is unaffected.
+  server.headersTimeout = 10_000;
+  server.requestTimeout = 30_000;
+  server.keepAliveTimeout = 5_000;
+  server.maxHeadersCount = 64;
 
   const port = await listen(server, inheritedPort);
   const lock: DaemonLock = { pid: process.pid, port, token, version: VERSION, startedAt: Date.now(), host: '127.0.0.1' };
@@ -228,6 +236,16 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, route
     return;
   }
 
+  // A browser always says where a write comes from. The cookie is
+  // SameSite=Strict already; this refuses a cross-site write outright even if
+  // a browser were to send it. Hooks, the MCP server and the CLI send no
+  // Origin and authenticate with the bearer token instead.
+  const origin = req.headers.origin;
+  if (origin && req.method !== 'GET' && req.method !== 'HEAD' && !sameOrigin(origin)) {
+    text(res, 403, 'cross-origin request refused');
+    return;
+  }
+
   if (url.pathname === '/health') {
     json(res, 200, { ok: true, version: VERSION, pid: process.pid });
     return;
@@ -245,6 +263,16 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, route
     return;
   }
   await match.handler({ req, res, url, params: match.params });
+}
+
+function sameOrigin(origin: string): boolean {
+  try {
+    const { protocol, hostname, port } = new URL(origin);
+    const own = String(readLiveLock()?.port ?? '');
+    return protocol === 'http:' && (hostname === '127.0.0.1' || hostname === 'localhost') && port === own;
+  } catch {
+    return false;
+  }
 }
 
 function authorized(req: http.IncomingMessage, url: URL, token: string): boolean {
@@ -426,7 +454,12 @@ function buildRouter(deps: Deps): Router {
     const focused = focus ? store.get(focus) : undefined;
     if (focused) send({ type: 'snapshot', session: focused });
 
+    // Only the session this page shows. The page reconnects with a new
+    // `session` when the user switches, so nothing it needs is filtered out,
+    // and a busy session elsewhere no longer streams its whole plan to every
+    // open tab on each keystroke.
     const listener = (event: ServerEvent) => {
+      if (event.type === 'snapshot' && event.session.sessionId !== focus) return;
       try {
         send(event);
       } catch {

@@ -40,6 +40,10 @@ export const MAX_CHANGES = 500;
 const MAX_TITLE = 200;
 const MAX_TEXT = 20_000;
 const MAX_TASKS = 400;
+const MAX_SECTIONS = 60;
+const MAX_DIAGRAMS = 40;
+const MAX_THREADS = 500;
+const MAX_REPLIES = 200;
 
 /* ------------------------------------------------------------------ *
  * Construction
@@ -168,6 +172,8 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
   // a working copy that still remembers the old items until the end.
   const next: Plan = { ...base, title, summary: clean(input.summary, MAX_TEXT) ?? base.summary };
 
+  if ((input.sections?.length ?? 0) > MAX_SECTIONS) throw new PlanError(`A plan holds at most ${MAX_SECTIONS} sections.`);
+  if ((input.diagrams?.length ?? 0) > MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
   const sections: Section[] = [];
   for (const raw of input.sections ?? []) {
     const old = base.sections.find((s) => s.id === raw.id);
@@ -175,7 +181,14 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
     const body = clean(raw.body, MAX_TEXT) ?? '';
     const sTitle = clean(raw.title, MAX_TITLE) ?? 'Untitled';
     const same = old && old.title === sTitle && old.body === body;
-    sections.push({ id, title: sTitle, body, updatedAt: same ? old.updatedAt : now, updatedBy: same ? old.updatedBy : 'claude' });
+    sections.push({
+      id,
+      title: sTitle,
+      body,
+      rev: same ? old.rev : (old?.rev ?? 0) + 1,
+      updatedAt: same ? old.updatedAt : now,
+      updatedBy: same ? old.updatedBy : 'claude',
+    });
   }
 
   const tasks: Task[] = [];
@@ -225,6 +238,7 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
     diagrams.push({
       id,
       title: dTitle,
+      rev: same ? old.rev : (old?.rev ?? 0) + 1,
       ...graph,
       direction,
       ...(caption ? { caption } : {}),
@@ -270,6 +284,37 @@ function detachIfOrphaned(plan: Plan, before: Plan, thread: Thread): Thread {
   if (targetExists(plan, thread.target)) return thread;
   const label = describeTarget(before, thread.target);
   return { ...thread, target: { kind: 'plan', id: '' }, text: `(on removed ${label}) ${thread.text}` };
+}
+
+/**
+ * Bring a plan read from disk into shape: every list present, every revision
+ * counter set. A plan written by any earlier build, or a hand-edited one, must
+ * load rather than throw — a throw on load is a plan the next save overwrites.
+ */
+export function normalizePlan(raw: Partial<Plan> & Record<string, unknown>, fallbackTitle: string): Plan {
+  const now = Date.now();
+  const list = <T>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
+  const plan: Plan = {
+    ...emptyPlan(typeof raw.title === 'string' && raw.title ? raw.title : fallbackTitle, now),
+    ...raw,
+    summary: typeof raw.summary === 'string' ? raw.summary : '',
+    sections: list<Section>(raw.sections).map((s) => ({ ...s, rev: typeof s.rev === 'number' ? s.rev : 1 })),
+    diagrams: list<Diagram>(raw.diagrams).map((d) => ({
+      ...d,
+      rev: typeof d.rev === 'number' ? d.rev : 1,
+      nodes: list(d.nodes),
+      edges: list(d.edges),
+      direction: d.direction === 'TB' ? 'TB' : 'LR',
+    })),
+    tasks: list<Task>(raw.tasks),
+    threads: list<Thread>(raw.threads).map((t) => ({ ...t, replies: list(t.replies) })),
+    changes: list<Change>(raw.changes),
+    seq: typeof raw.seq === 'number' ? raw.seq : 0,
+    claudeReadSeq: typeof raw.claudeReadSeq === 'number' ? raw.claudeReadSeq : 0,
+    claudeReadAt: typeof raw.claudeReadAt === 'number' ? raw.claudeReadAt : null,
+    revision: typeof raw.revision === 'number' ? raw.revision : 0,
+  };
+  return plan;
 }
 
 /* ------------------------------------------------------------------ *
@@ -324,22 +369,27 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
     case 'upsert_section': {
       const existing = op.id ? plan.sections.find((s) => s.id === op.id) : undefined;
       if (existing) {
+        checkRev(existing, op.expect, 'section', author);
         const title = clean(op.title, MAX_TITLE);
         const body = typeof op.body === 'string' ? clean(op.body, MAX_TEXT) ?? '' : undefined;
+        const changed = (title && title !== existing.title) || (body !== undefined && body !== existing.body);
+        if (typeof op.index === 'number') moveInList(plan.sections, existing.id, op.index);
+        if (!changed) return [];
         if (title) existing.title = title;
         if (body !== undefined) existing.body = body;
+        existing.rev += 1;
         existing.updatedAt = now;
         existing.updatedBy = author;
-        const out = [log('edited', ref('section', existing.id), `edited section "${existing.title}"`)];
-        if (typeof op.index === 'number') moveInList(plan.sections, existing.id, op.index);
-        return out;
+        return [log('edited', ref('section', existing.id), `edited section "${existing.title}"`)];
       }
       const title = clean(op.title, MAX_TITLE);
       if (!title) throw new PlanError(op.id ? `No section "${op.id}".` : 'A new section needs a title.');
+      if (plan.sections.length >= MAX_SECTIONS) throw new PlanError(`A plan holds at most ${MAX_SECTIONS} sections.`);
       const section: Section = {
         id: claimId(plan, 'section', op.id),
         title,
         body: clean(op.body, MAX_TEXT) ?? '',
+        rev: 1,
         updatedAt: now,
         updatedBy: author,
       };
@@ -350,6 +400,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
     case 'upsert_diagram': {
       const existing = op.id ? plan.diagrams.find((d) => d.id === op.id) : undefined;
       if (existing) {
+        checkRev(existing, op.expect, 'diagram', author);
         const before = structuredClone(existing);
         const title = clean(op.title, MAX_TITLE);
         if (title) existing.title = title;
@@ -364,6 +415,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         if (typeof op.index === 'number') moveInList(plan.diagrams, existing.id, op.index);
         const what = describeDiagramEdit(before, existing);
         if (!what) return [];
+        existing.rev += 1;
         existing.updatedAt = now;
         existing.updatedBy = author;
         // Dragging boxes around is layout, not content: logged, but as a move.
@@ -371,11 +423,13 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         return [log(kind, ref('diagram', existing.id), `${what} in diagram "${existing.title}"`)];
       }
       if (op.id) throw new PlanError(`No diagram "${op.id}".`);
+      if (plan.diagrams.length >= MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
       const title = clean(op.title, MAX_TITLE) ?? 'Diagram';
       const caption = clean(op.caption, MAX_TEXT);
       const diagram: Diagram = {
         id: claimId(plan, 'diagram', undefined),
         title,
+        rev: 1,
         ...buildGraph(op.nodes ?? [], op.edges ?? [], undefined, title, taskIdSet(plan)),
         direction: validDirection(op.direction) ?? 'LR',
         ...(caption ? { caption } : {}),
@@ -454,6 +508,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       if (!targetExists(plan, target)) throw new PlanError(`Nothing to comment on at ${target.kind} "${target.id}".`);
       const text = clean(op.text, MAX_TEXT);
       if (!text) throw new PlanError('A comment needs text.');
+      if (plan.threads.length >= MAX_THREADS) throw new PlanError(`A plan holds at most ${MAX_THREADS} comment threads.`);
       const thread: Thread = {
         id: claimId(plan, 'thread', undefined),
         target,
@@ -472,6 +527,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       if (!thread) throw new PlanError(`No comment thread "${op.threadId}".`);
       const text = clean(op.text, MAX_TEXT);
       if (!text) throw new PlanError('A reply needs text.');
+      if (thread.replies.length >= MAX_REPLIES) throw new PlanError('This thread is full; start a new comment.');
       thread.replies.push({ id: `${thread.id}.${thread.replies.length + 1}`, author, text, ts: now });
       return [log('replied', thread.target, `replied on ${describeTarget(plan, thread.target)}: ${short(text, 80)}`)];
     }
@@ -695,6 +751,21 @@ function describeDiagramEdit(before: Diagram, after: Diagram): string | null {
   if (parts.length) return parts.join('; ');
   if (moved.length) return `rearranged ${moved.length} node(s)`;
   return null;
+}
+
+/**
+ * Refuse a save made against a revision that has since moved on. Both sides
+ * edit the same plan, and a whole-body save from a stale editor would quietly
+ * throw away the other side's change — the one failure a shared plan must
+ * not have. The caller reloads and tries again with the latest in front of it.
+ */
+function checkRev(item: { rev: number; title: string; updatedBy: Author }, expect: unknown, kind: string, author: Author): void {
+  if (typeof expect !== 'number' || expect === item.rev) return;
+  const who = item.updatedBy === author ? 'another edit' : item.updatedBy === 'claude' ? 'Claude' : 'the user';
+  throw new PlanError(
+    `${kind[0]!.toUpperCase()}${kind.slice(1)} "${item.title}" was changed by ${who} while this edit was open, so it was not saved. ` +
+      'It now shows the latest version.',
+  );
 }
 
 function taskIdSet(plan: Pick<Plan, 'tasks'>): Set<string> {

@@ -177,6 +177,9 @@
   .fixed {
     position: fixed;
   }
+  .static {
+    position: static;
+  }
   .container {
     width: 100%;
     @media (width >= 40rem) {
@@ -1480,6 +1483,10 @@
   box-shadow: var(--shadow-1);
 }
 .seg {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   padding: 0 var(--sp-3);
   height: 30px;
   background: none;
@@ -2841,8 +2848,7 @@ button.chip:hover {
 }
 .status-dot.is-in_progress {
   border-color: var(--accent-solid);
-  color: var(--accent-solid);
-  background: var(--accent-subtle);
+  background: linear-gradient(90deg, var(--accent-solid) 50%, var(--surface-base) 50%);
 }
 .status-dot.is-blocked {
   border-color: var(--attention-solid);
@@ -3099,6 +3105,43 @@ button.chip:hover {
   text-decoration: none;
 }
 .claude-web {
+  font-size: var(--fs-sm);
+}
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  height: 100%;
+  color: var(--text-secondary);
+}
+.crash {
+  margin: var(--sp-5) var(--inset);
+  padding: var(--sp-4);
+  border: 1px solid var(--danger-border);
+  border-left-width: 4px;
+  border-radius: var(--r-lg);
+  background: var(--danger-bg);
+  color: var(--text-primary);
+}
+.crash-title {
+  margin: 0 0 var(--sp-1);
+  font-weight: 700;
+  color: var(--danger-fg);
+}
+.crash-detail {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.md-conflict {
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  background: var(--attention-bg);
+  color: var(--attention-fg);
+  border: 1px solid var(--attention-border);
   font-size: var(--fs-sm);
 }
 .lightbox {

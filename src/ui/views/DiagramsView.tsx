@@ -149,7 +149,8 @@ function DiagramPanel({ plan, diagram }: { plan: Plan; diagram: Diagram }) {
         placeholder="What this diagram shows."
         emptyAction="Describe it"
         rows={3}
-        onSave={(caption) => store.op({ op: 'upsert_diagram', id: diagram.id, caption })}
+        version={diagram.rev}
+        onSave={(caption, rev) => store.op({ op: 'upsert_diagram', id: diagram.id, caption, ...(rev !== undefined ? { expect: rev } : {}) })}
       />
       <p className="panel-hint">
         {diagram.nodes.length} boxes, {diagram.edges.length} arrows{linked ? `, ${linked} tracking tasks` : ''}. Select a box

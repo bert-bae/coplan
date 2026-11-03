@@ -122,6 +122,8 @@ function publishPlan(prev, input, now = Date.now()) {
   if (!title) throw new PlanError("A plan needs a title.");
   const base = prev ? structuredClone(prev) : emptyPlan(title, now);
   const next = { ...base, title, summary: clean(input.summary, MAX_TEXT) ?? base.summary };
+  if ((input.sections?.length ?? 0) > MAX_SECTIONS) throw new PlanError(`A plan holds at most ${MAX_SECTIONS} sections.`);
+  if ((input.diagrams?.length ?? 0) > MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
   const sections = [];
   for (const raw of input.sections ?? []) {
     const old = base.sections.find((s) => s.id === raw.id);
@@ -129,7 +131,14 @@ function publishPlan(prev, input, now = Date.now()) {
     const body = clean(raw.body, MAX_TEXT) ?? "";
     const sTitle = clean(raw.title, MAX_TITLE) ?? "Untitled";
     const same = old && old.title === sTitle && old.body === body;
-    sections.push({ id, title: sTitle, body, updatedAt: same ? old.updatedAt : now, updatedBy: same ? old.updatedBy : "claude" });
+    sections.push({
+      id,
+      title: sTitle,
+      body,
+      rev: same ? old.rev : (old?.rev ?? 0) + 1,
+      updatedAt: same ? old.updatedAt : now,
+      updatedBy: same ? old.updatedBy : "claude"
+    });
   }
   const tasks = [];
   const walk = (list, parentId) => {
@@ -172,6 +181,7 @@ function publishPlan(prev, input, now = Date.now()) {
     diagrams.push({
       id,
       title: dTitle,
+      rev: same ? old.rev : (old?.rev ?? 0) + 1,
       ...graph,
       direction,
       ...caption ? { caption } : {},
@@ -205,6 +215,31 @@ function detachIfOrphaned(plan, before2, thread) {
   if (targetExists(plan, thread.target)) return thread;
   const label = describeTarget(before2, thread.target);
   return { ...thread, target: { kind: "plan", id: "" }, text: `(on removed ${label}) ${thread.text}` };
+}
+function normalizePlan(raw, fallbackTitle) {
+  const now = Date.now();
+  const list = (v) => Array.isArray(v) ? v : [];
+  const plan = {
+    ...emptyPlan(typeof raw.title === "string" && raw.title ? raw.title : fallbackTitle, now),
+    ...raw,
+    summary: typeof raw.summary === "string" ? raw.summary : "",
+    sections: list(raw.sections).map((s) => ({ ...s, rev: typeof s.rev === "number" ? s.rev : 1 })),
+    diagrams: list(raw.diagrams).map((d) => ({
+      ...d,
+      rev: typeof d.rev === "number" ? d.rev : 1,
+      nodes: list(d.nodes),
+      edges: list(d.edges),
+      direction: d.direction === "TB" ? "TB" : "LR"
+    })),
+    tasks: list(raw.tasks),
+    threads: list(raw.threads).map((t) => ({ ...t, replies: list(t.replies) })),
+    changes: list(raw.changes),
+    seq: typeof raw.seq === "number" ? raw.seq : 0,
+    claudeReadSeq: typeof raw.claudeReadSeq === "number" ? raw.claudeReadSeq : 0,
+    claudeReadAt: typeof raw.claudeReadAt === "number" ? raw.claudeReadAt : null,
+    revision: typeof raw.revision === "number" ? raw.revision : 0
+  };
+  return plan;
 }
 function applyOps(plan, ops, author, now = Date.now()) {
   if (!Array.isArray(ops) || ops.length === 0) throw new PlanError("No edits were given.");
@@ -242,22 +277,27 @@ function applyOne(plan, op, author, now) {
     case "upsert_section": {
       const existing = op.id ? plan.sections.find((s) => s.id === op.id) : void 0;
       if (existing) {
+        checkRev(existing, op.expect, "section", author);
         const title2 = clean(op.title, MAX_TITLE);
         const body = typeof op.body === "string" ? clean(op.body, MAX_TEXT) ?? "" : void 0;
+        const changed = title2 && title2 !== existing.title || body !== void 0 && body !== existing.body;
+        if (typeof op.index === "number") moveInList(plan.sections, existing.id, op.index);
+        if (!changed) return [];
         if (title2) existing.title = title2;
         if (body !== void 0) existing.body = body;
+        existing.rev += 1;
         existing.updatedAt = now;
         existing.updatedBy = author;
-        const out = [log("edited", ref("section", existing.id), `edited section "${existing.title}"`)];
-        if (typeof op.index === "number") moveInList(plan.sections, existing.id, op.index);
-        return out;
+        return [log("edited", ref("section", existing.id), `edited section "${existing.title}"`)];
       }
       const title = clean(op.title, MAX_TITLE);
       if (!title) throw new PlanError(op.id ? `No section "${op.id}".` : "A new section needs a title.");
+      if (plan.sections.length >= MAX_SECTIONS) throw new PlanError(`A plan holds at most ${MAX_SECTIONS} sections.`);
       const section = {
         id: claimId(plan, "section", op.id),
         title,
         body: clean(op.body, MAX_TEXT) ?? "",
+        rev: 1,
         updatedAt: now,
         updatedBy: author
       };
@@ -267,6 +307,7 @@ function applyOne(plan, op, author, now) {
     case "upsert_diagram": {
       const existing = op.id ? plan.diagrams.find((d) => d.id === op.id) : void 0;
       if (existing) {
+        checkRev(existing, op.expect, "diagram", author);
         const before2 = structuredClone(existing);
         const title2 = clean(op.title, MAX_TITLE);
         if (title2) existing.title = title2;
@@ -281,17 +322,20 @@ function applyOne(plan, op, author, now) {
         if (typeof op.index === "number") moveInList(plan.diagrams, existing.id, op.index);
         const what = describeDiagramEdit(before2, existing);
         if (!what) return [];
+        existing.rev += 1;
         existing.updatedAt = now;
         existing.updatedBy = author;
         const kind = what.startsWith("rearranged") ? "moved" : "edited";
         return [log(kind, ref("diagram", existing.id), `${what} in diagram "${existing.title}"`)];
       }
       if (op.id) throw new PlanError(`No diagram "${op.id}".`);
+      if (plan.diagrams.length >= MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
       const title = clean(op.title, MAX_TITLE) ?? "Diagram";
       const caption = clean(op.caption, MAX_TEXT);
       const diagram = {
         id: claimId(plan, "diagram", void 0),
         title,
+        rev: 1,
         ...buildGraph(op.nodes ?? [], op.edges ?? [], void 0, title, taskIdSet(plan)),
         direction: validDirection(op.direction) ?? "LR",
         ...caption ? { caption } : {},
@@ -363,6 +407,7 @@ function applyOne(plan, op, author, now) {
       if (!targetExists(plan, target)) throw new PlanError(`Nothing to comment on at ${target.kind} "${target.id}".`);
       const text = clean(op.text, MAX_TEXT);
       if (!text) throw new PlanError("A comment needs text.");
+      if (plan.threads.length >= MAX_THREADS) throw new PlanError(`A plan holds at most ${MAX_THREADS} comment threads.`);
       const thread = {
         id: claimId(plan, "thread", void 0),
         target,
@@ -380,6 +425,7 @@ function applyOne(plan, op, author, now) {
       if (!thread) throw new PlanError(`No comment thread "${op.threadId}".`);
       const text = clean(op.text, MAX_TEXT);
       if (!text) throw new PlanError("A reply needs text.");
+      if (thread.replies.length >= MAX_REPLIES) throw new PlanError("This thread is full; start a new comment.");
       thread.replies.push({ id: `${thread.id}.${thread.replies.length + 1}`, author, text, ts: now });
       return [log("replied", thread.target, `replied on ${describeTarget(plan, thread.target)}: ${short(text, 80)}`)];
     }
@@ -436,6 +482,7 @@ function editTask(plan, task, op, author, now, log) {
     out.push(log("edited", ref("task", task.id), `edited the ${edited.join(", ")} of "${task.title}"`));
   }
   if (typeof op.index === "number") placeAmongSiblings(plan, task, op.index);
+  void author;
   return out;
 }
 function removeItem(plan, kind, id, log) {
@@ -560,6 +607,13 @@ function describeDiagramEdit(before2, after2) {
   if (parts.length) return parts.join("; ");
   if (moved.length) return `rearranged ${moved.length} node(s)`;
   return null;
+}
+function checkRev(item, expect, kind, author) {
+  if (typeof expect !== "number" || expect === item.rev) return;
+  const who = item.updatedBy === author ? "another edit" : item.updatedBy === "claude" ? "Claude" : "the user";
+  throw new PlanError(
+    `${kind[0].toUpperCase()}${kind.slice(1)} "${item.title}" was changed by ${who} while this edit was open, so it was not saved. It now shows the latest version.`
+  );
 }
 function taskIdSet(plan) {
   return new Set(plan.tasks.map((t) => t.id));
@@ -716,7 +770,7 @@ function currentTask(plan) {
   if (!plan) return null;
   return outline(plan).find((r) => r.task.status === "in_progress" && !plan.tasks.some((t) => t.parentId === r.task.id))?.task ?? null;
 }
-var PlanError, MAX_CHANGES, MAX_TITLE, MAX_TEXT, MAX_TASKS, PREFIX, MAX_NODES, MAX_EDGES, STATUS_WORDS;
+var PlanError, MAX_CHANGES, MAX_TITLE, MAX_TEXT, MAX_TASKS, MAX_SECTIONS, MAX_DIAGRAMS, MAX_THREADS, MAX_REPLIES, PREFIX, MAX_NODES, MAX_EDGES, STATUS_WORDS;
 var init_plan = __esm({
   "src/shared/plan.ts"() {
     "use strict";
@@ -727,6 +781,10 @@ var init_plan = __esm({
     MAX_TITLE = 200;
     MAX_TEXT = 2e4;
     MAX_TASKS = 400;
+    MAX_SECTIONS = 60;
+    MAX_DIAGRAMS = 40;
+    MAX_THREADS = 500;
+    MAX_REPLIES = 200;
     PREFIX = { section: "s", diagram: "d", task: "t", thread: "c" };
     MAX_NODES = 120;
     MAX_EDGES = 300;
@@ -790,26 +848,36 @@ function summarize(s) {
   };
 }
 function readState(file) {
+  if (!existsSync2(file)) return void 0;
   try {
-    if (!existsSync2(file)) return void 0;
     const state = JSON.parse(readFileSync2(file, "utf8"));
-    if (!state?.sessionId) return void 0;
+    if (!state || typeof state !== "object" || typeof state.sessionId !== "string") throw new Error("not a session");
     migrate(state);
     return state;
   } catch {
+    quarantine(file);
     return void 0;
+  }
+}
+function quarantine(file) {
+  try {
+    renameSync(file, path2.join(path2.dirname(file), `state.corrupt-${Date.now()}.json`));
+  } catch {
   }
 }
 function migrate(state) {
   const raw = state;
-  state.createdAt ??= state.updatedAt ?? Date.now();
+  state.updatedAt = typeof state.updatedAt === "number" ? state.updatedAt : Date.now();
+  state.createdAt ??= state.updatedAt;
+  state.title = typeof state.title === "string" && state.title ? state.title : state.sessionId.slice(0, 8);
+  state.cwd = typeof state.cwd === "string" ? state.cwd : "";
   if (state.status !== "ended") state.status = "idle";
   const oldPlan = raw["plan"];
   if (oldPlan && !Array.isArray(oldPlan["tasks"])) {
     const plan = emptyPlan(String(oldPlan["title"] ?? state.title));
     plan.summary = typeof oldPlan["summary"] === "string" ? oldPlan["summary"] : "";
     if (typeof oldPlan["markdown"] === "string" && oldPlan["markdown"].trim()) {
-      plan.sections.push({ id: "s1", title: "Notes", body: oldPlan["markdown"], updatedAt: Date.now(), updatedBy: "claude" });
+      plan.sections.push({ id: "s1", title: "Notes", body: oldPlan["markdown"], rev: 1, updatedAt: Date.now(), updatedBy: "claude" });
     }
     const steps = Array.isArray(oldPlan["steps"]) ? oldPlan["steps"] : [];
     steps.forEach((step, i) => {
@@ -828,7 +896,7 @@ function migrate(state) {
     });
     state.plan = plan;
   }
-  state.plan ??= null;
+  state.plan = state.plan && typeof state.plan === "object" ? normalizePlan(state.plan, state.title) : null;
   if (state.plan) {
     const plan = state.plan;
     delete plan["questions"];
@@ -1084,9 +1152,20 @@ var init_store = __esm({
       emitEvent(event) {
         this.emit("event", event);
       }
+      /**
+       * The rail's list, coalesced: a canvas drag or a batch of hook events can
+       * change a session many times in one tick, and every open page only needs
+       * the last of them.
+       */
       broadcastSessionList() {
-        this.emitEvent({ type: "sessions", sessions: this.summaries() });
+        if (this.listQueued) return;
+        this.listQueued = true;
+        setImmediate(() => {
+          this.listQueued = false;
+          this.emitEvent({ type: "sessions", sessions: this.summaries() });
+        });
       }
+      listQueued = false;
     };
   }
 });
@@ -1094,7 +1173,7 @@ var init_store = __esm({
 // src/test/store.test.ts
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync as rmSync2, existsSync as existsSync3, mkdirSync as mkdirSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { mkdtempSync, rmSync as rmSync2, existsSync as existsSync3, mkdirSync as mkdirSync3, writeFileSync as writeFileSync2, readdirSync as readdirSync2, readFileSync as readFileSync3 } from "node:fs";
 import { tmpdir } from "node:os";
 import path3 from "node:path";
 var home;
@@ -1152,8 +1231,10 @@ test("every change is broadcast as a whole-session snapshot", async () => {
   const seen = [];
   store.on("event", (e) => seen.push(e.type));
   store.publishPlan("s5", PLAN);
+  store.applyOps("s5", [{ op: "upsert_task", title: "more" }], "user");
   assert.ok(seen.includes("snapshot"));
-  assert.ok(seen.includes("sessions"), "the rail hears about it too");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(seen.filter((t) => t === "sessions").length, 1, "the rail hears about it once per tick");
 });
 test("a session written by the old review loop is migrated to a plan", async () => {
   const dir = path3.join(home, "sessions", "legacy");
@@ -1216,5 +1297,32 @@ test("sessions older than the retention window are not loaded", async () => {
   );
   const store = await freshStore();
   assert.equal(store.get("ancient"), void 0);
+});
+test("an unreadable state file is moved aside, never overwritten", async () => {
+  const dir = path3.join(home, "sessions", "damaged");
+  mkdirSync3(dir, { recursive: true });
+  writeFileSync2(path3.join(dir, "state.json"), '{"sessionId":"damaged","plan":{"title":"precious"');
+  const store = await freshStore();
+  assert.equal(store.get("damaged"), void 0);
+  const aside = readdirSync2(dir).find((f) => f.startsWith("state.corrupt-"));
+  assert.ok(aside, "the damaged file is kept beside, for recovery by hand");
+  assert.match(readFileSync3(path3.join(dir, aside), "utf8"), /precious/);
+  store.ensure("damaged", process.cwd());
+  store.persistNow("damaged");
+  assert.ok(existsSync3(path3.join(dir, aside)));
+});
+test("a plan missing lists from an older build still loads", async () => {
+  const dir = path3.join(home, "sessions", "sparse");
+  mkdirSync3(dir, { recursive: true });
+  writeFileSync2(
+    path3.join(dir, "state.json"),
+    JSON.stringify({ sessionId: "sparse", cwd: "/x", title: "t", status: "idle", updatedAt: Date.now(), plan: { title: "P", tasks: [], seq: 3 } })
+  );
+  const store = await freshStore();
+  const plan = store.get("sparse")?.plan;
+  assert.ok(plan);
+  assert.deepEqual(plan.threads, []);
+  assert.deepEqual(plan.diagrams, []);
+  assert.equal(plan.seq, 3);
 });
 //# sourceMappingURL=store.test.js.map

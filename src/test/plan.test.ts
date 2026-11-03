@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, countTasks, outline, PlanError, publishPlan, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, countTasks, normalizePlan, outline, PlanError, publishPlan, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import type { Plan, PlanInput } from '../shared/types.ts';
 
@@ -286,4 +286,55 @@ test('changes-only rendering skips the document', () => {
   assert.match(text, /commented on the plan: looks good/);
   assert.match(text, /Comments waiting on you/);
   assert.doesNotMatch(text, /## Tasks/);
+});
+
+/* ------------------------------------------------------------------ *
+ * Revisions: no silent lost updates
+ * ------------------------------------------------------------------ */
+
+test('a save made against an old revision is refused, naming who changed it', () => {
+  let plan = fresh();
+  const rev = plan.sections[0]!.rev;
+  plan = applyOps(plan, [{ op: 'upsert_section', id: 's1', body: 'Claude rewrote this.' }], 'claude').plan;
+  assert.throws(
+    () => applyOps(plan, [{ op: 'upsert_section', id: 's1', body: 'my stale edit', expect: rev }], 'user'),
+    /was changed by Claude while this edit was open/,
+  );
+  const ok = applyOps(plan, [{ op: 'upsert_section', id: 's1', body: 'my edit', expect: plan.sections[0]!.rev }], 'user').plan;
+  assert.equal(ok.sections[0]!.body, 'my edit');
+});
+
+test('every change to a diagram moves its revision; a no-op does not', () => {
+  const plan = fresh();
+  const d = plan.diagrams[0]!;
+  const same = applyOps(plan, [{ op: 'upsert_diagram', id: 'd1', nodes: d.nodes, edges: d.edges, expect: d.rev }], 'user').plan;
+  assert.equal(same.diagrams[0]!.rev, d.rev);
+  const moved = applyOps(plan, [{ op: 'upsert_diagram', id: 'd1', nodes: d.nodes.map((n) => ({ ...n, x: 1, y: 2 })), edges: d.edges, expect: d.rev }], 'user').plan;
+  assert.equal(moved.diagrams[0]!.rev, d.rev + 1);
+  assert.throws(() => applyOps(moved, [{ op: 'upsert_diagram', id: 'd1', caption: 'x', expect: d.rev }], 'user'), /not saved/);
+});
+
+test('a republish moves the revision only of what it changed', () => {
+  const plan = fresh();
+  const next = publishPlan(plan, { ...INPUT, sections: [{ id: 's1', title: 'Context', body: 'Reads are slow.' }], diagrams: [{ id: 'd1', ...INPUT.diagrams![0]!, title: 'Renamed' }] }).plan;
+  assert.equal(next.sections[0]!.rev, plan.sections[0]!.rev, 'unchanged section keeps its revision');
+  assert.equal(next.diagrams[0]!.rev, plan.diagrams[0]!.rev + 1);
+});
+
+test('a plan read from disk in any older shape is normalized, not rejected', () => {
+  const plan = normalizePlan({ title: 'old', sections: [{ id: 's1', title: 'x', body: 'y' }], diagrams: [{ id: 'd1', title: 'D' }] } as never, 'fallback');
+  assert.equal(plan.sections[0]!.rev, 1);
+  assert.deepEqual(plan.diagrams[0]!.nodes, []);
+  assert.deepEqual(plan.tasks, []);
+  assert.equal(plan.claudeReadAt, null);
+});
+
+test('comment threads and plan items are bounded', () => {
+  let plan = fresh();
+  const many = Array.from({ length: 61 }, (_, i) => ({ title: `S${i}`, body: '' }));
+  assert.throws(() => publishPlan(null, { title: 'x', sections: many }), /at most 60 sections/);
+  plan = applyOps(plan, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'a' }], 'user').plan;
+  const replies = Array.from({ length: 200 }, () => ({ op: 'reply' as const, threadId: 'c1', text: 'r' }));
+  plan = applyOps(plan, replies, 'user').plan;
+  assert.throws(() => applyOps(plan, [{ op: 'reply', threadId: 'c1', text: 'one more' }], 'user'), /thread is full/);
 });

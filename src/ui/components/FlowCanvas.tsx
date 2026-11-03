@@ -92,6 +92,8 @@ export interface GraphPatch {
   nodes: DiagramNodeInput[];
   edges: DiagramEdgeInput[];
   direction?: DiagramDirection;
+  /** The diagram revision this graph was edited from. */
+  expect?: number;
 }
 
 type NodePatch = Partial<Pick<FlowData, 'label' | 'kind' | 'detail' | 'notes' | 'taskIds'>>;
@@ -133,15 +135,23 @@ function Editor({
   nodesRef.current = nodes;
   edgesRef.current = edges;
   const dragging = useRef(false);
+  const queue = useRef<{ pending: GraphPatch | null; busy: boolean }>({ pending: null, busy: false });
 
   // The plan object is replaced on every broadcast, so follow the graph's
   // content rather than its identity — otherwise a comment elsewhere in the
   // plan would reset the canvas mid-gesture.
   const signature = useMemo(() => JSON.stringify([diagram.nodes, diagram.edges, diagram.direction]), [diagram]);
+  /** The revision the canvas's own state was loaded from. Saves are made
+   *  against it, so a change that landed elsewhere since is never overwritten
+   *  — not even one that arrived mid-drag, while the canvas was not listening. */
+  const baseRev = useRef(diagram.rev);
   useEffect(() => {
-    if (dragging.current) return;
+    // Mid-gesture or mid-save the canvas is ahead of the server; the save
+    // queue reconciles once it drains.
+    if (dragging.current || queue.current.busy || queue.current.pending) return;
     setNodes((prev) => keepSelection(prev, toFlowNodes(diagram, plan)));
     setEdges((prev) => keepSelection(prev, toFlowEdges(diagram)));
+    baseRev.current = diagram.rev;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on content
   }, [signature]);
 
@@ -165,9 +175,57 @@ function Editor({
     store.set({ focusTarget: null });
   }, [focusTarget, diagram.id, flow]);
 
+  /**
+   * Saving, one at a time and latest-wins.
+   *
+   * A drag, a rename and a connect can land within one round trip. Sending
+   * them concurrently would race, and each would carry the revision the
+   * canvas had before the others landed — so all but the first would be
+   * refused as stale. Instead there is at most one save in flight; anything
+   * newer replaces whatever is waiting behind it, and each save carries the
+   * revision the daemon handed back for the one before.
+   */
+  const latestRev = () => store.getState().session?.plan?.diagrams.find((d) => d.id === diagram.id)?.rev;
+
+  const resyncFromServer = useCallback(() => {
+    const plan = store.getState().session?.plan;
+    const current = plan?.diagrams.find((d) => d.id === diagram.id);
+    if (!plan || !current) return;
+    setNodes((prev) => keepSelection(prev, toFlowNodes(current, plan)));
+    setEdges((prev) => keepSelection(prev, toFlowEdges(current)));
+    baseRev.current = current.rev;
+  }, [diagram.id]);
+
+  const flush = useCallback(async () => {
+    const q = queue.current;
+    if (q.busy) return;
+    q.busy = true;
+    try {
+      while (q.pending) {
+        const patch = q.pending;
+        q.pending = null;
+        const ok = await onSave({ ...patch, expect: baseRev.current });
+        if (ok) {
+          // The daemon's answer is already in the store: build on it.
+          baseRev.current = latestRev() ?? baseRev.current;
+        } else {
+          // Refused — changed elsewhere, or invalid. Show what is really saved.
+          q.pending = null;
+          resyncFromServer();
+        }
+      }
+    } finally {
+      q.busy = false;
+    }
+    // Something newer than our last save may have arrived while we were busy
+    // and been held back; take it now.
+    if (latestRev() !== undefined && latestRev() !== baseRev.current) resyncFromServer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reads live state through refs
+  }, [onSave, resyncFromServer]);
+
   const persist = useCallback(
-    (ns: FlowNode[], es: FlowEdge[], direction?: DiagramDirection) =>
-      onSave({
+    (ns: FlowNode[], es: FlowEdge[], direction?: DiagramDirection) => {
+      queue.current.pending = {
         nodes: ns.map((n) => ({
           id: n.id,
           label: n.data.label,
@@ -186,8 +244,10 @@ function Editor({
           ...(e.data?.dashed ? { dashed: true } : {}),
         })),
         ...(direction ? { direction } : {}),
-      }),
-    [onSave],
+      };
+      void flush();
+    },
+    [flush],
   );
 
   const onNodesChange = useCallback((changes: NodeChange<FlowNode>[]) => setNodes((ns) => applyNodeChanges(changes, ns)), []);
@@ -199,7 +259,7 @@ function Editor({
       if (edgesRef.current.some((e) => e.source === conn.source && e.target === conn.target)) return;
       const next = [...edgesRef.current, makeEdge({ id: `${conn.source}->${conn.target}`, source: conn.source, target: conn.target })];
       setEdges(next);
-      void persist(nodesRef.current, next);
+      persist(nodesRef.current, next);
     },
     [persist],
   );
@@ -212,7 +272,7 @@ function Editor({
       const es = edgesRef.current.filter((e) => !cutIds.has(e.id) && !goneIds.has(e.source) && !goneIds.has(e.target));
       setNodes(ns);
       setEdges(es);
-      void persist(ns, es);
+      persist(ns, es);
     },
     [persist],
   );
@@ -222,7 +282,7 @@ function Editor({
       dragging.current = false;
       const at = new Map(moved.map((n) => [n.id, n.position]));
       const ns = nodesRef.current.map((n) => (at.has(n.id) ? { ...n, position: at.get(n.id)! } : n));
-      void persist(ns, edgesRef.current);
+      persist(ns, edgesRef.current);
     },
     [persist],
   );
@@ -235,7 +295,7 @@ function Editor({
       return { ...n, data: { ...data, width: nodeSize(data).width, ...progressOf(plan, data.taskIds) } };
     });
     setNodes(ns);
-    void persist(ns, edgesRef.current);
+    persist(ns, edgesRef.current);
   };
 
   const updateEdge = (id: string, patch: { label?: string; dashed?: boolean }) => {
@@ -246,7 +306,7 @@ function Editor({
       return makeEdge({ id: e.id, source: e.source, target: e.target, ...data }, e.selected);
     });
     setEdges(es);
-    void persist(nodesRef.current, es);
+    persist(nodesRef.current, es);
   };
 
   const select = (kind: 'node' | 'edge', id: string) => {
@@ -282,7 +342,7 @@ function Editor({
     const ns = [...nodesRef.current.map((x) => ({ ...x, selected: false })), node];
     setNodes(ns);
     setEdges((es) => es.map((e) => ({ ...e, selected: false })));
-    void persist(ns, edgesRef.current);
+    persist(ns, edgesRef.current);
   };
 
   const relayout = (direction: DiagramDirection) => {
@@ -293,9 +353,8 @@ function Editor({
     const at = autoLayout(graph, direction);
     const ns = nodesRef.current.map((n) => ({ ...n, position: at.get(n.id) ?? n.position, data: { ...n.data, direction } }));
     setNodes(ns);
-    void persist(ns, edgesRef.current, direction).then(() =>
-      window.requestAnimationFrame(() => void flow.fitView({ padding: 0.15, duration: 250 })),
-    );
+    persist(ns, edgesRef.current, direction);
+    window.requestAnimationFrame(() => void flow.fitView({ padding: 0.15, duration: 250 }));
   };
 
   const selectedNodes = nodes.filter((n) => n.selected);

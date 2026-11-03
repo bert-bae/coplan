@@ -121,10 +121,12 @@ export function stubFetch(handler: (route: string, init?: RequestInit) => unknow
         posts.push({ route, body: init.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {} });
       }
       const body = handler(route, init);
+      // A handler answers an error with `{ __status, error }`.
+      const status = body && typeof body === 'object' && '__status' in body ? Number((body as { __status: number }).__status) : 200;
       return {
-        ok: true,
-        status: 200,
-        statusText: 'OK',
+        ok: status < 400,
+        status,
+        statusText: status < 400 ? 'OK' : 'Error',
         headers: { get: (name: string) => (name.toLowerCase() === 'content-type' ? (typeof body === 'string' ? 'text/plain' : 'application/json') : null) },
         json: async () => body,
         text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),

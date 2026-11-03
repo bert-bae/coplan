@@ -128,13 +128,14 @@ class Store {
   async selectSession(id: string, updateHash = true): Promise<void> {
     if (updateHash) window.location.hash = `#/session/${id}`;
     this.set({ sessionId: id, session: null, diagramId: null, error: null });
+    this.connect();
     try {
       const { session } = await api.session(id);
-      this.set({ session });
+      // Clicking through the rail quickly: only the last choice may land.
+      if (this.state.sessionId === id) this.set({ session });
     } catch (err) {
-      this.set({ error: describeError(err) });
+      if (this.state.sessionId === id) this.set({ error: describeError(err) });
     }
-    this.connect();
   }
 
   /* ---------------------------------------------------------------- *

@@ -13,6 +13,10 @@ var MAX_CHANGES = 500;
 var MAX_TITLE = 200;
 var MAX_TEXT = 2e4;
 var MAX_TASKS = 400;
+var MAX_SECTIONS = 60;
+var MAX_DIAGRAMS = 40;
+var MAX_THREADS = 500;
+var MAX_REPLIES = 200;
 function emptyPlan(title = "Untitled plan", now = Date.now()) {
   return {
     title,
@@ -83,6 +87,8 @@ function publishPlan(prev, input, now = Date.now()) {
   if (!title) throw new PlanError("A plan needs a title.");
   const base = prev ? structuredClone(prev) : emptyPlan(title, now);
   const next = { ...base, title, summary: clean(input.summary, MAX_TEXT) ?? base.summary };
+  if ((input.sections?.length ?? 0) > MAX_SECTIONS) throw new PlanError(`A plan holds at most ${MAX_SECTIONS} sections.`);
+  if ((input.diagrams?.length ?? 0) > MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
   const sections = [];
   for (const raw of input.sections ?? []) {
     const old = base.sections.find((s) => s.id === raw.id);
@@ -90,7 +96,14 @@ function publishPlan(prev, input, now = Date.now()) {
     const body = clean(raw.body, MAX_TEXT) ?? "";
     const sTitle = clean(raw.title, MAX_TITLE) ?? "Untitled";
     const same = old && old.title === sTitle && old.body === body;
-    sections.push({ id, title: sTitle, body, updatedAt: same ? old.updatedAt : now, updatedBy: same ? old.updatedBy : "claude" });
+    sections.push({
+      id,
+      title: sTitle,
+      body,
+      rev: same ? old.rev : (old?.rev ?? 0) + 1,
+      updatedAt: same ? old.updatedAt : now,
+      updatedBy: same ? old.updatedBy : "claude"
+    });
   }
   const tasks = [];
   const walk = (list, parentId) => {
@@ -133,6 +146,7 @@ function publishPlan(prev, input, now = Date.now()) {
     diagrams.push({
       id,
       title: dTitle,
+      rev: same ? old.rev : (old?.rev ?? 0) + 1,
       ...graph,
       direction,
       ...caption ? { caption } : {},
@@ -166,6 +180,31 @@ function detachIfOrphaned(plan, before, thread) {
   if (targetExists(plan, thread.target)) return thread;
   const label = describeTarget(before, thread.target);
   return { ...thread, target: { kind: "plan", id: "" }, text: `(on removed ${label}) ${thread.text}` };
+}
+function normalizePlan(raw, fallbackTitle) {
+  const now = Date.now();
+  const list = (v) => Array.isArray(v) ? v : [];
+  const plan = {
+    ...emptyPlan(typeof raw.title === "string" && raw.title ? raw.title : fallbackTitle, now),
+    ...raw,
+    summary: typeof raw.summary === "string" ? raw.summary : "",
+    sections: list(raw.sections).map((s) => ({ ...s, rev: typeof s.rev === "number" ? s.rev : 1 })),
+    diagrams: list(raw.diagrams).map((d) => ({
+      ...d,
+      rev: typeof d.rev === "number" ? d.rev : 1,
+      nodes: list(d.nodes),
+      edges: list(d.edges),
+      direction: d.direction === "TB" ? "TB" : "LR"
+    })),
+    tasks: list(raw.tasks),
+    threads: list(raw.threads).map((t) => ({ ...t, replies: list(t.replies) })),
+    changes: list(raw.changes),
+    seq: typeof raw.seq === "number" ? raw.seq : 0,
+    claudeReadSeq: typeof raw.claudeReadSeq === "number" ? raw.claudeReadSeq : 0,
+    claudeReadAt: typeof raw.claudeReadAt === "number" ? raw.claudeReadAt : null,
+    revision: typeof raw.revision === "number" ? raw.revision : 0
+  };
+  return plan;
 }
 function applyOps(plan, ops, author, now = Date.now()) {
   if (!Array.isArray(ops) || ops.length === 0) throw new PlanError("No edits were given.");
@@ -203,22 +242,27 @@ function applyOne(plan, op, author, now) {
     case "upsert_section": {
       const existing = op.id ? plan.sections.find((s) => s.id === op.id) : void 0;
       if (existing) {
+        checkRev(existing, op.expect, "section", author);
         const title2 = clean(op.title, MAX_TITLE);
         const body = typeof op.body === "string" ? clean(op.body, MAX_TEXT) ?? "" : void 0;
+        const changed = title2 && title2 !== existing.title || body !== void 0 && body !== existing.body;
+        if (typeof op.index === "number") moveInList(plan.sections, existing.id, op.index);
+        if (!changed) return [];
         if (title2) existing.title = title2;
         if (body !== void 0) existing.body = body;
+        existing.rev += 1;
         existing.updatedAt = now;
         existing.updatedBy = author;
-        const out = [log("edited", ref("section", existing.id), `edited section "${existing.title}"`)];
-        if (typeof op.index === "number") moveInList(plan.sections, existing.id, op.index);
-        return out;
+        return [log("edited", ref("section", existing.id), `edited section "${existing.title}"`)];
       }
       const title = clean(op.title, MAX_TITLE);
       if (!title) throw new PlanError(op.id ? `No section "${op.id}".` : "A new section needs a title.");
+      if (plan.sections.length >= MAX_SECTIONS) throw new PlanError(`A plan holds at most ${MAX_SECTIONS} sections.`);
       const section = {
         id: claimId(plan, "section", op.id),
         title,
         body: clean(op.body, MAX_TEXT) ?? "",
+        rev: 1,
         updatedAt: now,
         updatedBy: author
       };
@@ -228,6 +272,7 @@ function applyOne(plan, op, author, now) {
     case "upsert_diagram": {
       const existing = op.id ? plan.diagrams.find((d) => d.id === op.id) : void 0;
       if (existing) {
+        checkRev(existing, op.expect, "diagram", author);
         const before = structuredClone(existing);
         const title2 = clean(op.title, MAX_TITLE);
         if (title2) existing.title = title2;
@@ -242,17 +287,20 @@ function applyOne(plan, op, author, now) {
         if (typeof op.index === "number") moveInList(plan.diagrams, existing.id, op.index);
         const what = describeDiagramEdit(before, existing);
         if (!what) return [];
+        existing.rev += 1;
         existing.updatedAt = now;
         existing.updatedBy = author;
         const kind = what.startsWith("rearranged") ? "moved" : "edited";
         return [log(kind, ref("diagram", existing.id), `${what} in diagram "${existing.title}"`)];
       }
       if (op.id) throw new PlanError(`No diagram "${op.id}".`);
+      if (plan.diagrams.length >= MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
       const title = clean(op.title, MAX_TITLE) ?? "Diagram";
       const caption = clean(op.caption, MAX_TEXT);
       const diagram = {
         id: claimId(plan, "diagram", void 0),
         title,
+        rev: 1,
         ...buildGraph(op.nodes ?? [], op.edges ?? [], void 0, title, taskIdSet(plan)),
         direction: validDirection(op.direction) ?? "LR",
         ...caption ? { caption } : {},
@@ -324,6 +372,7 @@ function applyOne(plan, op, author, now) {
       if (!targetExists(plan, target)) throw new PlanError(`Nothing to comment on at ${target.kind} "${target.id}".`);
       const text = clean(op.text, MAX_TEXT);
       if (!text) throw new PlanError("A comment needs text.");
+      if (plan.threads.length >= MAX_THREADS) throw new PlanError(`A plan holds at most ${MAX_THREADS} comment threads.`);
       const thread = {
         id: claimId(plan, "thread", void 0),
         target,
@@ -341,6 +390,7 @@ function applyOne(plan, op, author, now) {
       if (!thread) throw new PlanError(`No comment thread "${op.threadId}".`);
       const text = clean(op.text, MAX_TEXT);
       if (!text) throw new PlanError("A reply needs text.");
+      if (thread.replies.length >= MAX_REPLIES) throw new PlanError("This thread is full; start a new comment.");
       thread.replies.push({ id: `${thread.id}.${thread.replies.length + 1}`, author, text, ts: now });
       return [log("replied", thread.target, `replied on ${describeTarget(plan, thread.target)}: ${short(text, 80)}`)];
     }
@@ -397,6 +447,7 @@ function editTask(plan, task, op, author, now, log) {
     out.push(log("edited", ref("task", task.id), `edited the ${edited.join(", ")} of "${task.title}"`));
   }
   if (typeof op.index === "number") placeAmongSiblings(plan, task, op.index);
+  void author;
   return out;
 }
 function removeItem(plan, kind, id, log) {
@@ -523,6 +574,13 @@ function describeDiagramEdit(before, after) {
   if (parts.length) return parts.join("; ");
   if (moved.length) return `rearranged ${moved.length} node(s)`;
   return null;
+}
+function checkRev(item, expect, kind, author) {
+  if (typeof expect !== "number" || expect === item.rev) return;
+  const who2 = item.updatedBy === author ? "another edit" : item.updatedBy === "claude" ? "Claude" : "the user";
+  throw new PlanError(
+    `${kind[0].toUpperCase()}${kind.slice(1)} "${item.title}" was changed by ${who2} while this edit was open, so it was not saved. It now shows the latest version.`
+  );
 }
 function taskIdSet(plan) {
   return new Set(plan.tasks.map((t) => t.id));
@@ -1020,5 +1078,47 @@ test("changes-only rendering skips the document", () => {
   assert.match(text, /commented on the plan: looks good/);
   assert.match(text, /Comments waiting on you/);
   assert.doesNotMatch(text, /## Tasks/);
+});
+test("a save made against an old revision is refused, naming who changed it", () => {
+  let plan = fresh();
+  const rev = plan.sections[0].rev;
+  plan = applyOps(plan, [{ op: "upsert_section", id: "s1", body: "Claude rewrote this." }], "claude").plan;
+  assert.throws(
+    () => applyOps(plan, [{ op: "upsert_section", id: "s1", body: "my stale edit", expect: rev }], "user"),
+    /was changed by Claude while this edit was open/
+  );
+  const ok = applyOps(plan, [{ op: "upsert_section", id: "s1", body: "my edit", expect: plan.sections[0].rev }], "user").plan;
+  assert.equal(ok.sections[0].body, "my edit");
+});
+test("every change to a diagram moves its revision; a no-op does not", () => {
+  const plan = fresh();
+  const d = plan.diagrams[0];
+  const same = applyOps(plan, [{ op: "upsert_diagram", id: "d1", nodes: d.nodes, edges: d.edges, expect: d.rev }], "user").plan;
+  assert.equal(same.diagrams[0].rev, d.rev);
+  const moved = applyOps(plan, [{ op: "upsert_diagram", id: "d1", nodes: d.nodes.map((n) => ({ ...n, x: 1, y: 2 })), edges: d.edges, expect: d.rev }], "user").plan;
+  assert.equal(moved.diagrams[0].rev, d.rev + 1);
+  assert.throws(() => applyOps(moved, [{ op: "upsert_diagram", id: "d1", caption: "x", expect: d.rev }], "user"), /not saved/);
+});
+test("a republish moves the revision only of what it changed", () => {
+  const plan = fresh();
+  const next = publishPlan(plan, { ...INPUT, sections: [{ id: "s1", title: "Context", body: "Reads are slow." }], diagrams: [{ id: "d1", ...INPUT.diagrams[0], title: "Renamed" }] }).plan;
+  assert.equal(next.sections[0].rev, plan.sections[0].rev, "unchanged section keeps its revision");
+  assert.equal(next.diagrams[0].rev, plan.diagrams[0].rev + 1);
+});
+test("a plan read from disk in any older shape is normalized, not rejected", () => {
+  const plan = normalizePlan({ title: "old", sections: [{ id: "s1", title: "x", body: "y" }], diagrams: [{ id: "d1", title: "D" }] }, "fallback");
+  assert.equal(plan.sections[0].rev, 1);
+  assert.deepEqual(plan.diagrams[0].nodes, []);
+  assert.deepEqual(plan.tasks, []);
+  assert.equal(plan.claudeReadAt, null);
+});
+test("comment threads and plan items are bounded", () => {
+  let plan = fresh();
+  const many = Array.from({ length: 61 }, (_, i) => ({ title: `S${i}`, body: "" }));
+  assert.throws(() => publishPlan(null, { title: "x", sections: many }), /at most 60 sections/);
+  plan = applyOps(plan, [{ op: "comment", target: { kind: "plan", id: "" }, text: "a" }], "user").plan;
+  const replies = Array.from({ length: 200 }, () => ({ op: "reply", threadId: "c1", text: "r" }));
+  plan = applyOps(plan, replies, "user").plan;
+  assert.throws(() => applyOps(plan, [{ op: "reply", threadId: "c1", text: "one more" }], "user"), /thread is full/);
 });
 //# sourceMappingURL=plan.test.js.map

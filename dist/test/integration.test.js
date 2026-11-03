@@ -318,4 +318,55 @@ test("the session list summarizes the plan", async () => {
   assert.equal(row.planTitle, "Add a cache");
   assert.equal(row.tasks.done, 1);
 });
+var raw = (route, init = {}) => fetch(`${baseUrl(lock)}${route}`, {
+  ...init,
+  headers: { authorization: `Bearer ${lock.token}`, "content-type": "application/json", ...init.headers ?? {} }
+});
+test("the UI is served with a strict content policy and no referrer", async () => {
+  const res = await fetch(`${baseUrl(lock)}/?token=${lock.token}`);
+  assert.equal(res.status, 200);
+  const csp = res.headers.get("content-security-policy") ?? "";
+  assert.match(csp, /script-src 'self'/);
+  assert.doesNotMatch(csp, /script-src[^;]*unsafe-inline/, "no inline script, ever");
+  assert.match(csp, /frame-ancestors 'none'/);
+  assert.equal(res.headers.get("referrer-policy"), "no-referrer", "the token in the first URL never leaks");
+  assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+});
+test("malformed input is a 400, not a 500", async () => {
+  const bad = await raw(`/api/session/${sessionId}/plan/ops`, { method: "POST", body: "{not json" });
+  assert.equal(bad.status, 400);
+  const notObject = await raw(`/api/session/${sessionId}/plan/ops`, { method: "POST", body: "[1,2]" });
+  assert.equal(notObject.status, 400);
+  const badPath = await raw("/api/session/%E0%A4%A");
+  assert.equal(badPath.status, 400);
+});
+test("an oversized body is refused", async () => {
+  const res = await raw(`/api/session/${sessionId}/plan/ops`, { method: "POST", body: JSON.stringify({ ops: [], pad: "x".repeat(3 * 1024 * 1024) }) }).catch(() => null);
+  assert.ok(!res || res.status === 413, `expected 413, got ${res?.status}`);
+});
+test("a write from another origin is refused even with valid credentials", async () => {
+  const res = await raw(`/api/session/${sessionId}/plan/ops`, {
+    method: "POST",
+    headers: { origin: "https://evil.example" },
+    body: JSON.stringify({ ops: [{ op: "upsert_task", title: "injected" }] })
+  });
+  assert.equal(res.status, 403);
+  const own = await raw(`/api/session/${sessionId}/plan/ops`, {
+    method: "POST",
+    headers: { origin: baseUrl(lock) },
+    body: JSON.stringify({ ops: [{ op: "upsert_task", title: "from the page" }] })
+  });
+  assert.equal(own.status, 200, "the page itself is allowed");
+});
+test("without the token, nothing is served", async () => {
+  const res = await fetch(`${baseUrl(lock)}/api/sessions`);
+  assert.equal(res.status, 401);
+});
+test("a stale diagram save is refused over HTTP and changes nothing", async () => {
+  const before2 = (await session()).plan.diagrams[0];
+  await mcp("edit", { ops: [{ op: "upsert_diagram", id: before2.id, caption: "Claude moved first" }] });
+  const res = await ops([{ op: "upsert_diagram", id: before2.id, caption: "stale", expect: before2.rev }]);
+  assert.match(res.error ?? "", /changed by Claude while this edit was open/);
+  assert.equal((await session()).plan.diagrams[0].caption, "Claude moved first");
+});
 //# sourceMappingURL=integration.test.js.map

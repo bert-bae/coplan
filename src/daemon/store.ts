@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { paths, ensureHome, sanitizeId } from '../shared/paths.ts';
-import { applyOps, countTasks, currentTask, emptyPlan, markReadByClaude, publishPlan, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, countTasks, currentTask, emptyPlan, markReadByClaude, normalizePlan, publishPlan, unreadByClaude } from '../shared/plan.ts';
 import type { Author, Change, Plan, PlanInput, PlanOp, ServerEvent, SessionState, SessionSummary } from '../shared/types.ts';
 
 const PERSIST_DEBOUNCE_MS = 400;
@@ -272,9 +272,21 @@ export class SessionStore extends EventEmitter {
     this.emit('event', event);
   }
 
+  /**
+   * The rail's list, coalesced: a canvas drag or a batch of hook events can
+   * change a session many times in one tick, and every open page only needs
+   * the last of them.
+   */
   broadcastSessionList(): void {
-    this.emitEvent({ type: 'sessions', sessions: this.summaries() });
+    if (this.listQueued) return;
+    this.listQueued = true;
+    setImmediate(() => {
+      this.listQueued = false;
+      this.emitEvent({ type: 'sessions', sessions: this.summaries() });
+    });
   }
+
+  private listQueued = false;
 }
 
 export function summarize(s: SessionState): SessionSummary {
@@ -300,15 +312,31 @@ export function summarize(s: SessionState): SessionSummary {
   };
 }
 
+/**
+ * Read one session's state, or undefined if there is none.
+ *
+ * A file that exists but cannot be read is moved aside rather than ignored:
+ * ignoring it would let the next save write a blank session over the top of
+ * a plan that might still be recoverable by hand.
+ */
 function readState(file: string): SessionState | undefined {
+  if (!existsSync(file)) return undefined;
   try {
-    if (!existsSync(file)) return undefined;
     const state = JSON.parse(readFileSync(file, 'utf8')) as SessionState;
-    if (!state?.sessionId) return undefined;
+    if (!state || typeof state !== 'object' || typeof state.sessionId !== 'string') throw new Error('not a session');
     migrate(state);
     return state;
   } catch {
+    quarantine(file);
     return undefined;
+  }
+}
+
+function quarantine(file: string): void {
+  try {
+    renameSync(file, path.join(path.dirname(file), `state.corrupt-${Date.now()}.json`));
+  } catch {
+    /* if it cannot be moved it cannot be overwritten either */
   }
 }
 
@@ -321,7 +349,10 @@ function readState(file: string): SessionState | undefined {
  */
 function migrate(state: SessionState): void {
   const raw = state as unknown as Record<string, unknown>;
-  state.createdAt ??= state.updatedAt ?? Date.now();
+  state.updatedAt = typeof state.updatedAt === 'number' ? state.updatedAt : Date.now();
+  state.createdAt ??= state.updatedAt;
+  state.title = typeof state.title === 'string' && state.title ? state.title : state.sessionId.slice(0, 8);
+  state.cwd = typeof state.cwd === 'string' ? state.cwd : '';
   if (state.status !== 'ended') state.status = 'idle';
 
   const oldPlan = raw['plan'] as Record<string, unknown> | null | undefined;
@@ -329,7 +360,7 @@ function migrate(state: SessionState): void {
     const plan = emptyPlan(String(oldPlan['title'] ?? state.title));
     plan.summary = typeof oldPlan['summary'] === 'string' ? oldPlan['summary'] : '';
     if (typeof oldPlan['markdown'] === 'string' && oldPlan['markdown'].trim()) {
-      plan.sections.push({ id: 's1', title: 'Notes', body: oldPlan['markdown'], updatedAt: Date.now(), updatedBy: 'claude' });
+      plan.sections.push({ id: 's1', title: 'Notes', body: oldPlan['markdown'], rev: 1, updatedAt: Date.now(), updatedBy: 'claude' });
     }
     const steps = Array.isArray(oldPlan['steps']) ? (oldPlan['steps'] as Record<string, unknown>[]) : [];
     steps.forEach((step, i) => {
@@ -348,7 +379,7 @@ function migrate(state: SessionState): void {
     });
     state.plan = plan;
   }
-  state.plan ??= null;
+  state.plan = state.plan && typeof state.plan === 'object' ? normalizePlan(state.plan as Plan & Record<string, unknown>, state.title) : null;
   // Plans saved before questions moved into Claude's own chat.
   if (state.plan) {
     const plan = state.plan as unknown as Record<string, unknown>;

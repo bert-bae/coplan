@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -72,8 +72,10 @@ test('every change is broadcast as a whole-session snapshot', async () => {
   const seen: string[] = [];
   store.on('event', (e: { type: string }) => seen.push(e.type));
   store.publishPlan('s5', PLAN);
+  store.applyOps('s5', [{ op: 'upsert_task', title: 'more' }], 'user');
   assert.ok(seen.includes('snapshot'));
-  assert.ok(seen.includes('sessions'), 'the rail hears about it too');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(seen.filter((t) => t === 'sessions').length, 1, 'the rail hears about it once per tick');
 });
 
 test('a session written by the old review loop is migrated to a plan', async () => {
@@ -141,4 +143,35 @@ test('sessions older than the retention window are not loaded', async () => {
   );
   const store = await freshStore();
   assert.equal(store.get('ancient'), undefined);
+});
+
+test('an unreadable state file is moved aside, never overwritten', async () => {
+  const dir = path.join(home, 'sessions', 'damaged');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, 'state.json'), '{"sessionId":"damaged","plan":{"title":"precious"'); // truncated
+  const store = await freshStore();
+  assert.equal(store.get('damaged'), undefined);
+  const aside = readdirSync(dir).find((f) => f.startsWith('state.corrupt-'));
+  assert.ok(aside, 'the damaged file is kept beside, for recovery by hand');
+  assert.match(readFileSync(path.join(dir, aside!), 'utf8'), /precious/);
+
+  // A fresh session under the same id now starts clean without touching it.
+  store.ensure('damaged', process.cwd());
+  store.persistNow('damaged');
+  assert.ok(existsSync(path.join(dir, aside!)));
+});
+
+test('a plan missing lists from an older build still loads', async () => {
+  const dir = path.join(home, 'sessions', 'sparse');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, 'state.json'),
+    JSON.stringify({ sessionId: 'sparse', cwd: '/x', title: 't', status: 'idle', updatedAt: Date.now(), plan: { title: 'P', tasks: [], seq: 3 } }),
+  );
+  const store = await freshStore();
+  const plan = store.get('sparse')?.plan;
+  assert.ok(plan);
+  assert.deepEqual(plan!.threads, []);
+  assert.deepEqual(plan!.diagrams, []);
+  assert.equal(plan!.seq, 3);
 });

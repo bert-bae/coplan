@@ -330,7 +330,81 @@ test('a section is edited in place and saved as an op', async () => {
   await act(async () => {
     fireEvent.keyDown(area, { key: 'Enter', ctrlKey: true });
   });
-  assert.deepEqual(opsSent()[0], { op: 'upsert_section', id: 's1', body: 'Reads take 400ms.' });
+  assert.deepEqual(opsSent()[0], { op: 'upsert_section', id: 's1', body: 'Reads take 400ms.', expect: 1 }, 'made against the revision edited');
+});
+
+test('a refused save keeps the editor open with the text intact', async () => {
+  await boot();
+  await openTab('Overview');
+  // The daemon refuses: the section moved on underneath.
+  stubFetch((route) => {
+    if (route.endsWith('/plan/ops')) return { __status: 400, error: 'Section "Context" was changed by Claude while this edit was open, so it was not saved.' };
+    return { ok: true };
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+  });
+  const area = screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
+  await act(async () => {
+    fireEvent.change(area, { target: { value: 'My careful rewrite.' } });
+  });
+  await act(async () => {
+    fireEvent.keyDown(area, { key: 'Enter', ctrlKey: true });
+  });
+  const still = screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
+  assert.equal(still.value, 'My careful rewrite.', 'nothing typed is lost');
+  assert.ok(store.getState().toasts.some((t) => /changed by Claude/.test(t.text)), 'and the reason is shown');
+});
+
+test('a view that throws takes only itself down', async () => {
+  const broken = makePlan();
+  // A shape only the canvas reads, and does not expect: arrows not a list.
+  (broken.diagrams[0] as unknown as Record<string, unknown>)['edges'] = null;
+  const quiet = console.error;
+  console.error = () => {};
+  await boot(makeSession(broken));
+  console.error = quiet;
+  assert.ok(screen.getByRole('alert'));
+  assert.match(screen.getByRole('alert').textContent ?? '', /could not be shown/);
+  assert.ok(screen.getAllByRole('tab').length === 3, 'the rest of the page still works');
+  await openTab('Tasks');
+  assert.ok(document.querySelector('.task-line'), 'and the other views render');
+});
+
+test('while a session loads, the page says so instead of "no session"', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  stubFetch((route) => {
+    if (route.startsWith('/api/sessions')) return { sessions: [], version: 'test' };
+    return { ok: true };
+  });
+  const original = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', {
+    value: async (input: unknown, init?: RequestInit) => {
+      if (String(input).startsWith('/api/session/')) await gate;
+      return original(input as string, init);
+    },
+    configurable: true,
+    writable: true,
+  });
+  render(<App />);
+  await act(async () => {
+    void store.init();
+    await new Promise((r) => setTimeout(r, 10));
+  });
+  assert.ok(screen.getByText('Loading the plan…'));
+  assert.equal(screen.queryByText('No session yet'), null);
+  release();
+});
+
+test('a page without the harness key says how to open it properly', async () => {
+  stubFetch(() => ({ __status: 401, error: 'unauthorized' }));
+  render(<App />);
+  await act(async () => {
+    await store.init();
+  });
+  assert.ok(screen.getByText('This page is not signed in to the harness'));
+  assert.match(document.body.textContent ?? '', /harness open/);
 });
 
 test('a snapshot from Claude replaces the plan and says so', async () => {

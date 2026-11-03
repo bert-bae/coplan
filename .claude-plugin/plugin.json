@@ -1,7 +1,7 @@
 {
   "name": "cc-harness",
   "displayName": "Claude Planning Harness",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A visual planning workspace for Claude Code: architecture diagrams, a task breakdown you can reorganize, and open questions to answer \u2014 which Claude reads back when you tell it to.",
   "author": {
     "name": "Elbert B."
