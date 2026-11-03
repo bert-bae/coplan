@@ -369,4 +369,13 @@ test("a stale diagram save is refused over HTTP and changes nothing", async () =
   assert.match(res.error ?? "", /changed by Claude while this edit was open/);
   assert.equal((await session()).plan.diagrams[0].caption, "Claude moved first");
 });
+test("a batch too large to apply whole is refused, not truncated", async () => {
+  const before2 = (await session()).plan.tasks.length;
+  const many = Array.from({ length: 201 }, (_, i) => ({ op: "upsert_task", title: `bulk ${i}` }));
+  const res = await raw(`/api/session/${sessionId}/plan/ops`, { method: "POST", body: JSON.stringify({ ops: many }) });
+  assert.equal(res.status, 400);
+  const viaClaude = await mcp("edit", { ops: many });
+  assert.equal(viaClaude["ok"], false);
+  assert.equal((await session()).plan.tasks.length, before2, "none of it applied");
+});
 //# sourceMappingURL=integration.test.js.map

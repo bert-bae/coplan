@@ -191,7 +191,7 @@ var init_store = __esm({
         } catch (err) {
           this.set({ error: describeError(err) });
         }
-        this.connect();
+        if (!this.source) this.connect();
         window.addEventListener("hashchange", () => {
           const id = readHash();
           if (id && id !== this.state.sessionId) void this.selectSession(id, false);
@@ -265,17 +265,28 @@ var init_store = __esm({
        * refusal the daemon's reason is shown and the plan is left as it was.
        */
       async ops(ops) {
+        return await this.commit(ops) !== null;
+      }
+      /**
+       * Send edits, and resolve with the plan exactly as the daemon left it after
+       * them — or null when they were refused. Callers that build on the result
+       * (the canvas's revision) need the daemon's answer, not whatever the store
+       * holds by the time it arrives.
+       */
+      async commit(ops) {
         const id = this.state.sessionId;
-        if (!id || ops.length === 0) return false;
+        if (!id || ops.length === 0) return null;
         this.set({ saving: this.state.saving + 1 });
         try {
           const { plan } = await api.ops(id, ops);
           const session = this.state.session;
-          if (session && session.sessionId === id) this.set({ session: { ...session, plan } });
-          return true;
+          if (session && session.sessionId === id && (!session.plan || plan.seq >= session.plan.seq)) {
+            this.set({ session: { ...session, plan } });
+          }
+          return plan;
         } catch (err) {
           this.fail(err);
-          return false;
+          return null;
         } finally {
           this.set({ saving: Math.max(0, this.state.saving - 1) });
         }
@@ -3117,9 +3128,9 @@ function Editor({
       while (q.pending) {
         const patch = q.pending;
         q.pending = null;
-        const ok = await onSave({ ...patch, expect: baseRev.current });
-        if (ok) {
-          baseRev.current = latestRev() ?? baseRev.current;
+        const savedRev = await onSave({ ...patch, expect: baseRev.current });
+        if (savedRev !== null) {
+          baseRev.current = savedRev;
         } else {
           q.pending = null;
           resyncFromServer();
@@ -3132,6 +3143,7 @@ function Editor({
   }, [onSave, resyncFromServer]);
   const persist = useCallback(
     (ns, es, direction) => {
+      const superseded = queue.current.pending;
       queue.current.pending = {
         nodes: ns.map((n) => ({
           id: n.id,
@@ -3150,7 +3162,9 @@ function Editor({
           ...e.data?.label ? { label: e.data.label } : {},
           ...e.data?.dashed ? { dashed: true } : {}
         })),
-        ...direction ? { direction } : {}
+        // A patch waiting behind the one in flight is replaced, not merged —
+        // except for the direction, which only the relayout ever sets.
+        ...direction ?? superseded?.direction ? { direction: direction ?? superseded?.direction } : {}
       };
       void flush();
     },
@@ -3697,7 +3711,10 @@ function DiagramsView() {
       {
         diagram,
         plan,
-        onSave: (patch) => store.op({ op: "upsert_diagram", id: diagram.id, ...patch }),
+        onSave: async (patch) => {
+          const plan2 = await store.commit([{ op: "upsert_diagram", id: diagram.id, ...patch }]);
+          return plan2?.diagrams.find((d) => d.id === diagram.id)?.rev ?? null;
+        },
         aside: /* @__PURE__ */ jsx16(DiagramPanel, { plan, diagram })
       },
       diagram.id
@@ -3758,8 +3775,7 @@ function DiagramPanel({ plan, diagram }) {
         placeholder: "What this diagram shows.",
         emptyAction: "Describe it",
         rows: 3,
-        version: diagram.rev,
-        onSave: (caption, rev) => store.op({ op: "upsert_diagram", id: diagram.id, caption, ...rev !== void 0 ? { expect: rev } : {} })
+        onSave: (caption) => store.op({ op: "upsert_diagram", id: diagram.id, caption })
       }
     ),
     /* @__PURE__ */ jsxs15("p", { className: "panel-hint", children: [
@@ -3886,6 +3902,15 @@ function Outline({ plan, hideDone }) {
   const [hint, setHint] = useState13(null);
   const [expanded, setExpanded] = useState13(null);
   const [addingUnder, setAddingUnder] = useState13(null);
+  const partsByTask = useMemo3(() => {
+    const map = /* @__PURE__ */ new Map();
+    for (const d of plan.diagrams) {
+      for (const n of d.nodes) {
+        for (const t of n.taskIds ?? []) map.set(t, [...map.get(t) ?? [], { d, n }]);
+      }
+    }
+    return map;
+  }, [plan.diagrams]);
   const rows = useMemo3(() => {
     const hidden = /* @__PURE__ */ new Set();
     for (const id of collapsed) for (const d of descendants(plan, id)) hidden.add(d.id);
@@ -3950,7 +3975,8 @@ function Outline({ plan, hideDone }) {
         onDrop: (e) => onDrop(e, task),
         addingSubtask: addingUnder === task.id,
         onAddSubtask: () => setAddingUnder(task.id),
-        onCloseAdd: () => setAddingUnder(null)
+        onCloseAdd: () => setAddingUnder(null),
+        parts: partsByTask.get(task.id) ?? NO_PARTS
       },
       task.id
     )) }),
@@ -3966,7 +3992,7 @@ function TaskRow(props) {
   const sub = kids.length ? countTasks({ tasks: [task, ...descendants(plan, task.id)] }) : null;
   const threads = useThreads({ kind: "task", id: task.id });
   const target = { kind: "task", id: task.id };
-  const parts = plan.diagrams.flatMap((d) => d.nodes.filter((n) => n.taskIds?.includes(task.id)).map((n) => ({ d, n })));
+  const parts = props.parts;
   const siblings = childrenOf(plan, task.parentId);
   const index = siblings.findIndex((t) => t.id === task.id);
   const parent = task.parentId ? plan.tasks.find((t) => t.id === task.parentId) : void 0;
@@ -4328,7 +4354,7 @@ function isTyping(target) {
   const el = target;
   return Boolean(el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable));
 }
-var NEXT_STATUS, DRAG_TYPE;
+var NEXT_STATUS, NO_PARTS, DRAG_TYPE;
 var init_TasksView = __esm({
   "src/ui/views/TasksView.tsx"() {
     "use strict";
@@ -4348,6 +4374,7 @@ var init_TasksView = __esm({
       blocked: "in_progress",
       done: "todo"
     };
+    NO_PARTS = [];
     DRAG_TYPE = "application/x-harness-task";
   }
 });

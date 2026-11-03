@@ -1917,6 +1917,7 @@ async function main() {
   server.keepAliveTimeout = 5e3;
   server.maxHeadersCount = 64;
   const port = await listen(server, inheritedPort);
+  boundPort = port;
   const lock = { pid: process.pid, port, token, version: VERSION, startedAt: Date.now(), host: "127.0.0.1" };
   writeLock(lock);
   log(`listening on ${baseUrl(lock)} (pid ${process.pid}, v${VERSION})`);
@@ -1955,6 +1956,7 @@ async function main() {
   process.on("uncaughtException", (err) => log(`uncaught: ${err?.stack ?? err}`));
   process.on("unhandledRejection", (err) => log(`unhandled: ${String(err)}`));
 }
+var boundPort = 0;
 var RESTART_DELAY_MS = 120;
 var PORT_CLAIM_MS = 5e3;
 var MAX_TRACKED_OPENS = 200;
@@ -2065,7 +2067,7 @@ async function handle(req, res, router, token) {
 function sameOrigin(origin) {
   try {
     const { protocol, hostname, port } = new URL(origin);
-    const own = String(readLiveLock()?.port ?? "");
+    const own = String(boundPort);
     return protocol === "http:" && (hostname === "127.0.0.1" || hostname === "localhost") && port === own;
   } catch {
     return false;
@@ -2143,7 +2145,8 @@ function buildRouter(deps) {
     const session = sessionOr404(ctx);
     if (!session) return;
     const body = await readJson(ctx.req);
-    const ops = Array.isArray(body.ops) ? body.ops.slice(0, MAX_OPS) : [];
+    const ops = Array.isArray(body.ops) ? body.ops : [];
+    if (ops.length > MAX_OPS) throw new HttpError(400, `At most ${MAX_OPS} edits per request.`);
     try {
       const { plan, changes } = store.applyOps(session.sessionId, ops, "user");
       json(ctx.res, 200, { plan, changes });
@@ -2306,7 +2309,8 @@ Tell them in chat that the plan is ready, and ask anything you need decided with
           return;
         }
         case "edit": {
-          const ops = Array.isArray(body["ops"]) ? body["ops"].slice(0, MAX_OPS) : [];
+          const ops = Array.isArray(body["ops"]) ? body["ops"] : [];
+          if (ops.length > MAX_OPS) throw new PlanError(`At most ${MAX_OPS} edits per call; split the change.`);
           const { changes } = store.applyOps(id, ops, "claude");
           reply(
             true,

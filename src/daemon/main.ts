@@ -79,6 +79,7 @@ async function main(): Promise<void> {
   server.maxHeadersCount = 64;
 
   const port = await listen(server, inheritedPort);
+  boundPort = port;
   const lock: DaemonLock = { pid: process.pid, port, token, version: VERSION, startedAt: Date.now(), host: '127.0.0.1' };
   writeLock(lock);
   log(`listening on ${baseUrl(lock)} (pid ${process.pid}, v${VERSION})`);
@@ -123,6 +124,9 @@ async function main(): Promise<void> {
   process.on('uncaughtException', (err) => log(`uncaught: ${err?.stack ?? err}`));
   process.on('unhandledRejection', (err) => log(`unhandled: ${String(err)}`));
 }
+
+/** The port this process listens on; the Origin check compares against it. */
+let boundPort = 0;
 
 /** Grace for the restart response to flush before the socket is torn down. */
 const RESTART_DELAY_MS = 120;
@@ -268,7 +272,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, route
 function sameOrigin(origin: string): boolean {
   try {
     const { protocol, hostname, port } = new URL(origin);
-    const own = String(readLiveLock()?.port ?? '');
+    const own = String(boundPort);
     return protocol === 'http:' && (hostname === '127.0.0.1' || hostname === 'localhost') && port === own;
   } catch {
     return false;
@@ -387,7 +391,8 @@ function buildRouter(deps: Deps): Router {
     const session = sessionOr404(ctx);
     if (!session) return;
     const body = await readJson<{ ops?: PlanOp[] }>(ctx.req);
-    const ops = Array.isArray(body.ops) ? body.ops.slice(0, MAX_OPS) : [];
+    const ops = Array.isArray(body.ops) ? body.ops : [];
+    if (ops.length > MAX_OPS) throw new HttpError(400, `At most ${MAX_OPS} edits per request.`);
     try {
       const { plan, changes } = store.applyOps(session.sessionId, ops, 'user');
       json(ctx.res, 200, { plan, changes });
@@ -589,7 +594,9 @@ function buildRouter(deps: Deps): Router {
         }
 
         case 'edit': {
-          const ops = Array.isArray(body['ops']) ? (body['ops'] as PlanOp[]).slice(0, MAX_OPS) : [];
+          const ops = Array.isArray(body['ops']) ? (body['ops'] as PlanOp[]) : [];
+          // All or nothing: a batch that cannot be applied whole is refused.
+          if (ops.length > MAX_OPS) throw new PlanError(`At most ${MAX_OPS} edits per call; split the change.`);
           const { changes } = store.applyOps(id, ops, 'claude');
           reply(
             true,

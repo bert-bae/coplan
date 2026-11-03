@@ -8,7 +8,7 @@ import { ProgressBar, STATUS_GLYPH, STATUS_LABEL } from '../components/Progress.
 import { EmptyState } from '../components/primitives.tsx';
 import { classNames } from '../lib/format.ts';
 import { childrenOf, countTasks, descendants, outline } from '../../shared/plan.ts';
-import { TASK_STATUSES, type Plan, type PlanOp, type Task, type TaskStatus } from '../../shared/types.ts';
+import { TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type Task, type TaskStatus } from '../../shared/types.ts';
 
 /** Clicking the status dot steps through the common path; blocked is set
  *  from the detail panel or the board, where it can carry a reason. */
@@ -20,6 +20,8 @@ const NEXT_STATUS: Record<TaskStatus, TaskStatus> = {
 };
 
 type DropZone = 'before' | 'inside' | 'after';
+type Part = { d: Diagram; n: DiagramNode };
+const NO_PARTS: Part[] = [];
 const DRAG_TYPE = 'application/x-harness-task';
 
 /**
@@ -88,6 +90,17 @@ function Outline({ plan, hideDone }: { plan: Plan; hideDone: boolean }) {
   const [hint, setHint] = useState<{ id: string; zone: DropZone } | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [addingUnder, setAddingUnder] = useState<string | null>(null);
+
+  // Which boxes each task builds, worked out once for the whole outline.
+  const partsByTask = useMemo(() => {
+    const map = new Map<string, Part[]>();
+    for (const d of plan.diagrams) {
+      for (const n of d.nodes) {
+        for (const t of n.taskIds ?? []) map.set(t, [...(map.get(t) ?? []), { d, n }]);
+      }
+    }
+    return map;
+  }, [plan.diagrams]);
 
   const rows = useMemo(() => {
     const hidden = new Set<string>();
@@ -161,6 +174,7 @@ function Outline({ plan, hideDone }: { plan: Plan; hideDone: boolean }) {
             addingSubtask={addingUnder === task.id}
             onAddSubtask={() => setAddingUnder(task.id)}
             onCloseAdd={() => setAddingUnder(null)}
+            parts={partsByTask.get(task.id) ?? NO_PARTS}
           />
         ))}
       </div>
@@ -190,6 +204,8 @@ function TaskRow(props: {
   addingSubtask: boolean;
   onAddSubtask: () => void;
   onCloseAdd: () => void;
+  /** The parts of the architecture this task builds. */
+  parts: Part[];
 }) {
   const { plan, task, depth, number, expanded } = props;
   const collapsed = useStore((s) => s.collapsedTasks.includes(task.id));
@@ -198,8 +214,7 @@ function TaskRow(props: {
   const sub = kids.length ? countTasks({ tasks: [task, ...descendants(plan, task.id)] }) : null;
   const threads = useThreads({ kind: 'task', id: task.id });
   const target = { kind: 'task' as const, id: task.id };
-  // The parts of the architecture this task builds.
-  const parts = plan.diagrams.flatMap((d) => d.nodes.filter((n) => n.taskIds?.includes(task.id)).map((n) => ({ d, n })));
+  const parts = props.parts;
 
   const siblings = childrenOf(plan, task.parentId);
   const index = siblings.findIndex((t) => t.id === task.id);

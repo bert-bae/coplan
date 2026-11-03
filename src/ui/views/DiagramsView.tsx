@@ -78,7 +78,10 @@ export function DiagramsView() {
           key={diagram.id}
           diagram={diagram}
           plan={plan}
-          onSave={(patch: GraphPatch) => store.op({ op: 'upsert_diagram', id: diagram.id, ...patch })}
+          onSave={async (patch: GraphPatch) => {
+            const plan = await store.commit([{ op: 'upsert_diagram', id: diagram.id, ...patch }]);
+            return plan?.diagrams.find((d) => d.id === diagram.id)?.rev ?? null;
+          }}
           aside={<DiagramPanel plan={plan} diagram={diagram} />}
         />
       ) : (
@@ -149,8 +152,10 @@ function DiagramPanel({ plan, diagram }: { plan: Plan; diagram: Diagram }) {
         placeholder="What this diagram shows."
         emptyAction="Describe it"
         rows={3}
-        version={diagram.rev}
-        onSave={(caption, rev) => store.op({ op: 'upsert_diagram', id: diagram.id, caption, ...(rev !== undefined ? { expect: rev } : {}) })}
+        // No revision check: the diagram's revision moves with every drag on
+        // the canvas, so it would flag the user's own layout edits as a
+        // conflict. A caption is short and only ever edited here.
+        onSave={(caption) => store.op({ op: 'upsert_diagram', id: diagram.id, caption })}
       />
       <p className="panel-hint">
         {diagram.nodes.length} boxes, {diagram.edges.length} arrows{linked ? `, ${linked} tracking tasks` : ''}. Select a box

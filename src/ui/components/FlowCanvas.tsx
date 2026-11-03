@@ -101,7 +101,8 @@ type NodePatch = Partial<Pick<FlowData, 'label' | 'kind' | 'detail' | 'notes' | 
 export function DiagramEditor(props: {
   diagram: Diagram;
   plan: Plan;
-  onSave: (patch: GraphPatch) => Promise<boolean>;
+  /** Resolves with the diagram's revision after the save, or null if refused. */
+  onSave: (patch: GraphPatch) => Promise<number | null>;
   /** The panel's content when nothing is selected: the diagram itself. */
   aside: ReactNode;
 }) {
@@ -122,7 +123,7 @@ function Editor({
 }: {
   diagram: Diagram;
   plan: Plan;
-  onSave: (patch: GraphPatch) => Promise<boolean>;
+  onSave: (patch: GraphPatch) => Promise<number | null>;
   aside: ReactNode;
 }) {
   const theme = useResolvedTheme();
@@ -204,10 +205,11 @@ function Editor({
       while (q.pending) {
         const patch = q.pending;
         q.pending = null;
-        const ok = await onSave({ ...patch, expect: baseRev.current });
-        if (ok) {
-          // The daemon's answer is already in the store: build on it.
-          baseRev.current = latestRev() ?? baseRev.current;
+        const savedRev = await onSave({ ...patch, expect: baseRev.current });
+        if (savedRev !== null) {
+          // Build on the revision this save produced — not on whatever the
+          // store holds now, which may include a change the canvas never loaded.
+          baseRev.current = savedRev;
         } else {
           // Refused — changed elsewhere, or invalid. Show what is really saved.
           q.pending = null;
@@ -225,6 +227,7 @@ function Editor({
 
   const persist = useCallback(
     (ns: FlowNode[], es: FlowEdge[], direction?: DiagramDirection) => {
+      const superseded = queue.current.pending;
       queue.current.pending = {
         nodes: ns.map((n) => ({
           id: n.id,
@@ -243,7 +246,9 @@ function Editor({
           ...(e.data?.label ? { label: e.data.label } : {}),
           ...(e.data?.dashed ? { dashed: true } : {}),
         })),
-        ...(direction ? { direction } : {}),
+        // A patch waiting behind the one in flight is replaced, not merged —
+        // except for the direction, which only the relayout ever sets.
+        ...(direction ?? superseded?.direction ? { direction: direction ?? superseded?.direction } : {}),
       };
       void flush();
     },

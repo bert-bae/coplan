@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { api } from './lib/api.ts';
-import type { CleanupGroupId, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport } from '../shared/types.ts';
+import type { CleanupGroupId, Plan, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport } from '../shared/types.ts';
 
 export type Tab = 'diagrams' | 'tasks' | 'overview';
 /** The architecture comes first: it is where most of the plan is decided. */
@@ -118,7 +118,9 @@ class Store {
       this.set({ error: describeError(err) });
     }
 
-    this.connect();
+    // Selecting a session opens the stream; with none to select, open it for
+    // the session list alone.
+    if (!this.source) this.connect();
     window.addEventListener('hashchange', () => {
       const id = readHash();
       if (id && id !== this.state.sessionId) void this.selectSession(id, false);
@@ -203,17 +205,31 @@ class Store {
    * refusal the daemon's reason is shown and the plan is left as it was.
    */
   async ops(ops: PlanOp[]): Promise<boolean> {
+    return (await this.commit(ops)) !== null;
+  }
+
+  /**
+   * Send edits, and resolve with the plan exactly as the daemon left it after
+   * them — or null when they were refused. Callers that build on the result
+   * (the canvas's revision) need the daemon's answer, not whatever the store
+   * holds by the time it arrives.
+   */
+  async commit(ops: PlanOp[]): Promise<Plan | null> {
     const id = this.state.sessionId;
-    if (!id || ops.length === 0) return false;
+    if (!id || ops.length === 0) return null;
     this.set({ saving: this.state.saving + 1 });
     try {
       const { plan } = await api.ops(id, ops);
       const session = this.state.session;
-      if (session && session.sessionId === id) this.set({ session: { ...session, plan } });
-      return true;
+      // The live stream may already have delivered something newer — a change
+      // Claude made right after this one. Never roll the page back to it.
+      if (session && session.sessionId === id && (!session.plan || plan.seq >= session.plan.seq)) {
+        this.set({ session: { ...session, plan } });
+      }
+      return plan;
     } catch (err) {
       this.fail(err);
-      return false;
+      return null;
     } finally {
       this.set({ saving: Math.max(0, this.state.saving - 1) });
     }
