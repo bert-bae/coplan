@@ -29,7 +29,6 @@ export function CommitInput({
   placeholder,
   className,
   maxLength,
-  autoFocus,
   onCommit,
 }: {
   value: string;
@@ -37,7 +36,6 @@ export function CommitInput({
   placeholder?: string;
   className?: string;
   maxLength?: number;
-  autoFocus?: boolean;
   onCommit: (v: string) => void;
 }) {
   const [draft, setDraft] = useState(value);
@@ -63,8 +61,6 @@ export function CommitInput({
       aria-label={label}
       placeholder={placeholder}
       maxLength={maxLength}
-      // eslint-disable-next-line jsx-a11y/no-autofocus -- a box just created is named first
-      autoFocus={autoFocus}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => {
@@ -189,7 +185,6 @@ export function NodePanel({
   nodes,
   edges,
   plan,
-  focusName,
   onChange,
   onSelect,
   onConnect,
@@ -203,8 +198,6 @@ export function NodePanel({
   nodes: FlowNode[];
   edges: FlowEdge[];
   plan: Plan;
-  /** Put the cursor in the name: the box was just created. */
-  focusName?: boolean;
   onChange: (patch: NodePatch) => void;
   onSelect: (kind: 'node' | 'edge', id: string) => void;
   onConnect: (target: string) => void;
@@ -244,7 +237,6 @@ export function NodePanel({
         value={node.data.label}
         label="Box label"
         maxLength={120}
-        autoFocus={focusName}
         onCommit={(label) => label && onChange({ label })}
       />
 

@@ -28,6 +28,7 @@ function emptyPlan(title = "Untitled plan", now = Date.now()) {
     threads: [],
     changes: [],
     seq: 0,
+    version: 0,
     claudeReadSeq: 0,
     claudeReadAt: null,
     revision: 0,
@@ -61,6 +62,7 @@ function claimId(plan, kind, wanted) {
 }
 function record(plan, author, kind, target, summary, now) {
   plan.seq += 1;
+  plan.version += 1;
   const change = { seq: plan.seq, ts: now, author, kind, target, summary };
   plan.changes.push(change);
   if (plan.changes.length > MAX_CHANGES) plan.changes.splice(0, plan.changes.length - MAX_CHANGES);
@@ -74,6 +76,20 @@ function unreadByClaude(plan) {
 function unreadItems(plan) {
   return new Set(unreadByClaude(plan).map((c) => `${c.target.kind}:${c.target.id}`)).size;
 }
+var RENAMED_PLAN = "renamed the plan";
+function unreadAreas(plan) {
+  const areas = [];
+  const add = (what) => void (areas.includes(what) || areas.push(what));
+  for (const c of unreadByClaude(plan)) {
+    if (["commented", "replied", "resolved", "reopened"].includes(c.kind)) add("comments");
+    else if (c.target.kind === "diagram") add(`the "${plan.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
+    else if (c.target.kind === "task") add("tasks");
+    else if (c.target.kind === "section") add("sections");
+    else if (c.summary.startsWith(RENAMED_PLAN)) add("the plan's title");
+    else add("the summary");
+  }
+  return areas;
+}
 function markReadByClaude(plan, now = Date.now()) {
   plan.claudeReadSeq = plan.seq;
   plan.claudeReadAt = now;
@@ -83,6 +99,110 @@ function settleClaudeRead(plan) {
   if (unreadByClaude(plan).length > 0) return;
   plan.claudeReadSeq = plan.seq;
   plan.claudeBaseline = baselineOf(plan);
+}
+function foldClaudeEdit(base, before, after) {
+  const out = structuredClone(base);
+  if (before.title !== after.title) out.title = after.title;
+  if (before.summary !== after.summary) out.summary = after.summary;
+  out.sections = foldList(out.sections, before.sections, after.sections, foldFields);
+  out.tasks = foldList(out.tasks, before.tasks, after.tasks, foldFields);
+  out.diagrams = foldList(out.diagrams, before.diagrams, after.diagrams, (o, b, a) => {
+    const { nodes: _on, edges: _oe, ...meta } = o;
+    const { nodes: _bn, edges: _be, ...bMeta } = b;
+    const { nodes: _an, edges: _ae, ...aMeta } = a;
+    return {
+      ...foldFields(meta, bMeta, aMeta),
+      nodes: foldList(o.nodes, b.nodes, a.nodes, foldFields),
+      edges: foldEdges(o.edges, b.edges, a.edges)
+    };
+  });
+  return out;
+}
+function foldFields(o, b, a) {
+  const out = { ...o };
+  const was = b;
+  const now = a;
+  for (const key of /* @__PURE__ */ new Set([...Object.keys(was), ...Object.keys(now)])) {
+    if (JSON.stringify(was[key]) === JSON.stringify(now[key])) continue;
+    if (now[key] === void 0) delete out[key];
+    else out[key] = structuredClone(now[key]);
+  }
+  return out;
+}
+function foldList(base, before, after, merge) {
+  const has = (list, id) => list.some((x) => x.id === id);
+  let out = base.filter((x) => !(has(before, x.id) && !has(after, x.id)));
+  for (const a of after) {
+    const b = before.find((x) => x.id === a.id);
+    const i = out.findIndex((x) => x.id === a.id);
+    if (b && i >= 0 && JSON.stringify(b) !== JSON.stringify(a)) out[i] = merge(out[i], b, a);
+  }
+  const order = (list) => list.filter((x) => has(after, x.id) && has(before, x.id)).map((x) => x.id).join("\0");
+  if (order(before) !== order(after)) {
+    const at = new Map(after.map((x, i) => [x.id, i]));
+    let last = -1;
+    const rank = new Map(
+      out.map((x) => {
+        const i = at.get(x.id);
+        if (i !== void 0) last = i;
+        return [x.id, i ?? last + 0.5];
+      })
+    );
+    out = [...out].sort((x, y) => rank.get(x.id) - rank.get(y.id));
+  }
+  after.forEach((a, i) => {
+    if (has(before, a.id) || has(out, a.id)) return;
+    let at = 0;
+    for (let j = i - 1; j >= 0; j--) {
+      const k = out.findIndex((x) => x.id === after[j].id);
+      if (k >= 0) {
+        at = k + 1;
+        break;
+      }
+    }
+    out.splice(at, 0, structuredClone(a));
+  });
+  return out;
+}
+function sameContent(a, b) {
+  return canonical(a) === canonical(b);
+}
+function canonical(value, key = "") {
+  if (Array.isArray(value)) {
+    const items = value.map((v) => canonical(v));
+    if (key === "edges") items.sort();
+    return `[${items.join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const o = value;
+    const keys = Object.keys(o).filter((k) => o[k] !== void 0).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonical(o[k], k)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+function foldEdges(base, before, after) {
+  const claude = matchEdges(before, after);
+  let out = [...base];
+  for (const gone of claude.removed) {
+    const hit = matchEdges(out, [gone]).pairs[0]?.[0];
+    if (hit) out = out.filter((e) => e !== hit);
+  }
+  for (const [b, a] of claude.pairs) {
+    if (JSON.stringify(b) === JSON.stringify(a)) continue;
+    const hit = matchEdges(out, [b]).pairs[0]?.[0];
+    if (hit) out = out.map((e) => e === hit ? foldFields(e, b, a) : e);
+  }
+  return [...out, ...claude.added.map((e) => structuredClone(e))];
+}
+function validBaseline(raw) {
+  const b = raw;
+  const str = (v) => typeof v === "string";
+  const list = (v, ok) => Array.isArray(v) && v.every((x) => x !== null && typeof x === "object" && ok(x));
+  const whole = b !== null && typeof b === "object" && str(b.title) && str(b.summary) && list(b.sections, (x) => str(x["id"]) && str(x["title"]) && str(x["body"])) && list(b.tasks, (x) => str(x["id"]) && str(x["title"]) && str(x["status"]) && typeof x["order"] === "number") && list(
+    b.diagrams,
+    (x) => str(x["id"]) && str(x["title"]) && list(x["nodes"], (n) => str(n["id"]) && str(n["label"]) && str(n["kind"])) && list(x["edges"], (e) => str(e["source"]) && str(e["target"]))
+  );
+  return whole ? b : void 0;
 }
 function baselineOf(plan) {
   return structuredClone({
@@ -120,14 +240,14 @@ function publishPlan(prev, input, now = Date.now()) {
   const next = { ...base, title, summary: clean(input.summary, MAX_TEXT) ?? base.summary };
   if ((input.sections?.length ?? 0) > MAX_SECTIONS) throw new PlanError(`A plan holds at most ${MAX_SECTIONS} sections.`);
   if ((input.diagrams?.length ?? 0) > MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
-  const sections = [];
+  const sections2 = [];
   for (const raw of input.sections ?? []) {
     const old = base.sections.find((s) => s.id === raw.id);
-    const id = old ? old.id : claimIdAmong(next, "section", raw.id, sections);
+    const id = old ? old.id : claimIdAmong(next, "section", raw.id, sections2);
     const body = clean(raw.body, MAX_TEXT) ?? "";
     const sTitle = clean(raw.title, MAX_TITLE) ?? "Untitled";
     const same = old && old.title === sTitle && old.body === body;
-    sections.push({
+    sections2.push({
       id,
       title: sTitle,
       body,
@@ -185,7 +305,7 @@ function publishPlan(prev, input, now = Date.now()) {
       updatedBy: same ? old.updatedBy : "claude"
     });
   }
-  next.sections = sections;
+  next.sections = sections2;
   next.diagrams = diagrams;
   next.tasks = tasks;
   next.threads = base.threads.map((thread) => detachIfOrphaned(next, base, thread));
@@ -212,6 +332,35 @@ function detachIfOrphaned(plan, before, thread) {
   const label = describeTarget(before, thread.target);
   return { ...thread, target: { kind: "plan", id: "" }, text: `(on removed ${label}) ${thread.text}` };
 }
+function normalizePlan(raw, fallbackTitle) {
+  const now = Date.now();
+  const list = (v) => Array.isArray(v) ? v : [];
+  const plan = {
+    ...emptyPlan(typeof raw.title === "string" && raw.title ? raw.title : fallbackTitle, now),
+    ...raw,
+    summary: typeof raw.summary === "string" ? raw.summary : "",
+    sections: list(raw.sections).map((s) => ({ ...s, rev: typeof s.rev === "number" ? s.rev : 1 })),
+    diagrams: list(raw.diagrams).map((d) => ({
+      ...d,
+      rev: typeof d.rev === "number" ? d.rev : 1,
+      nodes: list(d.nodes),
+      edges: list(d.edges),
+      direction: d.direction === "TB" ? "TB" : "LR"
+    })),
+    tasks: list(raw.tasks),
+    threads: list(raw.threads).map((t) => ({ ...t, replies: list(t.replies) })),
+    changes: list(raw.changes),
+    seq: typeof raw.seq === "number" ? raw.seq : 0,
+    version: typeof raw.version === "number" ? raw.version : typeof raw.seq === "number" ? raw.seq : 0,
+    claudeReadSeq: typeof raw.claudeReadSeq === "number" ? raw.claudeReadSeq : 0,
+    claudeReadAt: typeof raw.claudeReadAt === "number" ? raw.claudeReadAt : null,
+    revision: typeof raw.revision === "number" ? raw.revision : 0
+  };
+  const baseline = validBaseline(raw.claudeBaseline);
+  if (baseline) plan.claudeBaseline = baseline;
+  else delete plan.claudeBaseline;
+  return plan;
+}
 function applyOps(plan, ops, author, now = Date.now()) {
   if (!Array.isArray(ops) || ops.length === 0) throw new PlanError("No edits were given.");
   const next = structuredClone(plan);
@@ -226,7 +375,12 @@ function applyOps(plan, ops, author, now = Date.now()) {
       throw err;
     }
   });
-  if (author === "claude") settleClaudeRead(next);
+  if (author === "claude") {
+    if (next.claudeBaseline && unreadByClaude(next).length > 0) {
+      next.claudeBaseline = foldClaudeEdit(next.claudeBaseline, baselineOf(plan), baselineOf(next));
+    }
+    settleClaudeRead(next);
+  }
   return { plan: next, changes };
 }
 function applyOne(plan, op, author, now) {
@@ -237,7 +391,7 @@ function applyOne(plan, op, author, now) {
       const title = clean(op.title, MAX_TITLE);
       if (title && title !== plan.title) {
         plan.title = title;
-        out.push(log("edited", { kind: "plan", id: "" }, `renamed the plan to "${title}"`));
+        out.push(log("edited", { kind: "plan", id: "" }, `${RENAMED_PLAN} to "${title}"`));
       }
       if (typeof op.summary === "string" && op.summary !== plan.summary) {
         plan.summary = clean(op.summary, MAX_TEXT) ?? "";
@@ -296,9 +450,14 @@ function applyOne(plan, op, author, now) {
         if (!what && !relaid) return [];
         existing.rev += 1;
         existing.updatedAt = now;
-        if (!what) return [];
+        if (!what) {
+          plan.version += 1;
+          plan.updatedAt = now;
+          return [];
+        }
         existing.updatedBy = author;
-        return [log("edited", ref("diagram", existing.id), `${what} in diagram "${existing.title}"`)];
+        const summary = what === EDITED_DESIGN ? `edited diagram "${existing.title}"` : `${what} in diagram "${existing.title}"`;
+        return [log("edited", ref("diagram", existing.id), summary)];
       }
       if (op.id) throw new PlanError(`No diagram "${op.id}".`);
       if (plan.diagrams.length >= MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
@@ -533,23 +692,30 @@ function buildGraph(rawNodes, rawEdges, old, title, taskIds) {
   }
   const ids = new Set(nodes.map((n) => n.id));
   const edges = [];
-  for (const raw of rawEdges) {
+  const cleaned = rawEdges.map((raw) => {
     const source = clean(raw?.source, 60);
     const target = clean(raw?.target, 60);
     if (!source || !target) throw new PlanError(`Diagram "${title}": every edge needs a source and a target.`);
     for (const end of [source, target]) {
       if (!ids.has(end)) throw new PlanError(`Diagram "${title}": an edge refers to node "${end}", which is not in the diagram.`);
     }
-    let id = clean(raw.id, 80) ?? `${source}->${target}`;
+    return { raw, source, target, id: clean(raw.id, 80), label: raw.label === void 0 ? void 0 : clean(raw.label, 120) ?? "" };
+  });
+  const prevOf = new Map(matchEdges(old?.edges ?? [], cleaned).pairs.map(([b, a]) => [a, b]));
+  for (const c of cleaned) {
+    const { raw, source, target } = c;
+    const prev = prevOf.get(c);
+    let id = c.id ?? `${source}->${target}`;
     for (let n = 2; edges.some((e) => e.id === id); n++) id = `${source}->${target}#${n}`;
-    const label = clean(raw.label, 120);
-    const arrows = validArrows(raw.arrows);
+    const label = c.label === void 0 ? prev?.label : c.label || void 0;
+    const dashed = raw.dashed === void 0 ? prev?.dashed : raw.dashed === true;
+    const arrows = raw.arrows === void 0 ? prev?.arrows : validArrows(raw.arrows);
     edges.push({
       id,
       source,
       target,
       ...label ? { label } : {},
-      ...raw.dashed ? { dashed: true } : {},
+      ...dashed ? { dashed: true } : {},
       ...arrows && arrows !== "end" ? { arrows } : {}
     });
   }
@@ -569,13 +735,10 @@ function describeDiagramEdit(before, after) {
     const b = before.nodes.find((x) => x.id === n.id);
     return b && (b.taskIds ?? []).join() !== (n.taskIds ?? []).join();
   });
-  const edgeKey = (e) => `${e.source}->${e.target}`;
-  const linked = after.edges.filter((e) => !before.edges.some((b) => edgeKey(b) === edgeKey(e)));
-  const unlinked = before.edges.filter((e) => !after.edges.some((a) => edgeKey(a) === edgeKey(e)));
-  const relabeled = after.edges.filter((e) => {
-    const b = before.edges.find((x) => edgeKey(x) === edgeKey(e));
-    return b && ((b.label ?? "") !== (e.label ?? "") || Boolean(b.dashed) !== Boolean(e.dashed) || (b.arrows ?? "end") !== (e.arrows ?? "end"));
-  });
+  const matched = matchEdges(before.edges, after.edges);
+  const linked = matched.added;
+  const unlinked = matched.removed;
+  const relabeled = matched.pairs.filter(([b, e]) => (b.label ?? "") !== (e.label ?? "") || Boolean(b.dashed) !== Boolean(e.dashed) || (b.arrows ?? "end") !== (e.arrows ?? "end")).map(([, e]) => e);
   const list = (items) => items.length > 3 ? `${items.slice(0, 3).join(", ")} and ${items.length - 3} more` : items.join(", ");
   if (added.length) parts.push(`added ${list(added.map((n) => `"${n.label}"`))}`);
   if (removed.length) parts.push(`removed ${list(removed.map((n) => `"${n.label}"`))}`);
@@ -585,7 +748,34 @@ function describeDiagramEdit(before, after) {
   if (unlinked.length) parts.push(`disconnected ${list(unlinked.map((e) => `${label(before, e.source)} \u2192 ${label(before, e.target)}`))}`);
   if (relabeled.length) parts.push(`relabelled ${list(relabeled.map((e) => `${label(after, e.source)} \u2192 ${label(after, e.target)}`))}`);
   if ((before.caption ?? "") !== (after.caption ?? "")) parts.push("edited the caption");
-  return parts.length ? parts.join("; ") : null;
+  if (parts.length) return parts.join("; ");
+  return designOf(before) !== designOf(after) ? EDITED_DESIGN : null;
+}
+var EDITED_DESIGN = "edited";
+function designOf(d) {
+  return JSON.stringify([d.title, d.caption ?? "", d.nodes.map(({ x: _x, y: _y, ...n }) => n), d.edges]);
+}
+function matchEdges(before, after) {
+  const pairs = [];
+  const left = [...before];
+  const right = [...after];
+  const take = (same) => {
+    for (let i = 0; i < left.length; ) {
+      const j = right.findIndex((a) => same(left[i], a));
+      if (j < 0) {
+        i++;
+        continue;
+      }
+      pairs.push([left[i], right[j]]);
+      left.splice(i, 1);
+      right.splice(j, 1);
+    }
+  };
+  const ends = (b, a) => b.source === a.source && b.target === a.target;
+  take((b, a) => b.id !== void 0 && b.id === a.id && ends(b, a));
+  take((b, a) => ends(b, a) && (b.label ?? "") === (a.label ?? ""));
+  take(ends);
+  return { pairs, removed: left, added: right };
 }
 function layoutChanged(before, after) {
   if (before.direction !== after.direction) return true;
@@ -939,11 +1129,11 @@ function diagramChanges(before, after, opts = {}) {
       ["description", b.description, n.description],
       ["decisions", b.notes, n.notes]
     ];
-    const editedText = texts.filter(([, was3, now3]) => (was3 ?? "").trim() !== (now3 ?? "").trim());
-    for (const [what, , now3] of editedText) facts.push(now3?.trim() ? `${what} edited` : `${what} removed`);
-    const was2 = b.taskIds ?? [];
-    const now2 = n.taskIds ?? [];
-    if (was2.join() !== now2.join()) facts.push(now2.length ? `built by ${now2.join(", ")}${was2.length ? ` (was ${was2.join(", ")})` : ""}` : "no longer linked to tasks");
+    const editedText = texts.filter(([, was2, now2]) => (was2 ?? "").trim() !== (now2 ?? "").trim());
+    for (const [what, , now2] of editedText) facts.push(now2?.trim() ? `${what} edited` : `${what} removed`);
+    const was = b.taskIds ?? [];
+    const now = n.taskIds ?? [];
+    if (was.join() !== now.join()) facts.push(now.length ? `built by ${now.join(", ")}${was.length ? ` (was ${was.join(", ")})` : ""}` : "no longer linked to tasks");
     if (!facts.length) continue;
     changed.push(`Changed ${ref2(n)}: ${facts.join("; ")}.`);
     if (opts.withText) {
@@ -956,29 +1146,24 @@ function diagramChanges(before, after, opts = {}) {
     if (!after.nodes.some((n) => n.id === b.id)) removed.push(`Removed ${ref2(b)}.`);
   }
   out.push(...added, ...removed, ...changed);
-  const key = (e) => `${e.source}\0${e.target}`;
-  const was = keyed(before.edges, key);
-  const now = keyed(after.edges, key);
+  const { pairs, removed: cut, added: drawn } = matchEdges(before.edges, after.edges);
   const connected = [];
   const disconnected = [];
   const restyled = [];
-  const reversed = /* @__PURE__ */ new Set();
-  for (const [k, e] of was) {
-    if (now.has(k)) continue;
-    const back = `${e.target}\0${e.source}`;
-    if (now.has(back) && !was.has(back)) {
-      reversed.add(back);
-      restyled.push(`Reversed ${label(e.source)} \u2192 ${label(e.target)}: it now runs ${edgePhrase(now.get(back), label)}.`);
+  const unclaimed = [...drawn];
+  for (const e of cut) {
+    const back = (a) => a.source === e.target && a.target === e.source;
+    const same = unclaimed.findIndex((a) => back(a) && (a.label ?? "") === (e.label ?? ""));
+    const k = same >= 0 ? same : unclaimed.findIndex(back);
+    if (k >= 0) {
+      const [now] = unclaimed.splice(k, 1);
+      restyled.push(`Reversed ${label(e.source)} \u2192 ${label(e.target)}: it now runs ${edgePhrase(now, label)}.`);
     } else {
       disconnected.push(`Disconnected ${edgePhrase(e, label)}.`);
     }
   }
-  for (const [k, e] of now) {
-    const b = was.get(k);
-    if (!b) {
-      if (!reversed.has(k)) connected.push(`Connected ${edgePhrase(e, label)}.`);
-      continue;
-    }
+  for (const e of unclaimed) connected.push(`Connected ${edgePhrase(e, label)}.`);
+  for (const [b, e] of pairs) {
     const facts = [];
     if ((b.label ?? "") !== (e.label ?? "")) facts.push(e.label ? `now labelled "${oneLine(e.label)}"` : "label removed");
     if (Boolean(b.dashed) !== Boolean(e.dashed)) facts.push(e.dashed ? "now dashed (optional, async or future)" : "now solid");
@@ -1000,15 +1185,6 @@ function contentOf(diagram2) {
 function labeller(diagram2) {
   const names = new Map(diagram2.nodes.map((n) => [n.id, n.label]));
   return (id) => names.get(id) ?? id;
-}
-function keyed(edges, key) {
-  const out = /* @__PURE__ */ new Map();
-  for (const e of edges) {
-    let k = key(e);
-    for (let n = 2; out.has(k); n++) k = `${key(e)}\0${n}`;
-    out.set(k, e);
-  }
-  return out;
 }
 function prose(what, text, opts) {
   if (!text?.trim()) return [`${what.replace(/^Edited/, "Removed")}.`];
@@ -1089,8 +1265,9 @@ function renderChanges(plan, unread, changesOnly) {
 ${lines.map((l) => l.startsWith(" ") || l === "" ? l : `- ${l}`).join("\n")}`);
   };
   const meta = [];
-  if (base.title !== plan.title) meta.push(`Renamed the plan "${base.title}" \u2192 "${plan.title}".`);
-  if (base.summary.trim() !== plan.summary.trim()) {
+  const userMeta = unread.some((c) => c.target.kind === "plan" && c.kind === "edited");
+  if (userMeta && base.title !== plan.title) meta.push(`Renamed the plan "${base.title}" \u2192 "${plan.title}".`);
+  if (userMeta && base.summary.trim() !== plan.summary.trim()) {
     meta.push(plan.summary.trim() ? "Edited the summary." : "Removed the summary.");
     if (changesOnly && plan.summary.trim()) meta.push(...indent(plan.summary, 2));
   }
@@ -1109,12 +1286,16 @@ ${lines.map((l) => l.startsWith(" ") || l === "" ? l : `- ${l}`).join("\n")}`);
       block(`Diagram [${now.id}] "${now.title}"`, diagramChanges(contentOf(was), contentOf(now), opts));
     }
   }
+  if (unread.some((c) => c.kind === "moved" && c.target.kind === "diagram") && reordered(base.diagrams, plan.diagrams)) {
+    block("Diagrams", [`Reordered the diagrams: ${plan.diagrams.map((d) => `"${d.title}"`).join(", ")}.`]);
+  }
   block("Tasks", taskChanges(base, plan, touched("task"), changesOnly));
   block("Sections", sectionChanges(base, plan, touched("section"), unread, changesOnly));
   const said = unread.filter((c) => ["commented", "replied", "resolved", "reopened"].includes(c.kind)).map((c) => `${capital(c.summary)}.`);
   block("Comments", [...new Set(said)]);
   const lead = changesOnly ? "_The net effect of their edits \u2014 not each step, and not where boxes were moved on the canvas._" : "_The net effect of their edits \u2014 not each step, and not where boxes were moved on the canvas. The full plan follows._";
   if (!blocks.length) {
+    if (!sameContent(baselineOf(plan), base)) return renderChangeLog(unread);
     return `## Since you last read
 The user made edits, but they cancel out: the plan's content is what you last read.`;
   }
@@ -1170,11 +1351,14 @@ function sectionChanges(base, plan, ids, unread, withText) {
       if (withText && was.body.trim() !== now.body.trim()) out.push(...indent(now.body, 2));
     }
   }
-  const order = (list) => list.map((s) => s.id).filter((id) => base.sections.some((s) => s.id === id) && plan.sections.some((s) => s.id === id));
-  if (unread.some((c) => c.kind === "moved" && c.target.kind === "section") && order(base.sections).join() !== order(plan.sections).join()) {
+  if (unread.some((c) => c.kind === "moved" && c.target.kind === "section") && reordered(base.sections, plan.sections)) {
     out.push(`Reordered the sections: ${plan.sections.map((s) => `"${s.title}"`).join(", ")}.`);
   }
   return out;
+}
+function reordered(was, now) {
+  const common = (list, other) => list.map((x) => x.id).filter((id) => other.some((o) => o.id === id));
+  return common(was, now).join("\0") !== common(now, was).join("\0");
 }
 function renderChangeLog(unread) {
   const lines = [...new Set(unread.filter((c) => !/^rearranged \d+ node/.test(c.summary)).map((c) => `- ${c.summary} [${c.target.kind}${c.target.id ? ` ${c.target.id}` : ""}]`))];
@@ -1372,5 +1556,154 @@ test("a long, narrow flow is drawn top to bottom; a short one left to right", ()
   assert.equal(published.diagrams[0].direction, "TB", "publish picks it when Claude does not");
   const asked = publishPlan(null, { title: "x", diagrams: [{ title: "D", direction: "LR", ...chain(8) }] }).plan;
   assert.equal(asked.diagrams[0].direction, "LR", "and keeps what Claude asked for");
+});
+var parallel = () => publishPlan(null, {
+  title: "P",
+  diagrams: [
+    {
+      title: "D",
+      nodes: [
+        { id: "api", label: "API", kind: "service" },
+        { id: "db", label: "DB", kind: "datastore" }
+      ],
+      edges: [
+        { source: "api", target: "db", label: "reads" },
+        { source: "api", target: "db", label: "writes" }
+      ]
+    }
+  ]
+}).plan;
+test("removing one of two arrows between the same boxes is a change, and reaches Claude", () => {
+  const plan = parallel();
+  const d = plan.diagrams[0];
+  const { plan: next, changes } = applyOps(plan, [{ op: "upsert_diagram", id: d.id, nodes: d.nodes, edges: d.edges.filter((e) => e.label !== "writes"), expect: d.rev }], "user");
+  assert.equal(changes.length, 1, "logged");
+  assert.equal(next.diagrams[0].rev, d.rev + 1, "and the revision moved, so a stale tab cannot save it back");
+  assert.match(renderPlan(next, { changesOnly: true }), /- Disconnected API → DB: writes\./);
+  assert.doesNotMatch(renderPlan(next, { changesOnly: true }), /reads/, "the other arrow is untouched");
+});
+test("restyling one of two parallel arrows names that arrow", () => {
+  const plan = parallel();
+  const d = plan.diagrams[0];
+  const edges = d.edges.map((e) => e.label === "writes" ? { ...e, dashed: true } : e);
+  const next = applyOps(plan, [{ op: "upsert_diagram", id: d.id, nodes: d.nodes, edges }], "user").plan;
+  assert.match(renderPlan(next, { changesOnly: true }), /- Changed API → DB: now dashed/);
+});
+test("two parallel arrows reversed are two reversals, not a reversal twice and a new arrow", () => {
+  const before = parallel().diagrams[0];
+  const after = structuredClone(before);
+  after.edges = after.edges.map((e) => ({ ...e, source: e.target, target: e.source }));
+  const lines = diagramChanges(before, after);
+  assert.equal(lines.filter((l) => l.startsWith("Reversed")).length, 2);
+  assert.equal(lines.filter((l) => l.startsWith("Connected")).length, 0);
+  assert.ok(lines.some((l) => /now runs DB → API: reads/.test(l)) && lines.some((l) => /now runs DB → API: writes/.test(l)));
+});
+test("Claude's edits made while the user's are unread are not reported as the user's", () => {
+  let plan = fresh();
+  plan = applyOps(plan, [{ op: "upsert_task", id: "cache-client", title: "Cache client (Redis)" }], "user").plan;
+  plan = applyOps(
+    plan,
+    [
+      { op: "upsert_task", id: "cache-client", status: "done" },
+      { op: "set_meta", title: "Renamed by Claude" },
+      { op: "upsert_section", title: "Claude adds a section", body: "x" }
+    ],
+    "claude"
+  ).plan;
+  const text = renderPlan(plan, { changesOnly: true });
+  assert.match(text, /Changed cache-client "Cache client \(Redis\)": renamed from "Cache client"\./, "the user's rename is still news");
+  assert.doesNotMatch(text, /status/, "Claude set the status itself");
+  assert.doesNotMatch(text, /Renamed the plan|Claude adds a section/);
+});
+test("Claude's edits to a diagram the user also changed are folded in, the user's are not", () => {
+  let plan = fresh();
+  const d = () => plan.diagrams[0];
+  plan = applyOps(plan, [{ op: "upsert_diagram", id: d().id, nodes: d().nodes.map((n) => n.id === "db" ? { ...n, label: "Postgres 16" } : n), edges: d().edges }], "user").plan;
+  plan = applyOps(
+    plan,
+    [{ op: "upsert_diagram", id: d().id, nodes: [...d().nodes, { id: "q", label: "Queue", kind: "queue" }], edges: [...d().edges, { source: "api", target: "q", label: "enqueue" }] }],
+    "claude"
+  ).plan;
+  const text = renderPlan(plan, { changesOnly: true });
+  assert.match(text, /Changed Postgres 16 \(`db`\): renamed from "Postgres"\./);
+  assert.doesNotMatch(text, /Queue|enqueue/, "Claude added those");
+});
+test("reordering diagrams is reported, not called a no-op", () => {
+  let plan = publishPlan(null, { title: "P", diagrams: [{ title: "First", nodes: [] }, { title: "Second", nodes: [] }] }).plan;
+  plan = applyOps(plan, [{ op: "move_diagram", id: plan.diagrams[1].id, index: 0 }], "user").plan;
+  const text = renderPlan(plan, { changesOnly: true });
+  assert.match(text, /Reordered the diagrams: "Second", "First"\./);
+  assert.doesNotMatch(text, /cancel out/);
+});
+test("a damaged baseline is dropped on load, and the read falls back to the log", () => {
+  let plan = applyOps(fresh(), [{ op: "upsert_task", title: "Load test" }], "user").plan;
+  const raw = JSON.parse(JSON.stringify(plan));
+  raw["claudeBaseline"] = { title: "P", summary: "" };
+  plan = normalizePlan(raw, "x");
+  assert.equal(plan.claudeBaseline, void 0);
+  assert.match(renderPlan(plan), /added task "Load test"/);
+});
+test(`renaming the plan is "the plan's title", not "the summary"`, () => {
+  const renamed = applyOps(fresh(), [{ op: "set_meta", title: "Better name" }], "user").plan;
+  assert.deepEqual(unreadAreas(renamed), ["the plan's title"]);
+  const summarised = applyOps(fresh(), [{ op: "set_meta", summary: "New summary" }], "user").plan;
+  assert.deepEqual(unreadAreas(summarised), ["the summary"]);
+});
+test("an arrow keeps the label and style the user gave it when Claude rewires around it", () => {
+  let plan = fresh();
+  const d = () => plan.diagrams[0];
+  const styled = d().edges.map((e) => e.target === "cache" ? { ...e, arrows: "both", dashed: true } : e);
+  plan = applyOps(plan, [{ op: "upsert_diagram", id: d().id, nodes: d().nodes, edges: styled }], "user").plan;
+  plan = publishPlanAfterRead(plan);
+  const bare = d().edges.map(({ source, target }) => ({ source, target }));
+  plan = applyOps(plan, [{ op: "upsert_diagram", id: d().id, edges: bare }], "claude").plan;
+  const cache = d().edges.find((e) => e.target === "cache");
+  assert.equal(cache.arrows, "both");
+  assert.equal(cache.dashed, true);
+  assert.equal(cache.label, "GET order:{id}");
+  plan = applyOps(plan, [{ op: "upsert_diagram", id: d().id, edges: d().edges.map((e) => ({ ...e, label: "", arrows: "end", dashed: false })) }], "user").plan;
+  const cleared = d().edges.find((e) => e.target === "cache");
+  assert.deepEqual([cleared.label, cleared.arrows, cleared.dashed], [void 0, void 0, void 0]);
+});
+function publishPlanAfterRead(plan) {
+  const next = structuredClone(plan);
+  markReadByClaude(next);
+  return next;
+}
+test("a layout save moves the version but logs nothing", () => {
+  const plan = fresh();
+  const d = plan.diagrams[0];
+  const next = applyOps(plan, [{ op: "upsert_diagram", id: d.id, nodes: d.nodes.map((n) => ({ ...n, x: 5, y: 5 })), edges: d.edges }], "user").plan;
+  assert.equal(next.seq, plan.seq);
+  assert.equal(next.version, plan.version + 1);
+});
+var sections = () => publishPlan(null, { title: "P", sections: [{ title: "A", body: "a" }, { title: "B", body: "b" }], tasks: [{ title: "T", note: "n" }] }).plan;
+test("edits that cancel out still say so after Claude has edited around them", () => {
+  let plan = sections();
+  plan = applyOps(plan, [{ op: "upsert_task", id: "t1", title: "T2" }], "user").plan;
+  plan = applyOps(plan, [{ op: "upsert_task", id: "t1", title: "T" }], "user").plan;
+  plan = applyOps(plan, [{ op: "upsert_section", title: "C", body: "c", index: 0 }, { op: "upsert_task", id: "t1", detail: "d" }], "claude").plan;
+  const text = renderPlan(plan, { changesOnly: true });
+  assert.match(text, /they cancel out/);
+  assert.doesNotMatch(text, /edited the title/, "not the step-by-step log");
+});
+test("a section Claude inserts goes where Claude put it, and the user's reorder is still reported", () => {
+  let plan = sections();
+  plan = applyOps(plan, [{ op: "move_section", id: "s2", index: 0 }], "user").plan;
+  plan = applyOps(plan, [{ op: "upsert_section", title: "C", body: "c", index: 0 }], "claude").plan;
+  assert.deepEqual(plan.claudeBaseline.sections.map((s) => s.title), ["C", "A", "B"], "C first, A and B as Claude last read them");
+  const text = renderPlan(plan, { changesOnly: true });
+  assert.match(text, /Reordered the sections: "C", "B", "A"\./);
+  assert.doesNotMatch(text, /Added \[s3\]/, "Claude added that one");
+});
+test("content is compared without regard to field order or the order arrows are listed in", () => {
+  const plan = parallel();
+  const a = baselineOf(plan);
+  const b = structuredClone(a);
+  b.diagrams[0].edges.reverse();
+  b.tasks = b.tasks.map((t) => Object.fromEntries(Object.entries(t).reverse()));
+  assert.ok(sameContent(a, b));
+  b.diagrams[0].edges[0].label = "other";
+  assert.ok(!sameContent(a, b));
 });
 //# sourceMappingURL=architecture.test.js.map

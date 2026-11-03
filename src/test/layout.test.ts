@@ -189,3 +189,26 @@ test('boxes with a subtitle or linked tasks are taller; long labels wrap rather 
   const long = nodeSize(node('a', { label: 'A component with a really very long name indeed' }));
   assert.ok(long.width <= 250 && long.height > nodeSize(node('a')).height);
 });
+
+test('the same graph is laid out once, however often it is asked for', () => {
+  const d = system();
+  const first = autoLayout(d, 'LR');
+  const route = (l: ReturnType<typeof autoLayout>) => l.routes.get('web->gw');
+  const dragged = autoLayout({ ...d, nodes: d.nodes.map((n) => ({ ...n, x: 99, y: 99 })) }, 'LR');
+  assert.equal(route(dragged), route(first), 'where boxes sit is not part of it: the same work, reused');
+  assert.deepEqual([...dragged.positions], [...first.positions]);
+  const renamed = autoLayout({ ...d, nodes: d.nodes.map((n) => (n.id === 'web' ? { ...n, label: 'Web storefront' } : n)) }, 'LR');
+  assert.notEqual(route(renamed), route(first), 'what changes a box\'s size is');
+  assert.notEqual(route(autoLayout(d, 'TB')), route(first));
+});
+
+test('a cached layout cannot be changed through what it hands out', () => {
+  const d = system();
+  const first = autoLayout(d, 'LR');
+  first.positions.get('web')!.x += 500;
+  assert.notEqual(autoLayout(d, 'LR').positions.get('web')!.x, first.positions.get('web')!.x, 'positions are copies');
+  assert.throws(() => {
+    'use strict';
+    (first.routes.get('web->gw')!.points[0] as { x: number }).x = 1;
+  }, TypeError, 'routes are frozen');
+});

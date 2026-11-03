@@ -214,16 +214,21 @@ class Store {
    * (the canvas's revision) need the daemon's answer, not whatever the store
    * holds by the time it arrives.
    */
-  async commit(ops: PlanOp[]): Promise<Plan | null> {
-    const id = this.state.sessionId;
+  async commit(ops: PlanOp[], sessionId: string | null = this.state.sessionId): Promise<Plan | null> {
+    // A caller bound to one session's plan (the canvas) names it, so a save
+    // still queued when the user switches sessions lands where it was made.
+    const id = sessionId;
     if (!id || ops.length === 0) return null;
     this.set({ saving: this.state.saving + 1 });
     try {
       const { plan } = await api.ops(id, ops);
       const session = this.state.session;
       // The live stream may already have delivered something newer — a change
-      // Claude made right after this one. Never roll the page back to it.
-      if (session && session.sessionId === id && (!session.plan || plan.seq >= session.plan.seq)) {
+      // Claude made right after this one, or another tab's drag. Never roll
+      // the page back to it. `version` counts layout saves too; `seq` does not.
+      // A daemon started before `version` existed sends none; fall back to seq.
+      const order = (p: Plan) => p.version ?? p.seq;
+      if (session && session.sessionId === id && (!session.plan || order(plan) >= order(session.plan))) {
         this.set({ session: { ...session, plan } });
       }
       return plan;

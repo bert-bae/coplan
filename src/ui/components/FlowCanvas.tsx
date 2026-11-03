@@ -97,8 +97,6 @@ function Editor({
   const [nodes, setNodes] = useState<FlowNode[]>(initial.nodes);
   const [edges, setEdges] = useState<FlowEdge[]>(initial.edges);
   const [editing, setEditing] = useState<string | null>(null);
-  /** A box just made, whose name the panel should be ready to take. */
-  const [fresh, setFresh] = useState<string | null>(null);
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
   nodesRef.current = nodes;
@@ -114,7 +112,11 @@ function Editor({
   // The plan object is replaced on every broadcast, so follow the graph's
   // content rather than its identity — otherwise a comment elsewhere in the
   // plan would reset the canvas mid-gesture.
-  const signature = useMemo(() => JSON.stringify([diagram.nodes, diagram.edges, diagram.direction]), [diagram]);
+  const signature = useMemo(() => signatureOf(diagram), [diagram]);
+  /** The graph the canvas last loaded, by signature. */
+  const loaded = useRef(signature);
+  /** A keyboard nudge waiting to be saved. */
+  const nudge = useRef<number | undefined>(undefined);
   /** The revision the canvas's own state was loaded from. Saves are made
    *  against it, so a change that landed elsewhere since is never overwritten
    *  — not even one that arrived mid-drag, while the canvas was not listening. */
@@ -125,15 +127,19 @@ function Editor({
     setNodes((prev) => keepSelection(prev, next.nodes));
     setEdges((prev) => keepRoutes(prev, keepSelection(prev, next.edges), next.nodes));
     baseRev.current = source.rev;
+    loaded.current = signatureOf(source);
   }, []);
 
   useEffect(() => {
     // Mid-gesture or mid-save the canvas is ahead of the server; the save
     // queue reconciles once it drains.
-    if (dragging.current || queue.current.busy || queue.current.pending) return;
-    load(diagram, plan);
+    if (dragging.current || nudge.current !== undefined || queue.current.busy || queue.current.pending) return;
+    if (loaded.current !== signature) load(diagram, plan);
+    // The revision moved without the graph changing — the title or caption
+    // was edited. Nothing to redraw, but the next save is made against it.
+    else baseRev.current = diagram.rev;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on content
-  }, [signature]);
+  }, [signature, diagram.rev]);
 
   // Task progress changes far more often than the graph does, and must not
   // move anything: patch it into the boxes in place.
@@ -224,9 +230,11 @@ function Editor({
           id: e.id,
           source: e.source,
           target: e.target,
-          ...(e.data?.label ? { label: e.data.label } : {}),
-          ...(e.data?.dashed ? { dashed: true } : {}),
-          ...(e.data?.arrows ? { arrows: e.data.arrows } : {}),
+          // Always said, even when empty: the daemon keeps an arrow's label
+          // and style when an edit leaves them out.
+          label: e.data?.label ?? '',
+          dashed: Boolean(e.data?.dashed),
+          arrows: e.data?.arrows ?? 'end',
         })),
         // A patch waiting behind the one in flight is replaced, not merged —
         // except for the direction, which only the relayout ever sets.
@@ -249,7 +257,33 @@ function Editor({
 
   /* ---------------------------- editing ---------------------------- */
 
-  const onNodesChange = useCallback((changes: NodeChange<FlowNode>[]) => setNodes((ns) => applyNodeChanges(changes, ns)), []);
+  const onNodesChange = useCallback(
+    (changes: NodeChange<FlowNode>[]) => {
+      setNodes((ns) => applyNodeChanges(changes, ns));
+      // Arrow keys move selected boxes through here rather than as a drag,
+      // so nothing else would save them. Save once the keys stop; a drag's
+      // own moves are saved when it ends.
+      if (dragging.current || !changes.some((c) => c.type === 'position' && c.position && !c.dragging)) return;
+      window.clearTimeout(nudge.current);
+      nudge.current = window.setTimeout(() => {
+        nudge.current = undefined;
+        persist(nodesRef.current, edgesRef.current);
+      }, 300);
+    },
+    [persist],
+  );
+  // Leaving the diagram within the nudge delay still saves the move.
+  const persistRef = useRef(persist);
+  persistRef.current = persist;
+  useEffect(
+    () => () => {
+      if (nudge.current === undefined) return;
+      window.clearTimeout(nudge.current);
+      nudge.current = undefined;
+      persistRef.current(nodesRef.current, edgesRef.current);
+    },
+    [],
+  );
   const onEdgesChange = useCallback((changes: EdgeChange<FlowEdge>[]) => setEdges((es) => applyEdgeChanges(changes, es)), []);
 
   const connect = useCallback(
@@ -288,7 +322,6 @@ function Editor({
       const base = edgesRef.current.map((e) => (e.selected ? { ...e, selected: false } : e));
       const nextEdges = opts.from ? [...base, makeEdge({ id: freeEdgeId(base, opts.from, id), source: opts.from, target: id })] : base;
       commit(nextNodes, nextEdges);
-      setFresh(id);
       setEditing(`node:${id}`);
     },
     [commit, diagram.direction, flow],
@@ -326,8 +359,9 @@ function Editor({
     [commit],
   );
 
-  const onNodeDragStop = useCallback(
-    (_: unknown, __: FlowNode, moved: FlowNode[]) => {
+  /** A drag of one box, or of a selection by its rectangle, is over. */
+  const onDragStop = useCallback(
+    (moved: FlowNode[]) => {
       dragging.current = false;
       const at = new Map(moved.map((n) => [n.id, n.position]));
       persist(
@@ -337,6 +371,11 @@ function Editor({
     },
     [persist],
   );
+  const onNodeDragStop = useCallback((_: unknown, __: FlowNode, moved: FlowNode[]) => onDragStop(moved), [onDragStop]);
+  const onSelectionDragStop = useCallback((_: unknown, moved: FlowNode[]) => onDragStop(moved), [onDragStop]);
+  const onDragStart = useCallback(() => {
+    dragging.current = true;
+  }, []);
 
   const updateNodes = (ids: Set<string>, patch: NodePatch) => {
     const ns = nodesRef.current.map((n) => {
@@ -526,7 +565,6 @@ function Editor({
       startEditing: setEditing,
       finishNodeLabel: (id, label) => {
         setEditing(null);
-        setFresh(null);
         const node = nodesRef.current.find((n) => n.id === id);
         const next = label?.trim();
         if (node && next && next !== node.data.label) updateNode(id, { label: next });
@@ -564,7 +602,6 @@ function Editor({
         nodes={nodes}
         edges={edges}
         plan={plan}
-        focusName={fresh === node.id && editing !== `node:${node.id}`}
         onChange={(patch) => updateNode(node.id, patch)}
         onSelect={select}
         onConnect={(target) => connect(node.id, target)}
@@ -634,10 +671,10 @@ function Editor({
             onConnect={onConnect}
             onConnectEnd={onConnectEnd}
             onDelete={onDelete}
-            onNodeDragStart={() => {
-              dragging.current = true;
-            }}
+            onNodeDragStart={onDragStart}
             onNodeDragStop={onNodeDragStop}
+            onSelectionDragStart={onDragStart}
+            onSelectionDragStop={onSelectionDragStop}
             onNodeDoubleClick={(_, node) => setEditing(`node:${node.id}`)}
             onEdgeDoubleClick={(_, edge) => setEditing(`edge:${edge.id}`)}
             connectionMode={ConnectionMode.Loose}
@@ -707,6 +744,11 @@ function toFlow(diagram: Diagram, plan: Plan): { nodes: FlowNode[]; edges: FlowE
   }));
   const edges = diagram.edges.map((e) => withRoute(makeEdge(e), layout));
   return { nodes, edges };
+}
+
+/** What the canvas draws from: the graph without its revision or authorship. */
+function signatureOf(d: Diagram): string {
+  return JSON.stringify([d.nodes, d.edges, d.direction]);
 }
 
 function makeEdge(

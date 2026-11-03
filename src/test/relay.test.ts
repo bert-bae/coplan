@@ -81,6 +81,10 @@ function relay(
     let stdout = '';
     child.stdout.on('data', (c: Buffer) => (stdout += c.toString()));
     child.on('close', (code) => resolve({ stdout, code }));
+    // The relay may exit without reading its input — with no event name it
+    // does so by design — and a write racing that exit fails with EPIPE.
+    // That is the behaviour under test, not an error in it.
+    child.stdin.on('error', () => undefined);
     child.stdin.write(payload);
     child.stdin.end();
   });

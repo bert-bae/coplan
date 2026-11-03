@@ -38,7 +38,7 @@ var EDGE = {
   properties: {
     source: { type: "string", description: "Node id." },
     target: { type: "string", description: "Node id." },
-    label: { type: "string", description: 'What flows along it, e.g. "REST", "publishes events".' },
+    label: { type: "string", description: 'What flows along it, e.g. "REST", "publishes events". "" clears it.' },
     dashed: { type: "boolean", description: "Optional, async or future connection." },
     arrows: { type: "string", enum: ["end", "both", "none"], description: 'Arrowheads. Default "end" (source to target).' }
   },
@@ -71,7 +71,7 @@ var TOOLS = [
   {
     name: "harness_plan_publish",
     endpoint: "publish",
-    description: "Publish the whole plan to the harness UI, where the user reads it visually, reorganizes it and comments on it. Include: a summary; sections for context, architecture and risks; diagrams of the design as nodes and edges (the UI lays them out and the user can rearrange them); and a task tree broken into subtasks. Replaces the plan; items keep their comments and statuses when you keep their ids. Refused if the user has changed the plan since you last read it. Ask decisions you need with AskUserQuestion in chat, not in the plan. Does not wait for the user: afterwards, tell them in chat that the plan is ready.",
+    description: 'Publish the whole plan to the harness UI, where the user reads it visually, reorganizes it and comments on it. Include: a summary; sections for context, architecture and risks; diagrams of the design as nodes and edges (the UI lays them out and the user can rearrange them); and a task tree broken into subtasks. Replaces the plan; items keep their comments and statuses when you keep their ids, a box keeps its position, description and notes and an arrow between the same two boxes its label and style unless you restate them ("" clears a label). Refused if the user has changed the plan since you last read it. Ask decisions you need with AskUserQuestion in chat, not in the plan. Does not wait for the user: afterwards, tell them in chat that the plan is ready.',
     inputSchema: {
       type: "object",
       properties: {
@@ -111,7 +111,7 @@ var TOOLS = [
   {
     name: "harness_plan_edit",
     endpoint: "edit",
-    description: 'Make targeted changes to the plan, applied together or not at all. Each op is an object with an "op" field: set_meta {title?, summary?}; upsert_section {id?, title?, body?, index?}; upsert_diagram {id?, title?, nodes?, edges?, direction?, caption?} (nodes/edges replace the current ones; positions are kept for node ids you keep); upsert_task {id?, parentId?, index?, title?, detail?, status?, files?, note?} (omit id to add; parentId makes it a subtask); move_task {id, parentId, index}; reply {threadId, text} (reply to a comment); resolve {threadId, resolved}; remove {kind: section|diagram|task, id}.',
+    description: 'Make targeted changes to the plan, applied together or not at all. Each op is an object with an "op" field: set_meta {title?, summary?}; upsert_section {id?, title?, body?, index?}; upsert_diagram {id?, title?, nodes?, edges?, direction?, caption?} (nodes/edges replace the current ones; a box you keep keeps its position, description and notes, and an arrow between the same two boxes keeps its label, dashed and arrows, unless you give them); upsert_task {id?, parentId?, index?, title?, detail?, status?, files?, note?} (omit id to add; parentId makes it a subtask); move_task {id, parentId, index}; reply {threadId, text} (reply to a comment); resolve {threadId, resolved}; remove {kind: section|diagram|task, id}.',
     inputSchema: {
       type: "object",
       properties: {

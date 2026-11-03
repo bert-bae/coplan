@@ -99,9 +99,46 @@ const SPACING: Record<DiagramDirection, { nodesep: number; ranksep: number; edge
 };
 const SHELF_GAP = 72;
 
+/**
+ * Layouts already worked out, by what they depend on: the boxes' sizes and
+ * the arrows, never where anything was dragged. Every reload after a drag
+ * asks for the same layout again — to see whether any arrow can keep its
+ * route — and running network-simplex each time is wasted.
+ */
+const computed = new Map<string, Layout>();
+const COMPUTED_MAX = 16;
+
 /** Top-left positions for every node, and a route for every arrow, ignoring
  *  any saved positions. */
 export function autoLayout(diagram: Graph, direction: DiagramDirection): Layout {
+  const key = JSON.stringify([
+    direction,
+    diagram.nodes.map((n) => [n.id, n.label, n.detail ?? '', n.kind, n.taskIds?.length ? 1 : 0]),
+    diagram.edges.map((e) => [e.id, e.source, e.target, e.label ?? '']),
+  ]);
+  let hit = computed.get(key);
+  if (hit) computed.delete(key);
+  else hit = seal(computeLayout(diagram, direction));
+  computed.set(key, hit);
+  if (computed.size > COMPUTED_MAX) computed.delete(computed.keys().next().value!);
+  // Positions go onto boxes the canvas owns, so each caller gets its own;
+  // routes are only ever read, and are frozen so nothing can change them.
+  return { positions: new Map([...hit.positions].map(([id, p]) => [id, { ...p }])), routes: new Map(hit.routes) };
+}
+
+function seal(layout: Layout): Layout {
+  for (const r of layout.routes.values()) {
+    for (const p of r.points) Object.freeze(p);
+    Object.freeze(r.points);
+    if (r.label) Object.freeze(r.label);
+    Object.freeze(r.from);
+    Object.freeze(r.to);
+    Object.freeze(r);
+  }
+  return layout;
+}
+
+function computeLayout(diagram: Graph, direction: DiagramDirection): Layout {
   const degree = new Map<string, number>();
   for (const e of diagram.edges) {
     if (e.source === e.target) continue;
@@ -243,11 +280,13 @@ function normalize(layout: Layout): Layout {
  * automatic layout would put them.
  */
 export function resolveLayout(diagram: Pick<Diagram, 'nodes' | 'edges' | 'direction'>): Layout {
-  const auto = autoLayout(diagram, diagram.direction);
   const placed = diagram.nodes.filter((n) => n.x !== undefined && n.y !== undefined);
+  const positions: Positions = new Map(placed.map((n) => [n.id, { x: n.x!, y: n.y! }]));
+  // Arranged by hand and nothing to route: no layout to work out.
+  if (placed.length === diagram.nodes.length && diagram.edges.length === 0) return { positions, routes: new Map() };
+  const auto = autoLayout(diagram, diagram.direction);
   if (placed.length === 0) return auto;
 
-  const positions: Positions = new Map(placed.map((n) => [n.id, { x: n.x!, y: n.y! }]));
   if (placed.length < diagram.nodes.length) placeNewcomers(diagram, positions, auto.positions);
 
   const routes = new Map<string, Route>();
@@ -256,11 +295,6 @@ export function resolveLayout(diagram: Pick<Diagram, 'nodes' | 'edges' | 'direct
     if (r && samePoint(positions.get(e.source), r.from) && samePoint(positions.get(e.target), r.to)) routes.set(e.id, r);
   }
   return { positions, routes };
-}
-
-/** Kept for callers that only want positions. */
-export function resolvePositions(diagram: Pick<Diagram, 'nodes' | 'edges' | 'direction'>): Positions {
-  return resolveLayout(diagram).positions;
 }
 
 const RANK_GAP = 90;
@@ -310,7 +344,7 @@ export function placeNewcomers(diagram: Pick<Diagram, 'nodes' | 'edges' | 'direc
           x: centre.x - s.width / 2,
           y: after ? Math.max(...boxes.map((b) => b.y + b.height)) + RANK_GAP : Math.min(...boxes.map((b) => b.y)) - RANK_GAP - s.height,
         };
-    positions.set(n.id, freeSpot(want, s, positions, size, lr));
+    positions.set(n.id, findFreeSpot(want, s, positions, size, lr));
   }
 
   if (!strays.length) return;
@@ -325,15 +359,10 @@ export function placeNewcomers(diagram: Pick<Diagram, 'nodes' | 'edges' | 'direc
   }
 }
 
-/** The nearest spot to `want` where a new box overlaps nothing on the
- *  canvas — for a box added from the toolbar or beside another. */
-export function findFreeSpot(want: Point, s: Box, positions: Positions, size: Map<string, Box>, lr: boolean): Point {
-  return freeSpot(want, s, positions, size, lr);
-}
-
 /** The nearest spot to `want`, moving across the flow, where a box of size
- *  `s` overlaps nothing already placed. */
-function freeSpot(want: Point, s: Box, positions: Positions, size: Map<string, Box>, lr: boolean): Point {
+ *  `s` overlaps nothing already placed — for a newcomer from Claude, or a
+ *  box added from the toolbar or beside another. */
+export function findFreeSpot(want: Point, s: Box, positions: Positions, size: Map<string, Box>, lr: boolean): Point {
   const clear = (p: Point) =>
     [...positions].every(([id, q]) => {
       const b = size.get(id) ?? { width: MIN_WIDTH, height: 44 };
@@ -348,7 +377,7 @@ function freeSpot(want: Point, s: Box, positions: Positions, size: Map<string, B
     if (clear(p)) return { x: Math.round(p.x), y: Math.round(p.y) };
   }
   // Nothing near is free: one more rank along the flow.
-  return freeSpot(lr ? { x: want.x + s.width + RANK_GAP, y: want.y } : { x: want.x, y: want.y + s.height + RANK_GAP }, s, positions, size, lr);
+  return findFreeSpot(lr ? { x: want.x + s.width + RANK_GAP, y: want.y } : { x: want.x, y: want.y + s.height + RANK_GAP }, s, positions, size, lr);
 }
 
 /* ------------------------------------------------------------------ *

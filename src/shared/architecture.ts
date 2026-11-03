@@ -20,7 +20,7 @@
  * and the tests.
  */
 import type { Diagram, DiagramEdge, DiagramNode, NodeKind, PlanBaseline, Task } from './types.ts';
-import { flowRanks } from './plan.ts';
+import { flowRanks, matchEdges } from './plan.ts';
 
 /** What each kind of box is, in words. */
 export const KIND_NOUN: Record<NodeKind, string> = {
@@ -241,31 +241,29 @@ export function diagramChanges(before: DiagramContent, after: DiagramContent, op
   }
   out.push(...added, ...removed, ...changed);
 
-  // Connections are matched by their ends, so a redrawn arrow between the
-  // same two parts is the same connection.
-  const key = (e: DiagramEdge) => `${e.source}\u0000${e.target}`;
-  const was = keyed(before.edges, key);
-  const now = keyed(after.edges, key);
+  // Connections pair up by identity, then by their ends (see matchEdges):
+  // a redrawn arrow between the same two parts is the same connection, and
+  // two arrows between the same parts stay two.
+  const { pairs, removed: cut, added: drawn } = matchEdges(before.edges, after.edges);
   const connected: string[] = [];
   const disconnected: string[] = [];
   const restyled: string[] = [];
-  const reversed = new Set<string>();
-  for (const [k, e] of was) {
-    if (now.has(k)) continue;
-    const back = `${e.target}\u0000${e.source}`;
-    if (now.has(back) && !was.has(back)) {
-      reversed.add(back);
-      restyled.push(`Reversed ${label(e.source)} → ${label(e.target)}: it now runs ${edgePhrase(now.get(back)!, label)}.`);
+  const unclaimed = [...drawn];
+  for (const e of cut) {
+    // Gone one way and new the other way between the same parts: reversed.
+    // Each new arrow can only be the reversal of one old one.
+    const back = (a: DiagramEdge) => a.source === e.target && a.target === e.source;
+    const same = unclaimed.findIndex((a) => back(a) && (a.label ?? '') === (e.label ?? ''));
+    const k = same >= 0 ? same : unclaimed.findIndex(back);
+    if (k >= 0) {
+      const [now] = unclaimed.splice(k, 1);
+      restyled.push(`Reversed ${label(e.source)} → ${label(e.target)}: it now runs ${edgePhrase(now!, label)}.`);
     } else {
       disconnected.push(`Disconnected ${edgePhrase(e, label)}.`);
     }
   }
-  for (const [k, e] of now) {
-    const b = was.get(k);
-    if (!b) {
-      if (!reversed.has(k)) connected.push(`Connected ${edgePhrase(e, label)}.`);
-      continue;
-    }
+  for (const e of unclaimed) connected.push(`Connected ${edgePhrase(e, label)}.`);
+  for (const [b, e] of pairs) {
     const facts: string[] = [];
     if ((b.label ?? '') !== (e.label ?? '')) facts.push(e.label ? `now labelled "${oneLine(e.label)}"` : 'label removed');
     if (Boolean(b.dashed) !== Boolean(e.dashed)) facts.push(e.dashed ? 'now dashed (optional, async or future)' : 'now solid');
@@ -294,16 +292,6 @@ export function contentOf(diagram: Diagram | PlanBaseline['diagrams'][number]): 
 function labeller(diagram: Pick<DiagramContent, 'nodes'>): (id: string) => string {
   const names = new Map(diagram.nodes.map((n) => [n.id, n.label]));
   return (id) => names.get(id) ?? id;
-}
-
-function keyed(edges: DiagramEdge[], key: (e: DiagramEdge) => string): Map<string, DiagramEdge> {
-  const out = new Map<string, DiagramEdge>();
-  for (const e of edges) {
-    let k = key(e);
-    for (let n = 2; out.has(k); n++) k = `${key(e)}\u0000${n}`;
-    out.set(k, e);
-  }
-  return out;
 }
 
 function prose(what: string, text: string | undefined, opts: DiffOptions): string[] {

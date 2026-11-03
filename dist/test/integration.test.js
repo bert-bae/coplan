@@ -303,8 +303,11 @@ test("the session environment decides the link back to Claude", async () => {
   assert.equal((await session()).link?.web, "https://claude.ai/code/session_01Cloud");
 });
 test("task tracking moves statuses and reports them", async () => {
+  await ops([{ op: "upsert_task", title: "Profile it" }]);
   const res = await mcp("task", { task_id: "t2", status: "done", note: "client added" });
   assert.match(String(res["text"]), /"Client" is done/);
+  assert.match(String(res["text"]), /The user has changed tasks since you last read the plan/);
+  assert.doesNotMatch(String(res["text"]), /time\(s\)/);
   const bad = await mcp("task", { task_id: "nope", status: "done" });
   assert.equal(bad["ok"], false);
   assert.match(String(bad["text"]), /No task "nope"/);

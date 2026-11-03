@@ -49,6 +49,7 @@ const TEMPLATES: { label: string; title: string; nodes: DiagramNodeInput[]; edge
 export function DiagramsView() {
   const plan = usePlan();
   const chosen = useStore((s) => s.diagramId);
+  const sessionId = useStore((s) => s.sessionId);
   if (!plan) return null;
   const diagram = plan.diagrams.find((d) => d.id === chosen) ?? plan.diagrams[0] ?? null;
 
@@ -79,11 +80,14 @@ export function DiagramsView() {
 
       {diagram ? (
         <DiagramEditor
-          key={diagram.id}
+          // Every plan's first diagram is d1: keyed by the session too, so
+          // switching sessions starts a fresh canvas rather than reusing one
+          // full of the last plan's boxes.
+          key={`${sessionId}:${diagram.id}`}
           diagram={diagram}
           plan={plan}
           onSave={async (patch: GraphPatch) => {
-            const plan = await store.commit([{ op: 'upsert_diagram', id: diagram.id, ...patch }]);
+            const plan = await store.commit([{ op: 'upsert_diagram', id: diagram.id, ...patch }], sessionId);
             return plan?.diagrams.find((d) => d.id === diagram.id)?.rev ?? null;
           }}
           aside={<DiagramPanel plan={plan} diagram={diagram} />}

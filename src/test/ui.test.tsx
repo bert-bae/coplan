@@ -403,6 +403,132 @@ test('"Copy as Markdown" copies the diagram as Claude reads it', async () => {
   assert.doesNotMatch(copied, /"x"|x: /);
 });
 
+test('a title edit elsewhere does not make the next canvas save stale', async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  // Renamed in another tab: the diagram's revision moves, its graph does not.
+  const s = store.getState().session!;
+  const plan = structuredClone(s.plan!);
+  plan.diagrams[0]!.rev += 1;
+  plan.diagrams[0]!.title = 'Renamed elsewhere';
+  plan.version += 1;
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...s, plan } });
+  });
+  await selectBox('API');
+  await act(async () => {
+    fireEvent.change(within(screen.getByRole('complementary', { name: 'Details' })).getByLabelText('Link a task to API'), { target: { value: 't3' } });
+  });
+  const op = opsSent().filter((o) => o['op'] === 'upsert_diagram').at(-1)!;
+  assert.equal(op['expect'], plan.diagrams[0]!.rev, 'saved against the revision now current');
+});
+
+test('a late answer never rolls the page back past a newer version', async () => {
+  await boot();
+  const s = store.getState().session!;
+  const older = { ...s.plan!, title: 'Older', version: s.plan!.version + 1 };
+  store.set({ session: { ...s, plan: { ...s.plan!, title: 'Newer', version: s.plan!.version + 2 } } });
+  stubFetch((route) => (route.endsWith('/plan/ops') ? { plan: older, changes: [] } : { ok: true }));
+  await act(async () => {
+    await store.commit([{ op: 'set_meta', title: 'Older' }]);
+  });
+  assert.equal(store.getState().session?.plan?.title, 'Newer');
+});
+
+test('moving a box with the arrow keys is saved', async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('API');
+  const node = [...document.querySelectorAll<HTMLElement>('.react-flow__node')].find((n) => n.textContent?.includes('API'))!;
+  const before = opsSent().length;
+  await act(async () => {
+    fireEvent.keyDown(node, { key: 'ArrowRight' });
+    fireEvent.keyDown(node, { key: 'ArrowRight' });
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 400));
+  });
+  assert.ok(opsSent().length > before, 'a save followed the keys');
+  assert.equal(opsSent().length - before, 1, 'one save for the run of keys, not one per press');
+});
+
+test('a keyboard move is saved even when the diagram closes straight after', async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('API');
+  const node = [...document.querySelectorAll<HTMLElement>('.react-flow__node')].find((n) => n.textContent?.includes('API'))!;
+  const before = opsSent().length;
+  await act(async () => {
+    fireEvent.keyDown(node, { key: 'ArrowRight' });
+  });
+  await act(async () => {
+    cleanup();
+    await new Promise((r) => setTimeout(r, 20));
+  });
+  assert.equal(opsSent().length - before, 1, 'saved on the way out');
+});
+
+test("a canvas save still pending when the session changes goes to the session it was made in", async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('API');
+  const node = [...document.querySelectorAll<HTMLElement>('.react-flow__node')].find((n) => n.textContent?.includes('API'))!;
+  await act(async () => {
+    fireEvent.keyDown(node, { key: 'ArrowRight' });
+  });
+  // Another session with the same plan shape — its first diagram is d1 too.
+  await act(async () => {
+    store.set({ sessionId: 's2', session: makeSession(makePlan(), { sessionId: 's2' }) });
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 400));
+  });
+  const saves = posts.filter((p) => p.route.endsWith('/plan/ops') && (p.body['ops'] as { op: string }[]).some((o) => o.op === 'upsert_diagram'));
+  assert.ok(saves.length > 0, 'the move was saved');
+  assert.ok(saves.every((p) => p.route.includes('/session/s1/')), `never into s2: ${saves.map((p) => p.route).join(', ')}`);
+});
+
+test('an answer from a daemon that predates version is still applied', async () => {
+  await boot();
+  const s = store.getState().session!;
+  const legacy = { ...s.plan!, title: 'From the old daemon', seq: s.plan!.seq + 1 } as Partial<Plan>;
+  delete legacy.version;
+  store.set({ session: { ...s, plan: { ...s.plan!, version: undefined as unknown as number } } });
+  stubFetch((route) => (route.endsWith('/plan/ops') ? { plan: legacy, changes: [] } : { ok: true }));
+  await act(async () => {
+    await store.commit([{ op: 'set_meta', title: 'From the old daemon' }]);
+  });
+  assert.equal(store.getState().session?.plan?.title, 'From the old daemon');
+});
+
+test('a summary says how many connections it left out', async () => {
+  const targets = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+  const plan = publishPlan(
+    null,
+    {
+      title: 'Hub',
+      diagrams: [
+        {
+          title: 'D',
+          nodes: [{ id: 'hub', label: 'Hub', kind: 'service' }, ...targets.map((t) => ({ id: t, label: t.toUpperCase(), kind: 'component' }))],
+          edges: targets.map((t) => ({ source: 'hub', target: t })),
+        },
+      ],
+    },
+    Date.now(),
+  ).plan;
+  await boot(makeSession(plan));
+  const info = await waitFor(() => {
+    const el = document.querySelector<HTMLButtonElement>('button[aria-label="About Hub"]');
+    assert.ok(el);
+    return el;
+  });
+  await act(async () => {
+    fireEvent.mouseEnter(info);
+  });
+  await waitFor(() => assert.match(document.querySelector('.flow-summary')?.textContent ?? '', /and 2 more/));
+});
+
 /* ---------------------------------------------------------------- tasks */
 
 test('the outline shows the breakdown, and which part each task builds', async () => {

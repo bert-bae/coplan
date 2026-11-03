@@ -64,6 +64,7 @@ function emptyPlan(title = "Untitled plan", now = Date.now()) {
     threads: [],
     changes: [],
     seq: 0,
+    version: 0,
     claudeReadSeq: 0,
     claudeReadAt: null,
     revision: 0,
@@ -96,6 +97,7 @@ function claimId(plan, kind, wanted) {
 }
 function record(plan, author, kind, target, summary, now) {
   plan.seq += 1;
+  plan.version += 1;
   const change = { seq: plan.seq, ts: now, author, kind, target, summary };
   plan.changes.push(change);
   if (plan.changes.length > MAX_CHANGES) plan.changes.splice(0, plan.changes.length - MAX_CHANGES);
@@ -118,6 +120,94 @@ function settleClaudeRead(plan) {
   if (unreadByClaude(plan).length > 0) return;
   plan.claudeReadSeq = plan.seq;
   plan.claudeBaseline = baselineOf(plan);
+}
+function foldClaudeEdit(base, before2, after2) {
+  const out = structuredClone(base);
+  if (before2.title !== after2.title) out.title = after2.title;
+  if (before2.summary !== after2.summary) out.summary = after2.summary;
+  out.sections = foldList(out.sections, before2.sections, after2.sections, foldFields);
+  out.tasks = foldList(out.tasks, before2.tasks, after2.tasks, foldFields);
+  out.diagrams = foldList(out.diagrams, before2.diagrams, after2.diagrams, (o, b, a) => {
+    const { nodes: _on, edges: _oe, ...meta } = o;
+    const { nodes: _bn, edges: _be, ...bMeta } = b;
+    const { nodes: _an, edges: _ae, ...aMeta } = a;
+    return {
+      ...foldFields(meta, bMeta, aMeta),
+      nodes: foldList(o.nodes, b.nodes, a.nodes, foldFields),
+      edges: foldEdges(o.edges, b.edges, a.edges)
+    };
+  });
+  return out;
+}
+function foldFields(o, b, a) {
+  const out = { ...o };
+  const was = b;
+  const now = a;
+  for (const key of /* @__PURE__ */ new Set([...Object.keys(was), ...Object.keys(now)])) {
+    if (JSON.stringify(was[key]) === JSON.stringify(now[key])) continue;
+    if (now[key] === void 0) delete out[key];
+    else out[key] = structuredClone(now[key]);
+  }
+  return out;
+}
+function foldList(base, before2, after2, merge) {
+  const has = (list, id) => list.some((x) => x.id === id);
+  let out = base.filter((x) => !(has(before2, x.id) && !has(after2, x.id)));
+  for (const a of after2) {
+    const b = before2.find((x) => x.id === a.id);
+    const i = out.findIndex((x) => x.id === a.id);
+    if (b && i >= 0 && JSON.stringify(b) !== JSON.stringify(a)) out[i] = merge(out[i], b, a);
+  }
+  const order = (list) => list.filter((x) => has(after2, x.id) && has(before2, x.id)).map((x) => x.id).join("\0");
+  if (order(before2) !== order(after2)) {
+    const at = new Map(after2.map((x, i) => [x.id, i]));
+    let last = -1;
+    const rank = new Map(
+      out.map((x) => {
+        const i = at.get(x.id);
+        if (i !== void 0) last = i;
+        return [x.id, i ?? last + 0.5];
+      })
+    );
+    out = [...out].sort((x, y) => rank.get(x.id) - rank.get(y.id));
+  }
+  after2.forEach((a, i) => {
+    if (has(before2, a.id) || has(out, a.id)) return;
+    let at = 0;
+    for (let j = i - 1; j >= 0; j--) {
+      const k = out.findIndex((x) => x.id === after2[j].id);
+      if (k >= 0) {
+        at = k + 1;
+        break;
+      }
+    }
+    out.splice(at, 0, structuredClone(a));
+  });
+  return out;
+}
+function foldEdges(base, before2, after2) {
+  const claude = matchEdges(before2, after2);
+  let out = [...base];
+  for (const gone of claude.removed) {
+    const hit = matchEdges(out, [gone]).pairs[0]?.[0];
+    if (hit) out = out.filter((e) => e !== hit);
+  }
+  for (const [b, a] of claude.pairs) {
+    if (JSON.stringify(b) === JSON.stringify(a)) continue;
+    const hit = matchEdges(out, [b]).pairs[0]?.[0];
+    if (hit) out = out.map((e) => e === hit ? foldFields(e, b, a) : e);
+  }
+  return [...out, ...claude.added.map((e) => structuredClone(e))];
+}
+function validBaseline(raw) {
+  const b = raw;
+  const str = (v) => typeof v === "string";
+  const list = (v, ok) => Array.isArray(v) && v.every((x) => x !== null && typeof x === "object" && ok(x));
+  const whole = b !== null && typeof b === "object" && str(b.title) && str(b.summary) && list(b.sections, (x) => str(x["id"]) && str(x["title"]) && str(x["body"])) && list(b.tasks, (x) => str(x["id"]) && str(x["title"]) && str(x["status"]) && typeof x["order"] === "number") && list(
+    b.diagrams,
+    (x) => str(x["id"]) && str(x["title"]) && list(x["nodes"], (n) => str(n["id"]) && str(n["label"]) && str(n["kind"])) && list(x["edges"], (e) => str(e["source"]) && str(e["target"]))
+  );
+  return whole ? b : void 0;
 }
 function baselineOf(plan) {
   return structuredClone({
@@ -266,10 +356,14 @@ function normalizePlan(raw, fallbackTitle) {
     threads: list(raw.threads).map((t) => ({ ...t, replies: list(t.replies) })),
     changes: list(raw.changes),
     seq: typeof raw.seq === "number" ? raw.seq : 0,
+    version: typeof raw.version === "number" ? raw.version : typeof raw.seq === "number" ? raw.seq : 0,
     claudeReadSeq: typeof raw.claudeReadSeq === "number" ? raw.claudeReadSeq : 0,
     claudeReadAt: typeof raw.claudeReadAt === "number" ? raw.claudeReadAt : null,
     revision: typeof raw.revision === "number" ? raw.revision : 0
   };
+  const baseline = validBaseline(raw.claudeBaseline);
+  if (baseline) plan.claudeBaseline = baseline;
+  else delete plan.claudeBaseline;
   return plan;
 }
 function applyOps(plan, ops, author, now = Date.now()) {
@@ -286,7 +380,12 @@ function applyOps(plan, ops, author, now = Date.now()) {
       throw err;
     }
   });
-  if (author === "claude") settleClaudeRead(next);
+  if (author === "claude") {
+    if (next.claudeBaseline && unreadByClaude(next).length > 0) {
+      next.claudeBaseline = foldClaudeEdit(next.claudeBaseline, baselineOf(plan), baselineOf(next));
+    }
+    settleClaudeRead(next);
+  }
   return { plan: next, changes };
 }
 function applyOne(plan, op, author, now) {
@@ -297,7 +396,7 @@ function applyOne(plan, op, author, now) {
       const title = clean(op.title, MAX_TITLE);
       if (title && title !== plan.title) {
         plan.title = title;
-        out.push(log("edited", { kind: "plan", id: "" }, `renamed the plan to "${title}"`));
+        out.push(log("edited", { kind: "plan", id: "" }, `${RENAMED_PLAN} to "${title}"`));
       }
       if (typeof op.summary === "string" && op.summary !== plan.summary) {
         plan.summary = clean(op.summary, MAX_TEXT) ?? "";
@@ -356,9 +455,14 @@ function applyOne(plan, op, author, now) {
         if (!what && !relaid) return [];
         existing.rev += 1;
         existing.updatedAt = now;
-        if (!what) return [];
+        if (!what) {
+          plan.version += 1;
+          plan.updatedAt = now;
+          return [];
+        }
         existing.updatedBy = author;
-        return [log("edited", ref("diagram", existing.id), `${what} in diagram "${existing.title}"`)];
+        const summary = what === EDITED_DESIGN ? `edited diagram "${existing.title}"` : `${what} in diagram "${existing.title}"`;
+        return [log("edited", ref("diagram", existing.id), summary)];
       }
       if (op.id) throw new PlanError(`No diagram "${op.id}".`);
       if (plan.diagrams.length >= MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
@@ -590,23 +694,30 @@ function buildGraph(rawNodes, rawEdges, old, title, taskIds) {
   }
   const ids = new Set(nodes.map((n) => n.id));
   const edges = [];
-  for (const raw of rawEdges) {
+  const cleaned = rawEdges.map((raw) => {
     const source = clean(raw?.source, 60);
     const target = clean(raw?.target, 60);
     if (!source || !target) throw new PlanError(`Diagram "${title}": every edge needs a source and a target.`);
     for (const end of [source, target]) {
       if (!ids.has(end)) throw new PlanError(`Diagram "${title}": an edge refers to node "${end}", which is not in the diagram.`);
     }
-    let id = clean(raw.id, 80) ?? `${source}->${target}`;
+    return { raw, source, target, id: clean(raw.id, 80), label: raw.label === void 0 ? void 0 : clean(raw.label, 120) ?? "" };
+  });
+  const prevOf = new Map(matchEdges(old?.edges ?? [], cleaned).pairs.map(([b, a]) => [a, b]));
+  for (const c of cleaned) {
+    const { raw, source, target } = c;
+    const prev = prevOf.get(c);
+    let id = c.id ?? `${source}->${target}`;
     for (let n = 2; edges.some((e) => e.id === id); n++) id = `${source}->${target}#${n}`;
-    const label = clean(raw.label, 120);
-    const arrows = validArrows(raw.arrows);
+    const label = c.label === void 0 ? prev?.label : c.label || void 0;
+    const dashed = raw.dashed === void 0 ? prev?.dashed : raw.dashed === true;
+    const arrows = raw.arrows === void 0 ? prev?.arrows : validArrows(raw.arrows);
     edges.push({
       id,
       source,
       target,
       ...label ? { label } : {},
-      ...raw.dashed ? { dashed: true } : {},
+      ...dashed ? { dashed: true } : {},
       ...arrows && arrows !== "end" ? { arrows } : {}
     });
   }
@@ -626,13 +737,10 @@ function describeDiagramEdit(before2, after2) {
     const b = before2.nodes.find((x) => x.id === n.id);
     return b && (b.taskIds ?? []).join() !== (n.taskIds ?? []).join();
   });
-  const edgeKey = (e) => `${e.source}->${e.target}`;
-  const linked = after2.edges.filter((e) => !before2.edges.some((b) => edgeKey(b) === edgeKey(e)));
-  const unlinked = before2.edges.filter((e) => !after2.edges.some((a) => edgeKey(a) === edgeKey(e)));
-  const relabeled = after2.edges.filter((e) => {
-    const b = before2.edges.find((x) => edgeKey(x) === edgeKey(e));
-    return b && ((b.label ?? "") !== (e.label ?? "") || Boolean(b.dashed) !== Boolean(e.dashed) || (b.arrows ?? "end") !== (e.arrows ?? "end"));
-  });
+  const matched = matchEdges(before2.edges, after2.edges);
+  const linked = matched.added;
+  const unlinked = matched.removed;
+  const relabeled = matched.pairs.filter(([b, e]) => (b.label ?? "") !== (e.label ?? "") || Boolean(b.dashed) !== Boolean(e.dashed) || (b.arrows ?? "end") !== (e.arrows ?? "end")).map(([, e]) => e);
   const list = (items) => items.length > 3 ? `${items.slice(0, 3).join(", ")} and ${items.length - 3} more` : items.join(", ");
   if (added.length) parts.push(`added ${list(added.map((n) => `"${n.label}"`))}`);
   if (removed.length) parts.push(`removed ${list(removed.map((n) => `"${n.label}"`))}`);
@@ -642,7 +750,33 @@ function describeDiagramEdit(before2, after2) {
   if (unlinked.length) parts.push(`disconnected ${list(unlinked.map((e) => `${label(before2, e.source)} \u2192 ${label(before2, e.target)}`))}`);
   if (relabeled.length) parts.push(`relabelled ${list(relabeled.map((e) => `${label(after2, e.source)} \u2192 ${label(after2, e.target)}`))}`);
   if ((before2.caption ?? "") !== (after2.caption ?? "")) parts.push("edited the caption");
-  return parts.length ? parts.join("; ") : null;
+  if (parts.length) return parts.join("; ");
+  return designOf(before2) !== designOf(after2) ? EDITED_DESIGN : null;
+}
+function designOf(d) {
+  return JSON.stringify([d.title, d.caption ?? "", d.nodes.map(({ x: _x, y: _y, ...n }) => n), d.edges]);
+}
+function matchEdges(before2, after2) {
+  const pairs = [];
+  const left = [...before2];
+  const right = [...after2];
+  const take = (same) => {
+    for (let i = 0; i < left.length; ) {
+      const j = right.findIndex((a) => same(left[i], a));
+      if (j < 0) {
+        i++;
+        continue;
+      }
+      pairs.push([left[i], right[j]]);
+      left.splice(i, 1);
+      right.splice(j, 1);
+    }
+  };
+  const ends = (b, a) => b.source === a.source && b.target === a.target;
+  take((b, a) => b.id !== void 0 && b.id === a.id && ends(b, a));
+  take((b, a) => ends(b, a) && (b.label ?? "") === (a.label ?? ""));
+  take(ends);
+  return { pairs, removed: left, added: right };
 }
 function layoutChanged(before2, after2) {
   if (before2.direction !== after2.direction) return true;
@@ -863,7 +997,7 @@ function currentTask(plan) {
   if (!plan) return null;
   return outline(plan).find((r) => r.task.status === "in_progress" && !plan.tasks.some((t) => t.parentId === r.task.id))?.task ?? null;
 }
-var PlanError, MAX_CHANGES, MAX_TITLE, MAX_TEXT, MAX_TASKS, MAX_SECTIONS, MAX_DIAGRAMS, MAX_THREADS, MAX_REPLIES, PREFIX, MAX_NODES, MAX_EDGES, MAX_DESCRIPTION, STATUS_WORDS;
+var PlanError, MAX_CHANGES, MAX_TITLE, MAX_TEXT, MAX_TASKS, MAX_SECTIONS, MAX_DIAGRAMS, MAX_THREADS, MAX_REPLIES, PREFIX, RENAMED_PLAN, MAX_NODES, MAX_EDGES, MAX_DESCRIPTION, EDITED_DESIGN, STATUS_WORDS;
 var init_plan = __esm({
   "src/shared/plan.ts"() {
     "use strict";
@@ -879,9 +1013,11 @@ var init_plan = __esm({
     MAX_THREADS = 500;
     MAX_REPLIES = 200;
     PREFIX = { section: "s", diagram: "d", task: "t", thread: "c" };
+    RENAMED_PLAN = "renamed the plan";
     MAX_NODES = 120;
     MAX_EDGES = 300;
     MAX_DESCRIPTION = 4e3;
+    EDITED_DESIGN = "edited";
     STATUS_WORDS = {
       todo: "to do",
       in_progress: "in progress",

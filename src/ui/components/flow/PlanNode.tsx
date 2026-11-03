@@ -124,6 +124,7 @@ function NodeSummary({ id, data, onEnter, onLeave }: { id: string; data: FlowDat
   const into = edges.filter((e) => e.target === id && e.source !== id);
   const tasks = (data.taskIds ?? []).map((t) => plan?.tasks.find((x) => x.id === t)).filter((t) => t !== undefined);
   const SHOWN = 5;
+  const hidden = Math.max(0, out.length - SHOWN) + Math.max(0, into.length - SHOWN);
 
   return (
     <div className="flow-summary" role="tooltip" onMouseEnter={onEnter} onMouseLeave={onLeave}>
@@ -193,7 +194,7 @@ function NodeSummary({ id, data, onEnter, onLeave }: { id: string; data: FlowDat
                 {e.data?.label && <span className="muted"> · {e.data.label}</span>}
               </li>
             ))}
-            {out.length + into.length > SHOWN * 2 && <li className="muted">and more</li>}
+            {hidden > 0 && <li className="muted">and {hidden} more</li>}
           </ul>
         </section>
       )}

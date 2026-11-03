@@ -273,14 +273,15 @@ var init_store = __esm({
        * (the canvas's revision) need the daemon's answer, not whatever the store
        * holds by the time it arrives.
        */
-      async commit(ops) {
-        const id = this.state.sessionId;
+      async commit(ops, sessionId = this.state.sessionId) {
+        const id = sessionId;
         if (!id || ops.length === 0) return null;
         this.set({ saving: this.state.saving + 1 });
         try {
           const { plan } = await api.ops(id, ops);
           const session = this.state.session;
-          if (session && session.sessionId === id && (!session.plan || plan.seq >= session.plan.seq)) {
+          const order = (p) => p.version ?? p.seq;
+          if (session && session.sessionId === id && (!session.plan || order(plan) >= order(session.plan))) {
             this.set({ session: { ...session, plan } });
           }
           return plan;
@@ -1106,9 +1107,11 @@ __export(plan_exports, {
   emptyPlan: () => emptyPlan,
   flowRanks: () => flowRanks,
   markReadByClaude: () => markReadByClaude,
+  matchEdges: () => matchEdges,
   normalizePlan: () => normalizePlan,
   outline: () => outline,
   publishPlan: () => publishPlan,
+  sameContent: () => sameContent,
   short: () => short,
   suggestDirection: () => suggestDirection,
   targetExists: () => targetExists,
@@ -1126,6 +1129,7 @@ function emptyPlan(title = "Untitled plan", now = Date.now()) {
     threads: [],
     changes: [],
     seq: 0,
+    version: 0,
     claudeReadSeq: 0,
     claudeReadAt: null,
     revision: 0,
@@ -1158,6 +1162,7 @@ function claimId(plan, kind, wanted) {
 }
 function record(plan, author, kind, target, summary, now) {
   plan.seq += 1;
+  plan.version += 1;
   const change = { seq: plan.seq, ts: now, author, kind, target, summary };
   plan.changes.push(change);
   if (plan.changes.length > MAX_CHANGES) plan.changes.splice(0, plan.changes.length - MAX_CHANGES);
@@ -1179,6 +1184,7 @@ function unreadAreas(plan) {
     else if (c.target.kind === "diagram") add(`the "${plan.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
     else if (c.target.kind === "task") add("tasks");
     else if (c.target.kind === "section") add("sections");
+    else if (c.summary.startsWith(RENAMED_PLAN)) add("the plan's title");
     else add("the summary");
   }
   return areas;
@@ -1192,6 +1198,110 @@ function settleClaudeRead(plan) {
   if (unreadByClaude(plan).length > 0) return;
   plan.claudeReadSeq = plan.seq;
   plan.claudeBaseline = baselineOf(plan);
+}
+function foldClaudeEdit(base, before, after2) {
+  const out = structuredClone(base);
+  if (before.title !== after2.title) out.title = after2.title;
+  if (before.summary !== after2.summary) out.summary = after2.summary;
+  out.sections = foldList(out.sections, before.sections, after2.sections, foldFields);
+  out.tasks = foldList(out.tasks, before.tasks, after2.tasks, foldFields);
+  out.diagrams = foldList(out.diagrams, before.diagrams, after2.diagrams, (o, b, a) => {
+    const { nodes: _on, edges: _oe, ...meta } = o;
+    const { nodes: _bn, edges: _be, ...bMeta } = b;
+    const { nodes: _an, edges: _ae, ...aMeta } = a;
+    return {
+      ...foldFields(meta, bMeta, aMeta),
+      nodes: foldList(o.nodes, b.nodes, a.nodes, foldFields),
+      edges: foldEdges(o.edges, b.edges, a.edges)
+    };
+  });
+  return out;
+}
+function foldFields(o, b, a) {
+  const out = { ...o };
+  const was = b;
+  const now = a;
+  for (const key of /* @__PURE__ */ new Set([...Object.keys(was), ...Object.keys(now)])) {
+    if (JSON.stringify(was[key]) === JSON.stringify(now[key])) continue;
+    if (now[key] === void 0) delete out[key];
+    else out[key] = structuredClone(now[key]);
+  }
+  return out;
+}
+function foldList(base, before, after2, merge) {
+  const has = (list, id) => list.some((x) => x.id === id);
+  let out = base.filter((x) => !(has(before, x.id) && !has(after2, x.id)));
+  for (const a of after2) {
+    const b = before.find((x) => x.id === a.id);
+    const i = out.findIndex((x) => x.id === a.id);
+    if (b && i >= 0 && JSON.stringify(b) !== JSON.stringify(a)) out[i] = merge(out[i], b, a);
+  }
+  const order = (list) => list.filter((x) => has(after2, x.id) && has(before, x.id)).map((x) => x.id).join("\0");
+  if (order(before) !== order(after2)) {
+    const at = new Map(after2.map((x, i) => [x.id, i]));
+    let last = -1;
+    const rank = new Map(
+      out.map((x) => {
+        const i = at.get(x.id);
+        if (i !== void 0) last = i;
+        return [x.id, i ?? last + 0.5];
+      })
+    );
+    out = [...out].sort((x, y) => rank.get(x.id) - rank.get(y.id));
+  }
+  after2.forEach((a, i) => {
+    if (has(before, a.id) || has(out, a.id)) return;
+    let at = 0;
+    for (let j = i - 1; j >= 0; j--) {
+      const k = out.findIndex((x) => x.id === after2[j].id);
+      if (k >= 0) {
+        at = k + 1;
+        break;
+      }
+    }
+    out.splice(at, 0, structuredClone(a));
+  });
+  return out;
+}
+function sameContent(a, b) {
+  return canonical(a) === canonical(b);
+}
+function canonical(value, key = "") {
+  if (Array.isArray(value)) {
+    const items = value.map((v) => canonical(v));
+    if (key === "edges") items.sort();
+    return `[${items.join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const o = value;
+    const keys = Object.keys(o).filter((k) => o[k] !== void 0).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonical(o[k], k)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+function foldEdges(base, before, after2) {
+  const claude = matchEdges(before, after2);
+  let out = [...base];
+  for (const gone of claude.removed) {
+    const hit = matchEdges(out, [gone]).pairs[0]?.[0];
+    if (hit) out = out.filter((e) => e !== hit);
+  }
+  for (const [b, a] of claude.pairs) {
+    if (JSON.stringify(b) === JSON.stringify(a)) continue;
+    const hit = matchEdges(out, [b]).pairs[0]?.[0];
+    if (hit) out = out.map((e) => e === hit ? foldFields(e, b, a) : e);
+  }
+  return [...out, ...claude.added.map((e) => structuredClone(e))];
+}
+function validBaseline(raw) {
+  const b = raw;
+  const str = (v) => typeof v === "string";
+  const list = (v, ok) => Array.isArray(v) && v.every((x) => x !== null && typeof x === "object" && ok(x));
+  const whole = b !== null && typeof b === "object" && str(b.title) && str(b.summary) && list(b.sections, (x) => str(x["id"]) && str(x["title"]) && str(x["body"])) && list(b.tasks, (x) => str(x["id"]) && str(x["title"]) && str(x["status"]) && typeof x["order"] === "number") && list(
+    b.diagrams,
+    (x) => str(x["id"]) && str(x["title"]) && list(x["nodes"], (n) => str(n["id"]) && str(n["label"]) && str(n["kind"])) && list(x["edges"], (e) => str(e["source"]) && str(e["target"]))
+  );
+  return whole ? b : void 0;
 }
 function baselineOf(plan) {
   return structuredClone({
@@ -1340,10 +1450,14 @@ function normalizePlan(raw, fallbackTitle) {
     threads: list(raw.threads).map((t) => ({ ...t, replies: list(t.replies) })),
     changes: list(raw.changes),
     seq: typeof raw.seq === "number" ? raw.seq : 0,
+    version: typeof raw.version === "number" ? raw.version : typeof raw.seq === "number" ? raw.seq : 0,
     claudeReadSeq: typeof raw.claudeReadSeq === "number" ? raw.claudeReadSeq : 0,
     claudeReadAt: typeof raw.claudeReadAt === "number" ? raw.claudeReadAt : null,
     revision: typeof raw.revision === "number" ? raw.revision : 0
   };
+  const baseline = validBaseline(raw.claudeBaseline);
+  if (baseline) plan.claudeBaseline = baseline;
+  else delete plan.claudeBaseline;
   return plan;
 }
 function applyOps(plan, ops, author, now = Date.now()) {
@@ -1360,7 +1474,12 @@ function applyOps(plan, ops, author, now = Date.now()) {
       throw err;
     }
   });
-  if (author === "claude") settleClaudeRead(next);
+  if (author === "claude") {
+    if (next.claudeBaseline && unreadByClaude(next).length > 0) {
+      next.claudeBaseline = foldClaudeEdit(next.claudeBaseline, baselineOf(plan), baselineOf(next));
+    }
+    settleClaudeRead(next);
+  }
   return { plan: next, changes };
 }
 function applyOne(plan, op, author, now) {
@@ -1371,7 +1490,7 @@ function applyOne(plan, op, author, now) {
       const title = clean(op.title, MAX_TITLE);
       if (title && title !== plan.title) {
         plan.title = title;
-        out.push(log("edited", { kind: "plan", id: "" }, `renamed the plan to "${title}"`));
+        out.push(log("edited", { kind: "plan", id: "" }, `${RENAMED_PLAN} to "${title}"`));
       }
       if (typeof op.summary === "string" && op.summary !== plan.summary) {
         plan.summary = clean(op.summary, MAX_TEXT) ?? "";
@@ -1430,9 +1549,14 @@ function applyOne(plan, op, author, now) {
         if (!what && !relaid) return [];
         existing.rev += 1;
         existing.updatedAt = now;
-        if (!what) return [];
+        if (!what) {
+          plan.version += 1;
+          plan.updatedAt = now;
+          return [];
+        }
         existing.updatedBy = author;
-        return [log("edited", ref("diagram", existing.id), `${what} in diagram "${existing.title}"`)];
+        const summary = what === EDITED_DESIGN ? `edited diagram "${existing.title}"` : `${what} in diagram "${existing.title}"`;
+        return [log("edited", ref("diagram", existing.id), summary)];
       }
       if (op.id) throw new PlanError(`No diagram "${op.id}".`);
       if (plan.diagrams.length >= MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
@@ -1664,23 +1788,30 @@ function buildGraph(rawNodes, rawEdges, old, title, taskIds) {
   }
   const ids = new Set(nodes.map((n) => n.id));
   const edges = [];
-  for (const raw of rawEdges) {
+  const cleaned = rawEdges.map((raw) => {
     const source = clean(raw?.source, 60);
     const target = clean(raw?.target, 60);
     if (!source || !target) throw new PlanError(`Diagram "${title}": every edge needs a source and a target.`);
     for (const end of [source, target]) {
       if (!ids.has(end)) throw new PlanError(`Diagram "${title}": an edge refers to node "${end}", which is not in the diagram.`);
     }
-    let id = clean(raw.id, 80) ?? `${source}->${target}`;
+    return { raw, source, target, id: clean(raw.id, 80), label: raw.label === void 0 ? void 0 : clean(raw.label, 120) ?? "" };
+  });
+  const prevOf = new Map(matchEdges(old?.edges ?? [], cleaned).pairs.map(([b, a]) => [a, b]));
+  for (const c of cleaned) {
+    const { raw, source, target } = c;
+    const prev = prevOf.get(c);
+    let id = c.id ?? `${source}->${target}`;
     for (let n = 2; edges.some((e) => e.id === id); n++) id = `${source}->${target}#${n}`;
-    const label = clean(raw.label, 120);
-    const arrows = validArrows(raw.arrows);
+    const label = c.label === void 0 ? prev?.label : c.label || void 0;
+    const dashed = raw.dashed === void 0 ? prev?.dashed : raw.dashed === true;
+    const arrows = raw.arrows === void 0 ? prev?.arrows : validArrows(raw.arrows);
     edges.push({
       id,
       source,
       target,
       ...label ? { label } : {},
-      ...raw.dashed ? { dashed: true } : {},
+      ...dashed ? { dashed: true } : {},
       ...arrows && arrows !== "end" ? { arrows } : {}
     });
   }
@@ -1700,13 +1831,10 @@ function describeDiagramEdit(before, after2) {
     const b = before.nodes.find((x) => x.id === n.id);
     return b && (b.taskIds ?? []).join() !== (n.taskIds ?? []).join();
   });
-  const edgeKey = (e) => `${e.source}->${e.target}`;
-  const linked = after2.edges.filter((e) => !before.edges.some((b) => edgeKey(b) === edgeKey(e)));
-  const unlinked = before.edges.filter((e) => !after2.edges.some((a) => edgeKey(a) === edgeKey(e)));
-  const relabeled = after2.edges.filter((e) => {
-    const b = before.edges.find((x) => edgeKey(x) === edgeKey(e));
-    return b && ((b.label ?? "") !== (e.label ?? "") || Boolean(b.dashed) !== Boolean(e.dashed) || (b.arrows ?? "end") !== (e.arrows ?? "end"));
-  });
+  const matched = matchEdges(before.edges, after2.edges);
+  const linked = matched.added;
+  const unlinked = matched.removed;
+  const relabeled = matched.pairs.filter(([b, e]) => (b.label ?? "") !== (e.label ?? "") || Boolean(b.dashed) !== Boolean(e.dashed) || (b.arrows ?? "end") !== (e.arrows ?? "end")).map(([, e]) => e);
   const list = (items) => items.length > 3 ? `${items.slice(0, 3).join(", ")} and ${items.length - 3} more` : items.join(", ");
   if (added.length) parts.push(`added ${list(added.map((n) => `"${n.label}"`))}`);
   if (removed.length) parts.push(`removed ${list(removed.map((n) => `"${n.label}"`))}`);
@@ -1716,7 +1844,33 @@ function describeDiagramEdit(before, after2) {
   if (unlinked.length) parts.push(`disconnected ${list(unlinked.map((e) => `${label(before, e.source)} \u2192 ${label(before, e.target)}`))}`);
   if (relabeled.length) parts.push(`relabelled ${list(relabeled.map((e) => `${label(after2, e.source)} \u2192 ${label(after2, e.target)}`))}`);
   if ((before.caption ?? "") !== (after2.caption ?? "")) parts.push("edited the caption");
-  return parts.length ? parts.join("; ") : null;
+  if (parts.length) return parts.join("; ");
+  return designOf(before) !== designOf(after2) ? EDITED_DESIGN : null;
+}
+function designOf(d) {
+  return JSON.stringify([d.title, d.caption ?? "", d.nodes.map(({ x: _x, y: _y, ...n }) => n), d.edges]);
+}
+function matchEdges(before, after2) {
+  const pairs = [];
+  const left = [...before];
+  const right = [...after2];
+  const take = (same) => {
+    for (let i = 0; i < left.length; ) {
+      const j = right.findIndex((a) => same(left[i], a));
+      if (j < 0) {
+        i++;
+        continue;
+      }
+      pairs.push([left[i], right[j]]);
+      left.splice(i, 1);
+      right.splice(j, 1);
+    }
+  };
+  const ends = (b, a) => b.source === a.source && b.target === a.target;
+  take((b, a) => b.id !== void 0 && b.id === a.id && ends(b, a));
+  take((b, a) => ends(b, a) && (b.label ?? "") === (a.label ?? ""));
+  take(ends);
+  return { pairs, removed: left, added: right };
 }
 function layoutChanged(before, after2) {
   if (before.direction !== after2.direction) return true;
@@ -1937,7 +2091,7 @@ function currentTask(plan) {
   if (!plan) return null;
   return outline(plan).find((r) => r.task.status === "in_progress" && !plan.tasks.some((t) => t.parentId === r.task.id))?.task ?? null;
 }
-var PlanError, MAX_CHANGES, MAX_TITLE, MAX_TEXT, MAX_TASKS, MAX_SECTIONS, MAX_DIAGRAMS, MAX_THREADS, MAX_REPLIES, PREFIX, MAX_NODES, MAX_EDGES, MAX_DESCRIPTION, STATUS_WORDS;
+var PlanError, MAX_CHANGES, MAX_TITLE, MAX_TEXT, MAX_TASKS, MAX_SECTIONS, MAX_DIAGRAMS, MAX_THREADS, MAX_REPLIES, PREFIX, RENAMED_PLAN, MAX_NODES, MAX_EDGES, MAX_DESCRIPTION, EDITED_DESIGN, STATUS_WORDS;
 var init_plan = __esm({
   "src/shared/plan.ts"() {
     "use strict";
@@ -1953,9 +2107,11 @@ var init_plan = __esm({
     MAX_THREADS = 500;
     MAX_REPLIES = 200;
     PREFIX = { section: "s", diagram: "d", task: "t", thread: "c" };
+    RENAMED_PLAN = "renamed the plan";
     MAX_NODES = 120;
     MAX_EDGES = 300;
     MAX_DESCRIPTION = 4e3;
+    EDITED_DESIGN = "edited";
     STATUS_WORDS = {
       todo: "to do",
       in_progress: "in progress",
@@ -3102,6 +3258,30 @@ function labelSize(label) {
   return { width: Math.round(Math.min(172, text + 14)), height: 8 + lines * 14 };
 }
 function autoLayout(diagram, direction) {
+  const key = JSON.stringify([
+    direction,
+    diagram.nodes.map((n) => [n.id, n.label, n.detail ?? "", n.kind, n.taskIds?.length ? 1 : 0]),
+    diagram.edges.map((e) => [e.id, e.source, e.target, e.label ?? ""])
+  ]);
+  let hit = computed.get(key);
+  if (hit) computed.delete(key);
+  else hit = seal(computeLayout(diagram, direction));
+  computed.set(key, hit);
+  if (computed.size > COMPUTED_MAX) computed.delete(computed.keys().next().value);
+  return { positions: new Map([...hit.positions].map(([id, p]) => [id, { ...p }])), routes: new Map(hit.routes) };
+}
+function seal(layout) {
+  for (const r of layout.routes.values()) {
+    for (const p of r.points) Object.freeze(p);
+    Object.freeze(r.points);
+    if (r.label) Object.freeze(r.label);
+    Object.freeze(r.from);
+    Object.freeze(r.to);
+    Object.freeze(r);
+  }
+  return layout;
+}
+function computeLayout(diagram, direction) {
   const degree = /* @__PURE__ */ new Map();
   for (const e of diagram.edges) {
     if (e.source === e.target) continue;
@@ -3222,10 +3402,11 @@ function normalize(layout) {
   return { positions, routes };
 }
 function resolveLayout(diagram) {
-  const auto = autoLayout(diagram, diagram.direction);
   const placed = diagram.nodes.filter((n) => n.x !== void 0 && n.y !== void 0);
-  if (placed.length === 0) return auto;
   const positions = new Map(placed.map((n) => [n.id, { x: n.x, y: n.y }]));
+  if (placed.length === diagram.nodes.length && diagram.edges.length === 0) return { positions, routes: /* @__PURE__ */ new Map() };
+  const auto = autoLayout(diagram, diagram.direction);
+  if (placed.length === 0) return auto;
   if (placed.length < diagram.nodes.length) placeNewcomers(diagram, positions, auto.positions);
   const routes = /* @__PURE__ */ new Map();
   for (const e of diagram.edges) {
@@ -3265,7 +3446,7 @@ function placeNewcomers(diagram, positions, auto) {
       x: centre2.x - s.width / 2,
       y: after2 ? Math.max(...boxes.map((b) => b.y + b.height)) + RANK_GAP : Math.min(...boxes.map((b) => b.y)) - RANK_GAP - s.height
     };
-    positions.set(n.id, freeSpot(want, s, positions, size, lr));
+    positions.set(n.id, findFreeSpot(want, s, positions, size, lr));
   }
   if (!strays.length) return;
   const sub = autoLayout(
@@ -3279,9 +3460,6 @@ function placeNewcomers(diagram, positions, auto) {
   }
 }
 function findFreeSpot(want, s, positions, size, lr) {
-  return freeSpot(want, s, positions, size, lr);
-}
-function freeSpot(want, s, positions, size, lr) {
   const clear = (p) => [...positions].every(([id, q]) => {
     const b = size.get(id) ?? { width: MIN_WIDTH, height: 44 };
     return p.x + s.width + CLEARANCE <= q.x || q.x + b.width + CLEARANCE <= p.x || p.y + s.height + CLEARANCE <= q.y || q.y + b.height + CLEARANCE <= p.y;
@@ -3292,7 +3470,7 @@ function freeSpot(want, s, positions, size, lr) {
     const p = lr ? { x: want.x, y: want.y + offset } : { x: want.x + offset, y: want.y };
     if (clear(p)) return { x: Math.round(p.x), y: Math.round(p.y) };
   }
-  return freeSpot(lr ? { x: want.x + s.width + RANK_GAP, y: want.y } : { x: want.x, y: want.y + s.height + RANK_GAP }, s, positions, size, lr);
+  return findFreeSpot(lr ? { x: want.x + s.width + RANK_GAP, y: want.y } : { x: want.x, y: want.y + s.height + RANK_GAP }, s, positions, size, lr);
 }
 function boundsOf(positions, size) {
   if (positions.size === 0) return null;
@@ -3312,7 +3490,7 @@ function boundsOf(positions, size) {
 function samePoint(a, b) {
   return Boolean(a && b && Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5);
 }
-var LABEL_CHAR, DETAIL_CHAR, LABEL_CHROME, DETAIL_CHROME, MIN_WIDTH, MAX_WIDTH, SPACING, SHELF_GAP, RANK_GAP, CLEARANCE;
+var LABEL_CHAR, DETAIL_CHAR, LABEL_CHROME, DETAIL_CHROME, MIN_WIDTH, MAX_WIDTH, SPACING, SHELF_GAP, computed, COMPUTED_MAX, RANK_GAP, CLEARANCE;
 var init_layout = __esm({
   "src/ui/lib/layout.ts"() {
     "use strict";
@@ -3328,6 +3506,8 @@ var init_layout = __esm({
       TB: { nodesep: 44, ranksep: 58, edgesep: 14 }
     };
     SHELF_GAP = 72;
+    computed = /* @__PURE__ */ new Map();
+    COMPUTED_MAX = 16;
     RANK_GAP = 90;
     CLEARANCE = 22;
   }
@@ -3709,6 +3889,7 @@ function NodeSummary({ id, data, onEnter, onLeave }) {
   const into = edges.filter((e) => e.target === id && e.source !== id);
   const tasks = (data.taskIds ?? []).map((t) => plan?.tasks.find((x) => x.id === t)).filter((t) => t !== void 0);
   const SHOWN = 5;
+  const hidden = Math.max(0, out.length - SHOWN) + Math.max(0, into.length - SHOWN);
   return /* @__PURE__ */ jsxs14("div", { className: "flow-summary", role: "tooltip", onMouseEnter: onEnter, onMouseLeave: onLeave, children: [
     /* @__PURE__ */ jsxs14("header", { className: "flow-summary-head", children: [
       /* @__PURE__ */ jsx15("span", { className: classNames("kind-swatch", `kind-${data.kind}`), "aria-hidden": "true", children: KIND_GLYPH[data.kind] }),
@@ -3765,7 +3946,11 @@ function NodeSummary({ id, data, onEnter, onLeave }) {
             e.data.label
           ] })
         ] }, e.id)),
-        out.length + into.length > SHOWN * 2 && /* @__PURE__ */ jsx15("li", { className: "muted", children: "and more" })
+        hidden > 0 && /* @__PURE__ */ jsxs14("li", { className: "muted", children: [
+          "and ",
+          hidden,
+          " more"
+        ] })
       ] })
     ] })
   ] });
@@ -3918,7 +4103,6 @@ function CommitInput({
   placeholder,
   className,
   maxLength,
-  autoFocus,
   onCommit
 }) {
   const [draft, setDraft] = useState12(value);
@@ -3943,7 +4127,6 @@ function CommitInput({
       "aria-label": label,
       placeholder,
       maxLength,
-      autoFocus,
       onChange: (e) => setDraft(e.target.value),
       onBlur: commit,
       onKeyDown: (e) => {
@@ -4038,7 +4221,6 @@ function NodePanel({
   nodes,
   edges,
   plan,
-  focusName,
   onChange,
   onSelect,
   onConnect,
@@ -4071,7 +4253,6 @@ function NodePanel({
         value: node.data.label,
         label: "Box label",
         maxLength: 120,
-        autoFocus: focusName,
         onCommit: (label) => label && onChange({ label })
       }
     ),
@@ -4345,7 +4526,6 @@ function Editor({
   const [nodes, setNodes] = useState13(initial2.nodes);
   const [edges, setEdges] = useState13(initial2.edges);
   const [editing, setEditing] = useState13(null);
-  const [fresh, setFresh] = useState13(null);
   const nodesRef = useRef6(nodes);
   const edgesRef = useRef6(edges);
   nodesRef.current = nodes;
@@ -4356,18 +4536,22 @@ function Editor({
   const queue = useRef6({ pending: null, busy: false });
   const pointer = useRef6(null);
   const pastes = useRef6(0);
-  const signature = useMemo2(() => JSON.stringify([diagram.nodes, diagram.edges, diagram.direction]), [diagram]);
+  const signature = useMemo2(() => signatureOf(diagram), [diagram]);
+  const loaded = useRef6(signature);
+  const nudge = useRef6(void 0);
   const baseRev = useRef6(diagram.rev);
   const load = useCallback((source, p) => {
     const next = toFlow(source, p);
     setNodes((prev) => keepSelection(prev, next.nodes));
     setEdges((prev) => keepRoutes(prev, keepSelection(prev, next.edges), next.nodes));
     baseRev.current = source.rev;
+    loaded.current = signatureOf(source);
   }, []);
   useEffect11(() => {
-    if (dragging.current || queue.current.busy || queue.current.pending) return;
-    load(diagram, plan);
-  }, [signature]);
+    if (dragging.current || nudge.current !== void 0 || queue.current.busy || queue.current.pending) return;
+    if (loaded.current !== signature) load(diagram, plan);
+    else baseRev.current = diagram.rev;
+  }, [signature, diagram.rev]);
   const progressKey = useMemo2(() => JSON.stringify(plan.tasks.map((t) => [t.id, t.status, t.parentId])), [plan.tasks]);
   useEffect11(() => {
     setNodes((ns) => ns.map((n) => ({ ...n, data: { ...n.data, ...progressOf(plan, n.data.taskIds) } })));
@@ -4430,9 +4614,11 @@ function Editor({
           id: e.id,
           source: e.source,
           target: e.target,
-          ...e.data?.label ? { label: e.data.label } : {},
-          ...e.data?.dashed ? { dashed: true } : {},
-          ...e.data?.arrows ? { arrows: e.data.arrows } : {}
+          // Always said, even when empty: the daemon keeps an arrow's label
+          // and style when an edit leaves them out.
+          label: e.data?.label ?? "",
+          dashed: Boolean(e.data?.dashed),
+          arrows: e.data?.arrows ?? "end"
         })),
         // A patch waiting behind the one in flight is replaced, not merged —
         // except for the direction, which only the relayout ever sets.
@@ -4450,7 +4636,29 @@ function Editor({
     },
     [persist]
   );
-  const onNodesChange = useCallback((changes) => setNodes((ns) => applyNodeChanges(changes, ns)), []);
+  const onNodesChange = useCallback(
+    (changes) => {
+      setNodes((ns) => applyNodeChanges(changes, ns));
+      if (dragging.current || !changes.some((c) => c.type === "position" && c.position && !c.dragging)) return;
+      window.clearTimeout(nudge.current);
+      nudge.current = window.setTimeout(() => {
+        nudge.current = void 0;
+        persist(nodesRef.current, edgesRef.current);
+      }, 300);
+    },
+    [persist]
+  );
+  const persistRef = useRef6(persist);
+  persistRef.current = persist;
+  useEffect11(
+    () => () => {
+      if (nudge.current === void 0) return;
+      window.clearTimeout(nudge.current);
+      nudge.current = void 0;
+      persistRef.current(nodesRef.current, edgesRef.current);
+    },
+    []
+  );
   const onEdgesChange = useCallback((changes) => setEdges((es) => applyEdgeChanges(changes, es)), []);
   const connect = useCallback(
     (source, target, base = edgesRef.current, ns = nodesRef.current) => {
@@ -4485,7 +4693,6 @@ function Editor({
       const base = edgesRef.current.map((e) => e.selected ? { ...e, selected: false } : e);
       const nextEdges = opts.from ? [...base, makeEdge({ id: freeEdgeId(base, opts.from, id), source: opts.from, target: id })] : base;
       commit(nextNodes, nextEdges);
-      setFresh(id);
       setEditing(`node:${id}`);
     },
     [commit, diagram.direction, flow]
@@ -4518,8 +4725,8 @@ function Editor({
     },
     [commit]
   );
-  const onNodeDragStop = useCallback(
-    (_, __, moved) => {
+  const onDragStop = useCallback(
+    (moved) => {
       dragging.current = false;
       const at = new Map(moved.map((n) => [n.id, n.position]));
       persist(
@@ -4529,6 +4736,11 @@ function Editor({
     },
     [persist]
   );
+  const onNodeDragStop = useCallback((_, __, moved) => onDragStop(moved), [onDragStop]);
+  const onSelectionDragStop = useCallback((_, moved) => onDragStop(moved), [onDragStop]);
+  const onDragStart = useCallback(() => {
+    dragging.current = true;
+  }, []);
   const updateNodes = (ids, patch) => {
     const ns = nodesRef.current.map((n) => {
       if (!ids.has(n.id)) return n;
@@ -4697,7 +4909,6 @@ function Editor({
       startEditing: setEditing,
       finishNodeLabel: (id, label) => {
         setEditing(null);
-        setFresh(null);
         const node = nodesRef.current.find((n) => n.id === id);
         const next = label?.trim();
         if (node && next && next !== node.data.label) updateNode(id, { label: next });
@@ -4729,7 +4940,6 @@ function Editor({
         nodes,
         edges,
         plan,
-        focusName: fresh === node.id && editing !== `node:${node.id}`,
         onChange: (patch) => updateNode(node.id, patch),
         onSelect: select,
         onConnect: (target) => connect(node.id, target),
@@ -4802,10 +5012,10 @@ function Editor({
             onConnect,
             onConnectEnd,
             onDelete,
-            onNodeDragStart: () => {
-              dragging.current = true;
-            },
+            onNodeDragStart: onDragStart,
             onNodeDragStop,
+            onSelectionDragStart: onDragStart,
+            onSelectionDragStop,
             onNodeDoubleClick: (_, node) => setEditing(`node:${node.id}`),
             onEdgeDoubleClick: (_, edge) => setEditing(`edge:${edge.id}`),
             connectionMode: ConnectionMode.Loose,
@@ -4865,6 +5075,9 @@ function toFlow(diagram, plan) {
   }));
   const edges = diagram.edges.map((e) => withRoute(makeEdge(e), layout));
   return { nodes, edges };
+}
+function signatureOf(d) {
+  return JSON.stringify([d.nodes, d.edges, d.direction]);
 }
 function makeEdge(e, selected) {
   const arrows = e.arrows === "both" || e.arrows === "none" ? e.arrows : void 0;
@@ -5129,6 +5342,7 @@ import { jsx as jsx19, jsxs as jsxs18 } from "react/jsx-runtime";
 function DiagramsView() {
   const plan = usePlan();
   const chosen = useStore((s) => s.diagramId);
+  const sessionId = useStore((s) => s.sessionId);
   if (!plan) return null;
   const diagram = plan.diagrams.find((d) => d.id === chosen) ?? plan.diagrams[0] ?? null;
   return /* @__PURE__ */ jsxs18("div", { className: "arch", children: [
@@ -5166,12 +5380,12 @@ function DiagramsView() {
         diagram,
         plan,
         onSave: async (patch) => {
-          const plan2 = await store.commit([{ op: "upsert_diagram", id: diagram.id, ...patch }]);
+          const plan2 = await store.commit([{ op: "upsert_diagram", id: diagram.id, ...patch }], sessionId);
           return plan2?.diagrams.find((d) => d.id === diagram.id)?.rev ?? null;
         },
         aside: /* @__PURE__ */ jsx19(DiagramPanel, { plan, diagram })
       },
-      diagram.id
+      `${sessionId}:${diagram.id}`
     ) : /* @__PURE__ */ jsx19("div", { className: "view-pad", children: /* @__PURE__ */ jsx19(
       EmptyState,
       {
@@ -6620,6 +6834,123 @@ test('"Copy as Markdown" copies the diagram as Claude reads it', async () => {
   assert.match(copied, /\*\*Postgres\*\* `db` — data store\n  Decisions:\n    Primary store\./);
   assert.match(copied, /- API → Postgres: SQL `api → db`/);
   assert.doesNotMatch(copied, /"x"|x: /);
+});
+test("a title edit elsewhere does not make the next canvas save stale", async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector(".react-flow__node")));
+  const s = store2.getState().session;
+  const plan = structuredClone(s.plan);
+  plan.diagrams[0].rev += 1;
+  plan.diagrams[0].title = "Renamed elsewhere";
+  plan.version += 1;
+  await act(async () => {
+    store2.apply({ type: "snapshot", session: { ...s, plan } });
+  });
+  await selectBox("API");
+  await act(async () => {
+    fireEvent.change(within(screen.getByRole("complementary", { name: "Details" })).getByLabelText("Link a task to API"), { target: { value: "t3" } });
+  });
+  const op = opsSent().filter((o) => o["op"] === "upsert_diagram").at(-1);
+  assert.equal(op["expect"], plan.diagrams[0].rev, "saved against the revision now current");
+});
+test("a late answer never rolls the page back past a newer version", async () => {
+  await boot();
+  const s = store2.getState().session;
+  const older = { ...s.plan, title: "Older", version: s.plan.version + 1 };
+  store2.set({ session: { ...s, plan: { ...s.plan, title: "Newer", version: s.plan.version + 2 } } });
+  stubFetch((route) => route.endsWith("/plan/ops") ? { plan: older, changes: [] } : { ok: true });
+  await act(async () => {
+    await store2.commit([{ op: "set_meta", title: "Older" }]);
+  });
+  assert.equal(store2.getState().session?.plan?.title, "Newer");
+});
+test("moving a box with the arrow keys is saved", async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector(".react-flow__node")));
+  await selectBox("API");
+  const node = [...document.querySelectorAll(".react-flow__node")].find((n) => n.textContent?.includes("API"));
+  const before = opsSent().length;
+  await act(async () => {
+    fireEvent.keyDown(node, { key: "ArrowRight" });
+    fireEvent.keyDown(node, { key: "ArrowRight" });
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 400));
+  });
+  assert.ok(opsSent().length > before, "a save followed the keys");
+  assert.equal(opsSent().length - before, 1, "one save for the run of keys, not one per press");
+});
+test("a keyboard move is saved even when the diagram closes straight after", async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector(".react-flow__node")));
+  await selectBox("API");
+  const node = [...document.querySelectorAll(".react-flow__node")].find((n) => n.textContent?.includes("API"));
+  const before = opsSent().length;
+  await act(async () => {
+    fireEvent.keyDown(node, { key: "ArrowRight" });
+  });
+  await act(async () => {
+    cleanup();
+    await new Promise((r) => setTimeout(r, 20));
+  });
+  assert.equal(opsSent().length - before, 1, "saved on the way out");
+});
+test("a canvas save still pending when the session changes goes to the session it was made in", async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector(".react-flow__node")));
+  await selectBox("API");
+  const node = [...document.querySelectorAll(".react-flow__node")].find((n) => n.textContent?.includes("API"));
+  await act(async () => {
+    fireEvent.keyDown(node, { key: "ArrowRight" });
+  });
+  await act(async () => {
+    store2.set({ sessionId: "s2", session: makeSession(makePlan(), { sessionId: "s2" }) });
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 400));
+  });
+  const saves = posts.filter((p) => p.route.endsWith("/plan/ops") && p.body["ops"].some((o) => o.op === "upsert_diagram"));
+  assert.ok(saves.length > 0, "the move was saved");
+  assert.ok(saves.every((p) => p.route.includes("/session/s1/")), `never into s2: ${saves.map((p) => p.route).join(", ")}`);
+});
+test("an answer from a daemon that predates version is still applied", async () => {
+  await boot();
+  const s = store2.getState().session;
+  const legacy = { ...s.plan, title: "From the old daemon", seq: s.plan.seq + 1 };
+  delete legacy.version;
+  store2.set({ session: { ...s, plan: { ...s.plan, version: void 0 } } });
+  stubFetch((route) => route.endsWith("/plan/ops") ? { plan: legacy, changes: [] } : { ok: true });
+  await act(async () => {
+    await store2.commit([{ op: "set_meta", title: "From the old daemon" }]);
+  });
+  assert.equal(store2.getState().session?.plan?.title, "From the old daemon");
+});
+test("a summary says how many connections it left out", async () => {
+  const targets = ["a", "b", "c", "d", "e", "f", "g"];
+  const plan = publishPlan2(
+    null,
+    {
+      title: "Hub",
+      diagrams: [
+        {
+          title: "D",
+          nodes: [{ id: "hub", label: "Hub", kind: "service" }, ...targets.map((t) => ({ id: t, label: t.toUpperCase(), kind: "component" }))],
+          edges: targets.map((t) => ({ source: "hub", target: t }))
+        }
+      ]
+    },
+    Date.now()
+  ).plan;
+  await boot(makeSession(plan));
+  const info = await waitFor(() => {
+    const el = document.querySelector('button[aria-label="About Hub"]');
+    assert.ok(el);
+    return el;
+  });
+  await act(async () => {
+    fireEvent.mouseEnter(info);
+  });
+  await waitFor(() => assert.match(document.querySelector(".flow-summary")?.textContent ?? "", /and 2 more/));
 });
 test("the outline shows the breakdown, and which part each task builds", async () => {
   await boot();

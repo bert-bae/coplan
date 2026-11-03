@@ -32,7 +32,33 @@ var SPACING = {
   TB: { nodesep: 44, ranksep: 58, edgesep: 14 }
 };
 var SHELF_GAP = 72;
+var computed = /* @__PURE__ */ new Map();
+var COMPUTED_MAX = 16;
 function autoLayout(diagram, direction) {
+  const key = JSON.stringify([
+    direction,
+    diagram.nodes.map((n) => [n.id, n.label, n.detail ?? "", n.kind, n.taskIds?.length ? 1 : 0]),
+    diagram.edges.map((e) => [e.id, e.source, e.target, e.label ?? ""])
+  ]);
+  let hit = computed.get(key);
+  if (hit) computed.delete(key);
+  else hit = seal(computeLayout(diagram, direction));
+  computed.set(key, hit);
+  if (computed.size > COMPUTED_MAX) computed.delete(computed.keys().next().value);
+  return { positions: new Map([...hit.positions].map(([id, p]) => [id, { ...p }])), routes: new Map(hit.routes) };
+}
+function seal(layout) {
+  for (const r of layout.routes.values()) {
+    for (const p of r.points) Object.freeze(p);
+    Object.freeze(r.points);
+    if (r.label) Object.freeze(r.label);
+    Object.freeze(r.from);
+    Object.freeze(r.to);
+    Object.freeze(r);
+  }
+  return layout;
+}
+function computeLayout(diagram, direction) {
   const degree = /* @__PURE__ */ new Map();
   for (const e of diagram.edges) {
     if (e.source === e.target) continue;
@@ -153,10 +179,11 @@ function normalize(layout) {
   return { positions, routes };
 }
 function resolveLayout(diagram) {
-  const auto = autoLayout(diagram, diagram.direction);
   const placed = diagram.nodes.filter((n) => n.x !== void 0 && n.y !== void 0);
-  if (placed.length === 0) return auto;
   const positions = new Map(placed.map((n) => [n.id, { x: n.x, y: n.y }]));
+  if (placed.length === diagram.nodes.length && diagram.edges.length === 0) return { positions, routes: /* @__PURE__ */ new Map() };
+  const auto = autoLayout(diagram, diagram.direction);
+  if (placed.length === 0) return auto;
   if (placed.length < diagram.nodes.length) placeNewcomers(diagram, positions, auto.positions);
   const routes = /* @__PURE__ */ new Map();
   for (const e of diagram.edges) {
@@ -198,7 +225,7 @@ function placeNewcomers(diagram, positions, auto) {
       x: centre.x - s.width / 2,
       y: after ? Math.max(...boxes.map((b) => b.y + b.height)) + RANK_GAP : Math.min(...boxes.map((b) => b.y)) - RANK_GAP - s.height
     };
-    positions.set(n.id, freeSpot(want, s, positions, size, lr));
+    positions.set(n.id, findFreeSpot(want, s, positions, size, lr));
   }
   if (!strays.length) return;
   const sub = autoLayout(
@@ -211,7 +238,7 @@ function placeNewcomers(diagram, positions, auto) {
     positions.set(n.id, lr ? { x: p.x + bounds.maxX + RANK_GAP, y: p.y + bounds.minY } : { x: p.x + bounds.minX, y: p.y + bounds.maxY + RANK_GAP });
   }
 }
-function freeSpot(want, s, positions, size, lr) {
+function findFreeSpot(want, s, positions, size, lr) {
   const clear = (p) => [...positions].every(([id, q]) => {
     const b = size.get(id) ?? { width: MIN_WIDTH, height: 44 };
     return p.x + s.width + CLEARANCE <= q.x || q.x + b.width + CLEARANCE <= p.x || p.y + s.height + CLEARANCE <= q.y || q.y + b.height + CLEARANCE <= p.y;
@@ -222,7 +249,7 @@ function freeSpot(want, s, positions, size, lr) {
     const p = lr ? { x: want.x, y: want.y + offset } : { x: want.x + offset, y: want.y };
     if (clear(p)) return { x: Math.round(p.x), y: Math.round(p.y) };
   }
-  return freeSpot(lr ? { x: want.x + s.width + RANK_GAP, y: want.y } : { x: want.x, y: want.y + s.height + RANK_GAP }, s, positions, size, lr);
+  return findFreeSpot(lr ? { x: want.x + s.width + RANK_GAP, y: want.y } : { x: want.x, y: want.y + s.height + RANK_GAP }, s, positions, size, lr);
 }
 function boundsOf(positions, size) {
   if (positions.size === 0) return null;
@@ -405,5 +432,26 @@ test("boxes with a subtitle or linked tasks are taller; long labels wrap rather 
   assert.ok(nodeSize(node("a", { taskIds: ["t1"] })).height > nodeSize(node("a")).height);
   const long = nodeSize(node("a", { label: "A component with a really very long name indeed" }));
   assert.ok(long.width <= 250 && long.height > nodeSize(node("a")).height);
+});
+test("the same graph is laid out once, however often it is asked for", () => {
+  const d = system();
+  const first = autoLayout(d, "LR");
+  const route = (l) => l.routes.get("web->gw");
+  const dragged = autoLayout({ ...d, nodes: d.nodes.map((n) => ({ ...n, x: 99, y: 99 })) }, "LR");
+  assert.equal(route(dragged), route(first), "where boxes sit is not part of it: the same work, reused");
+  assert.deepEqual([...dragged.positions], [...first.positions]);
+  const renamed = autoLayout({ ...d, nodes: d.nodes.map((n) => n.id === "web" ? { ...n, label: "Web storefront" } : n) }, "LR");
+  assert.notEqual(route(renamed), route(first), "what changes a box's size is");
+  assert.notEqual(route(autoLayout(d, "TB")), route(first));
+});
+test("a cached layout cannot be changed through what it hands out", () => {
+  const d = system();
+  const first = autoLayout(d, "LR");
+  first.positions.get("web").x += 500;
+  assert.notEqual(autoLayout(d, "LR").positions.get("web").x, first.positions.get("web").x, "positions are copies");
+  assert.throws(() => {
+    "use strict";
+    first.routes.get("web->gw").points[0].x = 1;
+  }, TypeError, "routes are frozen");
 });
 //# sourceMappingURL=layout.test.js.map

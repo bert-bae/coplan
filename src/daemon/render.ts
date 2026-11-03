@@ -6,7 +6,7 @@
  * an edit, and they lead with what changed — the reason it is reading at all.
  */
 import type { Change, Plan, PlanBaseline, Thread } from '../shared/types.ts';
-import { countTasks, describeTarget, outline, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import { baselineOf, countTasks, describeTarget, outline, sameContent, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { contentOf, diagramChanges, diagramToMarkdown, indent } from '../shared/architecture.ts';
 
 const STATUS_MARK = { todo: '[ ]', in_progress: '[~]', blocked: '[!]', done: '[x]' } as const;
@@ -105,10 +105,12 @@ function renderChanges(plan: Plan, unread: Change[], changesOnly: boolean): stri
     if (lines.length) blocks.push(`**${title}**\n${lines.map((l) => (l.startsWith(' ') || l === '' ? l : `- ${l}`)).join('\n')}`);
   };
 
-  // The plan itself.
+  // The plan itself — only if the user edited it: Claude's own renames are
+  // folded into the baseline, but the check costs nothing.
   const meta: string[] = [];
-  if (base.title !== plan.title) meta.push(`Renamed the plan "${base.title}" → "${plan.title}".`);
-  if (base.summary.trim() !== plan.summary.trim()) {
+  const userMeta = unread.some((c) => c.target.kind === 'plan' && c.kind === 'edited');
+  if (userMeta && base.title !== plan.title) meta.push(`Renamed the plan "${base.title}" → "${plan.title}".`);
+  if (userMeta && base.summary.trim() !== plan.summary.trim()) {
     meta.push(plan.summary.trim() ? 'Edited the summary.' : 'Removed the summary.');
     if (changesOnly && plan.summary.trim()) meta.push(...indent(plan.summary, 2));
   }
@@ -130,6 +132,11 @@ function renderChanges(plan: Plan, unread: Change[], changesOnly: boolean): stri
     }
   }
 
+  // Which diagram comes first is part of how the plan reads.
+  if (unread.some((c) => c.kind === 'moved' && c.target.kind === 'diagram') && reordered(base.diagrams, plan.diagrams)) {
+    block('Diagrams', [`Reordered the diagrams: ${plan.diagrams.map((d) => `"${d.title}"`).join(', ')}.`]);
+  }
+
   block('Tasks', taskChanges(base, plan, touched('task'), changesOnly));
   block('Sections', sectionChanges(base, plan, touched('section'), unread, changesOnly));
 
@@ -141,6 +148,9 @@ function renderChanges(plan: Plan, unread: Change[], changesOnly: boolean): stri
     ? '_The net effect of their edits — not each step, and not where boxes were moved on the canvas._'
     : '_The net effect of their edits — not each step, and not where boxes were moved on the canvas. The full plan follows._';
   if (!blocks.length) {
+    // Only say so when it is true. If the content differs and nothing above
+    // put it into words, the log is better than silence.
+    if (!sameContent(baselineOf(plan), base)) return renderChangeLog(unread);
     return `## Since you last read\nThe user made edits, but they cancel out: the plan's content is what you last read.`;
   }
   return ['## Since you last read — what the user changed', lead, '', blocks.join('\n\n')].join('\n');
@@ -203,11 +213,16 @@ function sectionChanges(base: PlanBaseline, plan: Plan, ids: Set<string>, unread
       if (withText && was.body.trim() !== now.body.trim()) out.push(...indent(now.body, 2));
     }
   }
-  const order = (list: { id: string }[]) => list.map((s) => s.id).filter((id) => base.sections.some((s) => s.id === id) && plan.sections.some((s) => s.id === id));
-  if (unread.some((c) => c.kind === 'moved' && c.target.kind === 'section') && order(base.sections).join() !== order(plan.sections).join()) {
+  if (unread.some((c) => c.kind === 'moved' && c.target.kind === 'section') && reordered(base.sections, plan.sections)) {
     out.push(`Reordered the sections: ${plan.sections.map((s) => `"${s.title}"`).join(', ')}.`);
   }
   return out;
+}
+
+/** Whether the items two lists share come in a different order. */
+function reordered(was: { id: string }[], now: { id: string }[]): boolean {
+  const common = (list: { id: string }[], other: { id: string }[]) => list.map((x) => x.id).filter((id) => other.some((o) => o.id === id));
+  return common(was, now).join('\u0000') !== common(now, was).join('\u0000');
 }
 
 /** For a plan saved before baselines existed: the log, without layout noise

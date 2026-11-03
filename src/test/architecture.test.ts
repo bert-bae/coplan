@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, publishPlan, suggestDirection, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, baselineOf, markReadByClaude, normalizePlan, publishPlan, sameContent, suggestDirection, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { diagramChanges, diagramToMarkdown, flowOrder } from '../shared/architecture.ts';
 import { renderPlan } from '../daemon/render.ts';
 import type { DiagramNodeInput, Plan, PlanInput } from '../shared/types.ts';
@@ -215,4 +215,182 @@ test('a long, narrow flow is drawn top to bottom; a short one left to right', ()
   assert.equal(published.diagrams[0]!.direction, 'TB', 'publish picks it when Claude does not');
   const asked = publishPlan(null, { title: 'x', diagrams: [{ title: 'D', direction: 'LR', ...chain(8) }] }).plan;
   assert.equal(asked.diagrams[0]!.direction, 'LR', 'and keeps what Claude asked for');
+});
+
+/* ------------------------------------------------------------------ *
+ * Review fixes: each of these was reported wrongly, or not at all
+ * ------------------------------------------------------------------ */
+
+const parallel = (): Plan =>
+  publishPlan(null, {
+    title: 'P',
+    diagrams: [
+      {
+        title: 'D',
+        nodes: [
+          { id: 'api', label: 'API', kind: 'service' },
+          { id: 'db', label: 'DB', kind: 'datastore' },
+        ],
+        edges: [
+          { source: 'api', target: 'db', label: 'reads' },
+          { source: 'api', target: 'db', label: 'writes' },
+        ],
+      },
+    ],
+  }).plan;
+
+test('removing one of two arrows between the same boxes is a change, and reaches Claude', () => {
+  const plan = parallel();
+  const d = plan.diagrams[0]!;
+  const { plan: next, changes } = applyOps(plan, [{ op: 'upsert_diagram', id: d.id, nodes: d.nodes, edges: d.edges.filter((e) => e.label !== 'writes'), expect: d.rev }], 'user');
+  assert.equal(changes.length, 1, 'logged');
+  assert.equal(next.diagrams[0]!.rev, d.rev + 1, 'and the revision moved, so a stale tab cannot save it back');
+  assert.match(renderPlan(next, { changesOnly: true }), /- Disconnected API → DB: writes\./);
+  assert.doesNotMatch(renderPlan(next, { changesOnly: true }), /reads/, 'the other arrow is untouched');
+});
+
+test('restyling one of two parallel arrows names that arrow', () => {
+  const plan = parallel();
+  const d = plan.diagrams[0]!;
+  const edges = d.edges.map((e) => (e.label === 'writes' ? { ...e, dashed: true } : e));
+  const next = applyOps(plan, [{ op: 'upsert_diagram', id: d.id, nodes: d.nodes, edges }], 'user').plan;
+  assert.match(renderPlan(next, { changesOnly: true }), /- Changed API → DB: now dashed/);
+});
+
+test('two parallel arrows reversed are two reversals, not a reversal twice and a new arrow', () => {
+  const before = parallel().diagrams[0]!;
+  const after = structuredClone(before);
+  after.edges = after.edges.map((e) => ({ ...e, source: e.target, target: e.source }));
+  const lines = diagramChanges(before, after);
+  assert.equal(lines.filter((l) => l.startsWith('Reversed')).length, 2);
+  assert.equal(lines.filter((l) => l.startsWith('Connected')).length, 0);
+  assert.ok(lines.some((l) => /now runs DB → API: reads/.test(l)) && lines.some((l) => /now runs DB → API: writes/.test(l)));
+});
+
+test("Claude's edits made while the user's are unread are not reported as the user's", () => {
+  let plan = fresh();
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'cache-client', title: 'Cache client (Redis)' }], 'user').plan;
+  plan = applyOps(
+    plan,
+    [
+      { op: 'upsert_task', id: 'cache-client', status: 'done' },
+      { op: 'set_meta', title: 'Renamed by Claude' },
+      { op: 'upsert_section', title: 'Claude adds a section', body: 'x' },
+    ],
+    'claude',
+  ).plan;
+  const text = renderPlan(plan, { changesOnly: true });
+  assert.match(text, /Changed cache-client "Cache client \(Redis\)": renamed from "Cache client"\./, 'the user\'s rename is still news');
+  assert.doesNotMatch(text, /status/, 'Claude set the status itself');
+  assert.doesNotMatch(text, /Renamed the plan|Claude adds a section/);
+});
+
+test("Claude's edits to a diagram the user also changed are folded in, the user's are not", () => {
+  let plan = fresh();
+  const d = () => plan.diagrams[0]!;
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id: d().id, nodes: d().nodes.map((n) => (n.id === 'db' ? { ...n, label: 'Postgres 16' } : n)), edges: d().edges }], 'user').plan;
+  plan = applyOps(
+    plan,
+    [{ op: 'upsert_diagram', id: d().id, nodes: [...d().nodes, { id: 'q', label: 'Queue', kind: 'queue' }], edges: [...d().edges, { source: 'api', target: 'q', label: 'enqueue' }] }],
+    'claude',
+  ).plan;
+  const text = renderPlan(plan, { changesOnly: true });
+  assert.match(text, /Changed Postgres 16 \(`db`\): renamed from "Postgres"\./);
+  assert.doesNotMatch(text, /Queue|enqueue/, 'Claude added those');
+});
+
+test('reordering diagrams is reported, not called a no-op', () => {
+  let plan = publishPlan(null, { title: 'P', diagrams: [{ title: 'First', nodes: [] }, { title: 'Second', nodes: [] }] }).plan;
+  plan = applyOps(plan, [{ op: 'move_diagram', id: plan.diagrams[1]!.id, index: 0 }], 'user').plan;
+  const text = renderPlan(plan, { changesOnly: true });
+  assert.match(text, /Reordered the diagrams: "Second", "First"\./);
+  assert.doesNotMatch(text, /cancel out/);
+});
+
+test('a damaged baseline is dropped on load, and the read falls back to the log', () => {
+  let plan = applyOps(fresh(), [{ op: 'upsert_task', title: 'Load test' }], 'user').plan;
+  const raw = JSON.parse(JSON.stringify(plan)) as Record<string, unknown>;
+  raw['claudeBaseline'] = { title: 'P', summary: '' }; // no sections, diagrams or tasks
+  plan = normalizePlan(raw as Plan & Record<string, unknown>, 'x');
+  assert.equal(plan.claudeBaseline, undefined);
+  assert.match(renderPlan(plan), /added task "Load test"/);
+});
+
+test('renaming the plan is "the plan\'s title", not "the summary"', () => {
+  const renamed = applyOps(fresh(), [{ op: 'set_meta', title: 'Better name' }], 'user').plan;
+  assert.deepEqual(unreadAreas(renamed), ["the plan's title"]);
+  const summarised = applyOps(fresh(), [{ op: 'set_meta', summary: 'New summary' }], 'user').plan;
+  assert.deepEqual(unreadAreas(summarised), ['the summary']);
+});
+
+test('an arrow keeps the label and style the user gave it when Claude rewires around it', () => {
+  let plan = fresh();
+  const d = () => plan.diagrams[0]!;
+  const styled = d().edges.map((e) => (e.target === 'cache' ? { ...e, arrows: 'both', dashed: true } : e));
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id: d().id, nodes: d().nodes, edges: styled }], 'user').plan;
+  plan = publishPlanAfterRead(plan);
+  // Claude rewrites the edges from the read, without restating their style.
+  const bare = d().edges.map(({ source, target }) => ({ source, target }));
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id: d().id, edges: bare }], 'claude').plan;
+  const cache = d().edges.find((e) => e.target === 'cache')!;
+  assert.equal(cache.arrows, 'both');
+  assert.equal(cache.dashed, true);
+  assert.equal(cache.label, 'GET order:{id}');
+  // Saying it is how to change it.
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id: d().id, edges: d().edges.map((e) => ({ ...e, label: '', arrows: 'end', dashed: false })) }], 'user').plan;
+  const cleared = d().edges.find((e) => e.target === 'cache')!;
+  assert.deepEqual([cleared.label, cleared.arrows, cleared.dashed], [undefined, undefined, undefined]);
+});
+
+/** Claude reads (catching up), as the daemon does after a read. */
+function publishPlanAfterRead(plan: Plan): Plan {
+  const next = structuredClone(plan);
+  markReadByClaude(next);
+  return next;
+}
+
+test('a layout save moves the version but logs nothing', () => {
+  const plan = fresh();
+  const d = plan.diagrams[0]!;
+  const next = applyOps(plan, [{ op: 'upsert_diagram', id: d.id, nodes: d.nodes.map((n) => ({ ...n, x: 5, y: 5 })), edges: d.edges }], 'user').plan;
+  assert.equal(next.seq, plan.seq);
+  assert.equal(next.version, plan.version + 1);
+});
+
+/* ------------------------------------------------------------------ *
+ * Second review: folding Claude's edits must not disturb the user's
+ * ------------------------------------------------------------------ */
+
+const sections = (): Plan =>
+  publishPlan(null, { title: 'P', sections: [{ title: 'A', body: 'a' }, { title: 'B', body: 'b' }], tasks: [{ title: 'T', note: 'n' }] }).plan;
+
+test('edits that cancel out still say so after Claude has edited around them', () => {
+  let plan = sections();
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't1', title: 'T2' }], 'user').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't1', title: 'T' }], 'user').plan;
+  plan = applyOps(plan, [{ op: 'upsert_section', title: 'C', body: 'c', index: 0 }, { op: 'upsert_task', id: 't1', detail: 'd' }], 'claude').plan;
+  const text = renderPlan(plan, { changesOnly: true });
+  assert.match(text, /they cancel out/);
+  assert.doesNotMatch(text, /edited the title/, 'not the step-by-step log');
+});
+
+test("a section Claude inserts goes where Claude put it, and the user's reorder is still reported", () => {
+  let plan = sections();
+  plan = applyOps(plan, [{ op: 'move_section', id: 's2', index: 0 }], 'user').plan;
+  plan = applyOps(plan, [{ op: 'upsert_section', title: 'C', body: 'c', index: 0 }], 'claude').plan;
+  assert.deepEqual(plan.claudeBaseline!.sections.map((s) => s.title), ['C', 'A', 'B'], 'C first, A and B as Claude last read them');
+  const text = renderPlan(plan, { changesOnly: true });
+  assert.match(text, /Reordered the sections: "C", "B", "A"\./);
+  assert.doesNotMatch(text, /Added \[s3\]/, 'Claude added that one');
+});
+
+test('content is compared without regard to field order or the order arrows are listed in', () => {
+  const plan = parallel();
+  const a = baselineOf(plan);
+  const b = structuredClone(a);
+  b.diagrams[0]!.edges.reverse();
+  b.tasks = b.tasks.map((t) => Object.fromEntries(Object.entries(t).reverse()) as typeof t);
+  assert.ok(sameContent(a, b));
+  b.diagrams[0]!.edges[0]!.label = 'other';
+  assert.ok(!sameContent(a, b));
 });

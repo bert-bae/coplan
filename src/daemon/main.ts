@@ -8,7 +8,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { SessionStore } from './store.ts';
 import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from './http.ts';
 import { ingestHook } from './hookIngest.ts';
-import { PlanError } from '../shared/plan.ts';
+import { PlanError, unreadAreas } from '../shared/plan.ts';
 import { renderPlan } from './render.ts';
 import { cleanStorage, scanStorage } from './housekeeping.ts';
 import { loadConfig, type HarnessConfig } from '../shared/config.ts';
@@ -617,12 +617,12 @@ function buildRouter(deps: Deps): Router {
             'claude',
           );
           const task = plan.tasks.find((t) => t.id === taskId);
-          const unread = plan.changes.filter((c) => c.seq > plan.claudeReadSeq && c.author === 'user').length;
+          const areas = unreadAreas(plan);
           reply(
             true,
             `[cc-harness] ${task ? `"${task.title}" is ${status.replace('_', ' ')}` : 'Updated'}.` +
               (changes.length ? '' : ' (It already was.)') +
-              (unread ? ` The user has changed the plan ${unread} time(s) since you last read it — call harness_plan_read.` : ''),
+              (areas.length ? ` The user has changed ${areas.join(', ')} since you last read the plan — call harness_plan_read.` : ''),
           );
           return;
         }

@@ -273,14 +273,15 @@ var init_store = __esm({
        * (the canvas's revision) need the daemon's answer, not whatever the store
        * holds by the time it arrives.
        */
-      async commit(ops) {
-        const id = this.state.sessionId;
+      async commit(ops, sessionId = this.state.sessionId) {
+        const id = sessionId;
         if (!id || ops.length === 0) return null;
         this.set({ saving: this.state.saving + 1 });
         try {
           const { plan } = await api.ops(id, ops);
           const session = this.state.session;
-          if (session && session.sessionId === id && (!session.plan || plan.seq >= session.plan.seq)) {
+          const order = (p) => p.version ?? p.seq;
+          if (session && session.sessionId === id && (!session.plan || order(plan) >= order(session.plan))) {
             this.set({ session: { ...session, plan } });
           }
           return plan;
@@ -1104,6 +1105,7 @@ function unreadAreas(plan) {
     else if (c.target.kind === "diagram") add(`the "${plan.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
     else if (c.target.kind === "task") add("tasks");
     else if (c.target.kind === "section") add("sections");
+    else if (c.summary.startsWith(RENAMED_PLAN)) add("the plan's title");
     else add("the summary");
   }
   return areas;
@@ -1186,10 +1188,12 @@ function currentTask(plan) {
   if (!plan) return null;
   return outline(plan).find((r) => r.task.status === "in_progress" && !plan.tasks.some((t) => t.parentId === r.task.id))?.task ?? null;
 }
+var RENAMED_PLAN;
 var init_plan = __esm({
   "src/shared/plan.ts"() {
     "use strict";
     init_types();
+    RENAMED_PLAN = "renamed the plan";
   }
 });
 
@@ -2330,6 +2334,30 @@ function labelSize(label) {
   return { width: Math.round(Math.min(172, text + 14)), height: 8 + lines * 14 };
 }
 function autoLayout(diagram, direction) {
+  const key = JSON.stringify([
+    direction,
+    diagram.nodes.map((n) => [n.id, n.label, n.detail ?? "", n.kind, n.taskIds?.length ? 1 : 0]),
+    diagram.edges.map((e) => [e.id, e.source, e.target, e.label ?? ""])
+  ]);
+  let hit = computed.get(key);
+  if (hit) computed.delete(key);
+  else hit = seal(computeLayout(diagram, direction));
+  computed.set(key, hit);
+  if (computed.size > COMPUTED_MAX) computed.delete(computed.keys().next().value);
+  return { positions: new Map([...hit.positions].map(([id, p]) => [id, { ...p }])), routes: new Map(hit.routes) };
+}
+function seal(layout) {
+  for (const r of layout.routes.values()) {
+    for (const p of r.points) Object.freeze(p);
+    Object.freeze(r.points);
+    if (r.label) Object.freeze(r.label);
+    Object.freeze(r.from);
+    Object.freeze(r.to);
+    Object.freeze(r);
+  }
+  return layout;
+}
+function computeLayout(diagram, direction) {
   const degree = /* @__PURE__ */ new Map();
   for (const e of diagram.edges) {
     if (e.source === e.target) continue;
@@ -2450,10 +2478,11 @@ function normalize(layout) {
   return { positions, routes };
 }
 function resolveLayout(diagram) {
-  const auto = autoLayout(diagram, diagram.direction);
   const placed = diagram.nodes.filter((n) => n.x !== void 0 && n.y !== void 0);
-  if (placed.length === 0) return auto;
   const positions = new Map(placed.map((n) => [n.id, { x: n.x, y: n.y }]));
+  if (placed.length === diagram.nodes.length && diagram.edges.length === 0) return { positions, routes: /* @__PURE__ */ new Map() };
+  const auto = autoLayout(diagram, diagram.direction);
+  if (placed.length === 0) return auto;
   if (placed.length < diagram.nodes.length) placeNewcomers(diagram, positions, auto.positions);
   const routes = /* @__PURE__ */ new Map();
   for (const e of diagram.edges) {
@@ -2493,7 +2522,7 @@ function placeNewcomers(diagram, positions, auto) {
       x: centre2.x - s.width / 2,
       y: after2 ? Math.max(...boxes.map((b) => b.y + b.height)) + RANK_GAP : Math.min(...boxes.map((b) => b.y)) - RANK_GAP - s.height
     };
-    positions.set(n.id, freeSpot(want, s, positions, size, lr));
+    positions.set(n.id, findFreeSpot(want, s, positions, size, lr));
   }
   if (!strays.length) return;
   const sub = autoLayout(
@@ -2507,9 +2536,6 @@ function placeNewcomers(diagram, positions, auto) {
   }
 }
 function findFreeSpot(want, s, positions, size, lr) {
-  return freeSpot(want, s, positions, size, lr);
-}
-function freeSpot(want, s, positions, size, lr) {
   const clear = (p) => [...positions].every(([id, q]) => {
     const b = size.get(id) ?? { width: MIN_WIDTH, height: 44 };
     return p.x + s.width + CLEARANCE <= q.x || q.x + b.width + CLEARANCE <= p.x || p.y + s.height + CLEARANCE <= q.y || q.y + b.height + CLEARANCE <= p.y;
@@ -2520,7 +2546,7 @@ function freeSpot(want, s, positions, size, lr) {
     const p = lr ? { x: want.x, y: want.y + offset } : { x: want.x + offset, y: want.y };
     if (clear(p)) return { x: Math.round(p.x), y: Math.round(p.y) };
   }
-  return freeSpot(lr ? { x: want.x + s.width + RANK_GAP, y: want.y } : { x: want.x, y: want.y + s.height + RANK_GAP }, s, positions, size, lr);
+  return findFreeSpot(lr ? { x: want.x + s.width + RANK_GAP, y: want.y } : { x: want.x, y: want.y + s.height + RANK_GAP }, s, positions, size, lr);
 }
 function boundsOf(positions, size) {
   if (positions.size === 0) return null;
@@ -2540,7 +2566,7 @@ function boundsOf(positions, size) {
 function samePoint(a, b) {
   return Boolean(a && b && Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5);
 }
-var LABEL_CHAR, DETAIL_CHAR, LABEL_CHROME, DETAIL_CHROME, MIN_WIDTH, MAX_WIDTH, SPACING, SHELF_GAP, RANK_GAP, CLEARANCE;
+var LABEL_CHAR, DETAIL_CHAR, LABEL_CHROME, DETAIL_CHROME, MIN_WIDTH, MAX_WIDTH, SPACING, SHELF_GAP, computed, COMPUTED_MAX, RANK_GAP, CLEARANCE;
 var init_layout = __esm({
   "src/ui/lib/layout.ts"() {
     "use strict";
@@ -2556,6 +2582,8 @@ var init_layout = __esm({
       TB: { nodesep: 44, ranksep: 58, edgesep: 14 }
     };
     SHELF_GAP = 72;
+    computed = /* @__PURE__ */ new Map();
+    COMPUTED_MAX = 16;
     RANK_GAP = 90;
     CLEARANCE = 22;
   }
@@ -2937,6 +2965,7 @@ function NodeSummary({ id, data, onEnter, onLeave }) {
   const into = edges.filter((e) => e.target === id && e.source !== id);
   const tasks = (data.taskIds ?? []).map((t) => plan?.tasks.find((x) => x.id === t)).filter((t) => t !== void 0);
   const SHOWN = 5;
+  const hidden = Math.max(0, out.length - SHOWN) + Math.max(0, into.length - SHOWN);
   return /* @__PURE__ */ jsxs14("div", { className: "flow-summary", role: "tooltip", onMouseEnter: onEnter, onMouseLeave: onLeave, children: [
     /* @__PURE__ */ jsxs14("header", { className: "flow-summary-head", children: [
       /* @__PURE__ */ jsx15("span", { className: classNames("kind-swatch", `kind-${data.kind}`), "aria-hidden": "true", children: KIND_GLYPH[data.kind] }),
@@ -2993,7 +3022,11 @@ function NodeSummary({ id, data, onEnter, onLeave }) {
             e.data.label
           ] })
         ] }, e.id)),
-        out.length + into.length > SHOWN * 2 && /* @__PURE__ */ jsx15("li", { className: "muted", children: "and more" })
+        hidden > 0 && /* @__PURE__ */ jsxs14("li", { className: "muted", children: [
+          "and ",
+          hidden,
+          " more"
+        ] })
       ] })
     ] })
   ] });
@@ -3146,7 +3179,6 @@ function CommitInput({
   placeholder,
   className,
   maxLength,
-  autoFocus,
   onCommit
 }) {
   const [draft, setDraft] = useState12(value);
@@ -3171,7 +3203,6 @@ function CommitInput({
       "aria-label": label,
       placeholder,
       maxLength,
-      autoFocus,
       onChange: (e) => setDraft(e.target.value),
       onBlur: commit,
       onKeyDown: (e) => {
@@ -3266,7 +3297,6 @@ function NodePanel({
   nodes,
   edges,
   plan,
-  focusName,
   onChange,
   onSelect,
   onConnect,
@@ -3299,7 +3329,6 @@ function NodePanel({
         value: node.data.label,
         label: "Box label",
         maxLength: 120,
-        autoFocus: focusName,
         onCommit: (label) => label && onChange({ label })
       }
     ),
@@ -3573,7 +3602,6 @@ function Editor({
   const [nodes, setNodes] = useState13(initial2.nodes);
   const [edges, setEdges] = useState13(initial2.edges);
   const [editing, setEditing] = useState13(null);
-  const [fresh, setFresh] = useState13(null);
   const nodesRef = useRef6(nodes);
   const edgesRef = useRef6(edges);
   nodesRef.current = nodes;
@@ -3584,18 +3612,22 @@ function Editor({
   const queue = useRef6({ pending: null, busy: false });
   const pointer = useRef6(null);
   const pastes = useRef6(0);
-  const signature = useMemo2(() => JSON.stringify([diagram.nodes, diagram.edges, diagram.direction]), [diagram]);
+  const signature = useMemo2(() => signatureOf(diagram), [diagram]);
+  const loaded = useRef6(signature);
+  const nudge = useRef6(void 0);
   const baseRev = useRef6(diagram.rev);
   const load = useCallback((source, p) => {
     const next = toFlow(source, p);
     setNodes((prev) => keepSelection(prev, next.nodes));
     setEdges((prev) => keepRoutes(prev, keepSelection(prev, next.edges), next.nodes));
     baseRev.current = source.rev;
+    loaded.current = signatureOf(source);
   }, []);
   useEffect11(() => {
-    if (dragging.current || queue.current.busy || queue.current.pending) return;
-    load(diagram, plan);
-  }, [signature]);
+    if (dragging.current || nudge.current !== void 0 || queue.current.busy || queue.current.pending) return;
+    if (loaded.current !== signature) load(diagram, plan);
+    else baseRev.current = diagram.rev;
+  }, [signature, diagram.rev]);
   const progressKey = useMemo2(() => JSON.stringify(plan.tasks.map((t) => [t.id, t.status, t.parentId])), [plan.tasks]);
   useEffect11(() => {
     setNodes((ns) => ns.map((n) => ({ ...n, data: { ...n.data, ...progressOf(plan, n.data.taskIds) } })));
@@ -3658,9 +3690,11 @@ function Editor({
           id: e.id,
           source: e.source,
           target: e.target,
-          ...e.data?.label ? { label: e.data.label } : {},
-          ...e.data?.dashed ? { dashed: true } : {},
-          ...e.data?.arrows ? { arrows: e.data.arrows } : {}
+          // Always said, even when empty: the daemon keeps an arrow's label
+          // and style when an edit leaves them out.
+          label: e.data?.label ?? "",
+          dashed: Boolean(e.data?.dashed),
+          arrows: e.data?.arrows ?? "end"
         })),
         // A patch waiting behind the one in flight is replaced, not merged —
         // except for the direction, which only the relayout ever sets.
@@ -3678,7 +3712,29 @@ function Editor({
     },
     [persist]
   );
-  const onNodesChange = useCallback((changes) => setNodes((ns) => applyNodeChanges(changes, ns)), []);
+  const onNodesChange = useCallback(
+    (changes) => {
+      setNodes((ns) => applyNodeChanges(changes, ns));
+      if (dragging.current || !changes.some((c) => c.type === "position" && c.position && !c.dragging)) return;
+      window.clearTimeout(nudge.current);
+      nudge.current = window.setTimeout(() => {
+        nudge.current = void 0;
+        persist(nodesRef.current, edgesRef.current);
+      }, 300);
+    },
+    [persist]
+  );
+  const persistRef = useRef6(persist);
+  persistRef.current = persist;
+  useEffect11(
+    () => () => {
+      if (nudge.current === void 0) return;
+      window.clearTimeout(nudge.current);
+      nudge.current = void 0;
+      persistRef.current(nodesRef.current, edgesRef.current);
+    },
+    []
+  );
   const onEdgesChange = useCallback((changes) => setEdges((es) => applyEdgeChanges(changes, es)), []);
   const connect = useCallback(
     (source, target, base = edgesRef.current, ns = nodesRef.current) => {
@@ -3713,7 +3769,6 @@ function Editor({
       const base = edgesRef.current.map((e) => e.selected ? { ...e, selected: false } : e);
       const nextEdges = opts.from ? [...base, makeEdge({ id: freeEdgeId(base, opts.from, id), source: opts.from, target: id })] : base;
       commit(nextNodes, nextEdges);
-      setFresh(id);
       setEditing(`node:${id}`);
     },
     [commit, diagram.direction, flow]
@@ -3746,8 +3801,8 @@ function Editor({
     },
     [commit]
   );
-  const onNodeDragStop = useCallback(
-    (_, __, moved) => {
+  const onDragStop = useCallback(
+    (moved) => {
       dragging.current = false;
       const at = new Map(moved.map((n) => [n.id, n.position]));
       persist(
@@ -3757,6 +3812,11 @@ function Editor({
     },
     [persist]
   );
+  const onNodeDragStop = useCallback((_, __, moved) => onDragStop(moved), [onDragStop]);
+  const onSelectionDragStop = useCallback((_, moved) => onDragStop(moved), [onDragStop]);
+  const onDragStart = useCallback(() => {
+    dragging.current = true;
+  }, []);
   const updateNodes = (ids, patch) => {
     const ns = nodesRef.current.map((n) => {
       if (!ids.has(n.id)) return n;
@@ -3925,7 +3985,6 @@ function Editor({
       startEditing: setEditing,
       finishNodeLabel: (id, label) => {
         setEditing(null);
-        setFresh(null);
         const node = nodesRef.current.find((n) => n.id === id);
         const next = label?.trim();
         if (node && next && next !== node.data.label) updateNode(id, { label: next });
@@ -3957,7 +4016,6 @@ function Editor({
         nodes,
         edges,
         plan,
-        focusName: fresh === node.id && editing !== `node:${node.id}`,
         onChange: (patch) => updateNode(node.id, patch),
         onSelect: select,
         onConnect: (target) => connect(node.id, target),
@@ -4030,10 +4088,10 @@ function Editor({
             onConnect,
             onConnectEnd,
             onDelete,
-            onNodeDragStart: () => {
-              dragging.current = true;
-            },
+            onNodeDragStart: onDragStart,
             onNodeDragStop,
+            onSelectionDragStart: onDragStart,
+            onSelectionDragStop,
             onNodeDoubleClick: (_, node) => setEditing(`node:${node.id}`),
             onEdgeDoubleClick: (_, edge) => setEditing(`edge:${edge.id}`),
             connectionMode: ConnectionMode.Loose,
@@ -4093,6 +4151,9 @@ function toFlow(diagram, plan) {
   }));
   const edges = diagram.edges.map((e) => withRoute(makeEdge(e), layout));
   return { nodes, edges };
+}
+function signatureOf(d) {
+  return JSON.stringify([d.nodes, d.edges, d.direction]);
 }
 function makeEdge(e, selected) {
   const arrows = e.arrows === "both" || e.arrows === "none" ? e.arrows : void 0;
@@ -4357,6 +4418,7 @@ import { jsx as jsx19, jsxs as jsxs18 } from "react/jsx-runtime";
 function DiagramsView() {
   const plan = usePlan();
   const chosen = useStore((s) => s.diagramId);
+  const sessionId = useStore((s) => s.sessionId);
   if (!plan) return null;
   const diagram = plan.diagrams.find((d) => d.id === chosen) ?? plan.diagrams[0] ?? null;
   return /* @__PURE__ */ jsxs18("div", { className: "arch", children: [
@@ -4394,12 +4456,12 @@ function DiagramsView() {
         diagram,
         plan,
         onSave: async (patch) => {
-          const plan2 = await store.commit([{ op: "upsert_diagram", id: diagram.id, ...patch }]);
+          const plan2 = await store.commit([{ op: "upsert_diagram", id: diagram.id, ...patch }], sessionId);
           return plan2?.diagrams.find((d) => d.id === diagram.id)?.rev ?? null;
         },
         aside: /* @__PURE__ */ jsx19(DiagramPanel, { plan, diagram })
       },
-      diagram.id
+      `${sessionId}:${diagram.id}`
     ) : /* @__PURE__ */ jsx19("div", { className: "view-pad", children: /* @__PURE__ */ jsx19(
       EmptyState,
       {

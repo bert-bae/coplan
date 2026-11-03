@@ -225,6 +225,10 @@ export interface Plan {
   changes: Change[];
   /** The last `seq` handed out. */
   seq: number;
+  /** Bumped on every saved change, layout included. `seq` only counts
+   *  changes worth logging, so this is what orders two versions of a plan —
+   *  a page uses it to never roll back to an older one. */
+  version: number;
   /** The last `seq` Claude has read. Changes after it are unread by Claude. */
   claudeReadSeq: number;
   claudeReadAt: number | null;
