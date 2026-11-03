@@ -11,7 +11,8 @@ const SESSION_STATE_LABEL: Record<string, string> = {
   ended: 'ended',
 };
 
-/** The pinned section is a group like any other, with a reserved key. */
+/** The lifted sections are groups like any other, with reserved keys. */
+const WAITING_KEY = '\u0000waiting';
 const PINNED_KEY = '\u0000pinned';
 
 interface Group {
@@ -60,6 +61,9 @@ export function Sidebar() {
         </button>
       </header>
 
+      {collapsed && !drawerOpen ? (
+        <CollapsedRail sessions={sessions} current={current} />
+      ) : (
       <nav className="session-list" aria-label="Live sessions">
         {sessions.length === 0 ? (
           <p className="sidebar-empty">No sessions yet.</p>
@@ -70,11 +74,12 @@ export function Sidebar() {
               group={group}
               current={current}
               open={!collapsedProjects.includes(group.key)}
-              showRepo={group.key === PINNED_KEY}
+              showRepo={group.key === PINNED_KEY || group.key === WAITING_KEY}
             />
           ))
         )}
       </nav>
+      )}
 
       <footer className="sidebar-foot">
         <GlobalActions />
@@ -97,12 +102,19 @@ export function groupSessions(sessions: SessionSummary[], pinned: string[]): Gro
   const groups = new Map<string, Group>();
 
   for (const session of sessions) {
-    const lift = pinnedSet.has(session.sessionId);
-    const key = lift ? PINNED_KEY : (session.repoRoot ?? session.cwd);
+    // A session Claude has stopped on is the reason to look at this rail at
+    // all, so it is lifted above everything, pinned or not.
+    const key = session.waiting
+      ? WAITING_KEY
+      : pinnedSet.has(session.sessionId)
+        ? PINNED_KEY
+        : (session.repoRoot ?? session.cwd);
     let group = groups.get(key);
     if (!group) {
       group =
-        key === PINNED_KEY
+        key === WAITING_KEY
+          ? { key, label: 'Waiting on you', path: '', sessions: [] }
+          : key === PINNED_KEY
           ? { key, label: 'Pinned', path: '', sessions: [] }
           : {
               key,
@@ -121,9 +133,9 @@ export function groupSessions(sessions: SessionSummary[], pinned: string[]): Gro
   for (const group of groups.values()) {
     group.sessions.sort((a, b) => b.createdAt - a.createdAt);
   }
+  const rank = (key: string) => (key === WAITING_KEY ? 0 : key === PINNED_KEY ? 1 : 2);
   return [...groups.values()].sort((a, b) => {
-    if (a.key === PINNED_KEY) return -1;
-    if (b.key === PINNED_KEY) return 1;
+    if (rank(a.key) !== rank(b.key)) return rank(a.key) - rank(b.key);
     return (b.sessions[0]?.createdAt ?? 0) - (a.sessions[0]?.createdAt ?? 0);
   });
 }
@@ -224,9 +236,18 @@ function SessionRow({
         title={`${session.title}\n${session.cwd}\nDouble-click to rename`}
       >
         <span className="session-name">
-          {session.status === 'active' && <span className="working-dot" title="Claude is working" aria-label="Claude is working" />}
+          {session.waiting ? (
+            <span className="dot is-attention" title="Claude is waiting on you" aria-label="Claude is waiting on you" />
+          ) : (
+            session.status === 'active' && <span className="working-dot" title="Claude is working" aria-label="Claude is working" />
+          )}
           {session.planTitle ?? session.title}
         </span>
+        {session.waiting ? (
+          <span className="session-waiting">{session.waiting.text}</span>
+        ) : (
+          session.current && <span className="session-now">now: {session.current}</span>
+        )}
         <span className="session-sub">
           {session.planTitle && session.planTitle !== session.title && <span className="session-stage">{session.title}</span>}
           {!session.planTitle && <span className="session-stage">no plan yet</span>}
@@ -243,7 +264,6 @@ function SessionRow({
             </span>
           )}
           <span>{relativeTime(session.updatedAt)}</span>
-          {session.openQuestions > 0 && <span className="pill is-queued">{session.openQuestions} open q</span>}
           {session.unreadByClaude > 0 && (
             <span className="pill is-draft" title="Changes Claude has not read yet">
               {session.unreadByClaude} unread
@@ -251,6 +271,12 @@ function SessionRow({
           )}
         </span>
       </button>
+      )}
+
+      {session.waiting && session.link && !renaming && (
+        <a className="session-answer btn btn-sm btn-primary" href={session.link.app} title="Open this session in the Claude desktop app">
+          Answer in Claude
+        </a>
       )}
 
       <div className="session-actions">
@@ -348,4 +374,44 @@ function RenameField({ session, onDone }: { session: SessionSummary; onDone: () 
       }}
     />
   );
+}
+
+/**
+ * The rail folded down to one column of initials, so the plan gets the width
+ * without losing the way to other sessions — or the signal that one of them
+ * is waiting on you.
+ */
+function CollapsedRail({ sessions, current }: { sessions: SessionSummary[]; current: string | null }) {
+  const ordered = [...sessions].sort((a, b) => Number(Boolean(b.waiting)) - Number(Boolean(a.waiting)) || b.createdAt - a.createdAt);
+  return (
+    <nav className="session-rail" aria-label="Sessions">
+      {ordered.map((s) => {
+        const name = s.planTitle ?? s.title;
+        return (
+          <button
+            key={s.sessionId}
+            type="button"
+            className={classNames('rail-item', s.sessionId === current && 'is-active', s.waiting && 'is-waiting')}
+            aria-current={s.sessionId === current ? 'true' : undefined}
+            title={`${name}${s.waiting ? ` — waiting on you: ${s.waiting.text}` : s.current ? ` — now: ${s.current}` : ''}`}
+            aria-label={`${name}${s.waiting ? ', waiting on you' : ''}`}
+            onClick={() => void store.selectSession(s.sessionId)}
+          >
+            <span aria-hidden="true">{initials(name)}</span>
+            {s.waiting && <span className="rail-dot is-attention" aria-hidden="true" />}
+            {!s.waiting && s.status === 'active' && <span className="rail-dot is-working" aria-hidden="true" />}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+const MINOR_WORDS = new Set(['a', 'an', 'the', 'to', 'of', 'for', 'and', 'in', 'on', 'with']);
+
+function initials(name: string): string {
+  const all = name.replace(/[^A-Za-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+  const words = all.filter((w) => !MINOR_WORDS.has(w.toLowerCase()));
+  if (words.length === 0) words.push(...all);
+  return ((words[0]?.[0] ?? '?') + (words[1]?.[0] ?? '')).toUpperCase();
 }

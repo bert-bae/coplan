@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { paths, ensureHome, sanitizeId } from '../shared/paths.ts';
-import { applyOps, countTasks, emptyPlan, markReadByClaude, publishPlan, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, countTasks, currentTask, emptyPlan, markReadByClaude, publishPlan, unreadByClaude } from '../shared/plan.ts';
 import type { Author, Change, Plan, PlanInput, PlanOp, ServerEvent, SessionState, SessionSummary } from '../shared/types.ts';
 
 const PERSIST_DEBOUNCE_MS = 400;
@@ -25,6 +25,9 @@ export function newSession(sessionId: string, cwd: string): SessionState {
     branch: null,
     title: path.basename(cwd) || sessionId.slice(0, 8),
     status: 'active',
+    waiting: null,
+    surface: 'unknown',
+    link: null,
     createdAt: now,
     updatedAt: now,
     plan: null,
@@ -288,7 +291,10 @@ export function summarize(s: SessionState): SessionSummary {
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     tasks: countTasks(plan),
-    openQuestions: plan?.questions.filter((q) => !q.answer).length ?? 0,
+    current: currentTask(plan)?.title ?? null,
+    waiting: s.waiting,
+    surface: s.surface,
+    link: s.link,
     openThreads: plan?.threads.filter((t) => !t.resolved).length ?? 0,
     unreadByClaude: unreadByClaude(plan).length,
   };
@@ -343,6 +349,17 @@ function migrate(state: SessionState): void {
     state.plan = plan;
   }
   state.plan ??= null;
+  // Plans saved before questions moved into Claude's own chat.
+  if (state.plan) {
+    const plan = state.plan as unknown as Record<string, unknown>;
+    delete plan['questions'];
+    state.plan.threads = state.plan.threads.filter((t) => (t.target.kind as string) !== 'question');
+    state.plan.changes = state.plan.changes.filter((c) => (c.target.kind as string) !== 'question');
+  }
+  // A waiting state cannot survive a restart: whatever was asked has moved on.
+  state.waiting = null;
+  state.surface ??= 'unknown';
+  state.link ??= null;
 
   for (const key of [
     'worktree', 'transcriptPath', 'stage', 'stageNote', 'baseRef', 'startCommit', 'reviewRound',

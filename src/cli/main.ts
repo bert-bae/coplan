@@ -197,11 +197,13 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
     for (const s of sessions) {
       const plan = s.planTitle
         ? `"${s.planTitle}" · tasks ${s.tasks.done}/${s.tasks.total}` +
-          (s.openQuestions ? ` · ${s.openQuestions} open question(s)` : '') +
+          (s.current ? ` · now: ${s.current}` : '') +
+          (s.waiting ? ` · WAITING ON YOU: ${s.waiting.text}` : '') +
           (s.unreadByClaude ? ` · ${s.unreadByClaude} change(s) unread by Claude` : '')
         : 'no plan yet';
       console.log(`  ${pad(s.status, 7)} ${pad(s.title, 28)} ${plan}`);
       console.log(`          ${s.sessionId}  ${s.cwd}`);
+      if (s.link) console.log(`          open: ${s.link.app}  (web: ${s.link.web})`);
     }
     return 0;
   },

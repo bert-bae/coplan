@@ -60,7 +60,6 @@ function emptyPlan(title = "Untitled plan", now = Date.now()) {
     sections: [],
     diagrams: [],
     tasks: [],
-    questions: [],
     threads: [],
     changes: [],
     seq: 0,
@@ -82,13 +81,12 @@ function nextId(plan, kind) {
   for (const s of plan.sections) scan(s.id);
   for (const d of plan.diagrams) scan(d.id);
   for (const t of plan.tasks) scan(t.id);
-  for (const q of plan.questions) scan(q.id);
   for (const c of plan.threads) scan(c.id);
   for (const ch of plan.changes) scan(ch.target.id);
   return `${prefix}${max + 1}`;
 }
 function idTaken(plan, id) {
-  return plan.sections.some((s) => s.id === id) || plan.diagrams.some((d) => d.id === id) || plan.tasks.some((t) => t.id === id) || plan.questions.some((q) => q.id === id) || plan.threads.some((c) => c.id === id);
+  return plan.sections.some((s) => s.id === id) || plan.diagrams.some((d) => d.id === id) || plan.tasks.some((t) => t.id === id) || plan.threads.some((c) => c.id === id);
 }
 function claimId(plan, kind, wanted) {
   const id = clean(wanted, 40);
@@ -133,25 +131,6 @@ function publishPlan(prev, input, now = Date.now()) {
     const same = old && old.title === sTitle && old.body === body;
     sections.push({ id, title: sTitle, body, updatedAt: same ? old.updatedAt : now, updatedBy: same ? old.updatedBy : "claude" });
   }
-  const diagrams = [];
-  for (const raw of input.diagrams ?? []) {
-    const old = base.diagrams.find((d) => d.id === raw.id);
-    const id = old ? old.id : claimIdAmong(next, "diagram", raw.id, diagrams);
-    const dTitle = clean(raw.title, MAX_TITLE) ?? "Diagram";
-    const caption = clean(raw.caption, MAX_TEXT);
-    const graph = buildGraph(raw.nodes ?? [], raw.edges ?? [], old, dTitle);
-    const direction = validDirection(raw.direction) ?? old?.direction ?? "LR";
-    const same = old && old.title === dTitle && old.caption === caption && old.direction === direction && JSON.stringify([old.nodes, old.edges]) === JSON.stringify([graph.nodes, graph.edges]);
-    diagrams.push({
-      id,
-      title: dTitle,
-      ...graph,
-      direction,
-      ...caption ? { caption } : {},
-      updatedAt: same ? old.updatedAt : now,
-      updatedBy: same ? old.updatedBy : "claude"
-    });
-  }
   const tasks = [];
   const walk = (list, parentId) => {
     (list ?? []).forEach((raw, order) => {
@@ -181,21 +160,28 @@ function publishPlan(prev, input, now = Date.now()) {
     });
   };
   walk(input.tasks, null);
-  const questions = [];
-  for (const raw of input.questions ?? []) {
-    const text = clean(raw?.question, MAX_TEXT);
-    if (!text) throw new PlanError("Every question needs its question text.");
-    const old = base.questions.find((q) => q.id === raw.id);
-    const id = old ? old.id : claimIdAmong(next, "question", raw.id, questions);
-    questions.push(buildQuestion(id, raw, old, tasks, now));
-  }
-  for (const q of base.questions) {
-    if (q.askedBy === "user" && !questions.some((x) => x.id === q.id)) questions.push(q);
+  const diagrams = [];
+  for (const raw of input.diagrams ?? []) {
+    const old = base.diagrams.find((d) => d.id === raw.id);
+    const id = old ? old.id : claimIdAmong(next, "diagram", raw.id, diagrams);
+    const dTitle = clean(raw.title, MAX_TITLE) ?? "Diagram";
+    const caption = clean(raw.caption, MAX_TEXT);
+    const graph = buildGraph(raw.nodes ?? [], raw.edges ?? [], old, dTitle, new Set(tasks.map((t) => t.id)));
+    const direction = validDirection(raw.direction) ?? old?.direction ?? "LR";
+    const same = old && old.title === dTitle && old.caption === caption && old.direction === direction && JSON.stringify([old.nodes, old.edges]) === JSON.stringify([graph.nodes, graph.edges]);
+    diagrams.push({
+      id,
+      title: dTitle,
+      ...graph,
+      direction,
+      ...caption ? { caption } : {},
+      updatedAt: same ? old.updatedAt : now,
+      updatedBy: same ? old.updatedBy : "claude"
+    });
   }
   next.sections = sections;
   next.diagrams = diagrams;
   next.tasks = tasks;
-  next.questions = questions;
   next.threads = base.threads.map((thread) => detachIfOrphaned(next, base, thread));
   next.revision = base.revision + 1;
   if (!prev) next.createdAt = now;
@@ -211,7 +197,7 @@ function publishPlan(prev, input, now = Date.now()) {
   return { plan: next, changes: [change] };
 }
 function claimIdAmong(plan, kind, wanted, fresh) {
-  const key = { section: "sections", diagram: "diagrams", task: "tasks", question: "questions" }[kind];
+  const key = { section: "sections", diagram: "diagrams", task: "tasks" }[kind];
   const probe = { ...plan, [key]: [...plan[key], ...fresh] };
   return claimId(probe, kind, wanted);
 }
@@ -219,23 +205,6 @@ function detachIfOrphaned(plan, before2, thread) {
   if (targetExists(plan, thread.target)) return thread;
   const label = describeTarget(before2, thread.target);
   return { ...thread, target: { kind: "plan", id: "" }, text: `(on removed ${label}) ${thread.text}` };
-}
-function buildQuestion(id, raw, old, tasks, now) {
-  const header = clean(raw.header, 40);
-  const context = clean(raw.context, MAX_TEXT);
-  const taskId = raw.taskId && tasks.some((t) => t.id === raw.taskId) ? raw.taskId : void 0;
-  return {
-    id,
-    question: clean(raw.question, MAX_TEXT) ?? old?.question ?? "",
-    ...header ? { header } : {},
-    ...context ? { context } : {},
-    options: raw.options ? toOptions(raw.options) : old?.options ?? [],
-    ...raw.multiSelect ? { multiSelect: true } : {},
-    ...taskId ? { taskId } : {},
-    askedBy: old?.askedBy ?? "claude",
-    createdAt: old?.createdAt ?? now,
-    ...old?.answer ? { answer: old.answer } : {}
-  };
 }
 function applyOps(plan, ops, author, now = Date.now()) {
   if (!Array.isArray(ops) || ops.length === 0) throw new PlanError("No edits were given.");
@@ -302,7 +271,7 @@ function applyOne(plan, op, author, now) {
         const title2 = clean(op.title, MAX_TITLE);
         if (title2) existing.title = title2;
         if (op.nodes || op.edges) {
-          const graph = buildGraph(op.nodes ?? existing.nodes, op.edges ?? existing.edges, existing, existing.title);
+          const graph = buildGraph(op.nodes ?? existing.nodes, op.edges ?? existing.edges, existing, existing.title, taskIdSet(plan));
           existing.nodes = graph.nodes;
           existing.edges = graph.edges;
         }
@@ -323,7 +292,7 @@ function applyOne(plan, op, author, now) {
       const diagram = {
         id: claimId(plan, "diagram", void 0),
         title,
-        ...buildGraph(op.nodes ?? [], op.edges ?? [], void 0, title),
+        ...buildGraph(op.nodes ?? [], op.edges ?? [], void 0, title, taskIdSet(plan)),
         direction: validDirection(op.direction) ?? "LR",
         ...caption ? { caption } : {},
         updatedAt: now,
@@ -386,47 +355,6 @@ function applyOne(plan, op, author, now) {
       if (!diagram) throw new PlanError(`No diagram "${op.id}".`);
       moveInList(plan.diagrams, diagram.id, op.index);
       return [log("moved", ref("diagram", diagram.id), `reordered diagram "${diagram.title}"`)];
-    }
-    case "upsert_question": {
-      const existing = op.id ? plan.questions.find((q) => q.id === op.id) : void 0;
-      if (existing) {
-        const text2 = clean(op.question, MAX_TEXT);
-        if (text2) existing.question = text2;
-        if (typeof op.header === "string") setOptional(existing, "header", clean(op.header, 40));
-        if (typeof op.context === "string") setOptional(existing, "context", clean(op.context, MAX_TEXT));
-        if (op.options) existing.options = toOptions(op.options);
-        if (typeof op.multiSelect === "boolean") setOptional(existing, "multiSelect", op.multiSelect || void 0);
-        if (op.taskId !== void 0) setOptional(existing, "taskId", op.taskId ? requireTask(plan, op.taskId).id : void 0);
-        return [log("edited", ref("question", existing.id), `edited question "${short(existing.question)}"`)];
-      }
-      const text = clean(op.question, MAX_TEXT);
-      if (!text) throw new PlanError(op.id ? `No question "${op.id}".` : "A new question needs its question text.");
-      if (op.taskId) requireTask(plan, op.taskId);
-      const question = buildQuestion(claimId(plan, "question", op.id), { ...op, question: text }, void 0, plan.tasks, now);
-      question.askedBy = author;
-      plan.questions.push(question);
-      return [log("created", ref("question", question.id), `asked "${short(text)}"`)];
-    }
-    case "answer": {
-      const question = plan.questions.find((q) => q.id === op.id);
-      if (!question) throw new PlanError(`No question "${op.id}".`);
-      const selected = (op.selected ?? []).map((s) => String(s).trim()).filter(Boolean);
-      const text = clean(op.text, MAX_TEXT) ?? "";
-      if (!selected.length && !text) throw new PlanError("An answer needs a picked option or some text.");
-      if (!question.multiSelect && selected.length > 1) {
-        throw new PlanError(`"${short(question.question)}" takes one option, not ${selected.length}.`);
-      }
-      const answer = { selected, text, by: author, at: now };
-      const had = Boolean(question.answer);
-      question.answer = answer;
-      return [log("answered", ref("question", question.id), `${had ? "changed the answer to" : "answered"} "${short(question.question)}": ${short(renderAnswer(answer), 80)}`)];
-    }
-    case "clear_answer": {
-      const question = plan.questions.find((q) => q.id === op.id);
-      if (!question) throw new PlanError(`No question "${op.id}".`);
-      if (!question.answer) return [];
-      delete question.answer;
-      return [log("edited", ref("question", question.id), `reopened "${short(question.question)}"`)];
     }
     case "remove":
       return removeItem(plan, op.kind, op.id, log);
@@ -533,16 +461,15 @@ function removeItem(plan, kind, id, log) {
       const doomed = /* @__PURE__ */ new Set([t.id, ...descendants(plan, t.id).map((d) => d.id)]);
       plan.tasks = plan.tasks.filter((x) => !doomed.has(x.id));
       normalizeSiblings(plan, t.parentId);
-      for (const q of plan.questions) if (q.taskId && doomed.has(q.taskId)) delete q.taskId;
+      for (const d of plan.diagrams) {
+        for (const n of d.nodes) {
+          if (!n.taskIds) continue;
+          n.taskIds = n.taskIds.filter((id2) => !doomed.has(id2));
+          if (n.taskIds.length === 0) delete n.taskIds;
+        }
+      }
       const extra = doomed.size > 1 ? ` and its ${doomed.size - 1} subtask(s)` : "";
       summary = `removed task "${t.title}"${extra}`;
-      break;
-    }
-    case "question": {
-      const q = plan.questions.find((x) => x.id === id);
-      if (!q) throw new PlanError(`No question "${id}".`);
-      plan.questions = plan.questions.filter((x) => x.id !== id);
-      summary = `removed question "${short(q.question)}"`;
       break;
     }
     default:
@@ -551,7 +478,7 @@ function removeItem(plan, kind, id, log) {
   plan.threads = plan.threads.map((t) => detachIfOrphaned(plan, before2, t));
   return [log("deleted", { kind, id }, summary)];
 }
-function buildGraph(rawNodes, rawEdges, old, title) {
+function buildGraph(rawNodes, rawEdges, old, title, taskIds) {
   if (!Array.isArray(rawNodes) || !Array.isArray(rawEdges)) throw new PlanError(`Diagram "${title}": nodes and edges must be lists.`);
   if (rawNodes.length > MAX_NODES) throw new PlanError(`Diagram "${title}" has more than ${MAX_NODES} nodes.`);
   if (rawEdges.length > MAX_EDGES) throw new PlanError(`Diagram "${title}" has more than ${MAX_EDGES} edges.`);
@@ -562,6 +489,11 @@ function buildGraph(rawNodes, rawEdges, old, title) {
     if (nodes.some((n) => n.id === id)) throw new PlanError(`Diagram "${title}": node id "${id}" is used twice.`);
     const prev = old?.nodes.find((n) => n.id === id);
     const detail = clean(raw.detail, 400);
+    const notes = raw.notes === void 0 ? prev?.notes : clean(raw.notes, MAX_TEXT);
+    const links = raw.taskIds === void 0 ? prev?.taskIds : cleanList(raw.taskIds);
+    for (const t of links ?? []) {
+      if (!taskIds.has(t)) throw new PlanError(`Diagram "${title}": node "${id}" links task "${t}", which is not in the plan.`);
+    }
     const x = finite(raw.x) ?? prev?.x;
     const y = finite(raw.y) ?? prev?.y;
     nodes.push({
@@ -569,6 +501,8 @@ function buildGraph(rawNodes, rawEdges, old, title) {
       label: clean(raw.label, 120) ?? prev?.label ?? id,
       kind: validKind(raw.kind) ?? prev?.kind ?? "component",
       ...detail ? { detail } : {},
+      ...notes ? { notes } : {},
+      ...links?.length ? { taskIds: [...new Set(links)] } : {},
       ...x !== void 0 && y !== void 0 ? { x: Math.round(x), y: Math.round(y) } : {}
     });
   }
@@ -596,7 +530,11 @@ function describeDiagramEdit(before2, after2) {
   const removed = before2.nodes.filter((n) => !after2.nodes.some((a) => a.id === n.id));
   const changed = after2.nodes.filter((n) => {
     const b = before2.nodes.find((x) => x.id === n.id);
-    return b && (b.label !== n.label || b.kind !== n.kind || (b.detail ?? "") !== (n.detail ?? ""));
+    return b && (b.label !== n.label || b.kind !== n.kind || (b.detail ?? "") !== (n.detail ?? "") || (b.notes ?? "") !== (n.notes ?? ""));
+  });
+  const relinked = after2.nodes.filter((n) => {
+    const b = before2.nodes.find((x) => x.id === n.id);
+    return b && (b.taskIds ?? []).join() !== (n.taskIds ?? []).join();
   });
   const moved = after2.nodes.filter((n) => {
     const b = before2.nodes.find((x) => x.id === n.id);
@@ -613,6 +551,7 @@ function describeDiagramEdit(before2, after2) {
   if (added.length) parts.push(`added ${list(added.map((n) => `"${n.label}"`))}`);
   if (removed.length) parts.push(`removed ${list(removed.map((n) => `"${n.label}"`))}`);
   if (changed.length) parts.push(`edited ${list(changed.map((n) => `"${n.label}"`))}`);
+  if (relinked.length) parts.push(`changed the tasks behind ${list(relinked.map((n) => `"${n.label}"`))}`);
   if (linked.length) parts.push(`connected ${list(linked.map((e) => `${label(after2, e.source)} \u2192 ${label(after2, e.target)}`))}`);
   if (unlinked.length) parts.push(`disconnected ${list(unlinked.map((e) => `${label(before2, e.source)} \u2192 ${label(before2, e.target)}`))}`);
   if (relabeled.length) parts.push(`relabelled ${list(relabeled.map((e) => `${label(after2, e.source)} \u2192 ${label(after2, e.target)}`))}`);
@@ -621,6 +560,9 @@ function describeDiagramEdit(before2, after2) {
   if (parts.length) return parts.join("; ");
   if (moved.length) return `rearranged ${moved.length} node(s)`;
   return null;
+}
+function taskIdSet(plan) {
+  return new Set(plan.tasks.map((t) => t.id));
 }
 function validKind(value) {
   return NODE_KINDS.includes(value) ? value : void 0;
@@ -669,6 +611,18 @@ function placeAmongSiblings(plan, task, index) {
     t.order = i;
   });
 }
+function outline(plan) {
+  const out = [];
+  const visit = (parentId, depth, prefix) => {
+    childrenOf(plan, parentId).forEach((task, i) => {
+      const number = prefix ? `${prefix}.${i + 1}` : String(i + 1);
+      out.push({ task, depth, number });
+      visit(task.id, depth + 1, number);
+    });
+  };
+  visit(null, 0, "");
+  return out;
+}
 function countTasks(plan) {
   const counts = { total: 0, done: 0, inProgress: 0, blocked: 0 };
   if (!plan) return counts;
@@ -700,8 +654,6 @@ function targetExists(plan, target) {
       return plan.diagrams.some((d) => d.id === target.id);
     case "task":
       return plan.tasks.some((t) => t.id === target.id);
-    case "question":
-      return plan.questions.some((q) => q.id === target.id);
     default:
       return false;
   }
@@ -722,32 +674,12 @@ function describeTarget(plan, target) {
       const t = plan.tasks.find((x) => x.id === target.id);
       return t ? `task "${t.title}"` : `task ${target.id}`;
     }
-    case "question": {
-      const q = plan.questions.find((x) => x.id === target.id);
-      return q ? `question "${short(q.question)}"` : `question ${target.id}`;
-    }
     default:
       return "an item";
   }
 }
-function renderAnswer(answer) {
-  const picked = answer.selected.join(", ");
-  if (picked && answer.text) return `${picked} \u2014 ${answer.text}`;
-  return picked || answer.text;
-}
 function validStatus(value) {
   return TASK_STATUSES.includes(value) ? value : void 0;
-}
-function toOptions(raw) {
-  if (!Array.isArray(raw)) return [];
-  return raw.map((o) => {
-    if (typeof o === "string") return o.trim() ? { label: o.trim().slice(0, 120) } : null;
-    if (!o || typeof o !== "object") return null;
-    const label = clean(o.label, 120);
-    if (!label) return null;
-    const description = clean(o.description, 400);
-    return { label, ...description ? { description } : {} };
-  }).filter((o) => o !== null).slice(0, MAX_OPTIONS);
 }
 function clean(value, max, trim = true) {
   if (typeof value !== "string") return void 0;
@@ -780,7 +712,11 @@ function short(text, max = 60) {
   const line = text.replace(/\s+/g, " ").trim();
   return line.length > max ? `${line.slice(0, max - 1)}\u2026` : line;
 }
-var PlanError, MAX_CHANGES, MAX_TITLE, MAX_TEXT, MAX_OPTIONS, MAX_TASKS, PREFIX, MAX_NODES, MAX_EDGES, STATUS_WORDS;
+function currentTask(plan) {
+  if (!plan) return null;
+  return outline(plan).find((r) => r.task.status === "in_progress" && !plan.tasks.some((t) => t.parentId === r.task.id))?.task ?? null;
+}
+var PlanError, MAX_CHANGES, MAX_TITLE, MAX_TEXT, MAX_TASKS, PREFIX, MAX_NODES, MAX_EDGES, STATUS_WORDS;
 var init_plan = __esm({
   "src/shared/plan.ts"() {
     "use strict";
@@ -790,9 +726,8 @@ var init_plan = __esm({
     MAX_CHANGES = 500;
     MAX_TITLE = 200;
     MAX_TEXT = 2e4;
-    MAX_OPTIONS = 8;
     MAX_TASKS = 400;
-    PREFIX = { section: "s", diagram: "d", task: "t", question: "q", thread: "c" };
+    PREFIX = { section: "s", diagram: "d", task: "t", thread: "c" };
     MAX_NODES = 120;
     MAX_EDGES = 300;
     STATUS_WORDS = {
@@ -824,6 +759,9 @@ function newSession(sessionId, cwd) {
     branch: null,
     title: path2.basename(cwd) || sessionId.slice(0, 8),
     status: "active",
+    waiting: null,
+    surface: "unknown",
+    link: null,
     createdAt: now,
     updatedAt: now,
     plan: null
@@ -843,7 +781,10 @@ function summarize(s) {
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     tasks: countTasks(plan),
-    openQuestions: plan?.questions.filter((q) => !q.answer).length ?? 0,
+    current: currentTask(plan)?.title ?? null,
+    waiting: s.waiting,
+    surface: s.surface,
+    link: s.link,
     openThreads: plan?.threads.filter((t) => !t.resolved).length ?? 0,
     unreadByClaude: unreadByClaude(plan).length
   };
@@ -888,6 +829,15 @@ function migrate(state) {
     state.plan = plan;
   }
   state.plan ??= null;
+  if (state.plan) {
+    const plan = state.plan;
+    delete plan["questions"];
+    state.plan.threads = state.plan.threads.filter((t) => t.target.kind !== "question");
+    state.plan.changes = state.plan.changes.filter((c) => c.target.kind !== "question");
+  }
+  state.waiting = null;
+  state.surface ??= "unknown";
+  state.link ??= null;
   for (const key of [
     "worktree",
     "transcriptPath",

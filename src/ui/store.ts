@@ -2,8 +2,9 @@ import { useSyncExternalStore } from 'react';
 import { api } from './lib/api.ts';
 import type { CleanupGroupId, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport } from '../shared/types.ts';
 
-export type Tab = 'overview' | 'diagrams' | 'tasks' | 'questions' | 'activity';
-export const TAB_IDS: Tab[] = ['overview', 'diagrams', 'tasks', 'questions', 'activity'];
+export type Tab = 'diagrams' | 'tasks' | 'overview';
+/** The architecture comes first: it is where most of the plan is decided. */
+export const TAB_IDS: Tab[] = ['diagrams', 'tasks', 'overview'];
 
 export type TaskMode = 'outline' | 'board';
 
@@ -20,6 +21,8 @@ export interface UiState {
   sessionId: string | null;
   session: SessionState | null;
   tab: Tab;
+  /** The diagram open on the Architecture tab; the first one when unset. */
+  diagramId: string | null;
   connection: ConnectionState;
   /** How the task tree is laid out: an editable outline, or status columns. */
   taskMode: TaskMode;
@@ -47,7 +50,8 @@ const initial: UiState = {
   sessions: [],
   sessionId: null,
   session: null,
-  tab: 'overview',
+  tab: 'diagrams',
+  diagramId: null,
   connection: 'connecting',
   taskMode: 'outline',
   hideDone: false,
@@ -123,7 +127,7 @@ class Store {
 
   async selectSession(id: string, updateHash = true): Promise<void> {
     if (updateHash) window.location.hash = `#/session/${id}`;
-    this.set({ sessionId: id, session: null, error: null });
+    this.set({ sessionId: id, session: null, diagramId: null, error: null });
     try {
       const { session } = await api.session(id);
       this.set({ session });
@@ -218,10 +222,16 @@ class Store {
     return this.ops([op]);
   }
 
-  /** Jump to an item from anywhere: the activity log, a linked question. */
+  /** Jump to an item from anywhere: a board card, the overview's "now". */
   focus(kind: string, id: string): void {
-    const tab: Tab =
-      kind === 'diagram' ? 'diagrams' : kind === 'task' ? 'tasks' : kind === 'question' ? 'questions' : 'overview';
+    const tab: Tab = kind === 'diagram' ? 'diagrams' : kind === 'task' ? 'tasks' : 'overview';
+    if (kind === 'diagram') this.set({ diagramId: id });
+    if (kind === 'node') {
+      // `node:<diagram>:<node>` — open that diagram; the editor selects the box.
+      const [diagramId] = id.split(':');
+      this.set({ tab: 'diagrams', diagramId: diagramId ?? null, focusTarget: `node:${id}` });
+      return;
+    }
     if (kind === 'task') {
       // Unfold every ancestor so the row actually exists to scroll to.
       const tasks = this.state.session?.plan?.tasks ?? [];

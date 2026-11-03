@@ -4,35 +4,31 @@ import { Sidebar } from './components/Sidebar.tsx';
 import { Toasts } from './components/Toasts.tsx';
 import { ConnectionBar } from './components/ConnectionBar.tsx';
 import { ThemeToggle } from './components/ThemeToggle.tsx';
-import { Handoff } from './components/Handoff.tsx';
+import { Handoff, WaitingBanner } from './components/Handoff.tsx';
 import { InlineText } from './components/Editable.tsx';
 import { ProgressBar } from './components/Progress.tsx';
 import { EmptyState } from './components/primitives.tsx';
 import { OverviewView } from './views/OverviewView.tsx';
 import { DiagramsView } from './views/DiagramsView.tsx';
 import { TasksView } from './views/TasksView.tsx';
-import { QuestionsView } from './views/QuestionsView.tsx';
-import { ActivityView } from './views/ActivityView.tsx';
 import { classNames } from './lib/format.ts';
-import { countTasks, unreadByClaude } from '../shared/plan.ts';
+import { countTasks } from '../shared/plan.ts';
 import type { Plan, SessionState } from '../shared/types.ts';
 
 const TAB_LABEL: Record<Tab, string> = {
-  overview: 'Overview',
-  diagrams: 'Diagrams',
+  diagrams: 'Architecture',
   tasks: 'Tasks',
-  questions: 'Questions',
-  activity: 'Activity',
+  overview: 'Overview',
 };
 
 const tabId = (id: Tab) => `tab-${id}`;
 const panelId = (id: Tab) => `panel-${id}`;
 
 /**
- * The planning workspace: one plan per Claude session, laid out to be read,
- * reorganized and argued with. There is deliberately no way to message Claude
- * from here — that happens in Claude's own chat, and the header says when
- * Claude is behind on what changed.
+ * The planning workspace: one plan per Claude session, laid out to be read and
+ * reorganized, and to follow Claude's progress through it. There is
+ * deliberately no way to message or answer Claude from here — that happens in
+ * Claude itself, and the page links there whenever Claude is waiting.
  */
 export function App() {
   const session = useSession();
@@ -77,6 +73,7 @@ export function App() {
           <>
             <Header session={session} />
             <ConnectionBar />
+            <WaitingBanner session={session} />
             {!plan ? (
               <NoPlan session={session} />
             ) : (
@@ -90,8 +87,6 @@ export function App() {
                   {tab === 'overview' && <OverviewView />}
                   {tab === 'diagrams' && <DiagramsView />}
                   {tab === 'tasks' && <TasksView />}
-                  {tab === 'questions' && <QuestionsView />}
-                  {tab === 'activity' && <ActivityView />}
                 </div>
               </>
             )}
@@ -138,23 +133,12 @@ function tabBadge(id: Tab, plan: Plan): { text: string; tone: 'neutral' | 'accen
       const c = countTasks(plan);
       return c.total ? { text: `${c.done}/${c.total}`, tone: 'neutral', label: `${c.done} of ${c.total} done` } : null;
     }
-    case 'questions': {
-      const forYou = plan.questions.filter((q) => !q.answer && q.askedBy === 'claude').length;
-      if (forYou) return { text: String(forYou), tone: 'warning', label: `${forYou} question(s) from Claude to answer` };
-      const open = plan.questions.filter((q) => !q.answer).length;
-      return open ? { text: String(open), tone: 'neutral', label: `${open} open question(s)` } : null;
-    }
-    case 'activity': {
-      const unread = unreadByClaude(plan).length;
-      return unread ? { text: String(unread), tone: 'accent', label: `${unread} change(s) Claude has not read` } : null;
-    }
     default:
       return null;
   }
 }
 
 function Header({ session }: { session: SessionState }) {
-  const drawerOpen = useStore((s) => s.drawerOpen);
   const saving = useStore((s) => s.saving);
   const plan = session.plan;
   const counts = countTasks(plan);
@@ -162,15 +146,7 @@ function Header({ session }: { session: SessionState }) {
   return (
     <header className="head">
       <div className="head-main">
-        <button
-          type="button"
-          className="icon-btn drawer-toggle"
-          aria-label="Open the session list"
-          aria-expanded={drawerOpen}
-          onClick={() => store.setDrawer(true)}
-        >
-          <span aria-hidden="true">☰</span>
-        </button>
+        <SessionsToggle />
         {plan ? (
           <InlineText
             as="h1"
@@ -188,8 +164,14 @@ function Header({ session }: { session: SessionState }) {
         <ThemeToggle />
       </div>
       <div className="head-meta">
-        <span className={classNames('head-status', `is-${session.status}`)} title="The Claude session this plan belongs to">
-          {session.status === 'active' ? 'Claude is working' : session.status === 'idle' ? 'Claude is idle' : 'session ended'}
+        <span className={classNames('head-status', `is-${session.waiting ? 'waiting' : session.status}`)} title="The Claude session this plan belongs to">
+          {session.waiting
+            ? 'Claude is waiting on you'
+            : session.status === 'active'
+              ? 'Claude is working'
+              : session.status === 'idle'
+                ? 'Claude is idle'
+                : 'session ended'}
         </span>
         {plan && plan.title !== session.title && <span className="head-stat">{session.title}</span>}
         {session.branch && <code className="head-branch">{session.branch}</code>}
@@ -209,6 +191,30 @@ function Header({ session }: { session: SessionState }) {
   );
 }
 
+/**
+ * Shows and hides the session list. On a wide window that folds the sidebar
+ * to a rail of initials, giving the plan the width; under the drawer
+ * breakpoint it opens the drawer instead.
+ */
+function SessionsToggle() {
+  const collapsed = useStore((s) => s.collapsedSidebar);
+  const drawerOpen = useStore((s) => s.drawerOpen);
+  const narrow = () => window.innerWidth <= 900;
+  const label = collapsed ? 'Show sessions' : 'Hide sessions';
+  return (
+    <button
+      type="button"
+      className="icon-btn sessions-toggle"
+      title={`${label} ( [ )`}
+      aria-label={label}
+      aria-expanded={narrow() ? drawerOpen : !collapsed}
+      onClick={() => (narrow() ? store.setDrawer(true) : store.toggleSidebar())}
+    >
+      <span aria-hidden="true">☰</span>
+    </button>
+  );
+}
+
 function NoPlan({ session }: { session: SessionState }) {
   return (
     <div className="view">
@@ -217,7 +223,8 @@ function NoPlan({ session }: { session: SessionState }) {
         hint={
           <>
             In Claude's chat, run <code>/harness &lt;what you want to build&gt;</code>. Claude investigates the code, then
-            publishes its plan here — architecture, diagrams, a task breakdown and the questions it needs answered.
+            publishes its plan here — the architecture, diagrams and a task breakdown — and asks what it needs to know
+            in the chat.
           </>
         }
         action={
@@ -258,9 +265,11 @@ function NoSession({ error }: { error: string | null }) {
 
 function useDocumentTitle(session: SessionState | null): void {
   const title = session?.plan?.title ?? session?.title ?? 'cc-harness';
+  const waiting = Boolean(session?.waiting);
   useEffect(() => {
-    document.title = `${title} — plan`;
-  }, [title]);
+    // The tab title is the only signal that reaches a user in another window.
+    document.title = waiting ? `● ${title} — Claude is waiting` : `${title} — plan`;
+  }, [title, waiting]);
 }
 
 function useDrawerDismiss(open: boolean): void {
@@ -281,13 +290,18 @@ function useDrawerDismiss(open: boolean): void {
   }, [open]);
 }
 
-/** 1–5 switch tabs, when the keyboard is not busy typing. */
+/** 1–3 switch tabs, when the keyboard is not busy typing. */
 function useShortcuts(): void {
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable);
       if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key === '[') {
+        event.preventDefault();
+        store.toggleSidebar();
+        return;
+      }
       const index = Number(event.key) - 1;
       const tab = TAB_IDS[index];
       if (tab && store.getState().session?.plan) {

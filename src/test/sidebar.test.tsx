@@ -28,6 +28,9 @@ function makeSession(): SessionState {
     branch: 'main',
     title: 's1 title',
     status: 'active',
+    waiting: null,
+    surface: 'unknown',
+    link: null,
     createdAt: now,
     updatedAt: now,
     plan: null,
@@ -49,7 +52,10 @@ function summary(sessionId: string, repo: string, createdAt: number, updatedAt: 
     createdAt,
     updatedAt,
     tasks: { total: 0, done: 0, inProgress: 0, blocked: 0 },
-    openQuestions: 0,
+    current: null,
+    waiting: null,
+    surface: 'unknown',
+    link: null,
     openThreads: 0,
     unreadByClaude: 0,
   };
@@ -315,22 +321,54 @@ test('collapsing the sidebar narrows the column it sits in', async () => {
   assert.ok(document.querySelector('.app')?.classList.contains('is-sidebar-collapsed'));
 });
 
-test('a row shows the plan, its progress, and what Claude has not read', async () => {
+test('a row shows the plan, its progress, and what Claude is on', async () => {
   const now = Date.now();
   await boot(() => [
     {
       ...summary('s1', 'repo', now),
       planTitle: 'Cache rewrite',
       tasks: { total: 5, done: 2, inProgress: 1, blocked: 0 },
-      openQuestions: 2,
+      current: 'Read-through wrapper',
       unreadByClaude: 3,
     },
   ]);
   const row = rowFor('Cache rewrite');
   assert.ok(row, 'the plan title names the row');
+  assert.match(row.textContent ?? '', /now: Read-through wrapper/);
   assert.match(row.textContent ?? '', /2\/5 tasks/);
-  assert.match(row.textContent ?? '', /2 open q/);
   assert.match(row.textContent ?? '', /3 unread/);
+});
+
+test('a session waiting on the user is lifted to the top, with a way into Claude', async () => {
+  const now = Date.now();
+  const link = { app: 'claude://claude.ai/code/session_1', web: 'https://claude.ai/code/session_1', via: 'cloud' as const };
+  await boot(() => [
+    summary('s1', 'repo', now),
+    { ...summary('s3', 'other', now - 2000), waiting: { kind: 'question' as const, text: 'Which TTL?', since: now }, link },
+  ]);
+  assert.deepEqual(groupNames(), ['Waiting on you', 'repo']);
+  const row = rowFor('s3 title');
+  assert.match(row.textContent ?? '', /Which TTL\?/);
+  assert.equal(within(row).getByText('Answer in Claude').getAttribute('href'), link.app);
+});
+
+test('collapsing the sidebar folds it to a rail of initials', async () => {
+  const now = Date.now();
+  await boot(() => [
+    { ...summary('s1', 'repo', now), planTitle: 'Cache rewrite' },
+    { ...summary('s2', 'other', now - 1000), waiting: { kind: 'input' as const, text: 'Go?', since: now } },
+  ]);
+  await act(async () => {
+    fireEvent.click(screen.getByTitle('Collapse sidebar'));
+  });
+  assert.equal(document.querySelector('.session-list'), null, 'the full list is gone');
+  const items = [...document.querySelectorAll('.rail-item')];
+  assert.deepEqual(items.map((i) => i.textContent), ['ST', 'CR'], 'waiting first, by initials');
+  assert.ok(items[0]!.classList.contains('is-waiting'));
+  await act(async () => {
+    fireEvent.click(items[0]!);
+  });
+  assert.equal(store.getState().sessionId, 's2', 'a rail item still opens its session');
 });
 
 test('a session can be renamed from the rail', async () => {

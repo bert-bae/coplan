@@ -12,7 +12,6 @@ var PlanError = class extends Error {
 var MAX_CHANGES = 500;
 var MAX_TITLE = 200;
 var MAX_TEXT = 2e4;
-var MAX_OPTIONS = 8;
 var MAX_TASKS = 400;
 function emptyPlan(title = "Untitled plan", now = Date.now()) {
   return {
@@ -21,7 +20,6 @@ function emptyPlan(title = "Untitled plan", now = Date.now()) {
     sections: [],
     diagrams: [],
     tasks: [],
-    questions: [],
     threads: [],
     changes: [],
     seq: 0,
@@ -32,7 +30,7 @@ function emptyPlan(title = "Untitled plan", now = Date.now()) {
     updatedAt: now
   };
 }
-var PREFIX = { section: "s", diagram: "d", task: "t", question: "q", thread: "c" };
+var PREFIX = { section: "s", diagram: "d", task: "t", thread: "c" };
 function nextId(plan, kind) {
   const prefix = PREFIX[kind];
   let max = 0;
@@ -44,13 +42,12 @@ function nextId(plan, kind) {
   for (const s of plan.sections) scan(s.id);
   for (const d of plan.diagrams) scan(d.id);
   for (const t of plan.tasks) scan(t.id);
-  for (const q of plan.questions) scan(q.id);
   for (const c of plan.threads) scan(c.id);
   for (const ch of plan.changes) scan(ch.target.id);
   return `${prefix}${max + 1}`;
 }
 function idTaken(plan, id) {
-  return plan.sections.some((s) => s.id === id) || plan.diagrams.some((d) => d.id === id) || plan.tasks.some((t) => t.id === id) || plan.questions.some((q) => q.id === id) || plan.threads.some((c) => c.id === id);
+  return plan.sections.some((s) => s.id === id) || plan.diagrams.some((d) => d.id === id) || plan.tasks.some((t) => t.id === id) || plan.threads.some((c) => c.id === id);
 }
 function claimId(plan, kind, wanted) {
   const id = clean(wanted, 40);
@@ -95,25 +92,6 @@ function publishPlan(prev, input, now = Date.now()) {
     const same = old && old.title === sTitle && old.body === body;
     sections.push({ id, title: sTitle, body, updatedAt: same ? old.updatedAt : now, updatedBy: same ? old.updatedBy : "claude" });
   }
-  const diagrams = [];
-  for (const raw of input.diagrams ?? []) {
-    const old = base.diagrams.find((d) => d.id === raw.id);
-    const id = old ? old.id : claimIdAmong(next, "diagram", raw.id, diagrams);
-    const dTitle = clean(raw.title, MAX_TITLE) ?? "Diagram";
-    const caption = clean(raw.caption, MAX_TEXT);
-    const graph = buildGraph(raw.nodes ?? [], raw.edges ?? [], old, dTitle);
-    const direction = validDirection(raw.direction) ?? old?.direction ?? "LR";
-    const same = old && old.title === dTitle && old.caption === caption && old.direction === direction && JSON.stringify([old.nodes, old.edges]) === JSON.stringify([graph.nodes, graph.edges]);
-    diagrams.push({
-      id,
-      title: dTitle,
-      ...graph,
-      direction,
-      ...caption ? { caption } : {},
-      updatedAt: same ? old.updatedAt : now,
-      updatedBy: same ? old.updatedBy : "claude"
-    });
-  }
   const tasks = [];
   const walk = (list, parentId) => {
     (list ?? []).forEach((raw, order) => {
@@ -143,21 +121,28 @@ function publishPlan(prev, input, now = Date.now()) {
     });
   };
   walk(input.tasks, null);
-  const questions = [];
-  for (const raw of input.questions ?? []) {
-    const text = clean(raw?.question, MAX_TEXT);
-    if (!text) throw new PlanError("Every question needs its question text.");
-    const old = base.questions.find((q) => q.id === raw.id);
-    const id = old ? old.id : claimIdAmong(next, "question", raw.id, questions);
-    questions.push(buildQuestion(id, raw, old, tasks, now));
-  }
-  for (const q of base.questions) {
-    if (q.askedBy === "user" && !questions.some((x) => x.id === q.id)) questions.push(q);
+  const diagrams = [];
+  for (const raw of input.diagrams ?? []) {
+    const old = base.diagrams.find((d) => d.id === raw.id);
+    const id = old ? old.id : claimIdAmong(next, "diagram", raw.id, diagrams);
+    const dTitle = clean(raw.title, MAX_TITLE) ?? "Diagram";
+    const caption = clean(raw.caption, MAX_TEXT);
+    const graph = buildGraph(raw.nodes ?? [], raw.edges ?? [], old, dTitle, new Set(tasks.map((t) => t.id)));
+    const direction = validDirection(raw.direction) ?? old?.direction ?? "LR";
+    const same = old && old.title === dTitle && old.caption === caption && old.direction === direction && JSON.stringify([old.nodes, old.edges]) === JSON.stringify([graph.nodes, graph.edges]);
+    diagrams.push({
+      id,
+      title: dTitle,
+      ...graph,
+      direction,
+      ...caption ? { caption } : {},
+      updatedAt: same ? old.updatedAt : now,
+      updatedBy: same ? old.updatedBy : "claude"
+    });
   }
   next.sections = sections;
   next.diagrams = diagrams;
   next.tasks = tasks;
-  next.questions = questions;
   next.threads = base.threads.map((thread) => detachIfOrphaned(next, base, thread));
   next.revision = base.revision + 1;
   if (!prev) next.createdAt = now;
@@ -173,7 +158,7 @@ function publishPlan(prev, input, now = Date.now()) {
   return { plan: next, changes: [change] };
 }
 function claimIdAmong(plan, kind, wanted, fresh2) {
-  const key = { section: "sections", diagram: "diagrams", task: "tasks", question: "questions" }[kind];
+  const key = { section: "sections", diagram: "diagrams", task: "tasks" }[kind];
   const probe = { ...plan, [key]: [...plan[key], ...fresh2] };
   return claimId(probe, kind, wanted);
 }
@@ -181,23 +166,6 @@ function detachIfOrphaned(plan, before, thread) {
   if (targetExists(plan, thread.target)) return thread;
   const label = describeTarget(before, thread.target);
   return { ...thread, target: { kind: "plan", id: "" }, text: `(on removed ${label}) ${thread.text}` };
-}
-function buildQuestion(id, raw, old, tasks, now) {
-  const header = clean(raw.header, 40);
-  const context = clean(raw.context, MAX_TEXT);
-  const taskId = raw.taskId && tasks.some((t) => t.id === raw.taskId) ? raw.taskId : void 0;
-  return {
-    id,
-    question: clean(raw.question, MAX_TEXT) ?? old?.question ?? "",
-    ...header ? { header } : {},
-    ...context ? { context } : {},
-    options: raw.options ? toOptions(raw.options) : old?.options ?? [],
-    ...raw.multiSelect ? { multiSelect: true } : {},
-    ...taskId ? { taskId } : {},
-    askedBy: old?.askedBy ?? "claude",
-    createdAt: old?.createdAt ?? now,
-    ...old?.answer ? { answer: old.answer } : {}
-  };
 }
 function applyOps(plan, ops, author, now = Date.now()) {
   if (!Array.isArray(ops) || ops.length === 0) throw new PlanError("No edits were given.");
@@ -264,7 +232,7 @@ function applyOne(plan, op, author, now) {
         const title2 = clean(op.title, MAX_TITLE);
         if (title2) existing.title = title2;
         if (op.nodes || op.edges) {
-          const graph = buildGraph(op.nodes ?? existing.nodes, op.edges ?? existing.edges, existing, existing.title);
+          const graph = buildGraph(op.nodes ?? existing.nodes, op.edges ?? existing.edges, existing, existing.title, taskIdSet(plan));
           existing.nodes = graph.nodes;
           existing.edges = graph.edges;
         }
@@ -285,7 +253,7 @@ function applyOne(plan, op, author, now) {
       const diagram = {
         id: claimId(plan, "diagram", void 0),
         title,
-        ...buildGraph(op.nodes ?? [], op.edges ?? [], void 0, title),
+        ...buildGraph(op.nodes ?? [], op.edges ?? [], void 0, title, taskIdSet(plan)),
         direction: validDirection(op.direction) ?? "LR",
         ...caption ? { caption } : {},
         updatedAt: now,
@@ -348,47 +316,6 @@ function applyOne(plan, op, author, now) {
       if (!diagram) throw new PlanError(`No diagram "${op.id}".`);
       moveInList(plan.diagrams, diagram.id, op.index);
       return [log("moved", ref("diagram", diagram.id), `reordered diagram "${diagram.title}"`)];
-    }
-    case "upsert_question": {
-      const existing = op.id ? plan.questions.find((q) => q.id === op.id) : void 0;
-      if (existing) {
-        const text2 = clean(op.question, MAX_TEXT);
-        if (text2) existing.question = text2;
-        if (typeof op.header === "string") setOptional(existing, "header", clean(op.header, 40));
-        if (typeof op.context === "string") setOptional(existing, "context", clean(op.context, MAX_TEXT));
-        if (op.options) existing.options = toOptions(op.options);
-        if (typeof op.multiSelect === "boolean") setOptional(existing, "multiSelect", op.multiSelect || void 0);
-        if (op.taskId !== void 0) setOptional(existing, "taskId", op.taskId ? requireTask(plan, op.taskId).id : void 0);
-        return [log("edited", ref("question", existing.id), `edited question "${short(existing.question)}"`)];
-      }
-      const text = clean(op.question, MAX_TEXT);
-      if (!text) throw new PlanError(op.id ? `No question "${op.id}".` : "A new question needs its question text.");
-      if (op.taskId) requireTask(plan, op.taskId);
-      const question = buildQuestion(claimId(plan, "question", op.id), { ...op, question: text }, void 0, plan.tasks, now);
-      question.askedBy = author;
-      plan.questions.push(question);
-      return [log("created", ref("question", question.id), `asked "${short(text)}"`)];
-    }
-    case "answer": {
-      const question = plan.questions.find((q) => q.id === op.id);
-      if (!question) throw new PlanError(`No question "${op.id}".`);
-      const selected = (op.selected ?? []).map((s) => String(s).trim()).filter(Boolean);
-      const text = clean(op.text, MAX_TEXT) ?? "";
-      if (!selected.length && !text) throw new PlanError("An answer needs a picked option or some text.");
-      if (!question.multiSelect && selected.length > 1) {
-        throw new PlanError(`"${short(question.question)}" takes one option, not ${selected.length}.`);
-      }
-      const answer = { selected, text, by: author, at: now };
-      const had = Boolean(question.answer);
-      question.answer = answer;
-      return [log("answered", ref("question", question.id), `${had ? "changed the answer to" : "answered"} "${short(question.question)}": ${short(renderAnswer(answer), 80)}`)];
-    }
-    case "clear_answer": {
-      const question = plan.questions.find((q) => q.id === op.id);
-      if (!question) throw new PlanError(`No question "${op.id}".`);
-      if (!question.answer) return [];
-      delete question.answer;
-      return [log("edited", ref("question", question.id), `reopened "${short(question.question)}"`)];
     }
     case "remove":
       return removeItem(plan, op.kind, op.id, log);
@@ -495,16 +422,15 @@ function removeItem(plan, kind, id, log) {
       const doomed = /* @__PURE__ */ new Set([t.id, ...descendants(plan, t.id).map((d) => d.id)]);
       plan.tasks = plan.tasks.filter((x) => !doomed.has(x.id));
       normalizeSiblings(plan, t.parentId);
-      for (const q of plan.questions) if (q.taskId && doomed.has(q.taskId)) delete q.taskId;
+      for (const d of plan.diagrams) {
+        for (const n of d.nodes) {
+          if (!n.taskIds) continue;
+          n.taskIds = n.taskIds.filter((id2) => !doomed.has(id2));
+          if (n.taskIds.length === 0) delete n.taskIds;
+        }
+      }
       const extra = doomed.size > 1 ? ` and its ${doomed.size - 1} subtask(s)` : "";
       summary = `removed task "${t.title}"${extra}`;
-      break;
-    }
-    case "question": {
-      const q = plan.questions.find((x) => x.id === id);
-      if (!q) throw new PlanError(`No question "${id}".`);
-      plan.questions = plan.questions.filter((x) => x.id !== id);
-      summary = `removed question "${short(q.question)}"`;
       break;
     }
     default:
@@ -515,7 +441,7 @@ function removeItem(plan, kind, id, log) {
 }
 var MAX_NODES = 120;
 var MAX_EDGES = 300;
-function buildGraph(rawNodes, rawEdges, old, title) {
+function buildGraph(rawNodes, rawEdges, old, title, taskIds) {
   if (!Array.isArray(rawNodes) || !Array.isArray(rawEdges)) throw new PlanError(`Diagram "${title}": nodes and edges must be lists.`);
   if (rawNodes.length > MAX_NODES) throw new PlanError(`Diagram "${title}" has more than ${MAX_NODES} nodes.`);
   if (rawEdges.length > MAX_EDGES) throw new PlanError(`Diagram "${title}" has more than ${MAX_EDGES} edges.`);
@@ -526,6 +452,11 @@ function buildGraph(rawNodes, rawEdges, old, title) {
     if (nodes.some((n) => n.id === id)) throw new PlanError(`Diagram "${title}": node id "${id}" is used twice.`);
     const prev = old?.nodes.find((n) => n.id === id);
     const detail = clean(raw.detail, 400);
+    const notes = raw.notes === void 0 ? prev?.notes : clean(raw.notes, MAX_TEXT);
+    const links = raw.taskIds === void 0 ? prev?.taskIds : cleanList(raw.taskIds);
+    for (const t of links ?? []) {
+      if (!taskIds.has(t)) throw new PlanError(`Diagram "${title}": node "${id}" links task "${t}", which is not in the plan.`);
+    }
     const x = finite(raw.x) ?? prev?.x;
     const y = finite(raw.y) ?? prev?.y;
     nodes.push({
@@ -533,6 +464,8 @@ function buildGraph(rawNodes, rawEdges, old, title) {
       label: clean(raw.label, 120) ?? prev?.label ?? id,
       kind: validKind(raw.kind) ?? prev?.kind ?? "component",
       ...detail ? { detail } : {},
+      ...notes ? { notes } : {},
+      ...links?.length ? { taskIds: [...new Set(links)] } : {},
       ...x !== void 0 && y !== void 0 ? { x: Math.round(x), y: Math.round(y) } : {}
     });
   }
@@ -560,7 +493,11 @@ function describeDiagramEdit(before, after) {
   const removed = before.nodes.filter((n) => !after.nodes.some((a) => a.id === n.id));
   const changed = after.nodes.filter((n) => {
     const b = before.nodes.find((x) => x.id === n.id);
-    return b && (b.label !== n.label || b.kind !== n.kind || (b.detail ?? "") !== (n.detail ?? ""));
+    return b && (b.label !== n.label || b.kind !== n.kind || (b.detail ?? "") !== (n.detail ?? "") || (b.notes ?? "") !== (n.notes ?? ""));
+  });
+  const relinked = after.nodes.filter((n) => {
+    const b = before.nodes.find((x) => x.id === n.id);
+    return b && (b.taskIds ?? []).join() !== (n.taskIds ?? []).join();
   });
   const moved = after.nodes.filter((n) => {
     const b = before.nodes.find((x) => x.id === n.id);
@@ -577,6 +514,7 @@ function describeDiagramEdit(before, after) {
   if (added.length) parts.push(`added ${list(added.map((n) => `"${n.label}"`))}`);
   if (removed.length) parts.push(`removed ${list(removed.map((n) => `"${n.label}"`))}`);
   if (changed.length) parts.push(`edited ${list(changed.map((n) => `"${n.label}"`))}`);
+  if (relinked.length) parts.push(`changed the tasks behind ${list(relinked.map((n) => `"${n.label}"`))}`);
   if (linked.length) parts.push(`connected ${list(linked.map((e) => `${label(after, e.source)} \u2192 ${label(after, e.target)}`))}`);
   if (unlinked.length) parts.push(`disconnected ${list(unlinked.map((e) => `${label(before, e.source)} \u2192 ${label(before, e.target)}`))}`);
   if (relabeled.length) parts.push(`relabelled ${list(relabeled.map((e) => `${label(after, e.source)} \u2192 ${label(after, e.target)}`))}`);
@@ -585,6 +523,9 @@ function describeDiagramEdit(before, after) {
   if (parts.length) return parts.join("; ");
   if (moved.length) return `rearranged ${moved.length} node(s)`;
   return null;
+}
+function taskIdSet(plan) {
+  return new Set(plan.tasks.map((t) => t.id));
 }
 function validKind(value) {
   return NODE_KINDS.includes(value) ? value : void 0;
@@ -682,8 +623,6 @@ function targetExists(plan, target) {
       return plan.diagrams.some((d) => d.id === target.id);
     case "task":
       return plan.tasks.some((t) => t.id === target.id);
-    case "question":
-      return plan.questions.some((q) => q.id === target.id);
     default:
       return false;
   }
@@ -704,32 +643,12 @@ function describeTarget(plan, target) {
       const t = plan.tasks.find((x) => x.id === target.id);
       return t ? `task "${t.title}"` : `task ${target.id}`;
     }
-    case "question": {
-      const q = plan.questions.find((x) => x.id === target.id);
-      return q ? `question "${short(q.question)}"` : `question ${target.id}`;
-    }
     default:
       return "an item";
   }
 }
-function renderAnswer(answer) {
-  const picked = answer.selected.join(", ");
-  if (picked && answer.text) return `${picked} \u2014 ${answer.text}`;
-  return picked || answer.text;
-}
 function validStatus(value) {
   return TASK_STATUSES.includes(value) ? value : void 0;
-}
-function toOptions(raw) {
-  if (!Array.isArray(raw)) return [];
-  return raw.map((o) => {
-    if (typeof o === "string") return o.trim() ? { label: o.trim().slice(0, 120) } : null;
-    if (!o || typeof o !== "object") return null;
-    const label = clean(o.label, 120);
-    if (!label) return null;
-    const description = clean(o.description, 400);
-    return { label, ...description ? { description } : {} };
-  }).filter((o) => o !== null).slice(0, MAX_OPTIONS);
 }
 function clean(value, max, trim = true) {
   if (typeof value !== "string") return void 0;
@@ -773,15 +692,12 @@ function renderPlan(plan, opts = {}) {
   const meta = [
     `revision ${plan.revision}`,
     counts.total ? `tasks ${counts.done}/${counts.total} done` : "no tasks",
-    `${plan.questions.filter((q) => !q.answer).length} open question(s)`,
     `${plan.threads.filter((t) => !t.resolved).length} open comment(s)`
   ];
   out.push(`_${meta.join(" \xB7 ")}${opts.url ? ` \xB7 UI: ${opts.url}` : ""}_`);
   out.push("");
   out.push(renderChanges(plan, unread));
   if (opts.changesOnly) {
-    const openQuestions = plan.questions.filter((q) => !q.answer && q.askedBy === "user");
-    if (openQuestions.length) out.push("", "## Questions the user asked you", ...openQuestions.map((q) => renderQuestion(plan, q)));
     const touched = new Set(unread.map((c) => `${c.target.kind}:${c.target.id}`));
     const threads = plan.threads.filter((t) => !t.resolved && (touched.has(`${t.target.kind}:${t.target.id}`) || lastAuthor(t) === "user"));
     if (threads.length) out.push("", "## Comments waiting on you", ...threads.map((t) => renderThread(plan, t)));
@@ -809,10 +725,6 @@ function renderPlan(plan, opts = {}) {
     if (task.files?.length) out.push(`${pad}  files: ${task.files.join(", ")}`);
     if (task.detail) for (const line of task.detail.trim().split("\n")) out.push(`${pad}  ${line}`);
   }
-  if (plan.questions.length) {
-    out.push("", "## Questions");
-    for (const q of plan.questions) out.push(renderQuestion(plan, q));
-  }
   const open = plan.threads.filter((t) => !t.resolved);
   if (open.length) {
     out.push("", "## Open comments");
@@ -826,7 +738,11 @@ function renderDiagram(d) {
   if (d.caption) lines.push(d.caption.trim());
   lines.push("nodes:");
   if (d.nodes.length === 0) lines.push("- _(none)_");
-  for (const n of d.nodes) lines.push(`- ${n.id}: "${n.label}" (${n.kind})${n.detail ? ` \u2014 ${n.detail.replace(/\n/g, " ")}` : ""}`);
+  for (const n of d.nodes) {
+    lines.push(`- ${n.id}: "${n.label}" (${n.kind})${n.detail ? ` \u2014 ${n.detail.replace(/\n/g, " ")}` : ""}`);
+    if (n.taskIds?.length) lines.push(`  tasks: ${n.taskIds.join(", ")}`);
+    if (n.notes) for (const line of n.notes.trim().split("\n")) lines.push(`  ${line}`);
+  }
   if (d.edges.length) {
     lines.push("edges:");
     for (const e of d.edges) {
@@ -841,22 +757,6 @@ function renderChanges(plan, unread) {
   }
   const lines = [`## Since you last read \u2014 ${unread.length} change(s) by the user`];
   for (const c of unread) lines.push(`- ${c.summary} [${c.target.kind}${c.target.id ? ` ${c.target.id}` : ""}]`);
-  return lines.join("\n");
-}
-function renderQuestion(plan, q) {
-  const who2 = q.askedBy === "user" ? "asked by the user" : "asked by you";
-  const header = q.header ? `[${q.header}] ` : "";
-  const task = q.taskId ? ` (holds up ${q.taskId})` : "";
-  const lines = [`- [${q.id}] ${header}${q.question} _(${who2}${task})_`];
-  if (q.context) lines.push(`  context: ${q.context.trim().replace(/\n/g, "\n  ")}`);
-  if (q.options.length) {
-    lines.push(`  options${q.multiSelect ? " (multi-select)" : ""}: ${q.options.map((o) => o.description ? `${o.label} (${o.description})` : o.label).join("; ")}`);
-  }
-  if (q.answer) {
-    lines.push(`  \u2192 ANSWERED by ${q.answer.by === "user" ? "the user" : "you"}: ${renderAnswer(q.answer)}`);
-  } else {
-    lines.push(q.askedBy === "user" ? '  \u2192 UNANSWERED \u2014 answer it with harness_plan_edit {op:"answer"}' : "  \u2192 unanswered");
-  }
   return lines.join("\n");
 }
 function renderThread(plan, t) {
@@ -902,8 +802,7 @@ var INPUT = {
   tasks: [
     { title: "Storage layer", subtasks: [{ title: "Cache client" }, { title: "Invalidation", status: "blocked" }] },
     { title: "Wire into API" }
-  ],
-  questions: [{ question: "Which cache?", header: "Backend", options: ["Redis", { label: "In-memory", description: "Lost on restart." }] }]
+  ]
 };
 var fresh = () => publishPlan(null, INPUT, 1e3).plan;
 test("publishing builds a nested task tree with readable ids", () => {
@@ -914,8 +813,6 @@ test("publishing builds a nested task tree with readable ids", () => {
   );
   assert.equal(plan.sections[0].id, "s1");
   assert.equal(plan.diagrams[0].id, "d1");
-  assert.equal(plan.questions[0].id, "q1");
-  assert.equal(plan.questions[0].options[1].description, "Lost on restart.");
 });
 test("progress counts leaf tasks only", () => {
   assert.deepEqual(countTasks(fresh()), { total: 3, done: 0, inProgress: 0, blocked: 1 });
@@ -926,10 +823,10 @@ test("publishing marks the plan read by Claude", () => {
   assert.equal(unreadByClaude(plan).length, 0);
 });
 test("a user edit is unread by Claude until it reads the plan", () => {
-  const { plan } = applyOps(fresh(), [{ op: "answer", id: "q1", selected: ["Redis"], text: "we already run it" }], "user");
+  const { plan } = applyOps(fresh(), [{ op: "move_task", id: "t4", parentId: "t1", index: 0 }], "user");
   const unread = unreadByClaude(plan);
   assert.equal(unread.length, 1);
-  assert.match(unread[0].summary, /answered "Which cache\?": Redis — we already run it/);
+  assert.match(unread[0].summary, /moved "Wire into API" under "Storage layer"/);
   assert.match(unreadNotice(plan) ?? "", /harness_plan_read/);
 });
 test("Claude's own edits never show up as unread", () => {
@@ -946,11 +843,10 @@ test("a republish is refused while the user has unread changes", () => {
   const edited = applyOps(fresh(), [{ op: "upsert_task", title: "Load test" }], "user").plan;
   assert.throws(() => publishPlan(edited, INPUT), (err) => err instanceof PlanError && /harness_plan_read/.test(err.message));
 });
-test("a republish keeps answers, comments and statuses on surviving ids", () => {
+test("a republish keeps comments and statuses on surviving ids", () => {
   let plan = applyOps(
     fresh(),
     [
-      { op: "answer", id: "q1", selected: ["Redis"] },
       { op: "comment", target: { kind: "task", id: "t2" }, text: "use the pooled client" },
       { op: "upsert_task", id: "t2", status: "done" }
     ],
@@ -959,10 +855,8 @@ test("a republish keeps answers, comments and statuses on surviving ids", () => 
   plan.claudeReadSeq = plan.seq;
   const next = publishPlan(plan, {
     ...INPUT,
-    tasks: [{ id: "t1", title: "Storage layer", subtasks: [{ id: "t2", title: "Cache client (pooled)" }] }],
-    questions: [{ id: "q1", question: "Which cache?", options: ["Redis", "In-memory"] }]
+    tasks: [{ id: "t1", title: "Storage layer", subtasks: [{ id: "t2", title: "Cache client (pooled)" }] }]
   }).plan;
-  assert.equal(next.questions[0].answer?.selected[0], "Redis");
   assert.equal(next.tasks.find((t) => t.id === "t2")?.status, "done", "a status Claude did not restate is kept");
   assert.equal(next.threads[0].target.id, "t2");
   assert.equal(next.revision, 2);
@@ -973,11 +867,17 @@ test("a comment on a removed item is kept, re-homed on the plan", () => {
   assert.equal(plan.threads[0].target.kind, "plan");
   assert.match(plan.threads[0].text, /on removed task "Wire into API"/);
 });
-test("removing a task removes its subtasks and unlinks its questions", () => {
-  let plan = applyOps(fresh(), [{ op: "upsert_question", question: "TTL?", taskId: "t3" }], "claude").plan;
+test("removing a task removes its subtasks and unlinks them from the diagram", () => {
+  const base = fresh();
+  const d = base.diagrams[0];
+  let plan = applyOps(
+    base,
+    [{ op: "upsert_diagram", id: "d1", nodes: d.nodes.map((n) => n.id === "cache" ? { ...n, taskIds: ["t3", "t4"] } : n), edges: d.edges }],
+    "claude"
+  ).plan;
   plan = applyOps(plan, [{ op: "remove", kind: "task", id: "t1" }], "user").plan;
   assert.deepEqual(plan.tasks.map((t) => t.id), ["t4"]);
-  assert.equal(plan.questions.find((q) => q.question === "TTL?")?.taskId, void 0);
+  assert.deepEqual(plan.diagrams[0].nodes.find((n) => n.id === "cache")?.taskIds, ["t4"]);
   assert.match(plan.changes.at(-1).summary, /and its 2 subtask/);
 });
 test("moving a task re-parents it and reorders both sibling lists", () => {
@@ -994,8 +894,8 @@ test("a task cannot be moved inside itself", () => {
 test("a batch is all or nothing", () => {
   const before = fresh();
   assert.throws(
-    () => applyOps(before, [{ op: "upsert_task", title: "Fine" }, { op: "answer", id: "q99", text: "nope" }], "user"),
-    /Edit 2 \(answer\): No question "q99"/
+    () => applyOps(before, [{ op: "upsert_task", title: "Fine" }, { op: "remove", kind: "task", id: "t99" }], "user"),
+    /Edit 2 \(remove\): No task "t99"/
   );
   assert.equal(before.tasks.length, 4, "the plan passed in is untouched");
 });
@@ -1004,9 +904,6 @@ test("ids are never reused, even after a delete", () => {
   plan = applyOps(plan, [{ op: "upsert_task", title: "New" }], "user").plan;
   assert.ok(plan.tasks.some((t) => t.id === "t5"));
   assert.ok(!plan.tasks.some((t) => t.id === "t4"));
-});
-test("a single-choice question refuses two answers", () => {
-  assert.throws(() => applyOps(fresh(), [{ op: "answer", id: "q1", selected: ["Redis", "In-memory"] }], "user"), /takes one option/);
 });
 test("threads: reply and resolve are logged against the item", () => {
   let plan = applyOps(fresh(), [{ op: "comment", target: { kind: "section", id: "s1" }, text: "too vague" }], "user").plan;
@@ -1067,6 +964,38 @@ test("dragging boxes is logged as a rearrangement, and positions survive a repub
   const republished = publishPlan(moved, { ...INPUT, diagrams: [{ id: "d1", ...INPUT.diagrams[0] }] }).plan;
   assert.equal(republished.diagrams[0].nodes.find((n) => n.id === "cache")?.x, 200, "Claude did not restate it, so it stays put");
 });
+test("a box carries notes and the tasks that build it", () => {
+  const plan = publishPlan(null, {
+    title: "x",
+    tasks: [{ id: "build-cache", title: "Build the cache", subtasks: [{ title: "client" }] }],
+    diagrams: [
+      {
+        title: "D",
+        nodes: [{ id: "cache", label: "Cache", kind: "datastore", notes: "Redis, because we run it.", taskIds: ["build-cache"] }]
+      }
+    ]
+  }).plan;
+  const node = plan.diagrams[0].nodes[0];
+  assert.equal(node.notes, "Redis, because we run it.");
+  assert.deepEqual(node.taskIds, ["build-cache"]);
+  assert.match(renderPlan(plan), /- cache: "Cache" \(datastore\)\n  tasks: build-cache\n  Redis, because we run it\./);
+});
+test("a box cannot link a task that does not exist", () => {
+  assert.throws(
+    () => publishPlan(null, { title: "x", diagrams: [{ title: "D", nodes: [{ id: "a", label: "A", taskIds: ["nope"] }] }] }),
+    /links task "nope"/
+  );
+});
+test("linking a box to tasks is described for Claude", () => {
+  const base = fresh();
+  const d = base.diagrams[0];
+  const { plan } = applyOps(
+    base,
+    [{ op: "upsert_diagram", id: "d1", nodes: d.nodes.map((n) => n.id === "cache" ? { ...n, taskIds: ["t2"], notes: "LRU" } : n), edges: d.edges }],
+    "user"
+  );
+  assert.match(plan.changes.at(-1).summary, /edited "Cache"; changed the tasks behind "Cache"/);
+});
 test("an edit that changes nothing logs nothing", () => {
   const plan = fresh();
   const d = plan.diagrams[0];
@@ -1074,15 +1003,16 @@ test("an edit that changes nothing logs nothing", () => {
   assert.equal(changes.length, 0);
 });
 test("the rendering leads with the changes and carries every id", () => {
-  const plan = applyOps(fresh(), [{ op: "upsert_question", question: "Should we shard?" }], "user").plan;
+  const plan = applyOps(fresh(), [{ op: "upsert_task", title: "Shard it" }], "user").plan;
   const text = renderPlan(plan, { url: "http://x" });
   assert.ok(text.indexOf("Since you last read") < text.indexOf("## Tasks"));
   assert.match(text, /- \[ \] t2 Cache client/);
   assert.match(text, /- \[!\] t3 Invalidation/);
   assert.match(text, /\[d1\] Components/);
   assert.match(text, /- api → cache "get"/);
-  assert.match(text, /\[q2\] Should we shard\? _\(asked by the user\)_/);
-  assert.match(text, /UNANSWERED — answer it with harness_plan_edit/);
+  assert.match(text, /added task "Shard it"/);
+  assert.match(text, /t5 Shard it _\(added by the user\)_/);
+  assert.doesNotMatch(text, /question/i, "questions live in Claude's chat, not the plan");
 });
 test("changes-only rendering skips the document", () => {
   const plan = applyOps(fresh(), [{ op: "comment", target: { kind: "plan", id: "" }, text: "looks good" }], "user").plan;

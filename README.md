@@ -1,26 +1,22 @@
 # cc-harness
 
-A visual planning workspace for Claude Code. Claude publishes its plan —
-architecture diagrams, a task breakdown, the questions it needs answered —
-and you read it, reorganize it, comment on it and answer it in the browser.
-When you're done, you tell Claude in its own chat, and it reads back exactly
-what you changed.
+A visual planning workspace for Claude Code, and a way to follow Claude's
+progress through the plan. Claude publishes its plan — the architecture as
+diagrams, and a task breakdown — and you reshape it in the browser: rearrange
+and rewire the architecture, record the decisions on each part, reorganize the
+tasks, comment on anything. As Claude builds, the same page shows where it is.
 
-The problem it solves: a plan written into a chat is a wall of prose. You can't
-see the architecture, you can't drag a task under another one, and you can
-only answer five questions by writing an essay that quotes each of them. The
-harness gives the plan a shape you can work with, then hands it back to the
-conversation.
-
-It does one thing. The harness never talks to Claude, never waits for you,
-and never holds a turn open. Every exchange happens in Claude's chat; the
-harness is where the plan lives.
+It does one thing. The harness never talks to Claude and never answers it.
+When Claude needs a decision it asks in its own chat; the harness shows the
+question and takes you straight to that session — in the Claude desktop app —
+to answer it.
 
 ```
  ┌──────────────────── Claude Code session ─────────────────────┐
- │  chat  ◀── you talk to Claude here, and only here            │
+ │  chat  ◀── you talk to and answer Claude here, and only here │
  │  MCP: harness_plan_publish · _read · _edit · task_update     │
- │  hooks: register the session; note unread plan changes       │
+ │  hooks: register the session; notice when Claude is waiting; │
+ │         note unread plan changes                             │
  └──────────────┬───────────────────────────────────────────────┘
                 │ loopback HTTP
                 ▼
@@ -30,7 +26,7 @@ harness is where the plan lives.
                 │ GET /api/events (SSE)        │ POST …/plan/ops
                 ▼                              │
  ┌──────────────── browser UI (React + React Flow) ─────────────┐
- │  Overview · Diagrams · Tasks · Questions · Activity          │
+ │  Architecture · Tasks · Overview      ──▶ "Answer in Claude"  │
  └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -81,85 +77,90 @@ In any session with the plugin enabled:
 ## The loop
 
 1. **Claude publishes.** `/harness add a cache to the orders API` — Claude
-   reads the code and calls `harness_plan_publish`, then tells you in chat that
-   the plan is ready.
-2. **You work the plan.** In the browser, answer its questions, drag tasks
-   into the order you want, nest and split them, redraw the architecture, and
-   leave comments on anything. Every edit is saved at once and recorded in the
-   plan's change log as yours.
-3. **You hand it back in chat.** The header shows how many of your changes
-   Claude hasn't read, and *Copy message for Claude* puts a ready-made
-   "read the plan" message on your clipboard. If you just type in chat,
-   the next prompt carries a one-line note that the plan changed.
+   reads the code, calls `harness_plan_publish`, and asks what it needs decided
+   with `AskUserQuestion` in chat.
+2. **You shape the plan.** In the browser, rearrange and rewire the
+   architecture, write down the decisions on each box, drag tasks into the
+   order you want, nest and split them, and comment on anything. Every edit is
+   saved at once and recorded in the plan's change log as yours.
+3. **You hand it back in chat.** The header says how many of your changes
+   Claude hasn't read and opens the session in Claude. If you just type in
+   chat, the next prompt carries a one-line note that the plan changed.
 4. **Claude reads it back.** `harness_plan_read` leads with exactly what you
-   did since it last looked: your answers, your moves, your comments. It
-   adjusts, replies in your comment threads, answers questions you asked it,
-   and tells you in chat what changed. Repeat until it's settled.
-5. **Claude builds against it.** As it works it marks tasks in progress, done
-   or blocked, so the Tasks board shows where it is.
+   did since it last looked. It adjusts and replies in your comment threads.
+5. **Claude builds against it.** It marks tasks in progress, done or blocked,
+   and boxes linked to those tasks fill up as it goes.
+
+## Questions are answered in Claude
+
+The harness has no question forms and no message box. When Claude stops on
+you — an `AskUserQuestion`, a permission prompt, an idle prompt, or a turn
+that ends on a question — the page shows a banner with what is being asked,
+the session moves to *Waiting on you* at the top of the rail, and the tab
+title changes. **Answer in Claude** opens the session:
+
+| Where the session runs | Link |
+| --- | --- |
+| Cloud (claude.ai/code) | `claude://claude.ai/code/session_…` for the desktop app, plus a web link |
+| Local, with Remote Control on | the same, from the Remote Control session id |
+| Local, without Remote Control | no documented link exists — the banner says where to answer, and that `/remote-control` turns it into a link |
+
+The banner clears as soon as you answer in Claude. Set `openClaudeOnQuestion`
+to have a local Remote Control session open itself in the desktop app the
+moment it asks.
 
 ## The views
 
-**Overview.** The plan as a document: a summary, then sections (context,
-architecture, risks…) you can edit in place, reorder and comment on. Four
-tiles across the top give the state at a glance — task progress, open
-questions, diagrams, open comments — and each opens its tab.
-
-**Diagrams.** Each diagram is a [React Flow](https://reactflow.dev) canvas.
-Claude writes nodes and edges without coordinates, and dagre lays them out;
-you drag boxes where you want them, draw arrows between handles, select a box
-or arrow to relabel it or change its kind, and press Backspace to delete.
-*Tidy layout* re-lays the whole diagram, the direction toggle flips it between
-left-to-right and top-to-bottom, and *Full screen* gives it the window. Box
-kinds — component, service, datastore, queue, external, actor, note — have
-their own shape and colour. Your edits reach Claude in words: *connected
-Cache warmer → Postgres*, *added "Jobs"*, *rearranged 3 nodes*.
+**Architecture.** One diagram at a time fills the view: a
+[React Flow](https://reactflow.dev) canvas taking about 70% of the width, and a
+details panel beside it. On the canvas, drag boxes, draw arrows between
+handles, and press Backspace to delete; *Tidy layout* re-lays the diagram
+with dagre and the direction toggle flips it. Select a box and the panel edits
+it: its label, kind and one-line description, **notes and decisions**
+(markdown — what was decided about this part and why), the **tasks that build
+it**, and its connections. Select an arrow to say what flows along it. With
+nothing selected the panel describes the diagram and holds its comments.
+Boxes linked to tasks show those tasks' progress, so the picture doubles as
+a progress map. Your edits reach Claude in words: *connected Cache warmer →
+Postgres*, *edited "Redis"*, *changed the tasks behind "Redis"*.
 
 **Tasks.** The breakdown, two ways:
 
 - *Outline* is for shaping it. Rows nest to any depth with outline numbers.
   Drag a row onto another to nest it, or onto its top or bottom edge to place
   it beside; or, with a row focused, Alt+↑/↓ to reorder, Alt+→ to nest under
-  the row above, Alt+← to move out a level. Click a status dot to move it
-  along; open a row for its detail, expected files, status note, linked
-  questions and comments.
-- *Board* is for following it: every leaf task in a To do / In progress /
-  Blocked / Done column, with its parent path. Drag between columns, or use
-  the status menu on the card.
+  the row above, Alt+← to move out a level. Each row shows the boxes it
+  builds; click one to see it on the canvas.
+- *Board* is for following Claude: every leaf task in a To do / In progress /
+  Blocked / Done column.
 
-Progress counts leaf tasks only — a parent is a heading over its subtasks.
+**Overview.** The summary, supporting sections, and tiles for progress, what
+Claude is on right now, diagrams and open comments.
 
-**Questions.** Claude's open decisions first, each with its options as
-choices (single or multi-select) and room for your own words. Saving an
-answer records it on the plan; nothing is sent. You can ask Claude questions
-here too, and its answers land on the same card.
-
-**Activity.** The change log, newest first, with a line marking how far
-Claude has read. Everything of yours above the line is what it hasn't seen.
+**The session list** groups sessions by project, lifts the ones waiting on
+you to the top, and shows each one's current task. Fold it to a rail of
+initials with the ☰ button or `[` to give the plan the width.
 
 *As Claude sees it*, in the header, shows the plan exactly as
-`harness_plan_read` will return it — opening it does not count as Claude
-reading.
+`harness_plan_read` returns it.
 
 ## What Claude gets
 
-Four tools, none of which waits on you:
+Four tools, none of which waits on you or asks you anything:
 
 | Tool | What it does |
 | --- | --- |
-| `harness_plan_publish` | Publish the whole plan. Items keep their comments and answers when their ids survive; refused while you have changes Claude hasn't read, so it can never overwrite your edits blind. |
+| `harness_plan_publish` | Publish the whole plan. Items keep their comments, positions and statuses when their ids survive; refused while you have changes Claude hasn't read, so it can never overwrite your edits blind. |
 | `harness_plan_read` | The plan as text, leading with your changes since the last read, with every id Claude needs. `changes_only` skips the document. |
-| `harness_plan_edit` | A batch of targeted edits — sections, diagrams, tasks, moves, questions, answers, replies — applied all or nothing. |
+| `harness_plan_edit` | A batch of targeted edits — sections, diagrams, tasks, moves, comment replies — applied all or nothing. |
 | `harness_task_update` | Mark a task in progress, done or blocked, with a one-line note. |
 
-The browser and Claude edit through the same operations, so the change log is
-written in one place whoever made the change. Ids are short and never reused
-(`t4`, `q2`, `d1`, `c3`), so a comment can't end up on a different item.
-
-The hooks do three things and answer immediately: register the session on
-`SessionStart`, keep its working/idle/ended state for the rail, and — if you
-changed the plan since Claude last read it — add one line to your next chat
-prompt saying so. Turn that off with `promptNotice: false`.
+The hooks answer immediately and never hold a turn. They register the
+session, keep its working/idle/ended state, notice when Claude is waiting on
+you (`PreToolUse`/`PostToolUse` for `AskUserQuestion`, `Notification`,
+`Stop`), read the session's link from its environment, and — if you changed
+the plan since Claude last read it — add one line to your next prompt saying
+so.
 
 ## Housekeeping
 
@@ -198,6 +199,7 @@ npm run check          # all three
 ```
 
 - `src/shared/plan.ts` — the plan model: publishing, every edit, the change log
+- `src/shared/link.ts` — how a session is linked back to in Claude
 - `src/daemon` — the singleton server: sessions, the plan API, rendering for
   Claude, hooks, housekeeping
 - `src/mcp` — the stdio MCP server (hand-rolled JSON-RPC, no dependencies)

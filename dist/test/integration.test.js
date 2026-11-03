@@ -122,8 +122,9 @@ async function call(route, init) {
   const type = res.headers.get("content-type") ?? "";
   return type.includes("json") ? await res.json() : { status: res.status, text: await res.text() };
 }
-var hookFor = (id, event, body = {}) => call(`/hook/${event}`, {
+var hookFor = (id, event, body = {}, headers = {}) => call(`/hook/${event}`, {
   method: "POST",
+  headers,
   body: JSON.stringify({ session_id: id, cwd: repo, ...body })
 });
 var mcpFor = (id, tool, body = {}) => call(`/mcp/${tool}`, {
@@ -131,7 +132,7 @@ var mcpFor = (id, tool, body = {}) => call(`/mcp/${tool}`, {
   headers: { "x-harness-session": id },
   body: JSON.stringify({ cwd: repo, ...body })
 });
-var hook = (event, body = {}) => hookFor(sessionId, event, body);
+var hook = (event, body = {}, headers = {}) => hookFor(sessionId, event, body, headers);
 var mcp = (tool, body = {}) => mcpFor(sessionId, tool, body);
 var sessionFor = (id) => call(`/api/session/${id}`).then((r) => r.session);
 var session = () => sessionFor(sessionId);
@@ -153,8 +154,7 @@ var PLAN = {
       edges: [{ source: "api", target: "db" }]
     }
   ],
-  tasks: [{ title: "Storage", subtasks: [{ title: "Client" }, { title: "Invalidation" }] }, { title: "Wire up" }],
-  questions: [{ question: "Which backend?", options: ["Redis", "Memcached"] }]
+  tasks: [{ title: "Storage", subtasks: [{ title: "Client" }, { title: "Invalidation" }] }, { title: "Wire up" }]
 };
 test("SessionStart records the repo and branch", async () => {
   await hook("SessionStart", { start_reason: "startup" });
@@ -184,10 +184,7 @@ test("no hook ever holds a turn", async () => {
   }
 });
 test("what the user does in the browser is what Claude reads back", async () => {
-  const before2 = await session();
-  const q = before2.plan.questions[0].id;
   const res = await ops([
-    { op: "answer", id: q, selected: ["Redis"], text: "already deployed" },
     { op: "move_task", id: "t4", parentId: "t1", index: 0 },
     { op: "upsert_task", parentId: "t1", title: "Load test" },
     { op: "comment", target: { kind: "diagram", id: "d1" }, text: "where does the cache go?" },
@@ -196,7 +193,7 @@ test("what the user does in the browser is what Claude reads back", async () => 
       id: "d1",
       nodes: [
         { id: "api", label: "API", kind: "service", x: 0, y: 0 },
-        { id: "cache", label: "Redis", kind: "datastore", x: 200, y: 0 },
+        { id: "cache", label: "Redis", kind: "datastore", x: 200, y: 0, notes: "Already deployed.", taskIds: ["t2"] },
         { id: "db", label: "Postgres", kind: "datastore", x: 400, y: 0 }
       ],
       edges: [
@@ -207,13 +204,12 @@ test("what the user does in the browser is what Claude reads back", async () => 
   ]);
   assert.ok(res.plan, res.error);
   const read = String((await mcp("read", {}))["text"]);
-  assert.match(read, /Since you last read — 5 change\(s\) by the user/);
-  assert.match(read, /answered "Which backend\?": Redis — already deployed/);
+  assert.match(read, /Since you last read — 4 change\(s\) by the user/);
   assert.match(read, /moved "Wire up" under "Storage"/);
   assert.match(read, /added task "Load test" under "Storage"/);
   assert.match(read, /commented on diagram "Components"/);
   assert.match(read, /added "Redis".*connected API → Redis/);
-  assert.match(read, /- cache: "Redis" \(datastore\)/);
+  assert.match(read, /- cache: "Redis" \(datastore\)\n  tasks: t2\n  Already deployed\./);
 });
 test("reading once catches Claude up", async () => {
   const again = String((await mcp("read", { changes_only: true }))["text"]);
@@ -222,7 +218,7 @@ test("reading once catches Claude up", async () => {
   assert.equal(notice.hookSpecificOutput?.additionalContext, void 0, "no notice once Claude is up to date");
 });
 test("the next chat message after an edit tells Claude to read the plan", async () => {
-  await ops([{ op: "upsert_question", question: "Should we shard?" }]);
+  await ops([{ op: "upsert_task", title: "Shard later" }]);
   const out = await hook("UserPromptSubmit", { prompt: "ok, go on" });
   assert.match(out.hookSpecificOutput?.additionalContext ?? "", /changed the plan .* harness_plan_read/);
 });
@@ -231,24 +227,62 @@ test("a republish over unread user edits is refused", async () => {
   assert.equal(res["ok"], false);
   assert.match(String(res["text"]), /harness_plan_read first/);
   const s = await session();
-  assert.ok(s.plan.questions.some((q) => q.question === "Should we shard?"), "nothing the user did was lost");
+  assert.ok(s.plan.tasks.some((t) => t.title === "Shard later"), "nothing the user did was lost");
 });
-test("Claude answers the user's question and replies to their comment", async () => {
+test("Claude replies to the user's comment in its thread", async () => {
   await mcp("read", {});
   const s = await session();
-  const asked = s.plan.questions.find((q) => q.question === "Should we shard?");
   const thread = s.plan.threads[0];
-  const res = await mcp("edit", {
-    ops: [
-      { op: "answer", id: asked.id, text: "Not yet \u2014 one node handles the load." },
-      { op: "reply", threadId: thread.id, text: "Between the API and Postgres." }
-    ]
-  });
+  const res = await mcp("edit", { ops: [{ op: "reply", threadId: thread.id, text: "Between the API and Postgres." }] });
   assert.equal(res["ok"], true, String(res["text"]));
   const after2 = await session();
-  assert.equal(after2.plan.questions.find((q) => q.id === asked.id)?.answer?.by, "claude");
   assert.equal(after2.plan.threads[0].replies[0].author, "claude");
   assert.equal(after2.plan.claudeReadSeq, after2.plan.seq, "its own edits are not news to it");
+});
+test("a question Claude asks is shown as waiting, and cleared when answered in Claude", async () => {
+  await hook("PreToolUse", {
+    tool_name: "AskUserQuestion",
+    tool_input: { questions: [{ question: "Which TTL?", header: "TTL", options: [{ label: "1m" }, { label: "10m" }] }] }
+  });
+  const asking = await session();
+  assert.equal(asking.waiting?.kind, "question");
+  assert.deepEqual(asking.waiting?.questions?.[0], { question: "Which TTL?", header: "TTL", options: ["1m", "10m"] });
+  const { sessions } = await call("/api/sessions");
+  assert.ok(sessions.find((x) => x.sessionId === sessionId)?.waiting, "the rail hears about it");
+  await hook("PostToolUse", { tool_name: "AskUserQuestion" });
+  assert.equal((await session()).waiting, null);
+});
+test("an idle reminder does not replace the question it reminds about", async () => {
+  await hook("PreToolUse", { tool_name: "AskUserQuestion", tool_input: { questions: [{ question: "Shard?", options: [] }] } });
+  await hook("Notification", { notification_type: "idle_prompt", message: "Claude is waiting for your input" });
+  assert.equal((await session()).waiting?.text, "Shard?");
+  await hook("UserPromptSubmit", { prompt: "no" });
+  assert.equal((await session()).waiting, null, "replying in Claude clears it");
+});
+test("a permission prompt is waiting too", async () => {
+  await hook("Notification", { notification_type: "permission_prompt", message: "Claude needs your permission to use Bash" });
+  const s = await session();
+  assert.equal(s.waiting?.kind, "permission");
+  assert.match(s.waiting?.text ?? "", /permission to use Bash/);
+  await hook("PostToolUse", { tool_name: "Bash" });
+});
+test("a turn that ends on a question is waiting on a reply", async () => {
+  await hook("Stop", { last_assistant_message: "Done with the plan.\n\nShould the warmer read from a replica?" });
+  const s = await session();
+  assert.equal(s.status, "idle");
+  assert.equal(s.waiting?.text, "Should the warmer read from a replica?");
+  await hook("Stop", { last_assistant_message: "All done." });
+  assert.equal((await session()).waiting, null);
+});
+test("the session environment decides the link back to Claude", async () => {
+  await hook("UserPromptSubmit", { prompt: "x" });
+  assert.equal((await session()).link, null, "a plain local session has no documented link");
+  await hook("Stop", {}, { "x-harness-bridge-session": "session_01Bridge", "x-harness-entrypoint": "cli" });
+  const s = await session();
+  assert.equal(s.surface, "cli");
+  assert.equal(s.link?.app, "claude://claude.ai/code/session_01Bridge");
+  await hook("Stop", {}, { "x-harness-remote-sdk": "https://api.anthropic.com/v1/code/sessions/cse_01Cloud" });
+  assert.equal((await session()).link?.web, "https://claude.ai/code/session_01Cloud");
 });
 test("task tracking moves statuses and reports them", async () => {
   const res = await mcp("task", { task_id: "t2", status: "done", note: "client added" });

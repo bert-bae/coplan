@@ -69,12 +69,20 @@ if ! read_lock; then
   start_daemon || exit 0
 fi
 
+# Hooks run inside the session's own environment, which is the only place
+# that says where the session lives — and therefore how to link back to it so
+# the user can answer Claude there. Remote Control can be switched on
+# mid-session, so this goes with every event rather than only SessionStart.
 RESPONSE=$(printf '%s' "$PAYLOAD" | curl -s -S \
   --max-time "$MAX_TIME" \
   --connect-timeout 2 \
   -X POST \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $TOKEN" \
+  -H "X-Harness-Remote-Session: ${CLAUDE_CODE_REMOTE_SESSION_ID:-}" \
+  -H "X-Harness-Remote-Sdk: ${CLAUDE_CODE_REMOTE_SDK_URL:-}" \
+  -H "X-Harness-Bridge-Session: ${CLAUDE_CODE_BRIDGE_SESSION_ID:-}" \
+  -H "X-Harness-Entrypoint: ${CLAUDE_CODE_ENTRYPOINT:-}" \
   --data-binary @- \
   "http://127.0.0.1:$PORT/hook/$EVENT" 2>/dev/null) || exit 0
 

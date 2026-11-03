@@ -2,12 +2,12 @@
  * Shared vocabulary for every process in the harness: the daemon, the MCP
  * server, the hook relay and the browser UI all speak these types.
  *
- * The harness has one job: to be the place where a plan is laid out, argued
- * over and broken down before (and while) Claude works on it. Everything here
- * describes a plan document — its prose, its diagrams, its task tree, its open
- * questions and the comments on all of them. Nothing here describes talking to
- * Claude: that happens in Claude's own chat, and Claude reads the plan back
- * when it is told to.
+ * The harness has two jobs: to be the place where a plan is laid out,
+ * reshaped and broken down, and to show how far Claude has got through it.
+ * Everything here describes a plan document — its prose, its diagrams, its
+ * task tree and the comments on them — plus whether Claude is waiting on the
+ * user. Nothing here describes talking to Claude: questions are asked and
+ * answered in Claude's own chat, and the harness only links there.
  */
 
 /** Who made a change. The plan is co-authored, and the change log is how each
@@ -42,8 +42,13 @@ export interface DiagramNode {
   id: string;
   label: string;
   kind: NodeKind;
-  /** One or two lines under the label: responsibility, tech, notes. */
+  /** One line under the label on the canvas: responsibility or technology. */
   detail?: string;
+  /** The longer story, edited in the side panel: decisions taken about this
+   *  part and why, interfaces, open concerns. Markdown. */
+  notes?: string;
+  /** Tasks that build this part, so the diagram shows how far along it is. */
+  taskIds?: string[];
   /** Canvas position. Absent until someone arranges the diagram; the UI lays
    *  out unplaced nodes automatically. */
   x?: number;
@@ -84,6 +89,8 @@ export interface DiagramNodeInput {
   label?: string;
   kind?: string;
   detail?: string;
+  notes?: string;
+  taskIds?: string[];
   x?: number;
   y?: number;
 }
@@ -131,44 +138,8 @@ export interface Task {
   createdBy: Author;
 }
 
-export interface QuestionOption {
-  label: string;
-  description?: string;
-}
-
-export interface Answer {
-  /** Option labels picked, when the question offered options. */
-  selected: string[];
-  /** Free text — the whole answer, or what qualifies the picked options. */
-  text: string;
-  by: Author;
-  at: number;
-}
-
-/**
- * An open decision. Either side can ask, and either side can answer: Claude
- * asks what it needs to know before it can build; the user asks what they
- * want Claude to look into. Answers stay on the plan, so the reasoning behind
- * the design outlives the conversation that produced it.
- */
-export interface Question {
-  id: string;
-  question: string;
-  /** Two or three words, rendered as a chip — e.g. "Storage". */
-  header?: string;
-  /** Why it matters, or what each answer would change. Markdown. */
-  context?: string;
-  options: QuestionOption[];
-  multiSelect?: boolean;
-  /** The task this question holds up, when it holds one up. */
-  taskId?: string;
-  askedBy: Author;
-  createdAt: number;
-  answer?: Answer;
-}
-
 /** What a comment is attached to. `plan` targets the plan as a whole. */
-export const TARGET_KINDS = ['plan', 'section', 'diagram', 'task', 'question'] as const;
+export const TARGET_KINDS = ['plan', 'section', 'diagram', 'task'] as const;
 export type TargetKind = (typeof TARGET_KINDS)[number];
 
 export interface Target {
@@ -205,8 +176,7 @@ export type ChangeKind =
   | 'commented'
   | 'replied'
   | 'resolved'
-  | 'reopened'
-  | 'answered';
+  | 'reopened';
 
 /**
  * One entry of the plan's change log.
@@ -232,7 +202,6 @@ export interface Plan {
   sections: Section[];
   diagrams: Diagram[];
   tasks: Task[];
-  questions: Question[];
   threads: Thread[];
   /** Newest last; bounded. */
   changes: Change[];
@@ -262,25 +231,14 @@ export interface TaskInput {
   subtasks?: TaskInput[];
 }
 
-export interface QuestionInput {
-  id?: string;
-  question: string;
-  header?: string;
-  context?: string;
-  options?: (string | QuestionOption)[];
-  multiSelect?: boolean;
-  taskId?: string;
-}
-
 /** The whole plan, as Claude publishes it. Replaces the plan's content while
- *  keeping comments and answers on every item whose id survives. */
+ *  keeping comments and statuses on every item whose id survives. */
 export interface PlanInput {
   title: string;
   summary?: string;
   sections?: { id?: string; title: string; body: string }[];
   diagrams?: DiagramInput[];
   tasks?: TaskInput[];
-  questions?: QuestionInput[];
 }
 
 /**
@@ -318,9 +276,6 @@ export type PlanOp =
   | { op: 'move_task'; id: string; parentId: string | null; index: number }
   | { op: 'move_section'; id: string; index: number }
   | { op: 'move_diagram'; id: string; index: number }
-  | ({ op: 'upsert_question' } & Partial<QuestionInput>)
-  | { op: 'answer'; id: string; text?: string; selected?: string[] }
-  | { op: 'clear_answer'; id: string }
   | { op: 'remove'; kind: Exclude<TargetKind, 'plan'>; id: string }
   | { op: 'comment'; target: Target; text: string }
   | { op: 'reply'; threadId: string; text: string }
@@ -331,6 +286,34 @@ export type PlanOpName = PlanOp['op'];
 /* ------------------------------------------------------------------ *
  * Sessions
  * ------------------------------------------------------------------ */
+
+/**
+ * Claude has stopped and needs something from the user: an answer to a
+ * question it asked, a permission decision, or simply a reply. Captured from
+ * hooks, shown in the harness, and answered in Claude itself — the harness
+ * links there and never answers on the user's behalf.
+ */
+export interface WaitingState {
+  kind: 'question' | 'permission' | 'input';
+  /** The question, or what the prompt says, in one or two lines. */
+  text: string;
+  /** For `AskUserQuestion`: each question with its choices, read-only here. */
+  questions?: { header?: string; question: string; options: string[]; multiSelect?: boolean }[];
+  since: number;
+}
+
+/** Where the session runs, which decides how to open it. */
+export type SessionSurface = 'cloud' | 'desktop' | 'cli' | 'unknown';
+
+/** Two ways to the same session: the Claude desktop app, and the web. */
+export interface SessionLink {
+  /** `claude://claude.ai/code/session_…` — opens the desktop app. */
+  app: string;
+  /** `https://claude.ai/code/session_…` — works anywhere you are signed in. */
+  web: string;
+  /** How the session became addressable. */
+  via: 'cloud' | 'remote-control';
+}
 
 export interface SessionState {
   sessionId: string;
@@ -343,6 +326,13 @@ export interface SessionState {
   /** Set once the user renames the session, so nothing overwrites it. */
   titleLocked?: boolean;
   status: SessionStatus;
+  /** Set while Claude is waiting on the user; cleared when they reply. */
+  waiting: WaitingState | null;
+  surface: SessionSurface;
+  /** Opens this session in Claude, where questions are answered. Null when
+   *  the session cannot be addressed from outside: a local session without
+   *  Remote Control has no documented link. */
+  link: SessionLink | null;
   createdAt: number;
   updatedAt: number;
   endedAt?: number;
@@ -370,7 +360,11 @@ export interface SessionSummary {
   createdAt: number;
   updatedAt: number;
   tasks: TaskCounts;
-  openQuestions: number;
+  /** The task Claude is on, for the rail. */
+  current: string | null;
+  waiting: WaitingState | null;
+  surface: SessionSurface;
+  link: SessionLink | null;
   openThreads: number;
   /** User changes Claude has not read yet. */
   unreadByClaude: number;

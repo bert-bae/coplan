@@ -81,7 +81,6 @@ var PlanError = class extends Error {
 var MAX_CHANGES = 500;
 var MAX_TITLE = 200;
 var MAX_TEXT = 2e4;
-var MAX_OPTIONS = 8;
 var MAX_TASKS = 400;
 function emptyPlan(title = "Untitled plan", now = Date.now()) {
   return {
@@ -90,7 +89,6 @@ function emptyPlan(title = "Untitled plan", now = Date.now()) {
     sections: [],
     diagrams: [],
     tasks: [],
-    questions: [],
     threads: [],
     changes: [],
     seq: 0,
@@ -101,7 +99,7 @@ function emptyPlan(title = "Untitled plan", now = Date.now()) {
     updatedAt: now
   };
 }
-var PREFIX = { section: "s", diagram: "d", task: "t", question: "q", thread: "c" };
+var PREFIX = { section: "s", diagram: "d", task: "t", thread: "c" };
 function nextId(plan, kind) {
   const prefix = PREFIX[kind];
   let max = 0;
@@ -113,13 +111,12 @@ function nextId(plan, kind) {
   for (const s of plan.sections) scan(s.id);
   for (const d of plan.diagrams) scan(d.id);
   for (const t of plan.tasks) scan(t.id);
-  for (const q of plan.questions) scan(q.id);
   for (const c of plan.threads) scan(c.id);
   for (const ch of plan.changes) scan(ch.target.id);
   return `${prefix}${max + 1}`;
 }
 function idTaken(plan, id) {
-  return plan.sections.some((s) => s.id === id) || plan.diagrams.some((d) => d.id === id) || plan.tasks.some((t) => t.id === id) || plan.questions.some((q) => q.id === id) || plan.threads.some((c) => c.id === id);
+  return plan.sections.some((s) => s.id === id) || plan.diagrams.some((d) => d.id === id) || plan.tasks.some((t) => t.id === id) || plan.threads.some((c) => c.id === id);
 }
 function claimId(plan, kind, wanted) {
   const id = clean(wanted, 40);
@@ -164,25 +161,6 @@ function publishPlan(prev, input, now = Date.now()) {
     const same = old && old.title === sTitle && old.body === body;
     sections.push({ id, title: sTitle, body, updatedAt: same ? old.updatedAt : now, updatedBy: same ? old.updatedBy : "claude" });
   }
-  const diagrams = [];
-  for (const raw of input.diagrams ?? []) {
-    const old = base.diagrams.find((d) => d.id === raw.id);
-    const id = old ? old.id : claimIdAmong(next, "diagram", raw.id, diagrams);
-    const dTitle = clean(raw.title, MAX_TITLE) ?? "Diagram";
-    const caption = clean(raw.caption, MAX_TEXT);
-    const graph = buildGraph(raw.nodes ?? [], raw.edges ?? [], old, dTitle);
-    const direction = validDirection(raw.direction) ?? old?.direction ?? "LR";
-    const same = old && old.title === dTitle && old.caption === caption && old.direction === direction && JSON.stringify([old.nodes, old.edges]) === JSON.stringify([graph.nodes, graph.edges]);
-    diagrams.push({
-      id,
-      title: dTitle,
-      ...graph,
-      direction,
-      ...caption ? { caption } : {},
-      updatedAt: same ? old.updatedAt : now,
-      updatedBy: same ? old.updatedBy : "claude"
-    });
-  }
   const tasks = [];
   const walk = (list, parentId) => {
     (list ?? []).forEach((raw, order) => {
@@ -212,21 +190,28 @@ function publishPlan(prev, input, now = Date.now()) {
     });
   };
   walk(input.tasks, null);
-  const questions = [];
-  for (const raw of input.questions ?? []) {
-    const text2 = clean(raw?.question, MAX_TEXT);
-    if (!text2) throw new PlanError("Every question needs its question text.");
-    const old = base.questions.find((q) => q.id === raw.id);
-    const id = old ? old.id : claimIdAmong(next, "question", raw.id, questions);
-    questions.push(buildQuestion(id, raw, old, tasks, now));
-  }
-  for (const q of base.questions) {
-    if (q.askedBy === "user" && !questions.some((x) => x.id === q.id)) questions.push(q);
+  const diagrams = [];
+  for (const raw of input.diagrams ?? []) {
+    const old = base.diagrams.find((d) => d.id === raw.id);
+    const id = old ? old.id : claimIdAmong(next, "diagram", raw.id, diagrams);
+    const dTitle = clean(raw.title, MAX_TITLE) ?? "Diagram";
+    const caption = clean(raw.caption, MAX_TEXT);
+    const graph = buildGraph(raw.nodes ?? [], raw.edges ?? [], old, dTitle, new Set(tasks.map((t) => t.id)));
+    const direction = validDirection(raw.direction) ?? old?.direction ?? "LR";
+    const same = old && old.title === dTitle && old.caption === caption && old.direction === direction && JSON.stringify([old.nodes, old.edges]) === JSON.stringify([graph.nodes, graph.edges]);
+    diagrams.push({
+      id,
+      title: dTitle,
+      ...graph,
+      direction,
+      ...caption ? { caption } : {},
+      updatedAt: same ? old.updatedAt : now,
+      updatedBy: same ? old.updatedBy : "claude"
+    });
   }
   next.sections = sections;
   next.diagrams = diagrams;
   next.tasks = tasks;
-  next.questions = questions;
   next.threads = base.threads.map((thread) => detachIfOrphaned(next, base, thread));
   next.revision = base.revision + 1;
   if (!prev) next.createdAt = now;
@@ -242,7 +227,7 @@ function publishPlan(prev, input, now = Date.now()) {
   return { plan: next, changes: [change] };
 }
 function claimIdAmong(plan, kind, wanted, fresh) {
-  const key = { section: "sections", diagram: "diagrams", task: "tasks", question: "questions" }[kind];
+  const key = { section: "sections", diagram: "diagrams", task: "tasks" }[kind];
   const probe = { ...plan, [key]: [...plan[key], ...fresh] };
   return claimId(probe, kind, wanted);
 }
@@ -250,23 +235,6 @@ function detachIfOrphaned(plan, before, thread) {
   if (targetExists(plan, thread.target)) return thread;
   const label = describeTarget(before, thread.target);
   return { ...thread, target: { kind: "plan", id: "" }, text: `(on removed ${label}) ${thread.text}` };
-}
-function buildQuestion(id, raw, old, tasks, now) {
-  const header = clean(raw.header, 40);
-  const context = clean(raw.context, MAX_TEXT);
-  const taskId = raw.taskId && tasks.some((t) => t.id === raw.taskId) ? raw.taskId : void 0;
-  return {
-    id,
-    question: clean(raw.question, MAX_TEXT) ?? old?.question ?? "",
-    ...header ? { header } : {},
-    ...context ? { context } : {},
-    options: raw.options ? toOptions(raw.options) : old?.options ?? [],
-    ...raw.multiSelect ? { multiSelect: true } : {},
-    ...taskId ? { taskId } : {},
-    askedBy: old?.askedBy ?? "claude",
-    createdAt: old?.createdAt ?? now,
-    ...old?.answer ? { answer: old.answer } : {}
-  };
 }
 function applyOps(plan, ops, author, now = Date.now()) {
   if (!Array.isArray(ops) || ops.length === 0) throw new PlanError("No edits were given.");
@@ -333,7 +301,7 @@ function applyOne(plan, op, author, now) {
         const title2 = clean(op.title, MAX_TITLE);
         if (title2) existing.title = title2;
         if (op.nodes || op.edges) {
-          const graph = buildGraph(op.nodes ?? existing.nodes, op.edges ?? existing.edges, existing, existing.title);
+          const graph = buildGraph(op.nodes ?? existing.nodes, op.edges ?? existing.edges, existing, existing.title, taskIdSet(plan));
           existing.nodes = graph.nodes;
           existing.edges = graph.edges;
         }
@@ -354,7 +322,7 @@ function applyOne(plan, op, author, now) {
       const diagram = {
         id: claimId(plan, "diagram", void 0),
         title,
-        ...buildGraph(op.nodes ?? [], op.edges ?? [], void 0, title),
+        ...buildGraph(op.nodes ?? [], op.edges ?? [], void 0, title, taskIdSet(plan)),
         direction: validDirection(op.direction) ?? "LR",
         ...caption ? { caption } : {},
         updatedAt: now,
@@ -417,47 +385,6 @@ function applyOne(plan, op, author, now) {
       if (!diagram) throw new PlanError(`No diagram "${op.id}".`);
       moveInList(plan.diagrams, diagram.id, op.index);
       return [log2("moved", ref("diagram", diagram.id), `reordered diagram "${diagram.title}"`)];
-    }
-    case "upsert_question": {
-      const existing = op.id ? plan.questions.find((q) => q.id === op.id) : void 0;
-      if (existing) {
-        const text3 = clean(op.question, MAX_TEXT);
-        if (text3) existing.question = text3;
-        if (typeof op.header === "string") setOptional(existing, "header", clean(op.header, 40));
-        if (typeof op.context === "string") setOptional(existing, "context", clean(op.context, MAX_TEXT));
-        if (op.options) existing.options = toOptions(op.options);
-        if (typeof op.multiSelect === "boolean") setOptional(existing, "multiSelect", op.multiSelect || void 0);
-        if (op.taskId !== void 0) setOptional(existing, "taskId", op.taskId ? requireTask(plan, op.taskId).id : void 0);
-        return [log2("edited", ref("question", existing.id), `edited question "${short(existing.question)}"`)];
-      }
-      const text2 = clean(op.question, MAX_TEXT);
-      if (!text2) throw new PlanError(op.id ? `No question "${op.id}".` : "A new question needs its question text.");
-      if (op.taskId) requireTask(plan, op.taskId);
-      const question = buildQuestion(claimId(plan, "question", op.id), { ...op, question: text2 }, void 0, plan.tasks, now);
-      question.askedBy = author;
-      plan.questions.push(question);
-      return [log2("created", ref("question", question.id), `asked "${short(text2)}"`)];
-    }
-    case "answer": {
-      const question = plan.questions.find((q) => q.id === op.id);
-      if (!question) throw new PlanError(`No question "${op.id}".`);
-      const selected = (op.selected ?? []).map((s) => String(s).trim()).filter(Boolean);
-      const text2 = clean(op.text, MAX_TEXT) ?? "";
-      if (!selected.length && !text2) throw new PlanError("An answer needs a picked option or some text.");
-      if (!question.multiSelect && selected.length > 1) {
-        throw new PlanError(`"${short(question.question)}" takes one option, not ${selected.length}.`);
-      }
-      const answer = { selected, text: text2, by: author, at: now };
-      const had = Boolean(question.answer);
-      question.answer = answer;
-      return [log2("answered", ref("question", question.id), `${had ? "changed the answer to" : "answered"} "${short(question.question)}": ${short(renderAnswer(answer), 80)}`)];
-    }
-    case "clear_answer": {
-      const question = plan.questions.find((q) => q.id === op.id);
-      if (!question) throw new PlanError(`No question "${op.id}".`);
-      if (!question.answer) return [];
-      delete question.answer;
-      return [log2("edited", ref("question", question.id), `reopened "${short(question.question)}"`)];
     }
     case "remove":
       return removeItem(plan, op.kind, op.id, log2);
@@ -564,16 +491,15 @@ function removeItem(plan, kind, id, log2) {
       const doomed = /* @__PURE__ */ new Set([t.id, ...descendants(plan, t.id).map((d) => d.id)]);
       plan.tasks = plan.tasks.filter((x) => !doomed.has(x.id));
       normalizeSiblings(plan, t.parentId);
-      for (const q of plan.questions) if (q.taskId && doomed.has(q.taskId)) delete q.taskId;
+      for (const d of plan.diagrams) {
+        for (const n of d.nodes) {
+          if (!n.taskIds) continue;
+          n.taskIds = n.taskIds.filter((id2) => !doomed.has(id2));
+          if (n.taskIds.length === 0) delete n.taskIds;
+        }
+      }
       const extra = doomed.size > 1 ? ` and its ${doomed.size - 1} subtask(s)` : "";
       summary = `removed task "${t.title}"${extra}`;
-      break;
-    }
-    case "question": {
-      const q = plan.questions.find((x) => x.id === id);
-      if (!q) throw new PlanError(`No question "${id}".`);
-      plan.questions = plan.questions.filter((x) => x.id !== id);
-      summary = `removed question "${short(q.question)}"`;
       break;
     }
     default:
@@ -584,7 +510,7 @@ function removeItem(plan, kind, id, log2) {
 }
 var MAX_NODES = 120;
 var MAX_EDGES = 300;
-function buildGraph(rawNodes, rawEdges, old, title) {
+function buildGraph(rawNodes, rawEdges, old, title, taskIds) {
   if (!Array.isArray(rawNodes) || !Array.isArray(rawEdges)) throw new PlanError(`Diagram "${title}": nodes and edges must be lists.`);
   if (rawNodes.length > MAX_NODES) throw new PlanError(`Diagram "${title}" has more than ${MAX_NODES} nodes.`);
   if (rawEdges.length > MAX_EDGES) throw new PlanError(`Diagram "${title}" has more than ${MAX_EDGES} edges.`);
@@ -595,6 +521,11 @@ function buildGraph(rawNodes, rawEdges, old, title) {
     if (nodes.some((n) => n.id === id)) throw new PlanError(`Diagram "${title}": node id "${id}" is used twice.`);
     const prev = old?.nodes.find((n) => n.id === id);
     const detail = clean(raw.detail, 400);
+    const notes = raw.notes === void 0 ? prev?.notes : clean(raw.notes, MAX_TEXT);
+    const links = raw.taskIds === void 0 ? prev?.taskIds : cleanList(raw.taskIds);
+    for (const t of links ?? []) {
+      if (!taskIds.has(t)) throw new PlanError(`Diagram "${title}": node "${id}" links task "${t}", which is not in the plan.`);
+    }
     const x = finite(raw.x) ?? prev?.x;
     const y = finite(raw.y) ?? prev?.y;
     nodes.push({
@@ -602,6 +533,8 @@ function buildGraph(rawNodes, rawEdges, old, title) {
       label: clean(raw.label, 120) ?? prev?.label ?? id,
       kind: validKind(raw.kind) ?? prev?.kind ?? "component",
       ...detail ? { detail } : {},
+      ...notes ? { notes } : {},
+      ...links?.length ? { taskIds: [...new Set(links)] } : {},
       ...x !== void 0 && y !== void 0 ? { x: Math.round(x), y: Math.round(y) } : {}
     });
   }
@@ -629,7 +562,11 @@ function describeDiagramEdit(before, after) {
   const removed = before.nodes.filter((n) => !after.nodes.some((a) => a.id === n.id));
   const changed = after.nodes.filter((n) => {
     const b = before.nodes.find((x) => x.id === n.id);
-    return b && (b.label !== n.label || b.kind !== n.kind || (b.detail ?? "") !== (n.detail ?? ""));
+    return b && (b.label !== n.label || b.kind !== n.kind || (b.detail ?? "") !== (n.detail ?? "") || (b.notes ?? "") !== (n.notes ?? ""));
+  });
+  const relinked = after.nodes.filter((n) => {
+    const b = before.nodes.find((x) => x.id === n.id);
+    return b && (b.taskIds ?? []).join() !== (n.taskIds ?? []).join();
   });
   const moved = after.nodes.filter((n) => {
     const b = before.nodes.find((x) => x.id === n.id);
@@ -646,6 +583,7 @@ function describeDiagramEdit(before, after) {
   if (added.length) parts.push(`added ${list(added.map((n) => `"${n.label}"`))}`);
   if (removed.length) parts.push(`removed ${list(removed.map((n) => `"${n.label}"`))}`);
   if (changed.length) parts.push(`edited ${list(changed.map((n) => `"${n.label}"`))}`);
+  if (relinked.length) parts.push(`changed the tasks behind ${list(relinked.map((n) => `"${n.label}"`))}`);
   if (linked.length) parts.push(`connected ${list(linked.map((e) => `${label(after, e.source)} \u2192 ${label(after, e.target)}`))}`);
   if (unlinked.length) parts.push(`disconnected ${list(unlinked.map((e) => `${label(before, e.source)} \u2192 ${label(before, e.target)}`))}`);
   if (relabeled.length) parts.push(`relabelled ${list(relabeled.map((e) => `${label(after, e.source)} \u2192 ${label(after, e.target)}`))}`);
@@ -654,6 +592,9 @@ function describeDiagramEdit(before, after) {
   if (parts.length) return parts.join("; ");
   if (moved.length) return `rearranged ${moved.length} node(s)`;
   return null;
+}
+function taskIdSet(plan) {
+  return new Set(plan.tasks.map((t) => t.id));
 }
 function validKind(value) {
   return NODE_KINDS.includes(value) ? value : void 0;
@@ -751,8 +692,6 @@ function targetExists(plan, target) {
       return plan.diagrams.some((d) => d.id === target.id);
     case "task":
       return plan.tasks.some((t) => t.id === target.id);
-    case "question":
-      return plan.questions.some((q) => q.id === target.id);
     default:
       return false;
   }
@@ -773,32 +712,12 @@ function describeTarget(plan, target) {
       const t = plan.tasks.find((x) => x.id === target.id);
       return t ? `task "${t.title}"` : `task ${target.id}`;
     }
-    case "question": {
-      const q = plan.questions.find((x) => x.id === target.id);
-      return q ? `question "${short(q.question)}"` : `question ${target.id}`;
-    }
     default:
       return "an item";
   }
 }
-function renderAnswer(answer) {
-  const picked = answer.selected.join(", ");
-  if (picked && answer.text) return `${picked} \u2014 ${answer.text}`;
-  return picked || answer.text;
-}
 function validStatus(value) {
   return TASK_STATUSES.includes(value) ? value : void 0;
-}
-function toOptions(raw) {
-  if (!Array.isArray(raw)) return [];
-  return raw.map((o) => {
-    if (typeof o === "string") return o.trim() ? { label: o.trim().slice(0, 120) } : null;
-    if (!o || typeof o !== "object") return null;
-    const label = clean(o.label, 120);
-    if (!label) return null;
-    const description = clean(o.description, 400);
-    return { label, ...description ? { description } : {} };
-  }).filter((o) => o !== null).slice(0, MAX_OPTIONS);
 }
 function clean(value, max, trim = true) {
   if (typeof value !== "string") return void 0;
@@ -831,6 +750,10 @@ function short(text2, max = 60) {
   const line = text2.replace(/\s+/g, " ").trim();
   return line.length > max ? `${line.slice(0, max - 1)}\u2026` : line;
 }
+function currentTask(plan) {
+  if (!plan) return null;
+  return outline(plan).find((r) => r.task.status === "in_progress" && !plan.tasks.some((t) => t.parentId === r.task.id))?.task ?? null;
+}
 
 // src/daemon/store.ts
 var PERSIST_DEBOUNCE_MS = 400;
@@ -845,6 +768,9 @@ function newSession(sessionId, cwd) {
     branch: null,
     title: path2.basename(cwd) || sessionId.slice(0, 8),
     status: "active",
+    waiting: null,
+    surface: "unknown",
+    link: null,
     createdAt: now,
     updatedAt: now,
     plan: null
@@ -1066,7 +992,10 @@ function summarize(s) {
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     tasks: countTasks(plan),
-    openQuestions: plan?.questions.filter((q) => !q.answer).length ?? 0,
+    current: currentTask(plan)?.title ?? null,
+    waiting: s.waiting,
+    surface: s.surface,
+    link: s.link,
     openThreads: plan?.threads.filter((t) => !t.resolved).length ?? 0,
     unreadByClaude: unreadByClaude(plan).length
   };
@@ -1111,6 +1040,15 @@ function migrate(state) {
     state.plan = plan;
   }
   state.plan ??= null;
+  if (state.plan) {
+    const plan = state.plan;
+    delete plan["questions"];
+    state.plan.threads = state.plan.threads.filter((t) => t.target.kind !== "question");
+    state.plan.changes = state.plan.changes.filter((c) => c.target.kind !== "question");
+  }
+  state.waiting = null;
+  state.surface ??= "unknown";
+  state.link ??= null;
   for (const key of [
     "worktree",
     "transcriptPath",
@@ -1301,15 +1239,12 @@ function renderPlan(plan, opts = {}) {
   const meta = [
     `revision ${plan.revision}`,
     counts.total ? `tasks ${counts.done}/${counts.total} done` : "no tasks",
-    `${plan.questions.filter((q) => !q.answer).length} open question(s)`,
     `${plan.threads.filter((t) => !t.resolved).length} open comment(s)`
   ];
   out.push(`_${meta.join(" \xB7 ")}${opts.url ? ` \xB7 UI: ${opts.url}` : ""}_`);
   out.push("");
   out.push(renderChanges(plan, unread));
   if (opts.changesOnly) {
-    const openQuestions = plan.questions.filter((q) => !q.answer && q.askedBy === "user");
-    if (openQuestions.length) out.push("", "## Questions the user asked you", ...openQuestions.map((q) => renderQuestion(plan, q)));
     const touched = new Set(unread.map((c) => `${c.target.kind}:${c.target.id}`));
     const threads = plan.threads.filter((t) => !t.resolved && (touched.has(`${t.target.kind}:${t.target.id}`) || lastAuthor(t) === "user"));
     if (threads.length) out.push("", "## Comments waiting on you", ...threads.map((t) => renderThread(plan, t)));
@@ -1337,10 +1272,6 @@ function renderPlan(plan, opts = {}) {
     if (task.files?.length) out.push(`${pad}  files: ${task.files.join(", ")}`);
     if (task.detail) for (const line of task.detail.trim().split("\n")) out.push(`${pad}  ${line}`);
   }
-  if (plan.questions.length) {
-    out.push("", "## Questions");
-    for (const q of plan.questions) out.push(renderQuestion(plan, q));
-  }
   const open = plan.threads.filter((t) => !t.resolved);
   if (open.length) {
     out.push("", "## Open comments");
@@ -1354,7 +1285,11 @@ function renderDiagram(d) {
   if (d.caption) lines.push(d.caption.trim());
   lines.push("nodes:");
   if (d.nodes.length === 0) lines.push("- _(none)_");
-  for (const n of d.nodes) lines.push(`- ${n.id}: "${n.label}" (${n.kind})${n.detail ? ` \u2014 ${n.detail.replace(/\n/g, " ")}` : ""}`);
+  for (const n of d.nodes) {
+    lines.push(`- ${n.id}: "${n.label}" (${n.kind})${n.detail ? ` \u2014 ${n.detail.replace(/\n/g, " ")}` : ""}`);
+    if (n.taskIds?.length) lines.push(`  tasks: ${n.taskIds.join(", ")}`);
+    if (n.notes) for (const line of n.notes.trim().split("\n")) lines.push(`  ${line}`);
+  }
   if (d.edges.length) {
     lines.push("edges:");
     for (const e of d.edges) {
@@ -1369,22 +1304,6 @@ function renderChanges(plan, unread) {
   }
   const lines = [`## Since you last read \u2014 ${unread.length} change(s) by the user`];
   for (const c of unread) lines.push(`- ${c.summary} [${c.target.kind}${c.target.id ? ` ${c.target.id}` : ""}]`);
-  return lines.join("\n");
-}
-function renderQuestion(plan, q) {
-  const who2 = q.askedBy === "user" ? "asked by the user" : "asked by you";
-  const header = q.header ? `[${q.header}] ` : "";
-  const task = q.taskId ? ` (holds up ${q.taskId})` : "";
-  const lines = [`- [${q.id}] ${header}${q.question} _(${who2}${task})_`];
-  if (q.context) lines.push(`  context: ${q.context.trim().replace(/\n/g, "\n  ")}`);
-  if (q.options.length) {
-    lines.push(`  options${q.multiSelect ? " (multi-select)" : ""}: ${q.options.map((o) => o.description ? `${o.label} (${o.description})` : o.label).join("; ")}`);
-  }
-  if (q.answer) {
-    lines.push(`  \u2192 ANSWERED by ${q.answer.by === "user" ? "the user" : "you"}: ${renderAnswer(q.answer)}`);
-  } else {
-    lines.push(q.askedBy === "user" ? '  \u2192 UNANSWERED \u2014 answer it with harness_plan_edit {op:"answer"}' : "  \u2192 unanswered");
-  }
   return lines.join("\n");
 }
 function renderThread(plan, t) {
@@ -1408,6 +1327,38 @@ function unreadNotice(plan) {
   return `[cc-harness] The user has changed the plan "${plan.title}" in the harness UI since you last read it (${parts}). Call harness_plan_read before acting on the plan.`;
 }
 
+// src/shared/link.ts
+var ID = /^[A-Za-z0-9_-]{6,128}$/;
+function resolveLink(env) {
+  const cloud = cloudSessionId(env);
+  if (cloud) return { surface: "cloud", link: linkFor(cloud, "cloud") };
+  const local = surfaceFromEntrypoint(env.entrypoint);
+  const bridge = (env.bridgeSessionId ?? "").trim();
+  if (bridge && ID.test(bridge)) {
+    const id = bridge.startsWith("session_") ? bridge : `session_${bridge.replace(/^cse_/, "")}`;
+    return { surface: local, link: linkFor(id, "remote-control") };
+  }
+  return { surface: local, link: null };
+}
+function cloudSessionId(env) {
+  const direct = (env.remoteSessionId ?? "").trim();
+  const fromUrl = /\/sessions\/(cse_[A-Za-z0-9]+)/.exec(env.remoteSdkUrl ?? "")?.[1] ?? "";
+  const raw = direct || fromUrl;
+  if (!raw || !ID.test(raw)) return null;
+  return raw.startsWith("session_") ? raw : `session_${raw.replace(/^cse_/, "")}`;
+}
+function surfaceFromEntrypoint(entrypoint) {
+  const value = (entrypoint ?? "").toLowerCase();
+  if (!value) return "unknown";
+  if (value.includes("desktop")) return "desktop";
+  if (value === "cli") return "cli";
+  return "unknown";
+}
+function linkFor(sessionId, via) {
+  const path8 = `claude.ai/code/${sessionId}`;
+  return { app: `claude://${path8}`, web: `https://${path8}`, via };
+}
+
 // src/shared/hooks.ts
 function additionalContext(event, text2) {
   return {
@@ -1421,27 +1372,43 @@ function additionalContext(event, text2) {
 var HOOK_NOOP = { suppressOutput: true };
 
 // src/daemon/hookIngest.ts
+var INPUT_NOTIFICATIONS = /* @__PURE__ */ new Set(["idle_prompt", "agent_needs_input", "elicitation_dialog"]);
 async function ingestHook(event, input, ctx) {
   const sessionId = input.session_id;
   if (!sessionId) return HOOK_NOOP;
+  ctx.store.ensure(sessionId, input.cwd);
+  applyEnv(sessionId, ctx);
   switch (event) {
     case "SessionStart":
       return onSessionStart(sessionId, input, ctx);
     case "SessionEnd":
-      ctx.store.ensure(sessionId, input.cwd);
-      ctx.store.update(sessionId, { status: "ended", endedAt: Date.now() });
+      ctx.store.update(sessionId, { status: "ended", endedAt: Date.now(), waiting: null });
       ctx.store.persistNow(sessionId);
       return HOOK_NOOP;
     case "UserPromptSubmit":
       return onUserPromptSubmit(sessionId, input, ctx);
-    case "Stop":
-      ctx.store.ensure(sessionId, input.cwd);
-      ctx.store.update(sessionId, { status: "idle" });
+    case "PreToolUse":
+      return onPreToolUse(sessionId, input, ctx);
+    case "PostToolUse": {
+      const s = ctx.store.get(sessionId);
+      if (s && (s.waiting || s.status !== "active")) ctx.store.update(sessionId, { status: "active", waiting: null });
       return HOOK_NOOP;
+    }
+    case "Notification":
+      return onNotification(sessionId, input, ctx);
+    case "Stop":
+      return onStop(sessionId, input, ctx);
     default:
-      ctx.store.ensure(sessionId, input.cwd);
       return HOOK_NOOP;
   }
+}
+function applyEnv(sessionId, ctx) {
+  if (!ctx.env) return;
+  const { surface, link } = resolveLink(ctx.env);
+  const s = ctx.store.get(sessionId);
+  if (!s) return;
+  if (s.surface === surface && JSON.stringify(s.link) === JSON.stringify(link)) return;
+  ctx.store.update(sessionId, { surface, link });
 }
 async function onSessionStart(sessionId, input, ctx) {
   const cwd = input.cwd || process.cwd();
@@ -1453,19 +1420,74 @@ async function onSessionStart(sessionId, input, ctx) {
     repoRoot: root,
     branch,
     status: "active",
+    waiting: null,
     endedAt: void 0,
-    // A fresh session is named after its project until the user (or the
-    // plan's own title, which the rail prefers) says otherwise.
     title: session.titleLocked ? session.title : path4.basename(root ?? cwd) || session.title
   });
   return HOOK_NOOP;
 }
-async function onUserPromptSubmit(sessionId, input, ctx) {
-  const session = ctx.store.ensure(sessionId, input.cwd);
-  ctx.store.update(sessionId, { status: "active" });
-  if (!ctx.config.promptNotice) return HOOK_NOOP;
+async function onUserPromptSubmit(sessionId, _input, ctx) {
+  const session = ctx.store.update(sessionId, { status: "active", waiting: null });
+  if (!ctx.config.promptNotice || !session) return HOOK_NOOP;
   const notice = unreadNotice(session.plan);
   return notice ? additionalContext("UserPromptSubmit", notice) : HOOK_NOOP;
+}
+function onPreToolUse(sessionId, input, ctx) {
+  if (input.tool_name !== "AskUserQuestion") return HOOK_NOOP;
+  const questions = readQuestions(input.tool_input);
+  if (questions.length === 0) return HOOK_NOOP;
+  setWaiting(sessionId, ctx, {
+    kind: "question",
+    text: questions.map((q) => q.question).join(" \xB7 "),
+    questions,
+    since: Date.now()
+  });
+  return HOOK_NOOP;
+}
+function onNotification(sessionId, input, ctx) {
+  const type = input.notification_type ?? "";
+  const text2 = clip(input.message ?? "") || "Claude is waiting for your input.";
+  const current = ctx.store.get(sessionId)?.waiting;
+  if (type === "permission_prompt") {
+    setWaiting(sessionId, ctx, { kind: "permission", text: text2, since: Date.now() });
+  } else if (INPUT_NOTIFICATIONS.has(type) && current?.kind !== "question") {
+    if (!current) setWaiting(sessionId, ctx, { kind: "input", text: text2, since: Date.now() });
+  }
+  return HOOK_NOOP;
+}
+function onStop(sessionId, input, ctx) {
+  const asked = trailingQuestion(input.last_assistant_message);
+  ctx.store.update(sessionId, {
+    status: "idle",
+    waiting: asked ? { kind: "input", text: asked, since: Date.now() } : null
+  });
+  if (asked) ctx.onWaiting?.(ctx.store.get(sessionId));
+  return HOOK_NOOP;
+}
+function setWaiting(sessionId, ctx, waiting) {
+  const before = ctx.store.get(sessionId)?.waiting;
+  const session = ctx.store.update(sessionId, { waiting });
+  if (session && !before) ctx.onWaiting?.(session);
+}
+function readQuestions(raw) {
+  const list = raw?.questions;
+  if (!Array.isArray(list)) return [];
+  return list.slice(0, 6).map((q) => {
+    const rec = q && typeof q === "object" ? q : {};
+    const question = clip(String(rec["question"] ?? ""));
+    const header = clip(String(rec["header"] ?? ""), 40);
+    const options = (Array.isArray(rec["options"]) ? rec["options"] : []).map((o) => clip(typeof o === "string" ? o : String(o?.["label"] ?? ""), 80)).filter(Boolean).slice(0, 8);
+    return { question, ...header ? { header } : {}, options, ...rec["multiSelect"] === true ? { multiSelect: true } : {} };
+  }).filter((q) => q.question);
+}
+function trailingQuestion(message) {
+  if (typeof message !== "string") return null;
+  const last = message.trim().split(/\n\s*\n/).pop()?.trim() ?? "";
+  return last.endsWith("?") ? clip(last.replace(/[*_`#>]/g, "")) : null;
+}
+function clip(text2, max = 300) {
+  const line = text2.replace(/\s+/g, " ").trim();
+  return line.length > max ? `${line.slice(0, max - 1)}\u2026` : line;
 }
 
 // src/daemon/housekeeping.ts
@@ -1663,6 +1685,7 @@ import path6 from "node:path";
 var DEFAULT_CONFIG = {
   autoOpen: false,
   promptNotice: true,
+  openClaudeOnQuestion: false,
   idleShutdownMinutes: 120
 };
 function isRecord(v) {
@@ -2064,15 +2087,31 @@ function buildRouter(deps) {
     ctx.req.on("close", cleanup);
     ctx.req.on("error", cleanup);
   });
+  const openClaude = (session) => {
+    if (!session.link || session.link.via === "cloud") return;
+    if (!configFor(session).openClaudeOnQuestion) return;
+    openInBrowser(session.link.app);
+  };
   router.post("/hook/:event", async (ctx) => {
     const event = ctx.params["event"] ?? "";
     let output = HOOK_NOOP;
     try {
       const input = await readJson(ctx.req);
       const session = typeof input["session_id"] === "string" ? store.get(input["session_id"]) : void 0;
+      const header = (name) => {
+        const value = ctx.req.headers[name];
+        return typeof value === "string" ? value : null;
+      };
       output = await ingestHook(event, input, {
         store,
-        config: session ? configFor(session) : config
+        config: session ? configFor(session) : config,
+        env: {
+          remoteSessionId: header("x-harness-remote-session"),
+          remoteSdkUrl: header("x-harness-remote-sdk"),
+          bridgeSessionId: header("x-harness-bridge-session"),
+          entrypoint: header("x-harness-entrypoint")
+        },
+        onWaiting: openClaude
       });
     } catch (err) {
       log(`hook ${event} failed: ${err?.message}`);
@@ -2112,7 +2151,7 @@ function buildRouter(deps) {
           reply(
             true,
             `[cc-harness] Published "${plan.title}" (revision ${plan.revision}). The user reviews it at ${url}
-Tell them in chat that the plan is ready, then end your turn. Nothing here waits for them: when they say they have reviewed it, call harness_plan_read.
+Tell them in chat that the plan is ready, and ask anything you need decided with AskUserQuestion, here in chat. Nothing in the harness waits for them: when they say they have reviewed it, call harness_plan_read.
 
 ` + renderPlan(plan, { url })
           );

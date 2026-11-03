@@ -153,9 +153,8 @@ async function runDoctor() {
   const published = await mcp("publish", {
     title: "doctor probe",
     summary: "A plan written by `harness doctor`.",
-    diagrams: [{ title: "Probe", source: "flowchart LR\n  A --> B" }],
-    tasks: [{ title: "parent", subtasks: [{ title: "child" }] }],
-    questions: [{ question: "doctor probe question?", options: ["yes", "no"] }]
+    diagrams: [{ title: "Probe", nodes: [{ id: "a", label: "A" }, { id: "b", label: "B" }], edges: [{ source: "a", target: "b" }] }],
+    tasks: [{ title: "parent", subtasks: [{ title: "child" }] }]
   });
   record("harness_plan_publish stores the plan", published["ok"] !== false, String(published["text"] ?? "").split("\n")[0], true);
   const afterPublish = await getSession();
@@ -166,13 +165,13 @@ async function runDoctor() {
     `${plan?.tasks.length ?? 0} task(s)`,
     true
   );
-  const questionId = plan?.questions[0]?.id;
+  const childTask = plan?.tasks.find((t) => t.parentId !== null)?.id;
   const opsRes = await fetch(`${baseUrl(lock)}/api/session/${sessionId}/plan/ops`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${lock.token}` },
     body: JSON.stringify({
       ops: [
-        { op: "answer", id: questionId, selected: ["yes"], text: "doctor probe answer" },
+        { op: "upsert_task", parentId: childTask ? plan?.tasks.find((t) => t.id === childTask)?.parentId : null, title: "doctor probe task" },
         { op: "comment", target: { kind: "plan", id: "" }, text: "doctor probe comment" }
       ]
     })
@@ -185,7 +184,7 @@ async function runDoctor() {
   const readText = String(read["text"] ?? "");
   record(
     "harness_plan_read reports what the user changed",
-    readText.includes("doctor probe answer") && readText.includes("doctor probe comment"),
+    readText.includes("doctor probe task") && readText.includes("doctor probe comment"),
     void 0,
     true
   );
@@ -205,6 +204,15 @@ async function runDoctor() {
     void 0,
     true
   );
+  await hook("PreToolUse", {
+    tool_name: "AskUserQuestion",
+    tool_input: { questions: [{ question: "doctor probe question?", header: "Probe", options: [{ label: "yes" }, { label: "no" }] }] }
+  });
+  const asking = await getSession();
+  record("a question Claude asks is noticed", asking?.waiting?.kind === "question", asking?.waiting?.text, true);
+  await hook("PostToolUse", { tool_name: "AskUserQuestion", tool_input: {} });
+  const answered = await getSession();
+  record("answering it in Claude clears it", answered?.waiting === null, void 0, true);
   const stopStarted = Date.now();
   const stopOut = await withTimeout(hook("Stop", { stop_hook_active: false }), 5e3);
   record(
@@ -636,9 +644,10 @@ var commands = {
       return 0;
     }
     for (const s of sessions) {
-      const plan = s.planTitle ? `"${s.planTitle}" \xB7 tasks ${s.tasks.done}/${s.tasks.total}` + (s.openQuestions ? ` \xB7 ${s.openQuestions} open question(s)` : "") + (s.unreadByClaude ? ` \xB7 ${s.unreadByClaude} change(s) unread by Claude` : "") : "no plan yet";
+      const plan = s.planTitle ? `"${s.planTitle}" \xB7 tasks ${s.tasks.done}/${s.tasks.total}` + (s.current ? ` \xB7 now: ${s.current}` : "") + (s.waiting ? ` \xB7 WAITING ON YOU: ${s.waiting.text}` : "") + (s.unreadByClaude ? ` \xB7 ${s.unreadByClaude} change(s) unread by Claude` : "") : "no plan yet";
       console.log(`  ${pad(s.status, 7)} ${pad(s.title, 28)} ${plan}`);
       console.log(`          ${s.sessionId}  ${s.cwd}`);
+      if (s.link) console.log(`          open: ${s.link.app}  (web: ${s.link.web})`);
     }
     return 0;
   },

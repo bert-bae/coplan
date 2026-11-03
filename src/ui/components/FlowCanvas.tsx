@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Background,
   ConnectionMode,
@@ -20,25 +20,38 @@ import {
   type NodeChange,
   type NodeProps,
 } from '@xyflow/react';
+import { store, useStore } from '../store.ts';
+import { MarkdownField } from './Editable.tsx';
+import { ProgressBar, STATUS_GLYPH, STATUS_LABEL } from './Progress.tsx';
 import { autoLayout, nodeSize, resolvePositions } from '../lib/layout.ts';
 import { useResolvedTheme } from '../lib/theme.ts';
 import { classNames } from '../lib/format.ts';
+import { countTasks, descendants, outline } from '../../shared/plan.ts';
 import {
   NODE_KINDS,
   type Diagram,
   type DiagramDirection,
   type DiagramEdgeInput,
+  type DiagramNode,
   type DiagramNodeInput,
   type NodeKind,
+  type Plan,
+  type TaskCounts,
 } from '../../shared/types.ts';
 
 /**
- * A diagram on a React Flow canvas.
+ * The architecture workspace: a React Flow canvas with a details panel beside
+ * it.
  *
- * Everything the reader does here is an edit to the plan: dragging boxes,
- * drawing an arrow from one handle to another, relabelling, deleting with
- * Backspace. Each one saves the whole graph back, and the change log records
- * it in words ("connected API → Cache") so Claude can read what moved.
+ * The canvas is where the shape of the system is decided — drag boxes, draw
+ * arrows between handles, Backspace to delete. The panel is where each part is
+ * decided: select a box and edit what it is, the reasoning behind it, and the
+ * tasks that build it; select an arrow and say what flows along it. Every
+ * change saves the whole graph back, and the plan's change log records it in
+ * words ("connected API → Cache") so Claude can read what moved.
+ *
+ * Boxes linked to tasks show those tasks' progress, so the same picture tells
+ * you how far Claude has got.
  */
 
 export const KIND_LABEL: Record<NodeKind, string> = {
@@ -51,7 +64,7 @@ export const KIND_LABEL: Record<NodeKind, string> = {
   note: 'Note',
 };
 
-const KIND_GLYPH: Record<NodeKind, string> = {
+export const KIND_GLYPH: Record<NodeKind, string> = {
   component: '▢',
   service: '⚙',
   datastore: '⛁',
@@ -61,7 +74,17 @@ const KIND_GLYPH: Record<NodeKind, string> = {
   note: '✎',
 };
 
-type FlowData = { label: string; kind: NodeKind; detail?: string; direction: DiagramDirection; width: number };
+type FlowData = {
+  label: string;
+  kind: NodeKind;
+  detail?: string;
+  notes?: string;
+  taskIds?: string[];
+  direction: DiagramDirection;
+  width: number;
+  /** Progress of the linked tasks; absent when the box has none. */
+  progress?: TaskCounts;
+};
 type FlowNode = Node<FlowData, 'plan'>;
 type FlowEdge = Edge<{ label?: string; dashed?: boolean }>;
 
@@ -71,21 +94,39 @@ export interface GraphPatch {
   direction?: DiagramDirection;
 }
 
-export function FlowCanvas(props: { diagram: Diagram; onSave: (patch: GraphPatch) => Promise<boolean>; expanded?: boolean }) {
+type NodePatch = Partial<Pick<FlowData, 'label' | 'kind' | 'detail' | 'notes' | 'taskIds'>>;
+
+export function DiagramEditor(props: {
+  diagram: Diagram;
+  plan: Plan;
+  onSave: (patch: GraphPatch) => Promise<boolean>;
+  /** The panel's content when nothing is selected: the diagram itself. */
+  aside: ReactNode;
+}) {
   return (
     <ReactFlowProvider>
-      <Canvas {...props} />
+      <Editor {...props} />
     </ReactFlowProvider>
   );
 }
 
 const nodeTypes = { plan: memo(PlanNode) };
 
-function Canvas({ diagram, onSave, expanded }: { diagram: Diagram; onSave: (patch: GraphPatch) => Promise<boolean>; expanded?: boolean }) {
+function Editor({
+  diagram,
+  plan,
+  onSave,
+  aside,
+}: {
+  diagram: Diagram;
+  plan: Plan;
+  onSave: (patch: GraphPatch) => Promise<boolean>;
+  aside: ReactNode;
+}) {
   const theme = useResolvedTheme();
   const flow = useReactFlow<FlowNode, FlowEdge>();
   const wrapper = useRef<HTMLDivElement>(null);
-  const [nodes, setNodes] = useState<FlowNode[]>(() => toFlowNodes(diagram));
+  const [nodes, setNodes] = useState<FlowNode[]>(() => toFlowNodes(diagram, plan));
   const [edges, setEdges] = useState<FlowEdge[]>(() => toFlowEdges(diagram));
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
@@ -99,21 +140,30 @@ function Canvas({ diagram, onSave, expanded }: { diagram: Diagram; onSave: (patc
   const signature = useMemo(() => JSON.stringify([diagram.nodes, diagram.edges, diagram.direction]), [diagram]);
   useEffect(() => {
     if (dragging.current) return;
-    setNodes((prev) => keepSelection(prev, toFlowNodes(diagram)));
+    setNodes((prev) => keepSelection(prev, toFlowNodes(diagram, plan)));
     setEdges((prev) => keepSelection(prev, toFlowEdges(diagram)));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on content
   }, [signature]);
 
-  // Growing to full screen (or back) leaves the graph in a corner; refit it.
-  const firstRender = useRef(true);
+  // Task progress changes far more often than the graph does, and must not
+  // move anything: patch it into the boxes in place.
+  const progressKey = useMemo(() => JSON.stringify(plan.tasks.map((t) => [t.id, t.status, t.parentId])), [plan.tasks]);
   useEffect(() => {
-    if (firstRender.current) {
-      firstRender.current = false;
-      return;
-    }
-    const frame = window.requestAnimationFrame(() => void flow.fitView({ padding: 0.15, duration: 200 }));
-    return () => window.cancelAnimationFrame(frame);
-  }, [expanded, flow]);
+    setNodes((ns) => ns.map((n) => ({ ...n, data: { ...n.data, ...progressOf(plan, n.data.taskIds) } })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on content
+  }, [progressKey]);
+
+  // Another part of the page asked to show a box: select it and bring it in.
+  const focusTarget = useStore((s) => s.focusTarget);
+  useEffect(() => {
+    const prefix = `node:${diagram.id}:`;
+    if (!focusTarget?.startsWith(prefix)) return;
+    const id = focusTarget.slice(prefix.length);
+    setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === id })));
+    setEdges((es) => es.map((e) => ({ ...e, selected: false })));
+    window.requestAnimationFrame(() => void flow.fitView({ nodes: [{ id }], padding: 1.2, duration: 250, maxZoom: 1.2 }));
+    store.set({ focusTarget: null });
+  }, [focusTarget, diagram.id, flow]);
 
   const persist = useCallback(
     (ns: FlowNode[], es: FlowEdge[], direction?: DiagramDirection) =>
@@ -123,6 +173,8 @@ function Canvas({ diagram, onSave, expanded }: { diagram: Diagram; onSave: (patc
           label: n.data.label,
           kind: n.data.kind,
           ...(n.data.detail ? { detail: n.data.detail } : {}),
+          notes: n.data.notes ?? '',
+          taskIds: n.data.taskIds ?? [],
           x: Math.round(n.position.x),
           y: Math.round(n.position.y),
         })),
@@ -175,12 +227,12 @@ function Canvas({ diagram, onSave, expanded }: { diagram: Diagram; onSave: (patc
     [persist],
   );
 
-  const updateNode = (id: string, patch: Partial<Pick<FlowData, 'label' | 'kind' | 'detail'>>) => {
+  const updateNode = (id: string, patch: NodePatch) => {
     const ns = nodesRef.current.map((n) => {
       if (n.id !== id) return n;
-      const data = { ...n.data, ...patch };
+      const data: FlowData = { ...n.data, ...patch };
       if (!data.detail) delete data.detail;
-      return { ...n, data: { ...data, width: nodeSize(data).width } };
+      return { ...n, data: { ...data, width: nodeSize(data).width, ...progressOf(plan, data.taskIds) } };
     });
     setNodes(ns);
     void persist(ns, edgesRef.current);
@@ -195,6 +247,16 @@ function Canvas({ diagram, onSave, expanded }: { diagram: Diagram; onSave: (patc
     });
     setEdges(es);
     void persist(nodesRef.current, es);
+  };
+
+  const select = (kind: 'node' | 'edge', id: string) => {
+    setNodes((ns) => ns.map((n) => ({ ...n, selected: kind === 'node' && n.id === id })));
+    setEdges((es) => es.map((e) => ({ ...e, selected: kind === 'edge' && e.id === id })));
+  };
+
+  const clearSelection = () => {
+    setNodes((ns) => ns.map((n) => (n.selected ? { ...n, selected: false } : n)));
+    setEdges((es) => es.map((e) => (e.selected ? { ...e, selected: false } : e)));
   };
 
   const removeSelected = () => {
@@ -219,6 +281,7 @@ function Canvas({ diagram, onSave, expanded }: { diagram: Diagram; onSave: (patc
     };
     const ns = [...nodesRef.current.map((x) => ({ ...x, selected: false })), node];
     setNodes(ns);
+    setEdges((es) => es.map((e) => ({ ...e, selected: false })));
     void persist(ns, edgesRef.current);
   };
 
@@ -228,77 +291,112 @@ function Canvas({ diagram, onSave, expanded }: { diagram: Diagram; onSave: (patc
       edges: edgesRef.current.map((e) => ({ id: e.id, source: e.source, target: e.target })),
     };
     const at = autoLayout(graph, direction);
-    const ns = nodesRef.current.map((n) => ({
-      ...n,
-      position: at.get(n.id) ?? n.position,
-      data: { ...n.data, direction },
-    }));
+    const ns = nodesRef.current.map((n) => ({ ...n, position: at.get(n.id) ?? n.position, data: { ...n.data, direction } }));
     setNodes(ns);
-    void persist(ns, edgesRef.current, direction).then(() => window.requestAnimationFrame(() => void flow.fitView({ padding: 0.15, duration: 250 })));
+    void persist(ns, edgesRef.current, direction).then(() =>
+      window.requestAnimationFrame(() => void flow.fitView({ padding: 0.15, duration: 250 })),
+    );
   };
 
   const selectedNodes = nodes.filter((n) => n.selected);
   const selectedEdges = edges.filter((e) => e.selected);
 
-  return (
-    <div ref={wrapper} className={classNames('flow', expanded && 'is-expanded')}>
-      <ReactFlow<FlowNode, FlowEdge>
+  let panel: ReactNode;
+  if (selectedNodes.length === 1 && selectedEdges.length === 0) {
+    const node = selectedNodes[0]!;
+    panel = (
+      <NodePanel
+        key={node.id}
+        node={node}
         nodes={nodes}
         edges={edges}
-        nodeTypes={nodeTypes}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        onConnect={onConnect}
-        onDelete={onDelete}
-        onNodeDragStart={() => {
-          dragging.current = true;
-        }}
-        onNodeDragStop={onNodeDragStop}
-        connectionMode={ConnectionMode.Loose}
-        deleteKeyCode={['Backspace', 'Delete']}
-        colorMode={theme}
-        fitView
-        fitViewOptions={{ padding: 0.15 }}
-        minZoom={0.2}
-        maxZoom={2}
-        defaultEdgeOptions={{ type: 'smoothstep' }}
-      >
-        <Background gap={18} size={1} />
-        <Controls showInteractive={false} position="bottom-left" />
-        {expanded && <MiniMap pannable zoomable position="bottom-right" />}
-        <Panel position="top-left" className="flow-toolbar">
-          <AddMenu onAdd={addNode} />
-          <button type="button" className="btn btn-sm" title="Lay the whole diagram out again" onClick={() => relayout(diagram.direction)}>
-            Tidy layout
+        plan={plan}
+        onChange={(patch) => updateNode(node.id, patch)}
+        onSelect={select}
+        onRemove={removeSelected}
+        onClose={clearSelection}
+      />
+    );
+  } else if (selectedEdges.length === 1 && selectedNodes.length === 0) {
+    const edge = selectedEdges[0]!;
+    panel = (
+      <EdgePanel
+        key={edge.id}
+        edge={edge}
+        nodes={nodes}
+        onChange={(patch) => updateEdge(edge.id, patch)}
+        onSelect={select}
+        onRemove={removeSelected}
+        onClose={clearSelection}
+      />
+    );
+  } else if (selectedNodes.length + selectedEdges.length > 1) {
+    panel = (
+      <div className="arch-panel-body">
+        <p className="panel-kicker">Selection</p>
+        <p>
+          {selectedNodes.length} box(es) and {selectedEdges.length} arrow(s) selected.
+        </p>
+        <div className="row-actions">
+          <button type="button" className="btn btn-sm btn-danger" onClick={removeSelected}>
+            Delete selection
           </button>
-          <button
-            type="button"
-            className="btn btn-sm"
-            title={diagram.direction === 'LR' ? 'Flow top to bottom' : 'Flow left to right'}
-            onClick={() => relayout(diagram.direction === 'LR' ? 'TB' : 'LR')}
-          >
-            {diagram.direction === 'LR' ? '→ Left to right' : '↓ Top to bottom'}
+          <button type="button" className="btn btn-sm btn-ghost" onClick={clearSelection}>
+            Clear selection
           </button>
-        </Panel>
-        {selectedNodes.length + selectedEdges.length > 0 && (
-          <Panel position="top-right" className="flow-inspector">
-            {selectedNodes.length === 1 && selectedEdges.length === 0 ? (
-              <NodeInspector key={selectedNodes[0]!.id} node={selectedNodes[0]!} onChange={(patch) => updateNode(selectedNodes[0]!.id, patch)} onRemove={removeSelected} />
-            ) : selectedEdges.length === 1 && selectedNodes.length === 0 ? (
-              <EdgeInspector key={selectedEdges[0]!.id} edge={selectedEdges[0]!} nodes={nodes} onChange={(patch) => updateEdge(selectedEdges[0]!.id, patch)} onRemove={removeSelected} />
-            ) : (
-              <div className="flow-inspector-body">
-                <p className="muted">
-                  {selectedNodes.length} box(es), {selectedEdges.length} arrow(s) selected
-                </p>
-                <button type="button" className="btn btn-sm btn-danger" onClick={removeSelected}>
-                  Delete selection
-                </button>
-              </div>
-            )}
+        </div>
+      </div>
+    );
+  } else {
+    panel = aside;
+  }
+
+  return (
+    <div className="arch-body">
+      <div ref={wrapper} className="flow">
+        <ReactFlow<FlowNode, FlowEdge>
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={nodeTypes}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          onConnect={onConnect}
+          onDelete={onDelete}
+          onNodeDragStart={() => {
+            dragging.current = true;
+          }}
+          onNodeDragStop={onNodeDragStop}
+          connectionMode={ConnectionMode.Loose}
+          deleteKeyCode={['Backspace', 'Delete']}
+          colorMode={theme}
+          fitView
+          fitViewOptions={{ padding: 0.15 }}
+          minZoom={0.2}
+          maxZoom={2}
+          defaultEdgeOptions={{ type: 'smoothstep' }}
+        >
+          <Background gap={18} size={1} />
+          <Controls showInteractive={false} position="bottom-left" />
+          <MiniMap pannable zoomable position="bottom-right" style={{ width: 150, height: 96 }} nodeBorderRadius={4} />
+          <Panel position="top-left" className="flow-toolbar">
+            <AddMenu onAdd={addNode} />
+            <button type="button" className="btn btn-sm" title="Lay the whole diagram out again" onClick={() => relayout(diagram.direction)}>
+              Tidy layout
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              title={diagram.direction === 'LR' ? 'Flow top to bottom' : 'Flow left to right'}
+              onClick={() => relayout(diagram.direction === 'LR' ? 'TB' : 'LR')}
+            >
+              {diagram.direction === 'LR' ? '→ Left to right' : '↓ Top to bottom'}
+            </button>
           </Panel>
-        )}
-      </ReactFlow>
+        </ReactFlow>
+      </div>
+      <aside className="arch-panel" aria-label="Details">
+        {panel}
+      </aside>
     </div>
   );
 }
@@ -309,22 +407,53 @@ function Canvas({ diagram, onSave, expanded }: { diagram: Diagram; onSave: (patc
 
 function PlanNode({ data, selected }: NodeProps<FlowNode>) {
   const horizontal = data.direction === 'LR';
+  const p = data.progress;
+  const state = !p ? null : p.blocked ? 'blocked' : p.inProgress ? 'in_progress' : p.done === p.total ? 'done' : 'todo';
   return (
-    <div className={classNames('flow-node', `kind-${data.kind}`, selected && 'is-selected')} style={{ width: data.width }}>
+    <div
+      className={classNames('flow-node', `kind-${data.kind}`, selected && 'is-selected', state && `progress-${state}`)}
+      style={{ width: data.width }}
+    >
       <Handle type="target" position={horizontal ? Position.Left : Position.Top} />
       <div className="flow-node-head">
         <span className="flow-node-glyph" aria-hidden="true">
           {KIND_GLYPH[data.kind]}
         </span>
         <span className="flow-node-label">{data.label}</span>
+        {data.notes && (
+          <span className="flow-node-flag" title="Has notes" aria-label="has notes">
+            ¶
+          </span>
+        )}
       </div>
       {data.detail && <div className="flow-node-detail">{data.detail}</div>}
+      {p && (
+        <div className="flow-node-progress" title={`${p.done} of ${p.total} tasks done${p.inProgress ? `, ${p.inProgress} in progress` : ''}${p.blocked ? `, ${p.blocked} blocked` : ''}`}>
+          <ProgressBar counts={p} compact />
+          <span>
+            {p.done}/{p.total}
+          </span>
+        </div>
+      )}
       <Handle type="source" position={horizontal ? Position.Right : Position.Bottom} />
     </div>
   );
 }
 
-function toFlowNodes(diagram: Diagram): FlowNode[] {
+function progressOf(plan: Plan, taskIds: string[] | undefined): { progress?: TaskCounts } {
+  if (!taskIds?.length) return { progress: undefined };
+  const seen = new Map<string, Plan['tasks'][number]>();
+  for (const id of taskIds) {
+    const task = plan.tasks.find((t) => t.id === id);
+    if (!task) continue;
+    seen.set(task.id, task);
+    for (const d of descendants(plan, task.id)) seen.set(d.id, d);
+  }
+  if (seen.size === 0) return { progress: undefined };
+  return { progress: countTasks({ tasks: [...seen.values()] }) };
+}
+
+function toFlowNodes(diagram: Diagram, plan: Plan): FlowNode[] {
   const at = resolvePositions(diagram);
   return diagram.nodes.map((n) => ({
     id: n.id,
@@ -334,8 +463,11 @@ function toFlowNodes(diagram: Diagram): FlowNode[] {
       label: n.label,
       kind: n.kind,
       ...(n.detail ? { detail: n.detail } : {}),
+      ...(n.notes ? { notes: n.notes } : {}),
+      ...(n.taskIds?.length ? { taskIds: n.taskIds } : {}),
       direction: diagram.direction,
       width: nodeSize(n).width,
+      ...progressOf(plan, n.taskIds),
     },
   }));
 }
@@ -365,7 +497,7 @@ function keepSelection<T extends { id: string; selected?: boolean }>(prev: T[], 
 }
 
 /* ------------------------------------------------------------------ *
- * Toolbar and inspector
+ * Toolbar
  * ------------------------------------------------------------------ */
 
 function AddMenu({ onAdd }: { onAdd: (kind: NodeKind) => void }) {
@@ -400,8 +532,24 @@ function AddMenu({ onAdd }: { onAdd: (kind: NodeKind) => void }) {
   );
 }
 
+/* ------------------------------------------------------------------ *
+ * The details panel
+ * ------------------------------------------------------------------ */
+
 /** A text input that commits on Enter or blur, not on every keystroke. */
-function CommitInput({ value, label, placeholder, onCommit }: { value: string; label: string; placeholder?: string; onCommit: (v: string) => void }) {
+function CommitInput({
+  value,
+  label,
+  placeholder,
+  className,
+  onCommit,
+}: {
+  value: string;
+  label: string;
+  placeholder?: string;
+  className?: string;
+  onCommit: (v: string) => void;
+}) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
   const commit = () => {
@@ -409,7 +557,7 @@ function CommitInput({ value, label, placeholder, onCommit }: { value: string; l
   };
   return (
     <input
-      className="input"
+      className={classNames('input', className)}
       value={draft}
       aria-label={label}
       placeholder={placeholder}
@@ -423,21 +571,49 @@ function CommitInput({ value, label, placeholder, onCommit }: { value: string; l
   );
 }
 
-function NodeInspector({
+function NodePanel({
   node,
+  nodes,
+  edges,
+  plan,
   onChange,
+  onSelect,
   onRemove,
+  onClose,
 }: {
   node: FlowNode;
-  onChange: (patch: Partial<Pick<FlowData, 'label' | 'kind' | 'detail'>>) => void;
+  nodes: FlowNode[];
+  edges: FlowEdge[];
+  plan: Plan;
+  onChange: (patch: NodePatch) => void;
+  onSelect: (kind: 'node' | 'edge', id: string) => void;
   onRemove: () => void;
+  onClose: () => void;
 }) {
+  const [confirming, setConfirming] = useState(false);
+  const name = (id: string) => nodes.find((n) => n.id === id)?.data.label ?? id;
+  const outgoing = edges.filter((e) => e.source === node.id);
+  const incoming = edges.filter((e) => e.target === node.id);
+  const linked = node.data.taskIds ?? [];
+  const rows = outline(plan);
+  const linkable = rows.filter((r) => !linked.includes(r.task.id));
+
   return (
-    <div className="flow-inspector-body" aria-label="Selected box">
-      <label className="field">
-        <span className="field-label">Label</span>
-        <CommitInput value={node.data.label} label="Box label" onCommit={(label) => label && onChange({ label })} />
-      </label>
+    <div className="arch-panel-body" aria-label={`Details of ${node.data.label}`}>
+      <header className="panel-top">
+        <span className={classNames('kind-swatch', `kind-${node.data.kind}`)} aria-hidden="true">
+          {KIND_GLYPH[node.data.kind]}
+        </span>
+        <span className="panel-kicker">{KIND_LABEL[node.data.kind]}</span>
+        <span className="item-id">{node.id}</span>
+        <span className="spacer" />
+        <button type="button" className="icon-btn is-tiny" aria-label="Close details" title="Back to the diagram" onClick={onClose}>
+          ×
+        </button>
+      </header>
+
+      <CommitInput className="panel-title-input" value={node.data.label} label="Box label" onCommit={(label) => label && onChange({ label })} />
+
       <label className="field">
         <span className="field-label">Kind</span>
         <select className="input" value={node.data.kind} onChange={(e) => onChange({ kind: e.target.value as NodeKind })}>
@@ -448,52 +624,167 @@ function NodeInspector({
           ))}
         </select>
       </label>
+
       <label className="field">
-        <span className="field-label">Detail</span>
-        <CommitInput value={node.data.detail ?? ''} label="Box detail" placeholder="Responsibility, technology…" onCommit={(detail) => onChange({ detail })} />
+        <span className="field-label">On the box</span>
+        <CommitInput value={node.data.detail ?? ''} label="Box detail" placeholder="One line: responsibility or technology" onCommit={(detail) => onChange({ detail })} />
       </label>
-      <div className="flow-inspector-foot">
-        <span className="item-id">{node.id}</span>
-        <span className="spacer" />
-        <button type="button" className="link is-danger" onClick={onRemove}>
-          Delete box
-        </button>
+
+      <div className="field">
+        <span className="field-label">Notes and decisions</span>
+        <MarkdownField
+          value={node.data.notes ?? ''}
+          label={`notes on ${node.data.label}`}
+          placeholder="Nothing decided here yet."
+          emptyAction="Add notes"
+          rows={6}
+          onSave={(notes) => onChange({ notes })}
+        />
       </div>
+
+      <div className="field">
+        <span className="field-label">Built by</span>
+        {linked.length > 0 ? (
+          <ul className="panel-tasks">
+            {linked.map((id) => {
+              const task = plan.tasks.find((t) => t.id === id);
+              if (!task) return null;
+              return (
+                <li key={id}>
+                  <span className={classNames('status-dot is-static', `is-${task.status}`)} title={STATUS_LABEL[task.status]} aria-label={STATUS_LABEL[task.status]}>
+                    {STATUS_GLYPH[task.status]}
+                  </span>
+                  <button type="button" className="link panel-task" onClick={() => store.focus('task', id)}>
+                    {task.title}
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn is-tiny"
+                    aria-label={`Unlink ${task.title}`}
+                    title="Unlink"
+                    onClick={() => onChange({ taskIds: linked.filter((t) => t !== id) })}
+                  >
+                    ×
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <p className="muted panel-empty">No tasks linked. Link the tasks that build this part to see its progress on the box.</p>
+        )}
+        {linkable.length > 0 && (
+          <select
+            className="input"
+            aria-label={`Link a task to ${node.data.label}`}
+            value=""
+            onChange={(e) => e.target.value && onChange({ taskIds: [...linked, e.target.value] })}
+          >
+            <option value="">Link a task…</option>
+            {linkable.map(({ task, number, depth }) => (
+              <option key={task.id} value={task.id}>
+                {' '.repeat(depth * 3)}
+                {number} {task.title}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      {(outgoing.length > 0 || incoming.length > 0) && (
+        <div className="field">
+          <span className="field-label">Connections</span>
+          <ul className="panel-links">
+            {outgoing.map((e) => (
+              <li key={e.id}>
+                <button type="button" className="link" onClick={() => onSelect('edge', e.id)}>
+                  → {name(e.target)}
+                </button>
+                {e.data?.label && <span className="muted"> {e.data.label}</span>}
+              </li>
+            ))}
+            {incoming.map((e) => (
+              <li key={e.id}>
+                <button type="button" className="link" onClick={() => onSelect('edge', e.id)}>
+                  ← {name(e.source)}
+                </button>
+                {e.data?.label && <span className="muted"> {e.data.label}</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <footer className="panel-foot">
+        {confirming ? (
+          <span className="item-confirm">
+            Delete this box and its arrows?
+            <button type="button" className="link is-danger" onClick={onRemove}>
+              Delete
+            </button>
+            <button type="button" className="link" onClick={() => setConfirming(false)}>
+              Keep
+            </button>
+          </span>
+        ) : (
+          <button type="button" className="link is-danger" onClick={() => setConfirming(true)}>
+            Delete box
+          </button>
+        )}
+      </footer>
     </div>
   );
 }
 
-function EdgeInspector({
+function EdgePanel({
   edge,
   nodes,
   onChange,
+  onSelect,
   onRemove,
+  onClose,
 }: {
   edge: FlowEdge;
   nodes: FlowNode[];
   onChange: (patch: { label?: string; dashed?: boolean }) => void;
+  onSelect: (kind: 'node' | 'edge', id: string) => void;
   onRemove: () => void;
+  onClose: () => void;
 }) {
   const name = (id: string) => nodes.find((n) => n.id === id)?.data.label ?? id;
   return (
-    <div className="flow-inspector-body" aria-label="Selected arrow">
-      <p className="flow-inspector-title">
-        {name(edge.source)} → {name(edge.target)}
+    <div className="arch-panel-body" aria-label="Details of the selected arrow">
+      <header className="panel-top">
+        <span className="panel-kicker">Arrow</span>
+        <span className="spacer" />
+        <button type="button" className="icon-btn is-tiny" aria-label="Close details" title="Back to the diagram" onClick={onClose}>
+          ×
+        </button>
+      </header>
+      <p className="panel-edge">
+        <button type="button" className="link" onClick={() => onSelect('node', edge.source)}>
+          {name(edge.source)}
+        </button>
+        <span aria-hidden="true"> → </span>
+        <button type="button" className="link" onClick={() => onSelect('node', edge.target)}>
+          {name(edge.target)}
+        </button>
       </p>
       <label className="field">
-        <span className="field-label">Label</span>
-        <CommitInput value={edge.data?.label ?? ''} label="Arrow label" placeholder="What flows along it" onCommit={(label) => onChange({ label })} />
+        <span className="field-label">What flows along it</span>
+        <CommitInput value={edge.data?.label ?? ''} label="Arrow label" placeholder="e.g. REST, publishes events" onCommit={(label) => onChange({ label })} />
       </label>
       <label className="toggle">
         <input type="checkbox" checked={Boolean(edge.data?.dashed)} onChange={(e) => onChange({ dashed: e.target.checked })} />
         Dashed — optional, async or future
       </label>
-      <div className="flow-inspector-foot">
-        <span className="spacer" />
+      <footer className="panel-foot">
         <button type="button" className="link is-danger" onClick={onRemove}>
           Delete arrow
         </button>
-      </div>
+      </footer>
     </div>
   );
 }
+
+export type { DiagramNode };

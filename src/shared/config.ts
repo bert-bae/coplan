@@ -15,6 +15,13 @@ export interface HarnessConfig {
    * only learns of the changes when it calls `harness_plan_read` itself.
    */
   promptNotice: boolean;
+  /**
+   * When Claude asks the user something, open that session in the Claude
+   * desktop app straight away instead of waiting for a click in the harness.
+   * Only possible for a local session with Remote Control on: nothing else
+   * has a documented link to open.
+   */
+  openClaudeOnQuestion: boolean;
   /** Exit after this long with no session activity and no browser open. 0 never. */
   idleShutdownMinutes: number;
 }
@@ -22,6 +29,7 @@ export interface HarnessConfig {
 export const DEFAULT_CONFIG: HarnessConfig = {
   autoOpen: false,
   promptNotice: true,
+  openClaudeOnQuestion: false,
   idleShutdownMinutes: 120,
 };
 

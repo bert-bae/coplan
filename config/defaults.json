@@ -1,5 +1,6 @@
 {
   "autoOpen": false,
   "promptNotice": true,
+  "openClaudeOnQuestion": false,
   "idleShutdownMinutes": 120
 }

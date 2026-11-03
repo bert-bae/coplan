@@ -457,15 +457,38 @@ function buildRouter(deps: Deps): Router {
 
   /* --------------------------- Hook ingest ------------------------- */
 
+  /**
+   * Opening Claude for the user, when they asked for that. The daemon runs on
+   * the same machine as the session, so for a local session with Remote
+   * Control this brings the desktop app up on the question; a cloud
+   * session's daemon is in the cloud and has no screen to open anything on.
+   */
+  const openClaude = (session: SessionState) => {
+    if (!session.link || session.link.via === 'cloud') return;
+    if (!configFor(session).openClaudeOnQuestion) return;
+    openInBrowser(session.link.app);
+  };
+
   router.post('/hook/:event', async (ctx) => {
     const event = ctx.params['event'] ?? '';
     let output: HookOutput = HOOK_NOOP;
     try {
       const input = await readJson<Record<string, unknown>>(ctx.req);
       const session = typeof input['session_id'] === 'string' ? store.get(input['session_id']) : undefined;
+      const header = (name: string) => {
+        const value = ctx.req.headers[name];
+        return typeof value === 'string' ? value : null;
+      };
       output = await ingestHook(event, input, {
         store,
         config: session ? configFor(session) : config,
+        env: {
+          remoteSessionId: header('x-harness-remote-session'),
+          remoteSdkUrl: header('x-harness-remote-sdk'),
+          bridgeSessionId: header('x-harness-bridge-session'),
+          entrypoint: header('x-harness-entrypoint'),
+        },
+        onWaiting: openClaude,
       });
     } catch (err) {
       // A hook must never break the session it is attached to.
@@ -513,8 +536,9 @@ function buildRouter(deps: Deps): Router {
           reply(
             true,
             `[cc-harness] Published "${plan.title}" (revision ${plan.revision}). The user reviews it at ${url}\n` +
-              'Tell them in chat that the plan is ready, then end your turn. Nothing here waits for them: ' +
-              'when they say they have reviewed it, call harness_plan_read.\n\n' +
+              'Tell them in chat that the plan is ready, and ask anything you need decided with ' +
+              'AskUserQuestion, here in chat. Nothing in the harness waits for them: when they say they ' +
+              'have reviewed it, call harness_plan_read.\n\n' +
               renderPlan(plan, { url }),
           );
           return;

@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 var DEFAULT_CONFIG = {
   autoOpen: false,
   promptNotice: true,
+  openClaudeOnQuestion: false,
   idleShutdownMinutes: 120
 };
 function isRecord(v) {

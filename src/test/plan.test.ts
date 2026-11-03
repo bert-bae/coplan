@@ -31,7 +31,6 @@ const INPUT: PlanInput = {
     { title: 'Storage layer', subtasks: [{ title: 'Cache client' }, { title: 'Invalidation', status: 'blocked' }] },
     { title: 'Wire into API' },
   ],
-  questions: [{ question: 'Which cache?', header: 'Backend', options: ['Redis', { label: 'In-memory', description: 'Lost on restart.' }] }],
 };
 
 const fresh = (): Plan => publishPlan(null, INPUT, 1000).plan;
@@ -44,8 +43,6 @@ test('publishing builds a nested task tree with readable ids', () => {
   );
   assert.equal(plan.sections[0]!.id, 's1');
   assert.equal(plan.diagrams[0]!.id, 'd1');
-  assert.equal(plan.questions[0]!.id, 'q1');
-  assert.equal(plan.questions[0]!.options[1]!.description, 'Lost on restart.');
 });
 
 test('progress counts leaf tasks only', () => {
@@ -60,10 +57,10 @@ test('publishing marks the plan read by Claude', () => {
 });
 
 test('a user edit is unread by Claude until it reads the plan', () => {
-  const { plan } = applyOps(fresh(), [{ op: 'answer', id: 'q1', selected: ['Redis'], text: 'we already run it' }], 'user');
+  const { plan } = applyOps(fresh(), [{ op: 'move_task', id: 't4', parentId: 't1', index: 0 }], 'user');
   const unread = unreadByClaude(plan);
   assert.equal(unread.length, 1);
-  assert.match(unread[0]!.summary, /answered "Which cache\?": Redis — we already run it/);
+  assert.match(unread[0]!.summary, /moved "Wire into API" under "Storage layer"/);
   assert.match(unreadNotice(plan) ?? '', /harness_plan_read/);
 });
 
@@ -84,11 +81,10 @@ test('a republish is refused while the user has unread changes', () => {
   assert.throws(() => publishPlan(edited, INPUT), (err: unknown) => err instanceof PlanError && /harness_plan_read/.test(err.message));
 });
 
-test('a republish keeps answers, comments and statuses on surviving ids', () => {
+test('a republish keeps comments and statuses on surviving ids', () => {
   let plan = applyOps(
     fresh(),
     [
-      { op: 'answer', id: 'q1', selected: ['Redis'] },
       { op: 'comment', target: { kind: 'task', id: 't2' }, text: 'use the pooled client' },
       { op: 'upsert_task', id: 't2', status: 'done' },
     ],
@@ -99,10 +95,8 @@ test('a republish keeps answers, comments and statuses on surviving ids', () => 
   const next = publishPlan(plan, {
     ...INPUT,
     tasks: [{ id: 't1', title: 'Storage layer', subtasks: [{ id: 't2', title: 'Cache client (pooled)' }] }],
-    questions: [{ id: 'q1', question: 'Which cache?', options: ['Redis', 'In-memory'] }],
   }).plan;
 
-  assert.equal(next.questions[0]!.answer?.selected[0], 'Redis');
   assert.equal(next.tasks.find((t) => t.id === 't2')?.status, 'done', 'a status Claude did not restate is kept');
   assert.equal(next.threads[0]!.target.id, 't2');
   assert.equal(next.revision, 2);
@@ -115,11 +109,17 @@ test('a comment on a removed item is kept, re-homed on the plan', () => {
   assert.match(plan.threads[0]!.text, /on removed task "Wire into API"/);
 });
 
-test('removing a task removes its subtasks and unlinks its questions', () => {
-  let plan = applyOps(fresh(), [{ op: 'upsert_question', question: 'TTL?', taskId: 't3' }], 'claude').plan;
+test('removing a task removes its subtasks and unlinks them from the diagram', () => {
+  const base = fresh();
+  const d = base.diagrams[0]!;
+  let plan = applyOps(
+    base,
+    [{ op: 'upsert_diagram', id: 'd1', nodes: d.nodes.map((n) => (n.id === 'cache' ? { ...n, taskIds: ['t3', 't4'] } : n)), edges: d.edges }],
+    'claude',
+  ).plan;
   plan = applyOps(plan, [{ op: 'remove', kind: 'task', id: 't1' }], 'user').plan;
   assert.deepEqual(plan.tasks.map((t) => t.id), ['t4']);
-  assert.equal(plan.questions.find((q) => q.question === 'TTL?')?.taskId, undefined);
+  assert.deepEqual(plan.diagrams[0]!.nodes.find((n) => n.id === 'cache')?.taskIds, ['t4']);
   assert.match(plan.changes.at(-1)!.summary, /and its 2 subtask/);
 });
 
@@ -140,8 +140,8 @@ test('a batch is all or nothing', () => {
   const before = fresh();
   assert.throws(
     () =>
-      applyOps(before, [{ op: 'upsert_task', title: 'Fine' }, { op: 'answer', id: 'q99', text: 'nope' }], 'user'),
-    /Edit 2 \(answer\): No question "q99"/,
+      applyOps(before, [{ op: 'upsert_task', title: 'Fine' }, { op: 'remove', kind: 'task', id: 't99' }], 'user'),
+    /Edit 2 \(remove\): No task "t99"/,
   );
   assert.equal(before.tasks.length, 4, 'the plan passed in is untouched');
 });
@@ -151,10 +151,6 @@ test('ids are never reused, even after a delete', () => {
   plan = applyOps(plan, [{ op: 'upsert_task', title: 'New' }], 'user').plan;
   assert.ok(plan.tasks.some((t) => t.id === 't5'));
   assert.ok(!plan.tasks.some((t) => t.id === 't4'));
-});
-
-test('a single-choice question refuses two answers', () => {
-  assert.throws(() => applyOps(fresh(), [{ op: 'answer', id: 'q1', selected: ['Redis', 'In-memory'] }], 'user'), /takes one option/);
 });
 
 test('threads: reply and resolve are logged against the item', () => {
@@ -225,6 +221,41 @@ test('dragging boxes is logged as a rearrangement, and positions survive a repub
   assert.equal(republished.diagrams[0]!.nodes.find((n) => n.id === 'cache')?.x, 200, 'Claude did not restate it, so it stays put');
 });
 
+test('a box carries notes and the tasks that build it', () => {
+  const plan = publishPlan(null, {
+    title: 'x',
+    tasks: [{ id: 'build-cache', title: 'Build the cache', subtasks: [{ title: 'client' }] }],
+    diagrams: [
+      {
+        title: 'D',
+        nodes: [{ id: 'cache', label: 'Cache', kind: 'datastore', notes: 'Redis, because we run it.', taskIds: ['build-cache'] }],
+      },
+    ],
+  }).plan;
+  const node = plan.diagrams[0]!.nodes[0]!;
+  assert.equal(node.notes, 'Redis, because we run it.');
+  assert.deepEqual(node.taskIds, ['build-cache']);
+  assert.match(renderPlan(plan), /- cache: "Cache" \(datastore\)\n  tasks: build-cache\n  Redis, because we run it\./);
+});
+
+test('a box cannot link a task that does not exist', () => {
+  assert.throws(
+    () => publishPlan(null, { title: 'x', diagrams: [{ title: 'D', nodes: [{ id: 'a', label: 'A', taskIds: ['nope'] }] }] }),
+    /links task "nope"/,
+  );
+});
+
+test('linking a box to tasks is described for Claude', () => {
+  const base = fresh();
+  const d = base.diagrams[0]!;
+  const { plan } = applyOps(
+    base,
+    [{ op: 'upsert_diagram', id: 'd1', nodes: d.nodes.map((n) => (n.id === 'cache' ? { ...n, taskIds: ['t2'], notes: 'LRU' } : n)), edges: d.edges }],
+    'user',
+  );
+  assert.match(plan.changes.at(-1)!.summary, /edited "Cache"; changed the tasks behind "Cache"/);
+});
+
 test('an edit that changes nothing logs nothing', () => {
   const plan = fresh();
   const d = plan.diagrams[0]!;
@@ -237,15 +268,16 @@ test('an edit that changes nothing logs nothing', () => {
  * ------------------------------------------------------------------ */
 
 test('the rendering leads with the changes and carries every id', () => {
-  const plan = applyOps(fresh(), [{ op: 'upsert_question', question: 'Should we shard?' }], 'user').plan;
+  const plan = applyOps(fresh(), [{ op: 'upsert_task', title: 'Shard it' }], 'user').plan;
   const text = renderPlan(plan, { url: 'http://x' });
   assert.ok(text.indexOf('Since you last read') < text.indexOf('## Tasks'));
   assert.match(text, /- \[ \] t2 Cache client/);
   assert.match(text, /- \[!\] t3 Invalidation/);
   assert.match(text, /\[d1\] Components/);
   assert.match(text, /- api → cache "get"/);
-  assert.match(text, /\[q2\] Should we shard\? _\(asked by the user\)_/);
-  assert.match(text, /UNANSWERED — answer it with harness_plan_edit/);
+  assert.match(text, /added task "Shard it"/);
+  assert.match(text, /t5 Shard it _\(added by the user\)_/);
+  assert.doesNotMatch(text, /question/i, 'questions live in Claude\'s chat, not the plan');
 });
 
 test('changes-only rendering skips the document', () => {

@@ -3,53 +3,83 @@ import type { SessionStore } from './store.ts';
 import type { HarnessConfig } from '../shared/config.ts';
 import { currentBranch, repoRoot } from './git.ts';
 import { unreadNotice } from './render.ts';
+import { resolveLink, type SessionEnv } from '../shared/link.ts';
 import {
   HOOK_NOOP,
   additionalContext,
   type HookInput,
   type HookOutput,
-  type SessionEndInput,
+  type NotificationInput,
+  type PreToolUseInput,
   type SessionStartInput,
+  type StopInput,
   type UserPromptSubmitInput,
 } from '../shared/hooks.ts';
+import type { SessionState, WaitingState } from '../shared/types.ts';
 
 /**
- * Lifecycle hooks, and nothing else.
+ * Lifecycle hooks.
  *
- * The harness does not watch Claude work and never holds a turn open: the
- * hooks only register a session, keep its working/idle/ended state honest for
- * the rail, and — when the user types in chat after changing the plan — slip
- * one line into the prompt saying so. Every hook answers immediately.
+ * The harness never holds a turn and never answers for the user. The hooks
+ * keep three things honest for the browser: whether Claude is working, whether
+ * it is waiting on the user (and for what), and how to link back to the
+ * session so they can answer it there. Every hook answers immediately.
  */
 
 export interface IngestContext {
   store: SessionStore;
   config: HarnessConfig;
+  /** Where the session runs, read from its environment by the relay. */
+  env?: SessionEnv;
+  /** Called when a session starts waiting on the user. */
+  onWaiting?: (session: SessionState) => void;
 }
+
+/** Notifications that mean "Claude cannot go on without the user". */
+const INPUT_NOTIFICATIONS = new Set(['idle_prompt', 'agent_needs_input', 'elicitation_dialog']);
 
 export async function ingestHook(event: string, input: HookInput, ctx: IngestContext): Promise<HookOutput> {
   const sessionId = input.session_id;
   if (!sessionId) return HOOK_NOOP;
+  ctx.store.ensure(sessionId, input.cwd);
+  applyEnv(sessionId, ctx);
 
   switch (event) {
     case 'SessionStart':
       return onSessionStart(sessionId, input as SessionStartInput, ctx);
     case 'SessionEnd':
-      ctx.store.ensure(sessionId, input.cwd);
-      ctx.store.update(sessionId, { status: 'ended', endedAt: Date.now() });
+      ctx.store.update(sessionId, { status: 'ended', endedAt: Date.now(), waiting: null });
       ctx.store.persistNow(sessionId);
-      void (input as SessionEndInput);
       return HOOK_NOOP;
     case 'UserPromptSubmit':
       return onUserPromptSubmit(sessionId, input as UserPromptSubmitInput, ctx);
-    case 'Stop':
-      ctx.store.ensure(sessionId, input.cwd);
-      ctx.store.update(sessionId, { status: 'idle' });
+    case 'PreToolUse':
+      return onPreToolUse(sessionId, input as PreToolUseInput, ctx);
+    case 'PostToolUse': {
+      // Any tool finishing means Claude is moving again: an answered question,
+      // an approved permission. Only write when something actually changes.
+      const s = ctx.store.get(sessionId);
+      if (s && (s.waiting || s.status !== 'active')) ctx.store.update(sessionId, { status: 'active', waiting: null });
       return HOOK_NOOP;
+    }
+    case 'Notification':
+      return onNotification(sessionId, input as NotificationInput, ctx);
+    case 'Stop':
+      return onStop(sessionId, input as StopInput, ctx);
     default:
-      ctx.store.ensure(sessionId, input.cwd);
       return HOOK_NOOP;
   }
+}
+
+/** Keep the session's link current. Remote Control can be switched on (or
+ *  off) mid-session, so every event re-reads it. */
+function applyEnv(sessionId: string, ctx: IngestContext): void {
+  if (!ctx.env) return;
+  const { surface, link } = resolveLink(ctx.env);
+  const s = ctx.store.get(sessionId);
+  if (!s) return;
+  if (s.surface === surface && JSON.stringify(s.link) === JSON.stringify(link)) return;
+  ctx.store.update(sessionId, { surface, link });
 }
 
 async function onSessionStart(sessionId: string, input: SessionStartInput, ctx: IngestContext): Promise<HookOutput> {
@@ -62,22 +92,92 @@ async function onSessionStart(sessionId: string, input: SessionStartInput, ctx: 
     repoRoot: root,
     branch,
     status: 'active',
+    waiting: null,
     endedAt: undefined,
-    // A fresh session is named after its project until the user (or the
-    // plan's own title, which the rail prefers) says otherwise.
     title: session.titleLocked ? session.title : path.basename(root ?? cwd) || session.title,
   });
   return HOOK_NOOP;
 }
 
-async function onUserPromptSubmit(
-  sessionId: string,
-  input: UserPromptSubmitInput,
-  ctx: IngestContext,
-): Promise<HookOutput> {
-  const session = ctx.store.ensure(sessionId, input.cwd);
-  ctx.store.update(sessionId, { status: 'active' });
-  if (!ctx.config.promptNotice) return HOOK_NOOP;
+async function onUserPromptSubmit(sessionId: string, _input: UserPromptSubmitInput, ctx: IngestContext): Promise<HookOutput> {
+  // The user has answered, in Claude, whatever was being waited on.
+  const session = ctx.store.update(sessionId, { status: 'active', waiting: null });
+  if (!ctx.config.promptNotice || !session) return HOOK_NOOP;
   const notice = unreadNotice(session.plan);
   return notice ? additionalContext('UserPromptSubmit', notice) : HOOK_NOOP;
+}
+
+function onPreToolUse(sessionId: string, input: PreToolUseInput, ctx: IngestContext): HookOutput {
+  if (input.tool_name !== 'AskUserQuestion') return HOOK_NOOP;
+  const questions = readQuestions(input.tool_input);
+  if (questions.length === 0) return HOOK_NOOP;
+  setWaiting(sessionId, ctx, {
+    kind: 'question',
+    text: questions.map((q) => q.question).join(' · '),
+    questions,
+    since: Date.now(),
+  });
+  return HOOK_NOOP;
+}
+
+function onNotification(sessionId: string, input: NotificationInput, ctx: IngestContext): HookOutput {
+  const type = input.notification_type ?? '';
+  const text = clip(input.message ?? '') || 'Claude is waiting for your input.';
+  const current = ctx.store.get(sessionId)?.waiting;
+  if (type === 'permission_prompt') {
+    setWaiting(sessionId, ctx, { kind: 'permission', text, since: Date.now() });
+  } else if (INPUT_NOTIFICATIONS.has(type) && current?.kind !== 'question') {
+    // An idle reminder must not replace the question it is reminding about.
+    if (!current) setWaiting(sessionId, ctx, { kind: 'input', text, since: Date.now() });
+  }
+  return HOOK_NOOP;
+}
+
+function onStop(sessionId: string, input: StopInput, ctx: IngestContext): HookOutput {
+  // A turn that ends on a question is waiting on an answer even though no
+  // tool asked it. Claude is told to use AskUserQuestion, but prose happens.
+  const asked = trailingQuestion(input.last_assistant_message);
+  ctx.store.update(sessionId, {
+    status: 'idle',
+    waiting: asked ? { kind: 'input', text: asked, since: Date.now() } : null,
+  });
+  if (asked) ctx.onWaiting?.(ctx.store.get(sessionId)!);
+  return HOOK_NOOP;
+}
+
+function setWaiting(sessionId: string, ctx: IngestContext, waiting: WaitingState): void {
+  const before = ctx.store.get(sessionId)?.waiting;
+  const session = ctx.store.update(sessionId, { waiting });
+  if (session && !before) ctx.onWaiting?.(session);
+}
+
+/** `AskUserQuestion`'s `tool_input.questions`, normalized and bounded. */
+function readQuestions(raw: unknown): NonNullable<WaitingState['questions']> {
+  const list = (raw as { questions?: unknown })?.questions;
+  if (!Array.isArray(list)) return [];
+  return list
+    .slice(0, 6)
+    .map((q) => {
+      const rec = (q && typeof q === 'object' ? q : {}) as Record<string, unknown>;
+      const question = clip(String(rec['question'] ?? ''));
+      const header = clip(String(rec['header'] ?? ''), 40);
+      const options = (Array.isArray(rec['options']) ? rec['options'] : [])
+        .map((o) => clip(typeof o === 'string' ? o : String((o as Record<string, unknown>)?.['label'] ?? ''), 80))
+        .filter(Boolean)
+        .slice(0, 8);
+      return { question, ...(header ? { header } : {}), options, ...(rec['multiSelect'] === true ? { multiSelect: true } : {}) };
+    })
+    .filter((q) => q.question);
+}
+
+/** The last paragraph of a message, when it ends in a question. */
+function trailingQuestion(message: unknown): string | null {
+  if (typeof message !== 'string') return null;
+  const last = message.trim().split(/\n\s*\n/).pop()?.trim() ?? '';
+  return last.endsWith('?') ? clip(last.replace(/[*_`#>]/g, '')) : null;
+}
+
+function clip(text: string, max = 300): string {
+  const line = text.replace(/\s+/g, ' ').trim();
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }

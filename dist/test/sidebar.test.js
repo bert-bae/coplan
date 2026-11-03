@@ -136,12 +136,13 @@ var init_store = __esm({
   "src/ui/store.ts"() {
     "use strict";
     init_api();
-    TAB_IDS = ["overview", "diagrams", "tasks", "questions", "activity"];
+    TAB_IDS = ["diagrams", "tasks", "overview"];
     initial = {
       sessions: [],
       sessionId: null,
       session: null,
-      tab: "overview",
+      tab: "diagrams",
+      diagramId: null,
       connection: "connecting",
       taskMode: "outline",
       hideDone: false,
@@ -198,7 +199,7 @@ var init_store = __esm({
       }
       async selectSession(id, updateHash = true) {
         if (updateHash) window.location.hash = `#/session/${id}`;
-        this.set({ sessionId: id, session: null, error: null });
+        this.set({ sessionId: id, session: null, diagramId: null, error: null });
         try {
           const { session } = await api.session(id);
           this.set({ session });
@@ -282,9 +283,15 @@ var init_store = __esm({
       op(op) {
         return this.ops([op]);
       }
-      /** Jump to an item from anywhere: the activity log, a linked question. */
+      /** Jump to an item from anywhere: a board card, the overview's "now". */
       focus(kind, id) {
-        const tab = kind === "diagram" ? "diagrams" : kind === "task" ? "tasks" : kind === "question" ? "questions" : "overview";
+        const tab = kind === "diagram" ? "diagrams" : kind === "task" ? "tasks" : "overview";
+        if (kind === "diagram") this.set({ diagramId: id });
+        if (kind === "node") {
+          const [diagramId] = id.split(":");
+          this.set({ tab: "diagrams", diagramId: diagramId ?? null, focusTarget: `node:${id}` });
+          return;
+        }
         if (kind === "task") {
           const tasks = this.state.session?.plan?.tasks ?? [];
           const ancestors = /* @__PURE__ */ new Set();
@@ -470,9 +477,6 @@ function duration(ms) {
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${minutes % 60}m`;
 }
-function clockTime(ts) {
-  return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
 function classNames(...parts) {
   return parts.filter(Boolean).join(" ");
 }
@@ -647,13 +651,13 @@ function Sidebar() {
             }
           )
         ] }),
-        /* @__PURE__ */ jsx2("nav", { className: "session-list", "aria-label": "Live sessions", children: sessions.length === 0 ? /* @__PURE__ */ jsx2("p", { className: "sidebar-empty", children: "No sessions yet." }) : groups.map((group) => /* @__PURE__ */ jsx2(
+        collapsed && !drawerOpen ? /* @__PURE__ */ jsx2(CollapsedRail, { sessions, current }) : /* @__PURE__ */ jsx2("nav", { className: "session-list", "aria-label": "Live sessions", children: sessions.length === 0 ? /* @__PURE__ */ jsx2("p", { className: "sidebar-empty", children: "No sessions yet." }) : groups.map((group) => /* @__PURE__ */ jsx2(
           ProjectGroup,
           {
             group,
             current,
             open: !collapsedProjects.includes(group.key),
-            showRepo: group.key === PINNED_KEY
+            showRepo: group.key === PINNED_KEY || group.key === WAITING_KEY
           },
           group.key
         )) }),
@@ -666,11 +670,10 @@ function groupSessions(sessions, pinned) {
   const pinnedSet = new Set(pinned);
   const groups = /* @__PURE__ */ new Map();
   for (const session of sessions) {
-    const lift = pinnedSet.has(session.sessionId);
-    const key = lift ? PINNED_KEY : session.repoRoot ?? session.cwd;
+    const key = session.waiting ? WAITING_KEY : pinnedSet.has(session.sessionId) ? PINNED_KEY : session.repoRoot ?? session.cwd;
     let group = groups.get(key);
     if (!group) {
-      group = key === PINNED_KEY ? { key, label: "Pinned", path: "", sessions: [] } : {
+      group = key === WAITING_KEY ? { key, label: "Waiting on you", path: "", sessions: [] } : key === PINNED_KEY ? { key, label: "Pinned", path: "", sessions: [] } : {
         key,
         label: groupLabel(session),
         path: session.repoRoot ?? session.cwd,
@@ -683,9 +686,9 @@ function groupSessions(sessions, pinned) {
   for (const group of groups.values()) {
     group.sessions.sort((a, b) => b.createdAt - a.createdAt);
   }
+  const rank = (key) => key === WAITING_KEY ? 0 : key === PINNED_KEY ? 1 : 2;
   return [...groups.values()].sort((a, b) => {
-    if (a.key === PINNED_KEY) return -1;
-    if (b.key === PINNED_KEY) return 1;
+    if (rank(a.key) !== rank(b.key)) return rank(a.key) - rank(b.key);
     return (b.sessions[0]?.createdAt ?? 0) - (a.sessions[0]?.createdAt ?? 0);
   });
 }
@@ -764,8 +767,12 @@ ${session.cwd}
 Double-click to rename`,
             children: [
               /* @__PURE__ */ jsxs2("span", { className: "session-name", children: [
-                session.status === "active" && /* @__PURE__ */ jsx2("span", { className: "working-dot", title: "Claude is working", "aria-label": "Claude is working" }),
+                session.waiting ? /* @__PURE__ */ jsx2("span", { className: "dot is-attention", title: "Claude is waiting on you", "aria-label": "Claude is waiting on you" }) : session.status === "active" && /* @__PURE__ */ jsx2("span", { className: "working-dot", title: "Claude is working", "aria-label": "Claude is working" }),
                 session.planTitle ?? session.title
+              ] }),
+              session.waiting ? /* @__PURE__ */ jsx2("span", { className: "session-waiting", children: session.waiting.text }) : session.current && /* @__PURE__ */ jsxs2("span", { className: "session-now", children: [
+                "now: ",
+                session.current
               ] }),
               /* @__PURE__ */ jsxs2("span", { className: "session-sub", children: [
                 session.planTitle && session.planTitle !== session.title && /* @__PURE__ */ jsx2("span", { className: "session-stage", children: session.title }),
@@ -782,10 +789,6 @@ Double-click to rename`,
                   " tasks"
                 ] }),
                 /* @__PURE__ */ jsx2("span", { children: relativeTime(session.updatedAt) }),
-                session.openQuestions > 0 && /* @__PURE__ */ jsxs2("span", { className: "pill is-queued", children: [
-                  session.openQuestions,
-                  " open q"
-                ] }),
                 session.unreadByClaude > 0 && /* @__PURE__ */ jsxs2("span", { className: "pill is-draft", title: "Changes Claude has not read yet", children: [
                   session.unreadByClaude,
                   " unread"
@@ -794,6 +797,7 @@ Double-click to rename`,
             ]
           }
         ),
+        session.waiting && session.link && !renaming && /* @__PURE__ */ jsx2("a", { className: "session-answer btn btn-sm btn-primary", href: session.link.app, title: "Open this session in the Claude desktop app", children: "Answer in Claude" }),
         /* @__PURE__ */ jsxs2("div", { className: "session-actions", children: [
           /* @__PURE__ */ jsx2(
             "button",
@@ -888,7 +892,36 @@ function RenameField({ session, onDone }) {
     }
   );
 }
-var SESSION_STATE_LABEL, PINNED_KEY;
+function CollapsedRail({ sessions, current }) {
+  const ordered = [...sessions].sort((a, b) => Number(Boolean(b.waiting)) - Number(Boolean(a.waiting)) || b.createdAt - a.createdAt);
+  return /* @__PURE__ */ jsx2("nav", { className: "session-rail", "aria-label": "Sessions", children: ordered.map((s) => {
+    const name = s.planTitle ?? s.title;
+    return /* @__PURE__ */ jsxs2(
+      "button",
+      {
+        type: "button",
+        className: classNames("rail-item", s.sessionId === current && "is-active", s.waiting && "is-waiting"),
+        "aria-current": s.sessionId === current ? "true" : void 0,
+        title: `${name}${s.waiting ? ` \u2014 waiting on you: ${s.waiting.text}` : s.current ? ` \u2014 now: ${s.current}` : ""}`,
+        "aria-label": `${name}${s.waiting ? ", waiting on you" : ""}`,
+        onClick: () => void store.selectSession(s.sessionId),
+        children: [
+          /* @__PURE__ */ jsx2("span", { "aria-hidden": "true", children: initials(name) }),
+          s.waiting && /* @__PURE__ */ jsx2("span", { className: "rail-dot is-attention", "aria-hidden": "true" }),
+          !s.waiting && s.status === "active" && /* @__PURE__ */ jsx2("span", { className: "rail-dot is-working", "aria-hidden": "true" })
+        ]
+      },
+      s.sessionId
+    );
+  }) });
+}
+function initials(name) {
+  const all = name.replace(/[^A-Za-z0-9 ]/g, " ").split(/\s+/).filter(Boolean);
+  const words = all.filter((w) => !MINOR_WORDS.has(w.toLowerCase()));
+  if (words.length === 0) words.push(...all);
+  return ((words[0]?.[0] ?? "?") + (words[1]?.[0] ?? "")).toUpperCase();
+}
+var SESSION_STATE_LABEL, WAITING_KEY, PINNED_KEY, MINOR_WORDS;
 var init_Sidebar = __esm({
   "src/ui/components/Sidebar.tsx"() {
     "use strict";
@@ -900,7 +933,9 @@ var init_Sidebar = __esm({
       idle: "idle",
       ended: "ended"
     };
+    WAITING_KEY = "\0waiting";
     PINNED_KEY = "\0pinned";
+    MINOR_WORDS = /* @__PURE__ */ new Set(["a", "an", "the", "to", "of", "for", "and", "in", "on", "with"]);
   }
 });
 
@@ -1081,21 +1116,9 @@ function countTasks(plan) {
   }
   return counts;
 }
-function targetExists(plan, target) {
-  switch (target.kind) {
-    case "plan":
-      return true;
-    case "section":
-      return plan.sections.some((s) => s.id === target.id);
-    case "diagram":
-      return plan.diagrams.some((d) => d.id === target.id);
-    case "task":
-      return plan.tasks.some((t) => t.id === target.id);
-    case "question":
-      return plan.questions.some((q) => q.id === target.id);
-    default:
-      return false;
-  }
+function currentTask(plan) {
+  if (!plan) return null;
+  return outline(plan).find((r) => r.task.status === "in_progress" && !plan.tasks.some((t) => t.parentId === r.task.id))?.task ?? null;
 }
 var init_plan = __esm({
   "src/shared/plan.ts"() {
@@ -1106,37 +1129,93 @@ var init_plan = __esm({
 
 // src/ui/components/Handoff.tsx
 import { useEffect as useEffect5, useState as useState5 } from "react";
-import { Fragment as Fragment2, jsx as jsx6, jsxs as jsxs6 } from "react/jsx-runtime";
+import { jsx as jsx6, jsxs as jsxs6 } from "react/jsx-runtime";
 function Handoff() {
+  const session = useSession();
   const plan = usePlan();
   const [viewing, setViewing] = useState5(false);
-  if (!plan) return null;
+  if (!session) return null;
   const unread = unreadByClaude(plan).length;
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(HANDOFF_MESSAGE);
-      store.toast("success", "Copied \u2014 paste it into Claude's chat.");
-    } catch {
-      store.toast("info", `Tell Claude: "${HANDOFF_MESSAGE}"`);
-    }
-  };
   return /* @__PURE__ */ jsxs6("div", { className: "handoff", children: [
-    unread > 0 ? /* @__PURE__ */ jsxs6(Fragment2, { children: [
-      /* @__PURE__ */ jsxs6("span", { className: "handoff-state is-behind", title: "Changes you made that Claude has not read yet", children: [
-        /* @__PURE__ */ jsx6("span", { className: "dot is-attention", "aria-hidden": "true" }),
-        unread,
-        " change",
-        unread === 1 ? "" : "s",
-        " Claude hasn't read"
-      ] }),
-      /* @__PURE__ */ jsx6("button", { type: "button", className: "btn btn-sm btn-primary", onClick: () => void copy(), title: HANDOFF_MESSAGE, children: "Copy message for Claude" })
+    plan && (unread > 0 ? /* @__PURE__ */ jsxs6("span", { className: "handoff-state is-behind", title: "Changes you made that Claude has not read yet", children: [
+      /* @__PURE__ */ jsx6("span", { className: "dot is-attention", "aria-hidden": "true" }),
+      unread,
+      " change",
+      unread === 1 ? "" : "s",
+      " Claude hasn't read"
     ] }) : /* @__PURE__ */ jsxs6("span", { className: "handoff-state is-current", title: plan.claudeReadAt ? `Read ${new Date(plan.claudeReadAt).toLocaleString()}` : void 0, children: [
       "\u2713 Claude is up to date",
       plan.claudeReadAt ? ` \xB7 read ${relativeTime(plan.claudeReadAt)}` : ""
-    ] }),
-    /* @__PURE__ */ jsx6("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setViewing(true), children: "As Claude sees it" }),
+    ] })),
+    /* @__PURE__ */ jsx6(OpenInClaude, { session, primary: unread > 0 }),
+    plan && /* @__PURE__ */ jsx6("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setViewing(true), children: "As Claude sees it" }),
     viewing && /* @__PURE__ */ jsx6(ClaudeView, { onClose: () => setViewing(false) })
   ] });
+}
+function OpenInClaude({
+  session,
+  primary,
+  label = "Open in Claude"
+}) {
+  if (session.link) return /* @__PURE__ */ jsx6(ClaudeLinks, { link: session.link, primary, label });
+  return /* @__PURE__ */ jsx6(
+    "button",
+    {
+      type: "button",
+      className: classNames("btn btn-sm", primary && "btn-primary"),
+      title: `${whereItRuns(session)} has no link the harness can open. Copies a message to paste there instead.`,
+      onClick: () => void copyHandoff(),
+      children: "Copy message for Claude"
+    }
+  );
+}
+function ClaudeLinks({ link, primary, label }) {
+  return /* @__PURE__ */ jsxs6("span", { className: "claude-links", children: [
+    /* @__PURE__ */ jsx6("a", { className: classNames("btn btn-sm", primary && "btn-primary"), href: link.app, title: "Open this session in the Claude desktop app", children: label }),
+    /* @__PURE__ */ jsx6("a", { className: "link claude-web", href: link.web, target: "_blank", rel: "noreferrer", title: "Open this session on claude.ai", children: "web" })
+  ] });
+}
+function WaitingBanner({ session }) {
+  const waiting = session.waiting;
+  if (!waiting) return null;
+  return /* @__PURE__ */ jsxs6("section", { className: classNames("waiting", `is-${waiting.kind}`), role: "status", "aria-label": "Claude is waiting on you", children: [
+    /* @__PURE__ */ jsxs6("div", { className: "waiting-body", children: [
+      /* @__PURE__ */ jsxs6("p", { className: "waiting-head", children: [
+        /* @__PURE__ */ jsx6("span", { className: "dot is-attention", "aria-hidden": "true" }),
+        HEADLINE[waiting.kind],
+        /* @__PURE__ */ jsxs6("span", { className: "muted", children: [
+          " \xB7 ",
+          relativeTime(waiting.since)
+        ] })
+      ] }),
+      waiting.questions?.length ? /* @__PURE__ */ jsx6("ol", { className: "waiting-questions", children: waiting.questions.map((q, i) => /* @__PURE__ */ jsxs6("li", { children: [
+        q.header && /* @__PURE__ */ jsx6("span", { className: "qchip", children: q.header }),
+        " ",
+        /* @__PURE__ */ jsx6("strong", { children: q.question }),
+        q.options.length > 0 && /* @__PURE__ */ jsxs6("span", { className: "waiting-options", children: [
+          q.multiSelect ? "choose any: " : "choose one: ",
+          q.options.join(" \xB7 ")
+        ] })
+      ] }, i)) }) : /* @__PURE__ */ jsx6("p", { className: "waiting-text", children: waiting.text }),
+      !session.link && /* @__PURE__ */ jsx6("p", { className: "waiting-hint", children: noLinkHint(session) })
+    ] }),
+    /* @__PURE__ */ jsx6(OpenInClaude, { session, primary: true, label: waiting.kind === "permission" ? "Decide in Claude" : "Answer in Claude" })
+  ] });
+}
+function whereItRuns(session) {
+  return session.surface === "desktop" ? "This desktop session" : session.surface === "cli" ? "This terminal session" : "This session";
+}
+function noLinkHint(session) {
+  const where = session.surface === "desktop" ? "in the Claude desktop app" : session.surface === "cli" ? "in your terminal" : "where the session is running";
+  return `Answer it ${where}. Turn on Remote Control there (/remote-control) and this becomes a link that opens the session directly.`;
+}
+async function copyHandoff() {
+  try {
+    await navigator.clipboard.writeText(HANDOFF_MESSAGE);
+    store.toast("success", "Copied \u2014 paste it into Claude's chat.");
+  } catch {
+    store.toast("info", `Tell Claude: "${HANDOFF_MESSAGE}"`);
+  }
 }
 function ClaudeView({ onClose }) {
   const session = useSession();
@@ -1170,7 +1249,7 @@ function ClaudeView({ onClose }) {
     ] })
   ] });
 }
-var HANDOFF_MESSAGE;
+var HANDOFF_MESSAGE, HEADLINE;
 var init_Handoff = __esm({
   "src/ui/components/Handoff.tsx"() {
     "use strict";
@@ -1178,7 +1257,12 @@ var init_Handoff = __esm({
     init_api();
     init_format();
     init_plan();
-    HANDOFF_MESSAGE = "I've updated the plan in the harness. Read it with harness_plan_read, take my edits, answers and comments into account, and tell me what changes.";
+    HANDOFF_MESSAGE = "I've updated the plan in the harness. Read it with harness_plan_read, take my edits and comments into account, and tell me what changes.";
+    HEADLINE = {
+      question: "Claude is asking you",
+      permission: "Claude needs your permission",
+      input: "Claude is waiting for your reply"
+    };
   }
 });
 
@@ -1987,9 +2071,9 @@ function OverviewView() {
 }
 function Glance({ plan }) {
   const counts = countTasks(plan);
-  const openQuestions = plan.questions.filter((q) => !q.answer);
-  const waitingOnYou = openQuestions.filter((q) => q.askedBy === "claude").length;
   const openThreads = plan.threads.filter((t) => !t.resolved).length;
+  const now = currentTask(plan);
+  const blocked = plan.tasks.filter((t) => t.status === "blocked");
   return /* @__PURE__ */ jsxs12("div", { className: "glance", role: "list", "aria-label": "Plan at a glance", children: [
     /* @__PURE__ */ jsxs12("button", { type: "button", role: "listitem", className: "glance-tile", onClick: () => store.setTab("tasks"), children: [
       /* @__PURE__ */ jsx13("span", { className: "glance-label", children: "Tasks" }),
@@ -2011,12 +2095,16 @@ function Glance({ plan }) {
       {
         type: "button",
         role: "listitem",
-        className: waitingOnYou ? "glance-tile is-attention" : "glance-tile",
-        onClick: () => store.setTab("questions"),
+        className: blocked.length ? "glance-tile is-attention" : "glance-tile",
+        onClick: () => {
+          const target = now ?? blocked[0];
+          if (target) store.focus("task", target.id);
+          else store.setTab("tasks");
+        },
         children: [
-          /* @__PURE__ */ jsx13("span", { className: "glance-label", children: "Open questions" }),
-          /* @__PURE__ */ jsx13("span", { className: "glance-value", children: openQuestions.length }),
-          /* @__PURE__ */ jsx13("span", { className: "glance-sub", children: waitingOnYou ? `${waitingOnYou} from Claude for you to answer` : openQuestions.length ? "waiting on Claude" : "all answered" })
+          /* @__PURE__ */ jsx13("span", { className: "glance-label", children: now ? "Claude is on" : blocked.length ? "Blocked" : "Now" }),
+          /* @__PURE__ */ jsx13("span", { className: "glance-now", children: now?.title ?? blocked[0]?.title ?? (counts.total && counts.done === counts.total ? "All done" : "Nothing in progress") }),
+          /* @__PURE__ */ jsx13("span", { className: "glance-sub", children: now?.note ?? blocked[0]?.note ?? (blocked.length > 1 ? `${blocked.length} tasks blocked` : " ") })
         ]
       }
     ),
@@ -2025,14 +2113,23 @@ function Glance({ plan }) {
       /* @__PURE__ */ jsx13("span", { className: "glance-value", children: plan.diagrams.length }),
       /* @__PURE__ */ jsx13("span", { className: "glance-sub", children: plan.diagrams.map((d) => d.title).slice(0, 2).join(", ") || "none yet" })
     ] }),
-    /* @__PURE__ */ jsxs12("button", { type: "button", role: "listitem", className: "glance-tile", onClick: () => store.setTab("activity"), children: [
-      /* @__PURE__ */ jsx13("span", { className: "glance-label", children: "Open comments" }),
-      /* @__PURE__ */ jsx13("span", { className: "glance-value", children: openThreads }),
-      /* @__PURE__ */ jsxs12("span", { className: "glance-sub", children: [
-        "revision ",
-        plan.revision || "draft"
-      ] })
-    ] })
+    /* @__PURE__ */ jsxs12(
+      "button",
+      {
+        type: "button",
+        role: "listitem",
+        className: "glance-tile",
+        onClick: () => document.getElementById("general-head")?.scrollIntoView({ behavior: scrollBehavior(), block: "start" }),
+        children: [
+          /* @__PURE__ */ jsx13("span", { className: "glance-label", children: "Open comments" }),
+          /* @__PURE__ */ jsx13("span", { className: "glance-value", children: openThreads }),
+          /* @__PURE__ */ jsxs12("span", { className: "glance-sub", children: [
+            "revision ",
+            plan.revision || "draft"
+          ] })
+        ]
+      }
+    )
   ] });
 }
 function SectionCard({ section, index, count }) {
@@ -2084,6 +2181,7 @@ var init_OverviewView = __esm({
     init_Threads();
     init_Item();
     init_Progress();
+    init_motion();
     init_plan();
   }
 });
@@ -2180,14 +2278,19 @@ import {
   useReactFlow
 } from "@xyflow/react";
 import { jsx as jsx14, jsxs as jsxs13 } from "react/jsx-runtime";
-function FlowCanvas(props) {
-  return /* @__PURE__ */ jsx14(ReactFlowProvider, { children: /* @__PURE__ */ jsx14(Canvas, { ...props }) });
+function DiagramEditor(props) {
+  return /* @__PURE__ */ jsx14(ReactFlowProvider, { children: /* @__PURE__ */ jsx14(Editor, { ...props }) });
 }
-function Canvas({ diagram, onSave, expanded }) {
+function Editor({
+  diagram,
+  plan,
+  onSave,
+  aside
+}) {
   const theme = useResolvedTheme();
   const flow = useReactFlow();
   const wrapper = useRef4(null);
-  const [nodes, setNodes] = useState11(() => toFlowNodes(diagram));
+  const [nodes, setNodes] = useState11(() => toFlowNodes(diagram, plan));
   const [edges, setEdges] = useState11(() => toFlowEdges(diagram));
   const nodesRef = useRef4(nodes);
   const edgesRef = useRef4(edges);
@@ -2197,18 +2300,23 @@ function Canvas({ diagram, onSave, expanded }) {
   const signature = useMemo2(() => JSON.stringify([diagram.nodes, diagram.edges, diagram.direction]), [diagram]);
   useEffect9(() => {
     if (dragging.current) return;
-    setNodes((prev) => keepSelection(prev, toFlowNodes(diagram)));
+    setNodes((prev) => keepSelection(prev, toFlowNodes(diagram, plan)));
     setEdges((prev) => keepSelection(prev, toFlowEdges(diagram)));
   }, [signature]);
-  const firstRender = useRef4(true);
+  const progressKey = useMemo2(() => JSON.stringify(plan.tasks.map((t) => [t.id, t.status, t.parentId])), [plan.tasks]);
   useEffect9(() => {
-    if (firstRender.current) {
-      firstRender.current = false;
-      return;
-    }
-    const frame = window.requestAnimationFrame(() => void flow.fitView({ padding: 0.15, duration: 200 }));
-    return () => window.cancelAnimationFrame(frame);
-  }, [expanded, flow]);
+    setNodes((ns) => ns.map((n) => ({ ...n, data: { ...n.data, ...progressOf(plan, n.data.taskIds) } })));
+  }, [progressKey]);
+  const focusTarget = useStore((s) => s.focusTarget);
+  useEffect9(() => {
+    const prefix = `node:${diagram.id}:`;
+    if (!focusTarget?.startsWith(prefix)) return;
+    const id = focusTarget.slice(prefix.length);
+    setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === id })));
+    setEdges((es) => es.map((e) => ({ ...e, selected: false })));
+    window.requestAnimationFrame(() => void flow.fitView({ nodes: [{ id }], padding: 1.2, duration: 250, maxZoom: 1.2 }));
+    store.set({ focusTarget: null });
+  }, [focusTarget, diagram.id, flow]);
   const persist = useCallback(
     (ns, es, direction) => onSave({
       nodes: ns.map((n) => ({
@@ -2216,6 +2324,8 @@ function Canvas({ diagram, onSave, expanded }) {
         label: n.data.label,
         kind: n.data.kind,
         ...n.data.detail ? { detail: n.data.detail } : {},
+        notes: n.data.notes ?? "",
+        taskIds: n.data.taskIds ?? [],
         x: Math.round(n.position.x),
         y: Math.round(n.position.y)
       })),
@@ -2268,7 +2378,7 @@ function Canvas({ diagram, onSave, expanded }) {
       if (n.id !== id) return n;
       const data = { ...n.data, ...patch };
       if (!data.detail) delete data.detail;
-      return { ...n, data: { ...data, width: nodeSize(data).width } };
+      return { ...n, data: { ...data, width: nodeSize(data).width, ...progressOf(plan, data.taskIds) } };
     });
     setNodes(ns);
     void persist(ns, edgesRef.current);
@@ -2282,6 +2392,14 @@ function Canvas({ diagram, onSave, expanded }) {
     });
     setEdges(es);
     void persist(nodesRef.current, es);
+  };
+  const select = (kind, id) => {
+    setNodes((ns) => ns.map((n) => ({ ...n, selected: kind === "node" && n.id === id })));
+    setEdges((es) => es.map((e) => ({ ...e, selected: kind === "edge" && e.id === id })));
+  };
+  const clearSelection = () => {
+    setNodes((ns) => ns.map((n) => n.selected ? { ...n, selected: false } : n));
+    setEdges((es) => es.map((e) => e.selected ? { ...e, selected: false } : e));
   };
   const removeSelected = () => {
     void flow.deleteElements({ nodes: nodesRef.current.filter((n) => n.selected), edges: edgesRef.current.filter((e) => e.selected) });
@@ -2302,6 +2420,7 @@ function Canvas({ diagram, onSave, expanded }) {
     };
     const ns = [...nodesRef.current.map((x) => ({ ...x, selected: false })), node];
     setNodes(ns);
+    setEdges((es) => es.map((e) => ({ ...e, selected: false })));
     void persist(ns, edgesRef.current);
   };
   const relayout = (direction) => {
@@ -2310,82 +2429,152 @@ function Canvas({ diagram, onSave, expanded }) {
       edges: edgesRef.current.map((e) => ({ id: e.id, source: e.source, target: e.target }))
     };
     const at = autoLayout(graph, direction);
-    const ns = nodesRef.current.map((n) => ({
-      ...n,
-      position: at.get(n.id) ?? n.position,
-      data: { ...n.data, direction }
-    }));
+    const ns = nodesRef.current.map((n) => ({ ...n, position: at.get(n.id) ?? n.position, data: { ...n.data, direction } }));
     setNodes(ns);
-    void persist(ns, edgesRef.current, direction).then(() => window.requestAnimationFrame(() => void flow.fitView({ padding: 0.15, duration: 250 })));
+    void persist(ns, edgesRef.current, direction).then(
+      () => window.requestAnimationFrame(() => void flow.fitView({ padding: 0.15, duration: 250 }))
+    );
   };
   const selectedNodes = nodes.filter((n) => n.selected);
   const selectedEdges = edges.filter((e) => e.selected);
-  return /* @__PURE__ */ jsx14("div", { ref: wrapper, className: classNames("flow", expanded && "is-expanded"), children: /* @__PURE__ */ jsxs13(
-    ReactFlow,
-    {
-      nodes,
-      edges,
-      nodeTypes,
-      onNodesChange,
-      onEdgesChange,
-      onConnect,
-      onDelete,
-      onNodeDragStart: () => {
-        dragging.current = true;
+  let panel;
+  if (selectedNodes.length === 1 && selectedEdges.length === 0) {
+    const node = selectedNodes[0];
+    panel = /* @__PURE__ */ jsx14(
+      NodePanel,
+      {
+        node,
+        nodes,
+        edges,
+        plan,
+        onChange: (patch) => updateNode(node.id, patch),
+        onSelect: select,
+        onRemove: removeSelected,
+        onClose: clearSelection
       },
-      onNodeDragStop,
-      connectionMode: ConnectionMode.Loose,
-      deleteKeyCode: ["Backspace", "Delete"],
-      colorMode: theme,
-      fitView: true,
-      fitViewOptions: { padding: 0.15 },
-      minZoom: 0.2,
-      maxZoom: 2,
-      defaultEdgeOptions: { type: "smoothstep" },
-      children: [
-        /* @__PURE__ */ jsx14(Background, { gap: 18, size: 1 }),
-        /* @__PURE__ */ jsx14(Controls, { showInteractive: false, position: "bottom-left" }),
-        expanded && /* @__PURE__ */ jsx14(MiniMap, { pannable: true, zoomable: true, position: "bottom-right" }),
-        /* @__PURE__ */ jsxs13(Panel, { position: "top-left", className: "flow-toolbar", children: [
-          /* @__PURE__ */ jsx14(AddMenu, { onAdd: addNode }),
-          /* @__PURE__ */ jsx14("button", { type: "button", className: "btn btn-sm", title: "Lay the whole diagram out again", onClick: () => relayout(diagram.direction), children: "Tidy layout" }),
-          /* @__PURE__ */ jsx14(
-            "button",
-            {
-              type: "button",
-              className: "btn btn-sm",
-              title: diagram.direction === "LR" ? "Flow top to bottom" : "Flow left to right",
-              onClick: () => relayout(diagram.direction === "LR" ? "TB" : "LR"),
-              children: diagram.direction === "LR" ? "\u2192 Left to right" : "\u2193 Top to bottom"
-            }
-          )
-        ] }),
-        selectedNodes.length + selectedEdges.length > 0 && /* @__PURE__ */ jsx14(Panel, { position: "top-right", className: "flow-inspector", children: selectedNodes.length === 1 && selectedEdges.length === 0 ? /* @__PURE__ */ jsx14(NodeInspector, { node: selectedNodes[0], onChange: (patch) => updateNode(selectedNodes[0].id, patch), onRemove: removeSelected }, selectedNodes[0].id) : selectedEdges.length === 1 && selectedNodes.length === 0 ? /* @__PURE__ */ jsx14(EdgeInspector, { edge: selectedEdges[0], nodes, onChange: (patch) => updateEdge(selectedEdges[0].id, patch), onRemove: removeSelected }, selectedEdges[0].id) : /* @__PURE__ */ jsxs13("div", { className: "flow-inspector-body", children: [
-          /* @__PURE__ */ jsxs13("p", { className: "muted", children: [
-            selectedNodes.length,
-            " box(es), ",
-            selectedEdges.length,
-            " arrow(s) selected"
-          ] }),
-          /* @__PURE__ */ jsx14("button", { type: "button", className: "btn btn-sm btn-danger", onClick: removeSelected, children: "Delete selection" })
-        ] }) })
-      ]
-    }
-  ) });
+      node.id
+    );
+  } else if (selectedEdges.length === 1 && selectedNodes.length === 0) {
+    const edge = selectedEdges[0];
+    panel = /* @__PURE__ */ jsx14(
+      EdgePanel,
+      {
+        edge,
+        nodes,
+        onChange: (patch) => updateEdge(edge.id, patch),
+        onSelect: select,
+        onRemove: removeSelected,
+        onClose: clearSelection
+      },
+      edge.id
+    );
+  } else if (selectedNodes.length + selectedEdges.length > 1) {
+    panel = /* @__PURE__ */ jsxs13("div", { className: "arch-panel-body", children: [
+      /* @__PURE__ */ jsx14("p", { className: "panel-kicker", children: "Selection" }),
+      /* @__PURE__ */ jsxs13("p", { children: [
+        selectedNodes.length,
+        " box(es) and ",
+        selectedEdges.length,
+        " arrow(s) selected."
+      ] }),
+      /* @__PURE__ */ jsxs13("div", { className: "row-actions", children: [
+        /* @__PURE__ */ jsx14("button", { type: "button", className: "btn btn-sm btn-danger", onClick: removeSelected, children: "Delete selection" }),
+        /* @__PURE__ */ jsx14("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: clearSelection, children: "Clear selection" })
+      ] })
+    ] });
+  } else {
+    panel = aside;
+  }
+  return /* @__PURE__ */ jsxs13("div", { className: "arch-body", children: [
+    /* @__PURE__ */ jsx14("div", { ref: wrapper, className: "flow", children: /* @__PURE__ */ jsxs13(
+      ReactFlow,
+      {
+        nodes,
+        edges,
+        nodeTypes,
+        onNodesChange,
+        onEdgesChange,
+        onConnect,
+        onDelete,
+        onNodeDragStart: () => {
+          dragging.current = true;
+        },
+        onNodeDragStop,
+        connectionMode: ConnectionMode.Loose,
+        deleteKeyCode: ["Backspace", "Delete"],
+        colorMode: theme,
+        fitView: true,
+        fitViewOptions: { padding: 0.15 },
+        minZoom: 0.2,
+        maxZoom: 2,
+        defaultEdgeOptions: { type: "smoothstep" },
+        children: [
+          /* @__PURE__ */ jsx14(Background, { gap: 18, size: 1 }),
+          /* @__PURE__ */ jsx14(Controls, { showInteractive: false, position: "bottom-left" }),
+          /* @__PURE__ */ jsx14(MiniMap, { pannable: true, zoomable: true, position: "bottom-right", style: { width: 150, height: 96 }, nodeBorderRadius: 4 }),
+          /* @__PURE__ */ jsxs13(Panel, { position: "top-left", className: "flow-toolbar", children: [
+            /* @__PURE__ */ jsx14(AddMenu, { onAdd: addNode }),
+            /* @__PURE__ */ jsx14("button", { type: "button", className: "btn btn-sm", title: "Lay the whole diagram out again", onClick: () => relayout(diagram.direction), children: "Tidy layout" }),
+            /* @__PURE__ */ jsx14(
+              "button",
+              {
+                type: "button",
+                className: "btn btn-sm",
+                title: diagram.direction === "LR" ? "Flow top to bottom" : "Flow left to right",
+                onClick: () => relayout(diagram.direction === "LR" ? "TB" : "LR"),
+                children: diagram.direction === "LR" ? "\u2192 Left to right" : "\u2193 Top to bottom"
+              }
+            )
+          ] })
+        ]
+      }
+    ) }),
+    /* @__PURE__ */ jsx14("aside", { className: "arch-panel", "aria-label": "Details", children: panel })
+  ] });
 }
 function PlanNode({ data, selected }) {
   const horizontal = data.direction === "LR";
-  return /* @__PURE__ */ jsxs13("div", { className: classNames("flow-node", `kind-${data.kind}`, selected && "is-selected"), style: { width: data.width }, children: [
-    /* @__PURE__ */ jsx14(Handle, { type: "target", position: horizontal ? Position.Left : Position.Top }),
-    /* @__PURE__ */ jsxs13("div", { className: "flow-node-head", children: [
-      /* @__PURE__ */ jsx14("span", { className: "flow-node-glyph", "aria-hidden": "true", children: KIND_GLYPH[data.kind] }),
-      /* @__PURE__ */ jsx14("span", { className: "flow-node-label", children: data.label })
-    ] }),
-    data.detail && /* @__PURE__ */ jsx14("div", { className: "flow-node-detail", children: data.detail }),
-    /* @__PURE__ */ jsx14(Handle, { type: "source", position: horizontal ? Position.Right : Position.Bottom })
-  ] });
+  const p = data.progress;
+  const state = !p ? null : p.blocked ? "blocked" : p.inProgress ? "in_progress" : p.done === p.total ? "done" : "todo";
+  return /* @__PURE__ */ jsxs13(
+    "div",
+    {
+      className: classNames("flow-node", `kind-${data.kind}`, selected && "is-selected", state && `progress-${state}`),
+      style: { width: data.width },
+      children: [
+        /* @__PURE__ */ jsx14(Handle, { type: "target", position: horizontal ? Position.Left : Position.Top }),
+        /* @__PURE__ */ jsxs13("div", { className: "flow-node-head", children: [
+          /* @__PURE__ */ jsx14("span", { className: "flow-node-glyph", "aria-hidden": "true", children: KIND_GLYPH[data.kind] }),
+          /* @__PURE__ */ jsx14("span", { className: "flow-node-label", children: data.label }),
+          data.notes && /* @__PURE__ */ jsx14("span", { className: "flow-node-flag", title: "Has notes", "aria-label": "has notes", children: "\xB6" })
+        ] }),
+        data.detail && /* @__PURE__ */ jsx14("div", { className: "flow-node-detail", children: data.detail }),
+        p && /* @__PURE__ */ jsxs13("div", { className: "flow-node-progress", title: `${p.done} of ${p.total} tasks done${p.inProgress ? `, ${p.inProgress} in progress` : ""}${p.blocked ? `, ${p.blocked} blocked` : ""}`, children: [
+          /* @__PURE__ */ jsx14(ProgressBar, { counts: p, compact: true }),
+          /* @__PURE__ */ jsxs13("span", { children: [
+            p.done,
+            "/",
+            p.total
+          ] })
+        ] }),
+        /* @__PURE__ */ jsx14(Handle, { type: "source", position: horizontal ? Position.Right : Position.Bottom })
+      ]
+    }
+  );
 }
-function toFlowNodes(diagram) {
+function progressOf(plan, taskIds) {
+  if (!taskIds?.length) return { progress: void 0 };
+  const seen = /* @__PURE__ */ new Map();
+  for (const id of taskIds) {
+    const task = plan.tasks.find((t) => t.id === id);
+    if (!task) continue;
+    seen.set(task.id, task);
+    for (const d of descendants(plan, task.id)) seen.set(d.id, d);
+  }
+  if (seen.size === 0) return { progress: void 0 };
+  return { progress: countTasks({ tasks: [...seen.values()] }) };
+}
+function toFlowNodes(diagram, plan) {
   const at = resolvePositions(diagram);
   return diagram.nodes.map((n) => ({
     id: n.id,
@@ -2395,8 +2584,11 @@ function toFlowNodes(diagram) {
       label: n.label,
       kind: n.kind,
       ...n.detail ? { detail: n.detail } : {},
+      ...n.notes ? { notes: n.notes } : {},
+      ...n.taskIds?.length ? { taskIds: n.taskIds } : {},
       direction: diagram.direction,
-      width: nodeSize(n).width
+      width: nodeSize(n).width,
+      ...progressOf(plan, n.taskIds)
     }
   }));
 }
@@ -2444,7 +2636,13 @@ function AddMenu({ onAdd }) {
     )) })
   ] });
 }
-function CommitInput({ value, label, placeholder, onCommit }) {
+function CommitInput({
+  value,
+  label,
+  placeholder,
+  className,
+  onCommit
+}) {
   const [draft, setDraft] = useState11(value);
   useEffect9(() => setDraft(value), [value]);
   const commit = () => {
@@ -2453,7 +2651,7 @@ function CommitInput({ value, label, placeholder, onCommit }) {
   return /* @__PURE__ */ jsx14(
     "input",
     {
-      className: "input",
+      className: classNames("input", className),
       value: draft,
       "aria-label": label,
       placeholder,
@@ -2466,65 +2664,168 @@ function CommitInput({ value, label, placeholder, onCommit }) {
     }
   );
 }
-function NodeInspector({
+function NodePanel({
   node,
+  nodes,
+  edges,
+  plan,
   onChange,
-  onRemove
+  onSelect,
+  onRemove,
+  onClose
 }) {
-  return /* @__PURE__ */ jsxs13("div", { className: "flow-inspector-body", "aria-label": "Selected box", children: [
-    /* @__PURE__ */ jsxs13("label", { className: "field", children: [
-      /* @__PURE__ */ jsx14("span", { className: "field-label", children: "Label" }),
-      /* @__PURE__ */ jsx14(CommitInput, { value: node.data.label, label: "Box label", onCommit: (label) => label && onChange({ label }) })
+  const [confirming, setConfirming] = useState11(false);
+  const name = (id) => nodes.find((n) => n.id === id)?.data.label ?? id;
+  const outgoing = edges.filter((e) => e.source === node.id);
+  const incoming = edges.filter((e) => e.target === node.id);
+  const linked = node.data.taskIds ?? [];
+  const rows = outline(plan);
+  const linkable = rows.filter((r) => !linked.includes(r.task.id));
+  return /* @__PURE__ */ jsxs13("div", { className: "arch-panel-body", "aria-label": `Details of ${node.data.label}`, children: [
+    /* @__PURE__ */ jsxs13("header", { className: "panel-top", children: [
+      /* @__PURE__ */ jsx14("span", { className: classNames("kind-swatch", `kind-${node.data.kind}`), "aria-hidden": "true", children: KIND_GLYPH[node.data.kind] }),
+      /* @__PURE__ */ jsx14("span", { className: "panel-kicker", children: KIND_LABEL[node.data.kind] }),
+      /* @__PURE__ */ jsx14("span", { className: "item-id", children: node.id }),
+      /* @__PURE__ */ jsx14("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx14("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Close details", title: "Back to the diagram", onClick: onClose, children: "\xD7" })
     ] }),
+    /* @__PURE__ */ jsx14(CommitInput, { className: "panel-title-input", value: node.data.label, label: "Box label", onCommit: (label) => label && onChange({ label }) }),
     /* @__PURE__ */ jsxs13("label", { className: "field", children: [
       /* @__PURE__ */ jsx14("span", { className: "field-label", children: "Kind" }),
       /* @__PURE__ */ jsx14("select", { className: "input", value: node.data.kind, onChange: (e) => onChange({ kind: e.target.value }), children: NODE_KINDS.map((k) => /* @__PURE__ */ jsx14("option", { value: k, children: KIND_LABEL[k] }, k)) })
     ] }),
     /* @__PURE__ */ jsxs13("label", { className: "field", children: [
-      /* @__PURE__ */ jsx14("span", { className: "field-label", children: "Detail" }),
-      /* @__PURE__ */ jsx14(CommitInput, { value: node.data.detail ?? "", label: "Box detail", placeholder: "Responsibility, technology\u2026", onCommit: (detail) => onChange({ detail }) })
+      /* @__PURE__ */ jsx14("span", { className: "field-label", children: "On the box" }),
+      /* @__PURE__ */ jsx14(CommitInput, { value: node.data.detail ?? "", label: "Box detail", placeholder: "One line: responsibility or technology", onCommit: (detail) => onChange({ detail }) })
     ] }),
-    /* @__PURE__ */ jsxs13("div", { className: "flow-inspector-foot", children: [
-      /* @__PURE__ */ jsx14("span", { className: "item-id", children: node.id }),
-      /* @__PURE__ */ jsx14("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx14("button", { type: "button", className: "link is-danger", onClick: onRemove, children: "Delete box" })
-    ] })
+    /* @__PURE__ */ jsxs13("div", { className: "field", children: [
+      /* @__PURE__ */ jsx14("span", { className: "field-label", children: "Notes and decisions" }),
+      /* @__PURE__ */ jsx14(
+        MarkdownField,
+        {
+          value: node.data.notes ?? "",
+          label: `notes on ${node.data.label}`,
+          placeholder: "Nothing decided here yet.",
+          emptyAction: "Add notes",
+          rows: 6,
+          onSave: (notes) => onChange({ notes })
+        }
+      )
+    ] }),
+    /* @__PURE__ */ jsxs13("div", { className: "field", children: [
+      /* @__PURE__ */ jsx14("span", { className: "field-label", children: "Built by" }),
+      linked.length > 0 ? /* @__PURE__ */ jsx14("ul", { className: "panel-tasks", children: linked.map((id) => {
+        const task = plan.tasks.find((t) => t.id === id);
+        if (!task) return null;
+        return /* @__PURE__ */ jsxs13("li", { children: [
+          /* @__PURE__ */ jsx14("span", { className: classNames("status-dot is-static", `is-${task.status}`), title: STATUS_LABEL[task.status], "aria-label": STATUS_LABEL[task.status], children: STATUS_GLYPH[task.status] }),
+          /* @__PURE__ */ jsx14("button", { type: "button", className: "link panel-task", onClick: () => store.focus("task", id), children: task.title }),
+          /* @__PURE__ */ jsx14(
+            "button",
+            {
+              type: "button",
+              className: "icon-btn is-tiny",
+              "aria-label": `Unlink ${task.title}`,
+              title: "Unlink",
+              onClick: () => onChange({ taskIds: linked.filter((t) => t !== id) }),
+              children: "\xD7"
+            }
+          )
+        ] }, id);
+      }) }) : /* @__PURE__ */ jsx14("p", { className: "muted panel-empty", children: "No tasks linked. Link the tasks that build this part to see its progress on the box." }),
+      linkable.length > 0 && /* @__PURE__ */ jsxs13(
+        "select",
+        {
+          className: "input",
+          "aria-label": `Link a task to ${node.data.label}`,
+          value: "",
+          onChange: (e) => e.target.value && onChange({ taskIds: [...linked, e.target.value] }),
+          children: [
+            /* @__PURE__ */ jsx14("option", { value: "", children: "Link a task\u2026" }),
+            linkable.map(({ task, number, depth }) => /* @__PURE__ */ jsxs13("option", { value: task.id, children: [
+              "\xA0".repeat(depth * 3),
+              number,
+              " ",
+              task.title
+            ] }, task.id))
+          ]
+        }
+      )
+    ] }),
+    (outgoing.length > 0 || incoming.length > 0) && /* @__PURE__ */ jsxs13("div", { className: "field", children: [
+      /* @__PURE__ */ jsx14("span", { className: "field-label", children: "Connections" }),
+      /* @__PURE__ */ jsxs13("ul", { className: "panel-links", children: [
+        outgoing.map((e) => /* @__PURE__ */ jsxs13("li", { children: [
+          /* @__PURE__ */ jsxs13("button", { type: "button", className: "link", onClick: () => onSelect("edge", e.id), children: [
+            "\u2192 ",
+            name(e.target)
+          ] }),
+          e.data?.label && /* @__PURE__ */ jsxs13("span", { className: "muted", children: [
+            " ",
+            e.data.label
+          ] })
+        ] }, e.id)),
+        incoming.map((e) => /* @__PURE__ */ jsxs13("li", { children: [
+          /* @__PURE__ */ jsxs13("button", { type: "button", className: "link", onClick: () => onSelect("edge", e.id), children: [
+            "\u2190 ",
+            name(e.source)
+          ] }),
+          e.data?.label && /* @__PURE__ */ jsxs13("span", { className: "muted", children: [
+            " ",
+            e.data.label
+          ] })
+        ] }, e.id))
+      ] })
+    ] }),
+    /* @__PURE__ */ jsx14("footer", { className: "panel-foot", children: confirming ? /* @__PURE__ */ jsxs13("span", { className: "item-confirm", children: [
+      "Delete this box and its arrows?",
+      /* @__PURE__ */ jsx14("button", { type: "button", className: "link is-danger", onClick: onRemove, children: "Delete" }),
+      /* @__PURE__ */ jsx14("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
+    ] }) : /* @__PURE__ */ jsx14("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Delete box" }) })
   ] });
 }
-function EdgeInspector({
+function EdgePanel({
   edge,
   nodes,
   onChange,
-  onRemove
+  onSelect,
+  onRemove,
+  onClose
 }) {
   const name = (id) => nodes.find((n) => n.id === id)?.data.label ?? id;
-  return /* @__PURE__ */ jsxs13("div", { className: "flow-inspector-body", "aria-label": "Selected arrow", children: [
-    /* @__PURE__ */ jsxs13("p", { className: "flow-inspector-title", children: [
-      name(edge.source),
-      " \u2192 ",
-      name(edge.target)
+  return /* @__PURE__ */ jsxs13("div", { className: "arch-panel-body", "aria-label": "Details of the selected arrow", children: [
+    /* @__PURE__ */ jsxs13("header", { className: "panel-top", children: [
+      /* @__PURE__ */ jsx14("span", { className: "panel-kicker", children: "Arrow" }),
+      /* @__PURE__ */ jsx14("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx14("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Close details", title: "Back to the diagram", onClick: onClose, children: "\xD7" })
+    ] }),
+    /* @__PURE__ */ jsxs13("p", { className: "panel-edge", children: [
+      /* @__PURE__ */ jsx14("button", { type: "button", className: "link", onClick: () => onSelect("node", edge.source), children: name(edge.source) }),
+      /* @__PURE__ */ jsx14("span", { "aria-hidden": "true", children: " \u2192 " }),
+      /* @__PURE__ */ jsx14("button", { type: "button", className: "link", onClick: () => onSelect("node", edge.target), children: name(edge.target) })
     ] }),
     /* @__PURE__ */ jsxs13("label", { className: "field", children: [
-      /* @__PURE__ */ jsx14("span", { className: "field-label", children: "Label" }),
-      /* @__PURE__ */ jsx14(CommitInput, { value: edge.data?.label ?? "", label: "Arrow label", placeholder: "What flows along it", onCommit: (label) => onChange({ label }) })
+      /* @__PURE__ */ jsx14("span", { className: "field-label", children: "What flows along it" }),
+      /* @__PURE__ */ jsx14(CommitInput, { value: edge.data?.label ?? "", label: "Arrow label", placeholder: "e.g. REST, publishes events", onCommit: (label) => onChange({ label }) })
     ] }),
     /* @__PURE__ */ jsxs13("label", { className: "toggle", children: [
       /* @__PURE__ */ jsx14("input", { type: "checkbox", checked: Boolean(edge.data?.dashed), onChange: (e) => onChange({ dashed: e.target.checked }) }),
       "Dashed \u2014 optional, async or future"
     ] }),
-    /* @__PURE__ */ jsxs13("div", { className: "flow-inspector-foot", children: [
-      /* @__PURE__ */ jsx14("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx14("button", { type: "button", className: "link is-danger", onClick: onRemove, children: "Delete arrow" })
-    ] })
+    /* @__PURE__ */ jsx14("footer", { className: "panel-foot", children: /* @__PURE__ */ jsx14("button", { type: "button", className: "link is-danger", onClick: onRemove, children: "Delete arrow" }) })
   ] });
 }
 var KIND_LABEL, KIND_GLYPH, nodeTypes;
 var init_FlowCanvas = __esm({
   "src/ui/components/FlowCanvas.tsx"() {
     "use strict";
+    init_store();
+    init_Editable();
+    init_Progress();
     init_layout();
     init_theme();
     init_format();
+    init_plan();
     init_types();
     KIND_LABEL = {
       component: "Component",
@@ -2549,96 +2850,137 @@ var init_FlowCanvas = __esm({
 });
 
 // src/ui/views/DiagramsView.tsx
-import { useEffect as useEffect10, useState as useState12 } from "react";
+import { useState as useState12 } from "react";
 import { jsx as jsx15, jsxs as jsxs14 } from "react/jsx-runtime";
 function DiagramsView() {
   const plan = usePlan();
-  const [adding, setAdding] = useState12(false);
+  const chosen = useStore((s) => s.diagramId);
   if (!plan) return null;
-  const add = async (t) => {
-    setAdding(false);
-    await store.op({ op: "upsert_diagram", title: t.title, nodes: t.nodes, edges: t.edges });
-  };
-  return /* @__PURE__ */ jsxs14("div", { className: "view-pad", children: [
-    /* @__PURE__ */ jsxs14("div", { className: "toolbar", children: [
-      /* @__PURE__ */ jsx15("p", { className: "toolbar-hint", children: plan.diagrams.length ? "Drag boxes to arrange them, drag from a handle to connect, select to edit, Backspace to delete." : "No diagrams yet." }),
+  const diagram = plan.diagrams.find((d) => d.id === chosen) ?? plan.diagrams[0] ?? null;
+  return /* @__PURE__ */ jsxs14("div", { className: "arch", children: [
+    /* @__PURE__ */ jsxs14("div", { className: "arch-bar", children: [
+      /* @__PURE__ */ jsx15("nav", { className: "arch-tabs", "aria-label": "Diagrams", children: plan.diagrams.map((d) => /* @__PURE__ */ jsxs14(
+        "button",
+        {
+          type: "button",
+          className: classNames("arch-tab", d.id === diagram?.id && "is-active"),
+          "aria-current": d.id === diagram?.id ? "true" : void 0,
+          onClick: () => store.set({ diagramId: d.id }),
+          children: [
+            d.title,
+            /* @__PURE__ */ jsx15("span", { className: "arch-tab-count", children: d.nodes.length })
+          ]
+        },
+        d.id
+      )) }),
+      /* @__PURE__ */ jsx15(NewDiagram, {}),
       /* @__PURE__ */ jsx15("span", { className: "spacer" }),
-      /* @__PURE__ */ jsxs14("div", { className: "add-menu", children: [
-        /* @__PURE__ */ jsx15("button", { type: "button", className: "btn btn-sm", "aria-expanded": adding, onClick: () => setAdding((v) => !v), children: "+ New diagram" }),
-        adding && /* @__PURE__ */ jsx15("div", { className: "add-menu-list is-right", role: "menu", children: TEMPLATES.map((t) => /* @__PURE__ */ jsx15("button", { type: "button", role: "menuitem", className: "add-menu-item", onClick: () => void add(t), children: t.label }, t.label)) })
-      ] })
+      /* @__PURE__ */ jsx15("p", { className: "toolbar-hint", children: "Drag to arrange \xB7 drag from a handle to connect \xB7 select to edit \xB7 Backspace deletes" })
     ] }),
-    plan.diagrams.length === 0 ? /* @__PURE__ */ jsx15(
+    diagram ? /* @__PURE__ */ jsx15(
+      DiagramEditor,
+      {
+        diagram,
+        plan,
+        onSave: (patch) => store.op({ op: "upsert_diagram", id: diagram.id, ...patch }),
+        aside: /* @__PURE__ */ jsx15(DiagramPanel, { plan, diagram })
+      },
+      diagram.id
+    ) : /* @__PURE__ */ jsx15("div", { className: "view-pad", children: /* @__PURE__ */ jsx15(
       EmptyState,
       {
         title: "No diagrams yet",
         hint: "Ask Claude to draw the architecture \u2014 components, data flow, boundaries \u2014 or start one from a template."
       }
-    ) : /* @__PURE__ */ jsx15("div", { className: "diagram-list", children: plan.diagrams.map((d, i) => /* @__PURE__ */ jsx15(DiagramCard, { diagram: d, index: i, count: plan.diagrams.length }, d.id)) })
+    ) })
   ] });
 }
-function DiagramCard({ diagram, index, count }) {
-  const [expanded, setExpanded] = useState12(false);
-  const [comments, setComments] = useState12(false);
-  const target = { kind: "diagram", id: diagram.id };
-  useEffect10(() => {
-    if (!expanded) return;
-    const onKey = (e) => {
-      const el = e.target;
-      if (e.key === "Escape" && !(el && (el.tagName === "INPUT" || el.tagName === "SELECT"))) setExpanded(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [expanded]);
-  const save = (patch) => store.op({ op: "upsert_diagram", id: diagram.id, ...patch });
-  return /* @__PURE__ */ jsxs14(Focusable, { kind: "diagram", id: diagram.id, as: "article", className: classNames("diagram-card", expanded && "is-expanded"), children: [
-    /* @__PURE__ */ jsxs14("header", { className: "item-head", children: [
-      /* @__PURE__ */ jsx15(
-        InlineText,
-        {
-          as: "h2",
-          className: "section-title",
-          value: diagram.title,
-          label: "Diagram title",
-          onSave: (title) => store.op({ op: "upsert_diagram", id: diagram.id, title })
-        }
-      ),
+function NewDiagram() {
+  const [open, setOpen] = useState12(false);
+  const add = async (t) => {
+    setOpen(false);
+    const before = new Set(store.getState().session?.plan?.diagrams.map((d) => d.id));
+    if (await store.op({ op: "upsert_diagram", title: t.title, nodes: t.nodes, edges: t.edges })) {
+      const made = store.getState().session?.plan?.diagrams.find((d) => !before.has(d.id));
+      if (made) store.set({ diagramId: made.id });
+    }
+  };
+  return /* @__PURE__ */ jsxs14("div", { className: "add-menu", children: [
+    /* @__PURE__ */ jsx15("button", { type: "button", className: "btn btn-sm", "aria-expanded": open, onClick: () => setOpen((v) => !v), children: "+ New diagram" }),
+    open && /* @__PURE__ */ jsx15("div", { className: "add-menu-list", role: "menu", children: TEMPLATES.map((t) => /* @__PURE__ */ jsx15("button", { type: "button", role: "menuitem", className: "add-menu-item", onClick: () => void add(t), children: t.label }, t.label)) })
+  ] });
+}
+function DiagramPanel({ plan, diagram }) {
+  const [confirming, setConfirming] = useState12(false);
+  const index = plan.diagrams.findIndex((d) => d.id === diagram.id);
+  const linked = diagram.nodes.filter((n) => n.taskIds?.length).length;
+  return /* @__PURE__ */ jsxs14("div", { className: "arch-panel-body", "aria-label": `About ${diagram.title}`, children: [
+    /* @__PURE__ */ jsxs14("header", { className: "panel-top", children: [
+      /* @__PURE__ */ jsx15("span", { className: "panel-kicker", children: "Diagram" }),
       /* @__PURE__ */ jsx15("span", { className: "item-id", children: diagram.id }),
-      /* @__PURE__ */ jsxs14("span", { className: "muted item-when", children: [
-        diagram.nodes.length,
-        " boxes \xB7 ",
+      /* @__PURE__ */ jsx15("span", { className: "spacer" }),
+      /* @__PURE__ */ jsxs14("span", { className: "muted panel-meta", children: [
         diagram.updatedBy === "user" ? "edited by you" : "by Claude",
         " \xB7 ",
         relativeTime(diagram.updatedAt)
-      ] }),
-      /* @__PURE__ */ jsx15("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx15("button", { type: "button", className: "btn btn-sm btn-ghost", "aria-pressed": expanded, onClick: () => setExpanded((v) => !v), children: expanded ? "Exit full screen" : "Full screen" }),
-      /* @__PURE__ */ jsx15(CommentToggle, { target, label: diagram.title, open: comments, onToggle: () => setComments((v) => !v) }),
-      !expanded && /* @__PURE__ */ jsx15(
-        ItemActions,
-        {
-          label: diagram.title,
-          index,
-          count,
-          onMove: (to) => store.op({ op: "move_diagram", id: diagram.id, index: to }),
-          onRemove: () => store.op({ op: "remove", kind: "diagram", id: diagram.id })
-        }
-      )
+      ] })
     ] }),
-    /* @__PURE__ */ jsx15(FlowCanvas, { diagram, onSave: save, expanded }),
-    !expanded && /* @__PURE__ */ jsx15(
+    /* @__PURE__ */ jsx15(
+      InlineText,
+      {
+        as: "h2",
+        className: "panel-title",
+        value: diagram.title,
+        label: "Diagram title",
+        onSave: (title) => store.op({ op: "upsert_diagram", id: diagram.id, title })
+      }
+    ),
+    /* @__PURE__ */ jsx15(
       MarkdownField,
       {
-        className: "diagram-caption",
         value: diagram.caption ?? "",
         label: `caption of "${diagram.title}"`,
-        placeholder: "No caption.",
-        emptyAction: "Add a caption",
+        placeholder: "What this diagram shows.",
+        emptyAction: "Describe it",
         rows: 3,
         onSave: (caption) => store.op({ op: "upsert_diagram", id: diagram.id, caption })
       }
     ),
-    comments && /* @__PURE__ */ jsx15(ThreadPanel, { target, label: diagram.title })
+    /* @__PURE__ */ jsxs14("p", { className: "panel-hint", children: [
+      diagram.nodes.length,
+      " boxes, ",
+      diagram.edges.length,
+      " arrows",
+      linked ? `, ${linked} tracking tasks` : "",
+      ". Select a box to edit its details, decisions and the tasks that build it."
+    ] }),
+    /* @__PURE__ */ jsx15("ul", { className: "kind-legend", "aria-label": "Box kinds", children: NODE_KINDS.map((k) => /* @__PURE__ */ jsxs14("li", { children: [
+      /* @__PURE__ */ jsx15("span", { className: classNames("kind-swatch", `kind-${k}`), "aria-hidden": "true", children: KIND_GLYPH[k] }),
+      KIND_LABEL[k]
+    ] }, k)) }),
+    /* @__PURE__ */ jsxs14("div", { className: "field", children: [
+      /* @__PURE__ */ jsx15("span", { className: "field-label", children: "Comments" }),
+      /* @__PURE__ */ jsx15(ThreadPanel, { target: { kind: "diagram", id: diagram.id }, label: diagram.title })
+    ] }),
+    /* @__PURE__ */ jsxs14("footer", { className: "panel-foot", children: [
+      /* @__PURE__ */ jsx15("button", { type: "button", className: "link", disabled: index <= 0, onClick: () => void store.op({ op: "move_diagram", id: diagram.id, index: index - 1 }), children: "Move left" }),
+      /* @__PURE__ */ jsx15(
+        "button",
+        {
+          type: "button",
+          className: "link",
+          disabled: index >= plan.diagrams.length - 1,
+          onClick: () => void store.op({ op: "move_diagram", id: diagram.id, index: index + 1 }),
+          children: "Move right"
+        }
+      ),
+      /* @__PURE__ */ jsx15("span", { className: "spacer" }),
+      confirming ? /* @__PURE__ */ jsxs14("span", { className: "item-confirm", children: [
+        "Remove?",
+        /* @__PURE__ */ jsx15("button", { type: "button", className: "link is-danger", onClick: () => void store.op({ op: "remove", kind: "diagram", id: diagram.id }), children: "Remove" }),
+        /* @__PURE__ */ jsx15("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
+      ] }) : /* @__PURE__ */ jsx15("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Remove diagram" })
+    ] })
   ] });
 }
 var TEMPLATES;
@@ -2648,10 +2990,10 @@ var init_DiagramsView = __esm({
     init_store();
     init_Editable();
     init_Threads();
-    init_Item();
     init_FlowCanvas();
     init_primitives();
     init_format();
+    init_types();
     TEMPLATES = [
       { label: "Blank", title: "New diagram", nodes: [], edges: [] },
       {
@@ -2688,7 +3030,7 @@ var init_DiagramsView = __esm({
 
 // src/ui/views/TasksView.tsx
 import { useMemo as useMemo3, useState as useState13 } from "react";
-import { Fragment as Fragment3, jsx as jsx16, jsxs as jsxs15 } from "react/jsx-runtime";
+import { Fragment as Fragment2, jsx as jsx16, jsxs as jsxs15 } from "react/jsx-runtime";
 function TasksView() {
   const plan = usePlan();
   const mode = useStore((s) => s.taskMode);
@@ -2716,7 +3058,7 @@ function TasksView() {
         ] })
       ] })
     ] }),
-    plan.tasks.length === 0 ? /* @__PURE__ */ jsxs15(Fragment3, { children: [
+    plan.tasks.length === 0 ? /* @__PURE__ */ jsxs15(Fragment2, { children: [
       /* @__PURE__ */ jsx16(EmptyState, { title: "No tasks yet", hint: "Break the work down here, or ask Claude to publish a task tree with the plan." }),
       /* @__PURE__ */ jsx16(AddField, { placeholder: "Add a task\u2026", label: "New task", onAdd: (title) => store.op({ op: "upsert_task", title }) })
     ] }) : mode === "outline" ? /* @__PURE__ */ jsx16(Outline, { plan, hideDone }) : /* @__PURE__ */ jsx16(Board, { plan })
@@ -2806,10 +3148,9 @@ function TaskRow(props) {
   const [comments, setComments] = useState13(false);
   const kids = childrenOf(plan, task.id);
   const sub = kids.length ? countTasks({ tasks: [task, ...descendants(plan, task.id)] }) : null;
-  const questions = plan.questions.filter((q) => q.taskId === task.id);
-  const openQuestions = questions.filter((q) => !q.answer).length;
   const threads = useThreads({ kind: "task", id: task.id });
   const target = { kind: "task", id: task.id };
+  const parts = plan.diagrams.flatMap((d) => d.nodes.filter((n) => n.taskIds?.includes(task.id)).map((n) => ({ d, n })));
   const siblings = childrenOf(plan, task.parentId);
   const index = siblings.findIndex((t) => t.id === task.id);
   const parent = task.parentId ? plan.tasks.find((t) => t.id === task.parentId) : void 0;
@@ -2883,16 +3224,26 @@ function TaskRow(props) {
               sub.total
             ] }),
             task.note && /* @__PURE__ */ jsx16("span", { className: classNames("chip is-note", task.status === "blocked" && "is-warning"), title: task.note, children: task.note }),
-            openQuestions > 0 && /* @__PURE__ */ jsxs15("button", { type: "button", className: "chip is-warning", onClick: () => store.focus("question", questions.find((q) => !q.answer).id), children: [
-              openQuestions,
-              " question",
-              openQuestions === 1 ? "" : "s"
-            ] }),
             task.files?.length ? /* @__PURE__ */ jsxs15("span", { className: "chip", title: task.files.join("\n"), children: [
               task.files.length,
               " file",
               task.files.length === 1 ? "" : "s"
             ] }) : null,
+            parts.map(({ d, n }) => /* @__PURE__ */ jsxs15(
+              "button",
+              {
+                type: "button",
+                className: "chip is-part",
+                title: `Builds "${n.label}" in ${d.title} \u2014 show it`,
+                onClick: () => store.focus("node", `${d.id}:${n.id}`),
+                children: [
+                  /* @__PURE__ */ jsx16("span", { "aria-hidden": "true", children: KIND_GLYPH[n.kind] }),
+                  " ",
+                  n.label
+                ]
+              },
+              `${d.id}:${n.id}`
+            )),
             task.createdBy === "user" && /* @__PURE__ */ jsx16("span", { className: "chip is-you", children: "added by you" })
           ] }),
           /* @__PURE__ */ jsx16("span", { className: "spacer" }),
@@ -2941,7 +3292,6 @@ function TaskRow(props) {
 }
 function TaskDetail({ plan, task }) {
   const [confirming, setConfirming] = useState13(false);
-  const questions = plan.questions.filter((q) => q.taskId === task.id);
   const subtasks = descendants(plan, task.id).length;
   return /* @__PURE__ */ jsxs15("div", { className: "task-detail-body", children: [
     /* @__PURE__ */ jsxs15("div", { className: "field-row", children: [
@@ -2977,14 +3327,6 @@ function TaskDetail({ plan, task }) {
     /* @__PURE__ */ jsxs15("div", { className: "field-col", children: [
       /* @__PURE__ */ jsx16("span", { className: "field-label", children: "Files" }),
       /* @__PURE__ */ jsx16(FilesField, { task })
-    ] }),
-    questions.length > 0 && /* @__PURE__ */ jsxs15("div", { className: "field-col", children: [
-      /* @__PURE__ */ jsx16("span", { className: "field-label", children: "Questions" }),
-      /* @__PURE__ */ jsx16("ul", { className: "plain-list", children: questions.map((q) => /* @__PURE__ */ jsxs15("li", { children: [
-        /* @__PURE__ */ jsx16("button", { type: "button", className: "link", onClick: () => store.focus("question", q.id), children: q.question }),
-        " ",
-        /* @__PURE__ */ jsx16("span", { className: q.answer ? "muted" : "attention", children: q.answer ? "answered" : "open" })
-      ] }, q.id)) })
     ] }),
     /* @__PURE__ */ jsxs15("div", { className: "task-detail-foot", children: [
       /* @__PURE__ */ jsxs15("span", { className: "muted", children: [
@@ -3178,6 +3520,7 @@ var init_TasksView = __esm({
     init_Editable();
     init_Threads();
     init_Item();
+    init_FlowCanvas();
     init_Progress();
     init_primitives();
     init_format();
@@ -3193,249 +3536,13 @@ var init_TasksView = __esm({
   }
 });
 
-// src/ui/views/QuestionsView.tsx
-import { useEffect as useEffect11, useState as useState14 } from "react";
-import { Fragment as Fragment4, jsx as jsx17, jsxs as jsxs16 } from "react/jsx-runtime";
-function QuestionsView() {
-  const plan = usePlan();
-  const [filter, setFilter] = useState14("open");
-  if (!plan) return null;
-  const shown = plan.questions.filter((q) => filter === "all" ? true : filter === "open" ? !q.answer : Boolean(q.answer));
-  shown.sort((a, b) => rank(a) - rank(b) || a.createdAt - b.createdAt);
-  const counts = {
-    open: plan.questions.filter((q) => !q.answer).length,
-    answered: plan.questions.filter((q) => q.answer).length,
-    all: plan.questions.length
-  };
-  return /* @__PURE__ */ jsxs16("div", { className: "view-pad questions", children: [
-    /* @__PURE__ */ jsxs16("div", { className: "toolbar", children: [
-      /* @__PURE__ */ jsx17("div", { className: "segmented", role: "group", "aria-label": "Show questions", children: ["open", "answered", "all"].map((f) => /* @__PURE__ */ jsxs16("button", { type: "button", className: classNames("seg", filter === f && "is-active"), "aria-pressed": filter === f, onClick: () => setFilter(f), children: [
-        f === "open" ? "Open" : f === "answered" ? "Answered" : "All",
-        " ",
-        /* @__PURE__ */ jsx17("span", { className: "seg-count", children: counts[f] })
-      ] }, f)) }),
-      /* @__PURE__ */ jsx17("span", { className: "spacer" })
-    ] }),
-    shown.length === 0 ? /* @__PURE__ */ jsx17(
-      EmptyState,
-      {
-        title: filter === "open" ? "No open questions" : "Nothing here",
-        hint: filter === "open" && counts.all ? "Every question has an answer." : "Questions Claude needs settled before it builds appear here."
-      }
-    ) : /* @__PURE__ */ jsx17("div", { className: "question-list", children: shown.map((q) => /* @__PURE__ */ jsx17(QuestionCard, { plan, question: q }, q.id)) }),
-    /* @__PURE__ */ jsx17(AskClaude, {})
-  ] });
-}
-function rank(q) {
-  if (!q.answer && q.askedBy === "claude") return 0;
-  if (!q.answer) return 1;
-  return 2;
-}
-function QuestionCard({ plan, question }) {
-  const [selected, setSelected] = useState14(question.answer?.selected ?? []);
-  const [text, setText] = useState14(question.answer?.text ?? "");
-  const [comments, setComments] = useState14(false);
-  const [confirming, setConfirming] = useState14(false);
-  const answer = question.answer;
-  const task = question.taskId ? plan.tasks.find((t) => t.id === question.taskId) : void 0;
-  const target = { kind: "question", id: question.id };
-  const forYou = question.askedBy === "claude";
-  useEffect11(() => {
-    setSelected(question.answer?.selected ?? []);
-    setText(question.answer?.text ?? "");
-  }, [question.answer?.at]);
-  const dirty = (answer?.text ?? "") !== text || (answer?.selected ?? []).join("\0") !== selected.join("\0");
-  const pick = (label) => {
-    if (question.multiSelect) setSelected((cur) => cur.includes(label) ? cur.filter((l) => l !== label) : [...cur, label]);
-    else setSelected((cur) => cur[0] === label ? [] : [label]);
-  };
-  const save = () => void store.op({ op: "answer", id: question.id, selected, text });
-  return /* @__PURE__ */ jsxs16(Focusable, { kind: "question", id: question.id, as: "article", className: classNames("question-card", answer ? "is-answered" : "is-open", forYou && "is-for-you"), children: [
-    /* @__PURE__ */ jsxs16("header", { className: "item-head", children: [
-      question.header && /* @__PURE__ */ jsx17("span", { className: "qchip", children: question.header }),
-      /* @__PURE__ */ jsxs16("span", { className: "muted", children: [
-        forYou ? "Claude asks" : "You asked",
-        " \xB7 ",
-        relativeTime(question.createdAt)
-      ] }),
-      task && /* @__PURE__ */ jsxs16("button", { type: "button", className: "chip", onClick: () => store.focus("task", task.id), children: [
-        "holds up: ",
-        task.title
-      ] }),
-      /* @__PURE__ */ jsx17("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx17(CommentToggle, { target, label: question.question, open: comments, onToggle: () => setComments((v) => !v) }),
-      confirming ? /* @__PURE__ */ jsxs16("span", { className: "item-confirm", children: [
-        "Remove?",
-        /* @__PURE__ */ jsx17("button", { type: "button", className: "link is-danger", onClick: () => void store.op({ op: "remove", kind: "question", id: question.id }), children: "Remove" }),
-        /* @__PURE__ */ jsx17("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
-      ] }) : /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn is-tiny is-danger", "aria-label": `Remove question ${question.question}`, onClick: () => setConfirming(true), children: "\xD7" })
-    ] }),
-    /* @__PURE__ */ jsx17(
-      InlineText,
-      {
-        as: "h2",
-        className: "question-text",
-        value: question.question,
-        label: "Question",
-        onSave: (q) => store.op({ op: "upsert_question", id: question.id, question: q })
-      }
-    ),
-    question.context && /* @__PURE__ */ jsx17(Markdown, { source: question.context, className: "question-context" }),
-    forYou || answer ? /* @__PURE__ */ jsxs16(Fragment4, { children: [
-      question.options.length > 0 && /* @__PURE__ */ jsx17("div", { className: "qoptions", role: question.multiSelect ? "group" : "radiogroup", "aria-label": question.question, children: question.options.map((o) => {
-        const on = selected.includes(o.label);
-        return /* @__PURE__ */ jsxs16(
-          "button",
-          {
-            type: "button",
-            role: question.multiSelect ? "checkbox" : "radio",
-            "aria-checked": on,
-            className: classNames("qoption", on && "is-selected"),
-            onClick: () => pick(o.label),
-            children: [
-              /* @__PURE__ */ jsx17("span", { className: classNames("qoption-mark", question.multiSelect && "is-multi"), "aria-hidden": "true", children: on ? "\u2713" : "" }),
-              /* @__PURE__ */ jsxs16("span", { className: "qoption-body", children: [
-                /* @__PURE__ */ jsx17("span", { className: "qoption-label", children: o.label }),
-                o.description && /* @__PURE__ */ jsx17("span", { className: "qoption-desc", children: o.description })
-              ] })
-            ]
-          },
-          o.label
-        );
-      }) }),
-      /* @__PURE__ */ jsx17(
-        "textarea",
-        {
-          className: "input",
-          rows: 2,
-          value: text,
-          "aria-label": `Answer to: ${question.question}`,
-          placeholder: question.options.length ? "Add a note, or answer in your own words\u2026" : "Your answer\u2026",
-          onChange: (e) => setText(e.target.value),
-          onKeyDown: (e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && dirty) {
-              e.preventDefault();
-              save();
-            }
-          }
-        }
-      ),
-      /* @__PURE__ */ jsxs16("footer", { className: "question-foot", children: [
-        answer ? /* @__PURE__ */ jsxs16("span", { className: "muted", children: [
-          /* @__PURE__ */ jsx17(AuthorBadge, { author: answer.by }),
-          " answered ",
-          relativeTime(answer.at)
-        ] }) : /* @__PURE__ */ jsx17("span", { className: "muted", children: "Saved to the plan. Claude reads it when you next ask it to." }),
-        /* @__PURE__ */ jsx17("span", { className: "spacer" }),
-        answer && /* @__PURE__ */ jsx17("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => void store.op({ op: "clear_answer", id: question.id }), children: "Reopen" }),
-        /* @__PURE__ */ jsx17("button", { type: "button", className: "btn btn-sm btn-primary", disabled: !dirty || !text.trim() && selected.length === 0, onClick: save, children: answer ? "Update answer" : "Save answer" })
-      ] })
-    ] }) : /* @__PURE__ */ jsx17("p", { className: "question-waiting", children: "Waiting for Claude. It sees this question the next time you ask it to read the plan." }),
-    comments && /* @__PURE__ */ jsx17(ThreadPanel, { target, label: question.question })
-  ] });
-}
-function AskClaude() {
-  const [question, setQuestion] = useState14("");
-  const [context, setContext] = useState14("");
-  const [open, setOpen] = useState14(false);
-  if (!open) {
-    return /* @__PURE__ */ jsx17("button", { type: "button", className: "btn ask-open", onClick: () => setOpen(true), children: "+ Ask Claude a question" });
-  }
-  return /* @__PURE__ */ jsxs16(
-    "form",
-    {
-      className: "ask",
-      onSubmit: async (e) => {
-        e.preventDefault();
-        if (!question.trim()) return;
-        const ok = await store.op({ op: "upsert_question", question, ...context.trim() ? { context } : {} });
-        if (ok) {
-          setQuestion("");
-          setContext("");
-          setOpen(false);
-        }
-      },
-      children: [
-        /* @__PURE__ */ jsx17("h2", { className: "doc-label", children: "Ask Claude" }),
-        /* @__PURE__ */ jsx17("input", { className: "input", value: question, autoFocus: true, placeholder: "What should Claude look into or decide?", "aria-label": "Question for Claude", onChange: (e) => setQuestion(e.target.value) }),
-        /* @__PURE__ */ jsx17(MarkdownField, { value: context, label: "context for the question", placeholder: "No context.", emptyAction: "Add context", rows: 3, onSave: setContext }),
-        /* @__PURE__ */ jsxs16("div", { className: "md-field-foot", children: [
-          /* @__PURE__ */ jsx17("span", { className: "muted", children: "Claude answers it here when it next reads the plan." }),
-          /* @__PURE__ */ jsx17("span", { className: "spacer" }),
-          /* @__PURE__ */ jsx17("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setOpen(false), children: "Cancel" }),
-          /* @__PURE__ */ jsx17("button", { type: "submit", className: "btn btn-sm btn-primary", disabled: !question.trim(), children: "Add question" })
-        ] })
-      ]
-    }
-  );
-}
-var init_QuestionsView = __esm({
-  "src/ui/views/QuestionsView.tsx"() {
-    "use strict";
-    init_store();
-    init_Editable();
-    init_Threads();
-    init_Item();
-    init_primitives();
-    init_Markdown();
-    init_format();
-  }
-});
-
-// src/ui/views/ActivityView.tsx
-import { useState as useState15 } from "react";
-import { Fragment as Fragment5, jsx as jsx18, jsxs as jsxs17 } from "react/jsx-runtime";
-function ActivityView() {
-  const plan = usePlan();
-  const [filter, setFilter] = useState15("all");
-  if (!plan) return null;
-  const changes = [...plan.changes].reverse().filter((c) => filter === "all" || c.author === filter);
-  const markerAt = changes.findIndex((c) => c.seq <= plan.claudeReadSeq);
-  return /* @__PURE__ */ jsxs17("div", { className: "view-pad", children: [
-    /* @__PURE__ */ jsxs17("div", { className: "toolbar", children: [
-      /* @__PURE__ */ jsx18("div", { className: "segmented", role: "group", "aria-label": "Show changes by", children: ["all", "user", "claude"].map((f) => /* @__PURE__ */ jsx18("button", { type: "button", className: classNames("seg", filter === f && "is-active"), "aria-pressed": filter === f, onClick: () => setFilter(f), children: f === "all" ? "Everyone" : f === "user" ? "You" : "Claude" }, f)) }),
-      /* @__PURE__ */ jsx18("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx18("span", { className: "muted", children: plan.claudeReadAt ? `Claude last read the plan ${relativeTime(plan.claudeReadAt)}` : "Claude has not read the plan back yet" })
-    ] }),
-    changes.length === 0 ? /* @__PURE__ */ jsx18(EmptyState, { title: "No changes yet" }) : /* @__PURE__ */ jsx18("ol", { className: "activity", children: changes.map((c, i) => /* @__PURE__ */ jsx18(Row, { change: c, marker: i === markerAt && i > 0, exists: targetExists(plan, c.target), unread: c.seq > plan.claudeReadSeq && c.author === "user" }, c.seq)) })
-  ] });
-}
-function Row({ change, marker, exists, unread }) {
-  const linkable = exists && change.target.kind !== "plan" && change.kind !== "deleted";
-  return /* @__PURE__ */ jsxs17(Fragment5, { children: [
-    marker && /* @__PURE__ */ jsx18("li", { className: "activity-marker", "aria-label": "Claude has read everything below this line", children: /* @__PURE__ */ jsx18("span", { children: "Claude has read everything below" }) }),
-    /* @__PURE__ */ jsxs17("li", { className: classNames("activity-row", `by-${change.author}`, unread && "is-unread"), children: [
-      /* @__PURE__ */ jsx18(AuthorBadge, { author: change.author }),
-      /* @__PURE__ */ jsx18("span", { className: "activity-text", children: change.summary }),
-      linkable && /* @__PURE__ */ jsx18("button", { type: "button", className: "link", onClick: () => store.focus(change.target.kind, change.target.id), children: "Show" }),
-      /* @__PURE__ */ jsx18("span", { className: "spacer" }),
-      unread && /* @__PURE__ */ jsx18("span", { className: "chip is-warning", children: "unread by Claude" }),
-      /* @__PURE__ */ jsxs17("time", { className: "muted", dateTime: new Date(change.ts).toISOString(), title: new Date(change.ts).toLocaleString(), children: [
-        relativeTime(change.ts),
-        " \xB7 ",
-        clockTime(change.ts)
-      ] })
-    ] })
-  ] });
-}
-var init_ActivityView = __esm({
-  "src/ui/views/ActivityView.tsx"() {
-    "use strict";
-    init_store();
-    init_Threads();
-    init_primitives();
-    init_format();
-    init_plan();
-  }
-});
-
 // src/ui/App.tsx
 var App_exports = {};
 __export(App_exports, {
   App: () => App
 });
-import { useCallback as useCallback2, useEffect as useEffect12, useRef as useRef5 } from "react";
-import { Fragment as Fragment6, jsx as jsx19, jsxs as jsxs18 } from "react/jsx-runtime";
+import { useCallback as useCallback2, useEffect as useEffect10, useRef as useRef5 } from "react";
+import { Fragment as Fragment3, jsx as jsx17, jsxs as jsxs16 } from "react/jsx-runtime";
 function App() {
   const session = useSession();
   const sessionId = useStore((s) => s.sessionId);
@@ -3462,30 +3569,29 @@ function App() {
     },
     [tab]
   );
-  return /* @__PURE__ */ jsxs18("div", { className: classNames("app", sidebarCollapsed && "is-sidebar-collapsed", drawerOpen && "is-drawer-open"), children: [
-    /* @__PURE__ */ jsx19("a", { className: "skip-link", href: `#${panelId(tab)}`, children: "Skip to content" }),
-    /* @__PURE__ */ jsx19(Sidebar, {}),
-    drawerOpen && /* @__PURE__ */ jsx19("button", { type: "button", className: "scrim", "aria-label": "Close the session list", onClick: () => store.setDrawer(false) }),
-    /* @__PURE__ */ jsx19("main", { className: "main", "aria-label": "Plan", children: !sessionId || !session ? /* @__PURE__ */ jsx19(NoSession, { error }) : /* @__PURE__ */ jsxs18(Fragment6, { children: [
-      /* @__PURE__ */ jsx19(Header, { session }),
-      /* @__PURE__ */ jsx19(ConnectionBar, {}),
-      !plan ? /* @__PURE__ */ jsx19(NoPlan, { session }) : /* @__PURE__ */ jsxs18(Fragment6, { children: [
-        /* @__PURE__ */ jsx19("nav", { className: "tabs", role: "tablist", "aria-label": "Plan views", ref: tabs, onKeyDown: onTabKeyDown, children: TAB_IDS.map((t) => /* @__PURE__ */ jsx19(TabButton, { id: t, active: tab === t, plan }, t)) }),
-        /* @__PURE__ */ jsxs18("div", { className: "view", id: panelId(tab), role: "tabpanel", "aria-labelledby": tabId(tab), tabIndex: -1, children: [
-          tab === "overview" && /* @__PURE__ */ jsx19(OverviewView, {}),
-          tab === "diagrams" && /* @__PURE__ */ jsx19(DiagramsView, {}),
-          tab === "tasks" && /* @__PURE__ */ jsx19(TasksView, {}),
-          tab === "questions" && /* @__PURE__ */ jsx19(QuestionsView, {}),
-          tab === "activity" && /* @__PURE__ */ jsx19(ActivityView, {})
+  return /* @__PURE__ */ jsxs16("div", { className: classNames("app", sidebarCollapsed && "is-sidebar-collapsed", drawerOpen && "is-drawer-open"), children: [
+    /* @__PURE__ */ jsx17("a", { className: "skip-link", href: `#${panelId(tab)}`, children: "Skip to content" }),
+    /* @__PURE__ */ jsx17(Sidebar, {}),
+    drawerOpen && /* @__PURE__ */ jsx17("button", { type: "button", className: "scrim", "aria-label": "Close the session list", onClick: () => store.setDrawer(false) }),
+    /* @__PURE__ */ jsx17("main", { className: "main", "aria-label": "Plan", children: !sessionId || !session ? /* @__PURE__ */ jsx17(NoSession, { error }) : /* @__PURE__ */ jsxs16(Fragment3, { children: [
+      /* @__PURE__ */ jsx17(Header, { session }),
+      /* @__PURE__ */ jsx17(ConnectionBar, {}),
+      /* @__PURE__ */ jsx17(WaitingBanner, { session }),
+      !plan ? /* @__PURE__ */ jsx17(NoPlan, { session }) : /* @__PURE__ */ jsxs16(Fragment3, { children: [
+        /* @__PURE__ */ jsx17("nav", { className: "tabs", role: "tablist", "aria-label": "Plan views", ref: tabs, onKeyDown: onTabKeyDown, children: TAB_IDS.map((t) => /* @__PURE__ */ jsx17(TabButton, { id: t, active: tab === t, plan }, t)) }),
+        /* @__PURE__ */ jsxs16("div", { className: "view", id: panelId(tab), role: "tabpanel", "aria-labelledby": tabId(tab), tabIndex: -1, children: [
+          tab === "overview" && /* @__PURE__ */ jsx17(OverviewView, {}),
+          tab === "diagrams" && /* @__PURE__ */ jsx17(DiagramsView, {}),
+          tab === "tasks" && /* @__PURE__ */ jsx17(TasksView, {})
         ] }, tab)
       ] })
     ] }) }),
-    /* @__PURE__ */ jsx19(Toasts, {})
+    /* @__PURE__ */ jsx17(Toasts, {})
   ] });
 }
 function TabButton({ id, active, plan }) {
   const badge = tabBadge(id, plan);
-  return /* @__PURE__ */ jsxs18(
+  return /* @__PURE__ */ jsxs16(
     "button",
     {
       type: "button",
@@ -3498,9 +3604,9 @@ function TabButton({ id, active, plan }) {
       onClick: () => store.setTab(id),
       children: [
         TAB_LABEL[id],
-        badge && /* @__PURE__ */ jsxs18(Fragment6, { children: [
-          /* @__PURE__ */ jsx19("span", { className: classNames("tab-badge", `is-${badge.tone}`), "aria-hidden": "true", children: badge.text }),
-          /* @__PURE__ */ jsx19("span", { className: "sr-only", children: badge.label })
+        badge && /* @__PURE__ */ jsxs16(Fragment3, { children: [
+          /* @__PURE__ */ jsx17("span", { className: classNames("tab-badge", `is-${badge.tone}`), "aria-hidden": "true", children: badge.text }),
+          /* @__PURE__ */ jsx17("span", { className: "sr-only", children: badge.label })
         ] })
       ]
     }
@@ -3514,39 +3620,18 @@ function tabBadge(id, plan) {
       const c = countTasks(plan);
       return c.total ? { text: `${c.done}/${c.total}`, tone: "neutral", label: `${c.done} of ${c.total} done` } : null;
     }
-    case "questions": {
-      const forYou = plan.questions.filter((q) => !q.answer && q.askedBy === "claude").length;
-      if (forYou) return { text: String(forYou), tone: "warning", label: `${forYou} question(s) from Claude to answer` };
-      const open = plan.questions.filter((q) => !q.answer).length;
-      return open ? { text: String(open), tone: "neutral", label: `${open} open question(s)` } : null;
-    }
-    case "activity": {
-      const unread = unreadByClaude(plan).length;
-      return unread ? { text: String(unread), tone: "accent", label: `${unread} change(s) Claude has not read` } : null;
-    }
     default:
       return null;
   }
 }
 function Header({ session }) {
-  const drawerOpen = useStore((s) => s.drawerOpen);
   const saving = useStore((s) => s.saving);
   const plan = session.plan;
   const counts = countTasks(plan);
-  return /* @__PURE__ */ jsxs18("header", { className: "head", children: [
-    /* @__PURE__ */ jsxs18("div", { className: "head-main", children: [
-      /* @__PURE__ */ jsx19(
-        "button",
-        {
-          type: "button",
-          className: "icon-btn drawer-toggle",
-          "aria-label": "Open the session list",
-          "aria-expanded": drawerOpen,
-          onClick: () => store.setDrawer(true),
-          children: /* @__PURE__ */ jsx19("span", { "aria-hidden": "true", children: "\u2630" })
-        }
-      ),
-      plan ? /* @__PURE__ */ jsx19(
+  return /* @__PURE__ */ jsxs16("header", { className: "head", children: [
+    /* @__PURE__ */ jsxs16("div", { className: "head-main", children: [
+      /* @__PURE__ */ jsx17(SessionsToggle, {}),
+      plan ? /* @__PURE__ */ jsx17(
         InlineText,
         {
           as: "h1",
@@ -3555,60 +3640,78 @@ function Header({ session }) {
           label: "Plan title",
           onSave: (title) => store.op({ op: "set_meta", title })
         }
-      ) : /* @__PURE__ */ jsx19("h1", { className: "head-title", children: session.title }),
-      saving > 0 && /* @__PURE__ */ jsx19("span", { className: "muted head-saving", children: "saving\u2026" }),
-      /* @__PURE__ */ jsx19("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx19(Handoff, {}),
-      /* @__PURE__ */ jsx19(ThemeToggle, {})
+      ) : /* @__PURE__ */ jsx17("h1", { className: "head-title", children: session.title }),
+      saving > 0 && /* @__PURE__ */ jsx17("span", { className: "muted head-saving", children: "saving\u2026" }),
+      /* @__PURE__ */ jsx17("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx17(Handoff, {}),
+      /* @__PURE__ */ jsx17(ThemeToggle, {})
     ] }),
-    /* @__PURE__ */ jsxs18("div", { className: "head-meta", children: [
-      /* @__PURE__ */ jsx19("span", { className: classNames("head-status", `is-${session.status}`), title: "The Claude session this plan belongs to", children: session.status === "active" ? "Claude is working" : session.status === "idle" ? "Claude is idle" : "session ended" }),
-      plan && plan.title !== session.title && /* @__PURE__ */ jsx19("span", { className: "head-stat", children: session.title }),
-      session.branch && /* @__PURE__ */ jsx19("code", { className: "head-branch", children: session.branch }),
-      counts.total > 0 && /* @__PURE__ */ jsxs18("span", { className: "head-progress", children: [
-        /* @__PURE__ */ jsx19(ProgressBar, { counts, compact: true }),
-        /* @__PURE__ */ jsxs18("span", { className: "head-stat", children: [
+    /* @__PURE__ */ jsxs16("div", { className: "head-meta", children: [
+      /* @__PURE__ */ jsx17("span", { className: classNames("head-status", `is-${session.waiting ? "waiting" : session.status}`), title: "The Claude session this plan belongs to", children: session.waiting ? "Claude is waiting on you" : session.status === "active" ? "Claude is working" : session.status === "idle" ? "Claude is idle" : "session ended" }),
+      plan && plan.title !== session.title && /* @__PURE__ */ jsx17("span", { className: "head-stat", children: session.title }),
+      session.branch && /* @__PURE__ */ jsx17("code", { className: "head-branch", children: session.branch }),
+      counts.total > 0 && /* @__PURE__ */ jsxs16("span", { className: "head-progress", children: [
+        /* @__PURE__ */ jsx17(ProgressBar, { counts, compact: true }),
+        /* @__PURE__ */ jsxs16("span", { className: "head-stat", children: [
           counts.done,
           "/",
           counts.total,
           " tasks"
         ] })
       ] }),
-      /* @__PURE__ */ jsx19("span", { className: "head-path", title: session.cwd, children: session.cwd })
+      /* @__PURE__ */ jsx17("span", { className: "head-path", title: session.cwd, children: session.cwd })
     ] })
   ] });
 }
+function SessionsToggle() {
+  const collapsed = useStore((s) => s.collapsedSidebar);
+  const drawerOpen = useStore((s) => s.drawerOpen);
+  const narrow = () => window.innerWidth <= 900;
+  const label = collapsed ? "Show sessions" : "Hide sessions";
+  return /* @__PURE__ */ jsx17(
+    "button",
+    {
+      type: "button",
+      className: "icon-btn sessions-toggle",
+      title: `${label} ( [ )`,
+      "aria-label": label,
+      "aria-expanded": narrow() ? drawerOpen : !collapsed,
+      onClick: () => narrow() ? store.setDrawer(true) : store.toggleSidebar(),
+      children: /* @__PURE__ */ jsx17("span", { "aria-hidden": "true", children: "\u2630" })
+    }
+  );
+}
 function NoPlan({ session }) {
-  return /* @__PURE__ */ jsx19("div", { className: "view", children: /* @__PURE__ */ jsx19(
+  return /* @__PURE__ */ jsx17("div", { className: "view", children: /* @__PURE__ */ jsx17(
     EmptyState,
     {
       title: "No plan yet",
-      hint: /* @__PURE__ */ jsxs18(Fragment6, { children: [
+      hint: /* @__PURE__ */ jsxs16(Fragment3, { children: [
         "In Claude's chat, run ",
-        /* @__PURE__ */ jsx19("code", { children: "/harness <what you want to build>" }),
-        ". Claude investigates the code, then publishes its plan here \u2014 architecture, diagrams, a task breakdown and the questions it needs answered."
+        /* @__PURE__ */ jsx17("code", { children: "/harness <what you want to build>" }),
+        ". Claude investigates the code, then publishes its plan here \u2014 the architecture, diagrams and a task breakdown \u2014 and asks what it needs to know in the chat."
       ] }),
-      action: /* @__PURE__ */ jsx19("button", { type: "button", className: "btn", onClick: () => void store.op({ op: "set_meta", title: session.title || "Untitled plan" }), children: "Start a plan by hand" })
+      action: /* @__PURE__ */ jsx17("button", { type: "button", className: "btn", onClick: () => void store.op({ op: "set_meta", title: session.title || "Untitled plan" }), children: "Start a plan by hand" })
     }
   ) });
 }
 function NoSession({ error }) {
-  return /* @__PURE__ */ jsx19("div", { className: "view", children: /* @__PURE__ */ jsx19(
+  return /* @__PURE__ */ jsx17("div", { className: "view", children: /* @__PURE__ */ jsx17(
     EmptyState,
     {
       title: "No session yet",
-      hint: /* @__PURE__ */ jsxs18(Fragment6, { children: [
+      hint: /* @__PURE__ */ jsxs16(Fragment3, { children: [
         "Start Claude Code in a project with the harness enabled, then run ",
-        /* @__PURE__ */ jsx19("code", { children: "/harness" }),
+        /* @__PURE__ */ jsx17("code", { children: "/harness" }),
         ". Sessions appear here the moment they register.",
-        error && /* @__PURE__ */ jsxs18("span", { className: "error-text", children: [
+        error && /* @__PURE__ */ jsxs16("span", { className: "error-text", children: [
           " \xB7 ",
           error
         ] })
       ] }),
-      action: /* @__PURE__ */ jsxs18("p", { className: "empty-hint", children: [
+      action: /* @__PURE__ */ jsxs16("p", { className: "empty-hint", children: [
         "If a session is running and nothing shows up, the hooks are not firing \u2014 run ",
-        /* @__PURE__ */ jsx19("code", { children: "harness doctor" }),
+        /* @__PURE__ */ jsx17("code", { children: "harness doctor" }),
         "."
       ] })
     }
@@ -3616,12 +3719,13 @@ function NoSession({ error }) {
 }
 function useDocumentTitle(session) {
   const title = session?.plan?.title ?? session?.title ?? "cc-harness";
-  useEffect12(() => {
-    document.title = `${title} \u2014 plan`;
-  }, [title]);
+  const waiting = Boolean(session?.waiting);
+  useEffect10(() => {
+    document.title = waiting ? `\u25CF ${title} \u2014 Claude is waiting` : `${title} \u2014 plan`;
+  }, [title, waiting]);
 }
 function useDrawerDismiss(open) {
-  useEffect12(() => {
+  useEffect10(() => {
     if (!open) return;
     const onKey = (event) => {
       if (event.key === "Escape") store.setDrawer(false);
@@ -3638,11 +3742,16 @@ function useDrawerDismiss(open) {
   }, [open]);
 }
 function useShortcuts() {
-  useEffect12(() => {
+  useEffect10(() => {
     const handler = (event) => {
       const target = event.target;
       const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
       if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key === "[") {
+        event.preventDefault();
+        store.toggleSidebar();
+        return;
+      }
       const index = Number(event.key) - 1;
       const tab = TAB_IDS[index];
       if (tab && store.getState().session?.plan) {
@@ -3670,16 +3779,12 @@ var init_App = __esm({
     init_OverviewView();
     init_DiagramsView();
     init_TasksView();
-    init_QuestionsView();
-    init_ActivityView();
     init_format();
     init_plan();
     TAB_LABEL = {
-      overview: "Overview",
-      diagrams: "Diagrams",
+      diagrams: "Architecture",
       tasks: "Tasks",
-      questions: "Questions",
-      activity: "Activity"
+      overview: "Overview"
     };
     tabId = (id) => `tab-${id}`;
     panelId = (id) => `panel-${id}`;
@@ -3818,7 +3923,7 @@ function stubFetch(handler) {
 }
 
 // src/test/sidebar.test.tsx
-import { jsx as jsx20 } from "react/jsx-runtime";
+import { jsx as jsx18 } from "react/jsx-runtime";
 setupDom();
 var { render, fireEvent, within, cleanup, act, screen, waitFor } = await import("@testing-library/react");
 var { App: App2 } = await Promise.resolve().then(() => (init_App(), App_exports));
@@ -3832,6 +3937,9 @@ function makeSession() {
     branch: "main",
     title: "s1 title",
     status: "active",
+    waiting: null,
+    surface: "unknown",
+    link: null,
     createdAt: now,
     updatedAt: now,
     plan: null
@@ -3850,7 +3958,10 @@ function summary(sessionId, repo, createdAt, updatedAt = createdAt) {
     createdAt,
     updatedAt,
     tasks: { total: 0, done: 0, inProgress: 0, blocked: 0 },
-    openQuestions: 0,
+    current: null,
+    waiting: null,
+    surface: "unknown",
+    link: null,
     openThreads: 0,
     unreadByClaude: 0
   };
@@ -3904,7 +4015,7 @@ async function boot(sessions) {
     if (route.startsWith("/api/session/")) return { session: makeSession() };
     return { ok: true };
   }));
-  render(/* @__PURE__ */ jsx20(App2, {}));
+  render(/* @__PURE__ */ jsx18(App2, {}));
   await act(async () => {
     await store2.init();
   });
@@ -4053,22 +4164,52 @@ test("collapsing the sidebar narrows the column it sits in", async () => {
   });
   assert.ok(document.querySelector(".app")?.classList.contains("is-sidebar-collapsed"));
 });
-test("a row shows the plan, its progress, and what Claude has not read", async () => {
+test("a row shows the plan, its progress, and what Claude is on", async () => {
   const now = Date.now();
   await boot(() => [
     {
       ...summary("s1", "repo", now),
       planTitle: "Cache rewrite",
       tasks: { total: 5, done: 2, inProgress: 1, blocked: 0 },
-      openQuestions: 2,
+      current: "Read-through wrapper",
       unreadByClaude: 3
     }
   ]);
   const row = rowFor("Cache rewrite");
   assert.ok(row, "the plan title names the row");
+  assert.match(row.textContent ?? "", /now: Read-through wrapper/);
   assert.match(row.textContent ?? "", /2\/5 tasks/);
-  assert.match(row.textContent ?? "", /2 open q/);
   assert.match(row.textContent ?? "", /3 unread/);
+});
+test("a session waiting on the user is lifted to the top, with a way into Claude", async () => {
+  const now = Date.now();
+  const link = { app: "claude://claude.ai/code/session_1", web: "https://claude.ai/code/session_1", via: "cloud" };
+  await boot(() => [
+    summary("s1", "repo", now),
+    { ...summary("s3", "other", now - 2e3), waiting: { kind: "question", text: "Which TTL?", since: now }, link }
+  ]);
+  assert.deepEqual(groupNames(), ["Waiting on you", "repo"]);
+  const row = rowFor("s3 title");
+  assert.match(row.textContent ?? "", /Which TTL\?/);
+  assert.equal(within(row).getByText("Answer in Claude").getAttribute("href"), link.app);
+});
+test("collapsing the sidebar folds it to a rail of initials", async () => {
+  const now = Date.now();
+  await boot(() => [
+    { ...summary("s1", "repo", now), planTitle: "Cache rewrite" },
+    { ...summary("s2", "other", now - 1e3), waiting: { kind: "input", text: "Go?", since: now } }
+  ]);
+  await act(async () => {
+    fireEvent.click(screen.getByTitle("Collapse sidebar"));
+  });
+  assert.equal(document.querySelector(".session-list"), null, "the full list is gone");
+  const items = [...document.querySelectorAll(".rail-item")];
+  assert.deepEqual(items.map((i) => i.textContent), ["ST", "CR"], "waiting first, by initials");
+  assert.ok(items[0].classList.contains("is-waiting"));
+  await act(async () => {
+    fireEvent.click(items[0]);
+  });
+  assert.equal(store2.getState().sessionId, "s2", "a rail item still opens its session");
 });
 test("a session can be renamed from the rail", async () => {
   await boot();

@@ -5,8 +5,8 @@
  * from these renderings, so they carry every id it will need to quote back in
  * an edit, and they lead with what changed — the reason it is reading at all.
  */
-import type { Change, Diagram, Plan, Question, Thread } from '../shared/types.ts';
-import { countTasks, describeTarget, outline, renderAnswer, unreadByClaude } from '../shared/plan.ts';
+import type { Change, Diagram, Plan, Thread } from '../shared/types.ts';
+import { countTasks, describeTarget, outline, unreadByClaude } from '../shared/plan.ts';
 
 const STATUS_MARK = { todo: '[ ]', in_progress: '[~]', blocked: '[!]', done: '[x]' } as const;
 
@@ -26,7 +26,6 @@ export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
   const meta = [
     `revision ${plan.revision}`,
     counts.total ? `tasks ${counts.done}/${counts.total} done` : 'no tasks',
-    `${plan.questions.filter((q) => !q.answer).length} open question(s)`,
     `${plan.threads.filter((t) => !t.resolved).length} open comment(s)`,
   ];
   out.push(`_${meta.join(' · ')}${opts.url ? ` · UI: ${opts.url}` : ''}_`);
@@ -35,8 +34,6 @@ export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
   out.push(renderChanges(plan, unread));
 
   if (opts.changesOnly) {
-    const openQuestions = plan.questions.filter((q) => !q.answer && q.askedBy === 'user');
-    if (openQuestions.length) out.push('', '## Questions the user asked you', ...openQuestions.map((q) => renderQuestion(plan, q)));
     const touched = new Set(unread.map((c) => `${c.target.kind}:${c.target.id}`));
     const threads = plan.threads.filter((t) => !t.resolved && (touched.has(`${t.target.kind}:${t.target.id}`) || lastAuthor(t) === 'user'));
     if (threads.length) out.push('', '## Comments waiting on you', ...threads.map((t) => renderThread(plan, t)));
@@ -69,11 +66,6 @@ export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
     if (task.detail) for (const line of task.detail.trim().split('\n')) out.push(`${pad}  ${line}`);
   }
 
-  if (plan.questions.length) {
-    out.push('', '## Questions');
-    for (const q of plan.questions) out.push(renderQuestion(plan, q));
-  }
-
   const open = plan.threads.filter((t) => !t.resolved);
   if (open.length) {
     out.push('', '## Open comments');
@@ -94,7 +86,11 @@ function renderDiagram(d: Diagram): string[] {
   if (d.caption) lines.push(d.caption.trim());
   lines.push('nodes:');
   if (d.nodes.length === 0) lines.push('- _(none)_');
-  for (const n of d.nodes) lines.push(`- ${n.id}: "${n.label}" (${n.kind})${n.detail ? ` — ${n.detail.replace(/\n/g, ' ')}` : ''}`);
+  for (const n of d.nodes) {
+    lines.push(`- ${n.id}: "${n.label}" (${n.kind})${n.detail ? ` — ${n.detail.replace(/\n/g, ' ')}` : ''}`);
+    if (n.taskIds?.length) lines.push(`  tasks: ${n.taskIds.join(', ')}`);
+    if (n.notes) for (const line of n.notes.trim().split('\n')) lines.push(`  ${line}`);
+  }
   if (d.edges.length) {
     lines.push('edges:');
     for (const e of d.edges) {
@@ -112,24 +108,6 @@ function renderChanges(plan: Plan, unread: Change[]): string {
   }
   const lines = [`## Since you last read — ${unread.length} change(s) by the user`];
   for (const c of unread) lines.push(`- ${c.summary} [${c.target.kind}${c.target.id ? ` ${c.target.id}` : ''}]`);
-  return lines.join('\n');
-}
-
-function renderQuestion(plan: Plan, q: Question): string {
-  const who = q.askedBy === 'user' ? 'asked by the user' : 'asked by you';
-  const header = q.header ? `[${q.header}] ` : '';
-  const task = q.taskId ? ` (holds up ${q.taskId})` : '';
-  const lines = [`- [${q.id}] ${header}${q.question} _(${who}${task})_`];
-  if (q.context) lines.push(`  context: ${q.context.trim().replace(/\n/g, '\n  ')}`);
-  if (q.options.length) {
-    lines.push(`  options${q.multiSelect ? ' (multi-select)' : ''}: ${q.options.map((o) => (o.description ? `${o.label} (${o.description})` : o.label)).join('; ')}`);
-  }
-  if (q.answer) {
-    lines.push(`  → ANSWERED by ${q.answer.by === 'user' ? 'the user' : 'you'}: ${renderAnswer(q.answer)}`);
-  } else {
-    lines.push(q.askedBy === 'user' ? '  → UNANSWERED — answer it with harness_plan_edit {op:"answer"}' : '  → unanswered');
-  }
-  void plan;
   return lines.join('\n');
 }
 

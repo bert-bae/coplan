@@ -3,6 +3,7 @@ import { store, usePlan, useStore } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
 import { CommentToggle, ThreadPanel, useThreads } from '../components/Threads.tsx';
 import { Focusable } from '../components/Item.tsx';
+import { KIND_GLYPH } from '../components/FlowCanvas.tsx';
 import { ProgressBar, STATUS_GLYPH, STATUS_LABEL } from '../components/Progress.tsx';
 import { EmptyState } from '../components/primitives.tsx';
 import { classNames } from '../lib/format.ts';
@@ -195,10 +196,10 @@ function TaskRow(props: {
   const [comments, setComments] = useState(false);
   const kids = childrenOf(plan, task.id);
   const sub = kids.length ? countTasks({ tasks: [task, ...descendants(plan, task.id)] }) : null;
-  const questions = plan.questions.filter((q) => q.taskId === task.id);
-  const openQuestions = questions.filter((q) => !q.answer).length;
   const threads = useThreads({ kind: 'task', id: task.id });
   const target = { kind: 'task' as const, id: task.id };
+  // The parts of the architecture this task builds.
+  const parts = plan.diagrams.flatMap((d) => d.nodes.filter((n) => n.taskIds?.includes(task.id)).map((n) => ({ d, n })));
 
   const siblings = childrenOf(plan, task.parentId);
   const index = siblings.findIndex((t) => t.id === task.id);
@@ -284,12 +285,18 @@ function TaskRow(props: {
               {task.note}
             </span>
           )}
-          {openQuestions > 0 && (
-            <button type="button" className="chip is-warning" onClick={() => store.focus('question', questions.find((q) => !q.answer)!.id)}>
-              {openQuestions} question{openQuestions === 1 ? '' : 's'}
-            </button>
-          )}
           {task.files?.length ? <span className="chip" title={task.files.join('\n')}>{task.files.length} file{task.files.length === 1 ? '' : 's'}</span> : null}
+          {parts.map(({ d, n }) => (
+            <button
+              key={`${d.id}:${n.id}`}
+              type="button"
+              className="chip is-part"
+              title={`Builds "${n.label}" in ${d.title} — show it`}
+              onClick={() => store.focus('node', `${d.id}:${n.id}`)}
+            >
+              <span aria-hidden="true">{KIND_GLYPH[n.kind]}</span> {n.label}
+            </button>
+          ))}
           {task.createdBy === 'user' && <span className="chip is-you">added by you</span>}
         </span>
         <span className="spacer" />
@@ -343,7 +350,6 @@ function TaskRow(props: {
 
 function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
   const [confirming, setConfirming] = useState(false);
-  const questions = plan.questions.filter((q) => q.taskId === task.id);
   const subtasks = descendants(plan, task.id).length;
   return (
     <div className="task-detail-body">
@@ -375,21 +381,6 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
         <span className="field-label">Files</span>
         <FilesField task={task} />
       </div>
-      {questions.length > 0 && (
-        <div className="field-col">
-          <span className="field-label">Questions</span>
-          <ul className="plain-list">
-            {questions.map((q) => (
-              <li key={q.id}>
-                <button type="button" className="link" onClick={() => store.focus('question', q.id)}>
-                  {q.question}
-                </button>{' '}
-                <span className={q.answer ? 'muted' : 'attention'}>{q.answer ? 'answered' : 'open'}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
       <div className="task-detail-foot">
         <span className="muted">
           {task.id} · {task.createdBy === 'user' ? 'added by you' : 'added by Claude'}

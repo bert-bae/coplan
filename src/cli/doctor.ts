@@ -128,9 +128,8 @@ export async function runDoctor(): Promise<number> {
   const published = await mcp('publish', {
     title: 'doctor probe',
     summary: 'A plan written by `harness doctor`.',
-    diagrams: [{ title: 'Probe', source: 'flowchart LR\n  A --> B' }],
+    diagrams: [{ title: 'Probe', nodes: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }], edges: [{ source: 'a', target: 'b' }] }],
     tasks: [{ title: 'parent', subtasks: [{ title: 'child' }] }],
-    questions: [{ question: 'doctor probe question?', options: ['yes', 'no'] }],
   });
   record('harness_plan_publish stores the plan', published['ok'] !== false, String(published['text'] ?? '').split('\n')[0], true);
 
@@ -143,13 +142,13 @@ export async function runDoctor(): Promise<number> {
     true,
   );
 
-  const questionId = plan?.questions[0]?.id;
+  const childTask = plan?.tasks.find((t) => t.parentId !== null)?.id;
   const opsRes = await fetch(`${baseUrl(lock)}/api/session/${sessionId}/plan/ops`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}` },
     body: JSON.stringify({
       ops: [
-        { op: 'answer', id: questionId, selected: ['yes'], text: 'doctor probe answer' },
+        { op: 'upsert_task', parentId: childTask ? plan?.tasks.find((t) => t.id === childTask)?.parentId : null, title: 'doctor probe task' },
         { op: 'comment', target: { kind: 'plan', id: '' }, text: 'doctor probe comment' },
       ],
     }),
@@ -164,7 +163,7 @@ export async function runDoctor(): Promise<number> {
   const readText = String(read['text'] ?? '');
   record(
     'harness_plan_read reports what the user changed',
-    readText.includes('doctor probe answer') && readText.includes('doctor probe comment'),
+    readText.includes('doctor probe task') && readText.includes('doctor probe comment'),
     undefined,
     true,
   );
@@ -186,6 +185,20 @@ export async function runDoctor(): Promise<number> {
     undefined,
     true,
   );
+
+  /* ---------------- waiting on the user ---------------- */
+
+  // Questions are answered in Claude, so the harness only has to notice one
+  // being asked, and notice it being answered.
+  await hook('PreToolUse', {
+    tool_name: 'AskUserQuestion',
+    tool_input: { questions: [{ question: 'doctor probe question?', header: 'Probe', options: [{ label: 'yes' }, { label: 'no' }] }] },
+  });
+  const asking = await getSession();
+  record('a question Claude asks is noticed', asking?.waiting?.kind === 'question', asking?.waiting?.text, true);
+  await hook('PostToolUse', { tool_name: 'AskUserQuestion', tool_input: {} });
+  const answered = await getSession();
+  record('answering it in Claude clears it', answered?.waiting === null, undefined, true);
 
   /* ---------------- nothing waits ---------------- */
 

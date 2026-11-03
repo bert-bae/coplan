@@ -4,14 +4,15 @@ import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx'
 import { CommentToggle, ThreadPanel } from '../components/Threads.tsx';
 import { Focusable, ItemActions } from '../components/Item.tsx';
 import { ProgressBar } from '../components/Progress.tsx';
-import { countTasks } from '../../shared/plan.ts';
+import { scrollBehavior } from '../lib/motion.ts';
+import { countTasks, currentTask } from '../../shared/plan.ts';
 import type { Plan, Section } from '../../shared/types.ts';
 
 /**
  * The plan as a document: what is being built and why, then the prose
  * sections — context, architecture, risks — in the order the user wants to
- * read them. The figures at the top are the plan's state at a glance, and
- * each one is a way into the tab that holds the detail.
+ * read them. The tiles at the top are where Claude has got to, at a glance,
+ * and each one is a way into the tab that holds the detail.
  */
 export function OverviewView() {
   const plan = usePlan();
@@ -57,9 +58,9 @@ export function OverviewView() {
 
 function Glance({ plan }: { plan: Plan }) {
   const counts = countTasks(plan);
-  const openQuestions = plan.questions.filter((q) => !q.answer);
-  const waitingOnYou = openQuestions.filter((q) => q.askedBy === 'claude').length;
   const openThreads = plan.threads.filter((t) => !t.resolved).length;
+  const now = currentTask(plan);
+  const blocked = plan.tasks.filter((t) => t.status === 'blocked');
   return (
     <div className="glance" role="list" aria-label="Plan at a glance">
       <button type="button" role="listitem" className="glance-tile" onClick={() => store.setTab('tasks')}>
@@ -77,21 +78,28 @@ function Glance({ plan }: { plan: Plan }) {
       <button
         type="button"
         role="listitem"
-        className={waitingOnYou ? 'glance-tile is-attention' : 'glance-tile'}
-        onClick={() => store.setTab('questions')}
+        className={blocked.length ? 'glance-tile is-attention' : 'glance-tile'}
+        onClick={() => {
+          const target = now ?? blocked[0];
+          if (target) store.focus('task', target.id);
+          else store.setTab('tasks');
+        }}
       >
-        <span className="glance-label">Open questions</span>
-        <span className="glance-value">{openQuestions.length}</span>
-        <span className="glance-sub">
-          {waitingOnYou ? `${waitingOnYou} from Claude for you to answer` : openQuestions.length ? 'waiting on Claude' : 'all answered'}
-        </span>
+        <span className="glance-label">{now ? 'Claude is on' : blocked.length ? 'Blocked' : 'Now'}</span>
+        <span className="glance-now">{now?.title ?? blocked[0]?.title ?? (counts.total && counts.done === counts.total ? 'All done' : 'Nothing in progress')}</span>
+        <span className="glance-sub">{now?.note ?? blocked[0]?.note ?? (blocked.length > 1 ? `${blocked.length} tasks blocked` : ' ')}</span>
       </button>
       <button type="button" role="listitem" className="glance-tile" onClick={() => store.setTab('diagrams')}>
         <span className="glance-label">Diagrams</span>
         <span className="glance-value">{plan.diagrams.length}</span>
         <span className="glance-sub">{plan.diagrams.map((d) => d.title).slice(0, 2).join(', ') || 'none yet'}</span>
       </button>
-      <button type="button" role="listitem" className="glance-tile" onClick={() => store.setTab('activity')}>
+      <button
+        type="button"
+        role="listitem"
+        className="glance-tile"
+        onClick={() => document.getElementById('general-head')?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' })}
+      >
         <span className="glance-label">Open comments</span>
         <span className="glance-value">{openThreads}</span>
         <span className="glance-sub">revision {plan.revision || 'draft'}</span>

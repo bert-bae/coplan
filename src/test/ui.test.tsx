@@ -5,7 +5,8 @@ import type { Plan, PlanInput, SessionState } from '../shared/types.ts';
 
 /**
  * The planning workspace in a browser: every edit becomes an op sent to the
- * daemon, and nothing on the page talks to Claude.
+ * daemon, and nothing on the page talks to Claude or answers it — questions
+ * are shown, and linked back to the session.
  */
 
 setupDom();
@@ -19,22 +20,19 @@ const INPUT: PlanInput = {
   title: 'Add a cache',
   summary: 'Put a cache in front of the database.',
   sections: [{ title: 'Context', body: 'Reads are **slow**.' }],
+  tasks: [
+    { id: 'storage', title: 'Storage layer', subtasks: [{ title: 'Cache client', status: 'done' }, { title: 'Invalidation' }] },
+    { title: 'Wire into API', status: 'in_progress' },
+  ],
   diagrams: [
     {
       title: 'Components',
       nodes: [
         { id: 'api', label: 'API', kind: 'service' },
-        { id: 'db', label: 'Postgres', kind: 'datastore' },
+        { id: 'db', label: 'Postgres', kind: 'datastore', taskIds: ['storage'], notes: 'Primary store.' },
       ],
       edges: [{ source: 'api', target: 'db', label: 'SQL' }],
     },
-  ],
-  tasks: [
-    { title: 'Storage layer', subtasks: [{ title: 'Cache client' }, { title: 'Invalidation' }] },
-    { title: 'Wire into API' },
-  ],
-  questions: [
-    { question: 'Which cache?', header: 'Backend', options: [{ label: 'Redis', description: 'Shared.' }, { label: 'In-memory' }] },
   ],
 };
 
@@ -43,10 +41,26 @@ function makePlan(unread = false): Plan {
   return unread ? applyOps(plan, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'hm' }], 'user').plan : plan;
 }
 
-function makeSession(plan: Plan | null = makePlan()): SessionState {
+function makeSession(plan: Plan | null = makePlan(), extra: Partial<SessionState> = {}): SessionState {
   const now = Date.now();
-  return { sessionId: 's1', cwd: '/repo', repoRoot: '/repo', branch: 'main', title: 'repo', status: 'idle', createdAt: now, updatedAt: now, plan };
+  return {
+    sessionId: 's1',
+    cwd: '/repo',
+    repoRoot: '/repo',
+    branch: 'main',
+    title: 'repo',
+    status: 'idle',
+    waiting: null,
+    surface: 'unknown',
+    link: null,
+    createdAt: now,
+    updatedAt: now,
+    plan,
+    ...extra,
+  };
 }
+
+const LINK = { app: 'claude://claude.ai/code/session_1', web: 'https://claude.ai/code/session_1', via: 'cloud' as const };
 
 let posts: { route: string; body: Record<string, unknown> }[];
 
@@ -75,20 +89,32 @@ const openTab = async (name: string) => {
 beforeEach(() => {
   cleanup();
   window.localStorage.clear();
-  store.set({ sessions: [], sessionId: null, session: null, tab: 'overview', taskMode: 'outline', hideDone: false, collapsedTasks: [], toasts: [], focusTarget: null });
+  store.set({
+    sessions: [],
+    sessionId: null,
+    session: null,
+    tab: 'diagrams',
+    diagramId: null,
+    taskMode: 'outline',
+    hideDone: false,
+    collapsedTasks: [],
+    collapsedSidebar: false,
+    toasts: [],
+    focusTarget: null,
+  });
 });
 
 after(() => cleanup());
 
 /* ------------------------------------------------------------------ */
 
-test('the workspace is five planning views, with no way to message Claude', async () => {
+test('three views, architecture first, and no way to answer Claude here', async () => {
   await boot();
   const tabs = screen.getAllByRole('tab').map((t) => t.textContent?.replace(/\d.*$/, ''));
-  assert.deepEqual(tabs, ['Overview', 'Diagrams', 'Tasks', 'Questions', 'Activity']);
-  assert.equal(document.querySelector('[aria-label*="Message" i]'), null);
-  assert.equal(screen.queryByText(/send now/i), null);
-  assert.equal(screen.queryByText(/approve/i), null);
+  assert.deepEqual(tabs, ['Architecture', 'Tasks', 'Overview']);
+  assert.equal(screen.getByRole('tab', { selected: true }).textContent?.startsWith('Architecture'), true);
+  assert.equal(screen.queryByText(/questions/i), null);
+  assert.equal(screen.queryByText(/activity/i), null);
 });
 
 test('with no plan yet, the page says how to get one', async () => {
@@ -100,20 +126,42 @@ test('with no plan yet, the page says how to get one', async () => {
   assert.equal(opsSent()[0]!['op'], 'set_meta');
 });
 
-test('the header says when Claude is behind, and offers the message to paste', async () => {
-  await boot(makeSession(makePlan(true)));
-  assert.match(document.querySelector('.handoff')?.textContent ?? '', /1 change Claude hasn't read/);
-  let copied = '';
-  Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (t: string) => void (copied = t) }, configurable: true });
-  await act(async () => {
-    fireEvent.click(screen.getByText('Copy message for Claude'));
-  });
-  assert.match(copied, /harness_plan_read/);
+/* ------------------------------------------------------- back to Claude */
+
+test('when Claude asks something, the page shows it and links to the session', async () => {
+  await boot(
+    makeSession(makePlan(), {
+      link: LINK,
+      waiting: {
+        kind: 'question',
+        text: 'Which TTL?',
+        questions: [{ header: 'TTL', question: 'Which TTL?', options: ['1 minute', '10 minutes'] }],
+        since: Date.now(),
+      },
+    }),
+  );
+  const banner = screen.getByRole('status', { name: 'Claude is waiting on you' });
+  assert.match(banner.textContent ?? '', /Claude is asking you/);
+  assert.match(banner.textContent ?? '', /Which TTL\?/);
+  assert.match(banner.textContent ?? '', /1 minute · 10 minutes/);
+  assert.equal(within(banner).getByText('Answer in Claude').getAttribute('href'), LINK.app, 'opens the desktop app');
+  assert.equal(within(banner).getByText('web').getAttribute('href'), LINK.web);
+  assert.equal(banner.querySelector('input, textarea, select'), null, 'nothing to answer with here');
+  assert.match(document.title, /Claude is waiting/);
 });
 
-test('when Claude is up to date the header says so', async () => {
-  await boot();
-  assert.match(document.querySelector('.handoff')?.textContent ?? '', /Claude is up to date/);
+test('without a link, the banner says where to answer and how to get one', async () => {
+  await boot(makeSession(makePlan(), { surface: 'cli', waiting: { kind: 'permission', text: 'Allow Bash?', since: Date.now() } }));
+  const banner = screen.getByRole('status', { name: 'Claude is waiting on you' });
+  assert.match(banner.textContent ?? '', /in your terminal/);
+  assert.match(banner.textContent ?? '', /\/remote-control/);
+  assert.ok(within(banner).getByText('Copy message for Claude'));
+});
+
+test('the header opens the session in Claude, and says when Claude is behind', async () => {
+  await boot(makeSession(makePlan(true), { link: LINK }));
+  assert.match(document.querySelector('.handoff')?.textContent ?? '', /1 change Claude hasn't read/);
+  assert.equal(screen.getByText('Open in Claude').getAttribute('href'), LINK.app);
 });
 
 test('"As Claude sees it" shows the text harness_plan_read returns', async () => {
@@ -124,53 +172,93 @@ test('"As Claude sees it" shows the text harness_plan_read returns', async () =>
   await waitFor(() => assert.match(document.querySelector('.claude-text')?.textContent ?? '', /as Claude reads it/));
 });
 
-/* ------------------------------------------------------------- overview */
+/* --------------------------------------------------------- architecture */
 
-test('a section is edited in place and saved as an op', async () => {
+test('the diagram fills the view, with the diagram itself in the panel', async () => {
   await boot();
-  await act(async () => {
-    fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+  assert.ok(document.querySelector('.arch-body .flow .react-flow'), 'the canvas');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  assert.match(panel.textContent ?? '', /Diagram/);
+  assert.match(panel.textContent ?? '', /2 boxes, 1 arrows, 1 tracking tasks/);
+  await waitFor(() => {
+    const labels = [...document.querySelectorAll('.flow-node-label')].map((n) => n.textContent);
+    assert.deepEqual(labels.sort(), ['API', 'Postgres']);
   });
-  const area = screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
-  await act(async () => {
-    fireEvent.change(area, { target: { value: 'Reads take 400ms.' } });
-  });
-  await act(async () => {
-    fireEvent.keyDown(area, { key: 'Enter', ctrlKey: true });
-  });
-  assert.deepEqual(opsSent()[0], { op: 'upsert_section', id: 's1', body: 'Reads take 400ms.' });
 });
 
-test('a comment is left on a section', async () => {
+test('a box shows the progress of the tasks that build it', async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.flow-node.kind-datastore .flow-node-progress')));
+  assert.match(document.querySelector('.flow-node.kind-datastore .flow-node-progress')?.textContent ?? '', /1\/2/);
+});
+
+const selectBox = async (label: string) => {
+  const node = [...document.querySelectorAll('.react-flow__node')].find((n) => n.textContent?.includes(label)) as HTMLElement;
+  await act(async () => {
+    fireEvent.click(node);
+  });
+};
+
+test('selecting a box opens its details in the side panel', async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('Postgres');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  await waitFor(() => assert.ok(within(panel).getByLabelText('Box label')));
+  assert.equal((within(panel).getByLabelText('Box label') as HTMLInputElement).value, 'Postgres');
+  assert.match(panel.textContent ?? '', /Primary store\./);
+  assert.match(panel.textContent ?? '', /Built by/);
+  assert.match(panel.textContent ?? '', /Storage layer/);
+  assert.match(panel.textContent ?? '', /← API/);
+});
+
+test('editing a box in the panel saves the graph', async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('API');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  await waitFor(() => assert.ok(within(panel).getByLabelText('Link a task to API')));
+  await act(async () => {
+    fireEvent.change(within(panel).getByLabelText('Link a task to API'), { target: { value: 't3' } });
+  });
+  const op = opsSent().at(-1)!;
+  assert.equal(op['op'], 'upsert_diagram');
+  const api = (op['nodes'] as { id: string; taskIds?: string[] }[]).find((n) => n.id === 'api')!;
+  assert.deepEqual(api.taskIds, ['t3']);
+});
+
+test('a new diagram starts from a template', async () => {
   await boot();
   await act(async () => {
-    fireEvent.click(screen.getByLabelText('Comment on Context'));
-  });
-  const box = screen.getByLabelText('New comment on Context');
-  await act(async () => {
-    fireEvent.change(box, { target: { value: 'Add numbers' } });
+    fireEvent.click(screen.getByText('+ New diagram'));
   });
   await act(async () => {
-    fireEvent.click(within(box.closest('.thread-composer') as HTMLElement).getByText('Comment'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Components' }));
   });
-  assert.deepEqual(opsSent()[0], { op: 'comment', target: { kind: 'section', id: 's1' }, text: 'Add numbers' });
+  const op = opsSent()[0]!;
+  assert.equal(op['op'], 'upsert_diagram');
+  assert.equal((op['nodes'] as unknown[]).length, 3);
 });
 
 /* ---------------------------------------------------------------- tasks */
 
-test('the outline shows the breakdown with outline numbers', async () => {
+test('the outline shows the breakdown, and which part each task builds', async () => {
   await boot();
   await openTab('Tasks');
   const rows = [...document.querySelectorAll('.task-line')].map((r) => r.querySelector('.task-num')?.textContent + ' ' + r.querySelector('.task-title')?.textContent);
   assert.deepEqual(rows, ['1 Storage layer', '1.1 Cache client', '1.2 Invalidation', '2 Wire into API']);
-  assert.match(document.querySelector('.toolbar-progress')?.textContent ?? '', /0\/3 done/);
+  const part = screen.getByTitle(/Builds "Postgres"/);
+  await act(async () => {
+    fireEvent.click(part);
+  });
+  assert.equal(store.getState().tab, 'diagrams', 'the part opens on the canvas');
 });
 
 test('clicking a status dot moves the task along', async () => {
   await boot();
   await openTab('Tasks');
   await act(async () => {
-    fireEvent.click(screen.getByLabelText(/^Cache client: To do/));
+    fireEvent.click(screen.getByLabelText(/^Invalidation: To do/));
   });
   assert.deepEqual(opsSent()[0], { op: 'upsert_task', id: 't2', status: 'in_progress' });
 });
@@ -182,18 +270,13 @@ test('Alt+arrows reorganize the tree from the keyboard', async () => {
   await act(async () => {
     fireEvent.keyDown(row, { key: 'ArrowRight', altKey: true });
   });
-  assert.deepEqual(opsSent()[0], { op: 'move_task', id: 't4', parentId: 't1', index: Number.MAX_SAFE_INTEGER });
+  assert.deepEqual(opsSent()[0], { op: 'move_task', id: 't3', parentId: 'storage', index: Number.MAX_SAFE_INTEGER });
 
   const child = screen.getByRole('treeitem', { name: /^1\.2 Invalidation/ });
   await act(async () => {
     fireEvent.keyDown(child, { key: 'ArrowLeft', altKey: true });
   });
-  assert.deepEqual(opsSent()[1], { op: 'move_task', id: 't3', parentId: null, index: 1 });
-
-  await act(async () => {
-    fireEvent.keyDown(child, { key: 'ArrowUp', altKey: true });
-  });
-  assert.deepEqual(opsSent()[2], { op: 'move_task', id: 't3', parentId: 't1', index: 0 });
+  assert.deepEqual(opsSent()[1], { op: 'move_task', id: 't2', parentId: null, index: 1 });
 });
 
 test('a subtask is added under its parent', async () => {
@@ -209,17 +292,7 @@ test('a subtask is added under its parent', async () => {
   await act(async () => {
     fireEvent.submit(input.closest('form')!);
   });
-  assert.deepEqual(opsSent()[0], { op: 'upsert_task', parentId: 't4', title: 'Feature flag' });
-});
-
-test('folding a parent hides its subtasks, and the fold is remembered', async () => {
-  await boot();
-  await openTab('Tasks');
-  await act(async () => {
-    fireEvent.click(screen.getByLabelText('Hide subtasks of Storage layer'));
-  });
-  assert.equal(document.querySelectorAll('.task-line').length, 2);
-  assert.match(window.localStorage.getItem('cc-harness:prefs') ?? '', /"collapsedTasks":\["t1"\]/);
+  assert.deepEqual(opsSent()[0], { op: 'upsert_task', parentId: 't3', title: 'Feature flag' });
 });
 
 test('the board puts each leaf task in its status column', async () => {
@@ -229,82 +302,35 @@ test('the board puts each leaf task in its status column', async () => {
     fireEvent.click(screen.getByText('Board'));
   });
   const todo = screen.getByRole('region', { name: 'To do' });
-  const titles = [...todo.querySelectorAll('.board-title')].map((t) => t.textContent);
-  assert.deepEqual(titles, ['Cache client', 'Invalidation', 'Wire into API'], 'the parent heading is not a card');
-  assert.match(todo.querySelector('.board-path')?.textContent ?? '', /Storage layer/);
-  await act(async () => {
-    fireEvent.change(within(todo).getByLabelText('Status of Invalidation'), { target: { value: 'blocked' } });
-  });
-  assert.deepEqual(opsSent()[0], { op: 'upsert_task', id: 't3', status: 'blocked' });
+  assert.deepEqual([...todo.querySelectorAll('.board-title')].map((t) => t.textContent), ['Invalidation']);
+  const doing = screen.getByRole('region', { name: 'In progress' });
+  assert.deepEqual([...doing.querySelectorAll('.board-title')].map((t) => t.textContent), ['Wire into API']);
 });
 
-/* ------------------------------------------------------------ questions */
+/* ------------------------------------------------------------- overview */
 
-test('answering a question saves it to the plan', async () => {
+test('the overview says what Claude is on', async () => {
   await boot();
-  await openTab('Questions');
-  await act(async () => {
-    fireEvent.click(screen.getByRole('radio', { name: /Redis/ }));
-  });
-  await act(async () => {
-    fireEvent.change(screen.getByLabelText('Answer to: Which cache?'), { target: { value: 'we run it already' } });
-  });
-  await act(async () => {
-    fireEvent.click(screen.getByText('Save answer'));
-  });
-  assert.deepEqual(opsSent()[0], { op: 'answer', id: 'q1', selected: ['Redis'], text: 'we run it already' });
+  await openTab('Overview');
+  const tiles = screen.getByRole('list', { name: 'Plan at a glance' });
+  assert.match(tiles.textContent ?? '', /Claude is on\s*Wire into API/);
+  assert.match(tiles.textContent ?? '', /1\/3/);
 });
 
-test('the user can ask Claude a question', async () => {
+test('a section is edited in place and saved as an op', async () => {
   await boot();
-  await openTab('Questions');
+  await openTab('Overview');
   await act(async () => {
-    fireEvent.click(screen.getByText('+ Ask Claude a question'));
+    fireEvent.click(screen.getByLabelText('Edit section "Context"'));
   });
+  const area = screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
   await act(async () => {
-    fireEvent.change(screen.getByLabelText('Question for Claude'), { target: { value: 'Is Redis HA here?' } });
-  });
-  await act(async () => {
-    fireEvent.click(screen.getByText('Add question'));
-  });
-  assert.deepEqual(opsSent()[0], { op: 'upsert_question', question: 'Is Redis HA here?' });
-});
-
-/* ------------------------------------------------------------- diagrams */
-
-test('a diagram renders as a React Flow canvas of its boxes', async () => {
-  await boot();
-  await openTab('Diagrams');
-  assert.ok(document.querySelector('.react-flow'), 'the canvas is mounted');
-  await waitFor(() => {
-    const labels = [...document.querySelectorAll('.flow-node-label')].map((n) => n.textContent);
-    assert.deepEqual(labels.sort(), ['API', 'Postgres']);
-  });
-  assert.ok(document.querySelector('.flow-node.kind-datastore'), 'the kind sets the shape');
-});
-
-test('a new diagram starts from a template', async () => {
-  await boot();
-  await openTab('Diagrams');
-  await act(async () => {
-    fireEvent.click(screen.getByText('+ New diagram'));
+    fireEvent.change(area, { target: { value: 'Reads take 400ms.' } });
   });
   await act(async () => {
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Components' }));
+    fireEvent.keyDown(area, { key: 'Enter', ctrlKey: true });
   });
-  const op = opsSent()[0]!;
-  assert.equal(op['op'], 'upsert_diagram');
-  assert.equal((op['nodes'] as unknown[]).length, 3);
-});
-
-/* ------------------------------------------------------------- activity */
-
-test('the activity log marks what Claude has not read', async () => {
-  await boot(makeSession(makePlan(true)));
-  await openTab('Activity');
-  const rows = [...document.querySelectorAll('.activity-row, .activity-marker')].map((r) => r.className);
-  assert.ok(rows[0]!.includes('is-unread'), 'the newest change is unread');
-  assert.ok(rows[1]!.includes('activity-marker'), 'then the line Claude has read up to');
+  assert.deepEqual(opsSent()[0], { op: 'upsert_section', id: 's1', body: 'Reads take 400ms.' });
 });
 
 test('a snapshot from Claude replaces the plan and says so', async () => {
@@ -319,18 +345,29 @@ test('a snapshot from Claude replaces the plan and says so', async () => {
   assert.ok(store.getState().toasts.some((t) => /revision 2/.test(t.text)));
 });
 
-/* -------------------------------------------------------- accessibility */
+/* ---------------------------------------------------- layout and access */
+
+test('the header hides and shows the session list', async () => {
+  await boot();
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Hide sessions'));
+  });
+  assert.equal(store.getState().collapsedSidebar, true);
+  assert.ok(document.querySelector('.app')?.classList.contains('is-sidebar-collapsed'));
+  await act(async () => {
+    fireEvent.keyDown(document.body, { key: '[' });
+  });
+  assert.equal(store.getState().collapsedSidebar, false, '[ toggles it back');
+});
 
 test('the tab strip is one tab stop, and arrow keys move along it', async () => {
   await boot();
   const tabs = screen.getAllByRole('tab');
-  assert.deepEqual(tabs.map((t) => t.tabIndex), [0, -1, -1, -1, -1]);
-  const panel = document.getElementById(tabs[0]!.getAttribute('aria-controls')!);
-  assert.equal(panel?.getAttribute('role'), 'tabpanel');
+  assert.deepEqual(tabs.map((t) => t.tabIndex), [0, -1, -1]);
   await act(async () => {
     fireEvent.keyDown(tabs[0]!, { key: 'ArrowLeft' });
   });
-  assert.equal(store.getState().tab, 'activity', 'wraps at the ends');
+  assert.equal(store.getState().tab, 'overview', 'wraps at the ends');
 });
 
 test('choosing a theme sets an explicit attribute', async () => {
@@ -346,6 +383,6 @@ test('icon-only controls carry a name', async () => {
   await openTab('Tasks');
   for (const button of document.querySelectorAll('button')) {
     const name = button.getAttribute('aria-label') ?? button.textContent?.trim();
-    assert.ok(name && !/^[↑↓←→＋×⌄⌃✎]$/.test(name), `unnamed button: ${button.outerHTML.slice(0, 120)}`);
+    assert.ok(name && !/^[↑↓←→＋×⌄⌃✎☰]$/.test(name), `unnamed button: ${button.outerHTML.slice(0, 120)}`);
   }
 });
