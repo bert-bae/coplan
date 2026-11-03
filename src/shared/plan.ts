@@ -140,6 +140,21 @@ export function unreadItems(plan: Plan | null): number {
   return new Set(unreadByClaude(plan).map((c) => `${c.target.kind}:${c.target.id}`)).size;
 }
 
+/** Where the user's unread changes are — "the "Components" diagram",
+ *  "tasks", "comments" — in the order they first touched each. */
+export function unreadAreas(plan: Plan | null): string[] {
+  const areas: string[] = [];
+  const add = (what: string) => void (areas.includes(what) || areas.push(what));
+  for (const c of unreadByClaude(plan)) {
+    if (['commented', 'replied', 'resolved', 'reopened'].includes(c.kind)) add('comments');
+    else if (c.target.kind === 'diagram') add(`the "${plan!.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
+    else if (c.target.kind === 'task') add('tasks');
+    else if (c.target.kind === 'section') add('sections');
+    else add('the summary');
+  }
+  return areas;
+}
+
 export function markReadByClaude(plan: Plan, now = Date.now()): void {
   plan.claudeReadSeq = plan.seq;
   plan.claudeReadAt = now;

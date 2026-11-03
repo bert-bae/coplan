@@ -5,6 +5,7 @@ import { ThreadPanel } from '../components/Threads.tsx';
 import { DiagramEditor, KIND_GLYPH, KIND_LABEL, type GraphPatch } from '../components/FlowCanvas.tsx';
 import { EmptyState } from '../components/primitives.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
+import { diagramToMarkdown } from '../../shared/architecture.ts';
 import { NODE_KINDS, type Diagram, type DiagramEdgeInput, type DiagramNodeInput, type Plan } from '../../shared/types.ts';
 
 /** Starting points for a new diagram. */
@@ -14,9 +15,9 @@ const TEMPLATES: { label: string; title: string; nodes: DiagramNodeInput[]; edge
     label: 'Components',
     title: 'Components',
     nodes: [
-      { id: 'client', label: 'Client', kind: 'actor' },
-      { id: 'api', label: 'API', kind: 'service' },
-      { id: 'db', label: 'Database', kind: 'datastore' },
+      { id: 'client', label: 'Client', kind: 'actor', description: 'Whoever calls the API: a browser, an app, another service.' },
+      { id: 'api', label: 'API', kind: 'service', description: 'Takes requests, applies the rules, and reads and writes the database.' },
+      { id: 'db', label: 'Database', kind: 'datastore', description: 'The system of record.' },
     ],
     edges: [
       { source: 'client', target: 'api', label: 'HTTPS' },
@@ -70,7 +71,10 @@ export function DiagramsView() {
         </nav>
         <NewDiagram />
         <span className="spacer" />
-        <p className="toolbar-hint">Drag to arrange · drag from a handle to connect · select to edit · Backspace deletes</p>
+        <p className="toolbar-hint">
+          Double-click to add a box · drag from a box's edge to connect · ⓘ for a summary · <kbd>⌘C</kbd> <kbd>⌘V</kbd> copy and paste ·{' '}
+          <kbd>⌫</kbd> deletes
+        </p>
       </div>
 
       {diagram ? (
@@ -161,6 +165,22 @@ function DiagramPanel({ plan, diagram }: { plan: Plan; diagram: Diagram }) {
         {diagram.nodes.length} boxes, {diagram.edges.length} arrows{linked ? `, ${linked} tracking tasks` : ''}. Select a box
         to edit its details, decisions and the tasks that build it.
       </p>
+      <div className="row-actions">
+        <button
+          type="button"
+          className="btn btn-sm"
+          title="The diagram as Claude reads it: every part, what it does and what was decided, then every connection"
+          onClick={() => {
+            const text = diagramToMarkdown(diagram, { tasks: plan.tasks });
+            void navigator.clipboard
+              ?.writeText(text)
+              .then(() => store.toast('success', 'Copied the diagram as Markdown.'))
+              .catch(() => store.toast('error', 'The browser would not let the page use the clipboard.'));
+          }}
+        >
+          Copy as Markdown
+        </button>
+      </div>
       <ul className="kind-legend" aria-label="Box kinds">
         {NODE_KINDS.map((k) => (
           <li key={k}>

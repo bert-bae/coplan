@@ -143,6 +143,18 @@ function unreadByClaude(plan) {
 function unreadItems(plan) {
   return new Set(unreadByClaude(plan).map((c) => `${c.target.kind}:${c.target.id}`)).size;
 }
+function unreadAreas(plan) {
+  const areas = [];
+  const add = (what) => void (areas.includes(what) || areas.push(what));
+  for (const c of unreadByClaude(plan)) {
+    if (["commented", "replied", "resolved", "reopened"].includes(c.kind)) add("comments");
+    else if (c.target.kind === "diagram") add(`the "${plan.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
+    else if (c.target.kind === "task") add("tasks");
+    else if (c.target.kind === "section") add("sections");
+    else add("the summary");
+  }
+  return areas;
+}
 function markReadByClaude(plan, now = Date.now()) {
   plan.claudeReadSeq = plan.seq;
   plan.claudeReadAt = now;
@@ -1827,17 +1839,8 @@ function lastAuthor(t) {
   return t.replies.length ? t.replies[t.replies.length - 1].author : t.author;
 }
 function unreadNotice(plan) {
-  const unread = unreadByClaude(plan);
-  if (!plan || unread.length === 0) return null;
-  const areas = [];
-  const add = (what) => void (areas.includes(what) || areas.push(what));
-  for (const c of unread) {
-    if (["commented", "replied", "resolved", "reopened"].includes(c.kind)) add("comments");
-    else if (c.target.kind === "diagram") add(`the "${plan.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
-    else if (c.target.kind === "task") add("tasks");
-    else if (c.target.kind === "section") add("sections");
-    else add("the summary");
-  }
+  const areas = unreadAreas(plan);
+  if (!plan || areas.length === 0) return null;
   return `[cc-harness] The user has changed the plan "${plan.title}" in the harness UI since you last read it (${areas.join(", ")}). Call harness_plan_read before acting on the plan.`;
 }
 

@@ -6,7 +6,7 @@
  * an edit, and they lead with what changed — the reason it is reading at all.
  */
 import type { Change, Plan, PlanBaseline, Thread } from '../shared/types.ts';
-import { countTasks, describeTarget, outline, unreadByClaude } from '../shared/plan.ts';
+import { countTasks, describeTarget, outline, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { contentOf, diagramChanges, diagramToMarkdown, indent } from '../shared/architecture.ts';
 
 const STATUS_MARK = { todo: '[ ]', in_progress: '[~]', blocked: '[!]', done: '[x]' } as const;
@@ -242,18 +242,9 @@ function lastAuthor(t: Thread): 'user' | 'claude' {
  * "go and read", not repeat what the read will say.
  */
 export function unreadNotice(plan: Plan | null): string | null {
-  const unread = unreadByClaude(plan);
-  if (!plan || unread.length === 0) return null;
   // Where, not how often: one save or forty, it is the same thing to read.
-  const areas: string[] = [];
-  const add = (what: string) => void (areas.includes(what) || areas.push(what));
-  for (const c of unread) {
-    if (['commented', 'replied', 'resolved', 'reopened'].includes(c.kind)) add('comments');
-    else if (c.target.kind === 'diagram') add(`the "${plan.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
-    else if (c.target.kind === 'task') add('tasks');
-    else if (c.target.kind === 'section') add('sections');
-    else add('the summary');
-  }
+  const areas = unreadAreas(plan);
+  if (!plan || areas.length === 0) return null;
   return (
     `[cc-harness] The user has changed the plan "${plan.title}" in the harness UI since you last read it ` +
     `(${areas.join(', ')}). Call harness_plan_read before acting on the plan.`

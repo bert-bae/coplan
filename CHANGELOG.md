@@ -1,5 +1,57 @@
 # Changelog
 
+## Unreleased
+
+The architecture canvas is easier to fill in and opens organised, and what
+Claude reads back about it is the design you ended up with — not a replay of
+every drag and keystroke.
+
+### What Claude reads
+
+- **Diagrams read as an architecture.** `harness_plan_read` (and *Copy as
+  Markdown* on the diagram panel) renders each diagram as the system's shape —
+  entry points, data stores, queues, external systems — then every part in
+  the order the flow reaches it, with its role, description, decisions and
+  the tasks that build it, then every connection in words. No coordinates,
+  no layout direction.
+- **"Since you last read" is the net change.** It compares the plan Claude
+  last read with the plan now: a box added and deleted again leaves nothing,
+  a box renamed three times is reported once by its final name. Changes are
+  grouped — parts added, removed, changed; connections connected,
+  disconnected, reversed, restyled — and `changes_only` quotes edited prose
+  in its final form.
+- **Layout is not news.** Dragging boxes or flipping the direction is saved
+  but never counts as a change for Claude, in the read, the prompt notice or
+  the header.
+
+### On the canvas
+
+- **Descriptions.** Every box has a description (what it does, what it owns,
+  how others talk to it) beside its decisions. Claude is asked to fill both
+  in while planning. Hover a box's ⓘ for a summary: description, decisions,
+  the tasks that build it and its connections.
+- **Organised from the start.** Layout leaves room between ranks for arrow
+  labels, routes arrows around the boxes they pass, puts unconnected boxes on
+  a shelf instead of beside the flow's start, never zooms a small diagram
+  past its real size, and picks top-to-bottom for long, narrow flows when
+  Claude does not say. A box Claude adds to an arranged diagram lands beside
+  what it connects to.
+- **Editing.** Double-click empty canvas to add a box; drag from any edge of
+  a box onto another to connect, or into space for a new connected box;
+  double-click a box or an arrow's label (or F2) to rename it in place.
+  Arrows join whichever sides face each other, so moving a box never leaves
+  them looping round it.
+- **Copy and paste.** ⌘/Ctrl+C, X, V and D copy, cut, paste and duplicate
+  boxes with everything on them and the arrows between them, across diagrams
+  and tabs. ⌘/Ctrl+A selects everything.
+- **Connections** can be reversed, re-pointed, made dashed, and drawn one
+  way, both ways or without direction, from their panel; a box's panel lists
+  its connections with a way to add and remove them.
+- **The panel's fields fit what goes in them:** inputs for a name, a
+  subtitle and an arrow's label; a growing textarea for a description; a
+  markdown editor for decisions; a visual kind picker. Several selected
+  boxes can have their kind changed at once.
+
 ## 0.2.0
 
 The harness is now a planning workspace: architecture and task breakdown in,

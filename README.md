@@ -83,11 +83,14 @@ In any session with the plugin enabled:
    architecture, write down the decisions on each box, drag tasks into the
    order you want, nest and split them, and comment on anything. Every edit is
    saved at once and recorded in the plan's change log as yours.
-3. **You hand it back in chat.** The header says how many of your changes
-   Claude hasn't read and opens the session in Claude. If you just type in
-   chat, the next prompt carries a one-line note that the plan changed.
-4. **Claude reads it back.** `harness_plan_read` leads with exactly what you
-   did since it last looked. It adjusts and replies in your comment threads.
+3. **You hand it back in chat.** The header says when Claude hasn't read
+   your changes and opens the session in Claude. If you just type in chat,
+   the next prompt carries a one-line note saying where the plan changed.
+4. **Claude reads it back.** `harness_plan_read` leads with the net effect of
+   your edits since it last looked — what is different now, not each step
+   you took, and never where you dragged boxes — then the plan, with each
+   diagram written out as an architecture. It adjusts and replies in your
+   comment threads.
 5. **Claude builds against it.** It marks tasks in progress, done or blocked,
    and boxes linked to those tasks fill up as it goes.
 
@@ -113,16 +116,37 @@ moment it asks.
 
 **Architecture.** One diagram at a time fills the view: a
 [React Flow](https://reactflow.dev) canvas taking about 70% of the width, and a
-details panel beside it. On the canvas, drag boxes, draw arrows between
-handles, and press Backspace to delete; *Tidy layout* re-lays the diagram
-with dagre and the direction toggle flips it. Select a box and the panel edits
-it: its label, kind and one-line description, **notes and decisions**
-(markdown — what was decided about this part and why), the **tasks that build
-it**, and its connections. Select an arrow to say what flows along it. With
-nothing selected the panel describes the diagram and holds its comments.
+details panel beside it.
+
+*On the canvas.* A diagram Claude publishes opens laid out along its flow
+(top to bottom when it is long and narrow), with room for every arrow's
+label, arrows routed around the boxes they pass, and boxes with no
+connections on a shelf to one side. *Tidy layout* lays it out again and the
+direction toggle flips it.
+
+| To | Do |
+| --- | --- |
+| Add a box | *+ Box*, double-click empty canvas, or drag an arrow out of a box into space |
+| Connect two boxes | Drag from any edge of one onto the other |
+| Rename a box or an arrow | Double-click it (or F2 on a selected box) |
+| See what a box is | Hover its ⓘ: description, decisions, tasks, connections |
+| Copy, cut, paste, duplicate | ⌘/Ctrl + C, X, V, D — across diagrams and tabs |
+| Select everything / delete | ⌘/Ctrl+A / Backspace |
+
+*In the panel.* Select a box and the panel edits it: its name and the few
+words shown on it (inputs), its **kind**, a **description** of what it does
+and how others talk to it (a textarea that grows as you write), **notes and
+decisions** (markdown — what was decided and why), the **tasks that build
+it**, and its **connections**, which you can add and remove there. Select an
+arrow to say what flows along it, reverse or re-point it, and draw it dashed
+or with heads at both ends or none. Select several boxes to change their kind
+at once. With nothing selected the panel describes the diagram, holds its
+comments, and copies it as Markdown — the same text Claude reads.
+
 Boxes linked to tasks show those tasks' progress, so the picture doubles as
-a progress map. Your edits reach Claude in words: *connected Cache warmer →
-Postgres*, *edited "Redis"*, *changed the tasks behind "Redis"*.
+a progress map. Your edits reach Claude as the design they produced: *Added
+Rate limiter — service*, *Connected API gateway → Rate limiter: check*,
+*Changed Redis: description edited*.
 
 **Tasks.** The breakdown, two ways:
 
@@ -151,7 +175,7 @@ Four tools, none of which waits on you or asks you anything:
 | Tool | What it does |
 | --- | --- |
 | `harness_plan_publish` | Publish the whole plan. Items keep their comments, positions and statuses when their ids survive; refused while you have changes Claude hasn't read, so it can never overwrite your edits blind. |
-| `harness_plan_read` | The plan as text, leading with your changes since the last read, with every id Claude needs. `changes_only` skips the document. |
+| `harness_plan_read` | The plan as text, leading with the net effect of your changes since the last read, with every id Claude needs. Diagrams read as an architecture: the system's shape, each part in flow order with its description, decisions and tasks, then every connection. `changes_only` skips the document and quotes edited text instead. |
 | `harness_plan_edit` | A batch of targeted edits — sections, diagrams, tasks, moves, comment replies — applied all or nothing. |
 | `harness_task_update` | Mark a task in progress, done or blocked, with a one-line note. |
 
@@ -199,11 +223,15 @@ npm run check          # all three
 ```
 
 - `src/shared/plan.ts` — the plan model: publishing, every edit, the change log
+- `src/shared/architecture.ts` — diagrams as words: the architecture
+  rendering and the net difference between two versions of a diagram
 - `src/shared/link.ts` — how a session is linked back to in Claude
 - `src/daemon` — the singleton server: sessions, the plan API, rendering for
   Claude, hooks, housekeeping
 - `src/mcp` — the stdio MCP server (hand-rolled JSON-RPC, no dependencies)
-- `src/ui` — the browser client (React, React Flow, dagre)
+- `src/ui` — the browser client (React, React Flow, dagre); the canvas is
+  `components/FlowCanvas.tsx` with its boxes, arrows and panel in
+  `components/flow/`, and layout, arrow geometry and the clipboard in `lib/`
 - `bin/hook-relay.sh` — sh + curl, so no Node process starts per hook
 
 The daemon, the MCP server and the CLI have no runtime dependencies. The

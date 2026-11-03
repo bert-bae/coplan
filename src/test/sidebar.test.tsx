@@ -336,7 +336,7 @@ test('a row shows the plan, its progress, and what Claude is on', async () => {
   assert.ok(row, 'the plan title names the row');
   assert.match(row.textContent ?? '', /now: Read-through wrapper/);
   assert.match(row.textContent ?? '', /2\/5 tasks/);
-  assert.match(row.textContent ?? '', /3 unread/);
+  assert.match(row.textContent ?? '', /unread/);
 });
 
 test('a session waiting on the user is lifted to the top, with a way into Claude', async () => {

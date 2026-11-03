@@ -160,7 +160,8 @@ test('without a link, the banner says where to answer and how to get one', async
 
 test('the header opens the session in Claude, and says when Claude is behind', async () => {
   await boot(makeSession(makePlan(true), { link: LINK }));
-  assert.match(document.querySelector('.handoff')?.textContent ?? '', /1 change Claude hasn't read/);
+  assert.match(document.querySelector('.handoff')?.textContent ?? '', /Claude hasn't read your changes/);
+  assert.match(document.querySelector('.handoff-state')?.getAttribute('title') ?? '', /You changed comments/);
   assert.equal(screen.getByText('Open in Claude').getAttribute('href'), LINK.app);
 });
 
@@ -238,6 +239,168 @@ test('a new diagram starts from a template', async () => {
   const op = opsSent()[0]!;
   assert.equal(op['op'], 'upsert_diagram');
   assert.equal((op['nodes'] as unknown[]).length, 3);
+});
+
+/** The last op sent for the diagram, and one of its nodes. */
+const lastGraph = () => {
+  const op = opsSent().filter((o) => o['op'] === 'upsert_diagram').at(-1)!;
+  return { nodes: op['nodes'] as Record<string, unknown>[], edges: op['edges'] as Record<string, unknown>[] };
+};
+
+test('short fields are inputs; the description is a textarea that saves when you leave it', async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('Postgres');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  assert.equal(within(panel).getByLabelText('Box label').tagName, 'INPUT');
+  assert.equal(within(panel).getByLabelText('Box detail').tagName, 'INPUT');
+  const area = within(panel).getByLabelText('Description of Postgres');
+  assert.equal(area.tagName, 'TEXTAREA', 'a paragraph gets room to be one');
+  await act(async () => {
+    fireEvent.change(area, { target: { value: 'Holds every order.\nThe system of record.' } });
+    fireEvent.blur(area);
+  });
+  const db = lastGraph().nodes.find((n) => n['id'] === 'db')!;
+  assert.equal(db['description'], 'Holds every order.\nThe system of record.');
+  assert.equal(db['notes'], 'Primary store.', 'the rest of the box is sent as it was');
+});
+
+test("hovering a box's info icon opens a summary of it", async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  // React Flow keeps boxes it has not measured hidden, and jsdom measures
+  // nothing, so the button is found by its name rather than its role.
+  const info = await waitFor(() => {
+    const el = document.querySelector<HTMLButtonElement>('button[aria-label="About Postgres"]');
+    assert.ok(el);
+    return el;
+  });
+  await act(async () => {
+    fireEvent.mouseEnter(info);
+  });
+  await waitFor(() => assert.ok(document.querySelector('.flow-summary')));
+  const text = document.querySelector('.flow-summary')!.textContent ?? '';
+  assert.match(text, /Datastore/);
+  assert.match(text, /No description yet/, 'and says how to add one');
+  assert.match(text, /Decisions\s*Primary store\./);
+  assert.match(text, /Built by 1\/2\s*Storage layer/, 'the tasks that build it, and how far along they are');
+  assert.match(text, /← API · SQL/, 'and what it talks to');
+  await act(async () => {
+    fireEvent.keyDown(info, { key: 'Escape' });
+  });
+  await waitFor(() => assert.equal(document.querySelector('.flow-summary'), null));
+});
+
+test('the kind is picked from the shapes themselves', async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('API');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  await act(async () => {
+    fireEvent.click(within(panel).getByRole('radio', { name: 'Queue' }));
+  });
+  assert.equal(lastGraph().nodes.find((n) => n['id'] === 'api')!['kind'], 'queue');
+});
+
+test('boxes copy to the clipboard and paste back with fresh ids and everything on them', async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('Postgres');
+  let clip = '';
+  await act(async () => {
+    fireEvent.copy(document.body, { clipboardData: { setData: (_: string, v: string) => (clip = v), getData: () => clip } });
+  });
+  assert.match(clip, /cc-harness\/diagram-selection/);
+  await act(async () => {
+    fireEvent.paste(document.body, { clipboardData: { getData: () => clip } });
+  });
+  const copy = lastGraph().nodes.find((n) => n['id'] === 'db-2');
+  assert.ok(copy, 'pasted under a new id');
+  assert.equal(copy['label'], 'Postgres');
+  assert.equal(copy['notes'], 'Primary store.');
+  assert.deepEqual(copy['taskIds'], ['storage']);
+  assert.equal(lastGraph().nodes.length, 3, 'the original stays');
+});
+
+test('pasting text that is not a selection is left alone', async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  const before = opsSent().length;
+  await act(async () => {
+    fireEvent.paste(document.body, { clipboardData: { getData: () => 'just some words' } });
+  });
+  assert.equal(opsSent().length, before);
+});
+
+test('double-clicking empty canvas adds a box and names it in place', async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__pane')));
+  await act(async () => {
+    fireEvent.doubleClick(document.querySelector('.react-flow__pane')!);
+  });
+  assert.ok(lastGraph().nodes.some((n) => n['id'] === 'n3' && n['label'] === 'New component'));
+  const input = await waitFor(() => {
+    const el = document.querySelector<HTMLInputElement>('.flow-node-input');
+    assert.ok(el);
+    return el;
+  });
+  await act(async () => {
+    fireEvent.change(input, { target: { value: 'Rate limiter' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+  });
+  assert.equal(lastGraph().nodes.find((n) => n['id'] === 'n3')!['label'], 'Rate limiter');
+});
+
+test("a connection's direction, arrowheads and label are edited in its panel", async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('API');
+  await act(async () => {
+    fireEvent.click(within(screen.getByRole('complementary', { name: 'Details' })).getByText(/→ Postgres/));
+  });
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  assert.ok(within(panel).getByLabelText('Arrow label'));
+  await act(async () => {
+    fireEvent.click(within(panel).getByRole('button', { name: 'Reverse direction' }));
+  });
+  assert.deepEqual(lastGraph().edges.map((e) => [e['source'], e['target']]), [['db', 'api']]);
+  await act(async () => {
+    fireEvent.click(within(panel).getByRole('radio', { name: '↔' }));
+  });
+  assert.equal(lastGraph().edges[0]!['arrows'], 'both');
+  await act(async () => {
+    fireEvent.click(within(panel).getByRole('radio', { name: 'Dashed' }));
+  });
+  assert.equal(lastGraph().edges[0]!['dashed'], true);
+});
+
+test('a box can be connected, and disconnected, from its panel', async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('Postgres');
+  let panel = screen.getByRole('complementary', { name: 'Details' });
+  await act(async () => {
+    fireEvent.change(within(panel).getByLabelText('Connect Postgres to'), { target: { value: 'api' } });
+  });
+  assert.ok(lastGraph().edges.some((e) => e['source'] === 'db' && e['target'] === 'api'));
+  panel = screen.getByRole('complementary', { name: 'Details' });
+  await act(async () => {
+    fireEvent.click(within(panel).getByRole('button', { name: 'Remove connection to API' }));
+  });
+  assert.deepEqual(lastGraph().edges.map((e) => [e['source'], e['target']]), [['api', 'db']], 'only the one asked for goes');
+});
+
+test('"Copy as Markdown" copies the diagram as Claude reads it', async () => {
+  let copied = '';
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (t: string) => void (copied = t) }, configurable: true });
+  await boot();
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Copy as Markdown' }));
+  });
+  await waitFor(() => assert.match(copied, /^### \[d1\] Components/));
+  assert.match(copied, /\*\*Postgres\*\* `db` — data store\n  Decisions:\n    Primary store\./);
+  assert.match(copied, /- API → Postgres: SQL `api → db`/);
+  assert.doesNotMatch(copied, /"x"|x: /);
 });
 
 /* ---------------------------------------------------------------- tasks */
