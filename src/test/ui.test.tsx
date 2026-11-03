@@ -1,958 +1,462 @@
-import { test, before, beforeEach, after } from 'node:test';
+import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, stubFetch } from './dom-env.ts';
-import type { DiffPayload, SessionState } from '../shared/types.ts';
+import type { Plan, PlanInput, SessionState } from '../shared/types.ts';
 
 /**
- * The React UI against jsdom.
- *
- * These cover the behaviours the review found broken in the vanilla version:
- * comments surviving a live update, being visible and removable before they
- * are sent, and the message box no longer resolving a gate behind the user's
- * back.
+ * The planning workspace in a browser: every edit becomes an op sent to the
+ * daemon, and nothing on the page talks to Claude or answers it — questions
+ * are shown, and linked back to the session.
  */
 
 setupDom();
 
-// Imported after the DOM exists — React reads globals at module load.
-const { render, screen, fireEvent, within, cleanup, act } = await import('@testing-library/react');
+const { render, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
 const { store } = await import('../ui/store.ts');
+const { publishPlan, applyOps } = await import('../shared/plan.ts');
 
-const DIFF: DiffPayload = {
-  baseRef: 'abc1234567890abc1234567890abc1234567890a',
-  headRef: 'def',
-  branch: 'feature/x',
-  generatedAt: Date.now(),
-  additions: 3,
-  deletions: 1,
-  includesWorkingTree: true,
-  round: 1,
-  files: [
+const INPUT: PlanInput = {
+  title: 'Add a cache',
+  summary: 'Put a cache in front of the database.',
+  sections: [{ title: 'Context', body: 'Reads are **slow**.' }],
+  tasks: [
+    { id: 'storage', title: 'Storage layer', subtasks: [{ title: 'Cache client', status: 'done' }, { title: 'Invalidation' }] },
+    { title: 'Wire into API', status: 'in_progress' },
+  ],
+  diagrams: [
     {
-      path: 'src/app.ts',
-      status: 'modified',
-      additions: 2,
-      deletions: 1,
-      binary: false,
-      hunks: [
-        {
-          header: '',
-          oldStart: 1,
-          oldCount: 3,
-          newStart: 1,
-          newCount: 4,
-          lines: [
-            { kind: 'context', oldLine: 1, newLine: 1, text: 'export function add() {' },
-            { kind: 'del', oldLine: 2, newLine: null, text: '  return 0;' },
-            { kind: 'add', oldLine: null, newLine: 2, text: '  return 1;' },
-            { kind: 'add', oldLine: null, newLine: 3, text: '  // note' },
-            { kind: 'context', oldLine: 3, newLine: 4, text: '}' },
-          ],
-        },
+      title: 'Components',
+      nodes: [
+        { id: 'api', label: 'API', kind: 'service' },
+        { id: 'db', label: 'Postgres', kind: 'datastore', taskIds: ['storage'], notes: 'Primary store.' },
       ],
+      edges: [{ source: 'api', target: 'db', label: 'SQL' }],
     },
-    { path: 'docs/logo.png', status: 'added', additions: 0, deletions: 0, binary: true },
   ],
 };
 
-function makeSession(overrides: Partial<SessionState> = {}): SessionState {
+function makePlan(unread = false): Plan {
+  const plan = publishPlan(null, INPUT, Date.now()).plan;
+  return unread ? applyOps(plan, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'hm' }], 'user').plan : plan;
+}
+
+function makeSession(plan: Plan | null = makePlan(), extra: Partial<SessionState> = {}): SessionState {
+  const now = Date.now();
   return {
     sessionId: 's1',
     cwd: '/repo',
     repoRoot: '/repo',
-    branch: 'feature/x',
-    transcriptPath: null,
-    title: 'demo',
-    stage: 'code_review',
-    status: 'waiting',
-    createdAt: Date.now() - 60_000,
-    updatedAt: Date.now(),
-    baseRef: 'abc',
-    startCommit: 'abc',
-    reviewRound: 1,
-    roundHistory: [],
-    tasks: [],
-    plan: {
-      title: 'Add subtract',
-      summary: 'Mirror add().',
-      steps: [
-        { id: 's1', title: 'Write subtract' },
-        { id: 's2', title: 'Add a test' },
-      ],
-      revision: 1,
-      updatedAt: Date.now(),
-    },
-    todos: [
-      { content: 'Write subtract', status: 'completed' },
-      { content: 'Add a test', status: 'in_progress' },
-    ],
-    files: [{ path: 'src/app.ts', edits: 2, firstTouchedAt: Date.now(), lastTouchedAt: Date.now(), tools: ['Edit'] }],
-    commands: [],
-    timeline: [{ id: 'e1', ts: Date.now(), kind: 'assistant', text: 'Working on **subtract** now.' }],
-    gates: [
-      {
-        id: 'g1',
-        kind: 'code_review',
-        stage: 'code_review',
-        prompt: 'Review the code changes',
-        createdAt: Date.now() - 90_000,
-        status: 'open',
-        waiting: true,
-      },
-    ],
-    activeGateId: 'g1',
-    threads: [],
-    checks: [],
-    ship: null,
-    pendingFeedback: [],
-    stats: { turns: 3, toolCalls: 9, edits: 2 },
-    ...overrides,
+    branch: 'main',
+    title: 'repo',
+    status: 'idle',
+    waiting: null,
+    surface: 'unknown',
+    link: null,
+    createdAt: now,
+    updatedAt: now,
+    plan,
+    ...extra,
   };
 }
 
-let posts: { route: string; body: Record<string, unknown> }[];
-let session: SessionState;
+const LINK = { app: 'claude://claude.ai/code/session_1', web: 'https://claude.ai/code/session_1', via: 'cloud' as const };
 
-function mount(state: SessionState = makeSession()) {
-  session = state;
+let posts: { route: string; body: Record<string, unknown> }[];
+
+async function boot(session: SessionState = makeSession()): Promise<void> {
   ({ posts } = stubFetch((route) => {
-    if (route.startsWith('/api/sessions')) {
-      return {
-        sessions: [
-          {
-            sessionId: 's1',
-            title: 'demo',
-            cwd: '/repo',
-            repoName: 'repo',
-            repoRoot: '/repo',
-            branch: 'feature/x',
-            stage: session.stage,
-            status: session.status,
-            updatedAt: Date.now(),
-            openGates: session.gates.filter((g) => g.status === 'open').length,
-            pendingFeedback: session.pendingFeedback.length,
-            tasks: { total: 0, done: 0, blocked: 0 },
-          },
-        ],
-        version: 'test',
-      };
-    }
-    if (route.startsWith('/api/session/s1/diff')) return { diff: DIFF };
-    if (route.startsWith('/api/session/s1/ship')) {
-      return {
-        ship: {
-          title: 'Add subtract',
-          body: 'body',
-          commitMessage: 'Add subtract',
-          branch: 'feature/x',
-          baseBranch: 'main',
-          steps: ['commit', 'push', 'pr'],
-          provider: 'gh',
-        },
-        providers: [{ id: 'gh', kind: 'command', label: 'GitHub' }],
-      };
-    }
-    if (route.startsWith('/api/session/s1')) return { session, diff: DIFF };
+    if (route.startsWith('/api/sessions')) return { sessions: [], version: 'test' };
+    if (route.endsWith('/plan/ops')) return { plan: store.getState().session?.plan, changes: [] };
+    if (route.endsWith('/plan/text')) return '# Add a cache\n\nas Claude reads it';
+    if (route.startsWith('/api/session/')) return { session };
     return { ok: true };
   }));
-  return render(<App />);
-}
-
-async function boot(state?: SessionState) {
-  mount(state);
+  render(<App />);
   await act(async () => {
     await store.init();
   });
 }
 
-/**
- * The message box is on the Conversation tab and nowhere else: every other
- * tab advances through its own gate, and a box there could only ever queue
- * text behind that gate while looking like the way to answer it.
- */
-function openConversation() {
-  act(() => store.setTab('timeline'));
-}
+const opsSent = () => posts.filter((p) => p.route.endsWith('/plan/ops')).flatMap((p) => p.body['ops'] as Record<string, unknown>[]);
+
+const openTab = async (name: string) => {
+  await act(async () => {
+    fireEvent.click(screen.getByRole('tab', { name: new RegExp(`^${name}`) }));
+  });
+};
 
 beforeEach(() => {
+  cleanup();
   window.localStorage.clear();
-  store.set({ drafts: {}, toasts: [], session: null, diff: null, sessionId: null, selectedFile: null });
+  store.set({
+    sessions: [],
+    sessionId: null,
+    session: null,
+    tab: 'diagrams',
+    diagramId: null,
+    taskMode: 'outline',
+    hideDone: false,
+    collapsedTasks: [],
+    collapsedSidebar: false,
+    toasts: [],
+    focusTarget: null,
+  });
 });
 
 after(() => cleanup());
 
 /* ------------------------------------------------------------------ */
 
-test('the shell renders the session and lands on the tab the gate needs', async () => {
+test('three views, architecture first, and no way to answer Claude here', async () => {
   await boot();
-  assert.equal(document.querySelector('.head-title')?.textContent, 'demo');
-  // The rail names the session; the project it belongs to is the group header.
-  assert.equal(document.querySelector('.session-row .session-name')?.textContent, 'demo');
-  // This session is parked on a code-review gate, so it is lifted out of its
-  // project group. Grouping by project is covered in sidebar.test.tsx.
-  assert.equal(document.querySelector('.session-group-name')?.textContent, 'Pinned / Action required');
-  assert.equal(store.getState().tab, 'review', 'a code-review gate opens the Review tab');
-  cleanup();
+  const tabs = screen.getAllByRole('tab').map((t) => t.textContent?.replace(/\d.*$/, ''));
+  assert.deepEqual(tabs, ['Architecture', 'Tasks', 'Overview']);
+  assert.equal(screen.getByRole('tab', { selected: true }).textContent?.startsWith('Architecture'), true);
+  assert.equal(screen.queryByText(/questions/i), null);
+  assert.equal(screen.queryByText(/activity/i), null);
 });
 
-test('a parked gate says the terminal is blocked, and counts up', async () => {
-  await boot();
-  const banner = document.querySelector('.gate-banner.is-blocking');
-  assert.ok(banner, 'a parked gate renders as blocking');
-  assert.match(banner!.textContent ?? '', /waiting on your review of the code/i);
-  assert.match(banner!.textContent ?? '', /parked and will not continue/i);
-  cleanup();
-});
-
-test('an open gate with nothing parked does not claim to be blocking', async () => {
-  const state = makeSession();
-  state.gates[0]!.waiting = false;
-  state.status = 'idle';
-  await boot(state);
-  assert.ok(!document.querySelector('.gate-banner.is-blocking'));
-  assert.match(document.querySelector('.gate-banner')!.textContent ?? '', /gone idle/i);
-  cleanup();
-});
-
-test('the diff lists every file at once rather than one at a time', async () => {
-  await boot();
-  assert.equal(document.querySelectorAll('.dfile').length, 2, 'both files render in one scroll');
-  assert.equal(document.querySelectorAll('.file-row').length, 2);
-  assert.match(document.body.textContent ?? '', /Binary file/);
-  cleanup();
-});
-
-test('a line comment is written, listed with its line, and kept', async () => {
-  await boot();
-  const addedLine = document.querySelectorAll('.drow.is-add')[0]!;
-  fireEvent.click(addedLine);
-
-  const composer = document.querySelector('.dcomposer')!;
-  assert.ok(composer, 'clicking a line opens a composer');
-  assert.match(composer.textContent ?? '', /src\/app\.ts:2/);
-
-  fireEvent.change(composer.querySelector('textarea')!, { target: { value: 'Guard against NaN.' } });
-  fireEvent.click(within(composer as HTMLElement).getByText('Add to review'));
-
-  // Listed in the pending panel, with its file and line.
-  const pending = document.querySelector('.pending')!;
-  assert.match(pending.textContent ?? '', /src\/app\.ts/);
-  assert.match(pending.textContent ?? '', /L2/);
-  assert.match(pending.textContent ?? '', /Guard against NaN/);
-
-  // And inline, marked as not yet sent.
-  const thread = document.querySelector('.dthread.is-draft')!;
-  assert.match(thread.textContent ?? '', /Not sent yet/);
-  cleanup();
-});
-
-test('a draft survives a live session update', async () => {
-  await boot();
-  fireEvent.click(document.querySelectorAll('.drow.is-add')[0]!);
-  fireEvent.change(document.querySelector('.dcomposer textarea')!, { target: { value: 'keep me' } });
-  fireEvent.click(screen.getByText('Add to review'));
-
-  // The daemon pushes a snapshot, which used to wipe everything in progress.
-  act(() => {
-    store.set({ session: { ...session, updatedAt: Date.now(), stats: { turns: 4, toolCalls: 10, edits: 3 } } });
-  });
-
-  assert.match(document.querySelector('.pending')!.textContent ?? '', /keep me/);
-  cleanup();
-});
-
-test('a draft is restored after a reload', async () => {
-  await boot();
-  fireEvent.click(document.querySelectorAll('.drow.is-add')[0]!);
-  fireEvent.change(document.querySelector('.dcomposer textarea')!, { target: { value: 'persist me' } });
-  fireEvent.click(screen.getByText('Add to review'));
-  cleanup();
-
-  const raw = window.localStorage.getItem('cc-harness:drafts');
-  assert.ok(raw && raw.includes('persist me'), 'drafts are persisted, not held only in memory');
-});
-
-test('a draft can be removed before it is sent', async () => {
-  await boot();
-  fireEvent.click(document.querySelectorAll('.drow.is-add')[0]!);
-  fireEvent.change(document.querySelector('.dcomposer textarea')!, { target: { value: 'delete me' } });
-  fireEvent.click(screen.getByText('Add to review'));
-  assert.equal(store.drafts().length, 1);
-
-  fireEvent.click(document.querySelector('.pending-item .icon-btn')!);
-  assert.equal(store.drafts().length, 0);
-  assert.doesNotMatch(document.querySelector('.pending')!.textContent ?? '', /delete me/);
-  cleanup();
-});
-
-test('submitting the review resolves the gate with every comment attached', async () => {
-  await boot();
-  fireEvent.click(document.querySelectorAll('.drow.is-add')[0]!);
-  fireEvent.change(document.querySelector('.dcomposer textarea')!, { target: { value: 'fix this' } });
-  fireEvent.click(screen.getByText('Add to review'));
-
-  posts.length = 0;
+test('with no plan yet, the page says how to get one', async () => {
+  await boot(makeSession(null));
+  assert.ok(screen.getByText('No plan yet'));
   await act(async () => {
-    fireEvent.click(screen.getByText('Request changes'));
+    fireEvent.click(screen.getByText('Start a plan by hand'));
   });
-
-  const call = posts.find((p) => p.route.includes('/gate/'));
-  assert.ok(call, 'the gate is resolved, not queued as loose feedback');
-  assert.equal(call!.body['verdict'], 'changes_requested');
-  const threads = call!.body['threads'] as { file: string; startLine: number; body: string }[];
-  assert.equal(threads.length, 1);
-  assert.equal(threads[0]!.file, 'src/app.ts');
-  assert.equal(threads[0]!.startLine, 2);
-  assert.equal(store.drafts().length, 0, 'drafts are cleared once sent');
-  cleanup();
+  assert.equal(opsSent()[0]!['op'], 'set_meta');
 });
 
-test('approving with unsent comments asks first', async () => {
-  await boot();
-  fireEvent.click(document.querySelectorAll('.drow.is-add')[0]!);
-  fireEvent.change(document.querySelector('.dcomposer textarea')!, { target: { value: 'hmm' } });
-  fireEvent.click(screen.getByText('Add to review'));
+/* ------------------------------------------------------- back to Claude */
 
-  posts.length = 0;
-  fireEvent.click(screen.getByText('Approve'));
-  assert.equal(posts.length, 0, 'nothing is sent until the user confirms');
-  assert.match(document.querySelector('.pending-confirm')!.textContent ?? '', /Approve with 1 unsent comment/);
-  cleanup();
-});
-
-test('the message box never resolves a gate', async () => {
-  await boot();
-  openConversation();
-  posts.length = 0;
-  const input = document.querySelector('.composer-input')!;
-  fireEvent.change(input, { target: { value: 'looks good, go ahead' } });
-  await act(async () => {
-    fireEvent.click(within(document.querySelector('.composer') as HTMLElement).getByText('Queue message'));
-  });
-
-  assert.equal(posts.length, 1);
-  assert.match(posts[0]!.route, /\/feedback$/, 'it queues a message rather than voting on the gate');
-  assert.doesNotMatch(posts[0]!.route, /\/gate\//);
-  assert.ok(!posts[0]!.body['interrupt'], 'the default send never touches the gate');
-  cleanup();
-});
-
-test('"send now" skips the gate instead of queueing behind it', async () => {
-  await boot();
-  openConversation();
-  posts.length = 0;
-  fireEvent.change(document.querySelector('.composer-input')!, {
-    target: { value: 'stop — do the other thing first' },
-  });
-  const composer = document.querySelector('.composer') as HTMLElement;
-  await act(async () => {
-    fireEvent.click(within(composer).getByRole('button', { name: 'Send now' }));
-  });
-
-  assert.equal(posts.length, 1);
-  assert.match(posts[0]!.route, /\/feedback$/);
-  assert.equal(posts[0]!.body['interrupt'], true, 'the daemon is told to drop the gate and deliver now');
-  cleanup();
-});
-
-test('"send now" is only offered when there is a gate to skip', async () => {
-  const state = makeSession({ status: 'active' });
-  state.gates = [];
-  state.activeGateId = null;
-  await boot(state);
-  openConversation();
-  const composer = within(document.querySelector('.composer') as HTMLElement);
-  assert.equal(composer.queryByRole('button', { name: 'Send now' }), null);
-  assert.ok(composer.getByText('Send message'), 'the plain send keeps its name when nothing is in the way');
-  cleanup();
-});
-
-test('the message box explains that it does not answer the open gate', async () => {
-  await boot();
-  openConversation();
-  const notice = document.querySelector('.composer-notice')!;
-  assert.match(notice.textContent ?? '', /does not answer it/i);
-  cleanup();
-});
-
-test('unsent comments are called out next to the message box', async () => {
-  await boot();
-  fireEvent.click(document.querySelectorAll('.drow.is-add')[0]!);
-  fireEvent.change(document.querySelector('.dcomposer textarea')!, { target: { value: 'x' } });
-  fireEvent.click(screen.getByText('Add to review'));
-  openConversation();
-  assert.match(document.querySelector('.composer-warn')!.textContent ?? '', /does not include them/i);
-  cleanup();
-});
-
-test('plan steps reorder and keep the note the user typed', async () => {
-  const state = makeSession({ stage: 'plan_review' });
-  state.gates[0] = { ...state.gates[0]!, kind: 'plan', prompt: 'Review the plan' };
-  await boot(state);
-  act(() => store.setTab('plan'));
-
-  const note = document.querySelector('.plan-side textarea')!;
-  fireEvent.change(note, { target: { value: 'reorder first' } });
-
-  const steps = () => [...document.querySelectorAll('.step-title')].map((n) => (n as HTMLInputElement).value);
-  assert.deepEqual(steps(), ['Write subtract', 'Add a test']);
-
-  fireEvent.click(document.querySelectorAll('.plan-step')[1]!.querySelector('[title="Move up"]')!);
-  assert.deepEqual(steps(), ['Add a test', 'Write subtract'], 'the order changed');
-  assert.equal(
-    (document.querySelector('.plan-side textarea') as HTMLTextAreaElement).value,
-    'reorder first',
-    'reordering does not wipe the note',
+test('when Claude asks something, the page shows it and links to the session', async () => {
+  await boot(
+    makeSession(makePlan(), {
+      link: LINK,
+      waiting: {
+        kind: 'question',
+        text: 'Which TTL?',
+        questions: [{ header: 'TTL', question: 'Which TTL?', options: ['1 minute', '10 minutes'] }],
+        since: Date.now(),
+      },
+    }),
   );
-  cleanup();
+  const banner = screen.getByRole('status', { name: 'Claude is waiting on you' });
+  assert.match(banner.textContent ?? '', /Claude is asking you/);
+  assert.match(banner.textContent ?? '', /Which TTL\?/);
+  assert.match(banner.textContent ?? '', /1 minute · 10 minutes/);
+  assert.equal(within(banner).getByText('Answer in Claude').getAttribute('href'), LINK.app, 'opens the desktop app');
+  assert.equal(within(banner).getByText('web').getAttribute('href'), LINK.web);
+  assert.equal(banner.querySelector('input, textarea, select'), null, 'nothing to answer with here');
+  assert.match(document.title, /Claude is waiting/);
 });
 
-test('a republished plan does not silently overwrite edits in progress', async () => {
-  const state = makeSession({ stage: 'plan_review' });
-  state.gates[0] = { ...state.gates[0]!, kind: 'plan', prompt: 'Review the plan' };
-  await boot(state);
-  act(() => store.setTab('plan'));
-
-  fireEvent.change(document.querySelectorAll('.step-title')[0]!, { target: { value: 'MY EDIT' } });
-
-  act(() => {
-    store.set({
-      session: {
-        ...session,
-        plan: { ...session.plan!, revision: 2, steps: [{ id: 's1', title: 'Claude rewrote it' }] },
-      },
-    });
-  });
-
-  const titles = [...document.querySelectorAll('.step-title')].map((n) => (n as HTMLInputElement).value);
-  assert.ok(titles.includes('MY EDIT'), 'the edit survives');
-  assert.match(document.querySelector('.plan-incoming')!.textContent ?? '', /published revision 2/);
-  cleanup();
+test('without a link, the banner says where to answer and how to get one', async () => {
+  await boot(makeSession(makePlan(), { surface: 'cli', waiting: { kind: 'permission', text: 'Allow Bash?', since: Date.now() } }));
+  const banner = screen.getByRole('status', { name: 'Claude is waiting on you' });
+  assert.match(banner.textContent ?? '', /in your terminal/);
+  assert.match(banner.textContent ?? '', /\/remote-control/);
+  assert.ok(within(banner).getByText('Copy message for Claude'));
 });
 
-test('ship requires an explicit confirmation naming the branches', async () => {
-  const state = makeSession({ stage: 'ship' });
-  state.gates[0] = { ...state.gates[0]!, kind: 'ship', prompt: 'Confirm the ship' };
-  await boot(state);
+test('the header opens the session in Claude, and says when Claude is behind', async () => {
+  await boot(makeSession(makePlan(true), { link: LINK }));
+  assert.match(document.querySelector('.handoff')?.textContent ?? '', /1 change Claude hasn't read/);
+  assert.equal(screen.getByText('Open in Claude').getAttribute('href'), LINK.app);
+});
+
+test('"As Claude sees it" shows the text harness_plan_read returns', async () => {
+  await boot();
   await act(async () => {
-    store.setTab('ship');
+    fireEvent.click(screen.getByText('As Claude sees it'));
   });
-
-  posts.length = 0;
-  fireEvent.click(screen.getByText('Ship…'));
-  assert.equal(posts.length, 0, 'the first click only asks');
-  const confirm = document.querySelector('.ship-confirm')!;
-  assert.match(confirm.textContent ?? '', /feature\/x/);
-  assert.match(confirm.textContent ?? '', /main/);
-  cleanup();
+  await waitFor(() => assert.match(document.querySelector('.claude-text')?.textContent ?? '', /as Claude reads it/));
 });
 
-test('ship refuses when the session is on the default branch', async () => {
-  const state = makeSession({ stage: 'ship', branch: 'main' });
-  state.gates[0] = { ...state.gates[0]!, kind: 'ship', prompt: 'Confirm the ship' };
-  ({ posts } = stubFetch((route) => {
-    if (route.startsWith('/api/sessions')) return { sessions: [], version: 'test' };
-    if (route.startsWith('/api/session/s1/ship')) {
-      return {
-        ship: {
-          title: 't',
-          body: 'b',
-          commitMessage: 'c',
-          branch: 'main',
-          baseBranch: 'main',
-          steps: ['commit', 'push'],
-          provider: 'gh',
-        },
-        providers: [{ id: 'gh', kind: 'command', label: 'GitHub' }],
-      };
-    }
-    if (route.startsWith('/api/session/s1')) return { session: state, diff: DIFF };
+/* --------------------------------------------------------- architecture */
+
+test('the diagram fills the view, with the diagram itself in the panel', async () => {
+  await boot();
+  assert.ok(document.querySelector('.arch-body .flow .react-flow'), 'the canvas');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  assert.match(panel.textContent ?? '', /Diagram/);
+  assert.match(panel.textContent ?? '', /2 boxes, 1 arrows, 1 tracking tasks/);
+  await waitFor(() => {
+    const labels = [...document.querySelectorAll('.flow-node-label')].map((n) => n.textContent);
+    assert.deepEqual(labels.sort(), ['API', 'Postgres']);
+  });
+});
+
+test('a box shows the progress of the tasks that build it', async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.flow-node.kind-datastore .flow-node-progress')));
+  assert.match(document.querySelector('.flow-node.kind-datastore .flow-node-progress')?.textContent ?? '', /1\/2/);
+});
+
+const selectBox = async (label: string) => {
+  const node = [...document.querySelectorAll('.react-flow__node')].find((n) => n.textContent?.includes(label)) as HTMLElement;
+  await act(async () => {
+    fireEvent.click(node);
+  });
+};
+
+test('selecting a box opens its details in the side panel', async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('Postgres');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  await waitFor(() => assert.ok(within(panel).getByLabelText('Box label')));
+  assert.equal((within(panel).getByLabelText('Box label') as HTMLInputElement).value, 'Postgres');
+  assert.match(panel.textContent ?? '', /Primary store\./);
+  assert.match(panel.textContent ?? '', /Built by/);
+  assert.match(panel.textContent ?? '', /Storage layer/);
+  assert.match(panel.textContent ?? '', /← API/);
+});
+
+test('editing a box in the panel saves the graph', async () => {
+  await boot();
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('API');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  await waitFor(() => assert.ok(within(panel).getByLabelText('Link a task to API')));
+  await act(async () => {
+    fireEvent.change(within(panel).getByLabelText('Link a task to API'), { target: { value: 't3' } });
+  });
+  const op = opsSent().at(-1)!;
+  assert.equal(op['op'], 'upsert_diagram');
+  const api = (op['nodes'] as { id: string; taskIds?: string[] }[]).find((n) => n.id === 'api')!;
+  assert.deepEqual(api.taskIds, ['t3']);
+});
+
+test('a new diagram starts from a template', async () => {
+  await boot();
+  await act(async () => {
+    fireEvent.click(screen.getByText('+ New diagram'));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Components' }));
+  });
+  const op = opsSent()[0]!;
+  assert.equal(op['op'], 'upsert_diagram');
+  assert.equal((op['nodes'] as unknown[]).length, 3);
+});
+
+/* ---------------------------------------------------------------- tasks */
+
+test('the outline shows the breakdown, and which part each task builds', async () => {
+  await boot();
+  await openTab('Tasks');
+  const rows = [...document.querySelectorAll('.task-line')].map((r) => r.querySelector('.task-num')?.textContent + ' ' + r.querySelector('.task-title')?.textContent);
+  assert.deepEqual(rows, ['1 Storage layer', '1.1 Cache client', '1.2 Invalidation', '2 Wire into API']);
+  const part = screen.getByTitle(/Builds "Postgres"/);
+  await act(async () => {
+    fireEvent.click(part);
+  });
+  assert.equal(store.getState().tab, 'diagrams', 'the part opens on the canvas');
+});
+
+test('clicking a status dot moves the task along', async () => {
+  await boot();
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText(/^Invalidation: To do/));
+  });
+  assert.deepEqual(opsSent()[0], { op: 'upsert_task', id: 't2', status: 'in_progress' });
+});
+
+test('Alt+arrows reorganize the tree from the keyboard', async () => {
+  await boot();
+  await openTab('Tasks');
+  const row = screen.getByRole('treeitem', { name: /^2 Wire into API/ });
+  await act(async () => {
+    fireEvent.keyDown(row, { key: 'ArrowRight', altKey: true });
+  });
+  assert.deepEqual(opsSent()[0], { op: 'move_task', id: 't3', parentId: 'storage', index: Number.MAX_SAFE_INTEGER });
+
+  const child = screen.getByRole('treeitem', { name: /^1\.2 Invalidation/ });
+  await act(async () => {
+    fireEvent.keyDown(child, { key: 'ArrowLeft', altKey: true });
+  });
+  assert.deepEqual(opsSent()[1], { op: 'move_task', id: 't2', parentId: null, index: 1 });
+});
+
+test('a subtask is added under its parent', async () => {
+  await boot();
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Add a subtask to Wire into API'));
+  });
+  const input = screen.getByLabelText('New subtask of Wire into API');
+  await act(async () => {
+    fireEvent.change(input, { target: { value: 'Feature flag' } });
+  });
+  await act(async () => {
+    fireEvent.submit(input.closest('form')!);
+  });
+  assert.deepEqual(opsSent()[0], { op: 'upsert_task', parentId: 't3', title: 'Feature flag' });
+});
+
+test('the board puts each leaf task in its status column', async () => {
+  await boot();
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByText('Board'));
+  });
+  const todo = screen.getByRole('region', { name: 'To do' });
+  assert.deepEqual([...todo.querySelectorAll('.board-title')].map((t) => t.textContent), ['Invalidation']);
+  const doing = screen.getByRole('region', { name: 'In progress' });
+  assert.deepEqual([...doing.querySelectorAll('.board-title')].map((t) => t.textContent), ['Wire into API']);
+});
+
+/* ------------------------------------------------------------- overview */
+
+test('the overview says what Claude is on', async () => {
+  await boot();
+  await openTab('Overview');
+  const tiles = screen.getByRole('list', { name: 'Plan at a glance' });
+  assert.match(tiles.textContent ?? '', /Claude is on\s*Wire into API/);
+  assert.match(tiles.textContent ?? '', /1\/3/);
+});
+
+test('a section is edited in place and saved as an op', async () => {
+  await boot();
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+  });
+  const area = screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
+  await act(async () => {
+    fireEvent.change(area, { target: { value: 'Reads take 400ms.' } });
+  });
+  await act(async () => {
+    fireEvent.keyDown(area, { key: 'Enter', ctrlKey: true });
+  });
+  assert.deepEqual(opsSent()[0], { op: 'upsert_section', id: 's1', body: 'Reads take 400ms.', expect: 1 }, 'made against the revision edited');
+});
+
+test('a refused save keeps the editor open with the text intact', async () => {
+  await boot();
+  await openTab('Overview');
+  // The daemon refuses: the section moved on underneath.
+  stubFetch((route) => {
+    if (route.endsWith('/plan/ops')) return { __status: 400, error: 'Section "Context" was changed by Claude while this edit was open, so it was not saved.' };
     return { ok: true };
-  }));
-  session = state;
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+  });
+  const area = screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
+  await act(async () => {
+    fireEvent.change(area, { target: { value: 'My careful rewrite.' } });
+  });
+  await act(async () => {
+    fireEvent.keyDown(area, { key: 'Enter', ctrlKey: true });
+  });
+  const still = screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
+  assert.equal(still.value, 'My careful rewrite.', 'nothing typed is lost');
+  assert.ok(store.getState().toasts.some((t) => /changed by Claude/.test(t.text)), 'and the reason is shown');
+});
+
+test('a view that throws takes only itself down', async () => {
+  const broken = makePlan();
+  // A shape only the canvas reads, and does not expect: arrows not a list.
+  (broken.diagrams[0] as unknown as Record<string, unknown>)['edges'] = null;
+  const quiet = console.error;
+  console.error = () => {};
+  await boot(makeSession(broken));
+  console.error = quiet;
+  assert.ok(screen.getByRole('alert'));
+  assert.match(screen.getByRole('alert').textContent ?? '', /could not be shown/);
+  assert.ok(screen.getAllByRole('tab').length === 3, 'the rest of the page still works');
+  await openTab('Tasks');
+  assert.ok(document.querySelector('.task-line'), 'and the other views render');
+});
+
+test('while a session loads, the page says so instead of "no session"', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  stubFetch((route) => {
+    if (route.startsWith('/api/sessions')) return { sessions: [], version: 'test' };
+    return { ok: true };
+  });
+  const original = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', {
+    value: async (input: unknown, init?: RequestInit) => {
+      if (String(input).startsWith('/api/session/')) await gate;
+      return original(input as string, init);
+    },
+    configurable: true,
+    writable: true,
+  });
   render(<App />);
   await act(async () => {
-    await store.selectSession('s1', false);
+    void store.init();
+    await new Promise((r) => setTimeout(r, 10));
   });
-  await act(async () => {
-    store.setTab('ship');
-  });
-
-  assert.match(document.querySelector('.warn-side, .ship-side')!.textContent ?? '', /default branch/i);
-  assert.ok((screen.getByText('Ship…') as HTMLButtonElement).disabled, 'shipping is blocked');
-  cleanup();
+  assert.ok(screen.getByText('Loading the plan…'));
+  assert.equal(screen.queryByText('No session yet'), null);
+  release();
 });
 
-test('the board shows where the agent is, per column', async () => {
-  const now = Date.now();
-  const state = makeSession({
-    stage: 'implementing',
-    tasks: [
-      { id: 't1', title: 'Add the helper', status: 'done', order: 0, createdAt: now, updatedAt: now,
-        notes: [{ id: 'n1', ts: now, kind: 'change', text: 'Added calculateTax in cart.js' }],
-        files: ['cart.js'], decisions: [] },
-      { id: 't2', title: 'Wire it into total()', status: 'in_progress', order: 1, createdAt: now,
-        updatedAt: now, startedAt: now - 90_000, notes: [], files: ['cart.js'], decisions: [] },
-      { id: 't3', title: 'Round the result', status: 'blocked', order: 2, createdAt: now, updatedAt: now,
-        blockedBy: 'q1', blockedReason: 'Round to cents or keep full precision?',
-        notes: [], files: [], decisions: [] },
-      { id: 't4', title: 'Add a test', status: 'todo', order: 3, createdAt: now, updatedAt: now,
-        notes: [], files: [], decisions: [] },
-    ],
-  });
-  state.gates = [];
-  state.activeGateId = null;
-  await boot(state);
-  act(() => store.setTab('board'));
-
-  assert.equal(document.querySelectorAll('.board-column').length, 4);
-  assert.equal(document.querySelectorAll('.board-card').length, 4);
-  assert.equal(document.querySelectorAll('.board-card.is-in_progress').length, 1);
-
-  const blocked = document.querySelector('.board-card.is-blocked')!;
-  assert.match(blocked.textContent ?? '', /Round to cents/, 'the question is visible on the card');
-  cleanup();
-});
-
-test('a task card exposes the files and decisions behind it', async () => {
-  const now = Date.now();
-  const state = makeSession({
-    stage: 'implementing',
-    tasks: [
-      {
-        id: 't1',
-        title: 'Add the helper',
-        status: 'done',
-        order: 0,
-        createdAt: now,
-        updatedAt: now,
-        notes: [{ id: 'n1', ts: now, kind: 'change', text: 'Added calculateTax in cart.js' }],
-        files: ['cart.js', 'cart.test.js'],
-        decisions: [{ id: 'd1', ts: now, question: 'Round to cents?', answer: 'Yes, banker’s rounding' }],
-      },
-    ],
-  });
-  state.gates = [];
-  await boot(state);
-  act(() => store.setTab('board'));
-
-  fireEvent.click(screen.getByText('details'));
-  const body = document.querySelector('.board-card-body')!;
-  assert.match(body.textContent ?? '', /cart\.test\.js/);
-  assert.match(body.textContent ?? '', /banker/);
-  assert.match(body.textContent ?? '', /Added calculateTax/);
-  cleanup();
-});
-
-test('moving a card tells Claude', async () => {
-  const now = Date.now();
-  const state = makeSession({
-    stage: 'implementing',
-    tasks: [
-      { id: 't1', title: 'Redo this', status: 'done', order: 0, createdAt: now, updatedAt: now,
-        notes: [], files: [], decisions: [] },
-    ],
-  });
-  state.gates = [];
-  await boot(state);
-  act(() => store.setTab('board'));
-
-  posts.length = 0;
-  await act(async () => {
-    await store.getState().session && (await import('../ui/lib/api.ts')).api.updateTask('s1', 't1', {
-      status: 'todo',
-    });
-  });
-  assert.match(posts[0]!.route, /\/tasks\/t1$/);
-  assert.equal(posts[0]!.body['status'], 'todo');
-  cleanup();
-});
-
-test('a second round offers a changed-only filter', async () => {
-  const state = makeSession();
-  ({ posts } = stubFetch((route) => {
-    const round2: typeof DIFF = {
-      ...DIFF,
-      round: 2,
-      previousRound: 1,
-      changedSinceLastReview: ['src/app.ts'],
-      files: [
-        { ...DIFF.files[0]!, changedSinceLastReview: true },
-        { ...DIFF.files[1]!, changedSinceLastReview: false },
-      ],
-    };
-    if (route.startsWith('/api/sessions')) return { sessions: [], version: 'test' };
-    if (route.startsWith('/api/session/s1/diff')) return { diff: round2 };
-    if (route.startsWith('/api/session/s1')) return { session: state, diff: round2 };
-    return { ok: true };
-  }));
-  session = state;
+test('a page without the harness key says how to open it properly', async () => {
+  stubFetch(() => ({ __status: 401, error: 'unauthorized' }));
   render(<App />);
   await act(async () => {
-    await store.selectSession('s1', false);
+    await store.init();
   });
-
-  assert.match(document.querySelector('.review-bar')!.textContent ?? '', /round 2/);
-  const toggle = screen.getByText(/Changed since round 1/);
-  assert.equal(document.querySelectorAll('.dfile').length, 2);
-
-  fireEvent.click(toggle);
-  assert.equal(document.querySelectorAll('.dfile').length, 1, 'only the file that moved is shown');
-  cleanup();
+  assert.ok(screen.getByText('This page is not signed in to the harness'));
+  assert.match(document.body.textContent ?? '', /harness open/);
 });
 
-test('a delivered comment can be replied to and resolved', async () => {
-  const now = Date.now();
-  const state = makeSession({
-    threads: [
-      {
-        id: 'th1',
-        file: 'src/app.ts',
-        side: 'new',
-        startLine: 2,
-        endLine: 2,
-        body: 'Guard against NaN.',
-        createdAt: now,
-        resolved: false,
-        deliveredAt: now,
-        replies: [{ id: 'r1', ts: now, author: 'claude', text: 'Added a guard.' }],
-      },
-    ],
-  });
-  await boot(state);
-
-  const thread = document.querySelector('.dthread.is-sent')!;
-  assert.match(thread.textContent ?? '', /Added a guard/);
-  assert.match(thread.textContent ?? '', /Claude/);
-
-  posts.length = 0;
-  fireEvent.click(within(thread as HTMLElement).getByText('Reply'));
-  fireEvent.change(thread.querySelector('textarea')!, { target: { value: 'Still wrong for null.' } });
+test('a snapshot from Claude replaces the plan and says so', async () => {
+  await boot();
+  const next = makePlan();
+  next.revision = 2;
+  next.title = 'Add a cache (v2)';
   await act(async () => {
-    fireEvent.click(within(thread as HTMLElement).getByText('Send reply'));
+    store.apply({ type: 'snapshot', session: makeSession(next) });
   });
-  assert.match(posts[0]!.route, /\/thread\/th1\/reply$/);
-  assert.equal(posts[0]!.body['text'], 'Still wrong for null.');
-  cleanup();
+  assert.ok(screen.getByText('Add a cache (v2)'));
+  assert.ok(store.getState().toasts.some((t) => /revision 2/.test(t.text)));
 });
 
-test("a question from Claude is answerable in the UI", async () => {
-  const state = makeSession({ stage: 'implementing' });
-  state.gates = [
-    {
-      id: 'q1',
-      kind: 'question',
-      stage: 'implementing',
-      prompt: 'Should I use a Map or a plain object here?',
-      createdAt: Date.now(),
-      status: 'open',
-      waiting: true,
-      meta: { options: ['Map', 'Plain object'] },
-    },
-  ];
-  state.activeGateId = 'q1';
-  await boot(state);
+/* ---------------------------------------------------- layout and access */
 
-  assert.equal(store.getState().tab, 'timeline');
-  const card = document.querySelector('.question-card')!;
-  assert.match(card.textContent ?? '', /Map or a plain object/);
-
-  posts.length = 0;
+test('the header hides and shows the session list', async () => {
+  await boot();
   await act(async () => {
-    fireEvent.click(within(card as HTMLElement).getByText('Map'));
+    fireEvent.click(screen.getByLabelText('Hide sessions'));
   });
-  const call = posts.find((p) => p.route.includes('/gate/'));
-  assert.ok(call, 'answering resolves the question gate');
-  assert.equal(call!.body['verdict'], 'answered');
-  assert.equal(call!.body['comment'], 'Map');
-  cleanup();
+  assert.equal(store.getState().collapsedSidebar, true);
+  assert.ok(document.querySelector('.app')?.classList.contains('is-sidebar-collapsed'));
+  await act(async () => {
+    fireEvent.keyDown(document.body, { key: '[' });
+  });
+  assert.equal(store.getState().collapsedSidebar, false, '[ toggles it back');
 });
 
-test('a question stays answerable from whatever tab is open', async () => {
-  const state = makeSession({ stage: 'implementing' });
-  state.gates = [
-    {
-      id: 'q1',
-      kind: 'question',
-      stage: 'implementing',
-      prompt: 'Should I use a Map or a plain object here?',
-      createdAt: Date.now(),
-      status: 'open',
-      waiting: true,
-      meta: { options: ['Map', 'Plain object'] },
-    },
-  ];
-  state.activeGateId = 'q1';
-  await boot(state);
+test('the tab strip is one tab stop, and arrow keys move along it', async () => {
+  await boot();
+  const tabs = screen.getAllByRole('tab');
+  assert.deepEqual(tabs.map((t) => t.tabIndex), [0, -1, -1]);
+  await act(async () => {
+    fireEvent.keyDown(tabs[0]!, { key: 'ArrowLeft' });
+  });
+  assert.equal(store.getState().tab, 'overview', 'wraps at the ends');
+});
 
-  // The question card lives above the tab strip, so moving around the app
-  // never takes the answer away — the thing that made a parked session feel
-  // impossible to act on.
-  for (const tab of ['plan', 'board', 'review', 'ship'] as const) {
-    await act(async () => {
-      store.setTab(tab);
-    });
-    assert.ok(document.querySelector('.question-card'), `answerable from the ${tab} tab`);
+test('choosing a theme sets an explicit attribute', async () => {
+  await boot();
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Dark' }));
+  });
+  assert.equal(document.documentElement.getAttribute('data-theme'), 'dark');
+});
+
+test('icon-only controls carry a name', async () => {
+  await boot();
+  await openTab('Tasks');
+  for (const button of document.querySelectorAll('button')) {
+    const name = button.getAttribute('aria-label') ?? button.textContent?.trim();
+    assert.ok(name && !/^[↑↓←→＋×⌄⌃✎☰]$/.test(name), `unnamed button: ${button.outerHTML.slice(0, 120)}`);
   }
-  cleanup();
-});
-
-test('a question with described options is answered as a form', async () => {
-  const state = makeSession({ stage: 'implementing' });
-  state.gates = [
-    {
-      id: 'g-questions',
-      kind: 'question',
-      stage: 'implementing',
-      prompt: 'How should the cache work?',
-      createdAt: Date.now(),
-      status: 'open',
-      waiting: true,
-      meta: {
-        questions: [
-          {
-            id: 'q1',
-            header: 'Backend',
-            question: 'Where should it live?',
-            options: [
-              { label: 'Redis', description: 'Shared across processes.' },
-              { label: 'In-memory', description: 'Lost on restart.' },
-            ],
-          },
-          {
-            id: 'q2',
-            header: 'Eviction',
-            question: 'What should it evict on?',
-            multiSelect: true,
-            options: [{ label: 'TTL' }, { label: 'LRU' }],
-          },
-        ],
-      },
-    },
-  ];
-  state.activeGateId = 'g-questions';
-  await boot(state);
-
-  const card = document.querySelector('.question-card') as HTMLElement;
-  assert.match(card.textContent ?? '', /Shared across processes/, 'option descriptions are shown');
-  assert.match(card.textContent ?? '', /Backend/, 'the header chip is shown');
-
-  const send = within(card).getByText('Send answers').closest('button') as HTMLButtonElement;
-  assert.equal(send.disabled, true, 'an unanswered question cannot be sent');
-
-  posts.length = 0;
-  await act(async () => {
-    fireEvent.click(within(card).getByText('Redis'));
-  });
-  assert.equal(
-    posts.filter((p) => p.route.includes('/gate/')).length,
-    0,
-    'picking an option does not send on its own once there is more than one question',
-  );
-
-  // Multi-select accumulates rather than replacing.
-  await act(async () => {
-    fireEvent.click(within(card).getByText('TTL'));
-  });
-  await act(async () => {
-    fireEvent.click(within(card).getByText('LRU'));
-  });
-  await act(async () => {
-    fireEvent.click(within(card).getByText('Send answers'));
-  });
-
-  const call = posts.find((p) => p.route.includes('/gate/'));
-  assert.ok(call, 'the form resolves the gate');
-  assert.equal(call!.body['verdict'], 'answered');
-  assert.deepEqual(call!.body['answers'], { q1: 'Redis', q2: 'TTL, LRU' });
-  cleanup();
-});
-
-
-/* ------------------------------------------------------------------ *
- * Stage state: what happened here, and what can be done about it
- * ------------------------------------------------------------------ */
-
-/** A session whose plan gate has been answered and closed. */
-function afterPlanVerdict(verdict: 'approved' | 'changes_requested', status: SessionState['status']) {
-  const state = makeSession({ stage: 'implementing', status });
-  state.gates = [
-    {
-      id: 'g0',
-      kind: 'plan',
-      stage: 'plan_review',
-      prompt: 'Review the plan',
-      createdAt: Date.now() - 600_000,
-      status: 'resolved',
-      waiting: false,
-      result: { verdict, resolvedAt: Date.now() - 300_000 },
-    },
-  ];
-  state.activeGateId = null;
-  return state;
-}
-
-test('an open gate names the only moves that answer it', async () => {
-  await boot();
-  const required = document.querySelector('.required')!;
-  assert.ok(required, 'the stage spells out what is required');
-  assert.match(required.textContent ?? '', /only things that move it on/i);
-  // The moves are the buttons themselves, so the list cannot drift from what
-  // is actually clickable.
-  const moves = [...required.querySelectorAll('.required-list .btn')].map((b) => b.textContent);
-  assert.deepEqual(moves, ['Approve', 'Request changes']);
-  assert.match(required.textContent ?? '', /not a verdict/i, 'the message box is ruled out explicitly');
-  cleanup();
-});
-
-test('a plan that was approved says so afterwards', async () => {
-  await boot(afterPlanVerdict('approved', 'idle'));
-  act(() => store.setTab('plan'));
-  const bar = document.querySelector('.stage-bar')!;
-  assert.ok(bar, 'the plan tab records what became of the plan');
-  assert.match(bar.textContent ?? '', /Approved/);
-  // With no gate open there is no verdict to give, so the verdict buttons go.
-  assert.equal(screen.queryByText('Approve plan'), null);
-  assert.ok(screen.getByText('Send these notes'));
-  cleanup();
-});
-
-test('a stage Claude is working on reads as working, not as untouched', async () => {
-  await boot(afterPlanVerdict('changes_requested', 'active'));
-  act(() => store.setTab('plan'));
-  const bar = document.querySelector('.stage-bar')!;
-  assert.match(bar.textContent ?? '', /Changes requested/);
-  assert.match(bar.textContent ?? '', /working through your feedback/i);
-  cleanup();
-});
-
-test('the activity tab shows an animated marker while Claude works', async () => {
-  const state = makeSession({ status: 'active' });
-  state.gates = [];
-  state.activeGateId = null;
-  await boot(state);
-  act(() => store.setTab('timeline'));
-
-  assert.ok(document.querySelector('.live-pill.is-working'), 'the feed header says the session is live');
-  assert.ok(document.querySelector('.event.is-live .working-dot'), 'the feed tail animates while it works');
-  assert.match(document.querySelector('.event.is-live')!.textContent ?? '', /Claude is working/);
-  cleanup();
-});
-
-test('an idle session is not mistaken for a working one', async () => {
-  const state = makeSession({ status: 'idle' });
-  state.gates = [];
-  state.activeGateId = null;
-  await boot(state);
-  act(() => store.setTab('timeline'));
-
-  assert.equal(document.querySelector('.event.is-live'), null);
-  assert.match(document.querySelector('.live-pill')!.textContent ?? '', /idle/i);
-  cleanup();
-});
-
-test('the stage panel records every stage, not just the open one', async () => {
-  await boot(afterPlanVerdict('approved', 'idle'));
-  act(() => store.setTab('timeline'));
-  const pipeline = document.querySelector('.pipeline')!;
-  assert.ok(pipeline);
-  assert.match(pipeline.textContent ?? '', /Plan/);
-  assert.match(pipeline.textContent ?? '', /Approved/);
-  cleanup();
-});
-
-test('a gate the user skipped is recorded as skipped rather than vanishing', async () => {
-  const state = makeSession({ status: 'active', stage: 'implementing' });
-  state.gates = [
-    {
-      id: 'g0',
-      kind: 'plan',
-      stage: 'plan_review',
-      prompt: 'Review the plan',
-      createdAt: Date.now() - 120_000,
-      status: 'cancelled',
-      waiting: false,
-    },
-  ];
-  state.activeGateId = null;
-  await boot(state);
-  act(() => store.setTab('plan'));
-  assert.match(document.querySelector('.stage-bar')!.textContent ?? '', /Skipped/);
-  cleanup();
-});
-
-test('the banner never promises a move the stage does not offer', async () => {
-  await boot();
-  const panel = [...document.querySelectorAll('.required-list .btn')].map((b) => b.textContent);
-  assert.ok(panel.length > 0);
-
-  // From another tab the banner is the only description of what answering
-  // involves, so it has to name the same moves.
-  act(() => store.setTab('timeline'));
-  const banner = [...document.querySelectorAll('.gate-choices strong')].map((b) => b.textContent);
-  assert.deepEqual(banner, panel);
-  cleanup();
-});
-
-test('the ship gate can be declined instead of leaving the session parked', async () => {
-  const state = makeSession({ stage: 'ship' });
-  state.gates[0] = { ...state.gates[0]!, kind: 'ship', prompt: 'Confirm the ship' };
-  await boot(state);
-  await act(async () => {
-    store.setTab('ship');
-  });
-
-  posts.length = 0;
-  await act(async () => {
-    fireEvent.click(screen.getByText("Don't ship"));
-  });
-
-  const call = posts.find((p) => p.route.includes('/gate/'));
-  assert.ok(call, 'declining resolves the gate rather than doing nothing');
-  assert.equal(call!.body['verdict'], 'rejected');
-  cleanup();
-});
-
-test('a panel does not promise a resume the harness cannot deliver', async () => {
-  // `gate.waiting` is the difference between a turn genuinely held open on
-  // this gate — where answering resumes it there and then — and a session
-  // that has already stopped, where nothing can wake it from outside and the
-  // verdict rides the user's next message. Every panel used to claim the
-  // first unconditionally, which is what made answering look broken: the
-  // toast said "Claude is resuming" and nothing moved.
-  const stopped = makeSession({ stage: 'plan_review', status: 'idle' });
-  stopped.gates[0] = { ...stopped.gates[0]!, kind: 'plan', prompt: 'Review the plan', waiting: false };
-  await boot(stopped);
-  act(() => store.setTab('plan'));
-
-  const idleCopy = document.querySelector('.plan')!.textContent ?? '';
-  assert.match(idleCopy, /next time the session runs/i);
-  assert.doesNotMatch(idleCopy, /resumes the parked session/i);
-  cleanup();
-
-  // And when a turn really is parked on it, it says so.
-  const parked = makeSession({ stage: 'plan_review' });
-  parked.gates[0] = { ...parked.gates[0]!, kind: 'plan', prompt: 'Review the plan', waiting: true };
-  await boot(parked);
-  act(() => store.setTab('plan'));
-  assert.match(document.querySelector('.plan')!.textContent ?? '', /resumes the parked session/i);
-  cleanup();
-});
-
-test('the toast after answering says what actually happens next', async () => {
-  const stopped = makeSession({ stage: 'plan_review', status: 'idle' });
-  stopped.gates[0] = { ...stopped.gates[0]!, kind: 'plan', prompt: 'Review the plan', waiting: false };
-  await boot(stopped);
-  act(() => store.setTab('plan'));
-
-  await act(async () => {
-    fireEvent.click(screen.getByText('Approve plan'));
-  });
-
-  const toast = document.querySelector('.toast')?.textContent ?? '';
-  assert.match(toast, /Plan approved/);
-  assert.match(toast, /with your next message/i, 'the user is told the click alone does not move it on');
-  assert.doesNotMatch(toast, /Claude is resuming/i);
-  cleanup();
 });

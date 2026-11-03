@@ -1,142 +1,48 @@
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import type { ShipProvider, ShipStep, Stage } from './types.ts';
 
 /**
- * Ceiling on one whole verification run, in ms.
- *
- * The MCP call that starts a run waits for it before it answers and opens the
- * gate, so the run's ceiling and the transport's budget have to be one number
- * with headroom, not two literals that agree by hand. `src/daemon/checks.ts`
- * enforces it; `src/mcp/tools.ts` adds {@link CHECK_TRANSPORT_HEADROOM_MS} to
- * it so the daemon's answer wins the race rather than the transport's.
+ * Harness configuration: `~/.claude/cc-harness/config.json`, overridden per
+ * repo by `.claude/harness.json`. Small on purpose — the harness does one
+ * thing, and most of what it does needs no knobs.
  */
-export const CHECK_RUN_BUDGET_MS = 15 * 60_000;
-export const CHECK_TRANSPORT_HEADROOM_MS = 30_000;
-
-export interface StageConfig {
-  /** Path to a markdown file (relative to the config dir) whose contents are
-   *  returned to the model when this stage is entered. */
-  instructions?: string;
-  /** Verification only: commands to run. */
-  checks?: string[];
-}
-
-export interface ShipConfig {
-  steps: ShipStep[];
-  provider: string;
-  providers: Record<string, ShipProvider>;
-  /** Supports {{branch}} and {{date}}. */
-  summaryPath?: string;
-  commitTemplate?: string;
-}
-
 export interface HarnessConfig {
-  /** Open a browser window the first time a session engages the harness.
-   *  Off by default — the URL is printed instead, and `harness open` is the
-   *  explicit way to get a window. */
+  /** Open the plan in a browser the first time Claude publishes one. */
   autoOpen: boolean;
-  /** Timeline ring-buffer size. */
-  maxTimelineEvents: number;
   /**
-   * How long the opt-in `holdIdleSessions` wait holds a finished turn open,
-   * in seconds.
+   * When the user types in chat after changing the plan in the browser, add a
+   * one-line note to the prompt telling Claude to read it. Off means Claude
+   * only learns of the changes when it calls `harness_plan_read` itself.
    */
-  stopHoldSeconds: number;
+  promptNotice: boolean;
   /**
-   * How long one `Stop` holds the turn open on an open gate, in seconds.
-   *
-   * This is what makes answering in the browser move the session on by
-   * itself. There is no way to wake a stopped CLI session from outside — no
-   * socket, no IPC — so the only place a verdict can resume a turn is the
-   * `Stop` hook that is still running. Answer inside the window and Claude
-   * carries straight on; miss it and the turn ends for good, with the verdict
-   * delivered on the next message as before.
-   *
-   * Bounded and single-round on purpose. The version of this that held for
-   * `gateHoldRounds × stopHoldSeconds` and re-blocked on expiry left the CLI
-   * structurally unable to stop for over half an hour; expiring into a plain
-   * stop costs one window and nothing else. `0` disables the hold.
+   * When Claude asks the user something, open that session in the Claude
+   * desktop app straight away instead of waiting for a click in the harness.
+   * Only possible for a local session with Remote Control on: nothing else
+   * has a documented link to open.
    */
-  gateHoldSeconds: number;
-  /** How long a single `harness_await` MCP call parks, in seconds. */
-  awaitSeconds: number;
-  /**
-   * Hold a finished turn open even with no gate, so a message typed in the
-   * browser can reach a session that would otherwise have gone idle.
-   *
-   * Off by default, and deliberately so: it keeps the terminal occupied and
-   * consumes the CLI's consecutive-Stop-block allowance. Turn it on for a
-   * session you intend to drive entirely from the browser.
-   */
-  holdIdleSessions: boolean;
-  /** Skip files larger than this many bytes in the diff view. */
-  maxDiffFileBytes: number;
-  /** Exit after this many minutes with no live session and no browser
-   *  attached. 0 disables it. Keeps daemons from accumulating. */
+  openClaudeOnQuestion: boolean;
+  /** Exit after this long with no session activity and no browser open. 0 never. */
   idleShutdownMinutes: number;
-  stages: Partial<Record<Stage, StageConfig>>;
-  ship: ShipConfig;
 }
 
 export const DEFAULT_CONFIG: HarnessConfig = {
   autoOpen: false,
-  maxTimelineEvents: 500,
-  stopHoldSeconds: 540,
-  gateHoldSeconds: 300,
-  awaitSeconds: 120,
-  holdIdleSessions: false,
-  maxDiffFileBytes: 400_000,
+  promptNotice: true,
+  openClaudeOnQuestion: false,
   idleShutdownMinutes: 120,
-  stages: {
-    verification: { checks: [] },
-  },
-  ship: {
-    steps: ['checks', 'commit', 'push', 'pr', 'summary'],
-    provider: 'gh',
-    providers: {
-      gh: {
-        kind: 'command',
-        label: 'GitHub (gh CLI)',
-        command: 'gh pr create --base {{base}} --head {{branch}} --title {{title}} --body-file {{bodyFile}}',
-      },
-      bitbucket: {
-        kind: 'mcp',
-        label: 'Bitbucket (MCP)',
-        directive:
-          'Open a pull request using the connected Bitbucket MCP server. Use the title and body below verbatim, ' +
-          'source branch {{branch}}, destination branch {{base}}. Report the resulting PR URL back with harness_note.',
-      },
-      none: { kind: 'none', label: 'No PR — commit and push only' },
-    },
-    summaryPath: 'docs/reviews/{{branch}}.md',
-    commitTemplate: '{{title}}\n\n{{body}}',
-  },
 };
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/** Shallow-merge with one level of nesting for `stages` and `ship`. */
 export function mergeConfig(base: HarnessConfig, override: unknown): HarnessConfig {
   if (!isRecord(override)) return base;
-  const out: HarnessConfig = { ...base, stages: { ...base.stages }, ship: { ...base.ship } };
-
-  for (const [key, value] of Object.entries(override)) {
-    if (key === 'stages' && isRecord(value)) {
-      for (const [stage, cfg] of Object.entries(value)) {
-        if (!isRecord(cfg)) continue;
-        const s = stage as Stage;
-        out.stages[s] = { ...out.stages[s], ...(cfg as StageConfig) };
-      }
-    } else if (key === 'ship' && isRecord(value)) {
-      out.ship = {
-        ...out.ship,
-        ...(value as unknown as Partial<ShipConfig>),
-        providers: { ...out.ship.providers, ...((value as unknown as Partial<ShipConfig>).providers ?? {}) },
-      };
-    } else if (value !== undefined) {
+  const out: HarnessConfig = { ...base };
+  for (const key of Object.keys(DEFAULT_CONFIG) as (keyof HarnessConfig)[]) {
+    const value = override[key];
+    if (value !== undefined && typeof value === typeof DEFAULT_CONFIG[key]) {
       (out as unknown as Record<string, unknown>)[key] = value;
     }
   }
@@ -146,7 +52,7 @@ export function mergeConfig(base: HarnessConfig, override: unknown): HarnessConf
 function readJson(file: string): unknown {
   try {
     if (!existsSync(file)) return undefined;
-    // Tolerate comments so the shipped defaults file can explain itself.
+    // Tolerate line comments so a config file can explain itself.
     const raw = readFileSync(file, 'utf8').replace(/^\s*\/\/.*$/gm, '');
     return JSON.parse(raw);
   } catch {
@@ -154,41 +60,9 @@ function readJson(file: string): unknown {
   }
 }
 
-/**
- * Config resolution: shipped defaults → user global → project-local.
- * The project file lets a repo pin its own checks and ship provider.
- */
 export function loadConfig(opts: { configDir: string; projectDir?: string | null }): HarnessConfig {
   let cfg = DEFAULT_CONFIG;
   cfg = mergeConfig(cfg, readJson(path.join(opts.configDir, 'config.json')));
-  if (opts.projectDir) {
-    cfg = mergeConfig(cfg, readJson(path.join(opts.projectDir, '.claude', 'harness.json')));
-  }
+  if (opts.projectDir) cfg = mergeConfig(cfg, readJson(path.join(opts.projectDir, '.claude', 'harness.json')));
   return cfg;
-}
-
-/** Read a stage's custom instructions, if the user configured any. */
-export function stageInstructions(
-  cfg: HarnessConfig,
-  stage: Stage,
-  opts: { configDir: string; projectDir?: string | null },
-): string | undefined {
-  const rel = cfg.stages[stage]?.instructions;
-  if (!rel) return undefined;
-  const candidates = [
-    path.resolve(opts.configDir, rel),
-    ...(opts.projectDir ? [path.resolve(opts.projectDir, rel)] : []),
-  ];
-  for (const file of candidates) {
-    try {
-      if (existsSync(file)) return readFileSync(file, 'utf8').trim();
-    } catch {
-      /* fall through */
-    }
-  }
-  return undefined;
-}
-
-export function renderTemplate(tpl: string, vars: Record<string, string>): string {
-  return tpl.replace(/\{\{(\w+)\}\}/g, (_m, k: string) => vars[k] ?? '');
 }

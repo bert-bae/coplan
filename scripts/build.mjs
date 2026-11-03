@@ -112,6 +112,8 @@ async function scanCandidates(dir) {
 async function copyStatic() {
   await mkdir(path.join(outRoot, 'ui'), { recursive: true });
   await cp(path.join(root, 'src/ui/index.html'), path.join(outRoot, 'ui/index.html'));
+  // React Flow's own stylesheet, loaded before ours so the app's theme wins.
+  await cp(path.join(root, 'node_modules/@xyflow/react/dist/style.css'), path.join(outRoot, 'ui/flow.css'));
   await writeFile(path.join(outRoot, 'ui/style.css'), await buildCss());
   await writeFile(path.join(outRoot, 'version.json'), JSON.stringify({ version: pkg.version }, null, 2));
 }

@@ -4,19 +4,17 @@ import assert from "node:assert/strict";
 import {
   mkdtempSync,
   mkdirSync as mkdirSync2,
-  readdirSync as readdirSync2,
   rmSync as rmSync2,
   writeFileSync as writeFileSync2,
   existsSync as existsSync3,
   utimesSync,
   readFileSync as readFileSync3
 } from "node:fs";
-import { tmpdir as tmpdir2 } from "node:os";
+import { tmpdir } from "node:os";
 import path3 from "node:path";
 
 // src/daemon/housekeeping.ts
 import { readdirSync, statSync, existsSync as existsSync2, rmSync, readFileSync as readFileSync2, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import path2 from "node:path";
 
 // src/shared/paths.ts
@@ -64,16 +62,13 @@ function isPidAlive(pid) {
 // src/daemon/housekeeping.ts
 var STALE_SESSION_MS = 24 * 60 * 60 * 1e3;
 var PARTIAL_WRITE_MS = 5 * 60 * 1e3;
-var SCRATCH_MS = 60 * 60 * 1e3;
 var LOG_LIMIT_BYTES = 1024 * 1024;
 var LOG_KEEP_BYTES = 256 * 1024;
-var SCRATCH_PREFIX = "cc-harness-";
 function scanStorage(opts2 = {}) {
   const now = opts2.now ?? Date.now();
   const live = /* @__PURE__ */ new Set();
   for (const id of opts2.liveSessionIds ?? []) live.add(sanitizeId(id));
-  const scratchDir = opts2.scratchDir ?? tmpdir();
-  const plans = buildPlans(live, now, scratchDir);
+  const plans = buildPlans(live, now);
   const groups = plans.map((plan) => ({
     id: plan.id,
     label: plan.label,
@@ -83,7 +78,6 @@ function scanStorage(opts2 = {}) {
   }));
   return {
     home: harnessHome(),
-    scratchDir,
     scannedAt: now,
     groups,
     totalBytes: groups.reduce((sum, g) => sum + g.bytes, 0)
@@ -93,9 +87,8 @@ function cleanStorage(opts2 = {}) {
   const now = opts2.now ?? Date.now();
   const live = /* @__PURE__ */ new Set();
   for (const id of opts2.liveSessionIds ?? []) live.add(sanitizeId(id));
-  const scratchDir = opts2.scratchDir ?? tmpdir();
   const wanted = opts2.groups && opts2.groups.length ? new Set(opts2.groups) : null;
-  const plans = buildPlans(live, now, scratchDir).filter((p) => !wanted || wanted.has(p.id));
+  const plans = buildPlans(live, now).filter((p) => !wanted || wanted.has(p.id));
   const groups = [];
   const failed = [];
   let freedBytes = 0;
@@ -110,7 +103,7 @@ function cleanStorage(opts2 = {}) {
         groupCount++;
         continue;
       }
-      if (!discard(candidate, scratchDir)) {
+      if (!discard(candidate)) {
         failed.push(candidate.path);
         continue;
       }
@@ -123,12 +116,12 @@ function cleanStorage(opts2 = {}) {
   }
   return { dryRun: Boolean(opts2.dryRun), groups, removed, freedBytes, failed };
 }
-function buildPlans(live, now, scratchDir) {
+function buildPlans(live, now) {
   return [
     {
       id: "sessions",
       label: "Finished sessions",
-      detail: "Recorded history for sessions the harness no longer lists, untouched for over a day.",
+      detail: "Saved plans for sessions the harness no longer lists, untouched for over a day.",
       candidates: staleSessionDirs(live, now)
     },
     {
@@ -136,12 +129,6 @@ function buildPlans(live, now, scratchDir) {
       label: "Interrupted writes",
       detail: "Half-written state files left behind when a daemon was killed mid-save.",
       candidates: partialWrites(now)
-    },
-    {
-      id: "scratch",
-      label: "Scratch files",
-      detail: "Commit messages and PR bodies a shipped change wrote to the temp directory.",
-      candidates: scratchFiles(now, scratchDir)
     },
     {
       id: "log",
@@ -195,28 +182,6 @@ function partialWrites(now) {
   }
   return out;
 }
-function scratchFiles(now, root) {
-  const home2 = path2.resolve(harnessHome());
-  const out = [];
-  for (const entry of safeReaddir(root)) {
-    if (!entry.name.startsWith(SCRATCH_PREFIX)) continue;
-    const full = path2.join(root, entry.name);
-    const resolved = path2.resolve(full);
-    if (resolved === home2 || home2.startsWith(resolved + path2.sep)) continue;
-    if (holdsLiveDaemon(resolved)) continue;
-    if (now - mtimeOf(full) < SCRATCH_MS) continue;
-    out.push({ path: full, bytes: sizeOf(full) });
-  }
-  return out;
-}
-function holdsLiveDaemon(dir) {
-  try {
-    const lock = JSON.parse(readFileSync2(path2.join(dir, "daemon.json"), "utf8"));
-    return typeof lock.pid === "number" && isPidAlive(lock.pid);
-  } catch {
-    return false;
-  }
-}
 function oversizedLog() {
   const file = paths.logFile();
   const bytes = sizeOf(file);
@@ -232,13 +197,10 @@ function staleLock() {
 function reclaimable(candidate) {
   return candidate.trimTo === void 0 ? candidate.bytes : Math.max(0, candidate.bytes - candidate.trimTo);
 }
-function discard(candidate, scratchDir) {
+function discard(candidate) {
   const target = path2.resolve(candidate.path);
   const home2 = path2.resolve(harnessHome());
-  const scratch2 = path2.resolve(scratchDir);
-  const inside = (root) => target.startsWith(root + path2.sep);
-  if (!inside(home2) && !inside(scratch2)) return false;
-  if (!inside(home2) && !path2.basename(target).startsWith(SCRATCH_PREFIX)) return false;
+  if (!target.startsWith(home2 + path2.sep)) return false;
   try {
     if (candidate.trimTo !== void 0) {
       trimFile(target, candidate.trimTo);
@@ -286,21 +248,17 @@ function sizeOf(target) {
 
 // src/test/housekeeping.test.ts
 var home;
-var scratch;
 before(() => {
-  home = mkdtempSync(path3.join(tmpdir2(), "cc-harness-hk-home-"));
-  scratch = mkdtempSync(path3.join(tmpdir2(), "cc-harness-hk-scratch-"));
+  home = mkdtempSync(path3.join(tmpdir(), "cc-harness-hk-home-"));
   process.env["CC_HARNESS_HOME"] = home;
 });
 after(() => {
   rmSync2(home, { recursive: true, force: true });
-  rmSync2(scratch, { recursive: true, force: true });
 });
 beforeEach(() => {
   rmSync2(path3.join(home, "sessions"), { recursive: true, force: true });
   rmSync2(path3.join(home, "daemon.log"), { force: true });
   rmSync2(path3.join(home, "daemon.json"), { force: true });
-  for (const entry of readdirSync2(scratch)) rmSync2(path3.join(scratch, entry), { recursive: true, force: true });
   mkdirSync2(path3.join(home, "sessions"), { recursive: true });
 });
 var DAY = 24 * 60 * 60 * 1e3;
@@ -319,7 +277,7 @@ function group(report, id) {
   assert.ok(found, `expected a "${id}" group in the report`);
   return found;
 }
-var opts = () => ({ scratchDir: scratch });
+var opts = () => ({});
 test("a session the daemon is holding is never offered up", () => {
   session("resident", 30 * DAY);
   const report = scanStorage({ ...opts(), liveSessionIds: ["resident"] });
@@ -357,10 +315,9 @@ test("a dry run reports what would go and removes nothing", () => {
 });
 test("cleaning one group leaves the others alone", () => {
   const dir = session("cold", 3 * DAY);
-  const junk = path3.join(scratch, "cc-harness-commit-9.txt");
-  writeFileSync2(junk, "body");
-  age(junk, 2 * 60 * 60 * 1e3);
-  const result = cleanStorage({ ...opts(), groups: ["scratch"] });
+  const junk = path3.join(home, "daemon.json");
+  writeFileSync2(junk, JSON.stringify({ pid: 0, port: 1, token: "t" }));
+  const result = cleanStorage({ ...opts(), groups: ["lock"] });
   assert.equal(result.groups.length, 1);
   assert.equal(existsSync3(dir), true, "the session group was not selected");
   assert.equal(existsSync3(junk), false);
@@ -380,39 +337,6 @@ test("a .tmp from a write still in flight is left alone", () => {
   const dir = session("live", 6e4);
   writeFileSync2(path3.join(dir, ".diff.99.tmp"), "x");
   assert.equal(group(scanStorage({ ...opts(), liveSessionIds: ["live"] }), "partial-writes").count, 0);
-});
-test("only harness-named scratch older than an hour is reclaimed", () => {
-  const ours = path3.join(scratch, "cc-harness-pr-1.md");
-  const fresh = path3.join(scratch, "cc-harness-commit-2.txt");
-  const theirs = path3.join(scratch, "some-other-tool.txt");
-  for (const file of [ours, fresh, theirs]) writeFileSync2(file, "body");
-  age(ours, 2 * 60 * 60 * 1e3);
-  age(theirs, 30 * DAY);
-  const report = scanStorage(opts());
-  assert.equal(group(report, "scratch").count, 1);
-  cleanStorage({ ...opts(), groups: ["scratch"] });
-  assert.equal(existsSync3(ours), false);
-  assert.equal(existsSync3(fresh), true, "a scratch file a ship may still be using stays");
-  assert.equal(existsSync3(theirs), true, "files the harness did not write are not ours to remove");
-});
-test("a temp directory holding a running daemon is not scratch", () => {
-  const other = path3.join(scratch, "cc-harness-other-home");
-  mkdirSync2(other, { recursive: true });
-  writeFileSync2(path3.join(other, "daemon.json"), JSON.stringify({ pid: process.pid, port: 1, token: "t" }));
-  age(other, 30 * DAY);
-  assert.equal(group(scanStorage(opts()), "scratch").count, 0);
-  writeFileSync2(path3.join(other, "daemon.json"), JSON.stringify({ pid: 0, port: 1, token: "t" }));
-  age(other, 30 * DAY);
-  assert.equal(group(scanStorage(opts()), "scratch").count, 1);
-});
-test("the live harness home is never scratch, whatever it is named", () => {
-  const report = scanStorage(opts());
-  assert.equal(report.home, home);
-  const scratchDirs = scanStorage({ scratchDir: tmpdir2(), now: Date.now() });
-  assert.ok(
-    scratchDirs.groups.every((g) => g.id !== "scratch" || g.count >= 0),
-    "scanning the real temp directory must not throw"
-  );
 });
 test("an oversized log is trimmed to its tail, not deleted", () => {
   const file = path3.join(home, "daemon.log");
@@ -442,12 +366,13 @@ test("a lock file is reclaimable only once its process is gone", () => {
   cleanStorage({ ...opts(), groups: ["lock"] });
   assert.equal(existsSync3(file), false);
 });
-test("nothing outside the home or the scratch directory can be removed", () => {
-  const outside = mkdtempSync(path3.join(tmpdir2(), "cc-harness-hk-outside-"));
+test("cleaning never reaches outside the harness home", () => {
+  const outside = mkdtempSync(path3.join(tmpdir(), "cc-harness-hk-outside-"));
   const victim = path3.join(outside, "precious.txt");
   writeFileSync2(victim, "keep me");
+  age(victim, 30 * DAY);
   try {
-    const result = cleanStorage({ scratchDir: scratch, groups: ["scratch"] });
+    const result = cleanStorage({ groups: ["sessions", "partial-writes", "log", "lock"] });
     assert.equal(result.failed.length, 0);
     assert.equal(existsSync3(victim), true);
   } finally {

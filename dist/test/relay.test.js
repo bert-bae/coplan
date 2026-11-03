@@ -28,10 +28,11 @@ before(async () => {
     req.on("end", () => {
       received.push({ url: req.url ?? "", auth: req.headers.authorization, body });
       const send = () => {
+        if (res.destroyed || res.writableEnded) return;
         res.writeHead(200, { "content-type": "application/json" });
         res.end(responseBody);
       };
-      if (holdMs) setTimeout(send, holdMs);
+      if (holdMs) setTimeout(send, holdMs).unref();
       else send();
     });
   });
@@ -62,25 +63,34 @@ function relay(event, payload, env = {}) {
 }
 test("forwards the payload with the token and echoes the response", async () => {
   received = [];
-  const payload = JSON.stringify({ session_id: "s1", tool_name: "Edit" });
-  const result = await relay("PostToolUse", payload);
+  const payload = JSON.stringify({ session_id: "s1", cwd: "/x" });
+  const result = await relay("SessionEnd", payload);
   assert.equal(result.code, 0);
   assert.equal(result.stdout, '{"suppressOutput":true}');
   assert.equal(received.length, 1);
-  assert.equal(received[0].url, "/hook/PostToolUse");
+  assert.equal(received[0].url, "/hook/SessionEnd");
   assert.equal(received[0].auth, "Bearer test-token");
   assert.equal(received[0].body, payload, "the payload is passed through byte for byte");
 });
-test("a Stop decision reaches the CLI unchanged", async () => {
-  responseBody = JSON.stringify({ decision: "block", reason: "do the thing" });
-  const result = await relay("Stop", JSON.stringify({ session_id: "s1" }));
+test("extra prompt context reaches the CLI unchanged", async () => {
+  responseBody = JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "read the plan" } });
+  const result = await relay("UserPromptSubmit", JSON.stringify({ session_id: "s1" }));
   assert.equal(result.code, 0);
-  assert.deepEqual(JSON.parse(result.stdout), { decision: "block", reason: "do the thing" });
+  assert.equal(JSON.parse(result.stdout).hookSpecificOutput.additionalContext, "read the plan");
   responseBody = '{"suppressOutput":true}';
+});
+test("a daemon that hangs cannot hold a turn open", async () => {
+  holdMs = 3e4;
+  const started = Date.now();
+  const result = await relay("Stop", '{"session_id":"s1"}');
+  holdMs = 0;
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, "");
+  assert.ok(Date.now() - started < 8e3, `took ${Date.now() - started}ms`);
 });
 test("says nothing when there is no daemon", async () => {
   const empty = mkdtempSync(path.join(tmpdir(), "cc-harness-nodaemon-"));
-  const result = await relay("PostToolUse", '{"session_id":"s1"}', { CC_HARNESS_HOME: empty });
+  const result = await relay("SessionEnd", '{"session_id":"s1"}', { CC_HARNESS_HOME: empty });
   assert.equal(result.code, 0, "a missing daemon must never fail the hook");
   assert.equal(result.stdout, "");
   rmSync(empty, { recursive: true, force: true });
@@ -93,7 +103,7 @@ test("ignores a lock file left behind by a dead daemon", async () => {
     JSON.stringify({ pid: 999999999, port, token: "test-token", host: "127.0.0.1" })
   );
   received = [];
-  const result = await relay("PostToolUse", '{"session_id":"s1"}', { CC_HARNESS_HOME: stale });
+  const result = await relay("SessionEnd", '{"session_id":"s1"}', { CC_HARNESS_HOME: stale });
   assert.equal(result.code, 0);
   assert.equal(result.stdout, "");
   assert.equal(received.length, 0, "it does not talk to a port owned by a dead pid");
@@ -101,14 +111,14 @@ test("ignores a lock file left behind by a dead daemon", async () => {
 });
 test("emits nothing when the response is not hook JSON", async () => {
   responseBody = "<html>gateway error</html>";
-  const result = await relay("PostToolUse", '{"session_id":"s1"}');
+  const result = await relay("SessionEnd", '{"session_id":"s1"}');
   assert.equal(result.code, 0);
   assert.equal(result.stdout, "", "anything that is not JSON is safer left unsaid");
   responseBody = '{"suppressOutput":true}';
 });
 test("exits quietly on empty stdin", async () => {
   received = [];
-  const result = await relay("PostToolUse", "");
+  const result = await relay("SessionEnd", "");
   assert.equal(result.code, 0);
   assert.equal(result.stdout, "");
   assert.equal(received.length, 0);
@@ -121,7 +131,7 @@ test("exits quietly with no event name", async () => {
 test("a slow daemon does not hang a short-budget hook", async () => {
   holdMs = 300;
   const started = Date.now();
-  const result = await relay("PostToolUse", '{"session_id":"s1"}');
+  const result = await relay("SessionEnd", '{"session_id":"s1"}');
   holdMs = 0;
   assert.equal(result.code, 0);
   assert.ok(Date.now() - started < 15e3);
@@ -129,7 +139,7 @@ test("a slow daemon does not hang a short-budget hook", async () => {
 test("a malformed lock file is treated as no daemon", async () => {
   const broken = mkdtempSync(path.join(tmpdir(), "cc-harness-broken-"));
   writeFileSync(path.join(broken, "daemon.json"), "not json at all");
-  const result = await relay("PostToolUse", '{"session_id":"s1"}', { CC_HARNESS_HOME: broken });
+  const result = await relay("SessionEnd", '{"session_id":"s1"}', { CC_HARNESS_HOME: broken });
   assert.equal(result.code, 0);
   assert.equal(result.stdout, "");
   rmSync(broken, { recursive: true, force: true });

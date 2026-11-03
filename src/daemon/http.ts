@@ -11,13 +11,23 @@ export interface Ctx {
 
 export type Handler = (ctx: Ctx) => Promise<void> | void;
 
+/** A refusal with a status the client should see, rather than a 500. */
+export class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 interface Route {
   method: string;
   segments: string[];
   handler: Handler;
 }
 
-/** A tiny path router: `/api/session/:id/gate/:gateId/resolve`. */
+/** A tiny path router: `/api/session/:id/plan/ops`. */
 export class Router {
   private routes: Route[] = [];
 
@@ -48,7 +58,13 @@ export class Router {
       for (let i = 0; i < route.segments.length; i++) {
         const seg = route.segments[i]!;
         const part = parts[i]!;
-        if (seg.startsWith(':')) params[seg.slice(1)] = decodeURIComponent(part);
+        if (seg.startsWith(':')) {
+          try {
+            params[seg.slice(1)] = decodeURIComponent(part);
+          } catch {
+            throw new HttpError(400, 'malformed path');
+          }
+        }
         else if (seg !== part) {
           ok = false;
           break;
@@ -60,9 +76,35 @@ export class Router {
   }
 }
 
+/** On every response: never sniff a type, never leak the URL (the first page
+ *  load carries the auth token in its query string), never be framed. */
+export const BASE_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+  'x-frame-options': 'DENY',
+} as const;
+
+/**
+ * The UI's content policy. Everything is served from the daemon itself;
+ * React Flow positions nodes with inline styles, so styles need
+ * 'unsafe-inline', but scripts never do.
+ */
+export const UI_CSP = [
+  "default-src 'none'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  "connect-src 'self'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+].join('; ');
+
 export function json(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
+    ...BASE_HEADERS,
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(payload),
     'cache-control': 'no-store',
@@ -71,11 +113,12 @@ export function json(res: ServerResponse, status: number, body: unknown): void {
 }
 
 export function text(res: ServerResponse, status: number, body: string): void {
-  res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+  res.writeHead(status, { ...BASE_HEADERS, 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
   res.end(body);
 }
 
-const MAX_BODY = 8 * 1024 * 1024;
+/** A plan is bounded well below this; anything larger is not a real request. */
+const MAX_BODY = 2 * 1024 * 1024;
 
 export async function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -84,7 +127,7 @@ export async function readBody(req: IncomingMessage): Promise<string> {
     req.on('data', (chunk: Buffer) => {
       size += chunk.length;
       if (size > MAX_BODY) {
-        reject(new Error('body too large'));
+        reject(new HttpError(413, 'body too large'));
         req.destroy();
         return;
       }
@@ -98,7 +141,14 @@ export async function readBody(req: IncomingMessage): Promise<string> {
 export async function readJson<T = Record<string, unknown>>(req: IncomingMessage): Promise<T> {
   const body = await readBody(req);
   if (!body.trim()) return {} as T;
-  return JSON.parse(body) as T;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    throw new HttpError(400, 'malformed JSON');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new HttpError(400, 'expected a JSON object');
+  return parsed as T;
 }
 
 const MIME: Record<string, string> = {
@@ -128,8 +178,11 @@ export function serveStatic(res: ServerResponse, rootDir: string, relPath: strin
   }
   if (!stat.isFile()) return false;
 
+  const ext = path.extname(file);
   res.writeHead(200, {
-    'content-type': MIME[path.extname(file)] ?? 'application/octet-stream',
+    ...BASE_HEADERS,
+    ...(ext === '.html' ? { 'content-security-policy': UI_CSP } : {}),
+    'content-type': MIME[ext] ?? 'application/octet-stream',
     'content-length': stat.size,
     'cache-control': 'no-cache',
   });
@@ -148,22 +201,4 @@ export function serveStatic(res: ServerResponse, rootDir: string, relPath: strin
   stream.on('end', () => res.off('close', done));
   stream.pipe(res);
   return true;
-}
-
-/**
- * An AbortSignal that fires when the client hangs up mid-long-poll.
- *
- * This is what stops a killed hook relay or a closed browser tab from leaving
- * a waiter parked in the daemon for its full nine-minute window.
- */
-export function requestSignal(req: IncomingMessage): AbortSignal {
-  const controller = new AbortController();
-  const abort = () => {
-    req.off('close', abort);
-    req.off('aborted', abort);
-    if (!controller.signal.aborted) controller.abort();
-  };
-  req.on('close', abort);
-  req.on('aborted', abort);
-  return controller.signal;
 }

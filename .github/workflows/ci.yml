@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install
+        run: npm ci --ignore-scripts
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      # dist/ is committed so the plugin installs without a build step. A
+      # source change that was not rebuilt would ship stale code silently.
+      - name: Committed dist/ matches the source
+        run: |
+          if ! git diff --quiet -- dist; then
+            echo "::error::dist/ is out of date. Run 'npm run build' and commit the result."
+            git diff --stat -- dist
+            exit 1
+          fi
+
+      - name: Test
+        run: npm test
+
+      - name: The plugin wiring self-test
+        env:
+          CC_HARNESS_HOME: ${{ runner.temp }}/harness
+        run: |
+          status=0
+          ./bin/harness doctor || status=$?
+          ./bin/harness stop
+          exit $status
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high

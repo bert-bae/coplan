@@ -1,11 +1,19 @@
 {
   "name": "cc-harness",
-  "displayName": "Claude Dev Harness",
-  "version": "0.1.0",
-  "description": "A live browser UI for a Claude Code session: plan review, progress, line-level diff review, verification and ship — with every response fed back into the same session.",
-  "author": { "name": "Elbert B." },
+  "displayName": "Claude Planning Harness",
+  "version": "0.2.0",
+  "description": "A visual planning workspace for Claude Code: architecture diagrams, a task breakdown you can reorganize, and open questions to answer \u2014 which Claude reads back when you tell it to.",
+  "author": {
+    "name": "Elbert B."
+  },
   "license": "MIT",
-  "keywords": ["review", "diff", "plan", "ui", "workflow"],
+  "keywords": [
+    "plan",
+    "planning",
+    "diagram",
+    "tasks",
+    "ui"
+  ],
   "hooks": "./hooks/hooks.json",
   "mcpServers": "./.mcp.json"
 }

@@ -1,39 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { store, useStore } from '../store.ts';
 import { GlobalActions } from './GlobalActions.tsx';
-import { WorkingDot } from './StageStatus.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
 import type { SessionSummary } from '../../shared/types.ts';
 
-const STAGE_LABEL: Record<string, string> = {
-  idle: 'Idle',
-  planning: 'Planning',
-  plan_review: 'Plan review',
-  implementing: 'Building',
-  code_review: 'Code review',
-  verification: 'Verifying',
-  ship: 'Shipping',
-  done: 'Done',
-};
-
-/** What the session itself is doing, alongside where in the pipeline it is.
- *  Stage and status answer different questions and were being conflated. */
+/** What the Claude session behind the plan is doing. */
 const SESSION_STATE_LABEL: Record<string, string> = {
   active: 'working',
-  waiting: 'needs you',
-  idle: 'stopped',
+  idle: 'idle',
   ended: 'ended',
 };
 
-/** The attention section is a group like any other, with a reserved key. */
+/** The lifted sections are groups like any other, with reserved keys. */
+const WAITING_KEY = '\u0000waiting';
 const PINNED_KEY = '\u0000pinned';
-
-/** Sessions Claude has stopped on. These are lifted to the top group whether
- *  or not they were pinned: the whole reason to look at the rail is to find
- *  the one that is blocked on you. */
-function needsAttention(session: SessionSummary): boolean {
-  return session.openGates > 0 || session.status === 'waiting';
-}
 
 interface Group {
   key: string;
@@ -41,7 +21,6 @@ interface Group {
   /** Full path, shown as the header's tooltip. Empty for the pinned group. */
   path: string;
   sessions: SessionSummary[];
-  openGates: number;
 }
 
 export function Sidebar() {
@@ -51,7 +30,6 @@ export function Sidebar() {
   const collapsed = useStore((s) => s.collapsedSidebar);
   const pinned = useStore((s) => s.pinned);
   const collapsedProjects = useStore((s) => s.collapsedProjects);
-  const soundEnabled = useStore((s) => s.soundEnabled);
 
   const drawerOpen = useStore((s) => s.drawerOpen);
   const groups = groupSessions(sessions, pinned);
@@ -73,16 +51,6 @@ export function Sidebar() {
         </div>
         <button
           type="button"
-          className={classNames('icon-btn', !soundEnabled && 'is-muted')}
-          title={soundEnabled ? 'Mute the alert chime' : 'Play a chime when Claude needs you'}
-          aria-label={soundEnabled ? 'Mute the alert chime' : 'Play a chime when Claude needs you'}
-          aria-pressed={soundEnabled}
-          onClick={() => store.toggleSound()}
-        >
-          <span aria-hidden="true">{soundEnabled ? '🔔' : '🔕'}</span>
-        </button>
-        <button
-          type="button"
           className="icon-btn"
           title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
@@ -93,6 +61,9 @@ export function Sidebar() {
         </button>
       </header>
 
+      {collapsed && !drawerOpen ? (
+        <CollapsedRail sessions={sessions} current={current} />
+      ) : (
       <nav className="session-list" aria-label="Live sessions">
         {sessions.length === 0 ? (
           <p className="sidebar-empty">No sessions yet.</p>
@@ -103,11 +74,12 @@ export function Sidebar() {
               group={group}
               current={current}
               open={!collapsedProjects.includes(group.key)}
-              showRepo={group.key === PINNED_KEY}
+              showRepo={group.key === PINNED_KEY || group.key === WAITING_KEY}
             />
           ))
         )}
       </nav>
+      )}
 
       <footer className="sidebar-foot">
         <GlobalActions />
@@ -130,24 +102,29 @@ export function groupSessions(sessions: SessionSummary[], pinned: string[]): Gro
   const groups = new Map<string, Group>();
 
   for (const session of sessions) {
-    const lift = pinnedSet.has(session.sessionId) || needsAttention(session);
-    const key = lift ? PINNED_KEY : (session.repoRoot ?? session.cwd);
+    // A session Claude has stopped on is the reason to look at this rail at
+    // all, so it is lifted above everything, pinned or not.
+    const key = session.waiting
+      ? WAITING_KEY
+      : pinnedSet.has(session.sessionId)
+        ? PINNED_KEY
+        : (session.repoRoot ?? session.cwd);
     let group = groups.get(key);
     if (!group) {
       group =
-        key === PINNED_KEY
-          ? { key, label: 'Pinned / Action required', path: '', sessions: [], openGates: 0 }
+        key === WAITING_KEY
+          ? { key, label: 'Waiting on you', path: '', sessions: [] }
+          : key === PINNED_KEY
+          ? { key, label: 'Pinned', path: '', sessions: [] }
           : {
               key,
               label: groupLabel(session),
               path: session.repoRoot ?? session.cwd,
               sessions: [],
-              openGates: 0,
             };
       groups.set(key, group);
     }
     group.sessions.push(session);
-    group.openGates += session.openGates;
   }
 
   // Newest session first, within a bucket and between buckets alike. Ordering
@@ -156,20 +133,15 @@ export function groupSessions(sessions: SessionSummary[], pinned: string[]): Gro
   for (const group of groups.values()) {
     group.sessions.sort((a, b) => b.createdAt - a.createdAt);
   }
+  const rank = (key: string) => (key === WAITING_KEY ? 0 : key === PINNED_KEY ? 1 : 2);
   return [...groups.values()].sort((a, b) => {
-    if (a.key === PINNED_KEY) return -1;
-    if (b.key === PINNED_KEY) return 1;
+    if (rank(a.key) !== rank(b.key)) return rank(a.key) - rank(b.key);
     return (b.sessions[0]?.createdAt ?? 0) - (a.sessions[0]?.createdAt ?? 0);
   });
 }
 
-/**
- * A worktree gets its own group — its `repoRoot` is the worktree itself — so
- * without naming it, every worktree of one repo would render the same header.
- */
 function groupLabel(session: SessionSummary): string {
-  const repo = session.repoName ?? basename(session.cwd) ?? 'Unknown project';
-  return session.worktree ? `${repo} ⑂ ${session.worktree}` : repo;
+  return session.repoName ?? basename(session.cwd) ?? 'Unknown project';
 }
 
 function basename(p: string): string {
@@ -188,8 +160,7 @@ function ProjectGroup({
   open: boolean;
   showRepo: boolean;
 }) {
-  // A collapsed group hiding the session you are looking at is disorienting,
-  // and so is one hiding a session that is blocked on you.
+  // A collapsed group hiding the session you are looking at is disorienting.
   const holdsCurrent = group.sessions.some((s) => s.sessionId === current);
   const expanded = open || holdsCurrent;
 
@@ -206,9 +177,6 @@ function ProjectGroup({
           {expanded ? '▾' : '▸'}
         </span>
         <span className="session-group-name">{group.label}</span>
-        {group.openGates > 0 && (
-          <span className="dot is-gate" title="A session here is waiting on you" aria-label="waiting on you" />
-        )}
         <span className="session-group-count">{group.sessions.length}</span>
       </button>
 
@@ -237,7 +205,6 @@ function SessionRow({
   active: boolean;
   showRepo: boolean;
 }) {
-  const drafts = useStore((s) => s.drafts[session.sessionId]?.length ?? 0);
   const pinned = useStore((s) => s.pinned.includes(session.sessionId));
   const [confirming, setConfirming] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -248,7 +215,6 @@ function SessionRow({
         'session-row',
         active && 'is-active',
         confirming && 'is-confirming',
-        needsAttention(session) && 'needs-you',
       )}
     >
       {renaming ? (
@@ -270,17 +236,21 @@ function SessionRow({
         title={`${session.title}\n${session.cwd}\nDouble-click to rename`}
       >
         <span className="session-name">
-          {session.openGates > 0 ? (
-            <span className="dot is-gate" title="Claude is waiting on you" aria-label="waiting on you" />
+          {session.waiting ? (
+            <span className="dot is-attention" title="Claude is waiting on you" aria-label="Claude is waiting on you" />
           ) : (
-            // Motion, not a word: the rail is scanned, not read, and "active"
-            // sitting still is indistinguishable from a stale page.
-            session.status === 'active' && <WorkingDot title="Claude is working" />
+            session.status === 'active' && <span className="working-dot" title="Claude is working" aria-label="Claude is working" />
           )}
-          {session.title}
+          {session.planTitle ?? session.title}
         </span>
+        {session.waiting ? (
+          <span className="session-waiting">{session.waiting.text}</span>
+        ) : (
+          session.current && <span className="session-now">now: {session.current}</span>
+        )}
         <span className="session-sub">
-          <span className="session-stage">{STAGE_LABEL[session.stage] ?? session.stage}</span>
+          {session.planTitle && session.planTitle !== session.title && <span className="session-stage">{session.title}</span>}
+          {!session.planTitle && <span className="session-stage">no plan yet</span>}
           <span className={classNames('session-state', `is-${session.status}`)}>
             {SESSION_STATE_LABEL[session.status] ?? session.status}
           </span>
@@ -288,13 +258,25 @@ function SessionRow({
         </span>
         <span className="session-foot">
           {showRepo && session.repoName && <span className="session-repo">{groupLabel(session)}</span>}
+          {session.tasks.total > 0 && (
+            <span title={`${session.tasks.done} of ${session.tasks.total} tasks done`}>
+              {session.tasks.done}/{session.tasks.total} tasks
+            </span>
+          )}
           <span>{relativeTime(session.updatedAt)}</span>
-          {drafts > 0 && <span className="pill is-draft">{drafts} draft</span>}
-          {session.pendingFeedback > 0 && (
-            <span className="pill is-queued">{session.pendingFeedback} queued</span>
+          {session.unreadByClaude > 0 && (
+            <span className="pill is-draft" title="Changes Claude has not read yet">
+              {session.unreadByClaude} unread
+            </span>
           )}
         </span>
       </button>
+      )}
+
+      {session.waiting && session.link && !renaming && (
+        <a className="session-answer btn btn-sm btn-primary" href={session.link.app} title="Open this session in the Claude desktop app">
+          Answer in Claude
+        </a>
       )}
 
       <div className="session-actions">
@@ -392,4 +374,44 @@ function RenameField({ session, onDone }: { session: SessionSummary; onDone: () 
       }}
     />
   );
+}
+
+/**
+ * The rail folded down to one column of initials, so the plan gets the width
+ * without losing the way to other sessions — or the signal that one of them
+ * is waiting on you.
+ */
+function CollapsedRail({ sessions, current }: { sessions: SessionSummary[]; current: string | null }) {
+  const ordered = [...sessions].sort((a, b) => Number(Boolean(b.waiting)) - Number(Boolean(a.waiting)) || b.createdAt - a.createdAt);
+  return (
+    <nav className="session-rail" aria-label="Sessions">
+      {ordered.map((s) => {
+        const name = s.planTitle ?? s.title;
+        return (
+          <button
+            key={s.sessionId}
+            type="button"
+            className={classNames('rail-item', s.sessionId === current && 'is-active', s.waiting && 'is-waiting')}
+            aria-current={s.sessionId === current ? 'true' : undefined}
+            title={`${name}${s.waiting ? ` — waiting on you: ${s.waiting.text}` : s.current ? ` — now: ${s.current}` : ''}`}
+            aria-label={`${name}${s.waiting ? ', waiting on you' : ''}`}
+            onClick={() => void store.selectSession(s.sessionId)}
+          >
+            <span aria-hidden="true">{initials(name)}</span>
+            {s.waiting && <span className="rail-dot is-attention" aria-hidden="true" />}
+            {!s.waiting && s.status === 'active' && <span className="rail-dot is-working" aria-hidden="true" />}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+const MINOR_WORDS = new Set(['a', 'an', 'the', 'to', 'of', 'for', 'and', 'in', 'on', 'with']);
+
+function initials(name: string): string {
+  const all = name.replace(/[^A-Za-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+  const words = all.filter((w) => !MINOR_WORDS.has(w.toLowerCase()));
+  if (words.length === 0) words.push(...all);
+  return ((words[0]?.[0] ?? '?') + (words[1]?.[0] ?? '')).toUpperCase();
 }

@@ -69,9 +69,8 @@ test('the daemon hands its address and token to its replacement', async () => {
     body: '{}',
   });
   assert.equal(res.status, 200);
-  const body = (await res.json()) as { restarting: boolean; interrupted: string[] };
+  const body = (await res.json()) as { restarting: boolean };
   assert.equal(body.restarting, true);
-  assert.deepEqual(body.interrupted, [], 'nothing was running to interrupt');
 
   const second = await waitForLock(first.pid);
   assert.ok(second, 'a replacement daemon should have claimed the lock');
@@ -80,7 +79,7 @@ test('the daemon hands its address and token to its replacement', async () => {
   assert.equal(second.token, first.token, 'and the cookie it holds still authorizes it');
 
   // The token has to survive the handover without being left in the
-  // environment of every command the daemon runs.
+  // environment for anything the daemon starts.
   assert.equal(await tokenWorks(second), true);
 
   await waitUntil(() => !isPidAlive(first.pid));

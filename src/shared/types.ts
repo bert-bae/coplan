@@ -1,472 +1,388 @@
 /**
  * Shared vocabulary for every process in the harness: the daemon, the MCP
  * server, the hook relay and the browser UI all speak these types.
+ *
+ * The harness has two jobs: to be the place where a plan is laid out,
+ * reshaped and broken down, and to show how far Claude has got through it.
+ * Everything here describes a plan document — its prose, its diagrams, its
+ * task tree and the comments on them — plus whether Claude is waiting on the
+ * user. Nothing here describes talking to Claude: questions are asked and
+ * answered in Claude's own chat, and the harness only links there.
  */
 
-export const STAGES = [
-  'idle',
-  'planning',
-  'plan_review',
-  'implementing',
-  'code_review',
-  'verification',
-  'ship',
-  'done',
-] as const;
+/** Who made a change. The plan is co-authored, and the change log is how each
+ *  side finds out what the other did. */
+export type Author = 'user' | 'claude';
 
-export type Stage = (typeof STAGES)[number];
-
-/** What the session is doing right now, as far as the harness can tell. */
-export type SessionStatus =
-  | 'active' /** a turn is in flight */
-  | 'waiting' /** parked on a gate, waiting for the user */
-  | 'idle' /** turn ended, no gate open */
-  | 'ended';
-
-export type GateKind = 'plan' | 'code_review' | 'verification' | 'ship' | 'question';
-
-export type Verdict = 'approved' | 'changes_requested' | 'rejected' | 'answered';
-
-export interface PlanStep {
-  id: string;
-  title: string;
-  detail?: string;
-  /** User-authored note attached to this step during plan review. */
-  comment?: string;
-  status?: 'pending' | 'active' | 'done' | 'dropped';
-}
-
-export interface Plan {
-  title: string;
-  summary?: string;
-  steps: PlanStep[];
-  /** Raw markdown, when the model published prose instead of steps. */
-  markdown?: string;
-  revision: number;
-  updatedAt: number;
-}
+/** What the session is doing right now, as far as the hooks can tell. Shown
+ *  for orientation only — nothing in the harness waits on it. */
+export type SessionStatus = 'active' | 'idle' | 'ended';
 
 /* ------------------------------------------------------------------ *
- * Task board
+ * The plan
  * ------------------------------------------------------------------ */
+
+/** A titled block of markdown: context, goals, the architecture in prose,
+ *  risks, what was ruled out. Ordered; the user can reorder them. */
+export interface Section {
+  id: string;
+  title: string;
+  body: string;
+  /** Bumped on every change. An editor sends the revision it started from,
+   *  and a save over someone else's newer change is refused, not merged. */
+  rev: number;
+  updatedAt: number;
+  updatedBy: Author;
+}
+
+/** What a box on a diagram stands for. Drives its shape and colour, so a
+ *  reader can tell a datastore from a service without reading the label. */
+export const NODE_KINDS = ['component', 'service', 'datastore', 'queue', 'external', 'actor', 'note'] as const;
+export type NodeKind = (typeof NODE_KINDS)[number];
+
+export interface DiagramNode {
+  /** Short slug, unique within the diagram — edges refer to it. */
+  id: string;
+  label: string;
+  kind: NodeKind;
+  /** One line under the label on the canvas: responsibility or technology. */
+  detail?: string;
+  /** The longer story, edited in the side panel: decisions taken about this
+   *  part and why, interfaces, open concerns. Markdown. */
+  notes?: string;
+  /** Tasks that build this part, so the diagram shows how far along it is. */
+  taskIds?: string[];
+  /** Canvas position. Absent until someone arranges the diagram; the UI lays
+   *  out unplaced nodes automatically. */
+  x?: number;
+  y?: number;
+}
+
+export interface DiagramEdge {
+  id: string;
+  source: string;
+  target: string;
+  label?: string;
+  /** Dashed for optional, async or future connections. */
+  dashed?: boolean;
+}
+
+export type DiagramDirection = 'LR' | 'TB';
+
+/**
+ * A diagram is a graph of boxes and arrows, drawn on a canvas the user can
+ * rearrange, rewire and relabel — and that Claude reads and writes as the same
+ * nodes and edges.
+ */
+export interface Diagram {
+  id: string;
+  title: string;
+  /** Bumped on every change; see `Section.rev`. */
+  rev: number;
+  nodes: DiagramNode[];
+  edges: DiagramEdge[];
+  /** Which way automatic layout flows. */
+  direction: DiagramDirection;
+  caption?: string;
+  updatedAt: number;
+  updatedBy: Author;
+}
+
+/** Nodes and edges as written by Claude or sent by the canvas. */
+export interface DiagramNodeInput {
+  id: string;
+  label?: string;
+  kind?: string;
+  detail?: string;
+  notes?: string;
+  taskIds?: string[];
+  x?: number;
+  y?: number;
+}
+
+export interface DiagramEdgeInput {
+  id?: string;
+  source: string;
+  target: string;
+  label?: string;
+  dashed?: boolean;
+}
+
+export interface DiagramInput {
+  id?: string;
+  title: string;
+  nodes?: DiagramNodeInput[];
+  edges?: DiagramEdgeInput[];
+  direction?: DiagramDirection;
+  caption?: string;
+}
 
 export const TASK_STATUSES = ['todo', 'in_progress', 'blocked', 'done'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
-export type TaskNoteKind = 'change' | 'decision' | 'blocker' | 'note';
-
-/** A line of the agent's working record for one task. */
-export interface TaskNote {
-  id: string;
-  ts: number;
-  kind: TaskNoteKind;
-  text: string;
-}
-
-/** Something the agent did not know, asked about, and got an answer to. The
- *  daemon records these automatically when a blocking question resolves, so
- *  the reasoning behind a change survives the session. */
-export interface TaskDecision {
-  id: string;
-  ts: number;
-  question: string;
-  answer: string;
-  /** What the agent did with the answer. */
-  rationale?: string;
-}
-
+/**
+ * One node of the task tree. Tasks nest to any depth through `parentId`;
+ * siblings are ordered by `order`. The tree is the breakdown Claude works
+ * through, and the statuses are how progress is tracked against it.
+ */
 export interface Task {
   id: string;
+  /** Null for a top-level task. */
+  parentId: string | null;
+  order: number;
   title: string;
+  /** Markdown: approach, acceptance criteria, gotchas. */
   detail?: string;
   status: TaskStatus;
-  /** The plan step this was derived from, when it came from one. */
-  planStepId?: string;
-  order: number;
+  /** Files this task is expected to touch — a planning aid, not a record. */
+  files?: string[];
+  /** A one-line status note: why it is blocked, what was done. */
+  note?: string;
   createdAt: number;
   updatedAt: number;
-  startedAt?: number;
-  completedAt?: number;
-  /** The agent's record of what it actually changed. */
-  notes: TaskNote[];
-  /** Files edited while this task was in progress — attributed by the daemon
-   *  from hook events, so it costs no tokens and cannot be misreported. */
-  files: string[];
-  /** Open question holding this task up. */
-  blockedBy?: string;
-  blockedReason?: string;
-  decisions: TaskDecision[];
+  createdBy: Author;
 }
 
-export interface TodoItem {
-  content: string;
-  status: 'pending' | 'in_progress' | 'completed';
-  activeForm?: string;
-}
+/** What a comment is attached to. `plan` targets the plan as a whole. */
+export const TARGET_KINDS = ['plan', 'section', 'diagram', 'task'] as const;
+export type TargetKind = (typeof TARGET_KINDS)[number];
 
-export interface TouchedFile {
-  path: string;
-  edits: number;
-  firstTouchedAt: number;
-  lastTouchedAt: number;
-  tools: string[];
-}
-
-export interface CommandRun {
+export interface Target {
+  kind: TargetKind;
+  /** Empty for `plan`. */
   id: string;
-  command: string;
-  description?: string;
-  startedAt: number;
-  ok: boolean;
-  /** Truncated head of the output, purely for the timeline. */
-  preview?: string;
 }
 
-export type TimelineKind =
-  | 'assistant'
-  | 'thinking'
-  | 'tool'
-  | 'stage'
-  | 'note'
-  | 'user'
-  | 'feedback'
-  | 'notification'
-  | 'gate'
-  | 'check'
-  | 'ship'
-  | 'error';
-
-export interface TimelineEvent {
+export interface Reply {
   id: string;
-  ts: number;
-  kind: TimelineKind;
-  /** Short label, e.g. a tool name or stage name. */
-  label?: string;
+  author: Author;
   text: string;
-  meta?: Record<string, unknown>;
-}
-
-export interface ThreadReply {
-  id: string;
   ts: number;
-  author: 'user' | 'claude';
-  text: string;
 }
 
-/** A comment thread anchored to a line range of a diff. */
-export interface ReviewThread {
+/** A comment and its replies, anchored to one item of the plan. */
+export interface Thread {
   id: string;
-  file: string;
-  side: 'old' | 'new';
-  startLine: number;
-  endLine: number;
-  body: string;
-  /** Verbatim source lines the user selected, so Claude sees what they meant. */
-  excerpt?: string;
-  createdAt: number;
+  target: Target;
+  author: Author;
+  text: string;
+  ts: number;
   resolved: boolean;
-  /** Set once the thread has been handed to Claude. */
-  deliveredAt?: number;
-  /** Review round it was written in. Lets the UI separate "this round" from
-   *  comments Claude has already had a chance to address. */
-  round?: number;
-  /** The back-and-forth on this comment. Without it, Claude's answer lands in
-   *  the activity feed as prose the reader has to correlate by hand. */
-  replies?: ThreadReply[];
+  replies: Reply[];
 }
 
-export interface DiffLine {
-  kind: 'context' | 'add' | 'del';
-  oldLine: number | null;
-  newLine: number | null;
-  text: string;
+export type ChangeKind =
+  | 'published'
+  | 'created'
+  | 'edited'
+  | 'moved'
+  | 'status'
+  | 'deleted'
+  | 'commented'
+  | 'replied'
+  | 'resolved'
+  | 'reopened';
+
+/**
+ * One entry of the plan's change log.
+ *
+ * `seq` increases monotonically per plan. Claude's read position is a `seq`,
+ * so "what has the user done since you last looked" is a filter on this list,
+ * not a diff of two documents.
+ */
+export interface Change {
+  seq: number;
+  ts: number;
+  author: Author;
+  kind: ChangeKind;
+  target: Target;
+  /** One line, in words: `moved "Add cache" under "Storage layer"`. */
+  summary: string;
 }
 
-export interface DiffHunk {
-  header: string;
-  oldStart: number;
-  oldCount: number;
-  newStart: number;
-  newCount: number;
-  lines: DiffLine[];
-}
-
-export interface DiffFile {
-  path: string;
-  oldPath?: string;
-  status: 'added' | 'modified' | 'deleted' | 'renamed';
-  additions: number;
-  deletions: number;
-  binary: boolean;
-  /** Omitted when the file is too large to render; the UI shows a stub. */
-  hunks?: DiffHunk[];
-  truncated?: boolean;
-  /** False when this file has not changed since the reviewer last looked.
-   *  Undefined on the first round, when everything is new. */
-  changedSinceLastReview?: boolean;
-}
-
-/** What the working tree looked like at the end of one review round. */
-export interface ReviewRoundSnapshot {
-  round: number;
-  at: number;
-  baseRef: string;
-  headRef: string;
-  /** Content hash per path, so "changed since you looked" survives commits,
-   *  amends and rebases — comparing SHAs alone would not. */
-  fingerprints: Record<string, string>;
-}
-
-export interface DiffPayload {
-  baseRef: string;
-  headRef: string;
-  branch: string | null;
-  generatedAt: number;
-  files: DiffFile[];
-  additions: number;
-  deletions: number;
-  /** Files changed in the working tree but not yet committed. */
-  includesWorkingTree: boolean;
-  round: number;
-  /** Set once there is an earlier round to compare against. */
-  previousRound?: number;
-  /** Paths that changed since the previous round. */
-  changedSinceLastReview?: string[];
-}
-
-export interface CheckRun {
-  id: string;
-  command: string;
-  label?: string;
-  status: 'pending' | 'running' | 'passed' | 'failed' | 'skipped';
-  exitCode?: number;
-  startedAt?: number;
-  finishedAt?: number;
-  /** Ring-buffered tail of combined stdout/stderr. */
-  output: string;
-}
-
-export interface ShipProviderCommand {
-  kind: 'command';
-  label?: string;
-  /** Supports {{title}}, {{body}}, {{bodyFile}}, {{branch}}, {{base}}. */
-  command: string;
-}
-
-export interface ShipProviderMcp {
-  kind: 'mcp';
-  label?: string;
-  /** Instruction handed back to the model, which performs the MCP call. */
-  directive: string;
-}
-
-export interface ShipProviderNone {
-  kind: 'none';
-  label?: string;
-}
-
-export type ShipProvider = ShipProviderCommand | ShipProviderMcp | ShipProviderNone;
-
-export type ShipStep = 'checks' | 'commit' | 'push' | 'pr' | 'summary';
-
-export interface ShipState {
+export interface Plan {
   title: string;
-  body: string;
-  commitMessage: string;
-  branch: string | null;
-  baseBranch: string | null;
-  steps: ShipStep[];
-  provider: string;
-  /** Filled in after the ship action runs. */
-  result?: {
-    ok: boolean;
-    output: string;
-    url?: string;
-    summaryPath?: string;
-  };
-}
-
-export interface GateResult {
-  verdict: Verdict;
-  comment?: string;
-  /** Plan review: the user's edited step list. */
-  steps?: PlanStep[];
-  /** Code review: line-anchored comments. */
-  threads?: ReviewThread[];
-  /** Ship: the user's confirmed configuration, plus what the daemon did with
-   *  it. `directive` is set when the chosen provider is an MCP server, which
-   *  only the session can call — Claude performs that step itself. */
-  ship?: Pick<ShipState, 'title' | 'body' | 'commitMessage' | 'steps' | 'provider'> & {
-    branch?: string | null;
-    baseBranch?: string | null;
-    directive?: string;
-    outcome?: { ok: boolean; output: string; url?: string; summaryPath?: string };
-  };
-  /** Free-form answers for `question` gates. */
-  answers?: Record<string, string>;
-  resolvedAt: number;
-}
-
-/** One selectable answer. `description` is the second line under the label,
- *  the way the CLI's own question UI renders its choices. */
-export interface GateQuestionOption {
-  label: string;
-  description?: string;
-}
-
-/** A structured question, mirroring what the CLI asks in the terminal: a
- *  short header chip, the question itself, and a set of options that may be
- *  single- or multi-select. Free text is always allowed alongside them. */
-export interface GateQuestion {
-  id: string;
-  /** Very short label, rendered as a chip, e.g. "Auth method". */
-  header?: string;
-  question: string;
-  multiSelect?: boolean;
-  options: GateQuestionOption[];
-}
-
-export interface GateOptions {
-  /** `question` gates, simple form: suggested answers as one-click buttons. */
-  options?: string[];
-  /** `question` gates, structured form: one or more questions with rich
-   *  options. When present the UI renders these and ignores `options`. */
-  questions?: GateQuestion[];
-}
-
-export interface Gate {
-  id: string;
-  kind: GateKind;
-  stage: Stage;
-  prompt: string;
+  /** Markdown: the one-paragraph version of the whole plan. */
+  summary: string;
+  sections: Section[];
+  diagrams: Diagram[];
+  tasks: Task[];
+  threads: Thread[];
+  /** Newest last; bounded. */
+  changes: Change[];
+  /** The last `seq` handed out. */
+  seq: number;
+  /** The last `seq` Claude has read. Changes after it are unread by Claude. */
+  claudeReadSeq: number;
+  claudeReadAt: number | null;
+  /** Bumped each time Claude publishes the plan wholesale. */
+  revision: number;
   createdAt: number;
-  /** Kind-specific extras the UI needs to render the gate. */
-  meta?: GateOptions;
-  status: 'open' | 'resolved' | 'cancelled';
-  result?: GateResult;
-  /** Set when the model is actively parked on this gate. */
-  waiting: boolean;
-  /** When the verdict was handed to Claude. A gate can be resolved before
-   *  Claude's turn ends, so "resolved" alone does not mean "delivered". */
-  deliveredAt?: number;
+  updatedAt: number;
 }
 
-/** An async comment queued while Claude was working; drained at a turn boundary. */
-export interface FeedbackItem {
-  id: string;
-  createdAt: number;
-  text: string;
-  /** Where in the UI it came from, for rendering it back with context. */
-  origin: 'timeline' | 'plan' | 'diff' | 'checks' | 'ship';
-  threads?: ReviewThread[];
-  /** Sent with "send now": the user chose to take the session off whatever it
-   *  was parked on rather than let the message wait for a turn boundary. */
-  interrupt?: boolean;
-  /** The gate this message closed on its way through, when it skipped one.
-   *  Recorded so the model is told the gate is gone rather than left waiting
-   *  on a verdict that is never coming. */
-  skippedGate?: { kind: GateKind; prompt: string };
+/* ------------------------------------------------------------------ *
+ * Edits
+ * ------------------------------------------------------------------ */
+
+/** A task as written by Claude when publishing: nested, ids optional. */
+export interface TaskInput {
+  id?: string;
+  title: string;
+  detail?: string;
+  status?: TaskStatus;
+  files?: string[];
+  note?: string;
+  subtasks?: TaskInput[];
+}
+
+/** The whole plan, as Claude publishes it. Replaces the plan's content while
+ *  keeping comments and statuses on every item whose id survives. */
+export interface PlanInput {
+  title: string;
+  summary?: string;
+  sections?: { id?: string; title: string; body: string }[];
+  diagrams?: DiagramInput[];
+  tasks?: TaskInput[];
 }
 
 /**
- * Where a session actually works, when that is not where it was launched.
- *
- * A worktree-isolated session runs in `<repo>/.claude/worktrees/<name>`, but
- * every hook payload keeps reporting the directory the CLI was started in.
- * Anchoring git on that would point the diff, the checks and the ship stage at
- * the wrong tree, so the resolved worktree is recorded separately.
+ * One edit to the plan. The UI and Claude speak the same operations, so the
+ * change log is written in exactly one place no matter who made the change.
  */
-export interface WorktreeInfo {
-  /** Absolute path of the worktree the session is working in. */
-  path: string;
-  /** The worktree's name as the CLI knows it, e.g. `feature/improvements`. */
-  name: string;
-  /** Root of the repository the worktree belongs to, for naming and grouping. */
-  mainRoot: string | null;
-  /** Directory the session was launched in, before it was relocated. */
-  originalCwd: string | null;
-  /** Branch that was checked out there. */
-  originalBranch: string | null;
-  /** HEAD in the original tree when the session moved in. The worktree's
-   *  branch was forked from it, so it is the base its review diffs against —
-   *  and it is still the right base for the original tree on the way back. */
-  originalHeadCommit: string | null;
+export type PlanOp =
+  | { op: 'set_meta'; title?: string; summary?: string }
+  | {
+      op: 'upsert_section';
+      id?: string;
+      title?: string;
+      body?: string;
+      index?: number;
+      /** The revision the edit was made against. Refused if it moved on. */
+      expect?: number;
+    }
+  | {
+      op: 'upsert_diagram';
+      id?: string;
+      title?: string;
+      /** When given, replaces the diagram's nodes (positions are kept for
+       *  nodes that keep their id and omit x/y). */
+      nodes?: DiagramNodeInput[];
+      /** When given, replaces the diagram's edges. */
+      edges?: DiagramEdgeInput[];
+      direction?: DiagramDirection;
+      caption?: string;
+      index?: number;
+      /** The revision the edit was made against. Refused if it moved on. */
+      expect?: number;
+    }
+  | {
+      op: 'upsert_task';
+      id?: string;
+      /** Only read on create; use `move_task` to re-parent. */
+      parentId?: string | null;
+      index?: number;
+      title?: string;
+      detail?: string;
+      status?: TaskStatus;
+      files?: string[];
+      note?: string;
+    }
+  | { op: 'move_task'; id: string; parentId: string | null; index: number }
+  | { op: 'move_section'; id: string; index: number }
+  | { op: 'move_diagram'; id: string; index: number }
+  | { op: 'remove'; kind: Exclude<TargetKind, 'plan'>; id: string }
+  | { op: 'comment'; target: Target; text: string }
+  | { op: 'reply'; threadId: string; text: string }
+  | { op: 'resolve'; threadId: string; resolved: boolean };
+
+export type PlanOpName = PlanOp['op'];
+
+/* ------------------------------------------------------------------ *
+ * Sessions
+ * ------------------------------------------------------------------ */
+
+/**
+ * Claude has stopped and needs something from the user: an answer to a
+ * question it asked, a permission decision, or simply a reply. Captured from
+ * hooks, shown in the harness, and answered in Claude itself — the harness
+ * links there and never answers on the user's behalf.
+ */
+export interface WaitingState {
+  kind: 'question' | 'permission' | 'input';
+  /** The question, or what the prompt says, in one or two lines. */
+  text: string;
+  /** For `AskUserQuestion`: each question with its choices, read-only here. */
+  questions?: { header?: string; question: string; options: string[]; multiSelect?: boolean }[];
+  since: number;
+}
+
+/** Where the session runs, which decides how to open it. */
+export type SessionSurface = 'cloud' | 'desktop' | 'cli' | 'unknown';
+
+/** Two ways to the same session: the Claude desktop app, and the web. */
+export interface SessionLink {
+  /** `claude://claude.ai/code/session_…` — opens the desktop app. */
+  app: string;
+  /** `https://claude.ai/code/session_…` — works anywhere you are signed in. */
+  web: string;
+  /** How the session became addressable. */
+  via: 'cloud' | 'remote-control';
 }
 
 export interface SessionState {
   sessionId: string;
   /** pid of the owning `claude` process, when known. */
   claudePid?: number;
-  /** The directory the session is working in — the worktree, once relocated. */
   cwd: string;
   repoRoot: string | null;
-  /** Set while the session is isolated in a git worktree. */
-  worktree?: WorktreeInfo | null;
   branch: string | null;
-  transcriptPath: string | null;
   title: string;
-  /** Set once the user renames the session, so the transcript's own
-   *  auto-generated title stops overwriting what they chose. */
+  /** Set once the user renames the session, so nothing overwrites it. */
   titleLocked?: boolean;
-  stage: Stage;
-  stageNote?: string;
   status: SessionStatus;
+  /** Set while Claude is waiting on the user; cleared when they reply. */
+  waiting: WaitingState | null;
+  surface: SessionSurface;
+  /** Opens this session in Claude, where questions are answered. Null when
+   *  the session cannot be addressed from outside: a local session without
+   *  Remote Control has no documented link. */
+  link: SessionLink | null;
   createdAt: number;
   updatedAt: number;
   endedAt?: number;
-  baseRef: string | null;
-  /** Commit the session started from, used as a diff base fallback. */
-  startCommit: string | null;
-  /** Incremented every time Claude publishes a diff for review. */
-  reviewRound: number;
-  /** One entry per completed round, for "what changed since I last looked". */
-  roundHistory: ReviewRoundSnapshot[];
-  tasks: Task[];
-  /** Rolled up from the transcript; shown per stage in the UI. */
-  usage?: { inputTokens: number; outputTokens: number; byStage: Record<string, number> };
   plan: Plan | null;
-  todos: TodoItem[];
-  files: TouchedFile[];
-  commands: CommandRun[];
-  timeline: TimelineEvent[];
-  gates: Gate[];
-  activeGateId: string | null;
-  threads: ReviewThread[];
-  checks: CheckRun[];
-  ship: ShipState | null;
-  pendingFeedback: FeedbackItem[];
-  /** Counters surfaced in the UI header. */
-  stats: {
-    turns: number;
-    toolCalls: number;
-    edits: number;
-  };
 }
 
-/** Compact row for the session switcher. */
+export interface TaskCounts {
+  total: number;
+  done: number;
+  inProgress: number;
+  blocked: number;
+}
+
+/** Compact row for the session rail. */
 export interface SessionSummary {
   sessionId: string;
   title: string;
+  planTitle: string | null;
   cwd: string;
   repoName: string | null;
-  /** Absolute repo root, or null outside a repo. The session list groups on
-   *  this, so two checkouts of the same repo stay separate accordions — and so
-   *  does each worktree, whose root is the worktree itself. */
   repoRoot: string | null;
-  /** Worktree name when the session is isolated in one, so two sessions on the
-   *  same repo are told apart in the switcher. */
-  worktree: string | null;
   branch: string | null;
-  stage: Stage;
   status: SessionStatus;
-  /** When the session first appeared. The rail orders on this so rows hold
-   *  still: ordering on activity had sessions jumping around under the cursor
-   *  every time one of them took a turn. */
+  /** The rail orders on this so rows hold still under the cursor. */
   createdAt: number;
   updatedAt: number;
-  openGates: number;
-  pendingFeedback: number;
-  tasks: { total: number; done: number; blocked: number };
+  tasks: TaskCounts;
+  /** The task Claude is on, for the rail. */
+  current: string | null;
+  waiting: WaitingState | null;
+  surface: SessionSurface;
+  link: SessionLink | null;
+  openThreads: number;
+  /** User changes Claude has not read yet. */
+  unreadByClaude: number;
 }
 
 /* ------------------------------------------------------------------ *
@@ -475,12 +391,7 @@ export interface SessionSummary {
 
 export type ServerEvent =
   | { type: 'snapshot'; session: SessionState }
-  | { type: 'state'; sessionId: string; patch: Partial<SessionState> }
-  | { type: 'timeline'; sessionId: string; events: TimelineEvent[] }
-  | { type: 'diff'; sessionId: string; diff: DiffPayload }
   | { type: 'sessions'; sessions: SessionSummary[] }
-  | { type: 'check'; sessionId: string; check: CheckRun }
-  | { type: 'tasks'; sessionId: string; tasks: Task[] }
   | { type: 'ping'; ts: number };
 
 /* ------------------------------------------------------------------ *
@@ -501,7 +412,7 @@ export interface DaemonLock {
  * ------------------------------------------------------------------ */
 
 /** The kinds of reclaimable file the harness knows how to describe. */
-export const CLEANUP_GROUPS = ['sessions', 'partial-writes', 'scratch', 'log', 'lock'] as const;
+export const CLEANUP_GROUPS = ['sessions', 'partial-writes', 'log', 'lock'] as const;
 export type CleanupGroupId = (typeof CLEANUP_GROUPS)[number];
 
 export interface StorageGroup {
@@ -515,8 +426,6 @@ export interface StorageGroup {
 
 export interface StorageReport {
   home: string;
-  /** The system temp directory, where ship scratch files land. */
-  scratchDir: string;
   scannedAt: number;
   groups: StorageGroup[];
   totalBytes: number;

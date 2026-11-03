@@ -1,12 +1,10 @@
 /**
  * Storage housekeeping.
  *
- * The harness writes in two places: `~/.claude/cc-harness` for everything it
- * means to keep, and the system temp directory for the scratch files a ship
- * needs for a moment. Both accumulate. A session directory outlives the
- * session by design — the daemon evicts it from memory long before it removes
- * it from disk, so a `--resume` can still find its history — and the scratch
- * files are removed in a `finally` that a SIGKILL never reaches.
+ * The harness writes in one place, `~/.claude/cc-harness`, and it accumulates.
+ * A session directory outlives the session by design — the daemon evicts it
+ * from memory long before it removes it from disk, so a `--resume` can still
+ * find its plan — and a daemon killed mid-save leaves a half-written file.
  *
  * None of that is a leak the daemon can fix on its own without deciding, on
  * the user's behalf, that a piece of their history is worthless. So this
@@ -14,7 +12,6 @@
  * asked to; the decision stays with the person who owns the files.
  */
 import { readdirSync, statSync, existsSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { harnessHome, paths, readLock, isPidAlive, sanitizeId } from '../shared/paths.ts';
 import type { CleanupGroupId, CleanupOutcome, StorageGroup, StorageReport } from '../shared/types.ts';
@@ -32,22 +29,14 @@ const STALE_SESSION_MS = 24 * 60 * 60 * 1000;
 /** A `.state.*.tmp` older than this was abandoned: the rename is atomic. */
 const PARTIAL_WRITE_MS = 5 * 60 * 1000;
 
-/** Ship scratch files linger only while the command using them runs. */
-const SCRATCH_MS = 60 * 60 * 1000;
-
 /** Above this, the daemon log is trimmed rather than left to grow. */
 const LOG_LIMIT_BYTES = 1024 * 1024;
 /** How much of the tail a trim keeps. */
 const LOG_KEEP_BYTES = 256 * 1024;
 
-/** Everything the harness leaves in the system temp directory is named this. */
-const SCRATCH_PREFIX = 'cc-harness-';
-
 export interface ScanOptions {
   /** Session ids the daemon is holding. These are never offered up. */
   liveSessionIds?: Iterable<string>;
-  /** Where ship scratch files land. Overridable so tests stay hermetic. */
-  scratchDir?: string;
   now?: number;
 }
 
@@ -74,8 +63,7 @@ export function scanStorage(opts: ScanOptions = {}): StorageReport {
   const live = new Set<string>();
   for (const id of opts.liveSessionIds ?? []) live.add(sanitizeId(id));
 
-  const scratchDir = opts.scratchDir ?? tmpdir();
-  const plans = buildPlans(live, now, scratchDir);
+  const plans = buildPlans(live, now);
   const groups: StorageGroup[] = plans.map((plan) => ({
     id: plan.id,
     label: plan.label,
@@ -86,7 +74,6 @@ export function scanStorage(opts: ScanOptions = {}): StorageReport {
 
   return {
     home: harnessHome(),
-    scratchDir,
     scannedAt: now,
     groups,
     totalBytes: groups.reduce((sum, g) => sum + g.bytes, 0),
@@ -113,9 +100,8 @@ export function cleanStorage(opts: CleanOptions = {}): CleanupOutcome {
   const live = new Set<string>();
   for (const id of opts.liveSessionIds ?? []) live.add(sanitizeId(id));
 
-  const scratchDir = opts.scratchDir ?? tmpdir();
   const wanted = opts.groups && opts.groups.length ? new Set(opts.groups) : null;
-  const plans = buildPlans(live, now, scratchDir).filter((p) => !wanted || wanted.has(p.id));
+  const plans = buildPlans(live, now).filter((p) => !wanted || wanted.has(p.id));
 
   const groups: CleanupOutcome['groups'] = [];
   const failed: string[] = [];
@@ -132,7 +118,7 @@ export function cleanStorage(opts: CleanOptions = {}): CleanupOutcome {
         groupCount++;
         continue;
       }
-      if (!discard(candidate, scratchDir)) {
+      if (!discard(candidate)) {
         failed.push(candidate.path);
         continue;
       }
@@ -151,12 +137,12 @@ export function cleanStorage(opts: CleanOptions = {}): CleanupOutcome {
  * Candidates
  * ------------------------------------------------------------------ */
 
-function buildPlans(live: Set<string>, now: number, scratchDir: string): GroupPlan[] {
+function buildPlans(live: Set<string>, now: number): GroupPlan[] {
   return [
     {
       id: 'sessions',
       label: 'Finished sessions',
-      detail: 'Recorded history for sessions the harness no longer lists, untouched for over a day.',
+      detail: 'Saved plans for sessions the harness no longer lists, untouched for over a day.',
       candidates: staleSessionDirs(live, now),
     },
     {
@@ -164,12 +150,6 @@ function buildPlans(live: Set<string>, now: number, scratchDir: string): GroupPl
       label: 'Interrupted writes',
       detail: 'Half-written state files left behind when a daemon was killed mid-save.',
       candidates: partialWrites(now),
-    },
-    {
-      id: 'scratch',
-      label: 'Scratch files',
-      detail: 'Commit messages and PR bodies a shipped change wrote to the temp directory.',
-      candidates: scratchFiles(now, scratchDir),
     },
     {
       id: 'log',
@@ -244,38 +224,6 @@ function partialWrites(now: number): Candidate[] {
   return out;
 }
 
-/**
- * `cc-harness-*` entries in the system temp directory.
- *
- * The live home is skipped, and so is any directory holding the lock file of a
- * daemon that is still running: a second harness told to keep its state under
- * `/tmp` is somebody's deliberate setup, not garbage.
- */
-function scratchFiles(now: number, root: string): Candidate[] {
-  const home = path.resolve(harnessHome());
-  const out: Candidate[] = [];
-
-  for (const entry of safeReaddir(root)) {
-    if (!entry.name.startsWith(SCRATCH_PREFIX)) continue;
-    const full = path.join(root, entry.name);
-    const resolved = path.resolve(full);
-    if (resolved === home || home.startsWith(resolved + path.sep)) continue;
-    if (holdsLiveDaemon(resolved)) continue;
-    if (now - mtimeOf(full) < SCRATCH_MS) continue;
-    out.push({ path: full, bytes: sizeOf(full) });
-  }
-  return out;
-}
-
-function holdsLiveDaemon(dir: string): boolean {
-  try {
-    const lock = JSON.parse(readFileSync(path.join(dir, 'daemon.json'), 'utf8')) as { pid?: number };
-    return typeof lock.pid === 'number' && isPidAlive(lock.pid);
-  } catch {
-    return false;
-  }
-}
-
 /** The log is appended to for the daemon's whole life and never rotated. */
 function oversizedLog(): Candidate[] {
   const file = paths.logFile();
@@ -301,21 +249,17 @@ function reclaimable(candidate: Candidate): number {
 }
 
 /**
- * Remove one candidate, refusing anything outside the two directories the
- * harness writes to.
+ * Remove one candidate, refusing anything outside the directory the harness
+ * writes to.
  *
  * Session ids are already sanitised on the way into a path, so this is a
  * second lock on a door that is bolted — which is the appropriate amount of
  * care for code whose failure mode is `rm -rf` on the wrong directory.
  */
-function discard(candidate: Candidate, scratchDir: string): boolean {
+function discard(candidate: Candidate): boolean {
   const target = path.resolve(candidate.path);
   const home = path.resolve(harnessHome());
-  const scratch = path.resolve(scratchDir);
-  const inside = (root: string) => target.startsWith(root + path.sep);
-  if (!inside(home) && !inside(scratch)) return false;
-  // Nothing directly inside the temp directory is ours unless it is named ours.
-  if (!inside(home) && !path.basename(target).startsWith(SCRATCH_PREFIX)) return false;
+  if (!target.startsWith(home + path.sep)) return false;
 
   try {
     if (candidate.trimTo !== undefined) {

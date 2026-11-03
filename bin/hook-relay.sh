@@ -11,8 +11,8 @@
 #   1. Fail open. If the daemon is down, unreachable, slow, or returns
 #      garbage, this must print nothing and exit 0. A hook that errors shows
 #      up inside the user's session, and this plugin is installed globally.
-#   2. No Node startup cost. This runs on every tool call, so it is sh + curl
-#      rather than a Node process.
+#   2. No Node startup cost. This runs on every prompt and every turn end, so
+#      it is sh + curl rather than a Node process.
 
 set -u
 
@@ -25,12 +25,10 @@ PAYLOAD=$(cat)
 HOME_DIR="${CC_HARNESS_HOME:-$HOME/.claude/cc-harness}"
 LOCK="$HOME_DIR/daemon.json"
 
-# The Stop hook parks the turn while the user works through a review gate, so
-# it needs a long budget. Everything else should be effectively instant.
+# Nothing the harness does waits on the user, so every event is near instant.
 case "$EVENT" in
-  Stop) MAX_TIME=570 ;;
-  UserPromptSubmit) MAX_TIME=20 ;;
-  *) MAX_TIME=15 ;;
+  SessionStart) MAX_TIME=15 ;;
+  *) MAX_TIME=4 ;;
 esac
 
 command -v curl >/dev/null 2>&1 || exit 0
@@ -71,12 +69,20 @@ if ! read_lock; then
   start_daemon || exit 0
 fi
 
+# Hooks run inside the session's own environment, which is the only place
+# that says where the session lives — and therefore how to link back to it so
+# the user can answer Claude there. Remote Control can be switched on
+# mid-session, so this goes with every event rather than only SessionStart.
 RESPONSE=$(printf '%s' "$PAYLOAD" | curl -s -S \
   --max-time "$MAX_TIME" \
   --connect-timeout 2 \
   -X POST \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $TOKEN" \
+  -H "X-Harness-Remote-Session: ${CLAUDE_CODE_REMOTE_SESSION_ID:-}" \
+  -H "X-Harness-Remote-Sdk: ${CLAUDE_CODE_REMOTE_SDK_URL:-}" \
+  -H "X-Harness-Bridge-Session: ${CLAUDE_CODE_BRIDGE_SESSION_ID:-}" \
+  -H "X-Harness-Entrypoint: ${CLAUDE_CODE_ENTRYPOINT:-}" \
   --data-binary @- \
   "http://127.0.0.1:$PORT/hook/$EVENT" 2>/dev/null) || exit 0
 

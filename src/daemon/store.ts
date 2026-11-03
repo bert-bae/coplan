@@ -1,44 +1,20 @@
 import { EventEmitter } from 'node:events';
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { paths, ensureHome, sanitizeId } from '../shared/paths.ts';
-import type {
-  SessionState,
-  SessionSummary,
-  Stage,
-  TimelineEvent,
-  TimelineKind,
-  ServerEvent,
-  Gate,
-  GateKind,
-  GateOptions,
-  GateResult,
-  FeedbackItem,
-  DiffPayload,
-  ReviewThread,
-} from '../shared/types.ts';
+import { applyOps, countTasks, currentTask, emptyPlan, markReadByClaude, normalizePlan, publishPlan, unreadByClaude } from '../shared/plan.ts';
+import type { Author, Change, Plan, PlanInput, PlanOp, ServerEvent, SessionState, SessionSummary } from '../shared/types.ts';
 
 const PERSIST_DEBOUNCE_MS = 400;
 
 /**
- * Retention bounds.
- *
- * The daemon is started once by a hook and can then run for weeks, and it
- * loads every session it has ever recorded on boot. Without these, resident
- * memory is a function of how long the user has had the plugin installed
- * rather than of what they are doing right now.
+ * Retention bounds. The daemon is started once by a hook and can then run for
+ * weeks, and it loads every session it has recorded on boot.
  */
-/** Sessions older than this are dropped from memory and from disk on boot. */
-const SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+/** Sessions untouched for longer than this are dropped from memory and disk on boot. */
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** Hard cap on sessions held in memory, newest first. */
 const MAX_SESSIONS = 60;
-/** Resolved gates retained per session; each one carries its full verdict. */
-const MAX_GATES = 40;
-/** Parsed diffs cached in memory. Each can be several megabytes. */
-/** Exported so tests can assert eviction at the real boundary rather than
- *  duplicating the number and drifting from it. */
-export const MAX_CACHED_DIFFS = 12;
 
 export function newSession(sessionId: string, cwd: string): SessionState {
   const now = Date.now();
@@ -46,48 +22,32 @@ export function newSession(sessionId: string, cwd: string): SessionState {
     sessionId,
     cwd,
     repoRoot: null,
-    worktree: null,
     branch: null,
-    transcriptPath: null,
     title: path.basename(cwd) || sessionId.slice(0, 8),
-    stage: 'idle',
     status: 'active',
+    waiting: null,
+    surface: 'unknown',
+    link: null,
     createdAt: now,
     updatedAt: now,
-    baseRef: null,
-    startCommit: null,
-    reviewRound: 0,
-    roundHistory: [],
-    tasks: [],
     plan: null,
-    todos: [],
-    files: [],
-    commands: [],
-    timeline: [],
-    gates: [],
-    activeGateId: null,
-    threads: [],
-    checks: [],
-    ship: null,
-    pendingFeedback: [],
-    stats: { turns: 0, toolCalls: 0, edits: 0 },
   };
 }
 
 /**
  * In-memory registry of every session the harness has seen, with
  * write-behind persistence and an SSE fan-out.
+ *
+ * Every change broadcasts the whole session. A plan is a few kilobytes, and
+ * one shape of update is far easier to keep correct than a family of patches.
  */
 export class SessionStore extends EventEmitter {
   private sessions = new Map<string, SessionState>();
-  private diffs = new Map<string, DiffPayload>();
   private persistTimers = new Map<string, NodeJS.Timeout>();
-  private maxTimeline: number;
 
-  constructor(opts: { maxTimelineEvents?: number } = {}) {
+  constructor() {
     super();
     this.setMaxListeners(0);
-    this.maxTimeline = opts.maxTimelineEvents ?? 500;
     ensureHome();
     this.loadFromDisk();
   }
@@ -109,76 +69,40 @@ export class SessionStore extends EventEmitter {
       const sessionDir = path.join(dir, entry.name);
       const file = path.join(sessionDir, 'state.json');
       if (!existsSync(file)) {
-        // A directory with no state was created by `ensure` for a session
-        // that never produced one. It is dead weight either way.
         if (mtimeOf(sessionDir) < cutoff) expired.push(sessionDir);
         continue;
       }
-      try {
-        const state = JSON.parse(readFileSync(file, 'utf8')) as SessionState;
-        if (!state.sessionId) continue;
-        if ((state.updatedAt ?? 0) < cutoff) {
-          expired.push(sessionDir);
-          continue;
-        }
-        migrate(state);
-        loaded.push(state);
-      } catch {
-        /* skip unreadable session */
+      const state = readState(file);
+      if (!state) continue;
+      if ((state.updatedAt ?? 0) < cutoff) {
+        expired.push(sessionDir);
+        continue;
       }
+      loaded.push(state);
     }
 
-    // Newest first, then cap. Anything past the cap stays on disk — it is not
-    // stale, just cold, and a later `harness status` should still find it.
+    // Anything past the cap stays on disk — cold, not stale.
     loaded.sort((a, b) => b.updatedAt - a.updatedAt);
-    for (const state of loaded.slice(0, MAX_SESSIONS)) {
-      this.sessions.set(state.sessionId, state);
-    }
+    for (const state of loaded.slice(0, MAX_SESSIONS)) this.sessions.set(state.sessionId, state);
     for (const sessionDir of expired) discardDir(sessionDir);
   }
 
-  /** Read one session from disk, or undefined if there is nothing to read. */
-  private readSession(id: string): SessionState | undefined {
-    try {
-      const file = paths.sessionState(id);
-      if (!existsSync(file)) return undefined;
-      const state = JSON.parse(readFileSync(file, 'utf8')) as SessionState;
-      if (!state.sessionId) return undefined;
-      migrate(state);
-      return state;
-    } catch {
-      return undefined;
-    }
-  }
-
-  /**
-   * Forget a session: memory, cached diff, and any pending write.
-   *
-   * On-disk state is left alone — this is eviction, not deletion — so the
-   * session is still there if the daemon restarts and the user goes looking.
-   */
+  /** Forget a session in memory; its state stays on disk. */
   drop(id: string): boolean {
     const timer = this.persistTimers.get(id);
     if (timer) {
       clearTimeout(timer);
       this.persistTimers.delete(id);
-      // The pending write was carrying real changes; do not lose them.
       this.persistNow(id);
     }
-    this.diffs.delete(id);
     const removed = this.sessions.delete(id);
     if (removed) this.broadcastSessionList();
     return removed;
   }
 
   /**
-   * Delete a session for good: memory, cached diff, pending write, and the
-   * whole on-disk directory.
-   *
-   * Unlike `drop`, this is not eviction. `ensure` reads state back off disk
-   * when a swept session reappears, so anything short of removing the
-   * directory would resurrect the session the next time a hook mentioned it —
-   * which is exactly what a user who clicked "delete" did not ask for.
+   * Delete a session for good, on disk too. Anything short of removing the
+   * directory would let `ensure` resurrect it the next time a hook fired.
    */
   purge(id: string): boolean {
     const timer = this.persistTimers.get(id);
@@ -186,34 +110,23 @@ export class SessionStore extends EventEmitter {
       clearTimeout(timer);
       this.persistTimers.delete(id);
     }
-    this.diffs.delete(id);
     const removed = this.sessions.delete(id);
     discardDir(paths.sessionDir(id));
     if (removed) this.broadcastSessionList();
     return removed;
   }
 
-  /**
-   * Evict sessions that ended a while ago, and trim gate history on the rest.
-   *
-   * Called on a timer by the daemon. A long-lived daemon accumulates finished
-   * sessions the user will never look at again; each one holds its timeline,
-   * every gate verdict, and its cached diff.
-   */
+  /** Evict sessions that ended a while ago, then enforce the cap. */
   sweep(opts: { endedTtlMs: number; now?: number } = { endedTtlMs: 60 * 60 * 1000 }): number {
     const now = opts.now ?? Date.now();
     let dropped = 0;
     for (const state of [...this.sessions.values()]) {
-      trimGates(state);
-      const finished = state.status === 'ended';
-      if (finished && now - (state.endedAt ?? state.updatedAt) > opts.endedTtlMs) {
+      if (state.status === 'ended' && now - (state.endedAt ?? state.updatedAt) > opts.endedTtlMs) {
         this.drop(state.sessionId);
         dropped++;
       }
     }
-    // Oldest-first eviction once the cap is exceeded, regardless of status.
-    const overflow = this.all().slice(MAX_SESSIONS);
-    for (const state of overflow) {
+    for (const state of this.all().slice(MAX_SESSIONS)) {
       this.drop(state.sessionId);
       dropped++;
     }
@@ -257,14 +170,12 @@ export class SessionStore extends EventEmitter {
     return this.sessions.get(id);
   }
 
-  /** Get or create. Sessions appear the moment any signal mentions them. */
+  /** Get or create. A session that was swept from memory is read back from
+   *  disk rather than overwritten with a blank one. */
   ensure(id: string, cwd?: string): SessionState {
     let state = this.sessions.get(id);
     if (!state) {
-      // A swept session still has its state on disk. Creating a blank one
-      // here would persist straight over the top of it, so a `--resume` an
-      // hour later would find its whole history gone.
-      state = this.readSession(id) ?? newSession(id, cwd || process.cwd());
+      state = readState(paths.sessionState(id)) ?? newSession(id, cwd || process.cwd());
       this.sessions.set(id, state);
       mkdirSync(paths.sessionDir(id), { recursive: true });
       this.emitEvent({ type: 'snapshot', session: state });
@@ -279,55 +190,19 @@ export class SessionStore extends EventEmitter {
     return [...this.sessions.values()].sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
-  /**
-   * The session list the rail renders, newest session first.
-   *
-   * Ordered on `createdAt`, not activity: an activity order reshuffles itself
-   * every time any session takes a turn, so a row the user was reaching for
-   * moves out from under the cursor. Creation order never changes.
-   */
+  /** The rail's rows, newest session first. Ordered on creation so rows
+   *  never move out from under the cursor. */
   summaries(): SessionSummary[] {
-    return this.all()
+    return [...this.sessions.values()]
       .sort((a, b) => b.createdAt - a.createdAt)
-      .map((s) => ({
-        sessionId: s.sessionId,
-        title: s.title,
-        cwd: s.cwd,
-        // In a worktree `repoRoot` is the worktree itself, whose basename is the
-        // branch. The switcher wants the repository it belongs to.
-        repoName: repoNameOf(s),
-        repoRoot: s.repoRoot,
-        worktree: s.worktree?.name ?? null,
-        branch: s.branch,
-        stage: s.stage,
-        status: s.status,
-        createdAt: s.createdAt,
-        updatedAt: s.updatedAt,
-        openGates: s.gates.filter((g) => g.status === 'open').length,
-        pendingFeedback: s.pendingFeedback.length,
-        tasks: {
-          total: s.tasks.length,
-          done: s.tasks.filter((t) => t.status === 'done').length,
-          blocked: s.tasks.filter((t) => t.status === 'blocked').length,
-        },
-      }));
+      .map((s) => summarize(s));
   }
 
-  /** Most recently updated session rooted at (or under) `cwd`. */
+  /** Most recently updated session rooted at `cwd`. */
   findByCwd(cwd: string): SessionState | undefined {
     const normalized = path.resolve(cwd);
-    const matches = (value: string | null | undefined): boolean =>
-      !!value && path.resolve(value) === normalized;
-    return this.all().find(
-      (s) =>
-        matches(s.cwd) ||
-        matches(s.repoRoot) ||
-        // A session that moved into a worktree is anchored there, but the MCP
-        // server it started with still reports the directory it was launched
-        // in — so that has to keep resolving to the same session.
-        matches(s.worktree?.originalCwd) ||
-        matches(s.worktree?.path),
-    );
+    const matches = (value: string | null | undefined) => !!value && path.resolve(value) === normalized;
+    return this.all().find((s) => matches(s.cwd) || matches(s.repoRoot));
   }
 
   findByPid(pid: number): SessionState | undefined {
@@ -338,19 +213,11 @@ export class SessionStore extends EventEmitter {
    * Mutation
    * ---------------------------------------------------------------- */
 
-  /** Apply a patch, persist, and push the delta to every connected client. */
   update(id: string, patch: Partial<SessionState>): SessionState | undefined {
-    const state = this.sessions.get(id);
-    if (!state) return undefined;
-    Object.assign(state, patch);
-    state.updatedAt = Date.now();
-    this.persistSoon(id);
-    this.emitEvent({ type: 'state', sessionId: id, patch: { ...patch, updatedAt: state.updatedAt } });
-    if (patch.stage || patch.status || patch.branch || patch.title) this.broadcastSessionList();
-    return state;
+    return this.mutate(id, (s) => Object.assign(s, patch));
   }
 
-  /** Mutate in place with a callback, then broadcast the whole session. */
+  /** Mutate in place, persist, and broadcast the whole session. */
   mutate(id: string, fn: (s: SessionState) => void): SessionState | undefined {
     const state = this.sessions.get(id);
     if (!state) return undefined;
@@ -362,382 +229,39 @@ export class SessionStore extends EventEmitter {
     return state;
   }
 
-  addTimeline(
-    id: string,
-    kind: TimelineKind,
-    text: string,
-    opts: { label?: string; meta?: Record<string, unknown> } = {},
-  ): TimelineEvent | undefined {
-    const state = this.sessions.get(id);
-    if (!state) return undefined;
-    const event: TimelineEvent = {
-      id: randomUUID(),
-      ts: Date.now(),
-      kind,
-      text,
-      ...(opts.label ? { label: opts.label } : {}),
-      ...(opts.meta ? { meta: opts.meta } : {}),
-    };
-    state.timeline.push(event);
-    if (state.timeline.length > this.maxTimeline) {
-      state.timeline.splice(0, state.timeline.length - this.maxTimeline);
-    }
-    state.updatedAt = event.ts;
-    this.persistSoon(id);
-    this.emitEvent({ type: 'timeline', sessionId: id, events: [event] });
-    return event;
-  }
-
-  addTimelineBatch(id: string, events: Omit<TimelineEvent, 'id' | 'ts'>[], baseTs = Date.now()): void {
-    if (events.length === 0) return;
-    const state = this.sessions.get(id);
-    if (!state) return;
-    const made: TimelineEvent[] = events.map((e, i) => ({ id: randomUUID(), ts: baseTs + i, ...e }));
-    state.timeline.push(...made);
-    if (state.timeline.length > this.maxTimeline) {
-      state.timeline.splice(0, state.timeline.length - this.maxTimeline);
-    }
-    state.updatedAt = Date.now();
-    this.persistSoon(id);
-    this.emitEvent({ type: 'timeline', sessionId: id, events: made });
-  }
-
-  setStage(id: string, stage: Stage, note?: string): void {
-    const state = this.sessions.get(id);
-    if (!state || state.stage === stage) {
-      if (state && note) this.update(id, { stageNote: note });
-      return;
-    }
-    this.update(id, { stage, stageNote: note });
-    this.addTimeline(id, 'stage', note ? `${stage} — ${note}` : stage, { label: stage });
-  }
-
-  /* ---------------------------------------------------------------- *
-   * Gates
-   * ---------------------------------------------------------------- */
-
-  openGate(id: string, kind: GateKind, prompt: string, meta?: GateOptions): Gate | undefined {
-    const state = this.sessions.get(id);
-    if (!state) return undefined;
-    // One open gate at a time keeps the UI unambiguous. Anything parked on
-    // the old gate has to be told, or it holds the terminal for its full
-    // window waiting on a gate that no longer exists.
-    for (const g of state.gates) {
-      if (g.status !== 'open') continue;
-      g.status = 'cancelled';
-      g.waiting = false;
-      this.emit('gate:cancelled', { sessionId: id, gate: g });
-    }
-    const gate: Gate = {
-      id: randomUUID(),
-      kind,
-      stage: state.stage,
-      prompt,
-      createdAt: Date.now(),
-      status: 'open',
-      waiting: false,
-      ...(meta && Object.keys(meta).length ? { meta } : {}),
-    };
-    state.gates.push(gate);
-    trimGates(state);
-    state.activeGateId = gate.id;
-    state.updatedAt = gate.createdAt;
-    this.persistSoon(id);
-    this.addTimeline(id, 'gate', prompt, { label: kind, meta: { gateId: gate.id } });
-    this.emitEvent({ type: 'state', sessionId: id, patch: { gates: state.gates, activeGateId: gate.id } });
-    this.broadcastSessionList();
-    return gate;
-  }
-
-  getGate(id: string, gateId: string): Gate | undefined {
-    return this.sessions.get(id)?.gates.find((g) => g.id === gateId);
-  }
-
-  activeGate(id: string): Gate | undefined {
-    const state = this.sessions.get(id);
-    if (!state) return undefined;
-    return state.gates.find((g) => g.id === state.activeGateId && g.status === 'open');
-  }
-
-  resolveGate(id: string, gateId: string, result: GateResult): Gate | undefined {
-    const state = this.sessions.get(id);
-    const gate = state?.gates.find((g) => g.id === gateId);
-    if (!state || !gate || gate.status !== 'open') return undefined;
-    const parked = gate.waiting;
-    gate.status = 'resolved';
-    gate.result = result;
-    gate.waiting = false;
-    if (state.activeGateId === gateId) state.activeGateId = null;
-    settleStatus(state, parked);
-    if (result.threads?.length) {
-      const byId = new Map(state.threads.map((t) => [t.id, t]));
-      for (const t of result.threads) byId.set(t.id, t);
-      state.threads = [...byId.values()];
-    }
-    if (result.steps && state.plan) {
-      state.plan = { ...state.plan, steps: result.steps, revision: state.plan.revision + 1, updatedAt: Date.now() };
-    }
-    state.updatedAt = Date.now();
-    this.persistSoon(id);
-    this.addTimeline(id, 'feedback', describeVerdict(result), {
-      label: gate.kind,
-      meta: { gateId, verdict: result.verdict },
-    });
-    this.emitEvent({ type: 'snapshot', session: state });
-    this.broadcastSessionList();
-    this.emit('gate:resolved', { sessionId: id, gate });
-    return gate;
-  }
-
-  /**
-   * Close an open gate without a verdict.
-   *
-   * This is what "send now" does: the user has decided the question the gate
-   * was asking is no longer the thing to answer, so anything parked on it is
-   * released and the session is free to act on the message instead. The gate
-   * is kept in the list as `cancelled` rather than deleted, so the UI can
-   * still say what was skipped and when.
-   */
-  cancelGate(id: string, gateId: string, reason?: string): Gate | undefined {
-    const state = this.sessions.get(id);
-    const gate = state?.gates.find((g) => g.id === gateId);
-    if (!state || !gate || gate.status !== 'open') return undefined;
-    const parked = gate.waiting;
-    gate.status = 'cancelled';
-    gate.waiting = false;
-    if (state.activeGateId === gateId) state.activeGateId = null;
-    settleStatus(state, parked);
-    state.updatedAt = Date.now();
-    this.persistSoon(id);
-    this.addTimeline(id, 'gate', reason ?? `The user skipped the ${gate.kind.replace('_', ' ')} gate.`, {
-      label: gate.kind,
-      meta: { gateId, cancelled: true },
-    });
-    this.emitEvent({
-      type: 'state',
-      sessionId: id,
-      patch: { gates: state.gates, activeGateId: null, status: state.status },
-    });
-    this.broadcastSessionList();
-    this.emit('gate:cancelled', { sessionId: id, gate });
-    return gate;
-  }
-
-  /**
-   * A gate the user has already answered but Claude has not yet been told
-   * about. This happens whenever the user answers faster than the turn ends.
-   */
-  undeliveredGate(id: string): Gate | undefined {
-    return this.undeliveredGates(id)[0];
-  }
-
-  /**
-   * Every answered gate Claude has not been told about, oldest first.
-   *
-   * Usually there is at most one. More than one means an answer was given
-   * while the session was stopped and then another gate came and went before
-   * it next ran — and handing over only the first would leave the user's most
-   * recent verdict stranded behind a stale one, which reads as the click
-   * having done nothing.
-   */
-  undeliveredGates(id: string): Gate[] {
-    return this.sessions.get(id)?.gates.filter((g) => g.status === 'resolved' && g.result && !g.deliveredAt) ?? [];
-  }
-
-  markGateDelivered(id: string, gateId: string): Gate | undefined {
-    const gate = this.getGate(id, gateId);
-    if (!gate || gate.deliveredAt) return gate;
-    const now = Date.now();
-    gate.deliveredAt = now;
-
-    // The comments carried by this verdict reached Claude at the same moment,
-    // so stamp them too — otherwise the UI keeps showing them as unsent and
-    // the next round can never close them out.
-    const state = this.sessions.get(id);
-    if (state) {
-      for (const delivered of gate.result?.threads ?? []) {
-        const live = state.threads.find((t) => t.id === delivered.id);
-        if (live && !live.deliveredAt) live.deliveredAt = now;
-      }
-      this.emitEvent({ type: 'state', sessionId: id, patch: { gates: state.gates, threads: state.threads } });
-    }
-    this.persistSoon(id);
-    return gate;
-  }
-
-  /**
-   * Stop marking a gate as parked, without deciding what the session is doing.
-   *
-   * {@link setGateWaiting} promotes a session off `waiting` when its wait
-   * ends, which is right for `harness_await` — the wait ending there means the
-   * turn is carrying on. It is wrong for a gate hold that simply expired:
-   * nothing is running, the turn is about to end, and broadcasting `active`
-   * first makes every unanswered gate flash the session card from "waiting"
-   * to "working" and back. The caller sets the real status straight after.
-   */
-  clearGateWaiting(id: string, gateId: string): void {
-    const gate = this.getGate(id, gateId);
-    if (!gate || !gate.waiting) return;
-    gate.waiting = false;
-    const state = this.sessions.get(id);
-    if (state) this.emitEvent({ type: 'state', sessionId: id, patch: { gates: state.gates } });
-  }
-
-  setGateWaiting(id: string, gateId: string, waiting: boolean): void {
-    const gate = this.getGate(id, gateId);
-    if (!gate) return;
-    gate.waiting = waiting;
-    const state = this.sessions.get(id);
-    if (state) {
-      const status = waiting ? 'waiting' : state.status === 'waiting' ? 'active' : state.status;
-      this.update(id, { status, gates: state.gates });
-    }
-  }
-
-  /* ---------------------------------------------------------------- *
-   * Async feedback queue
-   * ---------------------------------------------------------------- */
-
-  queueFeedback(id: string, item: Omit<FeedbackItem, 'id' | 'createdAt'>): FeedbackItem | undefined {
-    const state = this.sessions.get(id);
-    if (!state) return undefined;
-    const full: FeedbackItem = { id: randomUUID(), createdAt: Date.now(), ...item };
-    state.pendingFeedback.push(full);
-    if (full.threads?.length) {
-      const byId = new Map(state.threads.map((t) => [t.id, t]));
-      for (const t of full.threads) byId.set(t.id, t);
-      state.threads = [...byId.values()];
-    }
-    state.updatedAt = full.createdAt;
-    this.persistSoon(id);
-    this.addTimeline(id, 'feedback', full.text, { label: full.origin });
-    this.emitEvent({ type: 'state', sessionId: id, patch: { pendingFeedback: state.pendingFeedback } });
-    this.broadcastSessionList();
-    this.emit('feedback:queued', { sessionId: id, item: full });
-    return full;
-  }
-
-  /** Remove and return everything queued; called at a turn boundary. */
-  drainFeedback(id: string): FeedbackItem[] {
-    const state = this.sessions.get(id);
-    if (!state || state.pendingFeedback.length === 0) return [];
-    const drained = state.pendingFeedback;
-    state.pendingFeedback = [];
-    const now = Date.now();
-    for (const item of drained) {
-      for (const t of item.threads ?? []) {
-        const live = state.threads.find((x) => x.id === t.id);
-        if (live) live.deliveredAt = now;
-      }
-    }
-    state.updatedAt = now;
-    this.persistSoon(id);
-    this.emitEvent({ type: 'state', sessionId: id, patch: { pendingFeedback: [], threads: state.threads } });
-    this.broadcastSessionList();
-    return drained;
-  }
-
-  /* ---------------------------------------------------------------- *
-   * Diffs
-   * ---------------------------------------------------------------- */
-
-  setDiff(id: string, diff: DiffPayload): void {
-    this.cacheDiff(id, diff);
-    // Persisted so a daemon restart mid-review does not leave the session
-    // intact but the Review tab empty.
-    try {
-      const dir = paths.sessionDir(id);
-      mkdirSync(dir, { recursive: true });
-      const tmp = path.join(dir, `.diff.${process.pid}.tmp`);
-      writeFileSync(tmp, JSON.stringify(diff));
-      renameSync(tmp, path.join(dir, 'diff.json'));
-    } catch {
-      /* best effort */
-    }
-    this.emitEvent({ type: 'diff', sessionId: id, diff });
-  }
-
-  /**
-   * Forget a session's diff, in memory and on disk.
-   *
-   * Used when the ground moves under a session — it relocates into or out of a
-   * worktree — because the cached diff describes a tree it is no longer in.
-   */
-  clearDiff(id: string): void {
-    this.diffs.delete(id);
-    try {
-      rmSync(path.join(paths.sessionDir(id), 'diff.json'), { force: true });
-    } catch {
-      /* best effort */
-    }
-  }
-
-  getDiff(id: string): DiffPayload | undefined {
-    const cached = this.diffs.get(id);
-    if (cached) {
-      // Re-insert on a hit. Without this the eviction order is insertion
-      // order, not recency, so the diff being actively reviewed is the one
-      // most likely to be thrown out while colder entries survive.
-      this.cacheDiff(id, cached);
-      return cached;
-    }
-    try {
-      const file = path.join(paths.sessionDir(id), 'diff.json');
-      if (!existsSync(file)) return undefined;
-      const diff = JSON.parse(readFileSync(file, 'utf8')) as DiffPayload;
-      this.cacheDiff(id, diff);
-      return diff;
-    } catch {
-      return undefined;
-    }
-  }
-
-  /** Append a reply to a review thread and tell every client. */
-  addThreadReply(
-    id: string,
-    threadId: string,
-    reply: { author: 'user' | 'claude'; text: string },
-  ): ReviewThread | undefined {
-    let updated: ReviewThread | undefined;
+  /** Claude publishes the plan wholesale. Throws `PlanError` when refused. */
+  publishPlan(id: string, input: PlanInput): { plan: Plan; changes: Change[] } {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error('unknown session');
+    const result = publishPlan(session.plan, input);
     this.mutate(id, (s) => {
-      const thread = s.threads.find((t) => t.id === threadId);
-      if (!thread) return;
-      thread.replies = [
-        ...(thread.replies ?? []),
-        { id: randomUUID(), ts: Date.now(), author: reply.author, text: reply.text },
-      ];
-      updated = thread;
+      s.plan = result.plan;
     });
-    return updated;
+    return result;
   }
 
-  setThreadResolved(id: string, threadId: string, resolved: boolean): ReviewThread | undefined {
-    let updated: ReviewThread | undefined;
+  /** Apply edits from either side. Throws `PlanError` when any op fails, in
+   *  which case nothing is changed. */
+  applyOps(id: string, ops: PlanOp[], author: Author): { plan: Plan; changes: Change[] } {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error('unknown session');
+    // The user can start a plan from the browser before Claude has published.
+    const base = session.plan ?? emptyPlan(session.title);
+    const result = applyOps(base, ops, author);
     this.mutate(id, (s) => {
-      const thread = s.threads.find((t) => t.id === threadId);
-      if (!thread) return;
-      thread.resolved = resolved;
-      updated = thread;
+      s.plan = result.plan;
     });
-    return updated;
+    return result;
   }
 
-  /**
-   * Keep the diff cache bounded, evicting least-recently-used.
-   *
-   * Every entry is a fully parsed diff — up to `maxDiffFileBytes` per file —
-   * and the previous behaviour kept one per session forever. Re-inserting
-   * moves a key to the end of the Map's iteration order, which is the LRU
-   * position we evict from the front of.
-   */
-  private cacheDiff(id: string, diff: DiffPayload): void {
-    this.diffs.delete(id);
-    this.diffs.set(id, diff);
-    while (this.diffs.size > MAX_CACHED_DIFFS) {
-      const oldest = this.diffs.keys().next();
-      if (oldest.done) break;
-      this.diffs.delete(oldest.value);
-    }
+  /** Move Claude's read position to the end of the change log. */
+  markRead(id: string): void {
+    const session = this.sessions.get(id);
+    if (!session?.plan) return;
+    if (session.plan.claudeReadSeq === session.plan.seq && session.plan.claudeReadAt) return;
+    this.mutate(id, (s) => {
+      if (s.plan) markReadByClaude(s.plan);
+    });
   }
 
   /* ---------------------------------------------------------------- *
@@ -748,76 +272,133 @@ export class SessionStore extends EventEmitter {
     this.emit('event', event);
   }
 
+  /**
+   * The rail's list, coalesced: a canvas drag or a batch of hook events can
+   * change a session many times in one tick, and every open page only needs
+   * the last of them.
+   */
   broadcastSessionList(): void {
-    this.emitEvent({ type: 'sessions', sessions: this.summaries() });
+    if (this.listQueued) return;
+    this.listQueued = true;
+    setImmediate(() => {
+      this.listQueued = false;
+      this.emitEvent({ type: 'sessions', sessions: this.summaries() });
+    });
+  }
+
+  private listQueued = false;
+}
+
+export function summarize(s: SessionState): SessionSummary {
+  const plan = s.plan;
+  return {
+    sessionId: s.sessionId,
+    title: s.title,
+    planTitle: plan?.title ?? null,
+    cwd: s.cwd,
+    repoName: s.repoRoot ? path.basename(s.repoRoot) : null,
+    repoRoot: s.repoRoot,
+    branch: s.branch,
+    status: s.status,
+    createdAt: s.createdAt,
+    updatedAt: s.updatedAt,
+    tasks: countTasks(plan),
+    current: currentTask(plan)?.title ?? null,
+    waiting: s.waiting,
+    surface: s.surface,
+    link: s.link,
+    openThreads: plan?.threads.filter((t) => !t.resolved).length ?? 0,
+    unreadByClaude: unreadByClaude(plan).length,
+  };
+}
+
+/**
+ * Read one session's state, or undefined if there is none.
+ *
+ * A file that exists but cannot be read is moved aside rather than ignored:
+ * ignoring it would let the next save write a blank session over the top of
+ * a plan that might still be recoverable by hand.
+ */
+function readState(file: string): SessionState | undefined {
+  if (!existsSync(file)) return undefined;
+  try {
+    const state = JSON.parse(readFileSync(file, 'utf8')) as SessionState;
+    if (!state || typeof state !== 'object' || typeof state.sessionId !== 'string') throw new Error('not a session');
+    migrate(state);
+    return state;
+  } catch {
+    quarantine(file);
+    return undefined;
+  }
+}
+
+function quarantine(file: string): void {
+  try {
+    renameSync(file, path.join(path.dirname(file), `state.corrupt-${Date.now()}.json`));
+  } catch {
+    /* if it cannot be moved it cannot be overwritten either */
   }
 }
 
 /**
- * Bring a session read from disk up to date.
+ * Bring a session written by an older build up to date.
  *
- * Shared by the startup scan and the single-session rehydrate, so the two can
- * never drift into applying different fixups to the same file.
+ * Builds before the planning rewrite stored a flat step list and a pile of
+ * review-loop state. The steps become top-level tasks and the prose becomes a
+ * section; the rest has no meaning any more and is dropped.
  */
 function migrate(state: SessionState): void {
-  // Sessions written by an older build predate some fields.
-  state.reviewRound ??= 0;
-  // Predates `createdAt`; its last activity is the closest thing on record.
-  state.createdAt ??= state.updatedAt ?? Date.now();
-  state.worktree ??= null;
-  state.threads ??= [];
-  state.roundHistory ??= [];
-  state.tasks ??= [];
-  // A session cannot still be mid-turn across a daemon restart.
-  if (state.status === 'active') state.status = 'idle';
-  // Any gate that was parked has lost its waiter.
-  for (const gate of state.gates) gate.waiting = false;
-  trimGates(state);
-}
+  const raw = state as unknown as Record<string, unknown>;
+  state.updatedAt = typeof state.updatedAt === 'number' ? state.updatedAt : Date.now();
+  state.createdAt ??= state.updatedAt;
+  state.title = typeof state.title === 'string' && state.title ? state.title : state.sessionId.slice(0, 8);
+  state.cwd = typeof state.cwd === 'string' ? state.cwd : '';
+  if (state.status !== 'ended') state.status = 'idle';
 
-/**
- * Move a session off `waiting` once the thing it was waiting for is closed.
- *
- * `waiting` is what puts a session in the rail's *Action required* group and
- * labels it "needs you". Nothing used to clear it when the user answered, so
- * a session they had just signed off on went on asking for their attention
- * until the next hook fired — which, with the turn already ended, meant until
- * they went back to the terminal.
- *
- * Which state it lands in depends on whether a turn was actually parked on
- * the gate: one that was is about to be resumed with the verdict, and one
- * that was not has already stopped.
- */
-function settleStatus(state: SessionState, parked: boolean): void {
-  if (state.status !== 'waiting') return;
-  state.status = parked ? 'active' : 'idle';
-}
-
-/**
- * Cap a session's gate history.
- *
- * Every gate retains its full `GateResult` — the comment, the edited plan, and
- * each review thread with its source excerpt. A session that goes through many
- * review rounds would otherwise carry all of them in memory and rewrite the
- * lot to disk on every persist. Open and undelivered gates are never dropped:
- * something is still waiting on them.
- */
-function trimGates(state: SessionState): void {
-  if (state.gates.length <= MAX_GATES) return;
-  const keep = new Set<Gate>();
-  for (const gate of state.gates) {
-    if (gate.status === 'open' || (gate.result && !gate.deliveredAt)) keep.add(gate);
+  const oldPlan = raw['plan'] as Record<string, unknown> | null | undefined;
+  if (oldPlan && !Array.isArray(oldPlan['tasks'])) {
+    const plan = emptyPlan(String(oldPlan['title'] ?? state.title));
+    plan.summary = typeof oldPlan['summary'] === 'string' ? oldPlan['summary'] : '';
+    if (typeof oldPlan['markdown'] === 'string' && oldPlan['markdown'].trim()) {
+      plan.sections.push({ id: 's1', title: 'Notes', body: oldPlan['markdown'], rev: 1, updatedAt: Date.now(), updatedBy: 'claude' });
+    }
+    const steps = Array.isArray(oldPlan['steps']) ? (oldPlan['steps'] as Record<string, unknown>[]) : [];
+    steps.forEach((step, i) => {
+      const now = Date.now();
+      plan.tasks.push({
+        id: `t${i + 1}`,
+        parentId: null,
+        order: i,
+        title: String(step['title'] ?? `Step ${i + 1}`),
+        ...(typeof step['detail'] === 'string' ? { detail: step['detail'] } : {}),
+        status: step['status'] === 'done' ? 'done' : 'todo',
+        createdAt: now,
+        updatedAt: now,
+        createdBy: 'claude',
+      });
+    });
+    state.plan = plan;
   }
-  const droppable = state.gates.filter((g) => !keep.has(g));
-  const surplus = state.gates.length - MAX_GATES;
-  const drop = new Set(droppable.slice(0, Math.max(0, surplus)));
-  if (drop.size === 0) return;
-  state.gates = state.gates.filter((g) => !drop.has(g));
-}
+  state.plan = state.plan && typeof state.plan === 'object' ? normalizePlan(state.plan as Plan & Record<string, unknown>, state.title) : null;
+  // Plans saved before questions moved into Claude's own chat.
+  if (state.plan) {
+    const plan = state.plan as unknown as Record<string, unknown>;
+    delete plan['questions'];
+    state.plan.threads = state.plan.threads.filter((t) => (t.target.kind as string) !== 'question');
+    state.plan.changes = state.plan.changes.filter((c) => (c.target.kind as string) !== 'question');
+  }
+  // A waiting state cannot survive a restart: whatever was asked has moved on.
+  state.waiting = null;
+  state.surface ??= 'unknown';
+  state.link ??= null;
 
-function repoNameOf(state: SessionState): string | null {
-  const root = state.worktree?.mainRoot ?? state.repoRoot;
-  return root ? path.basename(root) : null;
+  for (const key of [
+    'worktree', 'transcriptPath', 'stage', 'stageNote', 'baseRef', 'startCommit', 'reviewRound',
+    'roundHistory', 'tasks', 'usage', 'todos', 'files', 'commands', 'timeline', 'gates',
+    'activeGateId', 'threads', 'checks', 'ship', 'pendingFeedback', 'stats',
+  ]) {
+    delete raw[key];
+  }
 }
 
 function mtimeOf(dir: string): number {
@@ -832,29 +413,8 @@ function discardDir(dir: string): void {
   try {
     rmSync(dir, { recursive: true, force: true });
   } catch {
-    /* a session directory we cannot remove is not worth failing boot over */
+    /* not worth failing over */
   }
-}
-
-function describeVerdict(result: GateResult): string {
-  const bits: string[] = [];
-  switch (result.verdict) {
-    case 'approved':
-      bits.push('Approved');
-      break;
-    case 'changes_requested':
-      bits.push('Changes requested');
-      break;
-    case 'rejected':
-      bits.push('Rejected');
-      break;
-    case 'answered':
-      bits.push('Answered');
-      break;
-  }
-  if (result.threads?.length) bits.push(`${result.threads.length} line comment(s)`);
-  if (result.comment) bits.push(result.comment);
-  return bits.join(' — ');
 }
 
 export { sanitizeId };

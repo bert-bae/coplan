@@ -4,7 +4,8 @@ import { setupDom, stubFetch } from './dom-env.ts';
 import type { SessionState, SessionSummary } from '../shared/types.ts';
 
 /**
- * The session rail: grouping by project, pinning, and deletion.
+ * The session rail: grouping by project, pinning, deletion, and the
+ * daemon-wide actions in its footer.
  *
  * The rail is the only way to reach a session that is not the current one, so
  * these cover the things that would strand a user — a fold that hides the
@@ -25,57 +26,38 @@ function makeSession(): SessionState {
     cwd: '/repo',
     repoRoot: '/repo',
     branch: 'main',
-    transcriptPath: null,
     title: 's1 title',
-    stage: 'implementing',
     status: 'active',
+    waiting: null,
+    surface: 'unknown',
+    link: null,
     createdAt: now,
     updatedAt: now,
-    baseRef: null,
-    startCommit: null,
-    reviewRound: 0,
-    roundHistory: [],
-    tasks: [],
     plan: null,
-    todos: [],
-    files: [],
-    commands: [],
-    timeline: [],
-    gates: [],
-    activeGateId: null,
-    threads: [],
-    checks: [],
-    ship: null,
-    pendingFeedback: [],
-    stats: { turns: 0, toolCalls: 0, edits: 0 },
   };
 }
 
 /** A summary row for the rail. The rail orders on `createdAt`, so activity
  *  (`updatedAt`) is a separate argument the ordering tests can move on its own. */
-function summary(
-  sessionId: string,
-  repo: string,
-  createdAt: number,
-  worktree: string | null = null,
-  updatedAt: number = createdAt,
-): SessionSummary {
+function summary(sessionId: string, repo: string, createdAt: number, updatedAt: number = createdAt): SessionSummary {
   return {
     sessionId,
     title: `${sessionId} title`,
+    planTitle: null,
     cwd: `/${repo}`,
     repoName: repo,
-    // A worktree is its own checkout, so it groups under its own root.
-    repoRoot: worktree ? `/${repo}/.claude/worktrees/${worktree}` : `/${repo}`,
-    worktree,
+    repoRoot: `/${repo}`,
     branch: 'main',
-    stage: 'implementing',
     status: 'active',
     createdAt,
     updatedAt,
-    openGates: 0,
-    pendingFeedback: 0,
-    tasks: { total: 0, done: 0, blocked: 0 },
+    tasks: { total: 0, done: 0, inProgress: 0, blocked: 0 },
+    current: null,
+    waiting: null,
+    surface: 'unknown',
+    link: null,
+    openThreads: 0,
+    unreadByClaude: 0,
   };
 }
 
@@ -91,7 +73,6 @@ const SESSIONS = () => {
 function storageReport(scale = 1) {
   return {
     home: '/home/u/.claude/cc-harness',
-    scratchDir: '/tmp',
     scannedAt: Date.now(),
     groups: [
       {
@@ -108,8 +89,7 @@ function storageReport(scale = 1) {
         count: 2 * scale,
         bytes: 2048 * scale,
       },
-      { id: 'scratch', label: 'Scratch files', detail: 'Commit messages.', count: 3 * scale, bytes: 1024 * scale },
-      { id: 'log', label: 'Daemon log', detail: 'The older part of the log.', count: 0, bytes: 0 },
+      { id: 'log', label: 'Daemon log', detail: 'The older part of the log.', count: 1 * scale, bytes: 1024 * scale },
       { id: 'lock', label: 'Stale lock file', detail: 'A dead address.', count: 0, bytes: 0 },
     ],
     totalBytes: 4_003_072 * scale,
@@ -133,9 +113,9 @@ async function boot(sessions?: () => SessionSummary[]): Promise<void> {
         report: storageReport(0),
       };
     }
-    if (route === '/api/daemon/restart') return { restarting: true, interrupted: ['npm test'] };
+    if (route === '/api/daemon/restart') return { restarting: true };
     if (route === '/health') return { ok: true, version: 'test', pid: nextPid() };
-    if (route.startsWith('/api/session/')) return { session: makeSession(), diff: null };
+    if (route.startsWith('/api/session/')) return { session: makeSession() };
     return { ok: true };
   }));
   render(<App />);
@@ -167,13 +147,10 @@ beforeEach(() => {
     sessions: [],
     sessionId: null,
     session: null,
-    diff: null,
-    drafts: {},
     toasts: [],
     pinned: [],
     collapsedProjects: [],
     collapsedSidebar: false,
-    soundEnabled: true,
     storage: null,
     storageBusy: false,
     restarting: false,
@@ -206,27 +183,13 @@ test('the rail holds its order when a session takes a turn', async () => {
       sessions: [
         summary('s1', 'repo', now),
         summary('s2', 'other', now - 1000),
-        summary('s3', 'other', now - 2000, null, now + 5000),
+        summary('s3', 'other', now - 2000, now + 5000),
       ],
     });
   });
 
   assert.deepEqual(groupNames(), ['repo', 'other'], 'activity does not reorder the projects');
   assert.deepEqual(rowNames(), ['s1 title', 's2 title', 's3 title'], 'nor the rows within one');
-});
-
-test('each worktree of a repo is its own group, named for the worktree', async () => {
-  // A worktree is a separate checkout, so it groups on its own root. Without
-  // naming it, every worktree of one repo renders the same header.
-  const now = Date.now();
-  await boot(() => [
-    summary('w1', 'repo', now, 'feature/ui'),
-    summary('w2', 'repo', now - 1000, 'fix/parser'),
-    summary('m1', 'repo', now - 2000),
-  ]);
-
-  assert.deepEqual(groupNames(), ['repo ⑂ feature/ui', 'repo ⑂ fix/parser', 'repo']);
-  assert.deepEqual(rowNames(), ['w1 title', 'w2 title', 'm1 title']);
 });
 
 test('a project group folds away, and the fold is remembered', async () => {
@@ -264,7 +227,7 @@ test('a pinned session moves to its own group at the top', async () => {
     fireEvent.click(within(rowFor('s3 title')).getByTitle('Pin session'));
   });
 
-  assert.deepEqual(groupNames(), ['Pinned / Action required', 'repo', 'other']);
+  assert.deepEqual(groupNames(), ['Pinned', 'repo', 'other']);
   assert.deepEqual(store.getState().pinned, ['s3']);
   assert.match(document.querySelector('.session-group')?.textContent ?? '', /s3 title/);
 
@@ -328,29 +291,12 @@ test('deleting the open session moves to another one', async () => {
   assert.equal(store.getState().sessionId, 's2');
 });
 
-test('deleting a session forgets the local state hanging off it', async () => {
+test('deleting a session forgets the pin hanging off it', async () => {
   await boot();
   // Flushed before the click: pinning re-parents the row into the Pinned
   // group, which remounts it and would drop the confirm mid-test.
   await act(async () => {
-    store.set({
-      drafts: {
-        s2: [
-          {
-            id: 'c1',
-            file: 'a.ts',
-            side: 'new',
-            startLine: 1,
-            endLine: 1,
-            body: 'note',
-            createdAt: Date.now(),
-            resolved: false,
-            draft: true,
-          },
-        ],
-      },
-      pinned: ['s2'],
-    });
+    store.set({ pinned: ['s2'] });
   });
 
   await act(async () => {
@@ -360,8 +306,7 @@ test('deleting a session forgets the local state hanging off it', async () => {
     fireEvent.click(within(rowFor('s2 title')).getByText('Delete'));
   });
 
-  // Nothing else will ever clean these up: the session id is gone for good.
-  assert.equal(store.getState().drafts['s2'], undefined);
+  // Nothing else will ever clean it up: the session id is gone for good.
   assert.deepEqual(store.getState().pinned, []);
 });
 
@@ -376,27 +321,54 @@ test('collapsing the sidebar narrows the column it sits in', async () => {
   assert.ok(document.querySelector('.app')?.classList.contains('is-sidebar-collapsed'));
 });
 
-test('a session waiting on the user is lifted to the top group unpinned', async () => {
-  ({ posts } = stubFetch((route) => {
-    if (route.startsWith('/api/sessions')) {
-      const now = Date.now();
-      const blocked = { ...summary('s3', 'other', now - 2000), openGates: 1, status: 'waiting' as const };
-      return { sessions: [summary('s1', 'repo', now), summary('s2', 'other', now - 1000), blocked], version: 'test' };
-    }
-    if (route.startsWith('/api/session/')) return { session: makeSession(), diff: null };
-    return { ok: true };
-  }));
-  render(<App />);
-  await act(async () => {
-    await store.init();
-  });
+test('a row shows the plan, its progress, and what Claude is on', async () => {
+  const now = Date.now();
+  await boot(() => [
+    {
+      ...summary('s1', 'repo', now),
+      planTitle: 'Cache rewrite',
+      tasks: { total: 5, done: 2, inProgress: 1, blocked: 0 },
+      current: 'Read-through wrapper',
+      unreadByClaude: 3,
+    },
+  ]);
+  const row = rowFor('Cache rewrite');
+  assert.ok(row, 'the plan title names the row');
+  assert.match(row.textContent ?? '', /now: Read-through wrapper/);
+  assert.match(row.textContent ?? '', /2\/5 tasks/);
+  assert.match(row.textContent ?? '', /3 unread/);
+});
 
-  // Nothing was pinned: being blocked on the user is enough on its own.
-  assert.deepEqual(store.getState().pinned, []);
-  assert.deepEqual(groupNames(), ['Pinned / Action required', 'repo', 'other']);
-  assert.match(document.querySelector('.session-group')?.textContent ?? '', /s3 title/);
-  // And it is not also listed under its project, which would double-count it.
-  assert.deepEqual(rowNames().filter((n) => n.includes('s3 title')).length, 1);
+test('a session waiting on the user is lifted to the top, with a way into Claude', async () => {
+  const now = Date.now();
+  const link = { app: 'claude://claude.ai/code/session_1', web: 'https://claude.ai/code/session_1', via: 'cloud' as const };
+  await boot(() => [
+    summary('s1', 'repo', now),
+    { ...summary('s3', 'other', now - 2000), waiting: { kind: 'question' as const, text: 'Which TTL?', since: now }, link },
+  ]);
+  assert.deepEqual(groupNames(), ['Waiting on you', 'repo']);
+  const row = rowFor('s3 title');
+  assert.match(row.textContent ?? '', /Which TTL\?/);
+  assert.equal(within(row).getByText('Answer in Claude').getAttribute('href'), link.app);
+});
+
+test('collapsing the sidebar folds it to a rail of initials', async () => {
+  const now = Date.now();
+  await boot(() => [
+    { ...summary('s1', 'repo', now), planTitle: 'Cache rewrite' },
+    { ...summary('s2', 'other', now - 1000), waiting: { kind: 'input' as const, text: 'Go?', since: now } },
+  ]);
+  await act(async () => {
+    fireEvent.click(screen.getByTitle('Collapse sidebar'));
+  });
+  assert.equal(document.querySelector('.session-list'), null, 'the full list is gone');
+  const items = [...document.querySelectorAll('.rail-item')];
+  assert.deepEqual(items.map((i) => i.textContent), ['ST', 'CR'], 'waiting first, by initials');
+  assert.ok(items[0]!.classList.contains('is-waiting'));
+  await act(async () => {
+    fireEvent.click(items[0]!);
+  });
+  assert.equal(store.getState().sessionId, 's2', 'a rail item still opens its session');
 });
 
 test('a session can be renamed from the rail', async () => {
@@ -442,22 +414,6 @@ test('abandoning a rename leaves the name alone', async () => {
   assert.ok(rowNames().some((n) => n.includes('s1 title')), 'the original name is still there');
 });
 
-test('the alert chime can be muted, and the choice is remembered', async () => {
-  await boot();
-  assert.equal(store.getState().soundEnabled, true, 'on by default');
-
-  await act(async () => {
-    fireEvent.click(screen.getByTitle('Mute the alert chime'));
-  });
-
-  assert.equal(store.getState().soundEnabled, false);
-  const saved = JSON.parse(window.localStorage.getItem('cc-harness:prefs') ?? '{}') as {
-    soundEnabled?: boolean;
-  };
-  assert.equal(saved.soundEnabled, false, 'a mute outlives the tab');
-  assert.ok(screen.getByTitle('Play a chime when Claude needs you'), 'the control inverts');
-});
-
 /* ------------------------------------------------------------------ *
  * Global actions
  * ------------------------------------------------------------------ */
@@ -475,7 +431,7 @@ test('the cleanup panel lists only what is actually holding space', async () => 
   const labels = [...document.querySelectorAll('.global-group-name')].map((el) => el.textContent);
   assert.deepEqual(
     labels,
-    ['Finished sessions', 'Interrupted writes', 'Scratch files'],
+    ['Finished sessions', 'Interrupted writes', 'Daemon log'],
     'empty groups are decisions the user does not have to make',
   );
 });
@@ -507,7 +463,7 @@ test('only the ticked groups are sent to be removed', async () => {
 
   const call = posts.find((p) => p.route === '/api/storage/clean');
   assert.ok(call, 'the clean request was sent');
-  assert.deepEqual(call!.body['groups'], ['partial-writes', 'scratch']);
+  assert.deepEqual(call!.body['groups'], ['partial-writes', 'log']);
   assert.ok(
     store.getState().toasts.some((t) => /Reclaimed/.test(t.text)),
     'the user is told how much came back',
@@ -531,10 +487,10 @@ test('ticking history in adds it to the request', async () => {
   });
 
   const call = posts.find((p) => p.route === '/api/storage/clean');
-  assert.deepEqual(call!.body['groups'], ['sessions', 'partial-writes', 'scratch']);
+  assert.deepEqual(call!.body['groups'], ['sessions', 'partial-writes', 'log']);
 });
 
-test('a restart is confirmed first, and says what it will interrupt', async () => {
+test('a restart is confirmed first', async () => {
   await boot();
   const reloaded = stubReload();
 
@@ -548,10 +504,6 @@ test('a restart is confirmed first, and says what it will interrupt', async () =
     fireEvent.click(screen.getByText('Restart'));
   });
   assert.ok(posts.find((p) => p.route === '/api/daemon/restart'), 'confirming sends the request');
-  assert.ok(
-    store.getState().toasts.some((t) => /1 running command/.test(t.text)),
-    'a check the restart kills is not left to look like it simply stopped',
-  );
 
   // The page reloads only once a *different* daemon answers: reloading against
   // the outgoing one would race the handover onto a closed socket.

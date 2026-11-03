@@ -1,33 +1,29 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, appendFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readLiveLock, baseUrl } from '../shared/paths.ts';
-import type { DaemonLock, DiffPayload, SessionState } from '../shared/types.ts';
+import type { DaemonLock, SessionState } from '../shared/types.ts';
 import type { HookOutput } from '../shared/hooks.ts';
 
 /**
  * End-to-end: a real daemon subprocess, a real git repository, real hook
  * payloads. This is the test that would catch a regression in the thing the
- * harness actually promises — that what the user does in the browser reaches
- * the session.
+ * harness actually promises — that what the user does to the plan in the
+ * browser is what Claude reads back, and that nothing ever holds a turn.
  */
 
 const DAEMON = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'daemon', 'main.js');
-/** Long enough for a test to answer inside the window, short enough that a
- *  test which does not answer is not punished for it. */
-const GATE_HOLD_SECONDS = 1.5;
 
 let home: string;
 let repo: string;
 let daemon: ChildProcess;
 let lock: DaemonLock;
 const sessionId = 'integration-session';
-let transcript: string;
 
 function git(args: string[]): void {
   execFileSync('git', args, { cwd: repo, stdio: 'pipe' });
@@ -46,16 +42,7 @@ before(async () => {
   git(['commit', '-qm', 'initial']);
   git(['checkout', '-qb', 'feature/change']);
 
-  transcript = path.join(home, 'transcript.jsonl');
-  writeFileSync(transcript, '');
-
-  // A gate holds the turn open so that answering in the browser resumes the
-  // session. Real sessions want minutes of that; a test wants just enough to
-  // prove the hold exists, and then to stop paying for it.
-  writeFileSync(
-    path.join(home, 'config.json'),
-    JSON.stringify({ gateHoldSeconds: GATE_HOLD_SECONDS }),
-  );
+  writeFileSync(path.join(home, 'config.json'), JSON.stringify({ idleShutdownMinutes: 0 }));
 
   daemon = spawn(process.execPath, [DAEMON], {
     env: { ...process.env, CC_HARNESS_HOME: home },
@@ -103,13 +90,15 @@ async function call<T>(route: string, init?: RequestInit): Promise<T> {
       ...(init?.headers ?? {}),
     },
   });
-  return (await res.json()) as T;
+  const type = res.headers.get('content-type') ?? '';
+  return (type.includes('json') ? await res.json() : { status: res.status, text: await res.text() }) as T;
 }
 
-const hookFor = (id: string, event: string, body: Record<string, unknown> = {}) =>
+const hookFor = (id: string, event: string, body: Record<string, unknown> = {}, headers: Record<string, string> = {}) =>
   call<HookOutput>(`/hook/${event}`, {
     method: 'POST',
-    body: JSON.stringify({ session_id: id, cwd: repo, transcript_path: transcript, ...body }),
+    headers,
+    body: JSON.stringify({ session_id: id, cwd: repo, ...body }),
   });
 
 const mcpFor = (id: string, tool: string, body: Record<string, unknown> = {}) =>
@@ -119,955 +108,292 @@ const mcpFor = (id: string, tool: string, body: Record<string, unknown> = {}) =>
     body: JSON.stringify({ cwd: repo, ...body }),
   });
 
-const hook = (event: string, body: Record<string, unknown> = {}) => hookFor(sessionId, event, body);
+const hook = (event: string, body: Record<string, unknown> = {}, headers: Record<string, string> = {}) =>
+  hookFor(sessionId, event, body, headers);
 const mcp = (tool: string, body: Record<string, unknown> = {}) => mcpFor(sessionId, tool, body);
 
 const sessionFor = (id: string) =>
   call<{ session: SessionState }>(`/api/session/${id}`).then((r) => r.session);
 const session = () => sessionFor(sessionId);
 
-async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
-  let timer: NodeJS.Timeout;
-  const timeout = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), ms);
-  });
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    clearTimeout(timer!);
-  }
-}
-
-async function until<T>(fn: () => Promise<T | null | undefined | false>, ms = 5000): Promise<T> {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    const value = await fn();
-    if (value) return value;
-    await sleep(75);
-  }
-  throw new Error('condition never became true');
-}
-
 /* ------------------------------------------------------------------ */
 
-test('SessionStart records the repo, branch and start commit', async () => {
+const ops = (list: unknown[]) =>
+  call<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${sessionId}/plan/ops`, {
+    method: 'POST',
+    body: JSON.stringify({ ops: list }),
+  });
+
+const PLAN = {
+  title: 'Add a cache',
+  summary: 'A read-through cache in front of Postgres.',
+  sections: [{ title: 'Context', body: 'Reads are slow.' }],
+  diagrams: [
+    {
+      title: 'Components',
+      nodes: [
+        { id: 'api', label: 'API', kind: 'service' },
+        { id: 'db', label: 'Postgres', kind: 'datastore' },
+      ],
+      edges: [{ source: 'api', target: 'db' }],
+    },
+  ],
+  tasks: [{ title: 'Storage', subtasks: [{ title: 'Client' }, { title: 'Invalidation' }] }, { title: 'Wire up' }],
+};
+
+test('SessionStart records the repo and branch', async () => {
   await hook('SessionStart', { start_reason: 'startup' });
   const s = await session();
-  assert.equal(s.repoRoot, repo);
+  assert.ok(s.repoRoot && s.repoRoot.endsWith(path.basename(repo)));
   assert.equal(s.branch, 'feature/change');
-  assert.match(s.startCommit ?? '', /^[0-9a-f]{40}$/);
+  assert.equal(s.plan, null);
 });
 
-test('the transcript tailer turns session output into timeline entries', async () => {
-  appendFileSync(
-    transcript,
-    JSON.stringify({
-      type: 'assistant',
-      message: {
-        role: 'assistant',
-        content: [
-          { type: 'thinking', thinking: 'considering the approach' },
-          { type: 'text', text: 'I will add a subtract function.' },
-          { type: 'tool_use', name: 'Edit', input: { file_path: `${repo}/app.ts` } },
-        ],
-      },
-    }) + '\n',
-  );
-
-  const found = await until(async () => {
-    const s = await session();
-    return s.timeline.find((e) => e.text.includes('add a subtract function'));
-  });
-  assert.equal(found.kind, 'assistant');
-
+test('publishing returns the plan as Claude will read it, with its ids', async () => {
+  const res = await mcp('publish', PLAN);
+  assert.equal(res['ok'], true);
+  const text = String(res['text']);
+  assert.match(text, /Published "Add a cache"/);
+  assert.match(text, /Tell them in chat/);
+  assert.match(text, /t2 Client/);
+  assert.match(text, /- api → db/);
+  assert.doesNotMatch(text, /token=/, 'the auth token never reaches the transcript');
   const s = await session();
-  assert.ok(s.timeline.some((e) => e.kind === 'thinking'), 'reasoning is captured separately');
-  assert.ok(s.timeline.some((e) => e.kind === 'tool' && e.label === 'Edit'), 'tool calls are captured');
+  assert.equal(s.plan?.tasks.length, 4);
 });
 
-test('tool-result user entries are not mistaken for user prompts', async () => {
-  appendFileSync(
-    transcript,
-    JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: [{ type: 'tool_result', content: 'ok' }] },
-    }) + '\n',
-  );
-  await sleep(300);
-  const s = await session();
-  assert.equal(s.timeline.filter((e) => e.kind === 'user').length, 0);
+test('no hook ever holds a turn', async () => {
+  // The whole review loop used to park Claude in the Stop hook. Planning
+  // never waits: the conversation is Claude's own chat.
+  for (const event of ['Stop', 'UserPromptSubmit', 'SessionEnd', 'SessionStart']) {
+    const started = Date.now();
+    const out = await hook(event, { stop_hook_active: false, prompt: 'hi' });
+    assert.notEqual(out.decision, 'block', event);
+    assert.ok(Date.now() - started < 2000, `${event} answered at once`);
+  }
 });
 
-test('the plan gate holds the turn, and answering in the UI resumes the session', async () => {
-  // The headline promise: the user clicks Approve in the browser and Claude
-  // carries on, without going back to the terminal to type anything.
-  const other = 'integration-plan-resume';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  const published = await mcpFor(other, 'plan', {
-    title: 'Resume on approve',
-    steps: [{ title: 'only step' }],
-  });
-  const gateId = String(published['gateId']);
-
-  const parked = hookFor(other, 'Stop', { stop_hook_active: false });
-  await until(async () => {
-    const s = await sessionFor(other);
-    return s.gates.find((g) => g.id === gateId)?.waiting === true;
-  });
-
-  await call(`/api/session/${other}/gate/${gateId}/resolve`, {
-    method: 'POST',
-    body: JSON.stringify({ verdict: 'approved', comment: 'Go ahead.' }),
-  });
-
-  const out = await withTimeout(parked, 8000);
-  assert.ok(out, 'the held Stop hook returned rather than hanging');
-  assert.equal(out.decision, 'block', 'the turn is resumed, not ended');
-  assert.match(out.reason ?? '', /approved at the plan gate/);
-  assert.match(out.reason ?? '', /Go ahead\./);
-
-  const after = await sessionFor(other);
-  assert.equal(after.status, 'active', 'and the session is working again, not still asking for the user');
-});
-
-test('a verdict that misses the window comes back on the next message', async () => {
-  const plan = await mcp('plan', {
-    title: 'Add a subtract function',
-    summary: 'Mirror add().',
-    steps: [{ title: 'Write subtract' }, { title: 'Add a test' }, { title: 'Update the docs' }],
-  });
-  const gateId = String(plan['gateId']);
-  assert.ok(gateId);
-  // The instruction that keeps the transcript clean: yield, don't poll.
-  assert.match(String(plan['text']), /End your turn now/);
-  assert.doesNotMatch(String(plan['text']), /Call harness_await/);
-
-  // Nobody answers inside the hold, so the window closes and the turn ends
-  // for good. The gate stays open behind it, to be answered at leisure.
-  const stopped = await hook('Stop', { stop_hook_active: false });
-  assert.notEqual(stopped.decision, 'block', 'the turn is allowed to end');
-  assert.equal((await session()).status, 'waiting');
-
-  // The user edits the plan in the UI and approves it.
-  await call(`/api/session/${sessionId}/gate/${gateId}/resolve`, {
-    method: 'POST',
-    body: JSON.stringify({
-      verdict: 'approved',
-      comment: 'Drop the docs step.',
-      steps: [
-        { id: 's1', title: 'Write subtract' },
-        { id: 's2', title: 'Add a test' },
-        { id: 's3', title: 'Update the docs', status: 'dropped' },
+test('what the user does in the browser is what Claude reads back', async () => {
+  const res = await ops([
+    { op: 'move_task', id: 't4', parentId: 't1', index: 0 },
+    { op: 'upsert_task', parentId: 't1', title: 'Load test' },
+    { op: 'comment', target: { kind: 'diagram', id: 'd1' }, text: 'where does the cache go?' },
+    {
+      op: 'upsert_diagram',
+      id: 'd1',
+      nodes: [
+        { id: 'api', label: 'API', kind: 'service', x: 0, y: 0 },
+        { id: 'cache', label: 'Redis', kind: 'datastore', x: 200, y: 0, notes: 'Already deployed.', taskIds: ['t2'] },
+        { id: 'db', label: 'Postgres', kind: 'datastore', x: 400, y: 0 },
       ],
-    }),
-  });
+      edges: [
+        { source: 'api', target: 'cache' },
+        { source: 'cache', target: 'db' },
+      ],
+    },
+  ]);
+  assert.ok(res.plan, res.error);
 
-  // …and it reaches Claude with the next thing they say to the session.
-  const resumed = await hook('UserPromptSubmit', { prompt: 'carry on' });
-  const out = { reason: resumed.hookSpecificOutput?.additionalContext ?? '' };
-  assert.match(out.reason, /approved at the plan gate/);
-  assert.match(out.reason, /Drop the docs step/);
-  assert.match(out.reason, /Approved plan \(2 steps\)/);
+  const read = String((await mcp('read', {}))['text']);
+  assert.match(read, /Since you last read — 4 change\(s\) by the user/);
+  assert.match(read, /moved "Wire up" under "Storage"/);
+  assert.match(read, /added task "Load test" under "Storage"/);
+  assert.match(read, /commented on diagram "Components"/);
+  assert.match(read, /added "Redis".*connected API → Redis/);
+  assert.match(read, /- cache: "Redis" \(datastore\)\n  tasks: t2\n  Already deployed\./);
+});
 
+test('reading once catches Claude up', async () => {
+  const again = String((await mcp('read', { changes_only: true }))['text']);
+  assert.match(again, /has not changed the plan/);
+  const notice = await hook('UserPromptSubmit', { prompt: 'continue' });
+  assert.equal(notice.hookSpecificOutput?.additionalContext, undefined, 'no notice once Claude is up to date');
+});
+
+test('the next chat message after an edit tells Claude to read the plan', async () => {
+  await ops([{ op: 'upsert_task', title: 'Shard later' }]);
+  const out = await hook('UserPromptSubmit', { prompt: 'ok, go on' });
+  assert.match(out.hookSpecificOutput?.additionalContext ?? '', /changed the plan .* harness_plan_read/);
+});
+
+test('a republish over unread user edits is refused', async () => {
+  const res = await mcp('publish', PLAN);
+  assert.equal(res['ok'], false);
+  assert.match(String(res['text']), /harness_plan_read first/);
   const s = await session();
-  assert.equal(s.plan?.steps.length, 3);
-  assert.equal(s.plan?.steps[2]?.status, 'dropped');
+  assert.ok(s.plan!.tasks.some((t) => t.title === 'Shard later'), 'nothing the user did was lost');
 });
 
-test('a verdict given before the turn ends is still delivered', async () => {
-  // The user is faster than Claude: they answer while the turn is still
-  // running, so no waiter is parked when the answer lands. The next Stop must
-  // still hand the verdict over rather than dropping it.
-  const other = 'integration-race';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  const plan = await mcpFor(other, 'plan', { title: 'Race', steps: [{ title: 'only step' }] });
-  const gateId = String(plan['gateId']);
-
-  await call(`/api/session/${other}/gate/${gateId}/resolve`, {
-    method: 'POST',
-    body: JSON.stringify({ verdict: 'approved', comment: 'Answered early.' }),
-  });
-
-  const out = await hookFor(other, 'Stop', { stop_hook_active: false });
-  assert.equal(out.decision, 'block');
-  assert.match(out.reason ?? '', /Answered early/);
-
-  // …and exactly once: a second Stop must not replay it.
-  const again = await hookFor(other, 'Stop', { stop_hook_active: true });
-  assert.notEqual(again.decision, 'block');
+test('Claude replies to the user\'s comment in its thread', async () => {
+  await mcp('read', {});
+  const s = await session();
+  const thread = s.plan!.threads[0]!;
+  const res = await mcp('edit', { ops: [{ op: 'reply', threadId: thread.id, text: 'Between the API and Postgres.' }] });
+  assert.equal(res['ok'], true, String(res['text']));
+  const after = await session();
+  assert.equal(after.plan!.threads[0]!.replies[0]!.author, 'claude');
+  assert.equal(after.plan!.claudeReadSeq, after.plan!.seq, 'its own edits are not news to it');
 });
 
-test('a verdict already delivered by harness_await is not replayed at Stop', async () => {
-  const other = 'integration-no-replay';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  const plan = await mcpFor(other, 'plan', { title: 'No replay', steps: [{ title: 'only step' }] });
-  const gateId = String(plan['gateId']);
-
-  await call(`/api/session/${other}/gate/${gateId}/resolve`, {
-    method: 'POST',
-    body: JSON.stringify({ verdict: 'approved', comment: 'Seen by await.' }),
+test('a question Claude asks is shown as waiting, and cleared when answered in Claude', async () => {
+  await hook('PreToolUse', {
+    tool_name: 'AskUserQuestion',
+    tool_input: { questions: [{ question: 'Which TTL?', header: 'TTL', options: [{ label: '1m' }, { label: '10m' }] }] },
   });
+  const asking = await session();
+  assert.equal(asking.waiting?.kind, 'question');
+  assert.deepEqual(asking.waiting?.questions?.[0], { question: 'Which TTL?', header: 'TTL', options: ['1m', '10m'] });
+  const { sessions } = await call<{ sessions: { sessionId: string; waiting: unknown }[] }>('/api/sessions');
+  assert.ok(sessions.find((x) => x.sessionId === sessionId)?.waiting, 'the rail hears about it');
 
-  const awaited = await mcpFor(other, 'await', { gate_id: gateId, timeout_seconds: 5 });
-  assert.equal(awaited['status'], 'resolved');
-  assert.match(String(awaited['text']), /Seen by await/);
-
-  const out = await hookFor(other, 'Stop', { stop_hook_active: false });
-  assert.notEqual(out.decision, 'block', 'the same verdict is not delivered twice');
+  await hook('PostToolUse', { tool_name: 'AskUserQuestion' });
+  assert.equal((await session()).waiting, null);
 });
 
-test('a question opens a gate the UI can answer', async () => {
-  const other = 'integration-question';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  const asked = await mcpFor(other, 'ask', {
-    question: 'Map or plain object?',
-    options: ['Map', 'Plain object'],
-  });
-  const gateId = String(asked['gateId']);
-  assert.ok(gateId);
-  assert.match(String(asked['text']), /Question posted/);
-
-  const state = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  const gate = state.gates.find((g) => g.id === gateId)!;
-  assert.equal(gate.kind, 'question');
-  assert.deepEqual(gate.meta?.options, ['Map', 'Plain object']);
-
-  await call(`/api/session/${other}/gate/${gateId}/resolve`, {
-    method: 'POST',
-    body: JSON.stringify({ verdict: 'answered', comment: 'Map' }),
-  });
-  const out = await hookFor(other, 'Stop', { stop_hook_active: false });
-  assert.equal(out.decision, 'block');
-  assert.match(out.reason ?? '', /answered at the question gate/);
-  assert.match(out.reason ?? '', /Map/);
+test('an idle reminder does not replace the question it reminds about', async () => {
+  await hook('PreToolUse', { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Shard?', options: [] }] } });
+  await hook('Notification', { notification_type: 'idle_prompt', message: 'Claude is waiting for your input' });
+  assert.equal((await session()).waiting?.text, 'Shard?');
+  await hook('UserPromptSubmit', { prompt: 'no' });
+  assert.equal((await session()).waiting, null, 'replying in Claude clears it');
 });
 
-test('a structured question round-trips as one answer per question', async () => {
-  const other = 'integration-questions';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  const asked = await mcpFor(other, 'ask', {
-    question: 'How should the cache work?',
-    questions: [
-      {
-        header: 'Backend',
-        question: 'Where should it live?',
-        options: [
-          { label: 'Redis', description: 'Shared across processes.' },
-          { label: 'In-memory', description: 'Simplest, lost on restart.' },
-        ],
-      },
-      {
-        header: 'Eviction',
-        question: 'What should it evict on?',
-        multiSelect: true,
-        options: [{ label: 'TTL' }, { label: 'LRU' }],
-      },
-    ],
-  });
-  const gateId = String(asked['gateId']);
-
-  const state = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  const gate = state.gates.find((g) => g.id === gateId)!;
-  assert.equal(gate.meta?.questions?.length, 2);
-  assert.equal(gate.meta?.questions?.[0]?.header, 'Backend');
-  assert.equal(gate.meta?.questions?.[0]?.options[0]?.description, 'Shared across processes.');
-  assert.equal(gate.meta?.questions?.[1]?.multiSelect, true);
-
-  // The UI answers per question id; the daemon folds those into the single
-  // comment every downstream consumer reads.
-  await call(`/api/session/${other}/gate/${gateId}/resolve`, {
-    method: 'POST',
-    body: JSON.stringify({ verdict: 'answered', answers: { q1: 'Redis', q2: 'TTL, LRU' } }),
-  });
-
-  const out = await hookFor(other, 'Stop', { stop_hook_active: false });
-  assert.equal(out.decision, 'block');
-  assert.match(out.reason ?? '', /Where should it live\?/);
-  assert.match(out.reason ?? '', /Redis/);
-  assert.match(out.reason ?? '', /TTL, LRU/);
+test('a permission prompt is waiting too', async () => {
+  await hook('Notification', { notification_type: 'permission_prompt', message: 'Claude needs your permission to use Bash' });
+  const s = await session();
+  assert.equal(s.waiting?.kind, 'permission');
+  assert.match(s.waiting?.text ?? '', /permission to use Bash/);
+  await hook('PostToolUse', { tool_name: 'Bash' });
 });
 
-test('a renamed session keeps its name against the transcript title', async () => {
-  const other = 'integration-rename';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-
-  const renamed = await call<{ title: string }>(`/api/session/${other}/title`, {
-    method: 'POST',
-    body: JSON.stringify({ title: 'Cache rewrite' }),
-  });
-  assert.equal(renamed.title, 'Cache rewrite');
-
-  const list = await call<{ sessions: { sessionId: string; title: string }[] }>('/api/sessions');
-  assert.equal(list.sessions.find((s) => s.sessionId === other)?.title, 'Cache rewrite');
-
-  // The CLI names conversations itself; that must not undo the user's name.
-  appendFileSync(transcript, `${JSON.stringify({ type: 'ai-title', title: 'Auto-generated title' })}\n`);
-  await sleep(400);
-  const state = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  assert.equal(state.title, 'Cache rewrite');
-  assert.equal(state.titleLocked, true);
+test('a turn that ends on a question is waiting on a reply', async () => {
+  await hook('Stop', { last_assistant_message: 'Done with the plan.\n\nShould the warmer read from a replica?' });
+  const s = await session();
+  assert.equal(s.status, 'idle');
+  assert.equal(s.waiting?.text, 'Should the warmer read from a replica?');
+  await hook('Stop', { last_assistant_message: 'All done.' });
+  assert.equal((await session()).waiting, null);
 });
 
-test('an empty rename is refused rather than blanking the session', async () => {
-  const other = 'integration-rename-empty';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  const before = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
+test('the session environment decides the link back to Claude', async () => {
+  await hook('UserPromptSubmit', { prompt: 'x' });
+  assert.equal((await session()).link, null, 'a plain local session has no documented link');
+  await hook('Stop', {}, { 'x-harness-bridge-session': 'session_01Bridge', 'x-harness-entrypoint': 'cli' });
+  const s = await session();
+  assert.equal(s.surface, 'cli');
+  assert.equal(s.link?.app, 'claude://claude.ai/code/session_01Bridge');
+  await hook('Stop', {}, { 'x-harness-remote-sdk': 'https://api.anthropic.com/v1/code/sessions/cse_01Cloud' });
+  assert.equal((await session()).link?.web, 'https://claude.ai/code/session_01Cloud');
+});
 
-  const res = await fetch(`${baseUrl(lock)}/api/session/${other}/title`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}` },
-    body: JSON.stringify({ title: '   ' }),
+test('task tracking moves statuses and reports them', async () => {
+  const res = await mcp('task', { task_id: 't2', status: 'done', note: 'client added' });
+  assert.match(String(res['text']), /"Client" is done/);
+  const bad = await mcp('task', { task_id: 'nope', status: 'done' });
+  assert.equal(bad['ok'], false);
+  assert.match(String(bad['text']), /No task "nope"/);
+});
+
+test('a refused browser edit says why and changes nothing', async () => {
+  const before = await session();
+  const res = await ops([{ op: 'move_task', id: 't1', parentId: 't2', index: 0 }]);
+  assert.match(res.error ?? '', /inside itself/);
+  const after = await session();
+  assert.equal(after.plan!.seq, before.plan!.seq);
+});
+
+test('the plan text endpoint shows exactly what Claude reads, without counting as a read', async () => {
+  await ops([{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'peek' }]);
+  const res = await call<{ status: number; text: string }>(`/api/session/${sessionId}/plan/text`);
+  assert.match(res.text, /# Add a cache/);
+  const s = await session();
+  assert.ok(s.plan!.claudeReadSeq < s.plan!.seq, 'Claude still has the comment to read');
+});
+
+test('a renamed session keeps its name', async () => {
+  await call(`/api/session/${sessionId}/title`, { method: 'POST', body: JSON.stringify({ title: 'Cache work' }) });
+  await hook('SessionStart', { start_reason: 'resume' });
+  assert.equal((await session()).title, 'Cache work');
+  const empty = await call<{ error?: string }>(`/api/session/${sessionId}/title`, { method: 'POST', body: JSON.stringify({ title: '  ' }) });
+  assert.ok(empty.error);
+});
+
+test('the session list summarizes the plan', async () => {
+  const { sessions } = await call<{ sessions: { sessionId: string; planTitle: string; tasks: { total: number; done: number } }[] }>('/api/sessions');
+  const row = sessions.find((s) => s.sessionId === sessionId)!;
+  assert.equal(row.planTitle, 'Add a cache');
+  assert.equal(row.tasks.done, 1);
+});
+
+/* ------------------------------------------------------------------ *
+ * The HTTP surface
+ * ------------------------------------------------------------------ */
+
+const raw = (route: string, init: RequestInit = {}) =>
+  fetch(`${baseUrl(lock)}${route}`, {
+    ...init,
+    headers: { authorization: `Bearer ${lock.token}`, 'content-type': 'application/json', ...(init.headers ?? {}) },
   });
+
+test('the UI is served with a strict content policy and no referrer', async () => {
+  const res = await fetch(`${baseUrl(lock)}/?token=${lock.token}`);
+  assert.equal(res.status, 200);
+  const csp = res.headers.get('content-security-policy') ?? '';
+  assert.match(csp, /script-src 'self'/);
+  assert.doesNotMatch(csp, /script-src[^;]*unsafe-inline/, 'no inline script, ever');
+  assert.match(csp, /frame-ancestors 'none'/);
+  assert.equal(res.headers.get('referrer-policy'), 'no-referrer', 'the token in the first URL never leaks');
+  assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+});
+
+test('malformed input is a 400, not a 500', async () => {
+  const bad = await raw(`/api/session/${sessionId}/plan/ops`, { method: 'POST', body: '{not json' });
+  assert.equal(bad.status, 400);
+  const notObject = await raw(`/api/session/${sessionId}/plan/ops`, { method: 'POST', body: '[1,2]' });
+  assert.equal(notObject.status, 400);
+  const badPath = await raw('/api/session/%E0%A4%A');
+  assert.equal(badPath.status, 400);
+});
+
+test('an oversized body is refused', async () => {
+  const res = await raw(`/api/session/${sessionId}/plan/ops`, { method: 'POST', body: JSON.stringify({ ops: [], pad: 'x'.repeat(3 * 1024 * 1024) }) }).catch(() => null);
+  assert.ok(!res || res.status === 413, `expected 413, got ${res?.status}`);
+});
+
+test('a write from another origin is refused even with valid credentials', async () => {
+  const res = await raw(`/api/session/${sessionId}/plan/ops`, {
+    method: 'POST',
+    headers: { origin: 'https://evil.example' },
+    body: JSON.stringify({ ops: [{ op: 'upsert_task', title: 'injected' }] }),
+  });
+  assert.equal(res.status, 403);
+  const own = await raw(`/api/session/${sessionId}/plan/ops`, {
+    method: 'POST',
+    headers: { origin: baseUrl(lock) },
+    body: JSON.stringify({ ops: [{ op: 'upsert_task', title: 'from the page' }] }),
+  });
+  assert.equal(own.status, 200, 'the page itself is allowed');
+});
+
+test('without the token, nothing is served', async () => {
+  const res = await fetch(`${baseUrl(lock)}/api/sessions`);
+  assert.equal(res.status, 401);
+});
+
+test('a stale diagram save is refused over HTTP and changes nothing', async () => {
+  const before = (await session()).plan!.diagrams[0]!;
+  await mcp('edit', { ops: [{ op: 'upsert_diagram', id: before.id, caption: 'Claude moved first' }] });
+  const res = await ops([{ op: 'upsert_diagram', id: before.id, caption: 'stale', expect: before.rev }]);
+  assert.match(res.error ?? '', /changed by Claude while this edit was open/);
+  assert.equal((await session()).plan!.diagrams[0]!.caption, 'Claude moved first');
+});
+
+test('a batch too large to apply whole is refused, not truncated', async () => {
+  const before = (await session()).plan!.tasks.length;
+  const many = Array.from({ length: 201 }, (_, i) => ({ op: 'upsert_task', title: `bulk ${i}` }));
+  const res = await raw(`/api/session/${sessionId}/plan/ops`, { method: 'POST', body: JSON.stringify({ ops: many }) });
   assert.equal(res.status, 400);
-
-  const after = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  assert.equal(after.title, before.title);
-});
-
-test('a superseded gate stops holding the turn', async () => {
-  const other = 'integration-superseded';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  await mcpFor(other, 'plan', { title: 'First', steps: [{ title: 'a' }] });
-
-  const parked = hookFor(other, 'Stop', { stop_hook_active: false });
-  await until(async () => {
-    const s = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-    return s.status === 'waiting';
-  });
-
-  // Publishing a new plan cancels the old gate. Nothing will ever resolve it,
-  // so the parked hook must be released rather than held for its full window.
-  await mcpFor(other, 'plan', { title: 'Second', steps: [{ title: 'b' }] });
-
-  const out = await withTimeout(parked, 8000);
-  assert.ok(out, 'the parked Stop hook returned rather than hanging');
-});
-
-test('"send now" closes the gate and overtakes it with the message', async () => {
-  // The complaint this covers: a message typed while the session sits at a
-  // gate used to wait for that gate to be answered — up to the full hold —
-  // which is exactly backwards when the message says "stop, do this instead".
-  const other = 'integration-skip-stop';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  await mcpFor(other, 'plan', { title: 'Skip me', steps: [{ title: 'only step' }] });
-
-  const stopped = await hookFor(other, 'Stop', { stop_hook_active: false });
-  assert.notEqual(stopped.decision, 'block', 'the gate ends the turn');
-
-  await call(`/api/session/${other}/feedback`, {
-    method: 'POST',
-    body: JSON.stringify({ text: 'Forget the plan — fix the typo in README first.', interrupt: true }),
-  });
-
-  // The gate closes the moment the message lands, so nothing is left claiming
-  // the user still owes it an answer.
-  const queued = await sessionFor(other);
-  assert.equal(queued.gates.at(-1)?.status, 'cancelled', 'the gate is closed rather than left open');
-
-  const resumed = await hookFor(other, 'UserPromptSubmit', { prompt: 'ok' });
-  const text = resumed.hookSpecificOutput?.additionalContext ?? '';
-  assert.match(text, /skipped the plan gate/);
-  assert.match(text, /do not wait on it/i);
-  assert.match(text, /fix the typo in README/);
-
-  const s = await sessionFor(other);
-  assert.equal(s.pendingFeedback.length, 0, 'the message was delivered, not left queued');
-});
-
-test('"send now" releases a harness_await parked on a gate', async () => {
-  const other = 'integration-skip-await';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  const plan = await mcpFor(other, 'plan', { title: 'Skip await', steps: [{ title: 'only step' }] });
-  const gateId = String(plan['gateId']);
-
-  const parked = mcpFor(other, 'await', { gate_id: gateId, timeout_seconds: 30 });
-  await until(async () => (await sessionFor(other)).status === 'waiting');
-
-  await call(`/api/session/${other}/feedback`, {
-    method: 'POST',
-    body: JSON.stringify({ text: 'Change of direction: do the docs first.', interrupt: true }),
-  });
-
-  const out = await parked;
-  assert.equal(out['status'], 'interrupted', 'the wait ends with the message, not another poll');
-  assert.match(String(out['text']), /skipped the plan gate/);
-  assert.match(String(out['text']), /do the docs first/);
-});
-
-test('an ordinary message still queues rather than closing the gate', async () => {
-  const other = 'integration-no-skip';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  await mcpFor(other, 'plan', { title: 'Keep the gate', steps: [{ title: 'only step' }] });
-
-  const queued = await call<{ delivery: string }>(`/api/session/${other}/feedback`, {
-    method: 'POST',
-    body: JSON.stringify({ text: 'Just a note.' }),
-  });
-  assert.notEqual(queued.delivery, 'interrupted');
-
-  const s = await sessionFor(other);
-  assert.equal(s.gates.at(-1)?.status, 'open', 'the gate is untouched by a plain message');
-  assert.equal(s.pendingFeedback.length, 1);
-});
-
-test('a superseded gate tells harness_await which gate to wait on instead', async () => {
-  const other = 'integration-superseded-await';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  const first = await mcpFor(other, 'plan', { title: 'First', steps: [{ title: 'a' }] });
-
-  const parked = mcpFor(other, 'await', { gate_id: String(first['gateId']), timeout_seconds: 30 });
-  await until(async () => (await sessionFor(other)).status === 'waiting');
-
-  // Publishing again supersedes the gate the waiter is holding.
-  const second = await mcpFor(other, 'plan', { title: 'Second', steps: [{ title: 'b' }] });
-
-  const out = await parked;
-  assert.equal(out['status'], 'cancelled');
-  assert.match(String(out['text']), /replaced by a newer/);
-  assert.match(String(out['text']), new RegExp(String(second['gateId'])), 'it names the gate to wait on');
-});
-
-test('the verification gate opens only after the checks have finished', async () => {
-  const other = 'integration-checks';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  const result = await mcpFor(other, 'checks', { commands: ['exit 0', 'exit 7'] });
-
-  // The call itself waits for the run, so the state is final by the time it
-  // returns — the user is never asked to sign off on `pending`.
-  const state = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  assert.ok(state.checks.every((c) => c.status === 'passed' || c.status === 'failed'));
-  assert.match(String(result['text']), /1 of 2 check\(s\) FAILED/);
-  assert.match(String(result['text']), /exit 7/);
-  assert.match(String(result['text']), /Do not ask the user to sign off on a red check/);
-});
-
-test('ship refuses to commit onto the default branch', async () => {
-  const other = 'integration-onmain';
-  const mainRepo = mkdtempSync(path.join(tmpdir(), 'cc-harness-main-'));
-  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: mainRepo });
-  execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: mainRepo });
-  execFileSync('git', ['config', 'user.name', 'T'], { cwd: mainRepo });
-  writeFileSync(path.join(mainRepo, 'a.txt'), 'one\n');
-  execFileSync('git', ['add', '-A'], { cwd: mainRepo });
-  execFileSync('git', ['commit', '-qm', 'init'], { cwd: mainRepo });
-  writeFileSync(path.join(mainRepo, 'a.txt'), 'two\n');
-
-  await call(`/hook/SessionStart`, {
-    method: 'POST',
-    body: JSON.stringify({ session_id: other, cwd: mainRepo, start_reason: 'startup' }),
-  });
-
-  const outcome = await call<{ ok: boolean; output: string }>(`/api/session/${other}/ship`, {
-    method: 'POST',
-    body: JSON.stringify({
-      ship: {
-        title: 't',
-        body: 'b',
-        commitMessage: 'c',
-        branch: 'main',
-        baseBranch: 'main',
-        steps: ['commit'],
-        provider: 'none',
-      },
-    }),
-  });
-
-  assert.equal(outcome.ok, false);
-  assert.match(outcome.output, /refusing to commit to "main"/);
-  rmSync(mainRepo, { recursive: true, force: true });
-});
-
-test('a repo-local config supplies its own checks', async () => {
-  const other = 'integration-projectconfig';
-  const cfgRepo = mkdtempSync(path.join(tmpdir(), 'cc-harness-cfg-'));
-  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: cfgRepo });
-  mkdirSync(path.join(cfgRepo, '.claude'), { recursive: true });
-  writeFileSync(
-    path.join(cfgRepo, '.claude', 'harness.json'),
-    JSON.stringify({ stages: { verification: { checks: ['echo from-project-config'] } } }),
-  );
-
-  await call(`/hook/SessionStart`, {
-    method: 'POST',
-    body: JSON.stringify({ session_id: other, cwd: cfgRepo, start_reason: 'startup' }),
-  });
-  await call(`/mcp/checks`, {
-    method: 'POST',
-    headers: { 'x-harness-session': other },
-    body: JSON.stringify({ cwd: cfgRepo }),
-  });
-
-  const state = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  assert.equal(state.checks.length, 1, 'the project config was read');
-  assert.equal(state.checks[0]!.command, 'echo from-project-config');
-  assert.match(state.checks[0]!.output, /from-project-config/);
-  rmSync(cfgRepo, { recursive: true, force: true });
-});
-
-test('publishing a new diff closes out the previous review round', async () => {
-  const other = 'integration-rounds';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  await mcpFor(other, 'diff', {});
-
-  const gate = await call<{ session: SessionState }>(`/api/session/${other}`)
-    .then((r) => r.session.gates.find((g) => g.status === 'open')!);
-  await call(`/api/session/${other}/gate/${gate.id}/resolve`, {
-    method: 'POST',
-    body: JSON.stringify({
-      verdict: 'changes_requested',
-      threads: [
-        { id: '', file: 'app.ts', side: 'new', startLine: 1, endLine: 1, body: 'round one', createdAt: 0, resolved: false },
-      ],
-    }),
-  });
-  await hookFor(other, 'Stop', { stop_hook_active: false });
-
-  await mcpFor(other, 'diff', {});
-  const after = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  assert.equal(after.reviewRound, 2);
-  assert.equal(after.threads[0]!.resolved, true, 'delivered comments close out when Claude republishes');
-  assert.equal(after.threads[0]!.round, 1);
-});
-
-test('approving a plan fills the task board', async () => {
-  const other = 'integration-board';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  const plan = await mcpFor(other, 'plan', {
-    title: 'Board test',
-    steps: [{ title: 'One' }, { title: 'Two' }, { title: 'Three' }],
-  });
-  await call(`/api/session/${other}/gate/${String(plan['gateId'])}/resolve`, {
-    method: 'POST',
-    body: JSON.stringify({
-      verdict: 'approved',
-      steps: [
-        { id: 's1', title: 'One' },
-        { id: 's2', title: 'Two' },
-        { id: 's3', title: 'Three', status: 'dropped' },
-      ],
-    }),
-  });
-
-  const s = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  assert.equal(s.tasks.length, 2, 'dropped steps do not become tasks');
-  assert.ok(s.tasks.every((t) => t.status === 'todo'));
-  assert.deepEqual(s.tasks.map((t) => t.title), ['One', 'Two']);
-});
-
-test('files edited are attributed to the task in progress', async () => {
-  const other = 'integration-attribute';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  await mcpFor(other, 'tasks', { tasks: [{ title: 'First' }, { title: 'Second' }] });
-
-  let s = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  const [first, second] = s.tasks;
-
-  await mcpFor(other, 'task_update', { task_id: first!.id, status: 'in_progress' });
-  await hookFor(other, 'PostToolUse', {
-    tool_name: 'Edit',
-    tool_input: { file_path: path.join(repo, 'app.ts') },
-  });
-
-  await mcpFor(other, 'task_update', { task_id: second!.id, status: 'in_progress' });
-  await hookFor(other, 'PostToolUse', {
-    tool_name: 'Write',
-    tool_input: { file_path: path.join(repo, 'other.ts') },
-  });
-
-  s = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  assert.deepEqual(s.tasks.find((t) => t.id === first!.id)!.files, ['app.ts']);
-  assert.deepEqual(s.tasks.find((t) => t.id === second!.id)!.files, ['other.ts']);
-  assert.equal(
-    s.tasks.filter((t) => t.status === 'in_progress').length,
-    1,
-    'starting a task stands the previous one down',
-  );
-});
-
-test('files changed through the shell are still attributed to the task', async () => {
-  // Attribution cannot depend on Edit/Write tool events: a heredoc, `sed` or a
-  // formatter changes files with no tool call to hang them on.
-  const other = 'integration-shelledit';
-  const shellRepo = mkdtempSync(path.join(tmpdir(), 'cc-harness-shell-'));
-  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: shellRepo });
-  execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: shellRepo });
-  execFileSync('git', ['config', 'user.name', 'T'], { cwd: shellRepo });
-  writeFileSync(path.join(shellRepo, 'seed.ts'), 'export const seed = 1;\n');
-  execFileSync('git', ['add', '-A'], { cwd: shellRepo });
-  execFileSync('git', ['commit', '-qm', 'init'], { cwd: shellRepo });
-
-  const hook = (event: string, extra: Record<string, unknown> = {}) =>
-    call<HookOutput>(`/hook/${event}`, {
-      method: 'POST',
-      body: JSON.stringify({ session_id: other, cwd: shellRepo, ...extra }),
-    });
-  const mcp = (tool: string, extra: Record<string, unknown> = {}) =>
-    call<Record<string, unknown>>(`/mcp/${tool}`, {
-      method: 'POST',
-      headers: { 'x-harness-session': other },
-      body: JSON.stringify({ cwd: shellRepo, ...extra }),
-    });
-
-  await hook('SessionStart', { start_reason: 'startup' });
-  await mcp('tasks', { tasks: [{ title: 'Shell task' }] });
-  const before = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  const task = before.tasks[0]!;
-
-  await mcp('task_update', { task_id: task.id, status: 'in_progress' });
-
-  // No Edit/Write event — the file just changes on disk.
-  writeFileSync(path.join(shellRepo, 'seed.ts'), 'export const seed = 2;\n');
-  writeFileSync(path.join(shellRepo, 'brand-new.ts'), 'export const fresh = true;\n');
-
-  await mcp('task_update', { task_id: task.id, status: 'done', note: 'did it with sed' });
-
-  const after = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  assert.deepEqual(after.tasks[0]!.files.sort(), ['brand-new.ts', 'seed.ts']);
-  rmSync(shellRepo, { recursive: true, force: true });
-});
-
-test('claiming a task moves the session into the implementing stage', async () => {
-  const other = 'integration-autostage';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  await mcpFor(other, 'plan', { title: 'Stage test', steps: [{ title: 'One' }] });
-  let s = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  assert.equal(s.stage, 'plan_review');
-
-  await mcpFor(other, 'tasks', { tasks: [{ title: 'Do the thing' }] });
-  s = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  await mcpFor(other, 'task_update', { task_id: s.tasks[0]!.id, status: 'in_progress' });
-
-  s = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  assert.equal(s.stage, 'implementing', 'the stage follows the board, not a separate tool call');
-});
-
-test('completing a task requires a record of what changed', async () => {
-  const other = 'integration-taskdone';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  await mcpFor(other, 'tasks', { tasks: [{ title: 'Only' }] });
-  const s = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  const task = s.tasks[0]!;
-
-  const refused = await mcpFor(other, 'task_update', { task_id: task.id, status: 'done' });
-  assert.equal(refused['ok'], false);
-  assert.match(String(refused['text']), /requires `note`/);
-
-  const accepted = await mcpFor(other, 'task_update', {
-    task_id: task.id.slice(0, 8),
-    status: 'done',
-    note: 'Added the helper and wired it in.',
-  });
-  assert.equal(accepted['ok'], true, 'the short id prefix is accepted');
-
-  const after = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  assert.equal(after.tasks[0]!.status, 'done');
-  assert.match(after.tasks[0]!.notes.at(-1)!.text, /Added the helper/);
-});
-
-test('blocking a task asks the user and records their answer as a decision', async () => {
-  const other = 'integration-block';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  await mcpFor(other, 'tasks', { tasks: [{ title: 'Needs a decision' }] });
-  let s = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  const task = s.tasks[0]!;
-
-  const blocked = await mcpFor(other, 'task_block', {
-    task_id: task.id,
-    question: 'Map or plain object?',
-    options: ['Map', 'Plain object'],
-  });
-  const gateId = String(blocked['gateId']);
-
-  s = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  assert.equal(s.tasks[0]!.status, 'blocked');
-  assert.equal(s.tasks[0]!.blockedBy, gateId);
-
-  await call(`/api/session/${other}/gate/${gateId}/resolve`, {
-    method: 'POST',
-    body: JSON.stringify({ verdict: 'answered', comment: 'Map' }),
-  });
-
-  s = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  const after = s.tasks[0]!;
-  assert.equal(after.status, 'in_progress', 'answering unblocks the task');
-  assert.equal(after.decisions.length, 1);
-  assert.equal(after.decisions[0]!.answer, 'Map');
-  assert.match(after.decisions[0]!.question, /Map or plain object/);
-  assert.ok(after.notes.some((n) => n.kind === 'decision'));
-});
-
-test('a second round marks only what actually moved', async () => {
-  const other = 'integration-rounds2';
-  const roundRepo = mkdtempSync(path.join(tmpdir(), 'cc-harness-rounds-'));
-  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: roundRepo });
-  execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: roundRepo });
-  execFileSync('git', ['config', 'user.name', 'T'], { cwd: roundRepo });
-  writeFileSync(path.join(roundRepo, 'stable.ts'), 'export const a = 1;\n');
-  writeFileSync(path.join(roundRepo, 'moving.ts'), 'export const b = 1;\n');
-  execFileSync('git', ['add', '-A'], { cwd: roundRepo });
-  execFileSync('git', ['commit', '-qm', 'init'], { cwd: roundRepo });
-  writeFileSync(path.join(roundRepo, 'stable.ts'), 'export const a = 2;\n');
-  writeFileSync(path.join(roundRepo, 'moving.ts'), 'export const b = 2;\n');
-
-  await call(`/hook/SessionStart`, {
-    method: 'POST',
-    body: JSON.stringify({ session_id: other, cwd: roundRepo, start_reason: 'startup' }),
-  });
-  const first = await call<Record<string, unknown>>(`/mcp/diff`, {
-    method: 'POST',
-    headers: { 'x-harness-session': other },
-    body: JSON.stringify({ cwd: roundRepo }),
-  });
-  assert.equal(first['round'], 1);
-
-  // Only one of the two files changes between rounds.
-  writeFileSync(path.join(roundRepo, 'moving.ts'), 'export const b = 3;\n');
-  await call(`/mcp/diff`, {
-    method: 'POST',
-    headers: { 'x-harness-session': other },
-    body: JSON.stringify({ cwd: roundRepo }),
-  });
-
-  const { diff } = await call<{ diff: DiffPayload }>(`/api/session/${other}/diff`);
-  assert.equal(diff.round, 2);
-  assert.equal(diff.previousRound, 1);
-  assert.deepEqual(diff.changedSinceLastReview, ['moving.ts']);
-  assert.equal(diff.files.find((f) => f.path === 'stable.ts')!.changedSinceLastReview, false);
-  assert.equal(diff.files.find((f) => f.path === 'moving.ts')!.changedSinceLastReview, true);
-  rmSync(roundRepo, { recursive: true, force: true });
-});
-
-test('Claude can reply to a comment in its thread', async () => {
-  const other = 'integration-reply';
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  await mcpFor(other, 'diff', {});
-  const gate = await call<{ session: SessionState }>(`/api/session/${other}`)
-    .then((r) => r.session.gates.find((g) => g.status === 'open')!);
-
-  await call(`/api/session/${other}/gate/${gate.id}/resolve`, {
-    method: 'POST',
-    body: JSON.stringify({
-      verdict: 'changes_requested',
-      threads: [
-        { id: '', file: 'app.ts', side: 'new', startLine: 1, endLine: 1, body: 'why?', createdAt: 0, resolved: false },
-      ],
-    }),
-  });
-  const withThread = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  const threadId = withThread.threads[0]!.id;
-
-  const replied = await mcpFor(other, 'reply', { thread_id: threadId, text: 'Because of X.' });
-  assert.equal(replied['ok'], true);
-
-  const after = await call<{ session: SessionState }>(`/api/session/${other}`).then((r) => r.session);
-  const thread = after.threads[0]!;
-  assert.equal(thread.replies?.length, 1);
-  assert.equal(thread.replies![0]!.author, 'claude');
-  assert.equal(thread.replies![0]!.text, 'Because of X.');
-  assert.equal(thread.resolved, true, 'replying resolves the thread by default');
-});
-
-test('the diff is persisted, so a daemon restart does not empty the review', async () => {
-  // It used to live only in an in-memory Map: a restart left the session
-  // intact but the Review tab blank.
-  const other = 'integration-diffpersist';
-  // Earlier tests may have left the tree clean; make sure there is a change.
-  writeFileSync(path.join(repo, 'persisted.ts'), 'export const persisted = true;\n');
-  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
-  await mcpFor(other, 'diff', {});
-
-  const served = await call<{ diff: DiffPayload }>(`/api/session/${other}/diff`);
-  assert.ok(served.diff.files.length > 0);
-
-  const onDisk = JSON.parse(
-    readFileSync(path.join(home, 'sessions', other, 'diff.json'), 'utf8'),
-  ) as DiffPayload;
-  assert.equal(onDisk.files.length, served.diff.files.length);
-  assert.equal(onDisk.baseRef, served.diff.baseRef);
-  rmSync(path.join(repo, 'persisted.ts'), { force: true });
-});
-
-test('the diff engine sees uncommitted and untracked work', async () => {
-  writeFileSync(
-    path.join(repo, 'app.ts'),
-    'export function add(a: number, b: number) {\n  return a + b;\n}\n\nexport function subtract(a: number, b: number) {\n  return a - b;\n}\n',
-  );
-  writeFileSync(path.join(repo, 'app.test.ts'), 'import { subtract } from "./app";\nsubtract(2, 1);\n');
-
-  const published = await mcp('diff', {});
-  assert.match(String(published['text']), /Diff published \(round \d+\): 2 file\(s\)/);
-
-  const { diff } = await call<{ diff: DiffPayload }>(`/api/session/${sessionId}/diff`);
-  const app = diff.files.find((f) => f.path === 'app.ts');
-  const test = diff.files.find((f) => f.path === 'app.test.ts');
-  assert.ok(app, 'the modified file is present');
-  assert.equal(test?.status, 'added', 'the untracked file is present as an addition');
-  assert.ok((app?.additions ?? 0) >= 4);
-});
-
-test('a line comment reaches the session with the source the user selected', async () => {
-  const s = await session();
-  const gate = s.gates.find((g) => g.status === 'open' && g.kind === 'code_review');
-  assert.ok(gate, 'publishing the diff opened the review gate');
-
-  const stopped = await hook('Stop', { stop_hook_active: false });
-  assert.notEqual(stopped.decision, 'block', 'the review gate ends the turn too');
-
-  await call(`/api/session/${sessionId}/gate/${gate.id}/resolve`, {
-    method: 'POST',
-    body: JSON.stringify({
-      verdict: 'changes_requested',
-      comment: 'One thing.',
-      threads: [
-        {
-          id: '',
-          file: 'app.ts',
-          side: 'new',
-          startLine: 5,
-          endLine: 6,
-          body: 'Guard against NaN here.',
-          createdAt: 0,
-          resolved: false,
-        },
-      ],
-    }),
-  });
-
-  const resumed = await hook('UserPromptSubmit', { prompt: 'go ahead' });
-  const text = resumed.hookSpecificOutput?.additionalContext ?? '';
-  assert.match(text, /app\.ts:5-6/);
-  assert.match(text, /Guard against NaN here/);
-  assert.match(text, /subtract/, 'the excerpt is filled in from the diff');
-  assert.match(text, /Address each comment above/);
-  assert.match(text, /harness_reply/);
-});
-
-test('checks run and stream their result', async () => {
-  await mcp('checks', { commands: ['echo hello-from-check'], run: true });
-  const passed = await until(async () => {
-    const s = await session();
-    const check = s.checks[0];
-    return check && check.status !== 'pending' && check.status !== 'running' ? check : null;
-  }, 15_000);
-
-  assert.equal(passed.status, 'passed');
-  assert.equal(passed.exitCode, 0);
-  assert.match(passed.output, /hello-from-check/);
-});
-
-test('a failing check is reported as failing', async () => {
-  await call(`/api/session/${sessionId}/checks`, {
-    method: 'POST',
-    body: JSON.stringify({ commands: ['exit 3'] }),
-  });
-  await call(`/api/session/${sessionId}/checks/run`, { method: 'POST', body: '{}' });
-
-  const failed = await until(async () => {
-    const s = await session();
-    const check = s.checks[0];
-    return check && (check.status === 'failed' || check.status === 'passed') ? check : null;
-  }, 15_000);
-  assert.equal(failed.status, 'failed');
-  assert.equal(failed.exitCode, 3);
-});
-
-test('the ship payload is composed from the approved plan and the checks', async () => {
-  const ship = await mcp('ship', {});
-  const payload = ship['ship'] as { title: string; body: string; commitMessage: string; branch: string };
-
-  assert.equal(payload.title, 'Add a subtract function');
-  assert.equal(payload.branch, 'feature/change');
-  assert.match(payload.body, /Mirror add\(\)/);
-  assert.match(payload.body, /Write subtract/);
-  assert.doesNotMatch(payload.body, /Update the docs/, 'dropped steps stay out of the PR body');
-  assert.match(payload.body, /## Verification/);
-  assert.match(payload.commitMessage, /^Add a subtract function/);
-});
-
-test('ship refuses to proceed while a check is failing', async () => {
-  const s = await session();
-  const result = await call<{ ok: boolean; output: string }>(`/api/session/${sessionId}/ship`, {
-    method: 'POST',
-    body: JSON.stringify({ ship: { ...s.ship, steps: ['checks', 'commit'] } }),
-  });
-  assert.equal(result.ok, false);
-  assert.match(result.output, /check\(s\) failing/);
-});
-
-test('async comments ride along with the next user prompt', async () => {
-  await call(`/api/session/${sessionId}/feedback`, {
-    method: 'POST',
-    body: JSON.stringify({ text: 'also rename the file', origin: 'timeline' }),
-  });
-  const out = await hook('UserPromptSubmit', { user_input: 'continue' });
-  assert.match(out.hookSpecificOutput?.additionalContext ?? '', /also rename the file/);
-  assert.equal(out.decision, undefined, 'context injection never blocks the prompt');
-});
-
-test('SessionEnd closes the session out', async () => {
-  await hook('SessionEnd', { end_reason: 'other' });
-  const s = await session();
-  assert.equal(s.status, 'ended');
-  assert.ok(s.endedAt);
-});
-
-test('a session can be deleted, and stays deleted', async () => {
-  const doomed = 'doomed-session';
-  await hookFor(doomed, 'SessionStart', { start_reason: 'startup' });
-
-  const before = await call<{ sessions: { sessionId: string }[] }>('/api/sessions');
-  assert.ok(before.sessions.some((s) => s.sessionId === doomed), 'the session is listed first');
-  const dir = path.join(home, 'sessions', doomed);
-  assert.ok(existsSync(dir), 'and has state on disk');
-
-  const res = await call<{ deleted: boolean }>(`/api/session/${doomed}`, { method: 'DELETE' });
-  assert.equal(res.deleted, true);
-
-  const after = await call<{ sessions: { sessionId: string }[] }>('/api/sessions');
-  assert.ok(!after.sessions.some((s) => s.sessionId === doomed), 'gone from the list');
-  assert.ok(!existsSync(dir), 'and gone from disk — this is deletion, not eviction');
-
-  const missing = await fetch(`${baseUrl(lock)}/api/session/${doomed}`, {
-    headers: { authorization: `Bearer ${lock.token}` },
-  });
-  assert.equal(missing.status, 404);
-});
-
-test('deleting an unknown session is a 404, not a silent success', async () => {
-  const res = await fetch(`${baseUrl(lock)}/api/session/no-such-session`, {
-    method: 'DELETE',
-    headers: { authorization: `Bearer ${lock.token}` },
-  });
-  assert.equal(res.status, 404);
-});
-
-test('deleting a session takes its transcript tailer with it', async () => {
-  // The tailer calls `store.ensure`, which reads state back from disk. Left
-  // running, it would recreate the session moments after it was deleted.
-  const tailed = 'tailed-session';
-  const ownTranscript = path.join(home, 'tailed.jsonl');
-  writeFileSync(ownTranscript, '');
-  await hookFor(tailed, 'SessionStart', { start_reason: 'startup', transcript_path: ownTranscript });
-
-  appendFileSync(
-    ownTranscript,
-    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'hello' }] } }) +
-      '\n',
-  );
-  await until(async () => {
-    const r = await call<{ session: SessionState }>(`/api/session/${tailed}`);
-    return r.session?.timeline?.some((e) => e.text.includes('hello'));
-  });
-
-  await call<{ deleted: boolean }>(`/api/session/${tailed}`, { method: 'DELETE' });
-
-  appendFileSync(
-    ownTranscript,
-    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'after' }] } }) +
-      '\n',
-  );
-  await sleep(600);
-
-  const list = await call<{ sessions: { sessionId: string }[] }>('/api/sessions');
-  assert.ok(!list.sessions.some((s) => s.sessionId === tailed), 'it does not come back');
+  const viaClaude = await mcp('edit', { ops: many });
+  assert.equal(viaClaude['ok'], false);
+  assert.equal((await session()).plan!.tasks.length, before, 'none of it applied');
 });

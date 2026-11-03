@@ -71,6 +71,21 @@ export function setupDom(url = 'http://127.0.0.1:1234/#/session/s1'): JSDOM {
       configurable: true,
     });
   }
+  // React Flow reads the canvas transform through this; jsdom has none.
+  if (!('DOMMatrixReadOnly' in globalThis)) {
+    Object.defineProperty(globalThis, 'DOMMatrixReadOnly', {
+      value: class {
+        m22: number;
+        constructor(transform?: string) {
+          const scale = /scale\(([\d.]+)\)/.exec(transform ?? '');
+          this.m22 = scale ? Number(scale[1]) : 1;
+        }
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+  globalThis.MutationObserver ??= dom.window.MutationObserver;
   // jsdom stubs this as a no-op that throws in some versions.
   if (!Element.prototype.scrollIntoView) {
     Element.prototype.scrollIntoView = function scrollIntoView() {};
@@ -106,12 +121,15 @@ export function stubFetch(handler: (route: string, init?: RequestInit) => unknow
         posts.push({ route, body: init.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {} });
       }
       const body = handler(route, init);
+      // A handler answers an error with `{ __status, error }`.
+      const status = body && typeof body === 'object' && '__status' in body ? Number((body as { __status: number }).__status) : 200;
       return {
-        ok: true,
-        status: 200,
-        statusText: 'OK',
+        ok: status < 400,
+        status,
+        statusText: status < 400 ? 'OK' : 'Error',
+        headers: { get: (name: string) => (name.toLowerCase() === 'content-type' ? (typeof body === 'string' ? 'text/plain' : 'application/json') : null) },
         json: async () => body,
-        text: async () => JSON.stringify(body),
+        text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),
       };
     },
     writable: true,

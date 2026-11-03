@@ -1,54 +1,102 @@
 {
-  "description": "cc-harness — mirrors session lifecycle into the review UI and delivers the user's answers back into the session.",
+  "description": "cc-harness \u2014 registers sessions with the planning UI, notices when Claude is waiting on the user so the UI can link back to the session, and tells Claude when the plan changed. Never blocks or holds a turn.",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/hook-relay.sh", "args": ["SessionStart"], "timeout": 20 }
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/hook-relay.sh",
+            "args": [
+              "SessionStart"
+            ],
+            "timeout": 20
+          }
         ]
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/hook-relay.sh", "args": ["SessionEnd"], "timeout": 5 }
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/hook-relay.sh",
+            "args": [
+              "SessionEnd"
+            ],
+            "timeout": 5
+          }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/hook-relay.sh", "args": ["UserPromptSubmit"], "timeout": 25 }
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/hook-relay.sh",
+            "args": [
+              "UserPromptSubmit"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/hook-relay.sh",
+            "args": [
+              "PreToolUse"
+            ],
+            "timeout": 5
+          }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "TodoWrite|Write|Edit|MultiEdit|NotebookEdit|Bash",
         "hooks": [
-          { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/hook-relay.sh", "args": ["PostToolUse"], "timeout": 15 }
-        ]
-      }
-    ],
-    "PostToolUseFailure": [
-      {
-        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
-        "hooks": [
-          { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/hook-relay.sh", "args": ["PostToolUseFailure"], "timeout": 15 }
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/hook-relay.sh",
+            "args": [
+              "PostToolUse"
+            ],
+            "timeout": 5
+          }
         ]
       }
     ],
     "Notification": [
       {
         "hooks": [
-          { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/hook-relay.sh", "args": ["Notification"], "timeout": 10 }
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/hook-relay.sh",
+            "args": [
+              "Notification"
+            ],
+            "timeout": 5
+          }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/bin/hook-relay.sh", "args": ["Stop"], "timeout": 600 }
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/hook-relay.sh",
+            "args": [
+              "Stop"
+            ],
+            "timeout": 5
+          }
         ]
       }
     ]

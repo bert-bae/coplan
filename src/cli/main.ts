@@ -99,13 +99,12 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
     if (!lock) return commands['start']!(args);
 
     try {
-      const result = await api<{ restarting?: boolean; interrupted?: string[] }>(
+      const result = await api<{ restarting?: boolean }>(
         lock,
         '/api/daemon/restart',
         { method: 'POST', body: '{}' },
       );
       if (result.restarting) {
-        for (const label of result.interrupted ?? []) console.log(`interrupted: ${label}`);
         const next = await waitForNewDaemon(lock.pid);
         if (next) {
           console.log(`cc-harness restarted on ${baseUrl(next)} (pid ${next.pid})`);
@@ -180,6 +179,33 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
       if (held) console.log(`recorded session history not touched (${formatBytes(held)}) — add "sessions" to include it`);
     }
     return outcome.failed.length ? 1 : 0;
+  },
+
+  /** The daemon, and every session with where its plan stands. */
+  async status() {
+    const lock = readLiveLock();
+    if (!lock) {
+      console.log('not running');
+      return 0;
+    }
+    console.log(`cc-harness v${lock.version} on ${baseUrl(lock)} (pid ${lock.pid})`);
+    const { sessions } = await api<{ sessions: SessionSummary[] }>(lock, '/api/sessions');
+    if (!sessions.length) {
+      console.log('no sessions');
+      return 0;
+    }
+    for (const s of sessions) {
+      const plan = s.planTitle
+        ? `"${s.planTitle}" · tasks ${s.tasks.done}/${s.tasks.total}` +
+          (s.current ? ` · now: ${s.current}` : '') +
+          (s.waiting ? ` · WAITING ON YOU: ${s.waiting.text}` : '') +
+          (s.unreadByClaude ? ` · ${s.unreadByClaude} change(s) unread by Claude` : '')
+        : 'no plan yet';
+      console.log(`  ${pad(s.status, 7)} ${pad(s.title, 28)} ${plan}`);
+      console.log(`          ${s.sessionId}  ${s.cwd}`);
+      if (s.link) console.log(`          open: ${s.link.app}  (web: ${s.link.web})`);
+    }
+    return 0;
   },
 
   async open(args) {
@@ -263,7 +289,7 @@ usage: harness <command>
   status     show the daemon and every registered session
   clean      remove stale harness files (--dry-run to only list them)
              recorded session history is kept unless you pass --all or name it
-             groups: sessions, partial-writes, scratch, log, lock
+             groups: sessions, partial-writes, log, lock
   open [id]  open the UI in a browser
   url  [id]  print the UI url (with auth token)
   logs       tail the daemon log
