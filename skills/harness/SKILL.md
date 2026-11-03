@@ -29,15 +29,23 @@ Read the code first. Then call `harness_plan_publish` with:
 - **diagrams** — the architecture, which is where most design decisions are
   made. Each diagram is `nodes` and `edges`:
   - a node has `id`, `label`, `kind` (`component`, `service`, `datastore`,
-    `queue`, `external`, `actor`, `note`), `detail` (one line shown on the
-    box), `notes` (markdown in the side panel: the decisions about this part
-    and why, its interface, open concerns) and `taskIds` (the tasks that
-    build it — the box then shows their progress);
-  - an edge has `source`, `target`, optional `label` (what flows along it)
-    and `dashed` (optional, async or future).
+    `queue`, `external`, `actor`, `note`), `detail` (a few words on the box:
+    technology or role), `description`, `notes` and `taskIds` (the tasks
+    that build it — the box then shows their progress);
+  - an edge has `source`, `target`, optional `label` (what flows along it),
+    `dashed` (optional, async or future) and `arrows` (`both` or `none`
+    when it is not one-way).
 
-  Do not give coordinates — the UI lays diagrams out and the user arranges
-  them. One diagram per idea (components, a request's path, data flow).
+  **Fill in every box as you plan it.** `description` is two to four
+  sentences on what the part does, what it owns and how others talk to it —
+  the user reads it by hovering the box, and it is how the diagram is read
+  back to you. `notes` holds what you decided about the part and why, and
+  what you ruled out. A box with only a label leaves the user nothing to
+  react to.
+
+  Do not give coordinates or a direction unless you mean it — the UI lays
+  diagrams out to fit and the user arranges them. One diagram per idea
+  (components, a request's path, data flow).
 - **sections** — supporting prose: Context, Risks, Out of scope. Markdown.
 
 Then ask, with `AskUserQuestion`, whatever you need decided before building —
@@ -47,8 +55,11 @@ several questions at once, with options. Tell the user the plan is ready.
 
 When the user says they have reviewed or changed the plan — or a prompt
 arrives with a `[cc-harness]` note that it changed — call `harness_plan_read`.
-It leads with everything they did since you last read: moved and added tasks,
-rearranged or rewired diagrams, edited box notes, comments. Then:
+It leads with what is different from what you last read — the net effect of
+their edits, not every step, and never where boxes were dragged: parts and
+connections added, removed or changed, tasks moved or added, comments. The
+diagrams follow as an architecture description: parts in flow order with
+their descriptions, decisions and tasks, then every connection. Then:
 
 - **Their edits** — their structure wins. Work from their task tree and their
   diagram, not yours.

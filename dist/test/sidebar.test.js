@@ -1098,6 +1098,9 @@ function unreadByClaude(plan) {
   if (!plan) return [];
   return plan.changes.filter((c) => c.seq > plan.claudeReadSeq && c.author === "user");
 }
+function unreadItems(plan) {
+  return new Set(unreadByClaude(plan).map((c) => `${c.target.kind}:${c.target.id}`)).size;
+}
 function childrenOf(plan, parentId) {
   return plan.tasks.filter((t) => t.parentId === parentId).sort((a, b) => a.order - b.order);
 }
@@ -1156,7 +1159,7 @@ function Handoff() {
   const plan = usePlan();
   const [viewing, setViewing] = useState5(false);
   if (!session) return null;
-  const unread = unreadByClaude(plan).length;
+  const unread = unreadItems(plan);
   return /* @__PURE__ */ jsxs6("div", { className: "handoff", children: [
     plan && (unread > 0 ? /* @__PURE__ */ jsxs6("span", { className: "handoff-state is-behind", title: "Changes you made that Claude has not read yet", children: [
       /* @__PURE__ */ jsx6("span", { className: "dot is-attention", "aria-hidden": "true" }),

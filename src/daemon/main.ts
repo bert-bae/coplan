@@ -356,7 +356,7 @@ function buildRouter(deps: Deps): Router {
 
   router.get('/api/session/:id', (ctx) => {
     const session = sessionOr404(ctx);
-    if (session) json(ctx.res, 200, { session });
+    if (session) json(ctx.res, 200, { session: forBrowser(session) });
   });
 
   router.delete('/api/session/:id', (ctx) => {
@@ -395,7 +395,7 @@ function buildRouter(deps: Deps): Router {
     if (ops.length > MAX_OPS) throw new HttpError(400, `At most ${MAX_OPS} edits per request.`);
     try {
       const { plan, changes } = store.applyOps(session.sessionId, ops, 'user');
-      json(ctx.res, 200, { plan, changes });
+      json(ctx.res, 200, { plan: forBrowser(plan), changes });
     } catch (err) {
       if (err instanceof PlanError) json(ctx.res, 400, { error: err.message });
       else throw err;
@@ -453,7 +453,7 @@ function buildRouter(deps: Deps): Router {
     res.write(': connected\n\n');
     clients.count++;
 
-    const send = (event: ServerEvent) => res.write(`data: ${JSON.stringify(event)}\n\n`);
+    const send = (event: ServerEvent) => res.write(`data: ${JSON.stringify(forBrowser(event))}\n\n`);
     send({ type: 'sessions', sessions: store.summaries() });
     const focus = ctx.url.searchParams.get('session');
     const focused = focus ? store.get(focus) : undefined;
@@ -683,3 +683,23 @@ function startReaper(store: SessionStore): { stop(): void } {
 }
 
 void main();
+
+/**
+ * What Claude last read is kept beside the plan so "since you last read" can
+ * be a true difference, but the page has no use for it — leave it out rather
+ * than send every plan twice on every save.
+ */
+function forBrowser<T>(value: T): T {
+  if (!value || typeof value !== 'object') return value;
+  if ('claudeBaseline' in value) {
+    const { claudeBaseline: _omit, ...plan } = value as Record<string, unknown>;
+    return plan as T;
+  }
+  if ('plan' in value && (value as { plan: unknown }).plan) {
+    return { ...value, plan: forBrowser((value as { plan: unknown }).plan) } as T;
+  }
+  if ('session' in value && (value as { session: unknown }).session) {
+    return { ...value, session: forBrowser((value as { session: unknown }).session) } as T;
+  }
+  return value;
+}

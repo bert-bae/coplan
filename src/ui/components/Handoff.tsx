@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { store, usePlan, useSession } from '../store.ts';
 import { api } from '../lib/api.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
-import { unreadByClaude } from '../../shared/plan.ts';
+import { unreadItems } from '../../shared/plan.ts';
 import type { SessionLink, SessionState, WaitingState } from '../../shared/types.ts';
 
 /** What to tell Claude once the plan has been worked over. */
@@ -22,7 +22,7 @@ export function Handoff() {
   const plan = usePlan();
   const [viewing, setViewing] = useState(false);
   if (!session) return null;
-  const unread = unreadByClaude(plan).length;
+  const unread = unreadItems(plan);
 
   return (
     <div className="handoff">

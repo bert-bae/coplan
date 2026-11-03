@@ -14,11 +14,13 @@ import type {
   Diagram,
   DiagramDirection,
   DiagramEdge,
+  EdgeArrows,
   DiagramEdgeInput,
   DiagramNode,
   DiagramNodeInput,
   NodeKind,
   Plan,
+  PlanBaseline,
   PlanInput,
   PlanOp,
   Section,
@@ -29,7 +31,7 @@ import type {
   TaskStatus,
   Thread,
 } from './types.ts';
-import { NODE_KINDS, TASK_STATUSES } from './types.ts';
+import { EDGE_ARROWS, NODE_KINDS, TASK_STATUSES } from './types.ts';
 
 /** Raised for an op that cannot apply. The message is shown verbatim to
  *  whoever sent it — the user in a toast, Claude in a tool result. */
@@ -129,9 +131,19 @@ export function unreadByClaude(plan: Plan | null): Change[] {
   return plan.changes.filter((c) => c.seq > plan.claudeReadSeq && c.author === 'user');
 }
 
+/**
+ * How many things the user changed that Claude has not read — each box,
+ * task, section or comment thread counted once however many saves it took.
+ * This is the number to show people; the log's length counts keystrokes.
+ */
+export function unreadItems(plan: Plan | null): number {
+  return new Set(unreadByClaude(plan).map((c) => `${c.target.kind}:${c.target.id}`)).size;
+}
+
 export function markReadByClaude(plan: Plan, now = Date.now()): void {
   plan.claudeReadSeq = plan.seq;
   plan.claudeReadAt = now;
+  plan.claudeBaseline = baselineOf(plan);
 }
 
 /**
@@ -140,7 +152,35 @@ export function markReadByClaude(plan: Plan, now = Date.now()): void {
  * "since you last read".
  */
 function settleClaudeRead(plan: Plan): void {
-  if (unreadByClaude(plan).length === 0) plan.claudeReadSeq = plan.seq;
+  if (unreadByClaude(plan).length > 0) return;
+  plan.claudeReadSeq = plan.seq;
+  plan.claudeBaseline = baselineOf(plan);
+}
+
+/** The plan's content, as Claude would compare it: no layout, no bookkeeping. */
+export function baselineOf(plan: Plan): PlanBaseline {
+  return structuredClone({
+    title: plan.title,
+    summary: plan.summary,
+    sections: plan.sections.map(({ id, title, body }) => ({ id, title, body })),
+    diagrams: plan.diagrams.map((d) => ({
+      id: d.id,
+      title: d.title,
+      ...(d.caption ? { caption: d.caption } : {}),
+      nodes: d.nodes.map(({ x: _x, y: _y, ...node }) => node),
+      edges: d.edges,
+    })),
+    tasks: plan.tasks.map(({ id, parentId, order, title, detail, status, files, note }) => ({
+      id,
+      parentId,
+      order,
+      title,
+      status,
+      ...(detail ? { detail } : {}),
+      ...(files?.length ? { files } : {}),
+      ...(note ? { note } : {}),
+    })),
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -159,7 +199,7 @@ function settleClaudeRead(plan: Plan): void {
 export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now()): { plan: Plan; changes: Change[] } {
   if (prev && unreadByClaude(prev).length > 0) {
     throw new PlanError(
-      `The user has made ${unreadByClaude(prev).length} change(s) to the plan since you last read it. ` +
+      `The user has changed ${unreadItems(prev)} item(s) in the plan since you last read it. ` +
         'Call harness_plan_read first, then publish again (or use harness_plan_edit for targeted changes) ' +
         'so their edits are not overwritten.',
     );
@@ -228,7 +268,7 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
     const dTitle = clean(raw.title, MAX_TITLE) ?? 'Diagram';
     const caption = clean(raw.caption, MAX_TEXT);
     const graph = buildGraph(raw.nodes ?? [], raw.edges ?? [], old, dTitle, new Set(tasks.map((t) => t.id)));
-    const direction = validDirection(raw.direction) ?? old?.direction ?? 'LR';
+    const direction = validDirection(raw.direction) ?? old?.direction ?? suggestDirection(graph.nodes, graph.edges);
     const same =
       old &&
       old.title === dTitle &&
@@ -414,24 +454,29 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         if (typeof op.caption === 'string') setOptional(existing, 'caption', clean(op.caption, MAX_TEXT));
         if (typeof op.index === 'number') moveInList(plan.diagrams, existing.id, op.index);
         const what = describeDiagramEdit(before, existing);
-        if (!what) return [];
+        const relaid = layoutChanged(before, existing);
+        if (!what && !relaid) return [];
         existing.rev += 1;
         existing.updatedAt = now;
+        // Dragging boxes around, or flipping which way the diagram is drawn,
+        // is presentation, not design. It is saved — and moves the revision,
+        // so a stale editor is still refused — but it is not a change anyone
+        // needs to read about.
+        if (!what) return [];
         existing.updatedBy = author;
-        // Dragging boxes around is layout, not content: logged, but as a move.
-        const kind: ChangeKind = what.startsWith('rearranged') ? 'moved' : 'edited';
-        return [log(kind, ref('diagram', existing.id), `${what} in diagram "${existing.title}"`)];
+        return [log('edited', ref('diagram', existing.id), `${what} in diagram "${existing.title}"`)];
       }
       if (op.id) throw new PlanError(`No diagram "${op.id}".`);
       if (plan.diagrams.length >= MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
       const title = clean(op.title, MAX_TITLE) ?? 'Diagram';
       const caption = clean(op.caption, MAX_TEXT);
+      const graph = buildGraph(op.nodes ?? [], op.edges ?? [], undefined, title, taskIdSet(plan));
       const diagram: Diagram = {
         id: claimId(plan, 'diagram', undefined),
         title,
         rev: 1,
-        ...buildGraph(op.nodes ?? [], op.edges ?? [], undefined, title, taskIdSet(plan)),
-        direction: validDirection(op.direction) ?? 'LR',
+        ...graph,
+        direction: validDirection(op.direction) ?? suggestDirection(graph.nodes, graph.edges),
         ...(caption ? { caption } : {}),
         updatedAt: now,
         updatedBy: author,
@@ -650,6 +695,7 @@ function removeItem(
 
 const MAX_NODES = 120;
 const MAX_EDGES = 300;
+const MAX_DESCRIPTION = 4_000;
 
 /**
  * Validate a graph and normalize it. Node ids must be unique and every edge
@@ -676,6 +722,9 @@ function buildGraph(
     if (nodes.some((n) => n.id === id)) throw new PlanError(`Diagram "${title}": node id "${id}" is used twice.`);
     const prev = old?.nodes.find((n) => n.id === id);
     const detail = clean(raw.detail, 400);
+    // Prose survives an edit that leaves it out, so Claude can rewire a
+    // diagram without restating what the user wrote on every box.
+    const description = raw.description === undefined ? prev?.description : clean(raw.description, MAX_DESCRIPTION);
     const notes = raw.notes === undefined ? prev?.notes : clean(raw.notes, MAX_TEXT);
     const links = raw.taskIds === undefined ? prev?.taskIds : cleanList(raw.taskIds);
     for (const t of links ?? []) {
@@ -688,6 +737,7 @@ function buildGraph(
       label: clean(raw.label, 120) ?? prev?.label ?? id,
       kind: validKind(raw.kind) ?? prev?.kind ?? 'component',
       ...(detail ? { detail } : {}),
+      ...(description ? { description } : {}),
       ...(notes ? { notes } : {}),
       ...(links?.length ? { taskIds: [...new Set(links)] } : {}),
       ...(x !== undefined && y !== undefined ? { x: Math.round(x), y: Math.round(y) } : {}),
@@ -706,7 +756,15 @@ function buildGraph(
     let id = clean(raw.id, 80) ?? `${source}->${target}`;
     for (let n = 2; edges.some((e) => e.id === id); n++) id = `${source}->${target}#${n}`;
     const label = clean(raw.label, 120);
-    edges.push({ id, source, target, ...(label ? { label } : {}), ...(raw.dashed ? { dashed: true } : {}) });
+    const arrows = validArrows(raw.arrows);
+    edges.push({
+      id,
+      source,
+      target,
+      ...(label ? { label } : {}),
+      ...(raw.dashed ? { dashed: true } : {}),
+      ...(arrows && arrows !== 'end' ? { arrows } : {}),
+    });
   }
   return { nodes, edges };
 }
@@ -720,22 +778,25 @@ function describeDiagramEdit(before: Diagram, after: Diagram): string | null {
   const removed = before.nodes.filter((n) => !after.nodes.some((a) => a.id === n.id));
   const changed = after.nodes.filter((n) => {
     const b = before.nodes.find((x) => x.id === n.id);
-    return b && (b.label !== n.label || b.kind !== n.kind || (b.detail ?? '') !== (n.detail ?? '') || (b.notes ?? '') !== (n.notes ?? ''));
+    return (
+      b &&
+      (b.label !== n.label ||
+        b.kind !== n.kind ||
+        (b.detail ?? '') !== (n.detail ?? '') ||
+        (b.description ?? '') !== (n.description ?? '') ||
+        (b.notes ?? '') !== (n.notes ?? ''))
+    );
   });
   const relinked = after.nodes.filter((n) => {
     const b = before.nodes.find((x) => x.id === n.id);
     return b && (b.taskIds ?? []).join() !== (n.taskIds ?? []).join();
-  });
-  const moved = after.nodes.filter((n) => {
-    const b = before.nodes.find((x) => x.id === n.id);
-    return b && (b.x !== n.x || b.y !== n.y);
   });
   const edgeKey = (e: DiagramEdge) => `${e.source}->${e.target}`;
   const linked = after.edges.filter((e) => !before.edges.some((b) => edgeKey(b) === edgeKey(e)));
   const unlinked = before.edges.filter((e) => !after.edges.some((a) => edgeKey(a) === edgeKey(e)));
   const relabeled = after.edges.filter((e) => {
     const b = before.edges.find((x) => edgeKey(x) === edgeKey(e));
-    return b && ((b.label ?? '') !== (e.label ?? '') || Boolean(b.dashed) !== Boolean(e.dashed));
+    return b && ((b.label ?? '') !== (e.label ?? '') || Boolean(b.dashed) !== Boolean(e.dashed) || (b.arrows ?? 'end') !== (e.arrows ?? 'end'));
   });
   const list = (items: string[]) => (items.length > 3 ? `${items.slice(0, 3).join(', ')} and ${items.length - 3} more` : items.join(', '));
 
@@ -746,11 +807,17 @@ function describeDiagramEdit(before: Diagram, after: Diagram): string | null {
   if (linked.length) parts.push(`connected ${list(linked.map((e) => `${label(after, e.source)} → ${label(after, e.target)}`))}`);
   if (unlinked.length) parts.push(`disconnected ${list(unlinked.map((e) => `${label(before, e.source)} → ${label(before, e.target)}`))}`);
   if (relabeled.length) parts.push(`relabelled ${list(relabeled.map((e) => `${label(after, e.source)} → ${label(after, e.target)}`))}`);
-  if (before.direction !== after.direction) parts.push(`turned it ${after.direction === 'LR' ? 'left-to-right' : 'top-to-bottom'}`);
   if ((before.caption ?? '') !== (after.caption ?? '')) parts.push('edited the caption');
-  if (parts.length) return parts.join('; ');
-  if (moved.length) return `rearranged ${moved.length} node(s)`;
-  return null;
+  return parts.length ? parts.join('; ') : null;
+}
+
+/** Whether only the drawing changed: where boxes sit, which way it flows. */
+function layoutChanged(before: Diagram, after: Diagram): boolean {
+  if (before.direction !== after.direction) return true;
+  return after.nodes.some((n) => {
+    const b = before.nodes.find((x) => x.id === n.id);
+    return b && (b.x !== n.x || b.y !== n.y);
+  });
 }
 
 /**
@@ -778,6 +845,78 @@ function validKind(value: unknown): NodeKind | undefined {
 
 function validDirection(value: unknown): DiagramDirection | undefined {
   return value === 'LR' || value === 'TB' ? value : undefined;
+}
+
+function validArrows(value: unknown): EdgeArrows | undefined {
+  return (EDGE_ARROWS as readonly string[]).includes(value as string) ? (value as EdgeArrows) : undefined;
+}
+
+/**
+ * Which way a diagram reads best, for when nobody said.
+ *
+ * Left to right is the natural reading order, so it wins unless the graph is
+ * so long and narrow that, laid out that way, it would have to be shrunk
+ * until its labels are unreadable — then top to bottom keeps it legible.
+ * Estimated from the depth and breadth of the flow; the canvas does the real
+ * layout.
+ */
+export function suggestDirection(
+  nodes: readonly { id: string }[],
+  edges: readonly { source: string; target: string }[],
+): DiagramDirection {
+  const ranks = flowRanks(nodes, edges);
+  if (ranks.size === 0) return 'LR';
+  const perRank = new Map<number, number>();
+  for (const r of ranks.values()) perRank.set(r, (perRank.get(r) ?? 0) + 1);
+  const depth = Math.max(...perRank.keys()) + 1;
+  const breadth = Math.max(...perRank.values());
+  // Rough footprint of each layout in pixels, against a typical canvas. A
+  // rank is a box plus the gap that carries the arrows; a lane is a box plus
+  // the space beside it.
+  const fit = (w: number, h: number) => Math.min(1, 1000 / w, 680 / h);
+  const lr = fit(depth * 300, breadth * 110);
+  const tb = fit(breadth * 250, depth * 150);
+  return tb > lr * 1.1 ? 'TB' : 'LR';
+}
+
+/** Each connected node's step along the flow: the longest chain of arrows
+ *  leading to it, with arrows that close a cycle ignored. Unconnected nodes
+ *  have no rank. */
+export function flowRanks(nodes: readonly { id: string }[], edges: readonly { source: string; target: string }[]): Map<string, number> {
+  const ids = new Set(nodes.map((n) => n.id));
+  const out = new Map<string, string[]>();
+  const connected: string[] = [];
+  const seen = new Set<string>();
+  for (const e of edges) {
+    if (e.source === e.target || !ids.has(e.source) || !ids.has(e.target)) continue;
+    out.set(e.source, [...(out.get(e.source) ?? []), e.target]);
+    for (const end of [e.source, e.target]) {
+      if (!seen.has(end)) connected.push(end);
+      seen.add(end);
+    }
+  }
+  // Depth-first, dropping back edges, so the order below is topological.
+  const state = new Map<string, 'open' | 'done'>();
+  const order: string[] = [];
+  const forward = new Map<string, string[]>();
+  const visit = (v: string): void => {
+    state.set(v, 'open');
+    const keep: string[] = [];
+    for (const w of out.get(v) ?? []) {
+      if (state.get(w) === 'open') continue;
+      keep.push(w);
+      if (!state.has(w)) visit(w);
+    }
+    forward.set(v, keep);
+    state.set(v, 'done');
+    order.push(v);
+  };
+  for (const v of connected) if (!state.has(v)) visit(v);
+  const rank = new Map<string, number>(connected.map((v) => [v, 0]));
+  for (const v of order.reverse()) {
+    for (const w of forward.get(v) ?? []) rank.set(w, Math.max(rank.get(w) ?? 0, rank.get(v)! + 1));
+  }
+  return rank;
 }
 
 function finite(value: unknown): number | undefined {

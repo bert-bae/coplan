@@ -199,7 +199,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
         ? `"${s.planTitle}" · tasks ${s.tasks.done}/${s.tasks.total}` +
           (s.current ? ` · now: ${s.current}` : '') +
           (s.waiting ? ` · WAITING ON YOU: ${s.waiting.text}` : '') +
-          (s.unreadByClaude ? ` · ${s.unreadByClaude} change(s) unread by Claude` : '')
+          (s.unreadByClaude ? ` · ${s.unreadByClaude} item(s) changed that Claude has not read` : '')
         : 'no plan yet';
       console.log(`  ${pad(s.status, 7)} ${pad(s.title, 28)} ${plan}`);
       console.log(`          ${s.sessionId}  ${s.cwd}`);

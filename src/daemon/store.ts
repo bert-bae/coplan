@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { paths, ensureHome, sanitizeId } from '../shared/paths.ts';
-import { applyOps, countTasks, currentTask, emptyPlan, markReadByClaude, normalizePlan, publishPlan, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, countTasks, currentTask, emptyPlan, markReadByClaude, normalizePlan, publishPlan, unreadItems } from '../shared/plan.ts';
 import type { Author, Change, Plan, PlanInput, PlanOp, ServerEvent, SessionState, SessionSummary } from '../shared/types.ts';
 
 const PERSIST_DEBOUNCE_MS = 400;
@@ -258,7 +258,7 @@ export class SessionStore extends EventEmitter {
   markRead(id: string): void {
     const session = this.sessions.get(id);
     if (!session?.plan) return;
-    if (session.plan.claudeReadSeq === session.plan.seq && session.plan.claudeReadAt) return;
+    if (session.plan.claudeReadSeq === session.plan.seq && session.plan.claudeReadAt && session.plan.claudeBaseline) return;
     this.mutate(id, (s) => {
       if (s.plan) markReadByClaude(s.plan);
     });
@@ -308,7 +308,7 @@ export function summarize(s: SessionState): SessionSummary {
     surface: s.surface,
     link: s.link,
     openThreads: plan?.threads.filter((t) => !t.resolved).length ?? 0,
-    unreadByClaude: unreadByClaude(plan).length,
+    unreadByClaude: unreadItems(plan),
   };
 }
 

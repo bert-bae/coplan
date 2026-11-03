@@ -27,10 +27,16 @@ const NODE = {
     id: { type: 'string', description: 'Short slug, unique in the diagram, e.g. "api". Edges refer to it.' },
     label: { type: 'string' },
     kind: { type: 'string', enum: ['component', 'service', 'datastore', 'queue', 'external', 'actor', 'note'] },
-    detail: { type: 'string', description: 'One line shown on the box: responsibility or technology.' },
+    detail: { type: 'string', description: 'A few words shown on the box: its technology or role, e.g. "Redis, read-through".' },
+    description: {
+      type: 'string',
+      description:
+        'Two to four sentences: what this part does, what it owns, and how others talk to it. Shown when the ' +
+        'user hovers the box, and read back to you as the architecture. Give every box one.',
+    },
     notes: {
       type: 'string',
-      description: 'Markdown shown in the side panel: decisions about this part and why, interfaces, concerns.',
+      description: 'Markdown: the decisions about this part and why, the alternatives ruled out, open concerns.',
     },
     taskIds: {
       type: 'array',
@@ -50,6 +56,7 @@ const EDGE = {
     target: { type: 'string', description: 'Node id.' },
     label: { type: 'string', description: 'What flows along it, e.g. "REST", "publishes events".' },
     dashed: { type: 'boolean', description: 'Optional, async or future connection.' },
+    arrows: { type: 'string', enum: ['end', 'both', 'none'], description: 'Arrowheads. Default "end" (source to target).' },
   },
   required: ['source', 'target'],
 };
@@ -61,7 +68,7 @@ const DIAGRAM = {
     title: { type: 'string' },
     nodes: { type: 'array', items: NODE },
     edges: { type: 'array', items: EDGE },
-    direction: { type: 'string', enum: ['LR', 'TB'], description: 'Layout flow. Default LR.' },
+    direction: { type: 'string', enum: ['LR', 'TB'], description: 'Layout flow. Omit it to let the harness pick what fits the graph.' },
     caption: { type: 'string' },
   },
   required: ['title', 'nodes'],
@@ -117,8 +124,10 @@ export const TOOLS: ToolDef[] = [
     name: 'harness_plan_read',
     endpoint: 'read',
     description:
-      'Read the plan back, leading with everything the user changed since you last read it: edits, moved or ' +
-      'added tasks, rearranged diagrams, and comments. Call it whenever the ' +
+      'Read the plan back, leading with what the user changed since you last read it — the net effect, ' +
+      'not each step: parts and connections added, removed or changed, tasks moved or added, and comments. ' +
+      'Diagrams come back as an architecture: parts in flow order with their descriptions and decisions, ' +
+      'then connections. Call it whenever the ' +
       'user says they have reviewed or updated the plan, and before publishing again. Every item carries its ' +
       'id for harness_plan_edit.',
     inputSchema: {
