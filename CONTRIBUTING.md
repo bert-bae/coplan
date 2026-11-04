@@ -14,14 +14,15 @@ Open an [issue](https://github.com/bert-bae/coplan/issues). For a bug, include:
 
 ## Setting up a checkout
 
-You need Node.js 20.11 or later and Claude Code.
+You need Node.js 20.11 or later, [pnpm](https://pnpm.io) 10 (`corepack enable
+pnpm` provides the version this repository pins) and Claude Code.
 
 ```bash
 git clone https://github.com/bert-bae/coplan.git
 ```
 
 ```bash
-cd coplan && npm install && npm run build
+cd coplan && pnpm install           # installs, and builds dist/
 ```
 
 Load your checkout instead of an installed copy:
@@ -37,18 +38,18 @@ reconnect by themselves.
 ## Checks
 
 ```bash
-npm run typecheck
-npm run build          # or: npm run build:watch
-npm test
-npm run check          # all three
+pnpm typecheck
+pnpm build             # or: pnpm build:watch
+pnpm test
+pnpm check             # all three
 ```
 
 CI runs the same checks on Node 20 and 22, plus `./bin/coplan doctor` and
-`npm audit`. The repository's own [`.coplan/config.json`](.coplan/config.json)
+`pnpm audit`. The repository's own [`.coplan/config.json`](.coplan/config.json)
 lists them per stage, so `./bin/coplan check review` runs what a change needs.
 
-**`dist/` is not committed.** It is build output: `npm install` builds it (the
-`prepare` script), and `npm run build` rebuilds it. People who install the
+**`dist/` is not committed.** It is build output: `pnpm install` builds it (the
+`prepare` script), and `pnpm build` rebuilds it. People who install the
 plugin build it once with `/coplan-setup`.
 
 ## How the code is laid out
@@ -90,4 +91,4 @@ plugin build it once with `/coplan-setup`.
 ## Pull requests
 
 Keep a pull request to one change, describe what it does and why, and make
-sure `npm run check` passes.
+sure `pnpm check` passes.

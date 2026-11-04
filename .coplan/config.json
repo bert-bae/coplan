@@ -4,13 +4,13 @@
   // runs a stage; CI runs the same commands.
   "hooks": {
     "implement": [
-      { "name": "typecheck", "run": "npm run typecheck" }
+      { "name": "typecheck", "run": "pnpm typecheck" }
     ],
     "review": [
-      { "name": "build and test", "run": "npm run build && npm test", "timeout": 900 }
+      { "name": "build and test", "run": "pnpm build && pnpm test", "timeout": 900 }
     ],
     "final": [
-      { "name": "check", "run": "npm run check", "timeout": 1200 },
+      { "name": "check", "run": "pnpm check", "timeout": 1200 },
       { "name": "doctor", "run": "CC_HARNESS_HOME=\"$(mktemp -d)\" sh -c './bin/coplan doctor; s=$?; ./bin/coplan stop; exit $s'", "timeout": 300 }
     ]
   },

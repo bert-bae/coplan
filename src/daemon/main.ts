@@ -373,7 +373,7 @@ function buildRouter(deps: Deps): Router {
     if (ctx.url.searchParams.get('token') === token) {
       ctx.res.setHeader('set-cookie', `cc_harness=${token}; Path=/; SameSite=Strict; HttpOnly`);
     }
-    if (!serveStatic(ctx.res, UI_DIR, 'index.html')) text(ctx.res, 500, 'UI bundle missing — run npm run build');
+    if (!serveStatic(ctx.res, UI_DIR, 'index.html')) text(ctx.res, 500, 'UI bundle missing — run pnpm build');
   });
 
   /* --------------------------- Sessions ---------------------------- */

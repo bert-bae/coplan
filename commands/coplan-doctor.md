@@ -17,4 +17,4 @@ cleared once answered, and no hook ever holds a turn.
 Summarise: say whether it passed, and for any failure quote the failing line and
 say what it means. A failure in "the Stop hook never holds a turn" would affect
 every project and is worth flagging loudly. A failure in the `present:` checks
-usually just means `npm run build` has not been run.
+usually just means Coplan has not been built: run `/coplan-setup`.

@@ -5,6 +5,6 @@ node_modules/
 .build/
 .build-previous/
 
-# Build output: `npm install` (or `npm run build`) makes it, after cloning
+# Build output: `pnpm install` (or `pnpm build`) makes it, after cloning
 # and after installing the plugin.
 dist/

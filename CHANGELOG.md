@@ -2,10 +2,13 @@
 
 ## Unreleased
 
-### Build after installing
+### Build after installing, with pnpm
 
+- The project uses **pnpm**: `pnpm-lock.yaml` replaces `package-lock.json`,
+  and `packageManager` pins the version for corepack. `pnpm install` installs
+  and builds; `pnpm check` runs everything CI does.
 - `dist/` is no longer committed. After installing or updating the plugin,
-  run `/coplan-setup` in Claude Code (it runs `npm install` in the plugin's
+  run `/coplan-setup` in Claude Code (it runs `pnpm install` in the plugin's
   directory, which builds it), then restart Claude Code. Until then the
   plugin's tools and hooks stay off, and `coplan` says how to build it. CI no
   longer compares a committed `dist/` with the source.

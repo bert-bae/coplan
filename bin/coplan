@@ -5,7 +5,7 @@ ROOT=$(CDPATH= cd -- "$DIR/.." && pwd)
 # dist/ is build output and is not committed: a fresh install has to build it.
 if [ ! -f "$ROOT/dist/cli/main.js" ]; then
   echo "coplan is not built yet. Build it once with:" >&2
-  echo "  cd \"$ROOT\" && npm install" >&2
+  echo "  cd \"$ROOT\" && pnpm install" >&2
   echo "(or run /coplan-setup in Claude Code), then restart Claude Code." >&2
   exit 3
 fi

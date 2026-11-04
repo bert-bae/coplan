@@ -40,9 +40,9 @@ writes a starting point from the repository's scripts.
 ```jsonc
 {
   "hooks": {
-    "implement": ["npm run typecheck", { "name": "ruff", "run": "ruff check .", "paths": ["*.py"] }],
-    "review": [{ "name": "tests", "run": "npm test", "timeout": 900 }],
-    "final": ["npm run check", { "name": "audit", "run": "npm audit", "optional": true }]
+    "implement": ["pnpm typecheck", { "name": "ruff", "run": "ruff check .", "paths": ["*.py"] }],
+    "review": [{ "name": "tests", "run": "pnpm test", "timeout": 900 }],
+    "final": ["pnpm check", { "name": "audit", "run": "pnpm audit", "optional": true }]
   },
   "iric": { "review": "subagent", "parallel": 2, "maxRounds": 3 },
   "branches": { "base": "main", "prefix": "coplan/" }
@@ -64,7 +64,7 @@ A hook is a command, run from the repository root, or an object:
 | Key | Meaning |
 | --- | --- |
 | `run` | The shell command. Required. |
-| `name` | What it is called in reports and on the board. Defaults to the script name (`npm run lint` → `lint`). |
+| `name` | What it is called in reports and on the board. Defaults to the script name (`pnpm lint` or `npm run lint` → `lint`). |
 | `timeout` | Seconds before `coplan check` stops it. Default 600. |
 | `paths` | Globs (`src/**`, `*.py`, `docs/`): the hook applies only to tasks that expect to touch a matching file. A task that lists no files gets every hook. |
 | `optional` | A failure is reported but does not hold the task back. |

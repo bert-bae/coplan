@@ -84,7 +84,8 @@ note that you changed the plan) rides along with your next message there.
 ## Install
 
 You need [Claude Code](https://code.claude.com), Node.js 20.11 or later,
-`sh` and `curl`. The Claude desktop app is optional; it is where *Answer in
+[pnpm](https://pnpm.io) (or Node's `corepack`, which provides it), `sh` and
+`curl`. The Claude desktop app is optional; it is where *Answer in
 Claude* links open.
 
 ### From GitHub
@@ -102,7 +103,7 @@ bert-bae/coplan` and then `/plugin install coplan@coplan`.
 
 The build output (`dist/`) is not in the repository, so **build the plugin
 once after installing it**: run `/coplan-setup` in any Claude Code session.
-It runs `npm install` in the installed plugin's directory, which builds it.
+It runs `pnpm install` in the installed plugin's directory, which builds it.
 Then restart Claude Code so the plugin's MCP server and hooks start from the
 build. Do the same after updating the plugin. Until it is built, the plugin's
 tools and hooks stay off, and `coplan` says how to build it.
@@ -114,7 +115,7 @@ git clone https://github.com/bert-bae/coplan.git
 ```
 
 ```bash
-cd coplan && npm install && npm run build
+cd coplan && pnpm install
 ```
 
 Then load the plugin for a single session:
@@ -272,11 +273,11 @@ committed `.coplan/config.json` (`//` comments allowed):
 {
   "hooks": {
     // quick checks after every implementation or refinement pass
-    "implement": ["npm run typecheck", "npm run lint"],
+    "implement": ["pnpm typecheck", "pnpm lint"],
     // the gate a task must pass before it is done
-    "review": [{ "name": "tests", "run": "npm test", "timeout": 900 }],
+    "review": [{ "name": "tests", "run": "pnpm test", "timeout": 900 }],
     // once every task is done
-    "final": ["npm run check"]
+    "final": ["pnpm check"]
   },
   "iric": { "review": "subagent", "parallel": 2, "maxRounds": 3 },
   "branches": { "base": "main", "prefix": "coplan/" }
@@ -439,14 +440,14 @@ covers setting up a checkout, the checks CI runs, and how the code is laid
 out. The short version:
 
 ```bash
-npm install
+pnpm install           # installs, and builds dist/
 ```
 
 ```bash
-npm run check          # typecheck, build and test
+pnpm check             # typecheck, build and test
 ```
 
-`dist/` is build output and is not committed; `npm install` builds it.
+`dist/` is build output and is not committed; `pnpm install` builds it.
 
 ## License
 
