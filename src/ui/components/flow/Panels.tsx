@@ -483,6 +483,8 @@ export function EdgePanel({
         </div>
       </div>
 
+      <p className="panel-hint">Or drag either end of the arrow on the canvas onto another box.</p>
+
       <footer className="panel-foot">
         <button type="button" className="link is-danger" onClick={onRemove}>
           Delete connection

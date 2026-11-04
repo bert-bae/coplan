@@ -126,12 +126,24 @@ direction toggle flips it.
 
 | To | Do |
 | --- | --- |
-| Add a box | *+ Box*, double-click empty canvas, or drag an arrow out of a box into space |
+| Add a box | *+ Box*, double-click or right-click empty canvas, or drag an arrow out of a box into space |
+| Add the next box along the flow | Select a box, then **Tab** (after it), **⇧Tab** (before it) or **Enter** (beside it, fed by the same boxes) |
 | Connect two boxes | Drag from any edge of one onto the other |
-| Rename a box or an arrow | Double-click it (or F2 on a selected box) |
+| Move an arrow's end | Select or hover the arrow and drag the grip at that end onto another box |
+| Put a box into an arrow | Drop an unconnected box on the arrow, or right-click the arrow → *Insert a box here* |
+| Rename a box or an arrow | Start typing on a selected box, or double-click (F2) |
+| See what a box connects to | Hover or select it: what it sends to, what sends to it and two-way links light up in their own colours, arrows flow in their direction, the rest fades. Hold **Alt** for two steps out |
 | See what a box is | Hover its ⓘ: description, decisions, tasks, connections |
+| Everything you can do to it | Right-click it, or **⇧F10** |
 | Copy, cut, paste, duplicate | ⌘/Ctrl + C, X, V, D — across diagrams and tabs |
-| Select everything / delete | ⌘/Ctrl+A / Backspace |
+| Undo, redo | ⌘/Ctrl+Z, ⇧⌘/Ctrl+Z — or the toolbar's ↶ ↷ |
+| Delete, keeping the flow | **Alt+⌫**: A→B→C without B becomes A→C |
+| Fit everything / zoom to the selection | **⇧1** / **⇧2**; Space-drag pans |
+| See every shortcut | **?** |
+
+Undo covers your own edits on the canvas. If Claude (or another tab) changes
+the diagram, history up to that point is dropped rather than letting an undo
+quietly revert their change, and the page says so.
 
 *In the panel.* Select a box and the panel edits it: its name and the few
 words shown on it (inputs), its **kind**, a **description** of what it does

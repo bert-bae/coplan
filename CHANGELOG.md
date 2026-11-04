@@ -6,6 +6,30 @@ The architecture canvas is easier to fill in and opens organised, and what
 Claude reads back about it is the design you ended up with — not a replay of
 every drag and keystroke.
 
+### Editing the canvas faster
+
+- **Right-click menus** for empty canvas (add a box of any kind right there,
+  paste here, tidy, fit), a box (rename, kind, add after/before/beside,
+  connect to, copy, duplicate, delete keeping the flow), an arrow (label,
+  reverse, dashed, arrowheads, insert a box, delete) and a selection. ⇧F10
+  or the menu key opens the same menu from the keyboard.
+- **Reconnect by dragging an arrow's end.** A selected or hovered arrow shows
+  a grip at each end; drag one onto another box. The arrow keeps its label
+  and style.
+- **Relationship highlighting.** Hover or select a box: what it sends to,
+  what sends to it and two-way links each get their own colour and a badge
+  in words, their arrows flow in their direction, and everything else fades.
+  Hold Alt for two steps out. An arrow lights up its two ends.
+- **Undo and redo** (⌘/Ctrl+Z, ⇧⌘/Ctrl+Z, toolbar ↶ ↷) for every canvas
+  edit. A change made elsewhere ends the history rather than being undone.
+- **Building by keyboard**: Tab adds the next box along the flow, ⇧Tab one
+  before, Enter one beside (same kind, same parents); typing on a selected
+  box renames it.
+- **Drop a box onto an arrow** to put it in between; **Alt+⌫** deletes a box
+  and joins the flow around it.
+- **⇧1** fits the diagram, **⇧2** zooms to the selection, **?** lists every
+  shortcut.
+
 ### What Claude reads
 
 - **Diagrams read as an architecture.** `harness_plan_read` (and *Copy as

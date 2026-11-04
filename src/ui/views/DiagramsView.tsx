@@ -73,8 +73,8 @@ export function DiagramsView() {
         <NewDiagram />
         <span className="spacer" />
         <p className="toolbar-hint">
-          Double-click to add a box · drag from a box's edge to connect · ⓘ for a summary · <kbd>⌘C</kbd> <kbd>⌘V</kbd> copy and paste ·{' '}
-          <kbd>⌫</kbd> deletes
+          Right-click for everything · <kbd>Tab</kbd> adds the next box · drag from a box's edge to connect · hover to see its connections ·{' '}
+          <kbd>?</kbd> all shortcuts
         </p>
       </div>
 

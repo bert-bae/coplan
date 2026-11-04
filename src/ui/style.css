@@ -77,10 +77,29 @@
   --shadow-up: 0 -1px 0 var(--border-default), 0 -8px 20px rgba(15, 20, 26, 0.06);
   --shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.6);
   --focus-ring: 0 0 0 2px var(--surface-base), 0 0 0 4px var(--border-focus);
+
+  /* Relationships on the canvas: what the box in focus sends to, and what
+     sends to it. Orange and teal stay distinct under the common colour-vision
+     deficiencies, and the badges say it in words besides. */
+  --rel-focus: #1f6feb;
+  --rel-to: #0f8a7e;
+  --rel-to-bg: #e3f6f3;
+  --rel-from: #d25a0b;
+  --rel-from-bg: #fdeee3;
+  --rel-both: #7c4dce;
+  --rel-both-bg: #f0eafb;
 }
 
 [data-theme='dark'] {
   color-scheme: dark;
+
+  --rel-focus: #5b9cff;
+  --rel-to: #2ec4b3;
+  --rel-to-bg: #0c2a27;
+  --rel-from: #ff8a3d;
+  --rel-from-bg: #331b0b;
+  --rel-both: #b18cf5;
+  --rel-both-bg: #22183a;
 
   --n-0: #0e131a;   --n-50: #151c25;  --n-100: #1b2430; --n-150: #212c3a;
   --n-200: #2a3644; --n-300: #3a4756; --n-400: #4e5d6e; --n-500: #8a95a3;
@@ -1629,4 +1648,158 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
   .seg { height: 40px; }
   .session-actions, .task-actions, .md-edit { opacity: 1; transform: none; pointer-events: auto; }
   .flow .react-flow__handle { opacity: 1; width: 14px; height: 14px; }
+}
+
+
+/* ------------------------------------------------------------------ *
+ * The canvas: relationships, grips, menus, shortcuts
+ * ------------------------------------------------------------------ */
+
+/* Everything not connected to the box in focus steps back. */
+.flow .react-flow__node.rel-dim { opacity: 0.32; transition: opacity var(--t-fast) linear; }
+.flow .react-flow__edge.rel-dim { opacity: 0.18; }
+.flow-edge-label.is-dim { opacity: 0.3; }
+
+/* The box in focus, and each kind of neighbour: a ring in its colour, so
+   the relationship reads from across the canvas. */
+.flow-node.rel-focus { box-shadow: 0 0 0 3px var(--rel-focus), 0 6px 18px rgba(31, 111, 235, 0.25); }
+.flow-node.rel-to { box-shadow: 0 0 0 2px var(--rel-to), var(--shadow-1); }
+.flow-node.rel-from { box-shadow: 0 0 0 2px var(--rel-from), var(--shadow-1); }
+.flow-node.rel-both { box-shadow: 0 0 0 2px var(--rel-both), var(--shadow-1); }
+.flow-node.rel-to2 { box-shadow: 0 0 0 1px var(--rel-to), var(--shadow-1); }
+.flow-node.rel-from2 { box-shadow: 0 0 0 1px var(--rel-from), var(--shadow-1); }
+.flow-node.rel-to2, .flow-node.rel-from2 { opacity: 0.85; }
+
+/* What the neighbour is to the focus, in words, on its top edge. */
+.flow-node-rel {
+  position: absolute; top: -9px; left: 8px; z-index: 1;
+  padding: 0 6px; height: 17px; line-height: 15px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.02em; white-space: nowrap;
+  border: 1px solid currentColor; border-radius: var(--r-full);
+  pointer-events: none;
+}
+.flow-node-rel.rel-to, .flow-node-rel.rel-to2 { color: var(--rel-to); background: var(--rel-to-bg); }
+.flow-node-rel.rel-from, .flow-node-rel.rel-from2 { color: var(--rel-from); background: var(--rel-from-bg); }
+.flow-node-rel.rel-both { color: var(--rel-both); background: var(--rel-both-bg); }
+.flow-node-rel.rel-to2, .flow-node-rel.rel-from2 { border-style: dashed; }
+
+/* Arrows tied to the focus: coloured by direction, thicker, and — for the
+   ones with a direction — flowing from source to target. */
+.flow .react-flow__edge.rel-out .react-flow__edge-path,
+.flow .react-flow__edge.rel-out2 .react-flow__edge-path { stroke: var(--rel-to); }
+.flow .react-flow__edge.rel-in .react-flow__edge-path,
+.flow .react-flow__edge.rel-in2 .react-flow__edge-path { stroke: var(--rel-from); }
+.flow .react-flow__edge.rel-both .react-flow__edge-path { stroke: var(--rel-both); }
+.flow .react-flow__edge.rel-out .react-flow__edge-path,
+.flow .react-flow__edge.rel-in .react-flow__edge-path,
+.flow .react-flow__edge.rel-both .react-flow__edge-path { stroke-width: 2.5; }
+.flow .react-flow__edge.rel-out2 .react-flow__edge-path,
+.flow .react-flow__edge.rel-in2 .react-flow__edge-path { stroke-width: 1.75; opacity: 0.8; }
+.flow .react-flow__edge.animated .react-flow__edge-path { stroke-dasharray: 8 5; animation: flow-along 0.9s linear infinite; }
+@keyframes flow-along { from { stroke-dashoffset: 13; } to { stroke-dashoffset: 0; } }
+.flow-edge-label.rel-out, .flow-edge-label.rel-out2 { color: var(--rel-to); border-color: var(--rel-to); background: var(--surface-base); }
+.flow-edge-label.rel-in, .flow-edge-label.rel-in2 { color: var(--rel-from); border-color: var(--rel-from); background: var(--surface-base); }
+.flow-edge-label.rel-both { color: var(--rel-both); border-color: var(--rel-both); background: var(--surface-base); }
+
+/* The key to the colours, while something is in focus. */
+.flow-legend {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; max-width: calc(100% - 420px);
+  padding: 5px 8px; border-radius: var(--r-lg);
+  background: var(--surface-overlay); border: 1px solid var(--border-default); box-shadow: var(--shadow-1);
+  font-size: var(--fs-micro); pointer-events: none;
+}
+.flow-legend-item { padding: 1px 7px; border: 1px solid currentColor; border-radius: var(--r-full); font-weight: 650; white-space: nowrap; }
+.flow-legend-item.rel-from { color: var(--rel-from); background: var(--rel-from-bg); }
+.flow-legend-item.rel-to { color: var(--rel-to); background: var(--rel-to-bg); }
+.flow-legend-item.rel-both { color: var(--rel-both); background: var(--rel-both-bg); }
+.flow-legend-item.rel-focus { color: var(--rel-focus); max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.flow-legend-hint { color: var(--text-tertiary); }
+
+/* Dragging something onto a box or an arrow it would join. */
+.flow-node.is-drop-target { box-shadow: 0 0 0 3px var(--accent-solid), 0 0 0 7px var(--accent-veil); }
+.flow .react-flow__edge.is-drop-target .react-flow__edge-path { stroke: var(--accent-solid); stroke-width: 4; }
+.flow .react-flow__edge.is-reconnecting { opacity: 0.25; }
+.flow.is-reconnecting, .flow.is-reconnecting * { cursor: crosshair !important; }
+
+/* The grips on an arrow's ends: drag one onto another box. */
+.flow-edge-grip {
+  position: absolute; z-index: 2; pointer-events: all;
+  width: 14px; height: 14px; padding: 0;
+  border: 2px solid var(--accent-solid); border-radius: var(--r-full);
+  background: var(--surface-base); box-shadow: var(--shadow-1);
+  cursor: grab; transition: transform var(--t-fast) var(--ease-out-soft);
+}
+.flow-edge-grip:hover { transform: translate(-50%, -50%) scale(1.3) !important; background: var(--accent-solid); }
+.flow-edge-grip.is-target { border-radius: 3px; }
+.flow-reconnect { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; overflow: visible; }
+.flow-reconnect line { stroke: var(--accent-solid); stroke-width: 2; stroke-dasharray: 6 4; }
+.flow-reconnect marker polyline { fill: var(--accent-solid); stroke: var(--accent-solid); }
+
+/* The toolbar's history and help buttons. */
+.flow-toolbar-group { display: inline-flex; gap: 2px; }
+.btn.btn-icon { min-width: 28px; padding: 0 var(--sp-2); justify-content: center; font-size: 14px; }
+.btn.btn-icon:disabled { opacity: 0.45; cursor: default; }
+
+/* The right-click menu. */
+.flow-menu {
+  position: absolute; z-index: 20; min-width: 220px; max-width: 300px; max-height: calc(100% - 8px); overflow-y: auto;
+  padding: 4px; border-radius: var(--r-lg);
+  background: var(--surface-overlay); border: 1px solid var(--border-default); box-shadow: var(--shadow-3);
+  font-size: var(--fs-sm); animation: fade-in var(--t-fast) var(--ease-out-soft);
+}
+.flow-menu-title {
+  display: flex; align-items: center; gap: 4px; padding: 4px 8px 6px;
+  font-size: var(--fs-micro); font-weight: 700; color: var(--text-tertiary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.flow-menu-back { border: none; background: none; padding: 0 4px; font-size: 15px; line-height: 1; color: var(--text-secondary); border-radius: var(--r-sm); }
+.flow-menu-back:hover, .flow-menu-back:focus-visible { background: var(--surface-hover); outline: none; }
+.flow-menu-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px;
+  border: none; border-radius: var(--r-md); background: none; color: var(--text-primary); text-align: left;
+}
+.flow-menu-item:hover:not(:disabled), .flow-menu-item:focus-visible { background: var(--surface-hover); outline: none; }
+.flow-menu-item:focus-visible { box-shadow: inset 0 0 0 2px var(--border-focus); }
+.flow-menu-item:disabled { color: var(--text-tertiary); cursor: default; }
+.flow-menu-item.is-danger { color: var(--danger-fg); }
+.flow-menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow-menu-hint, .flow-shortcut kbd {
+  flex: none; padding: 0 5px; font: inherit; font-size: var(--fs-micro); line-height: 17px; color: var(--text-tertiary);
+  border: 1px solid var(--border-default); border-bottom-width: 2px; border-radius: var(--r-sm); background: var(--surface-base);
+}
+.flow-menu-check { width: 14px; flex: none; color: var(--accent-fg); font-weight: 700; }
+.flow-menu-more { color: var(--text-tertiary); }
+.flow-menu-sep { height: 1px; margin: 4px 6px; background: var(--border-subtle); }
+.flow-menu-heading { padding: 4px 8px 2px; font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-tertiary); }
+.flow-menu-choices { padding: 0 0 4px; }
+.flow-menu-choice-row { display: flex; gap: 3px; padding: 2px 6px; flex-wrap: wrap; }
+.flow-menu-choice {
+  display: inline-grid; place-items: center; min-width: 28px; height: 28px; padding: 0 4px;
+  border: 1px solid var(--border-default); border-radius: var(--r-md); background: var(--surface-base); color: var(--text-primary);
+}
+.flow-menu-choice:hover, .flow-menu-choice:focus-visible { border-color: var(--border-focus); outline: none; box-shadow: 0 0 0 2px var(--accent-veil); }
+.flow-menu-choice.is-active { border-color: var(--accent-solid); background: var(--accent-subtle); }
+
+/* The shortcuts sheet. */
+.flow-shortcuts-backdrop {
+  position: absolute; inset: 0; z-index: 30; display: grid; place-items: center; padding: var(--sp-4);
+  background: rgba(15, 20, 26, 0.28); animation: fade-in var(--t-fast) var(--ease-out-soft);
+}
+.flow-shortcuts {
+  width: min(760px, 100%); max-height: 100%; overflow-y: auto; padding: var(--sp-4);
+  background: var(--surface-overlay); border: 1px solid var(--border-default); border-radius: var(--r-xl); box-shadow: var(--shadow-3);
+}
+.flow-shortcuts:focus { outline: none; }
+.flow-shortcuts-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--sp-3); }
+.flow-shortcuts-head h2 { margin: 0; font-size: var(--fs-lg); }
+.flow-shortcuts-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--sp-3) var(--sp-5); }
+.flow-shortcuts-groups h3 { margin: 0 0 var(--sp-1); font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-tertiary); }
+.flow-shortcuts-groups dl { margin: 0; }
+.flow-shortcut { display: flex; align-items: baseline; gap: var(--sp-2); padding: 3px 0; font-size: var(--fs-sm); }
+.flow-shortcut dt { flex: none; max-width: 55%; }
+.flow-shortcut kbd { display: inline-block; white-space: normal; }
+.flow-shortcut dd { margin: 0; color: var(--text-secondary); }
+
+@media (prefers-reduced-motion: reduce) {
+  .flow .react-flow__edge.animated .react-flow__edge-path { animation: none; stroke-dasharray: none; }
 }
