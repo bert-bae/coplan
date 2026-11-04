@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
- * `bin/hook-relay.sh` runs on every tool call in every session, and a hook
+ * `bin/coplan-hook-relay.sh` runs on every tool call in every session, and a hook
  * that errors surfaces inside the user's terminal. It had no tests; these
  * cover the contract it has to honour, especially the failure paths where
  * printing nothing and exiting 0 is the only acceptable behaviour.
@@ -19,7 +19,7 @@ const RELAY = path.resolve(
   '..',
   '..',
   'bin',
-  'hook-relay.sh',
+  'coplan-hook-relay.sh',
 );
 
 let home: string;

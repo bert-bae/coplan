@@ -40,7 +40,7 @@ export function GlobalActions() {
           type="button"
           className={classNames('icon-btn', 'is-tiny', panel && 'is-active')}
           aria-expanded={panel}
-          title="Clean up stale harness files"
+          title="Clean up stale Coplan files"
           disabled={restarting}
           onClick={() => {
             const next = !panel;

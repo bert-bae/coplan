@@ -374,7 +374,7 @@ export function PhaseStrip({ session }: { session: SessionState }) {
           'This session has ended. Resume it in Claude, then send any message: the prompt goes with it.'
         ) : (
           <>
-            Send any message in Claude's chat — <q>go</q> will do — and the harness hands it the build prompt with it.
+            Send any message in Claude's chat — <q>go</q> will do — and Coplan hands it the build prompt with it.
           </>
         );
       break;

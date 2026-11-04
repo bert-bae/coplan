@@ -88,8 +88,8 @@ async function callDaemon(
     return {
       ok: false,
       text:
-        '[cc-harness] Could not reach or start the harness daemon. ' +
-        'Run `harness status` in a terminal to diagnose; the session can continue without the UI.',
+        '[cc-harness] Could not reach or start the Coplan daemon. ' +
+        'Run `coplan status` in a terminal to diagnose; the session can continue without the UI.',
     };
   }
 

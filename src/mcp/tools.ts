@@ -68,7 +68,7 @@ const DIAGRAM = {
     title: { type: 'string' },
     nodes: { type: 'array', items: NODE },
     edges: { type: 'array', items: EDGE },
-    direction: { type: 'string', enum: ['LR', 'TB'], description: 'Layout flow. Omit it to let the harness pick what fits the graph.' },
+    direction: { type: 'string', enum: ['LR', 'TB'], description: 'Layout flow. Omit it to let Coplan pick what fits the graph.' },
     caption: { type: 'string' },
   },
   required: ['title', 'nodes'],
@@ -92,7 +92,7 @@ export const TOOLS: ToolDef[] = [
     name: 'harness_plan_publish',
     endpoint: 'publish',
     description:
-      'Publish the whole plan to the harness UI, where the user reads it visually, reorganizes it and ' +
+      'Publish the whole plan to the Coplan UI, where the user reads it visually, reorganizes it and ' +
       'comments on it. Include: a summary; sections for context, architecture and risks; diagrams of the ' +
       'design as nodes and edges (the UI lays them out and the user can rearrange them); and a task tree ' +
       'broken into subtasks. Replaces the plan; items keep their comments and statuses when you keep their ' +

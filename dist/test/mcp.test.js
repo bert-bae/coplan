@@ -51,7 +51,7 @@ var DIAGRAM = {
     title: { type: "string" },
     nodes: { type: "array", items: NODE },
     edges: { type: "array", items: EDGE },
-    direction: { type: "string", enum: ["LR", "TB"], description: "Layout flow. Omit it to let the harness pick what fits the graph." },
+    direction: { type: "string", enum: ["LR", "TB"], description: "Layout flow. Omit it to let Coplan pick what fits the graph." },
     caption: { type: "string" }
   },
   required: ["title", "nodes"]
@@ -71,7 +71,7 @@ var TOOLS = [
   {
     name: "harness_plan_publish",
     endpoint: "publish",
-    description: 'Publish the whole plan to the harness UI, where the user reads it visually, reorganizes it and comments on it. Include: a summary; sections for context, architecture and risks; diagrams of the design as nodes and edges (the UI lays them out and the user can rearrange them); and a task tree broken into subtasks. Replaces the plan; items keep their comments and statuses when you keep their ids, a box keeps its position, description and notes and an arrow between the same two boxes its label and style unless you restate them ("" clears a label). Refused if the user has changed the plan since you last read it, and while they have submitted it to be built (it is locked until every task is done). Ask decisions you need with AskUserQuestion in chat, not in the plan. Does not wait for the user: afterwards, tell them in chat that the plan is ready.',
+    description: 'Publish the whole plan to the Coplan UI, where the user reads it visually, reorganizes it and comments on it. Include: a summary; sections for context, architecture and risks; diagrams of the design as nodes and edges (the UI lays them out and the user can rearrange them); and a task tree broken into subtasks. Replaces the plan; items keep their comments and statuses when you keep their ids, a box keeps its position, description and notes and an arrow between the same two boxes its label and style unless you restate them ("" clears a label). Refused if the user has changed the plan since you last read it, and while they have submitted it to be built (it is locked until every task is done). Ask decisions you need with AskUserQuestion in chat, not in the plan. Does not wait for the user: afterwards, tell them in chat that the plan is ready.',
     inputSchema: {
       type: "object",
       properties: {

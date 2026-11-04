@@ -55,10 +55,10 @@ export function Sidebar() {
     >
       <header className="sidebar-head">
         <span className="logo" aria-hidden="true">
-          cc
+          co
         </span>
         <div className="sidebar-brand">
-          <strong>harness</strong>
+          <strong>Coplan</strong>
           <span className={classNames('conn', `is-${connection}`)}>
             {connection === 'live' ? 'live' : connection === 'connecting' ? 'connecting…' : 'reconnecting…'}
           </span>

@@ -614,7 +614,7 @@ function buildRouter(deps: Deps): Router {
         ok: false,
         text:
           '[cc-harness] No session is registered yet. This usually means the harness hooks have not fired; ' +
-          'run `harness doctor` to check the plugin wiring.',
+          'run `coplan doctor` to check the plugin wiring.',
       });
       return;
     }
@@ -631,7 +631,7 @@ function buildRouter(deps: Deps): Router {
             true,
             `[cc-harness] Published "${plan.title}" (revision ${plan.revision}). The user reviews it at ${url}\n` +
               'Tell them in chat that the plan is ready, and ask anything you need decided with ' +
-              'AskUserQuestion, here in chat. Nothing in the harness waits for them: when they say they ' +
+              'AskUserQuestion, here in chat. Nothing in Coplan waits for them: when they say they ' +
               'have reviewed it, call harness_plan_read.\n\n' +
               renderPlan(plan, { url }),
           );

@@ -123,7 +123,7 @@ function lockLine(plan: Plan): string | null {
       return (
         '> **Locked for building.** The user submitted this plan: build it task by task, keeping statuses true with ' +
         'harness_task_update. Only task updates and comment replies apply now; if the design has to change, ask ' +
-        'the user in chat — they can reopen the plan in the harness.'
+        'the user in chat — they can reopen the plan in Coplan.'
       );
   }
 }
@@ -193,9 +193,9 @@ export function buildPrompt(plan: Plan, opts: { target: BuildTarget; note?: stri
 
 function sessionBrief(plan: Plan): string[] {
   return [
-    `${BUILD_MARKER} "${plan.title}" — the user has reviewed it in the harness and submitted it.`,
+    `${BUILD_MARKER} "${plan.title}" — the user has reviewed it in Coplan and submitted it.`,
     '',
-    'The plan is final. Its architecture is locked, and from here the harness only follows your progress on its ' +
+    'The plan is final. Its architecture is locked, and from here Coplan only follows your progress on its ' +
       'task board, so keep every task\'s status true as you go:',
     '',
     '1. Work through the tasks below in order.',
@@ -204,7 +204,7 @@ function sessionBrief(plan: Plan): string[] {
     '3. If you are stuck, mark the task blocked with a note saying on what, and ask the user with AskUserQuestion.',
     '4. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.',
     '5. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, ' +
-      'stop and ask the user in chat — they can reopen the plan in the harness.',
+      'stop and ask the user in chat — they can reopen the plan in Coplan.',
   ];
 }
 

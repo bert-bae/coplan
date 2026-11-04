@@ -12,7 +12,7 @@ var RELAY = path.resolve(
   "..",
   "..",
   "bin",
-  "hook-relay.sh"
+  "coplan-hook-relay.sh"
 );
 var home;
 var server;

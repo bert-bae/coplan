@@ -120,30 +120,30 @@ claude plugin install coplan@coplan --scope user
 Verify the wiring against your installed CLI:
 
 ```bash
-./bin/harness doctor
+./bin/coplan doctor
 ```
 
-> **The `harness` name.** Coplan was previously called cc-harness. Its slash
-> commands, MCP tools, CLI and data directory still use that name
-> (`/harness`, `harness_plan_*`, `bin/harness`, `~/.claude/cc-harness`), so
-> existing plans and configuration keep working.
+> **Coming from cc-harness?** Coplan was previously called cc-harness. The
+> slash commands and CLI are now `/coplan*` and `coplan`; the MCP tools and
+> the data directory keep their old names (`harness_plan_*`,
+> `~/.claude/cc-harness`), so existing plans and configuration carry over.
 
 ## Use
 
 In any session with the plugin enabled:
 
-- `/harness <task>`: Claude investigates, then publishes a plan to the UI
-- `/harness-open`: open this session's plan in the browser
-- `/harness-doctor`: check the wiring
-- `/harness-restart`: restart the daemon after a rebuild
+- `/coplan <task>`: Claude investigates, then publishes a plan to the UI
+- `/coplan-open`: open this session's plan in the browser
+- `/coplan-doctor`: check the wiring
+- `/coplan-restart`: restart the daemon after a rebuild
 
-`./bin/harness status` lists every session and where its plan stands;
-`./bin/harness open` opens the UI. The UI does not open itself unless you set
+`./bin/coplan status` lists every session and where its plan stands;
+`./bin/coplan open` opens the UI. The UI does not open itself unless you set
 `autoOpen`.
 
 ## The loop
 
-1. **Claude publishes.** `/harness add a cache to the orders API` — Claude
+1. **Claude publishes.** `/coplan add a cache to the orders API` — Claude
    reads the code, calls `harness_plan_publish`, and asks what it needs decided
    with `AskUserQuestion` in chat.
 2. **You shape the plan.** In the browser, rearrange and rewire the
@@ -306,7 +306,7 @@ The rail's footer holds the two actions that belong to Coplan itself.
 
 **Restart.** The daemon runs whatever was in `dist/` when it started.
 Restarting hands the successor the port *and* the token, so open tabs
-reconnect by themselves. `harness restart` and `/harness-restart` do the same.
+reconnect by themselves. `coplan restart` and `/coplan-restart` do the same.
 
 **Clean up.** Session directories under `~/.claude/cc-harness` outlive their
 session by design, so a `--resume` still finds its plan. The panel reports what
@@ -319,7 +319,7 @@ could go and removes only what you tick:
 | Daemon log | The older part of `daemon.log`, trimmed rather than deleted |
 | Stale lock file | An address left behind by a process that is gone |
 
-Nothing the daemon is holding is ever offered up. `harness clean` does the
+Nothing the daemon is holding is ever offered up. `coplan clean` does the
 same from a terminal, with `--dry-run` to only list.
 
 ## Configuration

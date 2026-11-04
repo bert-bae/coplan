@@ -1,18 +1,18 @@
 ---
-name: harness
-description: Plan a task visually in the harness UI — architecture diagrams the user can reshape, and a task breakdown with subtasks that tracks your progress as you build. Use when the user types /harness, asks to "plan this in the harness", or wants to see and shape the plan before work starts.
+name: coplan
+description: Plan a task visually in the Coplan UI — architecture diagrams the user can reshape, and a task breakdown with subtasks that tracks your progress as you build. Use when the user types /coplan, asks to "plan this in Coplan", or wants to see and shape the plan before work starts.
 ---
 
-# Planning in the harness
+# Planning in Coplan
 
-The harness is a planning workspace in the user's browser. You publish a plan
+Coplan is a planning workspace in the user's browser. You publish a plan
 there; the user reshapes the architecture on a diagram canvas, reorganizes the
 task tree and comments on anything. As you build, the same page shows your
 progress through the tasks.
 
-**All conversation stays here, in chat.** The harness never talks to you and
+**All conversation stays here, in chat.** Coplan never talks to you and
 has no way to answer you. When you need a decision, ask it here with
-`AskUserQuestion` — the harness shows the question and links the user
+`AskUserQuestion` — Coplan shows the question and links the user
 straight back to this session to answer it. When the user has worked over the
 plan, they tell you so here, and you read it back.
 
@@ -73,9 +73,9 @@ changes you have not read — read first.
 
 ## 3. Build when the user submits the plan
 
-The user signs the plan off from the harness: they read the exact prompt you
+The user signs the plan off from Coplan: they read the exact prompt you
 will get, and submit. The plan is then **locked** — the diagrams, sections and
-task tree are final — and the harness only follows your progress on its task
+task tree are final — and Coplan only follows your progress on its task
 board. Their next message in chat carries a `[cc-harness] Build the plan …`
 prompt with the whole plan (or, for a long one, the task list and a pointer to
 `harness_plan_read`). Build from it, in order.
@@ -84,7 +84,7 @@ While the plan is locked, only tracking applies: `harness_task_update`,
 `upsert_task` to add work you discover, and `reply`/`resolve` on comments.
 Anything that would redesign it is refused, and so is publishing over it
 until every task is done. If the design has to change, stop and ask in chat —
-the user can reopen the plan in the harness.
+the user can reopen the plan in Coplan.
 
 If the user tells you to start without submitting, build all the same; the
 plan just stays open for them to edit.
@@ -105,10 +105,10 @@ builds, so the plan stays the map of the work.
 
 ## Rules
 
-- Ask in chat with `AskUserQuestion`, never in the plan. The harness links the
+- Ask in chat with `AskUserQuestion`, never in the plan. Coplan links the
   user to you; it cannot carry an answer.
 - Read before you republish, and never overwrite the user's structure.
 - A submitted plan is the user's sign-off: build it, do not redesign it.
 - Keep ids stable; quote them exactly in edits (`t4`, `d1`, `c3`, node ids).
-- If the harness tools return a daemon error, tell the user once and carry on
+- If the Coplan tools return a daemon error, tell the user once and carry on
   in chat. The UI is an aid, not a dependency.

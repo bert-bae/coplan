@@ -898,7 +898,7 @@ const LOCKED_FOR_USER = 'The plan has been submitted to be built, so it is locke
 const LOCKED_FOR_CLAUDE =
   'The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or ' +
   'upsert_task to add work you discover) and comment replies (reply, resolve) apply. If the design has to ' +
-  'change, ask the user in chat — they can reopen the plan in the harness.';
+  'change, ask the user in chat — they can reopen the plan in Coplan.';
 
 /** Where the plan is in its life. */
 export function planPhase(plan: Pick<Plan, 'submission' | 'tasks'> | null): PlanPhase {

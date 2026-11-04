@@ -6,7 +6,7 @@ import { store } from './store.ts';
 const container = document.getElementById('root');
 if (container) {
   createRoot(container).render(
-    <ErrorBoundary label="harness">
+    <ErrorBoundary label="Coplan">
       <App />
     </ErrorBoundary>,
   );

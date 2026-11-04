@@ -125,7 +125,7 @@ test('Claude cannot redesign a submitted plan, and is told what to do instead', 
   const plan = markDelivered(submitted());
   assert.throws(
     () => applyOps(plan, [{ op: 'upsert_diagram', id: 'd1', title: 'Redesigned' }], 'claude'),
-    (err: Error) => err instanceof PlanError && /submitted this plan/.test(err.message) && /reopen the plan in the harness/.test(err.message) && /upsert_diagram/.test(err.message),
+    (err: Error) => err instanceof PlanError && /submitted this plan/.test(err.message) && /reopen the plan in Coplan/.test(err.message) && /upsert_diagram/.test(err.message),
   );
   // All or nothing: a tracking op beside a design op is refused with it.
   assert.throws(() =>
