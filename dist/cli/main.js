@@ -13,7 +13,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { mkdirSync, readFileSync, existsSync } from "node:fs";
 function harnessHome() {
-  return process.env.CC_HARNESS_HOME || path.join(homedir(), ".claude", "cc-harness");
+  const override = process.env.CC_HARNESS_HOME;
+  return override && !override.includes("${") ? override : path.join(homedir(), ".claude", "cc-harness");
 }
 var paths = {
   home: harnessHome,
@@ -86,6 +87,12 @@ async function runDoctor() {
     ".claude-plugin/plugin.json",
     "hooks/hooks.json",
     ".mcp.json",
+    ".codex-plugin/plugin.json",
+    "hooks/codex.json",
+    "mcp/codex.json",
+    ".cursor-plugin/plugin.json",
+    "hooks/cursor.json",
+    "mcp/cursor.json",
     "dist/daemon/main.js",
     "dist/mcp/main.js",
     "dist/ui/index.html",
@@ -97,14 +104,25 @@ async function runDoctor() {
     const full = path2.join(PLUGIN_ROOT, file);
     record(`present: ${file}`, existsSync2(full), existsSync2(full) ? void 0 : full, true);
   }
-  try {
-    const hooks = JSON.parse(readFileSync2(path2.join(PLUGIN_ROOT, "hooks/hooks.json"), "utf8"));
-    const events = Object.keys(hooks.hooks ?? {});
-    const required = ["SessionStart", "SessionEnd", "Stop", "UserPromptSubmit"];
-    const missing = required.filter((e) => !events.includes(e));
-    record("hooks.json registers the required events", missing.length === 0, missing.join(", ") || `${events.length} events`, true);
-  } catch (err) {
-    record("hooks.json parses", false, err.message, true);
+  for (const [file, required, agent] of [
+    ["hooks/hooks.json", ["SessionStart", "SessionEnd", "Stop", "UserPromptSubmit"], null],
+    ["hooks/codex.json", ["SessionStart", "SessionEnd", "Stop", "UserPromptSubmit"], "codex"],
+    ["hooks/cursor.json", ["sessionStart", "sessionEnd", "stop", "beforeSubmitPrompt"], "cursor"]
+  ]) {
+    try {
+      const hooks = JSON.parse(readFileSync2(path2.join(PLUGIN_ROOT, file), "utf8"));
+      const events = Object.keys(hooks.hooks ?? {});
+      const missing = required.filter((e) => !events.includes(e));
+      const unnamed = agent ? events.filter((e) => !JSON.stringify(hooks.hooks?.[e]).includes(` ${agent}"`)) : [];
+      record(
+        `${file} registers the required events`,
+        missing.length === 0 && unnamed.length === 0,
+        missing.length ? `missing ${missing.join(", ")}` : unnamed.length ? `not marked ${agent}: ${unnamed.join(", ")}` : `${events.length} events`,
+        true
+      );
+    } catch (err) {
+      record(`${file} parses`, false, err.message, true);
+    }
   }
   const relay = path2.join(PLUGIN_ROOT, "bin/coplan-hook-relay.sh");
   if (existsSync2(relay)) {
@@ -224,6 +242,40 @@ async function runDoctor() {
     true
   );
   await hook("SessionEnd", { end_reason: "other" });
+  const agentHook = async (agent, event, body) => {
+    const res = await fetch(`${baseUrl(lock)}/hook/${event}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${lock.token}`, "x-harness-agent": agent },
+      body: JSON.stringify(body)
+    });
+    return res.json();
+  };
+  const sessionOf = async (id) => {
+    const res = await fetch(`${baseUrl(lock)}/api/session/${id}`, { headers: { authorization: `Bearer ${lock.token}` } });
+    return res.ok ? (await res.json()).session : null;
+  };
+  const thread = `doctor-codex-${randomUUID()}`;
+  const codexOut = await agentHook("codex", "SessionStart", { session_id: thread, cwd, hook_event_name: "SessionStart", source: "startup" });
+  const codexSession = await sessionOf(thread);
+  record(
+    "a Codex session registers as Codex",
+    codexSession?.agent === "codex" && JSON.stringify(codexOut) === "{}",
+    codexSession ? `link ${codexSession.link?.app ?? "none"}` : "not registered",
+    true
+  );
+  await agentHook("codex", "SessionEnd", { session_id: thread, cwd, hook_event_name: "SessionEnd", reason: "other" });
+  const chat = `doctor-cursor-${randomUUID()}`;
+  const cursorBase = { conversation_id: chat, generation_id: "doctor", workspace_roots: [cwd], cursor_version: "doctor" };
+  await agentHook("cursor", "sessionStart", { ...cursorBase, hook_event_name: "sessionStart", session_id: chat });
+  const cursorOut = await agentHook("cursor", "beforeSubmitPrompt", { ...cursorBase, hook_event_name: "beforeSubmitPrompt", prompt: "doctor" });
+  const cursorSession = await sessionOf(chat);
+  record(
+    "a Cursor chat registers as Cursor, from its own payload",
+    cursorSession?.agent === "cursor" && cursorSession.cwd === cwd && cursorOut.continue === true,
+    cursorSession ? void 0 : "not registered",
+    true
+  );
+  await agentHook("cursor", "sessionEnd", { ...cursorBase, hook_event_name: "sessionEnd", reason: "completed" });
   return summarize(checks);
 }
 function summarize(checks) {
@@ -261,6 +313,60 @@ async function withTimeout(promise, ms) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// src/shared/agents.ts
+var AGENT_KINDS = ["claude", "codex", "cursor"];
+var AGENTS = {
+  claude: {
+    kind: "claude",
+    name: "Claude",
+    product: "Claude Code",
+    app: "the Claude desktop app",
+    askTools: ["AskUserQuestion"],
+    askWith: "AskUserQuestion",
+    promptContext: true
+  },
+  codex: {
+    kind: "codex",
+    name: "Codex",
+    product: "Codex",
+    app: "the Codex app",
+    askTools: ["request_user_input", "request_user_input_async"],
+    // Codex only offers request_user_input in Plan mode.
+    askWith: "request_user_input (in Plan mode) or plainly",
+    promptContext: true
+  },
+  cursor: {
+    kind: "cursor",
+    name: "Cursor",
+    product: "Cursor",
+    app: "Cursor",
+    // Cursor's hooks do not see AskQuestion today; a question is noticed
+    // when the turn ends on one. Listed for when they do.
+    askTools: ["AskQuestion"],
+    askWith: "AskQuestion or plainly",
+    promptContext: false
+  }
+};
+var DEFAULT_AGENT = "claude";
+function isAgentKind(value) {
+  return typeof value === "string" && AGENT_KINDS.includes(value);
+}
+function agentInfo(kind) {
+  return AGENTS[kind && isAgentKind(kind) ? kind : DEFAULT_AGENT];
+}
+var SESSION_ENV = {
+  claude: ["CLAUDE_CODE_SESSION_ID"],
+  codex: ["CODEX_THREAD_ID"],
+  cursor: ["CURSOR_CONVERSATION_ID"]
+};
+function sessionFromEnv(env, agent) {
+  for (const key of SESSION_ENV[agent]) {
+    const value = env[key]?.trim();
+    if (value) return value;
+  }
+  return null;
 }
 
 // src/daemon/browser.ts
@@ -526,6 +632,20 @@ async function api(lock, route, init) {
   });
   return await res.json();
 }
+async function currentSession(lock) {
+  for (const agent of AGENT_KINDS) {
+    const id = sessionFromEnv(process.env, agent);
+    if (id) return id;
+  }
+  try {
+    const { sessions } = await api(lock, "/api/sessions");
+    const here = path4.resolve(process.cwd());
+    const at = (p) => !!p && path4.resolve(p) === here;
+    return [...sessions].sort((a, b) => b.updatedAt - a.updatedAt).find((s) => at(s.cwd) || at(s.repoRoot))?.sessionId;
+  } catch {
+    return void 0;
+  }
+}
 function uiUrl(lock, sessionId) {
   const base = `${baseUrl(lock)}/?token=${lock.token}`;
   return sessionId ? `${base}#/session/${sessionId}` : base;
@@ -646,18 +766,17 @@ var commands = {
       return 0;
     }
     for (const s of sessions) {
-      const plan = s.planTitle ? `"${s.planTitle}" \xB7 tasks ${s.tasks.done}/${s.tasks.total}` + (s.current ? ` \xB7 now: ${s.current}` : "") + (s.waiting ? ` \xB7 WAITING ON YOU: ${s.waiting.text}` : "") + (s.unreadByClaude ? ` \xB7 ${s.unreadByClaude} item(s) changed that Claude has not read` : "") : "no plan yet";
-      console.log(`  ${pad(s.status, 7)} ${pad(s.title, 28)} ${plan}`);
+      const plan = s.planTitle ? `"${s.planTitle}" \xB7 tasks ${s.tasks.done}/${s.tasks.total}` + (s.current ? ` \xB7 now: ${s.current}` : "") + (s.waiting ? ` \xB7 WAITING ON YOU: ${s.waiting.text}` : "") + (s.unreadByClaude ? ` \xB7 ${s.unreadByClaude} item(s) changed that ${agentInfo(s.agent).name} has not read` : "") : "no plan yet";
+      console.log(`  ${pad(s.status, 7)} ${pad(agentInfo(s.agent).name, 6)} ${pad(s.title, 28)} ${plan}`);
       console.log(`          ${s.sessionId}  ${s.cwd}`);
-      if (s.link) console.log(`          open: ${s.link.app}  (web: ${s.link.web})`);
+      if (s.link) console.log(`          open: ${s.link.app}${s.link.web ? `  (web: ${s.link.web})` : ""}`);
     }
     return 0;
   },
   async open(args) {
     const lock = await ensureDaemon2();
     if (!lock) return 1;
-    const sessionId = args[0] ?? process.env["CLAUDE_CODE_SESSION_ID"];
-    const url = uiUrl(lock, sessionId);
+    const url = uiUrl(lock, args[0] ?? await currentSession(lock));
     openInBrowser(url);
     console.log(url);
     return 0;
@@ -665,7 +784,7 @@ var commands = {
   async url(args) {
     const lock = await ensureDaemon2();
     if (!lock) return 1;
-    console.log(uiUrl(lock, args[0] ?? process.env["CLAUDE_CODE_SESSION_ID"]));
+    console.log(uiUrl(lock, args[0] ?? await currentSession(lock)));
     return 0;
   },
   async logs() {

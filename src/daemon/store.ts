@@ -18,6 +18,7 @@ import {
   unreadItems,
 } from '../shared/plan.ts';
 import { buildPrompt } from './render.ts';
+import { DEFAULT_AGENT, isAgentKind, type AgentKind } from '../shared/agents.ts';
 import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ServerEvent, SessionState, SessionSummary, Submission } from '../shared/types.ts';
 
 const PERSIST_DEBOUNCE_MS = 400;
@@ -31,10 +32,11 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** Hard cap on sessions held in memory, newest first. */
 const MAX_SESSIONS = 60;
 
-export function newSession(sessionId: string, cwd: string): SessionState {
+export function newSession(sessionId: string, cwd: string, agent: AgentKind = DEFAULT_AGENT): SessionState {
   const now = Date.now();
   return {
     sessionId,
+    agent,
     cwd,
     repoRoot: null,
     branch: null,
@@ -187,10 +189,10 @@ export class SessionStore extends EventEmitter {
 
   /** Get or create. A session that was swept from memory is read back from
    *  disk rather than overwritten with a blank one. */
-  ensure(id: string, cwd?: string): SessionState {
+  ensure(id: string, cwd?: string, agent?: AgentKind): SessionState {
     let state = this.sessions.get(id);
     if (!state) {
-      state = readState(paths.sessionState(id)) ?? newSession(id, cwd || process.cwd());
+      state = readState(paths.sessionState(id)) ?? newSession(id, cwd || process.cwd(), agent);
       this.sessions.set(id, state);
       mkdirSync(paths.sessionDir(id), { recursive: true });
       this.emitEvent({ type: 'snapshot', session: state });
@@ -213,15 +215,17 @@ export class SessionStore extends EventEmitter {
       .map((s) => summarize(s));
   }
 
-  /** Most recently updated session rooted at `cwd`. */
-  findByCwd(cwd: string): SessionState | undefined {
+  /** Most recently updated session rooted at `cwd` — of `agent`, when one is
+   *  named, so a Cursor window never picks up a Claude session in the same
+   *  folder. */
+  findByCwd(cwd: string, agent?: AgentKind): SessionState | undefined {
     const normalized = path.resolve(cwd);
     const matches = (value: string | null | undefined) => !!value && path.resolve(value) === normalized;
-    return this.all().find((s) => matches(s.cwd) || matches(s.repoRoot));
+    return this.all().find((s) => (!agent || s.agent === agent) && (matches(s.cwd) || matches(s.repoRoot)));
   }
 
-  findByPid(pid: number): SessionState | undefined {
-    return this.all().find((s) => s.claudePid === pid);
+  findByPid(pid: number, agent?: AgentKind): SessionState | undefined {
+    return this.all().find((s) => s.claudePid === pid && (!agent || s.agent === agent));
   }
 
   /* ---------------------------------------------------------------- *
@@ -282,7 +286,7 @@ export class SessionStore extends EventEmitter {
     if (typeof input.expect === 'number' && input.expect !== plan.version) {
       throw new PlanError('The plan changed while you were reviewing it. The preview now shows the latest version — check it, then submit again.');
     }
-    const { prompt, trimmed } = buildPrompt(plan, { target: input.target, ...(input.note ? { note: input.note } : {}) });
+    const { prompt, trimmed } = buildPrompt(plan, { target: input.target, agent: session.agent, ...(input.note ? { note: input.note } : {}) });
     const next = submitPlan(plan, { target: input.target, prompt, trimmed, ...(input.note ? { note: input.note } : {}) });
     this.mutate(id, (s) => {
       s.plan = next;
@@ -359,6 +363,7 @@ export function summarize(s: SessionState): SessionSummary {
   const plan = s.plan;
   return {
     sessionId: s.sessionId,
+    agent: s.agent,
     title: s.title,
     planTitle: plan?.title ?? null,
     cwd: s.cwd,
@@ -458,6 +463,8 @@ function migrate(state: SessionState): void {
   state.waiting = null;
   state.surface ??= 'unknown';
   state.link ??= null;
+  // Sessions saved before Coplan worked with agents other than Claude Code.
+  state.agent = isAgentKind(state.agent) ? state.agent : DEFAULT_AGENT;
 
   for (const key of [
     'worktree', 'transcriptPath', 'stage', 'stageNote', 'baseRef', 'startCommit', 'reviewRound',

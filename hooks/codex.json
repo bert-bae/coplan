@@ -1,0 +1,84 @@
+{
+  "description": "Coplan for Codex — registers sessions with the planning UI, notices when Codex is waiting on the user, and tells Codex when the plan changed. Never blocks or holds a turn.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" SessionStart codex",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" SessionEnd codex",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" UserPromptSubmit codex",
+            "timeout": 10,
+            "additionalContextLimit": 4000
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "request_user_input",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" PreToolUse codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" PermissionRequest codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" PostToolUse codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" Stop codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

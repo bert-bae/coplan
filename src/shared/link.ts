@@ -1,4 +1,5 @@
 import type { SessionLink, SessionSurface } from './types.ts';
+import type { AgentKind } from './agents.ts';
 
 /**
  * How to get back to a session, from the environment its hooks run in.
@@ -16,6 +17,11 @@ import type { SessionLink, SessionSurface } from './types.ts';
  *
  * A local session without Remote Control has no documented link of any kind,
  * so it gets none rather than a guess that opens the wrong thing.
+ *
+ * The variables above are Claude Code's. A Codex or Cursor session started
+ * from a terminal inside a Claude session inherits them, so they are only
+ * read for Claude; the other agents are linked from their own session id.
+ * Cursor documents no link to a chat, so its sessions get none.
  */
 
 export interface SessionEnv {
@@ -27,7 +33,13 @@ export interface SessionEnv {
 
 const ID = /^[A-Za-z0-9_-]{6,128}$/;
 
-export function resolveLink(env: SessionEnv): { surface: SessionSurface; link: SessionLink | null } {
+export function resolveLink(
+  env: SessionEnv,
+  agent: AgentKind = 'claude',
+  sessionId = '',
+): { surface: SessionSurface; link: SessionLink | null } {
+  if (agent === 'codex') return codexLink(sessionId);
+  if (agent === 'cursor') return { surface: 'desktop', link: null };
   const cloud = cloudSessionId(env);
   if (cloud) return { surface: 'cloud', link: linkFor(cloud, 'cloud') };
 
@@ -60,3 +72,13 @@ function linkFor(sessionId: string, via: SessionLink['via']): SessionLink {
   const path = `claude.ai/code/${sessionId}`;
   return { app: `claude://${path}`, web: `https://${path}`, via };
 }
+
+/** The Codex app opens a local thread from its id. The CLI and the app share
+ *  thread history, so the link works for a thread started in either. */
+function codexLink(threadId: string): { surface: SessionSurface; link: SessionLink | null } {
+  const id = threadId.trim();
+  if (!CODEX_ID.test(id)) return { surface: 'unknown', link: null };
+  return { surface: 'unknown', link: { app: `codex://threads/${id}`, web: null, via: 'app' } };
+}
+
+const CODEX_ID = /^[A-Za-z0-9-]{8,128}$/;

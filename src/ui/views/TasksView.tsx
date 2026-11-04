@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
-import { store, usePlan, useStore } from '../store.ts';
+import { store, useAgent, usePlan, useStore } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
 import { CommentToggle, ThreadPanel, useThreads } from '../components/Threads.tsx';
 import { Focusable } from '../components/Item.tsx';
@@ -35,6 +35,7 @@ const DRAG_TYPE = 'application/x-harness-task';
  *   way progress is tracked while Claude works through the plan.
  */
 export function TasksView() {
+  const agent = useAgent();
   const plan = usePlan();
   const mode = useStore((s) => s.taskMode);
   const hideDone = useStore((s) => s.hideDone);
@@ -53,8 +54,8 @@ export function TasksView() {
             {phase === 'handed-off'
               ? 'Handed off to be built elsewhere, so these statuses do not move.'
               : phase === 'submitted'
-                ? 'The plan is locked. Cards move across the board once Claude starts and reports each task.'
-                : 'The plan is locked. Cards move across the board as Claude reports each task.'}
+                ? `The plan is locked. Cards move across the board once ${agent.name} starts and reports each task.`
+                : `The plan is locked. Cards move across the board as ${agent.name} reports each task.`}
           </p>
           <span className="spacer" />
           <span className="toolbar-progress">
@@ -97,7 +98,7 @@ export function TasksView() {
 
       {plan.tasks.length === 0 ? (
         <>
-          <EmptyState title="No tasks yet" hint="Break the work down here, or ask Claude to publish a task tree with the plan." />
+          <EmptyState title="No tasks yet" hint={`Break the work down here, or ask ${agent.name} to publish a task tree with the plan.`} />
           <AddField placeholder="Add a task…" label="New task" onAdd={(title) => store.op({ op: 'upsert_task', title })} />
         </>
       ) : mode === 'outline' ? (
@@ -393,6 +394,7 @@ function TaskRow(props: {
 }
 
 function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
+  const agent = useAgent();
   const [confirming, setConfirming] = useState(false);
   const subtasks = descendants(plan, task.id).length;
   return (
@@ -427,7 +429,7 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
       </div>
       <div className="task-detail-foot">
         <span className="muted">
-          {task.id} · {task.createdBy === 'user' ? 'added by you' : 'added by Claude'}
+          {task.id} · {task.createdBy === 'user' ? 'added by you' : `added by ${agent.name}`}
         </span>
         <span className="spacer" />
         {confirming ? (
@@ -656,6 +658,7 @@ function useArrivals(plan: Plan): { arrived: Set<string>; announcement: string }
 /** A card on a submitted plan's board: read, never moved by hand. Opens to
  *  show what the task involves. */
 function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived: boolean }) {
+  const agent = useAgent();
   const [open, setOpen] = useState(false);
   const path: string[] = [];
   let cursor = task.parentId ? plan.tasks.find((t) => t.id === task.parentId) : undefined;
@@ -668,7 +671,7 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
     <Focusable kind="task" id={task.id} as="article" className={classNames('board-card', 'is-tracked', `is-${task.status}`, arrived && 'is-arrived')}>
       {path.length > 0 && <p className="board-path">{path.join(' › ')}</p>}
       <p className="board-title-row">
-        {task.status === 'in_progress' && <span className="working-dot" title="Claude is on it" aria-label="Claude is on it" />}
+        {task.status === 'in_progress' && <span className="working-dot" title={`${agent.name} is on it`} aria-label={`${agent.name} is on it`} />}
         {more ? (
           <button type="button" className="board-title" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
             {task.title}

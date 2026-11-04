@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### Codex and Cursor
+
+- Coplan now works in **Codex** and **Cursor** as well as Claude Code. The
+  same repository is a plugin for all three: `.codex-plugin/plugin.json` and
+  `.cursor-plugin/plugin.json` sit beside `.claude-plugin/`, each pointing at
+  that agent's own hooks (`hooks/codex.json`, `hooks/cursor.json`) and MCP
+  config (`mcp/codex.json`, `mcp/cursor.json`). Install with
+  `codex plugin marketplace add bert-bae/coplan` and
+  `codex plugin add coplan@coplan`, or from Cursor's plugin search with the
+  repository's URL.
+- Codex keeps a plugin's hooks off until you trust them: open `/hooks` in
+  Codex once after installing (and after each update).
+- Every session records which agent it runs in. The page names it — "Codex
+  is working", *Answer in Cursor* — and the session rail labels each row
+  once more than one agent is in the list. `coplan status` shows it too.
+- Each agent is told to ask with its own question tool: `AskUserQuestion` in
+  Claude Code, `request_user_input` (Plan mode) in Codex, `AskQuestion` in
+  Cursor. A Codex `request_user_input` or permission request shows the
+  waiting banner; *Answer in Codex* opens the thread in the Codex app
+  (`codex://threads/…`).
+- Codex's MCP server finds its thread from each tool call. Cursor's, which
+  one window shares across its chats, finds the chat in its workspace that
+  was active last, asking Cursor for the workspace (MCP roots) when its
+  config cannot say.
+- Cursor's hooks cannot reliably add to a prompt, so in Cursor submitting a
+  plan copies the build prompt for you to paste; pasting it counts as
+  delivering it, and so does the agent's first `harness_plan_read` after you
+  submit ("build the plan" will do).
+- `coplan open` and `coplan url` find the session they were run from in any
+  agent, falling back to the one most recently active in the current folder.
+- `coplan doctor` checks the Codex and Cursor files and replays a hook in
+  each agent's format.
+
 ### Renamed to Coplan
 
 - The project is now **Coplan**, open source under the MIT license. The

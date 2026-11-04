@@ -1266,6 +1266,48 @@ function oneLine(text) {
   return text.replace(/\s*\n\s*/g, " ").trim();
 }
 
+// src/shared/agents.ts
+var AGENT_KINDS = ["claude", "codex", "cursor"];
+var AGENTS = {
+  claude: {
+    kind: "claude",
+    name: "Claude",
+    product: "Claude Code",
+    app: "the Claude desktop app",
+    askTools: ["AskUserQuestion"],
+    askWith: "AskUserQuestion",
+    promptContext: true
+  },
+  codex: {
+    kind: "codex",
+    name: "Codex",
+    product: "Codex",
+    app: "the Codex app",
+    askTools: ["request_user_input", "request_user_input_async"],
+    // Codex only offers request_user_input in Plan mode.
+    askWith: "request_user_input (in Plan mode) or plainly",
+    promptContext: true
+  },
+  cursor: {
+    kind: "cursor",
+    name: "Cursor",
+    product: "Cursor",
+    app: "Cursor",
+    // Cursor's hooks do not see AskQuestion today; a question is noticed
+    // when the turn ends on one. Listed for when they do.
+    askTools: ["AskQuestion"],
+    askWith: "AskQuestion or plainly",
+    promptContext: false
+  }
+};
+var DEFAULT_AGENT = "claude";
+function isAgentKind(value) {
+  return typeof value === "string" && AGENT_KINDS.includes(value);
+}
+function agentInfo(kind) {
+  return AGENTS[kind && isAgentKind(kind) ? kind : DEFAULT_AGENT];
+}
+
 // src/daemon/render.ts
 var STATUS_MARK2 = { todo: "[ ]", in_progress: "[~]", blocked: "[!]", done: "[x]" };
 function renderPlan(plan, opts = {}) {
@@ -1352,7 +1394,7 @@ var BUILD_MARKER = "[cc-harness] Build the plan";
 function buildPrompt(plan, opts) {
   const here = opts.target === "session";
   const note = opts.note?.trim();
-  const head = here ? sessionBrief(plan) : outsideBrief(plan);
+  const head = here ? sessionBrief(plan, agentInfo(opts.agent)) : outsideBrief(plan);
   const fromUser = note ? ["", "## From the user", ...note.split("\n").map((l) => `> ${l}`.trimEnd())] : [];
   const changes = here ? changesSinceRead(plan) : [];
   const full = [...head, ...fromUser, ...changes, ...renderDocument(plan, { attribution: here, reader: here ? "claude" : "outside" })];
@@ -1375,7 +1417,7 @@ function buildPrompt(plan, opts) {
   }
   return { prompt: [...fixed, "", ...kept, "", STATUS_LEGEND].join("\n").trim(), trimmed: true };
 }
-function sessionBrief(plan) {
+function sessionBrief(plan, agent) {
   return [
     `${BUILD_MARKER} "${plan.title}" \u2014 the user has reviewed it in Coplan and submitted it.`,
     "",
@@ -1383,7 +1425,7 @@ function sessionBrief(plan) {
     "",
     "1. Work through the tasks below in order.",
     "2. When you start a task, mark it in_progress with harness_task_update. When it is finished, mark it done with a one-line note of what you did.",
-    "3. If you are stuck, mark the task blocked with a note saying on what, and ask the user with AskUserQuestion.",
+    `3. If you are stuck, mark the task blocked with a note saying on what, and ask the user with ${agent.askWith}.`,
     "4. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.",
     "5. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, stop and ask the user in chat \u2014 they can reopen the plan in Coplan."
   ];

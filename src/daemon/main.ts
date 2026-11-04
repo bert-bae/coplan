@@ -8,6 +8,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { SessionStore } from './store.ts';
 import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from './http.ts';
 import { ingestHook } from './hookIngest.ts';
+import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
+import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
 import { MAX_NOTE, PlanError, cleanNote, planPhase, unreadAreas, validTarget } from '../shared/plan.ts';
 import { PROMPT_BUDGET, buildPrompt, renderPlan } from './render.ts';
 import { cleanStorage, scanStorage } from './housekeeping.ts';
@@ -136,6 +138,18 @@ const PORT_CLAIM_MS = 5_000;
 const MAX_TRACKED_OPENS = 200;
 /** Per-project resolved configs held in memory. */
 const MAX_CACHED_CONFIGS = 50;
+
+/** Why an MCP call found no session: the agent's hooks have not reported
+ *  one, and what to do about it there. */
+const HOOKS_HINT: Record<AgentKind, string> = {
+  claude: "This usually means Coplan's hooks have not fired; run `coplan doctor` to check the plugin wiring.",
+  codex:
+    "Codex has not run Coplan's hooks: it holds a plugin's hooks until you approve them. Open /hooks in Codex, " +
+    'trust the Coplan hooks, then start a new session. `coplan doctor` checks the rest of the wiring.',
+  cursor:
+    "Cursor has not run Coplan's hooks for this chat yet. Check that the Coplan plugin is enabled, send a message " +
+    'in the chat so its hooks fire, then try again. `coplan doctor` checks the rest of the wiring.',
+};
 
 /**
  * Bind, retrying a requested port while its previous owner lets go — keeping
@@ -428,7 +442,7 @@ function buildRouter(deps: Deps): Router {
     }
     const target = validTarget(body.target) ?? 'session';
     const note = cleanNote(body.note);
-    const { prompt, trimmed } = buildPrompt(session.plan, { target, ...(note ? { note } : {}) });
+    const { prompt, trimmed } = buildPrompt(session.plan, { target, agent: session.agent, ...(note ? { note } : {}) });
     json(ctx.res, 200, { prompt, trimmed, version: session.plan.version, budget: PROMPT_BUDGET, maxNote: MAX_NOTE });
   });
 
@@ -564,32 +578,40 @@ function buildRouter(deps: Deps): Router {
   };
 
   router.post('/hook/:event', async (ctx) => {
-    const event = ctx.params['event'] ?? '';
+    const raw = ctx.params['event'] ?? '';
+    const header = (name: string) => {
+      const value = ctx.req.headers[name];
+      return typeof value === 'string' ? value : null;
+    };
+    // The relay says which agent the hook came from; Claude Code when it
+    // does not (an older relay, or the doctor).
+    let agent = parseAgent(header('x-harness-agent'));
     let output: HookOutput = HOOK_NOOP;
     try {
-      const input = await readJson<Record<string, unknown>>(ctx.req);
-      const session = typeof input['session_id'] === 'string' ? store.get(input['session_id']) : undefined;
-      const header = (name: string) => {
-        const value = ctx.req.headers[name];
-        return typeof value === 'string' ? value : null;
-      };
-      output = await ingestHook(event, input, {
-        store,
-        config: session ? configFor(session) : config,
-        env: {
-          remoteSessionId: header('x-harness-remote-session'),
-          remoteSdkUrl: header('x-harness-remote-sdk'),
-          bridgeSessionId: header('x-harness-bridge-session'),
-          entrypoint: header('x-harness-entrypoint'),
-        },
-        onWaiting: openClaude,
-      });
+      const body = await readJson<Record<string, unknown>>(ctx.req);
+      agent = hookAgent(agent, body);
+      const { event, input } = readAgentHook(agent, raw, body);
+      const session = typeof input.session_id === 'string' ? store.get(input.session_id) : undefined;
+      if (event) {
+        output = await ingestHook(event, input, {
+          store,
+          agent,
+          config: session ? configFor(session) : config,
+          env: agent !== 'claude' ? {} : {
+            remoteSessionId: header('x-harness-remote-session'),
+            remoteSdkUrl: header('x-harness-remote-sdk'),
+            bridgeSessionId: header('x-harness-bridge-session'),
+            entrypoint: header('x-harness-entrypoint'),
+          },
+          onWaiting: openClaude,
+        });
+      }
     } catch (err) {
       // A hook must never break the session it is attached to.
-      log(`hook ${event} failed: ${(err as Error)?.message}`);
+      log(`hook ${agent}/${raw} failed: ${(err as Error)?.message}`);
       output = HOOK_NOOP;
     }
-    if (!ctx.res.writableEnded) json(ctx.res, 200, output);
+    if (!ctx.res.writableEnded) json(ctx.res, 200, writeAgentOutput(agent, raw, output));
   });
 
   /* --------------------------- MCP bridge -------------------------- */
@@ -597,9 +619,23 @@ function buildRouter(deps: Deps): Router {
   const resolveSession = (ctx: Ctx, body: { sessionId?: string; cwd?: string; pid?: number }) => {
     const headerId = ctx.req.headers['x-harness-session'];
     const id = body.sessionId ?? (typeof headerId === 'string' && headerId ? headerId : undefined);
+    const agentHeader = ctx.req.headers['x-harness-agent'];
+    const agent = parseAgent(typeof agentHeader === 'string' ? agentHeader : undefined);
     let session: SessionState | null = null;
-    if (id) session = store.ensure(id, body.cwd);
-    else if (body.pid) session = store.findByPid(body.pid) ?? null;
+    if (id) session = store.ensure(id, body.cwd, agent);
+    else if (agent === 'claude') {
+      // One `claude` process is one session, so its pid names it.
+      if (body.pid) session = store.findByPid(body.pid) ?? null;
+      if (!session && body.cwd) session = store.findByCwd(body.cwd, agent) ?? null;
+    } else {
+      // One Cursor process serves every chat in every window, and one Codex
+      // app every thread: the folder says more than the pid. In that folder,
+      // the chat that was active last is the one calling.
+      if (body.cwd) session = store.findByCwd(body.cwd, agent) ?? null;
+      if (!session && body.pid) session = store.findByPid(body.pid, agent) ?? null;
+    }
+    // A server that names the wrong agent — Cursor running the Claude Code
+    // plugin's config — still finds the chat in its folder.
     if (!session && body.cwd) session = store.findByCwd(body.cwd) ?? null;
     if (!session) return null;
     if (body.pid && session.claudePid !== body.pid) store.update(session.sessionId, { claudePid: body.pid });
@@ -610,11 +646,10 @@ function buildRouter(deps: Deps): Router {
     const body = await readJson<Record<string, unknown>>(ctx.req);
     const session = resolveSession(ctx, body as { sessionId?: string; cwd?: string; pid?: number });
     if (!session) {
+      const agentHeader = ctx.req.headers['x-harness-agent'];
       json(ctx.res, 200, {
         ok: false,
-        text:
-          '[cc-harness] No session is registered yet. This usually means the harness hooks have not fired; ' +
-          'run `coplan doctor` to check the plugin wiring.',
+        text: `[cc-harness] No session is registered yet. ${HOOKS_HINT[parseAgent(typeof agentHeader === 'string' ? agentHeader : undefined)]}`,
       });
       return;
     }
@@ -631,7 +666,7 @@ function buildRouter(deps: Deps): Router {
             true,
             `[cc-harness] Published "${plan.title}" (revision ${plan.revision}). The user reviews it at ${url}\n` +
               'Tell them in chat that the plan is ready, and ask anything you need decided with ' +
-              'AskUserQuestion, here in chat. Nothing in Coplan waits for them: when they say they ' +
+              `${agentInfo(session.agent).askWith}, here in chat. Nothing in Coplan waits for them: when they say they ` +
               'have reviewed it, call harness_plan_read.\n\n' +
               renderPlan(plan, { url }),
           );
@@ -642,6 +677,16 @@ function buildRouter(deps: Deps): Router {
           if (!session.plan) {
             reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
             return;
+          }
+          // Where no hook can hand the build prompt over with the user's next
+          // message (Cursor), the first read after submitting carries it.
+          if (!agentInfo(session.agent).promptContext) {
+            const submission = store.deliver(id);
+            if (submission) {
+              store.markRead(id);
+              reply(true, submission.prompt);
+              return;
+            }
           }
           const textOut = renderPlan(session.plan, { url, changesOnly: body['changes_only'] === true });
           store.markRead(id);

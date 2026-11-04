@@ -892,6 +892,15 @@
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
 }
+.session-agent {
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 0 5px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+}
 .session-foot {
   display: flex;
   gap: var(--sp-2);

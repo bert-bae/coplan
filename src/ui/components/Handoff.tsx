@@ -1,25 +1,27 @@
 import { useEffect, useState } from 'react';
-import { store, usePlan, useSession } from '../store.ts';
+import { store, useAgent, usePlan, useSession } from '../store.ts';
 import { api } from '../lib/api.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { isLocked, unreadAreas } from '../../shared/plan.ts';
+import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
 import type { SessionLink, SessionState, WaitingState } from '../../shared/types.ts';
 
-/** What to tell Claude once the plan has been worked over. */
+/** What to tell the agent once the plan has been worked over. */
 export const HANDOFF_MESSAGE =
-  "I've updated the plan in the harness. Read it with harness_plan_read, take my edits and comments into account, and tell me what changes.";
+  "I've updated the plan in Coplan. Read it with harness_plan_read, take my edits and comments into account, and tell me what changes.";
 
 /**
- * The bridge back to Claude.
+ * The bridge back to the agent.
  *
- * The harness never talks to Claude and never answers for the user. All it
- * can do is say when Claude is behind or waiting, and take the user to the
- * session — in the Claude desktop app when the session can be addressed, and
+ * The harness never talks to the agent and never answers for the user. All
+ * it can do is say when the agent is behind or waiting, and take the user to
+ * the session — in the agent's app when the session can be addressed, and
  * otherwise by putting the words on their clipboard.
  */
 export function Handoff() {
   const session = useSession();
   const plan = usePlan();
+  const agent = useAgent();
   const [viewing, setViewing] = useState(false);
   if (!session) return null;
   // No count: one box edited forty times and forty boxes are both "changes",
@@ -35,13 +37,13 @@ export function Handoff() {
       {plan &&
         !locked &&
         (unread > 0 ? (
-          <span className="handoff-state is-behind" title={`You changed ${areas.join(', ')} since Claude last read the plan`}>
+          <span className="handoff-state is-behind" title={`You changed ${areas.join(', ')} since ${agent.name} last read the plan`}>
             <span className="dot is-attention" aria-hidden="true" />
-            Claude hasn't read your changes
+            {agent.name} hasn't read your changes
           </span>
         ) : (
           <span className="handoff-state is-current" title={plan.claudeReadAt ? `Read ${new Date(plan.claudeReadAt).toLocaleString()}` : undefined}>
-            ✓ Claude is up to date{plan.claudeReadAt ? ` · read ${relativeTime(plan.claudeReadAt)}` : ''}
+            ✓ {agent.name} is up to date{plan.claudeReadAt ? ` · read ${relativeTime(plan.claudeReadAt)}` : ''}
           </span>
         ))}
       {/* Without a link, the fallback copies "read my changes" — the wrong
@@ -49,7 +51,7 @@ export function Handoff() {
       {(!locked || session.link) && <OpenInClaude session={session} primary={unread > 0} />}
       {plan && (
         <button type="button" className="btn btn-sm btn-ghost" onClick={() => setViewing(true)}>
-          As Claude sees it
+          As {agent.name} sees it
         </button>
       )}
       {viewing && <ClaudeView onClose={() => setViewing(false)} />}
@@ -58,40 +60,44 @@ export function Handoff() {
 }
 
 /**
- * Opens the session in Claude. With no link — a local session without Remote
- * Control — the best the harness can do is the message to type there.
+ * Opens the session in its agent. With no link — a local Claude session
+ * without Remote Control, or a Cursor chat — the best the harness can do is
+ * the message to type there.
  */
 export function OpenInClaude({
   session,
   primary,
-  label = 'Open in Claude',
+  label,
 }: {
   session: SessionState;
   primary?: boolean;
   label?: string;
 }) {
-  if (session.link) return <ClaudeLinks link={session.link} primary={primary} label={label} />;
+  const agent = agentInfo(session.agent);
+  if (session.link) return <ClaudeLinks link={session.link} agent={agent} primary={primary} label={label ?? `Open in ${agent.name}`} />;
   return (
     <button
       type="button"
       className={classNames('btn btn-sm', primary && 'btn-primary')}
       title={`${whereItRuns(session)} has no link Coplan can open. Copies a message to paste there instead.`}
-      onClick={() => void copyHandoff()}
+      onClick={() => void copyHandoff(agent)}
     >
-      Copy message for Claude
+      Copy message for {agent.name}
     </button>
   );
 }
 
-function ClaudeLinks({ link, primary, label }: { link: SessionLink; primary?: boolean; label: string }) {
+function ClaudeLinks({ link, agent, primary, label }: { link: SessionLink; agent: AgentInfo; primary?: boolean; label: string }) {
   return (
     <span className="claude-links">
-      <a className={classNames('btn btn-sm', primary && 'btn-primary')} href={link.app} title="Open this session in the Claude desktop app">
+      <a className={classNames('btn btn-sm', primary && 'btn-primary')} href={link.app} title={`Open this session in ${agent.app}`}>
         {label}
       </a>
-      <a className="link claude-web" href={link.web} target="_blank" rel="noreferrer" title="Open this session on claude.ai">
-        web
-      </a>
+      {link.web && (
+        <a className="link claude-web" href={link.web} target="_blank" rel="noreferrer" title="Open this session on claude.ai">
+          web
+        </a>
+      )}
     </span>
   );
 }
@@ -104,12 +110,13 @@ function ClaudeLinks({ link, primary, label }: { link: SessionLink; primary?: bo
 export function WaitingBanner({ session }: { session: SessionState }) {
   const waiting = session.waiting;
   if (!waiting) return null;
+  const agent = agentInfo(session.agent);
   return (
-    <section className={classNames('waiting', `is-${waiting.kind}`)} role="status" aria-label="Claude is waiting on you">
+    <section className={classNames('waiting', `is-${waiting.kind}`)} role="status" aria-label={`${agent.name} is waiting on you`}>
       <div className="waiting-body">
         <p className="waiting-head">
           <span className="dot is-attention" aria-hidden="true" />
-          {HEADLINE[waiting.kind]}
+          {headline(waiting.kind, agent.name)}
           <span className="muted"> · {relativeTime(waiting.since)}</span>
         </p>
         {waiting.questions?.length ? (
@@ -131,32 +138,51 @@ export function WaitingBanner({ session }: { session: SessionState }) {
         )}
         {!session.link && <p className="waiting-hint">{noLinkHint(session)}</p>}
       </div>
-      <OpenInClaude session={session} primary label={waiting.kind === 'permission' ? 'Decide in Claude' : 'Answer in Claude'} />
+      <OpenInClaude
+        session={session}
+        primary
+        label={waiting.kind === 'permission' ? `Decide in ${agent.name}` : `Answer in ${agent.name}`}
+      />
     </section>
   );
 }
 
-const HEADLINE: Record<WaitingState['kind'], string> = {
-  question: 'Claude is asking you',
-  permission: 'Claude needs your permission',
-  input: 'Claude is waiting for your reply',
-};
+function headline(kind: WaitingState['kind'], agent: string): string {
+  switch (kind) {
+    case 'question':
+      return `${agent} is asking you`;
+    case 'permission':
+      return `${agent} needs your permission`;
+    default:
+      return `${agent} is waiting for your reply`;
+  }
+}
 
 function whereItRuns(session: SessionState): string {
+  if (session.agent === 'cursor') return 'A Cursor chat';
   return session.surface === 'desktop' ? 'This desktop session' : session.surface === 'cli' ? 'This terminal session' : 'This session';
 }
 
 function noLinkHint(session: SessionState): string {
-  const where = session.surface === 'desktop' ? 'in the Claude desktop app' : session.surface === 'cli' ? 'in your terminal' : 'where the session is running';
-  return `Answer it ${where}. Turn on Remote Control there (/remote-control) and this becomes a link that opens the session directly.`;
+  switch (session.agent) {
+    case 'cursor':
+      return 'Answer it in the Cursor chat that asked. Cursor has no link Coplan can open to a chat.';
+    case 'codex':
+      return 'Answer it where the Codex session is running.';
+    default: {
+      const where =
+        session.surface === 'desktop' ? 'in the Claude desktop app' : session.surface === 'cli' ? 'in your terminal' : 'where the session is running';
+      return `Answer it ${where}. Turn on Remote Control there (/remote-control) and this becomes a link that opens the session directly.`;
+    }
+  }
 }
 
-async function copyHandoff(): Promise<void> {
+async function copyHandoff(agent: AgentInfo): Promise<void> {
   try {
     await navigator.clipboard.writeText(HANDOFF_MESSAGE);
-    store.toast('success', "Copied — paste it into Claude's chat.");
+    store.toast('success', `Copied — paste it into ${agent.name}'s chat.`);
   } catch {
-    store.toast('info', `Tell Claude: "${HANDOFF_MESSAGE}"`);
+    store.toast('info', `Tell ${agent.name}: "${HANDOFF_MESSAGE}"`);
   }
 }
 
@@ -165,6 +191,7 @@ async function copyHandoff(): Promise<void> {
 function ClaudeView({ onClose }: { onClose: () => void }) {
   const session = useSession();
   const plan = usePlan();
+  const agent = useAgent();
   const [text, setText] = useState<string | null>(null);
 
   useEffect(() => {
@@ -188,11 +215,11 @@ function ClaudeView({ onClose }: { onClose: () => void }) {
   }, [onClose]);
 
   return (
-    <div className="lightbox" role="dialog" aria-modal="true" aria-label="The plan as Claude reads it">
+    <div className="lightbox" role="dialog" aria-modal="true" aria-label={`The plan as ${agent.name} reads it`}>
       <button type="button" className="lightbox-scrim" aria-label="Close" onClick={onClose} />
       <div className="lightbox-body is-text">
         <header className="item-head">
-          <h2 className="section-title">What Claude reads</h2>
+          <h2 className="section-title">What {agent.name} reads</h2>
           <span className="muted">the output of harness_plan_read</span>
           <span className="spacer" />
           <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>

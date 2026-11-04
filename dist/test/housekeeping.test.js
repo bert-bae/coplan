@@ -22,7 +22,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { mkdirSync, readFileSync, existsSync } from "node:fs";
 function harnessHome() {
-  return process.env.CC_HARNESS_HOME || path.join(homedir(), ".claude", "cc-harness");
+  const override = process.env.CC_HARNESS_HOME;
+  return override && !override.includes("${") ? override : path.join(homedir(), ".claude", "cc-harness");
 }
 var paths = {
   home: harnessHome,

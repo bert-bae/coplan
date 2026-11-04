@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" sessionStart cursor",
+        "timeout": 20
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" sessionEnd cursor",
+        "timeout": 5
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" beforeSubmitPrompt cursor",
+        "timeout": 10
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" preToolUse cursor",
+        "timeout": 5,
+        "matcher": "AskQuestion"
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" postToolUse cursor",
+        "timeout": 5,
+        "matcher": "AskQuestion"
+      }
+    ],
+    "afterAgentResponse": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" afterAgentResponse cursor",
+        "timeout": 5
+      }
+    ],
+    "stop": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" stop cursor",
+        "timeout": 5
+      }
+    ]
+  }
+}

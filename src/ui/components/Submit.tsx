@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { store, usePlan, useSession, useStore } from '../store.ts';
+import { store, useAgent, usePlan, useSession, useStore } from '../store.ts';
 import { api, type PromptPreview } from '../lib/api.ts';
 import { OpenInClaude } from './Handoff.tsx';
 import { ProgressBar } from './Progress.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { MAX_NOTE, countTasks, currentTask, planPhase, unreadAreas } from '../../shared/plan.ts';
+import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
 import type { BuildTarget, Plan, PlanPhase, SessionState } from '../../shared/types.ts';
 
 /**
@@ -17,18 +18,22 @@ import type { BuildTarget, Plan, PlanPhase, SessionState } from '../../shared/ty
  * only follows the build as tasks move across the board.
  */
 
-const TARGETS: { id: BuildTarget; label: string; hint: string }[] = [
-  {
-    id: 'session',
-    label: 'This Claude session',
-    hint: 'Your next message in its chat carries this prompt, and the board follows each task as Claude works through it.',
-  },
-  {
-    id: 'elsewhere',
-    label: 'Somewhere else',
-    hint: 'Copy the prompt into the agent that will build it. The plan is locked all the same, but its progress cannot be followed here.',
-  },
-];
+function targets(agent: AgentInfo): { id: BuildTarget; label: string; hint: string }[] {
+  return [
+    {
+      id: 'session',
+      label: `This ${agent.name} session`,
+      hint: agent.promptContext
+        ? `Your next message in its chat carries this prompt, and the board follows each task as ${agent.name} works through it.`
+        : `The prompt is copied for you to paste into this ${agent.name} chat, and the board follows each task as ${agent.name} works through it.`,
+    },
+    {
+      id: 'elsewhere',
+      label: 'Somewhere else',
+      hint: 'Copy the prompt into the agent that will build it. The plan is locked all the same, but its progress cannot be followed here.',
+    },
+  ];
+}
 
 /** How long typing in the note waits before the preview is rebuilt. */
 const NOTE_SETTLE_MS = 300;
@@ -36,6 +41,7 @@ const NOTE_SETTLE_MS = 300;
 /** The arch bar's main action while planning; what the plan is once it is not. */
 export function SubmitControl() {
   const plan = usePlan();
+  const agent = useAgent();
   const [open, setOpen] = useState(false);
   const [viewing, setViewing] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -62,7 +68,7 @@ export function SubmitControl() {
         ref={trigger}
         type="button"
         className="btn btn-sm btn-primary"
-        title="Read the prompt Claude will be given, then lock the plan and hand it over to be built"
+        title={`Read the prompt ${agent.name} will be given, then lock the plan and hand it over to be built`}
         onClick={() => setOpen(true)}
       >
         Review &amp; submit plan
@@ -99,6 +105,7 @@ interface Shown {
 export function SubmitDialog({ onClose }: { onClose: () => void }) {
   const session = useSession();
   const plan = usePlan();
+  const agent = useAgent();
   const sessionId = useStore((s) => s.sessionId);
   const [target, setTarget] = useState<BuildTarget>('session');
   const [note, setNote] = useState('');
@@ -157,7 +164,11 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
   const submit = async () => {
     if (!preview || !current) return;
     setSubmitting(true);
-    if (target === 'elsewhere') await copyText(preview.prompt, 'Copied the prompt.');
+    // Where no hook can hand the prompt over (Cursor), the user pastes it.
+    const paste = target === 'elsewhere' || !agent.promptContext;
+    if (paste) {
+      await copyText(preview.prompt, target === 'session' ? `Copied — paste it into ${agent.name}'s chat.` : 'Copied the prompt.');
+    }
     const ok = await store.submitPlan({ target, note, expect: preview.version });
     setSubmitting(false);
     if (ok) onClose();
@@ -184,7 +195,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
 
             <fieldset className="submit-targets">
               <legend className="field-label">Who builds it?</legend>
-              {TARGETS.map((t) => (
+              {targets(agent).map((t) => (
                 <label key={t.id} className={classNames('submit-target', target === t.id && 'is-active')}>
                   <input type="radio" name="build-target" value={t.id} checked={target === t.id} onChange={() => setTarget(t.id)} />
                   <span>
@@ -196,7 +207,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
             </fieldset>
 
             <label className="field">
-              <span className="field-label">Anything else for Claude?</span>
+              <span className="field-label">Anything else for {agent.name}?</span>
               <textarea
                 className="input"
                 rows={3}
@@ -217,14 +228,14 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
                 Cancel
               </button>
               <button type="button" className="btn btn-primary" disabled={!current || submitting} onClick={() => void submit()}>
-                {submitting ? 'Submitting…' : target === 'session' ? 'Submit and lock' : 'Copy, submit and lock'}
+                {submitting ? 'Submitting…' : target === 'session' && agent.promptContext ? 'Submit and lock' : 'Copy, submit and lock'}
               </button>
             </div>
           </div>
 
           <section className="submit-preview" aria-label="The prompt">
             <header className="submit-preview-head">
-              <span className="field-label">{target === 'session' ? 'The prompt Claude will get' : 'The prompt to paste'}</span>
+              <span className="field-label">{target === 'session' ? `The prompt ${agent.name} will get` : 'The prompt to paste'}</span>
               {preview && (
                 <span className="muted submit-count">
                   {preview.prompt.length.toLocaleString()} characters
@@ -259,6 +270,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
 
 /** What is worth knowing before locking the plan. */
 function Checklist({ session, plan, target, trimmed }: { session: SessionState; plan: Plan; target: BuildTarget; trimmed: boolean }) {
+  const agent = agentInfo(session.agent);
   const counts = countTasks(plan);
   const boxes = plan.diagrams.reduce((n, d) => n + d.nodes.length, 0);
   const open = plan.threads.filter((t) => !t.resolved).length;
@@ -266,19 +278,24 @@ function Checklist({ session, plan, target, trimmed }: { session: SessionState; 
   const notes: { tone: 'info' | 'warn'; text: ReactNode }[] = [];
   if (counts.total === 0) notes.push({ tone: 'warn', text: 'There are no tasks, so there will be nothing to follow on the board.' });
   if (target === 'session' && session.status === 'ended') {
-    notes.push({ tone: 'warn', text: 'This session has ended. Resume it in Claude to build here, or choose somewhere else.' });
+    notes.push({ tone: 'warn', text: `This session has ended. Resume it in ${agent.name} to build here, or choose somewhere else.` });
   }
   if (target === 'session' && session.waiting) {
-    notes.push({ tone: 'warn', text: 'Claude is waiting on you in chat. Answer it there; the prompt goes with the next message you type.' });
+    notes.push({
+      tone: 'warn',
+      text: agent.promptContext
+        ? `${agent.name} is waiting on you in chat. Answer it there; the prompt goes with the next message you type.`
+        : `${agent.name} is waiting on you in chat. Answer it there before you paste the prompt.`,
+    });
   }
   if (target === 'session' && unread.length) {
-    notes.push({ tone: 'info', text: `Claude has not read your latest changes (${unread.join(', ')}). The prompt lists them first.` });
+    notes.push({ tone: 'info', text: `${agent.name} has not read your latest changes (${unread.join(', ')}). The prompt lists them first.` });
   }
   if (open) notes.push({ tone: 'info', text: `${open} open comment${open === 1 ? '' : 's'} go${open === 1 ? 'es' : ''} with the plan.` });
   if (trimmed) {
     notes.push({
       tone: 'info',
-      text: 'The plan is longer than fits in one message, so the prompt carries the task list and Claude reads the rest with harness_plan_read.',
+      text: `The plan is longer than fits in one message, so the prompt carries the task list and ${agent.name} reads the rest with harness_plan_read.`,
     });
   }
   return (
@@ -303,6 +320,7 @@ function Checklist({ session, plan, target, trimmed }: { session: SessionState; 
 
 /** The prompt as it was submitted, for reading back or copying again. */
 function SubmittedPrompt({ plan, onClose }: { plan: Plan; onClose: () => void }) {
+  const agent = useAgent();
   const submission = plan.submission;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -316,9 +334,11 @@ function SubmittedPrompt({ plan, onClose }: { plan: Plan; onClose: () => void })
   }, [onClose]);
   if (!submission) return null;
   const delivered = submission.deliveredAt
-    ? `Claude got it ${relativeTime(submission.deliveredAt)}`
+    ? `${agent.name} got it ${relativeTime(submission.deliveredAt)}`
     : submission.target === 'session'
-      ? 'Not delivered yet: it goes with your next message in Claude'
+      ? agent.promptContext
+        ? `Not delivered yet: it goes with your next message in ${agent.name}`
+        : `Not delivered yet: paste it into ${agent.name}'s chat`
       : 'Handed off to build elsewhere';
   return (
     <div className="lightbox" role="dialog" aria-modal="true" aria-labelledby="submitted-title">
@@ -355,6 +375,7 @@ function SubmittedPrompt({ plan, onClose }: { plan: Plan; onClose: () => void })
  */
 export function PhaseStrip({ session }: { session: SessionState }) {
   const tab = useStore((s) => s.tab);
+  const agent = agentInfo(session.agent);
   const [confirming, setConfirming] = useState(false);
   const plan = session.plan;
   const phase = planPhase(plan);
@@ -368,27 +389,31 @@ export function PhaseStrip({ session }: { session: SessionState }) {
   let text: ReactNode;
   switch (phase) {
     case 'submitted':
-      head = 'Submitted — waiting for Claude to start';
-      text =
-        session.status === 'ended' ? (
-          'This session has ended. Resume it in Claude, then send any message: the prompt goes with it.'
-        ) : (
-          <>
-            Send any message in Claude's chat — <q>go</q> will do — and Coplan hands it the build prompt with it.
-          </>
-        );
+      head = `Submitted — waiting for ${agent.name} to start`;
+      text = !agent.promptContext ? (
+        <>
+          Paste the prompt into {agent.name}'s chat — or ask it to <q>build the plan</q>, and it picks the prompt up with
+          harness_plan_read.
+        </>
+      ) : session.status === 'ended' ? (
+        `This session has ended. Resume it in ${agent.name}, then send any message: the prompt goes with it.`
+      ) : (
+        <>
+          Send any message in {agent.name}'s chat — <q>go</q> will do — and Coplan hands it the build prompt with it.
+        </>
+      );
       break;
     case 'building':
       head = 'Building';
       text = now ? (
         <>
-          Claude is on <strong>{now.title}</strong>
+          {agent.name} is on <strong>{now.title}</strong>
           {now.note ? ` — ${now.note}` : ''}
         </>
       ) : blocked.length ? (
         `${blocked.length} task${blocked.length === 1 ? ' is' : 's are'} blocked: ${blocked[0]!.title}${blocked[0]!.note ? ` — ${blocked[0]!.note}` : ''}`
       ) : (
-        'Claude has the plan. No task is in progress right now.'
+        `${agent.name} has the plan. No task is in progress right now.`
       );
       break;
     case 'built':
@@ -421,7 +446,7 @@ export function PhaseStrip({ session }: { session: SessionState }) {
       <div className="phase-actions">
         {confirming ? (
           <span className="item-confirm">
-            {submission.deliveredAt ? 'Unlock the plan? Claude keeps building until you tell it otherwise in chat.' : 'Withdraw the submission?'}
+            {submission.deliveredAt ? `Unlock the plan? ${agent.name} keeps building until you tell it otherwise in chat.` : 'Withdraw the submission?'}
             <button
               type="button"
               className="link is-danger"
@@ -442,9 +467,11 @@ export function PhaseStrip({ session }: { session: SessionState }) {
             {(phase === 'submitted' || phase === 'handed-off') && (
               <button
                 type="button"
-                className={classNames('btn btn-sm', phase === 'submitted' && !session.link && 'btn-primary')}
-                title={phase === 'submitted' ? 'Pasting it into Claude works too; it is not sent twice' : undefined}
-                onClick={() => void copyText(submission.prompt, phase === 'submitted' ? "Copied — paste it into Claude's chat." : 'Copied the prompt.')}
+                className={classNames('btn btn-sm', phase === 'submitted' && (!session.link || !agent.promptContext) && 'btn-primary')}
+                title={phase === 'submitted' ? `Pasting it into ${agent.name} works too; it is not sent twice` : undefined}
+                onClick={() =>
+                  void copyText(submission.prompt, phase === 'submitted' ? `Copied — paste it into ${agent.name}'s chat.` : 'Copied the prompt.')
+                }
               >
                 Copy prompt
               </button>

@@ -1195,6 +1195,54 @@ var init_plan = __esm({
   }
 });
 
+// src/shared/agents.ts
+function isAgentKind(value) {
+  return typeof value === "string" && AGENT_KINDS.includes(value);
+}
+function agentInfo(kind) {
+  return AGENTS[kind && isAgentKind(kind) ? kind : DEFAULT_AGENT];
+}
+var AGENT_KINDS, AGENTS, DEFAULT_AGENT;
+var init_agents = __esm({
+  "src/shared/agents.ts"() {
+    "use strict";
+    AGENT_KINDS = ["claude", "codex", "cursor"];
+    AGENTS = {
+      claude: {
+        kind: "claude",
+        name: "Claude",
+        product: "Claude Code",
+        app: "the Claude desktop app",
+        askTools: ["AskUserQuestion"],
+        askWith: "AskUserQuestion",
+        promptContext: true
+      },
+      codex: {
+        kind: "codex",
+        name: "Codex",
+        product: "Codex",
+        app: "the Codex app",
+        askTools: ["request_user_input", "request_user_input_async"],
+        // Codex only offers request_user_input in Plan mode.
+        askWith: "request_user_input (in Plan mode) or plainly",
+        promptContext: true
+      },
+      cursor: {
+        kind: "cursor",
+        name: "Cursor",
+        product: "Cursor",
+        app: "Cursor",
+        // Cursor's hooks do not see AskQuestion today; a question is noticed
+        // when the turn ends on one. Listed for when they do.
+        askTools: ["AskQuestion"],
+        askWith: "AskQuestion or plainly",
+        promptContext: false
+      }
+    };
+    DEFAULT_AGENT = "claude";
+  }
+});
+
 // src/ui/store.ts
 var store_exports = {};
 __export(store_exports, {
@@ -1202,6 +1250,7 @@ __export(store_exports, {
   describeError: () => describeError,
   formatBytes: () => formatBytes,
   store: () => store,
+  useAgent: () => useAgent,
   usePlan: () => usePlan,
   useSession: () => useSession,
   useStore: () => useStore
@@ -1269,12 +1318,16 @@ function useSession() {
 function usePlan() {
   return useStore((s) => s.session?.plan ?? null);
 }
+function useAgent() {
+  return agentInfo(useStore((s) => s.session?.agent));
+}
 var TAB_IDS, initial, PREFS_KEY, Store, store;
 var init_store = __esm({
   "src/ui/store.ts"() {
     "use strict";
     init_api();
     init_plan();
+    init_agents();
     TAB_IDS = ["diagrams", "tasks", "overview"];
     initial = {
       sessions: [],
@@ -1386,11 +1439,12 @@ var init_store = __esm({
             if (event.session.sessionId !== this.state.sessionId) return;
             const before = this.state.session?.plan;
             const after2 = event.session.plan;
+            const agent = agentInfo(event.session.agent).name;
             if (before && after2 && after2.revision > before.revision) {
-              this.toast("info", `Claude published revision ${after2.revision} of the plan.`);
+              this.toast("info", `${agent} published revision ${after2.revision} of the plan.`);
             }
             if (before?.submission && !before.submission.deliveredAt && after2?.submission?.deliveredAt) {
-              this.toast("success", "Claude has the build prompt. Follow it on the board.");
+              this.toast("success", `${agent} has the build prompt. Follow it on the board.`);
             }
             this.set({ session: event.session });
             return;
@@ -1457,9 +1511,10 @@ var init_store = __esm({
           const { plan } = await api.submitPlan(id, input);
           this.adoptPlan(id, plan);
           this.set({ tab: "tasks", taskMode: "board" });
+          const agent = agentInfo(this.state.session?.agent);
           this.toast(
             "success",
-            input.target === "session" ? "Plan submitted and locked. Send any message in Claude to hand it the prompt." : "Plan submitted and locked. Paste the prompt where it will be built."
+            input.target !== "session" ? "Plan submitted and locked. Paste the prompt where it will be built." : agent.promptContext ? `Plan submitted and locked. Send any message in ${agent.name} to hand it the prompt.` : `Plan submitted and locked. Paste the prompt into ${agent.name}'s chat.`
           );
           return true;
         } catch (err) {
@@ -1474,7 +1529,7 @@ var init_store = __esm({
         try {
           const { plan } = await api.reopenPlan(id);
           this.adoptPlan(id, plan);
-          this.toast("info", "The plan is open for changes again. Tell Claude in chat once you have changed it.");
+          this.toast("info", `The plan is open for changes again. Tell ${agentInfo(this.state.session?.agent).name} in chat once you have changed it.`);
           return true;
         } catch (err) {
           this.fail(err);
@@ -1819,6 +1874,18 @@ var init_GlobalActions = __esm({
 // src/ui/components/Sidebar.tsx
 import { useEffect as useEffect2, useRef, useState as useState2 } from "react";
 import { jsx as jsx2, jsxs as jsxs2 } from "react/jsx-runtime";
+function phaseTitle(phase, agent) {
+  switch (phase) {
+    case "submitted":
+      return `Submitted: waiting for ${agent} to pick it up`;
+    case "building":
+      return `Submitted and locked: ${agent} is building it`;
+    case "built":
+      return "Submitted and built: every task is done";
+    default:
+      return "Submitted to be built somewhere else";
+  }
+}
 function Sidebar() {
   const sessions = useStore((s) => s.sessions);
   const current = useStore((s) => s.sessionId);
@@ -1942,8 +2009,10 @@ function SessionRow({
   showRepo
 }) {
   const pinned = useStore((s) => s.pinned.includes(session.sessionId));
+  const mixed = useStore((s) => s.sessions.some((other) => other.agent !== session.agent));
   const [confirming, setConfirming] = useState2(false);
   const [renaming, setRenaming] = useState2(false);
+  const agent = agentInfo(session.agent);
   return /* @__PURE__ */ jsxs2(
     "div",
     {
@@ -1969,7 +2038,7 @@ ${session.cwd}
 Double-click to rename`,
             children: [
               /* @__PURE__ */ jsxs2("span", { className: "session-name", children: [
-                session.waiting ? /* @__PURE__ */ jsx2("span", { className: "dot is-attention", title: "Claude is waiting on you", "aria-label": "Claude is waiting on you" }) : session.status === "active" && /* @__PURE__ */ jsx2("span", { className: "working-dot", title: "Claude is working", "aria-label": "Claude is working" }),
+                session.waiting ? /* @__PURE__ */ jsx2("span", { className: "dot is-attention", title: `${agent.name} is waiting on you`, "aria-label": `${agent.name} is waiting on you` }) : session.status === "active" && /* @__PURE__ */ jsx2("span", { className: "working-dot", title: `${agent.name} is working`, "aria-label": `${agent.name} is working` }),
                 session.planTitle ?? session.title
               ] }),
               session.waiting ? /* @__PURE__ */ jsx2("span", { className: "session-waiting", children: session.waiting.text }) : session.current && /* @__PURE__ */ jsxs2("span", { className: "session-now", children: [
@@ -1979,6 +2048,7 @@ Double-click to rename`,
               /* @__PURE__ */ jsxs2("span", { className: "session-sub", children: [
                 session.planTitle && session.planTitle !== session.title && /* @__PURE__ */ jsx2("span", { className: "session-stage", children: session.title }),
                 !session.planTitle && /* @__PURE__ */ jsx2("span", { className: "session-stage", children: "no plan yet" }),
+                mixed && /* @__PURE__ */ jsx2("span", { className: classNames("session-agent", `is-${agent.kind}`), children: agent.name }),
                 /* @__PURE__ */ jsx2("span", { className: classNames("session-state", `is-${session.status}`), children: SESSION_STATE_LABEL[session.status] ?? session.status }),
                 session.branch && /* @__PURE__ */ jsx2("span", { className: "session-branch", children: session.branch })
               ] }),
@@ -1991,12 +2061,15 @@ Double-click to rename`,
                   " tasks"
                 ] }),
                 /* @__PURE__ */ jsx2("span", { children: relativeTime(session.updatedAt) }),
-                session.phase !== "planning" ? /* @__PURE__ */ jsx2("span", { className: classNames("pill", `is-phase-${session.phase}`), title: PHASE_TITLE[session.phase], children: PHASE_PILL[session.phase] }) : session.unreadByClaude > 0 && /* @__PURE__ */ jsx2("span", { className: "pill is-draft", title: "You changed the plan since Claude last read it", children: "unread" })
+                session.phase !== "planning" ? /* @__PURE__ */ jsx2("span", { className: classNames("pill", `is-phase-${session.phase}`), title: phaseTitle(session.phase, agent.name), children: PHASE_PILL[session.phase] }) : session.unreadByClaude > 0 && /* @__PURE__ */ jsx2("span", { className: "pill is-draft", title: `You changed the plan since ${agent.name} last read it`, children: "unread" })
               ] })
             ]
           }
         ),
-        session.waiting && session.link && !renaming && /* @__PURE__ */ jsx2("a", { className: "session-answer btn btn-sm btn-primary", href: session.link.app, title: "Open this session in the Claude desktop app", children: "Answer in Claude" }),
+        session.waiting && session.link && !renaming && /* @__PURE__ */ jsxs2("a", { className: "session-answer btn btn-sm btn-primary", href: session.link.app, title: `Open this session in ${agent.app}`, children: [
+          "Answer in ",
+          agent.name
+        ] }),
         /* @__PURE__ */ jsxs2("div", { className: "session-actions", children: [
           /* @__PURE__ */ jsx2(
             "button",
@@ -2120,13 +2193,14 @@ function initials(name) {
   if (words.length === 0) words.push(...all);
   return ((words[0]?.[0] ?? "?") + (words[1]?.[0] ?? "")).toUpperCase();
 }
-var SESSION_STATE_LABEL, PHASE_PILL, PHASE_TITLE, WAITING_KEY, PINNED_KEY, MINOR_WORDS;
+var SESSION_STATE_LABEL, PHASE_PILL, WAITING_KEY, PINNED_KEY, MINOR_WORDS;
 var init_Sidebar = __esm({
   "src/ui/components/Sidebar.tsx"() {
     "use strict";
     init_store();
     init_GlobalActions();
     init_format();
+    init_agents();
     SESSION_STATE_LABEL = {
       active: "working",
       idle: "idle",
@@ -2137,12 +2211,6 @@ var init_Sidebar = __esm({
       building: "building",
       built: "built",
       "handed-off": "handed off"
-    };
-    PHASE_TITLE = {
-      submitted: "Submitted: waiting for Claude to pick it up",
-      building: "Submitted and locked: Claude is building it",
-      built: "Submitted and built: every task is done",
-      "handed-off": "Submitted to be built somewhere else"
     };
     WAITING_KEY = "\0waiting";
     PINNED_KEY = "\0pinned";
@@ -2289,55 +2357,68 @@ import { jsx as jsx6, jsxs as jsxs6 } from "react/jsx-runtime";
 function Handoff() {
   const session = useSession();
   const plan = usePlan();
+  const agent = useAgent();
   const [viewing, setViewing] = useState5(false);
   if (!session) return null;
   const areas = unreadAreas(plan);
   const locked = isLocked(plan);
   const unread = locked ? 0 : areas.length;
   return /* @__PURE__ */ jsxs6("div", { className: "handoff", children: [
-    plan && !locked && (unread > 0 ? /* @__PURE__ */ jsxs6("span", { className: "handoff-state is-behind", title: `You changed ${areas.join(", ")} since Claude last read the plan`, children: [
+    plan && !locked && (unread > 0 ? /* @__PURE__ */ jsxs6("span", { className: "handoff-state is-behind", title: `You changed ${areas.join(", ")} since ${agent.name} last read the plan`, children: [
       /* @__PURE__ */ jsx6("span", { className: "dot is-attention", "aria-hidden": "true" }),
-      "Claude hasn't read your changes"
+      agent.name,
+      " hasn't read your changes"
     ] }) : /* @__PURE__ */ jsxs6("span", { className: "handoff-state is-current", title: plan.claudeReadAt ? `Read ${new Date(plan.claudeReadAt).toLocaleString()}` : void 0, children: [
-      "\u2713 Claude is up to date",
+      "\u2713 ",
+      agent.name,
+      " is up to date",
       plan.claudeReadAt ? ` \xB7 read ${relativeTime(plan.claudeReadAt)}` : ""
     ] })),
     (!locked || session.link) && /* @__PURE__ */ jsx6(OpenInClaude, { session, primary: unread > 0 }),
-    plan && /* @__PURE__ */ jsx6("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setViewing(true), children: "As Claude sees it" }),
+    plan && /* @__PURE__ */ jsxs6("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setViewing(true), children: [
+      "As ",
+      agent.name,
+      " sees it"
+    ] }),
     viewing && /* @__PURE__ */ jsx6(ClaudeView, { onClose: () => setViewing(false) })
   ] });
 }
 function OpenInClaude({
   session,
   primary,
-  label = "Open in Claude"
+  label
 }) {
-  if (session.link) return /* @__PURE__ */ jsx6(ClaudeLinks, { link: session.link, primary, label });
-  return /* @__PURE__ */ jsx6(
+  const agent = agentInfo(session.agent);
+  if (session.link) return /* @__PURE__ */ jsx6(ClaudeLinks, { link: session.link, agent, primary, label: label ?? `Open in ${agent.name}` });
+  return /* @__PURE__ */ jsxs6(
     "button",
     {
       type: "button",
       className: classNames("btn btn-sm", primary && "btn-primary"),
       title: `${whereItRuns(session)} has no link Coplan can open. Copies a message to paste there instead.`,
-      onClick: () => void copyHandoff(),
-      children: "Copy message for Claude"
+      onClick: () => void copyHandoff(agent),
+      children: [
+        "Copy message for ",
+        agent.name
+      ]
     }
   );
 }
-function ClaudeLinks({ link, primary, label }) {
+function ClaudeLinks({ link, agent, primary, label }) {
   return /* @__PURE__ */ jsxs6("span", { className: "claude-links", children: [
-    /* @__PURE__ */ jsx6("a", { className: classNames("btn btn-sm", primary && "btn-primary"), href: link.app, title: "Open this session in the Claude desktop app", children: label }),
-    /* @__PURE__ */ jsx6("a", { className: "link claude-web", href: link.web, target: "_blank", rel: "noreferrer", title: "Open this session on claude.ai", children: "web" })
+    /* @__PURE__ */ jsx6("a", { className: classNames("btn btn-sm", primary && "btn-primary"), href: link.app, title: `Open this session in ${agent.app}`, children: label }),
+    link.web && /* @__PURE__ */ jsx6("a", { className: "link claude-web", href: link.web, target: "_blank", rel: "noreferrer", title: "Open this session on claude.ai", children: "web" })
   ] });
 }
 function WaitingBanner({ session }) {
   const waiting = session.waiting;
   if (!waiting) return null;
-  return /* @__PURE__ */ jsxs6("section", { className: classNames("waiting", `is-${waiting.kind}`), role: "status", "aria-label": "Claude is waiting on you", children: [
+  const agent = agentInfo(session.agent);
+  return /* @__PURE__ */ jsxs6("section", { className: classNames("waiting", `is-${waiting.kind}`), role: "status", "aria-label": `${agent.name} is waiting on you`, children: [
     /* @__PURE__ */ jsxs6("div", { className: "waiting-body", children: [
       /* @__PURE__ */ jsxs6("p", { className: "waiting-head", children: [
         /* @__PURE__ */ jsx6("span", { className: "dot is-attention", "aria-hidden": "true" }),
-        HEADLINE[waiting.kind],
+        headline(waiting.kind, agent.name),
         /* @__PURE__ */ jsxs6("span", { className: "muted", children: [
           " \xB7 ",
           relativeTime(waiting.since)
@@ -2354,27 +2435,54 @@ function WaitingBanner({ session }) {
       ] }, i)) }) : /* @__PURE__ */ jsx6("p", { className: "waiting-text", children: waiting.text }),
       !session.link && /* @__PURE__ */ jsx6("p", { className: "waiting-hint", children: noLinkHint(session) })
     ] }),
-    /* @__PURE__ */ jsx6(OpenInClaude, { session, primary: true, label: waiting.kind === "permission" ? "Decide in Claude" : "Answer in Claude" })
+    /* @__PURE__ */ jsx6(
+      OpenInClaude,
+      {
+        session,
+        primary: true,
+        label: waiting.kind === "permission" ? `Decide in ${agent.name}` : `Answer in ${agent.name}`
+      }
+    )
   ] });
 }
+function headline(kind, agent) {
+  switch (kind) {
+    case "question":
+      return `${agent} is asking you`;
+    case "permission":
+      return `${agent} needs your permission`;
+    default:
+      return `${agent} is waiting for your reply`;
+  }
+}
 function whereItRuns(session) {
+  if (session.agent === "cursor") return "A Cursor chat";
   return session.surface === "desktop" ? "This desktop session" : session.surface === "cli" ? "This terminal session" : "This session";
 }
 function noLinkHint(session) {
-  const where = session.surface === "desktop" ? "in the Claude desktop app" : session.surface === "cli" ? "in your terminal" : "where the session is running";
-  return `Answer it ${where}. Turn on Remote Control there (/remote-control) and this becomes a link that opens the session directly.`;
+  switch (session.agent) {
+    case "cursor":
+      return "Answer it in the Cursor chat that asked. Cursor has no link Coplan can open to a chat.";
+    case "codex":
+      return "Answer it where the Codex session is running.";
+    default: {
+      const where = session.surface === "desktop" ? "in the Claude desktop app" : session.surface === "cli" ? "in your terminal" : "where the session is running";
+      return `Answer it ${where}. Turn on Remote Control there (/remote-control) and this becomes a link that opens the session directly.`;
+    }
+  }
 }
-async function copyHandoff() {
+async function copyHandoff(agent) {
   try {
     await navigator.clipboard.writeText(HANDOFF_MESSAGE);
-    store.toast("success", "Copied \u2014 paste it into Claude's chat.");
+    store.toast("success", `Copied \u2014 paste it into ${agent.name}'s chat.`);
   } catch {
-    store.toast("info", `Tell Claude: "${HANDOFF_MESSAGE}"`);
+    store.toast("info", `Tell ${agent.name}: "${HANDOFF_MESSAGE}"`);
   }
 }
 function ClaudeView({ onClose }) {
   const session = useSession();
   const plan = usePlan();
+  const agent = useAgent();
   const [text, setText] = useState5(null);
   useEffect5(() => {
     if (!session) return;
@@ -2391,11 +2499,15 @@ function ClaudeView({ onClose }) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
-  return /* @__PURE__ */ jsxs6("div", { className: "lightbox", role: "dialog", "aria-modal": "true", "aria-label": "The plan as Claude reads it", children: [
+  return /* @__PURE__ */ jsxs6("div", { className: "lightbox", role: "dialog", "aria-modal": "true", "aria-label": `The plan as ${agent.name} reads it`, children: [
     /* @__PURE__ */ jsx6("button", { type: "button", className: "lightbox-scrim", "aria-label": "Close", onClick: onClose }),
     /* @__PURE__ */ jsxs6("div", { className: "lightbox-body is-text", children: [
       /* @__PURE__ */ jsxs6("header", { className: "item-head", children: [
-        /* @__PURE__ */ jsx6("h2", { className: "section-title", children: "What Claude reads" }),
+        /* @__PURE__ */ jsxs6("h2", { className: "section-title", children: [
+          "What ",
+          agent.name,
+          " reads"
+        ] }),
         /* @__PURE__ */ jsx6("span", { className: "muted", children: "the output of harness_plan_read" }),
         /* @__PURE__ */ jsx6("span", { className: "spacer" }),
         /* @__PURE__ */ jsx6("button", { type: "button", className: "icon-btn", "aria-label": "Close", onClick: onClose, children: "\xD7" })
@@ -2404,7 +2516,7 @@ function ClaudeView({ onClose }) {
     ] })
   ] });
 }
-var HANDOFF_MESSAGE, HEADLINE;
+var HANDOFF_MESSAGE;
 var init_Handoff = __esm({
   "src/ui/components/Handoff.tsx"() {
     "use strict";
@@ -2412,12 +2524,8 @@ var init_Handoff = __esm({
     init_api();
     init_format();
     init_plan();
-    HANDOFF_MESSAGE = "I've updated the plan in the harness. Read it with harness_plan_read, take my edits and comments into account, and tell me what changes.";
-    HEADLINE = {
-      question: "Claude is asking you",
-      permission: "Claude needs your permission",
-      input: "Claude is waiting for your reply"
-    };
+    init_agents();
+    HANDOFF_MESSAGE = "I've updated the plan in Coplan. Read it with harness_plan_read, take my edits and comments into account, and tell me what changes.";
   }
 });
 
@@ -2463,8 +2571,23 @@ var init_Progress = __esm({
 // src/ui/components/Submit.tsx
 import { useEffect as useEffect6, useRef as useRef2, useState as useState6 } from "react";
 import { Fragment as Fragment2, jsx as jsx8, jsxs as jsxs8 } from "react/jsx-runtime";
+function targets(agent) {
+  return [
+    {
+      id: "session",
+      label: `This ${agent.name} session`,
+      hint: agent.promptContext ? `Your next message in its chat carries this prompt, and the board follows each task as ${agent.name} works through it.` : `The prompt is copied for you to paste into this ${agent.name} chat, and the board follows each task as ${agent.name} works through it.`
+    },
+    {
+      id: "elsewhere",
+      label: "Somewhere else",
+      hint: "Copy the prompt into the agent that will build it. The plan is locked all the same, but its progress cannot be followed here."
+    }
+  ];
+}
 function SubmitControl() {
   const plan = usePlan();
+  const agent = useAgent();
   const [open, setOpen] = useState6(false);
   const [viewing, setViewing] = useState6(false);
   const trigger = useRef2(null);
@@ -2488,7 +2611,7 @@ function SubmitControl() {
         ref: trigger,
         type: "button",
         className: "btn btn-sm btn-primary",
-        title: "Read the prompt Claude will be given, then lock the plan and hand it over to be built",
+        title: `Read the prompt ${agent.name} will be given, then lock the plan and hand it over to be built`,
         onClick: () => setOpen(true),
         children: "Review & submit plan"
       }
@@ -2507,6 +2630,7 @@ function SubmitControl() {
 function SubmitDialog({ onClose }) {
   const session = useSession();
   const plan = usePlan();
+  const agent = useAgent();
   const sessionId = useStore((s) => s.sessionId);
   const [target, setTarget] = useState6("session");
   const [note, setNote] = useState6("");
@@ -2551,7 +2675,10 @@ function SubmitDialog({ onClose }) {
   const submit = async () => {
     if (!preview || !current) return;
     setSubmitting(true);
-    if (target === "elsewhere") await copyText(preview.prompt, "Copied the prompt.");
+    const paste = target === "elsewhere" || !agent.promptContext;
+    if (paste) {
+      await copyText(preview.prompt, target === "session" ? `Copied \u2014 paste it into ${agent.name}'s chat.` : "Copied the prompt.");
+    }
     const ok = await store.submitPlan({ target, note, expect: preview.version });
     setSubmitting(false);
     if (ok) onClose();
@@ -2570,7 +2697,7 @@ function SubmitDialog({ onClose }) {
           /* @__PURE__ */ jsx8(Checklist, { session, plan, target, trimmed: Boolean(preview?.trimmed && shown?.target === "session") }),
           /* @__PURE__ */ jsxs8("fieldset", { className: "submit-targets", children: [
             /* @__PURE__ */ jsx8("legend", { className: "field-label", children: "Who builds it?" }),
-            TARGETS.map((t) => /* @__PURE__ */ jsxs8("label", { className: classNames("submit-target", target === t.id && "is-active"), children: [
+            targets(agent).map((t) => /* @__PURE__ */ jsxs8("label", { className: classNames("submit-target", target === t.id && "is-active"), children: [
               /* @__PURE__ */ jsx8("input", { type: "radio", name: "build-target", value: t.id, checked: target === t.id, onChange: () => setTarget(t.id) }),
               /* @__PURE__ */ jsxs8("span", { children: [
                 /* @__PURE__ */ jsx8("strong", { children: t.label }),
@@ -2579,7 +2706,11 @@ function SubmitDialog({ onClose }) {
             ] }, t.id))
           ] }),
           /* @__PURE__ */ jsxs8("label", { className: "field", children: [
-            /* @__PURE__ */ jsx8("span", { className: "field-label", children: "Anything else for Claude?" }),
+            /* @__PURE__ */ jsxs8("span", { className: "field-label", children: [
+              "Anything else for ",
+              agent.name,
+              "?"
+            ] }),
             /* @__PURE__ */ jsx8(
               "textarea",
               {
@@ -2599,12 +2730,12 @@ function SubmitDialog({ onClose }) {
           ] }),
           /* @__PURE__ */ jsxs8("div", { className: "submit-actions", children: [
             /* @__PURE__ */ jsx8("button", { type: "button", className: "btn btn-ghost", onClick: onClose, disabled: submitting, children: "Cancel" }),
-            /* @__PURE__ */ jsx8("button", { type: "button", className: "btn btn-primary", disabled: !current || submitting, onClick: () => void submit(), children: submitting ? "Submitting\u2026" : target === "session" ? "Submit and lock" : "Copy, submit and lock" })
+            /* @__PURE__ */ jsx8("button", { type: "button", className: "btn btn-primary", disabled: !current || submitting, onClick: () => void submit(), children: submitting ? "Submitting\u2026" : target === "session" && agent.promptContext ? "Submit and lock" : "Copy, submit and lock" })
           ] })
         ] }),
         /* @__PURE__ */ jsxs8("section", { className: "submit-preview", "aria-label": "The prompt", children: [
           /* @__PURE__ */ jsxs8("header", { className: "submit-preview-head", children: [
-            /* @__PURE__ */ jsx8("span", { className: "field-label", children: target === "session" ? "The prompt Claude will get" : "The prompt to paste" }),
+            /* @__PURE__ */ jsx8("span", { className: "field-label", children: target === "session" ? `The prompt ${agent.name} will get` : "The prompt to paste" }),
             preview && /* @__PURE__ */ jsxs8("span", { className: "muted submit-count", children: [
               preview.prompt.length.toLocaleString(),
               " characters",
@@ -2632,6 +2763,7 @@ function SubmitDialog({ onClose }) {
   ] });
 }
 function Checklist({ session, plan, target, trimmed }) {
+  const agent = agentInfo(session.agent);
   const counts = countTasks(plan);
   const boxes = plan.diagrams.reduce((n, d) => n + d.nodes.length, 0);
   const open = plan.threads.filter((t) => !t.resolved).length;
@@ -2639,19 +2771,22 @@ function Checklist({ session, plan, target, trimmed }) {
   const notes = [];
   if (counts.total === 0) notes.push({ tone: "warn", text: "There are no tasks, so there will be nothing to follow on the board." });
   if (target === "session" && session.status === "ended") {
-    notes.push({ tone: "warn", text: "This session has ended. Resume it in Claude to build here, or choose somewhere else." });
+    notes.push({ tone: "warn", text: `This session has ended. Resume it in ${agent.name} to build here, or choose somewhere else.` });
   }
   if (target === "session" && session.waiting) {
-    notes.push({ tone: "warn", text: "Claude is waiting on you in chat. Answer it there; the prompt goes with the next message you type." });
+    notes.push({
+      tone: "warn",
+      text: agent.promptContext ? `${agent.name} is waiting on you in chat. Answer it there; the prompt goes with the next message you type.` : `${agent.name} is waiting on you in chat. Answer it there before you paste the prompt.`
+    });
   }
   if (target === "session" && unread.length) {
-    notes.push({ tone: "info", text: `Claude has not read your latest changes (${unread.join(", ")}). The prompt lists them first.` });
+    notes.push({ tone: "info", text: `${agent.name} has not read your latest changes (${unread.join(", ")}). The prompt lists them first.` });
   }
   if (open) notes.push({ tone: "info", text: `${open} open comment${open === 1 ? "" : "s"} go${open === 1 ? "es" : ""} with the plan.` });
   if (trimmed) {
     notes.push({
       tone: "info",
-      text: "The plan is longer than fits in one message, so the prompt carries the task list and Claude reads the rest with harness_plan_read."
+      text: `The plan is longer than fits in one message, so the prompt carries the task list and ${agent.name} reads the rest with harness_plan_read.`
     });
   }
   return /* @__PURE__ */ jsxs8("div", { className: "submit-check", children: [
@@ -2673,6 +2808,7 @@ function Checklist({ session, plan, target, trimmed }) {
   ] });
 }
 function SubmittedPrompt({ plan, onClose }) {
+  const agent = useAgent();
   const submission = plan.submission;
   useEffect6(() => {
     const onKey = (e) => {
@@ -2685,7 +2821,7 @@ function SubmittedPrompt({ plan, onClose }) {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose]);
   if (!submission) return null;
-  const delivered = submission.deliveredAt ? `Claude got it ${relativeTime(submission.deliveredAt)}` : submission.target === "session" ? "Not delivered yet: it goes with your next message in Claude" : "Handed off to build elsewhere";
+  const delivered = submission.deliveredAt ? `${agent.name} got it ${relativeTime(submission.deliveredAt)}` : submission.target === "session" ? agent.promptContext ? `Not delivered yet: it goes with your next message in ${agent.name}` : `Not delivered yet: paste it into ${agent.name}'s chat` : "Handed off to build elsewhere";
   return /* @__PURE__ */ jsxs8("div", { className: "lightbox", role: "dialog", "aria-modal": "true", "aria-labelledby": "submitted-title", children: [
     /* @__PURE__ */ jsx8("button", { type: "button", className: "lightbox-scrim", "aria-label": "Close", onClick: onClose }),
     /* @__PURE__ */ jsxs8("div", { className: "lightbox-body is-text", children: [
@@ -2707,6 +2843,7 @@ function SubmittedPrompt({ plan, onClose }) {
 }
 function PhaseStrip({ session }) {
   const tab = useStore((s) => s.tab);
+  const agent = agentInfo(session.agent);
   const [confirming, setConfirming] = useState6(false);
   const plan = session.plan;
   const phase = planPhase(plan);
@@ -2719,9 +2856,17 @@ function PhaseStrip({ session }) {
   let text;
   switch (phase) {
     case "submitted":
-      head = "Submitted \u2014 waiting for Claude to start";
-      text = session.status === "ended" ? "This session has ended. Resume it in Claude, then send any message: the prompt goes with it." : /* @__PURE__ */ jsxs8(Fragment2, { children: [
-        "Send any message in Claude's chat \u2014 ",
+      head = `Submitted \u2014 waiting for ${agent.name} to start`;
+      text = !agent.promptContext ? /* @__PURE__ */ jsxs8(Fragment2, { children: [
+        "Paste the prompt into ",
+        agent.name,
+        "'s chat \u2014 or ask it to ",
+        /* @__PURE__ */ jsx8("q", { children: "build the plan" }),
+        ", and it picks the prompt up with harness_plan_read."
+      ] }) : session.status === "ended" ? `This session has ended. Resume it in ${agent.name}, then send any message: the prompt goes with it.` : /* @__PURE__ */ jsxs8(Fragment2, { children: [
+        "Send any message in ",
+        agent.name,
+        "'s chat \u2014 ",
         /* @__PURE__ */ jsx8("q", { children: "go" }),
         " will do \u2014 and Coplan hands it the build prompt with it."
       ] });
@@ -2729,10 +2874,11 @@ function PhaseStrip({ session }) {
     case "building":
       head = "Building";
       text = now ? /* @__PURE__ */ jsxs8(Fragment2, { children: [
-        "Claude is on ",
+        agent.name,
+        " is on ",
         /* @__PURE__ */ jsx8("strong", { children: now.title }),
         now.note ? ` \u2014 ${now.note}` : ""
-      ] }) : blocked.length ? `${blocked.length} task${blocked.length === 1 ? " is" : "s are"} blocked: ${blocked[0].title}${blocked[0].note ? ` \u2014 ${blocked[0].note}` : ""}` : "Claude has the plan. No task is in progress right now.";
+      ] }) : blocked.length ? `${blocked.length} task${blocked.length === 1 ? " is" : "s are"} blocked: ${blocked[0].title}${blocked[0].note ? ` \u2014 ${blocked[0].note}` : ""}` : `${agent.name} has the plan. No task is in progress right now.`;
       break;
     case "built":
       head = "Built";
@@ -2766,7 +2912,7 @@ function PhaseStrip({ session }) {
         ] })
       ] }),
       /* @__PURE__ */ jsx8("div", { className: "phase-actions", children: confirming ? /* @__PURE__ */ jsxs8("span", { className: "item-confirm", children: [
-        submission.deliveredAt ? "Unlock the plan? Claude keeps building until you tell it otherwise in chat." : "Withdraw the submission?",
+        submission.deliveredAt ? `Unlock the plan? ${agent.name} keeps building until you tell it otherwise in chat.` : "Withdraw the submission?",
         /* @__PURE__ */ jsx8(
           "button",
           {
@@ -2786,9 +2932,9 @@ function PhaseStrip({ session }) {
           "button",
           {
             type: "button",
-            className: classNames("btn btn-sm", phase === "submitted" && !session.link && "btn-primary"),
-            title: phase === "submitted" ? "Pasting it into Claude works too; it is not sent twice" : void 0,
-            onClick: () => void copyText(submission.prompt, phase === "submitted" ? "Copied \u2014 paste it into Claude's chat." : "Copied the prompt."),
+            className: classNames("btn btn-sm", phase === "submitted" && (!session.link || !agent.promptContext) && "btn-primary"),
+            title: phase === "submitted" ? `Pasting it into ${agent.name} works too; it is not sent twice` : void 0,
+            onClick: () => void copyText(submission.prompt, phase === "submitted" ? `Copied \u2014 paste it into ${agent.name}'s chat.` : "Copied the prompt."),
             children: "Copy prompt"
           }
         ),
@@ -2806,7 +2952,7 @@ async function copyText(text, ok) {
     store.toast("error", "The browser would not let the page use the clipboard. Select the prompt and copy it instead.");
   }
 }
-var TARGETS, NOTE_SETTLE_MS, PHASE_CHIP;
+var NOTE_SETTLE_MS, PHASE_CHIP;
 var init_Submit = __esm({
   "src/ui/components/Submit.tsx"() {
     "use strict";
@@ -2816,18 +2962,7 @@ var init_Submit = __esm({
     init_Progress();
     init_format();
     init_plan();
-    TARGETS = [
-      {
-        id: "session",
-        label: "This Claude session",
-        hint: "Your next message in its chat carries this prompt, and the board follows each task as Claude works through it."
-      },
-      {
-        id: "elsewhere",
-        label: "Somewhere else",
-        hint: "Copy the prompt into the agent that will build it. The plan is locked all the same, but its progress cannot be followed here."
-      }
-    ];
+    init_agents();
     NOTE_SETTLE_MS = 300;
     PHASE_CHIP = {
       submitted: "Submitted",
@@ -3436,6 +3571,7 @@ function ThreadPanel({ target, label }) {
   ] });
 }
 function ThreadView({ thread }) {
+  const agent = useAgent();
   const [replying, setReplying] = useState8(false);
   return /* @__PURE__ */ jsxs12("article", { className: classNames("thread", thread.resolved && "is-resolved"), children: [
     /* @__PURE__ */ jsx13(Entry, { author: thread.author, text: thread.text, ts: thread.ts }),
@@ -3443,7 +3579,10 @@ function ThreadView({ thread }) {
     /* @__PURE__ */ jsxs12("div", { className: "thread-actions", children: [
       !thread.resolved && /* @__PURE__ */ jsx13("button", { type: "button", className: "link", onClick: () => setReplying((v) => !v), children: "Reply" }),
       /* @__PURE__ */ jsx13("button", { type: "button", className: "link", onClick: () => void store.op({ op: "resolve", threadId: thread.id, resolved: !thread.resolved }), children: thread.resolved ? "Reopen" : "Resolve" }),
-      !thread.resolved && lastAuthor(thread) === "user" && /* @__PURE__ */ jsx13("span", { className: "muted", children: "Claude sees this when it next reads the plan" })
+      !thread.resolved && lastAuthor(thread) === "user" && /* @__PURE__ */ jsxs12("span", { className: "muted", children: [
+        agent.name,
+        " sees this when it next reads the plan"
+      ] })
     ] }),
     replying && /* @__PURE__ */ jsx13(
       Composer,
@@ -3471,7 +3610,8 @@ function Entry({ author, text, ts, reply }) {
   ] });
 }
 function AuthorBadge({ author }) {
-  return /* @__PURE__ */ jsx13("span", { className: classNames("author", `is-${author}`), children: author === "user" ? "You" : "Claude" });
+  const agent = useAgent();
+  return /* @__PURE__ */ jsx13("span", { className: classNames("author", `is-${author}`), children: author === "user" ? "You" : agent.name });
 }
 function Composer({
   placeholder,
@@ -3667,6 +3807,7 @@ function OverviewView() {
   ] });
 }
 function Glance({ plan }) {
+  const agent = useAgent();
   const counts = countTasks(plan);
   const openThreads = plan.threads.filter((t) => !t.resolved).length;
   const now = currentTask(plan);
@@ -3699,7 +3840,7 @@ function Glance({ plan }) {
           else store.setTab("tasks");
         },
         children: [
-          /* @__PURE__ */ jsx15("span", { className: "glance-label", children: now ? "Claude is on" : blocked.length ? "Blocked" : "Now" }),
+          /* @__PURE__ */ jsx15("span", { className: "glance-label", children: now ? `${agent.name} is on` : blocked.length ? "Blocked" : "Now" }),
           /* @__PURE__ */ jsx15("span", { className: "glance-now", children: now?.title ?? blocked[0]?.title ?? (counts.total && counts.done === counts.total ? "All done" : "Nothing in progress") }),
           /* @__PURE__ */ jsx15("span", { className: "glance-sub", children: now?.note ?? blocked[0]?.note ?? (blocked.length > 1 ? `${blocked.length} tasks blocked` : " ") })
         ]
@@ -3972,8 +4113,8 @@ function placeNewcomers(diagram, positions, auto) {
   for (const n of fresh) {
     const s = size.get(n.id);
     const sources = diagram.edges.filter((e) => e.target === n.id && e.source !== n.id && positions.has(e.source)).map((e) => e.source);
-    const targets = diagram.edges.filter((e) => e.source === n.id && e.target !== n.id && positions.has(e.target)).map((e) => e.target);
-    const anchors = sources.length ? sources : targets;
+    const targets2 = diagram.edges.filter((e) => e.source === n.id && e.target !== n.id && positions.has(e.target)).map((e) => e.target);
+    const anchors = sources.length ? sources : targets2;
     if (!anchors.length) {
       strays.push(n);
       continue;
@@ -4980,6 +5121,7 @@ function NodePanel({
   onRemove,
   onClose
 }) {
+  const agent = useAgent();
   const [confirming, setConfirming] = useState13(false);
   const name = (id) => nodes.find((n) => n.id === id)?.data.label ?? id;
   const outgoing = edges.filter((e) => e.source === node.id);
@@ -4992,7 +5134,7 @@ function NodePanel({
     /* @__PURE__ */ jsxs17("header", { className: "panel-top", children: [
       /* @__PURE__ */ jsx18("span", { className: classNames("kind-swatch", `kind-${node.data.kind}`), "aria-hidden": "true", children: KIND_GLYPH[node.data.kind] }),
       /* @__PURE__ */ jsx18("span", { className: "panel-kicker", children: KIND_LABEL[node.data.kind] }),
-      /* @__PURE__ */ jsx18("span", { className: "item-id", title: "Id \u2014 how Claude refers to this box", children: node.id }),
+      /* @__PURE__ */ jsx18("span", { className: "item-id", title: `Id \u2014 how ${agent.name} refers to this box`, children: node.id }),
       /* @__PURE__ */ jsx18("span", { className: "spacer" }),
       /* @__PURE__ */ jsx18("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Close details", title: "Back to the diagram", onClick: onClose, children: "\xD7" })
     ] }),
@@ -6361,8 +6503,8 @@ function Editor({
     if (target.kind === "node") {
       const node = nodesRef.current.find((n) => n.id === target.id);
       if (!node) return { title: "Box", entries: [] };
-      const targets = new Set(edgesRef.current.filter((e) => e.source === node.id).map((e) => e.target));
-      const others = nodesRef.current.filter((n) => n.id !== node.id && !targets.has(n.id));
+      const targets2 = new Set(edgesRef.current.filter((e) => e.source === node.id).map((e) => e.target));
+      const others = nodesRef.current.filter((n) => n.id !== node.id && !targets2.has(n.id));
       return {
         title: node.data.label,
         entries: [
@@ -7050,6 +7192,7 @@ var init_architecture = __esm({
 import { useState as useState16 } from "react";
 import { jsx as jsx22, jsxs as jsxs21 } from "react/jsx-runtime";
 function DiagramsView() {
+  const agent = useAgent();
   const plan = usePlan();
   const chosen = useStore((s) => s.diagramId);
   const sessionId = useStore((s) => s.sessionId);
@@ -7101,7 +7244,7 @@ function DiagramsView() {
       EmptyState,
       {
         title: "No diagrams yet",
-        hint: locked ? "This plan was submitted without a diagram." : "Ask Claude to draw the architecture \u2014 components, data flow, boundaries \u2014 or start one from a template."
+        hint: locked ? "This plan was submitted without a diagram." : `Ask ${agent.name} to draw the architecture \u2014 components, data flow, boundaries \u2014 or start one from a template.`
       }
     ) })
   ] });
@@ -7122,6 +7265,7 @@ function NewDiagram() {
   ] });
 }
 function DiagramPanel({ plan, diagram, locked }) {
+  const agent = useAgent();
   const [confirming, setConfirming] = useState16(false);
   const index = plan.diagrams.findIndex((d) => d.id === diagram.id);
   const linked = diagram.nodes.filter((n) => n.taskIds?.length).length;
@@ -7130,7 +7274,7 @@ function DiagramPanel({ plan, diagram, locked }) {
       /* @__PURE__ */ jsx22("span", { className: "panel-kicker", children: "Diagram" }),
       /* @__PURE__ */ jsx22("span", { className: "item-id", children: diagram.id }),
       /* @__PURE__ */ jsx22("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx22("span", { className: "muted panel-meta", children: locked ? "locked" : `${diagram.updatedBy === "user" ? "edited by you" : "by Claude"} \xB7 ${relativeTime(diagram.updatedAt)}` })
+      /* @__PURE__ */ jsx22("span", { className: "muted panel-meta", children: locked ? "locked" : `${diagram.updatedBy === "user" ? "edited by you" : `by ${agent.name}`} \xB7 ${relativeTime(diagram.updatedAt)}` })
     ] }),
     /* @__PURE__ */ jsx22(
       InlineText,
@@ -7169,7 +7313,7 @@ function DiagramPanel({ plan, diagram, locked }) {
       {
         type: "button",
         className: "btn btn-sm",
-        title: "The diagram as Claude reads it: every part, what it does and what was decided, then every connection",
+        title: `The diagram as ${agent.name} reads it: every part, what it does and what was decided, then every connection`,
         onClick: () => {
           const text = diagramToMarkdown(diagram, { tasks: plan.tasks });
           void navigator.clipboard?.writeText(text).then(() => store.toast("success", "Copied the diagram as Markdown.")).catch(() => store.toast("error", "The browser would not let the page use the clipboard."));
@@ -7259,6 +7403,7 @@ var init_DiagramsView = __esm({
 import { useEffect as useEffect15, useMemo as useMemo3, useRef as useRef10, useState as useState17 } from "react";
 import { Fragment as Fragment5, jsx as jsx23, jsxs as jsxs22 } from "react/jsx-runtime";
 function TasksView() {
+  const agent = useAgent();
   const plan = usePlan();
   const mode = useStore((s) => s.taskMode);
   const hideDone = useStore((s) => s.hideDone);
@@ -7272,7 +7417,7 @@ function TasksView() {
         /* @__PURE__ */ jsxs22("p", { className: "toolbar-note", children: [
           /* @__PURE__ */ jsx23("span", { "aria-hidden": "true", children: "\u{1F512}" }),
           " ",
-          phase === "handed-off" ? "Handed off to be built elsewhere, so these statuses do not move." : phase === "submitted" ? "The plan is locked. Cards move across the board once Claude starts and reports each task." : "The plan is locked. Cards move across the board as Claude reports each task."
+          phase === "handed-off" ? "Handed off to be built elsewhere, so these statuses do not move." : phase === "submitted" ? `The plan is locked. Cards move across the board once ${agent.name} starts and reports each task.` : `The plan is locked. Cards move across the board as ${agent.name} reports each task.`
         ] }),
         /* @__PURE__ */ jsx23("span", { className: "spacer" }),
         /* @__PURE__ */ jsxs22("span", { className: "toolbar-progress", children: [
@@ -7310,7 +7455,7 @@ function TasksView() {
       ] })
     ] }),
     plan.tasks.length === 0 ? /* @__PURE__ */ jsxs22(Fragment5, { children: [
-      /* @__PURE__ */ jsx23(EmptyState, { title: "No tasks yet", hint: "Break the work down here, or ask Claude to publish a task tree with the plan." }),
+      /* @__PURE__ */ jsx23(EmptyState, { title: "No tasks yet", hint: `Break the work down here, or ask ${agent.name} to publish a task tree with the plan.` }),
       /* @__PURE__ */ jsx23(AddField, { placeholder: "Add a task\u2026", label: "New task", onAdd: (title) => store.op({ op: "upsert_task", title }) })
     ] }) : mode === "outline" ? /* @__PURE__ */ jsx23(Outline, { plan, hideDone }) : /* @__PURE__ */ jsx23(Board, { plan })
   ] });
@@ -7552,6 +7697,7 @@ function TaskRow(props) {
   ] });
 }
 function TaskDetail({ plan, task }) {
+  const agent = useAgent();
   const [confirming, setConfirming] = useState17(false);
   const subtasks = descendants(plan, task.id).length;
   return /* @__PURE__ */ jsxs22("div", { className: "task-detail-body", children: [
@@ -7593,7 +7739,7 @@ function TaskDetail({ plan, task }) {
       /* @__PURE__ */ jsxs22("span", { className: "muted", children: [
         task.id,
         " \xB7 ",
-        task.createdBy === "user" ? "added by you" : "added by Claude"
+        task.createdBy === "user" ? "added by you" : `added by ${agent.name}`
       ] }),
       /* @__PURE__ */ jsx23("span", { className: "spacer" }),
       confirming ? /* @__PURE__ */ jsxs22("span", { className: "item-confirm", children: [
@@ -7759,6 +7905,7 @@ function useArrivals(plan) {
   return { arrived, announcement };
 }
 function TrackedCard({ plan, task, arrived }) {
+  const agent = useAgent();
   const [open, setOpen] = useState17(false);
   const path = [];
   let cursor = task.parentId ? plan.tasks.find((t) => t.id === task.parentId) : void 0;
@@ -7770,7 +7917,7 @@ function TrackedCard({ plan, task, arrived }) {
   return /* @__PURE__ */ jsxs22(Focusable, { kind: "task", id: task.id, as: "article", className: classNames("board-card", "is-tracked", `is-${task.status}`, arrived && "is-arrived"), children: [
     path.length > 0 && /* @__PURE__ */ jsx23("p", { className: "board-path", children: path.join(" \u203A ") }),
     /* @__PURE__ */ jsxs22("p", { className: "board-title-row", children: [
-      task.status === "in_progress" && /* @__PURE__ */ jsx23("span", { className: "working-dot", title: "Claude is on it", "aria-label": "Claude is on it" }),
+      task.status === "in_progress" && /* @__PURE__ */ jsx23("span", { className: "working-dot", title: `${agent.name} is on it`, "aria-label": `${agent.name} is on it` }),
       more ? /* @__PURE__ */ jsx23("button", { type: "button", className: "board-title", "aria-expanded": open, onClick: () => setOpen((v) => !v), children: task.title }) : /* @__PURE__ */ jsx23("span", { className: "board-title", children: task.title })
     ] }),
     task.note && /* @__PURE__ */ jsx23("p", { className: "board-note", children: task.note }),
@@ -7961,6 +8108,7 @@ function Header({ session }) {
   const saving = useStore((s) => s.saving);
   const plan = session.plan;
   const counts = countTasks(plan);
+  const agent = agentInfo(session.agent);
   return /* @__PURE__ */ jsxs23("header", { className: "head", children: [
     /* @__PURE__ */ jsxs23("div", { className: "head-main", children: [
       /* @__PURE__ */ jsx24(SessionsToggle, {}),
@@ -7981,7 +8129,7 @@ function Header({ session }) {
       /* @__PURE__ */ jsx24(ThemeToggle, {})
     ] }),
     /* @__PURE__ */ jsxs23("div", { className: "head-meta", children: [
-      /* @__PURE__ */ jsx24("span", { className: classNames("head-status", `is-${session.waiting ? "waiting" : session.status}`), title: "The Claude session this plan belongs to", children: session.waiting ? "Claude is waiting on you" : session.status === "active" ? "Claude is working" : session.status === "idle" ? "Claude is idle" : "session ended" }),
+      /* @__PURE__ */ jsx24("span", { className: classNames("head-status", `is-${session.waiting ? "waiting" : session.status}`), title: `The ${agent.product} session this plan belongs to`, children: session.waiting ? `${agent.name} is waiting on you` : session.status === "active" ? `${agent.name} is working` : session.status === "idle" ? `${agent.name} is idle` : "session ended" }),
       plan && plan.title !== session.title && /* @__PURE__ */ jsx24("span", { className: "head-stat", children: session.title }),
       session.branch && /* @__PURE__ */ jsx24("code", { className: "head-branch", children: session.branch }),
       counts.total > 0 && /* @__PURE__ */ jsxs23("span", { className: "head-progress", children: [
@@ -8016,14 +8164,19 @@ function SessionsToggle() {
   );
 }
 function NoPlan({ session }) {
+  const agent = agentInfo(session.agent);
   return /* @__PURE__ */ jsx24("div", { className: "view", children: /* @__PURE__ */ jsx24(
     EmptyState,
     {
       title: "No plan yet",
       hint: /* @__PURE__ */ jsxs23(Fragment6, { children: [
-        "In Claude's chat, run ",
-        /* @__PURE__ */ jsx24("code", { children: "/coplan <what you want to build>" }),
-        ". Claude investigates the code, then publishes its plan here \u2014 the architecture, diagrams and a task breakdown \u2014 and asks what it needs to know in the chat."
+        "In ",
+        agent.name,
+        "'s chat, run ",
+        /* @__PURE__ */ jsx24("code", { children: START_PLAN[agent.kind] }),
+        ". ",
+        agent.name,
+        " investigates the code, then publishes its plan here \u2014 the architecture, diagrams and a task breakdown \u2014 and asks what it needs to know in the chat."
       ] }),
       action: /* @__PURE__ */ jsx24("button", { type: "button", className: "btn", onClick: () => void store.op({ op: "set_meta", title: session.title || "Untitled plan" }), children: "Start a plan by hand" })
     }
@@ -8046,7 +8199,10 @@ function SessionUnavailable({ error }) {
       hint: unauthorized ? /* @__PURE__ */ jsxs23(Fragment6, { children: [
         "Open Coplan with ",
         /* @__PURE__ */ jsx24("code", { children: "/coplan-open" }),
-        " in Claude, or ",
+        " in Claude Code or Cursor, ",
+        /* @__PURE__ */ jsx24("code", { children: "$coplan-open" }),
+        " in Codex, or",
+        " ",
         /* @__PURE__ */ jsx24("code", { children: "coplan open" }),
         " in a terminal \u2014 the link it prints carries the key this page needs."
       ] }) : /* @__PURE__ */ jsxs23(Fragment6, { children: [
@@ -8068,9 +8224,12 @@ function NoSession({ error }) {
     {
       title: "No session yet",
       hint: /* @__PURE__ */ jsxs23(Fragment6, { children: [
-        "Start Claude Code in a project with Coplan enabled, then run ",
+        "Start Claude Code, Codex or Cursor in a project with Coplan enabled, then ask for a plan:",
+        " ",
         /* @__PURE__ */ jsx24("code", { children: "/coplan" }),
-        ". Sessions appear here the moment they register.",
+        " in Claude Code and Cursor, ",
+        /* @__PURE__ */ jsx24("code", { children: "$coplan" }),
+        " in Codex. Sessions appear here the moment they register.",
         error && /* @__PURE__ */ jsxs23("span", { className: "error-text", children: [
           " \xB7 ",
           error
@@ -8087,9 +8246,10 @@ function NoSession({ error }) {
 function useDocumentTitle(session) {
   const title = session?.plan?.title ?? session?.title ?? "Coplan";
   const waiting = Boolean(session?.waiting);
+  const name = agentInfo(session?.agent).name;
   useEffect16(() => {
-    document.title = waiting ? `\u25CF ${title} \u2014 Claude is waiting` : `${title} \u2014 plan`;
-  }, [title, waiting]);
+    document.title = waiting ? `\u25CF ${title} \u2014 ${name} is waiting` : `${title} \u2014 plan`;
+  }, [title, waiting, name]);
 }
 function useDrawerDismiss(open) {
   useEffect16(() => {
@@ -8131,7 +8291,7 @@ function useShortcuts() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 }
-var TAB_LABEL, tabId, panelId;
+var TAB_LABEL, tabId, panelId, START_PLAN;
 var init_App = __esm({
   "src/ui/App.tsx"() {
     "use strict";
@@ -8151,6 +8311,7 @@ var init_App = __esm({
     init_TasksView();
     init_format();
     init_plan();
+    init_agents();
     TAB_LABEL = {
       diagrams: "Architecture",
       tasks: "Tasks",
@@ -8158,6 +8319,11 @@ var init_App = __esm({
     };
     tabId = (id) => `tab-${id}`;
     panelId = (id) => `panel-${id}`;
+    START_PLAN = {
+      claude: "/coplan <what you want to build>",
+      codex: "$coplan <what you want to build>",
+      cursor: "/coplan <what you want to build>"
+    };
   }
 });
 
@@ -8330,7 +8496,7 @@ function makePlan() {
 }
 function makeSession(plan = makePlan()) {
   const now = Date.now();
-  return { sessionId: "s1", cwd: "/repo", repoRoot: "/repo", branch: "main", title: "repo", status: "idle", waiting: null, surface: "unknown", link: null, createdAt: now, updatedAt: now, plan };
+  return { sessionId: "s1", agent: "claude", cwd: "/repo", repoRoot: "/repo", branch: "main", title: "repo", status: "idle", waiting: null, surface: "unknown", link: null, createdAt: now, updatedAt: now, plan };
 }
 var posts;
 async function boot(session = makeSession()) {

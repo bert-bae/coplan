@@ -35,3 +35,23 @@ test('ids that could break out of the url are refused', () => {
   assert.equal(resolveLink({ remoteSessionId: 'cse_x/../../evil' }).link, null);
   assert.equal(resolveLink({ bridgeSessionId: 'session_a"b' }).link, null);
 });
+
+/* ------------------------------------------------------------ agents */
+
+test('Claude Code variables never give a Codex or Cursor session a Claude link', () => {
+  // A Codex or Cursor session started from a terminal inside a Claude
+  // session inherits Claude's variables; they describe the outer session.
+  const inherited = { remoteSessionId: 'cse_01ABCdef', bridgeSessionId: 'session_01XYZabc', entrypoint: 'cli' };
+  assert.equal(resolveLink(inherited, 'codex', '0199a213-81c0-7800-8aa1-bbab2a035a53').link?.app.startsWith('claude://'), false);
+  assert.equal(resolveLink(inherited, 'cursor', 'c1').link, null);
+});
+
+test('a Codex thread opens in the Codex app, and has no web address', () => {
+  const { link } = resolveLink({}, 'codex', '0199a213-81c0-7800-8aa1-bbab2a035a53');
+  assert.deepEqual(link, { app: 'codex://threads/0199a213-81c0-7800-8aa1-bbab2a035a53', web: null, via: 'app' });
+  assert.equal(resolveLink({}, 'codex', '../../evil').link, null, 'an id that could leave the path gets no link');
+});
+
+test('a Cursor chat has no documented link, so it gets none', () => {
+  assert.deepEqual(resolveLink({}, 'cursor', 'c1'), { surface: 'desktop', link: null });
+});

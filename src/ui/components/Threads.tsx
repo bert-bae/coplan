@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { store, usePlan } from '../store.ts';
+import { store, useAgent, usePlan } from '../store.ts';
 import { Markdown } from './Markdown.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
 import type { Author, Target, Thread } from '../../shared/types.ts';
@@ -74,6 +74,7 @@ export function ThreadPanel({ target, label }: { target: Target; label: string }
 }
 
 function ThreadView({ thread }: { thread: Thread }) {
+  const agent = useAgent();
   const [replying, setReplying] = useState(false);
   return (
     <article className={classNames('thread', thread.resolved && 'is-resolved')}>
@@ -90,7 +91,7 @@ function ThreadView({ thread }: { thread: Thread }) {
         <button type="button" className="link" onClick={() => void store.op({ op: 'resolve', threadId: thread.id, resolved: !thread.resolved })}>
           {thread.resolved ? 'Reopen' : 'Resolve'}
         </button>
-        {!thread.resolved && lastAuthor(thread) === 'user' && <span className="muted">Claude sees this when it next reads the plan</span>}
+        {!thread.resolved && lastAuthor(thread) === 'user' && <span className="muted">{agent.name} sees this when it next reads the plan</span>}
       </div>
       {replying && (
         <Composer
@@ -122,7 +123,8 @@ function Entry({ author, text, ts, reply }: { author: Author; text: string; ts: 
 }
 
 export function AuthorBadge({ author }: { author: Author }) {
-  return <span className={classNames('author', `is-${author}`)}>{author === 'user' ? 'You' : 'Claude'}</span>;
+  const agent = useAgent();
+  return <span className={classNames('author', `is-${author}`)}>{author === 'user' ? 'You' : agent.name}</span>;
 }
 
 function Composer({

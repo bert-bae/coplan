@@ -45,6 +45,7 @@ function makeSession(plan: Plan | null = makePlan(), extra: Partial<SessionState
   const now = Date.now();
   return {
     sessionId: 's1',
+    agent: 'claude',
     cwd: '/repo',
     repoRoot: '/repo',
     branch: 'main',
@@ -904,7 +905,7 @@ test('the session rail says a plan is being built', async () => {
       ? {
           sessions: [
             {
-              sessionId: 's1', title: 'repo', planTitle: 'Add a cache', cwd: '/repo', repoName: 'repo', repoRoot: '/repo', branch: 'main',
+              sessionId: 's1', agent: 'claude', title: 'repo', planTitle: 'Add a cache', cwd: '/repo', repoName: 'repo', repoRoot: '/repo', branch: 'main',
               status: 'active', createdAt: 1, updatedAt: 1, tasks: { total: 3, done: 1, inProgress: 1, blocked: 0 }, phase: 'building',
               current: 'Wire into API', waiting: null, surface: 'unknown', link: null, openThreads: 0, unreadByClaude: 0,
             },
@@ -917,3 +918,69 @@ test('the session rail says a plan is being built', async () => {
   assert.ok(within(rail).getByText('building'));
 });
 
+
+/* ------------------------------------------------------ Codex and Cursor */
+
+test('a Codex session is named Codex, and its question opens the thread in the Codex app', async () => {
+  const link = { app: 'codex://threads/0199a213-81c0', web: null, via: 'app' as const };
+  await boot(
+    makeSession(makePlan(), {
+      agent: 'codex',
+      link,
+      status: 'active',
+      waiting: { kind: 'question', text: 'Which TTL?', questions: [{ question: 'Which TTL?', options: ['1m', '10m'] }], since: Date.now() },
+    }),
+  );
+  const banner = screen.getByRole('status', { name: 'Codex is waiting on you' });
+  assert.match(banner.textContent ?? '', /Codex is asking you/);
+  assert.equal(within(banner).getByText('Answer in Codex').getAttribute('href'), link.app);
+  assert.equal(within(banner).queryByText('web'), null, 'a local Codex thread has no web address');
+  assert.match(document.querySelector('.head-status')?.textContent ?? '', /Codex is waiting on you/);
+  assert.match(document.title, /Codex is waiting/);
+  assert.doesNotMatch(document.querySelector('.head')?.textContent ?? '', /Claude/);
+});
+
+test('a Cursor chat has no link, so the banner says to answer in the chat that asked', async () => {
+  await boot(makeSession(makePlan(), { agent: 'cursor', surface: 'desktop', waiting: { kind: 'input', text: 'Per tenant?', since: Date.now() } }));
+  const banner = screen.getByRole('status', { name: 'Cursor is waiting on you' });
+  assert.match(banner.textContent ?? '', /Cursor chat that asked/);
+  assert.doesNotMatch(banner.textContent ?? '', /remote-control/, 'Remote Control is a Claude Code feature');
+  assert.ok(within(banner).getByText('Copy message for Cursor'));
+});
+
+test('in Cursor, submitting copies the prompt to paste, since no hook can hand it over', async () => {
+  let copied = '';
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (t: string) => void (copied = t) }, configurable: true });
+  const session = makeSession(makePlan(), { agent: 'cursor' });
+  const version = session.plan!.version;
+  await boot(session, (route) => {
+    if (route.endsWith('/plan/prompt')) return { prompt: 'THE CURSOR PROMPT', trimmed: false, version, budget: 9000, maxNote: 4000 };
+    if (route.endsWith('/plan/submit')) return { plan: lockedPlan() };
+    return undefined;
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Review & submit plan' }));
+  });
+  const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
+  assert.ok(within(dialog).getByLabelText(/This Cursor session/));
+  assert.match(dialog.textContent ?? '', /copied for you to paste into this Cursor chat/);
+  const submit = within(dialog).getByRole('button', { name: 'Copy, submit and lock' }) as HTMLButtonElement;
+  await waitFor(() => assert.equal(submit.disabled, false));
+  await act(async () => {
+    fireEvent.click(submit);
+  });
+  assert.equal(copied, 'THE CURSOR PROMPT');
+  assert.ok(store.getState().toasts.some((t) => /Paste the prompt into Cursor's chat/.test(t.text)));
+});
+
+test('the session rail names each row\'s agent once there is more than one kind', async () => {
+  const row = (sessionId: string, agent: SessionState['agent']) => ({
+    sessionId, agent, title: sessionId, planTitle: null, cwd: '/repo', repoName: 'repo', repoRoot: '/repo', branch: 'main',
+    status: 'idle' as const, createdAt: 1, updatedAt: 1, tasks: { total: 0, done: 0, inProgress: 0, blocked: 0 }, phase: 'planning' as const,
+    current: null, waiting: null, surface: 'unknown' as const, link: null, openThreads: 0, unreadByClaude: 0,
+  });
+  await boot(makeSession(), (route) => (route.startsWith('/api/sessions') ? { sessions: [row('s1', 'claude'), row('s2', 'codex')], version: 'test' } : undefined));
+  const rail = screen.getByRole('navigation', { name: 'Live sessions' });
+  assert.ok(within(rail).getByText('Codex'));
+  assert.ok(within(rail).getByText('Claude'));
+});

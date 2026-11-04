@@ -8,6 +8,7 @@
 import type { BuildTarget, Change, Plan, PlanBaseline, Thread } from '../shared/types.ts';
 import { baselineOf, countTasks, describeTarget, outline, planPhase, sameContent, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { contentOf, diagramChanges, diagramToMarkdown, indent } from '../shared/architecture.ts';
+import { agentInfo, type AgentInfo, type AgentKind } from '../shared/agents.ts';
 
 const STATUS_MARK = { todo: '[ ]', in_progress: '[~]', blocked: '[!]', done: '[x]' } as const;
 
@@ -159,10 +160,10 @@ export interface BuildPrompt {
  * the user into an agent that has no harness tools, so it never mentions
  * them and is never trimmed.
  */
-export function buildPrompt(plan: Plan, opts: { target: BuildTarget; note?: string }): BuildPrompt {
+export function buildPrompt(plan: Plan, opts: { target: BuildTarget; note?: string; agent?: AgentKind }): BuildPrompt {
   const here = opts.target === 'session';
   const note = opts.note?.trim();
-  const head = here ? sessionBrief(plan) : outsideBrief(plan);
+  const head = here ? sessionBrief(plan, agentInfo(opts.agent)) : outsideBrief(plan);
   const fromUser = note ? ['', '## From the user', ...note.split('\n').map((l) => `> ${l}`.trimEnd())] : [];
   const changes = here ? changesSinceRead(plan) : [];
   const full = [...head, ...fromUser, ...changes, ...renderDocument(plan, { attribution: here, reader: here ? 'claude' : 'outside' })];
@@ -191,7 +192,7 @@ export function buildPrompt(plan: Plan, opts: { target: BuildTarget; note?: stri
   return { prompt: [...fixed, '', ...kept, '', STATUS_LEGEND].join('\n').trim(), trimmed: true };
 }
 
-function sessionBrief(plan: Plan): string[] {
+function sessionBrief(plan: Plan, agent: AgentInfo): string[] {
   return [
     `${BUILD_MARKER} "${plan.title}" — the user has reviewed it in Coplan and submitted it.`,
     '',
@@ -201,7 +202,7 @@ function sessionBrief(plan: Plan): string[] {
     '1. Work through the tasks below in order.',
     '2. When you start a task, mark it in_progress with harness_task_update. When it is finished, mark it done ' +
       'with a one-line note of what you did.',
-    '3. If you are stuck, mark the task blocked with a note saying on what, and ask the user with AskUserQuestion.',
+    `3. If you are stuck, mark the task blocked with a note saying on what, and ask the user with ${agent.askWith}.`,
     '4. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.',
     '5. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, ' +
       'stop and ask the user in chat — they can reopen the plan in Coplan.',

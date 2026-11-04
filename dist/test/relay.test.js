@@ -26,7 +26,8 @@ before(async () => {
     let body = "";
     req.on("data", (c) => body += c);
     req.on("end", () => {
-      received.push({ url: req.url ?? "", auth: req.headers.authorization, body });
+      const agent = req.headers["x-harness-agent"];
+      received.push({ url: req.url ?? "", auth: req.headers.authorization, agent: typeof agent === "string" ? agent : void 0, body });
       const send = () => {
         if (res.destroyed || res.writableEnded) return;
         res.writeHead(200, { "content-type": "application/json" });
@@ -49,9 +50,9 @@ after(() => {
   server?.close();
   rmSync(home, { recursive: true, force: true });
 });
-function relay(event, payload, env = {}) {
+function relay(event, payload, env = {}, extra = []) {
   return new Promise((resolve) => {
-    const child = spawn(RELAY, [event], {
+    const child = spawn(RELAY, [event, ...extra], {
       env: { ...process.env, CC_HARNESS_HOME: home, ...env }
     });
     let stdout = "";
@@ -144,5 +145,24 @@ test("a malformed lock file is treated as no daemon", async () => {
   assert.equal(result.code, 0);
   assert.equal(result.stdout, "");
   rmSync(broken, { recursive: true, force: true });
+});
+test("says which agent the hook came from, Claude Code by default", async () => {
+  received = [];
+  await relay("SessionEnd", '{"session_id":"s1"}');
+  await relay("stop", '{"conversation_id":"c1"}', {}, ["cursor"]);
+  await relay("Stop", '{"session_id":"t1"}', {}, ["codex"]);
+  assert.deepEqual(
+    received.map((r) => [r.url, r.agent]),
+    [
+      ["/hook/SessionEnd", "claude"],
+      ["/hook/stop", "cursor"],
+      ["/hook/Stop", "codex"]
+    ]
+  );
+});
+test("an agent it does not know is sent as Claude Code, never passed through", async () => {
+  received = [];
+  await relay("SessionEnd", '{"session_id":"s1"}', {}, ['x"; rm -rf /']);
+  assert.equal(received[0]?.agent, "claude");
 });
 //# sourceMappingURL=relay.test.js.map
