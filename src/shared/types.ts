@@ -315,6 +315,9 @@ export interface Submission {
  */
 export interface DesignSignoff {
   at: number;
+  /** The change log's position when it was confirmed: what the prompt
+   *  knows about. */
+  seq?: number;
   note?: string;
   /** The prompt asking Claude for the task list, as the user previewed it. */
   prompt: string;

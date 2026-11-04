@@ -712,13 +712,21 @@ function buildRouter(deps: Deps): Router {
     const status = typeof body['status'] === 'string' && body['status'] ? (body['status'] as TaskStatus) : undefined;
     const stage = typeof body['stage'] === 'string' && body['stage'] ? body['stage'] : undefined;
     if (stage !== undefined && !validStage(stage)) throw new PlanError(`"${stage}" is not a stage: implement, review or refine.`);
-    const checks = body['checks'] === undefined ? undefined : cleanChecks(body['checks']);
-    if (body['checks'] !== undefined && !checks) throw new PlanError('`checks` is a list of {name, ok, note?}.');
+    // Every check reported must be whole: a malformed one dropped quietly
+    // would erase the failure it was meant to report.
+    const rawChecks = body['checks'];
+    const cleaned = rawChecks === undefined ? undefined : cleanChecks(rawChecks);
+    if (rawChecks !== undefined && (!cleaned || cleaned.length !== Math.min((rawChecks as unknown[]).length, 40))) {
+      throw new PlanError('`checks` is a list of {name, ok, note?}, with `ok` true or false.');
+    }
+    const checks = cleaned?.length ? cleaned : undefined;
     const note = typeof body['note'] === 'string' ? body['note'] : undefined;
     if (!status && !stage && !checks && note === undefined) throw new PlanError('Say what changed: a status, a stage, checks or a note.');
     const project = projectFor(session);
 
-    const starting = task.status === 'todo' && (status === 'in_progress' || (stage !== undefined && status !== 'done' && status !== 'blocked'));
+    // Starting includes resuming a task that was blocked before it began.
+    const idle = task.status === 'todo' || task.status === 'blocked';
+    const starting = idle && (status === 'in_progress' || (stage !== undefined && status !== 'done' && status !== 'blocked'));
     const waits = waitingOn(before, task);
     if (starting && waits.length) {
       throw new PlanError(

@@ -55,11 +55,19 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   }
   const root = repoRootOf(cwd);
   const config = loadProjectConfig(root);
-  for (const e of config.errors) console.error(`coplan: ${e}`);
-  if (config.errors.length && !config.file) return 2;
+  // A config that cannot be read must not pass for one with nothing to run.
+  if (config.errors.length) {
+    for (const e of config.errors) console.error(`coplan: ${e}`);
+    console.error(`coplan: fix ${PROJECT_CONFIG_PATH} first; nothing was run.`);
+    return 2;
+  }
   if (!config.file) {
-    console.log(`No ${PROJECT_CONFIG_PATH} in ${root}: nothing is configured to run. \`coplan init\` writes a starting point.`);
-    return opts.json ? (console.log('[]'), 0) : 0;
+    const say = `No ${PROJECT_CONFIG_PATH} in ${root}: nothing is configured to run. \`coplan init\` writes a starting point.`;
+    if (opts.json) {
+      console.error(say);
+      console.log('[]');
+    } else console.log(say);
+    return 0;
   }
   const hooks = hooksFor(config, opts.stage, opts.files);
   if (!hooks.length) {
@@ -102,7 +110,21 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
   return new Promise((resolve) => {
     let output = '';
     let timedOut = false;
-    const child = spawn('sh', ['-c', hook.run], { cwd, env: { ...process.env, CI: process.env['CI'] ?? '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Its own process group, so a timeout stops everything it started — a
+    // test runner's workers too — not just the shell.
+    const child = spawn('sh', ['-c', hook.run], {
+      cwd,
+      env: { ...process.env, CI: process.env['CI'] ?? '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    });
+    const kill = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, signal);
+      } catch {
+        child.kill(signal);
+      }
+    };
     const keep = (chunk: Buffer) => {
       output += chunk.toString('utf8');
       if (output.length > KEEP_BYTES) output = output.slice(-KEEP_BYTES);
@@ -111,8 +133,8 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
     child.stderr.on('data', keep);
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 3000).unref();
+      kill('SIGTERM');
+      setTimeout(() => kill('SIGKILL'), 3000).unref();
     }, (hook.timeout ?? DEFAULT_HOOK_TIMEOUT) * 1000);
     child.on('error', (err) => {
       clearTimeout(timer);

@@ -148,6 +148,34 @@ test('coplan check without a config says so, and how to make one', () => {
     const out = spawnSync(process.execPath, [CLI, 'check'], { cwd: dir, encoding: 'utf8' });
     assert.equal(out.status, 0);
     assert.match(out.stdout, /No \.coplan\/config\.json.*coplan init/);
+    const json = spawnSync(process.execPath, [CLI, 'check', '--json'], { cwd: dir, encoding: 'utf8' });
+    assert.deepEqual(JSON.parse(json.stdout), [], 'stdout stays parseable');
+    assert.match(json.stderr, /No \.coplan\/config\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a config coplan check cannot read fails, rather than passing with nothing run', () => {
+  const dir = repo({ '.coplan/config.json': '{ "hooks": { "review": ["npm test"' });
+  try {
+    const out = spawnSync(process.execPath, [CLI, 'check', 'review', '--json'], { cwd: dir, encoding: 'utf8' });
+    assert.equal(out.status, 2);
+    assert.equal(out.stdout, '');
+    assert.match(out.stderr, /could not be read[\s\S]*nothing was run/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a timed-out hook is stopped with everything it started', () => {
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'hangs', run: 'sleep 20; echo done', timeout: 1 }] } }) });
+  try {
+    const started = Date.now();
+    const out = spawnSync(process.execPath, [CLI, 'check', 'review'], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
+    assert.ok(Date.now() - started < 8_000, `took ${Date.now() - started}ms`);
+    assert.equal(out.status, 1);
+    assert.match(out.stdout, /✗ hangs {2}\(timed out after 1s/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

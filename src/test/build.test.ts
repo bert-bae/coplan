@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PlanError, applyOps, confirmDesign, publishPlan, publishTasks, normalizePlan } from '../shared/plan.ts';
+import { PlanError, applyOps, confirmDesign, markDelivered, publishPlan, publishTasks, normalizePlan, submitPlan } from '../shared/plan.ts';
 import {
   branchPlan,
   buildSteps,
@@ -162,6 +162,53 @@ test('a branch that needs two others cannot simply stack, and says so', () => {
   assert.equal(three.base, null);
   assert.deepEqual(three.needs.sort(), ['one', 'two']);
   assert.match(renderPlan(plan), /`three` needs `one` and `two`: merge those first/);
+});
+
+test('branches that each need the other cannot stack, and are refused', () => {
+  assert.throws(
+    () =>
+      publishTasks(tasked(), {
+        tasks: [
+          { id: 'a1', title: 'A1', branch: 'one' },
+          { id: 'b1', title: 'B1', branch: 'two', dependsOn: ['a1'] },
+          { id: 'a2', title: 'A2', branch: 'one', dependsOn: ['b1'] },
+        ],
+      }),
+    /Branches `one` → `two` → `one`|Branches `two` → `one` → `two`/,
+  );
+});
+
+test('a branch needing one already in its stack stacks on the top of it', () => {
+  const plan = publishTasks(tasked(), {
+    tasks: [
+      { id: 'a1', title: 'A1', branch: 'one' },
+      { id: 'b1', title: 'B1', branch: 'two', dependsOn: ['a1'] },
+      { id: 'c1', title: 'C1', branch: 'three', dependsOn: ['a1', 'b1'] },
+    ],
+  }).plan;
+  const three = branchPlan(plan).branches.find((b) => b.branch === 'three')!;
+  assert.deepEqual(three.needs, ['two']);
+  assert.equal(three.base, 'two');
+  assert.deepEqual(branchPlan(plan).branches.map((b) => b.branch), ['one', 'two', 'three']);
+});
+
+test('a finished build takes no new task list: the next plan starts afresh', () => {
+  let plan = tasked();
+  plan = submitPlan(plan, { target: 'session', prompt: 'build' });
+  plan = markDelivered(plan);
+  plan = done(plan, 'client', 'config', 'invalidate', 'wire', 'docs');
+  assert.throws(() => publishTasks(plan, { tasks: [{ title: 'More' }] }), /This plan is built/);
+});
+
+test('linking a task to a box through `builds` is a change like any other', () => {
+  const plan = tasked();
+  const { plan: next, changes } = applyOps(plan, [{ op: 'upsert_task', id: 'docs', builds: ['db'] }], 'user');
+  assert.deepEqual(next.diagrams[0]!.nodes.find((n) => n.id === 'db')?.taskIds, ['docs']);
+  assert.equal(changes.length, 1);
+  assert.match(changes[0]!.summary, /linked "Docs" to "Postgres" in diagram "Components"/);
+  assert.equal(changes[0]!.target.kind, 'diagram');
+  assert.ok(next.version > plan.version);
+  assert.ok(next.diagrams[0]!.rev > plan.diagrams[0]!.rev);
 });
 
 test('a branch name git would refuse is refused here', () => {

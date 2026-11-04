@@ -179,7 +179,35 @@ export function dependencyProblem(plan: Tasks): string | null {
   }
   const cycle = findCycle(leafGraph(plan));
   if (cycle) return `These tasks wait on each other, so none of them could ever start: ${cycle.map(title).join(' → ')}.`;
+  // Branches stack one on another; two that each need the other's work
+  // cannot each be a pull request of their own.
+  const loop = findCycle(branchGraph(plan));
+  if (loop) {
+    return (
+      `Branches ${loop.map((b) => `\`${b}\``).join(' → ')} each need work from the next, so they cannot stack: ` +
+      'put those tasks on one branch, or change what they depend on.'
+    );
+  }
   return null;
+}
+
+/** Each branch and the other branches its tasks wait on. */
+function branchGraph(plan: Tasks): Map<string, Set<string>> {
+  const graph = new Map<string, Set<string>>();
+  const of = new Map(leafTasks(plan).map((t) => [t.id, effectiveBranch(plan, t)]));
+  for (const leaf of leafTasks(plan)) {
+    const branch = of.get(leaf.id);
+    if (!branch) continue;
+    const needs = graph.get(branch) ?? new Set<string>();
+    graph.set(branch, needs);
+    for (const id of inheritedDeps(plan, leaf)) {
+      for (const l of leavesUnder(plan, id)) {
+        const other = of.get(l.id);
+        if (other && other !== branch) needs.add(other);
+      }
+    }
+  }
+  return graph;
 }
 
 function findCycle(graph: Map<string, Set<string>>): string[] | null {
@@ -297,6 +325,14 @@ export function branchPlan(plan: Tasks): { branches: BranchPlan[]; unbranched: T
     }
   }
   const branches = [...byBranch.values()];
+  // A branch it needs only through another one it needs is already in that
+  // one's stack: C needing A and B, where B stacks on A, stacks on B.
+  const reaches = (from: string, to: string, seen = new Set<string>()): boolean => {
+    if (seen.has(from)) return false;
+    seen.add(from);
+    return (byBranch.get(from)?.needs ?? []).some((n) => n === to || reaches(n, to, seen));
+  };
+  for (const b of branches) b.needs = b.needs.filter((n) => !b.needs.some((m) => m !== n && reaches(m, n)));
   for (const b of branches) b.base = b.needs.length === 1 ? b.needs[0]! : null;
 
   // Stack order: a branch after the ones it needs. Ties keep build order.

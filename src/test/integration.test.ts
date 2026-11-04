@@ -471,11 +471,14 @@ test('confirming the design locks it, and the next message asks Claude for the t
   const retask = await opsOn(built, [{ op: 'upsert_task', id: 't4', title: 'Wire it in' }]);
   assert.ok(retask.plan, retask.error);
 
+  // Edited after confirming: not in the prompt, so Claude is told to read it.
   const first = await hookFor(built, 'UserPromptSubmit', { prompt: 'go' });
-  assert.equal(first.hookSpecificOutput?.additionalContext, preview.prompt);
+  const handed = String(first.hookSpecificOutput?.additionalContext ?? '');
+  assert.ok(handed.startsWith(preview.prompt));
+  assert.match(handed.slice(preview.prompt.length), /\[cc-harness\] The user has changed the plan "Add a cache" in the harness UI since you last read it \(tasks\)/);
   const s = await sessionFor(built);
   assert.ok(s.plan!.design!.deliveredAt);
-  assert.equal(s.plan!.claudeReadSeq, s.plan!.seq, 'the design reaching Claude is a read');
+  await mcpFor(built, 'read');
   const second = await hookFor(built, 'UserPromptSubmit', { prompt: 'and?' });
   assert.equal(second.hookSpecificOutput?.additionalContext, undefined);
 });
@@ -536,6 +539,13 @@ test('Claude publishes the task list: linked tasks, the boxes they build, and wh
   const early = await mcpFor(built, 'task', { task_id: 't4', status: 'in_progress' });
   assert.equal(early['ok'], false);
   assert.match(String(early['text']), /"Wire up" cannot start yet: it waits on t1 "Storage"/);
+  // Blocking it first is no way round that.
+  await mcpFor(built, 'task', { task_id: 't4', status: 'blocked', note: 'waiting' });
+  for (const body of [{ status: 'in_progress' }, { stage: 'implement' }]) {
+    const resumed = await mcpFor(built, 'task', { task_id: 't4', ...body });
+    assert.equal(resumed['ok'], false, JSON.stringify(body));
+  }
+  await mcpFor(built, 'task', { task_id: 't4', status: 'todo' });
 });
 
 test('a task goes round implement → review → refine, and is not done while its checks fail', async () => {
@@ -548,6 +558,11 @@ test('a task goes round implement → review → refine, and is not done while i
   const early = await mcpFor(built, 'task', { task_id: 't2', status: 'done' });
   assert.equal(early['ok'], false);
   assert.match(String(early['text']), /not done: its last checks failed \(tests: 1 failing\)/);
+  // A malformed report cannot wipe the failure out.
+  const sloppy = await mcpFor(built, 'task', { task_id: 't2', status: 'done', checks: [{ name: 'tests', ok: 'false' }] });
+  assert.equal(sloppy['ok'], false);
+  assert.match(String(sloppy['text']), /`ok` true or false/);
+  assert.equal((await sessionFor(built)).plan!.tasks.find((t) => t.id === 't2')?.checks?.[0]?.ok, false);
   await mcpFor(built, 'task', { task_id: 't2', stage: 'refine' });
   await mcpFor(built, 'task', { task_id: 't2', stage: 'review', checks: [{ name: 'tests', ok: true }] });
   const done = await mcpFor(built, 'task', { task_id: 't2', status: 'done', note: 'wrapped the driver' });

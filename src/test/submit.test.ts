@@ -231,8 +231,18 @@ test('the design prompt asks for a linked task list, and not for the build', () 
   assert.match(prompt, /Read-through, 10m TTL\./, 'the design itself follows');
 });
 
+test('edits made after confirming are not in the design prompt, so they stay unread', () => {
+  let plan = confirmed();
+  plan = applyOps(plan, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'use redis' }, { op: 'upsert_task', id: 't1', title: 'Wire in' }], 'user').plan;
+  plan = markDesignDelivered(plan, 3_000);
+  assert.equal(plan.design?.deliveredAt, 3_000);
+  assert.equal(unreadByClaude(plan).length, 2, 'Claude still has them to read');
+  assert.throws(() => applyOps(confirmed(), [{ op: 'upsert_diagram', id: 'd1', index: 0 }], 'user'), /design is confirmed/, 'no reordering either');
+});
+
 test('the design prompt reaching Claude is a read, and the build prompt supersedes it', () => {
-  let plan = applyOps(confirmed(), [{ op: 'upsert_task', title: 'Load test' }], 'user').plan;
+  // Edited before confirming: the prompt carries it.
+  let plan = confirmed(applyOps(published(), [{ op: 'upsert_task', title: 'Load test' }], 'user').plan);
   plan = markDesignDelivered(plan, 3_000);
   assert.equal(plan.design?.deliveredAt, 3_000);
   assert.equal(unreadByClaude(plan).length, 0);

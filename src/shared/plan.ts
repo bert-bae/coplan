@@ -443,7 +443,7 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
   next.sections = sections;
   next.diagrams = diagrams;
   next.tasks = tasks;
-  linkBuilds(next, builds);
+  linkBuilds(next, builds, now);
   checkDependencies(next);
   next.threads = base.threads.map((thread) => detachIfOrphaned(next, base, thread));
   next.revision = base.revision + 1;
@@ -469,7 +469,11 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
  */
 export function publishTasks(prev: Plan | null, input: TaskListInput, now = Date.now()): { plan: Plan; changes: Change[] } {
   if (!prev) throw new PlanError('There is no plan yet. Publish the design with harness_plan_publish first.');
-  if (prev.submission && planPhase(prev) !== 'built') throw new PlanError(LOCKED_FOR_CLAUDE);
+  if (prev.submission && planPhase(prev) === 'built') {
+    // New tasks on a finished build would start a build nobody submitted.
+    throw new PlanError('This plan is built. Start the next one with harness_plan_publish; its tasks are confirmed and submitted afresh.');
+  }
+  if (prev.submission) throw new PlanError(LOCKED_FOR_CLAUDE);
   refuseUnread(prev, 'publish the task list again');
   if (!Array.isArray(input?.tasks) || input.tasks.length === 0) throw new PlanError('The task list needs at least one task.');
 
@@ -593,7 +597,8 @@ function buildTaskTree(
  * Link tasks to the boxes their `builds` names: a node id, or
  * `diagramId/nodeId` when the same id is in several diagrams.
  */
-function linkBuilds(plan: Plan, builds: { id: string; refs: string[] }[], now?: number): void {
+function linkBuilds(plan: Plan, builds: { id: string; refs: string[] }[], now: number): { diagram: Diagram; node: DiagramNode }[] {
+  const linked: { diagram: Diagram; node: DiagramNode }[] = [];
   for (const { id, refs } of builds) {
     const title = plan.tasks.find((t) => t.id === id)?.title ?? id;
     for (const ref of refs) {
@@ -601,9 +606,29 @@ function linkBuilds(plan: Plan, builds: { id: string; refs: string[] }[], now?: 
       const links = node.taskIds ?? [];
       if (links.includes(id)) continue;
       node.taskIds = [...links, id];
-      if (now !== undefined) bumpDiagram(diagram, now);
+      // A canvas holding the old links must reload rather than save over them.
+      bumpDiagram(diagram, now);
+      linked.push({ diagram, node });
     }
   }
+  return linked;
+}
+
+/** A task's `builds` changed which boxes it is linked to: logged per
+ *  diagram, as the canvas logs a link made by hand. */
+function logLinks(
+  linked: { diagram: Diagram; node: DiagramNode }[],
+  task: Task,
+  author: Author,
+  log: (kind: ChangeKind, target: Target, summary: string) => Change,
+): Change[] {
+  const out: Change[] = [];
+  for (const diagram of new Set(linked.map((l) => l.diagram))) {
+    const boxes = linked.filter((l) => l.diagram === diagram).map((l) => `"${l.node.label}"`);
+    diagram.updatedBy = author;
+    out.push(log('edited', ref('diagram', diagram.id), `linked "${task.title}" to ${boxes.join(', ')} in diagram "${diagram.title}"`));
+  }
+  return out;
 }
 
 function findBox(plan: Plan, ref: string, title: string): { diagram: Diagram; node: DiagramNode } {
@@ -923,9 +948,10 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       };
       plan.tasks.push(task);
       placeAmongSiblings(plan, task, op.index);
-      if (op.builds?.length) linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now);
       const where = parentId ? ` under "${requireTask(plan, parentId).title}"` : '';
-      return [log('created', ref('task', task.id), `added task "${title}"${where}`)];
+      const created = log('created', ref('task', task.id), `added task "${title}"${where}`);
+      const linked = op.builds?.length ? linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now) : [];
+      return [created, ...logLinks(linked, task, author, log)];
     }
 
     case 'move_task': {
@@ -1104,9 +1130,8 @@ function editTask(
     task.updatedAt = now;
     out.push(log('edited', ref('task', task.id), `edited the ${edited.join(', ')} of "${task.title}"`));
   }
-  if (op.builds?.length) linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now);
+  if (op.builds?.length) out.push(...logLinks(linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now), task, author, log));
   if (typeof op.index === 'number') placeAmongSiblings(plan, task, op.index);
-  void author;
   return out;
 }
 
@@ -1257,7 +1282,8 @@ function checkDesignLocked(ops: PlanOp[], author: Author): void {
     if (op.op === 'remove') return op.kind !== 'task';
     // The title names the plan; the summary is part of its design.
     if (op.op === 'set_meta') return op.summary !== undefined;
-    if (op.op === 'upsert_diagram') return !op.id;
+    // Moving a diagram is part of how the design reads, like move_diagram.
+    if (op.op === 'upsert_diagram') return !op.id || typeof (raw as { index?: unknown }).index === 'number';
     return !TASKING_OPS.has(op.op ?? '');
   });
   if (!refused) return;
@@ -1333,6 +1359,7 @@ export function confirmDesign(plan: Plan, input: { prompt: string; note?: string
   const note = cleanNote(input.note);
   next.design = {
     at: now,
+    seq: plan.seq,
     ...(note ? { note } : {}),
     prompt: input.prompt,
     ...(input.trimmed ? { trimmed: true } : {}),
@@ -1360,7 +1387,11 @@ export function markDesignDelivered(plan: Plan, now = Date.now()): Plan {
   if (!plan.design || plan.design.deliveredAt || plan.submission) return plan;
   const next = structuredClone(plan);
   next.design!.deliveredAt = now;
-  markReadByClaude(next, now);
+  // The prompt was written when the design was confirmed. Anything the
+  // user changed since — tasks, comments — is not in it, so it stays unread
+  // and Claude is told to read it.
+  const confirmedAt = plan.design.seq ?? plan.seq;
+  if (!unreadByClaude(plan).some((c) => c.seq > confirmedAt)) markReadByClaude(next, now);
   next.version += 1;
   next.updatedAt = now;
   return next;
@@ -1406,6 +1437,7 @@ function validDesign(raw: unknown): DesignSignoff | undefined {
   if (!d || typeof d !== 'object' || typeof d.at !== 'number' || typeof d.prompt !== 'string' || !d.prompt) return undefined;
   return {
     at: d.at,
+    ...(typeof d.seq === 'number' ? { seq: d.seq } : {}),
     ...(typeof d.note === 'string' && d.note ? { note: d.note } : {}),
     prompt: d.prompt,
     ...(d.trimmed === true ? { trimmed: true } : {}),

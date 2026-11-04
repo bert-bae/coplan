@@ -112,7 +112,12 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
   const handed = ctx.store.deliver(sessionId);
   if (handed) {
     const typed = String(input.prompt ?? input.user_input ?? '');
-    return typed.includes(handed.marker) ? HOOK_NOOP : additionalContext('UserPromptSubmit', handed.prompt);
+    // The user can still edit tasks and comment after confirming the design;
+    // those edits are not in the prompt, and Claude is told to read them.
+    const later = ctx.store.get(sessionId)?.plan;
+    const notice = later && ctx.config.promptNotice ? unreadNotice(later) : null;
+    const text = [typed.includes(handed.marker) ? '' : handed.prompt, notice ?? ''].filter(Boolean).join('\n\n');
+    return text ? additionalContext('UserPromptSubmit', text) : HOOK_NOOP;
   }
 
   if (!ctx.config.promptNotice) return HOOK_NOOP;
