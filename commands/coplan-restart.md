@@ -13,6 +13,6 @@ The daemon hands its port and token to its replacement, so any browser tab
 already open on the UI reconnects by itself — say so rather than handing the
 user a new link.
 
-If the user has just changed Coplan's own source, run `npm run build` in
+If the user has just changed Coplan's own source, run `pnpm build` in
 the plugin directory first; the daemon starts from `dist/`, so a restart
 without a build picks up nothing.

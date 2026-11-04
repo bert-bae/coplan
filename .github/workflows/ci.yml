@@ -23,32 +23,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The pnpm version comes from package.json's packageManager field.
+      - uses: pnpm/action-setup@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
+          cache: pnpm
 
       - name: Install
-        run: npm ci --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Typecheck
-        run: npm run typecheck
+        run: pnpm typecheck
 
       - name: Build
-        run: npm run build
-
-      # dist/ is committed so the plugin installs without a build step. A
-      # source change that was not rebuilt would ship stale code silently.
-      - name: Committed dist/ matches the source
-        run: |
-          if ! git diff --quiet -- dist; then
-            echo "::error::dist/ is out of date. Run 'npm run build' and commit the result."
-            git diff --stat -- dist
-            exit 1
-          fi
+        run: pnpm build
 
       - name: Test
-        run: npm test
+        run: pnpm test
 
       - name: The plugin wiring self-test
         env:
@@ -60,4 +53,4 @@ jobs:
           exit $status
 
       - name: Audit dependencies
-        run: npm audit --audit-level=high
+        run: pnpm audit --audit-level high

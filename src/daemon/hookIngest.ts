@@ -2,7 +2,7 @@ import path from 'node:path';
 import type { SessionStore } from './store.ts';
 import type { HarnessConfig } from '../shared/config.ts';
 import { currentBranch, repoRoot } from './git.ts';
-import { BUILD_MARKER, unreadNotice } from './render.ts';
+import { unreadNotice } from './render.ts';
 import { resolveLink, type SessionEnv } from '../shared/link.ts';
 import { DEFAULT_AGENT, agentInfo, type AgentKind } from '../shared/agents.ts';
 import {
@@ -127,21 +127,28 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
   const session = ctx.store.update(sessionId, { status: 'active', waiting: null });
   if (!session) return HOOK_NOOP;
 
-  // The user submitted the plan for this session to build: their message is
-  // what carries it. Not subject to `promptNotice` — submitting was the
+  // The user signed something off for this session — the design, to be
+  // broken into tasks, or the plan, to be built: their message is what
+  // carries the prompt. Not subject to `promptNotice` — signing off was the
   // request to send it. A message that already holds the prompt (they pasted
   // it) is left as it is.
   const typed = String(input.prompt ?? input.user_input ?? '');
   if (!agentInfo(ctx.agent).promptContext) {
     // An agent whose hooks cannot be relied on to add to a prompt (Cursor)
-    // gets the build prompt by the user pasting it, or from its next
+    // gets the prompt by the user pasting it, or from its next
     // harness_plan_read. All this hook can do is notice the paste, so it is
     // not sent twice.
-    if (typed.includes(BUILD_MARKER)) ctx.store.deliver(sessionId);
+    const pending = ctx.store.pending(sessionId);
+    if (pending && typed.includes(pending.marker)) ctx.store.deliver(sessionId);
   } else {
-    const submission = ctx.store.deliver(sessionId);
-    if (submission) {
-      return typed.includes(BUILD_MARKER) ? HOOK_NOOP : additionalContext('UserPromptSubmit', submission.prompt);
+    const handed = ctx.store.deliver(sessionId);
+    if (handed) {
+      // The user can still edit tasks and comment after confirming the design;
+      // those edits are not in the prompt, and the agent is told to read them.
+      const later = ctx.store.get(sessionId)?.plan;
+      const notice = later && ctx.config.promptNotice ? unreadNotice(later) : null;
+      const text = [typed.includes(handed.marker) ? '' : handed.prompt, notice ?? ''].filter(Boolean).join('\n\n');
+      return text ? additionalContext('UserPromptSubmit', text) : HOOK_NOOP;
     }
   }
 

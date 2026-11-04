@@ -5,6 +5,6 @@ node_modules/
 .build/
 .build-previous/
 
-# Build output is committed so the plugin needs no install step, but
-# sourcemaps churn on every build and would dominate the history.
-dist/**/*.map
+# Build output: `pnpm install` (or `pnpm build`) makes it, after cloning
+# and after installing the plugin.
+dist/

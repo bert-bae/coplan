@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { openSync, writeSync, closeSync, unlinkSync, appendFileSync } from 'node:fs';
+import { openSync, writeSync, closeSync, unlinkSync, appendFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -10,19 +10,28 @@ import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from '
 import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
-import { MAX_NOTE, PlanError, cleanNote, planPhase, unreadAreas, validTarget } from '../shared/plan.ts';
-import { PROMPT_BUDGET, buildPrompt, renderPlan } from './render.ts';
+import { MAX_NOTE, PlanError, cleanChecks, cleanNote, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
+import { PROMPT_BUDGET, buildPrompt, designPrompt, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
+import { renderBrief, renderNext } from './brief.ts';
+import { cleanSettings, effectiveReview, readyTasks, waitingOn } from '../shared/build.ts';
+import { HOOK_STAGES, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
 import { cleanStorage, scanStorage } from './housekeeping.ts';
 import { loadConfig, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
-import type { CleanupGroupId, DaemonLock, PlanInput, PlanOp, ServerEvent, SessionState, TaskStatus } from '../shared/types.ts';
+import type { BuildSettings, CleanupGroupId, DaemonLock, PlanInput, PlanOp, ServerEvent, SessionState, TaskListInput, TaskStatus } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
 
 const UI_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'ui');
+/** The coplan CLI beside this build, for `coplan check` in what Claude is
+ *  told. Absent from a bundle run outside the plugin. */
+const COPLAN_BIN = (() => {
+  const bin = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'coplan');
+  return existsSync(bin) ? bin : undefined;
+})();
 
 /** Session names the user types. */
 const MAX_TITLE_LENGTH = 120;
@@ -347,6 +356,23 @@ function buildRouter(deps: Deps): Router {
     return resolved;
   };
 
+  /** The repository's `.coplan/config.json`. Read on every use: it is one
+   *  small file, and an edit to it should count at once. */
+  const projectFor = (session: SessionState): ProjectConfig => loadProjectConfig(session.repoRoot ?? session.cwd);
+
+  /** Settings as the page sent them, over the repository's defaults. */
+  const settingsFrom = (raw: unknown, project: ProjectConfig): BuildSettings =>
+    raw && typeof raw === 'object' ? cleanSettings(raw, project.settings) : project.settings;
+
+  /** What the review dialogs show beside the prompt: the defaults and the
+   *  checks this repository has, so the user sees what the build will run. */
+  const projectSummary = (project: ProjectConfig) => ({
+    file: project.file,
+    defaults: project.settings,
+    checks: Object.fromEntries(HOOK_STAGES.map((stage) => [stage, project.hooks[stage].map((h) => h.name)])),
+    errors: project.errors,
+  });
+
   const residentIds = (): string[] => store.all().map((s) => s.sessionId);
 
   const sessionOr404 = (ctx: Ctx): SessionState | null => {
@@ -361,7 +387,7 @@ function buildRouter(deps: Deps): Router {
     if (ctx.url.searchParams.get('token') === token) {
       ctx.res.setHeader('set-cookie', `cc_harness=${token}; Path=/; SameSite=Strict; HttpOnly`);
     }
-    if (!serveStatic(ctx.res, UI_DIR, 'index.html')) text(ctx.res, 500, 'UI bundle missing — run npm run build');
+    if (!serveStatic(ctx.res, UI_DIR, 'index.html')) text(ctx.res, 500, 'UI bundle missing — run pnpm build');
   });
 
   /* --------------------------- Sessions ---------------------------- */
@@ -435,15 +461,77 @@ function buildRouter(deps: Deps): Router {
   router.post('/api/session/:id/plan/prompt', async (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
-    const body = await readJson<{ note?: unknown; target?: unknown }>(ctx.req);
+    const body = await readJson<{ note?: unknown; target?: unknown; settings?: unknown }>(ctx.req);
     if (!session.plan) {
       json(ctx.res, 404, { error: 'no plan yet' });
       return;
     }
     const target = validTarget(body.target) ?? 'session';
     const note = cleanNote(body.note);
-    const { prompt, trimmed } = buildPrompt(session.plan, { target, agent: session.agent, ...(note ? { note } : {}) });
-    json(ctx.res, 200, { prompt, trimmed, version: session.plan.version, budget: PROMPT_BUDGET, maxNote: MAX_NOTE });
+    const project = projectFor(session);
+    const settings = settingsFrom(body.settings, project);
+    const { prompt, trimmed } = buildPrompt(session.plan, { target, agent: session.agent, settings, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
+    json(ctx.res, 200, {
+      prompt,
+      trimmed,
+      version: session.plan.version,
+      budget: PROMPT_BUDGET,
+      maxNote: MAX_NOTE,
+      settings,
+      project: projectSummary(project),
+    });
+  });
+
+  /** The prompt the agent would be given if the design were confirmed now. */
+  router.post('/api/session/:id/plan/design/prompt', async (ctx) => {
+    const session = sessionOr404(ctx);
+    if (!session) return;
+    const body = await readJson<{ note?: unknown }>(ctx.req);
+    if (!session.plan) {
+      json(ctx.res, 404, { error: 'no plan yet' });
+      return;
+    }
+    const note = cleanNote(body.note);
+    const project = projectFor(session);
+    const { prompt, trimmed } = designPrompt(session.plan, { agent: session.agent, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
+    json(ctx.res, 200, { prompt, trimmed, version: session.plan.version, budget: PROMPT_BUDGET, maxNote: MAX_NOTE, project: projectSummary(project) });
+  });
+
+  /**
+   * The user confirms the design. It is locked from here, and the agent gets
+   * the ask for a task list with their next message in its chat (or, in
+   * Cursor, when they paste it or its next harness_plan_read).
+   */
+  router.post('/api/session/:id/plan/design/confirm', async (ctx) => {
+    const session = sessionOr404(ctx);
+    if (!session) return;
+    const body = await readJson<{ note?: unknown; expect?: unknown }>(ctx.req);
+    const note = cleanNote(body.note);
+    try {
+      const plan = store.confirmDesign(session.sessionId, {
+        project: projectFor(session),
+        ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
+        ...(note ? { note } : {}),
+        ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
+      });
+      log(`design confirmed for ${session.sessionId}`);
+      json(ctx.res, 200, { plan: forBrowser(plan) });
+    } catch (err) {
+      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
+      else throw err;
+    }
+  });
+
+  /** Unlock a confirmed design. */
+  router.post('/api/session/:id/plan/design/reopen', (ctx) => {
+    const session = sessionOr404(ctx);
+    if (!session) return;
+    try {
+      json(ctx.res, 200, { plan: forBrowser(store.reopenDesign(session.sessionId)) });
+    } catch (err) {
+      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
+      else throw err;
+    }
   });
 
   /**
@@ -454,13 +542,17 @@ function buildRouter(deps: Deps): Router {
   router.post('/api/session/:id/plan/submit', async (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
-    const body = await readJson<{ note?: unknown; target?: unknown; expect?: unknown }>(ctx.req);
+    const body = await readJson<{ note?: unknown; target?: unknown; expect?: unknown; settings?: unknown }>(ctx.req);
     const target = validTarget(body.target);
     if (!target) throw new HttpError(400, 'Say who builds it: "session" or "elsewhere".');
     const note = cleanNote(body.note);
+    const project = projectFor(session);
     try {
       const plan = store.submit(session.sessionId, {
         target,
+        project,
+        settings: settingsFrom(body.settings, project),
+        ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
         ...(note ? { note } : {}),
         ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
       });
@@ -642,6 +734,105 @@ function buildRouter(deps: Deps): Router {
     return session;
   };
 
+  /**
+   * `harness_task_update`: a status, a step of the iric cycle, the checks
+   * run — answered with what it means for the build. Two moves are refused,
+   * because the board would then say something untrue: starting a task that
+   * still waits on another, and finishing one whose checks last failed.
+   */
+  const updateTask = (session: SessionState, body: Record<string, unknown>): string => {
+    const before = session.plan;
+    const taskId = String(body['task_id'] ?? '');
+    if (!before) throw new PlanError(`No task "${taskId}": there is no plan yet. Publish one with harness_plan_publish.`);
+    const task = before.tasks.find((t) => t.id === taskId);
+    if (!task) throw new PlanError(`No task "${taskId}".`);
+    const status = typeof body['status'] === 'string' && body['status'] ? (body['status'] as TaskStatus) : undefined;
+    const stage = typeof body['stage'] === 'string' && body['stage'] ? body['stage'] : undefined;
+    if (stage !== undefined && !validStage(stage)) throw new PlanError(`"${stage}" is not a stage: implement, review or refine.`);
+    // Every check reported must be whole: a malformed one dropped quietly
+    // would erase the failure it was meant to report.
+    const rawChecks = body['checks'];
+    const cleaned = rawChecks === undefined ? undefined : cleanChecks(rawChecks);
+    if (rawChecks !== undefined && (!cleaned || cleaned.length !== Math.min((rawChecks as unknown[]).length, 40))) {
+      throw new PlanError('`checks` is a list of {name, ok, note?}, with `ok` true or false.');
+    }
+    const checks = cleaned?.length ? cleaned : undefined;
+    const note = typeof body['note'] === 'string' ? body['note'] : undefined;
+    if (!status && !stage && !checks && note === undefined) throw new PlanError('Say what changed: a status, a stage, checks or a note.');
+    const project = projectFor(session);
+
+    // Starting includes resuming a task that was blocked before it began.
+    const idle = task.status === 'todo' || task.status === 'blocked';
+    const starting = idle && (status === 'in_progress' || (stage !== undefined && status !== 'done' && status !== 'blocked'));
+    const waits = waitingOn(before, task);
+    if (starting && waits.length) {
+      throw new PlanError(
+        `"${task.title}" cannot start yet: it waits on ${waits.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ')}. ` +
+          'Start a task that is ready instead — harness_task_next lists them. If the dependency is wrong, change it with ' +
+          'harness_plan_edit {op: "upsert_task", id, dependsOn: [...]} and tell the user why.',
+      );
+    }
+
+    if (status === 'done') {
+      const optional = new Set(HOOK_STAGES.flatMap((st) => project.hooks[st].filter((h) => h.optional).map((h) => h.name)));
+      const failing = (checks ?? task.checks ?? []).filter((c) => !c.ok && !optional.has(c.name));
+      if (failing.length) {
+        throw new PlanError(
+          `"${task.title}" is not done: its last checks failed (${failing.map((c) => `${c.name}${c.note ? `: ${c.note}` : ''}`).join('; ')}). ` +
+            'Refine it until they pass and report them again with `checks`. If a failure has nothing to do with this task, ' +
+            'mark it blocked with a note saying so and ask the user.',
+        );
+      }
+    }
+
+    const readyBefore = new Set(readyTasks(before).map((t) => t.id));
+    const { plan, changes } = store.applyOps(
+      session.sessionId,
+      [
+        {
+          op: 'upsert_task',
+          id: taskId,
+          ...(status ? { status } : {}),
+          ...(stage ? { stage: stage as NonNullable<ReturnType<typeof validStage>> } : {}),
+          ...(checks ? { checks } : {}),
+          ...(note !== undefined ? { note } : {}),
+        },
+      ],
+      'claude',
+    );
+    const now = plan.tasks.find((t) => t.id === taskId)!;
+    const settings = plan.submission?.settings ?? project.settings;
+    const out: string[] = [];
+    const state = now.status === 'in_progress' && now.stage ? stageWords(now) : now.status.replace('_', ' ');
+    out.push(`[cc-harness] "${now.title}" is ${state}.${changes.length ? '' : ' (It already was.)'}`);
+    if (checks?.length) {
+      const failed = checks.filter((c) => !c.ok);
+      out.push(failed.length ? `Checks: ${failed.length} failed (${failed.map((c) => c.name).join(', ')}) — refine before review passes.` : `Checks: all ${checks.length} passed.`);
+    }
+    if (now.stage === 'review' && stage === 'review') {
+      if ((now.round ?? 0) > settings.maxRounds) {
+        out.push(`This is review round ${now.round}, past the ${settings.maxRounds} the user allowed: if it does not pass, stop and ask the user.`);
+      }
+      if (effectiveReview(plan, now, settings.review) === 'user') {
+        out.push(`This task's review is the user's: show them the change and ask with ${agentInfo(session.agent).askWith} before marking it done.`);
+      }
+    }
+    if (status === 'done' && changes.length) {
+      if (planPhase(plan) === 'built') {
+        out.push('That was the last task: the plan is built, and the board shows it done. Finish the build — harness_task_next says how.');
+      } else {
+        const fresh = readyTasks(plan).filter((t) => !readyBefore.has(t.id));
+        if (fresh.length) out.push(`Now ready: ${fresh.map((t) => `${t.id} "${t.title}"`).join(', ')}.`);
+        const ready = readyTasks(plan);
+        if (!fresh.length && ready.length) out.push(`Ready to start: ${ready.slice(0, 6).map((t) => t.id).join(', ')}${ready.length > 6 ? ', …' : ''}.`);
+        if (!ready.length) out.push('Nothing else is ready yet — harness_task_next says what the rest wait on.');
+      }
+    }
+    const areas = unreadAreas(plan);
+    if (areas.length) out.push(`The user has changed ${areas.join(', ')} since you last read the plan — call harness_plan_read.`);
+    return out.join(' ');
+  };
+
   router.post('/mcp/:tool', async (ctx) => {
     const body = await readJson<Record<string, unknown>>(ctx.req);
     const session = resolveSession(ctx, body as { sessionId?: string; cwd?: string; pid?: number });
@@ -678,13 +869,18 @@ function buildRouter(deps: Deps): Router {
             reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
             return;
           }
-          // Where no hook can hand the build prompt over with the user's next
-          // message (Cursor), the first read after submitting carries it.
+          // Where no hook can hand a prompt over with the user's next message
+          // (Cursor), the first read after signing off carries it: the ask
+          // for a task list once the design is confirmed, the build prompt
+          // once the plan is submitted. Delivering it counts as the read —
+          // except for edits made after the design was confirmed, which are
+          // not in its prompt and stay unread.
           if (!agentInfo(session.agent).promptContext) {
-            const submission = store.deliver(id);
-            if (submission) {
-              store.markRead(id);
-              reply(true, submission.prompt);
+            const handed = store.deliver(id);
+            if (handed) {
+              const later = store.get(id)?.plan;
+              const notice = later ? unreadNotice(later) : null;
+              reply(true, notice ? `${handed.prompt}\n\n${notice}` : handed.prompt);
               return;
             }
           }
@@ -708,26 +904,46 @@ function buildRouter(deps: Deps): Router {
           return;
         }
 
-        case 'task': {
-          const taskId = String(body['task_id'] ?? '');
-          const status = String(body['status'] ?? '') as TaskStatus;
-          const note = typeof body['note'] === 'string' ? body['note'] : undefined;
-          const { plan, changes } = store.applyOps(
-            id,
-            [{ op: 'upsert_task', id: taskId, status, ...(note !== undefined ? { note } : {}) }],
-            'claude',
-          );
-          const task = plan.tasks.find((t) => t.id === taskId);
-          const areas = unreadAreas(plan);
-          // Finishing the last task of a submitted plan finishes the build.
-          const built = changes.length > 0 && status === 'done' && planPhase(plan) === 'built';
+        case 'tasks': {
+          const { plan } = store.publishTasks(id, { tasks: body['tasks'] } as unknown as TaskListInput);
+          revealUi(session);
+          const phase = planPhase(plan);
           reply(
             true,
-            `[cc-harness] ${task ? `"${task.title}" is ${status.replace('_', ' ')}` : 'Updated'}.` +
-              (changes.length ? '' : ' (It already was.)') +
-              (built ? ' That was the last task: the plan is built, and the board shows it done.' : '') +
-              (areas.length ? ` The user has changed ${areas.join(', ')} since you last read the plan — call harness_plan_read.` : ''),
+            `[cc-harness] Published the task list for "${plan.title}". The user reviews it at ${url}\n` +
+              (phase === 'tasking'
+                ? 'Tell them in chat that the task list is ready to review, and ask anything you need decided with ' +
+                  `${agentInfo(session.agent).askWith}. Do not start building: they submit the plan from Coplan when the tasks are right, ` +
+                  (agentInfo(session.agent).promptContext
+                    ? 'and the build prompt comes with their next message.\n\n'
+                    : 'and paste the build prompt here (or ask you to build, and harness_plan_read hands it to you).\n\n')
+                : 'Tell them in chat that the tasks are updated.\n\n') +
+              renderTaskList(plan, projectFor(session).branches.base),
           );
+          return;
+        }
+
+        case 'next': {
+          if (!session.plan) {
+            reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
+            return;
+          }
+          reply(true, renderNext(session.plan, { agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) }));
+          return;
+        }
+
+        case 'brief': {
+          const plan = session.plan;
+          if (!plan) throw new PlanError('No plan yet. Publish one with harness_plan_publish.');
+          const taskId = String(body['task_id'] ?? '');
+          const task = plan.tasks.find((t) => t.id === taskId);
+          if (!task) throw new PlanError(`No task "${taskId}". harness_task_next lists the tasks that are ready.`);
+          reply(true, renderBrief(plan, task, { agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) }));
+          return;
+        }
+
+        case 'task': {
+          reply(true, updateTask(session, body));
           return;
         }
 

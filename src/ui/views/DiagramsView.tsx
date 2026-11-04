@@ -6,7 +6,7 @@ import { ThreadPanel } from '../components/Threads.tsx';
 import { DiagramEditor, KIND_GLYPH, KIND_LABEL, type GraphPatch } from '../components/FlowCanvas.tsx';
 import { EmptyState } from '../components/primitives.tsx';
 import { SubmitControl } from '../components/Submit.tsx';
-import { isLocked } from '../../shared/plan.ts';
+import { isDesignLocked, isLocked } from '../../shared/plan.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { diagramToMarkdown } from '../../shared/architecture.ts';
 import { NODE_KINDS, type Diagram, type DiagramEdgeInput, type DiagramNodeInput, type Plan } from '../../shared/types.ts';
@@ -56,9 +56,11 @@ export function DiagramsView() {
   const sessionId = useStore((s) => s.sessionId);
   if (!plan) return null;
   const diagram = plan.diagrams.find((d) => d.id === chosen) ?? plan.diagrams[0] ?? null;
-  // Submitted: the design is final, and the canvas only shows it — boxes
-  // still fill up as the tasks that build them get done.
-  const locked = isLocked(plan);
+  // Confirmed or submitted: the design is settled, and the canvas only shows
+  // it — boxes still fill up as the tasks that build them get done. While
+  // the task list is being shaped, boxes can still be linked to tasks.
+  const locked = isDesignLocked(plan);
+  const tasking = locked && !isLocked(plan);
 
   return (
     <div className="arch">
@@ -79,7 +81,9 @@ export function DiagramsView() {
         </nav>
         {!locked && <NewDiagram />}
         <span className="spacer" />
-        {locked ? (
+        {tasking ? (
+          <p className="toolbar-hint">The design is confirmed · select a box to link the tasks that build it</p>
+        ) : locked ? (
           <p className="toolbar-hint">Hover a box to see its connections · each box fills up as the tasks that build it get done</p>
         ) : (
           <p className="toolbar-hint">
@@ -99,6 +103,15 @@ export function DiagramsView() {
           diagram={diagram}
           plan={plan}
           readOnly={locked}
+          {...(tasking
+            ? {
+                lockNote: 'The design is confirmed; reopen it to change the design. Task links can still change.',
+                onLinkTasks: (nodeId: string, taskIds: string[]) => {
+                  const nodes = diagram.nodes.map((n) => (n.id === nodeId ? { ...n, taskIds } : n));
+                  void store.commit([{ op: 'upsert_diagram', id: diagram.id, nodes }], sessionId);
+                },
+              }
+            : {})}
           onSave={async (patch: GraphPatch) => {
             const plan = await store.commit([{ op: 'upsert_diagram', id: diagram.id, ...patch }], sessionId);
             return plan?.diagrams.find((d) => d.id === diagram.id)?.rev ?? null;
@@ -192,9 +205,11 @@ function DiagramPanel({ plan, diagram, locked }: { plan: Plan; diagram: Diagram;
       )}
       <p className="panel-hint">
         {diagram.nodes.length} boxes, {diagram.edges.length} arrows{linked ? `, ${linked} tracking tasks` : ''}.{' '}
-        {locked
+        {isLocked(plan)
           ? 'The plan is submitted, so this is the final design. Select a box to read its details and how far the tasks that build it have got.'
-          : 'Select a box to edit its details, decisions and the tasks that build it.'}
+          : locked
+            ? 'The design is confirmed. Select a box to read it and link the tasks that build it.'
+            : 'Select a box to edit its details, decisions and the tasks that build it.'}
       </p>
       <div className="row-actions">
         <button
@@ -223,8 +238,8 @@ function DiagramPanel({ plan, diagram, locked }: { plan: Plan; diagram: Diagram;
         ))}
       </ul>
       {/* Locked, comments are read, not written: show them only if there are any. */}
-      {(!locked || plan.threads.some((t) => t.target.kind === 'diagram' && t.target.id === diagram.id)) && (
-        <fieldset className="lockable" disabled={locked}>
+      {(!isLocked(plan) || plan.threads.some((t) => t.target.kind === 'diagram' && t.target.id === diagram.id)) && (
+        <fieldset className="lockable" disabled={isLocked(plan)}>
           <div className="field">
             <span className="field-label">Comments</span>
             <ThreadPanel target={{ kind: 'diagram', id: diagram.id }} label={diagram.title} />

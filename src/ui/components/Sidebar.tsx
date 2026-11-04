@@ -12,8 +12,9 @@ const SESSION_STATE_LABEL: Record<string, string> = {
   ended: 'ended',
 };
 
-/** A submitted plan says how far its build has got. */
+/** A plan past its design says how far it has got. */
 const PHASE_PILL: Record<Exclude<PlanPhase, 'planning'>, string> = {
+  tasking: 'design confirmed',
   submitted: 'submitted',
   building: 'building',
   built: 'built',
@@ -21,6 +22,8 @@ const PHASE_PILL: Record<Exclude<PlanPhase, 'planning'>, string> = {
 };
 function phaseTitle(phase: Exclude<PlanPhase, 'planning'>, agent: string): string {
   switch (phase) {
+    case 'tasking':
+      return 'Design confirmed: the task list is being made and shaped';
     case 'submitted':
       return `Submitted: waiting for ${agent} to pick it up`;
     case 'building':

@@ -91,6 +91,9 @@ const PLAN = {
 };
 
 async function submit(id: string): Promise<void> {
+  // The design is confirmed before the plan is submitted.
+  const confirmed = await call<{ error?: string }>(`/api/session/${id}/plan/design/confirm`, { method: 'POST', body: '{}' });
+  assert.equal(confirmed.error, undefined);
   const preview = await call<{ version: number }>(`/api/session/${id}/plan/prompt`, {
     method: 'POST',
     body: JSON.stringify({ target: 'session' }),
@@ -202,6 +205,32 @@ test('pasting the build prompt into Cursor counts as delivering it', async () =>
   await submit(id);
   await hook('cursor', 'beforeSubmitPrompt', { ...base, hook_event_name: 'beforeSubmitPrompt', prompt: `${BUILD_MARKER} "Add a cache" …` });
   assert.ok((await session(id)).plan?.submission?.deliveredAt);
+});
+
+test('in Cursor the design prompt is picked up by the next read, and a paste counts as delivering it', async () => {
+  for (const pasted of [false, true]) {
+    const id = `cursor-design-${pasted ? 'paste' : 'read'}`;
+    const base = { ...cursorBase, conversation_id: id, workspace_roots: [repo] };
+    await hook('cursor', 'sessionStart', { ...base, hook_event_name: 'sessionStart' });
+    await mcp('cursor', 'publish', PLAN, id);
+    const confirmed = await call<{ plan?: { design?: { prompt: string } } }>(`/api/session/${id}/plan/design/confirm`, { method: 'POST', body: '{}' });
+    const prompt = confirmed.plan!.design!.prompt;
+    assert.match(prompt, /^\[cc-harness\] The design is confirmed/);
+    assert.match(prompt, /ask what you need decided with AskQuestion or plainly/, "Cursor's own question tool");
+
+    // An ordinary message cannot carry it.
+    await hook('cursor', 'beforeSubmitPrompt', { ...base, hook_event_name: 'beforeSubmitPrompt', prompt: 'go' });
+    assert.equal((await session(id)).plan?.design?.deliveredAt, null);
+
+    if (pasted) {
+      await hook('cursor', 'beforeSubmitPrompt', { ...base, hook_event_name: 'beforeSubmitPrompt', prompt });
+    } else {
+      const read = await mcp('cursor', 'read', {}, id);
+      assert.equal(read.text, prompt, 'the first read after confirming is the design prompt');
+      assert.ok(!(await mcp('cursor', 'read', {}, id)).text.startsWith('[cc-harness] The design'), 'only once');
+    }
+    assert.ok((await session(id)).plan?.design?.deliveredAt, pasted ? 'a paste delivers it' : 'the read delivered it');
+  }
 });
 
 test('an unknown Cursor event is answered with nothing, never an error', async () => {

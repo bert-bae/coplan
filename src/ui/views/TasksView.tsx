@@ -8,8 +8,10 @@ import { ProgressBar, STATUS_GLYPH, STATUS_LABEL } from '../components/Progress.
 import { EmptyState } from '../components/primitives.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { classNames } from '../lib/format.ts';
+import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
 import { childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
-import { TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type Task, type TaskStatus } from '../../shared/types.ts';
+import { ancestorsOf, branchPlan, buildSteps, effectiveBranch, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
+import { REVIEW_MODES, TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type ReviewMode, type Task, type TaskStatus } from '../../shared/types.ts';
 
 /** Clicking the status dot steps through the common path; blocked is set
  *  from the detail panel or the board, where it can carry a reason. */
@@ -65,10 +67,18 @@ export function TasksView() {
             </span>
           </span>
         </div>
-        {plan.tasks.length === 0 ? <EmptyState title="No tasks" hint="This plan was submitted without a task breakdown." /> : <Board key={sessionId} plan={plan} readOnly />}
+        {plan.tasks.length === 0 ? (
+          <EmptyState title="No tasks" hint="This plan was submitted without a task breakdown." />
+        ) : (
+          <>
+            <Board key={sessionId} plan={plan} readOnly />
+            <BuildOrder plan={plan} collapsible />
+          </>
+        )}
       </div>
     );
   }
+  const tasking = planPhase(plan) === 'tasking';
 
   return (
     <div className="view-pad">
@@ -94,6 +104,7 @@ export function TasksView() {
             {counts.done}/{counts.total} done
           </span>
         </span>
+        {tasking && <SubmitControl />}
       </div>
 
       {plan.tasks.length === 0 ? (
@@ -102,11 +113,125 @@ export function TasksView() {
           <AddField placeholder="Add a task…" label="New task" onAdd={(title) => store.op({ op: 'upsert_task', title })} />
         </>
       ) : mode === 'outline' ? (
-        <Outline plan={plan} hideDone={hideDone} />
+        <>
+          <Outline plan={plan} hideDone={hideDone} />
+          <BuildOrder plan={plan} />
+        </>
       ) : (
         <Board plan={plan} />
       )}
     </div>
+  );
+}
+
+/**
+ * The order the build will take: steps of tasks that can be built side by
+ * side, and the branches the work lands on. Shown once tasks say what they
+ * wait on or where they land.
+ */
+function BuildOrder({ plan, collapsible = false }: { plan: Plan; collapsible?: boolean }) {
+  const { branches, unbranched } = branchPlan(plan);
+  if (!hasDependencies(plan) && branches.length === 0) return null;
+  const steps = buildSteps(plan);
+  const numbers = new Map(outline(plan).map((r) => [r.task.id, r.number]));
+  const chip = (t: Task) => (
+    <button
+      key={t.id}
+      type="button"
+      className={classNames('chip', 'order-chip', `is-${readinessOf(plan, t)}`)}
+      title={`${t.title} — ${STATUS_LABEL[t.status].toLowerCase()}`}
+      onClick={() => store.focus('task', t.id)}
+    >
+      <span className="task-num">{numbers.get(t.id)}</span> {t.title}
+    </button>
+  );
+  const body = (
+    <>
+      {hasDependencies(plan) && (
+        <ol className="order-steps" aria-label="Build steps">
+          {steps.map((step, i) => (
+            <li key={i}>
+              <span className="order-step">Step {i + 1}</span>
+              <span className="order-tasks">{step.map(chip)}</span>
+            </li>
+          ))}
+        </ol>
+      )}
+      {branches.length > 0 && (
+        <ul className="order-branches" aria-label="Branches">
+          {branches.map((b) => (
+            <li key={b.branch}>
+              <code className="head-branch">{b.branch}</code>
+              <span className="muted">
+                {b.needs.length > 1 ? ` needs ${b.needs.join(' and ')}` : b.base ? ` stacked on ${b.base}` : ' from the base branch'}
+              </span>
+              <span className="order-tasks">{b.tasks.map(chip)}</span>
+            </li>
+          ))}
+          {unbranched.length > 0 && (
+            <li>
+              <span className="muted">current branch</span>
+              <span className="order-tasks">{unbranched.map(chip)}</span>
+            </li>
+          )}
+        </ul>
+      )}
+    </>
+  );
+  const hint = 'Tasks in the same step wait on nothing in it, so they can be built side by side.';
+  if (collapsible) {
+    return (
+      <details className="build-order">
+        <summary className="field-label">Build order and branches</summary>
+        <p className="muted order-hint">{hint}</p>
+        {body}
+      </details>
+    );
+  }
+  return (
+    <section className="build-order" aria-label="Build order">
+      <h2 className="field-label">Build order{branches.length ? ' and branches' : ''}</h2>
+      <p className="muted order-hint">{hint}</p>
+      {body}
+    </section>
+  );
+}
+
+/** Where a task stands for the build, as a chip: ready, or what it waits on. */
+function ReadinessChip({ plan, task }: { plan: Plan; task: Task }) {
+  const state = readinessOf(plan, task);
+  if (state === 'ready') return <span className="chip is-ready" title="Nothing it depends on is left: it can start">ready</span>;
+  if (state !== 'waiting') return null;
+  const numbers = new Map(outline(plan).map((r) => [r.task.id, r.number]));
+  const on = waitingOn(plan, task);
+  return (
+    <span className="chip is-waiting" title={`Waits on ${on.map((t) => t.title).join(', ')}`}>
+      waits on {on.map((t) => numbers.get(t.id) ?? t.id).join(', ')}
+    </span>
+  );
+}
+
+/** A task in progress: where it is in implement → review → refine, and its
+ *  last checks. */
+function IricBadges({ task }: { task: Task }) {
+  const checks = task.checks ?? [];
+  const failed = checks.filter((c) => !c.ok);
+  return (
+    <>
+      {task.status === 'in_progress' && task.stage && (
+        <span className={classNames('chip', 'stage-chip', `is-${task.stage}`)} title="Where it is in its implement → review → refine cycle">
+          {task.stage === 'implement' ? 'implementing' : task.stage === 'review' ? `in review${task.round ? ` · round ${task.round}` : ''}` : 'refining'}
+        </span>
+      )}
+      {checks.length > 0 && task.status !== 'todo' && (
+        <span
+          className={classNames('chip', failed.length ? 'is-check-fail' : 'is-check-ok')}
+          title={checks.map((c) => `${c.ok ? '✓' : '✗'} ${c.name}${c.note ? ` — ${c.note}` : ''}`).join('\n')}
+        >
+          {failed.length ? `✗ ${failed.map((c) => c.name).join(', ')}` : `✓ ${checks.length} check${checks.length === 1 ? '' : 's'}`}
+        </span>
+      )}
+    </>
   );
 }
 
@@ -132,6 +257,8 @@ function Outline({ plan, hideDone }: { plan: Plan; hideDone: boolean }) {
     return map;
   }, [plan.diagrams]);
 
+  const numbers = useMemo(() => new Map(outline(plan).map((r) => [r.task.id, r.number])), [plan]);
+  const tracking = planPhase(plan) !== 'planning';
   const rows = useMemo(() => {
     const hidden = new Set<string>();
     for (const id of collapsed) for (const d of descendants(plan, id)) hidden.add(d.id);
@@ -205,6 +332,8 @@ function Outline({ plan, hideDone }: { plan: Plan; hideDone: boolean }) {
             onAddSubtask={() => setAddingUnder(task.id)}
             onCloseAdd={() => setAddingUnder(null)}
             parts={partsByTask.get(task.id) ?? NO_PARTS}
+            numbers={numbers}
+            tracking={tracking}
           />
         ))}
       </div>
@@ -236,6 +365,10 @@ function TaskRow(props: {
   onCloseAdd: () => void;
   /** The parts of the architecture this task builds. */
   parts: Part[];
+  /** Outline numbers by task id, to name dependencies the way rows do. */
+  numbers: Map<string, string>;
+  /** The design is confirmed: say which tasks are ready. */
+  tracking: boolean;
 }) {
   const { plan, task, depth, number, expanded } = props;
   const collapsed = useStore((s) => s.collapsedTasks.includes(task.id));
@@ -331,6 +464,18 @@ function TaskRow(props: {
             </span>
           )}
           {task.files?.length ? <span className="chip" title={task.files.join('\n')}>{task.files.length} file{task.files.length === 1 ? '' : 's'}</span> : null}
+          {task.dependsOn?.length ? (
+            <span className="chip is-dep" title={`Starts after ${task.dependsOn.map((id) => plan.tasks.find((t) => t.id === id)?.title ?? id).join(', ')}`}>
+              after {task.dependsOn.map((id) => props.numbers.get(id) ?? id).join(', ')}
+            </span>
+          ) : null}
+          {task.branch && (
+            <span className="chip is-branch" title={`Lands on the branch ${task.branch}`}>
+              <span aria-hidden="true">⎇</span> {task.branch}
+            </span>
+          )}
+          {task.review && <span className="chip" title="How this task is reviewed">review: {REVIEW_LABEL[task.review].toLowerCase()}</span>}
+          {props.tracking && !kids.length && <ReadinessChip plan={plan} task={task} />}
           {parts.map(({ d, n }) => (
             <button
               key={`${d.id}:${n.id}`}
@@ -427,6 +572,27 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
         <span className="field-label">Files</span>
         <FilesField task={task} />
       </div>
+      <div className="field-col">
+        <span className="field-label">Starts after</span>
+        <DependsField plan={plan} task={task} />
+      </div>
+      <div className="field-row">
+        <span className="field-label">Branch</span>
+        <InlineText
+          className="task-branch mono"
+          value={task.branch ?? ''}
+          placeholder={(() => {
+            const inherited = task.parentId ? effectiveBranch(plan, plan.tasks.find((t) => t.id === task.parentId)!) : null;
+            return inherited ? `${inherited} (from its parent)` : 'the current branch';
+          })()}
+          label="Branch"
+          onSave={(branch) => store.op({ op: 'upsert_task', id: task.id, branch })}
+        />
+      </div>
+      <div className="field-row">
+        <span className="field-label">Review</span>
+        <ReviewPicker task={task} />
+      </div>
       <div className="task-detail-foot">
         <span className="muted">
           {task.id} · {task.createdBy === 'user' ? 'added by you' : `added by ${agent.name}`}
@@ -448,6 +614,77 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/** What a task waits on: chips to remove, a list to add from. A task can
+ *  wait on anything but itself, its own parents and its own subtasks. */
+function DependsField({ plan, task }: { plan: Plan; task: Task }) {
+  const deps = task.dependsOn ?? [];
+  const excluded = new Set([task.id, ...deps, ...ancestorsOf(plan, task).map((t) => t.id), ...descendants(plan, task.id).map((t) => t.id)]);
+  const rows = outline(plan);
+  const numbers = new Map(rows.map((r) => [r.task.id, r.number]));
+  const set = (dependsOn: string[]) => void store.op({ op: 'upsert_task', id: task.id, dependsOn });
+  const inherited = ancestorsOf(plan, task).flatMap((a) => (a.dependsOn ?? []).map((id) => ({ via: a, id })));
+  return (
+    <div className="depends">
+      {deps.length ? (
+        <ul className="depends-list">
+          {deps.map((id) => {
+            const dep = plan.tasks.find((t) => t.id === id);
+            return (
+              <li key={id} className="chip is-dep">
+                <button type="button" className="link" onClick={() => store.focus('task', id)}>
+                  {numbers.get(id)} {dep?.title ?? id}
+                </button>
+                <button type="button" className="icon-btn is-tiny" aria-label={`Stop waiting on ${dep?.title ?? id}`} title="Remove" onClick={() => set(deps.filter((d) => d !== id))}>
+                  ×
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <span className="muted">{inherited.length ? '' : 'Nothing — it can start whenever the build reaches it.'}</span>
+      )}
+      {inherited.length > 0 && (
+        <span className="muted depends-inherited">
+          Also waits on {inherited.map(({ id }) => numbers.get(id) ?? id).join(', ')} through {[...new Set(inherited.map(({ via }) => `"${via.title}"`))].join(', ')}.
+        </span>
+      )}
+      <select className="input" aria-label={`Add a task ${task.title} waits on`} value="" onChange={(e) => e.target.value && set([...deps, e.target.value])}>
+        <option value="">Wait on another task…</option>
+        {rows
+          .filter((r) => !excluded.has(r.task.id))
+          .map(({ task: t, number, depth }) => (
+            <option key={t.id} value={t.id}>
+              {' '.repeat(depth * 3)}
+              {number} {t.title}
+            </option>
+          ))}
+      </select>
+    </div>
+  );
+}
+
+function ReviewPicker({ task }: { task: Task }) {
+  const options: (ReviewMode | '')[] = ['', ...REVIEW_MODES];
+  return (
+    <div className="segmented is-small" role="radiogroup" aria-label={`How ${task.title} is reviewed`}>
+      {options.map((mode) => (
+        <button
+          key={mode || 'default'}
+          type="button"
+          role="radio"
+          aria-checked={(task.review ?? '') === mode}
+          className={classNames('seg', (task.review ?? '') === mode && 'is-active')}
+          title={mode ? undefined : "The build's default, or its parent's"}
+          onClick={() => void store.op({ op: 'upsert_task', id: task.id, review: mode })}
+        >
+          {mode ? REVIEW_LABEL[mode] : 'Default'}
+        </button>
+      ))}
     </div>
   );
 }
@@ -681,6 +918,11 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
         )}
       </p>
       {task.note && <p className="board-note">{task.note}</p>}
+      <p className="board-chips">
+        <IricBadges task={task} />
+        {task.status === 'todo' && <ReadinessChip plan={plan} task={task} />}
+        {effectiveBranch(plan, task) && <span className="chip is-branch">⎇ {effectiveBranch(plan, task)}</span>}
+      </p>
       {open && (
         <div className="board-more">
           {task.detail?.trim() && <Markdown source={task.detail} />}
@@ -720,6 +962,11 @@ function BoardCard({ plan, task }: { plan: Plan; task: Task }) {
         {task.title}
       </button>
       {task.note && <p className="board-note">{task.note}</p>}
+      {planPhase(plan) !== 'planning' && task.status === 'todo' && (
+        <p className="board-chips">
+          <ReadinessChip plan={plan} task={task} />
+        </p>
+      )}
       <footer className="board-foot">
         <span className="item-id">{task.id}</span>
         {comments > 0 && <span className="chip">💬 {comments}</span>}
@@ -747,7 +994,7 @@ function BoardCard({ plan, task }: { plan: Plan; task: Task }) {
 /* ------------------------------------------------------------------ */
 
 function hasChildren(plan: Pick<Plan, 'tasks'>, id: string): boolean {
-  return plan.tasks.some((t) => t.parentId === id);
+  return hasSubtasks(plan, id);
 }
 
 function isTyping(target: EventTarget | null): boolean {

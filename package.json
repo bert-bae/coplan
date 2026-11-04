@@ -30,17 +30,19 @@
   "engines": {
     "node": ">=20.11"
   },
+  "packageManager": "pnpm@10.28.0",
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:watch": "node scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit",
     "test": "node --test dist/test/*.test.js",
-    "check": "npm run typecheck && npm run build && npm run test",
+    "check": "pnpm typecheck && pnpm build && pnpm test",
     "prepare": "node scripts/build.mjs"
   },
   "devDependencies": {
     "@dagrejs/dagre": "^1.1.4",
     "@tailwindcss/cli": "^4.3.3",
+    "@tailwindcss/node": "^4.3.3",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.3",
     "@types/jsdom": "^30.0.0",
@@ -54,5 +56,13 @@
     "react-dom": "^19.2.8",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.7.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ],
+    "ignoredBuiltDependencies": [
+      "@parcel/watcher"
+    ]
   }
 }

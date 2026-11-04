@@ -1915,6 +1915,63 @@ span.board-title:hover { color: inherit; text-decoration: none; }
 .pill.is-phase-built { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
 .pill.is-phase-handed-off { background: var(--surface-sunken); color: var(--text-tertiary); }
 
+/* The design, confirmed: the tasks are shaped against it. */
+.lock-chip.is-tasking { background: var(--success-bg); border-color: var(--success-border); color: var(--success-fg); }
+.phase.is-tasking { background: var(--success-bg); border-bottom-color: var(--success-border); box-shadow: inset 4px 0 0 var(--success-solid); }
+.pill.is-phase-tasking { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
+
+/* How the build runs: chosen when submitting. */
+.submit-settings { margin: 0; padding: 0; border: 0; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+/* Four choices in a 2×2 grid, so none wraps on its own. */
+.submit-settings .segmented { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.submit-settings .seg + .seg { border-left: none; }
+.submit-settings .seg:nth-child(even) { border-left: 1px solid var(--border-default); }
+.submit-settings .seg:nth-child(n + 3) { border-top: 1px solid var(--border-default); }
+.settings-numbers { display: flex; flex-direction: column; gap: var(--sp-1); }
+.field-inline { display: inline-flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--text-secondary); }
+.input.input-number { width: 4.5em; height: 28px; padding: 0 var(--sp-2); font-variant-numeric: tabular-nums; }
+
+/* What blocks what, where it lands, where it is in its cycle. */
+.chip.is-dep { background: var(--surface-sunken); border-style: dashed; }
+.chip.is-branch { font-family: var(--font-mono); font-weight: 500; }
+.chip.is-ready { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
+.chip.is-waiting { background: var(--surface-sunken); color: var(--text-tertiary); }
+.chip.stage-chip { background: var(--accent-subtle); color: var(--accent-fg); border-color: var(--accent-border); }
+.chip.stage-chip.is-refine { background: var(--attention-bg); color: var(--attention-fg); border-color: var(--attention-border); }
+.chip.is-check-ok { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
+.chip.is-check-fail { background: var(--attention-bg); color: var(--attention-fg); border-color: var(--attention-border); }
+.board-chips { margin: 0; display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.board-chips:empty { display: none; }
+
+.depends { display: flex; flex-direction: column; gap: var(--sp-1); align-items: flex-start; }
+.depends-list { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.depends-list .chip { max-width: 40ch; padding-right: 2px; }
+.depends-list .link { color: inherit; overflow: hidden; text-overflow: ellipsis; }
+.depends-inherited { font-size: var(--fs-sm); }
+.task-branch { min-width: 12ch; }
+
+/* The build order: steps of tasks that can run side by side, and branches. */
+.build-order {
+  margin-top: var(--sp-5); padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border-subtle); border-radius: var(--r-lg); background: var(--surface-raised);
+}
+.build-order h2, .build-order summary { margin: 0; }
+.build-order summary { cursor: pointer; }
+.order-hint { margin: var(--sp-1) 0 var(--sp-2); font-size: var(--fs-sm); }
+.order-steps, .order-branches { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--sp-2); }
+.order-branches { margin-top: var(--sp-3); }
+.order-steps li, .order-branches li { display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap; }
+.order-step { flex: none; min-width: 4.5em; font-size: var(--fs-sm); font-weight: 600; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.order-tasks { display: inline-flex; flex-wrap: wrap; gap: var(--sp-1); min-width: 0; }
+.chip.order-chip { max-width: 36ch; }
+.chip.order-chip.is-done { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
+.chip.order-chip.is-in_progress { background: var(--accent-subtle); color: var(--accent-fg); border-color: var(--accent-border); }
+.chip.order-chip.is-blocked { background: var(--attention-bg); color: var(--attention-fg); border-color: var(--attention-border); }
+.chip.order-chip.is-ready { border-color: var(--success-border); }
+
+/* Claude's final report, at the top of the overview once the build is done. */
+.doc-block.report { border-left: 3px solid var(--success-solid); padding-left: var(--sp-4); }
+
 @media (max-width: 900px) {
   .submit-grid { grid-template-columns: minmax(0, 1fr); }
   .submit-prompt { max-height: 48vh; }

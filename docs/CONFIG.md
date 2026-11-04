@@ -29,5 +29,77 @@ directory: leave `CC_HARNESS_HOME` unset when you use Cursor.
 | --- | --- |
 | `daemon.json` | The running daemon's address and token. |
 | `daemon.log` | The daemon's log; trimmed by `coplan clean`. |
-| `sessions/<id>/state.json` | One session's plan, change log, comments and — once submitted — the prompt it was submitted with. Kept 30 days after its last change. |
+| `sessions/<id>/state.json` | One session's plan, change log, comments and — once signed off — the prompts it was confirmed and submitted with, and the build settings. Kept 30 days after its last change. |
 | `config.json` | Your global configuration. |
+
+## The repository: `.coplan/config.json`
+
+The settings above are about Coplan on your machine. What a *build* runs
+belongs to the repository, so it lives with the code — committed, so every
+build there runs the same checks: `<repo>/.coplan/config.json`. Line
+comments (`//`) are allowed. `coplan init` (or `/coplan-init` in Claude)
+writes a starting point from the repository's scripts.
+
+```jsonc
+{
+  "hooks": {
+    "implement": ["pnpm typecheck", { "name": "ruff", "run": "ruff check .", "paths": ["*.py"] }],
+    "review": [{ "name": "tests", "run": "pnpm test", "timeout": 900 }],
+    "final": ["pnpm check", { "name": "audit", "run": "pnpm audit", "optional": true }]
+  },
+  "iric": { "review": "subagent", "parallel": 2, "maxRounds": 3 },
+  "branches": { "base": "main", "prefix": "coplan/" }
+}
+```
+
+### `hooks`
+
+The checks for each step of a task's implement → review → refine cycle:
+
+| Stage | When it runs |
+| --- | --- |
+| `implement` | After every implementation or refinement pass, before a task goes to review. Keep it fast: typecheck, lint, format. |
+| `review` | The gate: a task is done only once these pass. The tests, and anything CI would fail on. |
+| `final` | Once every task is done, before the build report: the full suite, the build, repository-wide checks. |
+
+A hook is a command, run from the repository root, or an object:
+
+| Key | Meaning |
+| --- | --- |
+| `run` | The shell command. Required. |
+| `name` | What it is called in reports and on the board. Defaults to the script name (`pnpm lint` or `npm run lint` → `lint`). |
+| `timeout` | Seconds before `coplan check` stops it. Default 600. |
+| `paths` | Globs (`src/**`, `*.py`, `docs/`): the hook applies only to tasks that expect to touch a matching file. A task that lists no files gets every hook. |
+| `optional` | A failure is reported but does not hold the task back. |
+
+Coplan never runs these itself. They reach Claude in the build prompt and in
+each task's brief (`harness_task_brief`), and Claude runs them like any
+other command, under your permission settings. `coplan check <stage>` runs a
+whole stage at once and prints only the tail of what failed; `--files a,b`
+keeps to the hooks for those files, `--list` prints them without running,
+and `--json` prints results in the shape `harness_task_update` takes.
+
+Claude reports the checks it ran with each task. A task whose last reported
+checks include a failure (not `optional`) cannot be marked done.
+
+A file that cannot be read, a stage that does not exist, a hook without a
+command: each is reported — in the prompts, the review dialogs and `coplan
+check` — rather than silently skipped.
+
+### `iric`
+
+The build's defaults, which the submit dialog starts from and the user can
+change for each plan:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `review` | `subagent` | Who reviews a task that does not say otherwise: `subagent` (a fresh agent that did not write the change), `self`, `user` (Claude stops and asks you), or `skip` (the review checks only). |
+| `parallel` | `2` | How many ready tasks are built at once, each by its own subagent. 1 to 8. |
+| `maxRounds` | `3` | Review rounds a task may take before Claude stops and asks you. 1 to 10. |
+
+### `branches`
+
+| Key | Meaning |
+| --- | --- |
+| `base` | The branch work is cut from and merged back into. Named in the prompts and briefs. |
+| `prefix` | Suggested to Claude for the branches it names when a plan lands as several pull requests. |

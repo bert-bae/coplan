@@ -2,7 +2,7 @@ import { useSyncExternalStore } from 'react';
 import { api } from './lib/api.ts';
 import { isLocked } from '../shared/plan.ts';
 import { agentInfo, type AgentInfo } from '../shared/agents.ts';
-import type { BuildTarget, CleanupGroupId, Plan, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport } from '../shared/types.ts';
+import type { BuildSettings, BuildTarget, CleanupGroupId, Plan, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport } from '../shared/types.ts';
 
 export type Tab = 'diagrams' | 'tasks' | 'overview';
 /** The architecture comes first: it is where most of the plan is decided. */
@@ -194,6 +194,8 @@ class Store {
         // The moment the agent picks up the submitted plan.
         if (before?.submission && !before.submission.deliveredAt && after?.submission?.deliveredAt) {
           this.toast('success', `${agent} has the build prompt. Follow it on the board.`);
+        } else if (before?.design && !before.design.deliveredAt && after?.design?.deliveredAt && !after.submission) {
+          this.toast('success', `${agent} has the confirmed design and is making the task list.`);
         }
         this.set({ session: event.session });
         return;
@@ -265,7 +267,7 @@ class Store {
    * on the board. Resolves false when the daemon refused — most often
    * because the plan moved on since the preview was made.
    */
-  async submitPlan(input: { target: BuildTarget; note: string; expect: number }): Promise<boolean> {
+  async submitPlan(input: { target: BuildTarget; note: string; expect: number; settings?: BuildSettings }): Promise<boolean> {
     const id = this.state.sessionId;
     if (!id) return false;
     try {
@@ -288,14 +290,59 @@ class Store {
     }
   }
 
-  /** Unlock a submitted plan for changes. */
+  /** Unlock a submitted plan for changes. The design stays confirmed. */
   async reopenPlan(): Promise<boolean> {
     const id = this.state.sessionId;
     if (!id) return false;
     try {
       const { plan } = await api.reopenPlan(id);
       this.adoptPlan(id, plan);
-      this.toast('info', `The plan is open for changes again. Tell ${agentInfo(this.state.session?.agent).name} in chat once you have changed it.`);
+      const name = agentInfo(this.state.session?.agent).name;
+      this.toast(
+        'info',
+        plan.design
+          ? `The tasks are open for changes again; the design stays confirmed. Tell ${name} in chat once you have changed them.`
+          : `The plan is open for changes again. Tell ${name} in chat once you have changed it.`,
+      );
+      return true;
+    } catch (err) {
+      this.fail(err);
+      return false;
+    }
+  }
+
+  /**
+   * Sign the design off. From here it is locked, and Claude gets the ask for
+   * a task list with the user's next message.
+   */
+  async confirmDesign(input: { note: string; expect: number }): Promise<boolean> {
+    const id = this.state.sessionId;
+    if (!id) return false;
+    try {
+      const { plan } = await api.confirmDesign(id, input);
+      this.adoptPlan(id, plan);
+      const agent = agentInfo(this.state.session?.agent);
+      this.toast(
+        'success',
+        agent.promptContext
+          ? `Design confirmed. Send any message in ${agent.name} to have it make the task list.`
+          : `Design confirmed. Paste the prompt into ${agent.name}'s chat to have it make the task list.`,
+      );
+      return true;
+    } catch (err) {
+      this.fail(err);
+      return false;
+    }
+  }
+
+  /** Unlock a confirmed design so it can be reshaped. */
+  async reopenDesign(): Promise<boolean> {
+    const id = this.state.sessionId;
+    if (!id) return false;
+    try {
+      const { plan } = await api.reopenDesign(id);
+      this.adoptPlan(id, plan);
+      this.toast('info', `The design is open for changes again. Tell ${agentInfo(this.state.session?.agent).name} in chat once you have changed it.`);
       return true;
     } catch (err) {
       this.fail(err);

@@ -2,6 +2,67 @@
 
 ## Unreleased
 
+### Build after installing, with pnpm
+
+- The project uses **pnpm**: `pnpm-lock.yaml` replaces `package-lock.json`,
+  and `packageManager` pins the version for corepack. `pnpm install` installs
+  and builds; `pnpm check` runs everything CI does.
+- `dist/` is no longer committed. After installing or updating the plugin,
+  build it once: `/coplan-setup` in Claude Code or Cursor, or ask Codex to set
+  up Coplan (each runs `pnpm install` in the plugin's directory, which builds
+  it), then restart the agent. Until then the plugin's tools and hooks stay
+  off, and `coplan` says how to build it. CI no longer compares a committed
+  `dist/` with the source.
+
+### Design first, then a linked task list, then a reviewed build
+
+- **Confirm the design before the task list.** The Architecture view's main
+  action is now *Confirm design*: it shows exactly what the agent will be
+  asked, and confirming locks the diagrams, sections and summary. Your next
+  message carries the design to the agent (in Cursor you paste it, or its next
+  `harness_plan_read` picks it up), which breaks the planned tasks into the
+  task list with the new `harness_tasks_publish`. The title, the tasks, which boxes
+  they link to and comments still change; *Reopen design* unlocks the rest.
+  Submitting now needs a confirmed design, and *Reopen for changes* after
+  submitting unlocks the tasks while the design stays confirmed.
+- **Tasks say what blocks them, and where they land.** Each task can depend
+  on others (`dependsOn`; a parent's apply to its subtasks, and depending on
+  a parent waits for all of it), name a branch (inherited by subtasks), set
+  its own review mode, and link the boxes it builds (`builds`). Loops and
+  dependencies on a task's own parent or subtask are refused with the reason.
+  The Tasks view marks each task *ready* or what it *waits on*, edits all of
+  this in a task's details, and shows the **build order** — steps of tasks
+  that can be built side by side — and how the **branches stack** into pull
+  requests. The read-back and the prompts carry the same.
+- **What can start, and one task's brief.** `harness_task_next` lists the
+  ready tasks, how many to run at once, what is in progress and at which
+  step, and what the rest wait on — and, once everything is done, how to
+  finish. `harness_task_brief` gives one task self-contained, to hand to a
+  subagent: the objective, the boxes it builds with their decisions and
+  connections, what it comes after and before, its scope, its branch, and
+  its checks.
+- **Implement → review → refine, under your control.** The submit dialog
+  sets how each task is built: who reviews it (a fresh subagent, the agent
+  itself, you, or the checks alone), how many tasks run at once, and how
+  many review rounds before the agent stops and asks you. `harness_task_update`
+  reports a task's step and the checks it ran; starting a task that still
+  waits on another is refused, and so is marking one done while its last
+  checks failed. Board cards show the step, the round and the checks.
+- **Checks in `.coplan/config.json`.** A repository lists what every task
+  runs, per stage (`implement`, `review`, `final`), with the build's defaults
+  and its base branch. The checks reach the agent in the prompts and briefs;
+  `coplan check <stage>` runs a stage and shows only what failed, and
+  `coplan init` / `/coplan-init` writes a starting point. Coplan never runs
+  them itself.
+- **Skills for the build.** `coplan-build` runs a submitted plan: ready
+  tasks only, independent ones in parallel by subagents (in worktrees when
+  on different branches), stacked branches and pull requests, and the final
+  report. `iric` is one task's implement → review → refine cycle, with a
+  reviewer prompt and the round limit. `coplan` now covers the design and
+  the task list.
+- **The build report.** Once every task is done the agent writes a report with
+  `harness_plan_edit {op: "report"}`; it leads the Overview.
+
 ### Codex and Cursor
 
 - Coplan now works in **Codex** and **Cursor** as well as Claude Code. The

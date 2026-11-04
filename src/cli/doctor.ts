@@ -57,6 +57,8 @@ export async function runDoctor(): Promise<number> {
     'bin/coplan',
     'bin/coplan-hook-relay.sh',
     'skills/coplan/SKILL.md',
+    'skills/coplan-build/SKILL.md',
+    'skills/iric/SKILL.md',
   ]) {
     const full = path.join(PLUGIN_ROOT, file);
     record(`present: ${file}`, existsSync(full), existsSync(full) ? undefined : full, true);
