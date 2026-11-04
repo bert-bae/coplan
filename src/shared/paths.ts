@@ -3,9 +3,12 @@ import path from 'node:path';
 import { mkdirSync, readFileSync, existsSync } from 'node:fs';
 import type { DaemonLock } from './types.ts';
 
-/** Root for all harness state. Overridable so tests can run hermetically. */
+/** Root for all harness state. Overridable so tests can run hermetically.
+ *  An agent's MCP config forwards the variable as `${env:CC_HARNESS_HOME}`;
+ *  one that did not expand it names no directory, so it is ignored. */
 export function harnessHome(): string {
-  return process.env.CC_HARNESS_HOME || path.join(homedir(), '.claude', 'cc-harness');
+  const override = process.env.CC_HARNESS_HOME;
+  return override && !override.includes('${') ? override : path.join(homedir(), '.claude', 'cc-harness');
 }
 
 export const paths = {

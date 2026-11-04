@@ -1,0 +1,38 @@
+{
+  "name": "coplan",
+  "version": "0.2.0",
+  "description": "Open-source visual planning workspace for coding agents: shape the plan as architecture diagrams and a task board in the browser, submit it, and follow the build.",
+  "author": {
+    "name": "Elbert B."
+  },
+  "homepage": "https://github.com/bert-bae/coplan",
+  "repository": "https://github.com/bert-bae/coplan",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "planning",
+    "architecture",
+    "diagrams",
+    "tasks",
+    "ui"
+  ],
+  "skills": "./skills/",
+  "commands": [],
+  "hooks": "./hooks/codex.json",
+  "mcpServers": "./mcp/codex.json",
+  "interface": {
+    "displayName": "Coplan",
+    "shortDescription": "Plan on a canvas, then follow the build",
+    "longDescription": "Codex publishes its plan to a local browser workspace: the architecture as diagrams you can rewire and annotate, and a task tree you can reorganize. Review the exact build prompt, submit it, and follow each task across the board as Codex builds.",
+    "developerName": "Elbert B.",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/bert-bae/coplan",
+    "defaultPrompt": [
+      "Plan this in Coplan before we build it"
+    ]
+  }
+}

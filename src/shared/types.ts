@@ -8,7 +8,13 @@
  * task tree and the comments on them — plus whether Claude is waiting on the
  * user. Nothing here describes talking to Claude: questions are asked and
  * answered in Claude's own chat, and the harness only links there.
+ *
+ * "Claude" in these names is the agent on the other side of the plan, which
+ * may be Claude Code, Codex or Cursor: `Author` `'claude'` and
+ * `claudeReadAt` mean "the agent", and keep their names so saved plans load.
  */
+
+import type { AgentKind } from './agents.ts';
 
 /** Who made a change. The plan is co-authored, and the change log is how each
  *  side finds out what the other did. */
@@ -513,19 +519,24 @@ export interface WaitingState {
 /** Where the session runs, which decides how to open it. */
 export type SessionSurface = 'cloud' | 'desktop' | 'cli' | 'unknown';
 
-/** Two ways to the same session: the Claude desktop app, and the web. */
+/** Two ways to the same session: the agent's desktop app, and the web. */
 export interface SessionLink {
-  /** `claude://claude.ai/code/session_…` — opens the desktop app. */
+  /** Opens the session in the agent's app: `claude://claude.ai/code/session_…`
+   *  for Claude, `codex://threads/…` for Codex. */
   app: string;
-  /** `https://claude.ai/code/session_…` — works anywhere you are signed in. */
-  web: string;
+  /** `https://claude.ai/code/session_…` — works anywhere you are signed in.
+   *  Null when the session has no web address (a local Codex thread). */
+  web: string | null;
   /** How the session became addressable. */
-  via: 'cloud' | 'remote-control';
+  via: 'cloud' | 'remote-control' | 'app';
 }
 
 export interface SessionState {
   sessionId: string;
-  /** pid of the owning `claude` process, when known. */
+  /** The coding agent the session runs in. Sessions saved before Coplan
+   *  supported more than Claude Code read back as `claude`. */
+  agent: AgentKind;
+  /** pid of the owning agent process (`claude`, `codex`, …), when known. */
   claudePid?: number;
   cwd: string;
   repoRoot: string | null;
@@ -537,9 +548,10 @@ export interface SessionState {
   /** Set while Claude is waiting on the user; cleared when they reply. */
   waiting: WaitingState | null;
   surface: SessionSurface;
-  /** Opens this session in Claude, where questions are answered. Null when
-   *  the session cannot be addressed from outside: a local session without
-   *  Remote Control has no documented link. */
+  /** Opens this session in its agent, where questions are answered. Null
+   *  when the session cannot be addressed from outside: a local Claude
+   *  session without Remote Control, or any Cursor chat, has no documented
+   *  link. */
   link: SessionLink | null;
   createdAt: number;
   updatedAt: number;
@@ -557,6 +569,7 @@ export interface TaskCounts {
 /** Compact row for the session rail. */
 export interface SessionSummary {
   sessionId: string;
+  agent: AgentKind;
   title: string;
   planTitle: string | null;
   cwd: string;

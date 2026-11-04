@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { store, usePlan, useSession, useStore } from '../store.ts';
+import { store, useAgent, usePlan, useSession, useStore } from '../store.ts';
 import { api, type PromptPreview, type ProjectSummary } from '../lib/api.ts';
 import { OpenInClaude } from './Handoff.tsx';
 import { ProgressBar } from './Progress.tsx';
@@ -7,37 +7,43 @@ import { classNames, relativeTime } from '../lib/format.ts';
 import { MAX_NOTE, countTasks, currentTask, planPhase, unreadAreas } from '../../shared/plan.ts';
 import { MAX_PARALLEL, MAX_ROUNDS, branchPlan, buildSteps, hasDependencies, readyTasks } from '../../shared/build.ts';
 import { REVIEW_MODES, type BuildSettings, type BuildTarget, type Plan, type PlanPhase, type ReviewMode, type SessionState } from '../../shared/types.ts';
+import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
 
 /**
  * Signing the plan off, in two steps.
  *
  * **Confirm the design.** The architecture view is where the design is
  * finished, so it is where it is confirmed. The user reads the exact ask
- * Claude will get — make the task list from this design — and confirming
+ * the agent will get — make the task list from this design — and confirming
  * locks the architecture, sections and summary.
  *
- * **Submit the plan.** Once Claude has made the task list and the user has
+ * **Submit the plan.** Once the agent has made the task list and the user has
  * shaped it, they choose how the build runs — who reviews each task, how
- * many run at once, how many review rounds before Claude asks — read the
+ * many run at once, how many review rounds before the agent asks — read the
  * exact build prompt, and submit. From then on the page only follows the
  * build as tasks move across the board.
  *
  * In both, the daemon builds the prompt, so the preview is the prompt, not
- * an imitation of it.
+ * an imitation of it. Where the agent's hooks cannot hand a prompt over
+ * with the user's next message (Cursor), signing off copies it to paste.
  */
 
-const TARGETS: { id: BuildTarget; label: string; hint: string }[] = [
-  {
-    id: 'session',
-    label: 'This Claude session',
-    hint: 'Your next message in its chat carries this prompt, and the board follows each task as Claude works through it.',
-  },
-  {
-    id: 'elsewhere',
-    label: 'Somewhere else',
-    hint: 'Copy the prompt into the agent that will build it. The plan is locked all the same, but its progress cannot be followed here.',
-  },
-];
+function targets(agent: AgentInfo): { id: BuildTarget; label: string; hint: string }[] {
+  return [
+    {
+      id: 'session',
+      label: `This ${agent.name} session`,
+      hint: agent.promptContext
+        ? `Your next message in its chat carries this prompt, and the board follows each task as ${agent.name} works through it.`
+        : `The prompt is copied for you to paste into this ${agent.name} chat, and the board follows each task as ${agent.name} works through it.`,
+    },
+    {
+      id: 'elsewhere',
+      label: 'Somewhere else',
+      hint: 'Copy the prompt into the agent that will build it. The plan is locked all the same, but its progress cannot be followed here.',
+    },
+  ];
+}
 
 export const REVIEW_LABEL: Record<ReviewMode, string> = {
   subagent: 'Independent reviewer',
@@ -46,12 +52,18 @@ export const REVIEW_LABEL: Record<ReviewMode, string> = {
   skip: 'Checks only',
 };
 
-const REVIEW_HINT: Record<ReviewMode, string> = {
-  subagent: 'A fresh subagent that did not write the change reviews each task and runs the checks.',
-  self: 'Claude reviews its own change against the task, and runs the checks.',
-  user: 'Claude stops after each task and asks you to approve it in chat.',
-  skip: "The repository's checks are the only review. For small, low-risk plans.",
-};
+function reviewHint(mode: ReviewMode, agent: string): string {
+  switch (mode) {
+    case 'subagent':
+      return 'A fresh subagent that did not write the change reviews each task and runs the checks.';
+    case 'self':
+      return `${agent} reviews its own change against the task, and runs the checks.`;
+    case 'user':
+      return `${agent} stops after each task and asks you to approve it in chat.`;
+    default:
+      return "The repository's checks are the only review. For small, low-risk plans.";
+  }
+}
 
 /** How long typing in the note waits before the preview is rebuilt. */
 const NOTE_SETTLE_MS = 300;
@@ -60,6 +72,7 @@ const NOTE_SETTLE_MS = 300;
  *  what the plan is once it is past both. */
 export function SubmitControl() {
   const plan = usePlan();
+  const agent = useAgent();
   const [open, setOpen] = useState(false);
   const [viewing, setViewing] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -77,7 +90,7 @@ export function SubmitControl() {
           ref={trigger}
           type="button"
           className="btn btn-sm btn-primary"
-          title="Read what Claude will be asked, then lock the design so Claude can break it into a task list"
+          title={`Read what ${agent.name} will be asked, then lock the design so ${agent.name} can break it into a task list`}
           onClick={() => setOpen(true)}
         >
           Confirm design
@@ -97,7 +110,7 @@ export function SubmitControl() {
           ref={trigger}
           type="button"
           className="btn btn-sm btn-primary"
-          title="Choose how the build runs, read the prompt Claude will be given, then lock the plan and hand it over"
+          title={`Choose how the build runs, read the prompt ${agent.name} will be given, then lock the plan and hand it over`}
           onClick={() => setOpen(true)}
         >
           Review &amp; submit plan
@@ -121,9 +134,11 @@ export function SubmitControl() {
           prompt={plan.submission.prompt}
           meta={`submitted ${relativeTime(plan.submission.at)} · ${
             plan.submission.deliveredAt
-              ? `Claude got it ${relativeTime(plan.submission.deliveredAt)}`
+              ? `${agent.name} got it ${relativeTime(plan.submission.deliveredAt)}`
               : plan.submission.target === 'session'
-                ? 'Not delivered yet: it goes with your next message in Claude'
+                ? agent.promptContext
+                  ? `Not delivered yet: it goes with your next message in ${agent.name}`
+                  : `Not delivered yet: paste it into ${agent.name}'s chat`
                 : 'Handed off to build elsewhere'
           }`}
           onClose={() => setViewing(false)}
@@ -236,6 +251,7 @@ function ReviewFrame(props: {
 export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
   const session = useSession();
   const plan = usePlan();
+  const agent = useAgent();
   const sessionId = useStore((s) => s.sessionId);
   const [note, setNote] = useState('');
   const settled = useSettled(note);
@@ -268,6 +284,8 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
   const confirm = async () => {
     if (!preview || !current) return;
     setBusy(true);
+    // Where no hook can hand the prompt over (Cursor), the user pastes it.
+    if (!agent.promptContext) await copyText(preview.prompt, `Copied — paste it into ${agent.name}'s chat.`);
     const ok = await store.confirmDesign({ note, expect: preview.version });
     setBusy(false);
     if (ok) onClose();
@@ -280,7 +298,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
       plan={plan}
       busy={busy}
       onClose={onClose}
-      previewLabel="What Claude will be asked"
+      previewLabel={`What ${agent.name} will be asked`}
       preview={preview}
       current={current}
       error={error}
@@ -288,7 +306,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
         <>
           <DesignChecklist session={session} plan={plan} project={preview?.project} trimmed={Boolean(preview?.trimmed)} />
           <label className="field">
-            <span className="field-label">Anything else for Claude?</span>
+            <span className="field-label">Anything else for {agent.name}?</span>
             <textarea
               className="input"
               rows={3}
@@ -299,16 +317,17 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
             />
           </label>
           <p className="explain">
-            Confirming <strong>locks the design</strong> — the diagrams, sections and summary. Claude gets it with your next
-            message in chat and breaks the planned tasks into the task list: focused tasks, what blocks what, and which branch
-            each lands on. You shape that list, then submit the plan to start the build.
+            Confirming <strong>locks the design</strong> — the diagrams, sections and summary.{' '}
+            {agent.promptContext ? `${agent.name} gets it with your next message in chat` : `You paste it into ${agent.name}'s chat`} and
+            it breaks the planned tasks into the task list: focused tasks, what blocks what, and which branch each lands on. You
+            shape that list, then submit the plan to start the build.
           </p>
           <div className="submit-actions">
             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>
               Cancel
             </button>
             <button type="button" className="btn btn-primary" disabled={!current || busy} onClick={() => void confirm()}>
-              {busy ? 'Confirming…' : 'Confirm design'}
+              {busy ? 'Confirming…' : agent.promptContext ? 'Confirm design' : 'Copy and confirm design'}
             </button>
           </div>
         </>
@@ -330,6 +349,7 @@ const settingsKey = (s: BuildSettings | null) => (s ? `${s.review}:${s.parallel}
 export function SubmitDialog({ onClose }: { onClose: () => void }) {
   const session = useSession();
   const plan = usePlan();
+  const agent = useAgent();
   const sessionId = useStore((s) => s.sessionId);
   const [target, setTarget] = useState<BuildTarget>('session');
   const [note, setNote] = useState('');
@@ -344,7 +364,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
   useEscape(onClose, submitting);
 
   // Rebuilt whenever what it is built from changes: the choices, the note,
-  // or the plan itself (Claude can still move it while this is open).
+  // or the plan itself (the agent can still move it while this is open).
   useEffect(() => {
     if (!sessionId) return;
     let live = true;
@@ -374,7 +394,10 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
   const submit = async () => {
     if (!preview || !current) return;
     setSubmitting(true);
-    if (target === 'elsewhere') await copyText(preview.prompt, 'Copied the prompt.');
+    // Where no hook can hand the prompt over (Cursor), the user pastes it.
+    if (target === 'elsewhere' || !agent.promptContext) {
+      await copyText(preview.prompt, target === 'session' ? `Copied — paste it into ${agent.name}'s chat.` : 'Copied the prompt.');
+    }
     const ok = await store.submitPlan({ target, note, expect: preview.version, ...(settings ? { settings } : {}) });
     setSubmitting(false);
     if (ok) onClose();
@@ -387,7 +410,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
       plan={plan}
       busy={submitting}
       onClose={onClose}
-      previewLabel={target === 'session' ? 'The prompt Claude will get' : 'The prompt to paste'}
+      previewLabel={target === 'session' ? `The prompt ${agent.name} will get` : 'The prompt to paste'}
       preview={preview}
       current={current}
       error={error}
@@ -403,7 +426,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
 
           <fieldset className="submit-targets">
             <legend className="field-label">Who builds it?</legend>
-            {TARGETS.map((t) => (
+            {targets(agent).map((t) => (
               <label key={t.id} className={classNames('submit-target', target === t.id && 'is-active')}>
                 <input type="radio" name="build-target" value={t.id} checked={target === t.id} onChange={() => setTarget(t.id)} />
                 <span>
@@ -417,7 +440,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
           {settings && <SettingsFields settings={settings} onChange={setSettings} />}
 
           <label className="field">
-            <span className="field-label">Anything else for Claude?</span>
+            <span className="field-label">Anything else for {agent.name}?</span>
             <textarea
               className="input"
               rows={3}
@@ -438,7 +461,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
               Cancel
             </button>
             <button type="button" className="btn btn-primary" disabled={!current || submitting} onClick={() => void submit()}>
-              {submitting ? 'Submitting…' : target === 'session' ? 'Submit and lock' : 'Copy, submit and lock'}
+              {submitting ? 'Submitting…' : target === 'session' && agent.promptContext ? 'Submit and lock' : 'Copy, submit and lock'}
             </button>
           </div>
         </>
@@ -450,6 +473,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
 /** The user's control over the build: each task's implement → review →
  *  refine cycle, and how much runs at once. */
 function SettingsFields({ settings, onChange }: { settings: BuildSettings; onChange: (s: BuildSettings) => void }) {
+  const agent = useAgent();
   const number = (value: string, lo: number, hi: number, fallback: number) => {
     const n = Math.round(Number(value));
     return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : fallback;
@@ -466,14 +490,14 @@ function SettingsFields({ settings, onChange }: { settings: BuildSettings; onCha
             role="radio"
             aria-checked={settings.review === mode}
             className={classNames('seg', settings.review === mode && 'is-active')}
-            title={REVIEW_HINT[mode]}
+            title={reviewHint(mode, agent.name)}
             onClick={() => onChange({ ...settings, review: mode })}
           >
             {REVIEW_LABEL[mode]}
           </button>
         ))}
       </div>
-      <p className="submit-target-hint">{REVIEW_HINT[settings.review]}</p>
+      <p className="submit-target-hint">{reviewHint(settings.review, agent.name)}</p>
       <div className="settings-numbers">
         <label className="field-inline">
           <input
@@ -495,7 +519,9 @@ function SettingsFields({ settings, onChange }: { settings: BuildSettings; onCha
             value={settings.maxRounds}
             onChange={(e) => onChange({ ...settings, maxRounds: number(e.target.value, 1, MAX_ROUNDS, settings.maxRounds) })}
           />
-          <span>review round{settings.maxRounds === 1 ? '' : 's'}, then Claude asks you</span>
+          <span>
+            review round{settings.maxRounds === 1 ? '' : 's'}, then {agent.name} asks you
+          </span>
         </label>
       </div>
     </fieldset>
@@ -522,15 +548,21 @@ function NoteList({ summary, notes }: { summary: ReactNode; notes: Note[] }) {
 }
 
 function sessionNotes(session: SessionState, plan: Plan, notes: Note[]): void {
+  const agent = agentInfo(session.agent);
   const unread = unreadAreas(plan);
-  if (session.status === 'ended') notes.push({ tone: 'warn', text: 'This session has ended. Resume it in Claude to carry on here.' });
+  if (session.status === 'ended') notes.push({ tone: 'warn', text: `This session has ended. Resume it in ${agent.name} to carry on here.` });
   if (session.waiting) {
-    notes.push({ tone: 'warn', text: 'Claude is waiting on you in chat. Answer it there; the prompt goes with the next message you type.' });
+    notes.push({
+      tone: 'warn',
+      text: agent.promptContext
+        ? `${agent.name} is waiting on you in chat. Answer it there; the prompt goes with the next message you type.`
+        : `${agent.name} is waiting on you in chat. Answer it there before you paste the prompt.`,
+    });
   }
-  if (unread.length) notes.push({ tone: 'info', text: `Claude has not read your latest changes (${unread.join(', ')}). The prompt lists them first.` });
+  if (unread.length) notes.push({ tone: 'info', text: `${agent.name} has not read your latest changes (${unread.join(', ')}). The prompt lists them first.` });
 }
 
-function checksNote(project: ProjectSummary | undefined, notes: Note[]): void {
+function checksNote(project: ProjectSummary | undefined, notes: Note[], agent: AgentInfo): void {
   if (!project) return;
   for (const e of project.errors) notes.push({ tone: 'warn', text: e });
   const stages = (['implement', 'review', 'final'] as const).filter((s) => project.checks[s].length);
@@ -539,8 +571,8 @@ function checksNote(project: ProjectSummary | undefined, notes: Note[]): void {
       tone: 'info',
       text: (
         <>
-          No checks are set up for this repository (<code>.coplan/config.json</code>), so Claude picks what to run. Run{' '}
-          <code>/coplan-init</code> in Claude to set them.
+          No checks are set up for this repository (<code>.coplan/config.json</code>), so {agent.name} picks what to run.
+          Run <code>coplan init</code> (or <code>/coplan-init</code> in Claude Code) to set them.
         </>
       ),
     });
@@ -556,15 +588,16 @@ function DesignChecklist({ session, plan, project, trimmed }: { session: Session
   const linked = new Set(boxes.flatMap((n) => n.taskIds ?? []));
   const open = plan.threads.filter((t) => !t.resolved).length;
   const notes: Note[] = [];
-  if (plan.diagrams.length === 0) notes.push({ tone: 'warn', text: 'There is no diagram: Claude will make the task list from the sections alone.' });
+  const agent = agentInfo(session.agent);
+  if (plan.diagrams.length === 0) notes.push({ tone: 'warn', text: `There is no diagram: ${agent.name} will make the task list from the sections alone.` });
   if (bare.length) {
     notes.push({ tone: 'info', text: `${bare.length} box${bare.length === 1 ? ' has' : 'es have'} no description: ${bare.slice(0, 3).map((n) => n.label).join(', ')}${bare.length > 3 ? ', …' : ''}.` });
   }
   if (counts.total && boxes.length && linked.size === 0) notes.push({ tone: 'info', text: 'No box is linked to a planned task yet.' });
   if (open) notes.push({ tone: 'info', text: `${open} open comment${open === 1 ? '' : 's'} go${open === 1 ? 'es' : ''} with the design.` });
   sessionNotes(session, plan, notes);
-  checksNote(project, notes);
-  if (trimmed) notes.push({ tone: 'info', text: 'The design is longer than fits in one message, so Claude reads the rest with harness_plan_read.' });
+  checksNote(project, notes, agent);
+  if (trimmed) notes.push({ tone: 'info', text: `The design is longer than fits in one message, so ${agent.name} reads the rest with harness_plan_read.` });
   return (
     <NoteList
       summary={`${plan.diagrams.length} diagram${plan.diagrams.length === 1 ? '' : 's'} · ${boxes.length} box${boxes.length === 1 ? '' : 'es'} · ${plan.tasks.length} planned task${plan.tasks.length === 1 ? '' : 's'}`}
@@ -604,12 +637,12 @@ function Checklist({
     notes.push({ tone: 'info', text: `Lands on ${branches.length} branch${branches.length === 1 ? '' : 'es'}${stacked ? `, ${stacked} stacked on another` : ''}: ${branches.map((b) => b.branch).join(', ')}.` });
   }
   if (target === 'session') sessionNotes(session, plan, notes);
-  checksNote(project, notes);
+  checksNote(project, notes, agentInfo(session.agent));
   if (open) notes.push({ tone: 'info', text: `${open} open comment${open === 1 ? '' : 's'} go${open === 1 ? 'es' : ''} with the plan.` });
   if (trimmed) {
     notes.push({
       tone: 'info',
-      text: 'The plan is longer than fits in one message, so the prompt carries the task list and Claude reads the rest with harness_plan_read.',
+      text: `The plan is longer than fits in one message, so the prompt carries the task list and ${agentInfo(session.agent).name} reads the rest with harness_plan_read.`,
     });
   }
   const boxes = plan.diagrams.reduce((n, d) => n + d.nodes.length, 0);
@@ -659,7 +692,7 @@ function PromptViewer({ title, prompt, meta, onClose }: { title: string; prompt:
 
 /**
  * Where the plan stands, under the header on every view once the design is
- * confirmed — and, while Claude has not picked a prompt up, how to hand it
+ * confirmed — and, while the agent has not picked a prompt up, how to hand it
  * over.
  */
 export function PhaseStrip({ session }: { session: SessionState }) {
@@ -672,10 +705,11 @@ export function PhaseStrip({ session }: { session: SessionState }) {
 
 function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) {
   const tab = useStore((s) => s.tab);
+  const agent = agentInfo(session.agent);
   const [confirming, setConfirming] = useState(false);
   const [viewing, setViewing] = useState(false);
   const design = plan.design!;
-  // The task list Claude published since the design was confirmed.
+  // The task list the agent published since the design was confirmed.
   const listed = plan.changes.some((c) => c.kind === 'published' && c.ts >= design.at && c.summary.startsWith('published the task list'));
   const counts = countTasks(plan);
   const steps = buildSteps(plan).length;
@@ -683,18 +717,22 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
   let head: string;
   let text: ReactNode;
   if (!design.deliveredAt) {
-    head = 'Design confirmed — waiting for Claude';
-    text =
-      session.status === 'ended' ? (
-        'This session has ended. Resume it in Claude, then send any message: the design goes with it.'
-      ) : (
-        <>
-          Send any message in Claude's chat — <q>go</q> will do — and Coplan hands it the design to break into a task list.
-        </>
-      );
+    head = `Design confirmed — waiting for ${agent.name}`;
+    text = !agent.promptContext ? (
+      <>
+        Paste the prompt into {agent.name}'s chat — or ask it to <q>make the task list</q>, and it picks the design up with
+        harness_plan_read.
+      </>
+    ) : session.status === 'ended' ? (
+      `This session has ended. Resume it in ${agent.name}, then send any message: the design goes with it.`
+    ) : (
+      <>
+        Send any message in {agent.name}'s chat — <q>go</q> will do — and Coplan hands it the design to break into a task list.
+      </>
+    );
   } else if (!listed) {
-    head = 'Design confirmed — Claude is making the task list';
-    text = 'Claude has the design and is breaking it into focused tasks, what blocks what, and where each lands.';
+    head = `Design confirmed — ${agent.name} is making the task list`;
+    text = `${agent.name} has the design and is breaking it into focused tasks, what blocks what, and where each lands.`;
   } else {
     head = 'Design confirmed — the task list is ready to review';
     text = (
@@ -738,9 +776,9 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
             {!design.deliveredAt && (
               <button
                 type="button"
-                className={classNames('btn btn-sm', !session.link && 'btn-primary')}
-                title="Pasting it into Claude works too; it is not sent twice"
-                onClick={() => void copyText(design.prompt, "Copied — paste it into Claude's chat.")}
+                className={classNames('btn btn-sm', (!session.link || !agent.promptContext) && 'btn-primary')}
+                title={`Pasting it into ${agent.name} works too; it is not sent twice`}
+                onClick={() => void copyText(design.prompt, `Copied — paste it into ${agent.name}'s chat.`)}
               >
                 Copy prompt
               </button>
@@ -763,9 +801,9 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
       </div>
       {viewing && (
         <PromptViewer
-          title="The confirmed design, as Claude got it"
+          title={`The confirmed design, as ${agent.name} got it`}
           prompt={design.prompt}
-          meta={`confirmed ${relativeTime(design.at)}${design.deliveredAt ? ` · Claude got it ${relativeTime(design.deliveredAt)}` : ''}`}
+          meta={`confirmed ${relativeTime(design.at)}${design.deliveredAt ? ` · ${agent.name} got it ${relativeTime(design.deliveredAt)}` : ''}`}
           onClose={() => setViewing(false)}
         />
       )}
@@ -773,9 +811,10 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
   );
 }
 
-/** Where the build stands, and — before Claude has the prompt — how to hand it over. */
+/** Where the build stands, and — before the agent has the prompt — how to hand it over. */
 function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Plan; phase: PlanPhase }) {
   const tab = useStore((s) => s.tab);
+  const agent = agentInfo(session.agent);
   const [confirming, setConfirming] = useState(false);
   const submission = plan.submission;
   if (!submission) return null;
@@ -787,33 +826,37 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
   let text: ReactNode;
   switch (phase) {
     case 'submitted':
-      head = 'Submitted — waiting for Claude to start';
-      text =
-        session.status === 'ended' ? (
-          'This session has ended. Resume it in Claude, then send any message: the prompt goes with it.'
-        ) : (
-          <>
-            Send any message in Claude's chat — <q>go</q> will do — and Coplan hands it the build prompt with it.
-          </>
-        );
+      head = `Submitted — waiting for ${agent.name} to start`;
+      text = !agent.promptContext ? (
+        <>
+          Paste the prompt into {agent.name}'s chat — or ask it to <q>build the plan</q>, and it picks the prompt up with
+          harness_plan_read.
+        </>
+      ) : session.status === 'ended' ? (
+        `This session has ended. Resume it in ${agent.name}, then send any message: the prompt goes with it.`
+      ) : (
+        <>
+          Send any message in {agent.name}'s chat — <q>go</q> will do — and Coplan hands it the build prompt with it.
+        </>
+      );
       break;
     case 'building':
       head = 'Building';
       text = now ? (
         <>
-          Claude is on <strong>{now.title}</strong>
+          {agent.name} is on <strong>{now.title}</strong>
           {now.stage ? ` — ${now.stage === 'review' ? `in review${now.round ? `, round ${now.round}` : ''}` : now.stage === 'refine' ? 'refining' : 'implementing'}` : ''}
           {now.note ? ` — ${now.note}` : ''}
         </>
       ) : blocked.length ? (
         `${blocked.length} task${blocked.length === 1 ? ' is' : 's are'} blocked: ${blocked[0]!.title}${blocked[0]!.note ? ` — ${blocked[0]!.note}` : ''}`
       ) : (
-        'Claude has the plan. No task is in progress right now.'
+        `${agent.name} has the plan. No task is in progress right now.`
       );
       break;
     case 'built':
       head = 'Built';
-      text = plan.report ? `Every task is done (${counts.total}), and Claude wrote the build report.` : `Every task is done (${counts.total}).`;
+      text = plan.report ? `Every task is done (${counts.total}), and ${agent.name} wrote the build report.` : `Every task is done (${counts.total}).`;
       break;
     default:
       head = 'Handed off';
@@ -842,7 +885,7 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
         {confirming ? (
           <span className="item-confirm">
             {submission.deliveredAt
-              ? 'Unlock the tasks? The design stays confirmed, and Claude keeps building until you tell it otherwise in chat.'
+              ? `Unlock the tasks? The design stays confirmed, and ${agent.name} keeps building until you tell it otherwise in chat.`
               : 'Withdraw the submission?'}
             <button
               type="button"
@@ -864,9 +907,11 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
             {(phase === 'submitted' || phase === 'handed-off') && (
               <button
                 type="button"
-                className={classNames('btn btn-sm', phase === 'submitted' && !session.link && 'btn-primary')}
-                title={phase === 'submitted' ? 'Pasting it into Claude works too; it is not sent twice' : undefined}
-                onClick={() => void copyText(submission.prompt, phase === 'submitted' ? "Copied — paste it into Claude's chat." : 'Copied the prompt.')}
+                className={classNames('btn btn-sm', phase === 'submitted' && (!session.link || !agent.promptContext) && 'btn-primary')}
+                title={phase === 'submitted' ? `Pasting it into ${agent.name} works too; it is not sent twice` : undefined}
+                onClick={() =>
+                  void copyText(submission.prompt, phase === 'submitted' ? `Copied — paste it into ${agent.name}'s chat.` : 'Copied the prompt.')
+                }
               >
                 Copy prompt
               </button>

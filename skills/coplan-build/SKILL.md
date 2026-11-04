@@ -52,8 +52,9 @@ Repeat until `harness_task_next` says every task is done:
 ## Parallel work with subagents
 
 With `parallel` > 1 and several ready tasks, give each its own subagent
-(the Agent tool, in the background) and keep working on the others as they
-run. Each implementer gets the task's brief **verbatim** plus this:
+(in Claude Code, the Agent tool in the background; whatever your agent
+offers for delegating work) and keep working on the others as they run. An
+agent without subagents builds ready tasks one after another instead. Each implementer gets the task's brief **verbatim** plus this:
 
 > You are implementing one task of a larger plan. The brief below is your
 > whole job: build its objective, stay inside its scope, and run its
@@ -65,9 +66,9 @@ run. Each implementer gets the task's brief **verbatim** plus this:
 
 Where they work:
 
-- **Different branches** — each subagent works in its own worktree
-  (`isolation: "worktree"`), on its task's branch, cut from the base the
-  brief names.
+- **Different branches** — each subagent works in its own git worktree
+  (in Claude Code, `isolation: "worktree"`), on its task's branch, cut from
+  the base the brief names.
 - **Same branch, different files** — they may share the working tree; you
   commit each task's files separately once it is reviewed.
 - **Same branch, same files** — not in parallel. Sequence them.
@@ -96,7 +97,8 @@ Otherwise:
 ## When things go sideways
 
 - **Blocked** — `harness_task_update {status: "blocked", note}` and ask the
-  user with `AskUserQuestion`. Keep building other ready tasks meanwhile.
+  user with your question tool (`AskUserQuestion` in Claude Code,
+  `request_user_input` in Codex, or plainly in chat). Keep building other ready tasks meanwhile.
 - **Work not on the plan** — add it first:
   `harness_plan_edit {op: "upsert_task", parentId, title, detail, dependsOn}`,
   then build it like any other.

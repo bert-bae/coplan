@@ -8,18 +8,20 @@
   and `packageManager` pins the version for corepack. `pnpm install` installs
   and builds; `pnpm check` runs everything CI does.
 - `dist/` is no longer committed. After installing or updating the plugin,
-  run `/coplan-setup` in Claude Code (it runs `pnpm install` in the plugin's
-  directory, which builds it), then restart Claude Code. Until then the
-  plugin's tools and hooks stay off, and `coplan` says how to build it. CI no
-  longer compares a committed `dist/` with the source.
+  build it once: `/coplan-setup` in Claude Code or Cursor, or ask Codex to set
+  up Coplan (each runs `pnpm install` in the plugin's directory, which builds
+  it), then restart the agent. Until then the plugin's tools and hooks stay
+  off, and `coplan` says how to build it. CI no longer compares a committed
+  `dist/` with the source.
 
 ### Design first, then a linked task list, then a reviewed build
 
 - **Confirm the design before the task list.** The Architecture view's main
-  action is now *Confirm design*: it shows exactly what Claude will be asked,
-  and confirming locks the diagrams, sections and summary. Your next message
-  carries the design to Claude, which breaks the planned tasks into the task
-  list with the new `harness_tasks_publish`. The title, the tasks, which boxes
+  action is now *Confirm design*: it shows exactly what the agent will be
+  asked, and confirming locks the diagrams, sections and summary. Your next
+  message carries the design to the agent (in Cursor you paste it, or its next
+  `harness_plan_read` picks it up), which breaks the planned tasks into the
+  task list with the new `harness_tasks_publish`. The title, the tasks, which boxes
   they link to and comments still change; *Reopen design* unlocks the rest.
   Submitting now needs a confirmed design, and *Reopen for changes* after
   submitting unlocks the tasks while the design stays confirmed.
@@ -40,15 +42,15 @@
   connections, what it comes after and before, its scope, its branch, and
   its checks.
 - **Implement → review → refine, under your control.** The submit dialog
-  sets how each task is built: who reviews it (a fresh subagent, Claude
+  sets how each task is built: who reviews it (a fresh subagent, the agent
   itself, you, or the checks alone), how many tasks run at once, and how
-  many review rounds before Claude stops and asks you. `harness_task_update`
+  many review rounds before the agent stops and asks you. `harness_task_update`
   reports a task's step and the checks it ran; starting a task that still
   waits on another is refused, and so is marking one done while its last
   checks failed. Board cards show the step, the round and the checks.
 - **Checks in `.coplan/config.json`.** A repository lists what every task
   runs, per stage (`implement`, `review`, `final`), with the build's defaults
-  and its base branch. The checks reach Claude in the prompts and briefs;
+  and its base branch. The checks reach the agent in the prompts and briefs;
   `coplan check <stage>` runs a stage and shows only what failed, and
   `coplan init` / `/coplan-init` writes a starting point. Coplan never runs
   them itself.
@@ -58,8 +60,41 @@
   report. `iric` is one task's implement → review → refine cycle, with a
   reviewer prompt and the round limit. `coplan` now covers the design and
   the task list.
-- **The build report.** Once every task is done Claude writes a report with
+- **The build report.** Once every task is done the agent writes a report with
   `harness_plan_edit {op: "report"}`; it leads the Overview.
+
+### Codex and Cursor
+
+- Coplan now works in **Codex** and **Cursor** as well as Claude Code. The
+  same repository is a plugin for all three: `.codex-plugin/plugin.json` and
+  `.cursor-plugin/plugin.json` sit beside `.claude-plugin/`, each pointing at
+  that agent's own hooks (`hooks/codex.json`, `hooks/cursor.json`) and MCP
+  config (`mcp/codex.json`, `mcp/cursor.json`). Install with
+  `codex plugin marketplace add bert-bae/coplan` and
+  `codex plugin add coplan@coplan`, or from Cursor's plugin search with the
+  repository's URL.
+- Codex keeps a plugin's hooks off until you trust them: open `/hooks` in
+  Codex once after installing (and after each update).
+- Every session records which agent it runs in. The page names it — "Codex
+  is working", *Answer in Cursor* — and the session rail labels each row
+  once more than one agent is in the list. `coplan status` shows it too.
+- Each agent is told to ask with its own question tool: `AskUserQuestion` in
+  Claude Code, `request_user_input` (Plan mode) in Codex, `AskQuestion` in
+  Cursor. A Codex `request_user_input` or permission request shows the
+  waiting banner; *Answer in Codex* opens the thread in the Codex app
+  (`codex://threads/…`).
+- Codex's MCP server finds its thread from each tool call. Cursor's, which
+  one window shares across its chats, finds the chat in its workspace that
+  was active last, asking Cursor for the workspace (MCP roots) when its
+  config cannot say.
+- Cursor's hooks cannot reliably add to a prompt, so in Cursor submitting a
+  plan copies the build prompt for you to paste; pasting it counts as
+  delivering it, and so does the agent's first `harness_plan_read` after you
+  submit ("build the plan" will do).
+- `coplan open` and `coplan url` find the session they were run from in any
+  agent, falling back to the one most recently active in the current folder.
+- `coplan doctor` checks the Codex and Cursor files and replays a hook in
+  each agent's format.
 
 ### Renamed to Coplan
 

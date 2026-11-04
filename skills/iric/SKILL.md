@@ -58,7 +58,8 @@ wasted. Then review the way the brief says:
 - **self** — read your own diff cold, as that reviewer would, with the
   same four questions. Write the findings down before fixing any.
 - **user** — summarize the change for the user (what it does, files,
-  checks) and ask with `AskUserQuestion`: approve, request changes (they
+  checks) and ask with your question tool (`AskUserQuestion` in Claude Code,
+  `request_user_input` in Codex, or plainly in chat): approve, request changes (they
   say which), or see the diff first. Their answer is the review.
 - **skip** — the review checks are the review.
 
@@ -78,7 +79,7 @@ If the review found anything, or a review check failed:
 
 **Round limit.** After `maxRounds` reviews without a pass, stop. Mark the
 task blocked with a note on what is still failing, and ask the user with
-`AskUserQuestion`: another round, accept it as it is, or take it over.
+your question tool: another round, accept it as it is, or take it over.
 
 ## 4. Done
 

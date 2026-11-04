@@ -1,8 +1,8 @@
 <h1 align="center">Coplan</h1>
 
 <p align="center">
-  <strong>Plan with Claude Code on a canvas, then follow the build.</strong><br />
-  An open-source visual planning workspace for Claude Code.
+  <strong>Plan with your coding agent on a canvas, then follow the build.</strong><br />
+  An open-source visual planning workspace for Claude Code, Codex and Cursor.
 </p>
 
 <p align="center">
@@ -10,23 +10,31 @@
   <a href="https://github.com/bert-bae/coplan/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/bert-bae/coplan/actions/workflows/ci.yml/badge.svg" /></a>
   <img alt="Node.js 20.11 or later" src="https://img.shields.io/badge/node-%E2%89%A520.11-339933.svg" />
   <img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-d97757.svg" />
+  <img alt="Codex plugin" src="https://img.shields.io/badge/Codex-plugin-10a37f.svg" />
+  <img alt="Cursor plugin" src="https://img.shields.io/badge/Cursor-plugin-000000.svg" />
   <a href="CONTRIBUTING.md"><img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" /></a>
 </p>
 
 ---
 
-Coplan gives Claude Code's plan a place to live outside the chat. Claude
-publishes its design: the architecture as diagrams, with the tasks it plans
-linked to the boxes they build. You reshape it in the browser and **confirm
-the design**. Claude then breaks it into a task list — focused tasks, what
-blocks what, which branch each lands on — and you shape that and **submit the
-plan**, choosing how much of each task's implement → review → refine cycle
-you keep for yourself. The plan locks, and as Claude builds, the same page
-follows each task across the board.
+Coplan gives your coding agent's plan a place to live outside the chat. The
+agent — Claude Code, Codex or Cursor — publishes its design: the architecture
+as diagrams, with the tasks it plans linked to the boxes they build. You
+reshape it in the browser and **confirm the design**. The agent then breaks it
+into a task list — focused tasks, what blocks what, which branch each lands
+on — and you shape that and **submit the plan**, choosing how much of each
+task's implement → review → refine cycle you keep for yourself. The plan
+locks, and as the agent builds, the same page follows each task across the
+board.
 
 Coplan is free and open source under the [MIT license](LICENSE). It runs
-entirely on your machine: a small local daemon, a browser UI, and a Claude
-Code plugin. No account, no hosted service, and no telemetry.
+entirely on your machine: a small local daemon, a browser UI, and one plugin
+that installs in Claude Code, Codex and Cursor alike. No account, no hosted
+service, and no telemetry.
+
+The rest of this page says "Claude" for the agent; everything works the same
+in Codex and Cursor except where [Codex and Cursor](#codex-and-cursor) says
+otherwise.
 
 ## Features
 
@@ -63,10 +71,10 @@ What Coplan has to say to Claude (the confirmed design, the build prompt, or a
 note that you changed the plan) rides along with your next message there.
 
 ```
- ┌──────────────────── Claude Code session ─────────────────────┐
- │  chat  ◀── you talk to and answer Claude here, and only here │
- │  MCP: harness_plan_* · harness_tasks_publish · harness_task_* │
- │  hooks: register the session; notice when Claude is waiting; │
+ ┌──────── agent session: Claude Code · Codex · Cursor ─────────┐
+ │  chat  ◀── you talk to and answer the agent here, only       │
+ │  MCP: harness_plan_* · harness_tasks_publish · _task_*       │
+ │  hooks: register the session; notice when it waits;          │
  │         note unread plan changes                             │
  └──────────────┬───────────────────────────────────────────────┘
                 │ loopback HTTP
@@ -77,18 +85,21 @@ note that you changed the plan) rides along with your next message there.
                 │ GET /api/events (SSE)        │ POST …/plan/ops
                 ▼                              │
  ┌──────────────── browser UI (React + React Flow) ─────────────┐
- │  Architecture · Tasks · Overview      ──▶ "Answer in Claude" │
+ │  Architecture · Tasks · Overview      ──▶ "Answer in …"      │
  └──────────────────────────────────────────────────────────────┘
 ```
 
 ## Install
 
-You need [Claude Code](https://code.claude.com), Node.js 20.11 or later,
-[pnpm](https://pnpm.io) (or Node's `corepack`, which provides it), `sh` and
-`curl`. The Claude desktop app is optional; it is where *Answer in
-Claude* links open.
+You need Node.js 20.11 or later, [pnpm](https://pnpm.io) (or Node's
+`corepack`, which provides it), `sh` and `curl`, and at least one of
+[Claude Code](https://code.claude.com), [Codex](https://developers.openai.com/codex)
+or [Cursor](https://cursor.com). The Claude desktop app is optional; it is
+where *Answer in Claude* links open. Install the plugin in each agent you
+use: they share one daemon and one page, and the session list says which
+agent each session runs in.
 
-### From GitHub
+### Claude Code, from GitHub
 
 ```bash
 claude plugin marketplace add bert-bae/coplan
@@ -101,12 +112,48 @@ claude plugin install coplan@coplan --scope user
 Or, from inside a Claude Code session, run `/plugin marketplace add
 bert-bae/coplan` and then `/plugin install coplan@coplan`.
 
+### Codex
+
+```bash
+codex plugin marketplace add bert-bae/coplan
+```
+
+```bash
+codex plugin add coplan@coplan
+```
+
+Or browse for it with `/plugins` in Codex. **Then approve Coplan's hooks:**
+Codex holds a plugin's hooks until you review them, so open `/hooks` in Codex
+and trust the Coplan ones, then start a new session. Codex asks again after
+Coplan is updated. Until they are trusted, Coplan's tools answer that no
+session is registered.
+
+### Cursor
+
+In the editor, search for a plugin by its Git URL — paste
+`https://github.com/bert-bae/coplan` into the plugin search — and install it.
+From the Cursor CLI:
+
+```bash
+agent plugin marketplace add https://github.com/bert-bae/coplan
+```
+
+then install Coplan from `/plugin`. To load a clone instead, copy it to
+`~/.cursor/plugins/local/coplan` and run *Developer: Reload Window*.
+
+### Then build it
+
 The build output (`dist/`) is not in the repository, so **build the plugin
-once after installing it**: run `/coplan-setup` in any Claude Code session.
-It runs `pnpm install` in the installed plugin's directory, which builds it.
-Then restart Claude Code so the plugin's MCP server and hooks start from the
-build. Do the same after updating the plugin. Until it is built, the plugin's
-tools and hooks stay off, and `coplan` says how to build it.
+once after installing it, and again after each update**:
+
+- **Claude Code or Cursor:** run `/coplan-setup` in a session. It runs
+  `pnpm install` in the installed plugin's directory, which builds it.
+- **Codex:** ask it to *set up Coplan*. The Coplan skill tells it to run
+  `pnpm install` in the plugin's folder.
+
+Then restart the agent (or start a new session) so the plugin's MCP server
+and hooks start from the build. Until it is built, Coplan's tools and hooks
+stay off, and `coplan` prints how to build it.
 
 ### From source
 
@@ -118,13 +165,14 @@ git clone https://github.com/bert-bae/coplan.git
 cd coplan && pnpm install
 ```
 
-Then load the plugin for a single session:
+Then load the plugin for a single Claude Code session:
 
 ```bash
 claude --plugin-dir /path/to/coplan
 ```
 
-Or install it permanently from your clone:
+Or install it permanently from your clone (for Codex, `codex plugin
+marketplace add /path/to/coplan` and `codex plugin add coplan@coplan`):
 
 ```bash
 claude plugin marketplace add /path/to/coplan
@@ -149,16 +197,20 @@ Verify the wiring against your installed CLI:
 
 In any session with the plugin enabled:
 
-- `/coplan <task>`: Claude investigates, then publishes a plan to the UI
+- `/coplan <task>` (in Codex, `$coplan <task>`, or just ask it to plan the
+  task in Coplan): the agent investigates, then publishes a plan to the UI
 - `/coplan-open`: open this session's plan in the browser
 - `/coplan-setup`: build the plugin after installing or updating it
 - `/coplan-init`: set up `.coplan/config.json`, the checks every task runs
 - `/coplan-doctor`: check the wiring
 - `/coplan-restart`: restart the daemon after a rebuild
 
-The plugin also brings three skills Claude uses on its own: `coplan` (the
-design and the task list), `coplan-build` (running the build) and `iric`
-(one task's implement → review → refine cycle).
+Codex has no plugin slash commands; ask it to set up or open Coplan, run the
+doctor or restart the daemon, and the Coplan skill tells it how.
+
+The plugin also brings three skills the agent uses on its own: `coplan` (the
+design and the task list), `coplan-build` (running the build) and `iric` (one
+task's implement → review → refine cycle).
 
 `./bin/coplan status` lists every session and where its plan stands;
 `./bin/coplan open` opens the UI. The UI does not open itself unless you set
@@ -211,7 +263,9 @@ Architecture view) shows what Claude will be asked — break this design into
 a task list — with the design itself, anything you add, and which checks the
 repository has. Confirming locks the diagrams, sections and summary; the
 title, the tasks, which boxes they link to, and comments still change. Your
-next message in Claude carries it, once. *Reopen design* unlocks it again.
+next message in Claude carries it, once — in Cursor, confirming copies it for
+you to paste, or the agent's next `harness_plan_read` picks it up. *Reopen
+design* unlocks it again.
 
 Claude answers with the task list. Each task can say:
 
@@ -284,12 +338,12 @@ committed `.coplan/config.json` (`//` comments allowed):
 }
 ```
 
-The hooks go to Claude in the build prompt and in each task's brief; Claude
+The hooks go to the agent in the build prompt and in each task's brief; it
 runs them like any other command, under your permission settings — Coplan
 never runs them itself. `coplan check <stage>` runs a whole stage and prints
 only what failed (`--files a,b` for one task's files, `--json` for the
-results Claude reports). `coplan init`, or `/coplan-init` in Claude, writes a
-starting point from the repository's scripts. See
+results the agent reports). `coplan init`, or `/coplan-init` in Claude Code
+or Cursor, writes a starting point from the repository's scripts. See
 [docs/CONFIG.md](docs/CONFIG.md#the-repository-coplanconfigjson).
 
 A plan too long to hand over in one message — a hook adds about 10,000
@@ -310,10 +364,12 @@ title changes. **Answer in Claude** opens the session:
 | Cloud (claude.ai/code) | `claude://claude.ai/code/session_…` for the desktop app, plus a web link |
 | Local, with Remote Control on | the same, from the Remote Control session id |
 | Local, without Remote Control | no documented link exists — the banner says where to answer, and that `/remote-control` turns it into a link |
+| Codex (CLI or app) | `codex://threads/…`, which opens the thread in the Codex app |
+| Cursor | no documented link to a chat exists — the banner says to answer in the chat that asked |
 
 The banner clears as soon as you answer in Claude. Set `openClaudeOnQuestion`
-to have a local Remote Control session open itself in the desktop app the
-moment it asks.
+to have a local Remote Control session, or a Codex thread, open itself in its
+desktop app the moment it asks.
 
 ## The views
 
@@ -405,6 +461,38 @@ your next prompt: the confirmed design or the build prompt, once, after you
 sign it off; or — if you changed the plan since Claude last read it — one line
 saying so.
 
+## Codex and Cursor
+
+The plugin, the daemon and the page are the same for every agent. What
+differs is what each agent lets a plugin see and do:
+
+| | Claude Code | Codex | Cursor |
+| --- | --- | --- | --- |
+| Hooks | run once installed | run once you trust them in `/hooks` | run once installed |
+| Start a plan | `/coplan <task>` | `$coplan <task>`, or ask | `/coplan <task>` |
+| The build prompt reaches the agent | with your next message ("go") | with your next message ("go") | you paste it — submitting copies it — or say "build the plan" and it reads it with `harness_plan_read` |
+| "You changed the plan" note on your next message | yes | yes | where Cursor passes it on |
+| A question is noticed | `AskUserQuestion`, permission prompts, idle prompts, a turn ending on a question | `request_user_input` (Plan mode), permission requests, a turn ending on a question | a turn ending on a question |
+| *Answer in …* opens the session | cloud and Remote Control sessions | the Codex app (`codex://threads/…`) | no link: Cursor has none for a chat |
+| Slash commands | `/coplan-open`, `/coplan-doctor`, `/coplan-restart` | none; ask, and the skill runs `coplan` | `/coplan-open`, `/coplan-doctor`, `/coplan-restart` |
+
+How each one is wired:
+
+- **Codex** reads `.codex-plugin/plugin.json`, which points at
+  `hooks/codex.json` and `mcp/codex.json`. Codex's hooks use Claude Code's
+  event names, and its MCP server learns which thread is calling from each
+  tool call. Codex offers `request_user_input` only in Plan mode; elsewhere
+  it asks in plain chat, which Coplan notices when the turn ends on the
+  question.
+- **Cursor** reads `.cursor-plugin/plugin.json`, which points at
+  `hooks/cursor.json` (Cursor's own hook format) and `mcp/cursor.json`.
+  Cursor starts one MCP server per window rather than per chat, so the tools
+  act on the chat in that workspace that was active last. Cursor's hooks
+  cannot reliably add to a prompt, so the build prompt is pasted or read
+  instead, and its hooks do not see `AskQuestion`. If Cursor's *third-party
+  configs* setting imports the Claude Code plugin as well, Coplan recognises
+  Cursor's payloads and files them under Cursor all the same.
+
 ## Housekeeping
 
 The rail's footer holds the two actions that belong to Coplan itself.
@@ -430,8 +518,9 @@ same from a terminal, with `--dry-run` to only list.
 ## Configuration
 
 `~/.claude/cc-harness/config.json`, overridden per repo by
-`.claude/harness.json`; the build's checks and defaults live in the
-repository's `.coplan/config.json`. See [docs/CONFIG.md](docs/CONFIG.md).
+`.claude/harness.json` — for every agent, Codex and Cursor included. The
+build's checks and defaults live in the repository's `.coplan/config.json`.
+See [docs/CONFIG.md](docs/CONFIG.md).
 
 ## Contributing
 

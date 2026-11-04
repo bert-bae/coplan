@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { store, usePlan, useStore } from '../store.ts';
+import { store, useAgent, usePlan, useStore } from '../store.ts';
 import { InlineText, MarkdownField } from '../components/Editable.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { ThreadPanel } from '../components/Threads.tsx';
@@ -50,6 +50,7 @@ const TEMPLATES: { label: string; title: string; nodes: DiagramNodeInput[]; edge
  * selected — or, with nothing selected, the diagram itself.
  */
 export function DiagramsView() {
+  const agent = useAgent();
   const plan = usePlan();
   const chosen = useStore((s) => s.diagramId);
   const sessionId = useStore((s) => s.sessionId);
@@ -124,7 +125,7 @@ export function DiagramsView() {
             hint={
               locked
                 ? 'This plan was submitted without a diagram.'
-                : 'Ask Claude to draw the architecture — components, data flow, boundaries — or start one from a template.'
+                : `Ask ${agent.name} to draw the architecture — components, data flow, boundaries — or start one from a template.`
             }
           />
         </div>
@@ -163,6 +164,7 @@ function NewDiagram() {
 
 /** The panel with nothing selected: the diagram as a whole. */
 function DiagramPanel({ plan, diagram, locked }: { plan: Plan; diagram: Diagram; locked: boolean }) {
+  const agent = useAgent();
   const [confirming, setConfirming] = useState(false);
   const index = plan.diagrams.findIndex((d) => d.id === diagram.id);
   const linked = diagram.nodes.filter((n) => n.taskIds?.length).length;
@@ -173,7 +175,7 @@ function DiagramPanel({ plan, diagram, locked }: { plan: Plan; diagram: Diagram;
         <span className="item-id">{diagram.id}</span>
         <span className="spacer" />
         <span className="muted panel-meta">
-          {locked ? 'locked' : `${diagram.updatedBy === 'user' ? 'edited by you' : 'by Claude'} · ${relativeTime(diagram.updatedAt)}`}
+          {locked ? 'locked' : `${diagram.updatedBy === 'user' ? 'edited by you' : `by ${agent.name}`} · ${relativeTime(diagram.updatedAt)}`}
         </span>
       </header>
       <InlineText
@@ -213,7 +215,7 @@ function DiagramPanel({ plan, diagram, locked }: { plan: Plan; diagram: Diagram;
         <button
           type="button"
           className="btn btn-sm"
-          title="The diagram as Claude reads it: every part, what it does and what was decided, then every connection"
+          title={`The diagram as ${agent.name} reads it: every part, what it does and what was decided, then every connection`}
           onClick={() => {
             const text = diagramToMarkdown(diagram, { tasks: plan.tasks });
             void navigator.clipboard

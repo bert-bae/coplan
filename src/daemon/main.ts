@@ -8,8 +8,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { SessionStore } from './store.ts';
 import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from './http.ts';
 import { ingestHook } from './hookIngest.ts';
+import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
+import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
 import { MAX_NOTE, PlanError, cleanChecks, cleanNote, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
-import { PROMPT_BUDGET, buildPrompt, designPrompt, renderPlan, renderTaskList, stageWords } from './render.ts';
+import { PROMPT_BUDGET, buildPrompt, designPrompt, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
 import { renderBrief, renderNext } from './brief.ts';
 import { cleanSettings, effectiveReview, readyTasks, waitingOn } from '../shared/build.ts';
 import { HOOK_STAGES, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
@@ -145,6 +147,18 @@ const PORT_CLAIM_MS = 5_000;
 const MAX_TRACKED_OPENS = 200;
 /** Per-project resolved configs held in memory. */
 const MAX_CACHED_CONFIGS = 50;
+
+/** Why an MCP call found no session: the agent's hooks have not reported
+ *  one, and what to do about it there. */
+const HOOKS_HINT: Record<AgentKind, string> = {
+  claude: "This usually means Coplan's hooks have not fired; run `coplan doctor` to check the plugin wiring.",
+  codex:
+    "Codex has not run Coplan's hooks: it holds a plugin's hooks until you approve them. Open /hooks in Codex, " +
+    'trust the Coplan hooks, then start a new session. `coplan doctor` checks the rest of the wiring.',
+  cursor:
+    "Cursor has not run Coplan's hooks for this chat yet. Check that the Coplan plugin is enabled, send a message " +
+    'in the chat so its hooks fire, then try again. `coplan doctor` checks the rest of the wiring.',
+};
 
 /**
  * Bind, retrying a requested port while its previous owner lets go — keeping
@@ -456,7 +470,7 @@ function buildRouter(deps: Deps): Router {
     const note = cleanNote(body.note);
     const project = projectFor(session);
     const settings = settingsFrom(body.settings, project);
-    const { prompt, trimmed } = buildPrompt(session.plan, { target, settings, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
+    const { prompt, trimmed } = buildPrompt(session.plan, { target, agent: session.agent, settings, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
     json(ctx.res, 200, {
       prompt,
       trimmed,
@@ -468,7 +482,7 @@ function buildRouter(deps: Deps): Router {
     });
   });
 
-  /** The prompt Claude would be given if the design were confirmed now. */
+  /** The prompt the agent would be given if the design were confirmed now. */
   router.post('/api/session/:id/plan/design/prompt', async (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
@@ -479,13 +493,14 @@ function buildRouter(deps: Deps): Router {
     }
     const note = cleanNote(body.note);
     const project = projectFor(session);
-    const { prompt, trimmed } = designPrompt(session.plan, { project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
+    const { prompt, trimmed } = designPrompt(session.plan, { agent: session.agent, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
     json(ctx.res, 200, { prompt, trimmed, version: session.plan.version, budget: PROMPT_BUDGET, maxNote: MAX_NOTE, project: projectSummary(project) });
   });
 
   /**
-   * The user confirms the design. It is locked from here, and Claude gets
-   * the ask for a task list with their next message in its chat.
+   * The user confirms the design. It is locked from here, and the agent gets
+   * the ask for a task list with their next message in its chat (or, in
+   * Cursor, when they paste it or its next harness_plan_read).
    */
   router.post('/api/session/:id/plan/design/confirm', async (ctx) => {
     const session = sessionOr404(ctx);
@@ -655,32 +670,40 @@ function buildRouter(deps: Deps): Router {
   };
 
   router.post('/hook/:event', async (ctx) => {
-    const event = ctx.params['event'] ?? '';
+    const raw = ctx.params['event'] ?? '';
+    const header = (name: string) => {
+      const value = ctx.req.headers[name];
+      return typeof value === 'string' ? value : null;
+    };
+    // The relay says which agent the hook came from; Claude Code when it
+    // does not (an older relay, or the doctor).
+    let agent = parseAgent(header('x-harness-agent'));
     let output: HookOutput = HOOK_NOOP;
     try {
-      const input = await readJson<Record<string, unknown>>(ctx.req);
-      const session = typeof input['session_id'] === 'string' ? store.get(input['session_id']) : undefined;
-      const header = (name: string) => {
-        const value = ctx.req.headers[name];
-        return typeof value === 'string' ? value : null;
-      };
-      output = await ingestHook(event, input, {
-        store,
-        config: session ? configFor(session) : config,
-        env: {
-          remoteSessionId: header('x-harness-remote-session'),
-          remoteSdkUrl: header('x-harness-remote-sdk'),
-          bridgeSessionId: header('x-harness-bridge-session'),
-          entrypoint: header('x-harness-entrypoint'),
-        },
-        onWaiting: openClaude,
-      });
+      const body = await readJson<Record<string, unknown>>(ctx.req);
+      agent = hookAgent(agent, body);
+      const { event, input } = readAgentHook(agent, raw, body);
+      const session = typeof input.session_id === 'string' ? store.get(input.session_id) : undefined;
+      if (event) {
+        output = await ingestHook(event, input, {
+          store,
+          agent,
+          config: session ? configFor(session) : config,
+          env: agent !== 'claude' ? {} : {
+            remoteSessionId: header('x-harness-remote-session'),
+            remoteSdkUrl: header('x-harness-remote-sdk'),
+            bridgeSessionId: header('x-harness-bridge-session'),
+            entrypoint: header('x-harness-entrypoint'),
+          },
+          onWaiting: openClaude,
+        });
+      }
     } catch (err) {
       // A hook must never break the session it is attached to.
-      log(`hook ${event} failed: ${(err as Error)?.message}`);
+      log(`hook ${agent}/${raw} failed: ${(err as Error)?.message}`);
       output = HOOK_NOOP;
     }
-    if (!ctx.res.writableEnded) json(ctx.res, 200, output);
+    if (!ctx.res.writableEnded) json(ctx.res, 200, writeAgentOutput(agent, raw, output));
   });
 
   /* --------------------------- MCP bridge -------------------------- */
@@ -688,9 +711,23 @@ function buildRouter(deps: Deps): Router {
   const resolveSession = (ctx: Ctx, body: { sessionId?: string; cwd?: string; pid?: number }) => {
     const headerId = ctx.req.headers['x-harness-session'];
     const id = body.sessionId ?? (typeof headerId === 'string' && headerId ? headerId : undefined);
+    const agentHeader = ctx.req.headers['x-harness-agent'];
+    const agent = parseAgent(typeof agentHeader === 'string' ? agentHeader : undefined);
     let session: SessionState | null = null;
-    if (id) session = store.ensure(id, body.cwd);
-    else if (body.pid) session = store.findByPid(body.pid) ?? null;
+    if (id) session = store.ensure(id, body.cwd, agent);
+    else if (agent === 'claude') {
+      // One `claude` process is one session, so its pid names it.
+      if (body.pid) session = store.findByPid(body.pid) ?? null;
+      if (!session && body.cwd) session = store.findByCwd(body.cwd, agent) ?? null;
+    } else {
+      // One Cursor process serves every chat in every window, and one Codex
+      // app every thread: the folder says more than the pid. In that folder,
+      // the chat that was active last is the one calling.
+      if (body.cwd) session = store.findByCwd(body.cwd, agent) ?? null;
+      if (!session && body.pid) session = store.findByPid(body.pid, agent) ?? null;
+    }
+    // A server that names the wrong agent — Cursor running the Claude Code
+    // plugin's config — still finds the chat in its folder.
     if (!session && body.cwd) session = store.findByCwd(body.cwd) ?? null;
     if (!session) return null;
     if (body.pid && session.claudePid !== body.pid) store.update(session.sessionId, { claudePid: body.pid });
@@ -705,8 +742,8 @@ function buildRouter(deps: Deps): Router {
    */
   const updateTask = (session: SessionState, body: Record<string, unknown>): string => {
     const before = session.plan;
-    if (!before) throw new PlanError('No plan yet. Publish one with harness_plan_publish.');
     const taskId = String(body['task_id'] ?? '');
+    if (!before) throw new PlanError(`No task "${taskId}": there is no plan yet. Publish one with harness_plan_publish.`);
     const task = before.tasks.find((t) => t.id === taskId);
     if (!task) throw new PlanError(`No task "${taskId}".`);
     const status = typeof body['status'] === 'string' && body['status'] ? (body['status'] as TaskStatus) : undefined;
@@ -777,7 +814,7 @@ function buildRouter(deps: Deps): Router {
         out.push(`This is review round ${now.round}, past the ${settings.maxRounds} the user allowed: if it does not pass, stop and ask the user.`);
       }
       if (effectiveReview(plan, now, settings.review) === 'user') {
-        out.push("This task's review is the user's: show them the change and ask with AskUserQuestion before marking it done.");
+        out.push(`This task's review is the user's: show them the change and ask with ${agentInfo(session.agent).askWith} before marking it done.`);
       }
     }
     if (status === 'done' && changes.length) {
@@ -800,11 +837,10 @@ function buildRouter(deps: Deps): Router {
     const body = await readJson<Record<string, unknown>>(ctx.req);
     const session = resolveSession(ctx, body as { sessionId?: string; cwd?: string; pid?: number });
     if (!session) {
+      const agentHeader = ctx.req.headers['x-harness-agent'];
       json(ctx.res, 200, {
         ok: false,
-        text:
-          '[cc-harness] No session is registered yet. This usually means the harness hooks have not fired; ' +
-          'run `coplan doctor` to check the plugin wiring.',
+        text: `[cc-harness] No session is registered yet. ${HOOKS_HINT[parseAgent(typeof agentHeader === 'string' ? agentHeader : undefined)]}`,
       });
       return;
     }
@@ -821,7 +857,7 @@ function buildRouter(deps: Deps): Router {
             true,
             `[cc-harness] Published "${plan.title}" (revision ${plan.revision}). The user reviews it at ${url}\n` +
               'Tell them in chat that the plan is ready, and ask anything you need decided with ' +
-              'AskUserQuestion, here in chat. Nothing in Coplan waits for them: when they say they ' +
+              `${agentInfo(session.agent).askWith}, here in chat. Nothing in Coplan waits for them: when they say they ` +
               'have reviewed it, call harness_plan_read.\n\n' +
               renderPlan(plan, { url }),
           );
@@ -832,6 +868,21 @@ function buildRouter(deps: Deps): Router {
           if (!session.plan) {
             reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
             return;
+          }
+          // Where no hook can hand a prompt over with the user's next message
+          // (Cursor), the first read after signing off carries it: the ask
+          // for a task list once the design is confirmed, the build prompt
+          // once the plan is submitted. Delivering it counts as the read —
+          // except for edits made after the design was confirmed, which are
+          // not in its prompt and stay unread.
+          if (!agentInfo(session.agent).promptContext) {
+            const handed = store.deliver(id);
+            if (handed) {
+              const later = store.get(id)?.plan;
+              const notice = later ? unreadNotice(later) : null;
+              reply(true, notice ? `${handed.prompt}\n\n${notice}` : handed.prompt);
+              return;
+            }
           }
           const textOut = renderPlan(session.plan, { url, changesOnly: body['changes_only'] === true });
           store.markRead(id);
@@ -862,8 +913,10 @@ function buildRouter(deps: Deps): Router {
             `[cc-harness] Published the task list for "${plan.title}". The user reviews it at ${url}\n` +
               (phase === 'tasking'
                 ? 'Tell them in chat that the task list is ready to review, and ask anything you need decided with ' +
-                  'AskUserQuestion. Do not start building: they submit the plan from Coplan when the tasks are right, ' +
-                  'and the build prompt comes with their next message.\n\n'
+                  `${agentInfo(session.agent).askWith}. Do not start building: they submit the plan from Coplan when the tasks are right, ` +
+                  (agentInfo(session.agent).promptContext
+                    ? 'and the build prompt comes with their next message.\n\n'
+                    : 'and paste the build prompt here (or ask you to build, and harness_plan_read hands it to you).\n\n')
                 : 'Tell them in chat that the tasks are updated.\n\n') +
               renderTaskList(plan, projectFor(session).branches.base),
           );
@@ -875,7 +928,7 @@ function buildRouter(deps: Deps): Router {
             reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
             return;
           }
-          reply(true, renderNext(session.plan, { project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) }));
+          reply(true, renderNext(session.plan, { agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) }));
           return;
         }
 
@@ -885,7 +938,7 @@ function buildRouter(deps: Deps): Router {
           const taskId = String(body['task_id'] ?? '');
           const task = plan.tasks.find((t) => t.id === taskId);
           if (!task) throw new PlanError(`No task "${taskId}". harness_task_next lists the tasks that are ready.`);
-          reply(true, renderBrief(plan, task, { project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) }));
+          reply(true, renderBrief(plan, task, { agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) }));
           return;
         }
 

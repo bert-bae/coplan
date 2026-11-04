@@ -4,6 +4,7 @@ import type { HarnessConfig } from '../shared/config.ts';
 import { currentBranch, repoRoot } from './git.ts';
 import { unreadNotice } from './render.ts';
 import { resolveLink, type SessionEnv } from '../shared/link.ts';
+import { DEFAULT_AGENT, agentInfo, type AgentKind } from '../shared/agents.ts';
 import {
   HOOK_NOOP,
   additionalContext,
@@ -29,6 +30,9 @@ import type { SessionState, WaitingState } from '../shared/types.ts';
 export interface IngestContext {
   store: SessionStore;
   config: HarnessConfig;
+  /** Which agent the hook came from, already read as Claude Code's events
+   *  (see `agentHooks.ts`). Claude Code when unset. */
+  agent?: AgentKind;
   /** Where the session runs, read from its environment by the relay. */
   env?: SessionEnv;
   /** Called when a session starts waiting on the user. */
@@ -38,10 +42,20 @@ export interface IngestContext {
 /** Notifications that mean "Claude cannot go on without the user". */
 const INPUT_NOTIFICATIONS = new Set(['idle_prompt', 'agent_needs_input', 'elicitation_dialog']);
 
+/**
+ * The last thing each Cursor chat said, by session. Cursor's `stop` does not
+ * carry the reply the way Claude Code's `Stop` does; `afterAgentResponse`
+ * comes just before it with the text.
+ */
+const lastReplies = new Map<string, string>();
+const MAX_REPLIES = 200;
+
 export async function ingestHook(event: string, input: HookInput, ctx: IngestContext): Promise<HookOutput> {
   const sessionId = input.session_id;
   if (!sessionId) return HOOK_NOOP;
-  ctx.store.ensure(sessionId, input.cwd);
+  const agent = ctx.agent ?? DEFAULT_AGENT;
+  const existing = ctx.store.ensure(sessionId, input.cwd, agent);
+  if (existing.agent !== agent) ctx.store.update(sessionId, { agent });
   applyEnv(sessionId, ctx);
 
   switch (event) {
@@ -64,6 +78,15 @@ export async function ingestHook(event: string, input: HookInput, ctx: IngestCon
     }
     case 'Notification':
       return onNotification(sessionId, input as NotificationInput, ctx);
+    case 'AfterAgentResponse': {
+      const text = (input as StopInput).last_assistant_message;
+      if (typeof text === 'string') {
+        lastReplies.delete(sessionId);
+        lastReplies.set(sessionId, text);
+        if (lastReplies.size > MAX_REPLIES) lastReplies.delete(lastReplies.keys().next().value!);
+      }
+      return HOOK_NOOP;
+    }
     case 'Stop':
       return onStop(sessionId, input as StopInput, ctx);
     default:
@@ -75,7 +98,7 @@ export async function ingestHook(event: string, input: HookInput, ctx: IngestCon
  *  off) mid-session, so every event re-reads it. */
 function applyEnv(sessionId: string, ctx: IngestContext): void {
   if (!ctx.env) return;
-  const { surface, link } = resolveLink(ctx.env);
+  const { surface, link } = resolveLink(ctx.env, ctx.agent ?? DEFAULT_AGENT, sessionId);
   const s = ctx.store.get(sessionId);
   if (!s) return;
   if (s.surface === surface && JSON.stringify(s.link) === JSON.stringify(link)) return;
@@ -109,15 +132,24 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
   // carries the prompt. Not subject to `promptNotice` — signing off was the
   // request to send it. A message that already holds the prompt (they pasted
   // it) is left as it is.
-  const handed = ctx.store.deliver(sessionId);
-  if (handed) {
-    const typed = String(input.prompt ?? input.user_input ?? '');
-    // The user can still edit tasks and comment after confirming the design;
-    // those edits are not in the prompt, and Claude is told to read them.
-    const later = ctx.store.get(sessionId)?.plan;
-    const notice = later && ctx.config.promptNotice ? unreadNotice(later) : null;
-    const text = [typed.includes(handed.marker) ? '' : handed.prompt, notice ?? ''].filter(Boolean).join('\n\n');
-    return text ? additionalContext('UserPromptSubmit', text) : HOOK_NOOP;
+  const typed = String(input.prompt ?? input.user_input ?? '');
+  if (!agentInfo(ctx.agent).promptContext) {
+    // An agent whose hooks cannot be relied on to add to a prompt (Cursor)
+    // gets the prompt by the user pasting it, or from its next
+    // harness_plan_read. All this hook can do is notice the paste, so it is
+    // not sent twice.
+    const pending = ctx.store.pending(sessionId);
+    if (pending && typed.includes(pending.marker)) ctx.store.deliver(sessionId);
+  } else {
+    const handed = ctx.store.deliver(sessionId);
+    if (handed) {
+      // The user can still edit tasks and comment after confirming the design;
+      // those edits are not in the prompt, and the agent is told to read them.
+      const later = ctx.store.get(sessionId)?.plan;
+      const notice = later && ctx.config.promptNotice ? unreadNotice(later) : null;
+      const text = [typed.includes(handed.marker) ? '' : handed.prompt, notice ?? ''].filter(Boolean).join('\n\n');
+      return text ? additionalContext('UserPromptSubmit', text) : HOOK_NOOP;
+    }
   }
 
   if (!ctx.config.promptNotice) return HOOK_NOOP;
@@ -126,7 +158,9 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
 }
 
 function onPreToolUse(sessionId: string, input: PreToolUseInput, ctx: IngestContext): HookOutput {
-  if (input.tool_name !== 'AskUserQuestion') return HOOK_NOOP;
+  // AskUserQuestion in Claude Code, request_user_input in Codex, AskQuestion
+  // in Cursor: the same structured question, under each agent's name.
+  if (!agentInfo(ctx.agent).askTools.includes(input.tool_name ?? '')) return HOOK_NOOP;
   const questions = readQuestions(input.tool_input);
   if (questions.length === 0) return HOOK_NOOP;
   setWaiting(sessionId, ctx, {
@@ -154,7 +188,9 @@ function onNotification(sessionId: string, input: NotificationInput, ctx: Ingest
 function onStop(sessionId: string, input: StopInput, ctx: IngestContext): HookOutput {
   // A turn that ends on a question is waiting on an answer even though no
   // tool asked it. Claude is told to use AskUserQuestion, but prose happens.
-  const asked = trailingQuestion(input.last_assistant_message);
+  const reply = input.last_assistant_message ?? lastReplies.get(sessionId);
+  lastReplies.delete(sessionId);
+  const asked = trailingQuestion(reply);
   ctx.store.update(sessionId, {
     status: 'idle',
     waiting: asked ? { kind: 'input', text: asked, since: Date.now() } : null,

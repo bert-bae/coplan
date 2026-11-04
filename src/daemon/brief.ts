@@ -32,9 +32,12 @@ import {
 } from '../shared/build.ts';
 import { HOOK_STAGES, emptyProjectConfig, hasHooks, hooksFor, type ProjectConfig } from '../shared/project.ts';
 import { KIND_NOUN, edgePhrase, indent } from '../shared/architecture.ts';
+import { agentInfo, type AgentKind } from '../shared/agents.ts';
 import { checkWords, checksSection, renderBuildOrder, stageWords } from './render.ts';
 
 export interface BriefOptions {
+  /** The agent building it: how it is told to ask the user things. */
+  agent?: AgentKind;
   settings?: BuildSettings;
   project?: ProjectConfig;
   /** The coplan CLI on this machine, for `coplan check`. */
@@ -265,7 +268,7 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
   stage(
     'Review',
     review === 'user'
-      ? 'Run the review checks, then show the user the change and ask them, with AskUserQuestion, whether it is right:'
+      ? `Run the review checks, then show the user the change and ask them, with ${agentInfo(opts.agent).askWith}, whether it is right:`
       : review === 'skip'
         ? 'No reviewer: the review checks are the review. Run them:'
         : review === 'self'

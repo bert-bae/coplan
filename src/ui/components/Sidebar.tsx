@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { store, useStore } from '../store.ts';
 import { GlobalActions } from './GlobalActions.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
+import { agentInfo } from '../../shared/agents.ts';
 import type { PlanPhase, SessionSummary } from '../../shared/types.ts';
 
-/** What the Claude session behind the plan is doing. */
+/** What the agent session behind the plan is doing. */
 const SESSION_STATE_LABEL: Record<string, string> = {
   active: 'working',
   idle: 'idle',
@@ -19,13 +20,20 @@ const PHASE_PILL: Record<Exclude<PlanPhase, 'planning'>, string> = {
   built: 'built',
   'handed-off': 'handed off',
 };
-const PHASE_TITLE: Record<Exclude<PlanPhase, 'planning'>, string> = {
-  tasking: 'Design confirmed: the task list is being made and shaped',
-  submitted: 'Submitted: waiting for Claude to pick it up',
-  building: 'Submitted and locked: Claude is building it',
-  built: 'Submitted and built: every task is done',
-  'handed-off': 'Submitted to be built somewhere else',
-};
+function phaseTitle(phase: Exclude<PlanPhase, 'planning'>, agent: string): string {
+  switch (phase) {
+    case 'tasking':
+      return 'Design confirmed: the task list is being made and shaped';
+    case 'submitted':
+      return `Submitted: waiting for ${agent} to pick it up`;
+    case 'building':
+      return `Submitted and locked: ${agent} is building it`;
+    case 'built':
+      return 'Submitted and built: every task is done';
+    default:
+      return 'Submitted to be built somewhere else';
+  }
+}
 
 /** The lifted sections are groups like any other, with reserved keys. */
 const WAITING_KEY = '\u0000waiting';
@@ -222,8 +230,12 @@ function SessionRow({
   showRepo: boolean;
 }) {
   const pinned = useStore((s) => s.pinned.includes(session.sessionId));
+  // Which agent a row belongs to is only worth a word once there is more
+  // than one kind in the list.
+  const mixed = useStore((s) => s.sessions.some((other) => other.agent !== session.agent));
   const [confirming, setConfirming] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  const agent = agentInfo(session.agent);
 
   return (
     <div
@@ -253,9 +265,11 @@ function SessionRow({
       >
         <span className="session-name">
           {session.waiting ? (
-            <span className="dot is-attention" title="Claude is waiting on you" aria-label="Claude is waiting on you" />
+            <span className="dot is-attention" title={`${agent.name} is waiting on you`} aria-label={`${agent.name} is waiting on you`} />
           ) : (
-            session.status === 'active' && <span className="working-dot" title="Claude is working" aria-label="Claude is working" />
+            session.status === 'active' && (
+              <span className="working-dot" title={`${agent.name} is working`} aria-label={`${agent.name} is working`} />
+            )
           )}
           {session.planTitle ?? session.title}
         </span>
@@ -267,6 +281,7 @@ function SessionRow({
         <span className="session-sub">
           {session.planTitle && session.planTitle !== session.title && <span className="session-stage">{session.title}</span>}
           {!session.planTitle && <span className="session-stage">no plan yet</span>}
+          {mixed && <span className={classNames('session-agent', `is-${agent.kind}`)}>{agent.name}</span>}
           <span className={classNames('session-state', `is-${session.status}`)}>
             {SESSION_STATE_LABEL[session.status] ?? session.status}
           </span>
@@ -281,12 +296,12 @@ function SessionRow({
           )}
           <span>{relativeTime(session.updatedAt)}</span>
           {session.phase !== 'planning' ? (
-            <span className={classNames('pill', `is-phase-${session.phase}`)} title={PHASE_TITLE[session.phase]}>
+            <span className={classNames('pill', `is-phase-${session.phase}`)} title={phaseTitle(session.phase, agent.name)}>
               {PHASE_PILL[session.phase]}
             </span>
           ) : (
             session.unreadByClaude > 0 && (
-              <span className="pill is-draft" title="You changed the plan since Claude last read it">
+              <span className="pill is-draft" title={`You changed the plan since ${agent.name} last read it`}>
                 unread
               </span>
             )
@@ -296,8 +311,8 @@ function SessionRow({
       )}
 
       {session.waiting && session.link && !renaming && (
-        <a className="session-answer btn btn-sm btn-primary" href={session.link.app} title="Open this session in the Claude desktop app">
-          Answer in Claude
+        <a className="session-answer btn btn-sm btn-primary" href={session.link.app} title={`Open this session in ${agent.app}`}>
+          Answer in {agent.name}
         </a>
       )}
 

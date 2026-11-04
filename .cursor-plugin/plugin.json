@@ -1,0 +1,17 @@
+{
+  "name": "coplan",
+  "displayName": "Coplan",
+  "version": "0.2.0",
+  "description": "Open-source visual planning workspace for coding agents: shape the plan as architecture diagrams and a task board in the browser, submit it, and follow the build.",
+  "author": {
+    "name": "Elbert B."
+  },
+  "homepage": "https://github.com/bert-bae/coplan",
+  "repository": "https://github.com/bert-bae/coplan",
+  "license": "MIT",
+  "keywords": ["cursor", "planning", "architecture", "diagrams", "tasks", "ui"],
+  "skills": "./skills/",
+  "commands": "./commands/",
+  "hooks": "./hooks/cursor.json",
+  "mcpServers": "./mcp/cursor.json"
+}

@@ -19,6 +19,7 @@ import {
   waitingOn,
 } from '../shared/build.ts';
 import { HOOK_STAGES, PROJECT_CONFIG_PATH, emptyProjectConfig, hasHooks, type ProjectConfig } from '../shared/project.ts';
+import { agentInfo, type AgentInfo, type AgentKind } from '../shared/agents.ts';
 
 const STATUS_MARK = { todo: '[ ]', in_progress: '[~]', blocked: '[!]', done: '[x]' } as const;
 
@@ -251,7 +252,9 @@ export interface BuildPrompt {
 export const DESIGN_MARKER = '[cc-harness] The design is confirmed';
 
 export interface PromptOptions {
-  /** Anything the user added for Claude. */
+  /** The agent the prompt is for: how it is told to ask the user things. */
+  agent?: AgentKind;
+  /** Anything the user added for the agent. */
   note?: string;
   /** How the build runs, as the user chose it. */
   settings?: BuildSettings;
@@ -277,7 +280,7 @@ export function buildPrompt(plan: Plan, opts: PromptOptions & { target: BuildTar
   const settings = opts.settings ?? opts.project?.settings ?? DEFAULT_BUILD_SETTINGS;
   const project = opts.project ?? emptyProjectConfig();
   const head = [
-    ...(here ? sessionBrief(plan, settings) : outsideBrief(plan, settings)),
+    ...(here ? sessionBrief(plan, settings, agentInfo(opts.agent)) : outsideBrief(plan, settings)),
     '',
     ...checksSection(project, here ? opts.bin : undefined),
   ];
@@ -318,7 +321,7 @@ export function designPrompt(plan: Plan, opts: PromptOptions = {}): BuildPrompt 
       '`review: "user"` on risky or user-facing tasks, `"skip"` on trivial ones.',
     '6. Publish it with harness_tasks_publish — keep the ids of planned tasks you keep, so the boxes stay linked — ' +
       'then tell the user in chat that the task list is ready to review, and ask what you need decided with ' +
-      'AskUserQuestion. Do not start building: the user submits the plan when the tasks are right.',
+      `${agentInfo(opts.agent).askWith}. Do not start building: the user submits the plan when the tasks are right.`,
     '',
     ...checksSection(project, opts.bin, true),
   ];
@@ -363,7 +366,7 @@ function fit(plan: Plan, head: string[], said: string[], changes: string[], doc:
   return { prompt: [...fixed, '', ...kept, ...tail, '', STATUS_LEGEND].join('\n').trim(), trimmed: true };
 }
 
-function sessionBrief(plan: Plan, s: BuildSettings): string[] {
+function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo): string[] {
   const together =
     s.parallel > 1
       ? `build them side by side, up to ${s.parallel} at once, each by its own subagent given that task's harness_task_brief`
@@ -382,7 +385,7 @@ function sessionBrief(plan: Plan, s: BuildSettings): string[] {
       'checks you ran with `checks`.',
     `3. Review: ${REVIEW_WORDS[s.review]}, unless a task says otherwise. After ${s.maxRounds} review round${s.maxRounds === 1 ? '' : 's'} without passing, stop and ask the user.`,
     '4. Mark a task done only once its review passed and its review checks are green, with a one-line note of what you did.',
-    '5. If you are stuck, mark the task blocked with a note saying on what, and ask the user with AskUserQuestion.',
+    `5. If you are stuck, mark the task blocked with a note saying on what, and ask the user with ${agent.askWith}.`,
     '6. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.',
     ...(branches.length
       ? ['7. Land each task on its branch (see Branches below): cut a stacked branch from the one it builds on, and open the pull requests in stack order.']

@@ -49,7 +49,7 @@ function makePlan(): Plan {
 
 function makeSession(plan: Plan = makePlan()): SessionState {
   const now = Date.now();
-  return { sessionId: 's1', cwd: '/repo', repoRoot: '/repo', branch: 'main', title: 'repo', status: 'idle', waiting: null, surface: 'unknown', link: null, createdAt: now, updatedAt: now, plan };
+  return { sessionId: 's1', agent: 'claude', cwd: '/repo', repoRoot: '/repo', branch: 'main', title: 'repo', status: 'idle', waiting: null, surface: 'unknown', link: null, createdAt: now, updatedAt: now, plan };
 }
 
 let posts: { route: string; body: Record<string, unknown> }[];

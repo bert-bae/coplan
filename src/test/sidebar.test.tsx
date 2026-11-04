@@ -23,6 +23,7 @@ function makeSession(): SessionState {
   const now = Date.now();
   return {
     sessionId: 's1',
+    agent: 'claude',
     cwd: '/repo',
     repoRoot: '/repo',
     branch: 'main',
@@ -42,6 +43,7 @@ function makeSession(): SessionState {
 function summary(sessionId: string, repo: string, createdAt: number, updatedAt: number = createdAt): SessionSummary {
   return {
     sessionId,
+    agent: 'claude',
     title: `${sessionId} title`,
     planTitle: null,
     cwd: `/${repo}`,

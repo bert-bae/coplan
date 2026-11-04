@@ -1,10 +1,14 @@
 #!/bin/sh
 # Coplan hook relay.
 #
-# Forwards one Claude Code hook payload to the local Coplan daemon and echoes
-# the daemon's JSON response back as the hook's output.
+# Forwards one agent hook payload to the local Coplan daemon and echoes the
+# daemon's JSON response back as the hook's output.
 #
-#   usage: coplan-hook-relay.sh <EventName>
+#   usage: coplan-hook-relay.sh <EventName> [claude|codex|cursor]
+#
+# The agent defaults to Claude Code. Codex and Cursor name themselves in their
+# own hook files (hooks/codex.json, hooks/cursor.json); the daemon reads each
+# one's payload and answers in that agent's format.
 #
 # Two properties matter more than anything else here:
 #
@@ -18,6 +22,16 @@ set -u
 
 EVENT="${1:-}"
 [ -n "$EVENT" ] || exit 0
+AGENT="${2:-claude}"
+case "$AGENT" in
+  claude|codex|cursor) ;;
+  *) AGENT=claude ;;
+esac
+
+# Where the plugin lives. Claude Code and Codex say so in CLAUDE_PLUGIN_ROOT /
+# PLUGIN_ROOT; Cursor may not, and this script always knows where it is.
+SELF_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd) || SELF_ROOT=
+PLUGIN_ROOT_DIR="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-$SELF_ROOT}}}"
 
 PAYLOAD=$(cat)
 [ -n "$PAYLOAD" ] || exit 0
@@ -27,7 +41,7 @@ LOCK="$HOME_DIR/daemon.json"
 
 # Nothing the harness does waits on the user, so every event is near instant.
 case "$EVENT" in
-  SessionStart) MAX_TIME=15 ;;
+  SessionStart|sessionStart) MAX_TIME=15 ;;
   *) MAX_TIME=4 ;;
 esac
 
@@ -47,12 +61,15 @@ read_lock() {
 }
 
 start_daemon() {
-  # Only SessionStart pays the cost of starting the daemon; every other event
-  # in a session that has no daemon simply no-ops.
-  [ "$EVENT" = "SessionStart" ] || return 1
-  [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] || return 1
+  # Only the session's first event pays the cost of starting the daemon; every
+  # other event in a session that has no daemon simply no-ops.
+  case "$EVENT" in
+    SessionStart|sessionStart) ;;
+    *) return 1 ;;
+  esac
+  [ -n "$PLUGIN_ROOT_DIR" ] || return 1
   command -v node >/dev/null 2>&1 || return 1
-  ENTRY="$CLAUDE_PLUGIN_ROOT/dist/daemon/main.js"
+  ENTRY="$PLUGIN_ROOT_DIR/dist/daemon/main.js"
   [ -f "$ENTRY" ] || return 1
   mkdir -p "$HOME_DIR" 2>/dev/null || true
   (setsid node "$ENTRY" >/dev/null 2>&1 &) 2>/dev/null || (node "$ENTRY" >/dev/null 2>&1 &)
@@ -71,7 +88,7 @@ fi
 
 # Hooks run inside the session's own environment, which is the only place
 # that says where the session lives — and therefore how to link back to it so
-# the user can answer Claude there. Remote Control can be switched on
+# the user can answer the agent there. Remote Control can be switched on
 # mid-session, so this goes with every event rather than only SessionStart.
 RESPONSE=$(printf '%s' "$PAYLOAD" | curl -s -S \
   --max-time "$MAX_TIME" \
@@ -79,6 +96,7 @@ RESPONSE=$(printf '%s' "$PAYLOAD" | curl -s -S \
   -X POST \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $TOKEN" \
+  -H "X-Harness-Agent: $AGENT" \
   -H "X-Harness-Remote-Session: ${CLAUDE_CODE_REMOTE_SESSION_ID:-}" \
   -H "X-Harness-Remote-Sdk: ${CLAUDE_CODE_REMOTE_SDK_URL:-}" \
   -H "X-Harness-Bridge-Session: ${CLAUDE_CODE_BRIDGE_SESSION_ID:-}" \

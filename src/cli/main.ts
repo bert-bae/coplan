@@ -15,6 +15,7 @@ import { readLiveLock, baseUrl, paths, ensureHome } from '../shared/paths.ts';
 import { runDoctor } from './doctor.ts';
 import { runCheck } from './check.ts';
 import { runInit } from './init.ts';
+import { AGENT_KINDS, agentInfo, sessionFromEnv } from '../shared/agents.ts';
 import { openInBrowser } from '../daemon/browser.ts';
 import { cleanStorage, scanStorage } from '../daemon/housekeeping.ts';
 import { CLEANUP_GROUPS, type CleanupGroupId, type CleanupOutcome, type DaemonLock, type SessionSummary, type StorageReport } from '../shared/types.ts';
@@ -54,6 +55,26 @@ async function api<T>(lock: DaemonLock, route: string, init?: RequestInit): Prom
     headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}`, ...(init?.headers ?? {}) },
   });
   return (await res.json()) as T;
+}
+
+/**
+ * The session this command was run from. Claude Code and Codex name it in the
+ * environment of the commands they run; otherwise — Cursor, or a terminal —
+ * it is the session in this folder that was active last.
+ */
+async function currentSession(lock: DaemonLock): Promise<string | undefined> {
+  for (const agent of AGENT_KINDS) {
+    const id = sessionFromEnv(process.env, agent);
+    if (id) return id;
+  }
+  try {
+    const { sessions } = await api<{ sessions: SessionSummary[] }>(lock, '/api/sessions');
+    const here = path.resolve(process.cwd());
+    const at = (p: string | null) => !!p && path.resolve(p) === here;
+    return [...sessions].sort((a, b) => b.updatedAt - a.updatedAt).find((s) => at(s.cwd) || at(s.repoRoot))?.sessionId;
+  } catch {
+    return undefined;
+  }
 }
 
 function uiUrl(lock: DaemonLock, sessionId?: string): string {
@@ -201,11 +222,11 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
         ? `"${s.planTitle}" · tasks ${s.tasks.done}/${s.tasks.total}` +
           (s.current ? ` · now: ${s.current}` : '') +
           (s.waiting ? ` · WAITING ON YOU: ${s.waiting.text}` : '') +
-          (s.unreadByClaude ? ` · ${s.unreadByClaude} item(s) changed that Claude has not read` : '')
+          (s.unreadByClaude ? ` · ${s.unreadByClaude} item(s) changed that ${agentInfo(s.agent).name} has not read` : '')
         : 'no plan yet';
-      console.log(`  ${pad(s.status, 7)} ${pad(s.title, 28)} ${plan}`);
+      console.log(`  ${pad(s.status, 7)} ${pad(agentInfo(s.agent).name, 6)} ${pad(s.title, 28)} ${plan}`);
       console.log(`          ${s.sessionId}  ${s.cwd}`);
-      if (s.link) console.log(`          open: ${s.link.app}  (web: ${s.link.web})`);
+      if (s.link) console.log(`          open: ${s.link.app}${s.link.web ? `  (web: ${s.link.web})` : ''}`);
     }
     return 0;
   },
@@ -213,8 +234,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
   async open(args) {
     const lock = await ensureDaemon();
     if (!lock) return 1;
-    const sessionId = args[0] ?? process.env['CLAUDE_CODE_SESSION_ID'];
-    const url = uiUrl(lock, sessionId);
+    const url = uiUrl(lock, args[0] ?? (await currentSession(lock)));
     openInBrowser(url);
     console.log(url);
     return 0;
@@ -223,7 +243,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
   async url(args) {
     const lock = await ensureDaemon();
     if (!lock) return 1;
-    console.log(uiUrl(lock, args[0] ?? process.env['CLAUDE_CODE_SESSION_ID']));
+    console.log(uiUrl(lock, args[0] ?? (await currentSession(lock))));
     return 0;
   },
 

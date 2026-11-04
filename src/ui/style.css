@@ -477,6 +477,12 @@
 .session-name { display: flex; align-items: center; gap: var(--sp-2); font-weight: 600; }
 .session-sub { display: flex; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--text-secondary); flex-wrap: wrap; }
 .session-branch { font-family: var(--font-mono); font-size: var(--fs-micro); }
+/* Which agent a session runs in, once the rail holds more than one kind. */
+.session-agent {
+  font-size: var(--fs-micro); font-weight: 600; letter-spacing: 0.02em;
+  padding: 0 5px; border-radius: var(--r-sm);
+  border: 1px solid var(--border-default); color: var(--text-secondary);
+}
 .session-foot {
   display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap;
   font-size: var(--fs-micro); color: var(--text-tertiary);
