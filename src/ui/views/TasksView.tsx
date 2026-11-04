@@ -1,4 +1,4 @@
-import { useMemo, useState, type DragEvent, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
 import { store, usePlan, useStore } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
 import { CommentToggle, ThreadPanel, useThreads } from '../components/Threads.tsx';
@@ -6,8 +6,9 @@ import { Focusable } from '../components/Item.tsx';
 import { KIND_GLYPH } from '../components/FlowCanvas.tsx';
 import { ProgressBar, STATUS_GLYPH, STATUS_LABEL } from '../components/Progress.tsx';
 import { EmptyState } from '../components/primitives.tsx';
+import { Markdown } from '../components/Markdown.tsx';
 import { classNames } from '../lib/format.ts';
-import { childrenOf, countTasks, descendants, outline } from '../../shared/plan.ts';
+import { childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
 import { TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type Task, type TaskStatus } from '../../shared/types.ts';
 
 /** Clicking the status dot steps through the common path; blocked is set
@@ -37,8 +38,36 @@ export function TasksView() {
   const plan = usePlan();
   const mode = useStore((s) => s.taskMode);
   const hideDone = useStore((s) => s.hideDone);
+  const sessionId = useStore((s) => s.sessionId);
   if (!plan) return null;
   const counts = countTasks(plan);
+  // Submitted: the breakdown is final, and this view is the build moving
+  // across the board — nothing on it is edited.
+  if (isLocked(plan)) {
+    const phase = planPhase(plan);
+    return (
+      <div className="view-pad">
+        <div className="toolbar">
+          <p className="toolbar-note">
+            <span aria-hidden="true">🔒</span>{' '}
+            {phase === 'handed-off'
+              ? 'Handed off to be built elsewhere, so these statuses do not move.'
+              : phase === 'submitted'
+                ? 'The plan is locked. Cards move across the board once Claude starts and reports each task.'
+                : 'The plan is locked. Cards move across the board as Claude reports each task.'}
+          </p>
+          <span className="spacer" />
+          <span className="toolbar-progress">
+            <ProgressBar counts={counts} />
+            <span className="muted">
+              {counts.done}/{counts.total} done
+            </span>
+          </span>
+        </div>
+        {plan.tasks.length === 0 ? <EmptyState title="No tasks" hint="This plan was submitted without a task breakdown." /> : <Board key={sessionId} plan={plan} readOnly />}
+      </div>
+    );
+  }
 
   return (
     <div className="view-pad">
@@ -520,15 +549,16 @@ function StatusPicker({ task }: { task: Task }) {
  * Board
  * ------------------------------------------------------------------ */
 
-function Board({ plan }: { plan: Plan }) {
+function Board({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
   const [over, setOver] = useState<TaskStatus | null>(null);
+  const { arrived, announcement } = useArrivals(plan);
   // Leaves only: a parent is a heading, and its progress is its subtasks'.
   const leaves = outline(plan)
     .map((r) => r.task)
     .filter((t) => !hasChildren(plan, t.id));
 
   return (
-    <div className="board">
+    <div className={classNames('board', readOnly && 'is-readonly')}>
       {TASK_STATUSES.map((status) => {
         const cards = leaves.filter((t) => t.status === status);
         return (
@@ -537,12 +567,13 @@ function Board({ plan }: { plan: Plan }) {
             className={classNames('board-col', `is-${status}`, over === status && 'is-over')}
             aria-label={STATUS_LABEL[status]}
             onDragOver={(e) => {
-              if (!e.dataTransfer.types.includes(DRAG_TYPE)) return;
+              if (readOnly || !e.dataTransfer.types.includes(DRAG_TYPE)) return;
               e.preventDefault();
               setOver(status);
             }}
             onDragLeave={() => setOver((cur) => (cur === status ? null : cur))}
             onDrop={(e) => {
+              if (readOnly) return;
               e.preventDefault();
               setOver(null);
               const id = e.dataTransfer.getData(DRAG_TYPE);
@@ -558,15 +589,108 @@ function Board({ plan }: { plan: Plan }) {
               <span className="board-count">{cards.length}</span>
             </header>
             <div className="board-cards">
-              {cards.map((task) => (
-                <BoardCard key={task.id} plan={plan} task={task} />
-              ))}
-              {cards.length === 0 && <p className="board-empty">Drop tasks here</p>}
+              {cards.map((task) =>
+                readOnly ? (
+                  <TrackedCard key={task.id} plan={plan} task={task} arrived={arrived.has(task.id)} />
+                ) : (
+                  <BoardCard key={task.id} plan={plan} task={task} />
+                ),
+              )}
+              {cards.length === 0 && <p className="board-empty">{readOnly ? 'Nothing here yet' : 'Drop tasks here'}</p>}
             </div>
           </section>
         );
       })}
+      <p className="sr-only" aria-live="polite">
+        {announcement}
+      </p>
     </div>
+  );
+}
+
+/** How long a card that just moved column stands out. */
+const ARRIVAL_MS = 2400;
+
+/**
+ * Which tasks just changed column, so the eye can follow a card from one to
+ * the next — and the same moves, in words, for a screen reader. The first
+ * render is the board as it is: nothing has moved yet.
+ */
+function useArrivals(plan: Plan): { arrived: Set<string>; announcement: string } {
+  const last = useRef<Map<string, TaskStatus> | null>(null);
+  const timers = useRef(new Set<number>());
+  const [arrived, setArrived] = useState<Set<string>>(() => new Set());
+  const [announcement, setAnnouncement] = useState('');
+  const key = plan.tasks.map((t) => `${t.id}:${t.status}`).join('|');
+
+  useEffect(() => {
+    const before = last.current;
+    last.current = new Map(plan.tasks.map((t) => [t.id, t.status]));
+    if (!before) return;
+    const moved = plan.tasks.filter((t) => before.has(t.id) && before.get(t.id) !== t.status && !hasChildren(plan, t.id));
+    if (!moved.length) return;
+    const ids = moved.map((t) => t.id);
+    setArrived((cur) => new Set([...cur, ...ids]));
+    setAnnouncement(moved.map((t) => `${t.title}: ${STATUS_LABEL[t.status].toLowerCase()}`).join('. '));
+    const timer = window.setTimeout(() => {
+      timers.current.delete(timer);
+      setArrived((cur) => {
+        const next = new Set(cur);
+        for (const id of ids) next.delete(id);
+        return next;
+      });
+    }, ARRIVAL_MS);
+    timers.current.add(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on statuses
+  }, [key]);
+
+  useEffect(
+    () => () => {
+      for (const timer of timers.current) window.clearTimeout(timer);
+    },
+    [],
+  );
+  return { arrived, announcement };
+}
+
+/** A card on a submitted plan's board: read, never moved by hand. Opens to
+ *  show what the task involves. */
+function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived: boolean }) {
+  const [open, setOpen] = useState(false);
+  const path: string[] = [];
+  let cursor = task.parentId ? plan.tasks.find((t) => t.id === task.parentId) : undefined;
+  while (cursor) {
+    path.unshift(cursor.title);
+    cursor = cursor.parentId ? plan.tasks.find((t) => t.id === cursor!.parentId) : undefined;
+  }
+  const more = Boolean(task.detail?.trim() || task.files?.length);
+  return (
+    <Focusable kind="task" id={task.id} as="article" className={classNames('board-card', 'is-tracked', `is-${task.status}`, arrived && 'is-arrived')}>
+      {path.length > 0 && <p className="board-path">{path.join(' › ')}</p>}
+      <p className="board-title-row">
+        {task.status === 'in_progress' && <span className="working-dot" title="Claude is on it" aria-label="Claude is on it" />}
+        {more ? (
+          <button type="button" className="board-title" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+            {task.title}
+          </button>
+        ) : (
+          <span className="board-title">{task.title}</span>
+        )}
+      </p>
+      {task.note && <p className="board-note">{task.note}</p>}
+      {open && (
+        <div className="board-more">
+          {task.detail?.trim() && <Markdown source={task.detail} />}
+          {task.files?.length ? <p className="board-files mono">{task.files.join(', ')}</p> : null}
+        </div>
+      )}
+      <footer className="board-foot">
+        <span className="item-id">{task.id}</span>
+        {arrived && <span className="pill is-moved">just moved</span>}
+        <span className="spacer" />
+        <span className={classNames('board-state', `is-${task.status}`)}>{STATUS_LABEL[task.status]}</span>
+      </footer>
+    </Focusable>
   );
 }
 

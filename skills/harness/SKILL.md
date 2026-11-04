@@ -71,10 +71,28 @@ together). Use `harness_plan_publish` again only for a wholesale rewrite, and
 keep the ids of items that survive. Publishing is refused while the user has
 changes you have not read — read first.
 
-## 3. Track progress while you build
+## 3. Build when the user submits the plan
 
-Once the user says to start, work through the task tree in order and keep
-statuses truthful with `harness_task_update`:
+The user signs the plan off from the harness: they read the exact prompt you
+will get, and submit. The plan is then **locked** — the diagrams, sections and
+task tree are final — and the harness only follows your progress on its task
+board. Their next message in chat carries a `[cc-harness] Build the plan …`
+prompt with the whole plan (or, for a long one, the task list and a pointer to
+`harness_plan_read`). Build from it, in order.
+
+While the plan is locked, only tracking applies: `harness_task_update`,
+`upsert_task` to add work you discover, and `reply`/`resolve` on comments.
+Anything that would redesign it is refused, and so is publishing over it
+until every task is done. If the design has to change, stop and ask in chat —
+the user can reopen the plan in the harness.
+
+If the user tells you to start without submitting, build all the same; the
+plan just stays open for them to edit.
+
+## 4. Track progress while you build
+
+Work through the task tree in order and keep statuses truthful with
+`harness_task_update` — the board moves as you report:
 
 - `in_progress` when you start a task,
 - `done` with a one-line `note` of what you did,
@@ -90,6 +108,7 @@ builds, so the plan stays the map of the work.
 - Ask in chat with `AskUserQuestion`, never in the plan. The harness links the
   user to you; it cannot carry an answer.
 - Read before you republish, and never overwrite the user's structure.
+- A submitted plan is the user's sign-off: build it, do not redesign it.
 - Keep ids stable; quote them exactly in edits (`t4`, `d1`, `c3`, node ids).
 - If the harness tools return a daemon error, tell the user once and carry on
   in chat. The UI is an aid, not a dependency.

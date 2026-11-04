@@ -399,4 +399,112 @@ test("a batch too large to apply whole is refused, not truncated", async () => {
   assert.equal(viaClaude["ok"], false);
   assert.equal((await session()).plan.tasks.length, before2, "none of it applied");
 });
+var built = "submit-session";
+var opsOn = (id, list) => call(`/api/session/${id}/plan/ops`, { method: "POST", body: JSON.stringify({ ops: list }) });
+var post = (route, body = {}) => call(route, { method: "POST", body: JSON.stringify(body) });
+test("the prompt preview is the prompt, and reading it changes nothing", async () => {
+  await hookFor(built, "SessionStart", { start_reason: "startup" });
+  await mcpFor(built, "publish", PLAN);
+  await opsOn(built, [{ op: "upsert_task", title: "Load test" }]);
+  const before2 = await sessionFor(built);
+  const preview = await post(`/api/session/${built}/plan/prompt`, { target: "session", note: "Start with the client." });
+  assert.match(preview.prompt, /^\[cc-harness\] Build the plan "Add a cache"/);
+  assert.match(preview.prompt, /> Start with the client\./);
+  assert.match(preview.prompt, /Added t\d+ "Load test"/, "the edit Claude has not read leads");
+  assert.equal(preview.version, before2.plan.version);
+  const after2 = await sessionFor(built);
+  assert.equal(after2.plan.version, before2.plan.version);
+  assert.equal(after2.plan.submission, void 0);
+});
+test("a submission made against an older preview is refused", async () => {
+  const { version } = await post(`/api/session/${built}/plan/prompt`, { target: "session" });
+  await mcpFor(built, "task", { task_id: "t2", status: "in_progress" });
+  const res = await post(`/api/session/${built}/plan/submit`, { target: "session", expect: version });
+  assert.match(res.error ?? "", /changed while you were reviewing it/);
+  assert.equal((await sessionFor(built)).plan.submission, void 0);
+});
+test("submitting locks the plan with exactly the previewed prompt", async () => {
+  const preview = await post(`/api/session/${built}/plan/prompt`, { target: "session", note: "Go." });
+  const res = await post(`/api/session/${built}/plan/submit`, {
+    target: "session",
+    note: "Go.",
+    expect: preview.version
+  });
+  assert.ok(res.plan, res.error);
+  assert.equal(res.plan.submission?.prompt, preview.prompt);
+  assert.equal(res.plan.submission?.deliveredAt, null);
+  const { sessions } = await call("/api/sessions");
+  assert.equal(sessions.find((s) => s.sessionId === built)?.phase, "submitted");
+  const edit = await opsOn(built, [{ op: "upsert_task", title: "sneak in" }]);
+  assert.match(edit.error ?? "", /locked/);
+  const again = await post(`/api/session/${built}/plan/submit`, { target: "session" });
+  assert.match(again.error ?? "", /already been submitted/);
+});
+test("the user's next message in Claude carries the prompt \u2014 once", async () => {
+  const first = await hookFor(built, "UserPromptSubmit", { prompt: "go" });
+  const s = await sessionFor(built);
+  assert.equal(first.hookSpecificOutput?.additionalContext, s.plan.submission.prompt);
+  assert.notEqual(first.decision, "block", "delivering never holds the turn");
+  assert.ok(s.plan.submission.deliveredAt);
+  assert.equal(s.plan.claudeReadSeq, s.plan.seq, "the prompt is Claude reading the plan");
+  const second = await hookFor(built, "UserPromptSubmit", { prompt: "and go on" });
+  assert.equal(second.hookSpecificOutput?.additionalContext, void 0);
+  const { sessions } = await call("/api/sessions");
+  assert.equal(sessions.find((x) => x.sessionId === built)?.phase, "building");
+});
+test("while building, Claude tracks tasks but cannot redesign", async () => {
+  const redesign = await mcpFor(built, "edit", { ops: [{ op: "upsert_diagram", id: "d1", title: "Different" }] });
+  assert.equal(redesign["ok"], false);
+  assert.match(String(redesign["text"]), /submitted this plan to be built, so it is locked/);
+  const republish = await mcpFor(built, "publish", { ...PLAN, title: "Something else" });
+  assert.equal(republish["ok"], false);
+  const read = String((await mcpFor(built, "read", {}))["text"]);
+  assert.match(read, /Locked for building/);
+  const discovered = await mcpFor(built, "edit", { ops: [{ op: "upsert_task", parentId: "t1", title: "Handle timeouts" }] });
+  assert.equal(discovered["ok"], true, String(discovered["text"]));
+});
+test("finishing the last task finishes the build, and a new plan may follow", async () => {
+  const s = await sessionFor(built);
+  const leaves = s.plan.tasks.filter((t) => !s.plan.tasks.some((c) => c.parentId === t.id));
+  let last = {};
+  for (const t of leaves) last = await mcpFor(built, "task", { task_id: t.id, status: "done", note: "done" });
+  assert.match(String(last["text"]), /That was the last task: the plan is built/);
+  const { sessions } = await call("/api/sessions");
+  assert.equal(sessions.find((x) => x.sessionId === built)?.phase, "built");
+  const next = await mcpFor(built, "publish", { ...PLAN, title: "Next feature" });
+  assert.equal(next["ok"], true, String(next["text"]));
+  assert.equal((await sessionFor(built)).plan.submission, void 0);
+});
+test("a prompt the user pasted themselves is not delivered a second time", async () => {
+  const id = "paste-session";
+  await hookFor(id, "SessionStart", { start_reason: "startup" });
+  await mcpFor(id, "publish", PLAN);
+  const { version, prompt } = await post(`/api/session/${id}/plan/prompt`, { target: "session" });
+  await post(`/api/session/${id}/plan/submit`, { target: "session", expect: version });
+  const out = await hookFor(id, "UserPromptSubmit", { prompt });
+  assert.equal(out.hookSpecificOutput?.additionalContext, void 0);
+  assert.ok((await sessionFor(id)).plan.submission.deliveredAt, "but it is counted as delivered");
+});
+test("a plan handed off elsewhere is locked but never delivered here, and can be reopened", async () => {
+  const id = "elsewhere-session";
+  await hookFor(id, "SessionStart", { start_reason: "startup" });
+  await mcpFor(id, "publish", PLAN);
+  const preview = await post(`/api/session/${id}/plan/prompt`, { target: "elsewhere" });
+  assert.doesNotMatch(preview.prompt, /harness_/);
+  await post(`/api/session/${id}/plan/submit`, { target: "elsewhere", expect: preview.version });
+  const out = await hookFor(id, "UserPromptSubmit", { prompt: "hello" });
+  assert.equal(out.hookSpecificOutput?.additionalContext, void 0);
+  assert.equal((await sessionFor(id)).plan.submission.deliveredAt, null);
+  const reopened = await post(`/api/session/${id}/plan/reopen`);
+  assert.ok(reopened.plan, reopened.error);
+  assert.equal(reopened.plan.submission, void 0);
+  const edit = await opsOn(id, [{ op: "upsert_task", title: "after reopening" }]);
+  assert.ok(edit.plan, edit.error);
+  const twice = await post(`/api/session/${id}/plan/reopen`);
+  assert.match(twice.error ?? "", /not locked/);
+});
+test("a submission needs to say who builds it", async () => {
+  const res = await raw(`/api/session/${built}/plan/submit`, { method: "POST", body: JSON.stringify({ target: "mars" }) });
+  assert.equal(res.status, 400);
+});
 //# sourceMappingURL=integration.test.js.map

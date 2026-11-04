@@ -2,13 +2,27 @@ import { useEffect, useRef, useState } from 'react';
 import { store, useStore } from '../store.ts';
 import { GlobalActions } from './GlobalActions.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
-import type { SessionSummary } from '../../shared/types.ts';
+import type { PlanPhase, SessionSummary } from '../../shared/types.ts';
 
 /** What the Claude session behind the plan is doing. */
 const SESSION_STATE_LABEL: Record<string, string> = {
   active: 'working',
   idle: 'idle',
   ended: 'ended',
+};
+
+/** A submitted plan says how far its build has got. */
+const PHASE_PILL: Record<Exclude<PlanPhase, 'planning'>, string> = {
+  submitted: 'submitted',
+  building: 'building',
+  built: 'built',
+  'handed-off': 'handed off',
+};
+const PHASE_TITLE: Record<Exclude<PlanPhase, 'planning'>, string> = {
+  submitted: 'Submitted: waiting for Claude to pick it up',
+  building: 'Submitted and locked: Claude is building it',
+  built: 'Submitted and built: every task is done',
+  'handed-off': 'Submitted to be built somewhere else',
 };
 
 /** The lifted sections are groups like any other, with reserved keys. */
@@ -264,10 +278,16 @@ function SessionRow({
             </span>
           )}
           <span>{relativeTime(session.updatedAt)}</span>
-          {session.unreadByClaude > 0 && (
-            <span className="pill is-draft" title="You changed the plan since Claude last read it">
-              unread
+          {session.phase !== 'planning' ? (
+            <span className={classNames('pill', `is-phase-${session.phase}`)} title={PHASE_TITLE[session.phase]}>
+              {PHASE_PILL[session.phase]}
             </span>
+          ) : (
+            session.unreadByClaude > 0 && (
+              <span className="pill is-draft" title="You changed the plan since Claude last read it">
+                unread
+              </span>
+            )
           )}
         </span>
       </button>

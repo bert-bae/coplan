@@ -9,6 +9,7 @@
  */
 import type {
   Author,
+  BuildTarget,
   Change,
   ChangeKind,
   Diagram,
@@ -23,7 +24,9 @@ import type {
   PlanBaseline,
   PlanInput,
   PlanOp,
+  PlanPhase,
   Section,
+  Submission,
   Target,
   Task,
   TaskCounts,
@@ -31,7 +34,7 @@ import type {
   TaskStatus,
   Thread,
 } from './types.ts';
-import { EDGE_ARROWS, NODE_KINDS, TASK_STATUSES } from './types.ts';
+import { BUILD_TARGETS, EDGE_ARROWS, NODE_KINDS, TASK_STATUSES } from './types.ts';
 
 /** Raised for an op that cannot apply. The message is shown verbatim to
  *  whoever sent it — the user in a toast, Claude in a tool result. */
@@ -364,6 +367,9 @@ export function baselineOf(plan: Plan): PlanBaseline {
  * one thing this tool must never do.
  */
 export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now()): { plan: Plan; changes: Change[] } {
+  // A finished build is history: the next plan may replace it. Until then
+  // the plan is what the user signed off, and only they can reopen it.
+  if (prev?.submission && planPhase(prev) !== 'built') throw new PlanError(LOCKED_FOR_CLAUDE);
   if (prev && unreadByClaude(prev).length > 0) {
     throw new PlanError(
       `The user has changed ${unreadItems(prev)} item(s) in the plan since you last read it. ` +
@@ -375,6 +381,7 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
   if (!title) throw new PlanError('A plan needs a title.');
 
   const base = prev ? structuredClone(prev) : emptyPlan(title, now);
+  delete base.submission;
   // Ids are minted against everything the plan has ever held, so build into
   // a working copy that still remembers the old items until the end.
   const next: Plan = { ...base, title, summary: clean(input.summary, MAX_TEXT) ?? base.summary };
@@ -525,6 +532,10 @@ export function normalizePlan(raw: Partial<Plan> & Record<string, unknown>, fall
   const baseline = validBaseline(raw.claudeBaseline);
   if (baseline) plan.claudeBaseline = baseline;
   else delete plan.claudeBaseline;
+  // A damaged submission unlocks the plan rather than locking it for good.
+  const submission = validSubmission(raw.submission);
+  if (submission) plan.submission = submission;
+  else delete plan.submission;
   return plan;
 }
 
@@ -543,6 +554,7 @@ export function applyOps(
   now = Date.now(),
 ): { plan: Plan; changes: Change[] } {
   if (!Array.isArray(ops) || ops.length === 0) throw new PlanError('No edits were given.');
+  if (plan.submission) checkLocked(ops, author);
   const next = structuredClone(plan);
   const changes: Change[] = [];
   ops.forEach((op, i) => {
@@ -869,6 +881,120 @@ function removeItem(
   }
   plan.threads = plan.threads.map((t) => detachIfOrphaned(plan, before, t));
   return [log('deleted', { kind: kind as Target['kind'], id }, summary)];
+}
+
+/* ------------------------------------------------------------------ *
+ * Submitting the plan
+ * ------------------------------------------------------------------ */
+
+/** The longest note the user can hand Claude with a submission. */
+export const MAX_NOTE = 4_000;
+
+/** What Claude may still do to a locked plan: track the work it is doing,
+ *  and answer comments. Everything else is the design the user signed off. */
+const TRACKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'reply', 'resolve']);
+
+const LOCKED_FOR_USER = 'The plan has been submitted to be built, so it is locked. Reopen it to make changes.';
+const LOCKED_FOR_CLAUDE =
+  'The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or ' +
+  'upsert_task to add work you discover) and comment replies (reply, resolve) apply. If the design has to ' +
+  'change, ask the user in chat — they can reopen the plan in the harness.';
+
+/** Where the plan is in its life. */
+export function planPhase(plan: Pick<Plan, 'submission' | 'tasks'> | null): PlanPhase {
+  const submission = plan?.submission;
+  if (!submission) return 'planning';
+  if (submission.target === 'elsewhere') return 'handed-off';
+  if (!submission.deliveredAt) return 'submitted';
+  const counts = countTasks(plan);
+  return counts.total > 0 && counts.done === counts.total ? 'built' : 'building';
+}
+
+/** Whether the plan is locked against editing. */
+export function isLocked(plan: Pick<Plan, 'submission'> | null): boolean {
+  return Boolean(plan?.submission);
+}
+
+function checkLocked(ops: PlanOp[], author: Author): void {
+  if (author === 'user') throw new PlanError(LOCKED_FOR_USER);
+  const refused = ops.find((op) => !TRACKING_OPS.has((op as { op?: string })?.op ?? ''));
+  if (refused) throw new PlanError(`${LOCKED_FOR_CLAUDE} (Refused: ${(refused as { op?: string })?.op ?? 'an edit'}.)`);
+}
+
+export function validTarget(value: unknown): BuildTarget | undefined {
+  return (BUILD_TARGETS as readonly string[]).includes(value as string) ? (value as BuildTarget) : undefined;
+}
+
+/** A note as the user typed it, bounded; undefined when there is none. */
+export function cleanNote(value: unknown): string | undefined {
+  return clean(value, MAX_NOTE);
+}
+
+/**
+ * Lock the plan for building. `prompt` is what the user previewed: it is
+ * stored as it was shown, so what reaches Claude is exactly that.
+ */
+export function submitPlan(
+  plan: Plan,
+  input: { target: BuildTarget; prompt: string; note?: string; trimmed?: boolean },
+  now = Date.now(),
+): Plan {
+  if (plan.submission) throw new PlanError('The plan has already been submitted.');
+  if (!input.prompt.trim()) throw new PlanError('There is no prompt to submit.');
+  const next = structuredClone(plan);
+  const note = cleanNote(input.note);
+  next.submission = {
+    at: now,
+    target: input.target,
+    ...(note ? { note } : {}),
+    prompt: input.prompt,
+    ...(input.trimmed ? { trimmed: true } : {}),
+    deliveredAt: null,
+  };
+  next.version += 1;
+  next.updatedAt = now;
+  return next;
+}
+
+/** Unlock a submitted plan so it can be changed again. */
+export function reopenPlan(plan: Plan, now = Date.now()): Plan {
+  if (!plan.submission) throw new PlanError('The plan is not locked.');
+  const next = structuredClone(plan);
+  delete next.submission;
+  next.version += 1;
+  next.updatedAt = now;
+  return next;
+}
+
+/**
+ * The prompt has reached Claude. It carries the whole plan as submitted —
+ * or, when that was too long, tells Claude to read it — so this is Claude's
+ * read of the plan too.
+ */
+export function markDelivered(plan: Plan, now = Date.now()): Plan {
+  // Only this session is ever handed the prompt.
+  if (!plan.submission || plan.submission.target !== 'session' || plan.submission.deliveredAt) return plan;
+  const next = structuredClone(plan);
+  next.submission!.deliveredAt = now;
+  markReadByClaude(next, now);
+  next.version += 1;
+  next.updatedAt = now;
+  return next;
+}
+
+function validSubmission(raw: unknown): Submission | undefined {
+  const s = raw as Partial<Submission> | null;
+  if (!s || typeof s !== 'object') return undefined;
+  const target = validTarget(s.target);
+  if (!target || typeof s.at !== 'number' || typeof s.prompt !== 'string' || !s.prompt) return undefined;
+  return {
+    at: s.at,
+    target,
+    ...(typeof s.note === 'string' && s.note ? { note: s.note } : {}),
+    prompt: s.prompt,
+    ...(s.trimmed === true ? { trimmed: true } : {}),
+    deliveredAt: typeof s.deliveredAt === 'number' ? s.deliveredAt : null,
+  };
 }
 
 /* ------------------------------------------------------------------ *

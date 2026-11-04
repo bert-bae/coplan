@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Submitting the plan
+
+- **Review & submit plan**, on the Architecture view, shows the exact prompt
+  Claude will be given — built by the daemon from the plan as it stands, with
+  anything you add for Claude and what you changed that it has not read yet
+  — and submitting locks the plan. The preview is rebuilt as you type, and a
+  submission made against a plan that moved on since is refused.
+- **Who builds it**: this Claude session, which gets the prompt with your
+  next message in its chat (once; pasting it yourself is not sent twice), or
+  somewhere else, with a prompt written for an agent without the harness
+  tools, copied for you to paste.
+- **Locked.** A submitted plan is the final design: the canvas is read-only
+  (boxes still fill up with progress, and a box's panel links each task to
+  its card), the Tasks tab is a read-only board, and the Overview's controls
+  are off. Claude can still report tasks, add work it discovers and answer
+  comments; redesigning and republishing are refused until every task is
+  done. *Withdraw* or *Reopen for changes* unlocks it.
+- **Following the build.** A strip under the header says whether Claude has
+  the prompt, which task it is on, what is blocked, and when it is built. On
+  the board, a card that changes column glows as it arrives, and the move is
+  announced to screen readers. The session rail shows *submitted*,
+  *building* or *built*.
+- A plan too long for one message is sent as the instructions, summary and
+  task list, with a pointer to `harness_plan_read`; the review says so.
+
 The architecture canvas is easier to fill in and opens organised, and what
 Claude reads back about it is the design you ended up with — not a replay of
 every drag and keystroke.

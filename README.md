@@ -4,12 +4,15 @@ A visual planning workspace for Claude Code, and a way to follow Claude's
 progress through the plan. Claude publishes its plan — the architecture as
 diagrams, and a task breakdown — and you reshape it in the browser: rearrange
 and rewire the architecture, record the decisions on each part, reorganize the
-tasks, comment on anything. As Claude builds, the same page shows where it is.
+tasks, comment on anything. When it is right you submit it, after reading
+the exact prompt Claude will get; the plan locks, and as Claude builds, the
+same page follows each task across the board.
 
-It does one thing. The harness never talks to Claude and never answers it.
+It does one thing. The harness never starts a turn and never answers for you.
 When Claude needs a decision it asks in its own chat; the harness shows the
 question and takes you straight to that session — in the Claude desktop app —
-to answer it.
+to answer it. What the harness has to say to Claude — the build prompt, or a
+note that you changed the plan — rides along with your next message there.
 
 ```
  ┌──────────────────── Claude Code session ─────────────────────┐
@@ -91,8 +94,43 @@ In any session with the plugin enabled:
    you took, and never where you dragged boxes — then the plan, with each
    diagram written out as an architecture. It adjusts and replies in your
    comment threads.
-5. **Claude builds against it.** It marks tasks in progress, done or blocked,
-   and boxes linked to those tasks fill up as it goes.
+5. **You submit it.** From the Architecture view, *Review & submit plan*
+   shows the exact prompt Claude will get — built by the daemon from the
+   plan as it stands — and submitting locks the plan.
+6. **Claude builds against it.** Your next message in Claude carries the
+   prompt. It marks tasks in progress, done or blocked; the cards move across
+   the board and the boxes linked to those tasks fill up as it goes.
+
+## Submitting the plan
+
+When the design is right, **Review & submit plan** (top right of the
+Architecture view) opens the review:
+
+- **The prompt**, exactly as Claude will get it: what to do, how to report
+  progress, anything you add for Claude, what you changed that Claude has not
+  read yet, then the whole plan — summary, sections, the architecture and
+  the task tree. It is rebuilt as you type, and *Submit* waits until what is
+  on screen is what will be sent; a plan that moved on since is refused.
+- **Who builds it.** *This Claude session*: your next message in its chat —
+  "go" will do — carries the prompt, once, and the board follows each task
+  as Claude reports it. *Somewhere else*: the prompt is written for an agent
+  without the harness tools and copied for you to paste; the plan is locked,
+  but nothing reports back, so nothing moves here.
+
+Submitting **locks the plan**. The canvas becomes the final design — boxes
+still fill up as the tasks that build them get done — and the Tasks tab
+becomes a read-only board where each card glows as it arrives in its new
+column. A strip under the header says where the build stands: waiting for
+Claude (with *Copy prompt*, in case you would rather paste it), building and
+what Claude is on, or built. Claude can still report tasks, add work it
+discovers and answer comments; anything that would redesign the plan is
+refused, and so is publishing over it until every task is done. *Withdraw*
+(before Claude has the prompt) or *Reopen for changes* (after) unlocks it.
+
+A plan too long to hand over in one message — a hook adds about 10,000
+characters at most — is sent as the instructions, the summary and the task
+list, with Claude told to read the rest with `harness_plan_read`. The review
+says when that happens.
 
 ## Questions are answered in Claude
 
@@ -186,17 +224,17 @@ Four tools, none of which waits on you or asks you anything:
 
 | Tool | What it does |
 | --- | --- |
-| `harness_plan_publish` | Publish the whole plan. Items keep their comments, positions and statuses when their ids survive; refused while you have changes Claude hasn't read, so it can never overwrite your edits blind. |
+| `harness_plan_publish` | Publish the whole plan. Items keep their comments, positions and statuses when their ids survive; refused while you have changes Claude hasn't read, so it can never overwrite your edits blind, and while a submitted plan is still being built. |
 | `harness_plan_read` | The plan as text, leading with the net effect of your changes since the last read, with every id Claude needs. Diagrams read as an architecture: the system's shape, each part in flow order with its description, decisions and tasks, then every connection. `changes_only` skips the document and quotes edited text instead. |
-| `harness_plan_edit` | A batch of targeted edits — sections, diagrams, tasks, moves, comment replies — applied all or nothing. |
+| `harness_plan_edit` | A batch of targeted edits — sections, diagrams, tasks, moves, comment replies — applied all or nothing. Once the plan is submitted, only task edits and comment replies. |
 | `harness_task_update` | Mark a task in progress, done or blocked, with a one-line note. |
 
 The hooks answer immediately and never hold a turn. They register the
 session, keep its working/idle/ended state, notice when Claude is waiting on
 you (`PreToolUse`/`PostToolUse` for `AskUserQuestion`, `Notification`,
-`Stop`), read the session's link from its environment, and — if you changed
-the plan since Claude last read it — add one line to your next prompt saying
-so.
+`Stop`), read the session's link from its environment, and add context to
+your next prompt: the build prompt, once, after you submit the plan; or — if
+you changed the plan since Claude last read it — one line saying so.
 
 ## Housekeeping
 

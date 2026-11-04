@@ -5,6 +5,7 @@ import { Toasts } from './components/Toasts.tsx';
 import { ConnectionBar } from './components/ConnectionBar.tsx';
 import { ThemeToggle } from './components/ThemeToggle.tsx';
 import { Handoff, WaitingBanner } from './components/Handoff.tsx';
+import { PhaseStrip } from './components/Submit.tsx';
 import { InlineText } from './components/Editable.tsx';
 import { ProgressBar } from './components/Progress.tsx';
 import { EmptyState } from './components/primitives.tsx';
@@ -13,7 +14,7 @@ import { OverviewView } from './views/OverviewView.tsx';
 import { DiagramsView } from './views/DiagramsView.tsx';
 import { TasksView } from './views/TasksView.tsx';
 import { classNames } from './lib/format.ts';
-import { countTasks } from '../shared/plan.ts';
+import { countTasks, isLocked } from '../shared/plan.ts';
 import type { Plan, SessionState } from '../shared/types.ts';
 
 const TAB_LABEL: Record<Tab, string> = {
@@ -77,6 +78,7 @@ export function App() {
             <Header session={session} />
             <ConnectionBar />
             <WaitingBanner session={session} />
+            <PhaseStrip session={session} />
             {!plan ? (
               <NoPlan session={session} />
             ) : (
@@ -158,6 +160,7 @@ function Header({ session }: { session: SessionState }) {
             className="head-title"
             value={plan.title}
             label="Plan title"
+            readOnly={isLocked(plan)}
             onSave={(title) => store.op({ op: 'set_meta', title })}
           />
         ) : (
@@ -346,6 +349,8 @@ function useShortcuts(): void {
       const target = event.target as HTMLElement | null;
       const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable);
       if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
+      // Not behind an open dialog: the page under it should hold still.
+      if (document.querySelector('[aria-modal="true"]')) return;
       if (event.key === '[') {
         event.preventDefault();
         store.toggleSidebar();

@@ -8,8 +8,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { SessionStore } from './store.ts';
 import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from './http.ts';
 import { ingestHook } from './hookIngest.ts';
-import { PlanError, unreadAreas } from '../shared/plan.ts';
-import { renderPlan } from './render.ts';
+import { MAX_NOTE, PlanError, cleanNote, planPhase, unreadAreas, validTarget } from '../shared/plan.ts';
+import { PROMPT_BUDGET, buildPrompt, renderPlan } from './render.ts';
 import { cleanStorage, scanStorage } from './housekeeping.ts';
 import { loadConfig, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, isPidAlive, baseUrl } from '../shared/paths.ts';
@@ -414,6 +414,62 @@ function buildRouter(deps: Deps): Router {
     text(ctx.res, 200, renderPlan(session.plan, { url: uiUrl(session.sessionId) }));
   });
 
+  /**
+   * The prompt Claude would be given if the plan were submitted now — for
+   * the user to read before they do. Changes nothing.
+   */
+  router.post('/api/session/:id/plan/prompt', async (ctx) => {
+    const session = sessionOr404(ctx);
+    if (!session) return;
+    const body = await readJson<{ note?: unknown; target?: unknown }>(ctx.req);
+    if (!session.plan) {
+      json(ctx.res, 404, { error: 'no plan yet' });
+      return;
+    }
+    const target = validTarget(body.target) ?? 'session';
+    const note = cleanNote(body.note);
+    const { prompt, trimmed } = buildPrompt(session.plan, { target, ...(note ? { note } : {}) });
+    json(ctx.res, 200, { prompt, trimmed, version: session.plan.version, budget: PROMPT_BUDGET, maxNote: MAX_NOTE });
+  });
+
+  /**
+   * The user signs the plan off. It is locked from here: Claude gets the
+   * prompt they previewed with their next message in its chat, and the page
+   * follows the build on the task board.
+   */
+  router.post('/api/session/:id/plan/submit', async (ctx) => {
+    const session = sessionOr404(ctx);
+    if (!session) return;
+    const body = await readJson<{ note?: unknown; target?: unknown; expect?: unknown }>(ctx.req);
+    const target = validTarget(body.target);
+    if (!target) throw new HttpError(400, 'Say who builds it: "session" or "elsewhere".');
+    const note = cleanNote(body.note);
+    try {
+      const plan = store.submit(session.sessionId, {
+        target,
+        ...(note ? { note } : {}),
+        ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
+      });
+      log(`plan submitted for ${session.sessionId} (${target})`);
+      json(ctx.res, 200, { plan: forBrowser(plan) });
+    } catch (err) {
+      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
+      else throw err;
+    }
+  });
+
+  /** Unlock a submitted plan, so it can be changed again. */
+  router.post('/api/session/:id/plan/reopen', (ctx) => {
+    const session = sessionOr404(ctx);
+    if (!session) return;
+    try {
+      json(ctx.res, 200, { plan: forBrowser(store.reopen(session.sessionId)) });
+    } catch (err) {
+      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
+      else throw err;
+    }
+  });
+
   /* --------------------------- Maintenance ------------------------- */
 
   router.get('/api/storage', (ctx) => {
@@ -618,10 +674,13 @@ function buildRouter(deps: Deps): Router {
           );
           const task = plan.tasks.find((t) => t.id === taskId);
           const areas = unreadAreas(plan);
+          // Finishing the last task of a submitted plan finishes the build.
+          const built = changes.length > 0 && status === 'done' && planPhase(plan) === 'built';
           reply(
             true,
             `[cc-harness] ${task ? `"${task.title}" is ${status.replace('_', ' ')}` : 'Updated'}.` +
               (changes.length ? '' : ' (It already was.)') +
+              (built ? ' That was the last task: the plan is built, and the board shows it done.' : '') +
               (areas.length ? ` The user has changed ${areas.join(', ')} since you last read the plan — call harness_plan_read.` : ''),
           );
           return;

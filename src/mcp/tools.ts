@@ -97,7 +97,8 @@ export const TOOLS: ToolDef[] = [
       'design as nodes and edges (the UI lays them out and the user can rearrange them); and a task tree ' +
       'broken into subtasks. Replaces the plan; items keep their comments and statuses when you keep their ' +
       'ids, a box keeps its position, description and notes and an arrow between the same two boxes its ' +
-      'label and style unless you restate them ("" clears a label). Refused if the user has changed the plan since you last read it. Ask decisions you need with ' +
+      'label and style unless you restate them ("" clears a label). Refused if the user has changed the plan since you last read it, ' +
+      'and while they have submitted it to be built (it is locked until every task is done). Ask decisions you need with ' +
       'AskUserQuestion in chat, not in the plan. Does not wait for the user: afterwards, tell them in chat ' +
       'that the plan is ready.',
     inputSchema: {
@@ -153,7 +154,8 @@ export const TOOLS: ToolDef[] = [
       'dashed and arrows, unless you give them); upsert_task {id?, parentId?, index?, title?, detail?, status?, files?, ' +
       'note?} (omit id to add; parentId makes it a subtask); move_task {id, parentId, index}; reply ' +
       '{threadId, text} (reply to a comment); resolve {threadId, resolved}; remove {kind: ' +
-      'section|diagram|task, id}.',
+      'section|diagram|task, id}. Once the user submits the plan to be built it is locked: only upsert_task, reply ' +
+      'and resolve apply.',
     inputSchema: {
       type: 'object',
       properties: {

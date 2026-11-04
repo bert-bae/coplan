@@ -18,6 +18,7 @@ export function InlineText({
   placeholder = 'Untitled',
   className,
   as: Tag = 'span',
+  readOnly = false,
 }: {
   value: string;
   onSave: (next: string) => void | Promise<unknown>;
@@ -26,6 +27,8 @@ export function InlineText({
   placeholder?: string;
   className?: string;
   as?: 'span' | 'h1' | 'h2' | 'h3';
+  /** Shown, not editable: the plan is locked. */
+  readOnly?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
@@ -57,6 +60,8 @@ export function InlineText({
     setEditing(false);
     setDraft(value);
   };
+
+  if (readOnly) return <Tag className={classNames('inline-text', 'is-readonly', !value && 'is-empty', className)}>{value || placeholder}</Tag>;
 
   if (editing) {
     return (

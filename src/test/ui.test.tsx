@@ -14,7 +14,7 @@ setupDom();
 const { render, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
 const { store } = await import('../ui/store.ts');
-const { publishPlan, applyOps } = await import('../shared/plan.ts');
+const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan } = await import('../shared/plan.ts');
 
 const INPUT: PlanInput = {
   title: 'Add a cache',
@@ -64,8 +64,10 @@ const LINK = { app: 'claude://claude.ai/code/session_1', web: 'https://claude.ai
 
 let posts: { route: string; body: Record<string, unknown> }[];
 
-async function boot(session: SessionState = makeSession()): Promise<void> {
-  ({ posts } = stubFetch((route) => {
+async function boot(session: SessionState = makeSession(), extra?: (route: string, init?: RequestInit) => unknown): Promise<void> {
+  ({ posts } = stubFetch((route, init) => {
+    const answer = extra?.(route, init);
+    if (answer !== undefined) return answer;
     if (route.startsWith('/api/sessions')) return { sessions: [], version: 'test' };
     if (route.endsWith('/plan/ops')) return { plan: store.getState().session?.plan, changes: [] };
     if (route.endsWith('/plan/text')) return '# Add a cache\n\nas Claude reads it';
@@ -749,3 +751,169 @@ test('icon-only controls carry a name', async () => {
     assert.ok(name && !/^[↑↓←→＋×⌄⌃✎☰]$/.test(name), `unnamed button: ${button.outerHTML.slice(0, 120)}`);
   }
 });
+
+/* ------------------------------------------------- submitting the plan */
+
+/** The plan after the user submitted it — handed to Claude, if `delivered`. */
+function lockedPlan(delivered = false): Plan {
+  const plan = submitPlan(makePlan(), { target: 'session', prompt: '[cc-harness] Build the plan "Add a cache"\n\nTHE PROMPT' });
+  return delivered ? markDelivered(plan) : plan;
+}
+
+test('the plan is submitted from the architecture view, after reading the prompt it sends', async () => {
+  const session = makeSession();
+  const version = session.plan!.version;
+  await boot(session, (route, init) => {
+    if (route.endsWith('/plan/prompt')) {
+      const { target, note } = JSON.parse(String(init?.body)) as { target: string; note: string };
+      return { prompt: `PROMPT for ${target}${note ? ` with "${note}"` : ''}`, trimmed: false, version, budget: 9000, maxNote: 4000 };
+    }
+    if (route.endsWith('/plan/submit')) return { plan: lockedPlan() };
+    return undefined;
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Review & submit plan' }));
+  });
+  const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
+  const preview = () => within(dialog).getByTestId('prompt-preview').textContent;
+  await waitFor(() => assert.equal(preview(), 'PROMPT for session'));
+  assert.match(dialog.textContent ?? '', /1 diagram · 2 boxes · 3 tasks \(1 already done\)/);
+
+  // What is on screen is what is sent: the button waits for the preview.
+  await act(async () => {
+    fireEvent.change(within(dialog).getByLabelText('Anything else for Claude?'), { target: { value: 'tests first' } });
+  });
+  const submit = within(dialog).getByRole('button', { name: 'Submit and lock' }) as HTMLButtonElement;
+  assert.equal(submit.disabled, true, 'not while the preview is out of date');
+  await waitFor(() => assert.equal(preview(), 'PROMPT for session with "tests first"'));
+  await waitFor(() => assert.equal(submit.disabled, false));
+
+  // Choosing somewhere else rebuilds it, without the harness tools.
+  await act(async () => {
+    fireEvent.click(within(dialog).getByLabelText(/Somewhere else/));
+  });
+  await waitFor(() => assert.equal(preview(), 'PROMPT for elsewhere with "tests first"'));
+  await act(async () => {
+    fireEvent.click(within(dialog).getByLabelText(/This Claude session/));
+  });
+  await waitFor(() => assert.equal(preview(), 'PROMPT for session with "tests first"'));
+
+  await act(async () => {
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Submit and lock' }));
+  });
+  const sent = posts.find((p) => p.route.endsWith('/plan/submit'));
+  assert.deepEqual(sent?.body, { target: 'session', note: 'tests first', expect: version });
+  assert.equal(screen.queryByRole('dialog'), null);
+  assert.equal(store.getState().tab, 'tasks', 'the board is where the build is followed');
+  assert.ok(screen.getByRole('region', { name: 'To do' }));
+});
+
+test('a submitted plan is locked: the canvas shows the design, and the strip says how to hand it over', async () => {
+  await boot(makeSession(lockedPlan()));
+  assert.equal(screen.queryByRole('button', { name: 'Review & submit plan' }), null);
+  assert.equal(screen.queryByRole('button', { name: /\+ Box/ }), null);
+  assert.equal(screen.queryByRole('button', { name: /New diagram/ }), null);
+  assert.ok(screen.getByText('Final design'));
+  const strip = screen.getByRole('region', { name: 'The build' });
+  assert.match(strip.textContent ?? '', /Submitted — waiting for Claude to start/);
+  assert.match(strip.textContent ?? '', /Send any message in Claude's chat/);
+
+  // A box reads its details; nothing there edits it.
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('Postgres');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  await waitFor(() => assert.match(panel.textContent ?? '', /Built by/));
+  assert.match(panel.textContent ?? '', /Primary store\./);
+  assert.equal(within(panel).queryAllByRole('textbox').length, 0);
+  assert.equal(within(panel).queryAllByRole('combobox').length, 0);
+
+  // Typing on a selected box does not rename it, and nothing is saved.
+  await act(async () => {
+    fireEvent.keyDown(document.body, { key: 'x' });
+    fireEvent.keyDown(document.body, { key: 'Delete' });
+  });
+  assert.equal(document.querySelector('.flow-node-input'), null);
+  assert.equal(opsSent().length, 0);
+});
+
+test('withdrawing a submission Claude has not picked up unlocks the plan', async () => {
+  const locked = lockedPlan();
+  // As the daemon answers: the same plan, unlocked, one version on.
+  await boot(makeSession(locked), (route) => (route.endsWith('/plan/reopen') ? { plan: reopenPlan(locked) } : undefined));
+  const strip = screen.getByRole('region', { name: 'The build' });
+  await act(async () => {
+    fireEvent.click(within(strip).getByRole('button', { name: 'Withdraw' }));
+  });
+  await act(async () => {
+    fireEvent.click(within(strip).getByRole('button', { name: 'Withdraw' }));
+  });
+  assert.ok(posts.some((p) => p.route.endsWith('/plan/reopen')));
+  assert.ok(screen.getByRole('button', { name: 'Review & submit plan' }), 'planning again');
+});
+
+test('the submitted prompt can be read back from the architecture view', async () => {
+  await boot(makeSession(lockedPlan(true)));
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'View prompt' }));
+  });
+  const dialog = screen.getByRole('dialog', { name: 'The submitted prompt' });
+  assert.match(dialog.textContent ?? '', /THE PROMPT/);
+  assert.match(dialog.textContent ?? '', /Claude got it/);
+});
+
+test('while building, the board follows Claude and a card that moves stands out', async () => {
+  const plan = lockedPlan(true);
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  assert.equal(screen.queryByRole('group', { name: 'Task layout' }), null, 'the board is the only view');
+  assert.match(document.querySelector('.toolbar-note')?.textContent ?? '', /Cards move across the board as Claude reports each task/);
+  assert.equal(screen.queryAllByRole('combobox').length, 0, 'no status pickers');
+  assert.equal(document.querySelector('[draggable="true"]'), null, 'nothing to drag');
+  const strip = screen.getByRole('region', { name: 'The build' });
+  assert.match(strip.textContent ?? '', /Building/);
+  assert.match(strip.textContent ?? '', /Claude is on Wire into API/);
+
+  // Claude reports a task done: it arrives in the Done column, and says so.
+  const next = applyOps(plan, [{ op: 'upsert_task', id: 't2', status: 'done', note: 'TTL-based' }], 'claude').plan;
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: makeSession(next) });
+  });
+  const done = screen.getByRole('region', { name: 'Done' });
+  const card = [...done.querySelectorAll('.board-card')].find((c) => c.textContent?.includes('Invalidation'))!;
+  assert.ok(card, 'moved to Done');
+  assert.ok(card.classList.contains('is-arrived'));
+  assert.match(card.textContent ?? '', /TTL-based/);
+  assert.match(document.querySelector('.board [aria-live]')?.textContent ?? '', /Invalidation: done/);
+  // Cards already where they were do not.
+  const still = [...done.querySelectorAll('.board-card')].find((c) => c.textContent?.includes('Cache client'))!;
+  assert.equal(still.classList.contains('is-arrived'), false);
+});
+
+test("a box's task on a submitted plan opens its card on the board", async () => {
+  await boot(makeSession(lockedPlan(true)));
+  await act(async () => {
+    store.focus('task', 't3');
+  });
+  assert.equal(store.getState().tab, 'tasks');
+  await waitFor(() => assert.ok(document.getElementById('task-t3')?.classList.contains('board-card')));
+});
+
+test('the session rail says a plan is being built', async () => {
+  await boot(makeSession(lockedPlan(true)), (route) =>
+    route.startsWith('/api/sessions')
+      ? {
+          sessions: [
+            {
+              sessionId: 's1', title: 'repo', planTitle: 'Add a cache', cwd: '/repo', repoName: 'repo', repoRoot: '/repo', branch: 'main',
+              status: 'active', createdAt: 1, updatedAt: 1, tasks: { total: 3, done: 1, inProgress: 1, blocked: 0 }, phase: 'building',
+              current: 'Wire into API', waiting: null, surface: 'unknown', link: null, openThreads: 0, unreadByClaude: 0,
+            },
+          ],
+          version: 'test',
+        }
+      : undefined,
+  );
+  const rail = screen.getByRole('navigation', { name: 'Live sessions' });
+  assert.ok(within(rail).getByText('building'));
+});
+

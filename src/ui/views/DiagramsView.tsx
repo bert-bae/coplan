@@ -1,9 +1,12 @@
 import { useState } from 'react';
 import { store, usePlan, useStore } from '../store.ts';
 import { InlineText, MarkdownField } from '../components/Editable.tsx';
+import { Markdown } from '../components/Markdown.tsx';
 import { ThreadPanel } from '../components/Threads.tsx';
 import { DiagramEditor, KIND_GLYPH, KIND_LABEL, type GraphPatch } from '../components/FlowCanvas.tsx';
 import { EmptyState } from '../components/primitives.tsx';
+import { SubmitControl } from '../components/Submit.tsx';
+import { isLocked } from '../../shared/plan.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { diagramToMarkdown } from '../../shared/architecture.ts';
 import { NODE_KINDS, type Diagram, type DiagramEdgeInput, type DiagramNodeInput, type Plan } from '../../shared/types.ts';
@@ -52,6 +55,9 @@ export function DiagramsView() {
   const sessionId = useStore((s) => s.sessionId);
   if (!plan) return null;
   const diagram = plan.diagrams.find((d) => d.id === chosen) ?? plan.diagrams[0] ?? null;
+  // Submitted: the design is final, and the canvas only shows it — boxes
+  // still fill up as the tasks that build them get done.
+  const locked = isLocked(plan);
 
   return (
     <div className="arch">
@@ -70,12 +76,17 @@ export function DiagramsView() {
             </button>
           ))}
         </nav>
-        <NewDiagram />
+        {!locked && <NewDiagram />}
         <span className="spacer" />
-        <p className="toolbar-hint">
-          Right-click for everything · <kbd>Tab</kbd> adds the next box · drag from a box's edge to connect · hover to see its connections ·{' '}
-          <kbd>?</kbd> all shortcuts
-        </p>
+        {locked ? (
+          <p className="toolbar-hint">Hover a box to see its connections · each box fills up as the tasks that build it get done</p>
+        ) : (
+          <p className="toolbar-hint">
+            Right-click for everything · <kbd>Tab</kbd> adds the next box · drag from a box's edge to connect ·{' '}
+            <kbd>?</kbd> all shortcuts
+          </p>
+        )}
+        <SubmitControl />
       </div>
 
       {diagram ? (
@@ -86,17 +97,22 @@ export function DiagramsView() {
           key={`${sessionId}:${diagram.id}`}
           diagram={diagram}
           plan={plan}
+          readOnly={locked}
           onSave={async (patch: GraphPatch) => {
             const plan = await store.commit([{ op: 'upsert_diagram', id: diagram.id, ...patch }], sessionId);
             return plan?.diagrams.find((d) => d.id === diagram.id)?.rev ?? null;
           }}
-          aside={<DiagramPanel plan={plan} diagram={diagram} />}
+          aside={<DiagramPanel plan={plan} diagram={diagram} locked={locked} />}
         />
       ) : (
         <div className="view-pad">
           <EmptyState
             title="No diagrams yet"
-            hint="Ask Claude to draw the architecture — components, data flow, boundaries — or start one from a template."
+            hint={
+              locked
+                ? 'This plan was submitted without a diagram.'
+                : 'Ask Claude to draw the architecture — components, data flow, boundaries — or start one from a template.'
+            }
           />
         </div>
       )}
@@ -133,7 +149,7 @@ function NewDiagram() {
 }
 
 /** The panel with nothing selected: the diagram as a whole. */
-function DiagramPanel({ plan, diagram }: { plan: Plan; diagram: Diagram }) {
+function DiagramPanel({ plan, diagram, locked }: { plan: Plan; diagram: Diagram; locked: boolean }) {
   const [confirming, setConfirming] = useState(false);
   const index = plan.diagrams.findIndex((d) => d.id === diagram.id);
   const linked = diagram.nodes.filter((n) => n.taskIds?.length).length;
@@ -144,7 +160,7 @@ function DiagramPanel({ plan, diagram }: { plan: Plan; diagram: Diagram }) {
         <span className="item-id">{diagram.id}</span>
         <span className="spacer" />
         <span className="muted panel-meta">
-          {diagram.updatedBy === 'user' ? 'edited by you' : 'by Claude'} · {relativeTime(diagram.updatedAt)}
+          {locked ? 'locked' : `${diagram.updatedBy === 'user' ? 'edited by you' : 'by Claude'} · ${relativeTime(diagram.updatedAt)}`}
         </span>
       </header>
       <InlineText
@@ -152,8 +168,14 @@ function DiagramPanel({ plan, diagram }: { plan: Plan; diagram: Diagram }) {
         className="panel-title"
         value={diagram.title}
         label="Diagram title"
+        readOnly={locked}
         onSave={(title) => store.op({ op: 'upsert_diagram', id: diagram.id, title })}
       />
+      {locked ? (
+        diagram.caption ? (
+          <Markdown source={diagram.caption} />
+        ) : null
+      ) : (
       <MarkdownField
         value={diagram.caption ?? ''}
         label={`caption of "${diagram.title}"`}
@@ -165,9 +187,12 @@ function DiagramPanel({ plan, diagram }: { plan: Plan; diagram: Diagram }) {
         // conflict. A caption is short and only ever edited here.
         onSave={(caption) => store.op({ op: 'upsert_diagram', id: diagram.id, caption })}
       />
+      )}
       <p className="panel-hint">
-        {diagram.nodes.length} boxes, {diagram.edges.length} arrows{linked ? `, ${linked} tracking tasks` : ''}. Select a box
-        to edit its details, decisions and the tasks that build it.
+        {diagram.nodes.length} boxes, {diagram.edges.length} arrows{linked ? `, ${linked} tracking tasks` : ''}.{' '}
+        {locked
+          ? 'The plan is submitted, so this is the final design. Select a box to read its details and how far the tasks that build it have got.'
+          : 'Select a box to edit its details, decisions and the tasks that build it.'}
       </p>
       <div className="row-actions">
         <button
@@ -195,10 +220,16 @@ function DiagramPanel({ plan, diagram }: { plan: Plan; diagram: Diagram }) {
           </li>
         ))}
       </ul>
-      <div className="field">
-        <span className="field-label">Comments</span>
-        <ThreadPanel target={{ kind: 'diagram', id: diagram.id }} label={diagram.title} />
-      </div>
+      {/* Locked, comments are read, not written: show them only if there are any. */}
+      {(!locked || plan.threads.some((t) => t.target.kind === 'diagram' && t.target.id === diagram.id)) && (
+        <fieldset className="lockable" disabled={locked}>
+          <div className="field">
+            <span className="field-label">Comments</span>
+            <ThreadPanel target={{ kind: 'diagram', id: diagram.id }} label={diagram.title} />
+          </div>
+        </fieldset>
+      )}
+      {!locked && (
       <footer className="panel-foot">
         <button type="button" className="link" disabled={index <= 0} onClick={() => void store.op({ op: 'move_diagram', id: diagram.id, index: index - 1 })}>
           Move left
@@ -228,6 +259,7 @@ function DiagramPanel({ plan, diagram }: { plan: Plan; diagram: Diagram }) {
           </button>
         )}
       </footer>
+      )}
     </div>
   );
 }
