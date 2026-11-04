@@ -44,7 +44,8 @@ npm run check          # all three
 ```
 
 CI runs the same checks on Node 20 and 22, plus `./bin/coplan doctor` and
-`npm audit`.
+`npm audit`. The repository's own [`.coplan/config.json`](.coplan/config.json)
+lists them per stage, so `./bin/coplan check review` runs what a change needs.
 
 **`dist/` is committed** so the plugin installs with no build step. Run
 `npm run build` and commit the result with your change; CI fails when the
@@ -56,9 +57,18 @@ committed `dist/` does not match the source.
   the change log
 - `src/shared/architecture.ts`: diagrams as words, meaning the architecture
   rendering and the net difference between two versions of a diagram
+- `src/shared/build.ts`: the build as a graph — dependencies, readiness,
+  build steps, branches and how they stack, review modes and settings
+- `src/shared/project.ts`: a repository's `.coplan/config.json` — the check
+  hooks per stage and the build's defaults
 - `src/shared/link.ts`: how a session is linked back to in Claude
 - `src/daemon`: the singleton server, covering sessions, the plan API,
-  rendering for Claude, hooks and housekeeping
+  rendering for Claude (`render.ts` for the read-back and the prompts,
+  `brief.ts` for what is next and one task's brief), hooks and housekeeping
+- `src/cli`: the `coplan` CLI, including `check` (runs a stage's hooks) and
+  `init` (writes a starting `.coplan/config.json`)
+- `skills/`: what Claude is taught — `coplan` (the design and the task list),
+  `coplan-build` (running a build) and `iric` (one task's cycle)
 - `src/mcp`: the stdio MCP server (hand-rolled JSON-RPC, no dependencies)
 - `src/ui`: the browser client (React, React Flow, dagre). The canvas is
   `components/FlowCanvas.tsx` with its boxes, arrows and panel in

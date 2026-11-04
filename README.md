@@ -16,11 +16,13 @@
 ---
 
 Coplan gives Claude Code's plan a place to live outside the chat. Claude
-publishes its plan: the architecture as diagrams, plus a task breakdown. You
-reshape it in the browser. Rearrange and rewire the architecture, record the
-decisions on each part, reorganize the tasks and comment on anything. When it
-is right you read the exact prompt Claude will get and submit it. The plan
-locks, and as Claude builds, the same page follows each task across the board.
+publishes its design: the architecture as diagrams, with the tasks it plans
+linked to the boxes they build. You reshape it in the browser and **confirm
+the design**. Claude then breaks it into a task list — focused tasks, what
+blocks what, which branch each lands on — and you shape that and **submit the
+plan**, choosing how much of each task's implement → review → refine cycle
+you keep for yourself. The plan locks, and as Claude builds, the same page
+follows each task across the board.
 
 Coplan is free and open source under the [MIT license](LICENSE). It runs
 entirely on your machine: a small local daemon, a browser UI, and a Claude
@@ -33,11 +35,20 @@ Code plugin. No account, no hosted service, and no telemetry.
   and annotate boxes, with keyboard shortcuts, context menus and undo.
 - **A task breakdown you can shape.** Nest, split and reorder tasks in an
   outline, link them to the boxes they build, and follow them on a board.
+- **Design first, then tasks.** You confirm the architecture before the task
+  list is made from it, so the tasks build the design you agreed to.
+- **Tasks that know what blocks them.** Each task says what it waits on and
+  which branch it lands on. Coplan works out what can start now, what can run
+  side by side, and how branches stack into pull requests.
+- **Implement → review → refine.** Every task is checked and reviewed before
+  it is done: by a fresh subagent, by Claude itself, by you, or by the checks
+  alone — your choice. The checks come from the repository's
+  `.coplan/config.json`, so no agent guesses what to run.
 - **Claude reads back what you changed.** It gets the net effect of your edits
   (what is different now, not every drag), with each diagram written out as
   an architecture.
-- **Review, then submit.** You see the exact build prompt before it is sent,
-  and submitting locks the plan so the design can't drift mid-build.
+- **Review, then sign off.** You see the exact prompt before each sign-off is
+  sent, and submitting locks the plan so the design can't drift mid-build.
 - **Live progress.** Cards move across the board and boxes fill up as Claude
   marks tasks in progress, done or blocked.
 - **Your chat stays the chat.** Coplan never starts a turn or answers for you.
@@ -48,13 +59,13 @@ Code plugin. No account, no hosted service, and no telemetry.
 Coplan does one thing. It never starts a turn and never answers for you. When
 Claude needs a decision it asks in its own chat. Coplan shows the question and
 takes you straight to that session, in the Claude desktop app, to answer it.
-What Coplan has to say to Claude (the build prompt, or a note that you changed
-the plan) rides along with your next message there.
+What Coplan has to say to Claude (the confirmed design, the build prompt, or a
+note that you changed the plan) rides along with your next message there.
 
 ```
  ┌──────────────────── Claude Code session ─────────────────────┐
  │  chat  ◀── you talk to and answer Claude here, and only here │
- │  MCP: harness_plan_publish · _read · _edit · task_update     │
+ │  MCP: harness_plan_* · harness_tasks_publish · harness_task_* │
  │  hooks: register the session; notice when Claude is waiting; │
  │         note unread plan changes                             │
  └──────────────┬───────────────────────────────────────────────┘
@@ -134,8 +145,13 @@ In any session with the plugin enabled:
 
 - `/coplan <task>`: Claude investigates, then publishes a plan to the UI
 - `/coplan-open`: open this session's plan in the browser
+- `/coplan-init`: set up `.coplan/config.json`, the checks every task runs
 - `/coplan-doctor`: check the wiring
 - `/coplan-restart`: restart the daemon after a rebuild
+
+The plugin also brings three skills Claude uses on its own: `coplan` (the
+design and the task list), `coplan-build` (running the build) and `iric`
+(one task's implement → review → refine cycle).
 
 `./bin/coplan status` lists every session and where its plan stands;
 `./bin/coplan open` opens the UI. The UI does not open itself unless you set
@@ -143,9 +159,10 @@ In any session with the plugin enabled:
 
 ## The loop
 
-1. **Claude publishes.** `/coplan add a cache to the orders API` — Claude
-   reads the code, calls `harness_plan_publish`, and asks what it needs decided
-   with `AskUserQuestion` in chat.
+1. **Claude publishes the design.** `/coplan add a cache to the orders API`
+   — Claude reads the code, calls `harness_plan_publish` with the
+   architecture and the tasks it plans, and asks what it needs decided with
+   `AskUserQuestion` in chat.
 2. **You shape the plan.** In the browser, rearrange and rewire the
    architecture, write down the decisions on each box, drag tasks into the
    order you want, nest and split them, and comment on anything. Every edit is
@@ -158,17 +175,54 @@ In any session with the plugin enabled:
    you took, and never where you dragged boxes — then the plan, with each
    diagram written out as an architecture. It adjusts and replies in your
    comment threads.
-5. **You submit it.** From the Architecture view, *Review & submit plan*
-   shows the exact prompt Claude will get — built by the daemon from the
-   plan as it stands — and submitting locks the plan.
-6. **Claude builds against it.** Your next message in Claude carries the
-   prompt. It marks tasks in progress, done or blocked; the cards move across
-   the board and the boxes linked to those tasks fill up as it goes.
+5. **You confirm the design.** *Confirm design* shows exactly what Claude
+   will be asked, and confirming locks the architecture, sections and
+   summary.
+6. **Claude makes the task list.** Your next message carries the design.
+   Claude breaks the planned tasks into focused ones, links them by what
+   blocks what, names the boxes each builds and the branch each lands on,
+   and publishes them with `harness_tasks_publish`. You shape that list —
+   dependencies, branches and review modes are editable on each task — and
+   the Tasks view shows the build order it implies.
+7. **You submit it.** *Review & submit plan* shows the exact build prompt,
+   with how the build runs — who reviews each task, how many run at once,
+   how many review rounds before Claude asks you — and submitting locks the
+   plan.
+8. **Claude builds against it.** Your next message in Claude carries the
+   prompt. Claude starts only tasks that are ready, builds independent ones
+   side by side with subagents, and takes each through implement → review →
+   refine, running the repository's checks. Cards move across the board,
+   showing each task's step and checks; boxes fill up as their tasks finish.
+9. **Claude reports.** Once every task is done it runs the final checks,
+   opens the pull requests in stack order if you want them, and writes a
+   build report that appears on the Overview.
+
+## Confirming the design
+
+When the architecture is right, **Confirm design** (top right of the
+Architecture view) shows what Claude will be asked — break this design into
+a task list — with the design itself, anything you add, and which checks the
+repository has. Confirming locks the diagrams, sections and summary; the
+title, the tasks, which boxes they link to, and comments still change. Your
+next message in Claude carries it, once. *Reopen design* unlocks it again.
+
+Claude answers with the task list. Each task can say:
+
+| Field | What it means |
+| --- | --- |
+| Starts after (`dependsOn`) | Tasks that must be done first. A parent's apply to all its subtasks, and depending on a parent means waiting for all of it. Loops are refused. Anything without one can run alongside the rest. |
+| Branch | Where the work lands; subtasks inherit it. A branch whose tasks build on another branch's is *stacked* on it. No branch means the session's current branch. |
+| Review | `subagent`, `self`, `user` or `skip`, when a task needs other than the build's default. |
+| Builds (`builds`) | The boxes it implements, so the diagram tracks it. |
+
+The Tasks view marks each task *ready* or what it *waits on*, and shows the
+**build order** — steps of tasks that can be built side by side — and how
+the branches stack.
 
 ## Submitting the plan
 
-When the design is right, **Review & submit plan** (top right of the
-Architecture view) opens the review:
+When the tasks are right, **Review & submit plan** (on the Architecture and
+Tasks views) opens the review:
 
 - **The prompt**, exactly as Claude will get it: what to do, how to report
   progress, anything you add for Claude, what you changed that Claude has not
@@ -180,6 +234,12 @@ Architecture view) opens the review:
   as Claude reports it. *Somewhere else*: the prompt is written for an agent
   without the Coplan tools and copied for you to paste; the plan is locked,
   but nothing reports back, so nothing moves here.
+- **How each task is built.** Every task goes implement → review → refine.
+  You choose who reviews — an *independent reviewer* (a fresh subagent),
+  *self-review*, *you* (Claude stops after each task and asks), or *checks
+  only* — how many ready tasks are built at once, and how many review rounds
+  a task gets before Claude stops and asks you. The defaults come from the
+  repository's `.coplan/config.json`.
 
 Submitting **locks the plan**. The canvas becomes the final design — boxes
 still fill up as the tasks that build them get done — and the Tasks tab
@@ -189,7 +249,41 @@ Claude (with *Copy prompt*, in case you would rather paste it), building and
 what Claude is on, or built. Claude can still report tasks, add work it
 discovers and answer comments; anything that would redesign the plan is
 refused, and so is publishing over it until every task is done. *Withdraw*
-(before Claude has the prompt) or *Reopen for changes* (after) unlocks it.
+(before Claude has the prompt) or *Reopen for changes* (after) unlocks the
+tasks; the design stays confirmed until you reopen that too.
+
+While it builds, starting a task that still waits on another is refused, and
+so is marking one done while its last checks failed. Each card shows where
+its task is — implementing, in review (and which round), refining — and how
+its checks came out.
+
+## Checks: `.coplan/config.json`
+
+A repository says what every task runs, so no agent has to guess, in a
+committed `.coplan/config.json` (`//` comments allowed):
+
+```jsonc
+{
+  "hooks": {
+    // quick checks after every implementation or refinement pass
+    "implement": ["npm run typecheck", "npm run lint"],
+    // the gate a task must pass before it is done
+    "review": [{ "name": "tests", "run": "npm test", "timeout": 900 }],
+    // once every task is done
+    "final": ["npm run check"]
+  },
+  "iric": { "review": "subagent", "parallel": 2, "maxRounds": 3 },
+  "branches": { "base": "main", "prefix": "coplan/" }
+}
+```
+
+The hooks go to Claude in the build prompt and in each task's brief; Claude
+runs them like any other command, under your permission settings — Coplan
+never runs them itself. `coplan check <stage>` runs a whole stage and prints
+only what failed (`--files a,b` for one task's files, `--json` for the
+results Claude reports). `coplan init`, or `/coplan-init` in Claude, writes a
+starting point from the repository's scripts. See
+[docs/CONFIG.md](docs/CONFIG.md#the-repository-coplanconfigjson).
 
 A plan too long to hand over in one message — a hook adds about 10,000
 characters at most — is sent as the instructions, the summary and the task
@@ -284,21 +378,25 @@ initials with the ☰ button or `[` to give the plan the width.
 
 ## What Claude gets
 
-Four tools, none of which waits on you or asks you anything:
+Seven tools, none of which waits on you or asks you anything:
 
 | Tool | What it does |
 | --- | --- |
 | `harness_plan_publish` | Publish the whole plan. Items keep their comments, positions and statuses when their ids survive; refused while you have changes Claude hasn't read, so it can never overwrite your edits blind, and while a submitted plan is still being built. |
 | `harness_plan_read` | The plan as text, leading with the net effect of your changes since the last read, with every id Claude needs. Diagrams read as an architecture: the system's shape, each part in flow order with its description, decisions and tasks, then every connection. `changes_only` skips the document and quotes edited text instead. |
-| `harness_plan_edit` | A batch of targeted edits — sections, diagrams, tasks, moves, comment replies — applied all or nothing. Once the plan is submitted, only task edits and comment replies. |
-| `harness_task_update` | Mark a task in progress, done or blocked, with a one-line note. |
+| `harness_plan_edit` | A batch of targeted edits — sections, diagrams, tasks, moves, comment replies, the build report — applied all or nothing. Once the design is confirmed, only tasks, task links and comments; once the plan is submitted, only task edits, comment replies and the report. |
+| `harness_tasks_publish` | Publish the task list for the confirmed design: replaces the task tree and nothing else, with dependencies, branches, review modes and the boxes each task builds. |
+| `harness_task_next` | What can be built now: ready tasks, how many to run at once, what is in progress and at which step, what the rest wait on, the branches — and, once every task is done, how to finish. |
+| `harness_task_brief` | One task's focused brief, written to hand to a subagent as is: objective, the boxes it builds and their connections, what it comes after and before, its scope, branch, and its implement → review → refine cycle with the exact checks. |
+| `harness_task_update` | Mark a task in progress, done or blocked, with a one-line note, and report its step of the cycle and the checks run. Refuses to start a task that still waits on another, or to finish one whose checks failed. |
 
 The hooks answer immediately and never hold a turn. They register the
 session, keep its working/idle/ended state, notice when Claude is waiting on
 you (`PreToolUse`/`PostToolUse` for `AskUserQuestion`, `Notification`,
 `Stop`), read the session's link from its environment, and add context to
-your next prompt: the build prompt, once, after you submit the plan; or — if
-you changed the plan since Claude last read it — one line saying so.
+your next prompt: the confirmed design or the build prompt, once, after you
+sign it off; or — if you changed the plan since Claude last read it — one line
+saying so.
 
 ## Housekeeping
 
@@ -325,7 +423,8 @@ same from a terminal, with `--dry-run` to only list.
 ## Configuration
 
 `~/.claude/cc-harness/config.json`, overridden per repo by
-`.claude/harness.json`. See [docs/CONFIG.md](docs/CONFIG.md).
+`.claude/harness.json`; the build's checks and defaults live in the
+repository's `.coplan/config.json`. See [docs/CONFIG.md](docs/CONFIG.md).
 
 ## Contributing
 

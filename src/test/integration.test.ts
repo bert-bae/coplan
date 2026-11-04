@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -449,23 +449,138 @@ test('the prompt preview is the prompt, and reading it changes nothing', async (
   assert.equal(after.plan!.submission, undefined);
 });
 
+test('confirming the design locks it, and the next message asks Claude for the task list — once', async () => {
+  const early = await post<{ error?: string }>(`/api/session/${built}/plan/submit`, { target: 'session' });
+  assert.match(early.error ?? '', /Confirm the design first/);
+
+  const preview = await post<Preview>(`/api/session/${built}/plan/design/prompt`, { note: 'Split the storage work.' });
+  assert.match(preview.prompt, /^\[cc-harness\] The design is confirmed for "Add a cache"/);
+  assert.match(preview.prompt, /harness_tasks_publish/);
+  assert.match(preview.prompt, /> Split the storage work\./);
+  const res = await post<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${built}/plan/design/confirm`, {
+    note: 'Split the storage work.',
+    expect: preview.version,
+  });
+  assert.ok(res.plan, res.error);
+  assert.equal(res.plan!.design?.prompt, preview.prompt);
+  const { sessions } = await call<{ sessions: { sessionId: string; phase: string }[] }>('/api/sessions');
+  assert.equal(sessions.find((s) => s.sessionId === built)?.phase, 'tasking');
+
+  const redesign = await opsOn(built, [{ op: 'upsert_diagram', id: 'd1', title: 'Different' }]);
+  assert.match(redesign.error ?? '', /design is confirmed/);
+  const retask = await opsOn(built, [{ op: 'upsert_task', id: 't4', title: 'Wire it in' }]);
+  assert.ok(retask.plan, retask.error);
+
+  const first = await hookFor(built, 'UserPromptSubmit', { prompt: 'go' });
+  assert.equal(first.hookSpecificOutput?.additionalContext, preview.prompt);
+  const s = await sessionFor(built);
+  assert.ok(s.plan!.design!.deliveredAt);
+  assert.equal(s.plan!.claudeReadSeq, s.plan!.seq, 'the design reaching Claude is a read');
+  const second = await hookFor(built, 'UserPromptSubmit', { prompt: 'and?' });
+  assert.equal(second.hookSpecificOutput?.additionalContext, undefined);
+});
+
+test('Claude publishes the task list: linked tasks, the boxes they build, and what can start', async () => {
+  const republish = await mcpFor(built, 'publish', PLAN);
+  assert.equal(republish['ok'], false);
+  assert.match(String(republish['text']), /confirmed the design/);
+
+  const loop = await mcpFor(built, 'tasks', {
+    tasks: [
+      { id: 'a', title: 'A', dependsOn: ['b'] },
+      { id: 'b', title: 'B', dependsOn: ['a'] },
+    ],
+  });
+  assert.equal(loop['ok'], false);
+  assert.match(String(loop['text']), /wait on each other/);
+
+  const res = await mcpFor(built, 'tasks', {
+    tasks: [
+      {
+        id: 't1',
+        title: 'Storage',
+        branch: 'cache/storage',
+        subtasks: [
+          { id: 't2', title: 'Client', builds: ['db'], files: ['src/cache.ts'], detail: 'Wrap the driver.' },
+          { id: 't3', title: 'Invalidation', dependsOn: ['t2'] },
+        ],
+      },
+      { id: 't4', title: 'Wire up', dependsOn: ['t1'], builds: ['api'], branch: 'cache/api' },
+    ],
+  });
+  assert.equal(res['ok'], true, String(res['text']));
+  const text = String(res['text']);
+  assert.match(text, /Published the task list/);
+  assert.match(text, /Do not start building/);
+  assert.match(text, /## Build order/);
+  assert.match(text, /`cache\/api` from `cache\/storage` \(stacked\)/);
+
+  const s = await sessionFor(built);
+  assert.deepEqual(s.plan!.diagrams[0]!.nodes.find((n) => n.id === 'db')?.taskIds, ['t2']);
+  assert.deepEqual(s.plan!.tasks.find((t) => t.id === 't3')?.dependsOn, ['t2']);
+  assert.equal(s.plan!.tasks.length, 4);
+
+  const next = String((await mcpFor(built, 'next'))['text']);
+  assert.match(next, /The plan is not submitted yet/);
+  assert.match(next, /## Ready to start \(1\)\n- t2 Client/);
+  assert.match(next, /t3 Invalidation — waits on t2/);
+  assert.match(next, /t4 Wire up — waits on t1/);
+
+  const brief = String((await mcpFor(built, 'brief', { task_id: 't4' }))['text']);
+  assert.match(brief, /^# Task t4: Wire up/);
+  assert.match(brief, /\*\*API\*\* `api` in "Components"/);
+  assert.match(brief, /Cut it from `cache\/storage`/);
+  assert.match(brief, /cannot start yet: it waits on t1 Storage/);
+  assert.match(brief, /harness_task_update \{task_id: "t4"/);
+
+  const early = await mcpFor(built, 'task', { task_id: 't4', status: 'in_progress' });
+  assert.equal(early['ok'], false);
+  assert.match(String(early['text']), /"Wire up" cannot start yet: it waits on t1 "Storage"/);
+});
+
+test('a task goes round implement → review → refine, and is not done while its checks fail', async () => {
+  const start = await mcpFor(built, 'task', { task_id: 't2', stage: 'implement' });
+  assert.equal(start['ok'], true, String(start['text']));
+  assert.match(String(start['text']), /"Client" is implementing/);
+  const review = await mcpFor(built, 'task', { task_id: 't2', stage: 'review', checks: [{ name: 'tests', ok: false, note: '1 failing' }] });
+  assert.match(String(review['text']), /in review, round 1/);
+  assert.match(String(review['text']), /Checks: 1 failed \(tests\)/);
+  const early = await mcpFor(built, 'task', { task_id: 't2', status: 'done' });
+  assert.equal(early['ok'], false);
+  assert.match(String(early['text']), /not done: its last checks failed \(tests: 1 failing\)/);
+  await mcpFor(built, 'task', { task_id: 't2', stage: 'refine' });
+  await mcpFor(built, 'task', { task_id: 't2', stage: 'review', checks: [{ name: 'tests', ok: true }] });
+  const done = await mcpFor(built, 'task', { task_id: 't2', status: 'done', note: 'wrapped the driver' });
+  assert.equal(done['ok'], true, String(done['text']));
+  assert.match(String(done['text']), /Now ready: t3 "Invalidation"/);
+  const s = await sessionFor(built);
+  const t2 = s.plan!.tasks.find((t) => t.id === 't2')!;
+  assert.equal(t2.round, 2);
+  assert.equal(t2.stage, undefined, 'done is out of the cycle');
+});
+
 test('a submission made against an older preview is refused', async () => {
   const { version } = await post<Preview>(`/api/session/${built}/plan/prompt`, { target: 'session' });
-  await mcpFor(built, 'task', { task_id: 't2', status: 'in_progress' });
+  await mcpFor(built, 'task', { task_id: 't3', status: 'in_progress' });
   const res = await post<{ error?: string }>(`/api/session/${built}/plan/submit`, { target: 'session', expect: version });
   assert.match(res.error ?? '', /changed while you were reviewing it/);
   assert.equal((await sessionFor(built)).plan!.submission, undefined);
 });
 
 test('submitting locks the plan with exactly the previewed prompt', async () => {
-  const preview = await post<Preview>(`/api/session/${built}/plan/prompt`, { target: 'session', note: 'Go.' });
+  const settings = { review: 'self', parallel: 3, maxRounds: 2 };
+  const preview = await post<Preview & { settings: unknown }>(`/api/session/${built}/plan/prompt`, { target: 'session', note: 'Go.', settings });
+  assert.deepEqual(preview.settings, settings);
+  assert.match(preview.prompt, /Review: self-review/);
   const res = await post<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${built}/plan/submit`, {
     target: 'session',
     note: 'Go.',
     expect: preview.version,
+    settings,
   });
   assert.ok(res.plan, res.error);
   assert.equal(res.plan!.submission?.prompt, preview.prompt);
+  assert.deepEqual(res.plan!.submission?.settings, settings);
   assert.equal(res.plan!.submission?.deliveredAt, null);
 
   const { sessions } = await call<{ sessions: { sessionId: string; phase: string }[] }>('/api/sessions');
@@ -501,6 +616,8 @@ test('while building, Claude tracks tasks but cannot redesign', async () => {
   assert.match(read, /Locked for building/);
   const discovered = await mcpFor(built, 'edit', { ops: [{ op: 'upsert_task', parentId: 't1', title: 'Handle timeouts' }] });
   assert.equal(discovered['ok'], true, String(discovered['text']));
+  const next = String((await mcpFor(built, 'next'))['text']);
+  assert.match(next, /up to 3 at once · review: self · at most 2 review rounds/, 'the settings the user chose');
 });
 
 test('finishing the last task finishes the build, and a new plan may follow', async () => {
@@ -509,6 +626,13 @@ test('finishing the last task finishes the build, and a new plan may follow', as
   let last: Record<string, unknown> = {};
   for (const t of leaves) last = await mcpFor(built, 'task', { task_id: t.id, status: 'done', note: 'done' });
   assert.match(String(last['text']), /That was the last task: the plan is built/);
+  const finish = String((await mcpFor(built, 'next'))['text']);
+  assert.match(finish, /Every task in "Add a cache" is done/);
+  assert.match(finish, /pull requests in stack order: `cache\/storage` → `cache\/api` \(onto `cache\/storage`\)/);
+  assert.match(finish, /op: "report"/);
+  const report = await mcpFor(built, 'edit', { ops: [{ op: 'report', text: '## Built\n- Storage, Wire up' }] });
+  assert.equal(report['ok'], true, String(report['text']));
+  assert.match(String((await mcpFor(built, 'read'))['text']), /## Build report\n## Built/);
   const { sessions } = await call<{ sessions: { sessionId: string; phase: string }[] }>('/api/sessions');
   assert.equal(sessions.find((x) => x.sessionId === built)?.phase, 'built');
   const next = await mcpFor(built, 'publish', { ...PLAN, title: 'Next feature' });
@@ -520,6 +644,7 @@ test('a prompt the user pasted themselves is not delivered a second time', async
   const id = 'paste-session';
   await hookFor(id, 'SessionStart', { start_reason: 'startup' });
   await mcpFor(id, 'publish', PLAN);
+  await post(`/api/session/${id}/plan/design/confirm`);
   const { version, prompt } = await post<Preview>(`/api/session/${id}/plan/prompt`, { target: 'session' });
   await post(`/api/session/${id}/plan/submit`, { target: 'session', expect: version });
   const out = await hookFor(id, 'UserPromptSubmit', { prompt });
@@ -531,6 +656,7 @@ test('a plan handed off elsewhere is locked but never delivered here, and can be
   const id = 'elsewhere-session';
   await hookFor(id, 'SessionStart', { start_reason: 'startup' });
   await mcpFor(id, 'publish', PLAN);
+  await post(`/api/session/${id}/plan/design/confirm`);
   const preview = await post<Preview>(`/api/session/${id}/plan/prompt`, { target: 'elsewhere' });
   assert.doesNotMatch(preview.prompt, /harness_/);
   await post(`/api/session/${id}/plan/submit`, { target: 'elsewhere', expect: preview.version });
@@ -545,6 +671,53 @@ test('a plan handed off elsewhere is locked but never delivered here, and can be
   assert.ok(edit.plan, edit.error);
   const twice = await post<{ error?: string }>(`/api/session/${id}/plan/reopen`);
   assert.match(twice.error ?? '', /not locked/);
+
+  const design = await post<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${id}/plan/design/reopen`);
+  assert.ok(design.plan, design.error);
+  assert.equal(design.plan!.design, undefined);
+  const redesign = await opsOn(id, [{ op: 'upsert_diagram', id: 'd1', title: 'Different' }]);
+  assert.ok(redesign.plan, redesign.error);
+});
+
+test("the repository's .coplan/config.json reaches the prompts, the briefs and the done check", async () => {
+  const id = 'checks-session';
+  const dir = path.join(repo, '.coplan');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, 'config.json'),
+    [
+      '{',
+      '  // what the build runs',
+      '  "hooks": {',
+      '    "implement": ["npm run typecheck"],',
+      '    "review": [{ "name": "tests", "run": "npm test" }, { "name": "lint", "run": "npm run lint", "optional": true }]',
+      '  },',
+      '  "iric": { "review": "self", "parallel": 1, "maxRounds": 2 },',
+      '  "branches": { "base": "main" }',
+      '}',
+    ].join('\n'),
+  );
+  try {
+    await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+    await mcpFor(id, 'publish', PLAN);
+    const design = await post<Preview & { project: { checks: Record<string, string[]> } }>(`/api/session/${id}/plan/design/prompt`);
+    assert.deepEqual(design.project.checks['review'], ['tests', 'lint']);
+    assert.match(design.prompt, /- review: tests `npm test`; lint `npm run lint` \(optional\)/);
+    const build = await post<Preview & { settings: unknown }>(`/api/session/${id}/plan/prompt`, { target: 'session' });
+    assert.deepEqual(build.settings, { review: 'self', parallel: 1, maxRounds: 2 }, "the repository's defaults");
+
+    const brief = String((await mcpFor(id, 'brief', { task_id: 't2' }))['text']);
+    assert.match(brief, /- typecheck: `npm run typecheck`/);
+    assert.match(brief, /- tests: `npm test`/);
+    assert.match(brief, /Review: self-review/);
+
+    // An optional check failing does not hold a task back; a required one does.
+    await mcpFor(id, 'task', { task_id: 't2', stage: 'review', checks: [{ name: 'tests', ok: true }, { name: 'lint', ok: false }] });
+    const done = await mcpFor(id, 'task', { task_id: 't2', status: 'done' });
+    assert.equal(done['ok'], true, String(done['text']));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a submission needs to say who builds it', async () => {

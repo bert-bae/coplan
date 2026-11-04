@@ -9,9 +9,12 @@
  */
 import type {
   Author,
+  BuildSettings,
   BuildTarget,
   Change,
+  CheckResult,
   ChangeKind,
+  DesignSignoff,
   Diagram,
   DiagramDirection,
   DiagramEdge,
@@ -19,6 +22,7 @@ import type {
   DiagramEdgeInput,
   DiagramNode,
   DiagramNodeInput,
+  IricStage,
   NodeKind,
   Plan,
   PlanBaseline,
@@ -31,10 +35,12 @@ import type {
   Task,
   TaskCounts,
   TaskInput,
+  TaskListInput,
   TaskStatus,
   Thread,
 } from './types.ts';
-import { BUILD_TARGETS, EDGE_ARROWS, NODE_KINDS, TASK_STATUSES } from './types.ts';
+import { BUILD_TARGETS, EDGE_ARROWS, IRIC_STAGES, NODE_KINDS, TASK_STATUSES } from './types.ts';
+import { cleanSettings, dependencyProblem, validReview } from './build.ts';
 
 /** Raised for an op that cannot apply. The message is shown verbatim to
  *  whoever sent it — the user in a toast, Claude in a tool result. */
@@ -340,7 +346,7 @@ export function baselineOf(plan: Plan): PlanBaseline {
       nodes: d.nodes.map(({ x: _x, y: _y, ...node }) => node),
       edges: d.edges,
     })),
-    tasks: plan.tasks.map(({ id, parentId, order, title, detail, status, files, note }) => ({
+    tasks: plan.tasks.map(({ id, parentId, order, title, detail, status, files, note, dependsOn, branch, review }) => ({
       id,
       parentId,
       order,
@@ -349,6 +355,9 @@ export function baselineOf(plan: Plan): PlanBaseline {
       ...(detail ? { detail } : {}),
       ...(files?.length ? { files } : {}),
       ...(note ? { note } : {}),
+      ...(dependsOn?.length ? { dependsOn } : {}),
+      ...(branch ? { branch } : {}),
+      ...(review ? { review } : {}),
     })),
   });
 }
@@ -369,19 +378,17 @@ export function baselineOf(plan: Plan): PlanBaseline {
 export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now()): { plan: Plan; changes: Change[] } {
   // A finished build is history: the next plan may replace it. Until then
   // the plan is what the user signed off, and only they can reopen it.
-  if (prev?.submission && planPhase(prev) !== 'built') throw new PlanError(LOCKED_FOR_CLAUDE);
-  if (prev && unreadByClaude(prev).length > 0) {
-    throw new PlanError(
-      `The user has changed ${unreadItems(prev)} item(s) in the plan since you last read it. ` +
-        'Call harness_plan_read first, then publish again (or use harness_plan_edit for targeted changes) ' +
-        'so their edits are not overwritten.',
-    );
-  }
+  const finished = Boolean(prev?.submission && planPhase(prev) === 'built');
+  if (prev?.submission && !finished) throw new PlanError(LOCKED_FOR_CLAUDE);
+  if (prev?.design && !finished) throw new PlanError(DESIGN_LOCKED_FOR_CLAUDE);
+  refuseUnread(prev, 'publish again (or use harness_plan_edit for targeted changes)');
   const title = clean(input.title, MAX_TITLE);
   if (!title) throw new PlanError('A plan needs a title.');
 
   const base = prev ? structuredClone(prev) : emptyPlan(title, now);
   delete base.submission;
+  delete base.design;
+  delete base.report;
   // Ids are minted against everything the plan has ever held, so build into
   // a working copy that still remembers the old items until the end.
   const next: Plan = { ...base, title, summary: clean(input.summary, MAX_TEXT) ?? base.summary };
@@ -405,35 +412,7 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
     });
   }
 
-  const tasks: Task[] = [];
-  const walk = (list: TaskInput[] | undefined, parentId: string | null) => {
-    (list ?? []).forEach((raw, order) => {
-      if (tasks.length >= MAX_TASKS) throw new PlanError(`A plan holds at most ${MAX_TASKS} tasks.`);
-      const tTitle = clean(raw?.title, MAX_TITLE);
-      if (!tTitle) throw new PlanError('Every task needs a title.');
-      const old = base.tasks.find((t) => t.id === raw.id);
-      const id = old && !tasks.some((t) => t.id === old.id) ? old.id : claimIdAmong(next, 'task', raw.id, tasks);
-      const status = validStatus(raw.status) ?? old?.status ?? 'todo';
-      const detail = clean(raw.detail, MAX_TEXT);
-      const note = clean(raw.note, MAX_TITLE * 2) ?? old?.note;
-      const files = cleanList(raw.files) ?? old?.files;
-      tasks.push({
-        id,
-        parentId,
-        order,
-        title: tTitle,
-        ...(detail ? { detail } : {}),
-        status,
-        ...(files?.length ? { files } : {}),
-        ...(note ? { note } : {}),
-        createdAt: old?.createdAt ?? now,
-        updatedAt: now,
-        createdBy: old?.createdBy ?? 'claude',
-      });
-      walk(raw.subtasks, id);
-    });
-  };
-  walk(input.tasks, null);
+  const { tasks, builds } = buildTaskTree(base, next, input.tasks, now);
 
   const diagrams: Diagram[] = [];
   for (const raw of input.diagrams ?? []) {
@@ -464,6 +443,8 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
   next.sections = sections;
   next.diagrams = diagrams;
   next.tasks = tasks;
+  linkBuilds(next, builds);
+  checkDependencies(next);
   next.threads = base.threads.map((thread) => detachIfOrphaned(next, base, thread));
   next.revision = base.revision + 1;
   if (!prev) next.createdAt = now;
@@ -478,6 +459,195 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
   );
   markReadByClaude(next, now);
   return { plan: next, changes: [change] };
+}
+
+/**
+ * Replace the task tree and nothing else: the task list Claude makes from a
+ * confirmed design. The design stays exactly as the user confirmed it; each
+ * box keeps the tasks it links that survive, and gains those whose `builds`
+ * names it. Allowed while planning, too, to rework the planned tasks.
+ */
+export function publishTasks(prev: Plan | null, input: TaskListInput, now = Date.now()): { plan: Plan; changes: Change[] } {
+  if (!prev) throw new PlanError('There is no plan yet. Publish the design with harness_plan_publish first.');
+  if (prev.submission && planPhase(prev) !== 'built') throw new PlanError(LOCKED_FOR_CLAUDE);
+  refuseUnread(prev, 'publish the task list again');
+  if (!Array.isArray(input?.tasks) || input.tasks.length === 0) throw new PlanError('The task list needs at least one task.');
+
+  const base = structuredClone(prev);
+  const next: Plan = structuredClone(prev);
+  const { tasks, builds } = buildTaskTree(base, next, input.tasks, now);
+  next.tasks = tasks;
+  const live = new Set(tasks.map((t) => t.id));
+  for (const d of next.diagrams) {
+    let touched = false;
+    for (const n of d.nodes) {
+      if (!n.taskIds) continue;
+      const kept = n.taskIds.filter((id) => live.has(id));
+      if (kept.length === n.taskIds.length) continue;
+      touched = true;
+      if (kept.length) n.taskIds = kept;
+      else delete n.taskIds;
+    }
+    if (touched) bumpDiagram(d, now);
+  }
+  linkBuilds(next, builds, now);
+  checkDependencies(next);
+  next.threads = base.threads.map((thread) => detachIfOrphaned(next, base, thread));
+
+  const leaves = tasks.filter((t) => !tasks.some((c) => c.parentId === t.id)).length;
+  const change = record(next, 'claude', 'published', { kind: 'plan', id: '' }, `published the task list (${leaves} task${leaves === 1 ? '' : 's'})`, now);
+  markReadByClaude(next, now);
+  return { plan: next, changes: [change] };
+}
+
+/** A wholesale publish written without the user's unread edits would
+ *  silently discard them, which is the one thing it must never do. */
+function refuseUnread(prev: Plan | null, then: string): void {
+  if (!prev || unreadByClaude(prev).length === 0) return;
+  throw new PlanError(
+    `The user has changed ${unreadItems(prev)} item(s) in the plan since you last read it. ` +
+      `Call harness_plan_read first, then ${then} so their edits are not overwritten.`,
+  );
+}
+
+/**
+ * Build a task tree from what Claude wrote. Ids that survive keep their
+ * status, note, files and links; dependencies, branch and review mode left
+ * out are kept too (the user may have set them), and `[]` or `""` clears
+ * them. Dependencies may name any task by the id it was written with.
+ */
+function buildTaskTree(
+  base: Plan,
+  next: Plan,
+  input: TaskInput[] | undefined,
+  now: number,
+): { tasks: Task[]; builds: { id: string; refs: string[] }[] } {
+  const tasks: Task[] = [];
+  const written = new Map<string, string>();
+  const deps: { task: Task; explicit: boolean; ids: string[] }[] = [];
+  const builds: { id: string; refs: string[] }[] = [];
+  const walk = (list: TaskInput[] | undefined, parentId: string | null, depth: number) => {
+    if (!Array.isArray(list)) return;
+    if (depth > 12) throw new PlanError('The task tree is nested too deeply.');
+    list.forEach((raw, order) => {
+      if (tasks.length >= MAX_TASKS) throw new PlanError(`A plan holds at most ${MAX_TASKS} tasks.`);
+      const tTitle = clean(raw?.title, MAX_TITLE);
+      if (!tTitle) throw new PlanError('Every task needs a title.');
+      const old = base.tasks.find((t) => t.id === raw.id);
+      const id = old && !tasks.some((t) => t.id === old.id) ? old.id : claimIdAmong(next, 'task', raw.id, tasks);
+      if (typeof raw.id === 'string' && raw.id.trim()) written.set(raw.id.trim(), id);
+      const status = validStatus(raw.status) ?? old?.status ?? 'todo';
+      const detail = clean(raw.detail, MAX_TEXT);
+      const note = clean(raw.note, MAX_TITLE * 2) ?? old?.note;
+      const files = cleanList(raw.files) ?? old?.files;
+      const branch = raw.branch === undefined ? old?.branch : cleanBranch(raw.branch);
+      const review = raw.review === undefined ? old?.review : reviewOrThrow(raw.review, tTitle);
+      const task: Task = {
+        id,
+        parentId,
+        order,
+        title: tTitle,
+        ...(detail ? { detail } : {}),
+        status,
+        ...(files?.length ? { files } : {}),
+        ...(note ? { note } : {}),
+        ...(branch ? { branch } : {}),
+        ...(review ? { review } : {}),
+        ...(old?.stage && status === 'in_progress' ? { stage: old.stage } : {}),
+        ...(old?.round ? { round: old.round } : {}),
+        ...(old?.checks?.length ? { checks: old.checks } : {}),
+        createdAt: old?.createdAt ?? now,
+        updatedAt: now,
+        createdBy: old?.createdBy ?? 'claude',
+      };
+      tasks.push(task);
+      const explicit = raw.dependsOn !== undefined;
+      deps.push({ task, explicit, ids: explicit ? (cleanList(raw.dependsOn) ?? []) : (old?.dependsOn ?? []) });
+      const refs = cleanList(raw.builds);
+      if (refs?.length) builds.push({ id, refs });
+      walk(raw.subtasks, id, depth + 1);
+    });
+  };
+  walk(input, null, 0);
+
+  // Dependencies are resolved once every task has its id, so a task can
+  // name one written after it.
+  const kept = new Set(tasks.map((t) => t.id));
+  for (const { task, explicit, ids } of deps) {
+    const resolved: string[] = [];
+    for (const raw of ids) {
+      const id = written.get(raw) ?? (kept.has(raw) ? raw : undefined);
+      if (!id) {
+        // Carried over from before this publish: the task it named is gone.
+        if (!explicit) continue;
+        throw new PlanError(`"${task.title}" depends on "${raw}", which is not a task in this plan. Give the task it means that id.`);
+      }
+      if (!resolved.includes(id)) resolved.push(id);
+    }
+    if (resolved.length) task.dependsOn = resolved;
+  }
+  return { tasks, builds };
+}
+
+/**
+ * Link tasks to the boxes their `builds` names: a node id, or
+ * `diagramId/nodeId` when the same id is in several diagrams.
+ */
+function linkBuilds(plan: Plan, builds: { id: string; refs: string[] }[], now?: number): void {
+  for (const { id, refs } of builds) {
+    const title = plan.tasks.find((t) => t.id === id)?.title ?? id;
+    for (const ref of refs) {
+      const { diagram, node } = findBox(plan, ref, title);
+      const links = node.taskIds ?? [];
+      if (links.includes(id)) continue;
+      node.taskIds = [...links, id];
+      if (now !== undefined) bumpDiagram(diagram, now);
+    }
+  }
+}
+
+function findBox(plan: Plan, ref: string, title: string): { diagram: Diagram; node: DiagramNode } {
+  const slash = ref.indexOf('/');
+  if (slash > 0) {
+    const diagram = plan.diagrams.find((d) => d.id === ref.slice(0, slash));
+    const node = diagram?.nodes.find((n) => n.id === ref.slice(slash + 1));
+    if (diagram && node) return { diagram, node };
+    throw new PlanError(`"${title}" builds "${ref}", but there is no such box. Use "diagramId/nodeId" with ids from the plan.`);
+  }
+  const hits = plan.diagrams.flatMap((diagram) => diagram.nodes.filter((n) => n.id === ref).map((node) => ({ diagram, node })));
+  if (hits.length === 1) return hits[0]!;
+  if (hits.length === 0) throw new PlanError(`"${title}" builds "${ref}", but no box has that id.`);
+  throw new PlanError(
+    `"${title}" builds "${ref}", which is a box in ${hits.length} diagrams — write it as ${hits.map((h) => `"${h.diagram.id}/${ref}"`).join(' or ')}.`,
+  );
+}
+
+/** A diagram's links changed under it: a canvas editing it must reload. */
+function bumpDiagram(d: Diagram, now: number): void {
+  d.rev += 1;
+  d.updatedAt = now;
+}
+
+function checkDependencies(plan: Plan): void {
+  const problem = dependencyProblem(plan);
+  if (problem) throw new PlanError(problem);
+}
+
+function cleanBranch(value: unknown): string | undefined {
+  const name = clean(value, 120)?.replace(/\s+/g, '-');
+  if (!name) return undefined;
+  // What git refuses, refused here, rather than discovered at checkout.
+  if (/[~^:?*[\\\x00-\x20\x7f]|\.\.|@\{|^[-/.]|[/.]$|\/\/|\.lock$/.test(name)) {
+    throw new PlanError(`"${name}" is not a usable git branch name.`);
+  }
+  return name;
+}
+
+function reviewOrThrow(value: unknown, title: string) {
+  if (value === undefined || value === '' || value === null) return undefined;
+  const review = validReview(value);
+  if (!review) throw new PlanError(`"${title}": review must be one of subagent, self, user or skip.`);
+  return review;
 }
 
 /** `claimId`, but also avoiding ids already handed out in this publish. */
@@ -520,7 +690,7 @@ export function normalizePlan(raw: Partial<Plan> & Record<string, unknown>, fall
       edges: list(d.edges),
       direction: d.direction === 'TB' ? 'TB' : 'LR',
     })),
-    tasks: list<Task>(raw.tasks),
+    tasks: list<Task>(raw.tasks).map(normalizeTask),
     threads: list<Thread>(raw.threads).map((t) => ({ ...t, replies: list(t.replies) })),
     changes: list<Change>(raw.changes),
     seq: typeof raw.seq === 'number' ? raw.seq : 0,
@@ -536,7 +706,31 @@ export function normalizePlan(raw: Partial<Plan> & Record<string, unknown>, fall
   const submission = validSubmission(raw.submission);
   if (submission) plan.submission = submission;
   else delete plan.submission;
+  const design = validDesign(raw.design);
+  if (design) plan.design = design;
+  else delete plan.design;
+  const report = raw.report as { text?: unknown; at?: unknown } | undefined;
+  if (report && typeof report.text === 'string' && report.text && typeof report.at === 'number') plan.report = { text: report.text, at: report.at };
+  else delete plan.report;
   return plan;
+}
+
+/** A task's build fields as read from disk: anything malformed is dropped,
+ *  never allowed to break the dependency graph or the board. */
+function normalizeTask(task: Task): Task {
+  const t = { ...task } as Task & Record<string, unknown>;
+  const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x !== '') : []);
+  const deps = strings(t.dependsOn);
+  if (deps.length) t.dependsOn = deps;
+  else delete t.dependsOn;
+  if (typeof t.branch !== 'string' || !t.branch) delete t.branch;
+  if (!validReview(t.review)) delete t.review;
+  if (!validStage(t.stage)) delete t.stage;
+  if (typeof t.round !== 'number' || !(t.round > 0)) delete t.round;
+  const checks = cleanChecks(t.checks);
+  if (checks?.length) t.checks = checks;
+  else delete t.checks;
+  return t;
 }
 
 /* ------------------------------------------------------------------ *
@@ -555,6 +749,7 @@ export function applyOps(
 ): { plan: Plan; changes: Change[] } {
   if (!Array.isArray(ops) || ops.length === 0) throw new PlanError('No edits were given.');
   if (plan.submission) checkLocked(ops, author);
+  else if (plan.design) checkDesignLocked(ops, author);
   const next = structuredClone(plan);
   const changes: Change[] = [];
   ops.forEach((op, i) => {
@@ -567,6 +762,13 @@ export function applyOps(
       throw err;
     }
   });
+  // Dependencies are checked on the batch as a whole, so a task and the one
+  // it waits on can be added together in either order. A problem the plan
+  // already had (written by an older build) does not block unrelated edits.
+  if (ops.some((op) => TASK_SHAPE_OPS.has((op as { op?: string })?.op ?? '') || (op as { kind?: string })?.kind === 'task')) {
+    const problem = dependencyProblem(next);
+    if (problem && problem !== dependencyProblem(plan)) throw new PlanError(problem);
+  }
   if (author === 'claude') {
     if (next.claudeBaseline && unreadByClaude(next).length > 0) {
       next.claudeBaseline = foldClaudeEdit(next.claudeBaseline, baselineOf(plan), baselineOf(next));
@@ -641,6 +843,11 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         if (direction) existing.direction = direction;
         if (typeof op.caption === 'string') setOptional(existing, 'caption', clean(op.caption, MAX_TEXT));
         if (typeof op.index === 'number') moveInList(plan.diagrams, existing.id, op.index);
+        // A confirmed design can still be laid out, and its boxes linked to
+        // the tasks that build them — but not redesigned.
+        if (plan.design && designWithoutLinks(before) !== designWithoutLinks(existing)) {
+          throw new PlanError(author === 'user' ? DESIGN_LOCKED_FOR_USER : DESIGN_LOCKED_FOR_CLAUDE);
+        }
         const what = describeDiagramEdit(before, existing);
         const relaid = layoutChanged(before, existing);
         if (!what && !relaid) return [];
@@ -690,21 +897,33 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       const detail = clean(op.detail, MAX_TEXT);
       const note = clean(op.note, MAX_TITLE * 2);
       const files = cleanList(op.files);
+      const dependsOn = cleanList(op.dependsOn);
+      const branch = cleanBranch(op.branch);
+      const review = reviewOrThrow(op.review, title);
+      const stage = op.stage === undefined ? undefined : stageOrThrow(op.stage);
+      const checks = cleanChecks(op.checks);
+      const status = validStatus(op.status) ?? (stage ? 'in_progress' : 'todo');
       const task: Task = {
         id: claimId(plan, 'task', op.id),
         parentId,
         order: Number.MAX_SAFE_INTEGER,
         title,
         ...(detail ? { detail } : {}),
-        status: validStatus(op.status) ?? 'todo',
+        status,
         ...(files?.length ? { files } : {}),
         ...(note ? { note } : {}),
+        ...(dependsOn?.length ? { dependsOn: [...new Set(dependsOn)] } : {}),
+        ...(branch ? { branch } : {}),
+        ...(review ? { review } : {}),
+        ...(stage && status === 'in_progress' ? { stage, ...(stage === 'review' ? { round: 1 } : {}) } : {}),
+        ...(checks?.length ? { checks } : {}),
         createdAt: now,
         updatedAt: now,
         createdBy: author,
       };
       plan.tasks.push(task);
       placeAmongSiblings(plan, task, op.index);
+      if (op.builds?.length) linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now);
       const where = parentId ? ` under "${requireTask(plan, parentId).title}"` : '';
       return [log('created', ref('task', task.id), `added task "${title}"${where}`)];
     }
@@ -786,6 +1005,14 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       ];
     }
 
+    case 'report': {
+      const text = clean(op.text, MAX_TEXT);
+      if (!text) throw new PlanError('A report needs text.');
+      if (plan.report?.text === text) return [];
+      plan.report = { text, at: now };
+      return [log('edited', { kind: 'plan', id: '' }, 'wrote the build report')];
+    }
+
     default:
       throw new PlanError(`Unknown edit "${(op as { op?: unknown })?.op}".`);
   }
@@ -816,24 +1043,100 @@ function editTask(
   }
   if (typeof op.note === 'string') {
     setOptional(task, 'note', clean(op.note, MAX_TITLE * 2));
-    if (!op.status) edited.push('note');
+    if (!op.status && !op.stage) edited.push('note');
   }
-  if (op.status !== undefined) {
-    const status = validStatus(op.status);
-    if (!status) throw new PlanError(`"${op.status}" is not a task status (${TASK_STATUSES.join(', ')}).`);
+  if (Array.isArray(op.dependsOn)) {
+    // Checked with the whole batch, so a dependency can be added with it.
+    const deps = [...new Set(cleanList(op.dependsOn) ?? [])];
+    if (deps.join() !== (task.dependsOn ?? []).join()) {
+      setOptional(task, 'dependsOn', deps.length ? deps : undefined);
+      edited.push('dependencies');
+    }
+  }
+  if (typeof op.branch === 'string') {
+    const branch = cleanBranch(op.branch);
+    if (branch !== task.branch) {
+      setOptional(task, 'branch', branch);
+      edited.push('branch');
+    }
+  }
+  if (op.review !== undefined) {
+    const review = reviewOrThrow(op.review, task.title);
+    if (review !== task.review) {
+      setOptional(task, 'review', review);
+      edited.push('review');
+    }
+  }
+
+  // Moving to a stage of the cycle means the task is being worked on.
+  const stage = op.stage === undefined ? undefined : stageOrThrow(op.stage);
+  const wanted = op.status ?? (stage && task.status !== 'in_progress' ? 'in_progress' : undefined);
+  if (wanted !== undefined) {
+    const status = validStatus(wanted);
+    if (!status) throw new PlanError(`"${wanted}" is not a task status (${TASK_STATUSES.join(', ')}).`);
     if (status !== task.status) {
       task.status = status;
       task.updatedAt = now;
       const note = task.note && typeof op.note === 'string' ? ` — ${short(task.note, 80)}` : '';
       out.push(log('status', ref('task', task.id), `marked "${task.title}" ${STATUS_WORDS[status]}${note}`));
     }
+    // Finished, or back in the pile: no longer anywhere in the cycle.
+    if (status === 'done' || status === 'todo') delete task.stage;
   }
+  const progress: string[] = [];
+  if (stage && task.status !== 'done' && task.status !== 'todo' && stage !== task.stage) {
+    task.stage = stage;
+    if (stage === 'review') task.round = (task.round ?? 0) + 1;
+    progress.push(stage === 'review' ? `in review (round ${task.round})` : STAGE_WORDS[stage]);
+  }
+  const checks = op.checks === undefined ? undefined : cleanChecks(op.checks);
+  if (checks) {
+    if (checks.length) task.checks = checks;
+    else delete task.checks;
+    if (checks.length) progress.push(`checks ${checks.map((c) => `${c.name} ${c.ok ? '✓' : '✗'}`).join(', ')}`);
+  }
+  if (progress.length) {
+    task.updatedAt = now;
+    out.push(log('status', ref('task', task.id), `"${task.title}": ${progress.join('; ')}`));
+  }
+
   if (edited.length) {
     task.updatedAt = now;
     out.push(log('edited', ref('task', task.id), `edited the ${edited.join(', ')} of "${task.title}"`));
   }
+  if (op.builds?.length) linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now);
   if (typeof op.index === 'number') placeAmongSiblings(plan, task, op.index);
   void author;
+  return out;
+}
+
+const STAGE_WORDS: Record<IricStage, string> = {
+  implement: 'implementing',
+  review: 'in review',
+  refine: 'refining after review',
+};
+
+export function validStage(value: unknown): IricStage | undefined {
+  return (IRIC_STAGES as readonly string[]).includes(value as string) ? (value as IricStage) : undefined;
+}
+
+function stageOrThrow(value: unknown): IricStage {
+  const stage = validStage(value);
+  if (!stage) throw new PlanError(`"${String(value)}" is not a stage (${IRIC_STAGES.join(', ')}).`);
+  return stage;
+}
+
+/** Check results as reported: each with a name, at most a few dozen. */
+export function cleanChecks(value: unknown): CheckResult[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: CheckResult[] = [];
+  for (const raw of value.slice(0, 40)) {
+    const rec = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+    const name = clean(rec['name'], 80);
+    if (!name || typeof rec['ok'] !== 'boolean') continue;
+    const note = clean(rec['note'], 300);
+    out.push({ name, ok: rec['ok'], ...(note ? { note } : {}) });
+  }
   return out;
 }
 
@@ -865,6 +1168,13 @@ function removeItem(
       const doomed = new Set([t.id, ...descendants(plan, t.id).map((d) => d.id)]);
       plan.tasks = plan.tasks.filter((x) => !doomed.has(x.id));
       normalizeSiblings(plan, t.parentId);
+      // Nothing waits on work that is no longer in the plan.
+      for (const other of plan.tasks) {
+        if (!other.dependsOn?.some((id) => doomed.has(id))) continue;
+        const kept = other.dependsOn.filter((id) => !doomed.has(id));
+        if (kept.length) other.dependsOn = kept;
+        else delete other.dependsOn;
+      }
       for (const d of plan.diagrams) {
         for (const n of d.nodes) {
           if (!n.taskIds) continue;
@@ -892,18 +1202,32 @@ export const MAX_NOTE = 4_000;
 
 /** What Claude may still do to a locked plan: track the work it is doing,
  *  and answer comments. Everything else is the design the user signed off. */
-const TRACKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'reply', 'resolve']);
+const TRACKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'reply', 'resolve', 'report']);
+
+/** Ops that can change which task waits on which. */
+const TASK_SHAPE_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task']);
 
 const LOCKED_FOR_USER = 'The plan has been submitted to be built, so it is locked. Reopen it to make changes.';
 const LOCKED_FOR_CLAUDE =
   'The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or ' +
-  'upsert_task to add work you discover) and comment replies (reply, resolve) apply. If the design has to ' +
-  'change, ask the user in chat — they can reopen the plan in Coplan.';
+  'upsert_task to add work you discover), comment replies (reply, resolve) and the build report apply. If the ' +
+  'design has to change, ask the user in chat — they can reopen the plan in Coplan.';
+const DESIGN_LOCKED_FOR_USER =
+  'The design is confirmed, so the architecture, sections and summary are locked — only the tasks, the boxes they ' +
+  'build and comments change now. Reopen the design to change it.';
+const DESIGN_LOCKED_FOR_CLAUDE =
+  'The user has confirmed the design, so the architecture, sections and summary are locked. Build the task list ' +
+  'from it: harness_tasks_publish, or upsert_task / move_task / remove with harness_plan_edit (a task\'s `builds` ' +
+  'links it to boxes). If the design itself has to change, ask the user in chat — they can reopen the design in Coplan.';
+
+/** What a confirmed design still lets anyone do: work on the tasks, link
+ *  them to boxes (checked inside upsert_diagram), and talk about it. */
+const TASKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task', 'upsert_diagram', 'comment', 'reply', 'resolve', 'report']);
 
 /** Where the plan is in its life. */
-export function planPhase(plan: Pick<Plan, 'submission' | 'tasks'> | null): PlanPhase {
+export function planPhase(plan: Pick<Plan, 'submission' | 'tasks' | 'design'> | null): PlanPhase {
   const submission = plan?.submission;
-  if (!submission) return 'planning';
+  if (!submission) return plan?.design ? 'tasking' : 'planning';
   if (submission.target === 'elsewhere') return 'handed-off';
   if (!submission.deliveredAt) return 'submitted';
   const counts = countTasks(plan);
@@ -915,10 +1239,36 @@ export function isLocked(plan: Pick<Plan, 'submission'> | null): boolean {
   return Boolean(plan?.submission);
 }
 
+/** Whether the design — diagrams, sections, summary — is locked: confirmed,
+ *  or submitted. */
+export function isDesignLocked(plan: Pick<Plan, 'submission' | 'design'> | null): boolean {
+  return Boolean(plan?.design || plan?.submission);
+}
+
 function checkLocked(ops: PlanOp[], author: Author): void {
   if (author === 'user') throw new PlanError(LOCKED_FOR_USER);
   const refused = ops.find((op) => !TRACKING_OPS.has((op as { op?: string })?.op ?? ''));
   if (refused) throw new PlanError(`${LOCKED_FOR_CLAUDE} (Refused: ${(refused as { op?: string })?.op ?? 'an edit'}.)`);
+}
+
+function checkDesignLocked(ops: PlanOp[], author: Author): void {
+  const refused = ops.find((raw) => {
+    const op = raw as { op?: string; kind?: string; id?: string; summary?: unknown; title?: unknown };
+    if (op.op === 'remove') return op.kind !== 'task';
+    // The title names the plan; the summary is part of its design.
+    if (op.op === 'set_meta') return op.summary !== undefined;
+    if (op.op === 'upsert_diagram') return !op.id;
+    return !TASKING_OPS.has(op.op ?? '');
+  });
+  if (!refused) return;
+  const name = (refused as { op?: string })?.op ?? 'an edit';
+  throw new PlanError(author === 'user' ? DESIGN_LOCKED_FOR_USER : `${DESIGN_LOCKED_FOR_CLAUDE} (Refused: ${name}.)`);
+}
+
+/** A diagram's design with its task links left out: what a confirmed
+ *  design must keep. */
+function designWithoutLinks(d: Diagram): string {
+  return JSON.stringify([d.title, d.caption ?? '', d.nodes.map(({ x: _x, y: _y, taskIds: _t, ...n }) => n), d.edges]);
 }
 
 export function validTarget(value: unknown): BuildTarget | undefined {
@@ -936,16 +1286,53 @@ export function cleanNote(value: unknown): string | undefined {
  */
 export function submitPlan(
   plan: Plan,
-  input: { target: BuildTarget; prompt: string; note?: string; trimmed?: boolean },
+  input: { target: BuildTarget; prompt: string; note?: string; trimmed?: boolean; settings?: BuildSettings },
   now = Date.now(),
 ): Plan {
   if (plan.submission) throw new PlanError('The plan has already been submitted.');
+  if (!plan.design) {
+    throw new PlanError('Confirm the design first: the task list is made from the confirmed design, and then the plan is submitted.');
+  }
   if (!input.prompt.trim()) throw new PlanError('There is no prompt to submit.');
   const next = structuredClone(plan);
   const note = cleanNote(input.note);
   next.submission = {
     at: now,
     target: input.target,
+    ...(note ? { note } : {}),
+    prompt: input.prompt,
+    ...(input.trimmed ? { trimmed: true } : {}),
+    ...(input.settings ? { settings: cleanSettings(input.settings) } : {}),
+    deliveredAt: null,
+  };
+  next.version += 1;
+  next.updatedAt = now;
+  return next;
+}
+
+/** Unlock a submitted plan so the tasks can be changed again. The design
+ *  stays confirmed; reopening that is a step of its own. */
+export function reopenPlan(plan: Plan, now = Date.now()): Plan {
+  if (!plan.submission) throw new PlanError('The plan is not locked.');
+  const next = structuredClone(plan);
+  delete next.submission;
+  next.version += 1;
+  next.updatedAt = now;
+  return next;
+}
+
+/**
+ * The user confirms the design. `prompt` is what they previewed — the ask
+ * for a task list — and it reaches Claude with their next message, as is.
+ */
+export function confirmDesign(plan: Plan, input: { prompt: string; note?: string; trimmed?: boolean }, now = Date.now()): Plan {
+  if (plan.submission) throw new PlanError('The plan has already been submitted.');
+  if (plan.design) throw new PlanError('The design is already confirmed.');
+  if (!input.prompt.trim()) throw new PlanError('There is no prompt to send.');
+  const next = structuredClone(plan);
+  const note = cleanNote(input.note);
+  next.design = {
+    at: now,
     ...(note ? { note } : {}),
     prompt: input.prompt,
     ...(input.trimmed ? { trimmed: true } : {}),
@@ -956,11 +1343,24 @@ export function submitPlan(
   return next;
 }
 
-/** Unlock a submitted plan so it can be changed again. */
-export function reopenPlan(plan: Plan, now = Date.now()): Plan {
-  if (!plan.submission) throw new PlanError('The plan is not locked.');
+/** Unlock a confirmed design so it can be reshaped. The tasks stay. */
+export function reopenDesign(plan: Plan, now = Date.now()): Plan {
+  if (plan.submission) throw new PlanError('The plan is submitted. Reopen it first, then the design.');
+  if (!plan.design) throw new PlanError('The design is not confirmed.');
   const next = structuredClone(plan);
-  delete next.submission;
+  delete next.design;
+  next.version += 1;
+  next.updatedAt = now;
+  return next;
+}
+
+/** The ask for a task list reached Claude, carrying the design: that is
+ *  Claude reading the plan. */
+export function markDesignDelivered(plan: Plan, now = Date.now()): Plan {
+  if (!plan.design || plan.design.deliveredAt || plan.submission) return plan;
+  const next = structuredClone(plan);
+  next.design!.deliveredAt = now;
+  markReadByClaude(next, now);
   next.version += 1;
   next.updatedAt = now;
   return next;
@@ -976,6 +1376,9 @@ export function markDelivered(plan: Plan, now = Date.now()): Plan {
   if (!plan.submission || plan.submission.target !== 'session' || plan.submission.deliveredAt) return plan;
   const next = structuredClone(plan);
   next.submission!.deliveredAt = now;
+  // The build prompt carries the design too: a task-list ask not yet sent
+  // has nothing left to say.
+  if (next.design && !next.design.deliveredAt) next.design.deliveredAt = now;
   markReadByClaude(next, now);
   next.version += 1;
   next.updatedAt = now;
@@ -993,7 +1396,20 @@ function validSubmission(raw: unknown): Submission | undefined {
     ...(typeof s.note === 'string' && s.note ? { note: s.note } : {}),
     prompt: s.prompt,
     ...(s.trimmed === true ? { trimmed: true } : {}),
+    ...(s.settings && typeof s.settings === 'object' ? { settings: cleanSettings(s.settings) } : {}),
     deliveredAt: typeof s.deliveredAt === 'number' ? s.deliveredAt : null,
+  };
+}
+
+function validDesign(raw: unknown): DesignSignoff | undefined {
+  const d = raw as Partial<DesignSignoff> | null;
+  if (!d || typeof d !== 'object' || typeof d.at !== 'number' || typeof d.prompt !== 'string' || !d.prompt) return undefined;
+  return {
+    at: d.at,
+    ...(typeof d.note === 'string' && d.note ? { note: d.note } : {}),
+    prompt: d.prompt,
+    ...(d.trimmed === true ? { trimmed: true } : {}),
+    deliveredAt: typeof d.deliveredAt === 'number' ? d.deliveredAt : null,
   };
 }
 

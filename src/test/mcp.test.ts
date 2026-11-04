@@ -123,6 +123,9 @@ test('each tool forwards to its own endpoint', async () => {
     ['harness_plan_publish', '/mcp/publish'],
     ['harness_plan_edit', '/mcp/edit'],
     ['harness_task_update', '/mcp/task'],
+    ['harness_tasks_publish', '/mcp/tasks'],
+    ['harness_task_next', '/mcp/next'],
+    ['harness_task_brief', '/mcp/brief'],
   ] as const) {
     received = [];
     await callTool(name, {});
@@ -133,7 +136,7 @@ test('each tool forwards to its own endpoint', async () => {
 test('the toolset is the planning loop and nothing else', () => {
   assert.deepEqual(
     TOOLS.map((t) => t.name).sort(),
-    ['harness_plan_edit', 'harness_plan_publish', 'harness_plan_read', 'harness_task_update'],
+    ['harness_plan_edit', 'harness_plan_publish', 'harness_plan_read', 'harness_task_brief', 'harness_task_next', 'harness_task_update', 'harness_tasks_publish'],
   );
   for (const tool of TOOLS) {
     assert.doesNotMatch(tool.description, /end your turn and wait|gate|harness_await/i, `${tool.name} must not ask Claude to wait`);

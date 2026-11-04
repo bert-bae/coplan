@@ -87,8 +87,13 @@ export function DiagramEditor(props: {
   onSave: (patch: GraphPatch) => Promise<number | null>;
   /** The panel's content when nothing is selected: the diagram itself. */
   aside: ReactNode;
-  /** The plan is submitted: show the design, change nothing. */
+  /** The design is confirmed or submitted: show it, change nothing. */
   readOnly?: boolean;
+  /** Why it is read-only, for the badge on the canvas. */
+  lockNote?: string;
+  /** While the design is confirmed but not yet submitted, which tasks build
+   *  each box can still change. */
+  onLinkTasks?: (nodeId: string, taskIds: string[]) => void;
 }) {
   return (
     <ReactFlowProvider>
@@ -139,12 +144,16 @@ function Editor({
   onSave,
   aside,
   readOnly = false,
+  lockNote,
+  onLinkTasks,
 }: {
   diagram: Diagram;
   plan: Plan;
   onSave: (patch: GraphPatch) => Promise<number | null>;
   aside: ReactNode;
   readOnly?: boolean;
+  lockNote?: string;
+  onLinkTasks?: (nodeId: string, taskIds: string[]) => void;
 }) {
   const theme = useResolvedTheme();
   const flow = useReactFlow<FlowNode, FlowEdge>();
@@ -1174,6 +1183,7 @@ function Editor({
         plan={plan}
         onSelect={select}
         onClose={clearSelection}
+        {...(onLinkTasks ? { onLinkTasks } : {})}
       />
     );
   } else if (selectedNodes.length === 1 && selectedEdges.length === 0) {
@@ -1311,8 +1321,8 @@ function Editor({
             <MiniMap pannable zoomable position="bottom-right" style={{ width: 150, height: 96 }} nodeBorderRadius={4} />
             {readOnly ? (
               <Panel position="top-left" className="flow-toolbar">
-                <span className="flow-locked" title="The plan is submitted; reopen it to change the design">
-                  <span aria-hidden="true">🔒</span> Final design
+                <span className="flow-locked" title={lockNote ?? 'The plan is submitted; reopen it to change the design'}>
+                  <span aria-hidden="true">🔒</span> {onLinkTasks ? 'Design confirmed' : 'Final design'}
                 </span>
               </Panel>
             ) : (

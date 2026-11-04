@@ -5,20 +5,24 @@ import { paths, ensureHome, sanitizeId } from '../shared/paths.ts';
 import {
   PlanError,
   applyOps,
+  confirmDesign,
   countTasks,
   currentTask,
   emptyPlan,
   markDelivered,
+  markDesignDelivered,
   markReadByClaude,
   normalizePlan,
   planPhase,
   publishPlan,
+  publishTasks,
+  reopenDesign,
   reopenPlan,
   submitPlan,
   unreadItems,
 } from '../shared/plan.ts';
-import { buildPrompt } from './render.ts';
-import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ServerEvent, SessionState, SessionSummary, Submission } from '../shared/types.ts';
+import { BUILD_MARKER, DESIGN_MARKER, buildPrompt, designPrompt, type PromptOptions } from './render.ts';
+import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ServerEvent, SessionState, SessionSummary, TaskListInput } from '../shared/types.ts';
 
 const PERSIST_DEBOUNCE_MS = 400;
 
@@ -255,6 +259,17 @@ export class SessionStore extends EventEmitter {
     return result;
   }
 
+  /** Claude publishes the task list for the design. Throws `PlanError`. */
+  publishTasks(id: string, input: TaskListInput): { plan: Plan; changes: Change[] } {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error('unknown session');
+    const result = publishTasks(session.plan, input);
+    this.mutate(id, (s) => {
+      s.plan = result.plan;
+    });
+    return result;
+  }
+
   /** Apply edits from either side. Throws `PlanError` when any op fails, in
    *  which case nothing is changed. */
   applyOps(id: string, ops: PlanOp[], author: Author): { plan: Plan; changes: Change[] } {
@@ -274,7 +289,7 @@ export class SessionStore extends EventEmitter {
    * the plan as the daemon holds it, and only if that is still the version
    * the user previewed — what they read is what Claude gets.
    */
-  submit(id: string, input: { target: BuildTarget; note?: string; expect?: number }): Plan {
+  submit(id: string, input: PromptOptions & { target: BuildTarget; expect?: number }): Plan {
     const session = this.sessions.get(id);
     if (!session) throw new Error('unknown session');
     const plan = session.plan;
@@ -282,8 +297,49 @@ export class SessionStore extends EventEmitter {
     if (typeof input.expect === 'number' && input.expect !== plan.version) {
       throw new PlanError('The plan changed while you were reviewing it. The preview now shows the latest version — check it, then submit again.');
     }
-    const { prompt, trimmed } = buildPrompt(plan, { target: input.target, ...(input.note ? { note: input.note } : {}) });
-    const next = submitPlan(plan, { target: input.target, prompt, trimmed, ...(input.note ? { note: input.note } : {}) });
+    const { prompt, trimmed } = buildPrompt(plan, input);
+    const next = submitPlan(plan, {
+      target: input.target,
+      prompt,
+      trimmed,
+      ...(input.note ? { note: input.note } : {}),
+      ...(input.settings ? { settings: input.settings } : {}),
+    });
+    this.mutate(id, (s) => {
+      s.plan = next;
+    });
+    this.persistNow(id);
+    return next;
+  }
+
+  /**
+   * The user confirms the design. Like submitting, the prompt is built here
+   * from the plan as the daemon holds it, and only if that is the version
+   * the user previewed.
+   */
+  confirmDesign(id: string, input: PromptOptions & { expect?: number }): Plan {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error('unknown session');
+    const plan = session.plan;
+    if (!plan) throw new PlanError('There is no plan to confirm yet.');
+    if (typeof input.expect === 'number' && input.expect !== plan.version) {
+      throw new PlanError('The plan changed while you were reviewing it. The preview now shows the latest version — check it, then confirm again.');
+    }
+    const { prompt, trimmed } = designPrompt(plan, input);
+    const next = confirmDesign(plan, { prompt, trimmed, ...(input.note ? { note: input.note } : {}) });
+    this.mutate(id, (s) => {
+      s.plan = next;
+    });
+    this.persistNow(id);
+    return next;
+  }
+
+  /** Unlock a confirmed design. */
+  reopenDesign(id: string): Plan {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error('unknown session');
+    if (!session.plan) throw new PlanError('There is no plan.');
+    const next = reopenDesign(session.plan);
     this.mutate(id, (s) => {
       s.plan = next;
     });
@@ -305,19 +361,31 @@ export class SessionStore extends EventEmitter {
   }
 
   /**
-   * The build prompt is on its way to Claude, if one is waiting: returns it,
-   * and records that it went. Only ever once per submission.
+   * A prompt is on its way to Claude, if one is waiting — the build prompt,
+   * or else the ask for a task list — returned with the marker it begins
+   * with, and recorded as sent. Only ever once per sign-off.
    */
-  deliver(id: string): Submission | null {
+  deliver(id: string): { prompt: string; marker: string } | null {
     const plan = this.sessions.get(id)?.plan;
-    const submission = plan?.submission;
-    if (!plan || !submission || submission.target !== 'session' || submission.deliveredAt) return null;
-    const next = markDelivered(plan);
+    if (!plan) return null;
+    const submission = plan.submission;
+    let next: Plan;
+    let out: { prompt: string; marker: string };
+    if (submission) {
+      if (submission.target !== 'session' || submission.deliveredAt) return null;
+      next = markDelivered(plan);
+      out = { prompt: submission.prompt, marker: BUILD_MARKER };
+    } else if (plan.design && !plan.design.deliveredAt) {
+      next = markDesignDelivered(plan);
+      out = { prompt: plan.design.prompt, marker: DESIGN_MARKER };
+    } else {
+      return null;
+    }
     this.mutate(id, (s) => {
       s.plan = next;
     });
     this.persistNow(id);
-    return next.submission ?? null;
+    return out;
   }
 
   /** Move Claude's read position to the end of the change log. */

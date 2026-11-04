@@ -1,4 +1,5 @@
 import type {
+  BuildSettings,
   BuildTarget,
   Change,
   CleanupGroupId,
@@ -59,19 +60,30 @@ export const api = {
   /** The plan exactly as Claude reads it. */
   planText: (id: string) => request<string>(`/api/session/${id}/plan/text`),
 
-  /** The prompt Claude would be given if the plan were submitted now. */
-  promptPreview: (id: string, target: BuildTarget, note: string) =>
+  /** The prompt Claude would be given if the plan were submitted now.
+   *  Without `settings`, the repository's defaults are used — and returned. */
+  promptPreview: (id: string, target: BuildTarget, note: string, settings?: BuildSettings) =>
     request<PromptPreview>(`/api/session/${id}/plan/prompt`, {
       method: 'POST',
-      body: JSON.stringify({ target, note }),
+      body: JSON.stringify({ target, note, ...(settings ? { settings } : {}) }),
     }),
 
   /** Lock the plan and hand it over to be built. `expect` is the version
    *  the preview was made from; a plan that moved on since is refused. */
-  submitPlan: (id: string, body: { target: BuildTarget; note: string; expect: number }) =>
+  submitPlan: (id: string, body: { target: BuildTarget; note: string; expect: number; settings?: BuildSettings }) =>
     request<{ plan: Plan }>(`/api/session/${id}/plan/submit`, { method: 'POST', body: JSON.stringify(body) }),
 
   reopenPlan: (id: string) => request<{ plan: Plan }>(`/api/session/${id}/plan/reopen`, { method: 'POST', body: '{}' }),
+
+  /** The ask for a task list Claude would get if the design were confirmed now. */
+  designPreview: (id: string, note: string) =>
+    request<PromptPreview>(`/api/session/${id}/plan/design/prompt`, { method: 'POST', body: JSON.stringify({ note }) }),
+
+  /** Lock the design; Claude makes the task list from it. */
+  confirmDesign: (id: string, body: { note: string; expect: number }) =>
+    request<{ plan: Plan }>(`/api/session/${id}/plan/design/confirm`, { method: 'POST', body: JSON.stringify(body) }),
+
+  reopenDesign: (id: string) => request<{ plan: Plan }>(`/api/session/${id}/plan/design/reopen`, { method: 'POST', body: '{}' }),
 
   /* ---------------------- daemon-wide actions ---------------------- */
 
@@ -98,4 +110,17 @@ export interface PromptPreview {
   /** The longest prompt a hook hands Claude. */
   budget: number;
   maxNote: number;
+  /** The settings the prompt was built with (the build prompt only). */
+  settings?: BuildSettings;
+  /** What the repository's `.coplan/config.json` says. */
+  project?: ProjectSummary;
+}
+
+export interface ProjectSummary {
+  /** Where the config was read from; null when there is none. */
+  file: string | null;
+  defaults: BuildSettings;
+  /** Hook names per stage. */
+  checks: Record<'implement' | 'review' | 'final', string[]>;
+  errors: string[];
 }

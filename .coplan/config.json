@@ -1,0 +1,21 @@
+{
+  // Coplan's own checks: what every task of a change planned with Coplan
+  // runs in its implement → review → refine cycle. `coplan check <stage>`
+  // runs a stage; CI runs the same commands.
+  "hooks": {
+    "implement": [
+      { "name": "typecheck", "run": "npm run typecheck" }
+    ],
+    "review": [
+      { "name": "build and test", "run": "npm run build && npm test", "timeout": 900 }
+    ],
+    "final": [
+      { "name": "check", "run": "npm run check", "timeout": 1200 },
+      { "name": "dist committed", "run": "git diff --quiet -- dist" },
+      { "name": "doctor", "run": "CC_HARNESS_HOME=\"$(mktemp -d)\" sh -c './bin/coplan doctor; s=$?; ./bin/coplan stop; exit $s'", "timeout": 300 }
+    ]
+  },
+  // How a build runs by default; the submit dialog can change it per plan.
+  "iric": { "review": "subagent", "parallel": 2, "maxRounds": 3 },
+  "branches": { "base": "main" }
+}

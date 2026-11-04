@@ -11,14 +11,16 @@ const SESSION_STATE_LABEL: Record<string, string> = {
   ended: 'ended',
 };
 
-/** A submitted plan says how far its build has got. */
+/** A plan past its design says how far it has got. */
 const PHASE_PILL: Record<Exclude<PlanPhase, 'planning'>, string> = {
+  tasking: 'design confirmed',
   submitted: 'submitted',
   building: 'building',
   built: 'built',
   'handed-off': 'handed off',
 };
 const PHASE_TITLE: Record<Exclude<PlanPhase, 'planning'>, string> = {
+  tasking: 'Design confirmed: the task list is being made and shaped',
   submitted: 'Submitted: waiting for Claude to pick it up',
   building: 'Submitted and locked: Claude is building it',
   built: 'Submitted and built: every task is done',

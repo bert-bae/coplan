@@ -2,7 +2,7 @@ import path from 'node:path';
 import type { SessionStore } from './store.ts';
 import type { HarnessConfig } from '../shared/config.ts';
 import { currentBranch, repoRoot } from './git.ts';
-import { BUILD_MARKER, unreadNotice } from './render.ts';
+import { unreadNotice } from './render.ts';
 import { resolveLink, type SessionEnv } from '../shared/link.ts';
 import {
   HOOK_NOOP,
@@ -104,14 +104,15 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
   const session = ctx.store.update(sessionId, { status: 'active', waiting: null });
   if (!session) return HOOK_NOOP;
 
-  // The user submitted the plan for this session to build: their message is
-  // what carries it. Not subject to `promptNotice` — submitting was the
+  // The user signed something off for this session — the design, to be
+  // broken into tasks, or the plan, to be built: their message is what
+  // carries the prompt. Not subject to `promptNotice` — signing off was the
   // request to send it. A message that already holds the prompt (they pasted
   // it) is left as it is.
-  const submission = ctx.store.deliver(sessionId);
-  if (submission) {
+  const handed = ctx.store.deliver(sessionId);
+  if (handed) {
     const typed = String(input.prompt ?? input.user_input ?? '');
-    return typed.includes(BUILD_MARKER) ? HOOK_NOOP : additionalContext('UserPromptSubmit', submission.prompt);
+    return typed.includes(handed.marker) ? HOOK_NOOP : additionalContext('UserPromptSubmit', handed.prompt);
   }
 
   if (!ctx.config.promptNotice) return HOOK_NOOP;

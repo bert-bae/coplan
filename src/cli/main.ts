@@ -1,7 +1,7 @@
 /**
  * `coplan` — the operator CLI.
  *
- *   coplan start|stop|restart|status|open|url|logs|doctor
+ *   coplan start|stop|restart|status|open|url|logs|doctor|check|init
  *
  * Everything here is also reachable from the plugin, but a plain CLI is what
  * makes the daemon debuggable when the hook wiring is the thing that broke.
@@ -13,6 +13,8 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readLiveLock, baseUrl, paths, ensureHome } from '../shared/paths.ts';
 import { runDoctor } from './doctor.ts';
+import { runCheck } from './check.ts';
+import { runInit } from './init.ts';
 import { openInBrowser } from '../daemon/browser.ts';
 import { cleanStorage, scanStorage } from '../daemon/housekeeping.ts';
 import { CLEANUP_GROUPS, type CleanupGroupId, type CleanupOutcome, type DaemonLock, type SessionSummary, type StorageReport } from '../shared/types.ts';
@@ -240,6 +242,16 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
     return runDoctor();
   },
 
+  /** Run a stage's hooks from the repository's .coplan/config.json. */
+  async check(args) {
+    return runCheck(args);
+  },
+
+  /** Write a starting .coplan/config.json from what the repository has. */
+  async init(args) {
+    return runInit(args);
+  },
+
   async version() {
     console.log(VERSION);
     return 0;
@@ -294,6 +306,10 @@ usage: coplan <command>
   url  [id]  print the UI url (with auth token)
   logs       tail the daemon log
   doctor     verify the plugin wiring end to end
+  check [implement|review|final] [--files a,b] [--list] [--json]
+             run that stage's hooks from .coplan/config.json (default: review)
+  init [--print] [--force]
+             write a starting .coplan/config.json from the repository's scripts
   version    print the version
 `);
 }

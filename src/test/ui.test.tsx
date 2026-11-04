@@ -14,7 +14,7 @@ setupDom();
 const { render, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
 const { store } = await import('../ui/store.ts');
-const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan } = await import('../shared/plan.ts');
+const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan, confirmDesign } = await import('../shared/plan.ts');
 
 const INPUT: PlanInput = {
   title: 'Add a cache',
@@ -754,19 +754,122 @@ test('icon-only controls carry a name', async () => {
 
 /* ------------------------------------------------- submitting the plan */
 
+/** The plan once the user confirmed its design. */
+function confirmedPlan(plan: Plan = makePlan()): Plan {
+  return confirmDesign(plan, { prompt: '[cc-harness] The design is confirmed for "Add a cache"\n\nTHE DESIGN' });
+}
+
 /** The plan after the user submitted it — handed to Claude, if `delivered`. */
 function lockedPlan(delivered = false): Plan {
-  const plan = submitPlan(makePlan(), { target: 'session', prompt: '[cc-harness] Build the plan "Add a cache"\n\nTHE PROMPT' });
+  const plan = submitPlan(confirmedPlan(), { target: 'session', prompt: '[cc-harness] Build the plan "Add a cache"\n\nTHE PROMPT' });
   return delivered ? markDelivered(plan) : plan;
 }
 
-test('the plan is submitted from the architecture view, after reading the prompt it sends', async () => {
+const DEFAULTS = { review: 'subagent', parallel: 2, maxRounds: 3 };
+
+test('the design is confirmed from the architecture view, after reading what Claude will be asked', async () => {
   const session = makeSession();
   const version = session.plan!.version;
   await boot(session, (route, init) => {
+    if (route.endsWith('/plan/design/prompt')) {
+      const { note } = JSON.parse(String(init?.body)) as { note: string };
+      return { prompt: `DESIGN PROMPT${note ? ` with "${note}"` : ''}`, trimmed: false, version, budget: 9000, maxNote: 4000 };
+    }
+    if (route.endsWith('/plan/design/confirm')) return { plan: confirmedPlan() };
+    return undefined;
+  });
+  assert.equal(screen.queryByRole('button', { name: 'Review & submit plan' }), null, 'the design comes first');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm design' }));
+  });
+  const dialog = screen.getByRole('dialog', { name: 'Confirm the design' });
+  const preview = () => within(dialog).getByTestId('prompt-preview').textContent;
+  await waitFor(() => assert.equal(preview(), 'DESIGN PROMPT'));
+  assert.match(dialog.textContent ?? '', /1 diagram · 2 boxes · 4 planned tasks/);
+  assert.match(dialog.textContent ?? '', /locks the design/);
+  await act(async () => {
+    fireEvent.change(within(dialog).getByLabelText('Anything else for Claude?'), { target: { value: 'split storage' } });
+  });
+  await waitFor(() => assert.equal(preview(), 'DESIGN PROMPT with "split storage"'));
+  const confirm = within(dialog).getByRole('button', { name: 'Confirm design' }) as HTMLButtonElement;
+  await waitFor(() => assert.equal(confirm.disabled, false));
+  await act(async () => {
+    fireEvent.click(confirm);
+  });
+  const sent = posts.find((p) => p.route.endsWith('/plan/design/confirm'));
+  assert.deepEqual(sent?.body, { note: 'split storage', expect: version });
+  assert.equal(screen.queryByRole('dialog'), null);
+
+  // Confirmed: the canvas shows the design, and the next step is the tasks.
+  assert.ok(screen.getByText('Design confirmed', { selector: '.flow-locked' }));
+  assert.equal(screen.queryByRole('button', { name: /\+ Box/ }), null);
+  assert.ok(screen.getByRole('button', { name: 'Review & submit plan' }));
+  const strip = screen.getByRole('region', { name: 'The design' });
+  assert.match(strip.textContent ?? '', /Design confirmed — waiting for Claude/);
+});
+
+test('with the design confirmed, boxes still link to tasks but nothing else on them changes', async () => {
+  await boot(makeSession(confirmedPlan()));
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('Postgres');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  await waitFor(() => assert.match(panel.textContent ?? '', /Built by/));
+  assert.equal(within(panel).queryAllByRole('textbox').length, 0, 'the design itself is read-only');
+  await act(async () => {
+    fireEvent.change(within(panel).getByRole('combobox', { name: 'Link a task to Postgres' }), { target: { value: 't3' } });
+  });
+  const op = opsSent().find((o) => o['op'] === 'upsert_diagram')!;
+  const db = (op['nodes'] as { id: string; taskIds?: string[] }[]).find((n) => n.id === 'db');
+  assert.deepEqual(db?.taskIds, ['storage', 't3']);
+});
+
+test('the task list says what waits on what, and the order the build takes', async () => {
+  let plan = confirmedPlan();
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't3', status: 'todo', dependsOn: ['storage'], branch: 'cache/api', review: 'user' }], 'claude').plan;
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  const row = document.getElementById('task-t3')!;
+  assert.match(row.textContent ?? '', /after 1/);
+  assert.match(row.textContent ?? '', /cache\/api/);
+  assert.match(row.textContent ?? '', /review: you review/);
+  assert.match(row.textContent ?? '', /waits on 1/);
+  assert.match(document.getElementById('task-t2')?.textContent ?? '', /ready/);
+  const order = screen.getByRole('region', { name: 'Build order' });
+  assert.match(order.textContent ?? '', /Step 1/);
+  assert.match(order.textContent ?? '', /Step 2/);
+  assert.match(order.textContent ?? '', /cache\/api/);
+  assert.ok(screen.getByRole('button', { name: 'Review & submit plan' }), 'submitted from the tasks, too');
+
+  // Dependencies are edited in a task's details.
+  await act(async () => {
+    fireEvent.click(within(row).getByRole('button', { name: 'Details of Wire into API' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Stop waiting on Storage layer' }));
+  });
+  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 't3', dependsOn: [] });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('radio', { name: 'Self-review' }));
+  });
+  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 't3', review: 'self' });
+});
+
+test('the plan is submitted after reading the prompt it sends, with how the build runs', async () => {
+  const session = makeSession(confirmedPlan());
+  const version = session.plan!.version;
+  await boot(session, (route, init) => {
     if (route.endsWith('/plan/prompt')) {
-      const { target, note } = JSON.parse(String(init?.body)) as { target: string; note: string };
-      return { prompt: `PROMPT for ${target}${note ? ` with "${note}"` : ''}`, trimmed: false, version, budget: 9000, maxNote: 4000 };
+      const { target, note, settings } = JSON.parse(String(init?.body)) as { target: string; note: string; settings?: typeof DEFAULTS };
+      const used = settings ?? DEFAULTS;
+      return {
+        prompt: `PROMPT for ${target}${note ? ` with "${note}"` : ''}${settings ? ` reviewed by ${settings.review}` : ''}`,
+        trimmed: false,
+        version,
+        budget: 9000,
+        maxNote: 4000,
+        settings: used,
+        project: { file: null, defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [] },
+      };
     }
     if (route.endsWith('/plan/submit')) return { plan: lockedPlan() };
     return undefined;
@@ -776,8 +879,11 @@ test('the plan is submitted from the architecture view, after reading the prompt
   });
   const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
   const preview = () => within(dialog).getByTestId('prompt-preview').textContent;
-  await waitFor(() => assert.equal(preview(), 'PROMPT for session'));
+  // The repository's defaults come with the first preview, and are then
+  // what the prompt is built from.
+  await waitFor(() => assert.equal(preview(), 'PROMPT for session reviewed by subagent'));
   assert.match(dialog.textContent ?? '', /1 diagram · 2 boxes · 3 tasks \(1 already done\)/);
+  assert.match(dialog.textContent ?? '', /No checks are set up/);
 
   // What is on screen is what is sent: the button waits for the preview.
   await act(async () => {
@@ -785,24 +891,31 @@ test('the plan is submitted from the architecture view, after reading the prompt
   });
   const submit = within(dialog).getByRole('button', { name: 'Submit and lock' }) as HTMLButtonElement;
   assert.equal(submit.disabled, true, 'not while the preview is out of date');
-  await waitFor(() => assert.equal(preview(), 'PROMPT for session with "tests first"'));
+  await waitFor(() => assert.equal(preview(), 'PROMPT for session with "tests first" reviewed by subagent'));
   await waitFor(() => assert.equal(submit.disabled, false));
+
+  // The user's control over each task's cycle: who reviews it.
+  await act(async () => {
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'You review' }));
+  });
+  await waitFor(() => assert.equal(preview(), 'PROMPT for session with "tests first" reviewed by user'));
 
   // Choosing somewhere else rebuilds it, without the harness tools.
   await act(async () => {
     fireEvent.click(within(dialog).getByLabelText(/Somewhere else/));
   });
-  await waitFor(() => assert.equal(preview(), 'PROMPT for elsewhere with "tests first"'));
+  await waitFor(() => assert.equal(preview(), 'PROMPT for elsewhere with "tests first" reviewed by user'));
   await act(async () => {
     fireEvent.click(within(dialog).getByLabelText(/This Claude session/));
   });
-  await waitFor(() => assert.equal(preview(), 'PROMPT for session with "tests first"'));
+  await waitFor(() => assert.equal(preview(), 'PROMPT for session with "tests first" reviewed by user'));
+  await waitFor(() => assert.equal(submit.disabled, false));
 
   await act(async () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Submit and lock' }));
   });
   const sent = posts.find((p) => p.route.endsWith('/plan/submit'));
-  assert.deepEqual(sent?.body, { target: 'session', note: 'tests first', expect: version });
+  assert.deepEqual(sent?.body, { target: 'session', note: 'tests first', expect: version, settings: { ...DEFAULTS, review: 'user' } });
   assert.equal(screen.queryByRole('dialog'), null);
   assert.equal(store.getState().tab, 'tasks', 'the board is where the build is followed');
   assert.ok(screen.getByRole('region', { name: 'To do' }));
@@ -848,7 +961,8 @@ test('withdrawing a submission Claude has not picked up unlocks the plan', async
     fireEvent.click(within(strip).getByRole('button', { name: 'Withdraw' }));
   });
   assert.ok(posts.some((p) => p.route.endsWith('/plan/reopen')));
-  assert.ok(screen.getByRole('button', { name: 'Review & submit plan' }), 'planning again');
+  assert.ok(screen.getByRole('button', { name: 'Review & submit plan' }), 'the tasks are open again; the design stays confirmed');
+  assert.ok(screen.getByRole('region', { name: 'The design' }));
 });
 
 test('the submitted prompt can be read back from the architecture view', async () => {
@@ -887,6 +1001,26 @@ test('while building, the board follows Claude and a card that moves stands out'
   // Cards already where they were do not.
   const still = [...done.querySelectorAll('.board-card')].find((c) => c.textContent?.includes('Cache client'))!;
   assert.equal(still.classList.contains('is-arrived'), false);
+});
+
+test('each card on the board says where its task is in implement → review → refine', async () => {
+  let plan = lockedPlan(true);
+  plan = applyOps(
+    plan,
+    [
+      { op: 'upsert_task', id: 't3', stage: 'review' },
+      { op: 'upsert_task', id: 't3', stage: 'refine', checks: [{ name: 'tests', ok: false, note: '2 failing' }, { name: 'typecheck', ok: true }] },
+      { op: 'upsert_task', id: 't3', stage: 'review' },
+    ],
+    'claude',
+  ).plan;
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  const card = document.getElementById('task-t3')!;
+  assert.match(card.textContent ?? '', /in review · round 2/);
+  assert.match(card.textContent ?? '', /✗ tests/);
+  const strip = screen.getByRole('region', { name: 'The build' });
+  assert.match(strip.textContent ?? '', /Claude is on Wire into API — in review, round 2/);
 });
 
 test("a box's task on a submitted plan opens its card on the board", async () => {

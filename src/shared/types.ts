@@ -134,6 +134,31 @@ export const TASK_STATUSES = ['todo', 'in_progress', 'blocked', 'done'] as const
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 /**
+ * Who reviews a task in its implement → review → refine cycle (iric):
+ *
+ * - `subagent` — a fresh agent that did not write the change reads it, runs
+ *   the review checks and says what to refine.
+ * - `self` — the agent that built it reviews its own diff and runs the checks.
+ * - `user` — Claude stops and asks the user to look before it is done.
+ * - `skip` — no review beyond the checks: for trivial, mechanical work.
+ */
+export const REVIEW_MODES = ['subagent', 'self', 'user', 'skip'] as const;
+export type ReviewMode = (typeof REVIEW_MODES)[number];
+
+/** Where a task in progress is in its implement → review → refine cycle. */
+export const IRIC_STAGES = ['implement', 'review', 'refine'] as const;
+export type IricStage = (typeof IRIC_STAGES)[number];
+
+/** One check run against a task's change — a repository hook from
+ *  `.coplan/config.json` — and how it came out. */
+export interface CheckResult {
+  name: string;
+  ok: boolean;
+  /** One line: what failed, or what it covered. */
+  note?: string;
+}
+
+/**
  * One node of the task tree. Tasks nest to any depth through `parentId`;
  * siblings are ordered by `order`. The tree is the breakdown Claude works
  * through, and the statuses are how progress is tracked against it.
@@ -151,6 +176,25 @@ export interface Task {
   files?: string[];
   /** A one-line status note: why it is blocked, what was done. */
   note?: string;
+  /**
+   * Tasks that must be done before this one can start. Subtasks inherit
+   * their parent's: a task waits until everything it or any of its
+   * ancestors depends on is done. A task left out of every chain can run in
+   * parallel with the rest.
+   */
+  dependsOn?: string[];
+  /** The git branch this task's work lands on. Subtasks inherit it. A task
+   *  whose dependencies are on another branch stacks on that branch. */
+  branch?: string;
+  /** How this task is reviewed, when not the build's default. Inherited. */
+  review?: ReviewMode;
+  /** Where the task is in its implement → review → refine cycle, while it is
+   *  in progress. */
+  stage?: IricStage;
+  /** How many times it has gone to review. */
+  round?: number;
+  /** The checks last run against it. */
+  checks?: CheckResult[];
   createdAt: number;
   updatedAt: number;
   createdBy: Author;
@@ -226,6 +270,21 @@ export const BUILD_TARGETS = ['session', 'elsewhere'] as const;
 export type BuildTarget = (typeof BUILD_TARGETS)[number];
 
 /**
+ * How the build runs, chosen by the user when they submit — the control they
+ * keep over each task's implement → review → refine cycle. Defaults come from
+ * the repository's `.coplan/config.json`.
+ */
+export interface BuildSettings {
+  /** Who reviews a task that does not say otherwise. */
+  review: ReviewMode;
+  /** How many ready tasks may be built at once, each by its own subagent.
+   *  1 builds one task at a time. */
+  parallel: number;
+  /** Review rounds a task may take before Claude stops and asks the user. */
+  maxRounds: number;
+}
+
+/**
  * The user's sign-off on the plan. From then on the design is final: the
  * plan is locked, and the harness's only job is to show the build moving
  * across the task board.
@@ -240,17 +299,44 @@ export interface Submission {
   /** The plan was too long to quote whole in a prompt; it points Claude at
    *  `harness_plan_read` for the rest. */
   trimmed?: boolean;
+  /** How the build runs. Absent on plans submitted before it existed. */
+  settings?: BuildSettings;
   /** When the prompt reached Claude. Null until the user's next message in
    *  Claude's chat carries it — and always null for `elsewhere`. */
   deliveredAt: number | null;
 }
 
 /**
- * Where a plan is in its life, derived from its submission and its tasks:
- * being shaped, handed over and waiting for Claude to pick it up, being
- * built, built, or handed to something outside the harness.
+ * The user's sign-off on the design — the architecture, the sections and the
+ * tasks planned on the diagram — before the task list is made from it. From
+ * then on the design is locked and only the task breakdown moves: Claude
+ * turns the planned tasks into a linked task list (what blocks what, which
+ * branch each lands on), the user shapes that, and then submits it.
  */
-export type PlanPhase = 'planning' | 'submitted' | 'building' | 'built' | 'handed-off';
+export interface DesignSignoff {
+  at: number;
+  note?: string;
+  /** The prompt asking Claude for the task list, as the user previewed it. */
+  prompt: string;
+  trimmed?: boolean;
+  /** When the prompt reached Claude, with the user's next message. */
+  deliveredAt: number | null;
+}
+
+/** What Claude wrote once the build was done: what was built, on which
+ *  branches, how it was checked, and what was left. */
+export interface BuildReport {
+  text: string;
+  at: number;
+}
+
+/**
+ * Where a plan is in its life, derived from its sign-offs and its tasks:
+ * being designed, being broken into a task list once the design is
+ * confirmed, handed over and waiting for Claude to pick it up, being built,
+ * built, or handed to something outside the harness.
+ */
+export type PlanPhase = 'planning' | 'tasking' | 'submitted' | 'building' | 'built' | 'handed-off';
 
 export interface Plan {
   title: string;
@@ -276,10 +362,15 @@ export interface Plan {
    *  user's edits, not every step they took to get there. Daemon-side only:
    *  never sent to the browser. */
   claudeBaseline?: PlanBaseline;
+  /** Set once the user confirms the design. While it is set the design is
+   *  locked — only the tasks, their links to boxes and comments change. */
+  design?: DesignSignoff;
   /** Set once the user submits the plan to be built. While it is set the
    *  plan is locked: the user changes nothing, and Claude only tracks tasks
    *  and replies to comments. */
   submission?: Submission;
+  /** Claude's final report on the build. */
+  report?: BuildReport;
   /** Bumped each time Claude publishes the plan wholesale. */
   revision: number;
   createdAt: number;
@@ -293,7 +384,7 @@ export interface PlanBaseline {
   summary: string;
   sections: Pick<Section, 'id' | 'title' | 'body'>[];
   diagrams: (Pick<Diagram, 'id' | 'title' | 'caption' | 'edges'> & { nodes: Omit<DiagramNode, 'x' | 'y'>[] })[];
-  tasks: Pick<Task, 'id' | 'parentId' | 'order' | 'title' | 'detail' | 'status' | 'files' | 'note'>[];
+  tasks: Pick<Task, 'id' | 'parentId' | 'order' | 'title' | 'detail' | 'status' | 'files' | 'note' | 'dependsOn' | 'branch' | 'review'>[];
 }
 
 /* ------------------------------------------------------------------ *
@@ -308,7 +399,19 @@ export interface TaskInput {
   status?: TaskStatus;
   files?: string[];
   note?: string;
+  /** Ids of tasks that must be done first. */
+  dependsOn?: string[];
+  branch?: string;
+  review?: ReviewMode;
+  /** Boxes this task builds: a node id, or `diagramId/nodeId` when the id
+   *  is used in more than one diagram. Adds the task to each box. */
+  builds?: string[];
   subtasks?: TaskInput[];
+}
+
+/** The task list for a confirmed design, as Claude publishes it. */
+export interface TaskListInput {
+  tasks: TaskInput[];
 }
 
 /** The whole plan, as Claude publishes it. Replaces the plan's content while
@@ -362,6 +465,16 @@ export type PlanOp =
       status?: TaskStatus;
       files?: string[];
       note?: string;
+      /** Replaces the task's dependencies; `[]` clears them. */
+      dependsOn?: string[];
+      /** `""` clears it, so the task inherits its parent's. */
+      branch?: string;
+      /** `""` clears it, so the task inherits its parent's or the default. */
+      review?: ReviewMode | '';
+      stage?: IricStage;
+      checks?: CheckResult[];
+      /** Boxes this task builds, added to each (see `TaskInput.builds`). */
+      builds?: string[];
     }
   | { op: 'move_task'; id: string; parentId: string | null; index: number }
   | { op: 'move_section'; id: string; index: number }
@@ -369,7 +482,9 @@ export type PlanOp =
   | { op: 'remove'; kind: Exclude<TargetKind, 'plan'>; id: string }
   | { op: 'comment'; target: Target; text: string }
   | { op: 'reply'; threadId: string; text: string }
-  | { op: 'resolve'; threadId: string; resolved: boolean };
+  | { op: 'resolve'; threadId: string; resolved: boolean }
+  /** The final report on the build. Markdown; replaces any earlier one. */
+  | { op: 'report'; text: string };
 
 export type PlanOpName = PlanOp['op'];
 

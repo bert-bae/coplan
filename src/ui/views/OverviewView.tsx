@@ -5,7 +5,9 @@ import { CommentToggle, ThreadPanel } from '../components/Threads.tsx';
 import { Focusable, ItemActions } from '../components/Item.tsx';
 import { ProgressBar } from '../components/Progress.tsx';
 import { scrollBehavior } from '../lib/motion.ts';
-import { countTasks, currentTask, isLocked } from '../../shared/plan.ts';
+import { countTasks, currentTask, isDesignLocked, isLocked } from '../../shared/plan.ts';
+import { Markdown } from '../components/Markdown.tsx';
+import { relativeTime } from '../lib/format.ts';
 import type { Plan, Section } from '../../shared/types.ts';
 
 /**
@@ -21,8 +23,18 @@ export function OverviewView() {
     <div className="view-pad doc">
       <Glance plan={plan} />
 
-      {/* A submitted plan reads the same, but every control in it is off. */}
-      <fieldset className="lockable" disabled={isLocked(plan)}>
+      {plan.report && (
+        <section className="doc-block report" aria-labelledby="report-head">
+          <h2 id="report-head" className="doc-label">
+            Build report <span className="muted">· {relativeTime(plan.report.at)}</span>
+          </h2>
+          <Markdown source={plan.report.text} />
+        </section>
+      )}
+
+      {/* A confirmed or submitted design reads the same, but every control
+          in it is off. Comments stay open until the plan is submitted. */}
+      <fieldset className="lockable" disabled={isDesignLocked(plan)}>
       <section className="doc-block" aria-labelledby="summary-head">
         <h2 id="summary-head" className="doc-label">
           Summary
@@ -40,7 +52,7 @@ export function OverviewView() {
         <SectionCard key={section.id} section={section} index={i} count={plan.sections.length} />
       ))}
 
-      {!isLocked(plan) && (
+      {!isDesignLocked(plan) && (
         <div className="doc-add">
           <AddField
             placeholder="New section title — e.g. Data model, Risks, Out of scope"
@@ -50,15 +62,18 @@ export function OverviewView() {
         </div>
       )}
 
-      {(!isLocked(plan) || plan.threads.some((t) => t.target.kind === 'plan')) && (
-        <section className="doc-block" aria-labelledby="general-head">
-          <h2 id="general-head" className="doc-label">
-            General comments
-          </h2>
-          <ThreadPanel target={{ kind: 'plan', id: '' }} label="the plan" />
-        </section>
-      )}
       </fieldset>
+
+      {(!isLocked(plan) || plan.threads.some((t) => t.target.kind === 'plan')) && (
+        <fieldset className="lockable" disabled={isLocked(plan)}>
+          <section className="doc-block" aria-labelledby="general-head">
+            <h2 id="general-head" className="doc-label">
+              General comments
+            </h2>
+            <ThreadPanel target={{ kind: 'plan', id: '' }} label="the plan" />
+          </section>
+        </fieldset>
+      )}
     </div>
   );
 }

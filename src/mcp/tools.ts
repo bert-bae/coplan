@@ -74,16 +74,32 @@ const DIAGRAM = {
   required: ['title', 'nodes'],
 };
 
+const REVIEW = { type: 'string', enum: ['subagent', 'self', 'user', 'skip'] };
+
+/** What a task says about how it is built: what it waits on, where it lands,
+ *  how it is reviewed, which boxes it builds. */
+const BUILD_FIELDS: Record<string, unknown> = {
+  dependsOn: {
+    type: 'array',
+    items: { type: 'string' },
+    description: 'Ids of tasks that must be done first. Leave out whatever could run in parallel. Subtasks inherit it.',
+  },
+  branch: { type: 'string', description: 'Git branch the work lands on; subtasks inherit it. Omit for one PR on the current branch.' },
+  review: { ...REVIEW, description: 'Only when not the build default: "user" for risky work, "skip" for trivial.' },
+  builds: { type: 'array', items: { type: 'string' }, description: 'Boxes it builds: node ids (or "diagramId/nodeId").' },
+};
+
 /** Nested task schema, a few levels deep — deep enough for any real breakdown. */
-function taskSchema(depth: number): Record<string, unknown> {
+function taskSchema(depth: number, build = false): Record<string, unknown> {
   const properties: Record<string, unknown> = {
-    id: { type: 'string', description: 'Keep an existing id to keep its status and comments.' },
+    id: { type: 'string', description: 'Keep an existing id to keep its status and comments. Name it to refer to it in dependsOn.' },
     title: { type: 'string', description: 'One concrete piece of work.' },
-    detail: { type: 'string', description: 'Approach, acceptance criteria, gotchas. Markdown.' },
+    detail: { type: 'string', description: 'Objective, acceptance criteria, what is out of scope. Markdown.' },
     status: STATUS,
     files: { type: 'array', items: { type: 'string' }, description: 'Files you expect to touch.' },
+    ...(build ? BUILD_FIELDS : {}),
   };
-  if (depth > 0) properties['subtasks'] = { type: 'array', items: taskSchema(depth - 1) };
+  if (depth > 0) properties['subtasks'] = { type: 'array', items: taskSchema(depth - 1, build) };
   return { type: 'object', properties, required: ['title'] };
 }
 
@@ -98,7 +114,8 @@ export const TOOLS: ToolDef[] = [
       'broken into subtasks. Replaces the plan; items keep their comments and statuses when you keep their ' +
       'ids, a box keeps its position, description and notes and an arrow between the same two boxes its ' +
       'label and style unless you restate them ("" clears a label). Refused if the user has changed the plan since you last read it, ' +
-      'and while they have submitted it to be built (it is locked until every task is done). Ask decisions you need with ' +
+      'once they confirm the design (then harness_tasks_publish makes the task list), and while it is being built. ' +
+      'Tasks here are the planned tasks, shown on the boxes that link them. Ask decisions you need with ' +
       'AskUserQuestion in chat, not in the plan. Does not wait for the user: afterwards, tell them in chat ' +
       'that the plan is ready.',
     inputSchema: {
@@ -152,10 +169,10 @@ export const TOOLS: ToolDef[] = [
       'title?, nodes?, edges?, direction?, caption?} (nodes/edges replace the current ones; a box you keep ' +
       'keeps its position, description and notes, and an arrow between the same two boxes keeps its label, ' +
       'dashed and arrows, unless you give them); upsert_task {id?, parentId?, index?, title?, detail?, status?, files?, ' +
-      'note?} (omit id to add; parentId makes it a subtask); move_task {id, parentId, index}; reply ' +
-      '{threadId, text} (reply to a comment); resolve {threadId, resolved}; remove {kind: ' +
-      'section|diagram|task, id}. Once the user submits the plan to be built it is locked: only upsert_task, reply ' +
-      'and resolve apply.',
+      'note?, dependsOn?, branch?, review?, builds?} (omit id to add; parentId makes it a subtask); move_task {id, parentId, ' +
+      'index}; reply {threadId, text} (reply to a comment); resolve {threadId, resolved}; remove {kind: ' +
+      'section|diagram|task, id}; report {text} (the final build report). Once the user confirms the design only tasks, ' +
+      'task links and comments change; once they submit the plan only upsert_task, reply, resolve and report apply.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -177,6 +194,7 @@ export const TOOLS: ToolDef[] = [
                   'reply',
                   'resolve',
                   'remove',
+                  'report',
                 ],
               },
             },
@@ -189,21 +207,73 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: 'harness_tasks_publish',
+    endpoint: 'tasks',
+    description:
+      'Publish the task list for the design the user confirmed: replaces the task tree and nothing else. Break the ' +
+      'planned tasks into focused ones (one objective each), link them with dependsOn (what must be done first — ' +
+      'anything without one can run in parallel), say which boxes each builds, and give branches when the work lands ' +
+      'as several (stacked) pull requests. Ids you keep keep their status, comments and box links. Then tell the user ' +
+      'in chat it is ready to review; they submit the plan to start the build.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tasks: { type: 'array', description: 'The task tree, in build order.', items: taskSchema(3, true) },
+      },
+      required: ['tasks'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'harness_task_next',
+    endpoint: 'next',
+    description:
+      'What can be built now: tasks ready to start (none of their dependencies left), how many to run at once, ' +
+      'what is in progress and at which step, and what every other task waits on. Call it when you start the build ' +
+      'and whenever a task finishes. Once every task is done, it says how to finish: final checks, report, summary.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'harness_task_brief',
+    endpoint: 'brief',
+    description:
+      "One task's focused brief, self-contained so it can be handed to a subagent as is: the objective and acceptance " +
+      'criteria, the boxes it builds with their decisions and connections, what it comes after and before, what is out ' +
+      'of scope, its branch, and its implement → review → refine cycle with the exact checks to run.',
+    inputSchema: {
+      type: 'object',
+      properties: { task_id: { type: 'string' } },
+      required: ['task_id'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'harness_task_update',
     endpoint: 'task',
     description:
-      'Track progress on the plan while you work. Set a task in_progress when you start it and done when it ' +
-      'is finished (with a one-line note of what you did), or blocked with a note saying why — and when ' +
-      'blocked on a decision, ask it with AskUserQuestion. The user watches these statuses to follow your ' +
-      'progression through the plan.',
+      'Track progress while you build; the user follows it on the board. Mark a task in_progress (stage ' +
+      '"implement") when you start it, set stage "review" and "refine" as it goes round its implement → review → ' +
+      'refine cycle, report the checks you ran, and mark it done with a one-line note once review passed — or ' +
+      'blocked with a note, asking the user with AskUserQuestion. Refused: starting a task that still waits on ' +
+      'another, and done while its last checks failed.',
     inputSchema: {
       type: 'object',
       properties: {
         task_id: { type: 'string' },
         status: STATUS,
+        stage: { type: 'string', enum: ['implement', 'review', 'refine'], description: 'Step of the cycle; implies in_progress.' },
+        checks: {
+          type: 'array',
+          description: 'The checks just run: the hooks from .coplan/config.json (`coplan check <stage> --json` prints these).',
+          items: {
+            type: 'object',
+            properties: { name: { type: 'string' }, ok: { type: 'boolean' }, note: { type: 'string', description: 'One line: what failed.' } },
+            required: ['name', 'ok'],
+          },
+        },
         note: { type: 'string', description: 'One line: what was done, or what it is blocked on.' },
       },
-      required: ['task_id', 'status'],
+      required: ['task_id'],
       additionalProperties: false,
     },
   },

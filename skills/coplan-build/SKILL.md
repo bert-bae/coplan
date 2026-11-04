@@ -1,0 +1,126 @@
+---
+name: coplan-build
+description: Run the build of a submitted Coplan plan — start tasks only when what they depend on is done, build independent ones in parallel with subagents, land each on its branch (stacked pull requests when branches build on each other), take every task through the iric cycle, and finish with the final checks and report. Use when a "[cc-harness] Build the plan" prompt arrives, or the user asks to build a Coplan plan.
+---
+
+# Building a Coplan plan
+
+The plan is the map; your job is to get every task to done in an order
+the dependencies allow, with each task checked and reviewed, and to keep
+the board true while you do. You are the **orchestrator**: you decide what
+runs when, hand tasks to subagents, and you alone report status to Coplan.
+
+## Before you start
+
+The build prompt tells you the user's settings — read them, they are the
+user's control over the build:
+
+- **review** — who reviews a task by default (`subagent`, `self`, `user`,
+  `skip`). A task may override it.
+- **parallel** — how many tasks may be in progress at once.
+- **maxRounds** — review rounds a task may take before you stop and ask.
+
+It also lists the repository's **checks** from `.coplan/config.json`, per
+stage (`implement`, `review`, `final`). Run those — do not invent others.
+If there are none, pick the repository's own commands (scripts, CI) once,
+use them for every task, and say which in your notes.
+
+Call `harness_task_next`. It lists what is ready, what is in progress, what
+waits on what, and the branches.
+
+## The loop
+
+Repeat until `harness_task_next` says every task is done:
+
+1. **Pick.** Take ready tasks, up to `parallel` minus those in progress.
+   Ready means everything it depends on is done; starting anything else is
+   refused. Do not start two tasks at once in the same working tree if
+   they touch the same files (`harness_task_next` warns you).
+2. **Brief.** Call `harness_task_brief` for each. The brief is
+   self-contained: objective, acceptance criteria, the boxes it builds and
+   how they connect, what it comes after and before, what is out of
+   scope, the branch, and the exact checks.
+3. **Start.** `harness_task_update {task_id, status: "in_progress", stage: "implement"}`.
+4. **Build it through the `iric` skill** — implement → review → refine —
+   yourself or by subagents (below).
+5. **Done.** Once review passed and the review checks are green:
+   commit the task's work (one commit per task, message
+   `<title> (<task id>)`), then
+   `harness_task_update {task_id, status: "done", note: "<one line: what changed>"}`.
+   The reply says what became ready. Go to 1.
+
+## Parallel work with subagents
+
+With `parallel` > 1 and several ready tasks, give each its own subagent
+(the Agent tool, in the background) and keep working on the others as they
+run. Each implementer gets the task's brief **verbatim** plus this:
+
+> You are implementing one task of a larger plan. The brief below is your
+> whole job: build its objective, stay inside its scope, and run its
+> implement checks until they pass. Do not do work the brief gives to other
+> tasks — if you find some, list it in your report instead. Do not report
+> status to Coplan; report back to me: the files you changed, the commands
+> you ran and their results (pass/fail with the failing lines), and
+> anything left open or out of scope.
+
+Where they work:
+
+- **Different branches** — each subagent works in its own worktree
+  (`isolation: "worktree"`), on its task's branch, cut from the base the
+  brief names.
+- **Same branch, different files** — they may share the working tree; you
+  commit each task's files separately once it is reviewed.
+- **Same branch, same files** — not in parallel. Sequence them.
+
+Keep the main thread for orchestration: briefs, reviews, status, commits.
+With `parallel` = 1, build one task at a time — still through a subagent
+for a large task, so its detail does not crowd your context.
+
+## Branches and stacked pull requests
+
+If no task names a branch, everything lands on the current branch.
+Otherwise:
+
+- Create each branch when its first task starts, from the base the brief
+  names: the repository's base branch, or — for a **stacked** branch — the
+  branch it builds on.
+- When a lower branch changes after a branch above it was cut (a
+  refinement, a fix), rebase the branches above onto it before going on.
+- A branch that needs work from two others: merge those first, or cut it
+  from the last of them and say so.
+- At the end, open the pull requests in stack order, each against the
+  branch below it (the base branch for the bottom one), if the user wants
+  pull requests and you have the tools for it. Say in each which tasks it
+  carries and what it stacks on.
+
+## When things go sideways
+
+- **Blocked** — `harness_task_update {status: "blocked", note}` and ask the
+  user with `AskUserQuestion`. Keep building other ready tasks meanwhile.
+- **Work not on the plan** — add it first:
+  `harness_plan_edit {op: "upsert_task", parentId, title, detail, dependsOn}`,
+  then build it like any other.
+- **A dependency is wrong** (a task really can start earlier, or needs
+  something it does not list) — change it with `upsert_task {id, dependsOn}`
+  and tell the user why in chat.
+- **The design does not work** — stop and ask. The plan is locked; the user
+  can reopen it in Coplan.
+- **The user says something in chat** — it overrides the settings: if they
+  ask to see each task, review each with them; if they say go faster, so be it.
+
+## Finish: the final output
+
+When `harness_task_next` says every task is done:
+
+1. Run the **final** checks (`coplan check final`, or the commands the
+   prompt lists). Fix what they find — as a task (`upsert_task`), through
+   the cycle like any other.
+2. Push the branches; open the pull requests in stack order if wanted.
+3. Write the build report — `harness_plan_edit {op: "report", text}` — in
+   markdown:
+   - **Built** — each top-level task, one line each, with its sub-results.
+   - **Branches & PRs** — in stack order, with links.
+   - **Checks** — the final checks and how they came out.
+   - **Changed from the plan** — anything built differently, and why.
+   - **Follow-ups** — what was left out of scope, flaky checks, risks.
+4. Give the user the same summary in chat, shorter, with the links.

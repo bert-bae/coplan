@@ -572,6 +572,7 @@ export function ReadOnlyPanel({
   plan,
   onSelect,
   onClose,
+  onLinkTasks,
 }: {
   nodes: FlowNode[];
   edges: FlowEdge[];
@@ -580,6 +581,8 @@ export function ReadOnlyPanel({
   plan: Plan;
   onSelect: (kind: 'node' | 'edge', id: string) => void;
   onClose: () => void;
+  /** Set while the design is confirmed and the tasks are still being shaped. */
+  onLinkTasks?: (nodeId: string, taskIds: string[]) => void;
 }) {
   const name = (id: string) => nodes.find((n) => n.id === id)?.data.label ?? id;
   const close = (
@@ -627,14 +630,48 @@ export function ReadOnlyPanel({
                   <span className={classNames('status-dot is-static', `is-${task.status}`)} title={STATUS_LABEL[task.status]} aria-label={STATUS_LABEL[task.status]}>
                     {STATUS_GLYPH[task.status]}
                   </span>
-                  <button type="button" className="link panel-task" title="Show it on the board" onClick={() => store.focus('task', task.id)}>
+                  <button
+                    type="button"
+                    className="link panel-task"
+                    title={onLinkTasks ? 'Show it in the task list' : 'Show it on the board'}
+                    onClick={() => store.focus('task', task.id)}
+                  >
                     {task.title}
                   </button>
+                  {onLinkTasks && (
+                    <button
+                      type="button"
+                      className="icon-btn is-tiny"
+                      aria-label={`Unlink ${task.title}`}
+                      title="Unlink"
+                      onClick={() => onLinkTasks(node.id, (node.data.taskIds ?? []).filter((t) => t !== task.id))}
+                    >
+                      ×
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>
           ) : (
             <p className="muted panel-empty">No tasks are linked to this part.</p>
+          )}
+          {onLinkTasks && (
+            <select
+              className="input"
+              aria-label={`Link a task to ${node.data.label}`}
+              value=""
+              onChange={(e) => e.target.value && onLinkTasks(node.id, [...(node.data.taskIds ?? []), e.target.value])}
+            >
+              <option value="">Link a task…</option>
+              {outline(plan)
+                .filter((r) => !(node.data.taskIds ?? []).includes(r.task.id))
+                .map(({ task, number, depth }) => (
+                  <option key={task.id} value={task.id}>
+                    {' '.repeat(depth * 3)}
+                    {number} {task.title}
+                  </option>
+                ))}
+            </select>
           )}
         </div>
         {outgoing.length + incoming.length > 0 && (
