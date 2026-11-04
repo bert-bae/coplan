@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { store, usePlan, useSession } from '../store.ts';
 import { api } from '../lib/api.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
-import { unreadAreas } from '../../shared/plan.ts';
+import { isLocked, unreadAreas } from '../../shared/plan.ts';
 import type { SessionLink, SessionState, WaitingState } from '../../shared/types.ts';
 
 /** What to tell Claude once the plan has been worked over. */
@@ -25,11 +25,15 @@ export function Handoff() {
   // No count: one box edited forty times and forty boxes are both "changes",
   // and Claude reads the net result either way. Say where instead.
   const areas = unreadAreas(plan);
-  const unread = areas.length;
+  // Once the plan is submitted, the strip under the header says where the
+  // build stands; "Claude hasn't read your changes" no longer applies.
+  const locked = isLocked(plan);
+  const unread = locked ? 0 : areas.length;
 
   return (
     <div className="handoff">
       {plan &&
+        !locked &&
         (unread > 0 ? (
           <span className="handoff-state is-behind" title={`You changed ${areas.join(', ')} since Claude last read the plan`}>
             <span className="dot is-attention" aria-hidden="true" />
@@ -40,7 +44,9 @@ export function Handoff() {
             ✓ Claude is up to date{plan.claudeReadAt ? ` · read ${relativeTime(plan.claudeReadAt)}` : ''}
           </span>
         ))}
-      <OpenInClaude session={session} primary={unread > 0} />
+      {/* Without a link, the fallback copies "read my changes" — the wrong
+          words for a submitted plan; the strip below offers its prompt. */}
+      {(!locked || session.link) && <OpenInClaude session={session} primary={unread > 0} />}
       {plan && (
         <button type="button" className="btn btn-sm btn-ghost" onClick={() => setViewing(true)}>
           As Claude sees it

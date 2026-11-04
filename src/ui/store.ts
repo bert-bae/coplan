@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { api } from './lib/api.ts';
-import type { CleanupGroupId, Plan, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport } from '../shared/types.ts';
+import { isLocked } from '../shared/plan.ts';
+import type { BuildTarget, CleanupGroupId, Plan, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport } from '../shared/types.ts';
 
 export type Tab = 'diagrams' | 'tasks' | 'overview';
 /** The architecture comes first: it is where most of the plan is decided. */
@@ -188,6 +189,10 @@ class Store {
         if (before && after && after.revision > before.revision) {
           this.toast('info', `Claude published revision ${after.revision} of the plan.`);
         }
+        // The moment Claude picks up the submitted plan.
+        if (before?.submission && !before.submission.deliveredAt && after?.submission?.deliveredAt) {
+          this.toast('success', 'Claude has the build prompt. Follow it on the board.');
+        }
         this.set({ session: event.session });
         return;
       }
@@ -244,6 +249,55 @@ class Store {
     return this.ops([op]);
   }
 
+  /** Put the daemon's answer in place, unless something newer has landed. */
+  private adoptPlan(sessionId: string, plan: Plan): void {
+    const session = this.state.session;
+    const order = (p: Plan) => p.version ?? p.seq;
+    if (session && session.sessionId === sessionId && (!session.plan || order(plan) >= order(session.plan))) {
+      this.set({ session: { ...session, plan } });
+    }
+  }
+
+  /**
+   * Sign the plan off. From here it is locked and the page follows the build
+   * on the board. Resolves false when the daemon refused — most often
+   * because the plan moved on since the preview was made.
+   */
+  async submitPlan(input: { target: BuildTarget; note: string; expect: number }): Promise<boolean> {
+    const id = this.state.sessionId;
+    if (!id) return false;
+    try {
+      const { plan } = await api.submitPlan(id, input);
+      this.adoptPlan(id, plan);
+      this.set({ tab: 'tasks', taskMode: 'board' });
+      this.toast(
+        'success',
+        input.target === 'session'
+          ? 'Plan submitted and locked. Send any message in Claude to hand it the prompt.'
+          : 'Plan submitted and locked. Paste the prompt where it will be built.',
+      );
+      return true;
+    } catch (err) {
+      this.fail(err);
+      return false;
+    }
+  }
+
+  /** Unlock a submitted plan for changes. */
+  async reopenPlan(): Promise<boolean> {
+    const id = this.state.sessionId;
+    if (!id) return false;
+    try {
+      const { plan } = await api.reopenPlan(id);
+      this.adoptPlan(id, plan);
+      this.toast('info', 'The plan is open for changes again. Tell Claude in chat once you have changed it.');
+      return true;
+    } catch (err) {
+      this.fail(err);
+      return false;
+    }
+  }
+
   /** Jump to an item from anywhere: a board card, the overview's "now". */
   focus(kind: string, id: string): void {
     const tab: Tab = kind === 'diagram' ? 'diagrams' : kind === 'task' ? 'tasks' : 'overview';
@@ -252,6 +306,11 @@ class Store {
       // `node:<diagram>:<node>` — open that diagram; the editor selects the box.
       const [diagramId] = id.split(':');
       this.set({ tab: 'diagrams', diagramId: diagramId ?? null, focusTarget: `node:${id}` });
+      return;
+    }
+    if (kind === 'task' && isLocked(this.state.session?.plan ?? null)) {
+      // A locked plan's tasks live on the board, where its card is.
+      this.set({ tab, taskMode: 'board', focusTarget: `${kind}:${id}` });
       return;
     }
     if (kind === 'task') {

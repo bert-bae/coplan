@@ -52,6 +52,7 @@ function summary(sessionId: string, repo: string, createdAt: number, updatedAt: 
     createdAt,
     updatedAt,
     tasks: { total: 0, done: 0, inProgress: 0, blocked: 0 },
+    phase: 'planning',
     current: null,
     waiting: null,
     surface: 'unknown',

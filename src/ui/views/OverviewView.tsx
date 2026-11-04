@@ -5,7 +5,7 @@ import { CommentToggle, ThreadPanel } from '../components/Threads.tsx';
 import { Focusable, ItemActions } from '../components/Item.tsx';
 import { ProgressBar } from '../components/Progress.tsx';
 import { scrollBehavior } from '../lib/motion.ts';
-import { countTasks, currentTask } from '../../shared/plan.ts';
+import { countTasks, currentTask, isLocked } from '../../shared/plan.ts';
 import type { Plan, Section } from '../../shared/types.ts';
 
 /**
@@ -21,6 +21,8 @@ export function OverviewView() {
     <div className="view-pad doc">
       <Glance plan={plan} />
 
+      {/* A submitted plan reads the same, but every control in it is off. */}
+      <fieldset className="lockable" disabled={isLocked(plan)}>
       <section className="doc-block" aria-labelledby="summary-head">
         <h2 id="summary-head" className="doc-label">
           Summary
@@ -38,20 +40,25 @@ export function OverviewView() {
         <SectionCard key={section.id} section={section} index={i} count={plan.sections.length} />
       ))}
 
-      <div className="doc-add">
-        <AddField
-          placeholder="New section title — e.g. Data model, Risks, Out of scope"
-          label="New section title"
-          onAdd={(title) => store.op({ op: 'upsert_section', title, body: '' })}
-        />
-      </div>
+      {!isLocked(plan) && (
+        <div className="doc-add">
+          <AddField
+            placeholder="New section title — e.g. Data model, Risks, Out of scope"
+            label="New section title"
+            onAdd={(title) => store.op({ op: 'upsert_section', title, body: '' })}
+          />
+        </div>
+      )}
 
-      <section className="doc-block" aria-labelledby="general-head">
-        <h2 id="general-head" className="doc-label">
-          General comments
-        </h2>
-        <ThreadPanel target={{ kind: 'plan', id: '' }} label="the plan" />
-      </section>
+      {(!isLocked(plan) || plan.threads.some((t) => t.target.kind === 'plan')) && (
+        <section className="doc-block" aria-labelledby="general-head">
+          <h2 id="general-head" className="doc-label">
+            General comments
+          </h2>
+          <ThreadPanel target={{ kind: 'plan', id: '' }} label="the plan" />
+        </section>
+      )}
+      </fieldset>
     </div>
   );
 }

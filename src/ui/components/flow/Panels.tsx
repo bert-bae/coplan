@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { store } from '../../store.ts';
 import { MarkdownField } from '../Editable.tsx';
+import { Markdown } from '../Markdown.tsx';
 import { STATUS_GLYPH, STATUS_LABEL } from '../Progress.tsx';
 import { classNames } from '../../lib/format.ts';
 import { outline } from '../../../shared/plan.ts';
@@ -550,6 +551,158 @@ export function SelectionPanel({
           Delete selection
         </button>
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * A submitted plan: reading, not editing
+ * ------------------------------------------------------------------ */
+
+/**
+ * What the panel shows once the plan is submitted. The design is final, so
+ * nothing here edits it; what is still live is how far the tasks behind
+ * each box have got, and every task jumps to its card on the board.
+ */
+export function ReadOnlyPanel({
+  nodes,
+  edges,
+  selectedNodes,
+  selectedEdges,
+  plan,
+  onSelect,
+  onClose,
+}: {
+  nodes: FlowNode[];
+  edges: FlowEdge[];
+  selectedNodes: FlowNode[];
+  selectedEdges: FlowEdge[];
+  plan: Plan;
+  onSelect: (kind: 'node' | 'edge', id: string) => void;
+  onClose: () => void;
+}) {
+  const name = (id: string) => nodes.find((n) => n.id === id)?.data.label ?? id;
+  const close = (
+    <button type="button" className="icon-btn is-tiny" aria-label="Close details" title="Back to the diagram" onClick={onClose}>
+      ×
+    </button>
+  );
+
+  if (selectedNodes.length === 1 && selectedEdges.length === 0) {
+    const node = selectedNodes[0]!;
+    const outgoing = edges.filter((e) => e.source === node.id);
+    const incoming = edges.filter((e) => e.target === node.id && e.source !== node.id);
+    const tasks = (node.data.taskIds ?? []).map((id) => plan.tasks.find((t) => t.id === id)).filter((t) => t !== undefined);
+    return (
+      <div className="arch-panel-body is-readonly" aria-label={`Details of ${node.data.label}`}>
+        <header className="panel-top">
+          <span className={classNames('kind-swatch', `kind-${node.data.kind}`)} aria-hidden="true">
+            {KIND_GLYPH[node.data.kind]}
+          </span>
+          <span className="panel-kicker">{KIND_LABEL[node.data.kind]}</span>
+          <span className="item-id">{node.id}</span>
+          <span className="spacer" />
+          {close}
+        </header>
+        <h2 className="panel-title">{node.data.label}</h2>
+        {node.data.detail && <p className="panel-hint">{node.data.detail}</p>}
+        {node.data.description && (
+          <div className="field">
+            <span className="field-label">Description</span>
+            <Markdown source={node.data.description} />
+          </div>
+        )}
+        {node.data.notes && (
+          <div className="field">
+            <span className="field-label">Notes and decisions</span>
+            <Markdown source={node.data.notes} />
+          </div>
+        )}
+        <div className="field">
+          <span className="field-label">Built by</span>
+          {tasks.length ? (
+            <ul className="panel-tasks">
+              {tasks.map((task) => (
+                <li key={task.id}>
+                  <span className={classNames('status-dot is-static', `is-${task.status}`)} title={STATUS_LABEL[task.status]} aria-label={STATUS_LABEL[task.status]}>
+                    {STATUS_GLYPH[task.status]}
+                  </span>
+                  <button type="button" className="link panel-task" title="Show it on the board" onClick={() => store.focus('task', task.id)}>
+                    {task.title}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="muted panel-empty">No tasks are linked to this part.</p>
+          )}
+        </div>
+        {outgoing.length + incoming.length > 0 && (
+          <div className="field">
+            <span className="field-label">Connections</span>
+            <ul className="panel-links">
+              {outgoing.map((e) => (
+                <li key={e.id}>
+                  <button type="button" className="link" onClick={() => onSelect('edge', e.id)}>
+                    {e.data?.arrows === 'both' ? '↔' : '→'} {name(e.target)}
+                  </button>
+                  {e.data?.label && <span className="muted"> {e.data.label}</span>}
+                </li>
+              ))}
+              {incoming.map((e) => (
+                <li key={e.id}>
+                  <button type="button" className="link" onClick={() => onSelect('edge', e.id)}>
+                    {e.data?.arrows === 'both' ? '↔' : '←'} {name(e.source)}
+                  </button>
+                  {e.data?.label && <span className="muted"> {e.data.label}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (selectedEdges.length === 1 && selectedNodes.length === 0) {
+    const edge = selectedEdges[0]!;
+    const how = edge.data?.arrows === 'both' ? 'both ways' : edge.data?.arrows === 'none' ? 'no direction' : 'one way';
+    return (
+      <div className="arch-panel-body is-readonly" aria-label="Details of the connection">
+        <header className="panel-top">
+          <span className="panel-kicker">Connection</span>
+          <span className="spacer" />
+          {close}
+        </header>
+        <h2 className="panel-title">
+          <button type="button" className="link" onClick={() => onSelect('node', edge.source)}>
+            {name(edge.source)}
+          </button>{' '}
+          {edge.data?.arrows === 'both' ? '↔' : edge.data?.arrows === 'none' ? '—' : '→'}{' '}
+          <button type="button" className="link" onClick={() => onSelect('node', edge.target)}>
+            {name(edge.target)}
+          </button>
+        </h2>
+        <p className="panel-hint">
+          {edge.data?.label ? `Carries: ${edge.data.label}. ` : ''}
+          {edge.data?.dashed ? 'Dashed: optional, async or later. ' : ''}
+          {how[0]!.toUpperCase() + how.slice(1)}.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="arch-panel-body is-readonly" aria-label="Selection">
+      <header className="panel-top">
+        <span className="panel-kicker">Selection</span>
+        <span className="spacer" />
+        {close}
+      </header>
+      <p className="panel-hint">
+        {selectedNodes.length} box{selectedNodes.length === 1 ? '' : 'es'} and {selectedEdges.length} arrow{selectedEdges.length === 1 ? '' : 's'} selected. Select
+        one to read about it.
+      </p>
     </div>
   );
 }

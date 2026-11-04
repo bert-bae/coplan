@@ -1,4 +1,5 @@
 import type {
+  BuildTarget,
   Change,
   CleanupGroupId,
   CleanupOutcome,
@@ -58,6 +59,20 @@ export const api = {
   /** The plan exactly as Claude reads it. */
   planText: (id: string) => request<string>(`/api/session/${id}/plan/text`),
 
+  /** The prompt Claude would be given if the plan were submitted now. */
+  promptPreview: (id: string, target: BuildTarget, note: string) =>
+    request<PromptPreview>(`/api/session/${id}/plan/prompt`, {
+      method: 'POST',
+      body: JSON.stringify({ target, note }),
+    }),
+
+  /** Lock the plan and hand it over to be built. `expect` is the version
+   *  the preview was made from; a plan that moved on since is refused. */
+  submitPlan: (id: string, body: { target: BuildTarget; note: string; expect: number }) =>
+    request<{ plan: Plan }>(`/api/session/${id}/plan/submit`, { method: 'POST', body: JSON.stringify(body) }),
+
+  reopenPlan: (id: string) => request<{ plan: Plan }>(`/api/session/${id}/plan/reopen`, { method: 'POST', body: '{}' }),
+
   /* ---------------------- daemon-wide actions ---------------------- */
 
   storage: () => request<{ report: StorageReport }>('/api/storage'),
@@ -73,3 +88,14 @@ export const api = {
   /** Unauthenticated liveness; `pid` tells a successor from a survivor. */
   health: () => request<{ ok: boolean; version: string; pid: number }>('/health'),
 };
+
+export interface PromptPreview {
+  prompt: string;
+  /** The plan was too long to quote whole; the prompt points Claude at harness_plan_read. */
+  trimmed: boolean;
+  /** The plan version the prompt was built from. */
+  version: number;
+  /** The longest prompt a hook hands Claude. */
+  budget: number;
+  maxNote: number;
+}

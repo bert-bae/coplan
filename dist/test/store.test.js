@@ -43,13 +43,14 @@ var init_paths = __esm({
 });
 
 // src/shared/types.ts
-var NODE_KINDS, EDGE_ARROWS, TASK_STATUSES;
+var NODE_KINDS, EDGE_ARROWS, TASK_STATUSES, BUILD_TARGETS;
 var init_types = __esm({
   "src/shared/types.ts"() {
     "use strict";
     NODE_KINDS = ["component", "service", "datastore", "queue", "external", "actor", "note"];
     EDGE_ARROWS = ["end", "both", "none"];
     TASK_STATUSES = ["todo", "in_progress", "blocked", "done"];
+    BUILD_TARGETS = ["session", "elsewhere"];
   }
 });
 
@@ -185,6 +186,22 @@ function foldList(base, before2, after2, merge) {
   });
   return out;
 }
+function sameContent(a, b) {
+  return canonical(a) === canonical(b);
+}
+function canonical(value, key = "") {
+  if (Array.isArray(value)) {
+    const items = value.map((v) => canonical(v));
+    if (key === "edges") items.sort();
+    return `[${items.join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const o = value;
+    const keys = Object.keys(o).filter((k) => o[k] !== void 0).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonical(o[k], k)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
 function foldEdges(base, before2, after2) {
   const claude = matchEdges(before2, after2);
   let out = [...base];
@@ -234,6 +251,7 @@ function baselineOf(plan) {
   });
 }
 function publishPlan(prev, input, now = Date.now()) {
+  if (prev?.submission && planPhase(prev) !== "built") throw new PlanError(LOCKED_FOR_CLAUDE);
   if (prev && unreadByClaude(prev).length > 0) {
     throw new PlanError(
       `The user has changed ${unreadItems(prev)} item(s) in the plan since you last read it. Call harness_plan_read first, then publish again (or use harness_plan_edit for targeted changes) so their edits are not overwritten.`
@@ -242,6 +260,7 @@ function publishPlan(prev, input, now = Date.now()) {
   const title = clean(input.title, MAX_TITLE);
   if (!title) throw new PlanError("A plan needs a title.");
   const base = prev ? structuredClone(prev) : emptyPlan(title, now);
+  delete base.submission;
   const next = { ...base, title, summary: clean(input.summary, MAX_TEXT) ?? base.summary };
   if ((input.sections?.length ?? 0) > MAX_SECTIONS) throw new PlanError(`A plan holds at most ${MAX_SECTIONS} sections.`);
   if ((input.diagrams?.length ?? 0) > MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
@@ -364,10 +383,14 @@ function normalizePlan(raw, fallbackTitle) {
   const baseline = validBaseline(raw.claudeBaseline);
   if (baseline) plan.claudeBaseline = baseline;
   else delete plan.claudeBaseline;
+  const submission = validSubmission(raw.submission);
+  if (submission) plan.submission = submission;
+  else delete plan.submission;
   return plan;
 }
 function applyOps(plan, ops, author, now = Date.now()) {
   if (!Array.isArray(ops) || ops.length === 0) throw new PlanError("No edits were given.");
+  if (plan.submission) checkLocked(ops, author);
   const next = structuredClone(plan);
   const changes = [];
   ops.forEach((op, i) => {
@@ -661,6 +684,73 @@ function removeItem(plan, kind, id, log) {
   }
   plan.threads = plan.threads.map((t) => detachIfOrphaned(plan, before2, t));
   return [log("deleted", { kind, id }, summary)];
+}
+function planPhase(plan) {
+  const submission = plan?.submission;
+  if (!submission) return "planning";
+  if (submission.target === "elsewhere") return "handed-off";
+  if (!submission.deliveredAt) return "submitted";
+  const counts = countTasks(plan);
+  return counts.total > 0 && counts.done === counts.total ? "built" : "building";
+}
+function checkLocked(ops, author) {
+  if (author === "user") throw new PlanError(LOCKED_FOR_USER);
+  const refused = ops.find((op) => !TRACKING_OPS.has(op?.op ?? ""));
+  if (refused) throw new PlanError(`${LOCKED_FOR_CLAUDE} (Refused: ${refused?.op ?? "an edit"}.)`);
+}
+function validTarget(value) {
+  return BUILD_TARGETS.includes(value) ? value : void 0;
+}
+function cleanNote(value) {
+  return clean(value, MAX_NOTE);
+}
+function submitPlan(plan, input, now = Date.now()) {
+  if (plan.submission) throw new PlanError("The plan has already been submitted.");
+  if (!input.prompt.trim()) throw new PlanError("There is no prompt to submit.");
+  const next = structuredClone(plan);
+  const note = cleanNote(input.note);
+  next.submission = {
+    at: now,
+    target: input.target,
+    ...note ? { note } : {},
+    prompt: input.prompt,
+    ...input.trimmed ? { trimmed: true } : {},
+    deliveredAt: null
+  };
+  next.version += 1;
+  next.updatedAt = now;
+  return next;
+}
+function reopenPlan(plan, now = Date.now()) {
+  if (!plan.submission) throw new PlanError("The plan is not locked.");
+  const next = structuredClone(plan);
+  delete next.submission;
+  next.version += 1;
+  next.updatedAt = now;
+  return next;
+}
+function markDelivered(plan, now = Date.now()) {
+  if (!plan.submission || plan.submission.target !== "session" || plan.submission.deliveredAt) return plan;
+  const next = structuredClone(plan);
+  next.submission.deliveredAt = now;
+  markReadByClaude(next, now);
+  next.version += 1;
+  next.updatedAt = now;
+  return next;
+}
+function validSubmission(raw) {
+  const s = raw;
+  if (!s || typeof s !== "object") return void 0;
+  const target = validTarget(s.target);
+  if (!target || typeof s.at !== "number" || typeof s.prompt !== "string" || !s.prompt) return void 0;
+  return {
+    at: s.at,
+    target,
+    ...typeof s.note === "string" && s.note ? { note: s.note } : {},
+    prompt: s.prompt,
+    ...s.trimmed === true ? { trimmed: true } : {},
+    deliveredAt: typeof s.deliveredAt === "number" ? s.deliveredAt : null
+  };
 }
 function buildGraph(rawNodes, rawEdges, old, title, taskIds) {
   if (!Array.isArray(rawNodes) || !Array.isArray(rawEdges)) throw new PlanError(`Diagram "${title}": nodes and edges must be lists.`);
@@ -997,7 +1087,7 @@ function currentTask(plan) {
   if (!plan) return null;
   return outline(plan).find((r) => r.task.status === "in_progress" && !plan.tasks.some((t) => t.parentId === r.task.id))?.task ?? null;
 }
-var PlanError, MAX_CHANGES, MAX_TITLE, MAX_TEXT, MAX_TASKS, MAX_SECTIONS, MAX_DIAGRAMS, MAX_THREADS, MAX_REPLIES, PREFIX, RENAMED_PLAN, MAX_NODES, MAX_EDGES, MAX_DESCRIPTION, EDITED_DESIGN, STATUS_WORDS;
+var PlanError, MAX_CHANGES, MAX_TITLE, MAX_TEXT, MAX_TASKS, MAX_SECTIONS, MAX_DIAGRAMS, MAX_THREADS, MAX_REPLIES, PREFIX, RENAMED_PLAN, MAX_NOTE, TRACKING_OPS, LOCKED_FOR_USER, LOCKED_FOR_CLAUDE, MAX_NODES, MAX_EDGES, MAX_DESCRIPTION, EDITED_DESIGN, STATUS_WORDS;
 var init_plan = __esm({
   "src/shared/plan.ts"() {
     "use strict";
@@ -1014,6 +1104,10 @@ var init_plan = __esm({
     MAX_REPLIES = 200;
     PREFIX = { section: "s", diagram: "d", task: "t", thread: "c" };
     RENAMED_PLAN = "renamed the plan";
+    MAX_NOTE = 4e3;
+    TRACKING_OPS = /* @__PURE__ */ new Set(["upsert_task", "reply", "resolve"]);
+    LOCKED_FOR_USER = "The plan has been submitted to be built, so it is locked. Reopen it to make changes.";
+    LOCKED_FOR_CLAUDE = "The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or upsert_task to add work you discover) and comment replies (reply, resolve) apply. If the design has to change, ask the user in chat \u2014 they can reopen the plan in the harness.";
     MAX_NODES = 120;
     MAX_EDGES = 300;
     MAX_DESCRIPTION = 4e3;
@@ -1024,6 +1118,460 @@ var init_plan = __esm({
       blocked: "blocked",
       done: "done"
     };
+  }
+});
+
+// src/shared/architecture.ts
+function diagramToMarkdown(diagram, opts = {}) {
+  const ids = opts.ids ?? true;
+  const hashes = "#".repeat(Math.min(6, Math.max(1, opts.level ?? 3)));
+  const out = [`${hashes} ${ids ? `[${diagram.id}] ` : ""}${diagram.title}`];
+  if (opts.note) out.push(`_${opts.note}_`);
+  if (diagram.caption?.trim()) out.push("", diagram.caption.trim());
+  const nodes = diagram.nodes;
+  if (nodes.length === 0) {
+    out.push("", "_No parts yet._");
+    return out.join("\n");
+  }
+  const label = labeller(diagram);
+  const ref2 = (n) => ids ? `${n.label} (\`${n.id}\`)` : n.label;
+  const { ordered, notes, isolated } = flowOrder(diagram);
+  const shape = shapeOf(diagram, ordered);
+  if (shape) out.push("", shape);
+  if (ordered.length) {
+    out.push("", "**Parts**");
+    for (const n of ordered) out.push(...renderPart(n, opts, ids));
+  }
+  if (isolated.length) {
+    out.push("", `_Not connected to anything yet: ${isolated.map((n) => n.label).join(", ")}._`);
+  }
+  if (diagram.edges.length) {
+    out.push("", "**Connections**");
+    const rank = new Map(ordered.map((n, i) => [n.id, i]));
+    const edges = [...diagram.edges].sort(
+      (a, b) => (rank.get(a.source) ?? 1e9) - (rank.get(b.source) ?? 1e9) || (rank.get(a.target) ?? 1e9) - (rank.get(b.target) ?? 1e9)
+    );
+    for (const e of edges) out.push(`- ${edgePhrase(e, label)}${ids ? ` \`${e.source} ${ARROW[e.arrows ?? "end"]} ${e.target}\`` : ""}`);
+  }
+  if (notes.length) {
+    out.push("", "**Notes on the diagram**");
+    for (const n of notes) {
+      out.push(`- ${ref2(n)}`);
+      for (const text of [n.detail, n.description, n.notes]) if (text?.trim()) out.push(...indent(text, 2));
+    }
+  }
+  return out.join("\n");
+}
+function renderPart(n, opts, ids) {
+  const head = `- **${n.label}**${ids ? ` \`${n.id}\`` : ""} \u2014 ${KIND_NOUN[n.kind]}${n.detail ? `: ${oneLine(n.detail)}` : ""}`;
+  const lines = [head];
+  if (n.description?.trim()) lines.push(...indent(n.description, 2));
+  if (n.notes?.trim()) lines.push("  Decisions:", ...indent(n.notes, 4));
+  if (n.taskIds?.length) {
+    const named = n.taskIds.map((id) => {
+      const task = opts.tasks?.find((t) => t.id === id);
+      if (!task) return ids ? id : null;
+      return `${STATUS_MARK[task.status]} ${ids ? `${id} ` : ""}${task.title}`;
+    });
+    const list = named.filter(Boolean);
+    if (list.length) lines.push(`  Built by: ${list.join("; ")}`);
+  }
+  return lines;
+}
+function edgePhrase(e, label) {
+  const flags = [e.dashed ? "dashed: optional, async or future" : "", e.arrows === "none" ? "no direction" : ""].filter(Boolean);
+  return `${label(e.source)} ${ARROW[e.arrows ?? "end"]} ${label(e.target)}${e.label ? `: ${oneLine(e.label)}` : ""}${flags.length ? ` (${flags.join("; ")})` : ""}`;
+}
+function shapeOf(diagram, ordered) {
+  const incoming = /* @__PURE__ */ new Set();
+  const outgoing = /* @__PURE__ */ new Set();
+  for (const e of diagram.edges) {
+    if (e.source === e.target) continue;
+    outgoing.add(e.source);
+    incoming.add(e.target);
+    if (e.arrows === "both" || e.arrows === "none") {
+      outgoing.add(e.target);
+      incoming.add(e.source);
+    }
+  }
+  const names = (pick) => ordered.filter(pick).map((n) => n.label);
+  const parts = [
+    ["Entry points", names((n) => outgoing.has(n.id) && !incoming.has(n.id))],
+    ["Data stores", names((n) => n.kind === "datastore")],
+    ["Queues", names((n) => n.kind === "queue")],
+    ["External systems", names((n) => n.kind === "external")]
+  ];
+  const said = parts.filter(([, list]) => list.length).map(([what, list]) => `${what}: ${list.join(", ")}.`);
+  return said.length ? said.join(" ") : null;
+}
+function flowOrder(diagram) {
+  const ranks = flowRanks(diagram.nodes, diagram.edges);
+  const index = new Map(diagram.nodes.map((n, i) => [n.id, i]));
+  const parts = diagram.nodes.filter((n) => n.kind !== "note");
+  const connected = parts.filter((n) => ranks.has(n.id)).sort((a, b) => ranks.get(a.id) - ranks.get(b.id) || index.get(a.id) - index.get(b.id));
+  const isolated = parts.filter((n) => !ranks.has(n.id));
+  return { ordered: [...connected, ...isolated], notes: diagram.nodes.filter((n) => n.kind === "note"), isolated };
+}
+function diagramChanges(before2, after2, opts = {}) {
+  const ids = opts.ids ?? true;
+  const out = [];
+  const label = (id) => after2.nodes.find((n) => n.id === id)?.label ?? before2.nodes.find((n) => n.id === id)?.label ?? id;
+  const ref2 = (n) => ids ? `${n.label} (\`${n.id}\`)` : n.label;
+  if (before2.title !== after2.title) out.push(`Renamed the diagram "${before2.title}" \u2192 "${after2.title}".`);
+  if ((before2.caption ?? "") !== (after2.caption ?? "")) out.push(...prose("Edited the caption", after2.caption, opts));
+  const added = [];
+  const removed = [];
+  const changed = [];
+  for (const n of after2.nodes) {
+    const b = before2.nodes.find((x) => x.id === n.id);
+    if (!b) {
+      added.push(`Added ${ref2(n)} \u2014 ${KIND_NOUN[n.kind]}${n.detail ? `: ${oneLine(n.detail)}` : ""}.`);
+      if (opts.withText) {
+        if (n.description?.trim()) added.push(...indent(n.description, 2));
+        if (n.notes?.trim()) added.push("  Decisions:", ...indent(n.notes, 4));
+      }
+      continue;
+    }
+    const facts = [];
+    if (b.label !== n.label) facts.push(`renamed from "${b.label}"`);
+    if (b.kind !== n.kind) facts.push(`now a ${KIND_NOUN[n.kind]} (was a ${KIND_NOUN[b.kind]})`);
+    if ((b.detail ?? "") !== (n.detail ?? "")) facts.push(n.detail ? `subtitle "${oneLine(n.detail)}"` : "subtitle removed");
+    const texts = [
+      ["description", b.description, n.description],
+      ["decisions", b.notes, n.notes]
+    ];
+    const editedText = texts.filter(([, was2, now2]) => (was2 ?? "").trim() !== (now2 ?? "").trim());
+    for (const [what, , now2] of editedText) facts.push(now2?.trim() ? `${what} edited` : `${what} removed`);
+    const was = b.taskIds ?? [];
+    const now = n.taskIds ?? [];
+    if (was.join() !== now.join()) facts.push(now.length ? `built by ${now.join(", ")}${was.length ? ` (was ${was.join(", ")})` : ""}` : "no longer linked to tasks");
+    if (!facts.length) continue;
+    changed.push(`Changed ${ref2(n)}: ${facts.join("; ")}.`);
+    if (opts.withText) {
+      for (const [what, , text] of editedText) {
+        if (text?.trim()) changed.push(`  ${what[0].toUpperCase()}${what.slice(1)} now:`, ...indent(text, 4));
+      }
+    }
+  }
+  for (const b of before2.nodes) {
+    if (!after2.nodes.some((n) => n.id === b.id)) removed.push(`Removed ${ref2(b)}.`);
+  }
+  out.push(...added, ...removed, ...changed);
+  const { pairs, removed: cut, added: drawn } = matchEdges(before2.edges, after2.edges);
+  const connected = [];
+  const disconnected = [];
+  const restyled = [];
+  const unclaimed = [...drawn];
+  for (const e of cut) {
+    const back = (a) => a.source === e.target && a.target === e.source;
+    const same = unclaimed.findIndex((a) => back(a) && (a.label ?? "") === (e.label ?? ""));
+    const k = same >= 0 ? same : unclaimed.findIndex(back);
+    if (k >= 0) {
+      const [now] = unclaimed.splice(k, 1);
+      restyled.push(`Reversed ${label(e.source)} \u2192 ${label(e.target)}: it now runs ${edgePhrase(now, label)}.`);
+    } else {
+      disconnected.push(`Disconnected ${edgePhrase(e, label)}.`);
+    }
+  }
+  for (const e of unclaimed) connected.push(`Connected ${edgePhrase(e, label)}.`);
+  for (const [b, e] of pairs) {
+    const facts = [];
+    if ((b.label ?? "") !== (e.label ?? "")) facts.push(e.label ? `now labelled "${oneLine(e.label)}"` : "label removed");
+    if (Boolean(b.dashed) !== Boolean(e.dashed)) facts.push(e.dashed ? "now dashed (optional, async or future)" : "now solid");
+    if ((b.arrows ?? "end") !== (e.arrows ?? "end")) facts.push({ end: "now one way", both: "now both ways", none: "now without direction" }[e.arrows ?? "end"]);
+    if (facts.length) restyled.push(`Changed ${label(e.source)} \u2192 ${label(e.target)}: ${facts.join("; ")}.`);
+  }
+  out.push(...connected, ...disconnected, ...restyled);
+  return out;
+}
+function contentOf(diagram) {
+  return {
+    id: diagram.id,
+    title: diagram.title,
+    ...diagram.caption ? { caption: diagram.caption } : {},
+    nodes: diagram.nodes.map(({ x: _x, y: _y, ...n }) => n),
+    edges: diagram.edges
+  };
+}
+function labeller(diagram) {
+  const names = new Map(diagram.nodes.map((n) => [n.id, n.label]));
+  return (id) => names.get(id) ?? id;
+}
+function prose(what, text, opts) {
+  if (!text?.trim()) return [`${what.replace(/^Edited/, "Removed")}.`];
+  return opts.withText ? [`${what}:`, ...indent(text, 2)] : [`${what}.`];
+}
+function indent(text, by) {
+  const pad = " ".repeat(by);
+  return text.trim().split("\n").map((line) => line.trim() ? `${pad}${line.trimEnd()}` : "");
+}
+function oneLine(text) {
+  return text.replace(/\s*\n\s*/g, " ").trim();
+}
+var KIND_NOUN, STATUS_MARK, ARROW;
+var init_architecture = __esm({
+  "src/shared/architecture.ts"() {
+    "use strict";
+    init_plan();
+    KIND_NOUN = {
+      component: "component",
+      service: "service",
+      datastore: "data store",
+      queue: "queue",
+      external: "external system",
+      actor: "actor",
+      note: "note"
+    };
+    STATUS_MARK = { todo: "[ ]", in_progress: "[~]", blocked: "[!]", done: "[x]" };
+    ARROW = { end: "\u2192", both: "\u2194", none: "\u2014" };
+  }
+});
+
+// src/daemon/render.ts
+function renderDocument(plan, opts = {}) {
+  const { attribution = true, details = true, reader = "claude" } = opts;
+  const out = [];
+  if (plan.summary.trim()) out.push("", "## Summary", plan.summary.trim());
+  if (plan.sections.length) {
+    out.push("", "## Sections");
+    for (const s of plan.sections) {
+      const by = attribution && s.updatedBy === "user" ? " _(edited by the user)_" : "";
+      out.push("", `### [${s.id}] ${s.title}${by}`, s.body.trim() || "_(empty)_");
+    }
+  }
+  if (plan.diagrams.length) {
+    out.push("", "## Architecture");
+    for (const d of plan.diagrams) {
+      const note = attribution && d.updatedBy === "user" ? "last edited by the user" : void 0;
+      out.push("", diagramToMarkdown(d, { tasks: plan.tasks, note }));
+    }
+  }
+  out.push("", ...renderTasks(plan, { attribution, details }));
+  const open = plan.threads.filter((t) => !t.resolved);
+  if (open.length) {
+    out.push("", "## Open comments");
+    for (const t of open) out.push(renderThread(plan, t, reader));
+  }
+  out.push("", STATUS_LEGEND);
+  return out;
+}
+function renderTasks(plan, opts = {}) {
+  const counts = countTasks(plan);
+  const out = [`## Tasks${counts.total ? ` (${counts.done}/${counts.total} done)` : ""}`];
+  const rows = outline(plan);
+  if (rows.length === 0) out.push("_(no tasks yet)_");
+  for (const { task, depth } of rows) {
+    const pad = "  ".repeat(depth);
+    const by = opts.attribution !== false && task.createdBy === "user" ? " _(added by the user)_" : "";
+    const note = task.note ? ` \u2014 ${task.note}` : "";
+    out.push(`${pad}- ${STATUS_MARK2[task.status]} ${task.id} ${task.title}${by}${note}`);
+    if (task.files?.length) out.push(`${pad}  files: ${task.files.join(", ")}`);
+    if (opts.details !== false && task.detail) for (const line of task.detail.trim().split("\n")) out.push(`${pad}  ${line}`);
+  }
+  return out;
+}
+function buildPrompt(plan, opts) {
+  const here = opts.target === "session";
+  const note = opts.note?.trim();
+  const head = here ? sessionBrief(plan) : outsideBrief(plan);
+  const fromUser = note ? ["", "## From the user", ...note.split("\n").map((l) => `> ${l}`.trimEnd())] : [];
+  const changes = here ? changesSinceRead(plan) : [];
+  const full = [...head, ...fromUser, ...changes, ...renderDocument(plan, { attribution: here, reader: here ? "claude" : "outside" })];
+  const text = full.join("\n").trim();
+  if (!here || text.length <= PROMPT_BUDGET) return { prompt: text, trimmed: false };
+  const pointer = `_The architecture (${plan.diagrams.length} diagram(s)), the sections and each task's detail are too long to quote here: call harness_plan_read for them before you start._`;
+  const fixed = [...head, ...fromUser, ...clip(changes, 2500), "", pointer];
+  if (plan.summary.trim()) fixed.push("", "## Summary", ...clip(plan.summary.trim().split("\n"), 1200));
+  const room = PROMPT_BUDGET - fixed.join("\n").length - STATUS_LEGEND.length - 4;
+  const tasks = renderTasks(plan, { details: false });
+  const kept = [];
+  let used = 0;
+  for (const line of tasks) {
+    if (used + line.length + 1 > room - 80) {
+      kept.push(`- \u2026and ${tasks.length - kept.length} more line(s): harness_plan_read lists every task.`);
+      break;
+    }
+    kept.push(line);
+    used += line.length + 1;
+  }
+  return { prompt: [...fixed, "", ...kept, "", STATUS_LEGEND].join("\n").trim(), trimmed: true };
+}
+function sessionBrief(plan) {
+  return [
+    `${BUILD_MARKER} "${plan.title}" \u2014 the user has reviewed it in the harness and submitted it.`,
+    "",
+    "The plan is final. Its architecture is locked, and from here the harness only follows your progress on its task board, so keep every task's status true as you go:",
+    "",
+    "1. Work through the tasks below in order.",
+    "2. When you start a task, mark it in_progress with harness_task_update. When it is finished, mark it done with a one-line note of what you did.",
+    "3. If you are stuck, mark the task blocked with a note saying on what, and ask the user with AskUserQuestion.",
+    "4. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.",
+    "5. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, stop and ask the user in chat \u2014 they can reopen the plan in the harness."
+  ];
+}
+function outsideBrief(plan) {
+  return [
+    `Build "${plan.title}". This plan was designed and reviewed before any code was written, and this is its final version.`,
+    "",
+    "1. Work through the tasks below in order. Each says what it involves and which files it is expected to touch.",
+    "2. Build the architecture as described: its parts, what each one does and decides, and how they connect.",
+    "3. If the design turns out not to work, stop and say why rather than redesigning as you go."
+  ];
+}
+function changesSinceRead(plan) {
+  const unread = unreadByClaude(plan);
+  if (!plan.claudeBaseline || unread.length === 0) return [];
+  return ["", renderChanges(plan, unread, false)];
+}
+function clip(lines, max) {
+  const out = [];
+  let used = 0;
+  for (const line of lines) {
+    if (used + line.length > max) {
+      out.push("\u2026");
+      break;
+    }
+    out.push(line);
+    used += line.length + 1;
+  }
+  return out;
+}
+function renderChanges(plan, unread, changesOnly) {
+  if (unread.length === 0) {
+    return plan.claudeReadAt ? "## Since you last read\nNothing \u2014 the user has not changed the plan." : "## Since you last read\nThis is your first read of this plan.";
+  }
+  const base = plan.claudeBaseline;
+  if (!base) return renderChangeLog(unread);
+  const touched = (kind) => new Set(unread.filter((c) => c.target.kind === kind).map((c) => c.target.id));
+  const opts = { withText: changesOnly };
+  const blocks = [];
+  const block = (title, lines) => {
+    if (lines.length) blocks.push(`**${title}**
+${lines.map((l) => l.startsWith(" ") || l === "" ? l : `- ${l}`).join("\n")}`);
+  };
+  const meta = [];
+  const userMeta = unread.some((c) => c.target.kind === "plan" && c.kind === "edited");
+  if (userMeta && base.title !== plan.title) meta.push(`Renamed the plan "${base.title}" \u2192 "${plan.title}".`);
+  if (userMeta && base.summary.trim() !== plan.summary.trim()) {
+    meta.push(plan.summary.trim() ? "Edited the summary." : "Removed the summary.");
+    if (changesOnly && plan.summary.trim()) meta.push(...indent(plan.summary, 2));
+  }
+  block("Plan", meta);
+  for (const id of touched("diagram")) {
+    const was = base.diagrams.find((d) => d.id === id);
+    const now = plan.diagrams.find((d) => d.id === id);
+    if (!was && now) {
+      block(`New diagram [${now.id}] "${now.title}"`, [
+        `${now.nodes.length} part(s), ${now.edges.length} connection(s)${changesOnly ? ":" : " \u2014 described in full below."}`,
+        ...changesOnly ? indent(diagramToMarkdown(contentOf(now), { tasks: plan.tasks, level: 4 }), 2) : []
+      ]);
+    } else if (was && !now) {
+      block(`Diagram "${was.title}"`, ["Removed the diagram."]);
+    } else if (was && now) {
+      block(`Diagram [${now.id}] "${now.title}"`, diagramChanges(contentOf(was), contentOf(now), opts));
+    }
+  }
+  if (unread.some((c) => c.kind === "moved" && c.target.kind === "diagram") && reordered(base.diagrams, plan.diagrams)) {
+    block("Diagrams", [`Reordered the diagrams: ${plan.diagrams.map((d) => `"${d.title}"`).join(", ")}.`]);
+  }
+  block("Tasks", taskChanges(base, plan, touched("task"), changesOnly));
+  block("Sections", sectionChanges(base, plan, touched("section"), unread, changesOnly));
+  const said = unread.filter((c) => ["commented", "replied", "resolved", "reopened"].includes(c.kind)).map((c) => `${capital(c.summary)}.`);
+  block("Comments", [...new Set(said)]);
+  const lead = changesOnly ? "_The net effect of their edits \u2014 not each step, and not where boxes were moved on the canvas._" : "_The net effect of their edits \u2014 not each step, and not where boxes were moved on the canvas. The full plan follows._";
+  if (!blocks.length) {
+    if (!sameContent(baselineOf(plan), base)) return renderChangeLog(unread);
+    return `## Since you last read
+The user made edits, but they cancel out: the plan's content is what you last read.`;
+  }
+  return ["## Since you last read \u2014 what the user changed", lead, "", blocks.join("\n\n")].join("\n");
+}
+function taskChanges(base, plan, ids, withText) {
+  const out = [];
+  const titleOf = (id) => id ? plan.tasks.find((t) => t.id === id)?.title ?? base.tasks.find((t) => t.id === id)?.title ?? id : null;
+  const where = (parentId) => parentId ? `under "${titleOf(parentId)}"` : "at the top level";
+  const place = (tasks, t) => tasks.filter((x) => x.parentId === t.parentId).sort((a, b) => a.order - b.order).findIndex((x) => x.id === t.id);
+  for (const id of ids) {
+    const was = base.tasks.find((t) => t.id === id);
+    const now = plan.tasks.find((t) => t.id === id);
+    if (!was && now) {
+      out.push(`Added ${now.id} "${now.title}" ${where(now.parentId)}.`);
+      if (withText && now.detail?.trim()) out.push(...indent(now.detail, 2));
+      continue;
+    }
+    if (was && !now) {
+      out.push(`Removed ${was.id} "${was.title}".`);
+      continue;
+    }
+    if (!was || !now) continue;
+    const facts = [];
+    if (was.title !== now.title) facts.push(`renamed from "${was.title}"`);
+    if (was.parentId !== now.parentId) facts.push(`moved ${where(now.parentId)}`);
+    else if (place(base.tasks, was) !== place(plan.tasks, now)) facts.push(`moved to position ${place(plan.tasks, now) + 1} ${where(now.parentId)}`);
+    if (was.status !== now.status) facts.push(`status ${was.status} \u2192 ${now.status}`);
+    if ((was.detail ?? "").trim() !== (now.detail ?? "").trim()) facts.push(now.detail?.trim() ? "detail edited" : "detail removed");
+    if ((was.files ?? []).join() !== (now.files ?? []).join()) facts.push(`files now ${now.files?.join(", ") || "none"}`);
+    if ((was.note ?? "") !== (now.note ?? "")) facts.push(now.note ? `note "${now.note}"` : "note removed");
+    if (!facts.length) continue;
+    out.push(`Changed ${now.id} "${now.title}": ${facts.join("; ")}.`);
+    if (withText && (was.detail ?? "").trim() !== (now.detail ?? "").trim() && now.detail?.trim()) out.push("  Detail now:", ...indent(now.detail, 4));
+  }
+  return out;
+}
+function sectionChanges(base, plan, ids, unread, withText) {
+  const out = [];
+  for (const id of ids) {
+    const was = base.sections.find((s) => s.id === id);
+    const now = plan.sections.find((s) => s.id === id);
+    if (!was && now) {
+      out.push(`Added [${now.id}] "${now.title}".`);
+      if (withText && now.body.trim()) out.push(...indent(now.body, 2));
+    } else if (was && !now) {
+      out.push(`Removed "${was.title}".`);
+    } else if (was && now) {
+      const facts = [];
+      if (was.title !== now.title) facts.push(`renamed from "${was.title}"`);
+      if (was.body.trim() !== now.body.trim()) facts.push("text edited");
+      if (facts.length) out.push(`Changed [${now.id}] "${now.title}": ${facts.join("; ")}.`);
+      if (withText && was.body.trim() !== now.body.trim()) out.push(...indent(now.body, 2));
+    }
+  }
+  if (unread.some((c) => c.kind === "moved" && c.target.kind === "section") && reordered(base.sections, plan.sections)) {
+    out.push(`Reordered the sections: ${plan.sections.map((s) => `"${s.title}"`).join(", ")}.`);
+  }
+  return out;
+}
+function reordered(was, now) {
+  const common = (list, other) => list.map((x) => x.id).filter((id) => other.some((o) => o.id === id));
+  return common(was, now).join("\0") !== common(now, was).join("\0");
+}
+function renderChangeLog(unread) {
+  const lines = [...new Set(unread.filter((c) => !/^rearranged \d+ node/.test(c.summary)).map((c) => `- ${c.summary} [${c.target.kind}${c.target.id ? ` ${c.target.id}` : ""}]`))];
+  return [`## Since you last read \u2014 ${lines.length} change(s) by the user`, ...lines].join("\n");
+}
+function capital(text) {
+  return text ? `${text[0].toUpperCase()}${text.slice(1)}` : text;
+}
+function renderThread(plan, t, reader = "claude") {
+  const who = (author) => author === "user" ? "user" : reader === "claude" ? "you" : "planner";
+  const lines = [`- [${t.id}] on ${describeTarget(plan, t.target)} \u2014 ${who(t.author)}: ${t.text}`];
+  for (const r of t.replies) lines.push(`  \u21B3 ${who(r.author)}: ${r.text}`);
+  if (reader === "claude" && lastAuthor(t) === "user") lines.push('  \u2192 reply with harness_plan_edit {op:"reply"} once you have acted on it');
+  return lines.join("\n");
+}
+function lastAuthor(t) {
+  return t.replies.length ? t.replies[t.replies.length - 1].author : t.author;
+}
+var STATUS_MARK2, STATUS_LEGEND, PROMPT_BUDGET, BUILD_MARKER;
+var init_render = __esm({
+  "src/daemon/render.ts"() {
+    "use strict";
+    init_plan();
+    init_architecture();
+    STATUS_MARK2 = { todo: "[ ]", in_progress: "[~]", blocked: "[!]", done: "[x]" };
+    STATUS_LEGEND = `_Statuses: ${Object.entries(STATUS_MARK2).map(([k, v]) => `${v} ${k}`).join(", ")}_`;
+    PROMPT_BUDGET = 9e3;
+    BUILD_MARKER = "[cc-harness] Build the plan";
   }
 });
 
@@ -1069,6 +1617,7 @@ function summarize(s) {
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     tasks: countTasks(plan),
+    phase: planPhase(plan),
     current: currentTask(plan)?.title ?? null,
     waiting: s.waiting,
     surface: s.surface,
@@ -1181,6 +1730,7 @@ var init_store = __esm({
     "use strict";
     init_paths();
     init_plan();
+    init_render();
     PERSIST_DEBOUNCE_MS = 400;
     SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
     MAX_SESSIONS = 60;
@@ -1366,6 +1916,54 @@ var init_store = __esm({
           s.plan = result.plan;
         });
         return result;
+      }
+      /**
+       * The user submits the plan to be built. The prompt is built here, from
+       * the plan as the daemon holds it, and only if that is still the version
+       * the user previewed — what they read is what Claude gets.
+       */
+      submit(id, input) {
+        const session = this.sessions.get(id);
+        if (!session) throw new Error("unknown session");
+        const plan = session.plan;
+        if (!plan) throw new PlanError("There is no plan to submit yet.");
+        if (typeof input.expect === "number" && input.expect !== plan.version) {
+          throw new PlanError("The plan changed while you were reviewing it. The preview now shows the latest version \u2014 check it, then submit again.");
+        }
+        const { prompt, trimmed } = buildPrompt(plan, { target: input.target, ...input.note ? { note: input.note } : {} });
+        const next = submitPlan(plan, { target: input.target, prompt, trimmed, ...input.note ? { note: input.note } : {} });
+        this.mutate(id, (s) => {
+          s.plan = next;
+        });
+        this.persistNow(id);
+        return next;
+      }
+      /** Unlock a submitted plan. */
+      reopen(id) {
+        const session = this.sessions.get(id);
+        if (!session) throw new Error("unknown session");
+        if (!session.plan) throw new PlanError("There is no plan.");
+        const next = reopenPlan(session.plan);
+        this.mutate(id, (s) => {
+          s.plan = next;
+        });
+        this.persistNow(id);
+        return next;
+      }
+      /**
+       * The build prompt is on its way to Claude, if one is waiting: returns it,
+       * and records that it went. Only ever once per submission.
+       */
+      deliver(id) {
+        const plan = this.sessions.get(id)?.plan;
+        const submission = plan?.submission;
+        if (!plan || !submission || submission.target !== "session" || submission.deliveredAt) return null;
+        const next = markDelivered(plan);
+        this.mutate(id, (s) => {
+          s.plan = next;
+        });
+        this.persistNow(id);
+        return next.submission ?? null;
       }
       /** Move Claude's read position to the end of the change log. */
       markRead(id) {

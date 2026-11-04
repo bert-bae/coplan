@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 var NODE_KINDS = ["component", "service", "datastore", "queue", "external", "actor", "note"];
 var EDGE_ARROWS = ["end", "both", "none"];
 var TASK_STATUSES = ["todo", "in_progress", "blocked", "done"];
+var BUILD_TARGETS = ["session", "elsewhere"];
 
 // src/shared/plan.ts
 var PlanError = class extends Error {
@@ -229,6 +230,7 @@ function baselineOf(plan) {
   });
 }
 function publishPlan(prev, input, now = Date.now()) {
+  if (prev?.submission && planPhase(prev) !== "built") throw new PlanError(LOCKED_FOR_CLAUDE);
   if (prev && unreadByClaude(prev).length > 0) {
     throw new PlanError(
       `The user has changed ${unreadItems(prev)} item(s) in the plan since you last read it. Call harness_plan_read first, then publish again (or use harness_plan_edit for targeted changes) so their edits are not overwritten.`
@@ -237,6 +239,7 @@ function publishPlan(prev, input, now = Date.now()) {
   const title = clean(input.title, MAX_TITLE);
   if (!title) throw new PlanError("A plan needs a title.");
   const base = prev ? structuredClone(prev) : emptyPlan(title, now);
+  delete base.submission;
   const next = { ...base, title, summary: clean(input.summary, MAX_TEXT) ?? base.summary };
   if ((input.sections?.length ?? 0) > MAX_SECTIONS) throw new PlanError(`A plan holds at most ${MAX_SECTIONS} sections.`);
   if ((input.diagrams?.length ?? 0) > MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
@@ -359,10 +362,14 @@ function normalizePlan(raw, fallbackTitle) {
   const baseline = validBaseline(raw.claudeBaseline);
   if (baseline) plan.claudeBaseline = baseline;
   else delete plan.claudeBaseline;
+  const submission = validSubmission(raw.submission);
+  if (submission) plan.submission = submission;
+  else delete plan.submission;
   return plan;
 }
 function applyOps(plan, ops, author, now = Date.now()) {
   if (!Array.isArray(ops) || ops.length === 0) throw new PlanError("No edits were given.");
+  if (plan.submission) checkLocked(ops, author);
   const next = structuredClone(plan);
   const changes = [];
   ops.forEach((op, i) => {
@@ -657,6 +664,39 @@ function removeItem(plan, kind, id, log) {
   plan.threads = plan.threads.map((t) => detachIfOrphaned(plan, before, t));
   return [log("deleted", { kind, id }, summary)];
 }
+var TRACKING_OPS = /* @__PURE__ */ new Set(["upsert_task", "reply", "resolve"]);
+var LOCKED_FOR_USER = "The plan has been submitted to be built, so it is locked. Reopen it to make changes.";
+var LOCKED_FOR_CLAUDE = "The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or upsert_task to add work you discover) and comment replies (reply, resolve) apply. If the design has to change, ask the user in chat \u2014 they can reopen the plan in the harness.";
+function planPhase(plan) {
+  const submission = plan?.submission;
+  if (!submission) return "planning";
+  if (submission.target === "elsewhere") return "handed-off";
+  if (!submission.deliveredAt) return "submitted";
+  const counts = countTasks(plan);
+  return counts.total > 0 && counts.done === counts.total ? "built" : "building";
+}
+function checkLocked(ops, author) {
+  if (author === "user") throw new PlanError(LOCKED_FOR_USER);
+  const refused = ops.find((op) => !TRACKING_OPS.has(op?.op ?? ""));
+  if (refused) throw new PlanError(`${LOCKED_FOR_CLAUDE} (Refused: ${refused?.op ?? "an edit"}.)`);
+}
+function validTarget(value) {
+  return BUILD_TARGETS.includes(value) ? value : void 0;
+}
+function validSubmission(raw) {
+  const s = raw;
+  if (!s || typeof s !== "object") return void 0;
+  const target = validTarget(s.target);
+  if (!target || typeof s.at !== "number" || typeof s.prompt !== "string" || !s.prompt) return void 0;
+  return {
+    at: s.at,
+    target,
+    ...typeof s.note === "string" && s.note ? { note: s.note } : {},
+    prompt: s.prompt,
+    ...s.trimmed === true ? { trimmed: true } : {},
+    deliveredAt: typeof s.deliveredAt === "number" ? s.deliveredAt : null
+  };
+}
 var MAX_NODES = 120;
 var MAX_EDGES = 300;
 var MAX_DESCRIPTION = 4e3;
@@ -786,9 +826,9 @@ function layoutChanged(before, after) {
 }
 function checkRev(item, expect, kind, author) {
   if (typeof expect !== "number" || expect === item.rev) return;
-  const who2 = item.updatedBy === author ? "another edit" : item.updatedBy === "claude" ? "Claude" : "the user";
+  const who = item.updatedBy === author ? "another edit" : item.updatedBy === "claude" ? "Claude" : "the user";
   throw new PlanError(
-    `${kind[0].toUpperCase()}${kind.slice(1)} "${item.title}" was changed by ${who2} while this edit was open, so it was not saved. It now shows the latest version.`
+    `${kind[0].toUpperCase()}${kind.slice(1)} "${item.title}" was changed by ${who} while this edit was open, so it was not saved. It now shows the latest version.`
   );
 }
 function taskIdSet(plan) {
@@ -1211,6 +1251,8 @@ function renderPlan(plan, opts = {}) {
     `${plan.threads.filter((t) => !t.resolved).length} open comment(s)`
   ];
   out.push(`_${meta.join(" \xB7 ")}${opts.url ? ` \xB7 UI: ${opts.url}` : ""}_`);
+  const locked = lockLine(plan);
+  if (locked) out.push("", locked);
   out.push("");
   out.push(renderChanges(plan, unread, Boolean(opts.changesOnly)));
   if (opts.changesOnly) {
@@ -1219,37 +1261,63 @@ function renderPlan(plan, opts = {}) {
     if (threads.length) out.push("", "## Comments waiting on you", ...threads.map((t) => renderThread(plan, t)));
     return out.join("\n").trim();
   }
+  out.push(...renderDocument(plan));
+  return out.join("\n").trim();
+}
+function renderDocument(plan, opts = {}) {
+  const { attribution = true, details = true, reader = "claude" } = opts;
+  const out = [];
   if (plan.summary.trim()) out.push("", "## Summary", plan.summary.trim());
   if (plan.sections.length) {
     out.push("", "## Sections");
     for (const s of plan.sections) {
-      out.push("", `### [${s.id}] ${s.title}${s.updatedBy === "user" ? " _(edited by the user)_" : ""}`, s.body.trim() || "_(empty)_");
+      const by = attribution && s.updatedBy === "user" ? " _(edited by the user)_" : "";
+      out.push("", `### [${s.id}] ${s.title}${by}`, s.body.trim() || "_(empty)_");
     }
   }
   if (plan.diagrams.length) {
     out.push("", "## Architecture");
     for (const d of plan.diagrams) {
-      out.push("", diagramToMarkdown(d, { tasks: plan.tasks, note: d.updatedBy === "user" ? "last edited by the user" : void 0 }));
+      const note = attribution && d.updatedBy === "user" ? "last edited by the user" : void 0;
+      out.push("", diagramToMarkdown(d, { tasks: plan.tasks, note }));
     }
   }
-  out.push("", `## Tasks${counts.total ? ` (${counts.done}/${counts.total} done)` : ""}`);
+  out.push("", ...renderTasks(plan, { attribution, details }));
+  const open = plan.threads.filter((t) => !t.resolved);
+  if (open.length) {
+    out.push("", "## Open comments");
+    for (const t of open) out.push(renderThread(plan, t, reader));
+  }
+  out.push("", STATUS_LEGEND);
+  return out;
+}
+var STATUS_LEGEND = `_Statuses: ${Object.entries(STATUS_MARK2).map(([k, v]) => `${v} ${k}`).join(", ")}_`;
+function renderTasks(plan, opts = {}) {
+  const counts = countTasks(plan);
+  const out = [`## Tasks${counts.total ? ` (${counts.done}/${counts.total} done)` : ""}`];
   const rows = outline(plan);
   if (rows.length === 0) out.push("_(no tasks yet)_");
   for (const { task, depth } of rows) {
     const pad = "  ".repeat(depth);
-    const by = task.createdBy === "user" ? " _(added by the user)_" : "";
+    const by = opts.attribution !== false && task.createdBy === "user" ? " _(added by the user)_" : "";
     const note = task.note ? ` \u2014 ${task.note}` : "";
     out.push(`${pad}- ${STATUS_MARK2[task.status]} ${task.id} ${task.title}${by}${note}`);
     if (task.files?.length) out.push(`${pad}  files: ${task.files.join(", ")}`);
-    if (task.detail) for (const line of task.detail.trim().split("\n")) out.push(`${pad}  ${line}`);
+    if (opts.details !== false && task.detail) for (const line of task.detail.trim().split("\n")) out.push(`${pad}  ${line}`);
   }
-  const open = plan.threads.filter((t) => !t.resolved);
-  if (open.length) {
-    out.push("", "## Open comments");
-    for (const t of open) out.push(renderThread(plan, t));
+  return out;
+}
+function lockLine(plan) {
+  switch (planPhase(plan)) {
+    case "planning":
+      return null;
+    case "handed-off":
+      return "> **Locked.** The user submitted this plan to be built outside this session; it no longer changes here.";
+    case "built":
+      return "> **Built.** The user submitted this plan and every task is done. Publishing a new plan replaces it.";
+    default:
+      return "> **Locked for building.** The user submitted this plan: build it task by task, keeping statuses true with harness_task_update. Only task updates and comment replies apply now; if the design has to change, ask the user in chat \u2014 they can reopen the plan in the harness.";
   }
-  out.push("", `_Statuses: ${Object.entries(STATUS_MARK2).map(([k, v]) => `${v} ${k}`).join(", ")}_`);
-  return out.join("\n").trim();
 }
 function renderChanges(plan, unread, changesOnly) {
   if (unread.length === 0) {
@@ -1367,14 +1435,12 @@ function renderChangeLog(unread) {
 function capital(text) {
   return text ? `${text[0].toUpperCase()}${text.slice(1)}` : text;
 }
-function renderThread(plan, t) {
+function renderThread(plan, t, reader = "claude") {
+  const who = (author) => author === "user" ? "user" : reader === "claude" ? "you" : "planner";
   const lines = [`- [${t.id}] on ${describeTarget(plan, t.target)} \u2014 ${who(t.author)}: ${t.text}`];
   for (const r of t.replies) lines.push(`  \u21B3 ${who(r.author)}: ${r.text}`);
-  if (lastAuthor(t) === "user") lines.push('  \u2192 reply with harness_plan_edit {op:"reply"} once you have acted on it');
+  if (reader === "claude" && lastAuthor(t) === "user") lines.push('  \u2192 reply with harness_plan_edit {op:"reply"} once you have acted on it');
   return lines.join("\n");
-}
-function who(author) {
-  return author === "user" ? "user" : "you";
 }
 function lastAuthor(t) {
   return t.replies.length ? t.replies[t.replies.length - 1].author : t.author;

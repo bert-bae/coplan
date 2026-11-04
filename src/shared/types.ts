@@ -213,6 +213,45 @@ export interface Change {
   summary: string;
 }
 
+/**
+ * Who builds a submitted plan.
+ *
+ * - `session` — the Claude session the plan belongs to. The harness hands it
+ *   the prompt with the user's next message in its chat, and follows its
+ *   progress on the task board as it reports each task.
+ * - `elsewhere` — the user took the prompt to run somewhere the harness
+ *   cannot see. The plan is locked all the same, but nothing reports back.
+ */
+export const BUILD_TARGETS = ['session', 'elsewhere'] as const;
+export type BuildTarget = (typeof BUILD_TARGETS)[number];
+
+/**
+ * The user's sign-off on the plan. From then on the design is final: the
+ * plan is locked, and the harness's only job is to show the build moving
+ * across the task board.
+ */
+export interface Submission {
+  at: number;
+  target: BuildTarget;
+  /** Anything the user added for Claude when submitting. */
+  note?: string;
+  /** The prompt, exactly as the user previewed it before submitting. */
+  prompt: string;
+  /** The plan was too long to quote whole in a prompt; it points Claude at
+   *  `harness_plan_read` for the rest. */
+  trimmed?: boolean;
+  /** When the prompt reached Claude. Null until the user's next message in
+   *  Claude's chat carries it — and always null for `elsewhere`. */
+  deliveredAt: number | null;
+}
+
+/**
+ * Where a plan is in its life, derived from its submission and its tasks:
+ * being shaped, handed over and waiting for Claude to pick it up, being
+ * built, built, or handed to something outside the harness.
+ */
+export type PlanPhase = 'planning' | 'submitted' | 'building' | 'built' | 'handed-off';
+
 export interface Plan {
   title: string;
   /** Markdown: the one-paragraph version of the whole plan. */
@@ -237,6 +276,10 @@ export interface Plan {
    *  user's edits, not every step they took to get there. Daemon-side only:
    *  never sent to the browser. */
   claudeBaseline?: PlanBaseline;
+  /** Set once the user submits the plan to be built. While it is set the
+   *  plan is locked: the user changes nothing, and Claude only tracks tasks
+   *  and replies to comments. */
+  submission?: Submission;
   /** Bumped each time Claude publishes the plan wholesale. */
   revision: number;
   createdAt: number;
@@ -407,6 +450,8 @@ export interface SessionSummary {
   createdAt: number;
   updatedAt: number;
   tasks: TaskCounts;
+  /** Planning, or submitted and being built. */
+  phase: PlanPhase;
   /** The task Claude is on, for the rail. */
   current: string | null;
   waiting: WaitingState | null;

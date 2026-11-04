@@ -26,7 +26,7 @@ import { classNames } from '../lib/format.ts';
 import { NODE_KINDS, type Diagram, type DiagramDirection, type DiagramEdgeInput, type DiagramNodeInput, type NodeKind, type Plan } from '../../shared/types.ts';
 import { PlanNode } from './flow/PlanNode.tsx';
 import { PlanEdge } from './flow/PlanEdge.tsx';
-import { EdgePanel, NodePanel, SelectionPanel } from './flow/Panels.tsx';
+import { EdgePanel, NodePanel, ReadOnlyPanel, SelectionPanel } from './flow/Panels.tsx';
 import { ContextMenu, type MenuEntry } from './flow/ContextMenu.tsx';
 import { ALT, MOD, ShortcutsOverlay } from './flow/Shortcuts.tsx';
 import {
@@ -87,6 +87,8 @@ export function DiagramEditor(props: {
   onSave: (patch: GraphPatch) => Promise<number | null>;
   /** The panel's content when nothing is selected: the diagram itself. */
   aside: ReactNode;
+  /** The plan is submitted: show the design, change nothing. */
+  readOnly?: boolean;
 }) {
   return (
     <ReactFlowProvider>
@@ -136,11 +138,13 @@ function Editor({
   plan,
   onSave,
   aside,
+  readOnly = false,
 }: {
   diagram: Diagram;
   plan: Plan;
   onSave: (patch: GraphPatch) => Promise<number | null>;
   aside: ReactNode;
+  readOnly?: boolean;
 }) {
   const theme = useResolvedTheme();
   const flow = useReactFlow<FlowNode, FlowEdge>();
@@ -165,6 +169,8 @@ function Editor({
   edgesRef.current = edges;
   const planRef = useRef(plan);
   planRef.current = plan;
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
   const dragging = useRef(false);
   const queue = useRef<{ pending: GraphPatch | null; busy: boolean }>({ pending: null, busy: false });
   /** Where the pointer is on the canvas, in flow coordinates, for pasting. */
@@ -309,6 +315,8 @@ function Editor({
    */
   const persist = useCallback(
     (ns: FlowNode[], es: FlowEdge[], direction?: DiagramDirection, opts: { record?: boolean } = {}) => {
+      // A submitted plan is final; whatever path got here, nothing is saved.
+      if (readOnlyRef.current) return;
       const dir = direction ?? current.current.direction;
       const patch = patchOf(ns, es, dir);
       const key = JSON.stringify(patch);
@@ -378,7 +386,10 @@ function Editor({
   /* ---------------------------- editing ---------------------------- */
 
   const onNodesChange = useCallback(
-    (changes: NodeChange<FlowNode>[]) => {
+    (all: NodeChange<FlowNode>[]) => {
+      // Read-only: selecting and measuring, never moving or removing.
+      const changes = readOnlyRef.current ? all.filter((c) => c.type !== 'position' && c.type !== 'remove') : all;
+      if (changes.length === 0) return;
       setNodes((ns) => applyNodeChanges(changes, ns));
       // Arrow keys move selected boxes through here rather than as a drag,
       // so nothing else would save them. Save once the keys stop; a drag's
@@ -404,7 +415,13 @@ function Editor({
     },
     [],
   );
-  const onEdgesChange = useCallback((changes: EdgeChange<FlowEdge>[]) => setEdges((es) => applyEdgeChanges(changes, es)), []);
+  const onEdgesChange = useCallback(
+    (all: EdgeChange<FlowEdge>[]) => {
+      const changes = readOnlyRef.current ? all.filter((c) => c.type !== 'remove') : all;
+      if (changes.length) setEdges((es) => applyEdgeChanges(changes, es));
+    },
+    [],
+  );
 
   const connect = useCallback(
     (source: string, target: string, base: FlowEdge[] = edgesRef.current, ns: FlowNode[] = nodesRef.current) => {
@@ -968,14 +985,14 @@ function Editor({
       if (copySelection(e.clipboardData)) e.preventDefault();
     };
     const onCut = (e: ClipboardEvent) => {
-      if (!ours(e) || !nodesRef.current.some((n) => n.selected)) return;
+      if (readOnlyRef.current || !ours(e) || !nodesRef.current.some((n) => n.selected)) return;
       if (copySelection(e.clipboardData)) {
         e.preventDefault();
         removeSelected();
       }
     };
     const onPaste = (e: ClipboardEvent) => {
-      if (!ours(e)) return;
+      if (readOnlyRef.current || !ours(e)) return;
       const text = e.clipboardData?.getData('text/plain');
       // Something else on the clipboard is not ours to paste.
       const clip = text ? parseClip(text) : lastClip;
@@ -999,6 +1016,14 @@ function Editor({
         e.preventDefault();
         e.stopPropagation();
       };
+      if (readOnlyRef.current) {
+        // Looking, not editing: select, fit and clear — nothing that changes it.
+        if (mod && key === 'a' && !e.shiftKey) return claim(), k.selectAll();
+        if (!mod && e.shiftKey && e.code === 'Digit1') return claim(), k.fitAll();
+        if (!mod && e.shiftKey && e.code === 'Digit2') return claim(), k.fitSelection();
+        if (e.key === 'Escape') k.clearSelection();
+        return;
+      }
       if (mod) {
         if (key === 'z') return claim(), e.shiftKey ? k.redo() : k.undo();
         if (key === 'y') return claim(), k.redo();
@@ -1048,10 +1073,14 @@ function Editor({
   const api = useMemo<CanvasApi>(
     () => ({
       direction: diagram.direction,
-      editing,
+      editing: readOnly ? null : editing,
       editSeed,
-      startEditing: (key) => setEditing(key),
-      startReconnect,
+      startEditing: (key) => {
+        if (!readOnly) setEditing(key);
+      },
+      startReconnect: (edgeId, end, event) => {
+        if (!readOnly) startReconnect(edgeId, end, event);
+      },
       hoverEdge,
       finishNodeLabel: (id, label) => {
         setEditing(null);
@@ -1067,7 +1096,7 @@ function Editor({
       selectEdge: (id) => select('edge', id),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the updaters read live state through refs
-    [diagram.direction, editing, editSeed, select, startReconnect, hoverEdge, setEditing],
+    [diagram.direction, editing, editSeed, select, startReconnect, hoverEdge, setEditing, readOnly],
   );
 
   /* ------------------------ what is drawn -------------------------- */
@@ -1114,7 +1143,7 @@ function Editor({
     return edges.map((e) => {
       const rel = relations?.edges.get(e.id);
       const dim = Boolean(relations) && !rel;
-      const grips = !reconnect && e.source !== e.target && (Boolean(e.selected) || hoverEdgeId === e.id);
+      const grips = !readOnly && !reconnect && e.source !== e.target && (Boolean(e.selected) || hoverEdgeId === e.id);
       const lane = offsets.get(e.id);
       const drop = dropEdge === e.id;
       const moving = reconnect?.edgeId === e.id;
@@ -1130,12 +1159,24 @@ function Editor({
         data: { ...e.data, ...(lane !== undefined ? { lane } : {}), ...(rel ? { rel } : {}), ...(dim ? { dim } : {}), ...(grips ? { grips } : {}), ...(drop ? { dropTarget: true } : {}) },
       };
     });
-  }, [edges, relations, reconnect, hoverEdgeId, dropEdge]);
+  }, [edges, relations, reconnect, hoverEdgeId, dropEdge, readOnly]);
 
   /* ------------------------------ panel ----------------------------- */
 
   let panel: ReactNode;
-  if (selectedNodes.length === 1 && selectedEdges.length === 0) {
+  if (readOnly && selectedNodes.length + selectedEdges.length > 0) {
+    panel = (
+      <ReadOnlyPanel
+        nodes={nodes}
+        edges={edges}
+        selectedNodes={selectedNodes}
+        selectedEdges={selectedEdges}
+        plan={plan}
+        onSelect={select}
+        onClose={clearSelection}
+      />
+    );
+  } else if (selectedNodes.length === 1 && selectedEdges.length === 0) {
     const node = selectedNodes[0]!;
     panel = (
       <NodePanel
@@ -1192,7 +1233,7 @@ function Editor({
       <div className="arch-body">
         <div
           ref={wrapper}
-          className={classNames('flow', reconnect && 'is-reconnecting')}
+          className={classNames('flow', reconnect && 'is-reconnecting', readOnly && 'is-readonly')}
           onMouseMove={(e) => {
             pointer.current = flow.screenToFlowPosition({ x: e.clientX, y: e.clientY });
           }}
@@ -1200,6 +1241,7 @@ function Editor({
             pointer.current = null;
           }}
           onDoubleClick={(e) => {
+            if (readOnly) return;
             const el = e.target as HTMLElement;
             if (el.closest('.react-flow__node, .react-flow__edge, .react-flow__panel, .flow-edge-label, .flow-menu')) return;
             if (!el.closest('.react-flow__pane')) return;
@@ -1213,25 +1255,29 @@ function Editor({
             edgeTypes={edgeTypes}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            onConnectEnd={onConnectEnd}
-            onDelete={onDelete}
+            onConnect={readOnly ? undefined : onConnect}
+            onConnectEnd={readOnly ? undefined : onConnectEnd}
+            onDelete={readOnly ? undefined : onDelete}
+            nodesDraggable={!readOnly}
+            nodesConnectable={!readOnly}
             onNodeDragStart={onDragStart}
             onNodeDrag={onNodeDrag}
             onNodeDragStop={onNodeDragStop}
             onSelectionDragStart={onDragStart}
             onSelectionDragStop={onSelectionDragStop}
-            onNodeDoubleClick={(_, node) => setEditing(`node:${node.id}`)}
-            onEdgeDoubleClick={(_, edge) => setEditing(`edge:${edge.id}`)}
+            onNodeDoubleClick={(_, node) => !readOnly && setEditing(`node:${node.id}`)}
+            onEdgeDoubleClick={(_, edge) => !readOnly && setEditing(`edge:${edge.id}`)}
             onNodeMouseEnter={(_, node) => setHoverNode(node.id)}
             onNodeMouseLeave={() => setHoverNode(null)}
             onEdgeMouseEnter={(_, edge) => hoverEdge(edge.id)}
             onEdgeMouseLeave={() => hoverEdge(null)}
             onPaneContextMenu={(e) => {
+              if (readOnly) return;
               e.preventDefault();
               openMenu({ x: e.clientX, y: e.clientY }, { kind: 'pane' });
             }}
             onNodeContextMenu={(e, node) => {
+              if (readOnly) return;
               e.preventDefault();
               const many = nodesRef.current.filter((n) => n.selected).length + edgesRef.current.filter((x) => x.selected).length > 1;
               if (node.selected && many) return openMenu({ x: e.clientX, y: e.clientY }, { kind: 'selection' });
@@ -1239,17 +1285,19 @@ function Editor({
               openMenu({ x: e.clientX, y: e.clientY }, { kind: 'node', id: node.id });
             }}
             onEdgeContextMenu={(e, edge) => {
+              if (readOnly) return;
               e.preventDefault();
               select('edge', edge.id);
               openMenu({ x: e.clientX, y: e.clientY }, { kind: 'edge', id: edge.id });
             }}
             onSelectionContextMenu={(e) => {
+              if (readOnly) return;
               e.preventDefault();
               openMenu({ x: e.clientX, y: e.clientY }, { kind: 'selection' });
             }}
             onMoveStart={() => setMenu(null)}
             connectionMode={ConnectionMode.Loose}
-            deleteKeyCode={['Backspace', 'Delete']}
+            deleteKeyCode={readOnly ? null : ['Backspace', 'Delete']}
             zoomOnDoubleClick={false}
             colorMode={theme}
             fitView
@@ -1261,6 +1309,13 @@ function Editor({
             <Background gap={18} size={1} />
             <Controls showInteractive={false} position="bottom-left" fitViewOptions={FIT} />
             <MiniMap pannable zoomable position="bottom-right" style={{ width: 150, height: 96 }} nodeBorderRadius={4} />
+            {readOnly ? (
+              <Panel position="top-left" className="flow-toolbar">
+                <span className="flow-locked" title="The plan is submitted; reopen it to change the design">
+                  <span aria-hidden="true">🔒</span> Final design
+                </span>
+              </Panel>
+            ) : (
             <Panel position="top-left" className="flow-toolbar">
               <AddMenu onAdd={(kind) => addNode(kind)} />
               <button type="button" className="btn btn-sm" title="Lay the whole diagram out again, along its flow" onClick={() => relayout(diagram.direction)}>
@@ -1286,6 +1341,7 @@ function Editor({
                 ?
               </button>
             </Panel>
+            )}
             {relations && (
               <Panel position="bottom-center" className="flow-legend">
                 <span className="flow-legend-item rel-from" title="Boxes with an arrow into it">

@@ -2,8 +2,23 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { paths, ensureHome, sanitizeId } from '../shared/paths.ts';
-import { applyOps, countTasks, currentTask, emptyPlan, markReadByClaude, normalizePlan, publishPlan, unreadItems } from '../shared/plan.ts';
-import type { Author, Change, Plan, PlanInput, PlanOp, ServerEvent, SessionState, SessionSummary } from '../shared/types.ts';
+import {
+  PlanError,
+  applyOps,
+  countTasks,
+  currentTask,
+  emptyPlan,
+  markDelivered,
+  markReadByClaude,
+  normalizePlan,
+  planPhase,
+  publishPlan,
+  reopenPlan,
+  submitPlan,
+  unreadItems,
+} from '../shared/plan.ts';
+import { buildPrompt } from './render.ts';
+import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ServerEvent, SessionState, SessionSummary, Submission } from '../shared/types.ts';
 
 const PERSIST_DEBOUNCE_MS = 400;
 
@@ -254,6 +269,57 @@ export class SessionStore extends EventEmitter {
     return result;
   }
 
+  /**
+   * The user submits the plan to be built. The prompt is built here, from
+   * the plan as the daemon holds it, and only if that is still the version
+   * the user previewed — what they read is what Claude gets.
+   */
+  submit(id: string, input: { target: BuildTarget; note?: string; expect?: number }): Plan {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error('unknown session');
+    const plan = session.plan;
+    if (!plan) throw new PlanError('There is no plan to submit yet.');
+    if (typeof input.expect === 'number' && input.expect !== plan.version) {
+      throw new PlanError('The plan changed while you were reviewing it. The preview now shows the latest version — check it, then submit again.');
+    }
+    const { prompt, trimmed } = buildPrompt(plan, { target: input.target, ...(input.note ? { note: input.note } : {}) });
+    const next = submitPlan(plan, { target: input.target, prompt, trimmed, ...(input.note ? { note: input.note } : {}) });
+    this.mutate(id, (s) => {
+      s.plan = next;
+    });
+    this.persistNow(id);
+    return next;
+  }
+
+  /** Unlock a submitted plan. */
+  reopen(id: string): Plan {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error('unknown session');
+    if (!session.plan) throw new PlanError('There is no plan.');
+    const next = reopenPlan(session.plan);
+    this.mutate(id, (s) => {
+      s.plan = next;
+    });
+    this.persistNow(id);
+    return next;
+  }
+
+  /**
+   * The build prompt is on its way to Claude, if one is waiting: returns it,
+   * and records that it went. Only ever once per submission.
+   */
+  deliver(id: string): Submission | null {
+    const plan = this.sessions.get(id)?.plan;
+    const submission = plan?.submission;
+    if (!plan || !submission || submission.target !== 'session' || submission.deliveredAt) return null;
+    const next = markDelivered(plan);
+    this.mutate(id, (s) => {
+      s.plan = next;
+    });
+    this.persistNow(id);
+    return next.submission ?? null;
+  }
+
   /** Move Claude's read position to the end of the change log. */
   markRead(id: string): void {
     const session = this.sessions.get(id);
@@ -303,6 +369,7 @@ export function summarize(s: SessionState): SessionSummary {
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     tasks: countTasks(plan),
+    phase: planPhase(plan),
     current: currentTask(plan)?.title ?? null,
     waiting: s.waiting,
     surface: s.surface,

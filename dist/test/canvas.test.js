@@ -44,6 +44,15 @@ var init_api = __esm({
       }),
       /** The plan exactly as Claude reads it. */
       planText: (id) => request(`/api/session/${id}/plan/text`),
+      /** The prompt Claude would be given if the plan were submitted now. */
+      promptPreview: (id, target, note) => request(`/api/session/${id}/plan/prompt`, {
+        method: "POST",
+        body: JSON.stringify({ target, note })
+      }),
+      /** Lock the plan and hand it over to be built. `expect` is the version
+       *  the preview was made from; a plan that moved on since is refused. */
+      submitPlan: (id, body) => request(`/api/session/${id}/plan/submit`, { method: "POST", body: JSON.stringify(body) }),
+      reopenPlan: (id) => request(`/api/session/${id}/plan/reopen`, { method: "POST", body: "{}" }),
       /* ---------------------- daemon-wide actions ---------------------- */
       storage: () => request("/api/storage"),
       cleanStorage: (groups) => request("/api/storage/clean", {
@@ -53,6 +62,1135 @@ var init_api = __esm({
       restartDaemon: () => request("/api/daemon/restart", { method: "POST", body: "{}" }),
       /** Unauthenticated liveness; `pid` tells a successor from a survivor. */
       health: () => request("/health")
+    };
+  }
+});
+
+// src/shared/types.ts
+var NODE_KINDS, EDGE_ARROWS, TASK_STATUSES, BUILD_TARGETS;
+var init_types = __esm({
+  "src/shared/types.ts"() {
+    "use strict";
+    NODE_KINDS = ["component", "service", "datastore", "queue", "external", "actor", "note"];
+    EDGE_ARROWS = ["end", "both", "none"];
+    TASK_STATUSES = ["todo", "in_progress", "blocked", "done"];
+    BUILD_TARGETS = ["session", "elsewhere"];
+  }
+});
+
+// src/shared/plan.ts
+var plan_exports = {};
+__export(plan_exports, {
+  MAX_CHANGES: () => MAX_CHANGES,
+  MAX_NOTE: () => MAX_NOTE,
+  PlanError: () => PlanError,
+  applyOps: () => applyOps,
+  baselineOf: () => baselineOf,
+  childrenOf: () => childrenOf,
+  cleanNote: () => cleanNote,
+  countTasks: () => countTasks,
+  currentTask: () => currentTask,
+  descendants: () => descendants,
+  describeTarget: () => describeTarget,
+  emptyPlan: () => emptyPlan,
+  flowRanks: () => flowRanks,
+  isLocked: () => isLocked,
+  markDelivered: () => markDelivered,
+  markReadByClaude: () => markReadByClaude,
+  matchEdges: () => matchEdges,
+  normalizePlan: () => normalizePlan,
+  outline: () => outline,
+  planPhase: () => planPhase,
+  publishPlan: () => publishPlan,
+  reopenPlan: () => reopenPlan,
+  sameContent: () => sameContent,
+  short: () => short,
+  submitPlan: () => submitPlan,
+  suggestDirection: () => suggestDirection,
+  targetExists: () => targetExists,
+  unreadAreas: () => unreadAreas,
+  unreadByClaude: () => unreadByClaude,
+  unreadItems: () => unreadItems,
+  validTarget: () => validTarget
+});
+function emptyPlan(title = "Untitled plan", now = Date.now()) {
+  return {
+    title,
+    summary: "",
+    sections: [],
+    diagrams: [],
+    tasks: [],
+    threads: [],
+    changes: [],
+    seq: 0,
+    version: 0,
+    claudeReadSeq: 0,
+    claudeReadAt: null,
+    revision: 0,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+function nextId(plan, kind) {
+  const prefix = PREFIX[kind];
+  let max = 0;
+  const scan = (id) => {
+    if (!id.startsWith(prefix)) return;
+    const n = Number(id.slice(prefix.length));
+    if (Number.isInteger(n) && n > max) max = n;
+  };
+  for (const s of plan.sections) scan(s.id);
+  for (const d of plan.diagrams) scan(d.id);
+  for (const t of plan.tasks) scan(t.id);
+  for (const c of plan.threads) scan(c.id);
+  for (const ch of plan.changes) scan(ch.target.id);
+  return `${prefix}${max + 1}`;
+}
+function idTaken(plan, id) {
+  return plan.sections.some((s) => s.id === id) || plan.diagrams.some((d) => d.id === id) || plan.tasks.some((t) => t.id === id) || plan.threads.some((c) => c.id === id);
+}
+function claimId(plan, kind, wanted) {
+  const id = clean(wanted, 40);
+  if (id && /^[A-Za-z0-9_.-]+$/.test(id) && !idTaken(plan, id)) return id;
+  return nextId(plan, kind);
+}
+function record(plan, author, kind, target, summary, now) {
+  plan.seq += 1;
+  plan.version += 1;
+  const change = { seq: plan.seq, ts: now, author, kind, target, summary };
+  plan.changes.push(change);
+  if (plan.changes.length > MAX_CHANGES) plan.changes.splice(0, plan.changes.length - MAX_CHANGES);
+  plan.updatedAt = now;
+  return change;
+}
+function unreadByClaude(plan) {
+  if (!plan) return [];
+  return plan.changes.filter((c) => c.seq > plan.claudeReadSeq && c.author === "user");
+}
+function unreadItems(plan) {
+  return new Set(unreadByClaude(plan).map((c) => `${c.target.kind}:${c.target.id}`)).size;
+}
+function unreadAreas(plan) {
+  const areas = [];
+  const add = (what) => void (areas.includes(what) || areas.push(what));
+  for (const c of unreadByClaude(plan)) {
+    if (["commented", "replied", "resolved", "reopened"].includes(c.kind)) add("comments");
+    else if (c.target.kind === "diagram") add(`the "${plan.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
+    else if (c.target.kind === "task") add("tasks");
+    else if (c.target.kind === "section") add("sections");
+    else if (c.summary.startsWith(RENAMED_PLAN)) add("the plan's title");
+    else add("the summary");
+  }
+  return areas;
+}
+function markReadByClaude(plan, now = Date.now()) {
+  plan.claudeReadSeq = plan.seq;
+  plan.claudeReadAt = now;
+  plan.claudeBaseline = baselineOf(plan);
+}
+function settleClaudeRead(plan) {
+  if (unreadByClaude(plan).length > 0) return;
+  plan.claudeReadSeq = plan.seq;
+  plan.claudeBaseline = baselineOf(plan);
+}
+function foldClaudeEdit(base, before, after2) {
+  const out = structuredClone(base);
+  if (before.title !== after2.title) out.title = after2.title;
+  if (before.summary !== after2.summary) out.summary = after2.summary;
+  out.sections = foldList(out.sections, before.sections, after2.sections, foldFields);
+  out.tasks = foldList(out.tasks, before.tasks, after2.tasks, foldFields);
+  out.diagrams = foldList(out.diagrams, before.diagrams, after2.diagrams, (o, b, a) => {
+    const { nodes: _on, edges: _oe, ...meta } = o;
+    const { nodes: _bn, edges: _be, ...bMeta } = b;
+    const { nodes: _an, edges: _ae, ...aMeta } = a;
+    return {
+      ...foldFields(meta, bMeta, aMeta),
+      nodes: foldList(o.nodes, b.nodes, a.nodes, foldFields),
+      edges: foldEdges(o.edges, b.edges, a.edges)
+    };
+  });
+  return out;
+}
+function foldFields(o, b, a) {
+  const out = { ...o };
+  const was = b;
+  const now = a;
+  for (const key of /* @__PURE__ */ new Set([...Object.keys(was), ...Object.keys(now)])) {
+    if (JSON.stringify(was[key]) === JSON.stringify(now[key])) continue;
+    if (now[key] === void 0) delete out[key];
+    else out[key] = structuredClone(now[key]);
+  }
+  return out;
+}
+function foldList(base, before, after2, merge) {
+  const has = (list, id) => list.some((x) => x.id === id);
+  let out = base.filter((x) => !(has(before, x.id) && !has(after2, x.id)));
+  for (const a of after2) {
+    const b = before.find((x) => x.id === a.id);
+    const i = out.findIndex((x) => x.id === a.id);
+    if (b && i >= 0 && JSON.stringify(b) !== JSON.stringify(a)) out[i] = merge(out[i], b, a);
+  }
+  const order = (list) => list.filter((x) => has(after2, x.id) && has(before, x.id)).map((x) => x.id).join("\0");
+  if (order(before) !== order(after2)) {
+    const at = new Map(after2.map((x, i) => [x.id, i]));
+    let last = -1;
+    const rank = new Map(
+      out.map((x) => {
+        const i = at.get(x.id);
+        if (i !== void 0) last = i;
+        return [x.id, i ?? last + 0.5];
+      })
+    );
+    out = [...out].sort((x, y) => rank.get(x.id) - rank.get(y.id));
+  }
+  after2.forEach((a, i) => {
+    if (has(before, a.id) || has(out, a.id)) return;
+    let at = 0;
+    for (let j = i - 1; j >= 0; j--) {
+      const k = out.findIndex((x) => x.id === after2[j].id);
+      if (k >= 0) {
+        at = k + 1;
+        break;
+      }
+    }
+    out.splice(at, 0, structuredClone(a));
+  });
+  return out;
+}
+function sameContent(a, b) {
+  return canonical(a) === canonical(b);
+}
+function canonical(value, key = "") {
+  if (Array.isArray(value)) {
+    const items2 = value.map((v) => canonical(v));
+    if (key === "edges") items2.sort();
+    return `[${items2.join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const o = value;
+    const keys = Object.keys(o).filter((k) => o[k] !== void 0).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonical(o[k], k)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+function foldEdges(base, before, after2) {
+  const claude = matchEdges(before, after2);
+  let out = [...base];
+  for (const gone of claude.removed) {
+    const hit = matchEdges(out, [gone]).pairs[0]?.[0];
+    if (hit) out = out.filter((e) => e !== hit);
+  }
+  for (const [b, a] of claude.pairs) {
+    if (JSON.stringify(b) === JSON.stringify(a)) continue;
+    const hit = matchEdges(out, [b]).pairs[0]?.[0];
+    if (hit) out = out.map((e) => e === hit ? foldFields(e, b, a) : e);
+  }
+  return [...out, ...claude.added.map((e) => structuredClone(e))];
+}
+function validBaseline(raw) {
+  const b = raw;
+  const str = (v) => typeof v === "string";
+  const list = (v, ok) => Array.isArray(v) && v.every((x) => x !== null && typeof x === "object" && ok(x));
+  const whole = b !== null && typeof b === "object" && str(b.title) && str(b.summary) && list(b.sections, (x) => str(x["id"]) && str(x["title"]) && str(x["body"])) && list(b.tasks, (x) => str(x["id"]) && str(x["title"]) && str(x["status"]) && typeof x["order"] === "number") && list(
+    b.diagrams,
+    (x) => str(x["id"]) && str(x["title"]) && list(x["nodes"], (n) => str(n["id"]) && str(n["label"]) && str(n["kind"])) && list(x["edges"], (e) => str(e["source"]) && str(e["target"]))
+  );
+  return whole ? b : void 0;
+}
+function baselineOf(plan) {
+  return structuredClone({
+    title: plan.title,
+    summary: plan.summary,
+    sections: plan.sections.map(({ id, title, body }) => ({ id, title, body })),
+    diagrams: plan.diagrams.map((d) => ({
+      id: d.id,
+      title: d.title,
+      ...d.caption ? { caption: d.caption } : {},
+      nodes: d.nodes.map(({ x: _x, y: _y, ...node }) => node),
+      edges: d.edges
+    })),
+    tasks: plan.tasks.map(({ id, parentId, order, title, detail, status, files, note }) => ({
+      id,
+      parentId,
+      order,
+      title,
+      status,
+      ...detail ? { detail } : {},
+      ...files?.length ? { files } : {},
+      ...note ? { note } : {}
+    }))
+  });
+}
+function publishPlan(prev, input, now = Date.now()) {
+  if (prev?.submission && planPhase(prev) !== "built") throw new PlanError(LOCKED_FOR_CLAUDE);
+  if (prev && unreadByClaude(prev).length > 0) {
+    throw new PlanError(
+      `The user has changed ${unreadItems(prev)} item(s) in the plan since you last read it. Call harness_plan_read first, then publish again (or use harness_plan_edit for targeted changes) so their edits are not overwritten.`
+    );
+  }
+  const title = clean(input.title, MAX_TITLE);
+  if (!title) throw new PlanError("A plan needs a title.");
+  const base = prev ? structuredClone(prev) : emptyPlan(title, now);
+  delete base.submission;
+  const next = { ...base, title, summary: clean(input.summary, MAX_TEXT) ?? base.summary };
+  if ((input.sections?.length ?? 0) > MAX_SECTIONS) throw new PlanError(`A plan holds at most ${MAX_SECTIONS} sections.`);
+  if ((input.diagrams?.length ?? 0) > MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
+  const sections = [];
+  for (const raw of input.sections ?? []) {
+    const old = base.sections.find((s) => s.id === raw.id);
+    const id = old ? old.id : claimIdAmong(next, "section", raw.id, sections);
+    const body = clean(raw.body, MAX_TEXT) ?? "";
+    const sTitle = clean(raw.title, MAX_TITLE) ?? "Untitled";
+    const same = old && old.title === sTitle && old.body === body;
+    sections.push({
+      id,
+      title: sTitle,
+      body,
+      rev: same ? old.rev : (old?.rev ?? 0) + 1,
+      updatedAt: same ? old.updatedAt : now,
+      updatedBy: same ? old.updatedBy : "claude"
+    });
+  }
+  const tasks = [];
+  const walk = (list, parentId) => {
+    (list ?? []).forEach((raw, order) => {
+      if (tasks.length >= MAX_TASKS) throw new PlanError(`A plan holds at most ${MAX_TASKS} tasks.`);
+      const tTitle = clean(raw?.title, MAX_TITLE);
+      if (!tTitle) throw new PlanError("Every task needs a title.");
+      const old = base.tasks.find((t) => t.id === raw.id);
+      const id = old && !tasks.some((t) => t.id === old.id) ? old.id : claimIdAmong(next, "task", raw.id, tasks);
+      const status = validStatus(raw.status) ?? old?.status ?? "todo";
+      const detail = clean(raw.detail, MAX_TEXT);
+      const note = clean(raw.note, MAX_TITLE * 2) ?? old?.note;
+      const files = cleanList(raw.files) ?? old?.files;
+      tasks.push({
+        id,
+        parentId,
+        order,
+        title: tTitle,
+        ...detail ? { detail } : {},
+        status,
+        ...files?.length ? { files } : {},
+        ...note ? { note } : {},
+        createdAt: old?.createdAt ?? now,
+        updatedAt: now,
+        createdBy: old?.createdBy ?? "claude"
+      });
+      walk(raw.subtasks, id);
+    });
+  };
+  walk(input.tasks, null);
+  const diagrams = [];
+  for (const raw of input.diagrams ?? []) {
+    const old = base.diagrams.find((d) => d.id === raw.id);
+    const id = old ? old.id : claimIdAmong(next, "diagram", raw.id, diagrams);
+    const dTitle = clean(raw.title, MAX_TITLE) ?? "Diagram";
+    const caption = clean(raw.caption, MAX_TEXT);
+    const graph = buildGraph(raw.nodes ?? [], raw.edges ?? [], old, dTitle, new Set(tasks.map((t) => t.id)));
+    const direction = validDirection(raw.direction) ?? old?.direction ?? suggestDirection(graph.nodes, graph.edges);
+    const same = old && old.title === dTitle && old.caption === caption && old.direction === direction && JSON.stringify([old.nodes, old.edges]) === JSON.stringify([graph.nodes, graph.edges]);
+    diagrams.push({
+      id,
+      title: dTitle,
+      rev: same ? old.rev : (old?.rev ?? 0) + 1,
+      ...graph,
+      direction,
+      ...caption ? { caption } : {},
+      updatedAt: same ? old.updatedAt : now,
+      updatedBy: same ? old.updatedBy : "claude"
+    });
+  }
+  next.sections = sections;
+  next.diagrams = diagrams;
+  next.tasks = tasks;
+  next.threads = base.threads.map((thread) => detachIfOrphaned(next, base, thread));
+  next.revision = base.revision + 1;
+  if (!prev) next.createdAt = now;
+  const change = record(
+    next,
+    "claude",
+    "published",
+    { kind: "plan", id: "" },
+    prev ? `published revision ${next.revision} of the plan` : "published the plan",
+    now
+  );
+  markReadByClaude(next, now);
+  return { plan: next, changes: [change] };
+}
+function claimIdAmong(plan, kind, wanted, fresh) {
+  const key = { section: "sections", diagram: "diagrams", task: "tasks" }[kind];
+  const probe = { ...plan, [key]: [...plan[key], ...fresh] };
+  return claimId(probe, kind, wanted);
+}
+function detachIfOrphaned(plan, before, thread) {
+  if (targetExists(plan, thread.target)) return thread;
+  const label = describeTarget(before, thread.target);
+  return { ...thread, target: { kind: "plan", id: "" }, text: `(on removed ${label}) ${thread.text}` };
+}
+function normalizePlan(raw, fallbackTitle) {
+  const now = Date.now();
+  const list = (v) => Array.isArray(v) ? v : [];
+  const plan = {
+    ...emptyPlan(typeof raw.title === "string" && raw.title ? raw.title : fallbackTitle, now),
+    ...raw,
+    summary: typeof raw.summary === "string" ? raw.summary : "",
+    sections: list(raw.sections).map((s) => ({ ...s, rev: typeof s.rev === "number" ? s.rev : 1 })),
+    diagrams: list(raw.diagrams).map((d) => ({
+      ...d,
+      rev: typeof d.rev === "number" ? d.rev : 1,
+      nodes: list(d.nodes),
+      edges: list(d.edges),
+      direction: d.direction === "TB" ? "TB" : "LR"
+    })),
+    tasks: list(raw.tasks),
+    threads: list(raw.threads).map((t) => ({ ...t, replies: list(t.replies) })),
+    changes: list(raw.changes),
+    seq: typeof raw.seq === "number" ? raw.seq : 0,
+    version: typeof raw.version === "number" ? raw.version : typeof raw.seq === "number" ? raw.seq : 0,
+    claudeReadSeq: typeof raw.claudeReadSeq === "number" ? raw.claudeReadSeq : 0,
+    claudeReadAt: typeof raw.claudeReadAt === "number" ? raw.claudeReadAt : null,
+    revision: typeof raw.revision === "number" ? raw.revision : 0
+  };
+  const baseline = validBaseline(raw.claudeBaseline);
+  if (baseline) plan.claudeBaseline = baseline;
+  else delete plan.claudeBaseline;
+  const submission = validSubmission(raw.submission);
+  if (submission) plan.submission = submission;
+  else delete plan.submission;
+  return plan;
+}
+function applyOps(plan, ops, author, now = Date.now()) {
+  if (!Array.isArray(ops) || ops.length === 0) throw new PlanError("No edits were given.");
+  if (plan.submission) checkLocked(ops, author);
+  const next = structuredClone(plan);
+  const changes = [];
+  ops.forEach((op, i) => {
+    try {
+      changes.push(...applyOne(next, op, author, now));
+    } catch (err) {
+      if (err instanceof PlanError && ops.length > 1) {
+        throw new PlanError(`Edit ${i + 1} (${op?.op ?? "?"}): ${err.message}`);
+      }
+      throw err;
+    }
+  });
+  if (author === "claude") {
+    if (next.claudeBaseline && unreadByClaude(next).length > 0) {
+      next.claudeBaseline = foldClaudeEdit(next.claudeBaseline, baselineOf(plan), baselineOf(next));
+    }
+    settleClaudeRead(next);
+  }
+  return { plan: next, changes };
+}
+function applyOne(plan, op, author, now) {
+  const log = (kind, target, summary) => record(plan, author, kind, target, summary, now);
+  switch (op?.op) {
+    case "set_meta": {
+      const out = [];
+      const title = clean(op.title, MAX_TITLE);
+      if (title && title !== plan.title) {
+        plan.title = title;
+        out.push(log("edited", { kind: "plan", id: "" }, `${RENAMED_PLAN} to "${title}"`));
+      }
+      if (typeof op.summary === "string" && op.summary !== plan.summary) {
+        plan.summary = clean(op.summary, MAX_TEXT) ?? "";
+        out.push(log("edited", { kind: "plan", id: "" }, "edited the plan summary"));
+      }
+      return out;
+    }
+    case "upsert_section": {
+      const existing = op.id ? plan.sections.find((s) => s.id === op.id) : void 0;
+      if (existing) {
+        checkRev(existing, op.expect, "section", author);
+        const title2 = clean(op.title, MAX_TITLE);
+        const body = typeof op.body === "string" ? clean(op.body, MAX_TEXT) ?? "" : void 0;
+        const changed = title2 && title2 !== existing.title || body !== void 0 && body !== existing.body;
+        if (typeof op.index === "number") moveInList(plan.sections, existing.id, op.index);
+        if (!changed) return [];
+        if (title2) existing.title = title2;
+        if (body !== void 0) existing.body = body;
+        existing.rev += 1;
+        existing.updatedAt = now;
+        existing.updatedBy = author;
+        return [log("edited", ref("section", existing.id), `edited section "${existing.title}"`)];
+      }
+      const title = clean(op.title, MAX_TITLE);
+      if (!title) throw new PlanError(op.id ? `No section "${op.id}".` : "A new section needs a title.");
+      if (plan.sections.length >= MAX_SECTIONS) throw new PlanError(`A plan holds at most ${MAX_SECTIONS} sections.`);
+      const section = {
+        id: claimId(plan, "section", op.id),
+        title,
+        body: clean(op.body, MAX_TEXT) ?? "",
+        rev: 1,
+        updatedAt: now,
+        updatedBy: author
+      };
+      insertAt(plan.sections, section, op.index);
+      return [log("created", ref("section", section.id), `added section "${title}"`)];
+    }
+    case "upsert_diagram": {
+      const existing = op.id ? plan.diagrams.find((d) => d.id === op.id) : void 0;
+      if (existing) {
+        checkRev(existing, op.expect, "diagram", author);
+        const before = structuredClone(existing);
+        const title2 = clean(op.title, MAX_TITLE);
+        if (title2) existing.title = title2;
+        if (op.nodes || op.edges) {
+          const graph2 = buildGraph(op.nodes ?? existing.nodes, op.edges ?? existing.edges, existing, existing.title, taskIdSet(plan));
+          existing.nodes = graph2.nodes;
+          existing.edges = graph2.edges;
+        }
+        const direction = validDirection(op.direction);
+        if (direction) existing.direction = direction;
+        if (typeof op.caption === "string") setOptional(existing, "caption", clean(op.caption, MAX_TEXT));
+        if (typeof op.index === "number") moveInList(plan.diagrams, existing.id, op.index);
+        const what = describeDiagramEdit(before, existing);
+        const relaid = layoutChanged(before, existing);
+        if (!what && !relaid) return [];
+        existing.rev += 1;
+        existing.updatedAt = now;
+        if (!what) {
+          plan.version += 1;
+          plan.updatedAt = now;
+          return [];
+        }
+        existing.updatedBy = author;
+        const summary = what === EDITED_DESIGN ? `edited diagram "${existing.title}"` : `${what} in diagram "${existing.title}"`;
+        return [log("edited", ref("diagram", existing.id), summary)];
+      }
+      if (op.id) throw new PlanError(`No diagram "${op.id}".`);
+      if (plan.diagrams.length >= MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
+      const title = clean(op.title, MAX_TITLE) ?? "Diagram";
+      const caption = clean(op.caption, MAX_TEXT);
+      const graph = buildGraph(op.nodes ?? [], op.edges ?? [], void 0, title, taskIdSet(plan));
+      const diagram = {
+        id: claimId(plan, "diagram", void 0),
+        title,
+        rev: 1,
+        ...graph,
+        direction: validDirection(op.direction) ?? suggestDirection(graph.nodes, graph.edges),
+        ...caption ? { caption } : {},
+        updatedAt: now,
+        updatedBy: author
+      };
+      insertAt(plan.diagrams, diagram, op.index);
+      return [log("created", ref("diagram", diagram.id), `added diagram "${title}"`)];
+    }
+    case "upsert_task": {
+      const existing = op.id ? findTask(plan, op.id) : void 0;
+      if (existing) return editTask(plan, existing, op, author, now, log);
+      const title = clean(op.title, MAX_TITLE);
+      if (!title) throw new PlanError(op.id ? `No task "${op.id}".` : "A new task needs a title.");
+      if (plan.tasks.length >= MAX_TASKS) throw new PlanError(`A plan holds at most ${MAX_TASKS} tasks.`);
+      const parentId = op.parentId ? requireTask(plan, op.parentId).id : null;
+      const detail = clean(op.detail, MAX_TEXT);
+      const note = clean(op.note, MAX_TITLE * 2);
+      const files = cleanList(op.files);
+      const task = {
+        id: claimId(plan, "task", op.id),
+        parentId,
+        order: Number.MAX_SAFE_INTEGER,
+        title,
+        ...detail ? { detail } : {},
+        status: validStatus(op.status) ?? "todo",
+        ...files?.length ? { files } : {},
+        ...note ? { note } : {},
+        createdAt: now,
+        updatedAt: now,
+        createdBy: author
+      };
+      plan.tasks.push(task);
+      placeAmongSiblings(plan, task, op.index);
+      const where = parentId ? ` under "${requireTask(plan, parentId).title}"` : "";
+      return [log("created", ref("task", task.id), `added task "${title}"${where}`)];
+    }
+    case "move_task": {
+      const task = requireTask(plan, op.id);
+      const parentId = op.parentId ? requireTask(plan, op.parentId).id : null;
+      if (parentId && (parentId === task.id || isDescendant(plan, parentId, task.id))) {
+        throw new PlanError(`Cannot move "${task.title}" inside itself.`);
+      }
+      const from = task.parentId;
+      task.parentId = parentId;
+      task.updatedAt = now;
+      normalizeSiblings(plan, from);
+      placeAmongSiblings(plan, task, op.index);
+      const where = parentId ? `under "${requireTask(plan, parentId).title}"` : "to the top level";
+      const summary = from === parentId ? `reordered "${task.title}"` : `moved "${task.title}" ${where}`;
+      return [log("moved", ref("task", task.id), summary)];
+    }
+    case "move_section": {
+      const section = plan.sections.find((s) => s.id === op.id);
+      if (!section) throw new PlanError(`No section "${op.id}".`);
+      moveInList(plan.sections, section.id, op.index);
+      return [log("moved", ref("section", section.id), `reordered section "${section.title}"`)];
+    }
+    case "move_diagram": {
+      const diagram = plan.diagrams.find((d) => d.id === op.id);
+      if (!diagram) throw new PlanError(`No diagram "${op.id}".`);
+      moveInList(plan.diagrams, diagram.id, op.index);
+      return [log("moved", ref("diagram", diagram.id), `reordered diagram "${diagram.title}"`)];
+    }
+    case "remove":
+      return removeItem(plan, op.kind, op.id, log);
+    case "comment": {
+      const target = normalizeTarget(op.target);
+      if (!targetExists(plan, target)) throw new PlanError(`Nothing to comment on at ${target.kind} "${target.id}".`);
+      const text = clean(op.text, MAX_TEXT);
+      if (!text) throw new PlanError("A comment needs text.");
+      if (plan.threads.length >= MAX_THREADS) throw new PlanError(`A plan holds at most ${MAX_THREADS} comment threads.`);
+      const thread = {
+        id: claimId(plan, "thread", void 0),
+        target,
+        author,
+        text,
+        ts: now,
+        resolved: false,
+        replies: []
+      };
+      plan.threads.push(thread);
+      return [log("commented", target, `commented on ${describeTarget(plan, target)}: ${short(text, 80)}`)];
+    }
+    case "reply": {
+      const thread = plan.threads.find((c) => c.id === op.threadId);
+      if (!thread) throw new PlanError(`No comment thread "${op.threadId}".`);
+      const text = clean(op.text, MAX_TEXT);
+      if (!text) throw new PlanError("A reply needs text.");
+      if (thread.replies.length >= MAX_REPLIES) throw new PlanError("This thread is full; start a new comment.");
+      thread.replies.push({ id: `${thread.id}.${thread.replies.length + 1}`, author, text, ts: now });
+      return [log("replied", thread.target, `replied on ${describeTarget(plan, thread.target)}: ${short(text, 80)}`)];
+    }
+    case "resolve": {
+      const thread = plan.threads.find((c) => c.id === op.threadId);
+      if (!thread) throw new PlanError(`No comment thread "${op.threadId}".`);
+      const resolved = op.resolved !== false;
+      if (thread.resolved === resolved) return [];
+      thread.resolved = resolved;
+      return [
+        log(
+          resolved ? "resolved" : "reopened",
+          thread.target,
+          `${resolved ? "resolved" : "reopened"} a comment on ${describeTarget(plan, thread.target)}`
+        )
+      ];
+    }
+    default:
+      throw new PlanError(`Unknown edit "${op?.op}".`);
+  }
+}
+function editTask(plan, task, op, author, now, log) {
+  const out = [];
+  const edited = [];
+  const title = clean(op.title, MAX_TITLE);
+  if (title && title !== task.title) {
+    task.title = title;
+    edited.push("title");
+  }
+  if (typeof op.detail === "string" && op.detail !== (task.detail ?? "")) {
+    setOptional(task, "detail", clean(op.detail, MAX_TEXT));
+    edited.push("detail");
+  }
+  if (op.files) {
+    setOptional(task, "files", cleanList(op.files)?.length ? cleanList(op.files) : void 0);
+    edited.push("files");
+  }
+  if (typeof op.note === "string") {
+    setOptional(task, "note", clean(op.note, MAX_TITLE * 2));
+    if (!op.status) edited.push("note");
+  }
+  if (op.status !== void 0) {
+    const status = validStatus(op.status);
+    if (!status) throw new PlanError(`"${op.status}" is not a task status (${TASK_STATUSES.join(", ")}).`);
+    if (status !== task.status) {
+      task.status = status;
+      task.updatedAt = now;
+      const note = task.note && typeof op.note === "string" ? ` \u2014 ${short(task.note, 80)}` : "";
+      out.push(log("status", ref("task", task.id), `marked "${task.title}" ${STATUS_WORDS[status]}${note}`));
+    }
+  }
+  if (edited.length) {
+    task.updatedAt = now;
+    out.push(log("edited", ref("task", task.id), `edited the ${edited.join(", ")} of "${task.title}"`));
+  }
+  if (typeof op.index === "number") placeAmongSiblings(plan, task, op.index);
+  void author;
+  return out;
+}
+function removeItem(plan, kind, id, log) {
+  const before = structuredClone(plan);
+  let summary;
+  switch (kind) {
+    case "section": {
+      const s = plan.sections.find((x) => x.id === id);
+      if (!s) throw new PlanError(`No section "${id}".`);
+      plan.sections = plan.sections.filter((x) => x.id !== id);
+      summary = `removed section "${s.title}"`;
+      break;
+    }
+    case "diagram": {
+      const d = plan.diagrams.find((x) => x.id === id);
+      if (!d) throw new PlanError(`No diagram "${id}".`);
+      plan.diagrams = plan.diagrams.filter((x) => x.id !== id);
+      summary = `removed diagram "${d.title}"`;
+      break;
+    }
+    case "task": {
+      const t = requireTask(plan, id);
+      const doomed = /* @__PURE__ */ new Set([t.id, ...descendants(plan, t.id).map((d) => d.id)]);
+      plan.tasks = plan.tasks.filter((x) => !doomed.has(x.id));
+      normalizeSiblings(plan, t.parentId);
+      for (const d of plan.diagrams) {
+        for (const n of d.nodes) {
+          if (!n.taskIds) continue;
+          n.taskIds = n.taskIds.filter((id2) => !doomed.has(id2));
+          if (n.taskIds.length === 0) delete n.taskIds;
+        }
+      }
+      const extra = doomed.size > 1 ? ` and its ${doomed.size - 1} subtask(s)` : "";
+      summary = `removed task "${t.title}"${extra}`;
+      break;
+    }
+    default:
+      throw new PlanError(`Cannot remove a "${kind}".`);
+  }
+  plan.threads = plan.threads.map((t) => detachIfOrphaned(plan, before, t));
+  return [log("deleted", { kind, id }, summary)];
+}
+function planPhase(plan) {
+  const submission = plan?.submission;
+  if (!submission) return "planning";
+  if (submission.target === "elsewhere") return "handed-off";
+  if (!submission.deliveredAt) return "submitted";
+  const counts = countTasks(plan);
+  return counts.total > 0 && counts.done === counts.total ? "built" : "building";
+}
+function isLocked(plan) {
+  return Boolean(plan?.submission);
+}
+function checkLocked(ops, author) {
+  if (author === "user") throw new PlanError(LOCKED_FOR_USER);
+  const refused = ops.find((op) => !TRACKING_OPS.has(op?.op ?? ""));
+  if (refused) throw new PlanError(`${LOCKED_FOR_CLAUDE} (Refused: ${refused?.op ?? "an edit"}.)`);
+}
+function validTarget(value) {
+  return BUILD_TARGETS.includes(value) ? value : void 0;
+}
+function cleanNote(value) {
+  return clean(value, MAX_NOTE);
+}
+function submitPlan(plan, input, now = Date.now()) {
+  if (plan.submission) throw new PlanError("The plan has already been submitted.");
+  if (!input.prompt.trim()) throw new PlanError("There is no prompt to submit.");
+  const next = structuredClone(plan);
+  const note = cleanNote(input.note);
+  next.submission = {
+    at: now,
+    target: input.target,
+    ...note ? { note } : {},
+    prompt: input.prompt,
+    ...input.trimmed ? { trimmed: true } : {},
+    deliveredAt: null
+  };
+  next.version += 1;
+  next.updatedAt = now;
+  return next;
+}
+function reopenPlan(plan, now = Date.now()) {
+  if (!plan.submission) throw new PlanError("The plan is not locked.");
+  const next = structuredClone(plan);
+  delete next.submission;
+  next.version += 1;
+  next.updatedAt = now;
+  return next;
+}
+function markDelivered(plan, now = Date.now()) {
+  if (!plan.submission || plan.submission.target !== "session" || plan.submission.deliveredAt) return plan;
+  const next = structuredClone(plan);
+  next.submission.deliveredAt = now;
+  markReadByClaude(next, now);
+  next.version += 1;
+  next.updatedAt = now;
+  return next;
+}
+function validSubmission(raw) {
+  const s = raw;
+  if (!s || typeof s !== "object") return void 0;
+  const target = validTarget(s.target);
+  if (!target || typeof s.at !== "number" || typeof s.prompt !== "string" || !s.prompt) return void 0;
+  return {
+    at: s.at,
+    target,
+    ...typeof s.note === "string" && s.note ? { note: s.note } : {},
+    prompt: s.prompt,
+    ...s.trimmed === true ? { trimmed: true } : {},
+    deliveredAt: typeof s.deliveredAt === "number" ? s.deliveredAt : null
+  };
+}
+function buildGraph(rawNodes, rawEdges, old, title, taskIds) {
+  if (!Array.isArray(rawNodes) || !Array.isArray(rawEdges)) throw new PlanError(`Diagram "${title}": nodes and edges must be lists.`);
+  if (rawNodes.length > MAX_NODES) throw new PlanError(`Diagram "${title}" has more than ${MAX_NODES} nodes.`);
+  if (rawEdges.length > MAX_EDGES) throw new PlanError(`Diagram "${title}" has more than ${MAX_EDGES} edges.`);
+  const nodes = [];
+  for (const raw of rawNodes) {
+    const id = clean(raw?.id, 60);
+    if (!id) throw new PlanError(`Diagram "${title}": every node needs an id.`);
+    if (nodes.some((n) => n.id === id)) throw new PlanError(`Diagram "${title}": node id "${id}" is used twice.`);
+    const prev = old?.nodes.find((n) => n.id === id);
+    const detail = clean(raw.detail, 400);
+    const description = raw.description === void 0 ? prev?.description : clean(raw.description, MAX_DESCRIPTION);
+    const notes = raw.notes === void 0 ? prev?.notes : clean(raw.notes, MAX_TEXT);
+    const links = raw.taskIds === void 0 ? prev?.taskIds : cleanList(raw.taskIds);
+    for (const t of links ?? []) {
+      if (!taskIds.has(t)) throw new PlanError(`Diagram "${title}": node "${id}" links task "${t}", which is not in the plan.`);
+    }
+    const x = finite(raw.x) ?? prev?.x;
+    const y = finite(raw.y) ?? prev?.y;
+    nodes.push({
+      id,
+      label: clean(raw.label, 120) ?? prev?.label ?? id,
+      kind: validKind(raw.kind) ?? prev?.kind ?? "component",
+      ...detail ? { detail } : {},
+      ...description ? { description } : {},
+      ...notes ? { notes } : {},
+      ...links?.length ? { taskIds: [...new Set(links)] } : {},
+      ...x !== void 0 && y !== void 0 ? { x: Math.round(x), y: Math.round(y) } : {}
+    });
+  }
+  const ids = new Set(nodes.map((n) => n.id));
+  const edges = [];
+  const cleaned = rawEdges.map((raw) => {
+    const source = clean(raw?.source, 60);
+    const target = clean(raw?.target, 60);
+    if (!source || !target) throw new PlanError(`Diagram "${title}": every edge needs a source and a target.`);
+    for (const end of [source, target]) {
+      if (!ids.has(end)) throw new PlanError(`Diagram "${title}": an edge refers to node "${end}", which is not in the diagram.`);
+    }
+    return { raw, source, target, id: clean(raw.id, 80), label: raw.label === void 0 ? void 0 : clean(raw.label, 120) ?? "" };
+  });
+  const prevOf = new Map(matchEdges(old?.edges ?? [], cleaned).pairs.map(([b, a]) => [a, b]));
+  for (const c of cleaned) {
+    const { raw, source, target } = c;
+    const prev = prevOf.get(c);
+    let id = c.id ?? `${source}->${target}`;
+    for (let n = 2; edges.some((e) => e.id === id); n++) id = `${source}->${target}#${n}`;
+    const label = c.label === void 0 ? prev?.label : c.label || void 0;
+    const dashed = raw.dashed === void 0 ? prev?.dashed : raw.dashed === true;
+    const arrows = raw.arrows === void 0 ? prev?.arrows : validArrows(raw.arrows);
+    edges.push({
+      id,
+      source,
+      target,
+      ...label ? { label } : {},
+      ...dashed ? { dashed: true } : {},
+      ...arrows && arrows !== "end" ? { arrows } : {}
+    });
+  }
+  return { nodes, edges };
+}
+function describeDiagramEdit(before, after2) {
+  const parts = [];
+  if (before.title !== after2.title) parts.push(`renamed it from "${before.title}"`);
+  const label = (d, id) => d.nodes.find((n) => n.id === id)?.label ?? id;
+  const added = after2.nodes.filter((n) => !before.nodes.some((b) => b.id === n.id));
+  const removed = before.nodes.filter((n) => !after2.nodes.some((a) => a.id === n.id));
+  const changed = after2.nodes.filter((n) => {
+    const b = before.nodes.find((x) => x.id === n.id);
+    return b && (b.label !== n.label || b.kind !== n.kind || (b.detail ?? "") !== (n.detail ?? "") || (b.description ?? "") !== (n.description ?? "") || (b.notes ?? "") !== (n.notes ?? ""));
+  });
+  const relinked = after2.nodes.filter((n) => {
+    const b = before.nodes.find((x) => x.id === n.id);
+    return b && (b.taskIds ?? []).join() !== (n.taskIds ?? []).join();
+  });
+  const matched = matchEdges(before.edges, after2.edges);
+  const linked = matched.added;
+  const unlinked = matched.removed;
+  const relabeled = matched.pairs.filter(([b, e]) => (b.label ?? "") !== (e.label ?? "") || Boolean(b.dashed) !== Boolean(e.dashed) || (b.arrows ?? "end") !== (e.arrows ?? "end")).map(([, e]) => e);
+  const list = (items2) => items2.length > 3 ? `${items2.slice(0, 3).join(", ")} and ${items2.length - 3} more` : items2.join(", ");
+  if (added.length) parts.push(`added ${list(added.map((n) => `"${n.label}"`))}`);
+  if (removed.length) parts.push(`removed ${list(removed.map((n) => `"${n.label}"`))}`);
+  if (changed.length) parts.push(`edited ${list(changed.map((n) => `"${n.label}"`))}`);
+  if (relinked.length) parts.push(`changed the tasks behind ${list(relinked.map((n) => `"${n.label}"`))}`);
+  if (linked.length) parts.push(`connected ${list(linked.map((e) => `${label(after2, e.source)} \u2192 ${label(after2, e.target)}`))}`);
+  if (unlinked.length) parts.push(`disconnected ${list(unlinked.map((e) => `${label(before, e.source)} \u2192 ${label(before, e.target)}`))}`);
+  if (relabeled.length) parts.push(`relabelled ${list(relabeled.map((e) => `${label(after2, e.source)} \u2192 ${label(after2, e.target)}`))}`);
+  if ((before.caption ?? "") !== (after2.caption ?? "")) parts.push("edited the caption");
+  if (parts.length) return parts.join("; ");
+  return designOf(before) !== designOf(after2) ? EDITED_DESIGN : null;
+}
+function designOf(d) {
+  return JSON.stringify([d.title, d.caption ?? "", d.nodes.map(({ x: _x, y: _y, ...n }) => n), d.edges]);
+}
+function matchEdges(before, after2) {
+  const pairs = [];
+  const left = [...before];
+  const right = [...after2];
+  const take = (same) => {
+    for (let i = 0; i < left.length; ) {
+      const j = right.findIndex((a) => same(left[i], a));
+      if (j < 0) {
+        i++;
+        continue;
+      }
+      pairs.push([left[i], right[j]]);
+      left.splice(i, 1);
+      right.splice(j, 1);
+    }
+  };
+  const ends2 = (b, a) => b.source === a.source && b.target === a.target;
+  take((b, a) => b.id !== void 0 && b.id === a.id && ends2(b, a));
+  take((b, a) => ends2(b, a) && (b.label ?? "") === (a.label ?? ""));
+  take(ends2);
+  return { pairs, removed: left, added: right };
+}
+function layoutChanged(before, after2) {
+  if (before.direction !== after2.direction) return true;
+  return after2.nodes.some((n) => {
+    const b = before.nodes.find((x) => x.id === n.id);
+    return b && (b.x !== n.x || b.y !== n.y);
+  });
+}
+function checkRev(item, expect, kind, author) {
+  if (typeof expect !== "number" || expect === item.rev) return;
+  const who = item.updatedBy === author ? "another edit" : item.updatedBy === "claude" ? "Claude" : "the user";
+  throw new PlanError(
+    `${kind[0].toUpperCase()}${kind.slice(1)} "${item.title}" was changed by ${who} while this edit was open, so it was not saved. It now shows the latest version.`
+  );
+}
+function taskIdSet(plan) {
+  return new Set(plan.tasks.map((t) => t.id));
+}
+function validKind(value) {
+  return NODE_KINDS.includes(value) ? value : void 0;
+}
+function validDirection(value) {
+  return value === "LR" || value === "TB" ? value : void 0;
+}
+function validArrows(value) {
+  return EDGE_ARROWS.includes(value) ? value : void 0;
+}
+function suggestDirection(nodes, edges) {
+  const ranks = flowRanks(nodes, edges);
+  if (ranks.size === 0) return "LR";
+  const perRank = /* @__PURE__ */ new Map();
+  for (const r of ranks.values()) perRank.set(r, (perRank.get(r) ?? 0) + 1);
+  const depth = Math.max(...perRank.keys()) + 1;
+  const breadth = Math.max(...perRank.values());
+  const fit = (w, h) => Math.min(1, 1e3 / w, 680 / h);
+  const lr = fit(depth * 300, breadth * 110);
+  const tb = fit(breadth * 250, depth * 150);
+  return tb > lr * 1.1 ? "TB" : "LR";
+}
+function flowRanks(nodes, edges) {
+  const ids = new Set(nodes.map((n) => n.id));
+  const out = /* @__PURE__ */ new Map();
+  const connected = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const e of edges) {
+    if (e.source === e.target || !ids.has(e.source) || !ids.has(e.target)) continue;
+    out.set(e.source, [...out.get(e.source) ?? [], e.target]);
+    for (const end of [e.source, e.target]) {
+      if (!seen.has(end)) connected.push(end);
+      seen.add(end);
+    }
+  }
+  const state = /* @__PURE__ */ new Map();
+  const order = [];
+  const forward = /* @__PURE__ */ new Map();
+  const visit = (v) => {
+    state.set(v, "open");
+    const keep = [];
+    for (const w of out.get(v) ?? []) {
+      if (state.get(w) === "open") continue;
+      keep.push(w);
+      if (!state.has(w)) visit(w);
+    }
+    forward.set(v, keep);
+    state.set(v, "done");
+    order.push(v);
+  };
+  for (const v of connected) if (!state.has(v)) visit(v);
+  const rank = new Map(connected.map((v) => [v, 0]));
+  for (const v of order.reverse()) {
+    for (const w of forward.get(v) ?? []) rank.set(w, Math.max(rank.get(w) ?? 0, rank.get(v) + 1));
+  }
+  return rank;
+}
+function finite(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+}
+function findTask(plan, id) {
+  return plan.tasks.find((t) => t.id === id);
+}
+function requireTask(plan, id) {
+  const task = findTask(plan, id);
+  if (!task) throw new PlanError(`No task "${id}".`);
+  return task;
+}
+function childrenOf(plan, parentId) {
+  return plan.tasks.filter((t) => t.parentId === parentId).sort((a, b) => a.order - b.order);
+}
+function descendants(plan, id) {
+  const out = [];
+  const visit = (pid) => {
+    for (const child of childrenOf(plan, pid)) {
+      out.push(child);
+      visit(child.id);
+    }
+  };
+  visit(id);
+  return out;
+}
+function isDescendant(plan, candidate, ancestor) {
+  return descendants(plan, ancestor).some((t) => t.id === candidate);
+}
+function normalizeSiblings(plan, parentId) {
+  childrenOf(plan, parentId).forEach((t, i) => {
+    t.order = i;
+  });
+}
+function placeAmongSiblings(plan, task, index) {
+  const siblings = childrenOf(plan, task.parentId).filter((t) => t.id !== task.id);
+  const at = index === void 0 ? siblings.length : clampIndex(index, siblings.length);
+  siblings.splice(at, 0, task);
+  siblings.forEach((t, i) => {
+    t.order = i;
+  });
+}
+function outline(plan) {
+  const out = [];
+  const visit = (parentId, depth, prefix) => {
+    childrenOf(plan, parentId).forEach((task, i) => {
+      const number = prefix ? `${prefix}.${i + 1}` : String(i + 1);
+      out.push({ task, depth, number });
+      visit(task.id, depth + 1, number);
+    });
+  };
+  visit(null, 0, "");
+  return out;
+}
+function countTasks(plan) {
+  const counts = { total: 0, done: 0, inProgress: 0, blocked: 0 };
+  if (!plan) return counts;
+  const parents = new Set(plan.tasks.map((t) => t.parentId).filter(Boolean));
+  for (const t of plan.tasks) {
+    if (parents.has(t.id)) continue;
+    counts.total++;
+    if (t.status === "done") counts.done++;
+    else if (t.status === "in_progress") counts.inProgress++;
+    else if (t.status === "blocked") counts.blocked++;
+  }
+  return counts;
+}
+function ref(kind, id) {
+  return { kind, id };
+}
+function normalizeTarget(raw) {
+  const rec = raw && typeof raw === "object" ? raw : {};
+  const kind = String(rec["kind"] ?? "plan");
+  return { kind, id: kind === "plan" ? "" : String(rec["id"] ?? "") };
+}
+function targetExists(plan, target) {
+  switch (target.kind) {
+    case "plan":
+      return true;
+    case "section":
+      return plan.sections.some((s) => s.id === target.id);
+    case "diagram":
+      return plan.diagrams.some((d) => d.id === target.id);
+    case "task":
+      return plan.tasks.some((t) => t.id === target.id);
+    default:
+      return false;
+  }
+}
+function describeTarget(plan, target) {
+  switch (target.kind) {
+    case "plan":
+      return "the plan";
+    case "section": {
+      const s = plan.sections.find((x) => x.id === target.id);
+      return s ? `section "${s.title}"` : `section ${target.id}`;
+    }
+    case "diagram": {
+      const d = plan.diagrams.find((x) => x.id === target.id);
+      return d ? `diagram "${d.title}"` : `diagram ${target.id}`;
+    }
+    case "task": {
+      const t = plan.tasks.find((x) => x.id === target.id);
+      return t ? `task "${t.title}"` : `task ${target.id}`;
+    }
+    default:
+      return "an item";
+  }
+}
+function validStatus(value) {
+  return TASK_STATUSES.includes(value) ? value : void 0;
+}
+function clean(value, max, trim = true) {
+  if (typeof value !== "string") return void 0;
+  const out = (trim ? value.trim() : value.replace(/\s+$/, "")).slice(0, max);
+  return out.trim() ? out : void 0;
+}
+function cleanList(value) {
+  if (!Array.isArray(value)) return void 0;
+  return value.map((v) => typeof v === "string" ? v.trim().slice(0, 300) : "").filter(Boolean).slice(0, 50);
+}
+function setOptional(obj, key, value) {
+  if (value === void 0 || value === null || value === "") delete obj[key];
+  else obj[key] = value;
+}
+function insertAt(list, item, index) {
+  if (index === void 0) list.push(item);
+  else list.splice(clampIndex(index, list.length), 0, item);
+}
+function moveInList(list, id, index) {
+  const from = list.findIndex((x) => x.id === id);
+  if (from < 0) return;
+  const [item] = list.splice(from, 1);
+  list.splice(clampIndex(index, list.length), 0, item);
+}
+function clampIndex(index, length) {
+  if (!Number.isFinite(index)) return length;
+  return Math.max(0, Math.min(length, Math.trunc(index)));
+}
+function short(text, max = 60) {
+  const line = text.replace(/\s+/g, " ").trim();
+  return line.length > max ? `${line.slice(0, max - 1)}\u2026` : line;
+}
+function currentTask(plan) {
+  if (!plan) return null;
+  return outline(plan).find((r) => r.task.status === "in_progress" && !plan.tasks.some((t) => t.parentId === r.task.id))?.task ?? null;
+}
+var PlanError, MAX_CHANGES, MAX_TITLE, MAX_TEXT, MAX_TASKS, MAX_SECTIONS, MAX_DIAGRAMS, MAX_THREADS, MAX_REPLIES, PREFIX, RENAMED_PLAN, MAX_NOTE, TRACKING_OPS, LOCKED_FOR_USER, LOCKED_FOR_CLAUDE, MAX_NODES, MAX_EDGES, MAX_DESCRIPTION, EDITED_DESIGN, STATUS_WORDS;
+var init_plan = __esm({
+  "src/shared/plan.ts"() {
+    "use strict";
+    init_types();
+    PlanError = class extends Error {
+    };
+    MAX_CHANGES = 500;
+    MAX_TITLE = 200;
+    MAX_TEXT = 2e4;
+    MAX_TASKS = 400;
+    MAX_SECTIONS = 60;
+    MAX_DIAGRAMS = 40;
+    MAX_THREADS = 500;
+    MAX_REPLIES = 200;
+    PREFIX = { section: "s", diagram: "d", task: "t", thread: "c" };
+    RENAMED_PLAN = "renamed the plan";
+    MAX_NOTE = 4e3;
+    TRACKING_OPS = /* @__PURE__ */ new Set(["upsert_task", "reply", "resolve"]);
+    LOCKED_FOR_USER = "The plan has been submitted to be built, so it is locked. Reopen it to make changes.";
+    LOCKED_FOR_CLAUDE = "The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or upsert_task to add work you discover) and comment replies (reply, resolve) apply. If the design has to change, ask the user in chat \u2014 they can reopen the plan in the harness.";
+    MAX_NODES = 120;
+    MAX_EDGES = 300;
+    MAX_DESCRIPTION = 4e3;
+    EDITED_DESIGN = "edited";
+    STATUS_WORDS = {
+      todo: "to do",
+      in_progress: "in progress",
+      blocked: "blocked",
+      done: "done"
     };
   }
 });
@@ -136,6 +1274,7 @@ var init_store = __esm({
   "src/ui/store.ts"() {
     "use strict";
     init_api();
+    init_plan();
     TAB_IDS = ["diagrams", "tasks", "overview"];
     initial = {
       sessions: [],
@@ -250,6 +1389,9 @@ var init_store = __esm({
             if (before && after2 && after2.revision > before.revision) {
               this.toast("info", `Claude published revision ${after2.revision} of the plan.`);
             }
+            if (before?.submission && !before.submission.deliveredAt && after2?.submission?.deliveredAt) {
+              this.toast("success", "Claude has the build prompt. Follow it on the board.");
+            }
             this.set({ session: event.session });
             return;
           }
@@ -295,6 +1437,50 @@ var init_store = __esm({
       op(op) {
         return this.ops([op]);
       }
+      /** Put the daemon's answer in place, unless something newer has landed. */
+      adoptPlan(sessionId, plan) {
+        const session = this.state.session;
+        const order = (p) => p.version ?? p.seq;
+        if (session && session.sessionId === sessionId && (!session.plan || order(plan) >= order(session.plan))) {
+          this.set({ session: { ...session, plan } });
+        }
+      }
+      /**
+       * Sign the plan off. From here it is locked and the page follows the build
+       * on the board. Resolves false when the daemon refused — most often
+       * because the plan moved on since the preview was made.
+       */
+      async submitPlan(input) {
+        const id = this.state.sessionId;
+        if (!id) return false;
+        try {
+          const { plan } = await api.submitPlan(id, input);
+          this.adoptPlan(id, plan);
+          this.set({ tab: "tasks", taskMode: "board" });
+          this.toast(
+            "success",
+            input.target === "session" ? "Plan submitted and locked. Send any message in Claude to hand it the prompt." : "Plan submitted and locked. Paste the prompt where it will be built."
+          );
+          return true;
+        } catch (err) {
+          this.fail(err);
+          return false;
+        }
+      }
+      /** Unlock a submitted plan for changes. */
+      async reopenPlan() {
+        const id = this.state.sessionId;
+        if (!id) return false;
+        try {
+          const { plan } = await api.reopenPlan(id);
+          this.adoptPlan(id, plan);
+          this.toast("info", "The plan is open for changes again. Tell Claude in chat once you have changed it.");
+          return true;
+        } catch (err) {
+          this.fail(err);
+          return false;
+        }
+      }
       /** Jump to an item from anywhere: a board card, the overview's "now". */
       focus(kind, id) {
         const tab = kind === "diagram" ? "diagrams" : kind === "task" ? "tasks" : "overview";
@@ -302,6 +1488,10 @@ var init_store = __esm({
         if (kind === "node") {
           const [diagramId] = id.split(":");
           this.set({ tab: "diagrams", diagramId: diagramId ?? null, focusTarget: `node:${id}` });
+          return;
+        }
+        if (kind === "task" && isLocked(this.state.session?.plan ?? null)) {
+          this.set({ tab, taskMode: "board", focusTarget: `${kind}:${id}` });
           return;
         }
         if (kind === "task") {
@@ -801,7 +1991,7 @@ Double-click to rename`,
                   " tasks"
                 ] }),
                 /* @__PURE__ */ jsx2("span", { children: relativeTime(session.updatedAt) }),
-                session.unreadByClaude > 0 && /* @__PURE__ */ jsx2("span", { className: "pill is-draft", title: "You changed the plan since Claude last read it", children: "unread" })
+                session.phase !== "planning" ? /* @__PURE__ */ jsx2("span", { className: classNames("pill", `is-phase-${session.phase}`), title: PHASE_TITLE[session.phase], children: PHASE_PILL[session.phase] }) : session.unreadByClaude > 0 && /* @__PURE__ */ jsx2("span", { className: "pill is-draft", title: "You changed the plan since Claude last read it", children: "unread" })
               ] })
             ]
           }
@@ -930,7 +2120,7 @@ function initials(name) {
   if (words.length === 0) words.push(...all);
   return ((words[0]?.[0] ?? "?") + (words[1]?.[0] ?? "")).toUpperCase();
 }
-var SESSION_STATE_LABEL, WAITING_KEY, PINNED_KEY, MINOR_WORDS;
+var SESSION_STATE_LABEL, PHASE_PILL, PHASE_TITLE, WAITING_KEY, PINNED_KEY, MINOR_WORDS;
 var init_Sidebar = __esm({
   "src/ui/components/Sidebar.tsx"() {
     "use strict";
@@ -941,6 +2131,18 @@ var init_Sidebar = __esm({
       active: "working",
       idle: "idle",
       ended: "ended"
+    };
+    PHASE_PILL = {
+      submitted: "submitted",
+      building: "building",
+      built: "built",
+      "handed-off": "handed off"
+    };
+    PHASE_TITLE = {
+      submitted: "Submitted: waiting for Claude to pick it up",
+      building: "Submitted and locked: Claude is building it",
+      built: "Submitted and built: every task is done",
+      "handed-off": "Submitted to be built somewhere else"
     };
     WAITING_KEY = "\0waiting";
     PINNED_KEY = "\0pinned";
@@ -1081,1046 +2283,6 @@ var init_ThemeToggle = __esm({
   }
 });
 
-// src/shared/types.ts
-var NODE_KINDS, EDGE_ARROWS, TASK_STATUSES;
-var init_types = __esm({
-  "src/shared/types.ts"() {
-    "use strict";
-    NODE_KINDS = ["component", "service", "datastore", "queue", "external", "actor", "note"];
-    EDGE_ARROWS = ["end", "both", "none"];
-    TASK_STATUSES = ["todo", "in_progress", "blocked", "done"];
-  }
-});
-
-// src/shared/plan.ts
-var plan_exports = {};
-__export(plan_exports, {
-  MAX_CHANGES: () => MAX_CHANGES,
-  PlanError: () => PlanError,
-  applyOps: () => applyOps,
-  baselineOf: () => baselineOf,
-  childrenOf: () => childrenOf,
-  countTasks: () => countTasks,
-  currentTask: () => currentTask,
-  descendants: () => descendants,
-  describeTarget: () => describeTarget,
-  emptyPlan: () => emptyPlan,
-  flowRanks: () => flowRanks,
-  markReadByClaude: () => markReadByClaude,
-  matchEdges: () => matchEdges,
-  normalizePlan: () => normalizePlan,
-  outline: () => outline,
-  publishPlan: () => publishPlan,
-  sameContent: () => sameContent,
-  short: () => short,
-  suggestDirection: () => suggestDirection,
-  targetExists: () => targetExists,
-  unreadAreas: () => unreadAreas,
-  unreadByClaude: () => unreadByClaude,
-  unreadItems: () => unreadItems
-});
-function emptyPlan(title = "Untitled plan", now = Date.now()) {
-  return {
-    title,
-    summary: "",
-    sections: [],
-    diagrams: [],
-    tasks: [],
-    threads: [],
-    changes: [],
-    seq: 0,
-    version: 0,
-    claudeReadSeq: 0,
-    claudeReadAt: null,
-    revision: 0,
-    createdAt: now,
-    updatedAt: now
-  };
-}
-function nextId(plan, kind) {
-  const prefix = PREFIX[kind];
-  let max = 0;
-  const scan = (id) => {
-    if (!id.startsWith(prefix)) return;
-    const n = Number(id.slice(prefix.length));
-    if (Number.isInteger(n) && n > max) max = n;
-  };
-  for (const s of plan.sections) scan(s.id);
-  for (const d of plan.diagrams) scan(d.id);
-  for (const t of plan.tasks) scan(t.id);
-  for (const c of plan.threads) scan(c.id);
-  for (const ch of plan.changes) scan(ch.target.id);
-  return `${prefix}${max + 1}`;
-}
-function idTaken(plan, id) {
-  return plan.sections.some((s) => s.id === id) || plan.diagrams.some((d) => d.id === id) || plan.tasks.some((t) => t.id === id) || plan.threads.some((c) => c.id === id);
-}
-function claimId(plan, kind, wanted) {
-  const id = clean(wanted, 40);
-  if (id && /^[A-Za-z0-9_.-]+$/.test(id) && !idTaken(plan, id)) return id;
-  return nextId(plan, kind);
-}
-function record(plan, author, kind, target, summary, now) {
-  plan.seq += 1;
-  plan.version += 1;
-  const change = { seq: plan.seq, ts: now, author, kind, target, summary };
-  plan.changes.push(change);
-  if (plan.changes.length > MAX_CHANGES) plan.changes.splice(0, plan.changes.length - MAX_CHANGES);
-  plan.updatedAt = now;
-  return change;
-}
-function unreadByClaude(plan) {
-  if (!plan) return [];
-  return plan.changes.filter((c) => c.seq > plan.claudeReadSeq && c.author === "user");
-}
-function unreadItems(plan) {
-  return new Set(unreadByClaude(plan).map((c) => `${c.target.kind}:${c.target.id}`)).size;
-}
-function unreadAreas(plan) {
-  const areas = [];
-  const add = (what) => void (areas.includes(what) || areas.push(what));
-  for (const c of unreadByClaude(plan)) {
-    if (["commented", "replied", "resolved", "reopened"].includes(c.kind)) add("comments");
-    else if (c.target.kind === "diagram") add(`the "${plan.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
-    else if (c.target.kind === "task") add("tasks");
-    else if (c.target.kind === "section") add("sections");
-    else if (c.summary.startsWith(RENAMED_PLAN)) add("the plan's title");
-    else add("the summary");
-  }
-  return areas;
-}
-function markReadByClaude(plan, now = Date.now()) {
-  plan.claudeReadSeq = plan.seq;
-  plan.claudeReadAt = now;
-  plan.claudeBaseline = baselineOf(plan);
-}
-function settleClaudeRead(plan) {
-  if (unreadByClaude(plan).length > 0) return;
-  plan.claudeReadSeq = plan.seq;
-  plan.claudeBaseline = baselineOf(plan);
-}
-function foldClaudeEdit(base, before, after2) {
-  const out = structuredClone(base);
-  if (before.title !== after2.title) out.title = after2.title;
-  if (before.summary !== after2.summary) out.summary = after2.summary;
-  out.sections = foldList(out.sections, before.sections, after2.sections, foldFields);
-  out.tasks = foldList(out.tasks, before.tasks, after2.tasks, foldFields);
-  out.diagrams = foldList(out.diagrams, before.diagrams, after2.diagrams, (o, b, a) => {
-    const { nodes: _on, edges: _oe, ...meta } = o;
-    const { nodes: _bn, edges: _be, ...bMeta } = b;
-    const { nodes: _an, edges: _ae, ...aMeta } = a;
-    return {
-      ...foldFields(meta, bMeta, aMeta),
-      nodes: foldList(o.nodes, b.nodes, a.nodes, foldFields),
-      edges: foldEdges(o.edges, b.edges, a.edges)
-    };
-  });
-  return out;
-}
-function foldFields(o, b, a) {
-  const out = { ...o };
-  const was = b;
-  const now = a;
-  for (const key of /* @__PURE__ */ new Set([...Object.keys(was), ...Object.keys(now)])) {
-    if (JSON.stringify(was[key]) === JSON.stringify(now[key])) continue;
-    if (now[key] === void 0) delete out[key];
-    else out[key] = structuredClone(now[key]);
-  }
-  return out;
-}
-function foldList(base, before, after2, merge) {
-  const has = (list, id) => list.some((x) => x.id === id);
-  let out = base.filter((x) => !(has(before, x.id) && !has(after2, x.id)));
-  for (const a of after2) {
-    const b = before.find((x) => x.id === a.id);
-    const i = out.findIndex((x) => x.id === a.id);
-    if (b && i >= 0 && JSON.stringify(b) !== JSON.stringify(a)) out[i] = merge(out[i], b, a);
-  }
-  const order = (list) => list.filter((x) => has(after2, x.id) && has(before, x.id)).map((x) => x.id).join("\0");
-  if (order(before) !== order(after2)) {
-    const at = new Map(after2.map((x, i) => [x.id, i]));
-    let last = -1;
-    const rank = new Map(
-      out.map((x) => {
-        const i = at.get(x.id);
-        if (i !== void 0) last = i;
-        return [x.id, i ?? last + 0.5];
-      })
-    );
-    out = [...out].sort((x, y) => rank.get(x.id) - rank.get(y.id));
-  }
-  after2.forEach((a, i) => {
-    if (has(before, a.id) || has(out, a.id)) return;
-    let at = 0;
-    for (let j = i - 1; j >= 0; j--) {
-      const k = out.findIndex((x) => x.id === after2[j].id);
-      if (k >= 0) {
-        at = k + 1;
-        break;
-      }
-    }
-    out.splice(at, 0, structuredClone(a));
-  });
-  return out;
-}
-function sameContent(a, b) {
-  return canonical(a) === canonical(b);
-}
-function canonical(value, key = "") {
-  if (Array.isArray(value)) {
-    const items2 = value.map((v) => canonical(v));
-    if (key === "edges") items2.sort();
-    return `[${items2.join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    const o = value;
-    const keys = Object.keys(o).filter((k) => o[k] !== void 0).sort();
-    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonical(o[k], k)}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-function foldEdges(base, before, after2) {
-  const claude = matchEdges(before, after2);
-  let out = [...base];
-  for (const gone of claude.removed) {
-    const hit = matchEdges(out, [gone]).pairs[0]?.[0];
-    if (hit) out = out.filter((e) => e !== hit);
-  }
-  for (const [b, a] of claude.pairs) {
-    if (JSON.stringify(b) === JSON.stringify(a)) continue;
-    const hit = matchEdges(out, [b]).pairs[0]?.[0];
-    if (hit) out = out.map((e) => e === hit ? foldFields(e, b, a) : e);
-  }
-  return [...out, ...claude.added.map((e) => structuredClone(e))];
-}
-function validBaseline(raw) {
-  const b = raw;
-  const str = (v) => typeof v === "string";
-  const list = (v, ok) => Array.isArray(v) && v.every((x) => x !== null && typeof x === "object" && ok(x));
-  const whole = b !== null && typeof b === "object" && str(b.title) && str(b.summary) && list(b.sections, (x) => str(x["id"]) && str(x["title"]) && str(x["body"])) && list(b.tasks, (x) => str(x["id"]) && str(x["title"]) && str(x["status"]) && typeof x["order"] === "number") && list(
-    b.diagrams,
-    (x) => str(x["id"]) && str(x["title"]) && list(x["nodes"], (n) => str(n["id"]) && str(n["label"]) && str(n["kind"])) && list(x["edges"], (e) => str(e["source"]) && str(e["target"]))
-  );
-  return whole ? b : void 0;
-}
-function baselineOf(plan) {
-  return structuredClone({
-    title: plan.title,
-    summary: plan.summary,
-    sections: plan.sections.map(({ id, title, body }) => ({ id, title, body })),
-    diagrams: plan.diagrams.map((d) => ({
-      id: d.id,
-      title: d.title,
-      ...d.caption ? { caption: d.caption } : {},
-      nodes: d.nodes.map(({ x: _x, y: _y, ...node }) => node),
-      edges: d.edges
-    })),
-    tasks: plan.tasks.map(({ id, parentId, order, title, detail, status, files, note }) => ({
-      id,
-      parentId,
-      order,
-      title,
-      status,
-      ...detail ? { detail } : {},
-      ...files?.length ? { files } : {},
-      ...note ? { note } : {}
-    }))
-  });
-}
-function publishPlan(prev, input, now = Date.now()) {
-  if (prev && unreadByClaude(prev).length > 0) {
-    throw new PlanError(
-      `The user has changed ${unreadItems(prev)} item(s) in the plan since you last read it. Call harness_plan_read first, then publish again (or use harness_plan_edit for targeted changes) so their edits are not overwritten.`
-    );
-  }
-  const title = clean(input.title, MAX_TITLE);
-  if (!title) throw new PlanError("A plan needs a title.");
-  const base = prev ? structuredClone(prev) : emptyPlan(title, now);
-  const next = { ...base, title, summary: clean(input.summary, MAX_TEXT) ?? base.summary };
-  if ((input.sections?.length ?? 0) > MAX_SECTIONS) throw new PlanError(`A plan holds at most ${MAX_SECTIONS} sections.`);
-  if ((input.diagrams?.length ?? 0) > MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
-  const sections = [];
-  for (const raw of input.sections ?? []) {
-    const old = base.sections.find((s) => s.id === raw.id);
-    const id = old ? old.id : claimIdAmong(next, "section", raw.id, sections);
-    const body = clean(raw.body, MAX_TEXT) ?? "";
-    const sTitle = clean(raw.title, MAX_TITLE) ?? "Untitled";
-    const same = old && old.title === sTitle && old.body === body;
-    sections.push({
-      id,
-      title: sTitle,
-      body,
-      rev: same ? old.rev : (old?.rev ?? 0) + 1,
-      updatedAt: same ? old.updatedAt : now,
-      updatedBy: same ? old.updatedBy : "claude"
-    });
-  }
-  const tasks = [];
-  const walk = (list, parentId) => {
-    (list ?? []).forEach((raw, order) => {
-      if (tasks.length >= MAX_TASKS) throw new PlanError(`A plan holds at most ${MAX_TASKS} tasks.`);
-      const tTitle = clean(raw?.title, MAX_TITLE);
-      if (!tTitle) throw new PlanError("Every task needs a title.");
-      const old = base.tasks.find((t) => t.id === raw.id);
-      const id = old && !tasks.some((t) => t.id === old.id) ? old.id : claimIdAmong(next, "task", raw.id, tasks);
-      const status = validStatus(raw.status) ?? old?.status ?? "todo";
-      const detail = clean(raw.detail, MAX_TEXT);
-      const note = clean(raw.note, MAX_TITLE * 2) ?? old?.note;
-      const files = cleanList(raw.files) ?? old?.files;
-      tasks.push({
-        id,
-        parentId,
-        order,
-        title: tTitle,
-        ...detail ? { detail } : {},
-        status,
-        ...files?.length ? { files } : {},
-        ...note ? { note } : {},
-        createdAt: old?.createdAt ?? now,
-        updatedAt: now,
-        createdBy: old?.createdBy ?? "claude"
-      });
-      walk(raw.subtasks, id);
-    });
-  };
-  walk(input.tasks, null);
-  const diagrams = [];
-  for (const raw of input.diagrams ?? []) {
-    const old = base.diagrams.find((d) => d.id === raw.id);
-    const id = old ? old.id : claimIdAmong(next, "diagram", raw.id, diagrams);
-    const dTitle = clean(raw.title, MAX_TITLE) ?? "Diagram";
-    const caption = clean(raw.caption, MAX_TEXT);
-    const graph = buildGraph(raw.nodes ?? [], raw.edges ?? [], old, dTitle, new Set(tasks.map((t) => t.id)));
-    const direction = validDirection(raw.direction) ?? old?.direction ?? suggestDirection(graph.nodes, graph.edges);
-    const same = old && old.title === dTitle && old.caption === caption && old.direction === direction && JSON.stringify([old.nodes, old.edges]) === JSON.stringify([graph.nodes, graph.edges]);
-    diagrams.push({
-      id,
-      title: dTitle,
-      rev: same ? old.rev : (old?.rev ?? 0) + 1,
-      ...graph,
-      direction,
-      ...caption ? { caption } : {},
-      updatedAt: same ? old.updatedAt : now,
-      updatedBy: same ? old.updatedBy : "claude"
-    });
-  }
-  next.sections = sections;
-  next.diagrams = diagrams;
-  next.tasks = tasks;
-  next.threads = base.threads.map((thread) => detachIfOrphaned(next, base, thread));
-  next.revision = base.revision + 1;
-  if (!prev) next.createdAt = now;
-  const change = record(
-    next,
-    "claude",
-    "published",
-    { kind: "plan", id: "" },
-    prev ? `published revision ${next.revision} of the plan` : "published the plan",
-    now
-  );
-  markReadByClaude(next, now);
-  return { plan: next, changes: [change] };
-}
-function claimIdAmong(plan, kind, wanted, fresh) {
-  const key = { section: "sections", diagram: "diagrams", task: "tasks" }[kind];
-  const probe = { ...plan, [key]: [...plan[key], ...fresh] };
-  return claimId(probe, kind, wanted);
-}
-function detachIfOrphaned(plan, before, thread) {
-  if (targetExists(plan, thread.target)) return thread;
-  const label = describeTarget(before, thread.target);
-  return { ...thread, target: { kind: "plan", id: "" }, text: `(on removed ${label}) ${thread.text}` };
-}
-function normalizePlan(raw, fallbackTitle) {
-  const now = Date.now();
-  const list = (v) => Array.isArray(v) ? v : [];
-  const plan = {
-    ...emptyPlan(typeof raw.title === "string" && raw.title ? raw.title : fallbackTitle, now),
-    ...raw,
-    summary: typeof raw.summary === "string" ? raw.summary : "",
-    sections: list(raw.sections).map((s) => ({ ...s, rev: typeof s.rev === "number" ? s.rev : 1 })),
-    diagrams: list(raw.diagrams).map((d) => ({
-      ...d,
-      rev: typeof d.rev === "number" ? d.rev : 1,
-      nodes: list(d.nodes),
-      edges: list(d.edges),
-      direction: d.direction === "TB" ? "TB" : "LR"
-    })),
-    tasks: list(raw.tasks),
-    threads: list(raw.threads).map((t) => ({ ...t, replies: list(t.replies) })),
-    changes: list(raw.changes),
-    seq: typeof raw.seq === "number" ? raw.seq : 0,
-    version: typeof raw.version === "number" ? raw.version : typeof raw.seq === "number" ? raw.seq : 0,
-    claudeReadSeq: typeof raw.claudeReadSeq === "number" ? raw.claudeReadSeq : 0,
-    claudeReadAt: typeof raw.claudeReadAt === "number" ? raw.claudeReadAt : null,
-    revision: typeof raw.revision === "number" ? raw.revision : 0
-  };
-  const baseline = validBaseline(raw.claudeBaseline);
-  if (baseline) plan.claudeBaseline = baseline;
-  else delete plan.claudeBaseline;
-  return plan;
-}
-function applyOps(plan, ops, author, now = Date.now()) {
-  if (!Array.isArray(ops) || ops.length === 0) throw new PlanError("No edits were given.");
-  const next = structuredClone(plan);
-  const changes = [];
-  ops.forEach((op, i) => {
-    try {
-      changes.push(...applyOne(next, op, author, now));
-    } catch (err) {
-      if (err instanceof PlanError && ops.length > 1) {
-        throw new PlanError(`Edit ${i + 1} (${op?.op ?? "?"}): ${err.message}`);
-      }
-      throw err;
-    }
-  });
-  if (author === "claude") {
-    if (next.claudeBaseline && unreadByClaude(next).length > 0) {
-      next.claudeBaseline = foldClaudeEdit(next.claudeBaseline, baselineOf(plan), baselineOf(next));
-    }
-    settleClaudeRead(next);
-  }
-  return { plan: next, changes };
-}
-function applyOne(plan, op, author, now) {
-  const log = (kind, target, summary) => record(plan, author, kind, target, summary, now);
-  switch (op?.op) {
-    case "set_meta": {
-      const out = [];
-      const title = clean(op.title, MAX_TITLE);
-      if (title && title !== plan.title) {
-        plan.title = title;
-        out.push(log("edited", { kind: "plan", id: "" }, `${RENAMED_PLAN} to "${title}"`));
-      }
-      if (typeof op.summary === "string" && op.summary !== plan.summary) {
-        plan.summary = clean(op.summary, MAX_TEXT) ?? "";
-        out.push(log("edited", { kind: "plan", id: "" }, "edited the plan summary"));
-      }
-      return out;
-    }
-    case "upsert_section": {
-      const existing = op.id ? plan.sections.find((s) => s.id === op.id) : void 0;
-      if (existing) {
-        checkRev(existing, op.expect, "section", author);
-        const title2 = clean(op.title, MAX_TITLE);
-        const body = typeof op.body === "string" ? clean(op.body, MAX_TEXT) ?? "" : void 0;
-        const changed = title2 && title2 !== existing.title || body !== void 0 && body !== existing.body;
-        if (typeof op.index === "number") moveInList(plan.sections, existing.id, op.index);
-        if (!changed) return [];
-        if (title2) existing.title = title2;
-        if (body !== void 0) existing.body = body;
-        existing.rev += 1;
-        existing.updatedAt = now;
-        existing.updatedBy = author;
-        return [log("edited", ref("section", existing.id), `edited section "${existing.title}"`)];
-      }
-      const title = clean(op.title, MAX_TITLE);
-      if (!title) throw new PlanError(op.id ? `No section "${op.id}".` : "A new section needs a title.");
-      if (plan.sections.length >= MAX_SECTIONS) throw new PlanError(`A plan holds at most ${MAX_SECTIONS} sections.`);
-      const section = {
-        id: claimId(plan, "section", op.id),
-        title,
-        body: clean(op.body, MAX_TEXT) ?? "",
-        rev: 1,
-        updatedAt: now,
-        updatedBy: author
-      };
-      insertAt(plan.sections, section, op.index);
-      return [log("created", ref("section", section.id), `added section "${title}"`)];
-    }
-    case "upsert_diagram": {
-      const existing = op.id ? plan.diagrams.find((d) => d.id === op.id) : void 0;
-      if (existing) {
-        checkRev(existing, op.expect, "diagram", author);
-        const before = structuredClone(existing);
-        const title2 = clean(op.title, MAX_TITLE);
-        if (title2) existing.title = title2;
-        if (op.nodes || op.edges) {
-          const graph2 = buildGraph(op.nodes ?? existing.nodes, op.edges ?? existing.edges, existing, existing.title, taskIdSet(plan));
-          existing.nodes = graph2.nodes;
-          existing.edges = graph2.edges;
-        }
-        const direction = validDirection(op.direction);
-        if (direction) existing.direction = direction;
-        if (typeof op.caption === "string") setOptional(existing, "caption", clean(op.caption, MAX_TEXT));
-        if (typeof op.index === "number") moveInList(plan.diagrams, existing.id, op.index);
-        const what = describeDiagramEdit(before, existing);
-        const relaid = layoutChanged(before, existing);
-        if (!what && !relaid) return [];
-        existing.rev += 1;
-        existing.updatedAt = now;
-        if (!what) {
-          plan.version += 1;
-          plan.updatedAt = now;
-          return [];
-        }
-        existing.updatedBy = author;
-        const summary = what === EDITED_DESIGN ? `edited diagram "${existing.title}"` : `${what} in diagram "${existing.title}"`;
-        return [log("edited", ref("diagram", existing.id), summary)];
-      }
-      if (op.id) throw new PlanError(`No diagram "${op.id}".`);
-      if (plan.diagrams.length >= MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
-      const title = clean(op.title, MAX_TITLE) ?? "Diagram";
-      const caption = clean(op.caption, MAX_TEXT);
-      const graph = buildGraph(op.nodes ?? [], op.edges ?? [], void 0, title, taskIdSet(plan));
-      const diagram = {
-        id: claimId(plan, "diagram", void 0),
-        title,
-        rev: 1,
-        ...graph,
-        direction: validDirection(op.direction) ?? suggestDirection(graph.nodes, graph.edges),
-        ...caption ? { caption } : {},
-        updatedAt: now,
-        updatedBy: author
-      };
-      insertAt(plan.diagrams, diagram, op.index);
-      return [log("created", ref("diagram", diagram.id), `added diagram "${title}"`)];
-    }
-    case "upsert_task": {
-      const existing = op.id ? findTask(plan, op.id) : void 0;
-      if (existing) return editTask(plan, existing, op, author, now, log);
-      const title = clean(op.title, MAX_TITLE);
-      if (!title) throw new PlanError(op.id ? `No task "${op.id}".` : "A new task needs a title.");
-      if (plan.tasks.length >= MAX_TASKS) throw new PlanError(`A plan holds at most ${MAX_TASKS} tasks.`);
-      const parentId = op.parentId ? requireTask(plan, op.parentId).id : null;
-      const detail = clean(op.detail, MAX_TEXT);
-      const note = clean(op.note, MAX_TITLE * 2);
-      const files = cleanList(op.files);
-      const task = {
-        id: claimId(plan, "task", op.id),
-        parentId,
-        order: Number.MAX_SAFE_INTEGER,
-        title,
-        ...detail ? { detail } : {},
-        status: validStatus(op.status) ?? "todo",
-        ...files?.length ? { files } : {},
-        ...note ? { note } : {},
-        createdAt: now,
-        updatedAt: now,
-        createdBy: author
-      };
-      plan.tasks.push(task);
-      placeAmongSiblings(plan, task, op.index);
-      const where = parentId ? ` under "${requireTask(plan, parentId).title}"` : "";
-      return [log("created", ref("task", task.id), `added task "${title}"${where}`)];
-    }
-    case "move_task": {
-      const task = requireTask(plan, op.id);
-      const parentId = op.parentId ? requireTask(plan, op.parentId).id : null;
-      if (parentId && (parentId === task.id || isDescendant(plan, parentId, task.id))) {
-        throw new PlanError(`Cannot move "${task.title}" inside itself.`);
-      }
-      const from = task.parentId;
-      task.parentId = parentId;
-      task.updatedAt = now;
-      normalizeSiblings(plan, from);
-      placeAmongSiblings(plan, task, op.index);
-      const where = parentId ? `under "${requireTask(plan, parentId).title}"` : "to the top level";
-      const summary = from === parentId ? `reordered "${task.title}"` : `moved "${task.title}" ${where}`;
-      return [log("moved", ref("task", task.id), summary)];
-    }
-    case "move_section": {
-      const section = plan.sections.find((s) => s.id === op.id);
-      if (!section) throw new PlanError(`No section "${op.id}".`);
-      moveInList(plan.sections, section.id, op.index);
-      return [log("moved", ref("section", section.id), `reordered section "${section.title}"`)];
-    }
-    case "move_diagram": {
-      const diagram = plan.diagrams.find((d) => d.id === op.id);
-      if (!diagram) throw new PlanError(`No diagram "${op.id}".`);
-      moveInList(plan.diagrams, diagram.id, op.index);
-      return [log("moved", ref("diagram", diagram.id), `reordered diagram "${diagram.title}"`)];
-    }
-    case "remove":
-      return removeItem(plan, op.kind, op.id, log);
-    case "comment": {
-      const target = normalizeTarget(op.target);
-      if (!targetExists(plan, target)) throw new PlanError(`Nothing to comment on at ${target.kind} "${target.id}".`);
-      const text = clean(op.text, MAX_TEXT);
-      if (!text) throw new PlanError("A comment needs text.");
-      if (plan.threads.length >= MAX_THREADS) throw new PlanError(`A plan holds at most ${MAX_THREADS} comment threads.`);
-      const thread = {
-        id: claimId(plan, "thread", void 0),
-        target,
-        author,
-        text,
-        ts: now,
-        resolved: false,
-        replies: []
-      };
-      plan.threads.push(thread);
-      return [log("commented", target, `commented on ${describeTarget(plan, target)}: ${short(text, 80)}`)];
-    }
-    case "reply": {
-      const thread = plan.threads.find((c) => c.id === op.threadId);
-      if (!thread) throw new PlanError(`No comment thread "${op.threadId}".`);
-      const text = clean(op.text, MAX_TEXT);
-      if (!text) throw new PlanError("A reply needs text.");
-      if (thread.replies.length >= MAX_REPLIES) throw new PlanError("This thread is full; start a new comment.");
-      thread.replies.push({ id: `${thread.id}.${thread.replies.length + 1}`, author, text, ts: now });
-      return [log("replied", thread.target, `replied on ${describeTarget(plan, thread.target)}: ${short(text, 80)}`)];
-    }
-    case "resolve": {
-      const thread = plan.threads.find((c) => c.id === op.threadId);
-      if (!thread) throw new PlanError(`No comment thread "${op.threadId}".`);
-      const resolved = op.resolved !== false;
-      if (thread.resolved === resolved) return [];
-      thread.resolved = resolved;
-      return [
-        log(
-          resolved ? "resolved" : "reopened",
-          thread.target,
-          `${resolved ? "resolved" : "reopened"} a comment on ${describeTarget(plan, thread.target)}`
-        )
-      ];
-    }
-    default:
-      throw new PlanError(`Unknown edit "${op?.op}".`);
-  }
-}
-function editTask(plan, task, op, author, now, log) {
-  const out = [];
-  const edited = [];
-  const title = clean(op.title, MAX_TITLE);
-  if (title && title !== task.title) {
-    task.title = title;
-    edited.push("title");
-  }
-  if (typeof op.detail === "string" && op.detail !== (task.detail ?? "")) {
-    setOptional(task, "detail", clean(op.detail, MAX_TEXT));
-    edited.push("detail");
-  }
-  if (op.files) {
-    setOptional(task, "files", cleanList(op.files)?.length ? cleanList(op.files) : void 0);
-    edited.push("files");
-  }
-  if (typeof op.note === "string") {
-    setOptional(task, "note", clean(op.note, MAX_TITLE * 2));
-    if (!op.status) edited.push("note");
-  }
-  if (op.status !== void 0) {
-    const status = validStatus(op.status);
-    if (!status) throw new PlanError(`"${op.status}" is not a task status (${TASK_STATUSES.join(", ")}).`);
-    if (status !== task.status) {
-      task.status = status;
-      task.updatedAt = now;
-      const note = task.note && typeof op.note === "string" ? ` \u2014 ${short(task.note, 80)}` : "";
-      out.push(log("status", ref("task", task.id), `marked "${task.title}" ${STATUS_WORDS[status]}${note}`));
-    }
-  }
-  if (edited.length) {
-    task.updatedAt = now;
-    out.push(log("edited", ref("task", task.id), `edited the ${edited.join(", ")} of "${task.title}"`));
-  }
-  if (typeof op.index === "number") placeAmongSiblings(plan, task, op.index);
-  void author;
-  return out;
-}
-function removeItem(plan, kind, id, log) {
-  const before = structuredClone(plan);
-  let summary;
-  switch (kind) {
-    case "section": {
-      const s = plan.sections.find((x) => x.id === id);
-      if (!s) throw new PlanError(`No section "${id}".`);
-      plan.sections = plan.sections.filter((x) => x.id !== id);
-      summary = `removed section "${s.title}"`;
-      break;
-    }
-    case "diagram": {
-      const d = plan.diagrams.find((x) => x.id === id);
-      if (!d) throw new PlanError(`No diagram "${id}".`);
-      plan.diagrams = plan.diagrams.filter((x) => x.id !== id);
-      summary = `removed diagram "${d.title}"`;
-      break;
-    }
-    case "task": {
-      const t = requireTask(plan, id);
-      const doomed = /* @__PURE__ */ new Set([t.id, ...descendants(plan, t.id).map((d) => d.id)]);
-      plan.tasks = plan.tasks.filter((x) => !doomed.has(x.id));
-      normalizeSiblings(plan, t.parentId);
-      for (const d of plan.diagrams) {
-        for (const n of d.nodes) {
-          if (!n.taskIds) continue;
-          n.taskIds = n.taskIds.filter((id2) => !doomed.has(id2));
-          if (n.taskIds.length === 0) delete n.taskIds;
-        }
-      }
-      const extra = doomed.size > 1 ? ` and its ${doomed.size - 1} subtask(s)` : "";
-      summary = `removed task "${t.title}"${extra}`;
-      break;
-    }
-    default:
-      throw new PlanError(`Cannot remove a "${kind}".`);
-  }
-  plan.threads = plan.threads.map((t) => detachIfOrphaned(plan, before, t));
-  return [log("deleted", { kind, id }, summary)];
-}
-function buildGraph(rawNodes, rawEdges, old, title, taskIds) {
-  if (!Array.isArray(rawNodes) || !Array.isArray(rawEdges)) throw new PlanError(`Diagram "${title}": nodes and edges must be lists.`);
-  if (rawNodes.length > MAX_NODES) throw new PlanError(`Diagram "${title}" has more than ${MAX_NODES} nodes.`);
-  if (rawEdges.length > MAX_EDGES) throw new PlanError(`Diagram "${title}" has more than ${MAX_EDGES} edges.`);
-  const nodes = [];
-  for (const raw of rawNodes) {
-    const id = clean(raw?.id, 60);
-    if (!id) throw new PlanError(`Diagram "${title}": every node needs an id.`);
-    if (nodes.some((n) => n.id === id)) throw new PlanError(`Diagram "${title}": node id "${id}" is used twice.`);
-    const prev = old?.nodes.find((n) => n.id === id);
-    const detail = clean(raw.detail, 400);
-    const description = raw.description === void 0 ? prev?.description : clean(raw.description, MAX_DESCRIPTION);
-    const notes = raw.notes === void 0 ? prev?.notes : clean(raw.notes, MAX_TEXT);
-    const links = raw.taskIds === void 0 ? prev?.taskIds : cleanList(raw.taskIds);
-    for (const t of links ?? []) {
-      if (!taskIds.has(t)) throw new PlanError(`Diagram "${title}": node "${id}" links task "${t}", which is not in the plan.`);
-    }
-    const x = finite(raw.x) ?? prev?.x;
-    const y = finite(raw.y) ?? prev?.y;
-    nodes.push({
-      id,
-      label: clean(raw.label, 120) ?? prev?.label ?? id,
-      kind: validKind(raw.kind) ?? prev?.kind ?? "component",
-      ...detail ? { detail } : {},
-      ...description ? { description } : {},
-      ...notes ? { notes } : {},
-      ...links?.length ? { taskIds: [...new Set(links)] } : {},
-      ...x !== void 0 && y !== void 0 ? { x: Math.round(x), y: Math.round(y) } : {}
-    });
-  }
-  const ids = new Set(nodes.map((n) => n.id));
-  const edges = [];
-  const cleaned = rawEdges.map((raw) => {
-    const source = clean(raw?.source, 60);
-    const target = clean(raw?.target, 60);
-    if (!source || !target) throw new PlanError(`Diagram "${title}": every edge needs a source and a target.`);
-    for (const end of [source, target]) {
-      if (!ids.has(end)) throw new PlanError(`Diagram "${title}": an edge refers to node "${end}", which is not in the diagram.`);
-    }
-    return { raw, source, target, id: clean(raw.id, 80), label: raw.label === void 0 ? void 0 : clean(raw.label, 120) ?? "" };
-  });
-  const prevOf = new Map(matchEdges(old?.edges ?? [], cleaned).pairs.map(([b, a]) => [a, b]));
-  for (const c of cleaned) {
-    const { raw, source, target } = c;
-    const prev = prevOf.get(c);
-    let id = c.id ?? `${source}->${target}`;
-    for (let n = 2; edges.some((e) => e.id === id); n++) id = `${source}->${target}#${n}`;
-    const label = c.label === void 0 ? prev?.label : c.label || void 0;
-    const dashed = raw.dashed === void 0 ? prev?.dashed : raw.dashed === true;
-    const arrows = raw.arrows === void 0 ? prev?.arrows : validArrows(raw.arrows);
-    edges.push({
-      id,
-      source,
-      target,
-      ...label ? { label } : {},
-      ...dashed ? { dashed: true } : {},
-      ...arrows && arrows !== "end" ? { arrows } : {}
-    });
-  }
-  return { nodes, edges };
-}
-function describeDiagramEdit(before, after2) {
-  const parts = [];
-  if (before.title !== after2.title) parts.push(`renamed it from "${before.title}"`);
-  const label = (d, id) => d.nodes.find((n) => n.id === id)?.label ?? id;
-  const added = after2.nodes.filter((n) => !before.nodes.some((b) => b.id === n.id));
-  const removed = before.nodes.filter((n) => !after2.nodes.some((a) => a.id === n.id));
-  const changed = after2.nodes.filter((n) => {
-    const b = before.nodes.find((x) => x.id === n.id);
-    return b && (b.label !== n.label || b.kind !== n.kind || (b.detail ?? "") !== (n.detail ?? "") || (b.description ?? "") !== (n.description ?? "") || (b.notes ?? "") !== (n.notes ?? ""));
-  });
-  const relinked = after2.nodes.filter((n) => {
-    const b = before.nodes.find((x) => x.id === n.id);
-    return b && (b.taskIds ?? []).join() !== (n.taskIds ?? []).join();
-  });
-  const matched = matchEdges(before.edges, after2.edges);
-  const linked = matched.added;
-  const unlinked = matched.removed;
-  const relabeled = matched.pairs.filter(([b, e]) => (b.label ?? "") !== (e.label ?? "") || Boolean(b.dashed) !== Boolean(e.dashed) || (b.arrows ?? "end") !== (e.arrows ?? "end")).map(([, e]) => e);
-  const list = (items2) => items2.length > 3 ? `${items2.slice(0, 3).join(", ")} and ${items2.length - 3} more` : items2.join(", ");
-  if (added.length) parts.push(`added ${list(added.map((n) => `"${n.label}"`))}`);
-  if (removed.length) parts.push(`removed ${list(removed.map((n) => `"${n.label}"`))}`);
-  if (changed.length) parts.push(`edited ${list(changed.map((n) => `"${n.label}"`))}`);
-  if (relinked.length) parts.push(`changed the tasks behind ${list(relinked.map((n) => `"${n.label}"`))}`);
-  if (linked.length) parts.push(`connected ${list(linked.map((e) => `${label(after2, e.source)} \u2192 ${label(after2, e.target)}`))}`);
-  if (unlinked.length) parts.push(`disconnected ${list(unlinked.map((e) => `${label(before, e.source)} \u2192 ${label(before, e.target)}`))}`);
-  if (relabeled.length) parts.push(`relabelled ${list(relabeled.map((e) => `${label(after2, e.source)} \u2192 ${label(after2, e.target)}`))}`);
-  if ((before.caption ?? "") !== (after2.caption ?? "")) parts.push("edited the caption");
-  if (parts.length) return parts.join("; ");
-  return designOf(before) !== designOf(after2) ? EDITED_DESIGN : null;
-}
-function designOf(d) {
-  return JSON.stringify([d.title, d.caption ?? "", d.nodes.map(({ x: _x, y: _y, ...n }) => n), d.edges]);
-}
-function matchEdges(before, after2) {
-  const pairs = [];
-  const left = [...before];
-  const right = [...after2];
-  const take = (same) => {
-    for (let i = 0; i < left.length; ) {
-      const j = right.findIndex((a) => same(left[i], a));
-      if (j < 0) {
-        i++;
-        continue;
-      }
-      pairs.push([left[i], right[j]]);
-      left.splice(i, 1);
-      right.splice(j, 1);
-    }
-  };
-  const ends2 = (b, a) => b.source === a.source && b.target === a.target;
-  take((b, a) => b.id !== void 0 && b.id === a.id && ends2(b, a));
-  take((b, a) => ends2(b, a) && (b.label ?? "") === (a.label ?? ""));
-  take(ends2);
-  return { pairs, removed: left, added: right };
-}
-function layoutChanged(before, after2) {
-  if (before.direction !== after2.direction) return true;
-  return after2.nodes.some((n) => {
-    const b = before.nodes.find((x) => x.id === n.id);
-    return b && (b.x !== n.x || b.y !== n.y);
-  });
-}
-function checkRev(item, expect, kind, author) {
-  if (typeof expect !== "number" || expect === item.rev) return;
-  const who = item.updatedBy === author ? "another edit" : item.updatedBy === "claude" ? "Claude" : "the user";
-  throw new PlanError(
-    `${kind[0].toUpperCase()}${kind.slice(1)} "${item.title}" was changed by ${who} while this edit was open, so it was not saved. It now shows the latest version.`
-  );
-}
-function taskIdSet(plan) {
-  return new Set(plan.tasks.map((t) => t.id));
-}
-function validKind(value) {
-  return NODE_KINDS.includes(value) ? value : void 0;
-}
-function validDirection(value) {
-  return value === "LR" || value === "TB" ? value : void 0;
-}
-function validArrows(value) {
-  return EDGE_ARROWS.includes(value) ? value : void 0;
-}
-function suggestDirection(nodes, edges) {
-  const ranks = flowRanks(nodes, edges);
-  if (ranks.size === 0) return "LR";
-  const perRank = /* @__PURE__ */ new Map();
-  for (const r of ranks.values()) perRank.set(r, (perRank.get(r) ?? 0) + 1);
-  const depth = Math.max(...perRank.keys()) + 1;
-  const breadth = Math.max(...perRank.values());
-  const fit = (w, h) => Math.min(1, 1e3 / w, 680 / h);
-  const lr = fit(depth * 300, breadth * 110);
-  const tb = fit(breadth * 250, depth * 150);
-  return tb > lr * 1.1 ? "TB" : "LR";
-}
-function flowRanks(nodes, edges) {
-  const ids = new Set(nodes.map((n) => n.id));
-  const out = /* @__PURE__ */ new Map();
-  const connected = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const e of edges) {
-    if (e.source === e.target || !ids.has(e.source) || !ids.has(e.target)) continue;
-    out.set(e.source, [...out.get(e.source) ?? [], e.target]);
-    for (const end of [e.source, e.target]) {
-      if (!seen.has(end)) connected.push(end);
-      seen.add(end);
-    }
-  }
-  const state = /* @__PURE__ */ new Map();
-  const order = [];
-  const forward = /* @__PURE__ */ new Map();
-  const visit = (v) => {
-    state.set(v, "open");
-    const keep = [];
-    for (const w of out.get(v) ?? []) {
-      if (state.get(w) === "open") continue;
-      keep.push(w);
-      if (!state.has(w)) visit(w);
-    }
-    forward.set(v, keep);
-    state.set(v, "done");
-    order.push(v);
-  };
-  for (const v of connected) if (!state.has(v)) visit(v);
-  const rank = new Map(connected.map((v) => [v, 0]));
-  for (const v of order.reverse()) {
-    for (const w of forward.get(v) ?? []) rank.set(w, Math.max(rank.get(w) ?? 0, rank.get(v) + 1));
-  }
-  return rank;
-}
-function finite(value) {
-  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
-}
-function findTask(plan, id) {
-  return plan.tasks.find((t) => t.id === id);
-}
-function requireTask(plan, id) {
-  const task = findTask(plan, id);
-  if (!task) throw new PlanError(`No task "${id}".`);
-  return task;
-}
-function childrenOf(plan, parentId) {
-  return plan.tasks.filter((t) => t.parentId === parentId).sort((a, b) => a.order - b.order);
-}
-function descendants(plan, id) {
-  const out = [];
-  const visit = (pid) => {
-    for (const child of childrenOf(plan, pid)) {
-      out.push(child);
-      visit(child.id);
-    }
-  };
-  visit(id);
-  return out;
-}
-function isDescendant(plan, candidate, ancestor) {
-  return descendants(plan, ancestor).some((t) => t.id === candidate);
-}
-function normalizeSiblings(plan, parentId) {
-  childrenOf(plan, parentId).forEach((t, i) => {
-    t.order = i;
-  });
-}
-function placeAmongSiblings(plan, task, index) {
-  const siblings = childrenOf(plan, task.parentId).filter((t) => t.id !== task.id);
-  const at = index === void 0 ? siblings.length : clampIndex(index, siblings.length);
-  siblings.splice(at, 0, task);
-  siblings.forEach((t, i) => {
-    t.order = i;
-  });
-}
-function outline(plan) {
-  const out = [];
-  const visit = (parentId, depth, prefix) => {
-    childrenOf(plan, parentId).forEach((task, i) => {
-      const number = prefix ? `${prefix}.${i + 1}` : String(i + 1);
-      out.push({ task, depth, number });
-      visit(task.id, depth + 1, number);
-    });
-  };
-  visit(null, 0, "");
-  return out;
-}
-function countTasks(plan) {
-  const counts = { total: 0, done: 0, inProgress: 0, blocked: 0 };
-  if (!plan) return counts;
-  const parents = new Set(plan.tasks.map((t) => t.parentId).filter(Boolean));
-  for (const t of plan.tasks) {
-    if (parents.has(t.id)) continue;
-    counts.total++;
-    if (t.status === "done") counts.done++;
-    else if (t.status === "in_progress") counts.inProgress++;
-    else if (t.status === "blocked") counts.blocked++;
-  }
-  return counts;
-}
-function ref(kind, id) {
-  return { kind, id };
-}
-function normalizeTarget(raw) {
-  const rec = raw && typeof raw === "object" ? raw : {};
-  const kind = String(rec["kind"] ?? "plan");
-  return { kind, id: kind === "plan" ? "" : String(rec["id"] ?? "") };
-}
-function targetExists(plan, target) {
-  switch (target.kind) {
-    case "plan":
-      return true;
-    case "section":
-      return plan.sections.some((s) => s.id === target.id);
-    case "diagram":
-      return plan.diagrams.some((d) => d.id === target.id);
-    case "task":
-      return plan.tasks.some((t) => t.id === target.id);
-    default:
-      return false;
-  }
-}
-function describeTarget(plan, target) {
-  switch (target.kind) {
-    case "plan":
-      return "the plan";
-    case "section": {
-      const s = plan.sections.find((x) => x.id === target.id);
-      return s ? `section "${s.title}"` : `section ${target.id}`;
-    }
-    case "diagram": {
-      const d = plan.diagrams.find((x) => x.id === target.id);
-      return d ? `diagram "${d.title}"` : `diagram ${target.id}`;
-    }
-    case "task": {
-      const t = plan.tasks.find((x) => x.id === target.id);
-      return t ? `task "${t.title}"` : `task ${target.id}`;
-    }
-    default:
-      return "an item";
-  }
-}
-function validStatus(value) {
-  return TASK_STATUSES.includes(value) ? value : void 0;
-}
-function clean(value, max, trim = true) {
-  if (typeof value !== "string") return void 0;
-  const out = (trim ? value.trim() : value.replace(/\s+$/, "")).slice(0, max);
-  return out.trim() ? out : void 0;
-}
-function cleanList(value) {
-  if (!Array.isArray(value)) return void 0;
-  return value.map((v) => typeof v === "string" ? v.trim().slice(0, 300) : "").filter(Boolean).slice(0, 50);
-}
-function setOptional(obj, key, value) {
-  if (value === void 0 || value === null || value === "") delete obj[key];
-  else obj[key] = value;
-}
-function insertAt(list, item, index) {
-  if (index === void 0) list.push(item);
-  else list.splice(clampIndex(index, list.length), 0, item);
-}
-function moveInList(list, id, index) {
-  const from = list.findIndex((x) => x.id === id);
-  if (from < 0) return;
-  const [item] = list.splice(from, 1);
-  list.splice(clampIndex(index, list.length), 0, item);
-}
-function clampIndex(index, length) {
-  if (!Number.isFinite(index)) return length;
-  return Math.max(0, Math.min(length, Math.trunc(index)));
-}
-function short(text, max = 60) {
-  const line = text.replace(/\s+/g, " ").trim();
-  return line.length > max ? `${line.slice(0, max - 1)}\u2026` : line;
-}
-function currentTask(plan) {
-  if (!plan) return null;
-  return outline(plan).find((r) => r.task.status === "in_progress" && !plan.tasks.some((t) => t.parentId === r.task.id))?.task ?? null;
-}
-var PlanError, MAX_CHANGES, MAX_TITLE, MAX_TEXT, MAX_TASKS, MAX_SECTIONS, MAX_DIAGRAMS, MAX_THREADS, MAX_REPLIES, PREFIX, RENAMED_PLAN, MAX_NODES, MAX_EDGES, MAX_DESCRIPTION, EDITED_DESIGN, STATUS_WORDS;
-var init_plan = __esm({
-  "src/shared/plan.ts"() {
-    "use strict";
-    init_types();
-    PlanError = class extends Error {
-    };
-    MAX_CHANGES = 500;
-    MAX_TITLE = 200;
-    MAX_TEXT = 2e4;
-    MAX_TASKS = 400;
-    MAX_SECTIONS = 60;
-    MAX_DIAGRAMS = 40;
-    MAX_THREADS = 500;
-    MAX_REPLIES = 200;
-    PREFIX = { section: "s", diagram: "d", task: "t", thread: "c" };
-    RENAMED_PLAN = "renamed the plan";
-    MAX_NODES = 120;
-    MAX_EDGES = 300;
-    MAX_DESCRIPTION = 4e3;
-    EDITED_DESIGN = "edited";
-    STATUS_WORDS = {
-      todo: "to do",
-      in_progress: "in progress",
-      blocked: "blocked",
-      done: "done"
-    };
-  }
-});
-
 // src/ui/components/Handoff.tsx
 import { useEffect as useEffect5, useState as useState5 } from "react";
 import { jsx as jsx6, jsxs as jsxs6 } from "react/jsx-runtime";
@@ -2130,16 +2292,17 @@ function Handoff() {
   const [viewing, setViewing] = useState5(false);
   if (!session) return null;
   const areas = unreadAreas(plan);
-  const unread = areas.length;
+  const locked = isLocked(plan);
+  const unread = locked ? 0 : areas.length;
   return /* @__PURE__ */ jsxs6("div", { className: "handoff", children: [
-    plan && (unread > 0 ? /* @__PURE__ */ jsxs6("span", { className: "handoff-state is-behind", title: `You changed ${areas.join(", ")} since Claude last read the plan`, children: [
+    plan && !locked && (unread > 0 ? /* @__PURE__ */ jsxs6("span", { className: "handoff-state is-behind", title: `You changed ${areas.join(", ")} since Claude last read the plan`, children: [
       /* @__PURE__ */ jsx6("span", { className: "dot is-attention", "aria-hidden": "true" }),
       "Claude hasn't read your changes"
     ] }) : /* @__PURE__ */ jsxs6("span", { className: "handoff-state is-current", title: plan.claudeReadAt ? `Read ${new Date(plan.claudeReadAt).toLocaleString()}` : void 0, children: [
       "\u2713 Claude is up to date",
       plan.claudeReadAt ? ` \xB7 read ${relativeTime(plan.claudeReadAt)}` : ""
     ] })),
-    /* @__PURE__ */ jsx6(OpenInClaude, { session, primary: unread > 0 }),
+    (!locked || session.link) && /* @__PURE__ */ jsx6(OpenInClaude, { session, primary: unread > 0 }),
     plan && /* @__PURE__ */ jsx6("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setViewing(true), children: "As Claude sees it" }),
     viewing && /* @__PURE__ */ jsx6(ClaudeView, { onClose: () => setViewing(false) })
   ] });
@@ -2254,6 +2417,423 @@ var init_Handoff = __esm({
       question: "Claude is asking you",
       permission: "Claude needs your permission",
       input: "Claude is waiting for your reply"
+    };
+  }
+});
+
+// src/ui/components/Progress.tsx
+import { jsx as jsx7, jsxs as jsxs7 } from "react/jsx-runtime";
+function ProgressBar({ counts, compact }) {
+  const total = Math.max(1, counts.total);
+  const pct = (n) => `${n / total * 100}%`;
+  return /* @__PURE__ */ jsxs7(
+    "span",
+    {
+      className: classNames("progress", compact && "is-compact"),
+      role: "img",
+      "aria-label": `${counts.done} of ${counts.total} tasks done${counts.inProgress ? `, ${counts.inProgress} in progress` : ""}${counts.blocked ? `, ${counts.blocked} blocked` : ""}`,
+      children: [
+        /* @__PURE__ */ jsx7("span", { className: "progress-seg is-done", style: { width: pct(counts.done) } }),
+        /* @__PURE__ */ jsx7("span", { className: "progress-seg is-in_progress", style: { width: pct(counts.inProgress) } }),
+        /* @__PURE__ */ jsx7("span", { className: "progress-seg is-blocked", style: { width: pct(counts.blocked) } })
+      ]
+    }
+  );
+}
+var STATUS_LABEL, STATUS_GLYPH;
+var init_Progress = __esm({
+  "src/ui/components/Progress.tsx"() {
+    "use strict";
+    init_format();
+    STATUS_LABEL = {
+      todo: "To do",
+      in_progress: "In progress",
+      blocked: "Blocked",
+      done: "Done"
+    };
+    STATUS_GLYPH = {
+      todo: "",
+      in_progress: "",
+      blocked: "!",
+      done: "\u2713"
+    };
+  }
+});
+
+// src/ui/components/Submit.tsx
+import { useEffect as useEffect6, useRef as useRef2, useState as useState6 } from "react";
+import { Fragment as Fragment2, jsx as jsx8, jsxs as jsxs8 } from "react/jsx-runtime";
+function SubmitControl() {
+  const plan = usePlan();
+  const [open, setOpen] = useState6(false);
+  const [viewing, setViewing] = useState6(false);
+  const trigger = useRef2(null);
+  if (!plan) return null;
+  const phase = planPhase(plan);
+  if (phase !== "planning") {
+    return /* @__PURE__ */ jsxs8("span", { className: "lock-control", children: [
+      /* @__PURE__ */ jsxs8("span", { className: classNames("lock-chip", `is-${phase}`), title: "Submitted plans cannot be edited; reopen it to change it", children: [
+        /* @__PURE__ */ jsx8("span", { "aria-hidden": "true", children: "\u{1F512}" }),
+        " ",
+        PHASE_CHIP[phase]
+      ] }),
+      /* @__PURE__ */ jsx8("button", { type: "button", className: "btn btn-sm", onClick: () => setViewing(true), children: "View prompt" }),
+      viewing && /* @__PURE__ */ jsx8(SubmittedPrompt, { plan, onClose: () => setViewing(false) })
+    ] });
+  }
+  return /* @__PURE__ */ jsxs8(Fragment2, { children: [
+    /* @__PURE__ */ jsx8(
+      "button",
+      {
+        ref: trigger,
+        type: "button",
+        className: "btn btn-sm btn-primary",
+        title: "Read the prompt Claude will be given, then lock the plan and hand it over to be built",
+        onClick: () => setOpen(true),
+        children: "Review & submit plan"
+      }
+    ),
+    open && /* @__PURE__ */ jsx8(
+      SubmitDialog,
+      {
+        onClose: () => {
+          setOpen(false);
+          trigger.current?.focus();
+        }
+      }
+    )
+  ] });
+}
+function SubmitDialog({ onClose }) {
+  const session = useSession();
+  const plan = usePlan();
+  const sessionId = useStore((s) => s.sessionId);
+  const [target, setTarget] = useState6("session");
+  const [note, setNote] = useState6("");
+  const [settled, setSettled] = useState6("");
+  const [shown, setShown] = useState6(null);
+  const [error, setError] = useState6(null);
+  const [submitting, setSubmitting] = useState6(false);
+  const body = useRef2(null);
+  const version = plan?.version ?? 0;
+  useEffect6(() => {
+    body.current?.focus();
+  }, []);
+  useEffect6(() => {
+    const timer = window.setTimeout(() => setSettled(note), NOTE_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [note]);
+  useEffect6(() => {
+    if (!sessionId) return;
+    let live = true;
+    api.promptPreview(sessionId, target, settled).then((preview2) => {
+      if (!live) return;
+      setShown({ preview: preview2, target, note: settled });
+      setError(null);
+    }).catch((err) => live && setError(err.message));
+    return () => {
+      live = false;
+    };
+  }, [sessionId, target, settled, version]);
+  useEffect6(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape" && !submitting) {
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onClose, submitting]);
+  if (!session || !plan) return null;
+  const current = Boolean(shown && shown.target === target && shown.note === note && shown.preview.version >= version);
+  const preview = shown?.preview ?? null;
+  const submit = async () => {
+    if (!preview || !current) return;
+    setSubmitting(true);
+    if (target === "elsewhere") await copyText(preview.prompt, "Copied the prompt.");
+    const ok = await store.submitPlan({ target, note, expect: preview.version });
+    setSubmitting(false);
+    if (ok) onClose();
+  };
+  return /* @__PURE__ */ jsxs8("div", { className: "lightbox", role: "dialog", "aria-modal": "true", "aria-labelledby": "submit-title", children: [
+    /* @__PURE__ */ jsx8("button", { type: "button", className: "lightbox-scrim", "aria-label": "Close", onClick: onClose, disabled: submitting }),
+    /* @__PURE__ */ jsxs8("div", { className: "lightbox-body submit", ref: body, tabIndex: -1, children: [
+      /* @__PURE__ */ jsxs8("header", { className: "item-head", children: [
+        /* @__PURE__ */ jsx8("h2", { className: "section-title", id: "submit-title", children: "Submit the plan" }),
+        /* @__PURE__ */ jsx8("span", { className: "muted", children: plan.title }),
+        /* @__PURE__ */ jsx8("span", { className: "spacer" }),
+        /* @__PURE__ */ jsx8("button", { type: "button", className: "icon-btn", "aria-label": "Close", onClick: onClose, disabled: submitting, children: "\xD7" })
+      ] }),
+      /* @__PURE__ */ jsxs8("div", { className: "submit-grid", children: [
+        /* @__PURE__ */ jsxs8("div", { className: "submit-side", children: [
+          /* @__PURE__ */ jsx8(Checklist, { session, plan, target, trimmed: Boolean(preview?.trimmed && shown?.target === "session") }),
+          /* @__PURE__ */ jsxs8("fieldset", { className: "submit-targets", children: [
+            /* @__PURE__ */ jsx8("legend", { className: "field-label", children: "Who builds it?" }),
+            TARGETS.map((t) => /* @__PURE__ */ jsxs8("label", { className: classNames("submit-target", target === t.id && "is-active"), children: [
+              /* @__PURE__ */ jsx8("input", { type: "radio", name: "build-target", value: t.id, checked: target === t.id, onChange: () => setTarget(t.id) }),
+              /* @__PURE__ */ jsxs8("span", { children: [
+                /* @__PURE__ */ jsx8("strong", { children: t.label }),
+                /* @__PURE__ */ jsx8("span", { className: "submit-target-hint", children: t.hint })
+              ] })
+            ] }, t.id))
+          ] }),
+          /* @__PURE__ */ jsxs8("label", { className: "field", children: [
+            /* @__PURE__ */ jsx8("span", { className: "field-label", children: "Anything else for Claude?" }),
+            /* @__PURE__ */ jsx8(
+              "textarea",
+              {
+                className: "input",
+                rows: 3,
+                maxLength: preview?.maxNote ?? MAX_NOTE,
+                value: note,
+                placeholder: "Optional \u2014 where to start, what to leave alone, how to test it.",
+                onChange: (e) => setNote(e.target.value)
+              }
+            )
+          ] }),
+          /* @__PURE__ */ jsxs8("p", { className: "explain", children: [
+            "Submitting ",
+            /* @__PURE__ */ jsx8("strong", { children: "locks the plan" }),
+            ": the diagrams, tasks and sections can no longer be edited, and the page follows the build on the task board. You can reopen it if something has to change."
+          ] }),
+          /* @__PURE__ */ jsxs8("div", { className: "submit-actions", children: [
+            /* @__PURE__ */ jsx8("button", { type: "button", className: "btn btn-ghost", onClick: onClose, disabled: submitting, children: "Cancel" }),
+            /* @__PURE__ */ jsx8("button", { type: "button", className: "btn btn-primary", disabled: !current || submitting, onClick: () => void submit(), children: submitting ? "Submitting\u2026" : target === "session" ? "Submit and lock" : "Copy, submit and lock" })
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxs8("section", { className: "submit-preview", "aria-label": "The prompt", children: [
+          /* @__PURE__ */ jsxs8("header", { className: "submit-preview-head", children: [
+            /* @__PURE__ */ jsx8("span", { className: "field-label", children: target === "session" ? "The prompt Claude will get" : "The prompt to paste" }),
+            preview && /* @__PURE__ */ jsxs8("span", { className: "muted submit-count", children: [
+              preview.prompt.length.toLocaleString(),
+              " characters",
+              !current && " \xB7 updating\u2026"
+            ] }),
+            /* @__PURE__ */ jsx8("span", { className: "spacer" }),
+            /* @__PURE__ */ jsx8(
+              "button",
+              {
+                type: "button",
+                className: "btn btn-sm",
+                disabled: !preview,
+                onClick: () => preview && void copyText(preview.prompt, "Copied the prompt."),
+                children: "Copy"
+              }
+            )
+          ] }),
+          error ? /* @__PURE__ */ jsxs8("p", { className: "error-text", role: "alert", children: [
+            "Could not build the prompt: ",
+            error
+          ] }) : /* @__PURE__ */ jsx8("pre", { className: classNames("claude-text", "submit-prompt", !current && "is-stale"), "data-testid": "prompt-preview", children: preview?.prompt ?? "Building the prompt\u2026" })
+        ] })
+      ] })
+    ] })
+  ] });
+}
+function Checklist({ session, plan, target, trimmed }) {
+  const counts = countTasks(plan);
+  const boxes = plan.diagrams.reduce((n, d) => n + d.nodes.length, 0);
+  const open = plan.threads.filter((t) => !t.resolved).length;
+  const unread = unreadAreas(plan);
+  const notes = [];
+  if (counts.total === 0) notes.push({ tone: "warn", text: "There are no tasks, so there will be nothing to follow on the board." });
+  if (target === "session" && session.status === "ended") {
+    notes.push({ tone: "warn", text: "This session has ended. Resume it in Claude to build here, or choose somewhere else." });
+  }
+  if (target === "session" && session.waiting) {
+    notes.push({ tone: "warn", text: "Claude is waiting on you in chat. Answer it there; the prompt goes with the next message you type." });
+  }
+  if (target === "session" && unread.length) {
+    notes.push({ tone: "info", text: `Claude has not read your latest changes (${unread.join(", ")}). The prompt lists them first.` });
+  }
+  if (open) notes.push({ tone: "info", text: `${open} open comment${open === 1 ? "" : "s"} go${open === 1 ? "es" : ""} with the plan.` });
+  if (trimmed) {
+    notes.push({
+      tone: "info",
+      text: "The plan is longer than fits in one message, so the prompt carries the task list and Claude reads the rest with harness_plan_read."
+    });
+  }
+  return /* @__PURE__ */ jsxs8("div", { className: "submit-check", children: [
+    /* @__PURE__ */ jsxs8("p", { className: "submit-summary", children: [
+      plan.diagrams.length,
+      " diagram",
+      plan.diagrams.length === 1 ? "" : "s",
+      " \xB7 ",
+      boxes,
+      " box",
+      boxes === 1 ? "" : "es",
+      " \xB7 ",
+      counts.total,
+      " task",
+      counts.total === 1 ? "" : "s",
+      counts.done ? ` (${counts.done} already done)` : ""
+    ] }),
+    notes.length > 0 && /* @__PURE__ */ jsx8("ul", { className: "submit-notes", children: notes.map((n, i) => /* @__PURE__ */ jsx8("li", { className: `is-${n.tone}`, children: n.text }, i)) })
+  ] });
+}
+function SubmittedPrompt({ plan, onClose }) {
+  const submission = plan.submission;
+  useEffect6(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onClose]);
+  if (!submission) return null;
+  const delivered = submission.deliveredAt ? `Claude got it ${relativeTime(submission.deliveredAt)}` : submission.target === "session" ? "Not delivered yet: it goes with your next message in Claude" : "Handed off to build elsewhere";
+  return /* @__PURE__ */ jsxs8("div", { className: "lightbox", role: "dialog", "aria-modal": "true", "aria-labelledby": "submitted-title", children: [
+    /* @__PURE__ */ jsx8("button", { type: "button", className: "lightbox-scrim", "aria-label": "Close", onClick: onClose }),
+    /* @__PURE__ */ jsxs8("div", { className: "lightbox-body is-text", children: [
+      /* @__PURE__ */ jsxs8("header", { className: "item-head", children: [
+        /* @__PURE__ */ jsx8("h2", { className: "section-title", id: "submitted-title", children: "The submitted prompt" }),
+        /* @__PURE__ */ jsxs8("span", { className: "muted", children: [
+          "submitted ",
+          relativeTime(submission.at),
+          " \xB7 ",
+          delivered
+        ] }),
+        /* @__PURE__ */ jsx8("span", { className: "spacer" }),
+        /* @__PURE__ */ jsx8("button", { type: "button", className: "btn btn-sm", onClick: () => void copyText(submission.prompt, "Copied the prompt."), children: "Copy" }),
+        /* @__PURE__ */ jsx8("button", { type: "button", className: "icon-btn", "aria-label": "Close", onClick: onClose, children: "\xD7" })
+      ] }),
+      /* @__PURE__ */ jsx8("pre", { className: "claude-text", children: submission.prompt })
+    ] })
+  ] });
+}
+function PhaseStrip({ session }) {
+  const tab = useStore((s) => s.tab);
+  const [confirming, setConfirming] = useState6(false);
+  const plan = session.plan;
+  const phase = planPhase(plan);
+  if (!plan?.submission || phase === "planning") return null;
+  const submission = plan.submission;
+  const counts = countTasks(plan);
+  const now = currentTask(plan);
+  const blocked = plan.tasks.filter((t) => t.status === "blocked" && !plan.tasks.some((c) => c.parentId === t.id));
+  let head;
+  let text;
+  switch (phase) {
+    case "submitted":
+      head = "Submitted \u2014 waiting for Claude to start";
+      text = session.status === "ended" ? "This session has ended. Resume it in Claude, then send any message: the prompt goes with it." : /* @__PURE__ */ jsxs8(Fragment2, { children: [
+        "Send any message in Claude's chat \u2014 ",
+        /* @__PURE__ */ jsx8("q", { children: "go" }),
+        " will do \u2014 and the harness hands it the build prompt with it."
+      ] });
+      break;
+    case "building":
+      head = "Building";
+      text = now ? /* @__PURE__ */ jsxs8(Fragment2, { children: [
+        "Claude is on ",
+        /* @__PURE__ */ jsx8("strong", { children: now.title }),
+        now.note ? ` \u2014 ${now.note}` : ""
+      ] }) : blocked.length ? `${blocked.length} task${blocked.length === 1 ? " is" : "s are"} blocked: ${blocked[0].title}${blocked[0].note ? ` \u2014 ${blocked[0].note}` : ""}` : "Claude has the plan. No task is in progress right now.";
+      break;
+    case "built":
+      head = "Built";
+      text = `Every task is done (${counts.total}).`;
+      break;
+    default:
+      head = "Handed off";
+      text = "The prompt was copied to build somewhere else, so progress is not followed here.";
+  }
+  return (
+    // A region, not a live one: the board announces each move as it happens.
+    /* @__PURE__ */ jsxs8("section", { className: classNames("phase", `is-${phase}`), "aria-label": "The build", children: [
+      /* @__PURE__ */ jsxs8("div", { className: "phase-body", children: [
+        /* @__PURE__ */ jsxs8("p", { className: "phase-head", children: [
+          /* @__PURE__ */ jsx8("span", { "aria-hidden": "true", children: "\u{1F512}" }),
+          " ",
+          head,
+          /* @__PURE__ */ jsxs8("span", { className: "muted", children: [
+            " \xB7 submitted ",
+            relativeTime(submission.at)
+          ] })
+        ] }),
+        /* @__PURE__ */ jsx8("p", { className: "phase-text", children: text })
+      ] }),
+      counts.total > 0 && phase !== "handed-off" && /* @__PURE__ */ jsxs8("span", { className: "phase-progress", children: [
+        /* @__PURE__ */ jsx8(ProgressBar, { counts, compact: true }),
+        /* @__PURE__ */ jsxs8("span", { className: "muted", children: [
+          counts.done,
+          "/",
+          counts.total
+        ] })
+      ] }),
+      /* @__PURE__ */ jsx8("div", { className: "phase-actions", children: confirming ? /* @__PURE__ */ jsxs8("span", { className: "item-confirm", children: [
+        submission.deliveredAt ? "Unlock the plan? Claude keeps building until you tell it otherwise in chat." : "Withdraw the submission?",
+        /* @__PURE__ */ jsx8(
+          "button",
+          {
+            type: "button",
+            className: "link is-danger",
+            onClick: () => {
+              setConfirming(false);
+              void store.reopenPlan();
+            },
+            children: submission.deliveredAt ? "Reopen" : "Withdraw"
+          }
+        ),
+        /* @__PURE__ */ jsx8("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep it" })
+      ] }) : /* @__PURE__ */ jsxs8(Fragment2, { children: [
+        phase === "submitted" && session.link && /* @__PURE__ */ jsx8(OpenInClaude, { session, primary: true }),
+        (phase === "submitted" || phase === "handed-off") && /* @__PURE__ */ jsx8(
+          "button",
+          {
+            type: "button",
+            className: classNames("btn btn-sm", phase === "submitted" && !session.link && "btn-primary"),
+            title: phase === "submitted" ? "Pasting it into Claude works too; it is not sent twice" : void 0,
+            onClick: () => void copyText(submission.prompt, phase === "submitted" ? "Copied \u2014 paste it into Claude's chat." : "Copied the prompt."),
+            children: "Copy prompt"
+          }
+        ),
+        (phase === "building" || phase === "built") && tab !== "tasks" && /* @__PURE__ */ jsx8("button", { type: "button", className: "btn btn-sm", onClick: () => store.set({ tab: "tasks", taskMode: "board" }), children: "Follow on the board" }),
+        /* @__PURE__ */ jsx8("button", { type: "button", className: "link", onClick: () => setConfirming(true), children: submission.deliveredAt ? "Reopen for changes" : "Withdraw" })
+      ] }) })
+    ] })
+  );
+}
+async function copyText(text, ok) {
+  try {
+    await navigator.clipboard.writeText(text);
+    store.toast("success", ok);
+  } catch {
+    store.toast("error", "The browser would not let the page use the clipboard. Select the prompt and copy it instead.");
+  }
+}
+var TARGETS, NOTE_SETTLE_MS, PHASE_CHIP;
+var init_Submit = __esm({
+  "src/ui/components/Submit.tsx"() {
+    "use strict";
+    init_store();
+    init_api();
+    init_Handoff();
+    init_Progress();
+    init_format();
+    init_plan();
+    TARGETS = [
+      {
+        id: "session",
+        label: "This Claude session",
+        hint: "Your next message in its chat carries this prompt, and the board follows each task as Claude works through it."
+      },
+      {
+        id: "elsewhere",
+        label: "Somewhere else",
+        hint: "Copy the prompt into the agent that will build it. The plan is locked all the same, but its progress cannot be followed here."
+      }
+    ];
+    NOTE_SETTLE_MS = 300;
+    PHASE_CHIP = {
+      submitted: "Submitted",
+      building: "Locked \xB7 building",
+      built: "Built",
+      "handed-off": "Locked \xB7 handed off"
     };
   }
 });
@@ -2513,10 +3093,10 @@ var init_markdown = __esm({
 
 // src/ui/components/Markdown.tsx
 import { useMemo } from "react";
-import { jsx as jsx7 } from "react/jsx-runtime";
+import { jsx as jsx9 } from "react/jsx-runtime";
 function Markdown({ source, className }) {
   const html = useMemo(() => renderMarkdown(source), [source]);
-  return /* @__PURE__ */ jsx7("div", { className: className ? `md ${className}` : "md", dangerouslySetInnerHTML: { __html: html } });
+  return /* @__PURE__ */ jsx9("div", { className: className ? `md ${className}` : "md", dangerouslySetInnerHTML: { __html: html } });
 }
 var init_Markdown = __esm({
   "src/ui/components/Markdown.tsx"() {
@@ -2526,24 +3106,25 @@ var init_Markdown = __esm({
 });
 
 // src/ui/components/Editable.tsx
-import { useEffect as useEffect6, useRef as useRef2, useState as useState6 } from "react";
-import { jsx as jsx8, jsxs as jsxs7 } from "react/jsx-runtime";
+import { useEffect as useEffect7, useRef as useRef3, useState as useState7 } from "react";
+import { jsx as jsx10, jsxs as jsxs9 } from "react/jsx-runtime";
 function InlineText({
   value,
   onSave,
   label,
   placeholder = "Untitled",
   className,
-  as: Tag = "span"
+  as: Tag = "span",
+  readOnly = false
 }) {
-  const [editing, setEditing] = useState6(false);
-  const [draft, setDraft] = useState6(value);
-  const done = useRef2(false);
-  const input = useRef2(null);
-  useEffect6(() => {
+  const [editing, setEditing] = useState7(false);
+  const [draft, setDraft] = useState7(value);
+  const done = useRef3(false);
+  const input = useRef3(null);
+  useEffect7(() => {
     if (!editing) setDraft(value);
   }, [value, editing]);
-  useEffect6(() => {
+  useEffect7(() => {
     if (editing) input.current?.select();
   }, [editing]);
   const start = () => {
@@ -2563,8 +3144,9 @@ function InlineText({
     setEditing(false);
     setDraft(value);
   };
+  if (readOnly) return /* @__PURE__ */ jsx10(Tag, { className: classNames("inline-text", "is-readonly", !value && "is-empty", className), children: value || placeholder });
   if (editing) {
-    return /* @__PURE__ */ jsx8(
+    return /* @__PURE__ */ jsx10(
       "input",
       {
         ref: input,
@@ -2586,7 +3168,7 @@ function InlineText({
       }
     );
   }
-  return /* @__PURE__ */ jsx8(Tag, { className: classNames("inline-text", !value && "is-empty", className), children: /* @__PURE__ */ jsx8("button", { type: "button", className: "inline-trigger", onClick: start, title: "Click to edit", "aria-label": `${label}: ${value || placeholder}. Edit`, children: value || placeholder }) });
+  return /* @__PURE__ */ jsx10(Tag, { className: classNames("inline-text", !value && "is-empty", className), children: /* @__PURE__ */ jsx10("button", { type: "button", className: "inline-trigger", onClick: start, title: "Click to edit", "aria-label": `${label}: ${value || placeholder}. Edit`, children: value || placeholder }) });
 }
 function MarkdownField({
   value,
@@ -2600,15 +3182,15 @@ function MarkdownField({
   onCancel,
   version
 }) {
-  const [editing, setEditing] = useState6(startEditing);
-  const [draft, setDraft] = useState6(value);
-  const [saving, setSaving] = useState6(false);
-  const startedAt = useRef2(version);
-  const area = useRef2(null);
-  useEffect6(() => {
+  const [editing, setEditing] = useState7(startEditing);
+  const [draft, setDraft] = useState7(value);
+  const [saving, setSaving] = useState7(false);
+  const startedAt = useRef3(version);
+  const area = useRef3(null);
+  useEffect7(() => {
     if (!editing) setDraft(value);
   }, [value, editing]);
-  useEffect6(() => {
+  useEffect7(() => {
     if (editing) area.current?.focus();
   }, [editing]);
   const begin = () => {
@@ -2647,8 +3229,8 @@ function MarkdownField({
     }
   };
   if (editing) {
-    return /* @__PURE__ */ jsxs7("div", { className: classNames("md-field is-editing", className), children: [
-      /* @__PURE__ */ jsx8(
+    return /* @__PURE__ */ jsxs9("div", { className: classNames("md-field is-editing", className), children: [
+      /* @__PURE__ */ jsx10(
         "textarea",
         {
           ref: area,
@@ -2661,25 +3243,25 @@ function MarkdownField({
           onKeyDown
         }
       ),
-      changedUnderneath && /* @__PURE__ */ jsx8("p", { className: "md-conflict", role: "alert", children: "This changed while you were editing. Saving now replaces the newer version with your text \u2014 copy anything you want to keep from it first." }),
-      /* @__PURE__ */ jsxs7("div", { className: "md-field-foot", children: [
-        /* @__PURE__ */ jsx8("span", { className: "muted", children: "Markdown \xB7 \u2318/Ctrl+Enter to save \xB7 Esc to cancel" }),
-        /* @__PURE__ */ jsx8("span", { className: "spacer" }),
-        /* @__PURE__ */ jsx8("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: cancel, children: "Cancel" }),
-        /* @__PURE__ */ jsx8("button", { type: "button", className: "btn btn-sm btn-primary", disabled: saving, onClick: () => void save(), children: saving ? "Saving\u2026" : "Save" })
+      changedUnderneath && /* @__PURE__ */ jsx10("p", { className: "md-conflict", role: "alert", children: "This changed while you were editing. Saving now replaces the newer version with your text \u2014 copy anything you want to keep from it first." }),
+      /* @__PURE__ */ jsxs9("div", { className: "md-field-foot", children: [
+        /* @__PURE__ */ jsx10("span", { className: "muted", children: "Markdown \xB7 \u2318/Ctrl+Enter to save \xB7 Esc to cancel" }),
+        /* @__PURE__ */ jsx10("span", { className: "spacer" }),
+        /* @__PURE__ */ jsx10("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: cancel, children: "Cancel" }),
+        /* @__PURE__ */ jsx10("button", { type: "button", className: "btn btn-sm btn-primary", disabled: saving, onClick: () => void save(), children: saving ? "Saving\u2026" : "Save" })
       ] })
     ] });
   }
   if (!value.trim()) {
-    return /* @__PURE__ */ jsx8("div", { className: classNames("md-field is-empty", className), children: /* @__PURE__ */ jsxs7("button", { type: "button", className: "md-empty", onClick: begin, "aria-label": `${emptyAction}: ${label}`, children: [
-      /* @__PURE__ */ jsx8("span", { className: "muted", children: placeholder }),
+    return /* @__PURE__ */ jsx10("div", { className: classNames("md-field is-empty", className), children: /* @__PURE__ */ jsxs9("button", { type: "button", className: "md-empty", onClick: begin, "aria-label": `${emptyAction}: ${label}`, children: [
+      /* @__PURE__ */ jsx10("span", { className: "muted", children: placeholder }),
       " ",
-      /* @__PURE__ */ jsx8("span", { className: "link", children: emptyAction })
+      /* @__PURE__ */ jsx10("span", { className: "link", children: emptyAction })
     ] }) });
   }
-  return /* @__PURE__ */ jsxs7("div", { className: classNames("md-field", className), children: [
-    /* @__PURE__ */ jsx8(Markdown, { source: value }),
-    /* @__PURE__ */ jsx8("button", { type: "button", className: "md-edit icon-btn is-tiny", title: `Edit ${label}`, "aria-label": `Edit ${label}`, onClick: begin, children: /* @__PURE__ */ jsx8("span", { "aria-hidden": "true", children: "\u270E" }) })
+  return /* @__PURE__ */ jsxs9("div", { className: classNames("md-field", className), children: [
+    /* @__PURE__ */ jsx10(Markdown, { source: value }),
+    /* @__PURE__ */ jsx10("button", { type: "button", className: "md-edit icon-btn is-tiny", title: `Edit ${label}`, "aria-label": `Edit ${label}`, onClick: begin, children: /* @__PURE__ */ jsx10("span", { "aria-hidden": "true", children: "\u270E" }) })
   ] });
 }
 function AddField({
@@ -2690,8 +3272,8 @@ function AddField({
   onCancel,
   children
 }) {
-  const [value, setValue] = useState6("");
-  return /* @__PURE__ */ jsxs7(
+  const [value, setValue] = useState7("");
+  return /* @__PURE__ */ jsxs9(
     "form",
     {
       className: "add-field",
@@ -2703,7 +3285,7 @@ function AddField({
         if (ok !== false) setValue("");
       },
       children: [
-        /* @__PURE__ */ jsx8(
+        /* @__PURE__ */ jsx10(
           "input",
           {
             className: "input",
@@ -2724,7 +3306,7 @@ function AddField({
           }
         ),
         children,
-        /* @__PURE__ */ jsx8("button", { type: "submit", className: "btn btn-sm", disabled: !value.trim(), children: "Add" })
+        /* @__PURE__ */ jsx10("button", { type: "submit", className: "btn btn-sm", disabled: !value.trim(), children: "Add" })
       ]
     }
   );
@@ -2737,55 +3319,16 @@ var init_Editable = __esm({
   }
 });
 
-// src/ui/components/Progress.tsx
-import { jsx as jsx9, jsxs as jsxs8 } from "react/jsx-runtime";
-function ProgressBar({ counts, compact }) {
-  const total = Math.max(1, counts.total);
-  const pct = (n) => `${n / total * 100}%`;
-  return /* @__PURE__ */ jsxs8(
-    "span",
-    {
-      className: classNames("progress", compact && "is-compact"),
-      role: "img",
-      "aria-label": `${counts.done} of ${counts.total} tasks done${counts.inProgress ? `, ${counts.inProgress} in progress` : ""}${counts.blocked ? `, ${counts.blocked} blocked` : ""}`,
-      children: [
-        /* @__PURE__ */ jsx9("span", { className: "progress-seg is-done", style: { width: pct(counts.done) } }),
-        /* @__PURE__ */ jsx9("span", { className: "progress-seg is-in_progress", style: { width: pct(counts.inProgress) } }),
-        /* @__PURE__ */ jsx9("span", { className: "progress-seg is-blocked", style: { width: pct(counts.blocked) } })
-      ]
-    }
-  );
-}
-var STATUS_LABEL, STATUS_GLYPH;
-var init_Progress = __esm({
-  "src/ui/components/Progress.tsx"() {
-    "use strict";
-    init_format();
-    STATUS_LABEL = {
-      todo: "To do",
-      in_progress: "In progress",
-      blocked: "Blocked",
-      done: "Done"
-    };
-    STATUS_GLYPH = {
-      todo: "",
-      in_progress: "",
-      blocked: "!",
-      done: "\u2713"
-    };
-  }
-});
-
 // src/ui/components/primitives.tsx
-import { jsx as jsx10, jsxs as jsxs9 } from "react/jsx-runtime";
+import { jsx as jsx11, jsxs as jsxs10 } from "react/jsx-runtime";
 function EmptyState({
   title,
   hint,
   action
 }) {
-  return /* @__PURE__ */ jsxs9("div", { className: "empty-state", children: [
-    /* @__PURE__ */ jsx10("p", { className: "empty-title", children: title }),
-    hint && /* @__PURE__ */ jsx10("p", { className: "empty-hint", children: hint }),
+  return /* @__PURE__ */ jsxs10("div", { className: "empty-state", children: [
+    /* @__PURE__ */ jsx11("p", { className: "empty-title", children: title }),
+    hint && /* @__PURE__ */ jsx11("p", { className: "empty-hint", children: hint }),
     action
   ] });
 }
@@ -2798,7 +3341,7 @@ var init_primitives = __esm({
 
 // src/ui/components/ErrorBoundary.tsx
 import { Component } from "react";
-import { jsx as jsx11, jsxs as jsxs10 } from "react/jsx-runtime";
+import { jsx as jsx12, jsxs as jsxs11 } from "react/jsx-runtime";
 var ErrorBoundary;
 var init_ErrorBoundary = __esm({
   "src/ui/components/ErrorBoundary.tsx"() {
@@ -2816,19 +3359,19 @@ var init_ErrorBoundary = __esm({
       }
       render() {
         if (!this.state.error) return this.props.children;
-        return /* @__PURE__ */ jsxs10("div", { className: "crash", role: "alert", children: [
-          /* @__PURE__ */ jsxs10("p", { className: "crash-title", children: [
+        return /* @__PURE__ */ jsxs11("div", { className: "crash", role: "alert", children: [
+          /* @__PURE__ */ jsxs11("p", { className: "crash-title", children: [
             "The ",
             this.props.label,
             " could not be shown."
           ] }),
-          /* @__PURE__ */ jsxs10("p", { className: "crash-detail", children: [
+          /* @__PURE__ */ jsxs11("p", { className: "crash-detail", children: [
             "Your plan is saved \u2014 this is a display problem only. ",
-            /* @__PURE__ */ jsx11("code", { children: this.state.error.message })
+            /* @__PURE__ */ jsx12("code", { children: this.state.error.message })
           ] }),
-          /* @__PURE__ */ jsxs10("div", { className: "row-actions", children: [
-            /* @__PURE__ */ jsx11("button", { type: "button", className: "btn btn-sm btn-primary", onClick: () => this.setState({ error: null }), children: "Try again" }),
-            /* @__PURE__ */ jsx11("button", { type: "button", className: "btn btn-sm", onClick: () => window.location.reload(), children: "Reload the page" })
+          /* @__PURE__ */ jsxs11("div", { className: "row-actions", children: [
+            /* @__PURE__ */ jsx12("button", { type: "button", className: "btn btn-sm btn-primary", onClick: () => this.setState({ error: null }), children: "Try again" }),
+            /* @__PURE__ */ jsx12("button", { type: "button", className: "btn btn-sm", onClick: () => window.location.reload(), children: "Reload the page" })
           ] })
         ] });
       }
@@ -2837,8 +3380,8 @@ var init_ErrorBoundary = __esm({
 });
 
 // src/ui/components/Threads.tsx
-import { useState as useState7 } from "react";
-import { jsx as jsx12, jsxs as jsxs11 } from "react/jsx-runtime";
+import { useState as useState8 } from "react";
+import { jsx as jsx13, jsxs as jsxs12 } from "react/jsx-runtime";
 function useThreads(target) {
   const plan = usePlan();
   return (plan?.threads ?? []).filter((t) => t.target.kind === target.kind && t.target.id === target.id);
@@ -2852,7 +3395,7 @@ function CommentToggle({
   const threads = useThreads(target);
   const unresolved = threads.filter((t) => !t.resolved).length;
   const waiting = threads.some((t) => !t.resolved && lastAuthor(t) === "claude");
-  return /* @__PURE__ */ jsxs11(
+  return /* @__PURE__ */ jsxs12(
     "button",
     {
       type: "button",
@@ -2862,27 +3405,27 @@ function CommentToggle({
       "aria-label": unresolved ? `${unresolved} open comment(s) on ${label}` : `Comment on ${label}`,
       onClick: onToggle,
       children: [
-        /* @__PURE__ */ jsx12("span", { "aria-hidden": "true", children: "\u{1F4AC}" }),
-        unresolved > 0 && /* @__PURE__ */ jsx12("span", { className: "comment-count", children: unresolved })
+        /* @__PURE__ */ jsx13("span", { "aria-hidden": "true", children: "\u{1F4AC}" }),
+        unresolved > 0 && /* @__PURE__ */ jsx13("span", { className: "comment-count", children: unresolved })
       ]
     }
   );
 }
 function ThreadPanel({ target, label }) {
   const threads = useThreads(target);
-  const [showResolved, setShowResolved] = useState7(false);
+  const [showResolved, setShowResolved] = useState8(false);
   const open = threads.filter((t) => !t.resolved);
   const resolved = threads.filter((t) => t.resolved);
-  return /* @__PURE__ */ jsxs11("div", { className: "threads", "aria-label": `Comments on ${label}`, children: [
-    open.map((t) => /* @__PURE__ */ jsx12(ThreadView, { thread: t }, t.id)),
-    resolved.length > 0 && /* @__PURE__ */ jsxs11("button", { type: "button", className: "link threads-resolved", onClick: () => setShowResolved((v) => !v), children: [
+  return /* @__PURE__ */ jsxs12("div", { className: "threads", "aria-label": `Comments on ${label}`, children: [
+    open.map((t) => /* @__PURE__ */ jsx13(ThreadView, { thread: t }, t.id)),
+    resolved.length > 0 && /* @__PURE__ */ jsxs12("button", { type: "button", className: "link threads-resolved", onClick: () => setShowResolved((v) => !v), children: [
       showResolved ? "Hide" : "Show",
       " ",
       resolved.length,
       " resolved"
     ] }),
-    showResolved && resolved.map((t) => /* @__PURE__ */ jsx12(ThreadView, { thread: t }, t.id)),
-    /* @__PURE__ */ jsx12(
+    showResolved && resolved.map((t) => /* @__PURE__ */ jsx13(ThreadView, { thread: t }, t.id)),
+    /* @__PURE__ */ jsx13(
       Composer,
       {
         placeholder: open.length ? "Add another comment\u2026" : `Comment on ${label}\u2026`,
@@ -2893,16 +3436,16 @@ function ThreadPanel({ target, label }) {
   ] });
 }
 function ThreadView({ thread }) {
-  const [replying, setReplying] = useState7(false);
-  return /* @__PURE__ */ jsxs11("article", { className: classNames("thread", thread.resolved && "is-resolved"), children: [
-    /* @__PURE__ */ jsx12(Entry, { author: thread.author, text: thread.text, ts: thread.ts }),
-    thread.replies.map((r) => /* @__PURE__ */ jsx12(Entry, { author: r.author, text: r.text, ts: r.ts, reply: true }, r.id)),
-    /* @__PURE__ */ jsxs11("div", { className: "thread-actions", children: [
-      !thread.resolved && /* @__PURE__ */ jsx12("button", { type: "button", className: "link", onClick: () => setReplying((v) => !v), children: "Reply" }),
-      /* @__PURE__ */ jsx12("button", { type: "button", className: "link", onClick: () => void store.op({ op: "resolve", threadId: thread.id, resolved: !thread.resolved }), children: thread.resolved ? "Reopen" : "Resolve" }),
-      !thread.resolved && lastAuthor(thread) === "user" && /* @__PURE__ */ jsx12("span", { className: "muted", children: "Claude sees this when it next reads the plan" })
+  const [replying, setReplying] = useState8(false);
+  return /* @__PURE__ */ jsxs12("article", { className: classNames("thread", thread.resolved && "is-resolved"), children: [
+    /* @__PURE__ */ jsx13(Entry, { author: thread.author, text: thread.text, ts: thread.ts }),
+    thread.replies.map((r) => /* @__PURE__ */ jsx13(Entry, { author: r.author, text: r.text, ts: r.ts, reply: true }, r.id)),
+    /* @__PURE__ */ jsxs12("div", { className: "thread-actions", children: [
+      !thread.resolved && /* @__PURE__ */ jsx13("button", { type: "button", className: "link", onClick: () => setReplying((v) => !v), children: "Reply" }),
+      /* @__PURE__ */ jsx13("button", { type: "button", className: "link", onClick: () => void store.op({ op: "resolve", threadId: thread.id, resolved: !thread.resolved }), children: thread.resolved ? "Reopen" : "Resolve" }),
+      !thread.resolved && lastAuthor(thread) === "user" && /* @__PURE__ */ jsx13("span", { className: "muted", children: "Claude sees this when it next reads the plan" })
     ] }),
-    replying && /* @__PURE__ */ jsx12(
+    replying && /* @__PURE__ */ jsx13(
       Composer,
       {
         placeholder: "Reply\u2026",
@@ -2919,16 +3462,16 @@ function ThreadView({ thread }) {
   ] });
 }
 function Entry({ author, text, ts, reply }) {
-  return /* @__PURE__ */ jsxs11("div", { className: classNames("thread-entry", reply && "is-reply", `by-${author}`), children: [
-    /* @__PURE__ */ jsxs11("div", { className: "thread-meta", children: [
-      /* @__PURE__ */ jsx12(AuthorBadge, { author }),
-      /* @__PURE__ */ jsx12("span", { className: "muted", children: relativeTime(ts) })
+  return /* @__PURE__ */ jsxs12("div", { className: classNames("thread-entry", reply && "is-reply", `by-${author}`), children: [
+    /* @__PURE__ */ jsxs12("div", { className: "thread-meta", children: [
+      /* @__PURE__ */ jsx13(AuthorBadge, { author }),
+      /* @__PURE__ */ jsx13("span", { className: "muted", children: relativeTime(ts) })
     ] }),
-    /* @__PURE__ */ jsx12(Markdown, { source: text })
+    /* @__PURE__ */ jsx13(Markdown, { source: text })
   ] });
 }
 function AuthorBadge({ author }) {
-  return /* @__PURE__ */ jsx12("span", { className: classNames("author", `is-${author}`), children: author === "user" ? "You" : "Claude" });
+  return /* @__PURE__ */ jsx13("span", { className: classNames("author", `is-${author}`), children: author === "user" ? "You" : "Claude" });
 }
 function Composer({
   placeholder,
@@ -2937,8 +3480,8 @@ function Composer({
   autoFocus,
   onCancel
 }) {
-  const [text, setText] = useState7("");
-  const [busy, setBusy] = useState7(false);
+  const [text, setText] = useState8("");
+  const [busy, setBusy] = useState8(false);
   const send = async () => {
     const value = text.trim();
     if (!value || busy) return;
@@ -2947,8 +3490,8 @@ function Composer({
     setBusy(false);
     if (ok) setText("");
   };
-  return /* @__PURE__ */ jsxs11("div", { className: "thread-composer", children: [
-    /* @__PURE__ */ jsx12(
+  return /* @__PURE__ */ jsxs12("div", { className: "thread-composer", children: [
+    /* @__PURE__ */ jsx13(
       "textarea",
       {
         className: "input",
@@ -2970,11 +3513,11 @@ function Composer({
         }
       }
     ),
-    /* @__PURE__ */ jsxs11("div", { className: "thread-composer-foot", children: [
-      /* @__PURE__ */ jsx12("span", { className: "muted", children: "\u2318/Ctrl+Enter" }),
-      /* @__PURE__ */ jsx12("span", { className: "spacer" }),
-      onCancel && /* @__PURE__ */ jsx12("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: onCancel, children: "Cancel" }),
-      /* @__PURE__ */ jsx12("button", { type: "button", className: "btn btn-sm", disabled: !text.trim() || busy, onClick: () => void send(), children: "Comment" })
+    /* @__PURE__ */ jsxs12("div", { className: "thread-composer-foot", children: [
+      /* @__PURE__ */ jsx13("span", { className: "muted", children: "\u2318/Ctrl+Enter" }),
+      /* @__PURE__ */ jsx13("span", { className: "spacer" }),
+      onCancel && /* @__PURE__ */ jsx13("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: onCancel, children: "Cancel" }),
+      /* @__PURE__ */ jsx13("button", { type: "button", className: "btn btn-sm", disabled: !text.trim() || busy, onClick: () => void send(), children: "Comment" })
     ] })
   ] });
 }
@@ -3008,8 +3551,8 @@ var init_motion = __esm({
 });
 
 // src/ui/components/Item.tsx
-import { useEffect as useEffect7, useRef as useRef3, useState as useState8 } from "react";
-import { jsx as jsx13, jsxs as jsxs12 } from "react/jsx-runtime";
+import { useEffect as useEffect8, useRef as useRef4, useState as useState9 } from "react";
+import { jsx as jsx14, jsxs as jsxs13 } from "react/jsx-runtime";
 function Focusable({
   kind,
   id,
@@ -3018,10 +3561,10 @@ function Focusable({
   as: Tag = "section"
 }) {
   const focusTarget = useStore((s) => s.focusTarget);
-  const ref2 = useRef3(null);
-  const [flash, setFlash] = useState8(false);
+  const ref2 = useRef4(null);
+  const [flash, setFlash] = useState9(false);
   const mine = focusTarget === `${kind}:${id}`;
-  useEffect7(() => {
+  useEffect8(() => {
     if (!mine) return;
     ref2.current?.scrollIntoView?.({ behavior: scrollBehavior(), block: "center" });
     setFlash(true);
@@ -3031,7 +3574,7 @@ function Focusable({
     }, 1600);
     return () => window.clearTimeout(timer);
   }, [mine]);
-  return /* @__PURE__ */ jsx13(Tag, { ref: ref2, id: `${kind}-${id}`, className: classNames(className, flash && "is-flash"), children });
+  return /* @__PURE__ */ jsx14(Tag, { ref: ref2, id: `${kind}-${id}`, className: classNames(className, flash && "is-flash"), children });
 }
 function ItemActions({
   label,
@@ -3040,16 +3583,16 @@ function ItemActions({
   onMove,
   onRemove
 }) {
-  const [confirming, setConfirming] = useState8(false);
+  const [confirming, setConfirming] = useState9(false);
   if (confirming) {
-    return /* @__PURE__ */ jsxs12("span", { className: "item-confirm", children: [
+    return /* @__PURE__ */ jsxs13("span", { className: "item-confirm", children: [
       "Remove?",
-      /* @__PURE__ */ jsx13("button", { type: "button", className: "link is-danger", onClick: onRemove, children: "Remove" }),
-      /* @__PURE__ */ jsx13("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
+      /* @__PURE__ */ jsx14("button", { type: "button", className: "link is-danger", onClick: onRemove, children: "Remove" }),
+      /* @__PURE__ */ jsx14("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
     ] });
   }
-  return /* @__PURE__ */ jsxs12("span", { className: "item-actions", children: [
-    /* @__PURE__ */ jsx13(
+  return /* @__PURE__ */ jsxs13("span", { className: "item-actions", children: [
+    /* @__PURE__ */ jsx14(
       "button",
       {
         type: "button",
@@ -3058,10 +3601,10 @@ function ItemActions({
         title: "Move up",
         "aria-label": `Move ${label} up`,
         onClick: () => onMove(index - 1),
-        children: /* @__PURE__ */ jsx13("span", { "aria-hidden": "true", children: "\u2191" })
+        children: /* @__PURE__ */ jsx14("span", { "aria-hidden": "true", children: "\u2191" })
       }
     ),
-    /* @__PURE__ */ jsx13(
+    /* @__PURE__ */ jsx14(
       "button",
       {
         type: "button",
@@ -3070,10 +3613,10 @@ function ItemActions({
         title: "Move down",
         "aria-label": `Move ${label} down`,
         onClick: () => onMove(index + 1),
-        children: /* @__PURE__ */ jsx13("span", { "aria-hidden": "true", children: "\u2193" })
+        children: /* @__PURE__ */ jsx14("span", { "aria-hidden": "true", children: "\u2193" })
       }
     ),
-    /* @__PURE__ */ jsx13("button", { type: "button", className: "icon-btn is-tiny is-danger", title: "Remove", "aria-label": `Remove ${label}`, onClick: () => setConfirming(true), children: /* @__PURE__ */ jsx13("span", { "aria-hidden": "true", children: "\xD7" }) })
+    /* @__PURE__ */ jsx14("button", { type: "button", className: "icon-btn is-tiny is-danger", title: "Remove", "aria-label": `Remove ${label}`, onClick: () => setConfirming(true), children: /* @__PURE__ */ jsx14("span", { "aria-hidden": "true", children: "\xD7" }) })
   ] });
 }
 var init_Item = __esm({
@@ -3086,38 +3629,40 @@ var init_Item = __esm({
 });
 
 // src/ui/views/OverviewView.tsx
-import { useState as useState9 } from "react";
-import { jsx as jsx14, jsxs as jsxs13 } from "react/jsx-runtime";
+import { useState as useState10 } from "react";
+import { jsx as jsx15, jsxs as jsxs14 } from "react/jsx-runtime";
 function OverviewView() {
   const plan = usePlan();
   if (!plan) return null;
-  return /* @__PURE__ */ jsxs13("div", { className: "view-pad doc", children: [
-    /* @__PURE__ */ jsx14(Glance, { plan }),
-    /* @__PURE__ */ jsxs13("section", { className: "doc-block", "aria-labelledby": "summary-head", children: [
-      /* @__PURE__ */ jsx14("h2", { id: "summary-head", className: "doc-label", children: "Summary" }),
-      /* @__PURE__ */ jsx14(
-        MarkdownField,
+  return /* @__PURE__ */ jsxs14("div", { className: "view-pad doc", children: [
+    /* @__PURE__ */ jsx15(Glance, { plan }),
+    /* @__PURE__ */ jsxs14("fieldset", { className: "lockable", disabled: isLocked(plan), children: [
+      /* @__PURE__ */ jsxs14("section", { className: "doc-block", "aria-labelledby": "summary-head", children: [
+        /* @__PURE__ */ jsx15("h2", { id: "summary-head", className: "doc-label", children: "Summary" }),
+        /* @__PURE__ */ jsx15(
+          MarkdownField,
+          {
+            value: plan.summary,
+            label: "the plan summary",
+            placeholder: "No summary yet.",
+            emptyAction: "Write one",
+            onSave: (summary) => store.op({ op: "set_meta", summary })
+          }
+        )
+      ] }),
+      plan.sections.map((section, i) => /* @__PURE__ */ jsx15(SectionCard, { section, index: i, count: plan.sections.length }, section.id)),
+      !isLocked(plan) && /* @__PURE__ */ jsx15("div", { className: "doc-add", children: /* @__PURE__ */ jsx15(
+        AddField,
         {
-          value: plan.summary,
-          label: "the plan summary",
-          placeholder: "No summary yet.",
-          emptyAction: "Write one",
-          onSave: (summary) => store.op({ op: "set_meta", summary })
+          placeholder: "New section title \u2014 e.g. Data model, Risks, Out of scope",
+          label: "New section title",
+          onAdd: (title) => store.op({ op: "upsert_section", title, body: "" })
         }
-      )
-    ] }),
-    plan.sections.map((section, i) => /* @__PURE__ */ jsx14(SectionCard, { section, index: i, count: plan.sections.length }, section.id)),
-    /* @__PURE__ */ jsx14("div", { className: "doc-add", children: /* @__PURE__ */ jsx14(
-      AddField,
-      {
-        placeholder: "New section title \u2014 e.g. Data model, Risks, Out of scope",
-        label: "New section title",
-        onAdd: (title) => store.op({ op: "upsert_section", title, body: "" })
-      }
-    ) }),
-    /* @__PURE__ */ jsxs13("section", { className: "doc-block", "aria-labelledby": "general-head", children: [
-      /* @__PURE__ */ jsx14("h2", { id: "general-head", className: "doc-label", children: "General comments" }),
-      /* @__PURE__ */ jsx14(ThreadPanel, { target: { kind: "plan", id: "" }, label: "the plan" })
+      ) }),
+      (!isLocked(plan) || plan.threads.some((t) => t.target.kind === "plan")) && /* @__PURE__ */ jsxs14("section", { className: "doc-block", "aria-labelledby": "general-head", children: [
+        /* @__PURE__ */ jsx15("h2", { id: "general-head", className: "doc-label", children: "General comments" }),
+        /* @__PURE__ */ jsx15(ThreadPanel, { target: { kind: "plan", id: "" }, label: "the plan" })
+      ] })
     ] })
   ] });
 }
@@ -3126,23 +3671,23 @@ function Glance({ plan }) {
   const openThreads = plan.threads.filter((t) => !t.resolved).length;
   const now = currentTask(plan);
   const blocked = plan.tasks.filter((t) => t.status === "blocked");
-  return /* @__PURE__ */ jsxs13("div", { className: "glance", role: "list", "aria-label": "Plan at a glance", children: [
-    /* @__PURE__ */ jsxs13("button", { type: "button", role: "listitem", className: "glance-tile", onClick: () => store.setTab("tasks"), children: [
-      /* @__PURE__ */ jsx14("span", { className: "glance-label", children: "Tasks" }),
-      /* @__PURE__ */ jsxs13("span", { className: "glance-value", children: [
+  return /* @__PURE__ */ jsxs14("div", { className: "glance", role: "list", "aria-label": "Plan at a glance", children: [
+    /* @__PURE__ */ jsxs14("button", { type: "button", role: "listitem", className: "glance-tile", onClick: () => store.setTab("tasks"), children: [
+      /* @__PURE__ */ jsx15("span", { className: "glance-label", children: "Tasks" }),
+      /* @__PURE__ */ jsxs14("span", { className: "glance-value", children: [
         counts.done,
-        /* @__PURE__ */ jsxs13("span", { className: "glance-of", children: [
+        /* @__PURE__ */ jsxs14("span", { className: "glance-of", children: [
           "/",
           counts.total
         ] })
       ] }),
-      /* @__PURE__ */ jsx14(ProgressBar, { counts }),
-      /* @__PURE__ */ jsxs13("span", { className: "glance-sub", children: [
+      /* @__PURE__ */ jsx15(ProgressBar, { counts }),
+      /* @__PURE__ */ jsxs14("span", { className: "glance-sub", children: [
         counts.inProgress ? `${counts.inProgress} in progress` : counts.total ? "none in progress" : "no tasks yet",
         counts.blocked ? ` \xB7 ${counts.blocked} blocked` : ""
       ] })
     ] }),
-    /* @__PURE__ */ jsxs13(
+    /* @__PURE__ */ jsxs14(
       "button",
       {
         type: "button",
@@ -3154,18 +3699,18 @@ function Glance({ plan }) {
           else store.setTab("tasks");
         },
         children: [
-          /* @__PURE__ */ jsx14("span", { className: "glance-label", children: now ? "Claude is on" : blocked.length ? "Blocked" : "Now" }),
-          /* @__PURE__ */ jsx14("span", { className: "glance-now", children: now?.title ?? blocked[0]?.title ?? (counts.total && counts.done === counts.total ? "All done" : "Nothing in progress") }),
-          /* @__PURE__ */ jsx14("span", { className: "glance-sub", children: now?.note ?? blocked[0]?.note ?? (blocked.length > 1 ? `${blocked.length} tasks blocked` : " ") })
+          /* @__PURE__ */ jsx15("span", { className: "glance-label", children: now ? "Claude is on" : blocked.length ? "Blocked" : "Now" }),
+          /* @__PURE__ */ jsx15("span", { className: "glance-now", children: now?.title ?? blocked[0]?.title ?? (counts.total && counts.done === counts.total ? "All done" : "Nothing in progress") }),
+          /* @__PURE__ */ jsx15("span", { className: "glance-sub", children: now?.note ?? blocked[0]?.note ?? (blocked.length > 1 ? `${blocked.length} tasks blocked` : " ") })
         ]
       }
     ),
-    /* @__PURE__ */ jsxs13("button", { type: "button", role: "listitem", className: "glance-tile", onClick: () => store.setTab("diagrams"), children: [
-      /* @__PURE__ */ jsx14("span", { className: "glance-label", children: "Diagrams" }),
-      /* @__PURE__ */ jsx14("span", { className: "glance-value", children: plan.diagrams.length }),
-      /* @__PURE__ */ jsx14("span", { className: "glance-sub", children: plan.diagrams.map((d) => d.title).slice(0, 2).join(", ") || "none yet" })
+    /* @__PURE__ */ jsxs14("button", { type: "button", role: "listitem", className: "glance-tile", onClick: () => store.setTab("diagrams"), children: [
+      /* @__PURE__ */ jsx15("span", { className: "glance-label", children: "Diagrams" }),
+      /* @__PURE__ */ jsx15("span", { className: "glance-value", children: plan.diagrams.length }),
+      /* @__PURE__ */ jsx15("span", { className: "glance-sub", children: plan.diagrams.map((d) => d.title).slice(0, 2).join(", ") || "none yet" })
     ] }),
-    /* @__PURE__ */ jsxs13(
+    /* @__PURE__ */ jsxs14(
       "button",
       {
         type: "button",
@@ -3173,9 +3718,9 @@ function Glance({ plan }) {
         className: "glance-tile",
         onClick: () => document.getElementById("general-head")?.scrollIntoView({ behavior: scrollBehavior(), block: "start" }),
         children: [
-          /* @__PURE__ */ jsx14("span", { className: "glance-label", children: "Open comments" }),
-          /* @__PURE__ */ jsx14("span", { className: "glance-value", children: openThreads }),
-          /* @__PURE__ */ jsxs13("span", { className: "glance-sub", children: [
+          /* @__PURE__ */ jsx15("span", { className: "glance-label", children: "Open comments" }),
+          /* @__PURE__ */ jsx15("span", { className: "glance-value", children: openThreads }),
+          /* @__PURE__ */ jsxs14("span", { className: "glance-sub", children: [
             "revision ",
             plan.revision || "draft"
           ] })
@@ -3185,11 +3730,11 @@ function Glance({ plan }) {
   ] });
 }
 function SectionCard({ section, index, count }) {
-  const [comments, setComments] = useState9(false);
+  const [comments, setComments] = useState10(false);
   const target = { kind: "section", id: section.id };
-  return /* @__PURE__ */ jsxs13(Focusable, { kind: "section", id: section.id, className: "doc-block section-card", children: [
-    /* @__PURE__ */ jsxs13("header", { className: "item-head", children: [
-      /* @__PURE__ */ jsx14(
+  return /* @__PURE__ */ jsxs14(Focusable, { kind: "section", id: section.id, className: "doc-block section-card", children: [
+    /* @__PURE__ */ jsxs14("header", { className: "item-head", children: [
+      /* @__PURE__ */ jsx15(
         InlineText,
         {
           as: "h2",
@@ -3199,10 +3744,10 @@ function SectionCard({ section, index, count }) {
           onSave: (title) => store.op({ op: "upsert_section", id: section.id, title })
         }
       ),
-      /* @__PURE__ */ jsx14("span", { className: "item-id", children: section.id }),
-      /* @__PURE__ */ jsx14("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx14(CommentToggle, { target, label: section.title, open: comments, onToggle: () => setComments((v) => !v) }),
-      /* @__PURE__ */ jsx14(
+      /* @__PURE__ */ jsx15("span", { className: "item-id", children: section.id }),
+      /* @__PURE__ */ jsx15("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx15(CommentToggle, { target, label: section.title, open: comments, onToggle: () => setComments((v) => !v) }),
+      /* @__PURE__ */ jsx15(
         ItemActions,
         {
           label: section.title,
@@ -3213,7 +3758,7 @@ function SectionCard({ section, index, count }) {
         }
       )
     ] }),
-    /* @__PURE__ */ jsx14(
+    /* @__PURE__ */ jsx15(
       MarkdownField,
       {
         value: section.body,
@@ -3223,7 +3768,7 @@ function SectionCard({ section, index, count }) {
         onSave: (body, rev) => store.op({ op: "upsert_section", id: section.id, body, ...rev !== void 0 ? { expect: rev } : {} })
       }
     ),
-    comments && /* @__PURE__ */ jsx14(ThreadPanel, { target, label: section.title })
+    comments && /* @__PURE__ */ jsx15(ThreadPanel, { target, label: section.title })
   ] });
 }
 var init_OverviewView = __esm({
@@ -3869,11 +4414,11 @@ var init_clipboard = __esm({
 });
 
 // src/ui/lib/theme.ts
-import { useEffect as useEffect8, useState as useState10 } from "react";
+import { useEffect as useEffect9, useState as useState11 } from "react";
 function useResolvedTheme() {
   const read = () => document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
-  const [theme, setTheme] = useState10(read);
-  useEffect8(() => {
+  const [theme, setTheme] = useState11(read);
+  useEffect9(() => {
     const observer = new MutationObserver(() => setTheme(read()));
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     return () => observer.disconnect();
@@ -3929,9 +4474,9 @@ var init_shared = __esm({
 });
 
 // src/ui/components/flow/PlanNode.tsx
-import { useEffect as useEffect9, useRef as useRef4, useState as useState11 } from "react";
+import { useEffect as useEffect10, useRef as useRef5, useState as useState12 } from "react";
 import { Handle, NodeToolbar, Position, useEdges, useNodes } from "@xyflow/react";
-import { jsx as jsx15, jsxs as jsxs14 } from "react/jsx-runtime";
+import { jsx as jsx16, jsxs as jsxs15 } from "react/jsx-runtime";
 function PlanNode({ id, data, selected }) {
   const api2 = useCanvas();
   const editing = api2.editing === `node:${id}`;
@@ -3939,7 +4484,7 @@ function PlanNode({ id, data, selected }) {
   const state = !p ? null : p.blocked ? "blocked" : p.inProgress ? "in_progress" : p.done === p.total ? "done" : "todo";
   const summary = useHoverSummary();
   const hasStory = Boolean(data.description?.trim() || data.notes?.trim());
-  return /* @__PURE__ */ jsxs14(
+  return /* @__PURE__ */ jsxs15(
     "div",
     {
       className: classNames(
@@ -3953,12 +4498,12 @@ function PlanNode({ id, data, selected }) {
       ),
       style: { width: data.width, minHeight: data.height },
       children: [
-        data.rel && data.rel !== "focus" && /* @__PURE__ */ jsx15("span", { className: `flow-node-rel rel-${data.rel}`, title: REL_HINT[data.rel], children: REL_BADGE[data.rel] }),
-        SIDES.map(([side, position]) => /* @__PURE__ */ jsx15(Handle, { id: side, type: "source", position, className: `handle-${side}` }, side)),
-        /* @__PURE__ */ jsxs14("div", { className: "flow-node-head", children: [
-          /* @__PURE__ */ jsx15("span", { className: "flow-node-glyph", "aria-hidden": "true", children: KIND_GLYPH[data.kind] }),
-          editing ? /* @__PURE__ */ jsx15(LabelInput, { value: data.label, seed: api2.editSeed, onDone: (label) => api2.finishNodeLabel(id, label) }) : /* @__PURE__ */ jsx15("span", { className: "flow-node-label", children: data.label }),
-          /* @__PURE__ */ jsx15(
+        data.rel && data.rel !== "focus" && /* @__PURE__ */ jsx16("span", { className: `flow-node-rel rel-${data.rel}`, title: REL_HINT[data.rel], children: REL_BADGE[data.rel] }),
+        SIDES.map(([side, position]) => /* @__PURE__ */ jsx16(Handle, { id: side, type: "source", position, className: `handle-${side}` }, side)),
+        /* @__PURE__ */ jsxs15("div", { className: "flow-node-head", children: [
+          /* @__PURE__ */ jsx16("span", { className: "flow-node-glyph", "aria-hidden": "true", children: KIND_GLYPH[data.kind] }),
+          editing ? /* @__PURE__ */ jsx16(LabelInput, { value: data.label, seed: api2.editSeed, onDone: (label) => api2.finishNodeLabel(id, label) }) : /* @__PURE__ */ jsx16("span", { className: "flow-node-label", children: data.label }),
+          /* @__PURE__ */ jsx16(
             "button",
             {
               type: "button",
@@ -3972,19 +4517,19 @@ function PlanNode({ id, data, selected }) {
               onKeyDown: (e) => {
                 if (e.key === "Escape") summary.hideNow();
               },
-              children: /* @__PURE__ */ jsx15(InfoIcon, {})
+              children: /* @__PURE__ */ jsx16(InfoIcon, {})
             }
           )
         ] }),
-        data.detail && /* @__PURE__ */ jsx15("div", { className: "flow-node-detail", children: data.detail }),
-        p && /* @__PURE__ */ jsxs14(
+        data.detail && /* @__PURE__ */ jsx16("div", { className: "flow-node-detail", children: data.detail }),
+        p && /* @__PURE__ */ jsxs15(
           "div",
           {
             className: "flow-node-progress",
             title: `${p.done} of ${p.total} tasks done${p.inProgress ? `, ${p.inProgress} in progress` : ""}${p.blocked ? `, ${p.blocked} blocked` : ""}`,
             children: [
-              /* @__PURE__ */ jsx15(ProgressBar, { counts: p, compact: true }),
-              /* @__PURE__ */ jsxs14("span", { children: [
+              /* @__PURE__ */ jsx16(ProgressBar, { counts: p, compact: true }),
+              /* @__PURE__ */ jsxs15("span", { children: [
                 p.done,
                 "/",
                 p.total
@@ -3992,16 +4537,16 @@ function PlanNode({ id, data, selected }) {
             ]
           }
         ),
-        /* @__PURE__ */ jsx15(NodeToolbar, { isVisible: summary.open, position: summary.side, align: summary.align, offset: 10, className: "flow-summary-layer", children: summary.open && /* @__PURE__ */ jsx15(NodeSummary, { id, data, onEnter: summary.keep, onLeave: summary.hideSoon }) })
+        /* @__PURE__ */ jsx16(NodeToolbar, { isVisible: summary.open, position: summary.side, align: summary.align, offset: 10, className: "flow-summary-layer", children: summary.open && /* @__PURE__ */ jsx16(NodeSummary, { id, data, onEnter: summary.keep, onLeave: summary.hideSoon }) })
       ]
     }
   );
 }
 function useHoverSummary() {
-  const [side, setSide] = useState11(null);
-  const [align, setAlign] = useState11("center");
-  const timer = useRef4(void 0);
-  useEffect9(() => () => window.clearTimeout(timer.current), []);
+  const [side, setSide] = useState12(null);
+  const [align, setAlign] = useState12("center");
+  const timer = useRef5(void 0);
+  useEffect10(() => () => window.clearTimeout(timer.current), []);
   const keep = () => window.clearTimeout(timer.current);
   const show = (e) => {
     keep();
@@ -4033,63 +4578,63 @@ function NodeSummary({ id, data, onEnter, onLeave }) {
   const tasks = (data.taskIds ?? []).map((t) => plan?.tasks.find((x) => x.id === t)).filter((t) => t !== void 0);
   const SHOWN = 5;
   const hidden = Math.max(0, out.length - SHOWN) + Math.max(0, into.length - SHOWN);
-  return /* @__PURE__ */ jsxs14("div", { className: "flow-summary", role: "tooltip", onMouseEnter: onEnter, onMouseLeave: onLeave, children: [
-    /* @__PURE__ */ jsxs14("header", { className: "flow-summary-head", children: [
-      /* @__PURE__ */ jsx15("span", { className: classNames("kind-swatch", `kind-${data.kind}`), "aria-hidden": "true", children: KIND_GLYPH[data.kind] }),
-      /* @__PURE__ */ jsx15("span", { className: "panel-kicker", children: KIND_LABEL[data.kind] })
+  return /* @__PURE__ */ jsxs15("div", { className: "flow-summary", role: "tooltip", onMouseEnter: onEnter, onMouseLeave: onLeave, children: [
+    /* @__PURE__ */ jsxs15("header", { className: "flow-summary-head", children: [
+      /* @__PURE__ */ jsx16("span", { className: classNames("kind-swatch", `kind-${data.kind}`), "aria-hidden": "true", children: KIND_GLYPH[data.kind] }),
+      /* @__PURE__ */ jsx16("span", { className: "panel-kicker", children: KIND_LABEL[data.kind] })
     ] }),
-    /* @__PURE__ */ jsx15("p", { className: "flow-summary-title", children: data.label }),
-    data.detail && /* @__PURE__ */ jsx15("p", { className: "flow-summary-detail", children: data.detail }),
-    data.description?.trim() ? /* @__PURE__ */ jsx15("div", { className: "flow-summary-body", children: /* @__PURE__ */ jsx15(Markdown, { source: data.description }) }) : /* @__PURE__ */ jsx15("p", { className: "flow-summary-empty", children: "No description yet. Select the box to write what it does." }),
-    data.notes?.trim() && /* @__PURE__ */ jsxs14("section", { className: "flow-summary-section", children: [
-      /* @__PURE__ */ jsx15("p", { className: "flow-summary-label", children: "Decisions" }),
-      /* @__PURE__ */ jsx15("div", { className: "flow-summary-notes", children: /* @__PURE__ */ jsx15(Markdown, { source: data.notes }) })
+    /* @__PURE__ */ jsx16("p", { className: "flow-summary-title", children: data.label }),
+    data.detail && /* @__PURE__ */ jsx16("p", { className: "flow-summary-detail", children: data.detail }),
+    data.description?.trim() ? /* @__PURE__ */ jsx16("div", { className: "flow-summary-body", children: /* @__PURE__ */ jsx16(Markdown, { source: data.description }) }) : /* @__PURE__ */ jsx16("p", { className: "flow-summary-empty", children: "No description yet. Select the box to write what it does." }),
+    data.notes?.trim() && /* @__PURE__ */ jsxs15("section", { className: "flow-summary-section", children: [
+      /* @__PURE__ */ jsx16("p", { className: "flow-summary-label", children: "Decisions" }),
+      /* @__PURE__ */ jsx16("div", { className: "flow-summary-notes", children: /* @__PURE__ */ jsx16(Markdown, { source: data.notes }) })
     ] }),
-    tasks.length > 0 && /* @__PURE__ */ jsxs14("section", { className: "flow-summary-section", children: [
-      /* @__PURE__ */ jsxs14("p", { className: "flow-summary-label", children: [
+    tasks.length > 0 && /* @__PURE__ */ jsxs15("section", { className: "flow-summary-section", children: [
+      /* @__PURE__ */ jsxs15("p", { className: "flow-summary-label", children: [
         "Built by",
-        data.progress && /* @__PURE__ */ jsxs14("span", { className: "flow-summary-progress", children: [
-          /* @__PURE__ */ jsx15(ProgressBar, { counts: data.progress, compact: true }),
+        data.progress && /* @__PURE__ */ jsxs15("span", { className: "flow-summary-progress", children: [
+          /* @__PURE__ */ jsx16(ProgressBar, { counts: data.progress, compact: true }),
           " ",
           data.progress.done,
           "/",
           data.progress.total
         ] })
       ] }),
-      /* @__PURE__ */ jsxs14("ul", { className: "flow-summary-list", children: [
-        tasks.slice(0, SHOWN).map((t) => /* @__PURE__ */ jsxs14("li", { children: [
-          /* @__PURE__ */ jsx15("span", { className: classNames("status-dot is-static", `is-${t.status}`), "aria-label": STATUS_LABEL[t.status], children: STATUS_GLYPH[t.status] }),
+      /* @__PURE__ */ jsxs15("ul", { className: "flow-summary-list", children: [
+        tasks.slice(0, SHOWN).map((t) => /* @__PURE__ */ jsxs15("li", { children: [
+          /* @__PURE__ */ jsx16("span", { className: classNames("status-dot is-static", `is-${t.status}`), "aria-label": STATUS_LABEL[t.status], children: STATUS_GLYPH[t.status] }),
           t.title
         ] }, t.id)),
-        tasks.length > SHOWN && /* @__PURE__ */ jsxs14("li", { className: "muted", children: [
+        tasks.length > SHOWN && /* @__PURE__ */ jsxs15("li", { className: "muted", children: [
           "and ",
           tasks.length - SHOWN,
           " more"
         ] })
       ] })
     ] }),
-    (out.length > 0 || into.length > 0) && /* @__PURE__ */ jsxs14("section", { className: "flow-summary-section", children: [
-      /* @__PURE__ */ jsx15("p", { className: "flow-summary-label", children: "Connections" }),
-      /* @__PURE__ */ jsxs14("ul", { className: "flow-summary-list", children: [
-        out.slice(0, SHOWN).map((e) => /* @__PURE__ */ jsxs14("li", { children: [
-          /* @__PURE__ */ jsx15("span", { "aria-hidden": "true", children: e.data?.arrows === "both" ? "\u2194" : "\u2192" }),
+    (out.length > 0 || into.length > 0) && /* @__PURE__ */ jsxs15("section", { className: "flow-summary-section", children: [
+      /* @__PURE__ */ jsx16("p", { className: "flow-summary-label", children: "Connections" }),
+      /* @__PURE__ */ jsxs15("ul", { className: "flow-summary-list", children: [
+        out.slice(0, SHOWN).map((e) => /* @__PURE__ */ jsxs15("li", { children: [
+          /* @__PURE__ */ jsx16("span", { "aria-hidden": "true", children: e.data?.arrows === "both" ? "\u2194" : "\u2192" }),
           " ",
           name(e.target),
-          e.data?.label && /* @__PURE__ */ jsxs14("span", { className: "muted", children: [
+          e.data?.label && /* @__PURE__ */ jsxs15("span", { className: "muted", children: [
             " \xB7 ",
             e.data.label
           ] })
         ] }, e.id)),
-        into.slice(0, SHOWN).map((e) => /* @__PURE__ */ jsxs14("li", { children: [
-          /* @__PURE__ */ jsx15("span", { "aria-hidden": "true", children: e.data?.arrows === "both" ? "\u2194" : "\u2190" }),
+        into.slice(0, SHOWN).map((e) => /* @__PURE__ */ jsxs15("li", { children: [
+          /* @__PURE__ */ jsx16("span", { "aria-hidden": "true", children: e.data?.arrows === "both" ? "\u2194" : "\u2190" }),
           " ",
           name(e.source),
-          e.data?.label && /* @__PURE__ */ jsxs14("span", { className: "muted", children: [
+          e.data?.label && /* @__PURE__ */ jsxs15("span", { className: "muted", children: [
             " \xB7 ",
             e.data.label
           ] })
         ] }, e.id)),
-        hidden > 0 && /* @__PURE__ */ jsxs14("li", { className: "muted", children: [
+        hidden > 0 && /* @__PURE__ */ jsxs15("li", { className: "muted", children: [
           "and ",
           hidden,
           " more"
@@ -4105,11 +4650,11 @@ function LabelInput({
   className = "flow-node-input",
   placeholder
 }) {
-  const [draft, setDraft] = useState11(seed ?? value);
-  const seeded = useRef4(Boolean(seed));
-  const done = useRef4(false);
-  const ref2 = useRef4(null);
-  useEffect9(() => {
+  const [draft, setDraft] = useState12(seed ?? value);
+  const seeded = useRef5(Boolean(seed));
+  const done = useRef5(false);
+  const ref2 = useRef5(null);
+  useEffect10(() => {
     let tries = 0;
     let frame = 0;
     const grab = () => {
@@ -4129,7 +4674,7 @@ function LabelInput({
     done.current = true;
     onDone(v);
   };
-  return /* @__PURE__ */ jsx15(
+  return /* @__PURE__ */ jsx16(
     "input",
     {
       ref: ref2,
@@ -4154,10 +4699,10 @@ function LabelInput({
   );
 }
 function InfoIcon() {
-  return /* @__PURE__ */ jsxs14("svg", { viewBox: "0 0 16 16", width: "14", height: "14", "aria-hidden": "true", children: [
-    /* @__PURE__ */ jsx15("circle", { cx: "8", cy: "8", r: "6.6", fill: "none", stroke: "currentColor", strokeWidth: "1.4" }),
-    /* @__PURE__ */ jsx15("rect", { x: "7.25", y: "7", width: "1.5", height: "4.6", rx: "0.75", fill: "currentColor" }),
-    /* @__PURE__ */ jsx15("circle", { cx: "8", cy: "4.9", r: "0.95", fill: "currentColor" })
+  return /* @__PURE__ */ jsxs15("svg", { viewBox: "0 0 16 16", width: "14", height: "14", "aria-hidden": "true", children: [
+    /* @__PURE__ */ jsx16("circle", { cx: "8", cy: "8", r: "6.6", fill: "none", stroke: "currentColor", strokeWidth: "1.4" }),
+    /* @__PURE__ */ jsx16("rect", { x: "7.25", y: "7", width: "1.5", height: "4.6", rx: "0.75", fill: "currentColor" }),
+    /* @__PURE__ */ jsx16("circle", { cx: "8", cy: "4.9", r: "0.95", fill: "currentColor" })
   ] });
 }
 var REL_BADGE, REL_HINT, SIDES;
@@ -4188,7 +4733,7 @@ var init_PlanNode = __esm({
 
 // src/ui/components/flow/PlanEdge.tsx
 import { BaseEdge, EdgeLabelRenderer, getBezierPath, Position as Position2, useInternalNode } from "@xyflow/react";
-import { Fragment as Fragment2, jsx as jsx16, jsxs as jsxs15 } from "react/jsx-runtime";
+import { Fragment as Fragment3, jsx as jsx17, jsxs as jsxs16 } from "react/jsx-runtime";
 function PlanEdge({ id, source, target, data, markerEnd, markerStart, selected, style }) {
   const api2 = useCanvas();
   const from = useInternalNode(source);
@@ -4223,8 +4768,8 @@ function PlanEdge({ id, source, target, data, markerEnd, markerStart, selected, 
   const editing = api2.editing === `edge:${id}`;
   const text = data?.label;
   const rel = data?.rel;
-  return /* @__PURE__ */ jsxs15(Fragment2, { children: [
-    /* @__PURE__ */ jsx16(
+  return /* @__PURE__ */ jsxs16(Fragment3, { children: [
+    /* @__PURE__ */ jsx17(
       BaseEdge,
       {
         id,
@@ -4236,7 +4781,7 @@ function PlanEdge({ id, source, target, data, markerEnd, markerStart, selected, 
         className: classNames(rel && `rel-${rel}`, data?.dropTarget && "is-drop-target")
       }
     ),
-    data?.grips && ends2 && /* @__PURE__ */ jsx16(EdgeLabelRenderer, { children: ["source", "target"].map((end, i) => /* @__PURE__ */ jsx16(
+    data?.grips && ends2 && /* @__PURE__ */ jsx17(EdgeLabelRenderer, { children: ["source", "target"].map((end, i) => /* @__PURE__ */ jsx17(
       "button",
       {
         type: "button",
@@ -4255,7 +4800,7 @@ function PlanEdge({ id, source, target, data, markerEnd, markerStart, selected, 
       },
       end
     )) }),
-    (text || editing) && /* @__PURE__ */ jsx16(EdgeLabelRenderer, { children: /* @__PURE__ */ jsx16(
+    (text || editing) && /* @__PURE__ */ jsx17(EdgeLabelRenderer, { children: /* @__PURE__ */ jsx17(
       "div",
       {
         className: classNames(
@@ -4273,7 +4818,7 @@ function PlanEdge({ id, source, target, data, markerEnd, markerStart, selected, 
           api2.startEditing(`edge:${id}`);
         },
         title: "Double-click to edit",
-        children: editing ? /* @__PURE__ */ jsx16(LabelInput, { value: text ?? "", className: "flow-edge-input", placeholder: "What flows along it", onDone: (v) => api2.finishEdgeLabel(id, v) }) : text
+        children: editing ? /* @__PURE__ */ jsx17(LabelInput, { value: text ?? "", className: "flow-edge-input", placeholder: "What flows along it", onDone: (v) => api2.finishEdgeLabel(id, v) }) : text
       }
     ) })
   ] });
@@ -4300,8 +4845,8 @@ var init_PlanEdge = __esm({
 });
 
 // src/ui/components/flow/Panels.tsx
-import { useEffect as useEffect10, useLayoutEffect, useRef as useRef5, useState as useState12 } from "react";
-import { Fragment as Fragment3, jsx as jsx17, jsxs as jsxs16 } from "react/jsx-runtime";
+import { useEffect as useEffect11, useLayoutEffect, useRef as useRef6, useState as useState13 } from "react";
+import { Fragment as Fragment4, jsx as jsx18, jsxs as jsxs17 } from "react/jsx-runtime";
 function CommitInput({
   value,
   label,
@@ -4310,11 +4855,11 @@ function CommitInput({
   maxLength,
   onCommit
 }) {
-  const [draft, setDraft] = useState12(value);
-  const live = useRef5({ draft, value, onCommit });
+  const [draft, setDraft] = useState13(value);
+  const live = useRef6({ draft, value, onCommit });
   live.current = { draft, value, onCommit };
-  useEffect10(() => setDraft(value), [value]);
-  useEffect10(
+  useEffect11(() => setDraft(value), [value]);
+  useEffect11(
     () => () => {
       const { draft: draft2, value: value2, onCommit: onCommit2 } = live.current;
       if (draft2.trim() !== value2) onCommit2(draft2.trim());
@@ -4324,7 +4869,7 @@ function CommitInput({
   const commit = () => {
     if (draft.trim() !== value) onCommit(draft.trim());
   };
-  return /* @__PURE__ */ jsx17(
+  return /* @__PURE__ */ jsx18(
     "input",
     {
       className: classNames("input", className),
@@ -4352,12 +4897,12 @@ function CommitTextArea({
   maxLength,
   onCommit
 }) {
-  const [draft, setDraft] = useState12(value);
-  const area = useRef5(null);
-  const live = useRef5({ draft, value, onCommit });
+  const [draft, setDraft] = useState13(value);
+  const area = useRef6(null);
+  const live = useRef6({ draft, value, onCommit });
   live.current = { draft, value, onCommit };
-  useEffect10(() => setDraft(value), [value]);
-  useEffect10(
+  useEffect11(() => setDraft(value), [value]);
+  useEffect11(
     () => () => {
       const { draft: draft2, value: value2, onCommit: onCommit2 } = live.current;
       if (draft2.trim() !== value2.trim()) onCommit2(draft2.trim());
@@ -4373,7 +4918,7 @@ function CommitTextArea({
   const commit = () => {
     if (draft.trim() !== value.trim()) onCommit(draft.trim());
   };
-  return /* @__PURE__ */ jsx17(
+  return /* @__PURE__ */ jsx18(
     "textarea",
     {
       ref: area,
@@ -4400,8 +4945,8 @@ function CommitTextArea({
   );
 }
 function KindPicker({ value, onChange, label }) {
-  return /* @__PURE__ */ jsxs16("div", { className: "kind-picker", role: "radiogroup", "aria-label": label, children: [
-    NODE_KINDS.map((k) => /* @__PURE__ */ jsx17(
+  return /* @__PURE__ */ jsxs17("div", { className: "kind-picker", role: "radiogroup", "aria-label": label, children: [
+    NODE_KINDS.map((k) => /* @__PURE__ */ jsx18(
       "button",
       {
         type: "button",
@@ -4411,15 +4956,15 @@ function KindPicker({ value, onChange, label }) {
         title: `${KIND_LABEL[k]} \u2014 ${KIND_HINT[k]}`,
         className: classNames("kind-option", `kind-${k}`, value === k && "is-active"),
         onClick: () => onChange(k),
-        children: /* @__PURE__ */ jsx17("span", { className: "kind-swatch", "aria-hidden": "true", children: KIND_GLYPH[k] })
+        children: /* @__PURE__ */ jsx18("span", { className: "kind-swatch", "aria-hidden": "true", children: KIND_GLYPH[k] })
       },
       k
     )),
-    /* @__PURE__ */ jsx17("span", { className: "kind-picker-name", children: value ? KIND_LABEL[value] : "Mixed" })
+    /* @__PURE__ */ jsx18("span", { className: "kind-picker-name", children: value ? KIND_LABEL[value] : "Mixed" })
   ] });
 }
 function Segmented({ value, options, label, onChange }) {
-  return /* @__PURE__ */ jsx17("div", { className: "segmented is-small", role: "radiogroup", "aria-label": label, children: options.map(([v, text, title]) => /* @__PURE__ */ jsx17("button", { type: "button", role: "radio", "aria-checked": value === v, title, className: classNames("seg", value === v && "is-active"), onClick: () => onChange(v), children: text }, v)) });
+  return /* @__PURE__ */ jsx18("div", { className: "segmented is-small", role: "radiogroup", "aria-label": label, children: options.map(([v, text, title]) => /* @__PURE__ */ jsx18("button", { type: "button", role: "radio", "aria-checked": value === v, title, className: classNames("seg", value === v && "is-active"), onClick: () => onChange(v), children: text }, v)) });
 }
 function NodePanel({
   node,
@@ -4435,7 +4980,7 @@ function NodePanel({
   onRemove,
   onClose
 }) {
-  const [confirming, setConfirming] = useState12(false);
+  const [confirming, setConfirming] = useState13(false);
   const name = (id) => nodes.find((n) => n.id === id)?.data.label ?? id;
   const outgoing = edges.filter((e) => e.source === node.id);
   const incoming = edges.filter((e) => e.target === node.id && e.source !== node.id);
@@ -4443,15 +4988,15 @@ function NodePanel({
   const rows = outline(plan);
   const linkable = rows.filter((r) => !linked.includes(r.task.id));
   const unconnected = nodes.filter((n) => n.id !== node.id && !outgoing.some((e) => e.target === n.id));
-  return /* @__PURE__ */ jsxs16("div", { className: "arch-panel-body", "aria-label": `Details of ${node.data.label}`, children: [
-    /* @__PURE__ */ jsxs16("header", { className: "panel-top", children: [
-      /* @__PURE__ */ jsx17("span", { className: classNames("kind-swatch", `kind-${node.data.kind}`), "aria-hidden": "true", children: KIND_GLYPH[node.data.kind] }),
-      /* @__PURE__ */ jsx17("span", { className: "panel-kicker", children: KIND_LABEL[node.data.kind] }),
-      /* @__PURE__ */ jsx17("span", { className: "item-id", title: "Id \u2014 how Claude refers to this box", children: node.id }),
-      /* @__PURE__ */ jsx17("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Close details", title: "Back to the diagram", onClick: onClose, children: "\xD7" })
+  return /* @__PURE__ */ jsxs17("div", { className: "arch-panel-body", "aria-label": `Details of ${node.data.label}`, children: [
+    /* @__PURE__ */ jsxs17("header", { className: "panel-top", children: [
+      /* @__PURE__ */ jsx18("span", { className: classNames("kind-swatch", `kind-${node.data.kind}`), "aria-hidden": "true", children: KIND_GLYPH[node.data.kind] }),
+      /* @__PURE__ */ jsx18("span", { className: "panel-kicker", children: KIND_LABEL[node.data.kind] }),
+      /* @__PURE__ */ jsx18("span", { className: "item-id", title: "Id \u2014 how Claude refers to this box", children: node.id }),
+      /* @__PURE__ */ jsx18("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx18("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Close details", title: "Back to the diagram", onClick: onClose, children: "\xD7" })
     ] }),
-    /* @__PURE__ */ jsx17(
+    /* @__PURE__ */ jsx18(
       CommitInput,
       {
         className: "panel-title-input",
@@ -4461,23 +5006,23 @@ function NodePanel({
         onCommit: (label) => label && onChange({ label })
       }
     ),
-    /* @__PURE__ */ jsxs16("div", { className: "field", children: [
-      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Kind" }),
-      /* @__PURE__ */ jsx17(KindPicker, { value: node.data.kind, label: "Kind", onChange: (kind) => onChange({ kind }) })
+    /* @__PURE__ */ jsxs17("div", { className: "field", children: [
+      /* @__PURE__ */ jsx18("span", { className: "field-label", children: "Kind" }),
+      /* @__PURE__ */ jsx18(KindPicker, { value: node.data.kind, label: "Kind", onChange: (kind) => onChange({ kind }) })
     ] }),
-    /* @__PURE__ */ jsxs16("label", { className: "field", children: [
-      /* @__PURE__ */ jsxs16("span", { className: "field-label", children: [
+    /* @__PURE__ */ jsxs17("label", { className: "field", children: [
+      /* @__PURE__ */ jsxs17("span", { className: "field-label", children: [
         "On the box ",
-        /* @__PURE__ */ jsx17("span", { className: "field-aside", children: "a few words: technology or role" })
+        /* @__PURE__ */ jsx18("span", { className: "field-aside", children: "a few words: technology or role" })
       ] }),
-      /* @__PURE__ */ jsx17(CommitInput, { value: node.data.detail ?? "", label: "Box detail", placeholder: "e.g. Redis, read-through", maxLength: 80, onCommit: (detail) => onChange({ detail }) })
+      /* @__PURE__ */ jsx18(CommitInput, { value: node.data.detail ?? "", label: "Box detail", placeholder: "e.g. Redis, read-through", maxLength: 80, onCommit: (detail) => onChange({ detail }) })
     ] }),
-    /* @__PURE__ */ jsxs16("label", { className: "field", children: [
-      /* @__PURE__ */ jsxs16("span", { className: "field-label", children: [
+    /* @__PURE__ */ jsxs17("label", { className: "field", children: [
+      /* @__PURE__ */ jsxs17("span", { className: "field-label", children: [
         "Description ",
-        /* @__PURE__ */ jsx17("span", { className: "field-aside", children: "shown when hovering \u24D8" })
+        /* @__PURE__ */ jsx18("span", { className: "field-aside", children: "shown when hovering \u24D8" })
       ] }),
-      /* @__PURE__ */ jsx17(
+      /* @__PURE__ */ jsx18(
         CommitTextArea,
         {
           value: node.data.description ?? "",
@@ -4488,9 +5033,9 @@ function NodePanel({
         }
       )
     ] }),
-    /* @__PURE__ */ jsxs16("div", { className: "field", children: [
-      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Notes and decisions" }),
-      /* @__PURE__ */ jsx17(
+    /* @__PURE__ */ jsxs17("div", { className: "field", children: [
+      /* @__PURE__ */ jsx18("span", { className: "field-label", children: "Notes and decisions" }),
+      /* @__PURE__ */ jsx18(
         MarkdownField,
         {
           value: node.data.notes ?? "",
@@ -4502,20 +5047,20 @@ function NodePanel({
         }
       )
     ] }),
-    /* @__PURE__ */ jsxs16("div", { className: "field", children: [
-      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Built by" }),
-      linked.length > 0 ? /* @__PURE__ */ jsx17("ul", { className: "panel-tasks", children: linked.map((id) => {
+    /* @__PURE__ */ jsxs17("div", { className: "field", children: [
+      /* @__PURE__ */ jsx18("span", { className: "field-label", children: "Built by" }),
+      linked.length > 0 ? /* @__PURE__ */ jsx18("ul", { className: "panel-tasks", children: linked.map((id) => {
         const task = plan.tasks.find((t) => t.id === id);
         if (!task) return null;
-        return /* @__PURE__ */ jsxs16("li", { children: [
-          /* @__PURE__ */ jsx17("span", { className: classNames("status-dot is-static", `is-${task.status}`), title: STATUS_LABEL[task.status], "aria-label": STATUS_LABEL[task.status], children: STATUS_GLYPH[task.status] }),
-          /* @__PURE__ */ jsx17("button", { type: "button", className: "link panel-task", onClick: () => store.focus("task", id), children: task.title }),
-          /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn is-tiny", "aria-label": `Unlink ${task.title}`, title: "Unlink", onClick: () => onChange({ taskIds: linked.filter((t) => t !== id) }), children: "\xD7" })
+        return /* @__PURE__ */ jsxs17("li", { children: [
+          /* @__PURE__ */ jsx18("span", { className: classNames("status-dot is-static", `is-${task.status}`), title: STATUS_LABEL[task.status], "aria-label": STATUS_LABEL[task.status], children: STATUS_GLYPH[task.status] }),
+          /* @__PURE__ */ jsx18("button", { type: "button", className: "link panel-task", onClick: () => store.focus("task", id), children: task.title }),
+          /* @__PURE__ */ jsx18("button", { type: "button", className: "icon-btn is-tiny", "aria-label": `Unlink ${task.title}`, title: "Unlink", onClick: () => onChange({ taskIds: linked.filter((t) => t !== id) }), children: "\xD7" })
         ] }, id);
-      }) }) : /* @__PURE__ */ jsx17("p", { className: "muted panel-empty", children: "No tasks linked. Link the tasks that build this part to see its progress on the box." }),
-      linkable.length > 0 && /* @__PURE__ */ jsxs16("select", { className: "input", "aria-label": `Link a task to ${node.data.label}`, value: "", onChange: (e) => e.target.value && onChange({ taskIds: [...linked, e.target.value] }), children: [
-        /* @__PURE__ */ jsx17("option", { value: "", children: "Link a task\u2026" }),
-        linkable.map(({ task, number, depth }) => /* @__PURE__ */ jsxs16("option", { value: task.id, children: [
+      }) }) : /* @__PURE__ */ jsx18("p", { className: "muted panel-empty", children: "No tasks linked. Link the tasks that build this part to see its progress on the box." }),
+      linkable.length > 0 && /* @__PURE__ */ jsxs17("select", { className: "input", "aria-label": `Link a task to ${node.data.label}`, value: "", onChange: (e) => e.target.value && onChange({ taskIds: [...linked, e.target.value] }), children: [
+        /* @__PURE__ */ jsx18("option", { value: "", children: "Link a task\u2026" }),
+        linkable.map(({ task, number, depth }) => /* @__PURE__ */ jsxs17("option", { value: task.id, children: [
           " ".repeat(depth * 3),
           number,
           " ",
@@ -4523,52 +5068,52 @@ function NodePanel({
         ] }, task.id))
       ] })
     ] }),
-    /* @__PURE__ */ jsxs16("div", { className: "field", children: [
-      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Connections" }),
-      outgoing.length + incoming.length > 0 ? /* @__PURE__ */ jsxs16("ul", { className: "panel-links", children: [
-        outgoing.map((e) => /* @__PURE__ */ jsxs16("li", { children: [
-          /* @__PURE__ */ jsxs16("button", { type: "button", className: "link", onClick: () => onSelect("edge", e.id), children: [
+    /* @__PURE__ */ jsxs17("div", { className: "field", children: [
+      /* @__PURE__ */ jsx18("span", { className: "field-label", children: "Connections" }),
+      outgoing.length + incoming.length > 0 ? /* @__PURE__ */ jsxs17("ul", { className: "panel-links", children: [
+        outgoing.map((e) => /* @__PURE__ */ jsxs17("li", { children: [
+          /* @__PURE__ */ jsxs17("button", { type: "button", className: "link", onClick: () => onSelect("edge", e.id), children: [
             e.data?.arrows === "both" ? "\u2194" : "\u2192",
             " ",
             name(e.target)
           ] }),
-          e.data?.label && /* @__PURE__ */ jsxs16("span", { className: "muted", children: [
+          e.data?.label && /* @__PURE__ */ jsxs17("span", { className: "muted", children: [
             " ",
             e.data.label
           ] }),
-          /* @__PURE__ */ jsx17("span", { className: "spacer" }),
-          /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn is-tiny", "aria-label": `Remove connection to ${name(e.target)}`, title: "Disconnect", onClick: () => onDisconnect(e.id), children: "\xD7" })
+          /* @__PURE__ */ jsx18("span", { className: "spacer" }),
+          /* @__PURE__ */ jsx18("button", { type: "button", className: "icon-btn is-tiny", "aria-label": `Remove connection to ${name(e.target)}`, title: "Disconnect", onClick: () => onDisconnect(e.id), children: "\xD7" })
         ] }, e.id)),
-        incoming.map((e) => /* @__PURE__ */ jsxs16("li", { children: [
-          /* @__PURE__ */ jsxs16("button", { type: "button", className: "link", onClick: () => onSelect("edge", e.id), children: [
+        incoming.map((e) => /* @__PURE__ */ jsxs17("li", { children: [
+          /* @__PURE__ */ jsxs17("button", { type: "button", className: "link", onClick: () => onSelect("edge", e.id), children: [
             e.data?.arrows === "both" ? "\u2194" : "\u2190",
             " ",
             name(e.source)
           ] }),
-          e.data?.label && /* @__PURE__ */ jsxs16("span", { className: "muted", children: [
+          e.data?.label && /* @__PURE__ */ jsxs17("span", { className: "muted", children: [
             " ",
             e.data.label
           ] }),
-          /* @__PURE__ */ jsx17("span", { className: "spacer" }),
-          /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn is-tiny", "aria-label": `Remove connection from ${name(e.source)}`, title: "Disconnect", onClick: () => onDisconnect(e.id), children: "\xD7" })
+          /* @__PURE__ */ jsx18("span", { className: "spacer" }),
+          /* @__PURE__ */ jsx18("button", { type: "button", className: "icon-btn is-tiny", "aria-label": `Remove connection from ${name(e.source)}`, title: "Disconnect", onClick: () => onDisconnect(e.id), children: "\xD7" })
         ] }, e.id))
-      ] }) : /* @__PURE__ */ jsx17("p", { className: "muted panel-empty", children: "Not connected. Drag from any edge of the box to another box, or into space for a new one." }),
-      /* @__PURE__ */ jsxs16("div", { className: "row-actions", children: [
-        unconnected.length > 0 && /* @__PURE__ */ jsxs16("select", { className: "input", "aria-label": `Connect ${node.data.label} to`, value: "", onChange: (e) => e.target.value && onConnect(e.target.value), children: [
-          /* @__PURE__ */ jsx17("option", { value: "", children: "Connect to\u2026" }),
-          unconnected.map((n) => /* @__PURE__ */ jsx17("option", { value: n.id, children: n.data.label }, n.id))
+      ] }) : /* @__PURE__ */ jsx18("p", { className: "muted panel-empty", children: "Not connected. Drag from any edge of the box to another box, or into space for a new one." }),
+      /* @__PURE__ */ jsxs17("div", { className: "row-actions", children: [
+        unconnected.length > 0 && /* @__PURE__ */ jsxs17("select", { className: "input", "aria-label": `Connect ${node.data.label} to`, value: "", onChange: (e) => e.target.value && onConnect(e.target.value), children: [
+          /* @__PURE__ */ jsx18("option", { value: "", children: "Connect to\u2026" }),
+          unconnected.map((n) => /* @__PURE__ */ jsx18("option", { value: n.id, children: n.data.label }, n.id))
         ] }),
-        /* @__PURE__ */ jsx17("button", { type: "button", className: "btn btn-sm", onClick: onAddConnected, title: "A new box, connected from this one", children: "+ Connected box" })
+        /* @__PURE__ */ jsx18("button", { type: "button", className: "btn btn-sm", onClick: onAddConnected, title: "A new box, connected from this one", children: "+ Connected box" })
       ] })
     ] }),
-    /* @__PURE__ */ jsxs16("footer", { className: "panel-foot", children: [
-      /* @__PURE__ */ jsx17("button", { type: "button", className: "link", onClick: onDuplicate, title: "\u2318/Ctrl+D", children: "Duplicate" }),
-      /* @__PURE__ */ jsx17("span", { className: "spacer" }),
-      confirming ? /* @__PURE__ */ jsxs16("span", { className: "item-confirm", children: [
+    /* @__PURE__ */ jsxs17("footer", { className: "panel-foot", children: [
+      /* @__PURE__ */ jsx18("button", { type: "button", className: "link", onClick: onDuplicate, title: "\u2318/Ctrl+D", children: "Duplicate" }),
+      /* @__PURE__ */ jsx18("span", { className: "spacer" }),
+      confirming ? /* @__PURE__ */ jsxs17("span", { className: "item-confirm", children: [
         "Delete this box and its arrows?",
-        /* @__PURE__ */ jsx17("button", { type: "button", className: "link is-danger", onClick: onRemove, children: "Delete" }),
-        /* @__PURE__ */ jsx17("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
-      ] }) : /* @__PURE__ */ jsx17("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Delete box" })
+        /* @__PURE__ */ jsx18("button", { type: "button", className: "link is-danger", onClick: onRemove, children: "Delete" }),
+        /* @__PURE__ */ jsx18("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
+      ] }) : /* @__PURE__ */ jsx18("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Delete box" })
     ] })
   ] });
 }
@@ -4582,38 +5127,38 @@ function EdgePanel({
   onClose
 }) {
   const name = (id) => nodes.find((n) => n.id === id)?.data.label ?? id;
-  const ends2 = (which) => /* @__PURE__ */ jsx17("select", { className: "input", "aria-label": which === "source" ? "From" : "To", value: edge[which], onChange: (e) => onChange({ [which]: e.target.value }), children: nodes.map((n) => /* @__PURE__ */ jsx17("option", { value: n.id, disabled: n.id === (which === "source" ? edge.target : edge.source), children: n.data.label }, n.id)) });
-  return /* @__PURE__ */ jsxs16("div", { className: "arch-panel-body", "aria-label": "Details of the selected arrow", children: [
-    /* @__PURE__ */ jsxs16("header", { className: "panel-top", children: [
-      /* @__PURE__ */ jsx17("span", { className: "panel-kicker", children: "Connection" }),
-      /* @__PURE__ */ jsx17("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Close details", title: "Back to the diagram", onClick: onClose, children: "\xD7" })
+  const ends2 = (which) => /* @__PURE__ */ jsx18("select", { className: "input", "aria-label": which === "source" ? "From" : "To", value: edge[which], onChange: (e) => onChange({ [which]: e.target.value }), children: nodes.map((n) => /* @__PURE__ */ jsx18("option", { value: n.id, disabled: n.id === (which === "source" ? edge.target : edge.source), children: n.data.label }, n.id)) });
+  return /* @__PURE__ */ jsxs17("div", { className: "arch-panel-body", "aria-label": "Details of the selected arrow", children: [
+    /* @__PURE__ */ jsxs17("header", { className: "panel-top", children: [
+      /* @__PURE__ */ jsx18("span", { className: "panel-kicker", children: "Connection" }),
+      /* @__PURE__ */ jsx18("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx18("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Close details", title: "Back to the diagram", onClick: onClose, children: "\xD7" })
     ] }),
-    /* @__PURE__ */ jsxs16("p", { className: "panel-edge", children: [
-      /* @__PURE__ */ jsx17("button", { type: "button", className: "link", onClick: () => onSelect("node", edge.source), children: name(edge.source) }),
-      /* @__PURE__ */ jsxs16("span", { "aria-hidden": "true", children: [
+    /* @__PURE__ */ jsxs17("p", { className: "panel-edge", children: [
+      /* @__PURE__ */ jsx18("button", { type: "button", className: "link", onClick: () => onSelect("node", edge.source), children: name(edge.source) }),
+      /* @__PURE__ */ jsxs17("span", { "aria-hidden": "true", children: [
         " ",
         edge.data?.arrows === "both" ? "\u2194" : edge.data?.arrows === "none" ? "\u2014" : "\u2192",
         " "
       ] }),
-      /* @__PURE__ */ jsx17("button", { type: "button", className: "link", onClick: () => onSelect("node", edge.target), children: name(edge.target) })
+      /* @__PURE__ */ jsx18("button", { type: "button", className: "link", onClick: () => onSelect("node", edge.target), children: name(edge.target) })
     ] }),
-    /* @__PURE__ */ jsxs16("label", { className: "field", children: [
-      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "What flows along it" }),
-      /* @__PURE__ */ jsx17(CommitInput, { value: edge.data?.label ?? "", label: "Arrow label", placeholder: "e.g. REST, publishes events", maxLength: 120, onCommit: (label) => onChange({ label }) })
+    /* @__PURE__ */ jsxs17("label", { className: "field", children: [
+      /* @__PURE__ */ jsx18("span", { className: "field-label", children: "What flows along it" }),
+      /* @__PURE__ */ jsx18(CommitInput, { value: edge.data?.label ?? "", label: "Arrow label", placeholder: "e.g. REST, publishes events", maxLength: 120, onCommit: (label) => onChange({ label }) })
     ] }),
-    /* @__PURE__ */ jsxs16("div", { className: "field", children: [
-      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Joins" }),
-      /* @__PURE__ */ jsxs16("div", { className: "edge-ends", children: [
+    /* @__PURE__ */ jsxs17("div", { className: "field", children: [
+      /* @__PURE__ */ jsx18("span", { className: "field-label", children: "Joins" }),
+      /* @__PURE__ */ jsxs17("div", { className: "edge-ends", children: [
         ends2("source"),
-        /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn", "aria-label": "Reverse direction", title: "Reverse direction", onClick: onReverse, children: "\u21C4" }),
+        /* @__PURE__ */ jsx18("button", { type: "button", className: "icon-btn", "aria-label": "Reverse direction", title: "Reverse direction", onClick: onReverse, children: "\u21C4" }),
         ends2("target")
       ] })
     ] }),
-    /* @__PURE__ */ jsxs16("div", { className: "field-row", children: [
-      /* @__PURE__ */ jsxs16("div", { className: "field-col", children: [
-        /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Line" }),
-        /* @__PURE__ */ jsx17(
+    /* @__PURE__ */ jsxs17("div", { className: "field-row", children: [
+      /* @__PURE__ */ jsxs17("div", { className: "field-col", children: [
+        /* @__PURE__ */ jsx18("span", { className: "field-label", children: "Line" }),
+        /* @__PURE__ */ jsx18(
           Segmented,
           {
             label: "Line",
@@ -4626,9 +5171,9 @@ function EdgePanel({
           }
         )
       ] }),
-      /* @__PURE__ */ jsxs16("div", { className: "field-col", children: [
-        /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Arrowheads" }),
-        /* @__PURE__ */ jsx17(
+      /* @__PURE__ */ jsxs17("div", { className: "field-col", children: [
+        /* @__PURE__ */ jsx18("span", { className: "field-label", children: "Arrowheads" }),
+        /* @__PURE__ */ jsx18(
           Segmented,
           {
             label: "Arrowheads",
@@ -4643,8 +5188,8 @@ function EdgePanel({
         )
       ] })
     ] }),
-    /* @__PURE__ */ jsx17("p", { className: "panel-hint", children: "Or drag either end of the arrow on the canvas onto another box." }),
-    /* @__PURE__ */ jsx17("footer", { className: "panel-foot", children: /* @__PURE__ */ jsx17("button", { type: "button", className: "link is-danger", onClick: onRemove, children: "Delete connection" }) })
+    /* @__PURE__ */ jsx18("p", { className: "panel-hint", children: "Or drag either end of the arrow on the canvas onto another box." }),
+    /* @__PURE__ */ jsx18("footer", { className: "panel-foot", children: /* @__PURE__ */ jsx18("button", { type: "button", className: "link is-danger", onClick: onRemove, children: "Delete connection" }) })
   ] });
 }
 function SelectionPanel({
@@ -4658,13 +5203,13 @@ function SelectionPanel({
 }) {
   const kinds = new Set(nodes.map((n) => n.data.kind));
   const kind = kinds.size === 1 ? [...kinds][0] : null;
-  return /* @__PURE__ */ jsxs16("div", { className: "arch-panel-body", "aria-label": "Details of the selection", children: [
-    /* @__PURE__ */ jsxs16("header", { className: "panel-top", children: [
-      /* @__PURE__ */ jsx17("span", { className: "panel-kicker", children: "Selection" }),
-      /* @__PURE__ */ jsx17("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx17("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Clear selection", title: "Clear selection", onClick: onClose, children: "\xD7" })
+  return /* @__PURE__ */ jsxs17("div", { className: "arch-panel-body", "aria-label": "Details of the selection", children: [
+    /* @__PURE__ */ jsxs17("header", { className: "panel-top", children: [
+      /* @__PURE__ */ jsx18("span", { className: "panel-kicker", children: "Selection" }),
+      /* @__PURE__ */ jsx18("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx18("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Clear selection", title: "Clear selection", onClick: onClose, children: "\xD7" })
     ] }),
-    /* @__PURE__ */ jsxs16("p", { className: "panel-hint", children: [
+    /* @__PURE__ */ jsxs17("p", { className: "panel-hint", children: [
       nodes.length,
       " box",
       nodes.length === 1 ? "" : "es",
@@ -4674,16 +5219,128 @@ function SelectionPanel({
       edges.length === 1 ? "" : "s",
       " selected."
     ] }),
-    nodes.length > 0 && /* @__PURE__ */ jsxs16("div", { className: "field", children: [
-      /* @__PURE__ */ jsx17("span", { className: "field-label", children: "Kind of every box" }),
-      /* @__PURE__ */ jsx17(KindPicker, { value: kind, label: "Kind of every selected box", onChange: onKind })
+    nodes.length > 0 && /* @__PURE__ */ jsxs17("div", { className: "field", children: [
+      /* @__PURE__ */ jsx18("span", { className: "field-label", children: "Kind of every box" }),
+      /* @__PURE__ */ jsx18(KindPicker, { value: kind, label: "Kind of every selected box", onChange: onKind })
     ] }),
-    /* @__PURE__ */ jsxs16("div", { className: "row-actions", children: [
-      nodes.length > 0 && /* @__PURE__ */ jsxs16(Fragment3, { children: [
-        /* @__PURE__ */ jsx17("button", { type: "button", className: "btn btn-sm", onClick: onCopy, title: "\u2318/Ctrl+C", children: "Copy" }),
-        /* @__PURE__ */ jsx17("button", { type: "button", className: "btn btn-sm", onClick: onDuplicate, title: "\u2318/Ctrl+D", children: "Duplicate" })
+    /* @__PURE__ */ jsxs17("div", { className: "row-actions", children: [
+      nodes.length > 0 && /* @__PURE__ */ jsxs17(Fragment4, { children: [
+        /* @__PURE__ */ jsx18("button", { type: "button", className: "btn btn-sm", onClick: onCopy, title: "\u2318/Ctrl+C", children: "Copy" }),
+        /* @__PURE__ */ jsx18("button", { type: "button", className: "btn btn-sm", onClick: onDuplicate, title: "\u2318/Ctrl+D", children: "Duplicate" })
       ] }),
-      /* @__PURE__ */ jsx17("button", { type: "button", className: "btn btn-sm btn-danger", onClick: onRemove, children: "Delete selection" })
+      /* @__PURE__ */ jsx18("button", { type: "button", className: "btn btn-sm btn-danger", onClick: onRemove, children: "Delete selection" })
+    ] })
+  ] });
+}
+function ReadOnlyPanel({
+  nodes,
+  edges,
+  selectedNodes,
+  selectedEdges,
+  plan,
+  onSelect,
+  onClose
+}) {
+  const name = (id) => nodes.find((n) => n.id === id)?.data.label ?? id;
+  const close = /* @__PURE__ */ jsx18("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Close details", title: "Back to the diagram", onClick: onClose, children: "\xD7" });
+  if (selectedNodes.length === 1 && selectedEdges.length === 0) {
+    const node = selectedNodes[0];
+    const outgoing = edges.filter((e) => e.source === node.id);
+    const incoming = edges.filter((e) => e.target === node.id && e.source !== node.id);
+    const tasks = (node.data.taskIds ?? []).map((id) => plan.tasks.find((t) => t.id === id)).filter((t) => t !== void 0);
+    return /* @__PURE__ */ jsxs17("div", { className: "arch-panel-body is-readonly", "aria-label": `Details of ${node.data.label}`, children: [
+      /* @__PURE__ */ jsxs17("header", { className: "panel-top", children: [
+        /* @__PURE__ */ jsx18("span", { className: classNames("kind-swatch", `kind-${node.data.kind}`), "aria-hidden": "true", children: KIND_GLYPH[node.data.kind] }),
+        /* @__PURE__ */ jsx18("span", { className: "panel-kicker", children: KIND_LABEL[node.data.kind] }),
+        /* @__PURE__ */ jsx18("span", { className: "item-id", children: node.id }),
+        /* @__PURE__ */ jsx18("span", { className: "spacer" }),
+        close
+      ] }),
+      /* @__PURE__ */ jsx18("h2", { className: "panel-title", children: node.data.label }),
+      node.data.detail && /* @__PURE__ */ jsx18("p", { className: "panel-hint", children: node.data.detail }),
+      node.data.description && /* @__PURE__ */ jsxs17("div", { className: "field", children: [
+        /* @__PURE__ */ jsx18("span", { className: "field-label", children: "Description" }),
+        /* @__PURE__ */ jsx18(Markdown, { source: node.data.description })
+      ] }),
+      node.data.notes && /* @__PURE__ */ jsxs17("div", { className: "field", children: [
+        /* @__PURE__ */ jsx18("span", { className: "field-label", children: "Notes and decisions" }),
+        /* @__PURE__ */ jsx18(Markdown, { source: node.data.notes })
+      ] }),
+      /* @__PURE__ */ jsxs17("div", { className: "field", children: [
+        /* @__PURE__ */ jsx18("span", { className: "field-label", children: "Built by" }),
+        tasks.length ? /* @__PURE__ */ jsx18("ul", { className: "panel-tasks", children: tasks.map((task) => /* @__PURE__ */ jsxs17("li", { children: [
+          /* @__PURE__ */ jsx18("span", { className: classNames("status-dot is-static", `is-${task.status}`), title: STATUS_LABEL[task.status], "aria-label": STATUS_LABEL[task.status], children: STATUS_GLYPH[task.status] }),
+          /* @__PURE__ */ jsx18("button", { type: "button", className: "link panel-task", title: "Show it on the board", onClick: () => store.focus("task", task.id), children: task.title })
+        ] }, task.id)) }) : /* @__PURE__ */ jsx18("p", { className: "muted panel-empty", children: "No tasks are linked to this part." })
+      ] }),
+      outgoing.length + incoming.length > 0 && /* @__PURE__ */ jsxs17("div", { className: "field", children: [
+        /* @__PURE__ */ jsx18("span", { className: "field-label", children: "Connections" }),
+        /* @__PURE__ */ jsxs17("ul", { className: "panel-links", children: [
+          outgoing.map((e) => /* @__PURE__ */ jsxs17("li", { children: [
+            /* @__PURE__ */ jsxs17("button", { type: "button", className: "link", onClick: () => onSelect("edge", e.id), children: [
+              e.data?.arrows === "both" ? "\u2194" : "\u2192",
+              " ",
+              name(e.target)
+            ] }),
+            e.data?.label && /* @__PURE__ */ jsxs17("span", { className: "muted", children: [
+              " ",
+              e.data.label
+            ] })
+          ] }, e.id)),
+          incoming.map((e) => /* @__PURE__ */ jsxs17("li", { children: [
+            /* @__PURE__ */ jsxs17("button", { type: "button", className: "link", onClick: () => onSelect("edge", e.id), children: [
+              e.data?.arrows === "both" ? "\u2194" : "\u2190",
+              " ",
+              name(e.source)
+            ] }),
+            e.data?.label && /* @__PURE__ */ jsxs17("span", { className: "muted", children: [
+              " ",
+              e.data.label
+            ] })
+          ] }, e.id))
+        ] })
+      ] })
+    ] });
+  }
+  if (selectedEdges.length === 1 && selectedNodes.length === 0) {
+    const edge = selectedEdges[0];
+    const how = edge.data?.arrows === "both" ? "both ways" : edge.data?.arrows === "none" ? "no direction" : "one way";
+    return /* @__PURE__ */ jsxs17("div", { className: "arch-panel-body is-readonly", "aria-label": "Details of the connection", children: [
+      /* @__PURE__ */ jsxs17("header", { className: "panel-top", children: [
+        /* @__PURE__ */ jsx18("span", { className: "panel-kicker", children: "Connection" }),
+        /* @__PURE__ */ jsx18("span", { className: "spacer" }),
+        close
+      ] }),
+      /* @__PURE__ */ jsxs17("h2", { className: "panel-title", children: [
+        /* @__PURE__ */ jsx18("button", { type: "button", className: "link", onClick: () => onSelect("node", edge.source), children: name(edge.source) }),
+        " ",
+        edge.data?.arrows === "both" ? "\u2194" : edge.data?.arrows === "none" ? "\u2014" : "\u2192",
+        " ",
+        /* @__PURE__ */ jsx18("button", { type: "button", className: "link", onClick: () => onSelect("node", edge.target), children: name(edge.target) })
+      ] }),
+      /* @__PURE__ */ jsxs17("p", { className: "panel-hint", children: [
+        edge.data?.label ? `Carries: ${edge.data.label}. ` : "",
+        edge.data?.dashed ? "Dashed: optional, async or later. " : "",
+        how[0].toUpperCase() + how.slice(1),
+        "."
+      ] })
+    ] });
+  }
+  return /* @__PURE__ */ jsxs17("div", { className: "arch-panel-body is-readonly", "aria-label": "Selection", children: [
+    /* @__PURE__ */ jsxs17("header", { className: "panel-top", children: [
+      /* @__PURE__ */ jsx18("span", { className: "panel-kicker", children: "Selection" }),
+      /* @__PURE__ */ jsx18("span", { className: "spacer" }),
+      close
+    ] }),
+    /* @__PURE__ */ jsxs17("p", { className: "panel-hint", children: [
+      selectedNodes.length,
+      " box",
+      selectedNodes.length === 1 ? "" : "es",
+      " and ",
+      selectedEdges.length,
+      " arrow",
+      selectedEdges.length === 1 ? "" : "s",
+      " selected. Select one to read about it."
     ] })
   ] });
 }
@@ -4692,6 +5349,7 @@ var init_Panels = __esm({
     "use strict";
     init_store();
     init_Editable();
+    init_Markdown();
     init_Progress();
     init_format();
     init_plan();
@@ -4701,17 +5359,17 @@ var init_Panels = __esm({
 });
 
 // src/ui/components/flow/ContextMenu.tsx
-import { useEffect as useEffect11, useLayoutEffect as useLayoutEffect2, useRef as useRef6, useState as useState13 } from "react";
-import { jsx as jsx18, jsxs as jsxs17 } from "react/jsx-runtime";
+import { useEffect as useEffect12, useLayoutEffect as useLayoutEffect2, useRef as useRef7, useState as useState14 } from "react";
+import { jsx as jsx19, jsxs as jsxs18 } from "react/jsx-runtime";
 function ContextMenu({
   at,
   title,
   entries,
   onClose
 }) {
-  const menu = useRef6(null);
-  const [stack, setStack] = useState13([]);
-  const [place, setPlace] = useState13(at);
+  const menu = useRef7(null);
+  const [stack, setStack] = useState14([]);
+  const [place, setPlace] = useState14(at);
   const view = stack.at(-1) ?? { title, entries };
   useLayoutEffect2(() => {
     const el = menu.current;
@@ -4724,10 +5382,10 @@ function ContextMenu({
       y: Math.max(4, at.y + h > frame.height - 4 ? Math.max(4, frame.height - h - 4) : at.y)
     });
   }, [at.x, at.y, stack.length]);
-  useEffect11(() => {
+  useEffect12(() => {
     items(menu.current)[0]?.focus();
   }, [stack.length]);
-  useEffect11(() => {
+  useEffect12(() => {
     const away = (e) => {
       if (!menu.current?.contains(e.target)) onClose();
     };
@@ -4768,7 +5426,7 @@ function ContextMenu({
     onClose();
     fn();
   };
-  return /* @__PURE__ */ jsxs17(
+  return /* @__PURE__ */ jsxs18(
     "div",
     {
       ref: menu,
@@ -4779,18 +5437,18 @@ function ContextMenu({
       onKeyDown,
       onContextMenu: (e) => e.preventDefault(),
       children: [
-        /* @__PURE__ */ jsxs17("div", { className: "flow-menu-title", children: [
-          stack.length > 0 && /* @__PURE__ */ jsx18("button", { type: "button", role: "menuitem", className: "flow-menu-back", "aria-label": "Back", onClick: () => setStack((s) => s.slice(0, -1)), children: "\u2039" }),
-          /* @__PURE__ */ jsx18("span", { children: view.title })
+        /* @__PURE__ */ jsxs18("div", { className: "flow-menu-title", children: [
+          stack.length > 0 && /* @__PURE__ */ jsx19("button", { type: "button", role: "menuitem", className: "flow-menu-back", "aria-label": "Back", onClick: () => setStack((s) => s.slice(0, -1)), children: "\u2039" }),
+          /* @__PURE__ */ jsx19("span", { children: view.title })
         ] }),
         view.entries.map((entry, i) => {
           switch (entry.kind) {
             case "separator":
-              return /* @__PURE__ */ jsx18("div", { className: "flow-menu-sep", role: "separator" }, i);
+              return /* @__PURE__ */ jsx19("div", { className: "flow-menu-sep", role: "separator" }, i);
             case "heading":
-              return /* @__PURE__ */ jsx18("div", { className: "flow-menu-heading", role: "presentation", children: entry.label }, i);
+              return /* @__PURE__ */ jsx19("div", { className: "flow-menu-heading", role: "presentation", children: entry.label }, i);
             case "item":
-              return /* @__PURE__ */ jsxs17(
+              return /* @__PURE__ */ jsxs18(
                 "button",
                 {
                   type: "button",
@@ -4799,21 +5457,21 @@ function ContextMenu({
                   disabled: entry.disabled,
                   onClick: () => choose(entry.onSelect),
                   children: [
-                    /* @__PURE__ */ jsx18("span", { className: "flow-menu-label", children: entry.label }),
-                    entry.hint && /* @__PURE__ */ jsx18("kbd", { className: "flow-menu-hint", children: entry.hint })
+                    /* @__PURE__ */ jsx19("span", { className: "flow-menu-label", children: entry.label }),
+                    entry.hint && /* @__PURE__ */ jsx19("kbd", { className: "flow-menu-hint", children: entry.hint })
                   ]
                 },
                 i
               );
             case "check":
-              return /* @__PURE__ */ jsxs17("button", { type: "button", role: "menuitemcheckbox", "aria-checked": entry.checked, className: "flow-menu-item", onClick: () => choose(entry.onSelect), children: [
-                /* @__PURE__ */ jsx18("span", { className: "flow-menu-check", "aria-hidden": "true", children: entry.checked ? "\u2713" : "" }),
-                /* @__PURE__ */ jsx18("span", { className: "flow-menu-label", children: entry.label })
+              return /* @__PURE__ */ jsxs18("button", { type: "button", role: "menuitemcheckbox", "aria-checked": entry.checked, className: "flow-menu-item", onClick: () => choose(entry.onSelect), children: [
+                /* @__PURE__ */ jsx19("span", { className: "flow-menu-check", "aria-hidden": "true", children: entry.checked ? "\u2713" : "" }),
+                /* @__PURE__ */ jsx19("span", { className: "flow-menu-label", children: entry.label })
               ] }, i);
             case "choices":
-              return /* @__PURE__ */ jsxs17("div", { className: "flow-menu-choices", role: "group", "aria-label": entry.label, children: [
-                /* @__PURE__ */ jsx18("span", { className: "flow-menu-heading", children: entry.label }),
-                /* @__PURE__ */ jsx18("div", { className: "flow-menu-choice-row", children: entry.options.map((o) => /* @__PURE__ */ jsx18(
+              return /* @__PURE__ */ jsxs18("div", { className: "flow-menu-choices", role: "group", "aria-label": entry.label, children: [
+                /* @__PURE__ */ jsx19("span", { className: "flow-menu-heading", children: entry.label }),
+                /* @__PURE__ */ jsx19("div", { className: "flow-menu-choice-row", children: entry.options.map((o) => /* @__PURE__ */ jsx19(
                   "button",
                   {
                     type: "button",
@@ -4829,7 +5487,7 @@ function ContextMenu({
                 )) })
               ] }, i);
             case "submenu":
-              return /* @__PURE__ */ jsxs17(
+              return /* @__PURE__ */ jsxs18(
                 "button",
                 {
                   type: "button",
@@ -4844,9 +5502,9 @@ function ContextMenu({
                     }
                   },
                   children: [
-                    /* @__PURE__ */ jsx18("span", { className: "flow-menu-label", children: entry.label }),
-                    entry.hint && /* @__PURE__ */ jsx18("kbd", { className: "flow-menu-hint", children: entry.hint }),
-                    /* @__PURE__ */ jsx18("span", { className: "flow-menu-more", "aria-hidden": "true", children: "\u203A" })
+                    /* @__PURE__ */ jsx19("span", { className: "flow-menu-label", children: entry.label }),
+                    entry.hint && /* @__PURE__ */ jsx19("kbd", { className: "flow-menu-hint", children: entry.hint }),
+                    /* @__PURE__ */ jsx19("span", { className: "flow-menu-more", "aria-hidden": "true", children: "\u203A" })
                   ]
                 },
                 i
@@ -4871,23 +5529,23 @@ var init_ContextMenu = __esm({
 });
 
 // src/ui/components/flow/Shortcuts.tsx
-import { useEffect as useEffect12, useRef as useRef7 } from "react";
-import { jsx as jsx19, jsxs as jsxs18 } from "react/jsx-runtime";
+import { useEffect as useEffect13, useRef as useRef8 } from "react";
+import { jsx as jsx20, jsxs as jsxs19 } from "react/jsx-runtime";
 function ShortcutsOverlay({ onClose }) {
-  const panel = useRef7(null);
-  useEffect12(() => {
+  const panel = useRef8(null);
+  useEffect13(() => {
     const before = document.activeElement;
     panel.current?.focus();
     return () => before?.focus?.();
   }, []);
-  return /* @__PURE__ */ jsx19(
+  return /* @__PURE__ */ jsx20(
     "div",
     {
       className: "flow-shortcuts-backdrop",
       onPointerDown: (e) => {
         if (e.target === e.currentTarget) onClose();
       },
-      children: /* @__PURE__ */ jsxs18(
+      children: /* @__PURE__ */ jsxs19(
         "div",
         {
           ref: panel,
@@ -4904,15 +5562,15 @@ function ShortcutsOverlay({ onClose }) {
             }
           },
           children: [
-            /* @__PURE__ */ jsxs18("header", { className: "flow-shortcuts-head", children: [
-              /* @__PURE__ */ jsx19("h2", { children: "Shortcuts" }),
-              /* @__PURE__ */ jsx19("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Close shortcuts", onClick: onClose, children: "\xD7" })
+            /* @__PURE__ */ jsxs19("header", { className: "flow-shortcuts-head", children: [
+              /* @__PURE__ */ jsx20("h2", { children: "Shortcuts" }),
+              /* @__PURE__ */ jsx20("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Close shortcuts", onClick: onClose, children: "\xD7" })
             ] }),
-            /* @__PURE__ */ jsx19("div", { className: "flow-shortcuts-groups", children: SHORTCUTS.map((g) => /* @__PURE__ */ jsxs18("section", { children: [
-              /* @__PURE__ */ jsx19("h3", { children: g.group }),
-              /* @__PURE__ */ jsx19("dl", { children: g.keys.map(([keys, what]) => /* @__PURE__ */ jsxs18("div", { className: "flow-shortcut", children: [
-                /* @__PURE__ */ jsx19("dt", { children: /* @__PURE__ */ jsx19("kbd", { children: keys }) }),
-                /* @__PURE__ */ jsx19("dd", { children: what })
+            /* @__PURE__ */ jsx20("div", { className: "flow-shortcuts-groups", children: SHORTCUTS.map((g) => /* @__PURE__ */ jsxs19("section", { children: [
+              /* @__PURE__ */ jsx20("h3", { children: g.group }),
+              /* @__PURE__ */ jsx20("dl", { children: g.keys.map(([keys, what]) => /* @__PURE__ */ jsxs19("div", { className: "flow-shortcut", children: [
+                /* @__PURE__ */ jsx20("dt", { children: /* @__PURE__ */ jsx20("kbd", { children: keys }) }),
+                /* @__PURE__ */ jsx20("dd", { children: what })
               ] }, keys)) })
             ] }, g.group)) })
           ]
@@ -5111,7 +5769,7 @@ var init_convert = __esm({
 });
 
 // src/ui/components/FlowCanvas.tsx
-import { useCallback, useEffect as useEffect13, useMemo as useMemo2, useRef as useRef8, useState as useState14 } from "react";
+import { useCallback, useEffect as useEffect14, useMemo as useMemo2, useRef as useRef9, useState as useState15 } from "react";
 import {
   Background,
   ConnectionMode,
@@ -5124,55 +5782,58 @@ import {
   applyNodeChanges,
   useReactFlow
 } from "@xyflow/react";
-import { jsx as jsx20, jsxs as jsxs19 } from "react/jsx-runtime";
+import { jsx as jsx21, jsxs as jsxs20 } from "react/jsx-runtime";
 function DiagramEditor(props) {
-  return /* @__PURE__ */ jsx20(ReactFlowProvider, { children: /* @__PURE__ */ jsx20(Editor, { ...props }) });
+  return /* @__PURE__ */ jsx21(ReactFlowProvider, { children: /* @__PURE__ */ jsx21(Editor, { ...props }) });
 }
 function Editor({
   diagram,
   plan,
   onSave,
-  aside
+  aside,
+  readOnly = false
 }) {
   const theme = useResolvedTheme();
   const flow = useReactFlow();
-  const wrapper = useRef8(null);
-  const [initial2] = useState14(() => toFlow(diagram, plan));
-  const [nodes, setNodes] = useState14(initial2.nodes);
-  const [edges, setEdges] = useState14(initial2.edges);
-  const [editing, setEditingState] = useState14(null);
-  const [editSeed, setEditSeed] = useState14(null);
-  const [hoverNode, setHoverNode] = useState14(null);
-  const [hoverEdgeId, setHoverEdgeId] = useState14(null);
-  const [twoHops, setTwoHops] = useState14(false);
-  const [menu, setMenu] = useState14(null);
-  const [shortcuts, setShortcuts] = useState14(false);
-  const [reconnect, setReconnect] = useState14(null);
-  const [dropEdge, setDropEdge] = useState14(null);
-  const [, setHistoryTick] = useState14(0);
-  const nodesRef = useRef8(nodes);
-  const edgesRef = useRef8(edges);
+  const wrapper = useRef9(null);
+  const [initial2] = useState15(() => toFlow(diagram, plan));
+  const [nodes, setNodes] = useState15(initial2.nodes);
+  const [edges, setEdges] = useState15(initial2.edges);
+  const [editing, setEditingState] = useState15(null);
+  const [editSeed, setEditSeed] = useState15(null);
+  const [hoverNode, setHoverNode] = useState15(null);
+  const [hoverEdgeId, setHoverEdgeId] = useState15(null);
+  const [twoHops, setTwoHops] = useState15(false);
+  const [menu, setMenu] = useState15(null);
+  const [shortcuts, setShortcuts] = useState15(false);
+  const [reconnect, setReconnect] = useState15(null);
+  const [dropEdge, setDropEdge] = useState15(null);
+  const [, setHistoryTick] = useState15(0);
+  const nodesRef = useRef9(nodes);
+  const edgesRef = useRef9(edges);
   nodesRef.current = nodes;
   edgesRef.current = edges;
-  const planRef = useRef8(plan);
+  const planRef = useRef9(plan);
   planRef.current = plan;
-  const dragging = useRef8(false);
-  const queue = useRef8({ pending: null, busy: false });
-  const pointer = useRef8(null);
-  const pastes = useRef8(0);
+  const readOnlyRef = useRef9(readOnly);
+  readOnlyRef.current = readOnly;
+  const dragging = useRef9(false);
+  const queue = useRef9({ pending: null, busy: false });
+  const pointer = useRef9(null);
+  const pastes = useRef9(0);
   const setEditing = useCallback((key, seed = null) => {
     setEditSeed(seed);
     setEditingState(key);
   }, []);
   const signature = useMemo2(() => signatureOf(diagram), [diagram]);
-  const loaded = useRef8(signature);
-  const nudge = useRef8(void 0);
-  const baseRev = useRef8(diagram.rev);
-  const history = useRef8(new History());
-  const current = useRef8({ nodes: initial2.nodes, edges: initial2.edges, direction: diagram.direction });
-  const currentKey = useRef8(JSON.stringify(patchOf(initial2.nodes, initial2.edges, diagram.direction)));
-  const ownRevs = useRef8(/* @__PURE__ */ new Set([diagram.rev]));
-  const historyLost = useRef8(false);
+  const loaded = useRef9(signature);
+  const nudge = useRef9(void 0);
+  const baseRev = useRef9(diagram.rev);
+  const history = useRef9(new History());
+  const current = useRef9({ nodes: initial2.nodes, edges: initial2.edges, direction: diagram.direction });
+  const currentKey = useRef9(JSON.stringify(patchOf(initial2.nodes, initial2.edges, diagram.direction)));
+  const ownRevs = useRef9(/* @__PURE__ */ new Set([diagram.rev]));
+  const historyLost = useRef9(false);
   const bumpHistory = () => setHistoryTick((n) => n + 1);
   const load = useCallback((source, p) => {
     const next = toFlow(source, p);
@@ -5190,17 +5851,17 @@ function Editor({
       setHistoryTick((n) => n + 1);
     }
   }, []);
-  useEffect13(() => {
+  useEffect14(() => {
     if (dragging.current || nudge.current !== void 0 || queue.current.busy || queue.current.pending) return;
     if (loaded.current !== signature) load(diagram, plan);
     else baseRev.current = diagram.rev;
   }, [signature, diagram.rev]);
   const progressKey = useMemo2(() => JSON.stringify(plan.tasks.map((t) => [t.id, t.status, t.parentId])), [plan.tasks]);
-  useEffect13(() => {
+  useEffect14(() => {
     setNodes((ns) => ns.map((n) => ({ ...n, data: { ...n.data, ...progressOf(plan, n.data.taskIds) } })));
   }, [progressKey]);
   const focusTarget = useStore((s) => s.focusTarget);
-  useEffect13(() => {
+  useEffect14(() => {
     const prefix = `node:${diagram.id}:`;
     if (!focusTarget?.startsWith(prefix)) return;
     const id = focusTarget.slice(prefix.length);
@@ -5240,6 +5901,7 @@ function Editor({
   }, [onSave, resyncFromServer]);
   const persist = useCallback(
     (ns, es, direction, opts = {}) => {
+      if (readOnlyRef.current) return;
       const dir = direction ?? current.current.direction;
       const patch = patchOf(ns, es, dir);
       const key = JSON.stringify(patch);
@@ -5298,7 +5960,9 @@ function Editor({
     if (after2) restore(after2);
   }, [restore]);
   const onNodesChange = useCallback(
-    (changes) => {
+    (all) => {
+      const changes = readOnlyRef.current ? all.filter((c) => c.type !== "position" && c.type !== "remove") : all;
+      if (changes.length === 0) return;
       setNodes((ns) => applyNodeChanges(changes, ns));
       if (dragging.current || !changes.some((c) => c.type === "position" && c.position && !c.dragging)) return;
       window.clearTimeout(nudge.current);
@@ -5309,9 +5973,9 @@ function Editor({
     },
     [persist]
   );
-  const persistRef = useRef8(persist);
+  const persistRef = useRef9(persist);
   persistRef.current = persist;
-  useEffect13(
+  useEffect14(
     () => () => {
       if (nudge.current === void 0) return;
       window.clearTimeout(nudge.current);
@@ -5320,7 +5984,13 @@ function Editor({
     },
     []
   );
-  const onEdgesChange = useCallback((changes) => setEdges((es) => applyEdgeChanges(changes, es)), []);
+  const onEdgesChange = useCallback(
+    (all) => {
+      const changes = readOnlyRef.current ? all.filter((c) => c.type !== "remove") : all;
+      if (changes.length) setEdges((es) => applyEdgeChanges(changes, es));
+    },
+    []
+  );
   const connect = useCallback(
     (source, target, base = edgesRef.current, ns = nodesRef.current) => {
       if (source === target || base.some((e) => e.source === source && e.target === target)) return false;
@@ -5476,7 +6146,7 @@ function Editor({
     },
     [commit, persist]
   );
-  const dropEdgeRef = useRef8(dropEdge);
+  const dropEdgeRef = useRef9(dropEdge);
   dropEdgeRef.current = dropEdge;
   const onNodeDragStop = useCallback((_, __, moved) => onDragStop(moved, dropEdgeRef.current), [onDragStop]);
   const onSelectionDragStop = useCallback((_, moved) => onDragStop(moved), [onDragStop]);
@@ -5510,7 +6180,7 @@ function Editor({
     });
     commit(nodesRef.current, es);
   };
-  const updateEdgeRef = useRef8(updateEdge);
+  const updateEdgeRef = useRef9(updateEdge);
   updateEdgeRef.current = updateEdge;
   const reverseEdge = (id) => {
     const e = edgesRef.current.find((x) => x.id === id);
@@ -5598,7 +6268,7 @@ function Editor({
     setMenu(null);
     setReconnect({ edgeId, end, pointer: { x: e.clientX, y: e.clientY }, over: null });
   }, []);
-  useEffect13(() => {
+  useEffect14(() => {
     if (!reconnect) return;
     const edge = edgesRef.current.find((x) => x.id === reconnect.edgeId);
     const fixed = edge ? reconnect.end === "source" ? edge.target : edge.source : null;
@@ -5629,13 +6299,13 @@ function Editor({
       window.removeEventListener("keydown", key, true);
     };
   }, [reconnect?.edgeId, reconnect?.end]);
-  const hoverTimer = useRef8(void 0);
+  const hoverTimer = useRef9(void 0);
   const hoverEdge = useCallback((id) => {
     window.clearTimeout(hoverTimer.current);
     if (id) setHoverEdgeId(id);
     else hoverTimer.current = window.setTimeout(() => setHoverEdgeId(null), 160);
   }, []);
-  useEffect13(() => () => window.clearTimeout(hoverTimer.current), []);
+  useEffect14(() => () => window.clearTimeout(hoverTimer.current), []);
   const closeMenu = useCallback(() => setMenu(null), []);
   const openMenu = useCallback(
     (client, target) => {
@@ -5669,7 +6339,7 @@ function Editor({
     label: KIND_LABEL[k],
     className: `kind-${k}`,
     active: k === active,
-    content: /* @__PURE__ */ jsx20("span", { className: "kind-swatch", "aria-hidden": "true", children: KIND_GLYPH[k] })
+    content: /* @__PURE__ */ jsx21("span", { className: "kind-swatch", "aria-hidden": "true", children: KIND_GLYPH[k] })
   }));
   const menuEntries = (target, at) => {
     if (target.kind === "pane") {
@@ -5765,11 +6435,11 @@ function Editor({
       ]
     };
   };
-  const keys = useRef8({ undo, redo, duplicate, selectAll, addAfter, addBefore, addBeside, removeKeepingFlow, fitAll, fitSelection, openMenuForSelection, clearSelection });
+  const keys = useRef9({ undo, redo, duplicate, selectAll, addAfter, addBefore, addBeside, removeKeepingFlow, fitAll, fitSelection, openMenuForSelection, clearSelection });
   keys.current = { undo, redo, duplicate, selectAll, addAfter, addBefore, addBeside, removeKeepingFlow, fitAll, fitSelection, openMenuForSelection, clearSelection };
-  const overlays = useRef8({ menu: false, shortcuts: false, reconnect: false });
+  const overlays = useRef9({ menu: false, shortcuts: false, reconnect: false });
   overlays.current = { menu: Boolean(menu), shortcuts, reconnect: Boolean(reconnect) };
-  useEffect13(() => {
+  useEffect14(() => {
     const busy = (target) => {
       const el = target;
       if (!el || !(el instanceof HTMLElement)) return false;
@@ -5791,14 +6461,14 @@ function Editor({
       if (copySelection(e.clipboardData)) e.preventDefault();
     };
     const onCut = (e) => {
-      if (!ours(e) || !nodesRef.current.some((n) => n.selected)) return;
+      if (readOnlyRef.current || !ours(e) || !nodesRef.current.some((n) => n.selected)) return;
       if (copySelection(e.clipboardData)) {
         e.preventDefault();
         removeSelected();
       }
     };
     const onPaste = (e) => {
-      if (!ours(e)) return;
+      if (readOnlyRef.current || !ours(e)) return;
       const text = e.clipboardData?.getData("text/plain");
       const clip = text ? parseClip(text) : lastClip;
       if (!clip) return;
@@ -5819,6 +6489,13 @@ function Editor({
         e.preventDefault();
         e.stopPropagation();
       };
+      if (readOnlyRef.current) {
+        if (mod && key === "a" && !e.shiftKey) return claim(), k.selectAll();
+        if (!mod && e.shiftKey && e.code === "Digit1") return claim(), k.fitAll();
+        if (!mod && e.shiftKey && e.code === "Digit2") return claim(), k.fitSelection();
+        if (e.key === "Escape") k.clearSelection();
+        return;
+      }
       if (mod) {
         if (key === "z") return claim(), e.shiftKey ? k.redo() : k.undo();
         if (key === "y") return claim(), k.redo();
@@ -5864,10 +6541,14 @@ function Editor({
   const api2 = useMemo2(
     () => ({
       direction: diagram.direction,
-      editing,
+      editing: readOnly ? null : editing,
       editSeed,
-      startEditing: (key) => setEditing(key),
-      startReconnect,
+      startEditing: (key) => {
+        if (!readOnly) setEditing(key);
+      },
+      startReconnect: (edgeId, end, event) => {
+        if (!readOnly) startReconnect(edgeId, end, event);
+      },
       hoverEdge,
       finishNodeLabel: (id, label) => {
         setEditing(null);
@@ -5883,7 +6564,7 @@ function Editor({
       selectEdge: (id) => select("edge", id)
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the updaters read live state through refs
-    [diagram.direction, editing, editSeed, select, startReconnect, hoverEdge, setEditing]
+    [diagram.direction, editing, editSeed, select, startReconnect, hoverEdge, setEditing, readOnly]
   );
   const selectedNodes = nodes.filter((n) => n.selected);
   const selectedEdges = edges.filter((e) => e.selected);
@@ -5919,7 +6600,7 @@ function Editor({
     return edges.map((e) => {
       const rel = relations?.edges.get(e.id);
       const dim = Boolean(relations) && !rel;
-      const grips = !reconnect && e.source !== e.target && (Boolean(e.selected) || hoverEdgeId === e.id);
+      const grips = !readOnly && !reconnect && e.source !== e.target && (Boolean(e.selected) || hoverEdgeId === e.id);
       const lane = offsets.get(e.id);
       const drop = dropEdge === e.id;
       const moving = reconnect?.edgeId === e.id;
@@ -5935,11 +6616,24 @@ function Editor({
         data: { ...e.data, ...lane !== void 0 ? { lane } : {}, ...rel ? { rel } : {}, ...dim ? { dim } : {}, ...grips ? { grips } : {}, ...drop ? { dropTarget: true } : {} }
       };
     });
-  }, [edges, relations, reconnect, hoverEdgeId, dropEdge]);
+  }, [edges, relations, reconnect, hoverEdgeId, dropEdge, readOnly]);
   let panel;
-  if (selectedNodes.length === 1 && selectedEdges.length === 0) {
+  if (readOnly && selectedNodes.length + selectedEdges.length > 0) {
+    panel = /* @__PURE__ */ jsx21(
+      ReadOnlyPanel,
+      {
+        nodes,
+        edges,
+        selectedNodes,
+        selectedEdges,
+        plan,
+        onSelect: select,
+        onClose: clearSelection
+      }
+    );
+  } else if (selectedNodes.length === 1 && selectedEdges.length === 0) {
     const node = selectedNodes[0];
-    panel = /* @__PURE__ */ jsx20(
+    panel = /* @__PURE__ */ jsx21(
       NodePanel,
       {
         node,
@@ -5959,7 +6653,7 @@ function Editor({
     );
   } else if (selectedEdges.length === 1 && selectedNodes.length === 0) {
     const edge = selectedEdges[0];
-    panel = /* @__PURE__ */ jsx20(
+    panel = /* @__PURE__ */ jsx21(
       EdgePanel,
       {
         edge,
@@ -5973,7 +6667,7 @@ function Editor({
       edge.id
     );
   } else if (selectedNodes.length + selectedEdges.length > 1) {
-    panel = /* @__PURE__ */ jsx20(
+    panel = /* @__PURE__ */ jsx21(
       SelectionPanel,
       {
         nodes: selectedNodes,
@@ -5990,12 +6684,12 @@ function Editor({
   }
   const shownMenu = menu ? menuEntries(menu.target, menu.flow) : null;
   const focusLabel = focusNode ? nodes.find((n) => n.id === focusNode)?.data.label ?? "" : "this connection";
-  return /* @__PURE__ */ jsx20(CanvasContext.Provider, { value: api2, children: /* @__PURE__ */ jsxs19("div", { className: "arch-body", children: [
-    /* @__PURE__ */ jsxs19(
+  return /* @__PURE__ */ jsx21(CanvasContext.Provider, { value: api2, children: /* @__PURE__ */ jsxs20("div", { className: "arch-body", children: [
+    /* @__PURE__ */ jsxs20(
       "div",
       {
         ref: wrapper,
-        className: classNames("flow", reconnect && "is-reconnecting"),
+        className: classNames("flow", reconnect && "is-reconnecting", readOnly && "is-readonly"),
         onMouseMove: (e) => {
           pointer.current = flow.screenToFlowPosition({ x: e.clientX, y: e.clientY });
         },
@@ -6003,13 +6697,14 @@ function Editor({
           pointer.current = null;
         },
         onDoubleClick: (e) => {
+          if (readOnly) return;
           const el = e.target;
           if (el.closest(".react-flow__node, .react-flow__edge, .react-flow__panel, .flow-edge-label, .flow-menu")) return;
           if (!el.closest(".react-flow__pane")) return;
           addNode("component", { at: flow.screenToFlowPosition({ x: e.clientX, y: e.clientY }) });
         },
         children: [
-          /* @__PURE__ */ jsxs19(
+          /* @__PURE__ */ jsxs20(
             ReactFlow,
             {
               nodes: drawnNodes,
@@ -6018,25 +6713,29 @@ function Editor({
               edgeTypes,
               onNodesChange,
               onEdgesChange,
-              onConnect,
-              onConnectEnd,
-              onDelete,
+              onConnect: readOnly ? void 0 : onConnect,
+              onConnectEnd: readOnly ? void 0 : onConnectEnd,
+              onDelete: readOnly ? void 0 : onDelete,
+              nodesDraggable: !readOnly,
+              nodesConnectable: !readOnly,
               onNodeDragStart: onDragStart,
               onNodeDrag,
               onNodeDragStop,
               onSelectionDragStart: onDragStart,
               onSelectionDragStop,
-              onNodeDoubleClick: (_, node) => setEditing(`node:${node.id}`),
-              onEdgeDoubleClick: (_, edge) => setEditing(`edge:${edge.id}`),
+              onNodeDoubleClick: (_, node) => !readOnly && setEditing(`node:${node.id}`),
+              onEdgeDoubleClick: (_, edge) => !readOnly && setEditing(`edge:${edge.id}`),
               onNodeMouseEnter: (_, node) => setHoverNode(node.id),
               onNodeMouseLeave: () => setHoverNode(null),
               onEdgeMouseEnter: (_, edge) => hoverEdge(edge.id),
               onEdgeMouseLeave: () => hoverEdge(null),
               onPaneContextMenu: (e) => {
+                if (readOnly) return;
                 e.preventDefault();
                 openMenu({ x: e.clientX, y: e.clientY }, { kind: "pane" });
               },
               onNodeContextMenu: (e, node) => {
+                if (readOnly) return;
                 e.preventDefault();
                 const many = nodesRef.current.filter((n) => n.selected).length + edgesRef.current.filter((x) => x.selected).length > 1;
                 if (node.selected && many) return openMenu({ x: e.clientX, y: e.clientY }, { kind: "selection" });
@@ -6044,17 +6743,19 @@ function Editor({
                 openMenu({ x: e.clientX, y: e.clientY }, { kind: "node", id: node.id });
               },
               onEdgeContextMenu: (e, edge) => {
+                if (readOnly) return;
                 e.preventDefault();
                 select("edge", edge.id);
                 openMenu({ x: e.clientX, y: e.clientY }, { kind: "edge", id: edge.id });
               },
               onSelectionContextMenu: (e) => {
+                if (readOnly) return;
                 e.preventDefault();
                 openMenu({ x: e.clientX, y: e.clientY }, { kind: "selection" });
               },
               onMoveStart: () => setMenu(null),
               connectionMode: ConnectionMode.Loose,
-              deleteKeyCode: ["Backspace", "Delete"],
+              deleteKeyCode: readOnly ? null : ["Backspace", "Delete"],
               zoomOnDoubleClick: false,
               colorMode: theme,
               fitView: true,
@@ -6063,13 +6764,16 @@ function Editor({
               maxZoom: 2,
               defaultEdgeOptions: { type: "plan" },
               children: [
-                /* @__PURE__ */ jsx20(Background, { gap: 18, size: 1 }),
-                /* @__PURE__ */ jsx20(Controls, { showInteractive: false, position: "bottom-left", fitViewOptions: FIT }),
-                /* @__PURE__ */ jsx20(MiniMap, { pannable: true, zoomable: true, position: "bottom-right", style: { width: 150, height: 96 }, nodeBorderRadius: 4 }),
-                /* @__PURE__ */ jsxs19(Panel, { position: "top-left", className: "flow-toolbar", children: [
-                  /* @__PURE__ */ jsx20(AddMenu, { onAdd: (kind) => addNode(kind) }),
-                  /* @__PURE__ */ jsx20("button", { type: "button", className: "btn btn-sm", title: "Lay the whole diagram out again, along its flow", onClick: () => relayout(diagram.direction), children: "Tidy layout" }),
-                  /* @__PURE__ */ jsx20(
+                /* @__PURE__ */ jsx21(Background, { gap: 18, size: 1 }),
+                /* @__PURE__ */ jsx21(Controls, { showInteractive: false, position: "bottom-left", fitViewOptions: FIT }),
+                /* @__PURE__ */ jsx21(MiniMap, { pannable: true, zoomable: true, position: "bottom-right", style: { width: 150, height: 96 }, nodeBorderRadius: 4 }),
+                readOnly ? /* @__PURE__ */ jsx21(Panel, { position: "top-left", className: "flow-toolbar", children: /* @__PURE__ */ jsxs20("span", { className: "flow-locked", title: "The plan is submitted; reopen it to change the design", children: [
+                  /* @__PURE__ */ jsx21("span", { "aria-hidden": "true", children: "\u{1F512}" }),
+                  " Final design"
+                ] }) }) : /* @__PURE__ */ jsxs20(Panel, { position: "top-left", className: "flow-toolbar", children: [
+                  /* @__PURE__ */ jsx21(AddMenu, { onAdd: (kind) => addNode(kind) }),
+                  /* @__PURE__ */ jsx21("button", { type: "button", className: "btn btn-sm", title: "Lay the whole diagram out again, along its flow", onClick: () => relayout(diagram.direction), children: "Tidy layout" }),
+                  /* @__PURE__ */ jsx21(
                     "button",
                     {
                       type: "button",
@@ -6079,29 +6783,29 @@ function Editor({
                       children: diagram.direction === "LR" ? "\u2192 Left to right" : "\u2193 Top to bottom"
                     }
                   ),
-                  /* @__PURE__ */ jsxs19("span", { className: "flow-toolbar-group", children: [
-                    /* @__PURE__ */ jsx20("button", { type: "button", className: "btn btn-sm btn-icon", "aria-label": "Undo", title: `Undo (${MOD}Z)`, disabled: !history.current.canUndo, onClick: undo, children: "\u21B6" }),
-                    /* @__PURE__ */ jsx20("button", { type: "button", className: "btn btn-sm btn-icon", "aria-label": "Redo", title: `Redo (\u21E7${MOD}Z)`, disabled: !history.current.canRedo, onClick: redo, children: "\u21B7" })
+                  /* @__PURE__ */ jsxs20("span", { className: "flow-toolbar-group", children: [
+                    /* @__PURE__ */ jsx21("button", { type: "button", className: "btn btn-sm btn-icon", "aria-label": "Undo", title: `Undo (${MOD}Z)`, disabled: !history.current.canUndo, onClick: undo, children: "\u21B6" }),
+                    /* @__PURE__ */ jsx21("button", { type: "button", className: "btn btn-sm btn-icon", "aria-label": "Redo", title: `Redo (\u21E7${MOD}Z)`, disabled: !history.current.canRedo, onClick: redo, children: "\u21B7" })
                   ] }),
-                  /* @__PURE__ */ jsx20("button", { type: "button", className: "btn btn-sm btn-icon", "aria-label": "Keyboard shortcuts", title: "Keyboard shortcuts (?)", onClick: () => setShortcuts(true), children: "?" })
+                  /* @__PURE__ */ jsx21("button", { type: "button", className: "btn btn-sm btn-icon", "aria-label": "Keyboard shortcuts", title: "Keyboard shortcuts (?)", onClick: () => setShortcuts(true), children: "?" })
                 ] }),
-                relations && /* @__PURE__ */ jsxs19(Panel, { position: "bottom-center", className: "flow-legend", children: [
-                  /* @__PURE__ */ jsx20("span", { className: "flow-legend-item rel-from", title: "Boxes with an arrow into it", children: "from \u2192" }),
-                  /* @__PURE__ */ jsx20("span", { className: "flow-legend-item rel-focus", children: focusLabel }),
-                  /* @__PURE__ */ jsx20("span", { className: "flow-legend-item rel-to", title: "Boxes it has an arrow to", children: "\u2192 to" }),
-                  /* @__PURE__ */ jsx20("span", { className: "flow-legend-item rel-both", title: "Connected both ways, or without a direction", children: "\u21C4 both" }),
-                  focusNode && /* @__PURE__ */ jsx20("span", { className: "flow-legend-hint", children: twoHops ? "two steps out" : `hold ${ALT === "\u2325" ? "\u2325" : "Alt"} for two steps` })
+                relations && /* @__PURE__ */ jsxs20(Panel, { position: "bottom-center", className: "flow-legend", children: [
+                  /* @__PURE__ */ jsx21("span", { className: "flow-legend-item rel-from", title: "Boxes with an arrow into it", children: "from \u2192" }),
+                  /* @__PURE__ */ jsx21("span", { className: "flow-legend-item rel-focus", children: focusLabel }),
+                  /* @__PURE__ */ jsx21("span", { className: "flow-legend-item rel-to", title: "Boxes it has an arrow to", children: "\u2192 to" }),
+                  /* @__PURE__ */ jsx21("span", { className: "flow-legend-item rel-both", title: "Connected both ways, or without a direction", children: "\u21C4 both" }),
+                  focusNode && /* @__PURE__ */ jsx21("span", { className: "flow-legend-hint", children: twoHops ? "two steps out" : `hold ${ALT === "\u2325" ? "\u2325" : "Alt"} for two steps` })
                 ] })
               ]
             }
           ),
-          reconnect && /* @__PURE__ */ jsx20(ReconnectLine, { reconnect, edges, wrapper: wrapper.current }),
-          menu && shownMenu && /* @__PURE__ */ jsx20(ContextMenu, { at: menu.at, title: shownMenu.title, entries: shownMenu.entries, onClose: closeMenu }),
-          shortcuts && /* @__PURE__ */ jsx20(ShortcutsOverlay, { onClose: () => setShortcuts(false) })
+          reconnect && /* @__PURE__ */ jsx21(ReconnectLine, { reconnect, edges, wrapper: wrapper.current }),
+          menu && shownMenu && /* @__PURE__ */ jsx21(ContextMenu, { at: menu.at, title: shownMenu.title, entries: shownMenu.entries, onClose: closeMenu }),
+          shortcuts && /* @__PURE__ */ jsx21(ShortcutsOverlay, { onClose: () => setShortcuts(false) })
         ]
       }
     ),
-    /* @__PURE__ */ jsx20("aside", { className: "arch-panel", "aria-label": "Details", children: panel })
+    /* @__PURE__ */ jsx21("aside", { className: "arch-panel", "aria-label": "Details", children: panel })
   ] }) });
 }
 function patchOf(ns, es, direction) {
@@ -6159,16 +6863,16 @@ function ReconnectLine({ reconnect, edges, wrapper }) {
   const fixed = { x: c.x - rect.left, y: c.y - rect.top };
   const moving = { x: reconnect.pointer.x - rect.left, y: reconnect.pointer.y - rect.top };
   const [from, to] = reconnect.end === "target" ? [fixed, moving] : [moving, fixed];
-  return /* @__PURE__ */ jsxs19("svg", { className: "flow-reconnect", "aria-hidden": "true", children: [
-    /* @__PURE__ */ jsx20("defs", { children: /* @__PURE__ */ jsx20("marker", { id: "flow-reconnect-head", viewBox: "-10 -10 20 20", markerWidth: "14", markerHeight: "14", orient: "auto-start-reverse", refX: "0", refY: "0", children: /* @__PURE__ */ jsx20("polyline", { points: "-5,-4 0,0 -5,4 -5,-4" }) }) }),
-    /* @__PURE__ */ jsx20("line", { x1: from.x, y1: from.y, x2: to.x, y2: to.y, markerEnd: "url(#flow-reconnect-head)" })
+  return /* @__PURE__ */ jsxs20("svg", { className: "flow-reconnect", "aria-hidden": "true", children: [
+    /* @__PURE__ */ jsx21("defs", { children: /* @__PURE__ */ jsx21("marker", { id: "flow-reconnect-head", viewBox: "-10 -10 20 20", markerWidth: "14", markerHeight: "14", orient: "auto-start-reverse", refX: "0", refY: "0", children: /* @__PURE__ */ jsx21("polyline", { points: "-5,-4 0,0 -5,4 -5,-4" }) }) }),
+    /* @__PURE__ */ jsx21("line", { x1: from.x, y1: from.y, x2: to.x, y2: to.y, markerEnd: "url(#flow-reconnect-head)" })
   ] });
 }
 function AddMenu({ onAdd }) {
-  const [open, setOpen] = useState14(false);
-  return /* @__PURE__ */ jsxs19("div", { className: "add-menu", children: [
-    /* @__PURE__ */ jsx20("button", { type: "button", className: "btn btn-sm btn-primary", "aria-expanded": open, onClick: () => setOpen((v) => !v), title: "Or double-click or right-click empty canvas", children: "+ Box" }),
-    open && /* @__PURE__ */ jsx20("div", { className: "add-menu-list", role: "menu", children: NODE_KINDS.map((k) => /* @__PURE__ */ jsxs19(
+  const [open, setOpen] = useState15(false);
+  return /* @__PURE__ */ jsxs20("div", { className: "add-menu", children: [
+    /* @__PURE__ */ jsx21("button", { type: "button", className: "btn btn-sm btn-primary", "aria-expanded": open, onClick: () => setOpen((v) => !v), title: "Or double-click or right-click empty canvas", children: "+ Box" }),
+    open && /* @__PURE__ */ jsx21("div", { className: "add-menu-list", role: "menu", children: NODE_KINDS.map((k) => /* @__PURE__ */ jsxs20(
       "button",
       {
         type: "button",
@@ -6179,7 +6883,7 @@ function AddMenu({ onAdd }) {
           onAdd(k);
         },
         children: [
-          /* @__PURE__ */ jsx20("span", { className: classNames("kind-swatch", `kind-${k}`), "aria-hidden": "true", children: KIND_GLYPH[k] }),
+          /* @__PURE__ */ jsx21("span", { className: classNames("kind-swatch", `kind-${k}`), "aria-hidden": "true", children: KIND_GLYPH[k] }),
           KIND_LABEL[k]
         ]
       },
@@ -6343,17 +7047,18 @@ var init_architecture = __esm({
 });
 
 // src/ui/views/DiagramsView.tsx
-import { useState as useState15 } from "react";
-import { jsx as jsx21, jsxs as jsxs20 } from "react/jsx-runtime";
+import { useState as useState16 } from "react";
+import { jsx as jsx22, jsxs as jsxs21 } from "react/jsx-runtime";
 function DiagramsView() {
   const plan = usePlan();
   const chosen = useStore((s) => s.diagramId);
   const sessionId = useStore((s) => s.sessionId);
   if (!plan) return null;
   const diagram = plan.diagrams.find((d) => d.id === chosen) ?? plan.diagrams[0] ?? null;
-  return /* @__PURE__ */ jsxs20("div", { className: "arch", children: [
-    /* @__PURE__ */ jsxs20("div", { className: "arch-bar", children: [
-      /* @__PURE__ */ jsx21("nav", { className: "arch-tabs", "aria-label": "Diagrams", children: plan.diagrams.map((d) => /* @__PURE__ */ jsxs20(
+  const locked = isLocked(plan);
+  return /* @__PURE__ */ jsxs21("div", { className: "arch", children: [
+    /* @__PURE__ */ jsxs21("div", { className: "arch-bar", children: [
+      /* @__PURE__ */ jsx22("nav", { className: "arch-tabs", "aria-label": "Diagrams", children: plan.diagrams.map((d) => /* @__PURE__ */ jsxs21(
         "button",
         {
           type: "button",
@@ -6362,45 +7067,47 @@ function DiagramsView() {
           onClick: () => store.set({ diagramId: d.id }),
           children: [
             d.title,
-            /* @__PURE__ */ jsx21("span", { className: "arch-tab-count", children: d.nodes.length })
+            /* @__PURE__ */ jsx22("span", { className: "arch-tab-count", children: d.nodes.length })
           ]
         },
         d.id
       )) }),
-      /* @__PURE__ */ jsx21(NewDiagram, {}),
-      /* @__PURE__ */ jsx21("span", { className: "spacer" }),
-      /* @__PURE__ */ jsxs20("p", { className: "toolbar-hint", children: [
+      !locked && /* @__PURE__ */ jsx22(NewDiagram, {}),
+      /* @__PURE__ */ jsx22("span", { className: "spacer" }),
+      locked ? /* @__PURE__ */ jsx22("p", { className: "toolbar-hint", children: "Hover a box to see its connections \xB7 each box fills up as the tasks that build it get done" }) : /* @__PURE__ */ jsxs21("p", { className: "toolbar-hint", children: [
         "Right-click for everything \xB7 ",
-        /* @__PURE__ */ jsx21("kbd", { children: "Tab" }),
-        " adds the next box \xB7 drag from a box's edge to connect \xB7 hover to see its connections \xB7",
+        /* @__PURE__ */ jsx22("kbd", { children: "Tab" }),
+        " adds the next box \xB7 drag from a box's edge to connect \xB7",
         " ",
-        /* @__PURE__ */ jsx21("kbd", { children: "?" }),
+        /* @__PURE__ */ jsx22("kbd", { children: "?" }),
         " all shortcuts"
-      ] })
+      ] }),
+      /* @__PURE__ */ jsx22(SubmitControl, {})
     ] }),
-    diagram ? /* @__PURE__ */ jsx21(
+    diagram ? /* @__PURE__ */ jsx22(
       DiagramEditor,
       {
         diagram,
         plan,
+        readOnly: locked,
         onSave: async (patch) => {
           const plan2 = await store.commit([{ op: "upsert_diagram", id: diagram.id, ...patch }], sessionId);
           return plan2?.diagrams.find((d) => d.id === diagram.id)?.rev ?? null;
         },
-        aside: /* @__PURE__ */ jsx21(DiagramPanel, { plan, diagram })
+        aside: /* @__PURE__ */ jsx22(DiagramPanel, { plan, diagram, locked })
       },
       `${sessionId}:${diagram.id}`
-    ) : /* @__PURE__ */ jsx21("div", { className: "view-pad", children: /* @__PURE__ */ jsx21(
+    ) : /* @__PURE__ */ jsx22("div", { className: "view-pad", children: /* @__PURE__ */ jsx22(
       EmptyState,
       {
         title: "No diagrams yet",
-        hint: "Ask Claude to draw the architecture \u2014 components, data flow, boundaries \u2014 or start one from a template."
+        hint: locked ? "This plan was submitted without a diagram." : "Ask Claude to draw the architecture \u2014 components, data flow, boundaries \u2014 or start one from a template."
       }
     ) })
   ] });
 }
 function NewDiagram() {
-  const [open, setOpen] = useState15(false);
+  const [open, setOpen] = useState16(false);
   const add = async (t) => {
     setOpen(false);
     const before = new Set(store.getState().session?.plan?.diagrams.map((d) => d.id));
@@ -6409,37 +7116,34 @@ function NewDiagram() {
       if (made) store.set({ diagramId: made.id });
     }
   };
-  return /* @__PURE__ */ jsxs20("div", { className: "add-menu", children: [
-    /* @__PURE__ */ jsx21("button", { type: "button", className: "btn btn-sm", "aria-expanded": open, onClick: () => setOpen((v) => !v), children: "+ New diagram" }),
-    open && /* @__PURE__ */ jsx21("div", { className: "add-menu-list", role: "menu", children: TEMPLATES.map((t) => /* @__PURE__ */ jsx21("button", { type: "button", role: "menuitem", className: "add-menu-item", onClick: () => void add(t), children: t.label }, t.label)) })
+  return /* @__PURE__ */ jsxs21("div", { className: "add-menu", children: [
+    /* @__PURE__ */ jsx22("button", { type: "button", className: "btn btn-sm", "aria-expanded": open, onClick: () => setOpen((v) => !v), children: "+ New diagram" }),
+    open && /* @__PURE__ */ jsx22("div", { className: "add-menu-list", role: "menu", children: TEMPLATES.map((t) => /* @__PURE__ */ jsx22("button", { type: "button", role: "menuitem", className: "add-menu-item", onClick: () => void add(t), children: t.label }, t.label)) })
   ] });
 }
-function DiagramPanel({ plan, diagram }) {
-  const [confirming, setConfirming] = useState15(false);
+function DiagramPanel({ plan, diagram, locked }) {
+  const [confirming, setConfirming] = useState16(false);
   const index = plan.diagrams.findIndex((d) => d.id === diagram.id);
   const linked = diagram.nodes.filter((n) => n.taskIds?.length).length;
-  return /* @__PURE__ */ jsxs20("div", { className: "arch-panel-body", "aria-label": `About ${diagram.title}`, children: [
-    /* @__PURE__ */ jsxs20("header", { className: "panel-top", children: [
-      /* @__PURE__ */ jsx21("span", { className: "panel-kicker", children: "Diagram" }),
-      /* @__PURE__ */ jsx21("span", { className: "item-id", children: diagram.id }),
-      /* @__PURE__ */ jsx21("span", { className: "spacer" }),
-      /* @__PURE__ */ jsxs20("span", { className: "muted panel-meta", children: [
-        diagram.updatedBy === "user" ? "edited by you" : "by Claude",
-        " \xB7 ",
-        relativeTime(diagram.updatedAt)
-      ] })
+  return /* @__PURE__ */ jsxs21("div", { className: "arch-panel-body", "aria-label": `About ${diagram.title}`, children: [
+    /* @__PURE__ */ jsxs21("header", { className: "panel-top", children: [
+      /* @__PURE__ */ jsx22("span", { className: "panel-kicker", children: "Diagram" }),
+      /* @__PURE__ */ jsx22("span", { className: "item-id", children: diagram.id }),
+      /* @__PURE__ */ jsx22("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx22("span", { className: "muted panel-meta", children: locked ? "locked" : `${diagram.updatedBy === "user" ? "edited by you" : "by Claude"} \xB7 ${relativeTime(diagram.updatedAt)}` })
     ] }),
-    /* @__PURE__ */ jsx21(
+    /* @__PURE__ */ jsx22(
       InlineText,
       {
         as: "h2",
         className: "panel-title",
         value: diagram.title,
         label: "Diagram title",
+        readOnly: locked,
         onSave: (title) => store.op({ op: "upsert_diagram", id: diagram.id, title })
       }
     ),
-    /* @__PURE__ */ jsx21(
+    locked ? diagram.caption ? /* @__PURE__ */ jsx22(Markdown, { source: diagram.caption }) : null : /* @__PURE__ */ jsx22(
       MarkdownField,
       {
         value: diagram.caption ?? "",
@@ -6450,15 +7154,17 @@ function DiagramPanel({ plan, diagram }) {
         onSave: (caption) => store.op({ op: "upsert_diagram", id: diagram.id, caption })
       }
     ),
-    /* @__PURE__ */ jsxs20("p", { className: "panel-hint", children: [
+    /* @__PURE__ */ jsxs21("p", { className: "panel-hint", children: [
       diagram.nodes.length,
       " boxes, ",
       diagram.edges.length,
       " arrows",
       linked ? `, ${linked} tracking tasks` : "",
-      ". Select a box to edit its details, decisions and the tasks that build it."
+      ".",
+      " ",
+      locked ? "The plan is submitted, so this is the final design. Select a box to read its details and how far the tasks that build it have got." : "Select a box to edit its details, decisions and the tasks that build it."
     ] }),
-    /* @__PURE__ */ jsx21("div", { className: "row-actions", children: /* @__PURE__ */ jsx21(
+    /* @__PURE__ */ jsx22("div", { className: "row-actions", children: /* @__PURE__ */ jsx22(
       "button",
       {
         type: "button",
@@ -6471,17 +7177,17 @@ function DiagramPanel({ plan, diagram }) {
         children: "Copy as Markdown"
       }
     ) }),
-    /* @__PURE__ */ jsx21("ul", { className: "kind-legend", "aria-label": "Box kinds", children: NODE_KINDS.map((k) => /* @__PURE__ */ jsxs20("li", { children: [
-      /* @__PURE__ */ jsx21("span", { className: classNames("kind-swatch", `kind-${k}`), "aria-hidden": "true", children: KIND_GLYPH[k] }),
+    /* @__PURE__ */ jsx22("ul", { className: "kind-legend", "aria-label": "Box kinds", children: NODE_KINDS.map((k) => /* @__PURE__ */ jsxs21("li", { children: [
+      /* @__PURE__ */ jsx22("span", { className: classNames("kind-swatch", `kind-${k}`), "aria-hidden": "true", children: KIND_GLYPH[k] }),
       KIND_LABEL[k]
     ] }, k)) }),
-    /* @__PURE__ */ jsxs20("div", { className: "field", children: [
-      /* @__PURE__ */ jsx21("span", { className: "field-label", children: "Comments" }),
-      /* @__PURE__ */ jsx21(ThreadPanel, { target: { kind: "diagram", id: diagram.id }, label: diagram.title })
-    ] }),
-    /* @__PURE__ */ jsxs20("footer", { className: "panel-foot", children: [
-      /* @__PURE__ */ jsx21("button", { type: "button", className: "link", disabled: index <= 0, onClick: () => void store.op({ op: "move_diagram", id: diagram.id, index: index - 1 }), children: "Move left" }),
-      /* @__PURE__ */ jsx21(
+    (!locked || plan.threads.some((t) => t.target.kind === "diagram" && t.target.id === diagram.id)) && /* @__PURE__ */ jsx22("fieldset", { className: "lockable", disabled: locked, children: /* @__PURE__ */ jsxs21("div", { className: "field", children: [
+      /* @__PURE__ */ jsx22("span", { className: "field-label", children: "Comments" }),
+      /* @__PURE__ */ jsx22(ThreadPanel, { target: { kind: "diagram", id: diagram.id }, label: diagram.title })
+    ] }) }),
+    !locked && /* @__PURE__ */ jsxs21("footer", { className: "panel-foot", children: [
+      /* @__PURE__ */ jsx22("button", { type: "button", className: "link", disabled: index <= 0, onClick: () => void store.op({ op: "move_diagram", id: diagram.id, index: index - 1 }), children: "Move left" }),
+      /* @__PURE__ */ jsx22(
         "button",
         {
           type: "button",
@@ -6491,12 +7197,12 @@ function DiagramPanel({ plan, diagram }) {
           children: "Move right"
         }
       ),
-      /* @__PURE__ */ jsx21("span", { className: "spacer" }),
-      confirming ? /* @__PURE__ */ jsxs20("span", { className: "item-confirm", children: [
+      /* @__PURE__ */ jsx22("span", { className: "spacer" }),
+      confirming ? /* @__PURE__ */ jsxs21("span", { className: "item-confirm", children: [
         "Remove?",
-        /* @__PURE__ */ jsx21("button", { type: "button", className: "link is-danger", onClick: () => void store.op({ op: "remove", kind: "diagram", id: diagram.id }), children: "Remove" }),
-        /* @__PURE__ */ jsx21("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
-      ] }) : /* @__PURE__ */ jsx21("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Remove diagram" })
+        /* @__PURE__ */ jsx22("button", { type: "button", className: "link is-danger", onClick: () => void store.op({ op: "remove", kind: "diagram", id: diagram.id }), children: "Remove" }),
+        /* @__PURE__ */ jsx22("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
+      ] }) : /* @__PURE__ */ jsx22("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Remove diagram" })
     ] })
   ] });
 }
@@ -6506,9 +7212,12 @@ var init_DiagramsView = __esm({
     "use strict";
     init_store();
     init_Editable();
+    init_Markdown();
     init_Threads();
     init_FlowCanvas();
     init_primitives();
+    init_Submit();
+    init_plan();
     init_format();
     init_architecture();
     init_types();
@@ -6547,28 +7256,52 @@ var init_DiagramsView = __esm({
 });
 
 // src/ui/views/TasksView.tsx
-import { useMemo as useMemo3, useState as useState16 } from "react";
-import { Fragment as Fragment4, jsx as jsx22, jsxs as jsxs21 } from "react/jsx-runtime";
+import { useEffect as useEffect15, useMemo as useMemo3, useRef as useRef10, useState as useState17 } from "react";
+import { Fragment as Fragment5, jsx as jsx23, jsxs as jsxs22 } from "react/jsx-runtime";
 function TasksView() {
   const plan = usePlan();
   const mode = useStore((s) => s.taskMode);
   const hideDone = useStore((s) => s.hideDone);
+  const sessionId = useStore((s) => s.sessionId);
   if (!plan) return null;
   const counts = countTasks(plan);
-  return /* @__PURE__ */ jsxs21("div", { className: "view-pad", children: [
-    /* @__PURE__ */ jsxs21("div", { className: "toolbar", children: [
-      /* @__PURE__ */ jsxs21("div", { className: "segmented", role: "group", "aria-label": "Task layout", children: [
-        /* @__PURE__ */ jsx22("button", { type: "button", className: classNames("seg", mode === "outline" && "is-active"), "aria-pressed": mode === "outline", onClick: () => store.setTaskMode("outline"), children: "Outline" }),
-        /* @__PURE__ */ jsx22("button", { type: "button", className: classNames("seg", mode === "board" && "is-active"), "aria-pressed": mode === "board", onClick: () => store.setTaskMode("board"), children: "Board" })
+  if (isLocked(plan)) {
+    const phase = planPhase(plan);
+    return /* @__PURE__ */ jsxs22("div", { className: "view-pad", children: [
+      /* @__PURE__ */ jsxs22("div", { className: "toolbar", children: [
+        /* @__PURE__ */ jsxs22("p", { className: "toolbar-note", children: [
+          /* @__PURE__ */ jsx23("span", { "aria-hidden": "true", children: "\u{1F512}" }),
+          " ",
+          phase === "handed-off" ? "Handed off to be built elsewhere, so these statuses do not move." : phase === "submitted" ? "The plan is locked. Cards move across the board once Claude starts and reports each task." : "The plan is locked. Cards move across the board as Claude reports each task."
+        ] }),
+        /* @__PURE__ */ jsx23("span", { className: "spacer" }),
+        /* @__PURE__ */ jsxs22("span", { className: "toolbar-progress", children: [
+          /* @__PURE__ */ jsx23(ProgressBar, { counts }),
+          /* @__PURE__ */ jsxs22("span", { className: "muted", children: [
+            counts.done,
+            "/",
+            counts.total,
+            " done"
+          ] })
+        ] })
       ] }),
-      mode === "outline" && /* @__PURE__ */ jsxs21("label", { className: "toggle", children: [
-        /* @__PURE__ */ jsx22("input", { type: "checkbox", checked: hideDone, onChange: () => store.toggleHideDone() }),
+      plan.tasks.length === 0 ? /* @__PURE__ */ jsx23(EmptyState, { title: "No tasks", hint: "This plan was submitted without a task breakdown." }) : /* @__PURE__ */ jsx23(Board, { plan, readOnly: true }, sessionId)
+    ] });
+  }
+  return /* @__PURE__ */ jsxs22("div", { className: "view-pad", children: [
+    /* @__PURE__ */ jsxs22("div", { className: "toolbar", children: [
+      /* @__PURE__ */ jsxs22("div", { className: "segmented", role: "group", "aria-label": "Task layout", children: [
+        /* @__PURE__ */ jsx23("button", { type: "button", className: classNames("seg", mode === "outline" && "is-active"), "aria-pressed": mode === "outline", onClick: () => store.setTaskMode("outline"), children: "Outline" }),
+        /* @__PURE__ */ jsx23("button", { type: "button", className: classNames("seg", mode === "board" && "is-active"), "aria-pressed": mode === "board", onClick: () => store.setTaskMode("board"), children: "Board" })
+      ] }),
+      mode === "outline" && /* @__PURE__ */ jsxs22("label", { className: "toggle", children: [
+        /* @__PURE__ */ jsx23("input", { type: "checkbox", checked: hideDone, onChange: () => store.toggleHideDone() }),
         "Hide done"
       ] }),
-      /* @__PURE__ */ jsx22("span", { className: "spacer" }),
-      /* @__PURE__ */ jsxs21("span", { className: "toolbar-progress", children: [
-        /* @__PURE__ */ jsx22(ProgressBar, { counts }),
-        /* @__PURE__ */ jsxs21("span", { className: "muted", children: [
+      /* @__PURE__ */ jsx23("span", { className: "spacer" }),
+      /* @__PURE__ */ jsxs22("span", { className: "toolbar-progress", children: [
+        /* @__PURE__ */ jsx23(ProgressBar, { counts }),
+        /* @__PURE__ */ jsxs22("span", { className: "muted", children: [
           counts.done,
           "/",
           counts.total,
@@ -6576,18 +7309,18 @@ function TasksView() {
         ] })
       ] })
     ] }),
-    plan.tasks.length === 0 ? /* @__PURE__ */ jsxs21(Fragment4, { children: [
-      /* @__PURE__ */ jsx22(EmptyState, { title: "No tasks yet", hint: "Break the work down here, or ask Claude to publish a task tree with the plan." }),
-      /* @__PURE__ */ jsx22(AddField, { placeholder: "Add a task\u2026", label: "New task", onAdd: (title) => store.op({ op: "upsert_task", title }) })
-    ] }) : mode === "outline" ? /* @__PURE__ */ jsx22(Outline, { plan, hideDone }) : /* @__PURE__ */ jsx22(Board, { plan })
+    plan.tasks.length === 0 ? /* @__PURE__ */ jsxs22(Fragment5, { children: [
+      /* @__PURE__ */ jsx23(EmptyState, { title: "No tasks yet", hint: "Break the work down here, or ask Claude to publish a task tree with the plan." }),
+      /* @__PURE__ */ jsx23(AddField, { placeholder: "Add a task\u2026", label: "New task", onAdd: (title) => store.op({ op: "upsert_task", title }) })
+    ] }) : mode === "outline" ? /* @__PURE__ */ jsx23(Outline, { plan, hideDone }) : /* @__PURE__ */ jsx23(Board, { plan })
   ] });
 }
 function Outline({ plan, hideDone }) {
   const collapsed = useStore((s) => s.collapsedTasks);
-  const [dragging, setDragging] = useState16(null);
-  const [hint, setHint] = useState16(null);
-  const [expanded, setExpanded] = useState16(null);
-  const [addingUnder, setAddingUnder] = useState16(null);
+  const [dragging, setDragging] = useState17(null);
+  const [hint, setHint] = useState17(null);
+  const [expanded, setExpanded] = useState17(null);
+  const [addingUnder, setAddingUnder] = useState17(null);
   const partsByTask = useMemo3(() => {
     const map = /* @__PURE__ */ new Map();
     for (const d of plan.diagrams) {
@@ -6634,8 +7367,8 @@ function Outline({ plan, hideDone }) {
     if (zone === "inside" && collapsed.includes(target.id)) store.toggleTaskCollapsed(target.id);
     void store.op(op);
   };
-  return /* @__PURE__ */ jsxs21("div", { className: "task-outline", children: [
-    /* @__PURE__ */ jsx22("div", { className: "outline-rows", role: "tree", "aria-label": "Task tree", children: rows.map(({ task, depth, number }) => /* @__PURE__ */ jsx22(
+  return /* @__PURE__ */ jsxs22("div", { className: "task-outline", children: [
+    /* @__PURE__ */ jsx23("div", { className: "outline-rows", role: "tree", "aria-label": "Task tree", children: rows.map(({ task, depth, number }) => /* @__PURE__ */ jsx23(
       TaskRow,
       {
         plan,
@@ -6666,14 +7399,14 @@ function Outline({ plan, hideDone }) {
       },
       task.id
     )) }),
-    /* @__PURE__ */ jsx22(AddField, { placeholder: "Add a top-level task\u2026", label: "New top-level task", onAdd: (title) => store.op({ op: "upsert_task", title }) }),
-    /* @__PURE__ */ jsx22("p", { className: "outline-help muted", children: "Drag a row onto another to nest it, or to its top or bottom edge to place it beside. With a row focused: Alt+\u2191/\u2193 reorders, Alt+\u2192 nests under the row above, Alt+\u2190 moves it out a level." })
+    /* @__PURE__ */ jsx23(AddField, { placeholder: "Add a top-level task\u2026", label: "New top-level task", onAdd: (title) => store.op({ op: "upsert_task", title }) }),
+    /* @__PURE__ */ jsx23("p", { className: "outline-help muted", children: "Drag a row onto another to nest it, or to its top or bottom edge to place it beside. With a row focused: Alt+\u2191/\u2193 reorders, Alt+\u2192 nests under the row above, Alt+\u2190 moves it out a level." })
   ] });
 }
 function TaskRow(props) {
   const { plan, task, depth, number, expanded } = props;
   const collapsed = useStore((s) => s.collapsedTasks.includes(task.id));
-  const [comments, setComments] = useState16(false);
+  const [comments, setComments] = useState17(false);
   const kids = childrenOf(plan, task.id);
   const sub = kids.length ? countTasks({ tasks: [task, ...descendants(plan, task.id)] }) : null;
   const threads = useThreads({ kind: "task", id: task.id });
@@ -6704,8 +7437,8 @@ function TaskRow(props) {
       window.requestAnimationFrame(() => document.querySelector(`#task-${task.id} .task-line`)?.focus());
     });
   };
-  return /* @__PURE__ */ jsxs21(Focusable, { kind: "task", id: task.id, as: "div", className: classNames("task", `is-${task.status}`, props.dragging && "is-dragging"), children: [
-    /* @__PURE__ */ jsxs21(
+  return /* @__PURE__ */ jsxs22(Focusable, { kind: "task", id: task.id, as: "div", className: classNames("task", `is-${task.status}`, props.dragging && "is-dragging"), children: [
+    /* @__PURE__ */ jsxs22(
       "div",
       {
         className: classNames("task-line", props.dropZone && `drop-${props.dropZone}`),
@@ -6723,8 +7456,8 @@ function TaskRow(props) {
         onDrop: props.onDrop,
         onKeyDown,
         children: [
-          /* @__PURE__ */ jsx22("span", { className: "drag-handle", "aria-hidden": "true", title: "Drag to move", children: "\u22EE\u22EE" }),
-          kids.length ? /* @__PURE__ */ jsx22(
+          /* @__PURE__ */ jsx23("span", { className: "drag-handle", "aria-hidden": "true", title: "Drag to move", children: "\u22EE\u22EE" }),
+          kids.length ? /* @__PURE__ */ jsx23(
             "button",
             {
               type: "button",
@@ -6733,10 +7466,10 @@ function TaskRow(props) {
               onClick: () => store.toggleTaskCollapsed(task.id),
               children: collapsed ? "\u25B8" : "\u25BE"
             }
-          ) : /* @__PURE__ */ jsx22("span", { className: "twisty is-leaf", "aria-hidden": "true" }),
-          /* @__PURE__ */ jsx22(StatusDot, { task }),
-          /* @__PURE__ */ jsx22("span", { className: "task-num", children: number }),
-          /* @__PURE__ */ jsx22(
+          ) : /* @__PURE__ */ jsx23("span", { className: "twisty is-leaf", "aria-hidden": "true" }),
+          /* @__PURE__ */ jsx23(StatusDot, { task }),
+          /* @__PURE__ */ jsx23("span", { className: "task-num", children: number }),
+          /* @__PURE__ */ jsx23(
             InlineText,
             {
               className: "task-title",
@@ -6745,19 +7478,19 @@ function TaskRow(props) {
               onSave: (title) => store.op({ op: "upsert_task", id: task.id, title })
             }
           ),
-          /* @__PURE__ */ jsxs21("span", { className: "task-badges", children: [
-            sub && /* @__PURE__ */ jsxs21("span", { className: "chip", title: `${sub.done} of ${sub.total} subtasks done`, children: [
+          /* @__PURE__ */ jsxs22("span", { className: "task-badges", children: [
+            sub && /* @__PURE__ */ jsxs22("span", { className: "chip", title: `${sub.done} of ${sub.total} subtasks done`, children: [
               sub.done,
               "/",
               sub.total
             ] }),
-            task.note && /* @__PURE__ */ jsx22("span", { className: classNames("chip is-note", task.status === "blocked" && "is-warning"), title: task.note, children: task.note }),
-            task.files?.length ? /* @__PURE__ */ jsxs21("span", { className: "chip", title: task.files.join("\n"), children: [
+            task.note && /* @__PURE__ */ jsx23("span", { className: classNames("chip is-note", task.status === "blocked" && "is-warning"), title: task.note, children: task.note }),
+            task.files?.length ? /* @__PURE__ */ jsxs22("span", { className: "chip", title: task.files.join("\n"), children: [
               task.files.length,
               " file",
               task.files.length === 1 ? "" : "s"
             ] }) : null,
-            parts.map(({ d, n }) => /* @__PURE__ */ jsxs21(
+            parts.map(({ d, n }) => /* @__PURE__ */ jsxs22(
               "button",
               {
                 type: "button",
@@ -6765,25 +7498,25 @@ function TaskRow(props) {
                 title: `Builds "${n.label}" in ${d.title} \u2014 show it`,
                 onClick: () => store.focus("node", `${d.id}:${n.id}`),
                 children: [
-                  /* @__PURE__ */ jsx22("span", { "aria-hidden": "true", children: KIND_GLYPH[n.kind] }),
+                  /* @__PURE__ */ jsx23("span", { "aria-hidden": "true", children: KIND_GLYPH[n.kind] }),
                   " ",
                   n.label
                 ]
               },
               `${d.id}:${n.id}`
             )),
-            task.createdBy === "user" && /* @__PURE__ */ jsx22("span", { className: "chip is-you", children: "added by you" })
+            task.createdBy === "user" && /* @__PURE__ */ jsx23("span", { className: "chip is-you", children: "added by you" })
           ] }),
-          /* @__PURE__ */ jsx22("span", { className: "spacer" }),
-          /* @__PURE__ */ jsxs21("span", { className: "task-actions", children: [
-            /* @__PURE__ */ jsx22("button", { type: "button", className: "icon-btn is-tiny", title: "Add subtask", "aria-label": `Add a subtask to ${task.title}`, onClick: props.onAddSubtask, children: /* @__PURE__ */ jsx22("span", { "aria-hidden": "true", children: "\uFF0B" }) }),
-            /* @__PURE__ */ jsx22(MoveButton, { op: moves.outdent, glyph: "\u2190", label: `Move ${task.title} out a level` }),
-            /* @__PURE__ */ jsx22(MoveButton, { op: moves.indent, glyph: "\u2192", label: `Nest ${task.title} under the task above` }),
-            /* @__PURE__ */ jsx22(MoveButton, { op: moves.up, glyph: "\u2191", label: `Move ${task.title} up` }),
-            /* @__PURE__ */ jsx22(MoveButton, { op: moves.down, glyph: "\u2193", label: `Move ${task.title} down` })
+          /* @__PURE__ */ jsx23("span", { className: "spacer" }),
+          /* @__PURE__ */ jsxs22("span", { className: "task-actions", children: [
+            /* @__PURE__ */ jsx23("button", { type: "button", className: "icon-btn is-tiny", title: "Add subtask", "aria-label": `Add a subtask to ${task.title}`, onClick: props.onAddSubtask, children: /* @__PURE__ */ jsx23("span", { "aria-hidden": "true", children: "\uFF0B" }) }),
+            /* @__PURE__ */ jsx23(MoveButton, { op: moves.outdent, glyph: "\u2190", label: `Move ${task.title} out a level` }),
+            /* @__PURE__ */ jsx23(MoveButton, { op: moves.indent, glyph: "\u2192", label: `Nest ${task.title} under the task above` }),
+            /* @__PURE__ */ jsx23(MoveButton, { op: moves.up, glyph: "\u2191", label: `Move ${task.title} up` }),
+            /* @__PURE__ */ jsx23(MoveButton, { op: moves.down, glyph: "\u2193", label: `Move ${task.title} down` })
           ] }),
-          /* @__PURE__ */ jsx22(CommentToggle, { target, label: task.title, open: comments, onToggle: () => setComments((v) => !v) }),
-          /* @__PURE__ */ jsx22(
+          /* @__PURE__ */ jsx23(CommentToggle, { target, label: task.title, open: comments, onToggle: () => setComments((v) => !v) }),
+          /* @__PURE__ */ jsx23(
             "button",
             {
               type: "button",
@@ -6792,17 +7525,17 @@ function TaskRow(props) {
               title: "Details",
               "aria-label": `Details of ${task.title}`,
               onClick: props.onToggleExpanded,
-              children: /* @__PURE__ */ jsx22("span", { "aria-hidden": "true", children: expanded ? "\u2303" : "\u2304" })
+              children: /* @__PURE__ */ jsx23("span", { "aria-hidden": "true", children: expanded ? "\u2303" : "\u2304" })
             }
           )
         ]
       }
     ),
-    (expanded || comments) && /* @__PURE__ */ jsxs21("div", { className: "task-detail", style: { ["--depth"]: depth }, children: [
-      expanded && /* @__PURE__ */ jsx22(TaskDetail, { plan, task }),
-      comments && /* @__PURE__ */ jsx22(ThreadPanel, { target, label: task.title })
+    (expanded || comments) && /* @__PURE__ */ jsxs22("div", { className: "task-detail", style: { ["--depth"]: depth }, children: [
+      expanded && /* @__PURE__ */ jsx23(TaskDetail, { plan, task }),
+      comments && /* @__PURE__ */ jsx23(ThreadPanel, { target, label: task.title })
     ] }),
-    props.addingSubtask && /* @__PURE__ */ jsx22("div", { className: "task-add-sub", style: { ["--depth"]: depth + 1 }, children: /* @__PURE__ */ jsx22(
+    props.addingSubtask && /* @__PURE__ */ jsx23("div", { className: "task-add-sub", style: { ["--depth"]: depth + 1 }, children: /* @__PURE__ */ jsx23(
       AddField,
       {
         placeholder: `Subtask of "${task.title}"\u2026`,
@@ -6819,16 +7552,16 @@ function TaskRow(props) {
   ] });
 }
 function TaskDetail({ plan, task }) {
-  const [confirming, setConfirming] = useState16(false);
+  const [confirming, setConfirming] = useState17(false);
   const subtasks = descendants(plan, task.id).length;
-  return /* @__PURE__ */ jsxs21("div", { className: "task-detail-body", children: [
-    /* @__PURE__ */ jsxs21("div", { className: "field-row", children: [
-      /* @__PURE__ */ jsx22("span", { className: "field-label", children: "Status" }),
-      /* @__PURE__ */ jsx22(StatusPicker, { task })
+  return /* @__PURE__ */ jsxs22("div", { className: "task-detail-body", children: [
+    /* @__PURE__ */ jsxs22("div", { className: "field-row", children: [
+      /* @__PURE__ */ jsx23("span", { className: "field-label", children: "Status" }),
+      /* @__PURE__ */ jsx23(StatusPicker, { task })
     ] }),
-    /* @__PURE__ */ jsxs21("div", { className: "field-row", children: [
-      /* @__PURE__ */ jsx22("span", { className: "field-label", children: "Note" }),
-      /* @__PURE__ */ jsx22(
+    /* @__PURE__ */ jsxs22("div", { className: "field-row", children: [
+      /* @__PURE__ */ jsx23("span", { className: "field-label", children: "Note" }),
+      /* @__PURE__ */ jsx23(
         InlineText,
         {
           className: "task-note",
@@ -6839,9 +7572,9 @@ function TaskDetail({ plan, task }) {
         }
       )
     ] }),
-    /* @__PURE__ */ jsxs21("div", { className: "field-col", children: [
-      /* @__PURE__ */ jsx22("span", { className: "field-label", children: "Detail" }),
-      /* @__PURE__ */ jsx22(
+    /* @__PURE__ */ jsxs22("div", { className: "field-col", children: [
+      /* @__PURE__ */ jsx23("span", { className: "field-label", children: "Detail" }),
+      /* @__PURE__ */ jsx23(
         MarkdownField,
         {
           value: task.detail ?? "",
@@ -6852,35 +7585,35 @@ function TaskDetail({ plan, task }) {
         }
       )
     ] }),
-    /* @__PURE__ */ jsxs21("div", { className: "field-col", children: [
-      /* @__PURE__ */ jsx22("span", { className: "field-label", children: "Files" }),
-      /* @__PURE__ */ jsx22(FilesField, { task })
+    /* @__PURE__ */ jsxs22("div", { className: "field-col", children: [
+      /* @__PURE__ */ jsx23("span", { className: "field-label", children: "Files" }),
+      /* @__PURE__ */ jsx23(FilesField, { task })
     ] }),
-    /* @__PURE__ */ jsxs21("div", { className: "task-detail-foot", children: [
-      /* @__PURE__ */ jsxs21("span", { className: "muted", children: [
+    /* @__PURE__ */ jsxs22("div", { className: "task-detail-foot", children: [
+      /* @__PURE__ */ jsxs22("span", { className: "muted", children: [
         task.id,
         " \xB7 ",
         task.createdBy === "user" ? "added by you" : "added by Claude"
       ] }),
-      /* @__PURE__ */ jsx22("span", { className: "spacer" }),
-      confirming ? /* @__PURE__ */ jsxs21("span", { className: "item-confirm", children: [
+      /* @__PURE__ */ jsx23("span", { className: "spacer" }),
+      confirming ? /* @__PURE__ */ jsxs22("span", { className: "item-confirm", children: [
         "Remove",
         subtasks ? ` with ${subtasks} subtask(s)` : "",
         "?",
-        /* @__PURE__ */ jsx22("button", { type: "button", className: "link is-danger", onClick: () => void store.op({ op: "remove", kind: "task", id: task.id }), children: "Remove" }),
-        /* @__PURE__ */ jsx22("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
-      ] }) : /* @__PURE__ */ jsx22("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Remove task" })
+        /* @__PURE__ */ jsx23("button", { type: "button", className: "link is-danger", onClick: () => void store.op({ op: "remove", kind: "task", id: task.id }), children: "Remove" }),
+        /* @__PURE__ */ jsx23("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
+      ] }) : /* @__PURE__ */ jsx23("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Remove task" })
     ] })
   ] });
 }
 function FilesField({ task }) {
-  const [editing, setEditing] = useState16(false);
-  const [draft, setDraft] = useState16((task.files ?? []).join("\n"));
+  const [editing, setEditing] = useState17(false);
+  const [draft, setDraft] = useState17((task.files ?? []).join("\n"));
   if (!editing) {
-    return /* @__PURE__ */ jsxs21("div", { className: "files", children: [
-      task.files?.length ? /* @__PURE__ */ jsx22("ul", { className: "plain-list mono", children: task.files.map((f) => /* @__PURE__ */ jsx22("li", { children: f }, f)) }) : /* @__PURE__ */ jsx22("span", { className: "muted", children: "None listed." }),
+    return /* @__PURE__ */ jsxs22("div", { className: "files", children: [
+      task.files?.length ? /* @__PURE__ */ jsx23("ul", { className: "plain-list mono", children: task.files.map((f) => /* @__PURE__ */ jsx23("li", { children: f }, f)) }) : /* @__PURE__ */ jsx23("span", { className: "muted", children: "None listed." }),
       " ",
-      /* @__PURE__ */ jsx22(
+      /* @__PURE__ */ jsx23(
         "button",
         {
           type: "button",
@@ -6894,13 +7627,13 @@ function FilesField({ task }) {
       )
     ] });
   }
-  return /* @__PURE__ */ jsxs21("div", { className: "md-field is-editing", children: [
-    /* @__PURE__ */ jsx22("textarea", { className: "input mono", rows: 4, value: draft, "aria-label": "Files, one per line", onChange: (e) => setDraft(e.target.value) }),
-    /* @__PURE__ */ jsxs21("div", { className: "md-field-foot", children: [
-      /* @__PURE__ */ jsx22("span", { className: "muted", children: "One path per line" }),
-      /* @__PURE__ */ jsx22("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx22("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setEditing(false), children: "Cancel" }),
-      /* @__PURE__ */ jsx22(
+  return /* @__PURE__ */ jsxs22("div", { className: "md-field is-editing", children: [
+    /* @__PURE__ */ jsx23("textarea", { className: "input mono", rows: 4, value: draft, "aria-label": "Files, one per line", onChange: (e) => setDraft(e.target.value) }),
+    /* @__PURE__ */ jsxs22("div", { className: "md-field-foot", children: [
+      /* @__PURE__ */ jsx23("span", { className: "muted", children: "One path per line" }),
+      /* @__PURE__ */ jsx23("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx23("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setEditing(false), children: "Cancel" }),
+      /* @__PURE__ */ jsx23(
         "button",
         {
           type: "button",
@@ -6916,11 +7649,11 @@ function FilesField({ task }) {
   ] });
 }
 function MoveButton({ op, glyph, label }) {
-  return /* @__PURE__ */ jsx22("button", { type: "button", className: "icon-btn is-tiny", disabled: !op, title: label, "aria-label": label, onClick: () => op && void store.op(op), children: /* @__PURE__ */ jsx22("span", { "aria-hidden": "true", children: glyph }) });
+  return /* @__PURE__ */ jsx23("button", { type: "button", className: "icon-btn is-tiny", disabled: !op, title: label, "aria-label": label, onClick: () => op && void store.op(op), children: /* @__PURE__ */ jsx23("span", { "aria-hidden": "true", children: glyph }) });
 }
 function StatusDot({ task }) {
   const next = NEXT_STATUS[task.status];
-  return /* @__PURE__ */ jsx22(
+  return /* @__PURE__ */ jsx23(
     "button",
     {
       type: "button",
@@ -6928,12 +7661,12 @@ function StatusDot({ task }) {
       title: `${STATUS_LABEL[task.status]} \u2014 click to mark ${STATUS_LABEL[next].toLowerCase()}`,
       "aria-label": `${task.title}: ${STATUS_LABEL[task.status]}. Mark ${STATUS_LABEL[next].toLowerCase()}`,
       onClick: () => void store.op({ op: "upsert_task", id: task.id, status: next }),
-      children: /* @__PURE__ */ jsx22("span", { "aria-hidden": "true", children: STATUS_GLYPH[task.status] })
+      children: /* @__PURE__ */ jsx23("span", { "aria-hidden": "true", children: STATUS_GLYPH[task.status] })
     }
   );
 }
 function StatusPicker({ task }) {
-  return /* @__PURE__ */ jsx22("div", { className: "segmented", role: "radiogroup", "aria-label": `Status of ${task.title}`, children: TASK_STATUSES.map((s) => /* @__PURE__ */ jsx22(
+  return /* @__PURE__ */ jsx23("div", { className: "segmented", role: "radiogroup", "aria-label": `Status of ${task.title}`, children: TASK_STATUSES.map((s) => /* @__PURE__ */ jsx23(
     "button",
     {
       type: "button",
@@ -6946,44 +7679,112 @@ function StatusPicker({ task }) {
     s
   )) });
 }
-function Board({ plan }) {
-  const [over, setOver] = useState16(null);
+function Board({ plan, readOnly = false }) {
+  const [over, setOver] = useState17(null);
+  const { arrived, announcement } = useArrivals(plan);
   const leaves = outline(plan).map((r) => r.task).filter((t) => !hasChildren(plan, t.id));
-  return /* @__PURE__ */ jsx22("div", { className: "board", children: TASK_STATUSES.map((status) => {
-    const cards = leaves.filter((t) => t.status === status);
-    return /* @__PURE__ */ jsxs21(
-      "section",
-      {
-        className: classNames("board-col", `is-${status}`, over === status && "is-over"),
-        "aria-label": STATUS_LABEL[status],
-        onDragOver: (e) => {
-          if (!e.dataTransfer.types.includes(DRAG_TYPE)) return;
-          e.preventDefault();
-          setOver(status);
+  return /* @__PURE__ */ jsxs22("div", { className: classNames("board", readOnly && "is-readonly"), children: [
+    TASK_STATUSES.map((status) => {
+      const cards = leaves.filter((t) => t.status === status);
+      return /* @__PURE__ */ jsxs22(
+        "section",
+        {
+          className: classNames("board-col", `is-${status}`, over === status && "is-over"),
+          "aria-label": STATUS_LABEL[status],
+          onDragOver: (e) => {
+            if (readOnly || !e.dataTransfer.types.includes(DRAG_TYPE)) return;
+            e.preventDefault();
+            setOver(status);
+          },
+          onDragLeave: () => setOver((cur) => cur === status ? null : cur),
+          onDrop: (e) => {
+            if (readOnly) return;
+            e.preventDefault();
+            setOver(null);
+            const id = e.dataTransfer.getData(DRAG_TYPE);
+            const task = plan.tasks.find((t) => t.id === id);
+            if (task && task.status !== status) void store.op({ op: "upsert_task", id, status });
+          },
+          children: [
+            /* @__PURE__ */ jsxs22("header", { className: "board-col-head", children: [
+              /* @__PURE__ */ jsx23("span", { className: classNames("status-dot is-static", `is-${status}`), "aria-hidden": "true", children: STATUS_GLYPH[status] }),
+              /* @__PURE__ */ jsx23("h2", { children: STATUS_LABEL[status] }),
+              /* @__PURE__ */ jsx23("span", { className: "board-count", children: cards.length })
+            ] }),
+            /* @__PURE__ */ jsxs22("div", { className: "board-cards", children: [
+              cards.map(
+                (task) => readOnly ? /* @__PURE__ */ jsx23(TrackedCard, { plan, task, arrived: arrived.has(task.id) }, task.id) : /* @__PURE__ */ jsx23(BoardCard, { plan, task }, task.id)
+              ),
+              cards.length === 0 && /* @__PURE__ */ jsx23("p", { className: "board-empty", children: readOnly ? "Nothing here yet" : "Drop tasks here" })
+            ] })
+          ]
         },
-        onDragLeave: () => setOver((cur) => cur === status ? null : cur),
-        onDrop: (e) => {
-          e.preventDefault();
-          setOver(null);
-          const id = e.dataTransfer.getData(DRAG_TYPE);
-          const task = plan.tasks.find((t) => t.id === id);
-          if (task && task.status !== status) void store.op({ op: "upsert_task", id, status });
-        },
-        children: [
-          /* @__PURE__ */ jsxs21("header", { className: "board-col-head", children: [
-            /* @__PURE__ */ jsx22("span", { className: classNames("status-dot is-static", `is-${status}`), "aria-hidden": "true", children: STATUS_GLYPH[status] }),
-            /* @__PURE__ */ jsx22("h2", { children: STATUS_LABEL[status] }),
-            /* @__PURE__ */ jsx22("span", { className: "board-count", children: cards.length })
-          ] }),
-          /* @__PURE__ */ jsxs21("div", { className: "board-cards", children: [
-            cards.map((task) => /* @__PURE__ */ jsx22(BoardCard, { plan, task }, task.id)),
-            cards.length === 0 && /* @__PURE__ */ jsx22("p", { className: "board-empty", children: "Drop tasks here" })
-          ] })
-        ]
-      },
-      status
-    );
-  }) });
+        status
+      );
+    }),
+    /* @__PURE__ */ jsx23("p", { className: "sr-only", "aria-live": "polite", children: announcement })
+  ] });
+}
+function useArrivals(plan) {
+  const last = useRef10(null);
+  const timers = useRef10(/* @__PURE__ */ new Set());
+  const [arrived, setArrived] = useState17(() => /* @__PURE__ */ new Set());
+  const [announcement, setAnnouncement] = useState17("");
+  const key = plan.tasks.map((t) => `${t.id}:${t.status}`).join("|");
+  useEffect15(() => {
+    const before = last.current;
+    last.current = new Map(plan.tasks.map((t) => [t.id, t.status]));
+    if (!before) return;
+    const moved = plan.tasks.filter((t) => before.has(t.id) && before.get(t.id) !== t.status && !hasChildren(plan, t.id));
+    if (!moved.length) return;
+    const ids = moved.map((t) => t.id);
+    setArrived((cur) => /* @__PURE__ */ new Set([...cur, ...ids]));
+    setAnnouncement(moved.map((t) => `${t.title}: ${STATUS_LABEL[t.status].toLowerCase()}`).join(". "));
+    const timer = window.setTimeout(() => {
+      timers.current.delete(timer);
+      setArrived((cur) => {
+        const next = new Set(cur);
+        for (const id of ids) next.delete(id);
+        return next;
+      });
+    }, ARRIVAL_MS);
+    timers.current.add(timer);
+  }, [key]);
+  useEffect15(
+    () => () => {
+      for (const timer of timers.current) window.clearTimeout(timer);
+    },
+    []
+  );
+  return { arrived, announcement };
+}
+function TrackedCard({ plan, task, arrived }) {
+  const [open, setOpen] = useState17(false);
+  const path = [];
+  let cursor = task.parentId ? plan.tasks.find((t) => t.id === task.parentId) : void 0;
+  while (cursor) {
+    path.unshift(cursor.title);
+    cursor = cursor.parentId ? plan.tasks.find((t) => t.id === cursor.parentId) : void 0;
+  }
+  const more = Boolean(task.detail?.trim() || task.files?.length);
+  return /* @__PURE__ */ jsxs22(Focusable, { kind: "task", id: task.id, as: "article", className: classNames("board-card", "is-tracked", `is-${task.status}`, arrived && "is-arrived"), children: [
+    path.length > 0 && /* @__PURE__ */ jsx23("p", { className: "board-path", children: path.join(" \u203A ") }),
+    /* @__PURE__ */ jsxs22("p", { className: "board-title-row", children: [
+      task.status === "in_progress" && /* @__PURE__ */ jsx23("span", { className: "working-dot", title: "Claude is on it", "aria-label": "Claude is on it" }),
+      more ? /* @__PURE__ */ jsx23("button", { type: "button", className: "board-title", "aria-expanded": open, onClick: () => setOpen((v) => !v), children: task.title }) : /* @__PURE__ */ jsx23("span", { className: "board-title", children: task.title })
+    ] }),
+    task.note && /* @__PURE__ */ jsx23("p", { className: "board-note", children: task.note }),
+    open && /* @__PURE__ */ jsxs22("div", { className: "board-more", children: [
+      task.detail?.trim() && /* @__PURE__ */ jsx23(Markdown, { source: task.detail }),
+      task.files?.length ? /* @__PURE__ */ jsx23("p", { className: "board-files mono", children: task.files.join(", ") }) : null
+    ] }),
+    /* @__PURE__ */ jsxs22("footer", { className: "board-foot", children: [
+      /* @__PURE__ */ jsx23("span", { className: "item-id", children: task.id }),
+      arrived && /* @__PURE__ */ jsx23("span", { className: "pill is-moved", children: "just moved" }),
+      /* @__PURE__ */ jsx23("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx23("span", { className: classNames("board-state", `is-${task.status}`), children: STATUS_LABEL[task.status] })
+    ] })
+  ] });
 }
 function BoardCard({ plan, task }) {
   const path = [];
@@ -6993,7 +7794,7 @@ function BoardCard({ plan, task }) {
     cursor = cursor.parentId ? plan.tasks.find((t) => t.id === cursor.parentId) : void 0;
   }
   const comments = plan.threads.filter((t) => !t.resolved && t.target.kind === "task" && t.target.id === task.id).length;
-  return /* @__PURE__ */ jsxs21(
+  return /* @__PURE__ */ jsxs22(
     "article",
     {
       className: classNames("board-card", `is-${task.status}`),
@@ -7004,28 +7805,28 @@ function BoardCard({ plan, task }) {
         e.dataTransfer.effectAllowed = "move";
       },
       children: [
-        path.length > 0 && /* @__PURE__ */ jsx22("p", { className: "board-path", children: path.join(" \u203A ") }),
-        /* @__PURE__ */ jsx22("button", { type: "button", className: "board-title", onClick: () => store.focus("task", task.id), children: task.title }),
-        task.note && /* @__PURE__ */ jsx22("p", { className: "board-note", children: task.note }),
-        /* @__PURE__ */ jsxs21("footer", { className: "board-foot", children: [
-          /* @__PURE__ */ jsx22("span", { className: "item-id", children: task.id }),
-          comments > 0 && /* @__PURE__ */ jsxs21("span", { className: "chip", children: [
+        path.length > 0 && /* @__PURE__ */ jsx23("p", { className: "board-path", children: path.join(" \u203A ") }),
+        /* @__PURE__ */ jsx23("button", { type: "button", className: "board-title", onClick: () => store.focus("task", task.id), children: task.title }),
+        task.note && /* @__PURE__ */ jsx23("p", { className: "board-note", children: task.note }),
+        /* @__PURE__ */ jsxs22("footer", { className: "board-foot", children: [
+          /* @__PURE__ */ jsx23("span", { className: "item-id", children: task.id }),
+          comments > 0 && /* @__PURE__ */ jsxs22("span", { className: "chip", children: [
             "\u{1F4AC} ",
             comments
           ] }),
-          /* @__PURE__ */ jsx22("span", { className: "spacer" }),
-          /* @__PURE__ */ jsxs21("label", { className: "sr-only", htmlFor: `status-${task.id}`, children: [
+          /* @__PURE__ */ jsx23("span", { className: "spacer" }),
+          /* @__PURE__ */ jsxs22("label", { className: "sr-only", htmlFor: `status-${task.id}`, children: [
             "Status of ",
             task.title
           ] }),
-          /* @__PURE__ */ jsx22(
+          /* @__PURE__ */ jsx23(
             "select",
             {
               id: `status-${task.id}`,
               className: "board-status",
               value: task.status,
               onChange: (e) => void store.op({ op: "upsert_task", id: task.id, status: e.target.value }),
-              children: TASK_STATUSES.map((s) => /* @__PURE__ */ jsx22("option", { value: s, children: STATUS_LABEL[s] }, s))
+              children: TASK_STATUSES.map((s) => /* @__PURE__ */ jsx23("option", { value: s, children: STATUS_LABEL[s] }, s))
             }
           )
         ] })
@@ -7040,7 +7841,7 @@ function isTyping(target) {
   const el = target;
   return Boolean(el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable));
 }
-var NEXT_STATUS, NO_PARTS, DRAG_TYPE;
+var NEXT_STATUS, NO_PARTS, DRAG_TYPE, ARRIVAL_MS;
 var init_TasksView = __esm({
   "src/ui/views/TasksView.tsx"() {
     "use strict";
@@ -7051,6 +7852,7 @@ var init_TasksView = __esm({
     init_FlowCanvas();
     init_Progress();
     init_primitives();
+    init_Markdown();
     init_format();
     init_plan();
     init_types();
@@ -7062,6 +7864,7 @@ var init_TasksView = __esm({
     };
     NO_PARTS = [];
     DRAG_TYPE = "application/x-harness-task";
+    ARRIVAL_MS = 2400;
   }
 });
 
@@ -7070,8 +7873,8 @@ var App_exports = {};
 __export(App_exports, {
   App: () => App
 });
-import { useCallback as useCallback2, useEffect as useEffect14, useRef as useRef9 } from "react";
-import { Fragment as Fragment5, jsx as jsx23, jsxs as jsxs22 } from "react/jsx-runtime";
+import { useCallback as useCallback2, useEffect as useEffect16, useRef as useRef11 } from "react";
+import { Fragment as Fragment6, jsx as jsx24, jsxs as jsxs23 } from "react/jsx-runtime";
 function App() {
   const session = useSession();
   const sessionId = useStore((s) => s.sessionId);
@@ -7079,7 +7882,7 @@ function App() {
   const error = useStore((s) => s.error);
   const sidebarCollapsed = useStore((s) => s.collapsedSidebar);
   const drawerOpen = useStore((s) => s.drawerOpen);
-  const tabs = useRef9(null);
+  const tabs = useRef11(null);
   const plan = session?.plan ?? null;
   useDocumentTitle(session);
   useShortcuts();
@@ -7098,29 +7901,30 @@ function App() {
     },
     [tab]
   );
-  return /* @__PURE__ */ jsxs22("div", { className: classNames("app", sidebarCollapsed && "is-sidebar-collapsed", drawerOpen && "is-drawer-open"), children: [
-    /* @__PURE__ */ jsx23("a", { className: "skip-link", href: `#${panelId(tab)}`, children: "Skip to content" }),
-    /* @__PURE__ */ jsx23(Sidebar, {}),
-    drawerOpen && /* @__PURE__ */ jsx23("button", { type: "button", className: "scrim", "aria-label": "Close the session list", onClick: () => store.setDrawer(false) }),
-    /* @__PURE__ */ jsx23("main", { className: "main", "aria-label": "Plan", children: !sessionId ? /* @__PURE__ */ jsx23(NoSession, { error }) : !session ? error ? /* @__PURE__ */ jsx23(SessionUnavailable, { error }) : /* @__PURE__ */ jsx23(Loading, {}) : /* @__PURE__ */ jsxs22(Fragment5, { children: [
-      /* @__PURE__ */ jsx23(Header, { session }),
-      /* @__PURE__ */ jsx23(ConnectionBar, {}),
-      /* @__PURE__ */ jsx23(WaitingBanner, { session }),
-      !plan ? /* @__PURE__ */ jsx23(NoPlan, { session }) : /* @__PURE__ */ jsxs22(Fragment5, { children: [
-        /* @__PURE__ */ jsx23("nav", { className: "tabs", role: "tablist", "aria-label": "Plan views", ref: tabs, onKeyDown: onTabKeyDown, children: TAB_IDS.map((t) => /* @__PURE__ */ jsx23(TabButton, { id: t, active: tab === t, plan }, t)) }),
-        /* @__PURE__ */ jsx23("div", { className: "view", id: panelId(tab), role: "tabpanel", "aria-labelledby": tabId(tab), tabIndex: -1, children: /* @__PURE__ */ jsxs22(ErrorBoundary, { label: `${TAB_LABEL[tab]} view`, resetKey: `${sessionId}:${tab}`, children: [
-          tab === "overview" && /* @__PURE__ */ jsx23(OverviewView, {}),
-          tab === "diagrams" && /* @__PURE__ */ jsx23(DiagramsView, {}),
-          tab === "tasks" && /* @__PURE__ */ jsx23(TasksView, {})
+  return /* @__PURE__ */ jsxs23("div", { className: classNames("app", sidebarCollapsed && "is-sidebar-collapsed", drawerOpen && "is-drawer-open"), children: [
+    /* @__PURE__ */ jsx24("a", { className: "skip-link", href: `#${panelId(tab)}`, children: "Skip to content" }),
+    /* @__PURE__ */ jsx24(Sidebar, {}),
+    drawerOpen && /* @__PURE__ */ jsx24("button", { type: "button", className: "scrim", "aria-label": "Close the session list", onClick: () => store.setDrawer(false) }),
+    /* @__PURE__ */ jsx24("main", { className: "main", "aria-label": "Plan", children: !sessionId ? /* @__PURE__ */ jsx24(NoSession, { error }) : !session ? error ? /* @__PURE__ */ jsx24(SessionUnavailable, { error }) : /* @__PURE__ */ jsx24(Loading, {}) : /* @__PURE__ */ jsxs23(Fragment6, { children: [
+      /* @__PURE__ */ jsx24(Header, { session }),
+      /* @__PURE__ */ jsx24(ConnectionBar, {}),
+      /* @__PURE__ */ jsx24(WaitingBanner, { session }),
+      /* @__PURE__ */ jsx24(PhaseStrip, { session }),
+      !plan ? /* @__PURE__ */ jsx24(NoPlan, { session }) : /* @__PURE__ */ jsxs23(Fragment6, { children: [
+        /* @__PURE__ */ jsx24("nav", { className: "tabs", role: "tablist", "aria-label": "Plan views", ref: tabs, onKeyDown: onTabKeyDown, children: TAB_IDS.map((t) => /* @__PURE__ */ jsx24(TabButton, { id: t, active: tab === t, plan }, t)) }),
+        /* @__PURE__ */ jsx24("div", { className: "view", id: panelId(tab), role: "tabpanel", "aria-labelledby": tabId(tab), tabIndex: -1, children: /* @__PURE__ */ jsxs23(ErrorBoundary, { label: `${TAB_LABEL[tab]} view`, resetKey: `${sessionId}:${tab}`, children: [
+          tab === "overview" && /* @__PURE__ */ jsx24(OverviewView, {}),
+          tab === "diagrams" && /* @__PURE__ */ jsx24(DiagramsView, {}),
+          tab === "tasks" && /* @__PURE__ */ jsx24(TasksView, {})
         ] }) }, tab)
       ] })
     ] }) }),
-    /* @__PURE__ */ jsx23(Toasts, {})
+    /* @__PURE__ */ jsx24(Toasts, {})
   ] });
 }
 function TabButton({ id, active, plan }) {
   const badge = tabBadge(id, plan);
-  return /* @__PURE__ */ jsxs22(
+  return /* @__PURE__ */ jsxs23(
     "button",
     {
       type: "button",
@@ -7133,9 +7937,9 @@ function TabButton({ id, active, plan }) {
       onClick: () => store.setTab(id),
       children: [
         TAB_LABEL[id],
-        badge && /* @__PURE__ */ jsxs22(Fragment5, { children: [
-          /* @__PURE__ */ jsx23("span", { className: classNames("tab-badge", `is-${badge.tone}`), "aria-hidden": "true", children: badge.text }),
-          /* @__PURE__ */ jsx23("span", { className: "sr-only", children: badge.label })
+        badge && /* @__PURE__ */ jsxs23(Fragment6, { children: [
+          /* @__PURE__ */ jsx24("span", { className: classNames("tab-badge", `is-${badge.tone}`), "aria-hidden": "true", children: badge.text }),
+          /* @__PURE__ */ jsx24("span", { className: "sr-only", children: badge.label })
         ] })
       ]
     }
@@ -7157,38 +7961,39 @@ function Header({ session }) {
   const saving = useStore((s) => s.saving);
   const plan = session.plan;
   const counts = countTasks(plan);
-  return /* @__PURE__ */ jsxs22("header", { className: "head", children: [
-    /* @__PURE__ */ jsxs22("div", { className: "head-main", children: [
-      /* @__PURE__ */ jsx23(SessionsToggle, {}),
-      plan ? /* @__PURE__ */ jsx23(
+  return /* @__PURE__ */ jsxs23("header", { className: "head", children: [
+    /* @__PURE__ */ jsxs23("div", { className: "head-main", children: [
+      /* @__PURE__ */ jsx24(SessionsToggle, {}),
+      plan ? /* @__PURE__ */ jsx24(
         InlineText,
         {
           as: "h1",
           className: "head-title",
           value: plan.title,
           label: "Plan title",
+          readOnly: isLocked(plan),
           onSave: (title) => store.op({ op: "set_meta", title })
         }
-      ) : /* @__PURE__ */ jsx23("h1", { className: "head-title", children: session.title }),
-      saving > 0 && /* @__PURE__ */ jsx23("span", { className: "muted head-saving", children: "saving\u2026" }),
-      /* @__PURE__ */ jsx23("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx23(Handoff, {}),
-      /* @__PURE__ */ jsx23(ThemeToggle, {})
+      ) : /* @__PURE__ */ jsx24("h1", { className: "head-title", children: session.title }),
+      saving > 0 && /* @__PURE__ */ jsx24("span", { className: "muted head-saving", children: "saving\u2026" }),
+      /* @__PURE__ */ jsx24("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx24(Handoff, {}),
+      /* @__PURE__ */ jsx24(ThemeToggle, {})
     ] }),
-    /* @__PURE__ */ jsxs22("div", { className: "head-meta", children: [
-      /* @__PURE__ */ jsx23("span", { className: classNames("head-status", `is-${session.waiting ? "waiting" : session.status}`), title: "The Claude session this plan belongs to", children: session.waiting ? "Claude is waiting on you" : session.status === "active" ? "Claude is working" : session.status === "idle" ? "Claude is idle" : "session ended" }),
-      plan && plan.title !== session.title && /* @__PURE__ */ jsx23("span", { className: "head-stat", children: session.title }),
-      session.branch && /* @__PURE__ */ jsx23("code", { className: "head-branch", children: session.branch }),
-      counts.total > 0 && /* @__PURE__ */ jsxs22("span", { className: "head-progress", children: [
-        /* @__PURE__ */ jsx23(ProgressBar, { counts, compact: true }),
-        /* @__PURE__ */ jsxs22("span", { className: "head-stat", children: [
+    /* @__PURE__ */ jsxs23("div", { className: "head-meta", children: [
+      /* @__PURE__ */ jsx24("span", { className: classNames("head-status", `is-${session.waiting ? "waiting" : session.status}`), title: "The Claude session this plan belongs to", children: session.waiting ? "Claude is waiting on you" : session.status === "active" ? "Claude is working" : session.status === "idle" ? "Claude is idle" : "session ended" }),
+      plan && plan.title !== session.title && /* @__PURE__ */ jsx24("span", { className: "head-stat", children: session.title }),
+      session.branch && /* @__PURE__ */ jsx24("code", { className: "head-branch", children: session.branch }),
+      counts.total > 0 && /* @__PURE__ */ jsxs23("span", { className: "head-progress", children: [
+        /* @__PURE__ */ jsx24(ProgressBar, { counts, compact: true }),
+        /* @__PURE__ */ jsxs23("span", { className: "head-stat", children: [
           counts.done,
           "/",
           counts.total,
           " tasks"
         ] })
       ] }),
-      /* @__PURE__ */ jsx23("span", { className: "head-path", title: session.cwd, children: session.cwd })
+      /* @__PURE__ */ jsx24("span", { className: "head-path", title: session.cwd, children: session.cwd })
     ] })
   ] });
 }
@@ -7197,7 +8002,7 @@ function SessionsToggle() {
   const drawerOpen = useStore((s) => s.drawerOpen);
   const narrow = () => window.innerWidth <= 900;
   const label = collapsed ? "Show sessions" : "Hide sessions";
-  return /* @__PURE__ */ jsx23(
+  return /* @__PURE__ */ jsx24(
     "button",
     {
       type: "button",
@@ -7206,27 +8011,27 @@ function SessionsToggle() {
       "aria-label": label,
       "aria-expanded": narrow() ? drawerOpen : !collapsed,
       onClick: () => narrow() ? store.setDrawer(true) : store.toggleSidebar(),
-      children: /* @__PURE__ */ jsx23("span", { "aria-hidden": "true", children: "\u2630" })
+      children: /* @__PURE__ */ jsx24("span", { "aria-hidden": "true", children: "\u2630" })
     }
   );
 }
 function NoPlan({ session }) {
-  return /* @__PURE__ */ jsx23("div", { className: "view", children: /* @__PURE__ */ jsx23(
+  return /* @__PURE__ */ jsx24("div", { className: "view", children: /* @__PURE__ */ jsx24(
     EmptyState,
     {
       title: "No plan yet",
-      hint: /* @__PURE__ */ jsxs22(Fragment5, { children: [
+      hint: /* @__PURE__ */ jsxs23(Fragment6, { children: [
         "In Claude's chat, run ",
-        /* @__PURE__ */ jsx23("code", { children: "/harness <what you want to build>" }),
+        /* @__PURE__ */ jsx24("code", { children: "/harness <what you want to build>" }),
         ". Claude investigates the code, then publishes its plan here \u2014 the architecture, diagrams and a task breakdown \u2014 and asks what it needs to know in the chat."
       ] }),
-      action: /* @__PURE__ */ jsx23("button", { type: "button", className: "btn", onClick: () => void store.op({ op: "set_meta", title: session.title || "Untitled plan" }), children: "Start a plan by hand" })
+      action: /* @__PURE__ */ jsx24("button", { type: "button", className: "btn", onClick: () => void store.op({ op: "set_meta", title: session.title || "Untitled plan" }), children: "Start a plan by hand" })
     }
   ) });
 }
 function Loading() {
-  return /* @__PURE__ */ jsx23("div", { className: "view", children: /* @__PURE__ */ jsxs22("div", { className: "loading", role: "status", "aria-live": "polite", children: [
-    /* @__PURE__ */ jsx23("span", { className: "spinner", "aria-hidden": "true" }),
+  return /* @__PURE__ */ jsx24("div", { className: "view", children: /* @__PURE__ */ jsxs23("div", { className: "loading", role: "status", "aria-live": "polite", children: [
+    /* @__PURE__ */ jsx24("span", { className: "spinner", "aria-hidden": "true" }),
     "Loading the plan\u2026"
   ] }) });
 }
@@ -7234,22 +8039,22 @@ function SessionUnavailable({ error }) {
   const sessions = useStore((s) => s.sessions);
   const unauthorized = /401|unauthorized/i.test(error);
   const other = sessions[0];
-  return /* @__PURE__ */ jsx23("div", { className: "view", children: /* @__PURE__ */ jsx23(
+  return /* @__PURE__ */ jsx24("div", { className: "view", children: /* @__PURE__ */ jsx24(
     EmptyState,
     {
       title: unauthorized ? "This page is not signed in to the harness" : "This session is not available",
-      hint: unauthorized ? /* @__PURE__ */ jsxs22(Fragment5, { children: [
+      hint: unauthorized ? /* @__PURE__ */ jsxs23(Fragment6, { children: [
         "Open the harness with ",
-        /* @__PURE__ */ jsx23("code", { children: "/harness-open" }),
+        /* @__PURE__ */ jsx24("code", { children: "/harness-open" }),
         " in Claude, or ",
-        /* @__PURE__ */ jsx23("code", { children: "harness open" }),
+        /* @__PURE__ */ jsx24("code", { children: "harness open" }),
         " in a terminal \u2014 the link it prints carries the key this page needs."
-      ] }) : /* @__PURE__ */ jsxs22(Fragment5, { children: [
+      ] }) : /* @__PURE__ */ jsxs23(Fragment6, { children: [
         "It may have been deleted, or it ended long enough ago to be cleaned up. (",
         error,
         ")"
       ] }),
-      action: !unauthorized && other ? /* @__PURE__ */ jsxs22("button", { type: "button", className: "btn", onClick: () => void store.selectSession(other.sessionId), children: [
+      action: !unauthorized && other ? /* @__PURE__ */ jsxs23("button", { type: "button", className: "btn", onClick: () => void store.selectSession(other.sessionId), children: [
         "Open ",
         other.planTitle ?? other.title
       ] }) : void 0
@@ -7257,23 +8062,23 @@ function SessionUnavailable({ error }) {
   ) });
 }
 function NoSession({ error }) {
-  if (error && /401|unauthorized/i.test(error)) return /* @__PURE__ */ jsx23(SessionUnavailable, { error });
-  return /* @__PURE__ */ jsx23("div", { className: "view", children: /* @__PURE__ */ jsx23(
+  if (error && /401|unauthorized/i.test(error)) return /* @__PURE__ */ jsx24(SessionUnavailable, { error });
+  return /* @__PURE__ */ jsx24("div", { className: "view", children: /* @__PURE__ */ jsx24(
     EmptyState,
     {
       title: "No session yet",
-      hint: /* @__PURE__ */ jsxs22(Fragment5, { children: [
+      hint: /* @__PURE__ */ jsxs23(Fragment6, { children: [
         "Start Claude Code in a project with the harness enabled, then run ",
-        /* @__PURE__ */ jsx23("code", { children: "/harness" }),
+        /* @__PURE__ */ jsx24("code", { children: "/harness" }),
         ". Sessions appear here the moment they register.",
-        error && /* @__PURE__ */ jsxs22("span", { className: "error-text", children: [
+        error && /* @__PURE__ */ jsxs23("span", { className: "error-text", children: [
           " \xB7 ",
           error
         ] })
       ] }),
-      action: /* @__PURE__ */ jsxs22("p", { className: "empty-hint", children: [
+      action: /* @__PURE__ */ jsxs23("p", { className: "empty-hint", children: [
         "If a session is running and nothing shows up, the hooks are not firing \u2014 run ",
-        /* @__PURE__ */ jsx23("code", { children: "harness doctor" }),
+        /* @__PURE__ */ jsx24("code", { children: "harness doctor" }),
         "."
       ] })
     }
@@ -7282,12 +8087,12 @@ function NoSession({ error }) {
 function useDocumentTitle(session) {
   const title = session?.plan?.title ?? session?.title ?? "cc-harness";
   const waiting = Boolean(session?.waiting);
-  useEffect14(() => {
+  useEffect16(() => {
     document.title = waiting ? `\u25CF ${title} \u2014 Claude is waiting` : `${title} \u2014 plan`;
   }, [title, waiting]);
 }
 function useDrawerDismiss(open) {
-  useEffect14(() => {
+  useEffect16(() => {
     if (!open) return;
     const onKey = (event) => {
       if (event.key === "Escape") store.setDrawer(false);
@@ -7304,11 +8109,12 @@ function useDrawerDismiss(open) {
   }, [open]);
 }
 function useShortcuts() {
-  useEffect14(() => {
+  useEffect16(() => {
     const handler = (event) => {
       const target = event.target;
       const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
       if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (document.querySelector('[aria-modal="true"]')) return;
       if (event.key === "[") {
         event.preventDefault();
         store.toggleSidebar();
@@ -7335,6 +8141,7 @@ var init_App = __esm({
     init_ConnectionBar();
     init_ThemeToggle();
     init_Handoff();
+    init_Submit();
     init_Editable();
     init_Progress();
     init_primitives();
@@ -7487,7 +8294,7 @@ function stubFetch(handler) {
 }
 
 // src/test/canvas.test.tsx
-import { jsx as jsx24 } from "react/jsx-runtime";
+import { jsx as jsx25 } from "react/jsx-runtime";
 setupDom();
 var { render, fireEvent, within, cleanup, act, screen, waitFor } = await import("@testing-library/react");
 var { App: App2 } = await Promise.resolve().then(() => (init_App(), App_exports));
@@ -7533,7 +8340,7 @@ async function boot(session = makeSession()) {
     if (route.startsWith("/api/session/")) return { session };
     return { ok: true };
   }));
-  render(/* @__PURE__ */ jsx24(App2, {}));
+  render(/* @__PURE__ */ jsx25(App2, {}));
   await act(async () => {
     await store2.init();
   });

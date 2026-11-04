@@ -5,8 +5,8 @@
  * from these renderings, so they carry every id it will need to quote back in
  * an edit, and they lead with what changed — the reason it is reading at all.
  */
-import type { Change, Plan, PlanBaseline, Thread } from '../shared/types.ts';
-import { baselineOf, countTasks, describeTarget, outline, sameContent, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import type { BuildTarget, Change, Plan, PlanBaseline, Thread } from '../shared/types.ts';
+import { baselineOf, countTasks, describeTarget, outline, planPhase, sameContent, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { contentOf, diagramChanges, diagramToMarkdown, indent } from '../shared/architecture.ts';
 
 const STATUS_MARK = { todo: '[ ]', in_progress: '[~]', blocked: '[!]', done: '[x]' } as const;
@@ -30,6 +30,8 @@ export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
     `${plan.threads.filter((t) => !t.resolved).length} open comment(s)`,
   ];
   out.push(`_${meta.join(' · ')}${opts.url ? ` · UI: ${opts.url}` : ''}_`);
+  const locked = lockLine(plan);
+  if (locked) out.push('', locked);
 
   out.push('');
   out.push(renderChanges(plan, unread, Boolean(opts.changesOnly)));
@@ -41,42 +43,201 @@ export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
     return out.join('\n').trim();
   }
 
+  out.push(...renderDocument(plan));
+  return out.join('\n').trim();
+}
+
+interface DocumentOptions {
+  /** Say which parts the user wrote. Claude reads that as a cue to respect
+   *  their structure; an outside agent has no use for it. */
+  attribution?: boolean;
+  /** Each task's detail, under it. */
+  details?: boolean;
+  /** Who "you" is in a comment thread: Claude, or an outside reader. */
+  reader?: 'claude' | 'outside';
+}
+
+/** The plan as a document: summary, sections, architecture, tasks and the
+ *  comments still open. Shared by the read-back and the build prompt. */
+function renderDocument(plan: Plan, opts: DocumentOptions = {}): string[] {
+  const { attribution = true, details = true, reader = 'claude' } = opts;
+  const out: string[] = [];
   if (plan.summary.trim()) out.push('', '## Summary', plan.summary.trim());
 
   if (plan.sections.length) {
     out.push('', '## Sections');
     for (const s of plan.sections) {
-      out.push('', `### [${s.id}] ${s.title}${s.updatedBy === 'user' ? ' _(edited by the user)_' : ''}`, s.body.trim() || '_(empty)_');
+      const by = attribution && s.updatedBy === 'user' ? ' _(edited by the user)_' : '';
+      out.push('', `### [${s.id}] ${s.title}${by}`, s.body.trim() || '_(empty)_');
     }
   }
 
   if (plan.diagrams.length) {
     out.push('', '## Architecture');
     for (const d of plan.diagrams) {
-      out.push('', diagramToMarkdown(d, { tasks: plan.tasks, note: d.updatedBy === 'user' ? 'last edited by the user' : undefined }));
+      const note = attribution && d.updatedBy === 'user' ? 'last edited by the user' : undefined;
+      out.push('', diagramToMarkdown(d, { tasks: plan.tasks, note }));
     }
   }
 
-  out.push('', `## Tasks${counts.total ? ` (${counts.done}/${counts.total} done)` : ''}`);
-  const rows = outline(plan);
-  if (rows.length === 0) out.push('_(no tasks yet)_');
-  for (const { task, depth } of rows) {
-    const pad = '  '.repeat(depth);
-    const by = task.createdBy === 'user' ? ' _(added by the user)_' : '';
-    const note = task.note ? ` — ${task.note}` : '';
-    out.push(`${pad}- ${STATUS_MARK[task.status]} ${task.id} ${task.title}${by}${note}`);
-    if (task.files?.length) out.push(`${pad}  files: ${task.files.join(', ')}`);
-    if (task.detail) for (const line of task.detail.trim().split('\n')) out.push(`${pad}  ${line}`);
-  }
+  out.push('', ...renderTasks(plan, { attribution, details }));
 
   const open = plan.threads.filter((t) => !t.resolved);
   if (open.length) {
     out.push('', '## Open comments');
-    for (const t of open) out.push(renderThread(plan, t));
+    for (const t of open) out.push(renderThread(plan, t, reader));
   }
 
-  out.push('', `_Statuses: ${Object.entries(STATUS_MARK).map(([k, v]) => `${v} ${k}`).join(', ')}_`);
-  return out.join('\n').trim();
+  out.push('', STATUS_LEGEND);
+  return out;
+}
+
+const STATUS_LEGEND = `_Statuses: ${Object.entries(STATUS_MARK).map(([k, v]) => `${v} ${k}`).join(', ')}_`;
+
+function renderTasks(plan: Plan, opts: { attribution?: boolean; details?: boolean } = {}): string[] {
+  const counts = countTasks(plan);
+  const out = [`## Tasks${counts.total ? ` (${counts.done}/${counts.total} done)` : ''}`];
+  const rows = outline(plan);
+  if (rows.length === 0) out.push('_(no tasks yet)_');
+  for (const { task, depth } of rows) {
+    const pad = '  '.repeat(depth);
+    const by = opts.attribution !== false && task.createdBy === 'user' ? ' _(added by the user)_' : '';
+    const note = task.note ? ` — ${task.note}` : '';
+    out.push(`${pad}- ${STATUS_MARK[task.status]} ${task.id} ${task.title}${by}${note}`);
+    if (task.files?.length) out.push(`${pad}  files: ${task.files.join(', ')}`);
+    if (opts.details !== false && task.detail) for (const line of task.detail.trim().split('\n')) out.push(`${pad}  ${line}`);
+  }
+  return out;
+}
+
+/** What a locked plan says about itself at the top of a read. */
+function lockLine(plan: Plan): string | null {
+  switch (planPhase(plan)) {
+    case 'planning':
+      return null;
+    case 'handed-off':
+      return '> **Locked.** The user submitted this plan to be built outside this session; it no longer changes here.';
+    case 'built':
+      return '> **Built.** The user submitted this plan and every task is done. Publishing a new plan replaces it.';
+    default:
+      return (
+        '> **Locked for building.** The user submitted this plan: build it task by task, keeping statuses true with ' +
+        'harness_task_update. Only task updates and comment replies apply now; if the design has to change, ask ' +
+        'the user in chat — they can reopen the plan in the harness.'
+      );
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * The build prompt
+ * ------------------------------------------------------------------ */
+
+/**
+ * The longest build prompt handed to Claude through a hook. Claude Code
+ * keeps hook output it adds to the context to about 10,000 characters and
+ * moves anything longer out to a file, so the prompt stays under that.
+ */
+export const PROMPT_BUDGET = 9_000;
+
+/** How every build prompt for this session begins. The hook recognises it
+ *  in a message the user pasted themselves, so it is not delivered twice. */
+export const BUILD_MARKER = '[cc-harness] Build the plan';
+
+export interface BuildPrompt {
+  prompt: string;
+  /** Too long to quote whole: the prompt points Claude at harness_plan_read. */
+  trimmed: boolean;
+}
+
+/**
+ * What Claude is told when the user submits the plan: build it, and how to
+ * report progress — then the plan itself, as it stands.
+ *
+ * For this session the prompt reaches Claude with the user's next message,
+ * so it is kept within what a hook can hand over; Claude can always read the
+ * rest with `harness_plan_read`. A prompt for somewhere else is pasted by
+ * the user into an agent that has no harness tools, so it never mentions
+ * them and is never trimmed.
+ */
+export function buildPrompt(plan: Plan, opts: { target: BuildTarget; note?: string }): BuildPrompt {
+  const here = opts.target === 'session';
+  const note = opts.note?.trim();
+  const head = here ? sessionBrief(plan) : outsideBrief(plan);
+  const fromUser = note ? ['', '## From the user', ...note.split('\n').map((l) => `> ${l}`.trimEnd())] : [];
+  const changes = here ? changesSinceRead(plan) : [];
+  const full = [...head, ...fromUser, ...changes, ...renderDocument(plan, { attribution: here, reader: here ? 'claude' : 'outside' })];
+  const text = full.join('\n').trim();
+  if (!here || text.length <= PROMPT_BUDGET) return { prompt: text, trimmed: false };
+
+  // Too long for one message: the instructions, what the user said and
+  // changed, the summary and the task list — the rest is one tool call away.
+  const pointer =
+    `_The architecture (${plan.diagrams.length} diagram(s)), the sections and each task's detail are too long to quote ` +
+    'here: call harness_plan_read for them before you start._';
+  const fixed = [...head, ...fromUser, ...clip(changes, 2_500), '', pointer];
+  if (plan.summary.trim()) fixed.push('', '## Summary', ...clip(plan.summary.trim().split('\n'), 1_200));
+  const room = PROMPT_BUDGET - fixed.join('\n').length - STATUS_LEGEND.length - 4;
+  const tasks = renderTasks(plan, { details: false });
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of tasks) {
+    if (used + line.length + 1 > room - 80) {
+      kept.push(`- …and ${tasks.length - kept.length} more line(s): harness_plan_read lists every task.`);
+      break;
+    }
+    kept.push(line);
+    used += line.length + 1;
+  }
+  return { prompt: [...fixed, '', ...kept, '', STATUS_LEGEND].join('\n').trim(), trimmed: true };
+}
+
+function sessionBrief(plan: Plan): string[] {
+  return [
+    `${BUILD_MARKER} "${plan.title}" — the user has reviewed it in the harness and submitted it.`,
+    '',
+    'The plan is final. Its architecture is locked, and from here the harness only follows your progress on its ' +
+      'task board, so keep every task\'s status true as you go:',
+    '',
+    '1. Work through the tasks below in order.',
+    '2. When you start a task, mark it in_progress with harness_task_update. When it is finished, mark it done ' +
+      'with a one-line note of what you did.',
+    '3. If you are stuck, mark the task blocked with a note saying on what, and ask the user with AskUserQuestion.',
+    '4. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.',
+    '5. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, ' +
+      'stop and ask the user in chat — they can reopen the plan in the harness.',
+  ];
+}
+
+function outsideBrief(plan: Plan): string[] {
+  return [
+    `Build "${plan.title}". This plan was designed and reviewed before any code was written, and this is its final version.`,
+    '',
+    '1. Work through the tasks below in order. Each says what it involves and which files it is expected to touch.',
+    '2. Build the architecture as described: its parts, what each one does and decides, and how they connect.',
+    '3. If the design turns out not to work, stop and say why rather than redesigning as you go.',
+  ];
+}
+
+/** What the user changed since Claude last read, when Claude has read before. */
+function changesSinceRead(plan: Plan): string[] {
+  const unread = unreadByClaude(plan);
+  if (!plan.claudeBaseline || unread.length === 0) return [];
+  return ['', renderChanges(plan, unread, false)];
+}
+
+/** Lines, cut to about `max` characters. */
+function clip(lines: string[], max: number): string[] {
+  const out: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    if (used + line.length > max) {
+      out.push('…');
+      break;
+    }
+    out.push(line);
+    used += line.length + 1;
+  }
+  return out;
 }
 
 /**
@@ -236,15 +397,12 @@ function capital(text: string): string {
   return text ? `${text[0]!.toUpperCase()}${text.slice(1)}` : text;
 }
 
-function renderThread(plan: Plan, t: Thread): string {
+function renderThread(plan: Plan, t: Thread, reader: 'claude' | 'outside' = 'claude'): string {
+  const who = (author: 'user' | 'claude') => (author === 'user' ? 'user' : reader === 'claude' ? 'you' : 'planner');
   const lines = [`- [${t.id}] on ${describeTarget(plan, t.target)} — ${who(t.author)}: ${t.text}`];
   for (const r of t.replies) lines.push(`  ↳ ${who(r.author)}: ${r.text}`);
-  if (lastAuthor(t) === 'user') lines.push('  → reply with harness_plan_edit {op:"reply"} once you have acted on it');
+  if (reader === 'claude' && lastAuthor(t) === 'user') lines.push('  → reply with harness_plan_edit {op:"reply"} once you have acted on it');
   return lines.join('\n');
-}
-
-function who(author: 'user' | 'claude'): string {
-  return author === 'user' ? 'user' : 'you';
 }
 
 function lastAuthor(t: Thread): 'user' | 'claude' {
