@@ -2,6 +2,7 @@ import { createContext, useContext } from 'react';
 import type { Edge, Node } from '@xyflow/react';
 import type { DiagramDirection, EdgeArrows, NodeKind, TaskCounts } from '../../../shared/types.ts';
 import type { Route } from '../../lib/layout.ts';
+import type { EdgeRelation, NodeRelation } from '../../lib/graph.ts';
 
 /** What the canvas keeps on each box. Width and height come from the layout's
  *  size estimate, so the drawing and the layout agree on how big a box is. */
@@ -16,6 +17,10 @@ export type FlowData = {
   height: number;
   /** Progress of the linked tasks; absent when the box has none. */
   progress?: TaskCounts;
+  /** Drawing only, never saved: how this box relates to the one in focus. */
+  rel?: NodeRelation;
+  /** Drawing only: something being dragged would land on this box. */
+  dropTarget?: boolean;
 };
 export type FlowNode = Node<FlowData, 'plan'>;
 
@@ -27,6 +32,14 @@ export type EdgeData = {
   route?: Route;
   /** Offset from its neighbours when several arrows join the same boxes. */
   lane?: number;
+  /** Drawing only, never saved: how this arrow relates to the box in focus. */
+  rel?: EdgeRelation;
+  /** Drawing only: show the grips that drag its ends to other boxes. */
+  grips?: boolean;
+  /** Drawing only: a box being dragged would be put into this arrow. */
+  dropTarget?: boolean;
+  /** Drawing only: another box is in focus and this arrow is not part of it. */
+  dim?: boolean;
 };
 export type FlowEdge = Edge<EdgeData, 'plan'>;
 
@@ -42,7 +55,14 @@ export interface CanvasApi {
   direction: DiagramDirection;
   /** `node:<id>` or `edge:<id>` while that item's text is edited in place. */
   editing: string | null;
+  /** What the edit starts from instead of the current text — the key that
+   *  was typed on a selected box. */
+  editSeed: string | null;
   startEditing(key: string): void;
+  /** Start dragging one end of an arrow to another box. */
+  startReconnect(edgeId: string, end: 'source' | 'target', event: { clientX: number; clientY: number; pointerId?: number }): void;
+  /** The pointer is over this arrow (or its grips), or nothing. */
+  hoverEdge(id: string | null): void;
   /** Null cancels. */
   finishNodeLabel(id: string, label: string | null): void;
   finishEdgeLabel(id: string, label: string | null): void;

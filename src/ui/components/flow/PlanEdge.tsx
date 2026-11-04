@@ -24,6 +24,8 @@ export function PlanEdge({ id, source, target, data, markerEnd, markerStart, sel
 
   let path: string;
   let label: { x: number; y: number };
+  /** Where the arrow meets each box, for the grips that move its ends. */
+  let ends: [{ x: number; y: number }, { x: number; y: number }] | null = null;
   const route = data?.route;
   if (source === target) {
     ({ path, label } = loopPath(a));
@@ -34,6 +36,7 @@ export function PlanEdge({ id, source, target, data, markerEnd, markerStart, sel
     pts[pts.length - 1] = clipToRect(b, pts[pts.length - 2]!);
     path = splinePath(pts);
     label = route.label ?? midpoint(pts);
+    ends = [pts[0]!, pts[pts.length - 1]!];
   } else {
     const [sa, sb] = facingSides(a, b, api.direction);
     const lane = data?.lane ?? 0;
@@ -42,17 +45,56 @@ export function PlanEdge({ id, source, target, data, markerEnd, markerStart, sel
     const [p, lx, ly] = getBezierPath({ sourceX: s.x, sourceY: s.y, sourcePosition: POSITION[sa], targetX: t.x, targetY: t.y, targetPosition: POSITION[sb], curvature: 0.3 });
     path = p;
     label = { x: lx, y: ly };
+    ends = [s, t];
   }
 
   const editing = api.editing === `edge:${id}`;
   const text = data?.label;
+  const rel = data?.rel;
   return (
     <>
-      <BaseEdge id={id} path={path} markerEnd={markerEnd} markerStart={markerStart} style={style} interactionWidth={22} />
+      <BaseEdge
+        id={id}
+        path={path}
+        markerEnd={markerEnd}
+        markerStart={markerStart}
+        style={style}
+        interactionWidth={22}
+        className={classNames(rel && `rel-${rel}`, data?.dropTarget && 'is-drop-target')}
+      />
+      {data?.grips && ends && (
+        <EdgeLabelRenderer>
+          {(['source', 'target'] as const).map((end, i) => (
+            <button
+              key={end}
+              type="button"
+              className={`flow-edge-grip nodrag nopan is-${end}`}
+              style={{ transform: `translate(-50%, -50%) translate(${ends![i]!.x}px, ${ends![i]!.y}px)` }}
+              aria-label={end === 'source' ? 'Drag to move where this arrow starts' : 'Drag to move where this arrow ends'}
+              title={end === 'source' ? 'Drag onto another box to start the arrow there' : 'Drag onto another box to end the arrow there'}
+              onPointerEnter={() => api.hoverEdge(id)}
+              onPointerLeave={() => api.hoverEdge(null)}
+              onPointerDown={(e) => {
+                if (e.button !== 0) return;
+                e.preventDefault();
+                e.stopPropagation();
+                api.startReconnect(id, end, e);
+              }}
+            />
+          ))}
+        </EdgeLabelRenderer>
+      )}
       {(text || editing) && (
         <EdgeLabelRenderer>
           <div
-            className={classNames('flow-edge-label nodrag nopan', selected && 'is-selected', data?.dashed && 'is-dashed', editing && 'is-editing')}
+            className={classNames(
+              'flow-edge-label nodrag nopan',
+              selected && 'is-selected',
+              data?.dashed && 'is-dashed',
+              editing && 'is-editing',
+              rel && `rel-${rel}`,
+              data?.dim && 'is-dim',
+            )}
             style={{ transform: `translate(-50%, -50%) translate(${label.x}px, ${label.y}px)` }}
             onClick={() => api.selectEdge(id)}
             onDoubleClick={(e) => {

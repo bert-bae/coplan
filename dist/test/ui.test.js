@@ -1268,9 +1268,9 @@ function sameContent(a, b) {
 }
 function canonical(value, key = "") {
   if (Array.isArray(value)) {
-    const items = value.map((v) => canonical(v));
-    if (key === "edges") items.sort();
-    return `[${items.join(",")}]`;
+    const items2 = value.map((v) => canonical(v));
+    if (key === "edges") items2.sort();
+    return `[${items2.join(",")}]`;
   }
   if (value && typeof value === "object") {
     const o = value;
@@ -1835,7 +1835,7 @@ function describeDiagramEdit(before, after2) {
   const linked = matched.added;
   const unlinked = matched.removed;
   const relabeled = matched.pairs.filter(([b, e]) => (b.label ?? "") !== (e.label ?? "") || Boolean(b.dashed) !== Boolean(e.dashed) || (b.arrows ?? "end") !== (e.arrows ?? "end")).map(([, e]) => e);
-  const list = (items) => items.length > 3 ? `${items.slice(0, 3).join(", ")} and ${items.length - 3} more` : items.join(", ");
+  const list = (items2) => items2.length > 3 ? `${items2.slice(0, 3).join(", ")} and ${items2.length - 3} more` : items2.join(", ");
   if (added.length) parts.push(`added ${list(added.map((n) => `"${n.label}"`))}`);
   if (removed.length) parts.push(`removed ${list(removed.map((n) => `"${n.label}"`))}`);
   if (changed.length) parts.push(`edited ${list(changed.map((n) => `"${n.label}"`))}`);
@@ -3332,9 +3332,9 @@ function shelve(loose, positions, size, direction) {
     let y = 0;
     for (let row = 0; row * cols < loose.length; row++) {
       let x = 0;
-      const items = loose.slice(row * cols, row * cols + cols);
+      const items2 = loose.slice(row * cols, row * cols + cols);
       let tallest = 0;
-      items.forEach((n, i) => {
+      items2.forEach((n, i) => {
         const s = sizes[row * cols + i];
         positions.set(n.id, { x, y });
         x += s.width + gapX;
@@ -3629,6 +3629,140 @@ var init_geometry = __esm({
   }
 });
 
+// src/ui/lib/graph.ts
+function relationsOf(focus, edges, hops = 1) {
+  const nodes = /* @__PURE__ */ new Map([[focus, "focus"]]);
+  const rels = /* @__PURE__ */ new Map();
+  const mark = (id, rel) => {
+    const was = nodes.get(id);
+    if (was === "focus") return;
+    nodes.set(id, !was || was === rel ? rel : "both");
+  };
+  for (const e of edges) {
+    if (e.source === e.target) continue;
+    if (e.source !== focus && e.target !== focus) continue;
+    const other = e.source === focus ? e.target : e.source;
+    if (twoWay(e)) {
+      rels.set(e.id, "both");
+      mark(other, "both");
+    } else if (e.source === focus) {
+      rels.set(e.id, "out");
+      mark(other, "to");
+    } else {
+      rels.set(e.id, "in");
+      mark(other, "from");
+    }
+  }
+  if (hops < 2) return { nodes, edges: rels };
+  const first = new Map(nodes);
+  const downstream = [...first].filter(([, r]) => r === "to" || r === "both").map(([id]) => id);
+  const upstream = [...first].filter(([, r]) => r === "from" || r === "both").map(([id]) => id);
+  for (const e of edges) {
+    if (e.source === e.target || rels.has(e.id)) continue;
+    const onward = downstream.includes(e.source) ? e.target : twoWay(e) && downstream.includes(e.target) ? e.source : null;
+    if (onward && !first.has(onward)) {
+      rels.set(e.id, "out2");
+      if (!nodes.has(onward)) nodes.set(onward, "to2");
+      continue;
+    }
+    const back = upstream.includes(e.target) ? e.source : twoWay(e) && upstream.includes(e.source) ? e.target : null;
+    if (back && !first.has(back)) {
+      rels.set(e.id, "in2");
+      if (!nodes.has(back)) nodes.set(back, "from2");
+    }
+  }
+  return { nodes, edges: rels };
+}
+function bridgeOver(removed, edges) {
+  const kept = edges.filter((e) => !removed.has(e.source) && !removed.has(e.target));
+  const bridges = [];
+  const exists = (s, t) => kept.some((e) => e.source === s && e.target === t) || bridges.some((b) => b.source === s && b.target === t);
+  for (const into of edges) {
+    if (removed.has(into.source) || !removed.has(into.target)) continue;
+    const seen = /* @__PURE__ */ new Set([into.target]);
+    const queue = [into.target];
+    while (queue.length) {
+      const at = queue.shift();
+      for (const out of edges) {
+        if (out.source !== at) continue;
+        if (removed.has(out.target)) {
+          if (!seen.has(out.target)) {
+            seen.add(out.target);
+            queue.push(out.target);
+          }
+          continue;
+        }
+        if (out.target === into.source || exists(into.source, out.target)) continue;
+        bridges.push({
+          source: into.source,
+          target: out.target,
+          ...into.label ? { label: into.label } : {},
+          ...into.dashed || out.dashed ? { dashed: true } : {}
+        });
+      }
+    }
+  }
+  return { kept, bridges };
+}
+function splitEdge(edge, id) {
+  const style = { ...edge.dashed ? { dashed: true } : {}, ...edge.arrows ? { arrows: edge.arrows } : {} };
+  return [
+    { source: edge.source, target: id, ...edge.label ? { label: edge.label } : {}, ...style },
+    { source: id, target: edge.target, ...style }
+  ];
+}
+var twoWay;
+var init_graph = __esm({
+  "src/ui/lib/graph.ts"() {
+    "use strict";
+    twoWay = (e) => e.arrows === "both" || e.arrows === "none";
+  }
+});
+
+// src/ui/lib/history.ts
+var History;
+var init_history = __esm({
+  "src/ui/lib/history.ts"() {
+    "use strict";
+    History = class {
+      constructor(limit = 100) {
+        this.limit = limit;
+      }
+      past = [];
+      future = [];
+      /** `before` is the state just replaced by a new edit. */
+      record(before) {
+        this.past.push(before);
+        if (this.past.length > this.limit) this.past.shift();
+        this.future = [];
+      }
+      /** The state to go back to, given the one on screen; null if none. */
+      undo(current) {
+        const before = this.past.pop();
+        if (before === void 0) return null;
+        this.future.push(current);
+        return before;
+      }
+      redo(current) {
+        const after2 = this.future.pop();
+        if (after2 === void 0) return null;
+        this.past.push(current);
+        return after2;
+      }
+      clear() {
+        this.past = [];
+        this.future = [];
+      }
+      get canUndo() {
+        return this.past.length > 0;
+      }
+      get canRedo() {
+        return this.future.length > 0;
+      }
+    };
+  }
+});
+
 // src/ui/lib/clipboard.ts
 function toClip(nodes, edges) {
   if (!nodes.length) return null;
@@ -3808,13 +3942,22 @@ function PlanNode({ id, data, selected }) {
   return /* @__PURE__ */ jsxs14(
     "div",
     {
-      className: classNames("flow-node", `kind-${data.kind}`, selected && "is-selected", state && `progress-${state}`, editing && "is-editing"),
+      className: classNames(
+        "flow-node",
+        `kind-${data.kind}`,
+        selected && "is-selected",
+        state && `progress-${state}`,
+        editing && "is-editing",
+        data.rel && `rel-${data.rel}`,
+        data.dropTarget && "is-drop-target"
+      ),
       style: { width: data.width, minHeight: data.height },
       children: [
+        data.rel && data.rel !== "focus" && /* @__PURE__ */ jsx15("span", { className: `flow-node-rel rel-${data.rel}`, title: REL_HINT[data.rel], children: REL_BADGE[data.rel] }),
         SIDES.map(([side, position]) => /* @__PURE__ */ jsx15(Handle, { id: side, type: "source", position, className: `handle-${side}` }, side)),
         /* @__PURE__ */ jsxs14("div", { className: "flow-node-head", children: [
           /* @__PURE__ */ jsx15("span", { className: "flow-node-glyph", "aria-hidden": "true", children: KIND_GLYPH[data.kind] }),
-          editing ? /* @__PURE__ */ jsx15(LabelInput, { value: data.label, onDone: (label) => api2.finishNodeLabel(id, label) }) : /* @__PURE__ */ jsx15("span", { className: "flow-node-label", children: data.label }),
+          editing ? /* @__PURE__ */ jsx15(LabelInput, { value: data.label, seed: api2.editSeed, onDone: (label) => api2.finishNodeLabel(id, label) }) : /* @__PURE__ */ jsx15("span", { className: "flow-node-label", children: data.label }),
           /* @__PURE__ */ jsx15(
             "button",
             {
@@ -3955,8 +4098,15 @@ function NodeSummary({ id, data, onEnter, onLeave }) {
     ] })
   ] });
 }
-function LabelInput({ value, onDone, className = "flow-node-input", placeholder }) {
-  const [draft, setDraft] = useState11(value);
+function LabelInput({
+  value,
+  seed,
+  onDone,
+  className = "flow-node-input",
+  placeholder
+}) {
+  const [draft, setDraft] = useState11(seed ?? value);
+  const seeded = useRef4(Boolean(seed));
   const done = useRef4(false);
   const ref2 = useRef4(null);
   useEffect9(() => {
@@ -3966,8 +4116,10 @@ function LabelInput({ value, onDone, className = "flow-node-input", placeholder 
       const el = ref2.current;
       if (!el) return;
       el.focus();
-      if (document.activeElement === el) el.select();
-      else if (tries++ < 20) frame = window.requestAnimationFrame(grab);
+      if (document.activeElement !== el) {
+        if (tries++ < 20) frame = window.requestAnimationFrame(grab);
+      } else if (seeded.current) el.setSelectionRange(el.value.length, el.value.length);
+      else el.select();
     };
     grab();
     return () => window.cancelAnimationFrame(frame);
@@ -3992,6 +4144,10 @@ function LabelInput({ value, onDone, className = "flow-node-input", placeholder 
         e.stopPropagation();
         if (e.key === "Enter") finish(draft);
         if (e.key === "Escape") finish(null);
+        if (e.key === "Tab") {
+          e.preventDefault();
+          finish(draft);
+        }
       },
       onDoubleClick: (e) => e.stopPropagation()
     }
@@ -4004,7 +4160,7 @@ function InfoIcon() {
     /* @__PURE__ */ jsx15("circle", { cx: "8", cy: "4.9", r: "0.95", fill: "currentColor" })
   ] });
 }
-var SIDES;
+var REL_BADGE, REL_HINT, SIDES;
 var init_PlanNode = __esm({
   "src/ui/components/flow/PlanNode.tsx"() {
     "use strict";
@@ -4013,6 +4169,14 @@ var init_PlanNode = __esm({
     init_Progress();
     init_format();
     init_shared();
+    REL_BADGE = { to: "\u2192 to", from: "from \u2192", both: "\u21C4 both ways", to2: "\u2192 then", from2: "before \u2192" };
+    REL_HINT = {
+      to: "Downstream: the box in focus has an arrow to this one",
+      from: "Upstream: this box has an arrow to the one in focus",
+      both: "Connected both ways, or without a direction",
+      to2: "Two steps downstream (hold Alt)",
+      from2: "Two steps upstream (hold Alt)"
+    };
     SIDES = [
       ["top", Position.Top],
       ["right", Position.Right],
@@ -4035,6 +4199,7 @@ function PlanEdge({ id, source, target, data, markerEnd, markerStart, selected, 
   if (!a.width || !b.width) return null;
   let path;
   let label;
+  let ends = null;
   const route = data?.route;
   if (source === target) {
     ({ path, label } = loopPath(a));
@@ -4044,6 +4209,7 @@ function PlanEdge({ id, source, target, data, markerEnd, markerStart, selected, 
     pts[pts.length - 1] = clipToRect(b, pts[pts.length - 2]);
     path = splinePath(pts);
     label = route.label ?? midpoint(pts);
+    ends = [pts[0], pts[pts.length - 1]];
   } else {
     const [sa, sb] = facingSides(a, b, api2.direction);
     const lane = data?.lane ?? 0;
@@ -4052,15 +4218,54 @@ function PlanEdge({ id, source, target, data, markerEnd, markerStart, selected, 
     const [p, lx, ly] = getBezierPath({ sourceX: s.x, sourceY: s.y, sourcePosition: POSITION[sa], targetX: t.x, targetY: t.y, targetPosition: POSITION[sb], curvature: 0.3 });
     path = p;
     label = { x: lx, y: ly };
+    ends = [s, t];
   }
   const editing = api2.editing === `edge:${id}`;
   const text = data?.label;
+  const rel = data?.rel;
   return /* @__PURE__ */ jsxs15(Fragment2, { children: [
-    /* @__PURE__ */ jsx16(BaseEdge, { id, path, markerEnd, markerStart, style, interactionWidth: 22 }),
+    /* @__PURE__ */ jsx16(
+      BaseEdge,
+      {
+        id,
+        path,
+        markerEnd,
+        markerStart,
+        style,
+        interactionWidth: 22,
+        className: classNames(rel && `rel-${rel}`, data?.dropTarget && "is-drop-target")
+      }
+    ),
+    data?.grips && ends && /* @__PURE__ */ jsx16(EdgeLabelRenderer, { children: ["source", "target"].map((end, i) => /* @__PURE__ */ jsx16(
+      "button",
+      {
+        type: "button",
+        className: `flow-edge-grip nodrag nopan is-${end}`,
+        style: { transform: `translate(-50%, -50%) translate(${ends[i].x}px, ${ends[i].y}px)` },
+        "aria-label": end === "source" ? "Drag to move where this arrow starts" : "Drag to move where this arrow ends",
+        title: end === "source" ? "Drag onto another box to start the arrow there" : "Drag onto another box to end the arrow there",
+        onPointerEnter: () => api2.hoverEdge(id),
+        onPointerLeave: () => api2.hoverEdge(null),
+        onPointerDown: (e) => {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          e.stopPropagation();
+          api2.startReconnect(id, end, e);
+        }
+      },
+      end
+    )) }),
     (text || editing) && /* @__PURE__ */ jsx16(EdgeLabelRenderer, { children: /* @__PURE__ */ jsx16(
       "div",
       {
-        className: classNames("flow-edge-label nodrag nopan", selected && "is-selected", data?.dashed && "is-dashed", editing && "is-editing"),
+        className: classNames(
+          "flow-edge-label nodrag nopan",
+          selected && "is-selected",
+          data?.dashed && "is-dashed",
+          editing && "is-editing",
+          rel && `rel-${rel}`,
+          data?.dim && "is-dim"
+        ),
         style: { transform: `translate(-50%, -50%) translate(${label.x}px, ${label.y}px)` },
         onClick: () => api2.selectEdge(id),
         onDoubleClick: (e) => {
@@ -4438,6 +4643,7 @@ function EdgePanel({
         )
       ] })
     ] }),
+    /* @__PURE__ */ jsx17("p", { className: "panel-hint", children: "Or drag either end of the arrow on the canvas onto another box." }),
     /* @__PURE__ */ jsx17("footer", { className: "panel-foot", children: /* @__PURE__ */ jsx17("button", { type: "button", className: "link is-danger", onClick: onRemove, children: "Delete connection" }) })
   ] });
 }
@@ -4494,565 +4700,291 @@ var init_Panels = __esm({
   }
 });
 
-// src/ui/components/FlowCanvas.tsx
-import { useCallback, useEffect as useEffect11, useMemo as useMemo2, useRef as useRef6, useState as useState13 } from "react";
-import {
-  Background,
-  ConnectionMode,
-  Controls,
-  MarkerType,
-  MiniMap,
-  Panel,
-  ReactFlow,
-  ReactFlowProvider,
-  applyEdgeChanges,
-  applyNodeChanges,
-  useReactFlow
-} from "@xyflow/react";
+// src/ui/components/flow/ContextMenu.tsx
+import { useEffect as useEffect11, useLayoutEffect as useLayoutEffect2, useRef as useRef6, useState as useState13 } from "react";
 import { jsx as jsx18, jsxs as jsxs17 } from "react/jsx-runtime";
-function DiagramEditor(props) {
-  return /* @__PURE__ */ jsx18(ReactFlowProvider, { children: /* @__PURE__ */ jsx18(Editor, { ...props }) });
-}
-function Editor({
-  diagram,
-  plan,
-  onSave,
-  aside
+function ContextMenu({
+  at,
+  title,
+  entries,
+  onClose
 }) {
-  const theme = useResolvedTheme();
-  const flow = useReactFlow();
-  const wrapper = useRef6(null);
-  const [initial2] = useState13(() => toFlow(diagram, plan));
-  const [nodes, setNodes] = useState13(initial2.nodes);
-  const [edges, setEdges] = useState13(initial2.edges);
-  const [editing, setEditing] = useState13(null);
-  const nodesRef = useRef6(nodes);
-  const edgesRef = useRef6(edges);
-  nodesRef.current = nodes;
-  edgesRef.current = edges;
-  const planRef = useRef6(plan);
-  planRef.current = plan;
-  const dragging = useRef6(false);
-  const queue = useRef6({ pending: null, busy: false });
-  const pointer = useRef6(null);
-  const pastes = useRef6(0);
-  const signature = useMemo2(() => signatureOf(diagram), [diagram]);
-  const loaded = useRef6(signature);
-  const nudge = useRef6(void 0);
-  const baseRev = useRef6(diagram.rev);
-  const load = useCallback((source, p) => {
-    const next = toFlow(source, p);
-    setNodes((prev) => keepSelection(prev, next.nodes));
-    setEdges((prev) => keepRoutes(prev, keepSelection(prev, next.edges), next.nodes));
-    baseRev.current = source.rev;
-    loaded.current = signatureOf(source);
-  }, []);
-  useEffect11(() => {
-    if (dragging.current || nudge.current !== void 0 || queue.current.busy || queue.current.pending) return;
-    if (loaded.current !== signature) load(diagram, plan);
-    else baseRev.current = diagram.rev;
-  }, [signature, diagram.rev]);
-  const progressKey = useMemo2(() => JSON.stringify(plan.tasks.map((t) => [t.id, t.status, t.parentId])), [plan.tasks]);
-  useEffect11(() => {
-    setNodes((ns) => ns.map((n) => ({ ...n, data: { ...n.data, ...progressOf(plan, n.data.taskIds) } })));
-  }, [progressKey]);
-  const focusTarget = useStore((s) => s.focusTarget);
-  useEffect11(() => {
-    const prefix = `node:${diagram.id}:`;
-    if (!focusTarget?.startsWith(prefix)) return;
-    const id = focusTarget.slice(prefix.length);
-    setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === id })));
-    setEdges((es) => es.map((e) => ({ ...e, selected: false })));
-    window.requestAnimationFrame(() => void flow.fitView({ nodes: [{ id }], padding: 1.2, duration: 250, maxZoom: 1.2 }));
-    store.set({ focusTarget: null });
-  }, [focusTarget, diagram.id, flow]);
-  const latest = () => store.getState().session?.plan?.diagrams.find((d) => d.id === diagram.id);
-  const resyncFromServer = useCallback(() => {
-    const p = store.getState().session?.plan;
-    const current = p?.diagrams.find((d) => d.id === diagram.id);
-    if (p && current) load(current, p);
-  }, [diagram.id, load]);
-  const flush = useCallback(async () => {
-    const q = queue.current;
-    if (q.busy) return;
-    q.busy = true;
-    try {
-      while (q.pending) {
-        const patch = q.pending;
-        q.pending = null;
-        const savedRev = await onSave({ ...patch, expect: baseRev.current });
-        if (savedRev !== null) {
-          baseRev.current = savedRev;
-        } else {
-          q.pending = null;
-          resyncFromServer();
-        }
-      }
-    } finally {
-      q.busy = false;
-    }
-    const now = latest();
-    if (now && now.rev !== baseRev.current) resyncFromServer();
-  }, [onSave, resyncFromServer]);
-  const persist = useCallback(
-    (ns, es, direction) => {
-      const superseded = queue.current.pending;
-      queue.current.pending = {
-        nodes: ns.map((n) => ({
-          id: n.id,
-          label: n.data.label,
-          kind: n.data.kind,
-          ...n.data.detail ? { detail: n.data.detail } : {},
-          // Sent even when empty: leaving them out would keep the old text.
-          description: n.data.description ?? "",
-          notes: n.data.notes ?? "",
-          taskIds: n.data.taskIds ?? [],
-          x: Math.round(n.position.x),
-          y: Math.round(n.position.y)
-        })),
-        edges: es.map((e) => ({
-          id: e.id,
-          source: e.source,
-          target: e.target,
-          // Always said, even when empty: the daemon keeps an arrow's label
-          // and style when an edit leaves them out.
-          label: e.data?.label ?? "",
-          dashed: Boolean(e.data?.dashed),
-          arrows: e.data?.arrows ?? "end"
-        })),
-        // A patch waiting behind the one in flight is replaced, not merged —
-        // except for the direction, which only the relayout ever sets.
-        ...direction ?? superseded?.direction ? { direction: direction ?? superseded?.direction } : {}
-      };
-      void flush();
-    },
-    [flush]
-  );
-  const commit = useCallback(
-    (ns, es, direction) => {
-      setNodes(ns);
-      setEdges(es);
-      persist(ns, es, direction);
-    },
-    [persist]
-  );
-  const onNodesChange = useCallback(
-    (changes) => {
-      setNodes((ns) => applyNodeChanges(changes, ns));
-      if (dragging.current || !changes.some((c) => c.type === "position" && c.position && !c.dragging)) return;
-      window.clearTimeout(nudge.current);
-      nudge.current = window.setTimeout(() => {
-        nudge.current = void 0;
-        persist(nodesRef.current, edgesRef.current);
-      }, 300);
-    },
-    [persist]
-  );
-  const persistRef = useRef6(persist);
-  persistRef.current = persist;
-  useEffect11(
-    () => () => {
-      if (nudge.current === void 0) return;
-      window.clearTimeout(nudge.current);
-      nudge.current = void 0;
-      persistRef.current(nodesRef.current, edgesRef.current);
-    },
-    []
-  );
-  const onEdgesChange = useCallback((changes) => setEdges((es) => applyEdgeChanges(changes, es)), []);
-  const connect = useCallback(
-    (source, target, base = edgesRef.current, ns = nodesRef.current) => {
-      if (source === target || base.some((e) => e.source === source && e.target === target)) return false;
-      commit(ns, [...base, makeEdge({ id: freeEdgeId(base, source, target), source, target })]);
-      return true;
-    },
-    [commit]
-  );
-  const onConnect = useCallback((conn) => conn.source && conn.target && connect(conn.source, conn.target), [connect]);
-  const addNode = useCallback(
-    (kind, opts = {}) => {
-      const ns = nodesRef.current;
-      let k = ns.length + 1;
-      while (ns.some((x) => x.id === `n${k}`)) k++;
-      const id = `n${k}`;
-      const data = sized({ label: `New ${KIND_LABEL[kind].toLowerCase()}`, kind, width: 0, height: 0 });
-      const lr = diagram.direction === "LR";
-      let want;
-      if (opts.at) want = { x: opts.at.x - data.width / 2, y: opts.at.y - data.height / 2 };
-      else if (opts.from) {
-        const src = ns.find((n) => n.id === opts.from);
-        want = lr ? { x: src.position.x + src.data.width + 90, y: src.position.y } : { x: src.position.x, y: src.position.y + src.data.height + 90 };
-      } else {
-        const rect = wrapper.current?.getBoundingClientRect();
-        const c = rect ? flow.screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }) : { x: 0, y: 0 };
-        want = { x: c.x - data.width / 2, y: c.y - data.height / 2 };
-      }
-      const position = opts.at ? round(want) : findFreeSpot(want, data, positionsOf(ns), sizesOf(ns), lr);
-      const node = { id, type: "plan", position, data, selected: true };
-      const nextNodes = [...ns.map((x) => x.selected ? { ...x, selected: false } : x), node];
-      const base = edgesRef.current.map((e) => e.selected ? { ...e, selected: false } : e);
-      const nextEdges = opts.from ? [...base, makeEdge({ id: freeEdgeId(base, opts.from, id), source: opts.from, target: id })] : base;
-      commit(nextNodes, nextEdges);
-      setEditing(`node:${id}`);
-    },
-    [commit, diagram.direction, flow]
-  );
-  const onConnectEnd = useCallback(
-    (event, state) => {
-      if (state.isValid || !state.fromNode) return;
-      const point = "changedTouches" in event ? event.changedTouches[0] : event;
-      if (!point) return;
-      const hit = document.elementFromPoint?.(point.clientX, point.clientY) ?? null;
-      const onNode = hit?.closest(".react-flow__node")?.getAttribute("data-id");
-      if (onNode) {
-        if (onNode !== state.fromNode.id) connect(state.fromNode.id, onNode);
-        return;
-      }
-      if (hit?.closest(".react-flow__pane")) {
-        addNode("component", { at: flow.screenToFlowPosition({ x: point.clientX, y: point.clientY }), from: state.fromNode.id });
-      }
-    },
-    [addNode, connect, flow]
-  );
-  const onDelete = useCallback(
-    ({ nodes: gone, edges: cut }) => {
-      const goneIds = new Set(gone.map((n) => n.id));
-      const cutIds = new Set(cut.map((e) => e.id));
-      commit(
-        nodesRef.current.filter((n) => !goneIds.has(n.id)),
-        edgesRef.current.filter((e) => !cutIds.has(e.id) && !goneIds.has(e.source) && !goneIds.has(e.target))
-      );
-    },
-    [commit]
-  );
-  const onDragStop = useCallback(
-    (moved) => {
-      dragging.current = false;
-      const at = new Map(moved.map((n) => [n.id, n.position]));
-      persist(
-        nodesRef.current.map((n) => at.has(n.id) ? { ...n, position: at.get(n.id) } : n),
-        edgesRef.current
-      );
-    },
-    [persist]
-  );
-  const onNodeDragStop = useCallback((_, __, moved) => onDragStop(moved), [onDragStop]);
-  const onSelectionDragStop = useCallback((_, moved) => onDragStop(moved), [onDragStop]);
-  const onDragStart = useCallback(() => {
-    dragging.current = true;
-  }, []);
-  const updateNodes = (ids, patch) => {
-    const ns = nodesRef.current.map((n) => {
-      if (!ids.has(n.id)) return n;
-      const data = { ...n.data, ...patch };
-      for (const key of ["detail", "description", "notes"]) if (!data[key]) delete data[key];
-      return { ...n, data: { ...sized(data), ...progressOf(planRef.current, data.taskIds) } };
+  const menu = useRef6(null);
+  const [stack, setStack] = useState13([]);
+  const [place, setPlace] = useState13(at);
+  const view = stack.at(-1) ?? { title, entries };
+  useLayoutEffect2(() => {
+    const el = menu.current;
+    const frame = el?.parentElement?.getBoundingClientRect();
+    if (!el || !frame) return;
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    setPlace({
+      x: Math.max(4, at.x + w > frame.width - 4 ? at.x - w : at.x),
+      y: Math.max(4, at.y + h > frame.height - 4 ? Math.max(4, frame.height - h - 4) : at.y)
     });
-    commit(ns, edgesRef.current);
-  };
-  const updateNode = (id, patch) => updateNodes(/* @__PURE__ */ new Set([id]), patch);
-  const updateEdge = (id, patch) => {
-    const es = edgesRef.current.map((e) => {
-      if (e.id !== id) return e;
-      const source = patch.source ?? e.source;
-      const target = patch.target ?? e.target;
-      const data = { ...e.data, ...patch };
-      delete data.source;
-      delete data.target;
-      if (!data.label) delete data.label;
-      if (!data.arrows) delete data.arrows;
-      if (!data.dashed) delete data.dashed;
-      if (source !== e.source || target !== e.target) delete data.route;
-      return makeEdge({ id: e.id, source, target, ...data }, e.selected);
-    });
-    commit(nodesRef.current, es);
-  };
-  const reverseEdge = (id) => {
-    const e = edgesRef.current.find((x) => x.id === id);
-    if (e) updateEdge(id, { source: e.target, target: e.source });
-  };
-  const select = useCallback((kind, id) => {
-    setNodes((ns) => ns.map((n) => ({ ...n, selected: kind === "node" && n.id === id })));
-    setEdges((es) => es.map((e) => ({ ...e, selected: kind === "edge" && e.id === id })));
-  }, []);
-  const clearSelection = () => {
-    setNodes((ns) => ns.map((n) => n.selected ? { ...n, selected: false } : n));
-    setEdges((es) => es.map((e) => e.selected ? { ...e, selected: false } : e));
-  };
-  const removeSelected = useCallback(() => {
-    void flow.deleteElements({ nodes: nodesRef.current.filter((n) => n.selected), edges: edgesRef.current.filter((e) => e.selected) });
-  }, [flow]);
-  const relayout = (direction) => {
-    const at = autoLayout(graphOf(nodesRef.current, edgesRef.current), direction);
-    const ns = nodesRef.current.map((n) => ({ ...n, position: at.positions.get(n.id) ?? n.position }));
-    const es = edgesRef.current.map((e) => withRoute(e, at));
-    commit(ns, es, direction);
-    window.requestAnimationFrame(() => void flow.fitView(FIT));
-  };
-  const selectionClip = useCallback(() => {
-    const picked = nodesRef.current.filter((n) => n.selected);
-    return toClip(
-      picked.map((n) => ({ id: n.id, ...contentOf(n.data), x: n.position.x, y: n.position.y })),
-      edgesRef.current.map((e) => ({ source: e.source, target: e.target, ...edgeContent(e.data) }))
-    );
-  }, []);
-  const paste = useCallback(
-    (clip, where) => {
-      const origin = clipOrigin(clip);
-      pastes.current += 1;
-      const step = 32 * pastes.current;
-      const at = where === "pointer" && pointer.current ? { x: pointer.current.x - origin.x, y: pointer.current.y - origin.y } : { x: step, y: step };
-      const tasks = new Set(planRef.current.tasks.map((t) => t.id));
-      const made = pasteClip(clip, nodesRef.current.map((n) => n.id), tasks, at);
-      const newNodes = made.nodes.map(({ id, x, y, ...content }) => ({
-        id,
-        type: "plan",
-        position: { x, y },
-        data: { ...sized({ ...content, width: 0, height: 0 }), ...progressOf(planRef.current, content.taskIds) },
-        selected: true
-      }));
-      const base = edgesRef.current.map((e) => e.selected ? { ...e, selected: false } : e);
-      const newEdges = made.edges.reduce((es, e) => [...es, makeEdge({ id: freeEdgeId(es, e.source, e.target), ...e })], base);
-      commit([...nodesRef.current.map((n) => n.selected ? { ...n, selected: false } : n), ...newNodes], newEdges);
-      return newNodes.length;
-    },
-    [commit]
-  );
-  const copySelection = useCallback(
-    (data) => {
-      const clip = selectionClip();
-      if (!clip) return false;
-      lastClip = clip;
-      pastes.current = 0;
-      const text = serializeClip(clip);
-      if (data) data.setData("text/plain", text);
-      else void navigator.clipboard?.writeText(text).catch(() => void 0);
-      store.toast("info", `Copied ${clip.nodes.length} box${clip.nodes.length === 1 ? "" : "es"}. Paste with \u2318/Ctrl+V, here or in another diagram.`);
-      return true;
-    },
-    [selectionClip]
-  );
-  const duplicate = useCallback(() => {
-    const clip = selectionClip();
-    if (!clip) return;
-    pastes.current = 0;
-    paste(clip, "offset");
-  }, [paste, selectionClip]);
+  }, [at.x, at.y, stack.length]);
   useEffect11(() => {
-    const busy = (target) => {
-      const el = target;
-      if (!el || !(el instanceof HTMLElement)) return false;
-      return el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName);
+    items(menu.current)[0]?.focus();
+  }, [stack.length]);
+  useEffect11(() => {
+    const away = (e) => {
+      if (!menu.current?.contains(e.target)) onClose();
     };
-    const ours = (e) => {
-      if (busy(e.target) || busy(document.activeElement)) return false;
-      const active = document.activeElement;
-      const onCanvas = !active || active === document.body || Boolean(wrapper.current?.contains(active));
-      const text = window.getSelection?.()?.toString() ?? "";
-      return onCanvas && !text;
-    };
-    const onCopy = (e) => {
-      if (!ours(e) || !nodesRef.current.some((n) => n.selected)) return;
-      if (copySelection(e.clipboardData)) e.preventDefault();
-    };
-    const onCut = (e) => {
-      if (!ours(e) || !nodesRef.current.some((n) => n.selected)) return;
-      if (copySelection(e.clipboardData)) {
-        e.preventDefault();
-        removeSelected();
-      }
-    };
-    const onPaste = (e) => {
-      if (!ours(e)) return;
-      const text = e.clipboardData?.getData("text/plain");
-      const clip = text ? parseClip(text) : lastClip;
-      if (!clip) return;
-      e.preventDefault();
-      paste(clip, "pointer");
-    };
-    const onKey = (e) => {
-      if (busy(e.target)) return;
-      const active = document.activeElement;
-      if (active && active !== document.body && !wrapper.current?.contains(active)) return;
-      const mod = e.metaKey || e.ctrlKey;
-      const selected = nodesRef.current.filter((n) => n.selected);
-      if (mod && e.key.toLowerCase() === "d" && selected.length) {
-        e.preventDefault();
-        duplicate();
-      } else if (mod && e.key.toLowerCase() === "a" && !e.shiftKey) {
-        e.preventDefault();
-        setNodes((ns) => ns.map((n) => ({ ...n, selected: true })));
-        setEdges((es) => es.map((x) => ({ ...x, selected: true })));
-      } else if (e.key === "F2" && selected.length === 1) {
-        e.preventDefault();
-        setEditing(`node:${selected[0].id}`);
-      } else if (e.key === "Escape") {
-        setEditing(null);
-        clearSelection();
-      }
-    };
-    document.addEventListener("copy", onCopy);
-    document.addEventListener("cut", onCut);
-    document.addEventListener("paste", onPaste);
-    document.addEventListener("keydown", onKey);
+    document.addEventListener("pointerdown", away, true);
+    window.addEventListener("blur", onClose);
     return () => {
-      document.removeEventListener("copy", onCopy);
-      document.removeEventListener("cut", onCut);
-      document.removeEventListener("paste", onPaste);
-      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("pointerdown", away, true);
+      window.removeEventListener("blur", onClose);
     };
-  }, [copySelection, duplicate, paste, removeSelected]);
-  const api2 = useMemo2(
-    () => ({
-      direction: diagram.direction,
-      editing,
-      startEditing: setEditing,
-      finishNodeLabel: (id, label) => {
-        setEditing(null);
-        const node = nodesRef.current.find((n) => n.id === id);
-        const next = label?.trim();
-        if (node && next && next !== node.data.label) updateNode(id, { label: next });
-      },
-      finishEdgeLabel: (id, label) => {
-        setEditing(null);
-        const edge = edgesRef.current.find((e) => e.id === id);
-        if (edge && label !== null && label.trim() !== (edge.data?.label ?? "")) updateEdge(id, { label: label.trim() });
-      },
-      selectEdge: (id) => select("edge", id)
-    }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- the updaters read live state through refs
-    [diagram.direction, editing, select]
-  );
-  const drawnEdges = useMemo2(() => {
-    const offsets = lanes(edges);
-    if (offsets.size === 0) return edges;
-    return edges.map((e) => offsets.has(e.id) ? { ...e, data: { ...e.data, lane: offsets.get(e.id) } } : e);
-  }, [edges]);
-  const selectedNodes = nodes.filter((n) => n.selected);
-  const selectedEdges = edges.filter((e) => e.selected);
-  let panel;
-  if (selectedNodes.length === 1 && selectedEdges.length === 0) {
-    const node = selectedNodes[0];
-    panel = /* @__PURE__ */ jsx18(
-      NodePanel,
-      {
-        node,
-        nodes,
-        edges,
-        plan,
-        onChange: (patch) => updateNode(node.id, patch),
-        onSelect: select,
-        onConnect: (target) => connect(node.id, target),
-        onDisconnect: (id) => commit(nodesRef.current, edgesRef.current.filter((e) => e.id !== id)),
-        onAddConnected: () => addNode("component", { from: node.id }),
-        onDuplicate: duplicate,
-        onRemove: removeSelected,
-        onClose: clearSelection
-      },
-      node.id
-    );
-  } else if (selectedEdges.length === 1 && selectedNodes.length === 0) {
-    const edge = selectedEdges[0];
-    panel = /* @__PURE__ */ jsx18(
-      EdgePanel,
-      {
-        edge,
-        nodes,
-        onChange: (patch) => updateEdge(edge.id, patch),
-        onReverse: () => reverseEdge(edge.id),
-        onSelect: select,
-        onRemove: removeSelected,
-        onClose: clearSelection
-      },
-      edge.id
-    );
-  } else if (selectedNodes.length + selectedEdges.length > 1) {
-    panel = /* @__PURE__ */ jsx18(
-      SelectionPanel,
-      {
-        nodes: selectedNodes,
-        edges: selectedEdges,
-        onKind: (kind) => updateNodes(new Set(selectedNodes.map((n) => n.id)), { kind }),
-        onCopy: () => copySelection(null),
-        onDuplicate: duplicate,
-        onRemove: removeSelected,
-        onClose: clearSelection
-      }
-    );
-  } else {
-    panel = aside;
-  }
-  return /* @__PURE__ */ jsx18(CanvasContext.Provider, { value: api2, children: /* @__PURE__ */ jsxs17("div", { className: "arch-body", children: [
-    /* @__PURE__ */ jsx18(
-      "div",
-      {
-        ref: wrapper,
-        className: "flow",
-        onMouseMove: (e) => {
-          pointer.current = flow.screenToFlowPosition({ x: e.clientX, y: e.clientY });
-        },
-        onMouseLeave: () => {
-          pointer.current = null;
-        },
-        onDoubleClick: (e) => {
-          const el = e.target;
-          if (el.closest(".react-flow__node, .react-flow__edge, .react-flow__panel, .flow-edge-label")) return;
-          if (!el.closest(".react-flow__pane")) return;
-          addNode("component", { at: flow.screenToFlowPosition({ x: e.clientX, y: e.clientY }) });
-        },
-        children: /* @__PURE__ */ jsxs17(
-          ReactFlow,
-          {
-            nodes,
-            edges: drawnEdges,
-            nodeTypes,
-            edgeTypes,
-            onNodesChange,
-            onEdgesChange,
-            onConnect,
-            onConnectEnd,
-            onDelete,
-            onNodeDragStart: onDragStart,
-            onNodeDragStop,
-            onSelectionDragStart: onDragStart,
-            onSelectionDragStop,
-            onNodeDoubleClick: (_, node) => setEditing(`node:${node.id}`),
-            onEdgeDoubleClick: (_, edge) => setEditing(`edge:${edge.id}`),
-            connectionMode: ConnectionMode.Loose,
-            deleteKeyCode: ["Backspace", "Delete"],
-            zoomOnDoubleClick: false,
-            colorMode: theme,
-            fitView: true,
-            fitViewOptions: FIT,
-            minZoom: 0.2,
-            maxZoom: 2,
-            defaultEdgeOptions: { type: "plan" },
-            children: [
-              /* @__PURE__ */ jsx18(Background, { gap: 18, size: 1 }),
-              /* @__PURE__ */ jsx18(Controls, { showInteractive: false, position: "bottom-left", fitViewOptions: FIT }),
-              /* @__PURE__ */ jsx18(MiniMap, { pannable: true, zoomable: true, position: "bottom-right", style: { width: 150, height: 96 }, nodeBorderRadius: 4 }),
-              /* @__PURE__ */ jsxs17(Panel, { position: "top-left", className: "flow-toolbar", children: [
-                /* @__PURE__ */ jsx18(AddMenu, { onAdd: (kind) => addNode(kind) }),
-                /* @__PURE__ */ jsx18("button", { type: "button", className: "btn btn-sm", title: "Lay the whole diagram out again, along its flow", onClick: () => relayout(diagram.direction), children: "Tidy layout" }),
-                /* @__PURE__ */ jsx18(
+  }, [onClose]);
+  const onKeyDown = (e) => {
+    e.stopPropagation();
+    const list = items(menu.current);
+    const at2 = list.indexOf(document.activeElement);
+    const go = (i) => list[(i + list.length) % list.length]?.focus();
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      go(at2 + 1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      go(at2 - 1);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      go(0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      go(list.length - 1);
+    } else if (e.key === "Escape" || e.key === "ArrowLeft" && stack.length) {
+      e.preventDefault();
+      if (stack.length) setStack((s) => s.slice(0, -1));
+      else onClose();
+    } else if (e.key === "Tab") {
+      e.preventDefault();
+      go(at2 + (e.shiftKey ? -1 : 1));
+    }
+  };
+  const choose = (fn) => {
+    onClose();
+    fn();
+  };
+  return /* @__PURE__ */ jsxs17(
+    "div",
+    {
+      ref: menu,
+      className: "flow-menu nodrag nopan nowheel",
+      role: "menu",
+      "aria-label": view.title,
+      style: { left: place.x, top: place.y },
+      onKeyDown,
+      onContextMenu: (e) => e.preventDefault(),
+      children: [
+        /* @__PURE__ */ jsxs17("div", { className: "flow-menu-title", children: [
+          stack.length > 0 && /* @__PURE__ */ jsx18("button", { type: "button", role: "menuitem", className: "flow-menu-back", "aria-label": "Back", onClick: () => setStack((s) => s.slice(0, -1)), children: "\u2039" }),
+          /* @__PURE__ */ jsx18("span", { children: view.title })
+        ] }),
+        view.entries.map((entry, i) => {
+          switch (entry.kind) {
+            case "separator":
+              return /* @__PURE__ */ jsx18("div", { className: "flow-menu-sep", role: "separator" }, i);
+            case "heading":
+              return /* @__PURE__ */ jsx18("div", { className: "flow-menu-heading", role: "presentation", children: entry.label }, i);
+            case "item":
+              return /* @__PURE__ */ jsxs17(
+                "button",
+                {
+                  type: "button",
+                  role: "menuitem",
+                  className: classNames("flow-menu-item", entry.danger && "is-danger"),
+                  disabled: entry.disabled,
+                  onClick: () => choose(entry.onSelect),
+                  children: [
+                    /* @__PURE__ */ jsx18("span", { className: "flow-menu-label", children: entry.label }),
+                    entry.hint && /* @__PURE__ */ jsx18("kbd", { className: "flow-menu-hint", children: entry.hint })
+                  ]
+                },
+                i
+              );
+            case "check":
+              return /* @__PURE__ */ jsxs17("button", { type: "button", role: "menuitemcheckbox", "aria-checked": entry.checked, className: "flow-menu-item", onClick: () => choose(entry.onSelect), children: [
+                /* @__PURE__ */ jsx18("span", { className: "flow-menu-check", "aria-hidden": "true", children: entry.checked ? "\u2713" : "" }),
+                /* @__PURE__ */ jsx18("span", { className: "flow-menu-label", children: entry.label })
+              ] }, i);
+            case "choices":
+              return /* @__PURE__ */ jsxs17("div", { className: "flow-menu-choices", role: "group", "aria-label": entry.label, children: [
+                /* @__PURE__ */ jsx18("span", { className: "flow-menu-heading", children: entry.label }),
+                /* @__PURE__ */ jsx18("div", { className: "flow-menu-choice-row", children: entry.options.map((o) => /* @__PURE__ */ jsx18(
                   "button",
                   {
                     type: "button",
-                    className: "btn btn-sm",
-                    title: diagram.direction === "LR" ? "Lay it out top to bottom" : "Lay it out left to right",
-                    onClick: () => relayout(diagram.direction === "LR" ? "TB" : "LR"),
-                    children: diagram.direction === "LR" ? "\u2192 Left to right" : "\u2193 Top to bottom"
-                  }
-                )
-              ] })
-            ]
+                    role: "menuitemradio",
+                    "aria-checked": Boolean(o.active),
+                    "aria-label": o.label,
+                    title: o.label,
+                    className: classNames("flow-menu-choice", o.className, o.active && "is-active"),
+                    onClick: () => choose(() => entry.onSelect(o.value)),
+                    children: o.content
+                  },
+                  o.value
+                )) })
+              ] }, i);
+            case "submenu":
+              return /* @__PURE__ */ jsxs17(
+                "button",
+                {
+                  type: "button",
+                  role: "menuitem",
+                  "aria-haspopup": "menu",
+                  className: "flow-menu-item",
+                  onClick: () => setStack((s) => [...s, { title: entry.label, entries: entry.entries }]),
+                  onKeyDown: (e) => {
+                    if (e.key === "ArrowRight") {
+                      e.preventDefault();
+                      setStack((s) => [...s, { title: entry.label, entries: entry.entries }]);
+                    }
+                  },
+                  children: [
+                    /* @__PURE__ */ jsx18("span", { className: "flow-menu-label", children: entry.label }),
+                    entry.hint && /* @__PURE__ */ jsx18("kbd", { className: "flow-menu-hint", children: entry.hint }),
+                    /* @__PURE__ */ jsx18("span", { className: "flow-menu-more", "aria-hidden": "true", children: "\u203A" })
+                  ]
+                },
+                i
+              );
           }
-        )
-      }
-    ),
-    /* @__PURE__ */ jsx18("aside", { className: "arch-panel", "aria-label": "Details", children: panel })
-  ] }) });
+        })
+      ]
+    }
+  );
 }
+function items(root) {
+  if (!root) return [];
+  return [...root.querySelectorAll('[role="menuitem"]:not(:disabled), [role="menuitemradio"], [role="menuitemcheckbox"]')].sort(
+    (a, b) => a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
+  );
+}
+var init_ContextMenu = __esm({
+  "src/ui/components/flow/ContextMenu.tsx"() {
+    "use strict";
+    init_format();
+  }
+});
+
+// src/ui/components/flow/Shortcuts.tsx
+import { useEffect as useEffect12, useRef as useRef7 } from "react";
+import { jsx as jsx19, jsxs as jsxs18 } from "react/jsx-runtime";
+function ShortcutsOverlay({ onClose }) {
+  const panel = useRef7(null);
+  useEffect12(() => {
+    const before = document.activeElement;
+    panel.current?.focus();
+    return () => before?.focus?.();
+  }, []);
+  return /* @__PURE__ */ jsx19(
+    "div",
+    {
+      className: "flow-shortcuts-backdrop",
+      onPointerDown: (e) => {
+        if (e.target === e.currentTarget) onClose();
+      },
+      children: /* @__PURE__ */ jsxs18(
+        "div",
+        {
+          ref: panel,
+          className: "flow-shortcuts",
+          role: "dialog",
+          "aria-modal": "true",
+          "aria-label": "Keyboard shortcuts",
+          tabIndex: -1,
+          onKeyDown: (e) => {
+            e.stopPropagation();
+            if (e.key === "Escape" || e.key === "?") {
+              e.preventDefault();
+              onClose();
+            }
+          },
+          children: [
+            /* @__PURE__ */ jsxs18("header", { className: "flow-shortcuts-head", children: [
+              /* @__PURE__ */ jsx19("h2", { children: "Shortcuts" }),
+              /* @__PURE__ */ jsx19("button", { type: "button", className: "icon-btn is-tiny", "aria-label": "Close shortcuts", onClick: onClose, children: "\xD7" })
+            ] }),
+            /* @__PURE__ */ jsx19("div", { className: "flow-shortcuts-groups", children: SHORTCUTS.map((g) => /* @__PURE__ */ jsxs18("section", { children: [
+              /* @__PURE__ */ jsx19("h3", { children: g.group }),
+              /* @__PURE__ */ jsx19("dl", { children: g.keys.map(([keys, what]) => /* @__PURE__ */ jsxs18("div", { className: "flow-shortcut", children: [
+                /* @__PURE__ */ jsx19("dt", { children: /* @__PURE__ */ jsx19("kbd", { children: keys }) }),
+                /* @__PURE__ */ jsx19("dd", { children: what })
+              ] }, keys)) })
+            ] }, g.group)) })
+          ]
+        }
+      )
+    }
+  );
+}
+var MOD, ALT, SHORTCUTS;
+var init_Shortcuts = __esm({
+  "src/ui/components/flow/Shortcuts.tsx"() {
+    "use strict";
+    MOD = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? "\u2318" : "Ctrl+";
+    ALT = MOD === "\u2318" ? "\u2325" : "Alt+";
+    SHORTCUTS = [
+      {
+        group: "Add",
+        keys: [
+          ["Double-click or right-click empty canvas", "a box there"],
+          ["Tab", "a box after the selected one, connected"],
+          ["\u21E7Tab", "a box before it, connected"],
+          ["Enter", "a box beside it, from the same boxes"],
+          ["Drag from a box\u2019s edge into space", "a connected box there"]
+        ]
+      },
+      {
+        group: "Connect",
+        keys: [
+          ["Drag from a box\u2019s edge onto a box", "connect them"],
+          ["Drag an arrow\u2019s end grip", "move that end to another box"],
+          ["Drop an unconnected box on an arrow", "put it into the arrow"]
+        ]
+      },
+      {
+        group: "Edit",
+        keys: [
+          ["Type on a selected box", "rename it"],
+          ["F2 or double-click", "rename a box or an arrow"],
+          [`${MOD}C  ${MOD}X  ${MOD}V`, "copy, cut, paste"],
+          [`${MOD}D`, "duplicate"],
+          ["\u232B", "delete"],
+          [`${ALT}\u232B`, "delete, keeping the flow through it"],
+          [`${MOD}Z  \u21E7${MOD}Z`, "undo, redo"],
+          ["Right-click, or \u21E7F10", "everything you can do to it"]
+        ]
+      },
+      {
+        group: "Select and move",
+        keys: [
+          ["Click / \u21E7-drag", "select one / select an area"],
+          [`${MOD}A`, "select everything"],
+          ["Arrow keys", "nudge the selection"],
+          ["Hover or select a box", "see what it connects to"],
+          [ALT === "\u2325" ? "Hold \u2325" : "Hold Alt", "see two steps out"],
+          ["Esc", "clear the selection"]
+        ]
+      },
+      {
+        group: "View",
+        keys: [
+          ["\u21E71", "fit the whole diagram"],
+          ["\u21E72", "zoom to the selection"],
+          ["Space-drag", "pan"],
+          ["?", "these shortcuts"]
+        ]
+      }
+    ];
+  }
+});
+
+// src/ui/components/flow/convert.ts
+import { MarkerType } from "@xyflow/react";
 function toFlow(diagram, plan) {
   const layout = resolveLayout(diagram);
   const nodes = diagram.nodes.map((n) => ({
@@ -5169,11 +5101,1074 @@ function progressOf(plan, taskIds) {
   if (seen.size === 0) return { progress: void 0 };
   return { progress: countTasks({ tasks: [...seen.values()] }) };
 }
+var init_convert = __esm({
+  "src/ui/components/flow/convert.ts"() {
+    "use strict";
+    init_layout();
+    init_format();
+    init_plan();
+  }
+});
+
+// src/ui/components/FlowCanvas.tsx
+import { useCallback, useEffect as useEffect13, useMemo as useMemo2, useRef as useRef8, useState as useState14 } from "react";
+import {
+  Background,
+  ConnectionMode,
+  Controls,
+  MiniMap,
+  Panel,
+  ReactFlow,
+  ReactFlowProvider,
+  applyEdgeChanges,
+  applyNodeChanges,
+  useReactFlow
+} from "@xyflow/react";
+import { jsx as jsx20, jsxs as jsxs19 } from "react/jsx-runtime";
+function DiagramEditor(props) {
+  return /* @__PURE__ */ jsx20(ReactFlowProvider, { children: /* @__PURE__ */ jsx20(Editor, { ...props }) });
+}
+function Editor({
+  diagram,
+  plan,
+  onSave,
+  aside
+}) {
+  const theme = useResolvedTheme();
+  const flow = useReactFlow();
+  const wrapper = useRef8(null);
+  const [initial2] = useState14(() => toFlow(diagram, plan));
+  const [nodes, setNodes] = useState14(initial2.nodes);
+  const [edges, setEdges] = useState14(initial2.edges);
+  const [editing, setEditingState] = useState14(null);
+  const [editSeed, setEditSeed] = useState14(null);
+  const [hoverNode, setHoverNode] = useState14(null);
+  const [hoverEdgeId, setHoverEdgeId] = useState14(null);
+  const [twoHops, setTwoHops] = useState14(false);
+  const [menu, setMenu] = useState14(null);
+  const [shortcuts, setShortcuts] = useState14(false);
+  const [reconnect, setReconnect] = useState14(null);
+  const [dropEdge, setDropEdge] = useState14(null);
+  const [, setHistoryTick] = useState14(0);
+  const nodesRef = useRef8(nodes);
+  const edgesRef = useRef8(edges);
+  nodesRef.current = nodes;
+  edgesRef.current = edges;
+  const planRef = useRef8(plan);
+  planRef.current = plan;
+  const dragging = useRef8(false);
+  const queue = useRef8({ pending: null, busy: false });
+  const pointer = useRef8(null);
+  const pastes = useRef8(0);
+  const setEditing = useCallback((key, seed = null) => {
+    setEditSeed(seed);
+    setEditingState(key);
+  }, []);
+  const signature = useMemo2(() => signatureOf(diagram), [diagram]);
+  const loaded = useRef8(signature);
+  const nudge = useRef8(void 0);
+  const baseRev = useRef8(diagram.rev);
+  const history = useRef8(new History());
+  const current = useRef8({ nodes: initial2.nodes, edges: initial2.edges, direction: diagram.direction });
+  const currentKey = useRef8(JSON.stringify(patchOf(initial2.nodes, initial2.edges, diagram.direction)));
+  const ownRevs = useRef8(/* @__PURE__ */ new Set([diagram.rev]));
+  const historyLost = useRef8(false);
+  const bumpHistory = () => setHistoryTick((n) => n + 1);
+  const load = useCallback((source, p) => {
+    const next = toFlow(source, p);
+    const ns = keepSelection(nodesRef.current, next.nodes);
+    const es = keepRoutes(edgesRef.current, keepSelection(edgesRef.current, next.edges), next.nodes);
+    setNodes(ns);
+    setEdges(es);
+    baseRev.current = source.rev;
+    loaded.current = signatureOf(source);
+    current.current = { nodes: ns, edges: es, direction: source.direction };
+    currentKey.current = JSON.stringify(patchOf(ns, es, source.direction));
+    if (!ownRevs.current.has(source.rev)) {
+      if (history.current.canUndo || history.current.canRedo) historyLost.current = true;
+      history.current.clear();
+      setHistoryTick((n) => n + 1);
+    }
+  }, []);
+  useEffect13(() => {
+    if (dragging.current || nudge.current !== void 0 || queue.current.busy || queue.current.pending) return;
+    if (loaded.current !== signature) load(diagram, plan);
+    else baseRev.current = diagram.rev;
+  }, [signature, diagram.rev]);
+  const progressKey = useMemo2(() => JSON.stringify(plan.tasks.map((t) => [t.id, t.status, t.parentId])), [plan.tasks]);
+  useEffect13(() => {
+    setNodes((ns) => ns.map((n) => ({ ...n, data: { ...n.data, ...progressOf(plan, n.data.taskIds) } })));
+  }, [progressKey]);
+  const focusTarget = useStore((s) => s.focusTarget);
+  useEffect13(() => {
+    const prefix = `node:${diagram.id}:`;
+    if (!focusTarget?.startsWith(prefix)) return;
+    const id = focusTarget.slice(prefix.length);
+    setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === id })));
+    setEdges((es) => es.map((e) => ({ ...e, selected: false })));
+    window.requestAnimationFrame(() => void flow.fitView({ nodes: [{ id }], padding: 1.2, duration: 250, maxZoom: 1.2 }));
+    store.set({ focusTarget: null });
+  }, [focusTarget, diagram.id, flow]);
+  const latest = () => store.getState().session?.plan?.diagrams.find((d) => d.id === diagram.id);
+  const resyncFromServer = useCallback(() => {
+    const p = store.getState().session?.plan;
+    const now = p?.diagrams.find((d) => d.id === diagram.id);
+    if (p && now) load(now, p);
+  }, [diagram.id, load]);
+  const flush = useCallback(async () => {
+    const q = queue.current;
+    if (q.busy) return;
+    q.busy = true;
+    try {
+      while (q.pending) {
+        const patch = q.pending;
+        q.pending = null;
+        const savedRev = await onSave({ ...patch, expect: baseRev.current });
+        if (savedRev !== null) {
+          baseRev.current = savedRev;
+          ownRevs.current.add(savedRev);
+        } else {
+          q.pending = null;
+          resyncFromServer();
+        }
+      }
+    } finally {
+      q.busy = false;
+    }
+    const now = latest();
+    if (now && now.rev !== baseRev.current) resyncFromServer();
+  }, [onSave, resyncFromServer]);
+  const persist = useCallback(
+    (ns, es, direction, opts = {}) => {
+      const dir = direction ?? current.current.direction;
+      const patch = patchOf(ns, es, dir);
+      const key = JSON.stringify(patch);
+      if (key === currentKey.current && !queue.current.pending) return;
+      if (opts.record !== false) {
+        history.current.record(current.current);
+        historyLost.current = false;
+        bumpHistory();
+      }
+      current.current = { nodes: ns, edges: es, direction: dir };
+      currentKey.current = key;
+      const superseded = queue.current.pending;
+      const { direction: _dir, ...graph } = patch;
+      const flowDir = direction ?? superseded?.direction;
+      queue.current.pending = { ...graph, ...flowDir ? { direction: flowDir } : {} };
+      void flush();
+    },
+    [flush]
+  );
+  const commit = useCallback(
+    (ns, es, direction) => {
+      setNodes(ns);
+      setEdges(es);
+      persist(ns, es, direction);
+    },
+    [persist]
+  );
+  const restore = useCallback(
+    (snap) => {
+      const selected = new Set(nodesRef.current.filter((n) => n.selected).map((n) => n.id));
+      const ns = snap.nodes.map((n) => ({
+        ...n,
+        selected: selected.has(n.id),
+        // Progress moves on whatever is undone; show it as it is now.
+        data: { ...n.data, ...progressOf(planRef.current, n.data.taskIds) }
+      }));
+      const es = snap.edges.map((e) => ({ ...e, selected: false }));
+      setNodes(ns);
+      setEdges(es);
+      setEditing(null);
+      persist(ns, es, snap.direction !== current.current.direction ? snap.direction : void 0, { record: false });
+      bumpHistory();
+    },
+    [persist, setEditing]
+  );
+  const undo = useCallback(() => {
+    const before = history.current.undo(current.current);
+    if (before) return restore(before);
+    store.toast(
+      "info",
+      historyLost.current ? "Nothing to undo: this diagram was changed elsewhere since your last edit, and undoing past that would revert it." : "Nothing to undo."
+    );
+  }, [restore]);
+  const redo = useCallback(() => {
+    const after2 = history.current.redo(current.current);
+    if (after2) restore(after2);
+  }, [restore]);
+  const onNodesChange = useCallback(
+    (changes) => {
+      setNodes((ns) => applyNodeChanges(changes, ns));
+      if (dragging.current || !changes.some((c) => c.type === "position" && c.position && !c.dragging)) return;
+      window.clearTimeout(nudge.current);
+      nudge.current = window.setTimeout(() => {
+        nudge.current = void 0;
+        persist(nodesRef.current, edgesRef.current);
+      }, 300);
+    },
+    [persist]
+  );
+  const persistRef = useRef8(persist);
+  persistRef.current = persist;
+  useEffect13(
+    () => () => {
+      if (nudge.current === void 0) return;
+      window.clearTimeout(nudge.current);
+      nudge.current = void 0;
+      persistRef.current(nodesRef.current, edgesRef.current);
+    },
+    []
+  );
+  const onEdgesChange = useCallback((changes) => setEdges((es) => applyEdgeChanges(changes, es)), []);
+  const connect = useCallback(
+    (source, target, base = edgesRef.current, ns = nodesRef.current) => {
+      if (source === target || base.some((e) => e.source === source && e.target === target)) return false;
+      commit(ns, [...base, makeEdge({ id: freeEdgeId(base, source, target), source, target })]);
+      return true;
+    },
+    [commit]
+  );
+  const onConnect = useCallback((conn) => conn.source && conn.target && connect(conn.source, conn.target), [connect]);
+  const reveal = useCallback(
+    (id) => {
+      window.requestAnimationFrame(() => {
+        const node = flow.getInternalNode(id);
+        const rect = wrapper.current?.getBoundingClientRect();
+        if (!node || !rect?.width) return;
+        const { x, y, zoom } = flow.getViewport();
+        const w = node.measured.width ?? node.data.width;
+        const h = node.measured.height ?? node.data.height;
+        const sx = node.internals.positionAbsolute.x * zoom + x;
+        const sy = node.internals.positionAbsolute.y * zoom + y;
+        if (sx < 0 || sy < 0 || sx + w * zoom > rect.width || sy + h * zoom > rect.height) {
+          void flow.setCenter(node.internals.positionAbsolute.x + w / 2, node.internals.positionAbsolute.y + h / 2, { zoom, duration: 200 });
+        }
+      });
+    },
+    [flow]
+  );
+  const newId = () => {
+    const ns = nodesRef.current;
+    let k = ns.length + 1;
+    while (ns.some((x) => x.id === `n${k}`)) k++;
+    return `n${k}`;
+  };
+  const addNode = useCallback(
+    (kind, opts = {}) => {
+      const ns = nodesRef.current;
+      const id = newId();
+      const data = sized({ label: `New ${KIND_LABEL[kind].toLowerCase()}`, kind, width: 0, height: 0 });
+      const lr = diagram.direction === "LR";
+      const anchor = opts.near && ns.find((n) => n.id === opts.near.id);
+      let want;
+      if (opts.at) want = { x: opts.at.x - data.width / 2, y: opts.at.y - data.height / 2 };
+      else if (anchor) {
+        const { x, y } = anchor.position;
+        const { width: w, height: h } = anchor.data;
+        const gap = 90;
+        want = {
+          after: lr ? { x: x + w + gap, y } : { x, y: y + h + gap },
+          before: lr ? { x: x - gap - data.width, y } : { x, y: y - gap - data.height },
+          beside: lr ? { x, y: y + h + 40 } : { x: x + w + 50, y }
+        }[opts.near.where];
+      } else {
+        const rect = wrapper.current?.getBoundingClientRect();
+        const c = rect ? flow.screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }) : { x: 0, y: 0 };
+        want = { x: c.x - data.width / 2, y: c.y - data.height / 2 };
+      }
+      const position = opts.at ? round(want) : findFreeSpot(want, data, positionsOf(ns), sizesOf(ns), lr);
+      const node = { id, type: "plan", position, data, selected: true };
+      const nextNodes = [...ns.map((x) => x.selected ? { ...x, selected: false } : x), node];
+      let nextEdges = edgesRef.current.map((e) => e.selected ? { ...e, selected: false } : e);
+      for (const s of opts.from ?? []) nextEdges = [...nextEdges, makeEdge({ id: freeEdgeId(nextEdges, s, id), source: s, target: id })];
+      for (const t of opts.to ?? []) nextEdges = [...nextEdges, makeEdge({ id: freeEdgeId(nextEdges, id, t), source: id, target: t })];
+      commit(nextNodes, nextEdges);
+      setEditing(`node:${id}`);
+      reveal(id);
+      return id;
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- newId reads live state through refs
+    [commit, diagram.direction, flow, reveal, setEditing]
+  );
+  const addAfter = useCallback((id) => addNode("component", { near: { id, where: "after" }, from: [id] }), [addNode]);
+  const addBefore = useCallback((id) => addNode("component", { near: { id, where: "before" }, to: [id] }), [addNode]);
+  const addBeside = useCallback(
+    (id) => {
+      const node = nodesRef.current.find((n) => n.id === id);
+      if (!node) return;
+      const parents = [...new Set(edgesRef.current.filter((e) => e.target === id && e.source !== id).map((e) => e.source))];
+      addNode(node.data.kind === "note" ? "component" : node.data.kind, { near: { id, where: "beside" }, from: parents });
+    },
+    [addNode]
+  );
+  const insertIntoEdge = useCallback(
+    (edgeId, at) => {
+      const edge = edgesRef.current.find((e) => e.id === edgeId);
+      if (!edge) return;
+      const id = newId();
+      const data = sized({ label: "New component", kind: "component", width: 0, height: 0 });
+      const node = { id, type: "plan", position: round({ x: at.x - data.width / 2, y: at.y - data.height / 2 }), data, selected: true };
+      const ns = nodesRef.current.map((x) => x.selected ? { ...x, selected: false } : x);
+      commit([...ns, node], spliced(edgesRef.current, edge, id));
+      setEditing(`node:${id}`);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- newId reads live state through refs
+    [commit, setEditing]
+  );
+  const onConnectEnd = useCallback(
+    (event, state) => {
+      if (state.isValid || !state.fromNode) return;
+      const point = "changedTouches" in event ? event.changedTouches[0] : event;
+      if (!point) return;
+      const hit = document.elementFromPoint?.(point.clientX, point.clientY) ?? null;
+      const onNode = hit?.closest(".react-flow__node")?.getAttribute("data-id");
+      if (onNode) {
+        if (onNode !== state.fromNode.id) connect(state.fromNode.id, onNode);
+        return;
+      }
+      if (hit?.closest(".react-flow__pane")) {
+        addNode("component", { at: flow.screenToFlowPosition({ x: point.clientX, y: point.clientY }), from: [state.fromNode.id] });
+      }
+    },
+    [addNode, connect, flow]
+  );
+  const onDelete = useCallback(
+    ({ nodes: gone, edges: cut }) => {
+      const goneIds = new Set(gone.map((n) => n.id));
+      const cutIds = new Set(cut.map((e) => e.id));
+      commit(
+        nodesRef.current.filter((n) => !goneIds.has(n.id)),
+        edgesRef.current.filter((e) => !cutIds.has(e.id) && !goneIds.has(e.source) && !goneIds.has(e.target))
+      );
+    },
+    [commit]
+  );
+  const removeKeepingFlow = useCallback(() => {
+    const gone = new Set(nodesRef.current.filter((n) => n.selected).map((n) => n.id));
+    const cut = new Set(edgesRef.current.filter((e) => e.selected).map((e) => e.id));
+    if (!gone.size && !cut.size) return;
+    const { kept, bridges } = bridgeOver(gone, edgesRef.current.filter((e) => !cut.has(e.id)).map(liteEdge));
+    const keep = new Set(kept.map((k) => k.id));
+    let es = edgesRef.current.filter((e) => keep.has(e.id));
+    for (const b of bridges) es = [...es, makeEdge({ id: freeEdgeId(es, b.source, b.target), ...b })];
+    commit(
+      nodesRef.current.filter((n) => !gone.has(n.id)),
+      es
+    );
+    if (bridges.length) store.toast("info", `Deleted, and joined ${bridges.length} connection${bridges.length === 1 ? "" : "s"} around it.`);
+  }, [commit]);
+  const onNodeDrag = useCallback((event, node, moving) => {
+    const free = moving.length === 1 && !edgesRef.current.some((e) => e.source === node.id || e.target === node.id);
+    const under = free ? document.elementsFromPoint?.(event.clientX, event.clientY) ?? [] : [];
+    const hit = under.map((el) => el.closest(".react-flow__edge")?.getAttribute("data-id")).find(Boolean) ?? null;
+    setDropEdge((was) => was === hit ? was : hit);
+  }, []);
+  const onDragStop = useCallback(
+    (moved, into = null) => {
+      dragging.current = false;
+      setDropEdge(null);
+      const at = new Map(moved.map((n) => [n.id, n.position]));
+      const ns = nodesRef.current.map((n) => at.has(n.id) ? { ...n, position: at.get(n.id) } : n);
+      const edge = into && edgesRef.current.find((e) => e.id === into);
+      if (edge && moved.length === 1) commit(ns, spliced(edgesRef.current, edge, moved[0].id));
+      else persist(ns, edgesRef.current);
+    },
+    [commit, persist]
+  );
+  const dropEdgeRef = useRef8(dropEdge);
+  dropEdgeRef.current = dropEdge;
+  const onNodeDragStop = useCallback((_, __, moved) => onDragStop(moved, dropEdgeRef.current), [onDragStop]);
+  const onSelectionDragStop = useCallback((_, moved) => onDragStop(moved), [onDragStop]);
+  const onDragStart = useCallback(() => {
+    dragging.current = true;
+    setMenu(null);
+  }, []);
+  const updateNodes = (ids, patch) => {
+    const ns = nodesRef.current.map((n) => {
+      if (!ids.has(n.id)) return n;
+      const data = { ...n.data, ...patch };
+      for (const key of ["detail", "description", "notes"]) if (!data[key]) delete data[key];
+      return { ...n, data: { ...sized(data), ...progressOf(planRef.current, data.taskIds) } };
+    });
+    commit(ns, edgesRef.current);
+  };
+  const updateNode = (id, patch) => updateNodes(/* @__PURE__ */ new Set([id]), patch);
+  const updateEdge = (id, patch) => {
+    const es = edgesRef.current.map((e) => {
+      if (e.id !== id) return e;
+      const source = patch.source ?? e.source;
+      const target = patch.target ?? e.target;
+      const data = { ...e.data, ...patch };
+      delete data.source;
+      delete data.target;
+      if (!data.label) delete data.label;
+      if (!data.arrows) delete data.arrows;
+      if (!data.dashed) delete data.dashed;
+      if (source !== e.source || target !== e.target) delete data.route;
+      return makeEdge({ id: e.id, source, target, ...data }, e.selected);
+    });
+    commit(nodesRef.current, es);
+  };
+  const updateEdgeRef = useRef8(updateEdge);
+  updateEdgeRef.current = updateEdge;
+  const reverseEdge = (id) => {
+    const e = edgesRef.current.find((x) => x.id === id);
+    if (e) updateEdge(id, { source: e.target, target: e.source });
+  };
+  const select = useCallback((kind, id) => {
+    setNodes((ns) => ns.map((n) => ({ ...n, selected: kind === "node" && n.id === id })));
+    setEdges((es) => es.map((e) => ({ ...e, selected: kind === "edge" && e.id === id })));
+  }, []);
+  const clearSelection = useCallback(() => {
+    setNodes((ns) => ns.map((n) => n.selected ? { ...n, selected: false } : n));
+    setEdges((es) => es.map((e) => e.selected ? { ...e, selected: false } : e));
+  }, []);
+  const selectAll = useCallback(() => {
+    setNodes((ns) => ns.map((n) => ({ ...n, selected: true })));
+    setEdges((es) => es.map((x) => ({ ...x, selected: true })));
+  }, []);
+  const removeSelected = useCallback(() => {
+    void flow.deleteElements({ nodes: nodesRef.current.filter((n) => n.selected), edges: edgesRef.current.filter((e) => e.selected) });
+  }, [flow]);
+  const relayout = (direction) => {
+    const at = autoLayout(graphOf(nodesRef.current, edgesRef.current), direction);
+    const ns = nodesRef.current.map((n) => ({ ...n, position: at.positions.get(n.id) ?? n.position }));
+    const es = edgesRef.current.map((e) => withRoute(e, at));
+    commit(ns, es, direction);
+    window.requestAnimationFrame(() => void flow.fitView(FIT));
+  };
+  const fitAll = useCallback(() => void flow.fitView({ ...FIT, duration: 200 }), [flow]);
+  const fitSelection = useCallback(() => {
+    const picked = nodesRef.current.filter((n) => n.selected);
+    if (!picked.length) return fitAll();
+    void flow.fitView({ nodes: picked.map((n) => ({ id: n.id })), padding: 0.5, maxZoom: 1.25, duration: 200 });
+  }, [fitAll, flow]);
+  const selectionClip = useCallback(() => {
+    const picked = nodesRef.current.filter((n) => n.selected);
+    return toClip(
+      picked.map((n) => ({ id: n.id, ...contentOf(n.data), x: n.position.x, y: n.position.y })),
+      edgesRef.current.map((e) => ({ source: e.source, target: e.target, ...edgeContent(e.data) }))
+    );
+  }, []);
+  const paste = useCallback(
+    (clip, where) => {
+      const origin = clipOrigin(clip);
+      pastes.current += 1;
+      const step = 32 * pastes.current;
+      const point = where === "pointer" ? pointer.current : where === "offset" ? null : where;
+      const at = point ? { x: point.x - origin.x, y: point.y - origin.y } : { x: step, y: step };
+      const tasks = new Set(planRef.current.tasks.map((t) => t.id));
+      const made = pasteClip(clip, nodesRef.current.map((n) => n.id), tasks, at);
+      const newNodes = made.nodes.map(({ id, x, y, ...content }) => ({
+        id,
+        type: "plan",
+        position: { x, y },
+        data: { ...sized({ ...content, width: 0, height: 0 }), ...progressOf(planRef.current, content.taskIds) },
+        selected: true
+      }));
+      const base = edgesRef.current.map((e) => e.selected ? { ...e, selected: false } : e);
+      const newEdges = made.edges.reduce((es, e) => [...es, makeEdge({ id: freeEdgeId(es, e.source, e.target), ...e })], base);
+      commit([...nodesRef.current.map((n) => n.selected ? { ...n, selected: false } : n), ...newNodes], newEdges);
+      return newNodes.length;
+    },
+    [commit]
+  );
+  const copySelection = useCallback(
+    (data) => {
+      const clip = selectionClip();
+      if (!clip) return false;
+      lastClip = clip;
+      pastes.current = 0;
+      const text = serializeClip(clip);
+      if (data) data.setData("text/plain", text);
+      else void navigator.clipboard?.writeText(text).catch(() => void 0);
+      store.toast("info", `Copied ${clip.nodes.length} box${clip.nodes.length === 1 ? "" : "es"}. Paste with ${MOD}V, here or in another diagram.`);
+      return true;
+    },
+    [selectionClip]
+  );
+  const duplicate = useCallback(() => {
+    const clip = selectionClip();
+    if (!clip) return;
+    pastes.current = 0;
+    paste(clip, "offset");
+  }, [paste, selectionClip]);
+  const startReconnect = useCallback((edgeId, end, e) => {
+    setMenu(null);
+    setReconnect({ edgeId, end, pointer: { x: e.clientX, y: e.clientY }, over: null });
+  }, []);
+  useEffect13(() => {
+    if (!reconnect) return;
+    const edge = edgesRef.current.find((x) => x.id === reconnect.edgeId);
+    const fixed = edge ? reconnect.end === "source" ? edge.target : edge.source : null;
+    const boxAt = (x, y) => {
+      const hit = document.elementFromPoint?.(x, y)?.closest(".react-flow__node")?.getAttribute("data-id") ?? null;
+      return hit && hit !== fixed ? hit : null;
+    };
+    const move = (ev) => setReconnect((r) => r && { ...r, pointer: { x: ev.clientX, y: ev.clientY }, over: boxAt(ev.clientX, ev.clientY) });
+    const up = (ev) => {
+      const over = boxAt(ev.clientX, ev.clientY);
+      setReconnect(null);
+      if (edge && over && over !== edge[reconnect.end]) updateEdgeRef.current(edge.id, { [reconnect.end]: over });
+    };
+    const key = (ev) => {
+      if (ev.key === "Escape") setReconnect(null);
+    };
+    const cancel = () => setReconnect(null);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("blur", cancel);
+    window.addEventListener("keydown", key, true);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("blur", cancel);
+      window.removeEventListener("keydown", key, true);
+    };
+  }, [reconnect?.edgeId, reconnect?.end]);
+  const hoverTimer = useRef8(void 0);
+  const hoverEdge = useCallback((id) => {
+    window.clearTimeout(hoverTimer.current);
+    if (id) setHoverEdgeId(id);
+    else hoverTimer.current = window.setTimeout(() => setHoverEdgeId(null), 160);
+  }, []);
+  useEffect13(() => () => window.clearTimeout(hoverTimer.current), []);
+  const closeMenu = useCallback(() => setMenu(null), []);
+  const openMenu = useCallback(
+    (client, target) => {
+      const rect = wrapper.current?.getBoundingClientRect();
+      if (!rect) return;
+      setMenu({ at: { x: client.x - rect.left, y: client.y - rect.top }, flow: flow.screenToFlowPosition(client), target });
+    },
+    [flow]
+  );
+  const openMenuForSelection = useCallback(() => {
+    const rect = wrapper.current?.getBoundingClientRect();
+    if (!rect) return;
+    const picked = nodesRef.current.filter((n) => n.selected);
+    const lines = edgesRef.current.filter((e) => e.selected);
+    const centreOf = (id) => {
+      const n = flow.getInternalNode(id);
+      if (!n) return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      return flow.flowToScreenPosition({ x: n.internals.positionAbsolute.x + (n.measured.width ?? 0) / 2, y: n.internals.positionAbsolute.y + (n.measured.height ?? 0) / 2 });
+    };
+    if (picked.length === 1 && !lines.length) return openMenu(centreOf(picked[0].id), { kind: "node", id: picked[0].id });
+    if (lines.length === 1 && !picked.length) {
+      const a = centreOf(lines[0].source);
+      const b = centreOf(lines[0].target);
+      return openMenu({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, { kind: "edge", id: lines[0].id });
+    }
+    if (picked.length + lines.length > 1) return openMenu(centreOf(picked[0]?.id ?? ""), { kind: "selection" });
+    openMenu({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }, { kind: "pane" });
+  }, [flow, openMenu]);
+  const kindChoices = (active) => NODE_KINDS.map((k) => ({
+    value: k,
+    label: KIND_LABEL[k],
+    className: `kind-${k}`,
+    active: k === active,
+    content: /* @__PURE__ */ jsx20("span", { className: "kind-swatch", "aria-hidden": "true", children: KIND_GLYPH[k] })
+  }));
+  const menuEntries = (target, at) => {
+    if (target.kind === "pane") {
+      return {
+        title: "Canvas",
+        entries: [
+          { kind: "choices", label: "Add a box here", options: kindChoices(null), onSelect: (k) => addNode(k, { at }) },
+          { kind: "item", label: "Paste here", hint: `${MOD}V`, disabled: !lastClip, onSelect: () => lastClip && paste(lastClip, at) },
+          { kind: "separator" },
+          { kind: "item", label: "Select everything", hint: `${MOD}A`, onSelect: selectAll },
+          { kind: "item", label: "Tidy layout", onSelect: () => relayout(diagram.direction) },
+          { kind: "item", label: "Fit the whole diagram", hint: "\u21E71", onSelect: fitAll },
+          { kind: "separator" },
+          { kind: "item", label: "Undo", hint: `${MOD}Z`, disabled: !history.current.canUndo, onSelect: undo },
+          { kind: "item", label: "Keyboard shortcuts", hint: "?", onSelect: () => setShortcuts(true) }
+        ]
+      };
+    }
+    if (target.kind === "node") {
+      const node = nodesRef.current.find((n) => n.id === target.id);
+      if (!node) return { title: "Box", entries: [] };
+      const targets = new Set(edgesRef.current.filter((e) => e.source === node.id).map((e) => e.target));
+      const others = nodesRef.current.filter((n) => n.id !== node.id && !targets.has(n.id));
+      return {
+        title: node.data.label,
+        entries: [
+          { kind: "item", label: "Rename", hint: "F2", onSelect: () => setEditing(`node:${node.id}`) },
+          { kind: "choices", label: "Kind", options: kindChoices(node.data.kind), onSelect: (k) => updateNode(node.id, { kind: k }) },
+          { kind: "separator" },
+          { kind: "item", label: "Add a box after it", hint: "Tab", onSelect: () => addAfter(node.id) },
+          { kind: "item", label: "Add a box before it", hint: "\u21E7Tab", onSelect: () => addBefore(node.id) },
+          { kind: "item", label: "Add a box beside it", hint: "Enter", onSelect: () => addBeside(node.id) },
+          {
+            kind: "submenu",
+            label: "Connect to",
+            entries: others.length ? others.map((n) => ({ kind: "item", label: n.data.label, onSelect: () => connect(node.id, n.id) })) : [{ kind: "item", label: "Already connected to every box", disabled: true, onSelect: () => void 0 }]
+          },
+          { kind: "separator" },
+          { kind: "item", label: "Copy", hint: `${MOD}C`, onSelect: () => copySelection(null) },
+          { kind: "item", label: "Duplicate", hint: `${MOD}D`, onSelect: duplicate },
+          { kind: "separator" },
+          { kind: "item", label: "Delete, keeping the flow", hint: `${ALT}\u232B`, onSelect: removeKeepingFlow },
+          { kind: "item", label: "Delete", hint: "\u232B", danger: true, onSelect: removeSelected }
+        ]
+      };
+    }
+    if (target.kind === "edge") {
+      const edge = edgesRef.current.find((e) => e.id === target.id);
+      if (!edge) return { title: "Connection", entries: [] };
+      const name = (id) => nodesRef.current.find((n) => n.id === id)?.data.label ?? id;
+      return {
+        title: `${name(edge.source)} \u2192 ${name(edge.target)}`,
+        entries: [
+          { kind: "item", label: edge.data?.label ? "Edit label" : "Add a label", onSelect: () => setEditing(`edge:${edge.id}`) },
+          { kind: "item", label: "Reverse direction", onSelect: () => reverseEdge(edge.id) },
+          { kind: "check", label: "Dashed \u2014 optional, async or future", checked: Boolean(edge.data?.dashed), onSelect: () => updateEdge(edge.id, { dashed: !edge.data?.dashed }) },
+          {
+            kind: "choices",
+            label: "Arrowheads",
+            options: [
+              ["end", "\u2192", "One way"],
+              ["both", "\u2194", "Both ways"],
+              ["none", "\u2014", "No direction"]
+            ].map(([value, glyph, label]) => ({ value, label, active: (edge.data?.arrows ?? "end") === value, content: glyph })),
+            onSelect: (v) => updateEdge(edge.id, { arrows: v === "end" ? void 0 : v })
+          },
+          { kind: "separator" },
+          { kind: "item", label: "Insert a box here", onSelect: () => insertIntoEdge(edge.id, at) },
+          { kind: "item", label: "Delete", hint: "\u232B", danger: true, onSelect: removeSelected }
+        ]
+      };
+    }
+    const picked = nodesRef.current.filter((n) => n.selected);
+    const kinds = new Set(picked.map((n) => n.data.kind));
+    return {
+      title: `${picked.length} box${picked.length === 1 ? "" : "es"} selected`,
+      entries: [
+        ...picked.length ? [
+          {
+            kind: "choices",
+            label: "Kind of every box",
+            options: kindChoices(kinds.size === 1 ? [...kinds][0] : null),
+            onSelect: (k) => updateNodes(new Set(picked.map((n) => n.id)), { kind: k })
+          },
+          { kind: "separator" },
+          { kind: "item", label: "Copy", hint: `${MOD}C`, onSelect: () => copySelection(null) },
+          { kind: "item", label: "Duplicate", hint: `${MOD}D`, onSelect: duplicate },
+          { kind: "item", label: "Zoom to them", hint: "\u21E72", onSelect: fitSelection },
+          { kind: "separator" },
+          { kind: "item", label: "Delete, keeping the flow", hint: `${ALT}\u232B`, onSelect: removeKeepingFlow }
+        ] : [],
+        { kind: "item", label: "Delete", hint: "\u232B", danger: true, onSelect: removeSelected }
+      ]
+    };
+  };
+  const keys = useRef8({ undo, redo, duplicate, selectAll, addAfter, addBefore, addBeside, removeKeepingFlow, fitAll, fitSelection, openMenuForSelection, clearSelection });
+  keys.current = { undo, redo, duplicate, selectAll, addAfter, addBefore, addBeside, removeKeepingFlow, fitAll, fitSelection, openMenuForSelection, clearSelection };
+  const overlays = useRef8({ menu: false, shortcuts: false, reconnect: false });
+  overlays.current = { menu: Boolean(menu), shortcuts, reconnect: Boolean(reconnect) };
+  useEffect13(() => {
+    const busy = (target) => {
+      const el = target;
+      if (!el || !(el instanceof HTMLElement)) return false;
+      return el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName);
+    };
+    const onCanvas = () => {
+      const active = document.activeElement;
+      const canvas = wrapper.current;
+      if (!active || !canvas) return true;
+      return canvas.contains(active) || active.contains(canvas);
+    };
+    const ours = (e) => {
+      if (busy(e.target) || busy(document.activeElement)) return false;
+      const text = window.getSelection?.()?.toString() ?? "";
+      return onCanvas() && !text;
+    };
+    const onCopy = (e) => {
+      if (!ours(e) || !nodesRef.current.some((n) => n.selected)) return;
+      if (copySelection(e.clipboardData)) e.preventDefault();
+    };
+    const onCut = (e) => {
+      if (!ours(e) || !nodesRef.current.some((n) => n.selected)) return;
+      if (copySelection(e.clipboardData)) {
+        e.preventDefault();
+        removeSelected();
+      }
+    };
+    const onPaste = (e) => {
+      if (!ours(e)) return;
+      const text = e.clipboardData?.getData("text/plain");
+      const clip = text ? parseClip(text) : lastClip;
+      if (!clip) return;
+      e.preventDefault();
+      paste(clip, "pointer");
+    };
+    const onKey = (e) => {
+      if (e.key === "Alt") setTwoHops(true);
+      if (busy(e.target) || !onCanvas()) return;
+      const o = overlays.current;
+      if (o.menu || o.shortcuts || o.reconnect) return;
+      const k = keys.current;
+      const mod = e.metaKey || e.ctrlKey;
+      const key = e.key.toLowerCase();
+      const selected = nodesRef.current.filter((n) => n.selected);
+      const one = selected.length === 1 && !edgesRef.current.some((x) => x.selected) ? selected[0] : null;
+      const claim = () => {
+        e.preventDefault();
+        e.stopPropagation();
+      };
+      if (mod) {
+        if (key === "z") return claim(), e.shiftKey ? k.redo() : k.undo();
+        if (key === "y") return claim(), k.redo();
+        if (key === "d" && selected.length) return claim(), k.duplicate();
+        if (key === "a" && !e.shiftKey) return claim(), k.selectAll();
+        return;
+      }
+      if (e.key === "F10" && e.shiftKey || e.key === "ContextMenu") return claim(), k.openMenuForSelection();
+      if (e.key === "?") return claim(), setShortcuts(true);
+      if (e.shiftKey && e.code === "Digit1") return claim(), k.fitAll();
+      if (e.shiftKey && e.code === "Digit2") return claim(), k.fitSelection();
+      if ((e.key === "Backspace" || e.key === "Delete") && e.altKey && selected.length) return claim(), k.removeKeepingFlow();
+      if (e.key === "Escape") {
+        setEditing(null);
+        k.clearSelection();
+        return;
+      }
+      if (!one) return;
+      if (e.key === "Tab") return claim(), e.shiftKey ? k.addBefore(one.id) : k.addAfter(one.id);
+      if (e.key === "Enter" && !e.altKey) return claim(), k.addBeside(one.id);
+      if (e.key === "F2") return claim(), setEditing(`node:${one.id}`);
+      if (e.key.length === 1 && e.key !== " " && !e.altKey) return claim(), setEditing(`node:${one.id}`, e.key);
+    };
+    const onKeyUp = (e) => {
+      if (e.key === "Alt") setTwoHops(false);
+    };
+    const onBlur = () => setTwoHops(false);
+    document.addEventListener("copy", onCopy);
+    document.addEventListener("cut", onCut);
+    document.addEventListener("paste", onPaste);
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      document.removeEventListener("copy", onCopy);
+      document.removeEventListener("cut", onCut);
+      document.removeEventListener("paste", onPaste);
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [copySelection, paste, removeSelected, setEditing]);
+  const api2 = useMemo2(
+    () => ({
+      direction: diagram.direction,
+      editing,
+      editSeed,
+      startEditing: (key) => setEditing(key),
+      startReconnect,
+      hoverEdge,
+      finishNodeLabel: (id, label) => {
+        setEditing(null);
+        const node = nodesRef.current.find((n) => n.id === id);
+        const next = label?.trim();
+        if (node && next && next !== node.data.label) updateNode(id, { label: next });
+      },
+      finishEdgeLabel: (id, label) => {
+        setEditing(null);
+        const edge = edgesRef.current.find((e) => e.id === id);
+        if (edge && label !== null && label.trim() !== (edge.data?.label ?? "")) updateEdge(id, { label: label.trim() });
+      },
+      selectEdge: (id) => select("edge", id)
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the updaters read live state through refs
+    [diagram.direction, editing, editSeed, select, startReconnect, hoverEdge, setEditing]
+  );
+  const selectedNodes = nodes.filter((n) => n.selected);
+  const selectedEdges = edges.filter((e) => e.selected);
+  const gesturing = Boolean(reconnect) || dragging.current;
+  const focusNode = !gesturing && hoverNode || (selectedNodes.length === 1 && !selectedEdges.length ? selectedNodes[0].id : null);
+  const focusEdge = focusNode ? null : !gesturing && hoverEdgeId || (selectedEdges.length === 1 && !selectedNodes.length ? selectedEdges[0].id : null);
+  const relations = useMemo2(() => {
+    const lite = edges.map(liteEdge);
+    if (focusNode && nodes.some((n) => n.id === focusNode)) return relationsOf(focusNode, lite, twoHops ? 2 : 1);
+    const e = focusEdge ? lite.find((x) => x.id === focusEdge) : void 0;
+    if (!e) return null;
+    const both = e.arrows === "both" || e.arrows === "none";
+    return {
+      nodes: /* @__PURE__ */ new Map([
+        [e.source, both ? "both" : "from"],
+        [e.target, both ? "both" : "to"]
+      ]),
+      edges: /* @__PURE__ */ new Map([[e.id, both ? "both" : "out"]])
+    };
+  }, [edges, nodes, focusNode, focusEdge, twoHops]);
+  const drawnNodes = useMemo2(
+    () => nodes.map((n) => {
+      const rel = relations?.nodes.get(n.id);
+      const dim = Boolean(relations) && !rel;
+      const drop = reconnect?.over === n.id;
+      if (!rel && !dim && !drop) return n;
+      return { ...n, className: classNames(dim && "rel-dim", rel && `rel-${rel}`), data: { ...n.data, ...rel ? { rel } : {}, ...drop ? { dropTarget: true } : {} } };
+    }),
+    [nodes, relations, reconnect?.over]
+  );
+  const drawnEdges = useMemo2(() => {
+    const offsets = lanes(edges);
+    return edges.map((e) => {
+      const rel = relations?.edges.get(e.id);
+      const dim = Boolean(relations) && !rel;
+      const grips = !reconnect && e.source !== e.target && (Boolean(e.selected) || hoverEdgeId === e.id);
+      const lane = offsets.get(e.id);
+      const drop = dropEdge === e.id;
+      const moving = reconnect?.edgeId === e.id;
+      if (!rel && !dim && !grips && lane === void 0 && !drop && !moving) return e;
+      const colour = rel ? REL_COLOUR[rel] : void 0;
+      const marker = (m) => m && typeof m === "object" && colour ? { ...m, color: colour } : m;
+      return {
+        ...e,
+        className: classNames(e.className, rel && `rel-${rel}`, dim && "rel-dim", drop && "is-drop-target", moving && "is-reconnecting"),
+        animated: rel === "out" || rel === "in" || rel === "out2" || rel === "in2",
+        markerEnd: marker(e.markerEnd),
+        markerStart: marker(e.markerStart),
+        data: { ...e.data, ...lane !== void 0 ? { lane } : {}, ...rel ? { rel } : {}, ...dim ? { dim } : {}, ...grips ? { grips } : {}, ...drop ? { dropTarget: true } : {} }
+      };
+    });
+  }, [edges, relations, reconnect, hoverEdgeId, dropEdge]);
+  let panel;
+  if (selectedNodes.length === 1 && selectedEdges.length === 0) {
+    const node = selectedNodes[0];
+    panel = /* @__PURE__ */ jsx20(
+      NodePanel,
+      {
+        node,
+        nodes,
+        edges,
+        plan,
+        onChange: (patch) => updateNode(node.id, patch),
+        onSelect: select,
+        onConnect: (target) => connect(node.id, target),
+        onDisconnect: (id) => commit(nodesRef.current, edgesRef.current.filter((e) => e.id !== id)),
+        onAddConnected: () => addAfter(node.id),
+        onDuplicate: duplicate,
+        onRemove: removeSelected,
+        onClose: clearSelection
+      },
+      node.id
+    );
+  } else if (selectedEdges.length === 1 && selectedNodes.length === 0) {
+    const edge = selectedEdges[0];
+    panel = /* @__PURE__ */ jsx20(
+      EdgePanel,
+      {
+        edge,
+        nodes,
+        onChange: (patch) => updateEdge(edge.id, patch),
+        onReverse: () => reverseEdge(edge.id),
+        onSelect: select,
+        onRemove: removeSelected,
+        onClose: clearSelection
+      },
+      edge.id
+    );
+  } else if (selectedNodes.length + selectedEdges.length > 1) {
+    panel = /* @__PURE__ */ jsx20(
+      SelectionPanel,
+      {
+        nodes: selectedNodes,
+        edges: selectedEdges,
+        onKind: (kind) => updateNodes(new Set(selectedNodes.map((n) => n.id)), { kind }),
+        onCopy: () => copySelection(null),
+        onDuplicate: duplicate,
+        onRemove: removeSelected,
+        onClose: clearSelection
+      }
+    );
+  } else {
+    panel = aside;
+  }
+  const shownMenu = menu ? menuEntries(menu.target, menu.flow) : null;
+  const focusLabel = focusNode ? nodes.find((n) => n.id === focusNode)?.data.label ?? "" : "this connection";
+  return /* @__PURE__ */ jsx20(CanvasContext.Provider, { value: api2, children: /* @__PURE__ */ jsxs19("div", { className: "arch-body", children: [
+    /* @__PURE__ */ jsxs19(
+      "div",
+      {
+        ref: wrapper,
+        className: classNames("flow", reconnect && "is-reconnecting"),
+        onMouseMove: (e) => {
+          pointer.current = flow.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+        },
+        onMouseLeave: () => {
+          pointer.current = null;
+        },
+        onDoubleClick: (e) => {
+          const el = e.target;
+          if (el.closest(".react-flow__node, .react-flow__edge, .react-flow__panel, .flow-edge-label, .flow-menu")) return;
+          if (!el.closest(".react-flow__pane")) return;
+          addNode("component", { at: flow.screenToFlowPosition({ x: e.clientX, y: e.clientY }) });
+        },
+        children: [
+          /* @__PURE__ */ jsxs19(
+            ReactFlow,
+            {
+              nodes: drawnNodes,
+              edges: drawnEdges,
+              nodeTypes,
+              edgeTypes,
+              onNodesChange,
+              onEdgesChange,
+              onConnect,
+              onConnectEnd,
+              onDelete,
+              onNodeDragStart: onDragStart,
+              onNodeDrag,
+              onNodeDragStop,
+              onSelectionDragStart: onDragStart,
+              onSelectionDragStop,
+              onNodeDoubleClick: (_, node) => setEditing(`node:${node.id}`),
+              onEdgeDoubleClick: (_, edge) => setEditing(`edge:${edge.id}`),
+              onNodeMouseEnter: (_, node) => setHoverNode(node.id),
+              onNodeMouseLeave: () => setHoverNode(null),
+              onEdgeMouseEnter: (_, edge) => hoverEdge(edge.id),
+              onEdgeMouseLeave: () => hoverEdge(null),
+              onPaneContextMenu: (e) => {
+                e.preventDefault();
+                openMenu({ x: e.clientX, y: e.clientY }, { kind: "pane" });
+              },
+              onNodeContextMenu: (e, node) => {
+                e.preventDefault();
+                const many = nodesRef.current.filter((n) => n.selected).length + edgesRef.current.filter((x) => x.selected).length > 1;
+                if (node.selected && many) return openMenu({ x: e.clientX, y: e.clientY }, { kind: "selection" });
+                select("node", node.id);
+                openMenu({ x: e.clientX, y: e.clientY }, { kind: "node", id: node.id });
+              },
+              onEdgeContextMenu: (e, edge) => {
+                e.preventDefault();
+                select("edge", edge.id);
+                openMenu({ x: e.clientX, y: e.clientY }, { kind: "edge", id: edge.id });
+              },
+              onSelectionContextMenu: (e) => {
+                e.preventDefault();
+                openMenu({ x: e.clientX, y: e.clientY }, { kind: "selection" });
+              },
+              onMoveStart: () => setMenu(null),
+              connectionMode: ConnectionMode.Loose,
+              deleteKeyCode: ["Backspace", "Delete"],
+              zoomOnDoubleClick: false,
+              colorMode: theme,
+              fitView: true,
+              fitViewOptions: FIT,
+              minZoom: 0.2,
+              maxZoom: 2,
+              defaultEdgeOptions: { type: "plan" },
+              children: [
+                /* @__PURE__ */ jsx20(Background, { gap: 18, size: 1 }),
+                /* @__PURE__ */ jsx20(Controls, { showInteractive: false, position: "bottom-left", fitViewOptions: FIT }),
+                /* @__PURE__ */ jsx20(MiniMap, { pannable: true, zoomable: true, position: "bottom-right", style: { width: 150, height: 96 }, nodeBorderRadius: 4 }),
+                /* @__PURE__ */ jsxs19(Panel, { position: "top-left", className: "flow-toolbar", children: [
+                  /* @__PURE__ */ jsx20(AddMenu, { onAdd: (kind) => addNode(kind) }),
+                  /* @__PURE__ */ jsx20("button", { type: "button", className: "btn btn-sm", title: "Lay the whole diagram out again, along its flow", onClick: () => relayout(diagram.direction), children: "Tidy layout" }),
+                  /* @__PURE__ */ jsx20(
+                    "button",
+                    {
+                      type: "button",
+                      className: "btn btn-sm",
+                      title: diagram.direction === "LR" ? "Lay it out top to bottom" : "Lay it out left to right",
+                      onClick: () => relayout(diagram.direction === "LR" ? "TB" : "LR"),
+                      children: diagram.direction === "LR" ? "\u2192 Left to right" : "\u2193 Top to bottom"
+                    }
+                  ),
+                  /* @__PURE__ */ jsxs19("span", { className: "flow-toolbar-group", children: [
+                    /* @__PURE__ */ jsx20("button", { type: "button", className: "btn btn-sm btn-icon", "aria-label": "Undo", title: `Undo (${MOD}Z)`, disabled: !history.current.canUndo, onClick: undo, children: "\u21B6" }),
+                    /* @__PURE__ */ jsx20("button", { type: "button", className: "btn btn-sm btn-icon", "aria-label": "Redo", title: `Redo (\u21E7${MOD}Z)`, disabled: !history.current.canRedo, onClick: redo, children: "\u21B7" })
+                  ] }),
+                  /* @__PURE__ */ jsx20("button", { type: "button", className: "btn btn-sm btn-icon", "aria-label": "Keyboard shortcuts", title: "Keyboard shortcuts (?)", onClick: () => setShortcuts(true), children: "?" })
+                ] }),
+                relations && /* @__PURE__ */ jsxs19(Panel, { position: "bottom-center", className: "flow-legend", children: [
+                  /* @__PURE__ */ jsx20("span", { className: "flow-legend-item rel-from", title: "Boxes with an arrow into it", children: "from \u2192" }),
+                  /* @__PURE__ */ jsx20("span", { className: "flow-legend-item rel-focus", children: focusLabel }),
+                  /* @__PURE__ */ jsx20("span", { className: "flow-legend-item rel-to", title: "Boxes it has an arrow to", children: "\u2192 to" }),
+                  /* @__PURE__ */ jsx20("span", { className: "flow-legend-item rel-both", title: "Connected both ways, or without a direction", children: "\u21C4 both" }),
+                  focusNode && /* @__PURE__ */ jsx20("span", { className: "flow-legend-hint", children: twoHops ? "two steps out" : `hold ${ALT === "\u2325" ? "\u2325" : "Alt"} for two steps` })
+                ] })
+              ]
+            }
+          ),
+          reconnect && /* @__PURE__ */ jsx20(ReconnectLine, { reconnect, edges, wrapper: wrapper.current }),
+          menu && shownMenu && /* @__PURE__ */ jsx20(ContextMenu, { at: menu.at, title: shownMenu.title, entries: shownMenu.entries, onClose: closeMenu }),
+          shortcuts && /* @__PURE__ */ jsx20(ShortcutsOverlay, { onClose: () => setShortcuts(false) })
+        ]
+      }
+    ),
+    /* @__PURE__ */ jsx20("aside", { className: "arch-panel", "aria-label": "Details", children: panel })
+  ] }) });
+}
+function patchOf(ns, es, direction) {
+  return {
+    nodes: ns.map((n) => ({
+      id: n.id,
+      label: n.data.label,
+      kind: n.data.kind,
+      ...n.data.detail ? { detail: n.data.detail } : {},
+      // Sent even when empty: leaving them out would keep the old text.
+      description: n.data.description ?? "",
+      notes: n.data.notes ?? "",
+      taskIds: n.data.taskIds ?? [],
+      x: Math.round(n.position.x),
+      y: Math.round(n.position.y)
+    })),
+    edges: es.map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      // Always said, even when empty: the daemon keeps an arrow's label
+      // and style when an edit leaves them out.
+      label: e.data?.label ?? "",
+      dashed: Boolean(e.data?.dashed),
+      arrows: e.data?.arrows ?? "end"
+    })),
+    direction
+  };
+}
+function liteEdge(e) {
+  return {
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    ...e.data?.label ? { label: e.data.label } : {},
+    ...e.data?.dashed ? { dashed: true } : {},
+    ...e.data?.arrows ? { arrows: e.data.arrows } : {}
+  };
+}
+function spliced(edges, edge, id) {
+  const [first, second] = splitEdge(liteEdge(edge), id);
+  let out = edges.filter((e) => e.id !== edge.id);
+  for (const half of [first, second]) out = [...out, makeEdge({ id: freeEdgeId(out, half.source, half.target), ...half })];
+  return out;
+}
+function ReconnectLine({ reconnect, edges, wrapper }) {
+  const flow = useReactFlow();
+  const edge = edges.find((e) => e.id === reconnect.edgeId);
+  const rect = wrapper?.getBoundingClientRect();
+  if (!edge || !rect) return null;
+  const fixedId = reconnect.end === "source" ? edge.target : edge.source;
+  const n = flow.getInternalNode(fixedId);
+  if (!n) return null;
+  const c = flow.flowToScreenPosition({ x: n.internals.positionAbsolute.x + (n.measured.width ?? 0) / 2, y: n.internals.positionAbsolute.y + (n.measured.height ?? 0) / 2 });
+  const fixed = { x: c.x - rect.left, y: c.y - rect.top };
+  const moving = { x: reconnect.pointer.x - rect.left, y: reconnect.pointer.y - rect.top };
+  const [from, to] = reconnect.end === "target" ? [fixed, moving] : [moving, fixed];
+  return /* @__PURE__ */ jsxs19("svg", { className: "flow-reconnect", "aria-hidden": "true", children: [
+    /* @__PURE__ */ jsx20("defs", { children: /* @__PURE__ */ jsx20("marker", { id: "flow-reconnect-head", viewBox: "-10 -10 20 20", markerWidth: "14", markerHeight: "14", orient: "auto-start-reverse", refX: "0", refY: "0", children: /* @__PURE__ */ jsx20("polyline", { points: "-5,-4 0,0 -5,4 -5,-4" }) }) }),
+    /* @__PURE__ */ jsx20("line", { x1: from.x, y1: from.y, x2: to.x, y2: to.y, markerEnd: "url(#flow-reconnect-head)" })
+  ] });
+}
 function AddMenu({ onAdd }) {
-  const [open, setOpen] = useState13(false);
-  return /* @__PURE__ */ jsxs17("div", { className: "add-menu", children: [
-    /* @__PURE__ */ jsx18("button", { type: "button", className: "btn btn-sm btn-primary", "aria-expanded": open, onClick: () => setOpen((v) => !v), title: "Or double-click empty canvas", children: "+ Box" }),
-    open && /* @__PURE__ */ jsx18("div", { className: "add-menu-list", role: "menu", children: NODE_KINDS.map((k) => /* @__PURE__ */ jsxs17(
+  const [open, setOpen] = useState14(false);
+  return /* @__PURE__ */ jsxs19("div", { className: "add-menu", children: [
+    /* @__PURE__ */ jsx20("button", { type: "button", className: "btn btn-sm btn-primary", "aria-expanded": open, onClick: () => setOpen((v) => !v), title: "Or double-click or right-click empty canvas", children: "+ Box" }),
+    open && /* @__PURE__ */ jsx20("div", { className: "add-menu-list", role: "menu", children: NODE_KINDS.map((k) => /* @__PURE__ */ jsxs19(
       "button",
       {
         type: "button",
@@ -5184,7 +6179,7 @@ function AddMenu({ onAdd }) {
           onAdd(k);
         },
         children: [
-          /* @__PURE__ */ jsx18("span", { className: classNames("kind-swatch", `kind-${k}`), "aria-hidden": "true", children: KIND_GLYPH[k] }),
+          /* @__PURE__ */ jsx20("span", { className: classNames("kind-swatch", `kind-${k}`), "aria-hidden": "true", children: KIND_GLYPH[k] }),
           KIND_LABEL[k]
         ]
       },
@@ -5192,25 +6187,36 @@ function AddMenu({ onAdd }) {
     )) })
   ] });
 }
-var nodeTypes, edgeTypes, lastClip, FIT;
+var nodeTypes, edgeTypes, lastClip, REL_COLOUR, FIT;
 var init_FlowCanvas = __esm({
   "src/ui/components/FlowCanvas.tsx"() {
     "use strict";
     init_store();
     init_layout();
     init_geometry();
+    init_graph();
+    init_history();
     init_clipboard();
     init_theme();
     init_format();
-    init_plan();
     init_types();
     init_PlanNode();
     init_PlanEdge();
     init_Panels();
+    init_ContextMenu();
+    init_Shortcuts();
+    init_convert();
     init_shared();
     nodeTypes = { plan: PlanNode };
     edgeTypes = { plan: PlanEdge };
     lastClip = null;
+    REL_COLOUR = {
+      out: "var(--rel-to)",
+      out2: "var(--rel-to)",
+      in: "var(--rel-from)",
+      in2: "var(--rel-from)",
+      both: "var(--rel-both)"
+    };
     FIT = { padding: 0.14, maxZoom: 1, minZoom: 0.4, duration: 0 };
   }
 });
@@ -5337,17 +6343,17 @@ var init_architecture = __esm({
 });
 
 // src/ui/views/DiagramsView.tsx
-import { useState as useState14 } from "react";
-import { jsx as jsx19, jsxs as jsxs18 } from "react/jsx-runtime";
+import { useState as useState15 } from "react";
+import { jsx as jsx21, jsxs as jsxs20 } from "react/jsx-runtime";
 function DiagramsView() {
   const plan = usePlan();
   const chosen = useStore((s) => s.diagramId);
   const sessionId = useStore((s) => s.sessionId);
   if (!plan) return null;
   const diagram = plan.diagrams.find((d) => d.id === chosen) ?? plan.diagrams[0] ?? null;
-  return /* @__PURE__ */ jsxs18("div", { className: "arch", children: [
-    /* @__PURE__ */ jsxs18("div", { className: "arch-bar", children: [
-      /* @__PURE__ */ jsx19("nav", { className: "arch-tabs", "aria-label": "Diagrams", children: plan.diagrams.map((d) => /* @__PURE__ */ jsxs18(
+  return /* @__PURE__ */ jsxs20("div", { className: "arch", children: [
+    /* @__PURE__ */ jsxs20("div", { className: "arch-bar", children: [
+      /* @__PURE__ */ jsx21("nav", { className: "arch-tabs", "aria-label": "Diagrams", children: plan.diagrams.map((d) => /* @__PURE__ */ jsxs20(
         "button",
         {
           type: "button",
@@ -5356,25 +6362,23 @@ function DiagramsView() {
           onClick: () => store.set({ diagramId: d.id }),
           children: [
             d.title,
-            /* @__PURE__ */ jsx19("span", { className: "arch-tab-count", children: d.nodes.length })
+            /* @__PURE__ */ jsx21("span", { className: "arch-tab-count", children: d.nodes.length })
           ]
         },
         d.id
       )) }),
-      /* @__PURE__ */ jsx19(NewDiagram, {}),
-      /* @__PURE__ */ jsx19("span", { className: "spacer" }),
-      /* @__PURE__ */ jsxs18("p", { className: "toolbar-hint", children: [
-        "Double-click to add a box \xB7 drag from a box's edge to connect \xB7 \u24D8 for a summary \xB7 ",
-        /* @__PURE__ */ jsx19("kbd", { children: "\u2318C" }),
+      /* @__PURE__ */ jsx21(NewDiagram, {}),
+      /* @__PURE__ */ jsx21("span", { className: "spacer" }),
+      /* @__PURE__ */ jsxs20("p", { className: "toolbar-hint", children: [
+        "Right-click for everything \xB7 ",
+        /* @__PURE__ */ jsx21("kbd", { children: "Tab" }),
+        " adds the next box \xB7 drag from a box's edge to connect \xB7 hover to see its connections \xB7",
         " ",
-        /* @__PURE__ */ jsx19("kbd", { children: "\u2318V" }),
-        " copy and paste \xB7",
-        " ",
-        /* @__PURE__ */ jsx19("kbd", { children: "\u232B" }),
-        " deletes"
+        /* @__PURE__ */ jsx21("kbd", { children: "?" }),
+        " all shortcuts"
       ] })
     ] }),
-    diagram ? /* @__PURE__ */ jsx19(
+    diagram ? /* @__PURE__ */ jsx21(
       DiagramEditor,
       {
         diagram,
@@ -5383,10 +6387,10 @@ function DiagramsView() {
           const plan2 = await store.commit([{ op: "upsert_diagram", id: diagram.id, ...patch }], sessionId);
           return plan2?.diagrams.find((d) => d.id === diagram.id)?.rev ?? null;
         },
-        aside: /* @__PURE__ */ jsx19(DiagramPanel, { plan, diagram })
+        aside: /* @__PURE__ */ jsx21(DiagramPanel, { plan, diagram })
       },
       `${sessionId}:${diagram.id}`
-    ) : /* @__PURE__ */ jsx19("div", { className: "view-pad", children: /* @__PURE__ */ jsx19(
+    ) : /* @__PURE__ */ jsx21("div", { className: "view-pad", children: /* @__PURE__ */ jsx21(
       EmptyState,
       {
         title: "No diagrams yet",
@@ -5396,7 +6400,7 @@ function DiagramsView() {
   ] });
 }
 function NewDiagram() {
-  const [open, setOpen] = useState14(false);
+  const [open, setOpen] = useState15(false);
   const add = async (t) => {
     setOpen(false);
     const before = new Set(store.getState().session?.plan?.diagrams.map((d) => d.id));
@@ -5405,27 +6409,27 @@ function NewDiagram() {
       if (made) store.set({ diagramId: made.id });
     }
   };
-  return /* @__PURE__ */ jsxs18("div", { className: "add-menu", children: [
-    /* @__PURE__ */ jsx19("button", { type: "button", className: "btn btn-sm", "aria-expanded": open, onClick: () => setOpen((v) => !v), children: "+ New diagram" }),
-    open && /* @__PURE__ */ jsx19("div", { className: "add-menu-list", role: "menu", children: TEMPLATES.map((t) => /* @__PURE__ */ jsx19("button", { type: "button", role: "menuitem", className: "add-menu-item", onClick: () => void add(t), children: t.label }, t.label)) })
+  return /* @__PURE__ */ jsxs20("div", { className: "add-menu", children: [
+    /* @__PURE__ */ jsx21("button", { type: "button", className: "btn btn-sm", "aria-expanded": open, onClick: () => setOpen((v) => !v), children: "+ New diagram" }),
+    open && /* @__PURE__ */ jsx21("div", { className: "add-menu-list", role: "menu", children: TEMPLATES.map((t) => /* @__PURE__ */ jsx21("button", { type: "button", role: "menuitem", className: "add-menu-item", onClick: () => void add(t), children: t.label }, t.label)) })
   ] });
 }
 function DiagramPanel({ plan, diagram }) {
-  const [confirming, setConfirming] = useState14(false);
+  const [confirming, setConfirming] = useState15(false);
   const index = plan.diagrams.findIndex((d) => d.id === diagram.id);
   const linked = diagram.nodes.filter((n) => n.taskIds?.length).length;
-  return /* @__PURE__ */ jsxs18("div", { className: "arch-panel-body", "aria-label": `About ${diagram.title}`, children: [
-    /* @__PURE__ */ jsxs18("header", { className: "panel-top", children: [
-      /* @__PURE__ */ jsx19("span", { className: "panel-kicker", children: "Diagram" }),
-      /* @__PURE__ */ jsx19("span", { className: "item-id", children: diagram.id }),
-      /* @__PURE__ */ jsx19("span", { className: "spacer" }),
-      /* @__PURE__ */ jsxs18("span", { className: "muted panel-meta", children: [
+  return /* @__PURE__ */ jsxs20("div", { className: "arch-panel-body", "aria-label": `About ${diagram.title}`, children: [
+    /* @__PURE__ */ jsxs20("header", { className: "panel-top", children: [
+      /* @__PURE__ */ jsx21("span", { className: "panel-kicker", children: "Diagram" }),
+      /* @__PURE__ */ jsx21("span", { className: "item-id", children: diagram.id }),
+      /* @__PURE__ */ jsx21("span", { className: "spacer" }),
+      /* @__PURE__ */ jsxs20("span", { className: "muted panel-meta", children: [
         diagram.updatedBy === "user" ? "edited by you" : "by Claude",
         " \xB7 ",
         relativeTime(diagram.updatedAt)
       ] })
     ] }),
-    /* @__PURE__ */ jsx19(
+    /* @__PURE__ */ jsx21(
       InlineText,
       {
         as: "h2",
@@ -5435,7 +6439,7 @@ function DiagramPanel({ plan, diagram }) {
         onSave: (title) => store.op({ op: "upsert_diagram", id: diagram.id, title })
       }
     ),
-    /* @__PURE__ */ jsx19(
+    /* @__PURE__ */ jsx21(
       MarkdownField,
       {
         value: diagram.caption ?? "",
@@ -5446,7 +6450,7 @@ function DiagramPanel({ plan, diagram }) {
         onSave: (caption) => store.op({ op: "upsert_diagram", id: diagram.id, caption })
       }
     ),
-    /* @__PURE__ */ jsxs18("p", { className: "panel-hint", children: [
+    /* @__PURE__ */ jsxs20("p", { className: "panel-hint", children: [
       diagram.nodes.length,
       " boxes, ",
       diagram.edges.length,
@@ -5454,7 +6458,7 @@ function DiagramPanel({ plan, diagram }) {
       linked ? `, ${linked} tracking tasks` : "",
       ". Select a box to edit its details, decisions and the tasks that build it."
     ] }),
-    /* @__PURE__ */ jsx19("div", { className: "row-actions", children: /* @__PURE__ */ jsx19(
+    /* @__PURE__ */ jsx21("div", { className: "row-actions", children: /* @__PURE__ */ jsx21(
       "button",
       {
         type: "button",
@@ -5467,17 +6471,17 @@ function DiagramPanel({ plan, diagram }) {
         children: "Copy as Markdown"
       }
     ) }),
-    /* @__PURE__ */ jsx19("ul", { className: "kind-legend", "aria-label": "Box kinds", children: NODE_KINDS.map((k) => /* @__PURE__ */ jsxs18("li", { children: [
-      /* @__PURE__ */ jsx19("span", { className: classNames("kind-swatch", `kind-${k}`), "aria-hidden": "true", children: KIND_GLYPH[k] }),
+    /* @__PURE__ */ jsx21("ul", { className: "kind-legend", "aria-label": "Box kinds", children: NODE_KINDS.map((k) => /* @__PURE__ */ jsxs20("li", { children: [
+      /* @__PURE__ */ jsx21("span", { className: classNames("kind-swatch", `kind-${k}`), "aria-hidden": "true", children: KIND_GLYPH[k] }),
       KIND_LABEL[k]
     ] }, k)) }),
-    /* @__PURE__ */ jsxs18("div", { className: "field", children: [
-      /* @__PURE__ */ jsx19("span", { className: "field-label", children: "Comments" }),
-      /* @__PURE__ */ jsx19(ThreadPanel, { target: { kind: "diagram", id: diagram.id }, label: diagram.title })
+    /* @__PURE__ */ jsxs20("div", { className: "field", children: [
+      /* @__PURE__ */ jsx21("span", { className: "field-label", children: "Comments" }),
+      /* @__PURE__ */ jsx21(ThreadPanel, { target: { kind: "diagram", id: diagram.id }, label: diagram.title })
     ] }),
-    /* @__PURE__ */ jsxs18("footer", { className: "panel-foot", children: [
-      /* @__PURE__ */ jsx19("button", { type: "button", className: "link", disabled: index <= 0, onClick: () => void store.op({ op: "move_diagram", id: diagram.id, index: index - 1 }), children: "Move left" }),
-      /* @__PURE__ */ jsx19(
+    /* @__PURE__ */ jsxs20("footer", { className: "panel-foot", children: [
+      /* @__PURE__ */ jsx21("button", { type: "button", className: "link", disabled: index <= 0, onClick: () => void store.op({ op: "move_diagram", id: diagram.id, index: index - 1 }), children: "Move left" }),
+      /* @__PURE__ */ jsx21(
         "button",
         {
           type: "button",
@@ -5487,12 +6491,12 @@ function DiagramPanel({ plan, diagram }) {
           children: "Move right"
         }
       ),
-      /* @__PURE__ */ jsx19("span", { className: "spacer" }),
-      confirming ? /* @__PURE__ */ jsxs18("span", { className: "item-confirm", children: [
+      /* @__PURE__ */ jsx21("span", { className: "spacer" }),
+      confirming ? /* @__PURE__ */ jsxs20("span", { className: "item-confirm", children: [
         "Remove?",
-        /* @__PURE__ */ jsx19("button", { type: "button", className: "link is-danger", onClick: () => void store.op({ op: "remove", kind: "diagram", id: diagram.id }), children: "Remove" }),
-        /* @__PURE__ */ jsx19("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
-      ] }) : /* @__PURE__ */ jsx19("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Remove diagram" })
+        /* @__PURE__ */ jsx21("button", { type: "button", className: "link is-danger", onClick: () => void store.op({ op: "remove", kind: "diagram", id: diagram.id }), children: "Remove" }),
+        /* @__PURE__ */ jsx21("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
+      ] }) : /* @__PURE__ */ jsx21("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Remove diagram" })
     ] })
   ] });
 }
@@ -5543,28 +6547,28 @@ var init_DiagramsView = __esm({
 });
 
 // src/ui/views/TasksView.tsx
-import { useMemo as useMemo3, useState as useState15 } from "react";
-import { Fragment as Fragment4, jsx as jsx20, jsxs as jsxs19 } from "react/jsx-runtime";
+import { useMemo as useMemo3, useState as useState16 } from "react";
+import { Fragment as Fragment4, jsx as jsx22, jsxs as jsxs21 } from "react/jsx-runtime";
 function TasksView() {
   const plan = usePlan();
   const mode = useStore((s) => s.taskMode);
   const hideDone = useStore((s) => s.hideDone);
   if (!plan) return null;
   const counts = countTasks(plan);
-  return /* @__PURE__ */ jsxs19("div", { className: "view-pad", children: [
-    /* @__PURE__ */ jsxs19("div", { className: "toolbar", children: [
-      /* @__PURE__ */ jsxs19("div", { className: "segmented", role: "group", "aria-label": "Task layout", children: [
-        /* @__PURE__ */ jsx20("button", { type: "button", className: classNames("seg", mode === "outline" && "is-active"), "aria-pressed": mode === "outline", onClick: () => store.setTaskMode("outline"), children: "Outline" }),
-        /* @__PURE__ */ jsx20("button", { type: "button", className: classNames("seg", mode === "board" && "is-active"), "aria-pressed": mode === "board", onClick: () => store.setTaskMode("board"), children: "Board" })
+  return /* @__PURE__ */ jsxs21("div", { className: "view-pad", children: [
+    /* @__PURE__ */ jsxs21("div", { className: "toolbar", children: [
+      /* @__PURE__ */ jsxs21("div", { className: "segmented", role: "group", "aria-label": "Task layout", children: [
+        /* @__PURE__ */ jsx22("button", { type: "button", className: classNames("seg", mode === "outline" && "is-active"), "aria-pressed": mode === "outline", onClick: () => store.setTaskMode("outline"), children: "Outline" }),
+        /* @__PURE__ */ jsx22("button", { type: "button", className: classNames("seg", mode === "board" && "is-active"), "aria-pressed": mode === "board", onClick: () => store.setTaskMode("board"), children: "Board" })
       ] }),
-      mode === "outline" && /* @__PURE__ */ jsxs19("label", { className: "toggle", children: [
-        /* @__PURE__ */ jsx20("input", { type: "checkbox", checked: hideDone, onChange: () => store.toggleHideDone() }),
+      mode === "outline" && /* @__PURE__ */ jsxs21("label", { className: "toggle", children: [
+        /* @__PURE__ */ jsx22("input", { type: "checkbox", checked: hideDone, onChange: () => store.toggleHideDone() }),
         "Hide done"
       ] }),
-      /* @__PURE__ */ jsx20("span", { className: "spacer" }),
-      /* @__PURE__ */ jsxs19("span", { className: "toolbar-progress", children: [
-        /* @__PURE__ */ jsx20(ProgressBar, { counts }),
-        /* @__PURE__ */ jsxs19("span", { className: "muted", children: [
+      /* @__PURE__ */ jsx22("span", { className: "spacer" }),
+      /* @__PURE__ */ jsxs21("span", { className: "toolbar-progress", children: [
+        /* @__PURE__ */ jsx22(ProgressBar, { counts }),
+        /* @__PURE__ */ jsxs21("span", { className: "muted", children: [
           counts.done,
           "/",
           counts.total,
@@ -5572,18 +6576,18 @@ function TasksView() {
         ] })
       ] })
     ] }),
-    plan.tasks.length === 0 ? /* @__PURE__ */ jsxs19(Fragment4, { children: [
-      /* @__PURE__ */ jsx20(EmptyState, { title: "No tasks yet", hint: "Break the work down here, or ask Claude to publish a task tree with the plan." }),
-      /* @__PURE__ */ jsx20(AddField, { placeholder: "Add a task\u2026", label: "New task", onAdd: (title) => store.op({ op: "upsert_task", title }) })
-    ] }) : mode === "outline" ? /* @__PURE__ */ jsx20(Outline, { plan, hideDone }) : /* @__PURE__ */ jsx20(Board, { plan })
+    plan.tasks.length === 0 ? /* @__PURE__ */ jsxs21(Fragment4, { children: [
+      /* @__PURE__ */ jsx22(EmptyState, { title: "No tasks yet", hint: "Break the work down here, or ask Claude to publish a task tree with the plan." }),
+      /* @__PURE__ */ jsx22(AddField, { placeholder: "Add a task\u2026", label: "New task", onAdd: (title) => store.op({ op: "upsert_task", title }) })
+    ] }) : mode === "outline" ? /* @__PURE__ */ jsx22(Outline, { plan, hideDone }) : /* @__PURE__ */ jsx22(Board, { plan })
   ] });
 }
 function Outline({ plan, hideDone }) {
   const collapsed = useStore((s) => s.collapsedTasks);
-  const [dragging, setDragging] = useState15(null);
-  const [hint, setHint] = useState15(null);
-  const [expanded, setExpanded] = useState15(null);
-  const [addingUnder, setAddingUnder] = useState15(null);
+  const [dragging, setDragging] = useState16(null);
+  const [hint, setHint] = useState16(null);
+  const [expanded, setExpanded] = useState16(null);
+  const [addingUnder, setAddingUnder] = useState16(null);
   const partsByTask = useMemo3(() => {
     const map = /* @__PURE__ */ new Map();
     for (const d of plan.diagrams) {
@@ -5630,8 +6634,8 @@ function Outline({ plan, hideDone }) {
     if (zone === "inside" && collapsed.includes(target.id)) store.toggleTaskCollapsed(target.id);
     void store.op(op);
   };
-  return /* @__PURE__ */ jsxs19("div", { className: "task-outline", children: [
-    /* @__PURE__ */ jsx20("div", { className: "outline-rows", role: "tree", "aria-label": "Task tree", children: rows.map(({ task, depth, number }) => /* @__PURE__ */ jsx20(
+  return /* @__PURE__ */ jsxs21("div", { className: "task-outline", children: [
+    /* @__PURE__ */ jsx22("div", { className: "outline-rows", role: "tree", "aria-label": "Task tree", children: rows.map(({ task, depth, number }) => /* @__PURE__ */ jsx22(
       TaskRow,
       {
         plan,
@@ -5662,14 +6666,14 @@ function Outline({ plan, hideDone }) {
       },
       task.id
     )) }),
-    /* @__PURE__ */ jsx20(AddField, { placeholder: "Add a top-level task\u2026", label: "New top-level task", onAdd: (title) => store.op({ op: "upsert_task", title }) }),
-    /* @__PURE__ */ jsx20("p", { className: "outline-help muted", children: "Drag a row onto another to nest it, or to its top or bottom edge to place it beside. With a row focused: Alt+\u2191/\u2193 reorders, Alt+\u2192 nests under the row above, Alt+\u2190 moves it out a level." })
+    /* @__PURE__ */ jsx22(AddField, { placeholder: "Add a top-level task\u2026", label: "New top-level task", onAdd: (title) => store.op({ op: "upsert_task", title }) }),
+    /* @__PURE__ */ jsx22("p", { className: "outline-help muted", children: "Drag a row onto another to nest it, or to its top or bottom edge to place it beside. With a row focused: Alt+\u2191/\u2193 reorders, Alt+\u2192 nests under the row above, Alt+\u2190 moves it out a level." })
   ] });
 }
 function TaskRow(props) {
   const { plan, task, depth, number, expanded } = props;
   const collapsed = useStore((s) => s.collapsedTasks.includes(task.id));
-  const [comments, setComments] = useState15(false);
+  const [comments, setComments] = useState16(false);
   const kids = childrenOf(plan, task.id);
   const sub = kids.length ? countTasks({ tasks: [task, ...descendants(plan, task.id)] }) : null;
   const threads = useThreads({ kind: "task", id: task.id });
@@ -5700,8 +6704,8 @@ function TaskRow(props) {
       window.requestAnimationFrame(() => document.querySelector(`#task-${task.id} .task-line`)?.focus());
     });
   };
-  return /* @__PURE__ */ jsxs19(Focusable, { kind: "task", id: task.id, as: "div", className: classNames("task", `is-${task.status}`, props.dragging && "is-dragging"), children: [
-    /* @__PURE__ */ jsxs19(
+  return /* @__PURE__ */ jsxs21(Focusable, { kind: "task", id: task.id, as: "div", className: classNames("task", `is-${task.status}`, props.dragging && "is-dragging"), children: [
+    /* @__PURE__ */ jsxs21(
       "div",
       {
         className: classNames("task-line", props.dropZone && `drop-${props.dropZone}`),
@@ -5719,8 +6723,8 @@ function TaskRow(props) {
         onDrop: props.onDrop,
         onKeyDown,
         children: [
-          /* @__PURE__ */ jsx20("span", { className: "drag-handle", "aria-hidden": "true", title: "Drag to move", children: "\u22EE\u22EE" }),
-          kids.length ? /* @__PURE__ */ jsx20(
+          /* @__PURE__ */ jsx22("span", { className: "drag-handle", "aria-hidden": "true", title: "Drag to move", children: "\u22EE\u22EE" }),
+          kids.length ? /* @__PURE__ */ jsx22(
             "button",
             {
               type: "button",
@@ -5729,10 +6733,10 @@ function TaskRow(props) {
               onClick: () => store.toggleTaskCollapsed(task.id),
               children: collapsed ? "\u25B8" : "\u25BE"
             }
-          ) : /* @__PURE__ */ jsx20("span", { className: "twisty is-leaf", "aria-hidden": "true" }),
-          /* @__PURE__ */ jsx20(StatusDot, { task }),
-          /* @__PURE__ */ jsx20("span", { className: "task-num", children: number }),
-          /* @__PURE__ */ jsx20(
+          ) : /* @__PURE__ */ jsx22("span", { className: "twisty is-leaf", "aria-hidden": "true" }),
+          /* @__PURE__ */ jsx22(StatusDot, { task }),
+          /* @__PURE__ */ jsx22("span", { className: "task-num", children: number }),
+          /* @__PURE__ */ jsx22(
             InlineText,
             {
               className: "task-title",
@@ -5741,19 +6745,19 @@ function TaskRow(props) {
               onSave: (title) => store.op({ op: "upsert_task", id: task.id, title })
             }
           ),
-          /* @__PURE__ */ jsxs19("span", { className: "task-badges", children: [
-            sub && /* @__PURE__ */ jsxs19("span", { className: "chip", title: `${sub.done} of ${sub.total} subtasks done`, children: [
+          /* @__PURE__ */ jsxs21("span", { className: "task-badges", children: [
+            sub && /* @__PURE__ */ jsxs21("span", { className: "chip", title: `${sub.done} of ${sub.total} subtasks done`, children: [
               sub.done,
               "/",
               sub.total
             ] }),
-            task.note && /* @__PURE__ */ jsx20("span", { className: classNames("chip is-note", task.status === "blocked" && "is-warning"), title: task.note, children: task.note }),
-            task.files?.length ? /* @__PURE__ */ jsxs19("span", { className: "chip", title: task.files.join("\n"), children: [
+            task.note && /* @__PURE__ */ jsx22("span", { className: classNames("chip is-note", task.status === "blocked" && "is-warning"), title: task.note, children: task.note }),
+            task.files?.length ? /* @__PURE__ */ jsxs21("span", { className: "chip", title: task.files.join("\n"), children: [
               task.files.length,
               " file",
               task.files.length === 1 ? "" : "s"
             ] }) : null,
-            parts.map(({ d, n }) => /* @__PURE__ */ jsxs19(
+            parts.map(({ d, n }) => /* @__PURE__ */ jsxs21(
               "button",
               {
                 type: "button",
@@ -5761,25 +6765,25 @@ function TaskRow(props) {
                 title: `Builds "${n.label}" in ${d.title} \u2014 show it`,
                 onClick: () => store.focus("node", `${d.id}:${n.id}`),
                 children: [
-                  /* @__PURE__ */ jsx20("span", { "aria-hidden": "true", children: KIND_GLYPH[n.kind] }),
+                  /* @__PURE__ */ jsx22("span", { "aria-hidden": "true", children: KIND_GLYPH[n.kind] }),
                   " ",
                   n.label
                 ]
               },
               `${d.id}:${n.id}`
             )),
-            task.createdBy === "user" && /* @__PURE__ */ jsx20("span", { className: "chip is-you", children: "added by you" })
+            task.createdBy === "user" && /* @__PURE__ */ jsx22("span", { className: "chip is-you", children: "added by you" })
           ] }),
-          /* @__PURE__ */ jsx20("span", { className: "spacer" }),
-          /* @__PURE__ */ jsxs19("span", { className: "task-actions", children: [
-            /* @__PURE__ */ jsx20("button", { type: "button", className: "icon-btn is-tiny", title: "Add subtask", "aria-label": `Add a subtask to ${task.title}`, onClick: props.onAddSubtask, children: /* @__PURE__ */ jsx20("span", { "aria-hidden": "true", children: "\uFF0B" }) }),
-            /* @__PURE__ */ jsx20(MoveButton, { op: moves.outdent, glyph: "\u2190", label: `Move ${task.title} out a level` }),
-            /* @__PURE__ */ jsx20(MoveButton, { op: moves.indent, glyph: "\u2192", label: `Nest ${task.title} under the task above` }),
-            /* @__PURE__ */ jsx20(MoveButton, { op: moves.up, glyph: "\u2191", label: `Move ${task.title} up` }),
-            /* @__PURE__ */ jsx20(MoveButton, { op: moves.down, glyph: "\u2193", label: `Move ${task.title} down` })
+          /* @__PURE__ */ jsx22("span", { className: "spacer" }),
+          /* @__PURE__ */ jsxs21("span", { className: "task-actions", children: [
+            /* @__PURE__ */ jsx22("button", { type: "button", className: "icon-btn is-tiny", title: "Add subtask", "aria-label": `Add a subtask to ${task.title}`, onClick: props.onAddSubtask, children: /* @__PURE__ */ jsx22("span", { "aria-hidden": "true", children: "\uFF0B" }) }),
+            /* @__PURE__ */ jsx22(MoveButton, { op: moves.outdent, glyph: "\u2190", label: `Move ${task.title} out a level` }),
+            /* @__PURE__ */ jsx22(MoveButton, { op: moves.indent, glyph: "\u2192", label: `Nest ${task.title} under the task above` }),
+            /* @__PURE__ */ jsx22(MoveButton, { op: moves.up, glyph: "\u2191", label: `Move ${task.title} up` }),
+            /* @__PURE__ */ jsx22(MoveButton, { op: moves.down, glyph: "\u2193", label: `Move ${task.title} down` })
           ] }),
-          /* @__PURE__ */ jsx20(CommentToggle, { target, label: task.title, open: comments, onToggle: () => setComments((v) => !v) }),
-          /* @__PURE__ */ jsx20(
+          /* @__PURE__ */ jsx22(CommentToggle, { target, label: task.title, open: comments, onToggle: () => setComments((v) => !v) }),
+          /* @__PURE__ */ jsx22(
             "button",
             {
               type: "button",
@@ -5788,17 +6792,17 @@ function TaskRow(props) {
               title: "Details",
               "aria-label": `Details of ${task.title}`,
               onClick: props.onToggleExpanded,
-              children: /* @__PURE__ */ jsx20("span", { "aria-hidden": "true", children: expanded ? "\u2303" : "\u2304" })
+              children: /* @__PURE__ */ jsx22("span", { "aria-hidden": "true", children: expanded ? "\u2303" : "\u2304" })
             }
           )
         ]
       }
     ),
-    (expanded || comments) && /* @__PURE__ */ jsxs19("div", { className: "task-detail", style: { ["--depth"]: depth }, children: [
-      expanded && /* @__PURE__ */ jsx20(TaskDetail, { plan, task }),
-      comments && /* @__PURE__ */ jsx20(ThreadPanel, { target, label: task.title })
+    (expanded || comments) && /* @__PURE__ */ jsxs21("div", { className: "task-detail", style: { ["--depth"]: depth }, children: [
+      expanded && /* @__PURE__ */ jsx22(TaskDetail, { plan, task }),
+      comments && /* @__PURE__ */ jsx22(ThreadPanel, { target, label: task.title })
     ] }),
-    props.addingSubtask && /* @__PURE__ */ jsx20("div", { className: "task-add-sub", style: { ["--depth"]: depth + 1 }, children: /* @__PURE__ */ jsx20(
+    props.addingSubtask && /* @__PURE__ */ jsx22("div", { className: "task-add-sub", style: { ["--depth"]: depth + 1 }, children: /* @__PURE__ */ jsx22(
       AddField,
       {
         placeholder: `Subtask of "${task.title}"\u2026`,
@@ -5815,16 +6819,16 @@ function TaskRow(props) {
   ] });
 }
 function TaskDetail({ plan, task }) {
-  const [confirming, setConfirming] = useState15(false);
+  const [confirming, setConfirming] = useState16(false);
   const subtasks = descendants(plan, task.id).length;
-  return /* @__PURE__ */ jsxs19("div", { className: "task-detail-body", children: [
-    /* @__PURE__ */ jsxs19("div", { className: "field-row", children: [
-      /* @__PURE__ */ jsx20("span", { className: "field-label", children: "Status" }),
-      /* @__PURE__ */ jsx20(StatusPicker, { task })
+  return /* @__PURE__ */ jsxs21("div", { className: "task-detail-body", children: [
+    /* @__PURE__ */ jsxs21("div", { className: "field-row", children: [
+      /* @__PURE__ */ jsx22("span", { className: "field-label", children: "Status" }),
+      /* @__PURE__ */ jsx22(StatusPicker, { task })
     ] }),
-    /* @__PURE__ */ jsxs19("div", { className: "field-row", children: [
-      /* @__PURE__ */ jsx20("span", { className: "field-label", children: "Note" }),
-      /* @__PURE__ */ jsx20(
+    /* @__PURE__ */ jsxs21("div", { className: "field-row", children: [
+      /* @__PURE__ */ jsx22("span", { className: "field-label", children: "Note" }),
+      /* @__PURE__ */ jsx22(
         InlineText,
         {
           className: "task-note",
@@ -5835,9 +6839,9 @@ function TaskDetail({ plan, task }) {
         }
       )
     ] }),
-    /* @__PURE__ */ jsxs19("div", { className: "field-col", children: [
-      /* @__PURE__ */ jsx20("span", { className: "field-label", children: "Detail" }),
-      /* @__PURE__ */ jsx20(
+    /* @__PURE__ */ jsxs21("div", { className: "field-col", children: [
+      /* @__PURE__ */ jsx22("span", { className: "field-label", children: "Detail" }),
+      /* @__PURE__ */ jsx22(
         MarkdownField,
         {
           value: task.detail ?? "",
@@ -5848,35 +6852,35 @@ function TaskDetail({ plan, task }) {
         }
       )
     ] }),
-    /* @__PURE__ */ jsxs19("div", { className: "field-col", children: [
-      /* @__PURE__ */ jsx20("span", { className: "field-label", children: "Files" }),
-      /* @__PURE__ */ jsx20(FilesField, { task })
+    /* @__PURE__ */ jsxs21("div", { className: "field-col", children: [
+      /* @__PURE__ */ jsx22("span", { className: "field-label", children: "Files" }),
+      /* @__PURE__ */ jsx22(FilesField, { task })
     ] }),
-    /* @__PURE__ */ jsxs19("div", { className: "task-detail-foot", children: [
-      /* @__PURE__ */ jsxs19("span", { className: "muted", children: [
+    /* @__PURE__ */ jsxs21("div", { className: "task-detail-foot", children: [
+      /* @__PURE__ */ jsxs21("span", { className: "muted", children: [
         task.id,
         " \xB7 ",
         task.createdBy === "user" ? "added by you" : "added by Claude"
       ] }),
-      /* @__PURE__ */ jsx20("span", { className: "spacer" }),
-      confirming ? /* @__PURE__ */ jsxs19("span", { className: "item-confirm", children: [
+      /* @__PURE__ */ jsx22("span", { className: "spacer" }),
+      confirming ? /* @__PURE__ */ jsxs21("span", { className: "item-confirm", children: [
         "Remove",
         subtasks ? ` with ${subtasks} subtask(s)` : "",
         "?",
-        /* @__PURE__ */ jsx20("button", { type: "button", className: "link is-danger", onClick: () => void store.op({ op: "remove", kind: "task", id: task.id }), children: "Remove" }),
-        /* @__PURE__ */ jsx20("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
-      ] }) : /* @__PURE__ */ jsx20("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Remove task" })
+        /* @__PURE__ */ jsx22("button", { type: "button", className: "link is-danger", onClick: () => void store.op({ op: "remove", kind: "task", id: task.id }), children: "Remove" }),
+        /* @__PURE__ */ jsx22("button", { type: "button", className: "link", onClick: () => setConfirming(false), children: "Keep" })
+      ] }) : /* @__PURE__ */ jsx22("button", { type: "button", className: "link is-danger", onClick: () => setConfirming(true), children: "Remove task" })
     ] })
   ] });
 }
 function FilesField({ task }) {
-  const [editing, setEditing] = useState15(false);
-  const [draft, setDraft] = useState15((task.files ?? []).join("\n"));
+  const [editing, setEditing] = useState16(false);
+  const [draft, setDraft] = useState16((task.files ?? []).join("\n"));
   if (!editing) {
-    return /* @__PURE__ */ jsxs19("div", { className: "files", children: [
-      task.files?.length ? /* @__PURE__ */ jsx20("ul", { className: "plain-list mono", children: task.files.map((f) => /* @__PURE__ */ jsx20("li", { children: f }, f)) }) : /* @__PURE__ */ jsx20("span", { className: "muted", children: "None listed." }),
+    return /* @__PURE__ */ jsxs21("div", { className: "files", children: [
+      task.files?.length ? /* @__PURE__ */ jsx22("ul", { className: "plain-list mono", children: task.files.map((f) => /* @__PURE__ */ jsx22("li", { children: f }, f)) }) : /* @__PURE__ */ jsx22("span", { className: "muted", children: "None listed." }),
       " ",
-      /* @__PURE__ */ jsx20(
+      /* @__PURE__ */ jsx22(
         "button",
         {
           type: "button",
@@ -5890,13 +6894,13 @@ function FilesField({ task }) {
       )
     ] });
   }
-  return /* @__PURE__ */ jsxs19("div", { className: "md-field is-editing", children: [
-    /* @__PURE__ */ jsx20("textarea", { className: "input mono", rows: 4, value: draft, "aria-label": "Files, one per line", onChange: (e) => setDraft(e.target.value) }),
-    /* @__PURE__ */ jsxs19("div", { className: "md-field-foot", children: [
-      /* @__PURE__ */ jsx20("span", { className: "muted", children: "One path per line" }),
-      /* @__PURE__ */ jsx20("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx20("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setEditing(false), children: "Cancel" }),
-      /* @__PURE__ */ jsx20(
+  return /* @__PURE__ */ jsxs21("div", { className: "md-field is-editing", children: [
+    /* @__PURE__ */ jsx22("textarea", { className: "input mono", rows: 4, value: draft, "aria-label": "Files, one per line", onChange: (e) => setDraft(e.target.value) }),
+    /* @__PURE__ */ jsxs21("div", { className: "md-field-foot", children: [
+      /* @__PURE__ */ jsx22("span", { className: "muted", children: "One path per line" }),
+      /* @__PURE__ */ jsx22("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx22("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setEditing(false), children: "Cancel" }),
+      /* @__PURE__ */ jsx22(
         "button",
         {
           type: "button",
@@ -5912,11 +6916,11 @@ function FilesField({ task }) {
   ] });
 }
 function MoveButton({ op, glyph, label }) {
-  return /* @__PURE__ */ jsx20("button", { type: "button", className: "icon-btn is-tiny", disabled: !op, title: label, "aria-label": label, onClick: () => op && void store.op(op), children: /* @__PURE__ */ jsx20("span", { "aria-hidden": "true", children: glyph }) });
+  return /* @__PURE__ */ jsx22("button", { type: "button", className: "icon-btn is-tiny", disabled: !op, title: label, "aria-label": label, onClick: () => op && void store.op(op), children: /* @__PURE__ */ jsx22("span", { "aria-hidden": "true", children: glyph }) });
 }
 function StatusDot({ task }) {
   const next = NEXT_STATUS[task.status];
-  return /* @__PURE__ */ jsx20(
+  return /* @__PURE__ */ jsx22(
     "button",
     {
       type: "button",
@@ -5924,12 +6928,12 @@ function StatusDot({ task }) {
       title: `${STATUS_LABEL[task.status]} \u2014 click to mark ${STATUS_LABEL[next].toLowerCase()}`,
       "aria-label": `${task.title}: ${STATUS_LABEL[task.status]}. Mark ${STATUS_LABEL[next].toLowerCase()}`,
       onClick: () => void store.op({ op: "upsert_task", id: task.id, status: next }),
-      children: /* @__PURE__ */ jsx20("span", { "aria-hidden": "true", children: STATUS_GLYPH[task.status] })
+      children: /* @__PURE__ */ jsx22("span", { "aria-hidden": "true", children: STATUS_GLYPH[task.status] })
     }
   );
 }
 function StatusPicker({ task }) {
-  return /* @__PURE__ */ jsx20("div", { className: "segmented", role: "radiogroup", "aria-label": `Status of ${task.title}`, children: TASK_STATUSES.map((s) => /* @__PURE__ */ jsx20(
+  return /* @__PURE__ */ jsx22("div", { className: "segmented", role: "radiogroup", "aria-label": `Status of ${task.title}`, children: TASK_STATUSES.map((s) => /* @__PURE__ */ jsx22(
     "button",
     {
       type: "button",
@@ -5943,11 +6947,11 @@ function StatusPicker({ task }) {
   )) });
 }
 function Board({ plan }) {
-  const [over, setOver] = useState15(null);
+  const [over, setOver] = useState16(null);
   const leaves = outline(plan).map((r) => r.task).filter((t) => !hasChildren(plan, t.id));
-  return /* @__PURE__ */ jsx20("div", { className: "board", children: TASK_STATUSES.map((status) => {
+  return /* @__PURE__ */ jsx22("div", { className: "board", children: TASK_STATUSES.map((status) => {
     const cards = leaves.filter((t) => t.status === status);
-    return /* @__PURE__ */ jsxs19(
+    return /* @__PURE__ */ jsxs21(
       "section",
       {
         className: classNames("board-col", `is-${status}`, over === status && "is-over"),
@@ -5966,14 +6970,14 @@ function Board({ plan }) {
           if (task && task.status !== status) void store.op({ op: "upsert_task", id, status });
         },
         children: [
-          /* @__PURE__ */ jsxs19("header", { className: "board-col-head", children: [
-            /* @__PURE__ */ jsx20("span", { className: classNames("status-dot is-static", `is-${status}`), "aria-hidden": "true", children: STATUS_GLYPH[status] }),
-            /* @__PURE__ */ jsx20("h2", { children: STATUS_LABEL[status] }),
-            /* @__PURE__ */ jsx20("span", { className: "board-count", children: cards.length })
+          /* @__PURE__ */ jsxs21("header", { className: "board-col-head", children: [
+            /* @__PURE__ */ jsx22("span", { className: classNames("status-dot is-static", `is-${status}`), "aria-hidden": "true", children: STATUS_GLYPH[status] }),
+            /* @__PURE__ */ jsx22("h2", { children: STATUS_LABEL[status] }),
+            /* @__PURE__ */ jsx22("span", { className: "board-count", children: cards.length })
           ] }),
-          /* @__PURE__ */ jsxs19("div", { className: "board-cards", children: [
-            cards.map((task) => /* @__PURE__ */ jsx20(BoardCard, { plan, task }, task.id)),
-            cards.length === 0 && /* @__PURE__ */ jsx20("p", { className: "board-empty", children: "Drop tasks here" })
+          /* @__PURE__ */ jsxs21("div", { className: "board-cards", children: [
+            cards.map((task) => /* @__PURE__ */ jsx22(BoardCard, { plan, task }, task.id)),
+            cards.length === 0 && /* @__PURE__ */ jsx22("p", { className: "board-empty", children: "Drop tasks here" })
           ] })
         ]
       },
@@ -5989,7 +6993,7 @@ function BoardCard({ plan, task }) {
     cursor = cursor.parentId ? plan.tasks.find((t) => t.id === cursor.parentId) : void 0;
   }
   const comments = plan.threads.filter((t) => !t.resolved && t.target.kind === "task" && t.target.id === task.id).length;
-  return /* @__PURE__ */ jsxs19(
+  return /* @__PURE__ */ jsxs21(
     "article",
     {
       className: classNames("board-card", `is-${task.status}`),
@@ -6000,28 +7004,28 @@ function BoardCard({ plan, task }) {
         e.dataTransfer.effectAllowed = "move";
       },
       children: [
-        path.length > 0 && /* @__PURE__ */ jsx20("p", { className: "board-path", children: path.join(" \u203A ") }),
-        /* @__PURE__ */ jsx20("button", { type: "button", className: "board-title", onClick: () => store.focus("task", task.id), children: task.title }),
-        task.note && /* @__PURE__ */ jsx20("p", { className: "board-note", children: task.note }),
-        /* @__PURE__ */ jsxs19("footer", { className: "board-foot", children: [
-          /* @__PURE__ */ jsx20("span", { className: "item-id", children: task.id }),
-          comments > 0 && /* @__PURE__ */ jsxs19("span", { className: "chip", children: [
+        path.length > 0 && /* @__PURE__ */ jsx22("p", { className: "board-path", children: path.join(" \u203A ") }),
+        /* @__PURE__ */ jsx22("button", { type: "button", className: "board-title", onClick: () => store.focus("task", task.id), children: task.title }),
+        task.note && /* @__PURE__ */ jsx22("p", { className: "board-note", children: task.note }),
+        /* @__PURE__ */ jsxs21("footer", { className: "board-foot", children: [
+          /* @__PURE__ */ jsx22("span", { className: "item-id", children: task.id }),
+          comments > 0 && /* @__PURE__ */ jsxs21("span", { className: "chip", children: [
             "\u{1F4AC} ",
             comments
           ] }),
-          /* @__PURE__ */ jsx20("span", { className: "spacer" }),
-          /* @__PURE__ */ jsxs19("label", { className: "sr-only", htmlFor: `status-${task.id}`, children: [
+          /* @__PURE__ */ jsx22("span", { className: "spacer" }),
+          /* @__PURE__ */ jsxs21("label", { className: "sr-only", htmlFor: `status-${task.id}`, children: [
             "Status of ",
             task.title
           ] }),
-          /* @__PURE__ */ jsx20(
+          /* @__PURE__ */ jsx22(
             "select",
             {
               id: `status-${task.id}`,
               className: "board-status",
               value: task.status,
               onChange: (e) => void store.op({ op: "upsert_task", id: task.id, status: e.target.value }),
-              children: TASK_STATUSES.map((s) => /* @__PURE__ */ jsx20("option", { value: s, children: STATUS_LABEL[s] }, s))
+              children: TASK_STATUSES.map((s) => /* @__PURE__ */ jsx22("option", { value: s, children: STATUS_LABEL[s] }, s))
             }
           )
         ] })
@@ -6066,8 +7070,8 @@ var App_exports = {};
 __export(App_exports, {
   App: () => App
 });
-import { useCallback as useCallback2, useEffect as useEffect12, useRef as useRef7 } from "react";
-import { Fragment as Fragment5, jsx as jsx21, jsxs as jsxs20 } from "react/jsx-runtime";
+import { useCallback as useCallback2, useEffect as useEffect14, useRef as useRef9 } from "react";
+import { Fragment as Fragment5, jsx as jsx23, jsxs as jsxs22 } from "react/jsx-runtime";
 function App() {
   const session = useSession();
   const sessionId = useStore((s) => s.sessionId);
@@ -6075,7 +7079,7 @@ function App() {
   const error = useStore((s) => s.error);
   const sidebarCollapsed = useStore((s) => s.collapsedSidebar);
   const drawerOpen = useStore((s) => s.drawerOpen);
-  const tabs = useRef7(null);
+  const tabs = useRef9(null);
   const plan = session?.plan ?? null;
   useDocumentTitle(session);
   useShortcuts();
@@ -6094,29 +7098,29 @@ function App() {
     },
     [tab]
   );
-  return /* @__PURE__ */ jsxs20("div", { className: classNames("app", sidebarCollapsed && "is-sidebar-collapsed", drawerOpen && "is-drawer-open"), children: [
-    /* @__PURE__ */ jsx21("a", { className: "skip-link", href: `#${panelId(tab)}`, children: "Skip to content" }),
-    /* @__PURE__ */ jsx21(Sidebar, {}),
-    drawerOpen && /* @__PURE__ */ jsx21("button", { type: "button", className: "scrim", "aria-label": "Close the session list", onClick: () => store.setDrawer(false) }),
-    /* @__PURE__ */ jsx21("main", { className: "main", "aria-label": "Plan", children: !sessionId ? /* @__PURE__ */ jsx21(NoSession, { error }) : !session ? error ? /* @__PURE__ */ jsx21(SessionUnavailable, { error }) : /* @__PURE__ */ jsx21(Loading, {}) : /* @__PURE__ */ jsxs20(Fragment5, { children: [
-      /* @__PURE__ */ jsx21(Header, { session }),
-      /* @__PURE__ */ jsx21(ConnectionBar, {}),
-      /* @__PURE__ */ jsx21(WaitingBanner, { session }),
-      !plan ? /* @__PURE__ */ jsx21(NoPlan, { session }) : /* @__PURE__ */ jsxs20(Fragment5, { children: [
-        /* @__PURE__ */ jsx21("nav", { className: "tabs", role: "tablist", "aria-label": "Plan views", ref: tabs, onKeyDown: onTabKeyDown, children: TAB_IDS.map((t) => /* @__PURE__ */ jsx21(TabButton, { id: t, active: tab === t, plan }, t)) }),
-        /* @__PURE__ */ jsx21("div", { className: "view", id: panelId(tab), role: "tabpanel", "aria-labelledby": tabId(tab), tabIndex: -1, children: /* @__PURE__ */ jsxs20(ErrorBoundary, { label: `${TAB_LABEL[tab]} view`, resetKey: `${sessionId}:${tab}`, children: [
-          tab === "overview" && /* @__PURE__ */ jsx21(OverviewView, {}),
-          tab === "diagrams" && /* @__PURE__ */ jsx21(DiagramsView, {}),
-          tab === "tasks" && /* @__PURE__ */ jsx21(TasksView, {})
+  return /* @__PURE__ */ jsxs22("div", { className: classNames("app", sidebarCollapsed && "is-sidebar-collapsed", drawerOpen && "is-drawer-open"), children: [
+    /* @__PURE__ */ jsx23("a", { className: "skip-link", href: `#${panelId(tab)}`, children: "Skip to content" }),
+    /* @__PURE__ */ jsx23(Sidebar, {}),
+    drawerOpen && /* @__PURE__ */ jsx23("button", { type: "button", className: "scrim", "aria-label": "Close the session list", onClick: () => store.setDrawer(false) }),
+    /* @__PURE__ */ jsx23("main", { className: "main", "aria-label": "Plan", children: !sessionId ? /* @__PURE__ */ jsx23(NoSession, { error }) : !session ? error ? /* @__PURE__ */ jsx23(SessionUnavailable, { error }) : /* @__PURE__ */ jsx23(Loading, {}) : /* @__PURE__ */ jsxs22(Fragment5, { children: [
+      /* @__PURE__ */ jsx23(Header, { session }),
+      /* @__PURE__ */ jsx23(ConnectionBar, {}),
+      /* @__PURE__ */ jsx23(WaitingBanner, { session }),
+      !plan ? /* @__PURE__ */ jsx23(NoPlan, { session }) : /* @__PURE__ */ jsxs22(Fragment5, { children: [
+        /* @__PURE__ */ jsx23("nav", { className: "tabs", role: "tablist", "aria-label": "Plan views", ref: tabs, onKeyDown: onTabKeyDown, children: TAB_IDS.map((t) => /* @__PURE__ */ jsx23(TabButton, { id: t, active: tab === t, plan }, t)) }),
+        /* @__PURE__ */ jsx23("div", { className: "view", id: panelId(tab), role: "tabpanel", "aria-labelledby": tabId(tab), tabIndex: -1, children: /* @__PURE__ */ jsxs22(ErrorBoundary, { label: `${TAB_LABEL[tab]} view`, resetKey: `${sessionId}:${tab}`, children: [
+          tab === "overview" && /* @__PURE__ */ jsx23(OverviewView, {}),
+          tab === "diagrams" && /* @__PURE__ */ jsx23(DiagramsView, {}),
+          tab === "tasks" && /* @__PURE__ */ jsx23(TasksView, {})
         ] }) }, tab)
       ] })
     ] }) }),
-    /* @__PURE__ */ jsx21(Toasts, {})
+    /* @__PURE__ */ jsx23(Toasts, {})
   ] });
 }
 function TabButton({ id, active, plan }) {
   const badge = tabBadge(id, plan);
-  return /* @__PURE__ */ jsxs20(
+  return /* @__PURE__ */ jsxs22(
     "button",
     {
       type: "button",
@@ -6129,9 +7133,9 @@ function TabButton({ id, active, plan }) {
       onClick: () => store.setTab(id),
       children: [
         TAB_LABEL[id],
-        badge && /* @__PURE__ */ jsxs20(Fragment5, { children: [
-          /* @__PURE__ */ jsx21("span", { className: classNames("tab-badge", `is-${badge.tone}`), "aria-hidden": "true", children: badge.text }),
-          /* @__PURE__ */ jsx21("span", { className: "sr-only", children: badge.label })
+        badge && /* @__PURE__ */ jsxs22(Fragment5, { children: [
+          /* @__PURE__ */ jsx23("span", { className: classNames("tab-badge", `is-${badge.tone}`), "aria-hidden": "true", children: badge.text }),
+          /* @__PURE__ */ jsx23("span", { className: "sr-only", children: badge.label })
         ] })
       ]
     }
@@ -6153,10 +7157,10 @@ function Header({ session }) {
   const saving = useStore((s) => s.saving);
   const plan = session.plan;
   const counts = countTasks(plan);
-  return /* @__PURE__ */ jsxs20("header", { className: "head", children: [
-    /* @__PURE__ */ jsxs20("div", { className: "head-main", children: [
-      /* @__PURE__ */ jsx21(SessionsToggle, {}),
-      plan ? /* @__PURE__ */ jsx21(
+  return /* @__PURE__ */ jsxs22("header", { className: "head", children: [
+    /* @__PURE__ */ jsxs22("div", { className: "head-main", children: [
+      /* @__PURE__ */ jsx23(SessionsToggle, {}),
+      plan ? /* @__PURE__ */ jsx23(
         InlineText,
         {
           as: "h1",
@@ -6165,26 +7169,26 @@ function Header({ session }) {
           label: "Plan title",
           onSave: (title) => store.op({ op: "set_meta", title })
         }
-      ) : /* @__PURE__ */ jsx21("h1", { className: "head-title", children: session.title }),
-      saving > 0 && /* @__PURE__ */ jsx21("span", { className: "muted head-saving", children: "saving\u2026" }),
-      /* @__PURE__ */ jsx21("span", { className: "spacer" }),
-      /* @__PURE__ */ jsx21(Handoff, {}),
-      /* @__PURE__ */ jsx21(ThemeToggle, {})
+      ) : /* @__PURE__ */ jsx23("h1", { className: "head-title", children: session.title }),
+      saving > 0 && /* @__PURE__ */ jsx23("span", { className: "muted head-saving", children: "saving\u2026" }),
+      /* @__PURE__ */ jsx23("span", { className: "spacer" }),
+      /* @__PURE__ */ jsx23(Handoff, {}),
+      /* @__PURE__ */ jsx23(ThemeToggle, {})
     ] }),
-    /* @__PURE__ */ jsxs20("div", { className: "head-meta", children: [
-      /* @__PURE__ */ jsx21("span", { className: classNames("head-status", `is-${session.waiting ? "waiting" : session.status}`), title: "The Claude session this plan belongs to", children: session.waiting ? "Claude is waiting on you" : session.status === "active" ? "Claude is working" : session.status === "idle" ? "Claude is idle" : "session ended" }),
-      plan && plan.title !== session.title && /* @__PURE__ */ jsx21("span", { className: "head-stat", children: session.title }),
-      session.branch && /* @__PURE__ */ jsx21("code", { className: "head-branch", children: session.branch }),
-      counts.total > 0 && /* @__PURE__ */ jsxs20("span", { className: "head-progress", children: [
-        /* @__PURE__ */ jsx21(ProgressBar, { counts, compact: true }),
-        /* @__PURE__ */ jsxs20("span", { className: "head-stat", children: [
+    /* @__PURE__ */ jsxs22("div", { className: "head-meta", children: [
+      /* @__PURE__ */ jsx23("span", { className: classNames("head-status", `is-${session.waiting ? "waiting" : session.status}`), title: "The Claude session this plan belongs to", children: session.waiting ? "Claude is waiting on you" : session.status === "active" ? "Claude is working" : session.status === "idle" ? "Claude is idle" : "session ended" }),
+      plan && plan.title !== session.title && /* @__PURE__ */ jsx23("span", { className: "head-stat", children: session.title }),
+      session.branch && /* @__PURE__ */ jsx23("code", { className: "head-branch", children: session.branch }),
+      counts.total > 0 && /* @__PURE__ */ jsxs22("span", { className: "head-progress", children: [
+        /* @__PURE__ */ jsx23(ProgressBar, { counts, compact: true }),
+        /* @__PURE__ */ jsxs22("span", { className: "head-stat", children: [
           counts.done,
           "/",
           counts.total,
           " tasks"
         ] })
       ] }),
-      /* @__PURE__ */ jsx21("span", { className: "head-path", title: session.cwd, children: session.cwd })
+      /* @__PURE__ */ jsx23("span", { className: "head-path", title: session.cwd, children: session.cwd })
     ] })
   ] });
 }
@@ -6193,7 +7197,7 @@ function SessionsToggle() {
   const drawerOpen = useStore((s) => s.drawerOpen);
   const narrow = () => window.innerWidth <= 900;
   const label = collapsed ? "Show sessions" : "Hide sessions";
-  return /* @__PURE__ */ jsx21(
+  return /* @__PURE__ */ jsx23(
     "button",
     {
       type: "button",
@@ -6202,27 +7206,27 @@ function SessionsToggle() {
       "aria-label": label,
       "aria-expanded": narrow() ? drawerOpen : !collapsed,
       onClick: () => narrow() ? store.setDrawer(true) : store.toggleSidebar(),
-      children: /* @__PURE__ */ jsx21("span", { "aria-hidden": "true", children: "\u2630" })
+      children: /* @__PURE__ */ jsx23("span", { "aria-hidden": "true", children: "\u2630" })
     }
   );
 }
 function NoPlan({ session }) {
-  return /* @__PURE__ */ jsx21("div", { className: "view", children: /* @__PURE__ */ jsx21(
+  return /* @__PURE__ */ jsx23("div", { className: "view", children: /* @__PURE__ */ jsx23(
     EmptyState,
     {
       title: "No plan yet",
-      hint: /* @__PURE__ */ jsxs20(Fragment5, { children: [
+      hint: /* @__PURE__ */ jsxs22(Fragment5, { children: [
         "In Claude's chat, run ",
-        /* @__PURE__ */ jsx21("code", { children: "/harness <what you want to build>" }),
+        /* @__PURE__ */ jsx23("code", { children: "/harness <what you want to build>" }),
         ". Claude investigates the code, then publishes its plan here \u2014 the architecture, diagrams and a task breakdown \u2014 and asks what it needs to know in the chat."
       ] }),
-      action: /* @__PURE__ */ jsx21("button", { type: "button", className: "btn", onClick: () => void store.op({ op: "set_meta", title: session.title || "Untitled plan" }), children: "Start a plan by hand" })
+      action: /* @__PURE__ */ jsx23("button", { type: "button", className: "btn", onClick: () => void store.op({ op: "set_meta", title: session.title || "Untitled plan" }), children: "Start a plan by hand" })
     }
   ) });
 }
 function Loading() {
-  return /* @__PURE__ */ jsx21("div", { className: "view", children: /* @__PURE__ */ jsxs20("div", { className: "loading", role: "status", "aria-live": "polite", children: [
-    /* @__PURE__ */ jsx21("span", { className: "spinner", "aria-hidden": "true" }),
+  return /* @__PURE__ */ jsx23("div", { className: "view", children: /* @__PURE__ */ jsxs22("div", { className: "loading", role: "status", "aria-live": "polite", children: [
+    /* @__PURE__ */ jsx23("span", { className: "spinner", "aria-hidden": "true" }),
     "Loading the plan\u2026"
   ] }) });
 }
@@ -6230,22 +7234,22 @@ function SessionUnavailable({ error }) {
   const sessions = useStore((s) => s.sessions);
   const unauthorized = /401|unauthorized/i.test(error);
   const other = sessions[0];
-  return /* @__PURE__ */ jsx21("div", { className: "view", children: /* @__PURE__ */ jsx21(
+  return /* @__PURE__ */ jsx23("div", { className: "view", children: /* @__PURE__ */ jsx23(
     EmptyState,
     {
       title: unauthorized ? "This page is not signed in to the harness" : "This session is not available",
-      hint: unauthorized ? /* @__PURE__ */ jsxs20(Fragment5, { children: [
+      hint: unauthorized ? /* @__PURE__ */ jsxs22(Fragment5, { children: [
         "Open the harness with ",
-        /* @__PURE__ */ jsx21("code", { children: "/harness-open" }),
+        /* @__PURE__ */ jsx23("code", { children: "/harness-open" }),
         " in Claude, or ",
-        /* @__PURE__ */ jsx21("code", { children: "harness open" }),
+        /* @__PURE__ */ jsx23("code", { children: "harness open" }),
         " in a terminal \u2014 the link it prints carries the key this page needs."
-      ] }) : /* @__PURE__ */ jsxs20(Fragment5, { children: [
+      ] }) : /* @__PURE__ */ jsxs22(Fragment5, { children: [
         "It may have been deleted, or it ended long enough ago to be cleaned up. (",
         error,
         ")"
       ] }),
-      action: !unauthorized && other ? /* @__PURE__ */ jsxs20("button", { type: "button", className: "btn", onClick: () => void store.selectSession(other.sessionId), children: [
+      action: !unauthorized && other ? /* @__PURE__ */ jsxs22("button", { type: "button", className: "btn", onClick: () => void store.selectSession(other.sessionId), children: [
         "Open ",
         other.planTitle ?? other.title
       ] }) : void 0
@@ -6253,23 +7257,23 @@ function SessionUnavailable({ error }) {
   ) });
 }
 function NoSession({ error }) {
-  if (error && /401|unauthorized/i.test(error)) return /* @__PURE__ */ jsx21(SessionUnavailable, { error });
-  return /* @__PURE__ */ jsx21("div", { className: "view", children: /* @__PURE__ */ jsx21(
+  if (error && /401|unauthorized/i.test(error)) return /* @__PURE__ */ jsx23(SessionUnavailable, { error });
+  return /* @__PURE__ */ jsx23("div", { className: "view", children: /* @__PURE__ */ jsx23(
     EmptyState,
     {
       title: "No session yet",
-      hint: /* @__PURE__ */ jsxs20(Fragment5, { children: [
+      hint: /* @__PURE__ */ jsxs22(Fragment5, { children: [
         "Start Claude Code in a project with the harness enabled, then run ",
-        /* @__PURE__ */ jsx21("code", { children: "/harness" }),
+        /* @__PURE__ */ jsx23("code", { children: "/harness" }),
         ". Sessions appear here the moment they register.",
-        error && /* @__PURE__ */ jsxs20("span", { className: "error-text", children: [
+        error && /* @__PURE__ */ jsxs22("span", { className: "error-text", children: [
           " \xB7 ",
           error
         ] })
       ] }),
-      action: /* @__PURE__ */ jsxs20("p", { className: "empty-hint", children: [
+      action: /* @__PURE__ */ jsxs22("p", { className: "empty-hint", children: [
         "If a session is running and nothing shows up, the hooks are not firing \u2014 run ",
-        /* @__PURE__ */ jsx21("code", { children: "harness doctor" }),
+        /* @__PURE__ */ jsx23("code", { children: "harness doctor" }),
         "."
       ] })
     }
@@ -6278,12 +7282,12 @@ function NoSession({ error }) {
 function useDocumentTitle(session) {
   const title = session?.plan?.title ?? session?.title ?? "cc-harness";
   const waiting = Boolean(session?.waiting);
-  useEffect12(() => {
+  useEffect14(() => {
     document.title = waiting ? `\u25CF ${title} \u2014 Claude is waiting` : `${title} \u2014 plan`;
   }, [title, waiting]);
 }
 function useDrawerDismiss(open) {
-  useEffect12(() => {
+  useEffect14(() => {
     if (!open) return;
     const onKey = (event) => {
       if (event.key === "Escape") store.setDrawer(false);
@@ -6300,7 +7304,7 @@ function useDrawerDismiss(open) {
   }, [open]);
 }
 function useShortcuts() {
-  useEffect12(() => {
+  useEffect14(() => {
     const handler = (event) => {
       const target = event.target;
       const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
@@ -6483,7 +7487,7 @@ function stubFetch(handler) {
 }
 
 // src/test/ui.test.tsx
-import { jsx as jsx22 } from "react/jsx-runtime";
+import { jsx as jsx24 } from "react/jsx-runtime";
 setupDom();
 var { render, fireEvent, within, cleanup, act, screen, waitFor } = await import("@testing-library/react");
 var { App: App2 } = await Promise.resolve().then(() => (init_App(), App_exports));
@@ -6540,7 +7544,7 @@ async function boot(session = makeSession()) {
     if (route.startsWith("/api/session/")) return { session };
     return { ok: true };
   }));
-  render(/* @__PURE__ */ jsx22(App2, {}));
+  render(/* @__PURE__ */ jsx24(App2, {}));
   await act(async () => {
     await store2.init();
   });
@@ -7084,7 +8088,7 @@ test('while a session loads, the page says so instead of "no session"', async ()
     configurable: true,
     writable: true
   });
-  render(/* @__PURE__ */ jsx22(App2, {}));
+  render(/* @__PURE__ */ jsx24(App2, {}));
   await act(async () => {
     void store2.init();
     await new Promise((r) => setTimeout(r, 10));
@@ -7095,7 +8099,7 @@ test('while a session loads, the page says so instead of "no session"', async ()
 });
 test("a page without the harness key says how to open it properly", async () => {
   stubFetch(() => ({ __status: 401, error: "unauthorized" }));
-  render(/* @__PURE__ */ jsx22(App2, {}));
+  render(/* @__PURE__ */ jsx24(App2, {}));
   await act(async () => {
     await store2.init();
   });

@@ -6,6 +6,17 @@ import { ProgressBar, STATUS_GLYPH, STATUS_LABEL } from '../Progress.tsx';
 import { classNames } from '../../lib/format.ts';
 import { KIND_GLYPH, KIND_LABEL, useCanvas, type FlowData, type FlowEdge, type FlowNode } from './shared.ts';
 
+/** How a box relates to the one in focus, said on the box. The words carry
+ *  the direction, so it never rests on colour alone. */
+const REL_BADGE = { to: '→ to', from: 'from →', both: '⇄ both ways', to2: '→ then', from2: 'before →' } as const;
+const REL_HINT = {
+  to: 'Downstream: the box in focus has an arrow to this one',
+  from: 'Upstream: this box has an arrow to the one in focus',
+  both: 'Connected both ways, or without a direction',
+  to2: 'Two steps downstream (hold Alt)',
+  from2: 'Two steps upstream (hold Alt)',
+} as const;
+
 const SIDES = [
   ['top', Position.Top],
   ['right', Position.Right],
@@ -32,9 +43,22 @@ export function PlanNode({ id, data, selected }: NodeProps<FlowNode>) {
 
   return (
     <div
-      className={classNames('flow-node', `kind-${data.kind}`, selected && 'is-selected', state && `progress-${state}`, editing && 'is-editing')}
+      className={classNames(
+        'flow-node',
+        `kind-${data.kind}`,
+        selected && 'is-selected',
+        state && `progress-${state}`,
+        editing && 'is-editing',
+        data.rel && `rel-${data.rel}`,
+        data.dropTarget && 'is-drop-target',
+      )}
       style={{ width: data.width, minHeight: data.height }}
     >
+      {data.rel && data.rel !== 'focus' && (
+        <span className={`flow-node-rel rel-${data.rel}`} title={REL_HINT[data.rel]}>
+          {REL_BADGE[data.rel]}
+        </span>
+      )}
       {SIDES.map(([side, position]) => (
         <Handle key={side} id={side} type="source" position={position} className={`handle-${side}`} />
       ))}
@@ -43,7 +67,7 @@ export function PlanNode({ id, data, selected }: NodeProps<FlowNode>) {
           {KIND_GLYPH[data.kind]}
         </span>
         {editing ? (
-          <LabelInput value={data.label} onDone={(label) => api.finishNodeLabel(id, label)} />
+          <LabelInput value={data.label} seed={api.editSeed} onDone={(label) => api.finishNodeLabel(id, label)} />
         ) : (
           <span className="flow-node-label">{data.label}</span>
         )}
@@ -204,8 +228,22 @@ function NodeSummary({ id, data, onEnter, onLeave }: { id: string; data: FlowDat
 
 /** The label as an input, on the box itself. Enter or leaving saves; Escape
  *  puts it back. */
-export function LabelInput({ value, onDone, className = 'flow-node-input', placeholder }: { value: string; onDone: (v: string | null) => void; className?: string; placeholder?: string }) {
-  const [draft, setDraft] = useState(value);
+export function LabelInput({
+  value,
+  seed,
+  onDone,
+  className = 'flow-node-input',
+  placeholder,
+}: {
+  value: string;
+  /** Typed over the old label, spreadsheet-style, with the caret after it. */
+  seed?: string | null;
+  onDone: (v: string | null) => void;
+  className?: string;
+  placeholder?: string;
+}) {
+  const [draft, setDraft] = useState(seed ?? value);
+  const seeded = useRef(Boolean(seed));
   const done = useRef(false);
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -217,8 +255,10 @@ export function LabelInput({ value, onDone, className = 'flow-node-input', place
       const el = ref.current;
       if (!el) return;
       el.focus();
-      if (document.activeElement === el) el.select();
-      else if (tries++ < 20) frame = window.requestAnimationFrame(grab);
+      if (document.activeElement !== el) {
+        if (tries++ < 20) frame = window.requestAnimationFrame(grab);
+      } else if (seeded.current) el.setSelectionRange(el.value.length, el.value.length);
+      else el.select();
     };
     grab();
     return () => window.cancelAnimationFrame(frame);
@@ -242,6 +282,12 @@ export function LabelInput({ value, onDone, className = 'flow-node-input', place
         e.stopPropagation();
         if (e.key === 'Enter') finish(draft);
         if (e.key === 'Escape') finish(null);
+        // Tab finishes the name and stays on the canvas, ready for the next
+        // Tab to add the next box — not off to the next control on the page.
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          finish(draft);
+        }
       }}
       onDoubleClick={(e) => e.stopPropagation()}
     />
