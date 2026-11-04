@@ -1,4 +1,4 @@
 #!/bin/sh
-# cc-harness operator CLI. Added to PATH by the plugin's bin/ directory.
+# Coplan operator CLI. Added to PATH by the plugin's bin/ directory.
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 exec node "$DIR/../dist/cli/main.js" "$@"

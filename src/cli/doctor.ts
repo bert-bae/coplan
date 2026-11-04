@@ -36,7 +36,7 @@ export async function runDoctor(): Promise<number> {
     console.log(`${mark} ${name}${detail ? ` — ${detail}` : ''}`);
   };
 
-  console.log('cc-harness doctor\n');
+  console.log('coplan doctor\n');
 
   /* ---------------- static wiring ---------------- */
 

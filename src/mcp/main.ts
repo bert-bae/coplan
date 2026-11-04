@@ -143,7 +143,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
       respond(req.id, {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'cc-harness', version: VERSION },
+        serverInfo: { name: 'coplan', version: VERSION },
       });
       return;
 

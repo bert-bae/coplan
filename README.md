@@ -1,18 +1,55 @@
-# cc-harness
+<h1 align="center">Coplan</h1>
 
-A visual planning workspace for Claude Code, and a way to follow Claude's
-progress through the plan. Claude publishes its plan — the architecture as
-diagrams, and a task breakdown — and you reshape it in the browser: rearrange
-and rewire the architecture, record the decisions on each part, reorganize the
-tasks, comment on anything. When it is right you submit it, after reading
-the exact prompt Claude will get; the plan locks, and as Claude builds, the
-same page follows each task across the board.
+<p align="center">
+  <strong>Plan with Claude Code on a canvas, then follow the build.</strong><br />
+  An open-source visual planning workspace for Claude Code.
+</p>
 
-It does one thing. The harness never starts a turn and never answers for you.
-When Claude needs a decision it asks in its own chat; the harness shows the
-question and takes you straight to that session — in the Claude desktop app —
-to answer it. What the harness has to say to Claude — the build prompt, or a
-note that you changed the plan — rides along with your next message there.
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
+  <a href="https://github.com/bert-bae/coplan/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/bert-bae/coplan/actions/workflows/ci.yml/badge.svg" /></a>
+  <img alt="Node.js 20.11 or later" src="https://img.shields.io/badge/node-%E2%89%A520.11-339933.svg" />
+  <img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-d97757.svg" />
+  <a href="CONTRIBUTING.md"><img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" /></a>
+</p>
+
+---
+
+Coplan gives Claude Code's plan a place to live outside the chat. Claude
+publishes its plan: the architecture as diagrams, plus a task breakdown. You
+reshape it in the browser. Rearrange and rewire the architecture, record the
+decisions on each part, reorganize the tasks and comment on anything. When it
+is right you read the exact prompt Claude will get and submit it. The plan
+locks, and as Claude builds, the same page follows each task across the board.
+
+Coplan is free and open source under the [MIT license](LICENSE). It runs
+entirely on your machine: a small local daemon, a browser UI, and a Claude
+Code plugin. No account, no hosted service, and no telemetry.
+
+## Features
+
+- **Architecture you can edit.** Claude's diagrams open laid out along their
+  flow on a [React Flow](https://reactflow.dev) canvas. Add, connect, rewire
+  and annotate boxes, with keyboard shortcuts, context menus and undo.
+- **A task breakdown you can shape.** Nest, split and reorder tasks in an
+  outline, link them to the boxes they build, and follow them on a board.
+- **Claude reads back what you changed.** It gets the net effect of your edits
+  (what is different now, not every drag), with each diagram written out as
+  an architecture.
+- **Review, then submit.** You see the exact build prompt before it is sent,
+  and submitting locks the plan so the design can't drift mid-build.
+- **Live progress.** Cards move across the board and boxes fill up as Claude
+  marks tasks in progress, done or blocked.
+- **Your chat stays the chat.** Coplan never starts a turn or answers for you.
+  When Claude asks a question, it links you straight back to that session.
+
+## How it works
+
+Coplan does one thing. It never starts a turn and never answers for you. When
+Claude needs a decision it asks in its own chat. Coplan shows the question and
+takes you straight to that session, in the Claude desktop app, to answer it.
+What Coplan has to say to Claude (the build prompt, or a note that you changed
+the plan) rides along with your next message there.
 
 ```
  ┌──────────────────── Claude Code session ─────────────────────┐
@@ -23,39 +60,61 @@ note that you changed the plan — rides along with your next message there.
  └──────────────┬───────────────────────────────────────────────┘
                 │ loopback HTTP
                 ▼
- ┌──────────────── cc-harnessd (one per user) ──────────────────┐
+ ┌─────────────── coplan daemon (one per user) ─────────────────┐
  │  sessions · plans · change log · static UI · SSE             │
  └──────────────┬──────────────────────────────▲────────────────┘
                 │ GET /api/events (SSE)        │ POST …/plan/ops
                 ▼                              │
  ┌──────────────── browser UI (React + React Flow) ─────────────┐
- │  Architecture · Tasks · Overview      ──▶ "Answer in Claude"  │
+ │  Architecture · Tasks · Overview      ──▶ "Answer in Claude" │
  └──────────────────────────────────────────────────────────────┘
 ```
 
 ## Install
 
-```bash
-npm install
-npm run build          # writes dist/, which the plugin loads directly
-```
+You need [Claude Code](https://code.claude.com), Node.js 20.11 or later,
+`sh` and `curl`. The Claude desktop app is optional; it is where *Answer in
+Claude* links open.
 
-`dist/` is committed, so installing the plugin needs no build step of its own.
+### From GitHub
 
-Then load the plugin. For a session at a time:
-
-```bash
-claude --plugin-dir /path/to/cc-ui-harness
-```
-
-Or permanently, via a local marketplace:
+`dist/` is committed, so the plugin installs with no build step:
 
 ```bash
-claude plugin marketplace add /path/to/cc-ui-harness
+claude plugin marketplace add bert-bae/coplan
 ```
 
 ```bash
-claude plugin install cc-harness@cc-harness-local --scope user
+claude plugin install coplan@coplan --scope user
+```
+
+Or, from inside a Claude Code session, run `/plugin marketplace add
+bert-bae/coplan` and then `/plugin install coplan@coplan`.
+
+### From source
+
+```bash
+git clone https://github.com/bert-bae/coplan.git
+```
+
+```bash
+cd coplan && npm install && npm run build
+```
+
+Then load the plugin for a single session:
+
+```bash
+claude --plugin-dir /path/to/coplan
+```
+
+Or install it permanently from your clone:
+
+```bash
+claude plugin marketplace add /path/to/coplan
+```
+
+```bash
+claude plugin install coplan@coplan --scope user
 ```
 
 Verify the wiring against your installed CLI:
@@ -64,14 +123,19 @@ Verify the wiring against your installed CLI:
 ./bin/harness doctor
 ```
 
+> **The `harness` name.** Coplan was previously called cc-harness. Its slash
+> commands, MCP tools, CLI and data directory still use that name
+> (`/harness`, `harness_plan_*`, `bin/harness`, `~/.claude/cc-harness`), so
+> existing plans and configuration keep working.
+
 ## Use
 
 In any session with the plugin enabled:
 
-- `/harness <task>` — Claude investigates, then publishes a plan to the UI
-- `/harness-open` — open this session's plan in the browser
-- `/harness-doctor` — check the wiring
-- `/harness-restart` — restart the daemon after a rebuild
+- `/harness <task>`: Claude investigates, then publishes a plan to the UI
+- `/harness-open`: open this session's plan in the browser
+- `/harness-doctor`: check the wiring
+- `/harness-restart`: restart the daemon after a rebuild
 
 `./bin/harness status` lists every session and where its plan stands;
 `./bin/harness open` opens the UI. The UI does not open itself unless you set
@@ -114,7 +178,7 @@ Architecture view) opens the review:
 - **Who builds it.** *This Claude session*: your next message in its chat —
   "go" will do — carries the prompt, once, and the board follows each task
   as Claude reports it. *Somewhere else*: the prompt is written for an agent
-  without the harness tools and copied for you to paste; the plan is locked,
+  without the Coplan tools and copied for you to paste; the plan is locked,
   but nothing reports back, so nothing moves here.
 
 Submitting **locks the plan**. The canvas becomes the final design — boxes
@@ -134,7 +198,7 @@ says when that happens.
 
 ## Questions are answered in Claude
 
-The harness has no question forms and no message box. When Claude stops on
+Coplan has no question forms and no message box. When Claude stops on
 you — an `AskUserQuestion`, a permission prompt, an idle prompt, or a turn
 that ends on a question — the page shows a banner with what is being asked,
 the session moves to *Waiting on you* at the top of the rail, and the tab
@@ -238,7 +302,7 @@ you changed the plan since Claude last read it — one line saying so.
 
 ## Housekeeping
 
-The rail's footer holds the two actions that belong to the harness itself.
+The rail's footer holds the two actions that belong to Coplan itself.
 
 **Restart.** The daemon runs whatever was in `dist/` when it started.
 Restarting hands the successor the port *and* the token, so open tabs
@@ -263,27 +327,22 @@ same from a terminal, with `--dry-run` to only list.
 `~/.claude/cc-harness/config.json`, overridden per repo by
 `.claude/harness.json`. See [docs/CONFIG.md](docs/CONFIG.md).
 
-## Development
+## Contributing
+
+Bug reports, ideas and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md)
+covers setting up a checkout, the checks CI runs, and how the code is laid
+out. The short version:
 
 ```bash
-npm run typecheck
-npm run build          # or: npm run build:watch
-npm test
-npm run check          # all three
+npm install
 ```
 
-- `src/shared/plan.ts` — the plan model: publishing, every edit, the change log
-- `src/shared/architecture.ts` — diagrams as words: the architecture
-  rendering and the net difference between two versions of a diagram
-- `src/shared/link.ts` — how a session is linked back to in Claude
-- `src/daemon` — the singleton server: sessions, the plan API, rendering for
-  Claude, hooks, housekeeping
-- `src/mcp` — the stdio MCP server (hand-rolled JSON-RPC, no dependencies)
-- `src/ui` — the browser client (React, React Flow, dagre); the canvas is
-  `components/FlowCanvas.tsx` with its boxes, arrows and panel in
-  `components/flow/`, and layout, arrow geometry and the clipboard in `lib/`
-- `bin/hook-relay.sh` — sh + curl, so no Node process starts per hook
+```bash
+npm run check          # typecheck, build and test
+```
 
-The daemon, the MCP server and the CLI have no runtime dependencies. The
-browser bundle carries React and React Flow, compiled once, and React Flow's
-stylesheet is copied beside it.
+Commit the rebuilt `dist/` with your change; CI fails if it is out of date.
+
+## License
+
+[MIT](LICENSE) © Elbert B.

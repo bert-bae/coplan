@@ -1,5 +1,5 @@
 ---
-description: Verify the cc-harness plugin wiring against the installed Claude Code version
+description: Verify the Coplan plugin wiring against the installed Claude Code version
 ---
 
 Run the harness self-test and report the result:

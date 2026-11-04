@@ -1,8 +1,27 @@
 {
-  "name": "cc-harness",
+  "name": "coplan",
   "version": "0.2.0",
   "private": true,
-  "description": "Visual planning workspace for live Claude Code sessions",
+  "description": "Open-source visual planning workspace for Claude Code: shape Claude's plan as architecture diagrams and a task board in the browser, submit it, and follow the build.",
+  "license": "MIT",
+  "author": "Elbert B.",
+  "homepage": "https://github.com/bert-bae/coplan#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bert-bae/coplan.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bert-bae/coplan/issues"
+  },
+  "keywords": [
+    "claude-code",
+    "claude-code-plugin",
+    "planning",
+    "architecture",
+    "diagrams",
+    "tasks",
+    "mcp"
+  ],
   "type": "module",
   "engines": {
     "node": ">=20.11"

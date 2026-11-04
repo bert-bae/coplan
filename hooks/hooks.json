@@ -1,5 +1,5 @@
 {
-  "description": "cc-harness \u2014 registers sessions with the planning UI, notices when Claude is waiting on the user so the UI can link back to the session, and tells Claude when the plan changed. Never blocks or holds a turn.",
+  "description": "Coplan \u2014 registers sessions with the planning UI, notices when Claude is waiting on the user so the UI can link back to the session, and tells Claude when the plan changed. Never blocks or holds a turn.",
   "hooks": {
     "SessionStart": [
       {

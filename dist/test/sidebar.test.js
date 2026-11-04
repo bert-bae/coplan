@@ -7084,7 +7084,7 @@ function NoSession({ error }) {
   ) });
 }
 function useDocumentTitle(session) {
-  const title = session?.plan?.title ?? session?.title ?? "cc-harness";
+  const title = session?.plan?.title ?? session?.title ?? "Coplan";
   const waiting = Boolean(session?.waiting);
   useEffect16(() => {
     document.title = waiting ? `\u25CF ${title} \u2014 Claude is waiting` : `${title} \u2014 plan`;
