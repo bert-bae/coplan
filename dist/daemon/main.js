@@ -736,7 +736,7 @@ function removeItem(plan, kind, id, log2) {
 var MAX_NOTE = 4e3;
 var TRACKING_OPS = /* @__PURE__ */ new Set(["upsert_task", "reply", "resolve"]);
 var LOCKED_FOR_USER = "The plan has been submitted to be built, so it is locked. Reopen it to make changes.";
-var LOCKED_FOR_CLAUDE = "The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or upsert_task to add work you discover) and comment replies (reply, resolve) apply. If the design has to change, ask the user in chat \u2014 they can reopen the plan in the harness.";
+var LOCKED_FOR_CLAUDE = "The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or upsert_task to add work you discover) and comment replies (reply, resolve) apply. If the design has to change, ask the user in chat \u2014 they can reopen the plan in Coplan.";
 function planPhase(plan) {
   const submission = plan?.submission;
   if (!submission) return "planning";
@@ -1427,7 +1427,7 @@ function lockLine(plan) {
     case "built":
       return "> **Built.** The user submitted this plan and every task is done. Publishing a new plan replaces it.";
     default:
-      return "> **Locked for building.** The user submitted this plan: build it task by task, keeping statuses true with harness_task_update. Only task updates and comment replies apply now; if the design has to change, ask the user in chat \u2014 they can reopen the plan in the harness.";
+      return "> **Locked for building.** The user submitted this plan: build it task by task, keeping statuses true with harness_task_update. Only task updates and comment replies apply now; if the design has to change, ask the user in chat \u2014 they can reopen the plan in Coplan.";
   }
 }
 var PROMPT_BUDGET = 9e3;
@@ -1460,15 +1460,15 @@ function buildPrompt(plan, opts) {
 }
 function sessionBrief(plan) {
   return [
-    `${BUILD_MARKER} "${plan.title}" \u2014 the user has reviewed it in the harness and submitted it.`,
+    `${BUILD_MARKER} "${plan.title}" \u2014 the user has reviewed it in Coplan and submitted it.`,
     "",
-    "The plan is final. Its architecture is locked, and from here the harness only follows your progress on its task board, so keep every task's status true as you go:",
+    "The plan is final. Its architecture is locked, and from here Coplan only follows your progress on its task board, so keep every task's status true as you go:",
     "",
     "1. Work through the tasks below in order.",
     "2. When you start a task, mark it in_progress with harness_task_update. When it is finished, mark it done with a one-line note of what you did.",
     "3. If you are stuck, mark the task blocked with a note saying on what, and ask the user with AskUserQuestion.",
     "4. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.",
-    "5. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, stop and ask the user in chat \u2014 they can reopen the plan in the harness."
+    "5. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, stop and ask the user in chat \u2014 they can reopen the plan in Coplan."
   ];
 }
 function outsideBrief(plan) {
@@ -2445,7 +2445,7 @@ function buildPlans(live, now) {
     {
       id: "sessions",
       label: "Finished sessions",
-      detail: "Saved plans for sessions the harness no longer lists, untouched for over a day.",
+      detail: "Saved plans for sessions Coplan no longer lists, untouched for over a day.",
       candidates: staleSessionDirs(live, now)
     },
     {
@@ -3094,7 +3094,7 @@ function buildRouter(deps) {
     if (!session) {
       json(ctx.res, 200, {
         ok: false,
-        text: "[cc-harness] No session is registered yet. This usually means the harness hooks have not fired; run `harness doctor` to check the plugin wiring."
+        text: "[cc-harness] No session is registered yet. This usually means the harness hooks have not fired; run `coplan doctor` to check the plugin wiring."
       });
       return;
     }
@@ -3109,7 +3109,7 @@ function buildRouter(deps) {
           reply(
             true,
             `[cc-harness] Published "${plan.title}" (revision ${plan.revision}). The user reviews it at ${url}
-Tell them in chat that the plan is ready, and ask anything you need decided with AskUserQuestion, here in chat. Nothing in the harness waits for them: when they say they have reviewed it, call harness_plan_read.
+Tell them in chat that the plan is ready, and ask anything you need decided with AskUserQuestion, here in chat. Nothing in Coplan waits for them: when they say they have reviewed it, call harness_plan_read.
 
 ` + renderPlan(plan, { url })
           );

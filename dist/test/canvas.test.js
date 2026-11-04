@@ -1181,7 +1181,7 @@ var init_plan = __esm({
     MAX_NOTE = 4e3;
     TRACKING_OPS = /* @__PURE__ */ new Set(["upsert_task", "reply", "resolve"]);
     LOCKED_FOR_USER = "The plan has been submitted to be built, so it is locked. Reopen it to make changes.";
-    LOCKED_FOR_CLAUDE = "The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or upsert_task to add work you discover) and comment replies (reply, resolve) apply. If the design has to change, ask the user in chat \u2014 they can reopen the plan in the harness.";
+    LOCKED_FOR_CLAUDE = "The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or upsert_task to add work you discover) and comment replies (reply, resolve) apply. If the design has to change, ask the user in chat \u2014 they can reopen the plan in Coplan.";
     MAX_NODES = 120;
     MAX_EDGES = 300;
     MAX_DESCRIPTION = 4e3;
@@ -1634,7 +1634,7 @@ var init_store = __esm({
         const arrived = await waitForDaemon(previousPid, waitMs);
         if (!arrived) {
           this.set({ restarting: false });
-          this.toast("error", "The daemon did not come back. Run `harness start` in a terminal.");
+          this.toast("error", "The daemon did not come back. Run `coplan start` in a terminal.");
           return;
         }
         this.reloadPage();
@@ -1709,7 +1709,7 @@ function GlobalActions() {
           type: "button",
           className: classNames("icon-btn", "is-tiny", panel && "is-active"),
           "aria-expanded": panel,
-          title: "Clean up stale harness files",
+          title: "Clean up stale Coplan files",
           disabled: restarting,
           onClick: () => {
             const next = !panel;
@@ -1835,9 +1835,9 @@ function Sidebar() {
       "aria-label": "Sessions",
       children: [
         /* @__PURE__ */ jsxs2("header", { className: "sidebar-head", children: [
-          /* @__PURE__ */ jsx2("span", { className: "logo", "aria-hidden": "true", children: "cc" }),
+          /* @__PURE__ */ jsx2("span", { className: "logo", "aria-hidden": "true", children: "co" }),
           /* @__PURE__ */ jsxs2("div", { className: "sidebar-brand", children: [
-            /* @__PURE__ */ jsx2("strong", { children: "harness" }),
+            /* @__PURE__ */ jsx2("strong", { children: "Coplan" }),
             /* @__PURE__ */ jsx2("span", { className: classNames("conn", `is-${connection}`), children: connection === "live" ? "live" : connection === "connecting" ? "connecting\u2026" : "reconnecting\u2026" })
           ] }),
           /* @__PURE__ */ jsx2(
@@ -2318,7 +2318,7 @@ function OpenInClaude({
     {
       type: "button",
       className: classNames("btn btn-sm", primary && "btn-primary"),
-      title: `${whereItRuns(session)} has no link the harness can open. Copies a message to paste there instead.`,
+      title: `${whereItRuns(session)} has no link Coplan can open. Copies a message to paste there instead.`,
       onClick: () => void copyHandoff(),
       children: "Copy message for Claude"
     }
@@ -2723,7 +2723,7 @@ function PhaseStrip({ session }) {
       text = session.status === "ended" ? "This session has ended. Resume it in Claude, then send any message: the prompt goes with it." : /* @__PURE__ */ jsxs8(Fragment2, { children: [
         "Send any message in Claude's chat \u2014 ",
         /* @__PURE__ */ jsx8("q", { children: "go" }),
-        " will do \u2014 and the harness hands it the build prompt with it."
+        " will do \u2014 and Coplan hands it the build prompt with it."
       ] });
       break;
     case "building":
@@ -8022,7 +8022,7 @@ function NoPlan({ session }) {
       title: "No plan yet",
       hint: /* @__PURE__ */ jsxs23(Fragment6, { children: [
         "In Claude's chat, run ",
-        /* @__PURE__ */ jsx24("code", { children: "/harness <what you want to build>" }),
+        /* @__PURE__ */ jsx24("code", { children: "/coplan <what you want to build>" }),
         ". Claude investigates the code, then publishes its plan here \u2014 the architecture, diagrams and a task breakdown \u2014 and asks what it needs to know in the chat."
       ] }),
       action: /* @__PURE__ */ jsx24("button", { type: "button", className: "btn", onClick: () => void store.op({ op: "set_meta", title: session.title || "Untitled plan" }), children: "Start a plan by hand" })
@@ -8042,12 +8042,12 @@ function SessionUnavailable({ error }) {
   return /* @__PURE__ */ jsx24("div", { className: "view", children: /* @__PURE__ */ jsx24(
     EmptyState,
     {
-      title: unauthorized ? "This page is not signed in to the harness" : "This session is not available",
+      title: unauthorized ? "This page is not signed in to Coplan" : "This session is not available",
       hint: unauthorized ? /* @__PURE__ */ jsxs23(Fragment6, { children: [
-        "Open the harness with ",
-        /* @__PURE__ */ jsx24("code", { children: "/harness-open" }),
+        "Open Coplan with ",
+        /* @__PURE__ */ jsx24("code", { children: "/coplan-open" }),
         " in Claude, or ",
-        /* @__PURE__ */ jsx24("code", { children: "harness open" }),
+        /* @__PURE__ */ jsx24("code", { children: "coplan open" }),
         " in a terminal \u2014 the link it prints carries the key this page needs."
       ] }) : /* @__PURE__ */ jsxs23(Fragment6, { children: [
         "It may have been deleted, or it ended long enough ago to be cleaned up. (",
@@ -8068,8 +8068,8 @@ function NoSession({ error }) {
     {
       title: "No session yet",
       hint: /* @__PURE__ */ jsxs23(Fragment6, { children: [
-        "Start Claude Code in a project with the harness enabled, then run ",
-        /* @__PURE__ */ jsx24("code", { children: "/harness" }),
+        "Start Claude Code in a project with Coplan enabled, then run ",
+        /* @__PURE__ */ jsx24("code", { children: "/coplan" }),
         ". Sessions appear here the moment they register.",
         error && /* @__PURE__ */ jsxs23("span", { className: "error-text", children: [
           " \xB7 ",
@@ -8078,7 +8078,7 @@ function NoSession({ error }) {
       ] }),
       action: /* @__PURE__ */ jsxs23("p", { className: "empty-hint", children: [
         "If a session is running and nothing shows up, the hooks are not firing \u2014 run ",
-        /* @__PURE__ */ jsx24("code", { children: "harness doctor" }),
+        /* @__PURE__ */ jsx24("code", { children: "coplan doctor" }),
         "."
       ] })
     }

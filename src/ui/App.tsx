@@ -230,7 +230,7 @@ function NoPlan({ session }: { session: SessionState }) {
         title="No plan yet"
         hint={
           <>
-            In Claude's chat, run <code>/harness &lt;what you want to build&gt;</code>. Claude investigates the code, then
+            In Claude's chat, run <code>/coplan &lt;what you want to build&gt;</code>. Claude investigates the code, then
             publishes its plan here — the architecture, diagrams and a task breakdown — and asks what it needs to know
             in the chat.
           </>
@@ -265,11 +265,11 @@ function SessionUnavailable({ error }: { error: string }) {
   return (
     <div className="view">
       <EmptyState
-        title={unauthorized ? 'This page is not signed in to the harness' : 'This session is not available'}
+        title={unauthorized ? 'This page is not signed in to Coplan' : 'This session is not available'}
         hint={
           unauthorized ? (
             <>
-              Open the harness with <code>/harness-open</code> in Claude, or <code>harness open</code> in a terminal — the link
+              Open Coplan with <code>/coplan-open</code> in Claude, or <code>coplan open</code> in a terminal — the link
               it prints carries the key this page needs.
             </>
           ) : (
@@ -296,14 +296,14 @@ function NoSession({ error }: { error: string | null }) {
         title="No session yet"
         hint={
           <>
-            Start Claude Code in a project with the harness enabled, then run <code>/harness</code>. Sessions appear here the
+            Start Claude Code in a project with Coplan enabled, then run <code>/coplan</code>. Sessions appear here the
             moment they register.
             {error && <span className="error-text"> · {error}</span>}
           </>
         }
         action={
           <p className="empty-hint">
-            If a session is running and nothing shows up, the hooks are not firing — run <code>harness doctor</code>.
+            If a session is running and nothing shows up, the hooks are not firing — run <code>coplan doctor</code>.
           </p>
         }
       />

@@ -90,7 +90,9 @@ async function runDoctor() {
     "dist/mcp/main.js",
     "dist/ui/index.html",
     "dist/ui/app.js",
-    "bin/hook-relay.sh"
+    "bin/coplan",
+    "bin/coplan-hook-relay.sh",
+    "skills/coplan/SKILL.md"
   ]) {
     const full = path2.join(PLUGIN_ROOT, file);
     record(`present: ${file}`, existsSync2(full), existsSync2(full) ? void 0 : full, true);
@@ -104,13 +106,13 @@ async function runDoctor() {
   } catch (err) {
     record("hooks.json parses", false, err.message, true);
   }
-  const relay = path2.join(PLUGIN_ROOT, "bin/hook-relay.sh");
+  const relay = path2.join(PLUGIN_ROOT, "bin/coplan-hook-relay.sh");
   if (existsSync2(relay)) {
     try {
       const mode = (await import("node:fs")).statSync(relay).mode;
-      record("hook-relay.sh is executable", (mode & 73) !== 0, `mode ${(mode & 511).toString(8)}`, true);
+      record("coplan-hook-relay.sh is executable", (mode & 73) !== 0, `mode ${(mode & 511).toString(8)}`, true);
     } catch {
-      record("hook-relay.sh is executable", false, void 0, true);
+      record("coplan-hook-relay.sh is executable", false, void 0, true);
     }
   }
   const lock = await ensureDaemon();
@@ -152,7 +154,7 @@ async function runDoctor() {
   record("SessionStart registers the session", await getSession() !== null, sessionId, true);
   const published = await mcp("publish", {
     title: "doctor probe",
-    summary: "A plan written by `harness doctor`.",
+    summary: "A plan written by `coplan doctor`.",
     diagrams: [{ title: "Probe", nodes: [{ id: "a", label: "A" }, { id: "b", label: "B" }], edges: [{ source: "a", target: "b" }] }],
     tasks: [{ title: "parent", subtasks: [{ title: "child" }] }]
   });
@@ -367,7 +369,7 @@ function buildPlans(live, now) {
     {
       id: "sessions",
       label: "Finished sessions",
-      detail: "Saved plans for sessions the harness no longer lists, untouched for over a day.",
+      detail: "Saved plans for sessions Coplan no longer lists, untouched for over a day.",
       candidates: staleSessionDirs(live, now)
     },
     {
@@ -589,7 +591,7 @@ var commands = {
    * Report — and, unless asked not to, remove — the files the harness has
    * left behind.
    *
-   *   harness clean [--dry-run] [--all] [group ...]
+   *   coplan clean [--dry-run] [--all] [group ...]
    *
    * Recorded session history is excluded unless it is asked for by name or
    * with `--all`, which is the same default the browser panel offers: every
@@ -711,13 +713,13 @@ async function waitForNewDaemon(previousPid) {
 function usage() {
   console.log(`coplan v${VERSION}
 
-usage: harness <command>
+usage: coplan <command>
 
   start      start the daemon (idempotent)
   stop       stop the daemon
   restart    restart the daemon in place, keeping its address
   status     show the daemon and every registered session
-  clean      remove stale harness files (--dry-run to only list them)
+  clean      remove stale Coplan files (--dry-run to only list them)
              recorded session history is kept unless you pass --all or name it
              groups: sessions, partial-writes, log, lock
   open [id]  open the UI in a browser

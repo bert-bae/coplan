@@ -421,7 +421,7 @@ test('abandoning a rename leaves the name alone', async () => {
 
 const openCleanup = async (): Promise<void> => {
   await act(async () => {
-    fireEvent.click(screen.getByTitle('Clean up stale harness files'));
+    fireEvent.click(screen.getByTitle('Clean up stale Coplan files'));
   });
 };
 

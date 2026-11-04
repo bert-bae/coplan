@@ -8,7 +8,7 @@ released under the same [license](LICENSE).
 Open an [issue](https://github.com/bert-bae/coplan/issues). For a bug, include:
 
 - what you did, what you expected, and what happened instead
-- the output of `./bin/harness doctor` and `./bin/harness version`
+- the output of `./bin/coplan doctor` and `./bin/coplan version`
 - your Claude Code version (`claude --version`), OS and Node.js version
 - anything relevant from `~/.claude/cc-harness/daemon.log`
 
@@ -31,7 +31,7 @@ claude --plugin-dir "$PWD"
 ```
 
 The daemon runs whatever was in `dist/` when it started, so after a rebuild
-restart it with `./bin/harness restart` (or `/harness-restart`). Open tabs
+restart it with `./bin/coplan restart` (or `/coplan-restart`). Open tabs
 reconnect by themselves.
 
 ## Checks
@@ -43,7 +43,7 @@ npm test
 npm run check          # all three
 ```
 
-CI runs the same checks on Node 20 and 22, plus `./bin/harness doctor` and
+CI runs the same checks on Node 20 and 22, plus `./bin/coplan doctor` and
 `npm audit`.
 
 **`dist/` is committed** so the plugin installs with no build step. Run
@@ -63,7 +63,7 @@ committed `dist/` does not match the source.
 - `src/ui`: the browser client (React, React Flow, dagre). The canvas is
   `components/FlowCanvas.tsx` with its boxes, arrows and panel in
   `components/flow/`, and layout, arrow geometry and the clipboard in `lib/`
-- `bin/hook-relay.sh`: sh + curl, so no Node process starts per hook
+- `bin/coplan-hook-relay.sh`: sh + curl, so no Node process starts per hook
 
 ## Ground rules
 

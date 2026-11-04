@@ -1,7 +1,7 @@
 /**
- * `harness` — the operator CLI.
+ * `coplan` — the operator CLI.
  *
- *   harness start|stop|restart|status|open|url|logs|doctor
+ *   coplan start|stop|restart|status|open|url|logs|doctor
  *
  * Everything here is also reachable from the plugin, but a plain CLI is what
  * makes the daemon debuggable when the hook wiring is the thing that broke.
@@ -126,7 +126,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
    * Report — and, unless asked not to, remove — the files the harness has
    * left behind.
    *
-   *   harness clean [--dry-run] [--all] [group ...]
+   *   coplan clean [--dry-run] [--all] [group ...]
    *
    * Recorded session history is excluded unless it is asked for by name or
    * with `--all`, which is the same default the browser panel offers: every
@@ -281,13 +281,13 @@ async function waitForNewDaemon(previousPid: number): Promise<DaemonLock | null>
 function usage(): void {
   console.log(`coplan v${VERSION}
 
-usage: harness <command>
+usage: coplan <command>
 
   start      start the daemon (idempotent)
   stop       stop the daemon
   restart    restart the daemon in place, keeping its address
   status     show the daemon and every registered session
-  clean      remove stale harness files (--dry-run to only list them)
+  clean      remove stale Coplan files (--dry-run to only list them)
              recorded session history is kept unless you pass --all or name it
              groups: sessions, partial-writes, log, lock
   open [id]  open the UI in a browser

@@ -121,7 +121,7 @@ function buildPlans(live, now) {
     {
       id: "sessions",
       label: "Finished sessions",
-      detail: "Saved plans for sessions the harness no longer lists, untouched for over a day.",
+      detail: "Saved plans for sessions Coplan no longer lists, untouched for over a day.",
       candidates: staleSessionDirs(live, now)
     },
     {

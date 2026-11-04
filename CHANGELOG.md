@@ -11,9 +11,15 @@
   and `claude plugin install coplan@coplan`. If you installed
   `cc-harness@cc-harness-local`, uninstall it, remove that marketplace, and
   install `coplan@coplan`.
-- The slash commands, MCP tools, CLI and data directory keep the `harness`
-  name (`/harness`, `harness_plan_*`, `bin/harness`, `~/.claude/cc-harness`),
-  so existing plans and configuration carry over unchanged.
+- The slash commands are `/coplan`, `/coplan-open`, `/coplan-doctor` and
+  `/coplan-restart` (they were `/harness…`), and the CLI is `bin/coplan`
+  (it was `bin/harness`). The hook relay is `bin/coplan-hook-relay.sh`, so
+  nothing generic lands on your `PATH`. The UI, the CLI and what Claude is
+  told all say Coplan.
+- The MCP tools and the data directory keep their old names
+  (`harness_plan_*`, `~/.claude/cc-harness`, `CC_HARNESS_HOME`,
+  `.claude/harness.json`), so existing plans and configuration carry over
+  unchanged.
 
 ### Submitting the plan
 

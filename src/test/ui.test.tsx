@@ -694,8 +694,8 @@ test('a page without the harness key says how to open it properly', async () => 
   await act(async () => {
     await store.init();
   });
-  assert.ok(screen.getByText('This page is not signed in to the harness'));
-  assert.match(document.body.textContent ?? '', /harness open/);
+  assert.ok(screen.getByText('This page is not signed in to Coplan'));
+  assert.match(document.body.textContent ?? '', /coplan open/);
 });
 
 test('a snapshot from Claude replaces the plan and says so', async () => {

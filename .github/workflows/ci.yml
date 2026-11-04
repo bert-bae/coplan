@@ -55,8 +55,8 @@ jobs:
           CC_HARNESS_HOME: ${{ runner.temp }}/harness
         run: |
           status=0
-          ./bin/harness doctor || status=$?
-          ./bin/harness stop
+          ./bin/coplan doctor || status=$?
+          ./bin/coplan stop
           exit $status
 
       - name: Audit dependencies

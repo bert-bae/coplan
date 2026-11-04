@@ -1,10 +1,10 @@
 #!/bin/sh
 # Coplan hook relay.
 #
-# Forwards one Claude Code hook payload to the local harness daemon and echoes
+# Forwards one Claude Code hook payload to the local Coplan daemon and echoes
 # the daemon's JSON response back as the hook's output.
 #
-#   usage: hook-relay.sh <EventName>
+#   usage: coplan-hook-relay.sh <EventName>
 #
 # Two properties matter more than anything else here:
 #

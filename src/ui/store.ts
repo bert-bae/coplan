@@ -477,7 +477,7 @@ class Store {
     const arrived = await waitForDaemon(previousPid, waitMs);
     if (!arrived) {
       this.set({ restarting: false });
-      this.toast('error', 'The daemon did not come back. Run `harness start` in a terminal.');
+      this.toast('error', 'The daemon did not come back. Run `coplan start` in a terminal.');
       return;
     }
     this.reloadPage();

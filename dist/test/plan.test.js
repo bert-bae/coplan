@@ -666,7 +666,7 @@ function removeItem(plan, kind, id, log) {
 }
 var TRACKING_OPS = /* @__PURE__ */ new Set(["upsert_task", "reply", "resolve"]);
 var LOCKED_FOR_USER = "The plan has been submitted to be built, so it is locked. Reopen it to make changes.";
-var LOCKED_FOR_CLAUDE = "The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or upsert_task to add work you discover) and comment replies (reply, resolve) apply. If the design has to change, ask the user in chat \u2014 they can reopen the plan in the harness.";
+var LOCKED_FOR_CLAUDE = "The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or upsert_task to add work you discover) and comment replies (reply, resolve) apply. If the design has to change, ask the user in chat \u2014 they can reopen the plan in Coplan.";
 function planPhase(plan) {
   const submission = plan?.submission;
   if (!submission) return "planning";
@@ -1316,7 +1316,7 @@ function lockLine(plan) {
     case "built":
       return "> **Built.** The user submitted this plan and every task is done. Publishing a new plan replaces it.";
     default:
-      return "> **Locked for building.** The user submitted this plan: build it task by task, keeping statuses true with harness_task_update. Only task updates and comment replies apply now; if the design has to change, ask the user in chat \u2014 they can reopen the plan in the harness.";
+      return "> **Locked for building.** The user submitted this plan: build it task by task, keeping statuses true with harness_task_update. Only task updates and comment replies apply now; if the design has to change, ask the user in chat \u2014 they can reopen the plan in Coplan.";
   }
 }
 function renderChanges(plan, unread, changesOnly) {

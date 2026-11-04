@@ -75,7 +75,7 @@ export function OpenInClaude({
     <button
       type="button"
       className={classNames('btn btn-sm', primary && 'btn-primary')}
-      title={`${whereItRuns(session)} has no link the harness can open. Copies a message to paste there instead.`}
+      title={`${whereItRuns(session)} has no link Coplan can open. Copies a message to paste there instead.`}
       onClick={() => void copyHandoff()}
     >
       Copy message for Claude

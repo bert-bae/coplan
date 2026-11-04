@@ -269,16 +269,16 @@ test("markup inside a code fence stays literal", () => {
 });
 test("a slash command renders as one chip instead of three raw tags", () => {
   const html = renderMarkdown(
-    "<command-message>cc-harness:harness</command-message>\n<command-name>/cc-harness:harness</command-name>\n<command-args>security audit for packages - reusable pattern</command-args>"
+    "<command-message>coplan:coplan</command-message>\n<command-name>/coplan:coplan</command-name>\n<command-args>security audit for packages - reusable pattern</command-args>"
   );
   assert.ok(!html.includes("&lt;command-name&gt;"), "the tags themselves are gone");
   assert.equal((html.match(/md-command"/g) ?? []).length, 1, "the trio is one chip, not three");
-  assert.ok(html.includes('<span class="md-command-name">/cc-harness:harness</span>'));
+  assert.ok(html.includes('<span class="md-command-name">/coplan:coplan</span>'));
   assert.ok(html.includes("security audit for packages - reusable pattern"));
 });
 test("a command message that only repeats the name is not shown twice", () => {
   const html = renderMarkdown(
-    "<command-message>cc-harness:harness</command-message>\n<command-name>/cc-harness:harness</command-name>"
+    "<command-message>coplan:coplan</command-message>\n<command-name>/coplan:coplan</command-name>"
   );
   assert.ok(!html.includes("md-command-message"));
 });

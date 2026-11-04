@@ -2,10 +2,10 @@
 description: Verify the Coplan plugin wiring against the installed Claude Code version
 ---
 
-Run the harness self-test and report the result:
+Run the Coplan self-test and report the result:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/bin/harness" doctor
+"${CLAUDE_PLUGIN_ROOT}/bin/coplan" doctor
 ```
 
 This replays real hook payloads against a live daemon and checks the planning

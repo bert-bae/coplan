@@ -1,5 +1,5 @@
 /**
- * `harness doctor` — verify the wiring, not the code.
+ * `coplan doctor` — verify the wiring, not the code.
  *
  * The hook contract belongs to the Claude Code CLI, and it has changed shape
  * before. Rather than trust the docs, this replays real hook payloads against
@@ -48,7 +48,9 @@ export async function runDoctor(): Promise<number> {
     'dist/mcp/main.js',
     'dist/ui/index.html',
     'dist/ui/app.js',
-    'bin/hook-relay.sh',
+    'bin/coplan',
+    'bin/coplan-hook-relay.sh',
+    'skills/coplan/SKILL.md',
   ]) {
     const full = path.join(PLUGIN_ROOT, file);
     record(`present: ${file}`, existsSync(full), existsSync(full) ? undefined : full, true);
@@ -66,13 +68,13 @@ export async function runDoctor(): Promise<number> {
     record('hooks.json parses', false, (err as Error).message, true);
   }
 
-  const relay = path.join(PLUGIN_ROOT, 'bin/hook-relay.sh');
+  const relay = path.join(PLUGIN_ROOT, 'bin/coplan-hook-relay.sh');
   if (existsSync(relay)) {
     try {
       const mode = (await import('node:fs')).statSync(relay).mode;
-      record('hook-relay.sh is executable', (mode & 0o111) !== 0, `mode ${(mode & 0o777).toString(8)}`, true);
+      record('coplan-hook-relay.sh is executable', (mode & 0o111) !== 0, `mode ${(mode & 0o777).toString(8)}`, true);
     } catch {
-      record('hook-relay.sh is executable', false, undefined, true);
+      record('coplan-hook-relay.sh is executable', false, undefined, true);
     }
   }
 
@@ -127,7 +129,7 @@ export async function runDoctor(): Promise<number> {
   // back. That round trip is the whole product, so it is what gets probed.
   const published = await mcp('publish', {
     title: 'doctor probe',
-    summary: 'A plan written by `harness doctor`.',
+    summary: 'A plan written by `coplan doctor`.',
     diagrams: [{ title: 'Probe', nodes: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }], edges: [{ source: 'a', target: 'b' }] }],
     tasks: [{ title: 'parent', subtasks: [{ title: 'child' }] }],
   });
