@@ -66,7 +66,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
       console.error('failed to start the daemon; see', paths.logFile());
       return 1;
     }
-    console.log(`cc-harness running on ${baseUrl(lock)} (pid ${lock.pid})`);
+    console.log(`coplan running on ${baseUrl(lock)} (pid ${lock.pid})`);
     console.log(`open: ${uiUrl(lock)}`);
     return 0;
   },
@@ -107,7 +107,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
       if (result.restarting) {
         const next = await waitForNewDaemon(lock.pid);
         if (next) {
-          console.log(`cc-harness restarted on ${baseUrl(next)} (pid ${next.pid})`);
+          console.log(`coplan restarted on ${baseUrl(next)} (pid ${next.pid})`);
           return 0;
         }
         console.error('the daemon stopped but did not come back; see', paths.logFile());
@@ -188,7 +188,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
       console.log('not running');
       return 0;
     }
-    console.log(`cc-harness v${lock.version} on ${baseUrl(lock)} (pid ${lock.pid})`);
+    console.log(`coplan v${lock.version} on ${baseUrl(lock)} (pid ${lock.pid})`);
     const { sessions } = await api<{ sessions: SessionSummary[] }>(lock, '/api/sessions');
     if (!sessions.length) {
       console.log('no sessions');
@@ -279,7 +279,7 @@ async function waitForNewDaemon(previousPid: number): Promise<DaemonLock | null>
 }
 
 function usage(): void {
-  console.log(`cc-harness v${VERSION}
+  console.log(`coplan v${VERSION}
 
 usage: harness <command>
 

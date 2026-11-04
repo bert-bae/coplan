@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Renamed to Coplan
+
+- The project is now **Coplan**, open source under the MIT license. The
+  repository moved to `bert-bae/coplan`; GitHub redirects the old address.
+- The plugin and its marketplace are both named `coplan`, so it installs
+  straight from GitHub with `claude plugin marketplace add bert-bae/coplan`
+  and `claude plugin install coplan@coplan`. If you installed
+  `cc-harness@cc-harness-local`, uninstall it, remove that marketplace, and
+  install `coplan@coplan`.
+- The slash commands, MCP tools, CLI and data directory keep the `harness`
+  name (`/harness`, `harness_plan_*`, `bin/harness`, `~/.claude/cc-harness`),
+  so existing plans and configuration carry over unchanged.
+
 ### Submitting the plan
 
 - **Review & submit plan**, on the Architecture view, shows the exact prompt

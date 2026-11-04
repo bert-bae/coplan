@@ -316,7 +316,7 @@ function NoSession({ error }: { error: string | null }) {
  * ------------------------------------------------------------------ */
 
 function useDocumentTitle(session: SessionState | null): void {
-  const title = session?.plan?.title ?? session?.title ?? 'cc-harness';
+  const title = session?.plan?.title ?? session?.title ?? 'Coplan';
   const waiting = Boolean(session?.waiting);
   useEffect(() => {
     // The tab title is the only signal that reaches a user in another window.

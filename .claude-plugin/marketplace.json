@@ -1,13 +1,13 @@
 {
-  "name": "cc-harness-local",
+  "name": "coplan",
   "owner": {
     "name": "Elbert B."
   },
   "plugins": [
     {
-      "name": "cc-harness",
+      "name": "coplan",
       "source": "./",
-      "description": "A visual planning workspace for Claude Code: architecture diagrams, a task breakdown you can reorganize, and open questions to answer \u2014 which Claude reads back when you tell it to."
+      "description": "Open-source visual planning workspace for Claude Code: shape Claude's plan as architecture diagrams and a task board in the browser, submit it, and follow the build."
     }
   ]
 }
