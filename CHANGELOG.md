@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Build after installing
+
+- `dist/` is no longer committed. After installing or updating the plugin,
+  run `/coplan-setup` in Claude Code (it runs `npm install` in the plugin's
+  directory, which builds it), then restart Claude Code. Until then the
+  plugin's tools and hooks stay off, and `coplan` says how to build it. CI no
+  longer compares a committed `dist/` with the source.
+
 ### Design first, then a linked task list, then a reviewed build
 
 - **Confirm the design before the task list.** The Architecture view's main

@@ -11,7 +11,6 @@
     ],
     "final": [
       { "name": "check", "run": "npm run check", "timeout": 1200 },
-      { "name": "dist committed", "run": "git diff --quiet -- dist" },
       { "name": "doctor", "run": "CC_HARNESS_HOME=\"$(mktemp -d)\" sh -c './bin/coplan doctor; s=$?; ./bin/coplan stop; exit $s'", "timeout": 300 }
     ]
   },

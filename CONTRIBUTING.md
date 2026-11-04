@@ -47,9 +47,9 @@ CI runs the same checks on Node 20 and 22, plus `./bin/coplan doctor` and
 `npm audit`. The repository's own [`.coplan/config.json`](.coplan/config.json)
 lists them per stage, so `./bin/coplan check review` runs what a change needs.
 
-**`dist/` is committed** so the plugin installs with no build step. Run
-`npm run build` and commit the result with your change; CI fails when the
-committed `dist/` does not match the source.
+**`dist/` is not committed.** It is build output: `npm install` builds it (the
+`prepare` script), and `npm run build` rebuilds it. People who install the
+plugin build it once with `/coplan-setup`.
 
 ## How the code is laid out
 
@@ -90,4 +90,4 @@ committed `dist/` does not match the source.
 ## Pull requests
 
 Keep a pull request to one change, describe what it does and why, and make
-sure `npm run check` passes with `dist/` rebuilt.
+sure `npm run check` passes.

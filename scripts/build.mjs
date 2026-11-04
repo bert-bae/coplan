@@ -2,7 +2,8 @@
 // Build pipeline for Coplan.
 //   node scripts/build.mjs [--watch]
 //
-// Produces dist/, which is committed so the plugin needs no install step.
+// Produces dist/: build output, not committed. `npm install` runs it too
+// (the `prepare` script), so installing the plugin's dependencies builds it.
 // A one-shot build stages into a temporary directory and swaps it in only
 // once every bundle has succeeded — a failed build must never leave the
 // installed plugin without a UI.

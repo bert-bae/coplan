@@ -89,8 +89,6 @@ Claude* links open.
 
 ### From GitHub
 
-`dist/` is committed, so the plugin installs with no build step:
-
 ```bash
 claude plugin marketplace add bert-bae/coplan
 ```
@@ -101,6 +99,13 @@ claude plugin install coplan@coplan --scope user
 
 Or, from inside a Claude Code session, run `/plugin marketplace add
 bert-bae/coplan` and then `/plugin install coplan@coplan`.
+
+The build output (`dist/`) is not in the repository, so **build the plugin
+once after installing it**: run `/coplan-setup` in any Claude Code session.
+It runs `npm install` in the installed plugin's directory, which builds it.
+Then restart Claude Code so the plugin's MCP server and hooks start from the
+build. Do the same after updating the plugin. Until it is built, the plugin's
+tools and hooks stay off, and `coplan` says how to build it.
 
 ### From source
 
@@ -145,6 +150,7 @@ In any session with the plugin enabled:
 
 - `/coplan <task>`: Claude investigates, then publishes a plan to the UI
 - `/coplan-open`: open this session's plan in the browser
+- `/coplan-setup`: build the plugin after installing or updating it
 - `/coplan-init`: set up `.coplan/config.json`, the checks every task runs
 - `/coplan-doctor`: check the wiring
 - `/coplan-restart`: restart the daemon after a rebuild
@@ -440,7 +446,7 @@ npm install
 npm run check          # typecheck, build and test
 ```
 
-Commit the rebuilt `dist/` with your change; CI fails if it is out of date.
+`dist/` is build output and is not committed; `npm install` builds it.
 
 ## License
 
