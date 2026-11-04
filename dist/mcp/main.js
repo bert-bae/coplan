@@ -13,7 +13,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { mkdirSync, readFileSync, existsSync } from "node:fs";
 function harnessHome() {
-  return process.env.CC_HARNESS_HOME || path.join(homedir(), ".claude", "cc-harness");
+  const override = process.env.CC_HARNESS_HOME;
+  return override && !override.includes("${") ? override : path.join(homedir(), ".claude", "cc-harness");
 }
 var paths = {
   home: harnessHome,
@@ -218,12 +219,107 @@ var TOOLS = [
   }
 ];
 
+// src/shared/agents.ts
+var AGENT_KINDS = ["claude", "codex", "cursor"];
+var AGENTS = {
+  claude: {
+    kind: "claude",
+    name: "Claude",
+    product: "Claude Code",
+    app: "the Claude desktop app",
+    askTools: ["AskUserQuestion"],
+    askWith: "AskUserQuestion",
+    promptContext: true
+  },
+  codex: {
+    kind: "codex",
+    name: "Codex",
+    product: "Codex",
+    app: "the Codex app",
+    askTools: ["request_user_input", "request_user_input_async"],
+    // Codex only offers request_user_input in Plan mode.
+    askWith: "request_user_input (in Plan mode) or plainly",
+    promptContext: true
+  },
+  cursor: {
+    kind: "cursor",
+    name: "Cursor",
+    product: "Cursor",
+    app: "Cursor",
+    // Cursor's hooks do not see AskQuestion today; a question is noticed
+    // when the turn ends on one. Listed for when they do.
+    askTools: ["AskQuestion"],
+    askWith: "AskQuestion or plainly",
+    promptContext: false
+  }
+};
+var DEFAULT_AGENT = "claude";
+function isAgentKind(value) {
+  return typeof value === "string" && AGENT_KINDS.includes(value);
+}
+function parseAgent(value) {
+  const v = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return isAgentKind(v) ? v : DEFAULT_AGENT;
+}
+function agentInfo(kind) {
+  return AGENTS[kind && isAgentKind(kind) ? kind : DEFAULT_AGENT];
+}
+var SESSION_ENV = {
+  claude: ["CLAUDE_CODE_SESSION_ID"],
+  codex: ["CODEX_THREAD_ID"],
+  cursor: ["CURSOR_CONVERSATION_ID"]
+};
+function sessionFromEnv(env, agent) {
+  for (const key of SESSION_ENV[agent]) {
+    const value = env[key]?.trim();
+    if (value) return value;
+  }
+  return null;
+}
+function workspaceFromEnv(env) {
+  const value = env["COPLAN_WORKSPACE"]?.trim();
+  return value && !value.includes("${") ? value : null;
+}
+
 // src/mcp/main.ts
 var VERSION = true ? "0.2.0" : "0.0.0";
 var PROTOCOL_VERSION = "2024-11-05";
 var DAEMON_ENTRY = path2.resolve(path2.dirname(fileURLToPath(import.meta.url)), "..", "daemon", "main.js");
-var SESSION_ID = process.env["CLAUDE_CODE_SESSION_ID"] ?? "";
+var AGENT = parseAgent(process.env["COPLAN_AGENT"]);
+var SESSION_ID = sessionFromEnv(process.env, AGENT) ?? "";
 var CLAUDE_PID = Number(process.env["CLAUDE_PID"] ?? process.ppid);
+var WORKSPACE_ENV = workspaceFromEnv(process.env);
+var workspace = WORKSPACE_ENV ?? process.cwd();
+var rootsWanted = false;
+var rootsAsked = 0;
+var rootsSettled = Promise.resolve();
+var settleRoots = null;
+var pendingRoots = /* @__PURE__ */ new Set();
+function askForRoots() {
+  const id = `coplan-roots-${++rootsAsked}`;
+  pendingRoots.add(id);
+  rootsSettled = new Promise((resolve) => {
+    settleRoots = resolve;
+    setTimeout(resolve, ROOTS_WAIT_MS).unref();
+  });
+  send({ jsonrpc: "2.0", id, method: "roots/list" });
+}
+function onRoots(result) {
+  const roots = result?.roots;
+  if (Array.isArray(roots)) {
+    for (const root of roots) {
+      const uri = root?.uri;
+      if (typeof uri !== "string" || !uri.startsWith("file://")) continue;
+      try {
+        workspace = fileURLToPath(uri);
+        break;
+      } catch {
+      }
+    }
+  }
+  settleRoots?.();
+}
+var ROOTS_WAIT_MS = 1500;
 var cachedLock = null;
 async function daemon() {
   if (cachedLock && readLiveLock()?.pid === cachedLock.pid) return cachedLock;
@@ -253,7 +349,7 @@ async function startDaemon() {
   }
   return null;
 }
-async function callDaemon(tool, args, timeoutMs, onTimeout) {
+async function callDaemon(tool, args, timeoutMs, onTimeout, sessionId = SESSION_ID) {
   const lock = await daemon();
   if (!lock) {
     return {
@@ -269,9 +365,17 @@ async function callDaemon(tool, args, timeoutMs, onTimeout) {
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${lock.token}`,
-        "x-harness-session": SESSION_ID
+        "x-harness-session": sessionId,
+        "x-harness-agent": AGENT
       },
-      body: JSON.stringify({ ...args, sessionId: SESSION_ID || void 0, cwd: process.cwd(), pid: CLAUDE_PID }),
+      // Codex starts this server in the plugin's own folder, which says
+      // nothing about the session; its thread id says everything.
+      body: JSON.stringify({
+        ...args,
+        sessionId: sessionId || void 0,
+        cwd: AGENT === "codex" && !WORKSPACE_ENV ? void 0 : workspace,
+        pid: CLAUDE_PID
+      }),
       signal: controller.signal
     });
     const body = await res.json();
@@ -285,6 +389,17 @@ async function callDaemon(tool, args, timeoutMs, onTimeout) {
   } finally {
     clearTimeout(timer);
   }
+}
+function sessionFromCall(params) {
+  if (AGENT !== "codex") return null;
+  const meta = params["_meta"];
+  if (!meta || typeof meta !== "object") return null;
+  const record = meta;
+  for (const key of ["threadId", "sessionId"]) {
+    const value = record[key];
+    if (typeof value === "string" && /^[A-Za-z0-9_-]{6,128}$/.test(value)) return value;
+  }
+  return null;
 }
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}
@@ -300,15 +415,20 @@ function respondError(id, code, message) {
 }
 async function handleRequest(req) {
   switch (req.method) {
-    case "initialize":
+    case "initialize": {
+      const capabilities = req.params?.["capabilities"] ?? {};
+      rootsWanted = AGENT !== "claude" && !WORKSPACE_ENV && Boolean(capabilities["roots"]);
       respond(req.id, {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "coplan", version: VERSION }
       });
       return;
+    }
     case "notifications/initialized":
     case "initialized":
+    case "notifications/roots/list_changed":
+      if (rootsWanted) askForRoots();
       return;
     case "ping":
       respond(req.id, {});
@@ -317,7 +437,9 @@ async function handleRequest(req) {
       respond(req.id, {
         tools: TOOLS.map((t) => ({
           name: t.name,
-          description: t.description,
+          // The descriptions name Claude Code's question tool; each agent is
+          // told to ask with its own.
+          description: t.description.replaceAll("AskUserQuestion", agentInfo(AGENT).askWith),
           inputSchema: t.inputSchema
         }))
       });
@@ -331,11 +453,13 @@ async function handleRequest(req) {
         respondError(req.id, -32602, `Unknown tool: ${name}`);
         return;
       }
+      await rootsSettled;
       const result = await callDaemon(
         tool.endpoint,
         args,
         DEFAULT_BUDGET_MS,
-        "[cc-harness] The daemon did not respond in time. Call the tool again."
+        "[cc-harness] The daemon did not respond in time. Call the tool again.",
+        sessionFromCall(params) ?? SESSION_ID
       );
       respond(req.id, {
         content: [{ type: "text", text: result.text }],
@@ -362,6 +486,11 @@ rl.on("line", (line) => {
   try {
     req = JSON.parse(trimmed);
   } catch {
+    return;
+  }
+  if (typeof req.method !== "string") {
+    const id = String(req.id ?? "");
+    if (pendingRoots.delete(id)) onRoots(req.result);
     return;
   }
   inFlight++;

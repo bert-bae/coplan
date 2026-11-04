@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "harness": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${CURSOR_PLUGIN_ROOT}/dist/mcp/main.js"],
+      "env": {
+        "COPLAN_AGENT": "cursor",
+        "COPLAN_WORKSPACE": "${workspaceFolder}"
+      }
+    }
+  }
+}

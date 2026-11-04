@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { store, usePlan } from '../store.ts';
+import { store, useAgent, usePlan } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
 import { CommentToggle, ThreadPanel } from '../components/Threads.tsx';
 import { Focusable, ItemActions } from '../components/Item.tsx';
@@ -64,6 +64,7 @@ export function OverviewView() {
 }
 
 function Glance({ plan }: { plan: Plan }) {
+  const agent = useAgent();
   const counts = countTasks(plan);
   const openThreads = plan.threads.filter((t) => !t.resolved).length;
   const now = currentTask(plan);
@@ -92,7 +93,7 @@ function Glance({ plan }: { plan: Plan }) {
           else store.setTab('tasks');
         }}
       >
-        <span className="glance-label">{now ? 'Claude is on' : blocked.length ? 'Blocked' : 'Now'}</span>
+        <span className="glance-label">{now ? `${agent.name} is on` : blocked.length ? 'Blocked' : 'Now'}</span>
         <span className="glance-now">{now?.title ?? blocked[0]?.title ?? (counts.total && counts.done === counts.total ? 'All done' : 'Nothing in progress')}</span>
         <span className="glance-sub">{now?.note ?? blocked[0]?.note ?? (blocked.length > 1 ? `${blocked.length} tasks blocked` : ' ')}</span>
       </button>

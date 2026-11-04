@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { store } from '../../store.ts';
+import { store, useAgent } from '../../store.ts';
 import { MarkdownField } from '../Editable.tsx';
 import { Markdown } from '../Markdown.tsx';
 import { STATUS_GLYPH, STATUS_LABEL } from '../Progress.tsx';
@@ -208,6 +208,7 @@ export function NodePanel({
   onRemove: () => void;
   onClose: () => void;
 }) {
+  const agent = useAgent();
   const [confirming, setConfirming] = useState(false);
   const name = (id: string) => nodes.find((n) => n.id === id)?.data.label ?? id;
   const outgoing = edges.filter((e) => e.source === node.id);
@@ -224,7 +225,7 @@ export function NodePanel({
           {KIND_GLYPH[node.data.kind]}
         </span>
         <span className="panel-kicker">{KIND_LABEL[node.data.kind]}</span>
-        <span className="item-id" title="Id — how Claude refers to this box">
+        <span className="item-id" title={`Id — how ${agent.name} refers to this box`}>
           {node.id}
         </span>
         <span className="spacer" />

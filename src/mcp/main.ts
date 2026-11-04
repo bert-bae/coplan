@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readLiveLock, baseUrl, ensureHome } from '../shared/paths.ts';
 import { TOOLS, DEFAULT_BUDGET_MS } from './tools.ts';
+import { agentInfo, parseAgent, sessionFromEnv, workspaceFromEnv } from '../shared/agents.ts';
 import type { DaemonLock } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
@@ -28,8 +29,67 @@ interface JsonRpcRequest {
   params?: Record<string, unknown>;
 }
 
-const SESSION_ID = process.env['CLAUDE_CODE_SESSION_ID'] ?? '';
+/**
+ * Which agent started this server, and which of its sessions is calling.
+ *
+ * Each agent's MCP config sets `COPLAN_AGENT`. Claude Code names the session
+ * in the environment; Codex names it on each call (see `sessionFromCall`).
+ * Otherwise the daemon matches this server's parent process, then its
+ * workspace, against the sessions the hooks registered. Cursor starts one
+ * server per window rather than per chat, so it says which folder is open in
+ * `COPLAN_WORKSPACE` and the daemon picks the chat there that was active last.
+ */
+const AGENT = parseAgent(process.env['COPLAN_AGENT']);
+const SESSION_ID = sessionFromEnv(process.env, AGENT) ?? '';
 const CLAUDE_PID = Number(process.env['CLAUDE_PID'] ?? process.ppid);
+const WORKSPACE_ENV = workspaceFromEnv(process.env);
+let workspace = WORKSPACE_ENV ?? process.cwd();
+
+/* ------------------------------------------------------------------ *
+ * The workspace, from the client
+ * ------------------------------------------------------------------ */
+
+/**
+ * An agent whose MCP config cannot say which folder is open — Cursor, when
+ * `${workspaceFolder}` is left unexpanded — may still offer MCP roots. Ask
+ * for them once the session is up, and before the first tool call wait a
+ * moment for the answer. Claude Code names its session, so it never asks.
+ */
+let rootsWanted = false;
+let rootsAsked = 0;
+let rootsSettled: Promise<void> = Promise.resolve();
+let settleRoots: (() => void) | null = null;
+const pendingRoots = new Set<string>();
+
+function askForRoots(): void {
+  const id = `coplan-roots-${++rootsAsked}`;
+  pendingRoots.add(id);
+  rootsSettled = new Promise<void>((resolve) => {
+    settleRoots = resolve;
+    setTimeout(resolve, ROOTS_WAIT_MS).unref();
+  });
+  send({ jsonrpc: '2.0', id, method: 'roots/list' });
+}
+
+/** The answer to `roots/list`: the first local folder is the workspace. */
+function onRoots(result: unknown): void {
+  const roots = (result as { roots?: unknown })?.roots;
+  if (Array.isArray(roots)) {
+    for (const root of roots) {
+      const uri = (root as { uri?: unknown })?.uri;
+      if (typeof uri !== 'string' || !uri.startsWith('file://')) continue;
+      try {
+        workspace = fileURLToPath(uri);
+        break;
+      } catch {
+        /* not a local path; try the next */
+      }
+    }
+  }
+  settleRoots?.();
+}
+
+const ROOTS_WAIT_MS = 1_500;
 
 /* ------------------------------------------------------------------ *
  * Daemon connection
@@ -82,6 +142,7 @@ async function callDaemon(
   args: Record<string, unknown>,
   timeoutMs: number,
   onTimeout: string,
+  sessionId: string = SESSION_ID,
 ): Promise<CallResult> {
   const lock = await daemon();
   if (!lock) {
@@ -101,9 +162,17 @@ async function callDaemon(
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${lock.token}`,
-        'x-harness-session': SESSION_ID,
+        'x-harness-session': sessionId,
+        'x-harness-agent': AGENT,
       },
-      body: JSON.stringify({ ...args, sessionId: SESSION_ID || undefined, cwd: process.cwd(), pid: CLAUDE_PID }),
+      // Codex starts this server in the plugin's own folder, which says
+      // nothing about the session; its thread id says everything.
+      body: JSON.stringify({
+        ...args,
+        sessionId: sessionId || undefined,
+        cwd: AGENT === 'codex' && !WORKSPACE_ENV ? undefined : workspace,
+        pid: CLAUDE_PID,
+      }),
       signal: controller.signal,
     });
     const body = (await res.json()) as { text?: string; ok?: boolean };
@@ -117,6 +186,24 @@ async function callDaemon(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * The session a tool call comes from, when the call says. Codex puts it in
+ * every `tools/call`'s `_meta` (`threadId`), and nowhere else: its MCP
+ * servers get a filtered environment, and with connection sharing one server
+ * can serve several threads.
+ */
+function sessionFromCall(params: Record<string, unknown>): string | null {
+  if (AGENT !== 'codex') return null;
+  const meta = params['_meta'];
+  if (!meta || typeof meta !== 'object') return null;
+  const record = meta as Record<string, unknown>;
+  for (const key of ['threadId', 'sessionId']) {
+    const value = record[key];
+    if (typeof value === 'string' && /^[A-Za-z0-9_-]{6,128}$/.test(value)) return value;
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------ *
@@ -139,16 +226,21 @@ function respondError(id: number | string | null | undefined, code: number, mess
 
 async function handleRequest(req: JsonRpcRequest): Promise<void> {
   switch (req.method) {
-    case 'initialize':
+    case 'initialize': {
+      const capabilities = (req.params?.['capabilities'] ?? {}) as Record<string, unknown>;
+      rootsWanted = AGENT !== 'claude' && !WORKSPACE_ENV && Boolean(capabilities['roots']);
       respond(req.id, {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: 'coplan', version: VERSION },
       });
       return;
+    }
 
     case 'notifications/initialized':
     case 'initialized':
+    case 'notifications/roots/list_changed':
+      if (rootsWanted) askForRoots();
       return;
 
     case 'ping':
@@ -159,7 +251,9 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
       respond(req.id, {
         tools: TOOLS.map((t) => ({
           name: t.name,
-          description: t.description,
+          // The descriptions name Claude Code's question tool; each agent is
+          // told to ask with its own.
+          description: t.description.replaceAll('AskUserQuestion', agentInfo(AGENT).askWith),
           inputSchema: t.inputSchema,
         })),
       });
@@ -174,11 +268,13 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
         respondError(req.id, -32602, `Unknown tool: ${name}`);
         return;
       }
+      await rootsSettled;
       const result = await callDaemon(
         tool.endpoint,
         args,
         DEFAULT_BUDGET_MS,
         '[cc-harness] The daemon did not respond in time. Call the tool again.',
+        sessionFromCall(params) ?? SESSION_ID,
       );
       respond(req.id, {
         content: [{ type: 'text', text: result.text }],
@@ -212,6 +308,12 @@ rl.on('line', (line) => {
   try {
     req = JSON.parse(trimmed) as JsonRpcRequest;
   } catch {
+    return;
+  }
+  // The client answering a request of ours (`roots/list`), not asking one.
+  if (typeof req.method !== 'string') {
+    const id = String(req.id ?? '');
+    if (pendingRoots.delete(id)) onRoots((req as unknown as { result?: unknown }).result);
     return;
   }
   inFlight++;

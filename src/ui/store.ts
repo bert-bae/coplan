@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { api } from './lib/api.ts';
 import { isLocked } from '../shared/plan.ts';
+import { agentInfo, type AgentInfo } from '../shared/agents.ts';
 import type { BuildTarget, CleanupGroupId, Plan, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport } from '../shared/types.ts';
 
 export type Tab = 'diagrams' | 'tasks' | 'overview';
@@ -186,12 +187,13 @@ class Store {
         const before = this.state.session?.plan;
         const after = event.session.plan;
         // Claude rewriting the plan under the reader is worth a word.
+        const agent = agentInfo(event.session.agent).name;
         if (before && after && after.revision > before.revision) {
-          this.toast('info', `Claude published revision ${after.revision} of the plan.`);
+          this.toast('info', `${agent} published revision ${after.revision} of the plan.`);
         }
-        // The moment Claude picks up the submitted plan.
+        // The moment the agent picks up the submitted plan.
         if (before?.submission && !before.submission.deliveredAt && after?.submission?.deliveredAt) {
-          this.toast('success', 'Claude has the build prompt. Follow it on the board.');
+          this.toast('success', `${agent} has the build prompt. Follow it on the board.`);
         }
         this.set({ session: event.session });
         return;
@@ -270,11 +272,14 @@ class Store {
       const { plan } = await api.submitPlan(id, input);
       this.adoptPlan(id, plan);
       this.set({ tab: 'tasks', taskMode: 'board' });
+      const agent = agentInfo(this.state.session?.agent);
       this.toast(
         'success',
-        input.target === 'session'
-          ? 'Plan submitted and locked. Send any message in Claude to hand it the prompt.'
-          : 'Plan submitted and locked. Paste the prompt where it will be built.',
+        input.target !== 'session'
+          ? 'Plan submitted and locked. Paste the prompt where it will be built.'
+          : agent.promptContext
+            ? `Plan submitted and locked. Send any message in ${agent.name} to hand it the prompt.`
+            : `Plan submitted and locked. Paste the prompt into ${agent.name}'s chat.`,
       );
       return true;
     } catch (err) {
@@ -290,7 +295,7 @@ class Store {
     try {
       const { plan } = await api.reopenPlan(id);
       this.adoptPlan(id, plan);
-      this.toast('info', 'The plan is open for changes again. Tell Claude in chat once you have changed it.');
+      this.toast('info', `The plan is open for changes again. Tell ${agentInfo(this.state.session?.agent).name} in chat once you have changed it.`);
       return true;
     } catch (err) {
       this.fail(err);
@@ -586,4 +591,10 @@ export function useSession(): SessionState | null {
 
 export function usePlan() {
   return useStore((s) => s.session?.plan ?? null);
+}
+
+/** The agent behind the open session — Claude, Codex or Cursor — which is
+ *  what the page calls the other side of the plan. */
+export function useAgent(): AgentInfo {
+  return agentInfo(useStore((s) => s.session?.agent));
 }

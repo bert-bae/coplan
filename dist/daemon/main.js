@@ -20,7 +20,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { mkdirSync, readFileSync, existsSync } from "node:fs";
 function harnessHome() {
-  return process.env.CC_HARNESS_HOME || path.join(homedir(), ".claude", "cc-harness");
+  const override = process.env.CC_HARNESS_HOME;
+  return override && !override.includes("${") ? override : path.join(homedir(), ".claude", "cc-harness");
 }
 var paths = {
   home: harnessHome,
@@ -1349,6 +1350,52 @@ function oneLine(text2) {
   return text2.replace(/\s*\n\s*/g, " ").trim();
 }
 
+// src/shared/agents.ts
+var AGENT_KINDS = ["claude", "codex", "cursor"];
+var AGENTS = {
+  claude: {
+    kind: "claude",
+    name: "Claude",
+    product: "Claude Code",
+    app: "the Claude desktop app",
+    askTools: ["AskUserQuestion"],
+    askWith: "AskUserQuestion",
+    promptContext: true
+  },
+  codex: {
+    kind: "codex",
+    name: "Codex",
+    product: "Codex",
+    app: "the Codex app",
+    askTools: ["request_user_input", "request_user_input_async"],
+    // Codex only offers request_user_input in Plan mode.
+    askWith: "request_user_input (in Plan mode) or plainly",
+    promptContext: true
+  },
+  cursor: {
+    kind: "cursor",
+    name: "Cursor",
+    product: "Cursor",
+    app: "Cursor",
+    // Cursor's hooks do not see AskQuestion today; a question is noticed
+    // when the turn ends on one. Listed for when they do.
+    askTools: ["AskQuestion"],
+    askWith: "AskQuestion or plainly",
+    promptContext: false
+  }
+};
+var DEFAULT_AGENT = "claude";
+function isAgentKind(value) {
+  return typeof value === "string" && AGENT_KINDS.includes(value);
+}
+function parseAgent(value) {
+  const v = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return isAgentKind(v) ? v : DEFAULT_AGENT;
+}
+function agentInfo(kind) {
+  return AGENTS[kind && isAgentKind(kind) ? kind : DEFAULT_AGENT];
+}
+
 // src/daemon/render.ts
 var STATUS_MARK2 = { todo: "[ ]", in_progress: "[~]", blocked: "[!]", done: "[x]" };
 function renderPlan(plan, opts = {}) {
@@ -1435,7 +1482,7 @@ var BUILD_MARKER = "[cc-harness] Build the plan";
 function buildPrompt(plan, opts) {
   const here = opts.target === "session";
   const note = opts.note?.trim();
-  const head = here ? sessionBrief(plan) : outsideBrief(plan);
+  const head = here ? sessionBrief(plan, agentInfo(opts.agent)) : outsideBrief(plan);
   const fromUser = note ? ["", "## From the user", ...note.split("\n").map((l) => `> ${l}`.trimEnd())] : [];
   const changes = here ? changesSinceRead(plan) : [];
   const full = [...head, ...fromUser, ...changes, ...renderDocument(plan, { attribution: here, reader: here ? "claude" : "outside" })];
@@ -1458,7 +1505,7 @@ function buildPrompt(plan, opts) {
   }
   return { prompt: [...fixed, "", ...kept, "", STATUS_LEGEND].join("\n").trim(), trimmed: true };
 }
-function sessionBrief(plan) {
+function sessionBrief(plan, agent) {
   return [
     `${BUILD_MARKER} "${plan.title}" \u2014 the user has reviewed it in Coplan and submitted it.`,
     "",
@@ -1466,7 +1513,7 @@ function sessionBrief(plan) {
     "",
     "1. Work through the tasks below in order.",
     "2. When you start a task, mark it in_progress with harness_task_update. When it is finished, mark it done with a one-line note of what you did.",
-    "3. If you are stuck, mark the task blocked with a note saying on what, and ask the user with AskUserQuestion.",
+    `3. If you are stuck, mark the task blocked with a note saying on what, and ask the user with ${agent.askWith}.`,
     "4. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.",
     "5. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, stop and ask the user in chat \u2014 they can reopen the plan in Coplan."
   ];
@@ -1634,10 +1681,11 @@ function unreadNotice(plan) {
 var PERSIST_DEBOUNCE_MS = 400;
 var SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
 var MAX_SESSIONS = 60;
-function newSession(sessionId, cwd) {
+function newSession(sessionId, cwd, agent = DEFAULT_AGENT) {
   const now = Date.now();
   return {
     sessionId,
+    agent,
     cwd,
     repoRoot: null,
     branch: null,
@@ -1765,10 +1813,10 @@ var SessionStore = class extends EventEmitter {
   }
   /** Get or create. A session that was swept from memory is read back from
    *  disk rather than overwritten with a blank one. */
-  ensure(id, cwd) {
+  ensure(id, cwd, agent) {
     let state = this.sessions.get(id);
     if (!state) {
-      state = readState(paths.sessionState(id)) ?? newSession(id, cwd || process.cwd());
+      state = readState(paths.sessionState(id)) ?? newSession(id, cwd || process.cwd(), agent);
       this.sessions.set(id, state);
       mkdirSync2(paths.sessionDir(id), { recursive: true });
       this.emitEvent({ type: "snapshot", session: state });
@@ -1786,14 +1834,16 @@ var SessionStore = class extends EventEmitter {
   summaries() {
     return [...this.sessions.values()].sort((a, b) => b.createdAt - a.createdAt).map((s) => summarize(s));
   }
-  /** Most recently updated session rooted at `cwd`. */
-  findByCwd(cwd) {
+  /** Most recently updated session rooted at `cwd` — of `agent`, when one is
+   *  named, so a Cursor window never picks up a Claude session in the same
+   *  folder. */
+  findByCwd(cwd, agent) {
     const normalized = path2.resolve(cwd);
     const matches = (value) => !!value && path2.resolve(value) === normalized;
-    return this.all().find((s) => matches(s.cwd) || matches(s.repoRoot));
+    return this.all().find((s) => (!agent || s.agent === agent) && (matches(s.cwd) || matches(s.repoRoot)));
   }
-  findByPid(pid) {
-    return this.all().find((s) => s.claudePid === pid);
+  findByPid(pid, agent) {
+    return this.all().find((s) => s.claudePid === pid && (!agent || s.agent === agent));
   }
   /* ---------------------------------------------------------------- *
    * Mutation
@@ -1847,7 +1897,7 @@ var SessionStore = class extends EventEmitter {
     if (typeof input.expect === "number" && input.expect !== plan.version) {
       throw new PlanError("The plan changed while you were reviewing it. The preview now shows the latest version \u2014 check it, then submit again.");
     }
-    const { prompt, trimmed } = buildPrompt(plan, { target: input.target, ...input.note ? { note: input.note } : {} });
+    const { prompt, trimmed } = buildPrompt(plan, { target: input.target, agent: session.agent, ...input.note ? { note: input.note } : {} });
     const next = submitPlan(plan, { target: input.target, prompt, trimmed, ...input.note ? { note: input.note } : {} });
     this.mutate(id, (s) => {
       s.plan = next;
@@ -1916,6 +1966,7 @@ function summarize(s) {
   const plan = s.plan;
   return {
     sessionId: s.sessionId,
+    agent: s.agent,
     title: s.title,
     planTitle: plan?.title ?? null,
     cwd: s.cwd,
@@ -1994,6 +2045,7 @@ function migrate(state) {
   state.waiting = null;
   state.surface ??= "unknown";
   state.link ??= null;
+  state.agent = isAgentKind(state.agent) ? state.agent : DEFAULT_AGENT;
   for (const key of [
     "worktree",
     "transcriptPath",
@@ -2214,7 +2266,9 @@ async function currentBranch(cwd) {
 
 // src/shared/link.ts
 var ID = /^[A-Za-z0-9_-]{6,128}$/;
-function resolveLink(env) {
+function resolveLink(env, agent = "claude", sessionId = "") {
+  if (agent === "codex") return codexLink(sessionId);
+  if (agent === "cursor") return { surface: "desktop", link: null };
   const cloud = cloudSessionId(env);
   if (cloud) return { surface: "cloud", link: linkFor(cloud, "cloud") };
   const local = surfaceFromEntrypoint(env.entrypoint);
@@ -2243,6 +2297,12 @@ function linkFor(sessionId, via) {
   const path8 = `claude.ai/code/${sessionId}`;
   return { app: `claude://${path8}`, web: `https://${path8}`, via };
 }
+function codexLink(threadId) {
+  const id = threadId.trim();
+  if (!CODEX_ID.test(id)) return { surface: "unknown", link: null };
+  return { surface: "unknown", link: { app: `codex://threads/${id}`, web: null, via: "app" } };
+}
+var CODEX_ID = /^[A-Za-z0-9-]{8,128}$/;
 
 // src/shared/hooks.ts
 function additionalContext(event, text2) {
@@ -2258,10 +2318,14 @@ var HOOK_NOOP = { suppressOutput: true };
 
 // src/daemon/hookIngest.ts
 var INPUT_NOTIFICATIONS = /* @__PURE__ */ new Set(["idle_prompt", "agent_needs_input", "elicitation_dialog"]);
+var lastReplies = /* @__PURE__ */ new Map();
+var MAX_REPLIES2 = 200;
 async function ingestHook(event, input, ctx) {
   const sessionId = input.session_id;
   if (!sessionId) return HOOK_NOOP;
-  ctx.store.ensure(sessionId, input.cwd);
+  const agent = ctx.agent ?? DEFAULT_AGENT;
+  const existing = ctx.store.ensure(sessionId, input.cwd, agent);
+  if (existing.agent !== agent) ctx.store.update(sessionId, { agent });
   applyEnv(sessionId, ctx);
   switch (event) {
     case "SessionStart":
@@ -2281,6 +2345,15 @@ async function ingestHook(event, input, ctx) {
     }
     case "Notification":
       return onNotification(sessionId, input, ctx);
+    case "AfterAgentResponse": {
+      const text2 = input.last_assistant_message;
+      if (typeof text2 === "string") {
+        lastReplies.delete(sessionId);
+        lastReplies.set(sessionId, text2);
+        if (lastReplies.size > MAX_REPLIES2) lastReplies.delete(lastReplies.keys().next().value);
+      }
+      return HOOK_NOOP;
+    }
     case "Stop":
       return onStop(sessionId, input, ctx);
     default:
@@ -2289,7 +2362,7 @@ async function ingestHook(event, input, ctx) {
 }
 function applyEnv(sessionId, ctx) {
   if (!ctx.env) return;
-  const { surface, link } = resolveLink(ctx.env);
+  const { surface, link } = resolveLink(ctx.env, ctx.agent ?? DEFAULT_AGENT, sessionId);
   const s = ctx.store.get(sessionId);
   if (!s) return;
   if (s.surface === surface && JSON.stringify(s.link) === JSON.stringify(link)) return;
@@ -2314,17 +2387,21 @@ async function onSessionStart(sessionId, input, ctx) {
 async function onUserPromptSubmit(sessionId, input, ctx) {
   const session = ctx.store.update(sessionId, { status: "active", waiting: null });
   if (!session) return HOOK_NOOP;
-  const submission = ctx.store.deliver(sessionId);
-  if (submission) {
-    const typed = String(input.prompt ?? input.user_input ?? "");
-    return typed.includes(BUILD_MARKER) ? HOOK_NOOP : additionalContext("UserPromptSubmit", submission.prompt);
+  const typed = String(input.prompt ?? input.user_input ?? "");
+  if (!agentInfo(ctx.agent).promptContext) {
+    if (typed.includes(BUILD_MARKER)) ctx.store.deliver(sessionId);
+  } else {
+    const submission = ctx.store.deliver(sessionId);
+    if (submission) {
+      return typed.includes(BUILD_MARKER) ? HOOK_NOOP : additionalContext("UserPromptSubmit", submission.prompt);
+    }
   }
   if (!ctx.config.promptNotice) return HOOK_NOOP;
   const notice = unreadNotice(session.plan);
   return notice ? additionalContext("UserPromptSubmit", notice) : HOOK_NOOP;
 }
 function onPreToolUse(sessionId, input, ctx) {
-  if (input.tool_name !== "AskUserQuestion") return HOOK_NOOP;
+  if (!agentInfo(ctx.agent).askTools.includes(input.tool_name ?? "")) return HOOK_NOOP;
   const questions = readQuestions(input.tool_input);
   if (questions.length === 0) return HOOK_NOOP;
   setWaiting(sessionId, ctx, {
@@ -2347,7 +2424,9 @@ function onNotification(sessionId, input, ctx) {
   return HOOK_NOOP;
 }
 function onStop(sessionId, input, ctx) {
-  const asked = trailingQuestion(input.last_assistant_message);
+  const reply = input.last_assistant_message ?? lastReplies.get(sessionId);
+  lastReplies.delete(sessionId);
+  const asked = trailingQuestion(reply);
   ctx.store.update(sessionId, {
     status: "idle",
     waiting: asked ? { kind: "input", text: asked, since: Date.now() } : null
@@ -2380,6 +2459,73 @@ function clip2(text2, max = 300) {
   const line = text2.replace(/\s+/g, " ").trim();
   return line.length > max ? `${line.slice(0, max - 1)}\u2026` : line;
 }
+
+// src/daemon/agentHooks.ts
+var CURSOR_EVENTS = {
+  sessionStart: "SessionStart",
+  sessionEnd: "SessionEnd",
+  beforeSubmitPrompt: "UserPromptSubmit",
+  preToolUse: "PreToolUse",
+  postToolUse: "PostToolUse",
+  postToolUseFailure: "PostToolUse",
+  afterAgentResponse: "AfterAgentResponse",
+  stop: "Stop"
+};
+var CLAUDE_EVENTS_IN_CURSOR = /* @__PURE__ */ new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]);
+function hookAgent(named, raw) {
+  if (named === "claude" && typeof raw["cursor_version"] === "string" && typeof raw["conversation_id"] === "string") return "cursor";
+  return named;
+}
+function readAgentHook(agent, event, raw) {
+  if (agent === "cursor") {
+    const known = CURSOR_EVENTS[event] ?? (CLAUDE_EVENTS_IN_CURSOR.has(event) ? event : null);
+    return { event: known, input: fromCursor(raw) };
+  }
+  if (agent === "codex" && event === "PermissionRequest") {
+    const tool = typeof raw["tool_name"] === "string" ? raw["tool_name"] : "";
+    return {
+      event: "Notification",
+      input: {
+        ...raw,
+        notification_type: "permission_prompt",
+        message: tool ? `Codex needs your permission to use ${tool}` : "Codex needs your permission"
+      }
+    };
+  }
+  return { event, input: raw };
+}
+function fromCursor(raw) {
+  const str = (key) => typeof raw[key] === "string" ? raw[key] : void 0;
+  const roots = Array.isArray(raw["workspace_roots"]) ? raw["workspace_roots"].filter((r) => typeof r === "string") : [];
+  const sessionId = str("conversation_id") ?? str("session_id");
+  const cwd = roots[0] ?? str("cwd");
+  return {
+    ...raw,
+    ...sessionId ? { session_id: sessionId } : {},
+    ...cwd ? { cwd } : {},
+    // `afterAgentResponse` carries the reply that `Stop` does not.
+    ...str("text") !== void 0 && raw["last_assistant_message"] === void 0 ? { last_assistant_message: str("text") } : {}
+  };
+}
+function writeAgentOutput(agent, event, output) {
+  if (agent === "claude") return output;
+  if (agent === "codex") {
+    const context2 = output.hookSpecificOutput?.additionalContext;
+    return context2 && CODEX_CONTEXT_EVENTS.has(event) ? { hookSpecificOutput: { hookEventName: event, additionalContext: context2 } } : {};
+  }
+  const context = output.hookSpecificOutput?.additionalContext;
+  switch (event) {
+    case "beforeSubmitPrompt":
+    case "UserPromptSubmit":
+      return context ? { continue: true, additional_context: context } : { continue: true };
+    case "sessionStart":
+    case "SessionStart":
+      return context ? { additional_context: context } : {};
+    default:
+      return {};
+  }
+}
+var CODEX_CONTEXT_EVENTS = /* @__PURE__ */ new Set(["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"]);
 
 // src/daemon/housekeeping.ts
 import { readdirSync as readdirSync2, statSync as statSync3, existsSync as existsSync4, rmSync as rmSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
@@ -2735,6 +2881,11 @@ var RESTART_DELAY_MS = 120;
 var PORT_CLAIM_MS = 5e3;
 var MAX_TRACKED_OPENS = 200;
 var MAX_CACHED_CONFIGS = 50;
+var HOOKS_HINT = {
+  claude: "This usually means Coplan's hooks have not fired; run `coplan doctor` to check the plugin wiring.",
+  codex: "Codex has not run Coplan's hooks: it holds a plugin's hooks until you approve them. Open /hooks in Codex, trust the Coplan hooks, then start a new session. `coplan doctor` checks the rest of the wiring.",
+  cursor: "Cursor has not run Coplan's hooks for this chat yet. Check that the Coplan plugin is enabled, send a message in the chat so its hooks fire, then try again. `coplan doctor` checks the rest of the wiring."
+};
 async function listen(server, port) {
   const deadline = Date.now() + PORT_CLAIM_MS;
   for (; ; ) {
@@ -2948,7 +3099,7 @@ function buildRouter(deps) {
     }
     const target = validTarget(body.target) ?? "session";
     const note = cleanNote(body.note);
-    const { prompt, trimmed } = buildPrompt(session.plan, { target, ...note ? { note } : {} });
+    const { prompt, trimmed } = buildPrompt(session.plan, { target, agent: session.agent, ...note ? { note } : {} });
     json(ctx.res, 200, { prompt, trimmed, version: session.plan.version, budget: PROMPT_BUDGET, maxNote: MAX_NOTE });
   });
   router.post("/api/session/:id/plan/submit", async (ctx) => {
@@ -3051,38 +3202,52 @@ function buildRouter(deps) {
     openInBrowser(session.link.app);
   };
   router.post("/hook/:event", async (ctx) => {
-    const event = ctx.params["event"] ?? "";
+    const raw = ctx.params["event"] ?? "";
+    const header = (name) => {
+      const value = ctx.req.headers[name];
+      return typeof value === "string" ? value : null;
+    };
+    let agent = parseAgent(header("x-harness-agent"));
     let output = HOOK_NOOP;
     try {
-      const input = await readJson(ctx.req);
-      const session = typeof input["session_id"] === "string" ? store.get(input["session_id"]) : void 0;
-      const header = (name) => {
-        const value = ctx.req.headers[name];
-        return typeof value === "string" ? value : null;
-      };
-      output = await ingestHook(event, input, {
-        store,
-        config: session ? configFor(session) : config,
-        env: {
-          remoteSessionId: header("x-harness-remote-session"),
-          remoteSdkUrl: header("x-harness-remote-sdk"),
-          bridgeSessionId: header("x-harness-bridge-session"),
-          entrypoint: header("x-harness-entrypoint")
-        },
-        onWaiting: openClaude
-      });
+      const body = await readJson(ctx.req);
+      agent = hookAgent(agent, body);
+      const { event, input } = readAgentHook(agent, raw, body);
+      const session = typeof input.session_id === "string" ? store.get(input.session_id) : void 0;
+      if (event) {
+        output = await ingestHook(event, input, {
+          store,
+          agent,
+          config: session ? configFor(session) : config,
+          env: agent !== "claude" ? {} : {
+            remoteSessionId: header("x-harness-remote-session"),
+            remoteSdkUrl: header("x-harness-remote-sdk"),
+            bridgeSessionId: header("x-harness-bridge-session"),
+            entrypoint: header("x-harness-entrypoint")
+          },
+          onWaiting: openClaude
+        });
+      }
     } catch (err) {
-      log(`hook ${event} failed: ${err?.message}`);
+      log(`hook ${agent}/${raw} failed: ${err?.message}`);
       output = HOOK_NOOP;
     }
-    if (!ctx.res.writableEnded) json(ctx.res, 200, output);
+    if (!ctx.res.writableEnded) json(ctx.res, 200, writeAgentOutput(agent, raw, output));
   });
   const resolveSession = (ctx, body) => {
     const headerId = ctx.req.headers["x-harness-session"];
     const id = body.sessionId ?? (typeof headerId === "string" && headerId ? headerId : void 0);
+    const agentHeader = ctx.req.headers["x-harness-agent"];
+    const agent = parseAgent(typeof agentHeader === "string" ? agentHeader : void 0);
     let session = null;
-    if (id) session = store.ensure(id, body.cwd);
-    else if (body.pid) session = store.findByPid(body.pid) ?? null;
+    if (id) session = store.ensure(id, body.cwd, agent);
+    else if (agent === "claude") {
+      if (body.pid) session = store.findByPid(body.pid) ?? null;
+      if (!session && body.cwd) session = store.findByCwd(body.cwd, agent) ?? null;
+    } else {
+      if (body.cwd) session = store.findByCwd(body.cwd, agent) ?? null;
+      if (!session && body.pid) session = store.findByPid(body.pid, agent) ?? null;
+    }
     if (!session && body.cwd) session = store.findByCwd(body.cwd) ?? null;
     if (!session) return null;
     if (body.pid && session.claudePid !== body.pid) store.update(session.sessionId, { claudePid: body.pid });
@@ -3092,9 +3257,10 @@ function buildRouter(deps) {
     const body = await readJson(ctx.req);
     const session = resolveSession(ctx, body);
     if (!session) {
+      const agentHeader = ctx.req.headers["x-harness-agent"];
       json(ctx.res, 200, {
         ok: false,
-        text: "[cc-harness] No session is registered yet. This usually means the harness hooks have not fired; run `coplan doctor` to check the plugin wiring."
+        text: `[cc-harness] No session is registered yet. ${HOOKS_HINT[parseAgent(typeof agentHeader === "string" ? agentHeader : void 0)]}`
       });
       return;
     }
@@ -3109,7 +3275,7 @@ function buildRouter(deps) {
           reply(
             true,
             `[cc-harness] Published "${plan.title}" (revision ${plan.revision}). The user reviews it at ${url}
-Tell them in chat that the plan is ready, and ask anything you need decided with AskUserQuestion, here in chat. Nothing in Coplan waits for them: when they say they have reviewed it, call harness_plan_read.
+Tell them in chat that the plan is ready, and ask anything you need decided with ${agentInfo(session.agent).askWith}, here in chat. Nothing in Coplan waits for them: when they say they have reviewed it, call harness_plan_read.
 
 ` + renderPlan(plan, { url })
           );
@@ -3119,6 +3285,14 @@ Tell them in chat that the plan is ready, and ask anything you need decided with
           if (!session.plan) {
             reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
             return;
+          }
+          if (!agentInfo(session.agent).promptContext) {
+            const submission = store.deliver(id);
+            if (submission) {
+              store.markRead(id);
+              reply(true, submission.prompt);
+              return;
+            }
           }
           const textOut = renderPlan(session.plan, { url, changesOnly: body["changes_only"] === true });
           store.markRead(id);

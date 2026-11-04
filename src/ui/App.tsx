@@ -15,6 +15,7 @@ import { DiagramsView } from './views/DiagramsView.tsx';
 import { TasksView } from './views/TasksView.tsx';
 import { classNames } from './lib/format.ts';
 import { countTasks, isLocked } from '../shared/plan.ts';
+import { agentInfo } from '../shared/agents.ts';
 import type { Plan, SessionState } from '../shared/types.ts';
 
 const TAB_LABEL: Record<Tab, string> = {
@@ -149,6 +150,7 @@ function Header({ session }: { session: SessionState }) {
   const saving = useStore((s) => s.saving);
   const plan = session.plan;
   const counts = countTasks(plan);
+  const agent = agentInfo(session.agent);
 
   return (
     <header className="head">
@@ -172,13 +174,13 @@ function Header({ session }: { session: SessionState }) {
         <ThemeToggle />
       </div>
       <div className="head-meta">
-        <span className={classNames('head-status', `is-${session.waiting ? 'waiting' : session.status}`)} title="The Claude session this plan belongs to">
+        <span className={classNames('head-status', `is-${session.waiting ? 'waiting' : session.status}`)} title={`The ${agent.product} session this plan belongs to`}>
           {session.waiting
-            ? 'Claude is waiting on you'
+            ? `${agent.name} is waiting on you`
             : session.status === 'active'
-              ? 'Claude is working'
+              ? `${agent.name} is working`
               : session.status === 'idle'
-                ? 'Claude is idle'
+                ? `${agent.name} is idle`
                 : 'session ended'}
         </span>
         {plan && plan.title !== session.title && <span className="head-stat">{session.title}</span>}
@@ -223,14 +225,23 @@ function SessionsToggle() {
   );
 }
 
+/** How a user asks each agent for a plan: a slash command in Claude Code
+ *  and Cursor, a skill mention in Codex. */
+const START_PLAN: Record<SessionState['agent'], string> = {
+  claude: '/coplan <what you want to build>',
+  codex: '$coplan <what you want to build>',
+  cursor: '/coplan <what you want to build>',
+};
+
 function NoPlan({ session }: { session: SessionState }) {
+  const agent = agentInfo(session.agent);
   return (
     <div className="view">
       <EmptyState
         title="No plan yet"
         hint={
           <>
-            In Claude's chat, run <code>/coplan &lt;what you want to build&gt;</code>. Claude investigates the code, then
+            In {agent.name}'s chat, run <code>{START_PLAN[agent.kind]}</code>. {agent.name} investigates the code, then
             publishes its plan here — the architecture, diagrams and a task breakdown — and asks what it needs to know
             in the chat.
           </>
@@ -269,8 +280,8 @@ function SessionUnavailable({ error }: { error: string }) {
         hint={
           unauthorized ? (
             <>
-              Open Coplan with <code>/coplan-open</code> in Claude, or <code>coplan open</code> in a terminal — the link
-              it prints carries the key this page needs.
+              Open Coplan with <code>/coplan-open</code> in Claude Code or Cursor, <code>$coplan-open</code> in Codex, or{' '}
+              <code>coplan open</code> in a terminal — the link it prints carries the key this page needs.
             </>
           ) : (
             <>It may have been deleted, or it ended long enough ago to be cleaned up. ({error})</>
@@ -296,8 +307,9 @@ function NoSession({ error }: { error: string | null }) {
         title="No session yet"
         hint={
           <>
-            Start Claude Code in a project with Coplan enabled, then run <code>/coplan</code>. Sessions appear here the
-            moment they register.
+            Start Claude Code, Codex or Cursor in a project with Coplan enabled, then ask for a plan:{' '}
+            <code>/coplan</code> in Claude Code and Cursor, <code>$coplan</code> in Codex. Sessions appear here the moment
+            they register.
             {error && <span className="error-text"> · {error}</span>}
           </>
         }
@@ -318,10 +330,11 @@ function NoSession({ error }: { error: string | null }) {
 function useDocumentTitle(session: SessionState | null): void {
   const title = session?.plan?.title ?? session?.title ?? 'Coplan';
   const waiting = Boolean(session?.waiting);
+  const name = agentInfo(session?.agent).name;
   useEffect(() => {
     // The tab title is the only signal that reaches a user in another window.
-    document.title = waiting ? `● ${title} — Claude is waiting` : `${title} — plan`;
-  }, [title, waiting]);
+    document.title = waiting ? `● ${title} — ${name} is waiting` : `${title} — plan`;
+  }, [title, waiting, name]);
 }
 
 function useDrawerDismiss(open: boolean): void {

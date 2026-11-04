@@ -13,7 +13,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { mkdirSync, readFileSync, existsSync } from "node:fs";
 function harnessHome() {
-  return process.env.CC_HARNESS_HOME || path.join(homedir(), ".claude", "cc-harness");
+  const override = process.env.CC_HARNESS_HOME;
+  return override && !override.includes("${") ? override : path.join(homedir(), ".claude", "cc-harness");
 }
 function sanitizeId(id) {
   return id.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 128) || "unknown";
@@ -1327,6 +1328,54 @@ var init_architecture = __esm({
   }
 });
 
+// src/shared/agents.ts
+function isAgentKind(value) {
+  return typeof value === "string" && AGENT_KINDS.includes(value);
+}
+function agentInfo(kind) {
+  return AGENTS[kind && isAgentKind(kind) ? kind : DEFAULT_AGENT];
+}
+var AGENT_KINDS, AGENTS, DEFAULT_AGENT;
+var init_agents = __esm({
+  "src/shared/agents.ts"() {
+    "use strict";
+    AGENT_KINDS = ["claude", "codex", "cursor"];
+    AGENTS = {
+      claude: {
+        kind: "claude",
+        name: "Claude",
+        product: "Claude Code",
+        app: "the Claude desktop app",
+        askTools: ["AskUserQuestion"],
+        askWith: "AskUserQuestion",
+        promptContext: true
+      },
+      codex: {
+        kind: "codex",
+        name: "Codex",
+        product: "Codex",
+        app: "the Codex app",
+        askTools: ["request_user_input", "request_user_input_async"],
+        // Codex only offers request_user_input in Plan mode.
+        askWith: "request_user_input (in Plan mode) or plainly",
+        promptContext: true
+      },
+      cursor: {
+        kind: "cursor",
+        name: "Cursor",
+        product: "Cursor",
+        app: "Cursor",
+        // Cursor's hooks do not see AskQuestion today; a question is noticed
+        // when the turn ends on one. Listed for when they do.
+        askTools: ["AskQuestion"],
+        askWith: "AskQuestion or plainly",
+        promptContext: false
+      }
+    };
+    DEFAULT_AGENT = "claude";
+  }
+});
+
 // src/daemon/render.ts
 function renderDocument(plan, opts = {}) {
   const { attribution = true, details = true, reader = "claude" } = opts;
@@ -1373,7 +1422,7 @@ function renderTasks(plan, opts = {}) {
 function buildPrompt(plan, opts) {
   const here = opts.target === "session";
   const note = opts.note?.trim();
-  const head = here ? sessionBrief(plan) : outsideBrief(plan);
+  const head = here ? sessionBrief(plan, agentInfo(opts.agent)) : outsideBrief(plan);
   const fromUser = note ? ["", "## From the user", ...note.split("\n").map((l) => `> ${l}`.trimEnd())] : [];
   const changes = here ? changesSinceRead(plan) : [];
   const full = [...head, ...fromUser, ...changes, ...renderDocument(plan, { attribution: here, reader: here ? "claude" : "outside" })];
@@ -1396,7 +1445,7 @@ function buildPrompt(plan, opts) {
   }
   return { prompt: [...fixed, "", ...kept, "", STATUS_LEGEND].join("\n").trim(), trimmed: true };
 }
-function sessionBrief(plan) {
+function sessionBrief(plan, agent) {
   return [
     `${BUILD_MARKER} "${plan.title}" \u2014 the user has reviewed it in Coplan and submitted it.`,
     "",
@@ -1404,7 +1453,7 @@ function sessionBrief(plan) {
     "",
     "1. Work through the tasks below in order.",
     "2. When you start a task, mark it in_progress with harness_task_update. When it is finished, mark it done with a one-line note of what you did.",
-    "3. If you are stuck, mark the task blocked with a note saying on what, and ask the user with AskUserQuestion.",
+    `3. If you are stuck, mark the task blocked with a note saying on what, and ask the user with ${agent.askWith}.`,
     "4. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.",
     "5. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, stop and ask the user in chat \u2014 they can reopen the plan in Coplan."
   ];
@@ -1568,6 +1617,7 @@ var init_render = __esm({
     "use strict";
     init_plan();
     init_architecture();
+    init_agents();
     STATUS_MARK2 = { todo: "[ ]", in_progress: "[~]", blocked: "[!]", done: "[x]" };
     STATUS_LEGEND = `_Statuses: ${Object.entries(STATUS_MARK2).map(([k, v]) => `${v} ${k}`).join(", ")}_`;
     PROMPT_BUDGET = 9e3;
@@ -1586,10 +1636,11 @@ __export(store_exports, {
 import { EventEmitter } from "node:events";
 import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, readdirSync, existsSync as existsSync2, renameSync, rmSync, statSync } from "node:fs";
 import path2 from "node:path";
-function newSession(sessionId, cwd) {
+function newSession(sessionId, cwd, agent = DEFAULT_AGENT) {
   const now = Date.now();
   return {
     sessionId,
+    agent,
     cwd,
     repoRoot: null,
     branch: null,
@@ -1607,6 +1658,7 @@ function summarize(s) {
   const plan = s.plan;
   return {
     sessionId: s.sessionId,
+    agent: s.agent,
     title: s.title,
     planTitle: plan?.title ?? null,
     cwd: s.cwd,
@@ -1685,6 +1737,7 @@ function migrate(state) {
   state.waiting = null;
   state.surface ??= "unknown";
   state.link ??= null;
+  state.agent = isAgentKind(state.agent) ? state.agent : DEFAULT_AGENT;
   for (const key of [
     "worktree",
     "transcriptPath",
@@ -1731,6 +1784,7 @@ var init_store = __esm({
     init_paths();
     init_plan();
     init_render();
+    init_agents();
     PERSIST_DEBOUNCE_MS = 400;
     SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
     MAX_SESSIONS = 60;
@@ -1848,10 +1902,10 @@ var init_store = __esm({
       }
       /** Get or create. A session that was swept from memory is read back from
        *  disk rather than overwritten with a blank one. */
-      ensure(id, cwd) {
+      ensure(id, cwd, agent) {
         let state = this.sessions.get(id);
         if (!state) {
-          state = readState(paths.sessionState(id)) ?? newSession(id, cwd || process.cwd());
+          state = readState(paths.sessionState(id)) ?? newSession(id, cwd || process.cwd(), agent);
           this.sessions.set(id, state);
           mkdirSync2(paths.sessionDir(id), { recursive: true });
           this.emitEvent({ type: "snapshot", session: state });
@@ -1869,14 +1923,16 @@ var init_store = __esm({
       summaries() {
         return [...this.sessions.values()].sort((a, b) => b.createdAt - a.createdAt).map((s) => summarize(s));
       }
-      /** Most recently updated session rooted at `cwd`. */
-      findByCwd(cwd) {
+      /** Most recently updated session rooted at `cwd` — of `agent`, when one is
+       *  named, so a Cursor window never picks up a Claude session in the same
+       *  folder. */
+      findByCwd(cwd, agent) {
         const normalized = path2.resolve(cwd);
         const matches = (value) => !!value && path2.resolve(value) === normalized;
-        return this.all().find((s) => matches(s.cwd) || matches(s.repoRoot));
+        return this.all().find((s) => (!agent || s.agent === agent) && (matches(s.cwd) || matches(s.repoRoot)));
       }
-      findByPid(pid) {
-        return this.all().find((s) => s.claudePid === pid);
+      findByPid(pid, agent) {
+        return this.all().find((s) => s.claudePid === pid && (!agent || s.agent === agent));
       }
       /* ---------------------------------------------------------------- *
        * Mutation
@@ -1930,7 +1986,7 @@ var init_store = __esm({
         if (typeof input.expect === "number" && input.expect !== plan.version) {
           throw new PlanError("The plan changed while you were reviewing it. The preview now shows the latest version \u2014 check it, then submit again.");
         }
-        const { prompt, trimmed } = buildPrompt(plan, { target: input.target, ...input.note ? { note: input.note } : {} });
+        const { prompt, trimmed } = buildPrompt(plan, { target: input.target, agent: session.agent, ...input.note ? { note: input.note } : {} });
         const next = submitPlan(plan, { target: input.target, prompt, trimmed, ...input.note ? { note: input.note } : {} });
         this.mutate(id, (s) => {
           s.plan = next;

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "harness": {
+      "command": "node",
+      "args": ["./dist/mcp/main.js"],
+      "cwd": ".",
+      "env": {
+        "COPLAN_AGENT": "codex"
+      },
+      "env_vars": ["CC_HARNESS_HOME"],
+      "startup_timeout_sec": 20,
+      "tool_timeout_sec": 60
+    }
+  }
+}
