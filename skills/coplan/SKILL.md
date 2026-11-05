@@ -102,7 +102,11 @@ it as `expect` on an `upsert_section`, `upsert_diagram` or `upsert_task` to
 have the edit refused if the user changed that item since.
 
 Use `harness_plan_edit` for targeted changes, `harness_plan_publish` only
-for a wholesale rewrite (keeping the ids of items that survive). Publishing
+for a wholesale rewrite (keeping the ids of items that survive). To change
+one box or arrow, use `upsert_node`, `remove_node`, `upsert_edge` or
+`remove_edge` rather than restating the whole diagram:
+`harness_plan_edit {ops: [{op: "upsert_node", diagramId: "d1", id: "cache",
+description: "…"}]}` changes that box's description and nothing else. Publishing
 is refused while the user has changes you have not read, and so is an edit
 to any item (a diagram, section or task) they changed since your last read:
 it could undo theirs. Read first, then edit on top of their version.

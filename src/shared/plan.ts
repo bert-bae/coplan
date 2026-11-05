@@ -820,6 +820,10 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
   move_task: ['id', 'parentId', 'index'],
   move_section: ['id', 'index'],
   move_diagram: ['id', 'index'],
+  upsert_node: ['diagramId', 'id', 'label', 'kind', 'detail', 'description', 'notes', 'taskIds', 'expect'],
+  remove_node: ['diagramId', 'id', 'expect'],
+  upsert_edge: ['diagramId', 'id', 'from', 'to', 'label', 'dashed', 'arrows', 'expect'],
+  remove_edge: ['diagramId', 'id', 'from', 'to', 'expect'],
   remove: ['kind', 'id'],
   comment: ['target', 'text'],
   reply: ['threadId', 'text'],
@@ -892,6 +896,11 @@ function contentTargetOf(op: PlanOp): string | null {
       return op.id && has('title', 'body') ? `section:${op.id}` : null;
     case 'upsert_diagram':
       return op.id && has('title', 'nodes', 'edges', 'direction', 'caption') ? `diagram:${op.id}` : null;
+    case 'upsert_node':
+    case 'remove_node':
+    case 'upsert_edge':
+    case 'remove_edge':
+      return `diagram:${op.diagramId}`;
     case 'upsert_task':
       // A note with a status is a progress report (harness_task_update).
       return op.id && (has('title', 'detail', 'files', 'dependsOn', 'branch', 'review') || (has('note') && !has('status', 'stage')))
@@ -917,6 +926,70 @@ function refuseUnreadEdit(plan: Plan, op: PlanOp, unread: Set<string>): void {
   throw new PlanError(
     `The user changed ${describeTarget(plan, { kind, id })} since you last read the plan, so this edit was not applied — ` +
       'it could undo theirs. Call harness_plan_read to see their version, then make the edit on top of it.',
+  );
+}
+
+type PartOp = Extract<PlanOp, { op: 'upsert_node' | 'remove_node' | 'upsert_edge' | 'remove_edge' }>;
+
+/**
+ * A diagram's boxes and arrows with one part changed. Untouched parts are
+ * restated by id alone: upsert_diagram keeps everything a part had that an
+ * edit leaves out, so nothing the user wrote on them is restated — or lost.
+ */
+function partEdit(d: Diagram, op: PartOp): { nodes: DiagramNodeInput[]; edges: DiagramEdgeInput[] } {
+  const nodes: DiagramNodeInput[] = d.nodes.map((n) => ({ id: n.id }));
+  const edges: DiagramEdgeInput[] = d.edges.map((e) => ({ id: e.id, source: e.source, target: e.target }));
+  const given = <K extends string>(keys: readonly K[]) =>
+    Object.fromEntries(keys.filter((k) => (op as Record<string, unknown>)[k] !== undefined).map((k) => [k, (op as Record<string, unknown>)[k]]));
+  switch (op.op) {
+    case 'upsert_node': {
+      const fields = given(['label', 'kind', 'detail', 'description', 'notes', 'taskIds'] as const);
+      const at = nodes.findIndex((n) => n.id === op.id);
+      if (at >= 0) nodes[at] = { id: op.id, ...fields };
+      else if (!clean(op.label, 120)) throw new PlanError(`No box "${op.id}" in "${d.title}" to change; to add it, give it a label.`);
+      else nodes.push({ id: op.id, ...fields });
+      return { nodes, edges };
+    }
+    case 'remove_node': {
+      if (!d.nodes.some((n) => n.id === op.id)) throw new PlanError(`No box "${op.id}" in "${d.title}".`);
+      return { nodes: nodes.filter((n) => n.id !== op.id), edges: edges.filter((e) => e.source !== op.id && e.target !== op.id) };
+    }
+    case 'upsert_edge': {
+      const style = given(['label', 'dashed', 'arrows'] as const);
+      const at = op.id ? edges.findIndex((e) => e.id === op.id) : -1;
+      if (at >= 0) {
+        const was = edges[at]!;
+        edges[at] = { ...was, ...(op.from ? { source: op.from } : {}), ...(op.to ? { target: op.to } : {}), ...style };
+      } else {
+        if (!op.from || !op.to) {
+          throw new PlanError(op.id ? `No arrow "${op.id}" in "${d.title}"; to add one, give from and to.` : 'A new arrow needs from and to (box ids).');
+        }
+        edges.push({ ...(op.id ? { id: op.id } : {}), source: op.from, target: op.to, ...style });
+      }
+      return { nodes, edges };
+    }
+    case 'remove_edge': {
+      const id = arrowId(d, op);
+      return { nodes, edges: edges.filter((e) => e.id !== id) };
+    }
+  }
+}
+
+/**
+ * The arrow an op names: by id (`source->target` unless the read shows
+ * another), or by its ends when only one arrow joins them that way.
+ */
+function arrowId(d: Diagram, op: { id?: string; from?: string; to?: string }): string {
+  if (op.id) {
+    if (!d.edges.some((e) => e.id === op.id)) throw new PlanError(`No arrow "${op.id}" in "${d.title}". An arrow's id is from->to unless the read shows another.`);
+    return op.id;
+  }
+  const between = d.edges.filter((e) => e.source === op.from && e.target === op.to);
+  if (between.length === 1) return between[0]!.id;
+  throw new PlanError(
+    between.length
+      ? `${between.length} arrows run ${op.from} → ${op.to} in "${d.title}": name one by id (${between.map((e) => e.id).join(', ')}).`
+      : `No arrow ${op.from ?? '?'} → ${op.to ?? '?'} in "${d.title}".`,
   );
 }
 
@@ -1178,6 +1251,20 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       if (!diagram) throw new PlanError(`No diagram "${op.id}".`);
       moveInList(plan.diagrams, diagram.id, op.index);
       return [log('moved', ref('diagram', diagram.id), `reordered diagram "${diagram.title}"`)];
+    }
+
+    // One box or arrow at a time. Each is the diagram's current boxes and
+    // arrows with that one change, applied as upsert_diagram — so it is
+    // checked, locked and logged exactly as a whole-diagram edit is, and
+    // nothing else in the diagram is restated (or lost).
+    case 'upsert_node':
+    case 'remove_node':
+    case 'upsert_edge':
+    case 'remove_edge': {
+      const d = plan.diagrams.find((x) => x.id === op.diagramId);
+      if (!d) throw new PlanError(`No diagram "${op.diagramId}". The read lists each diagram's id.`);
+      const { nodes, edges } = partEdit(d, op);
+      return applyOne(plan, { op: 'upsert_diagram', id: d.id, nodes, edges, ...(op.expect !== undefined ? { expect: op.expect } : {}) }, author, now);
     }
 
     case 'remove':
@@ -1468,7 +1555,7 @@ const DESIGN_LOCKED_FOR_CLAUDE =
 
 /** What a confirmed design still lets anyone do: work on the tasks, link
  *  them to boxes (checked inside upsert_diagram), and talk about it. */
-const TASKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task', 'upsert_diagram', 'comment', 'reply', 'resolve', 'report']);
+const TASKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task', 'upsert_diagram', 'upsert_node', 'comment', 'reply', 'resolve', 'report']);
 
 /** Where the plan is in its life. */
 export function planPhase(plan: Pick<Plan, 'submission' | 'tasks' | 'design'> | null): PlanPhase {

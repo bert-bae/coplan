@@ -112,6 +112,10 @@ export const AGENT_OPS = [
   'move_task',
   'move_section',
   'move_diagram',
+  'upsert_node',
+  'remove_node',
+  'upsert_edge',
+  'remove_edge',
   'comment',
   'reply',
   'resolve',
@@ -133,13 +137,28 @@ const OP_PROPERTIES: Record<string, unknown> = {
   summary: { type: 'string', description: 'set_meta: the plan summary. Markdown.' },
   body: { type: 'string', description: 'upsert_section: the section body. Markdown.' },
   index: { type: 'integer', minimum: 0, description: 'Position among its siblings, from 0.' },
-  expect: { type: 'integer', description: 'upsert_section / upsert_diagram / upsert_task: the rev you read; refused if the user changed the item since.' },
+  expect: {
+    type: 'integer',
+    description: "upsert_section / upsert_diagram / upsert_task, and the box and arrow ops (the diagram's rev): the rev you read; refused if the user changed it since.",
+  },
+  diagramId: { type: 'string', description: 'upsert_node / remove_node / upsert_edge / remove_edge: the diagram the box or arrow is in.' },
+  label: { type: 'string', description: 'upsert_node: the box name. upsert_edge: what flows along it ("" clears it).' },
+  description: { type: 'string', description: 'upsert_node: two to four sentences on what the part does, owns, and how others talk to it.' },
+  notes: { type: 'string', description: 'upsert_node: Markdown — the decisions about this part and why.' },
+  taskIds: { ...STR_LIST, description: 'upsert_node: the tasks that build this box (replaces its links).' },
+  from: { type: 'string', description: 'upsert_edge / remove_edge: the box id the arrow starts at.' },
+  to: { type: 'string', description: 'upsert_edge / remove_edge: the box id it points to.' },
+  dashed: { type: 'boolean', description: 'upsert_edge: optional, async or future.' },
+  arrows: { type: 'string', enum: ['end', 'both', 'none'], description: 'upsert_edge: arrowheads.' },
   nodes: { type: 'array', items: NODE, description: 'upsert_diagram: replaces the boxes.' },
   edges: { type: 'array', items: EDGE, description: 'upsert_diagram: replaces the arrows.' },
   direction: { type: 'string', enum: ['LR', 'TB'] },
   caption: { type: 'string' },
   parentId: { description: 'upsert_task (when adding) and move_task: the parent task id, or null for the top level.' },
-  detail: { type: 'string', description: 'upsert_task: objective, acceptance criteria, out of scope. Markdown.' },
+  detail: {
+    type: 'string',
+    description: 'upsert_task: objective, acceptance criteria, out of scope (Markdown). upsert_node: a few words on the box, e.g. "Redis, read-through".',
+  },
   files: STR_LIST,
   note: { type: 'string', description: 'upsert_task: one line on the task.' },
   dependsOn: { ...STR_LIST, description: 'upsert_task: replaces its dependencies; [] clears them.' },
@@ -149,7 +168,11 @@ const OP_PROPERTIES: Record<string, unknown> = {
   threadId: { type: 'string', description: 'reply / resolve: the comment thread.' },
   text: { type: 'string', description: 'reply: your reply. report: the build report. Markdown.' },
   resolved: { type: 'boolean' },
-  kind: { type: 'string', enum: ['section', 'diagram', 'task'], description: 'remove: what kind of item.' },
+  kind: {
+    type: 'string',
+    enum: ['section', 'diagram', 'task', 'component', 'service', 'datastore', 'queue', 'external', 'actor', 'note'],
+    description: 'remove: section, diagram or task. upsert_node: the kind of box.',
+  },
   target: {
     type: 'object',
     description:
@@ -237,7 +260,11 @@ export const TOOLS: ToolDef[] = [
       'arrow between the same two boxes keeps its label, dashed and arrows, unless you give them); upsert_task ' +
       '{id?, parentId?, index?, title?, detail?, files?, note?, dependsOn?, branch?, review?, builds?} ' +
       '(omit id to add; parentId makes it a subtask); move_task {id, parentId, index}; move_section {id, index}; ' +
-      'move_diagram {id, index}; comment {target: {kind, id}, text} (start a thread — on a box: kind "node", id ' +
+      'move_diagram {id, index}; one box or arrow without restating the rest — upsert_node {diagramId, id, label?, ' +
+      'kind?, detail?, description?, notes?, taskIds?} (only the fields you give change; a new box needs a label), ' +
+      'remove_node {diagramId, id} (and its arrows), upsert_edge {diagramId, id?, from?, to?, label?, dashed?, arrows?} ' +
+      '(by id to change one — an arrow\'s id is from->to unless the read shows another — or from and to to add one), ' +
+      'remove_edge {diagramId, id? | from, to}; comment {target: {kind, id}, text} (start a thread — on a box: kind "node", id ' +
       '"diagramId/nodeId"; when you are unsure of a change, comment rather than overwrite); reply {threadId, text} ' +
       '(reply to a comment); resolve {threadId, resolved}; remove {kind: section|diagram|task, id}; report {text} ' +
       '(the final build report). upsert_section, upsert_diagram and upsert_task take expect: the rev you read. ' +

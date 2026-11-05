@@ -500,6 +500,35 @@ export type PlanOp =
   | { op: 'move_task'; id: string; parentId: string | null; index: number }
   | { op: 'move_section'; id: string; index: number }
   | { op: 'move_diagram'; id: string; index: number }
+  /** One box: changed (only the fields given) or added. */
+  | {
+      op: 'upsert_node';
+      diagramId: string;
+      id: string;
+      label?: string;
+      kind?: string;
+      detail?: string;
+      description?: string;
+      notes?: string;
+      taskIds?: string[];
+      expect?: number;
+    }
+  /** One box, and the arrows to and from it. */
+  | { op: 'remove_node'; diagramId: string; id: string; expect?: number }
+  /** One arrow: changed by id (only the fields given), or added from → to. */
+  | {
+      op: 'upsert_edge';
+      diagramId: string;
+      id?: string;
+      from?: string;
+      to?: string;
+      label?: string;
+      dashed?: boolean;
+      arrows?: string;
+      expect?: number;
+    }
+  /** One arrow, by id or by its ends. */
+  | { op: 'remove_edge'; diagramId: string; id?: string; from?: string; to?: string; expect?: number }
   | { op: 'remove'; kind: 'section' | 'diagram' | 'task'; id: string }
   | { op: 'comment'; target: Target; text: string }
   | { op: 'reply'; threadId: string; text: string }

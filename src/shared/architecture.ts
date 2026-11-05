@@ -95,7 +95,10 @@ export function diagramToMarkdown(diagram: DiagramContent, opts: ArchitectureOpt
     const edges = [...diagram.edges].sort(
       (a, b) => (rank.get(a.source) ?? 1e9) - (rank.get(b.source) ?? 1e9) || (rank.get(a.target) ?? 1e9) - (rank.get(b.target) ?? 1e9),
     );
-    for (const e of edges) out.push(`- ${edgePhrase(e, label)}${ids ? ` \`${e.source} ${ARROW[e.arrows ?? 'end']} ${e.target}\`` : ''}`);
+    // An arrow's id is `source->target` unless it says otherwise (a second
+    // arrow between the same boxes, one drawn in the browser).
+    const own = (e: DiagramEdge) => (e.id !== `${e.source}->${e.target}` ? ` (arrow \`${e.id}\`)` : '');
+    for (const e of edges) out.push(`- ${edgePhrase(e, label)}${ids ? ` \`${e.source} ${ARROW[e.arrows ?? 'end']} ${e.target}\`${own(e)}` : ''}`);
   }
 
   if (notes.length) {
