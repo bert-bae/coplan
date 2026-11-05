@@ -28,6 +28,7 @@ import type {
   PlanBaseline,
   PlanInput,
   PlanOp,
+  PlanOpName,
   PlanPhase,
   Section,
   Submission,
@@ -155,6 +156,10 @@ export function unreadItems(plan: Plan | null): number {
  *  summary edit, which shares the plan as its target. */
 const RENAMED_PLAN = 'renamed the plan';
 
+/** How a reopened sign-off is logged. */
+export const REOPENED_DESIGN = 'reopened the design';
+export const REOPENED_PLAN = 'reopened the submitted plan';
+
 /** Where the user's unread changes are — "the "Components" diagram",
  *  "tasks", "comments" — in the order they first touched each. */
 export function unreadAreas(plan: Plan | null): string[] {
@@ -162,6 +167,7 @@ export function unreadAreas(plan: Plan | null): string[] {
   const add = (what: string) => void (areas.includes(what) || areas.push(what));
   for (const c of unreadByClaude(plan)) {
     if (['commented', 'replied', 'resolved', 'reopened'].includes(c.kind)) add('comments');
+    else if (c.target.kind === 'plan' && c.kind === 'status') add(c.summary === REOPENED_DESIGN ? 'reopened the design' : 'reopened the plan');
     else if (c.target.kind === 'diagram') add(`the "${plan!.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
     else if (c.target.kind === 'task') add('tasks');
     else if (c.target.kind === 'section') add('sections');
@@ -766,19 +772,73 @@ function normalizeTask(task: Task): Task {
  * Apply a batch of ops to a copy of `plan`. All or nothing: the first op that
  * cannot apply throws, and the caller keeps the plan it had.
  */
+/**
+ * The fields each edit takes. Claude's edits are checked against it, so a
+ * misspelt field (`depends_on`) is refused with the right names instead of
+ * being ignored — an ignored field reads as "Nothing changed", which is
+ * worse than an error. The MCP tool schema is checked against this table
+ * in the tests.
+ */
+export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Extract<PlanOp, { op: K }>, 'op'>[] } = {
+  set_meta: ['title', 'summary'],
+  upsert_section: ['id', 'title', 'body', 'index', 'expect'],
+  upsert_diagram: ['id', 'title', 'nodes', 'edges', 'direction', 'caption', 'index', 'expect'],
+  upsert_task: [
+    'id',
+    'parentId',
+    'index',
+    'title',
+    'detail',
+    'status',
+    'files',
+    'note',
+    'dependsOn',
+    'branch',
+    'review',
+    'stage',
+    'checks',
+    'builds',
+  ],
+  move_task: ['id', 'parentId', 'index'],
+  move_section: ['id', 'index'],
+  move_diagram: ['id', 'index'],
+  remove: ['kind', 'id'],
+  comment: ['target', 'text'],
+  reply: ['threadId', 'text'],
+  resolve: ['threadId', 'resolved'],
+  report: ['text'],
+};
+
+/** Refuses an edit Claude sent with a field its op does not take. */
+function checkOpFields(op: unknown): void {
+  if (!op || typeof op !== 'object' || Array.isArray(op)) throw new PlanError('Each edit is an object with an "op" field.');
+  const name = (op as { op?: unknown }).op;
+  const fields = typeof name === 'string' ? (OP_FIELDS as Record<string, readonly string[]>)[name] : undefined;
+  if (!fields) throw new PlanError(`Unknown edit ${JSON.stringify(name)}: use one of ${Object.keys(OP_FIELDS).join(', ')}.`);
+  const unknown = Object.keys(op).filter((k) => k !== 'op' && !fields.includes(k));
+  if (unknown.length) {
+    throw new PlanError(
+      `${name} does not take ${unknown.map((k) => `"${k}"`).join(', ')}: its fields are ${fields.join(', ')}. Nothing was changed.`,
+    );
+  }
+}
+
 export function applyOps(
   plan: Plan,
   ops: PlanOp[],
   author: Author,
   now = Date.now(),
 ): { plan: Plan; changes: Change[] } {
-  if (!Array.isArray(ops) || ops.length === 0) throw new PlanError('No edits were given.');
+  if (!Array.isArray(ops) || ops.length === 0) {
+    throw new PlanError('No edits were given: pass them as {ops: [{op: "upsert_task", id: "t3", note: "…"}, …]}.');
+  }
   if (plan.submission) checkLocked(ops, author);
   else if (plan.design) checkDesignLocked(ops, author);
   const next = structuredClone(plan);
   const changes: Change[] = [];
   ops.forEach((op, i) => {
     try {
+      if (author === 'claude') checkOpFields(op);
       changes.push(...applyOne(next, op, author, now));
     } catch (err) {
       if (err instanceof PlanError && ops.length > 1) {
@@ -1212,7 +1272,12 @@ function removeItem(
       break;
     }
     default:
-      throw new PlanError(`Cannot remove a "${kind}".`);
+      throw new PlanError(
+        kind === 'node' || kind === 'edge'
+          ? `Cannot remove a ${kind} on its own: send the diagram's ${kind === 'node' ? 'nodes (and edges)' : 'edges'} without it, ` +
+              'with upsert_diagram {id, nodes, edges}.'
+          : `Cannot remove a "${kind}": remove takes kind section, diagram or task.`,
+      );
   }
   plan.threads = plan.threads.map((t) => detachIfOrphaned(plan, before, t));
   return [log('deleted', { kind: kind as Target['kind'], id }, summary)];
@@ -1342,8 +1407,10 @@ export function reopenPlan(plan: Plan, now = Date.now()): Plan {
   if (!plan.submission) throw new PlanError('The plan is not locked.');
   const next = structuredClone(plan);
   delete next.submission;
-  next.version += 1;
-  next.updatedAt = now;
+  // Logged as the user's change, so Claude hears the plan is open again
+  // instead of finding out when an edit it no longer needs to hold back
+  // is refused — or not at all.
+  record(next, 'user', 'status', { kind: 'plan', id: '' }, REOPENED_PLAN, now);
   return next;
 }
 
@@ -1376,8 +1443,7 @@ export function reopenDesign(plan: Plan, now = Date.now()): Plan {
   if (!plan.design) throw new PlanError('The design is not confirmed.');
   const next = structuredClone(plan);
   delete next.design;
-  next.version += 1;
-  next.updatedAt = now;
+  record(next, 'user', 'status', { kind: 'plan', id: '' }, REOPENED_DESIGN, now);
   return next;
 }
 
@@ -1649,16 +1715,25 @@ function taskIdSet(plan: Pick<Plan, 'tasks'>): Set<string> {
   return new Set(plan.tasks.map((t) => t.id));
 }
 
+/** A value from a fixed list, or undefined when none was given. A value
+ *  that is not on the list is refused rather than quietly dropped: the
+ *  author meant something, and should hear it did not land. */
+function oneOf<T extends string>(value: unknown, allowed: readonly T[], what: string): T | undefined {
+  if (value === undefined || value === null) return undefined;
+  if ((allowed as readonly unknown[]).includes(value)) return value as T;
+  throw new PlanError(`${JSON.stringify(value)} is not ${what}: use one of ${allowed.join(', ')}.`);
+}
+
 function validKind(value: unknown): NodeKind | undefined {
-  return (NODE_KINDS as readonly string[]).includes(value as string) ? (value as NodeKind) : undefined;
+  return oneOf(value, NODE_KINDS, 'a box kind');
 }
 
 function validDirection(value: unknown): DiagramDirection | undefined {
-  return value === 'LR' || value === 'TB' ? value : undefined;
+  return oneOf(value, ['LR', 'TB'] as const, 'a diagram direction');
 }
 
 function validArrows(value: unknown): EdgeArrows | undefined {
-  return (EDGE_ARROWS as readonly string[]).includes(value as string) ? (value as EdgeArrows) : undefined;
+  return oneOf(value, EDGE_ARROWS, 'an arrow style');
 }
 
 /**

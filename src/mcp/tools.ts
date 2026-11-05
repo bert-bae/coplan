@@ -103,6 +103,61 @@ function taskSchema(depth: number, build = false): Record<string, unknown> {
   return { type: 'object', properties, required: ['title'] };
 }
 
+/** The edits Claude is offered through harness_plan_edit. */
+export const AGENT_OPS = [
+  'set_meta',
+  'upsert_section',
+  'upsert_diagram',
+  'upsert_task',
+  'move_task',
+  'move_section',
+  'move_diagram',
+  'reply',
+  'resolve',
+  'remove',
+  'report',
+] as const;
+
+const STR_LIST = { type: 'array', items: { type: 'string' } };
+
+/**
+ * Every field an op in harness_plan_edit can carry: the union of what the
+ * ops in AGENT_OPS take (the daemon's OP_FIELDS, which a test holds this
+ * to). Which op takes which is in the tool's description, and the daemon
+ * refuses a field the op does not take.
+ */
+const OP_PROPERTIES: Record<string, unknown> = {
+  id: { type: 'string', description: 'The item to change. Omit it on upsert_* to add one.' },
+  title: { type: 'string' },
+  summary: { type: 'string', description: 'set_meta: the plan summary. Markdown.' },
+  body: { type: 'string', description: 'upsert_section: the section body. Markdown.' },
+  index: { type: 'integer', minimum: 0, description: 'Position among its siblings, from 0.' },
+  expect: { type: 'integer', description: 'upsert_section / upsert_diagram: refused if the item changed since this revision.' },
+  nodes: { type: 'array', items: NODE, description: 'upsert_diagram: replaces the boxes.' },
+  edges: { type: 'array', items: EDGE, description: 'upsert_diagram: replaces the arrows.' },
+  direction: { type: 'string', enum: ['LR', 'TB'] },
+  caption: { type: 'string' },
+  parentId: { description: 'upsert_task (when adding) and move_task: the parent task id, or null for the top level.' },
+  detail: { type: 'string', description: 'upsert_task: objective, acceptance criteria, out of scope. Markdown.' },
+  status: STATUS,
+  files: STR_LIST,
+  note: { type: 'string', description: 'upsert_task: one line on the task.' },
+  dependsOn: { ...STR_LIST, description: 'upsert_task: replaces its dependencies; [] clears them.' },
+  branch: { type: 'string', description: 'upsert_task: "" clears it.' },
+  review: { type: 'string', enum: [...REVIEW.enum, ''], description: 'upsert_task: "" clears it.' },
+  stage: { type: 'string', enum: ['implement', 'review', 'refine'], description: 'Prefer harness_task_update.' },
+  checks: {
+    type: 'array',
+    description: 'Prefer harness_task_update.',
+    items: { type: 'object', properties: { name: { type: 'string' }, ok: { type: 'boolean' }, note: { type: 'string' } }, required: ['name', 'ok'] },
+  },
+  builds: { ...STR_LIST, description: 'upsert_task: boxes it builds, as node ids or "diagramId/nodeId".' },
+  threadId: { type: 'string', description: 'reply / resolve: the comment thread.' },
+  text: { type: 'string', description: 'reply: your reply. report: the build report. Markdown.' },
+  resolved: { type: 'boolean' },
+  kind: { type: 'string', enum: ['section', 'diagram', 'task'], description: 'remove: what kind of item.' },
+};
+
 export const TOOLS: ToolDef[] = [
   {
     name: 'harness_plan_publish',
@@ -164,41 +219,32 @@ export const TOOLS: ToolDef[] = [
     name: 'harness_plan_edit',
     endpoint: 'edit',
     description:
-      'Make targeted changes to the plan, applied together or not at all. Each op is an object with an "op" ' +
-      'field: set_meta {title?, summary?}; upsert_section {id?, title?, body?, index?}; upsert_diagram {id?, ' +
-      'title?, nodes?, edges?, direction?, caption?} (nodes/edges replace the current ones; a box you keep ' +
-      'keeps its position, description and notes, and an arrow between the same two boxes keeps its label, ' +
-      'dashed and arrows, unless you give them); upsert_task {id?, parentId?, index?, title?, detail?, status?, files?, ' +
-      'note?, dependsOn?, branch?, review?, builds?} (omit id to add; parentId makes it a subtask); move_task {id, parentId, ' +
-      'index}; reply {threadId, text} (reply to a comment); resolve {threadId, resolved}; remove {kind: ' +
-      'section|diagram|task, id}; report {text} (the final build report). Once the user confirms the design only tasks, ' +
-      'task links and comments change; once they submit the plan only upsert_task, reply, resolve and report apply.',
+      'Make targeted changes to the plan, applied together or not at all. Call it as {ops: [ … ]}, where each op ' +
+      'is an object with an "op" field and only that op\'s fields: set_meta {title?, summary?}; upsert_section ' +
+      '{id?, title?, body?, index?}; upsert_diagram {id?, title?, nodes?, edges?, direction?, caption?, index?} ' +
+      '(nodes/edges replace the current ones; a box you keep keeps its position, description and notes, and an ' +
+      'arrow between the same two boxes keeps its label, dashed and arrows, unless you give them); upsert_task ' +
+      '{id?, parentId?, index?, title?, detail?, status?, files?, note?, dependsOn?, branch?, review?, builds?} ' +
+      '(omit id to add; parentId makes it a subtask); move_task {id, parentId, index}; move_section {id, index}; ' +
+      'move_diagram {id, index}; reply {threadId, text} (reply to a comment); resolve {threadId, resolved}; remove ' +
+      '{kind: section|diagram|task, id}; report {text} (the final build report). Example: {ops: [{op: "reply", ' +
+      'threadId: "c2", text: "Done: split the cache."}]}. Once the user confirms the design only tasks, task links ' +
+      'and comments change; once they submit the plan only upsert_task, reply, resolve and report apply.',
     inputSchema: {
       type: 'object',
       properties: {
         ops: {
           type: 'array',
+          minItems: 1,
           items: {
             type: 'object',
+            description: 'One edit: "op" plus the fields that op takes (see the tool description).',
             properties: {
-              op: {
-                type: 'string',
-                enum: [
-                  'set_meta',
-                  'upsert_section',
-                  'upsert_diagram',
-                  'upsert_task',
-                  'move_task',
-                  'move_section',
-                  'move_diagram',
-                  'reply',
-                  'resolve',
-                  'remove',
-                  'report',
-                ],
-              },
+              op: { type: 'string', enum: [...AGENT_OPS] },
+              ...OP_PROPERTIES,
             },
             required: ['op'],
+            additionalProperties: false,
           },
         },
       },

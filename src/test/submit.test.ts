@@ -16,7 +16,7 @@ import {
   submitPlan,
   unreadByClaude,
 } from '../shared/plan.ts';
-import { BUILD_MARKER, DESIGN_MARKER, PROMPT_BUDGET, buildPrompt, designPrompt, renderPlan } from '../daemon/render.ts';
+import { BUILD_MARKER, DESIGN_MARKER, PROMPT_BUDGET, buildPrompt, designPrompt, renderPlan, unreadNotice } from '../daemon/render.ts';
 import { parseProjectConfig } from '../shared/project.ts';
 import type { BuildTarget, Plan, PlanInput, PlanOp } from '../shared/types.ts';
 
@@ -181,6 +181,16 @@ test('reopening unlocks the tasks; reopening the design unlocks the rest', () =>
   assert.equal(planPhase(open), 'planning');
   assert.doesNotThrow(() => applyOps(open, [{ op: 'upsert_diagram', id: 'd1', title: 'Renamed' }], 'user'));
   assert.throws(() => reopenDesign(open), /not confirmed/);
+});
+
+test('Claude hears that the user reopened the plan or the design', () => {
+  const reopened = reopenPlan(markDelivered(submitted()));
+  assert.match(unreadNotice(reopened) ?? '', /reopened the plan/);
+  assert.match(renderPlan(reopened, { changesOnly: true }), /Reopened the submitted plan: it is no longer locked/);
+
+  const open = reopenDesign(reopened);
+  assert.match(unreadNotice(open) ?? '', /reopened the design/);
+  assert.match(renderPlan(open, { changesOnly: true }), /Reopened the design: it is no longer confirmed/);
 });
 
 /* ------------------------------------------------------------------ *

@@ -769,7 +769,7 @@ function buildRouter(deps: Deps): Router {
       throw new PlanError(
         `"${task.title}" cannot start yet: it waits on ${waits.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ')}. ` +
           'Start a task that is ready instead — harness_task_next lists them. If the dependency is wrong, change it with ' +
-          'harness_plan_edit {op: "upsert_task", id, dependsOn: [...]} and tell the user why.',
+          'harness_plan_edit {ops: [{op: "upsert_task", id, dependsOn: [...]}]} and tell the user why.',
       );
     }
 

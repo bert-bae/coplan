@@ -73,7 +73,7 @@ If the review found anything, or a review check failed:
 
 - Fix the findings that are in the task's scope. A finding that is really
   another task's work, or new work, becomes a task
-  (`harness_plan_edit {op: "upsert_task", ...}`) — say so in your note.
+  (`harness_plan_edit {ops: [{op: "upsert_task", ...}]}`) — say so in your note.
 - If you disagree with a finding, say why in one line; do not just skip it.
 - Run the implement checks again, then go back to **2. Review**.
 

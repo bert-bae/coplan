@@ -339,3 +339,45 @@ test('comment threads and plan items are bounded', () => {
   plan = applyOps(plan, replies, 'user').plan;
   assert.throws(() => applyOps(plan, [{ op: 'reply', threadId: 'c1', text: 'one more' }], 'user'), /thread is full/);
 });
+
+test("Claude's edits are checked field by field: a misspelt field is refused, not ignored", () => {
+  const plan = fresh();
+  assert.throws(
+    () => applyOps(plan, [{ op: 'upsert_task', id: 't2', depends_on: ['t1'] } as never], 'claude'),
+    (err: Error) => err instanceof PlanError && /upsert_task does not take "depends_on"/.test(err.message) && /dependsOn/.test(err.message),
+  );
+  assert.throws(() => applyOps(plan, [{ op: 'rename_task', id: 't2' } as never], 'claude'), /Unknown edit "rename_task"/);
+  // Still all or nothing: the good edit before the bad one is not applied.
+  assert.throws(
+    () => applyOps(plan, [{ op: 'set_meta', title: 'New' }, { op: 'reply', threadId: 'c1', body: 'x' } as never], 'claude'),
+    /Edit 2 \(reply\): reply does not take "body"/,
+  );
+  const { changes } = applyOps(plan, [{ op: 'upsert_task', id: 't4', dependsOn: ['t1'] }], 'claude');
+  assert.equal(changes.length, 1);
+});
+
+test('an empty edit list says what shape to use', () => {
+  assert.throws(() => applyOps(fresh(), [], 'claude'), /pass them as \{ops: \[/);
+});
+
+test('a box kind, arrow style or direction that is not on the list is refused, not dropped', () => {
+  const plan = fresh();
+  const d = plan.diagrams[0]!;
+  const nodes = d.nodes.map((n) => ({ id: n.id, label: n.label }));
+  assert.throws(
+    () => applyOps(plan, [{ op: 'upsert_diagram', id: d.id, nodes: [...nodes, { id: 'q', label: 'Q', kind: 'kafka' as never }] }], 'claude'),
+    /"kafka" is not a box kind: use one of component, service/,
+  );
+  assert.throws(
+    () => applyOps(plan, [{ op: 'upsert_diagram', id: d.id, edges: [{ source: 'api', target: 'cache', arrows: 'two' as never }] }], 'claude'),
+    /"two" is not an arrow style/,
+  );
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_diagram', id: d.id, direction: 'RL' as never }], 'claude'), /"RL" is not a diagram direction/);
+  // Left out, they keep what was there.
+  const { plan: next } = applyOps(plan, [{ op: 'upsert_diagram', id: d.id, nodes }], 'claude');
+  assert.equal(next.diagrams[0]!.nodes.find((n) => n.id === 'cache')!.kind, 'datastore');
+});
+
+test('removing a node points at the edit that does it', () => {
+  assert.throws(() => applyOps(fresh(), [{ op: 'remove', kind: 'node' as never, id: 'cache' }], 'claude'), /upsert_diagram \{id, nodes, edges\}/);
+});

@@ -6,7 +6,18 @@
  * an edit, and they lead with what changed — the reason it is reading at all.
  */
 import type { BuildSettings, BuildTarget, Change, Plan, PlanBaseline, Task, Thread } from '../shared/types.ts';
-import { baselineOf, countTasks, describeTarget, outline, planPhase, sameContent, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import {
+  baselineOf,
+  countTasks,
+  describeTarget,
+  outline,
+  planPhase,
+  REOPENED_DESIGN,
+  REOPENED_PLAN,
+  sameContent,
+  unreadAreas,
+  unreadByClaude,
+} from '../shared/plan.ts';
 import { contentOf, diagramChanges, diagramToMarkdown, indent } from '../shared/architecture.ts';
 import {
   DEFAULT_BUILD_SETTINGS,
@@ -392,7 +403,7 @@ function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo): string[] 
       : ['7. Everything lands on the current branch: no task names a branch of its own.']),
     '8. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, ' +
       'stop and ask the user in chat — they can reopen the plan in Coplan.',
-    '9. When every task is done, run the final checks, write the build report (harness_plan_edit {op: "report", text}) ' +
+    '9. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text}]}) ' +
       'and give the user the final summary: what was built, the branches and pull requests, and how it was checked.',
   ];
 }
@@ -490,6 +501,22 @@ function renderChanges(plan: Plan, unread: Change[], changesOnly: boolean): stri
   if (userMeta && base.summary.trim() !== plan.summary.trim()) {
     meta.push(plan.summary.trim() ? 'Edited the summary.' : 'Removed the summary.');
     if (changesOnly && plan.summary.trim()) meta.push(...indent(plan.summary, 2));
+  }
+  // Reopening a sign-off is state, not content: say where it stands now.
+  const reopened = unread.filter((c) => c.target.kind === 'plan' && c.kind === 'status').map((c) => c.summary);
+  if (reopened.includes(REOPENED_PLAN)) {
+    meta.push(
+      plan.submission
+        ? 'Reopened the submitted plan, then submitted it again.'
+        : 'Reopened the submitted plan: it is no longer locked, and the tasks can change again. Do not build until they submit it again.',
+    );
+  }
+  if (reopened.includes(REOPENED_DESIGN)) {
+    meta.push(
+      plan.design
+        ? 'Reopened the design, then confirmed it again.'
+        : 'Reopened the design: it is no longer confirmed, so the architecture can change again. Wait for them to confirm it before making the task list.',
+    );
   }
   block('Plan', meta);
 
@@ -617,7 +644,7 @@ function renderThread(plan: Plan, t: Thread, reader: 'claude' | 'outside' = 'cla
   const who = (author: 'user' | 'claude') => (author === 'user' ? 'user' : reader === 'claude' ? 'you' : 'planner');
   const lines = [`- [${t.id}] on ${describeTarget(plan, t.target)} — ${who(t.author)}: ${t.text}`];
   for (const r of t.replies) lines.push(`  ↳ ${who(r.author)}: ${r.text}`);
-  if (reader === 'claude' && lastAuthor(t) === 'user') lines.push('  → reply with harness_plan_edit {op:"reply"} once you have acted on it');
+  if (reader === 'claude' && lastAuthor(t) === 'user') lines.push(`  → reply with harness_plan_edit {ops: [{op: "reply", threadId: "${t.id}", text}]} once you have acted on it`);
   return lines.join('\n');
 }
 

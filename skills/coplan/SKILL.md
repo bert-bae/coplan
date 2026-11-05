@@ -33,8 +33,12 @@ prompt.
 Coplan's tools are the MCP server `harness`: `harness_plan_publish`,
 `harness_plan_read`, `harness_plan_edit`, `harness_tasks_publish`,
 `harness_task_next`, `harness_task_brief` and `harness_task_update`. Your
-agent may show them with a prefix (`mcp__harness__…`); they are the same
-tools.
+agent may show them with a prefix that names the server (in Claude Code,
+`mcp__plugin_coplan_harness__…`); they are the same tools.
+
+`harness_plan_edit` takes a list of edits, even for one:
+`{ops: [{op: "reply", threadId: "c2", text: "…"}]}`. Each edit takes only
+its own fields, and a misspelt one is refused with the right names.
 
 ## 1. Investigate, then publish the design
 
@@ -78,7 +82,8 @@ It leads with the net effect of their edits, then the plan.
 
 - **Their edits** — their structure wins. Work from their diagram and tasks.
 - **Comments** — act on each, then reply in its thread with
-  `harness_plan_edit` `{op: "reply", threadId, text}`; resolve it if settled.
+  `harness_plan_edit {ops: [{op: "reply", threadId, text}]}`; resolve it
+  (`{op: "resolve", threadId, resolved: true}`) if settled.
 
 Use `harness_plan_edit` for targeted changes, `harness_plan_publish` only
 for a wholesale rewrite (keeping the ids of items that survive). Publishing

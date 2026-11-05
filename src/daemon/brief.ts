@@ -79,7 +79,7 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
       branches.length
         ? `2. Push each branch and open the pull requests in stack order: ${branches.map((b) => `\`${b.branch}\`${b.base ? ` (onto \`${b.base}\`)` : ''}`).join(' → ')}.`
         : '2. Commit and push the work on the current branch, and open a pull request if the user wants one.',
-      '3. Write the build report with harness_plan_edit {op: "report", text}: what each task did, the branches and pull requests, the checks and how they came out, anything that differs from the plan, and follow-ups.',
+      '3. Write the build report with harness_plan_edit {ops: [{op: "report", text}]}: what each task did, the branches and pull requests, the checks and how they came out, anything that differs from the plan, and follow-ups.',
       '4. Give the user the final summary in chat, with the links.',
     );
     if (plan.report) out.push('', `_A build report was written ${new Date(plan.report.at).toISOString().slice(0, 16).replace('T', ' ')}; writing it again replaces it._`);

@@ -100,10 +100,10 @@ Otherwise:
   user with your question tool (`AskUserQuestion` in Claude Code,
   `request_user_input` in Codex, or plainly in chat). Keep building other ready tasks meanwhile.
 - **Work not on the plan** — add it first:
-  `harness_plan_edit {op: "upsert_task", parentId, title, detail, dependsOn}`,
+  `harness_plan_edit {ops: [{op: "upsert_task", parentId, title, detail, dependsOn}]}`,
   then build it like any other.
 - **A dependency is wrong** (a task really can start earlier, or needs
-  something it does not list) — change it with `upsert_task {id, dependsOn}`
+  something it does not list) — change it with `harness_plan_edit {ops: [{op: "upsert_task", id, dependsOn}]}`
   and tell the user why in chat.
 - **The design does not work** — stop and ask. The plan is locked; the user
   can reopen it in Coplan.
@@ -118,7 +118,7 @@ When `harness_task_next` says every task is done:
    prompt lists). Fix what they find — as a task (`upsert_task`), through
    the cycle like any other.
 2. Push the branches; open the pull requests in stack order if wanted.
-3. Write the build report — `harness_plan_edit {op: "report", text}` — in
+3. Write the build report — `harness_plan_edit {ops: [{op: "report", text}]}` — in
    markdown:
    - **Built** — each top-level task, one line each, with its sub-results.
    - **Branches & PRs** — in stack order, with links.
