@@ -13,7 +13,7 @@ import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
 import { MAX_NOTE, PlanError, cleanChecks, cleanNote, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
 import { PROMPT_BUDGET, buildPrompt, designPrompt, promptHash, renderGaps, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
 import { renderBrief, renderNext } from './brief.ts';
-import { cleanSettings, effectiveReview, hasSubtasks, readyTasks, waitingOn } from '../shared/build.ts';
+import { cleanSettings, dependents, effectiveReview, hasSubtasks, readyTasks, waitingOn } from '../shared/build.ts';
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
 import { cleanStorage, scanStorage } from './housekeeping.ts';
 import { loadConfig, type HarnessConfig } from '../shared/config.ts';
@@ -871,6 +871,10 @@ function buildRouter(deps: Deps): Router {
     if (approved && !note?.trim()) {
       throw new PlanError('`user_approved` needs a `note` saying what the user told you in chat.');
     }
+    // Dropping work is a decision someone will want the reason for.
+    if (status === 'dropped' && !note?.trim()) {
+      throw new PlanError(`Dropping "${task.title}" needs a \`note\`: why it is no longer needed (and who said so).`);
+    }
     const project = projectFor(session);
     const settings = before.submission?.settings ?? project.settings;
 
@@ -979,7 +983,25 @@ function buildRouter(deps: Deps): Router {
         out.push(`This task's review is the user's: show them the change and ask with ${agentInfo(session.agent).askWith} before marking it done.`);
       }
     }
-    if (status === 'done' && changes.length) {
+    // The tasks that wait on this one: what dropping or reopening it means
+    // for them is worth saying out loud.
+    const waiting = dependents(plan, now);
+    if (status === 'dropped' && changes.length && waiting.length) {
+      out.push(
+        `${waiting.map((t) => `${t.id} "${t.title}"`).join(', ')} waited on it and no longer do${waiting.length === 1 ? 'es' : ''}: ` +
+          'check they do not need its work, and tell the user.',
+      );
+    }
+    if (task.status === 'done' && status && status !== 'done' && status !== 'dropped') {
+      const built = waiting.filter((t) => t.status !== 'todo');
+      if (built.length) {
+        out.push(
+          `${built.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ')} already went ahead on this task's work: ` +
+            'check they still hold once it changes.',
+        );
+      }
+    }
+    if ((status === 'done' || status === 'dropped') && changes.length) {
       if (planPhase(plan) === 'built') {
         out.push('That was the last task: the plan is built, and the board shows it done. Finish the build — harness_task_next says how.');
       } else {

@@ -1458,6 +1458,8 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 }
 .status-dot.is-blocked { border-color: var(--attention-solid); background: var(--attention-solid); }
 .status-dot.is-done { border-color: var(--success-solid); background: var(--success-solid); }
+.status-dot.is-dropped { border-color: var(--border-strong); background: var(--surface-sunken); color: var(--text-tertiary); }
+.board-card.is-dropped, .task-row.is-dropped .task-title { opacity: 0.65; text-decoration: line-through; }
 
 .task-num { color: var(--text-tertiary); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; min-width: 2.2em; }
 .task-title { font-weight: 550; min-width: 0; }
@@ -1486,7 +1488,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .seg.status-blocked.is-active { background: var(--attention-solid); }
 .outline-help { font-size: var(--fs-sm); margin-top: var(--sp-3); }
 
-.board { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: var(--sp-3); align-items: start; }
+.board { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--sp-3); align-items: start; }
 .board-col {
   display: flex; flex-direction: column; min-height: 240px;
   border: 1px solid var(--border-default); border-radius: var(--r-xl);

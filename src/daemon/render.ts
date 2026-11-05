@@ -35,7 +35,7 @@ import {
 import { HOOK_STAGES, PROJECT_CONFIG_PATH, emptyProjectConfig, hasHooks, type ProjectConfig } from '../shared/project.ts';
 import { agentInfo, type AgentInfo, type AgentKind } from '../shared/agents.ts';
 
-const STATUS_MARK = { todo: '[ ]', in_progress: '[~]', blocked: '[!]', done: '[x]' } as const;
+const STATUS_MARK = { todo: '[ ]', in_progress: '[~]', blocked: '[!]', done: '[x]', dropped: '[-]' } as const;
 
 export interface RenderOptions {
   /** Address of the plan in the browser, for Claude to pass on. */

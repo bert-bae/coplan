@@ -19,7 +19,7 @@ export interface ToolDef {
 /** Every tool only reads or writes harness state, so one budget fits all. */
 export const DEFAULT_BUDGET_MS = 30_000;
 
-const STATUS = { type: 'string', enum: ['todo', 'in_progress', 'blocked', 'done'] };
+const STATUS = { type: 'string', enum: ['todo', 'in_progress', 'blocked', 'done', 'dropped'] };
 
 const NODE = {
   type: 'object',

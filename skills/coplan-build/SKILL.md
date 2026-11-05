@@ -101,7 +101,14 @@ Otherwise:
   `request_user_input` in Codex, or plainly in chat). Keep building other ready tasks meanwhile.
 - **Work not on the plan** — add it first:
   `harness_plan_edit {ops: [{op: "upsert_task", parentId, title, detail, dependsOn}]}`,
-  then build it like any other.
+  then build it like any other. It shows as added during the build. Not
+  under a task that has already started: add it beside that task, depending
+  on it. The tasks the user signed off keep their title, detail, branch and
+  review; track them with notes, and ask if one is wrong.
+- **Work no longer needed** — drop it, saying why:
+  `harness_task_update {task_id, status: "dropped", note}`. It no longer
+  holds anything up; check the tasks that waited on it still have what they
+  need, and tell the user.
 - **A dependency is wrong** (a task really can start earlier, or needs
   something it does not list) — change it with `harness_plan_edit {ops: [{op: "upsert_task", id, dependsOn}]}`
   and tell the user why in chat.

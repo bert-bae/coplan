@@ -853,6 +853,27 @@ test('the build gates hold however the agent reports progress, and only the user
   }
 });
 
+test('dropping a task needs a reason; dropping or reopening one says what it means for the rest', async () => {
+  const id = 'scope-session';
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't4', dependsOn: ['t1'] }] });
+
+  const silent = await task({ task_id: 't2', status: 'dropped' });
+  assert.equal(silent['ok'], false);
+  assert.match(String(silent['text']), /needs a `note`: why it is no longer needed/);
+  assert.equal((await task({ task_id: 't2', status: 'dropped', note: 'the client already exists' }))['ok'], true);
+
+  await task({ task_id: 't3', stage: 'review' });
+  const done = String((await task({ task_id: 't3', status: 'done', note: 'done' }))['text']);
+  assert.match(done, /Now ready: t4 "Wire up"/, 'dropped and done, t1 holds nothing up');
+
+  await task({ task_id: 't4', stage: 'implement' });
+  const reopened = String((await task({ task_id: 't3', status: 'in_progress', stage: 'refine' }))['text']);
+  assert.match(reopened, /t4 "Wire up" \(in progress\) already went ahead on this task's work/);
+});
+
 test('a submission needs to say who builds it', async () => {
   const res = await raw(`/api/session/${built}/plan/submit`, { method: 'POST', body: JSON.stringify({ target: 'mars' }) });
   assert.equal(res.status, 400);

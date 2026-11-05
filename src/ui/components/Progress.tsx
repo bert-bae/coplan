@@ -23,6 +23,7 @@ export const STATUS_LABEL: Record<TaskStatus, string> = {
   in_progress: 'In progress',
   blocked: 'Blocked',
   done: 'Done',
+  dropped: 'Dropped',
 };
 
 export const STATUS_GLYPH: Record<TaskStatus, string> = {
@@ -30,4 +31,5 @@ export const STATUS_GLYPH: Record<TaskStatus, string> = {
   in_progress: '',
   blocked: '!',
   done: '✓',
+  dropped: '–',
 };

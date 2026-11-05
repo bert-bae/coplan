@@ -86,11 +86,17 @@ export function leavesUnder(plan: Tasks, id: string): Task[] {
   return out;
 }
 
-/** Done means every leaf under it is done. A task that no longer exists
- *  holds nothing up. */
+/** Done, or dropped: either way the build is through with it and nothing
+ *  waits on it any longer. */
+export function isSettled(task: Task): boolean {
+  return task.status === 'done' || task.status === 'dropped';
+}
+
+/** Done means every leaf under it is settled — done, or dropped with a
+ *  reason. A task that no longer exists holds nothing up. */
 export function isComplete(plan: Tasks, id: string): boolean {
   if (!byId(plan, id)) return true;
-  return leavesUnder(plan, id).every((t) => t.status === 'done');
+  return leavesUnder(plan, id).every(isSettled);
 }
 
 /* ------------------------------------------------------------------ *
@@ -122,12 +128,12 @@ export type Readiness = 'done' | 'in_progress' | 'blocked' | 'ready' | 'waiting'
 export function readinessOf(plan: Tasks, task: Task): Readiness {
   if (hasSubtasks(plan, task.id)) {
     const leaves = leavesUnder(plan, task.id);
-    if (leaves.every((t) => t.status === 'done')) return 'done';
+    if (leaves.every(isSettled)) return 'done';
     if (leaves.some((t) => t.status === 'in_progress')) return 'in_progress';
     if (leaves.some((t) => t.status === 'blocked')) return 'blocked';
     return leaves.some((t) => readinessOf(plan, t) === 'ready') ? 'ready' : 'waiting';
   }
-  if (task.status === 'done') return 'done';
+  if (isSettled(task)) return 'done';
   if (task.status === 'in_progress') return 'in_progress';
   if (task.status === 'blocked') return 'blocked';
   return waitingOn(plan, task).length ? 'waiting' : 'ready';

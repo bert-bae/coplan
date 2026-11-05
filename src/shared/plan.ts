@@ -1245,6 +1245,15 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       if (!title) throw new PlanError(op.id ? `No task "${op.id}".` : 'A new task needs a title.');
       if (plan.tasks.length >= MAX_TASKS) throw new PlanError(`A plan holds at most ${MAX_TASKS} tasks.`);
       const parentId = op.parentId ? requireTask(plan, op.parentId).id : null;
+      // Under a task already started or finished, a subtask would make it a
+      // parent and take its progress — stage, rounds, checks — away.
+      const parent = parentId ? requireTask(plan, parentId) : null;
+      if (parent && parent.status !== 'todo' && !plan.tasks.some((t) => t.parentId === parent.id)) {
+        throw new PlanError(
+          `"${parent.title}" is already ${STATUS_WORDS[parent.status]}, so it cannot take subtasks: add the new work as its own ` +
+            `task beside it${parent.parentId ? ` (parentId "${parent.parentId}")` : ''}, depending on ${parent.id} if it builds on it.`,
+        );
+      }
       const detail = clean(op.detail, MAX_TEXT);
       const note = clean(op.note, MAX_TITLE * 2);
       const files = cleanList(op.files);
@@ -1268,6 +1277,8 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         ...(review ? { review } : {}),
         ...(stage && status === 'in_progress' ? { stage, ...(stage === 'review' ? { round: 1 } : {}) } : {}),
         ...(checks?.length ? { checks } : {}),
+        // Work found once the plan was signed off: the user did not sign it.
+        ...(plan.submission ? { addedInBuild: true } : {}),
         createdAt: now,
         updatedAt: now,
         createdBy: author,
@@ -1393,6 +1404,19 @@ function editTask(
   log: (kind: ChangeKind, target: Target, summary: string) => Change,
 ): Change[] {
   checkTaskRev(task, op.expect, author);
+  // On a submitted plan, what a task the user signed off says is theirs:
+  // Claude tracks the work (a note, the files it touched, a dependency it
+  // found to be wrong) but does not re-scope it. Tasks it adds itself are
+  // its own to shape.
+  if (plan.submission && author === 'claude' && !task.addedInBuild) {
+    const scope = (['title', 'detail', 'branch', 'review', 'builds'] as const).filter((k) => op[k] !== undefined);
+    if (scope.length) {
+      throw new PlanError(
+        `"${task.title}" is part of the plan the user submitted, so its ${scope.join(', ')} cannot change now. Track the work with ` +
+          'a note; add work you discover as a new task; if the task itself is wrong, stop and ask the user — they can reopen the plan.',
+      );
+    }
+  }
   const out: Change[] = [];
   const edited: string[] = [];
   const title = clean(op.title, MAX_TITLE);
@@ -1454,7 +1478,7 @@ function editTask(
       out.push(log('status', ref('task', task.id), `marked "${task.title}" ${STATUS_WORDS[status]}${note}`));
     }
     // Finished, or back in the pile: no longer anywhere in the cycle.
-    if (status === 'done' || status === 'todo') delete task.stage;
+    if (status === 'done' || status === 'todo' || status === 'dropped') delete task.stage;
     // Put back in the pile by the user, it starts its cycle over: the rounds
     // and checks of the work it had are not this work's. Claude cannot do
     // that to itself — it would be a way round the round limit.
@@ -1466,7 +1490,7 @@ function editTask(
   const progress: string[] = [];
   // Going into review is a round. Reporting review again while in it —
   // with the review checks, say — is the same round.
-  if (stage && task.status !== 'done' && task.status !== 'todo' && stage !== task.stage) {
+  if (stage && task.status !== 'done' && task.status !== 'todo' && task.status !== 'dropped' && stage !== task.stage) {
     task.stage = stage;
     if (stage === 'review') task.round = (task.round ?? 0) + 1;
     progress.push(stage === 'review' ? `in review (round ${task.round})` : STAGE_WORDS[stage]);
@@ -2228,6 +2252,8 @@ export function countTasks(plan: Pick<Plan, 'tasks'> | null): TaskCounts {
   const parents = new Set(plan.tasks.map((t) => t.parentId).filter(Boolean));
   for (const t of plan.tasks) {
     if (parents.has(t.id)) continue;
+    // Dropped work is neither done nor left to do: it is out of the count.
+    if (t.status === 'dropped') continue;
     counts.total++;
     if (t.status === 'done') counts.done++;
     else if (t.status === 'in_progress') counts.inProgress++;
@@ -2245,6 +2271,7 @@ const STATUS_WORDS: Record<TaskStatus, string> = {
   in_progress: 'in progress',
   blocked: 'blocked',
   done: 'done',
+  dropped: 'dropped',
 };
 
 function ref(kind: Target['kind'], id: string): Target {

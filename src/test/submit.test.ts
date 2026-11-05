@@ -4,6 +4,7 @@ import {
   PlanError,
   applyOps,
   confirmDesign,
+  countTasks,
   isDesignLocked,
   isLocked,
   markDelivered,
@@ -138,9 +139,29 @@ test('the user can change nothing on a submitted plan', () => {
 test('Claude can track the work on a submitted plan, and add work it discovers', () => {
   let plan = markDelivered(submitted());
   plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'in_progress' }], 'claude', undefined, { tracking: true }).plan;
-  plan = applyOps(plan, [{ op: 'upsert_task', parentId: 'client', title: 'Handle timeouts' }], 'claude').plan;
+  // Under a task already started, it would take that task's progress away.
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_task', parentId: 'client', title: 'Handle timeouts' }], 'claude'), /already in progress, so it cannot take subtasks/);
+  plan = applyOps(plan, [{ op: 'upsert_task', title: 'Handle timeouts', dependsOn: ['client'] }], 'claude').plan;
   assert.equal(plan.tasks.find((t) => t.id === 'client')?.status, 'in_progress');
-  assert.ok(plan.tasks.some((t) => t.title === 'Handle timeouts'));
+  const added = plan.tasks.find((t) => t.title === 'Handle timeouts')!;
+  assert.equal(added.addedInBuild, true, 'marked as found during the build');
+  // Work Claude added is its own to shape; the signed-off tasks are not.
+  assert.doesNotThrow(() => applyOps(plan, [{ op: 'upsert_task', id: added.id, detail: 'Retry twice, then fail.' }], 'claude'));
+  assert.throws(
+    () => applyOps(plan, [{ op: 'upsert_task', id: 'client', detail: 'Actually, use memcached.' }], 'claude'),
+    /part of the plan the user submitted, so its detail cannot change now/,
+  );
+  assert.doesNotThrow(() => applyOps(plan, [{ op: 'upsert_task', id: 'client', note: 'wrapping ioredis' }], 'claude'));
+});
+
+test('dropped work is settled: it holds nothing up, and the plan is built without it', () => {
+  let plan = markDelivered(submitted());
+  const leaves = plan.tasks.filter((t) => !plan.tasks.some((c) => c.parentId === t.id));
+  const [first, ...rest] = leaves;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: first!.id, status: 'dropped', note: 'not needed after all' }], 'claude', undefined, { tracking: true }).plan;
+  assert.equal(countTasks(plan).total, leaves.length - 1, 'out of the count');
+  for (const t of rest) plan = applyOps(plan, [{ op: 'upsert_task', id: t.id, status: 'done' }], 'claude', undefined, { tracking: true }).plan;
+  assert.equal(planPhase(plan), 'built');
 });
 
 test('Claude cannot redesign a submitted plan, and is told what to do instead', () => {

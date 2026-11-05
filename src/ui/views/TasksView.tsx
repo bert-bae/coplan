@@ -20,6 +20,7 @@ const NEXT_STATUS: Record<TaskStatus, TaskStatus> = {
   in_progress: 'done',
   blocked: 'in_progress',
   done: 'todo',
+  dropped: 'todo',
 };
 
 type DropZone = 'before' | 'inside' | 'after';
@@ -495,6 +496,11 @@ function TaskRow(props: {
             </button>
           ))}
           {task.createdBy === 'user' && <span className="chip is-you">added by you</span>}
+          {task.addedInBuild && (
+            <span className="chip is-note" title="Found during the build: not part of the plan you submitted">
+              added during the build
+            </span>
+          )}
         </span>
         <span className="spacer" />
         <span className="task-actions">
@@ -840,7 +846,7 @@ function Board({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
 
   return (
     <div className={classNames('board', readOnly && 'is-readonly')}>
-      {TASK_STATUSES.map((status) => {
+      {TASK_STATUSES.filter((s) => s !== 'dropped' || leaves.some((t) => t.status === 'dropped')).map((status) => {
         const cards = leaves.filter((t) => t.status === status);
         return (
           <section

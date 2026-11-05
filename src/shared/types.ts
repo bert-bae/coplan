@@ -136,7 +136,7 @@ export interface DiagramInput {
   caption?: string;
 }
 
-export const TASK_STATUSES = ['todo', 'in_progress', 'blocked', 'done'] as const;
+export const TASK_STATUSES = ['todo', 'in_progress', 'blocked', 'done', 'dropped'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 /**
@@ -208,6 +208,9 @@ export interface Task {
   /** The revision each side last edited, so an edit made against an older
    *  revision is refused only when the other side changed it since. */
   revBy?: Partial<Record<Author, number>>;
+  /** Added once the plan was submitted: work found during the build, not
+   *  part of what the user signed off. */
+  addedInBuild?: boolean;
   createdAt: number;
   updatedAt: number;
   createdBy: Author;
