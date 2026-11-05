@@ -12,8 +12,8 @@
  * It is written so Claude can hand it to a subagent as it is: the subagent
  * learns how its piece fits the whole, and where its job ends.
  */
-import type { BuildSettings, Plan, Task } from '../shared/types.ts';
-import { countTasks, outline, planPhase } from '../shared/plan.ts';
+import type { BuildSettings, Plan, Task, Thread } from '../shared/types.ts';
+import { countTasks, describeTarget, findPart, outline, planPhase } from '../shared/plan.ts';
 import {
   DEFAULT_BUILD_SETTINGS,
   REVIEW_WORDS,
@@ -190,6 +190,25 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
 
   if (plan.summary.trim()) out.push('', '## The plan, in short', nestHeadings(plan.summary.trim(), 2));
 
+  // The plan's own prose — context, risks, what is out of scope — holds for
+  // every task: a subagent given only this brief must have it too.
+  const sections = plan.sections.filter((s) => s.body.trim());
+  if (sections.length) {
+    out.push('', '## From the plan');
+    let room = SECTIONS_BUDGET;
+    for (const s of sections) {
+      const body = nestHeadings(s.body.trim(), 3);
+      const cut = body.length > Math.min(SECTION_MAX, room);
+      const text = cut ? `${body.slice(0, Math.max(0, Math.min(SECTION_MAX, room))).trimEnd()} …` : body;
+      out.push('', `### ${s.title}`, text);
+      room -= text.length;
+      if (room <= 0) {
+        out.push('', '_…more of the plan than fits here: harness_plan_read {peek: true} has all of it._');
+        break;
+      }
+    }
+  }
+
   // The objective.
   out.push('', '## Your objective', `**${task.title}**`);
   if (task.detail?.trim()) out.push('', task.detail.trim());
@@ -296,15 +315,53 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
     out.push('', `_Now: ${[task.stage ? stageWords(task) : task.status.replace('_', ' '), task.checks?.length ? `checks ${checkWords(task)}` : ''].filter(Boolean).join(' · ')}._`);
   }
 
-  const threads = plan.threads.filter((t) => !t.resolved && t.target.kind === 'task' && mine.has(t.target.id));
+  // Every open comment that bears on it: on the task, on the plan as a
+  // whole, and on the design it builds — its diagrams, its boxes, and the
+  // arrows to and from them. "Don't use Redis here" on a box is as much
+  // part of the brief as the task's own detail.
+  const { diagrams, nodes } = designOf(plan, task);
+  const bears = (t: Thread): boolean => {
+    const { kind, id } = t.target;
+    if (kind === 'task') return mine.has(id);
+    if (kind === 'plan') return true;
+    if (kind === 'diagram') return diagrams.has(id);
+    if (kind === 'node') return nodes.has(id);
+    if (kind === 'edge') {
+      const part = findPart(plan, t.target);
+      return Boolean(part?.edge && (nodes.has(`${part.diagram.id}/${part.edge.source}`) || nodes.has(`${part.diagram.id}/${part.edge.target}`)));
+    }
+    return false;
+  };
+  const threads = plan.threads.filter((t) => !t.resolved && bears(t));
   if (threads.length) {
-    out.push('', '## Comments on it');
+    out.push('', '## Open comments on it and its design');
     for (const t of threads) {
-      out.push(`- ${t.author === 'user' ? 'user' : 'planner'}: ${hang(t.text, 4)}`);
+      const on = t.target.kind === 'task' && mine.has(t.target.id) ? '' : ` _(on ${describeTarget(plan, t.target)})_`;
+      out.push(`- ${t.author === 'user' ? 'user' : 'planner'}${on}: ${hang(t.text, 4)}`);
       for (const r of t.replies) out.push(`  ↳ ${r.author === 'user' ? 'user' : 'planner'}: ${hang(r.text, 4)}`);
     }
   }
   return out.join('\n');
+}
+
+/** How much of the plan's sections a brief quotes: each, and in all. */
+const SECTION_MAX = 1_200;
+const SECTIONS_BUDGET = 3_000;
+
+/** The diagrams and boxes (`diagramId/nodeId`) a task builds — through
+ *  itself, a parent or a subtask. */
+function designOf(plan: Plan, task: Task): { diagrams: Set<string>; nodes: Set<string> } {
+  const related = new Set([task.id, ...ancestorsOf(plan, task).map((t) => t.id), ...leavesUnder(plan, task.id).map((t) => t.id)]);
+  const diagrams = new Set<string>();
+  const nodes = new Set<string>();
+  for (const d of plan.diagrams) {
+    for (const n of d.nodes) {
+      if (!n.taskIds?.some((id) => related.has(id))) continue;
+      diagrams.add(d.id);
+      nodes.add(`${d.id}/${n.id}`);
+    }
+  }
+  return { diagrams, nodes };
 }
 
 /** The boxes a task builds — through itself, a parent or a subtask — with

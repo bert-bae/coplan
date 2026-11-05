@@ -86,7 +86,11 @@ const BUILD_FIELDS: Record<string, unknown> = {
   },
   branch: { type: 'string', description: 'Git branch the work lands on; subtasks inherit it. Omit for one PR on the current branch.' },
   review: { ...REVIEW, description: 'Only when not the build default: "user" for risky work, "skip" for trivial.' },
-  builds: { type: 'array', items: { type: 'string' }, description: 'Boxes it builds: node ids (or "diagramId/nodeId").' },
+  builds: {
+    type: 'array',
+    items: { type: 'string' },
+    description: 'Boxes it builds: node ids (or "diagramId/nodeId"). Given, it replaces the boxes the task built before; [] unlinks it.',
+  },
 };
 
 /** Nested task schema, a few levels deep — deep enough for any real breakdown. */

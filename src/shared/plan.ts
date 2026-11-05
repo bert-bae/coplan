@@ -488,11 +488,15 @@ export function publishTasks(prev: Plan | null, input: TaskListInput, now = Date
   const { tasks, builds } = buildTaskTree(base, next, input.tasks, now);
   next.tasks = tasks;
   const live = new Set(tasks.map((t) => t.id));
+  // A task that restates `builds` builds those boxes now — not those plus
+  // whatever it built before — so its old links go first. Its brief, and
+  // the boxes' progress, then follow what the task list says.
+  const relinked = new Set(builds.map((b) => b.id));
   for (const d of next.diagrams) {
     let touched = false;
     for (const n of d.nodes) {
       if (!n.taskIds) continue;
-      const kept = n.taskIds.filter((id) => live.has(id));
+      const kept = n.taskIds.filter((id) => live.has(id) && !relinked.has(id));
       if (kept.length === n.taskIds.length) continue;
       touched = true;
       if (kept.length) n.taskIds = kept;
@@ -579,7 +583,8 @@ function buildTaskTree(
       const explicit = raw.dependsOn !== undefined;
       deps.push({ task, explicit, ids: explicit ? (cleanList(raw.dependsOn) ?? []) : (old?.dependsOn ?? []) });
       const refs = cleanList(raw.builds);
-      if (refs?.length) builds.push({ id, refs });
+      // Restated (even as []), it says which boxes the task builds now.
+      if (raw.builds !== undefined) builds.push({ id, refs: refs ?? [] });
       walk(raw.subtasks, id, depth + 1);
     });
   };
