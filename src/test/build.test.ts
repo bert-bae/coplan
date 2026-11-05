@@ -68,7 +68,7 @@ function tasked(): Plan {
 
 const ids = (list: { id: string }[]) => list.map((t) => t.id);
 const done = (plan: Plan, ...which: string[]) =>
-  applyOps(plan, which.map((id) => ({ op: 'upsert_task' as const, id, status: 'done' as const })), 'claude').plan;
+  applyOps(plan, which.map((id) => ({ op: 'upsert_task' as const, id, status: 'done' as const })), 'claude', undefined, { tracking: true }).plan;
 
 /* ------------------------------------------------------------------ *
  * Readiness
@@ -225,7 +225,7 @@ test('the task list replaces only the tasks, links boxes, and keeps what survive
   const base = confirmDesign(publishPlan(null, DESIGN, 1_000).plan, { prompt: 'p' }, 1_100);
   // The user linked a box to a planned task, and commented on it.
   let plan = applyOps(base, [{ op: 'comment', target: { kind: 'task', id: 'wire' }, text: 'keep it small' }], 'user').plan;
-  plan = applyOps(plan, [{ op: 'upsert_task', id: 'wire', status: 'in_progress' }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'wire', status: 'in_progress' }], 'claude', undefined, { tracking: true }).plan;
   assert.throws(() => publishTasks(plan, { tasks: TASKS }), /changed 1 item/, 'unread user changes first');
   plan = { ...plan, claudeReadSeq: plan.seq };
 
@@ -277,7 +277,7 @@ test('a build field the file was damaged in is dropped on load', () => {
 
 test('a task goes round its cycle: stages imply progress, reviews count rounds, done leaves it', () => {
   let plan = tasked();
-  const step = (op: Record<string, unknown>) => (plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', ...op }], 'claude').plan);
+  const step = (op: Record<string, unknown>) => (plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', ...op }], 'claude', undefined, { tracking: true }).plan);
   const client = () => plan.tasks.find((t) => t.id === 'client')!;
   step({ stage: 'implement' });
   assert.equal(client().status, 'in_progress');
@@ -292,6 +292,45 @@ test('a task goes round its cycle: stages imply progress, reviews count rounds, 
   assert.equal(client().round, 2, 'the history stays');
   assert.match(plan.changes.map((c) => c.summary).join('\n'), /"Cache client": in review \(round 2\); checks tests ✓/);
   assert.throws(() => step({ stage: 'polish' }), /not a stage/);
+});
+
+test('going into review is a round, checks merge by name, and only the user starts a task over', () => {
+  let plan = tasked();
+  const step = (op: Record<string, unknown>) => (plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', ...op }], 'claude', undefined, { tracking: true }).plan);
+  const client = () => plan.tasks.find((t) => t.id === 'client')!;
+  step({ stage: 'review' });
+  step({ stage: 'review', checks: [{ name: 'tests', ok: false }, { name: 'lint', ok: true }] });
+  assert.equal(client().round, 1, 'reporting the review checks is the same round');
+  step({ stage: 'refine', checks: [{ name: 'typecheck', ok: true }] });
+  assert.deepEqual(
+    client().checks?.map((c) => `${c.name}:${c.ok}`),
+    ['tests:false', 'lint:true', 'typecheck:true'],
+    'a refine that re-runs one check keeps the others',
+  );
+  step({ checks: [{ name: 'tests', ok: true }] });
+  assert.equal(client().checks?.find((c) => c.name === 'tests')?.ok, true);
+  // Claude sending it back to todo keeps its rounds: no way round the limit.
+  step({ status: 'todo' });
+  assert.equal(client().round, 1);
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'in_progress' }], 'user').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'todo' }], 'user').plan;
+  assert.equal(client().round, undefined, 'the user putting it back starts it over');
+  assert.equal(client().checks, undefined);
+});
+
+test("Claude's upsert_task does not report progress: that is harness_task_update's", () => {
+  for (const progress of [{ status: 'done' }, { stage: 'review' }, { checks: [{ name: 'tests', ok: true }] }]) {
+    assert.throws(
+      () => applyOps(tasked(), [{ op: 'upsert_task', id: 'client', ...progress } as never], 'claude'),
+      /report progress with harness_task_update/,
+    );
+  }
+  assert.throws(() => applyOps(tasked(), [{ op: 'upsert_task', title: 'New', status: 'done' }], 'claude'), /A new task starts as todo/);
+  // The user marks progress on the board as before.
+  assert.doesNotThrow(() => applyOps(tasked(), [{ op: 'upsert_task', id: 'client', status: 'done' }], 'user'));
+  // Nor does publishing again move a task that already exists.
+  const republished = publishTasks(tasked(), { tasks: TASKS.map((t) => ({ ...t, status: 'done' as const })) }).plan;
+  assert.equal(republished.tasks.find((t) => t.id === 'wire')!.status, 'todo');
 });
 
 test('review modes are inherited, with the build default last', () => {
@@ -333,7 +372,7 @@ test('the read-back marks what is ready and what waits, once the design is confi
 
 test('what is next says what to start, how many at once, and what the rest wait on', () => {
   let plan = tasked();
-  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', stage: 'implement' }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', stage: 'implement' }], 'claude', undefined, { tracking: true }).plan;
   const next = renderNext(plan, { project: PROJECT, settings: { review: 'subagent', parallel: 3, maxRounds: 3 } });
   assert.match(next, /## In progress \(1\)\n- client Cache client — implementing/);
   assert.match(next, /## Ready to start \(2\)\n- config Config · branch `cache\/storage`[^\n]*\n- docs Docs · review: skip/);
@@ -380,4 +419,12 @@ test("a task's brief is self-contained: objective, where it fits, scope, branch 
   assert.match(parent, /Its subtasks — build them in this order/);
   assert.match(parent, /\*\*Redis\*\* `cache`[\s\S]*Decisions:\n    TTL 10m\./, 'a parent builds what its subtasks build');
   assert.match(parent, /No checks are configured/);
+});
+
+test("a parent's brief lists its subtasks in the order they can be built, not the outline's", () => {
+  // Config, second in the outline, now waits on Invalidation, which is third.
+  const plan = applyOps(tasked(), [{ op: 'upsert_task', id: 'config', dependsOn: ['invalidate'] }], 'user').plan;
+  const brief = renderBrief(plan, plan.tasks.find((t) => t.id === 'storage')!, {});
+  const order = [...brief.matchAll(/^- \[ \] (?:NOT DONE YET — )?(\w+) /gm)].map((m) => m[1]);
+  assert.deepEqual(order.slice(0, 3), ['client', 'invalidate', 'config']);
 });

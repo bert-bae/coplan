@@ -194,7 +194,12 @@ export interface DiffOptions {
 export function diagramChanges(before: DiagramContent, after: DiagramContent, opts: DiffOptions = {}): string[] {
   const ids = opts.ids ?? true;
   const out: string[] = [];
-  const label = (id: string) => after.nodes.find((n) => n.id === id)?.label ?? before.nodes.find((n) => n.id === id)?.label ?? id;
+  const named = (id: string) => after.nodes.find((n) => n.id === id)?.label ?? before.nodes.find((n) => n.id === id)?.label ?? id;
+  // A connection names its ends by label — and by id too when two boxes
+  // share a label, or "Connected API → Cache" would not say which Cache.
+  const counts = new Map<string, number>();
+  for (const n of new Map([...before.nodes, ...after.nodes].map((n) => [n.id, n])).values()) counts.set(named(n.id), (counts.get(named(n.id)) ?? 0) + 1);
+  const label = (id: string) => (ids && (counts.get(named(id)) ?? 0) > 1 ? `${named(id)} (\`${id}\`)` : named(id));
   const ref = (n: { id: string; label: string }) => (ids ? `${n.label} (\`${n.id}\`)` : n.label);
 
   if (before.title !== after.title) out.push(`Renamed the diagram "${before.title}" → "${after.title}".`);
@@ -227,7 +232,7 @@ export function diagramChanges(before: DiagramContent, after: DiagramContent, op
     for (const [what, , now] of editedText) facts.push(now?.trim() ? `${what} edited` : `${what} removed`);
     const was = b.taskIds ?? [];
     const now = n.taskIds ?? [];
-    if (was.join() !== now.join()) facts.push(now.length ? `built by ${now.join(', ')}${was.length ? ` (was ${was.join(', ')})` : ''}` : 'no longer linked to tasks');
+    if ([...was].sort().join() !== [...now].sort().join()) facts.push(now.length ? `built by ${now.join(', ')}${was.length ? ` (was ${was.join(', ')})` : ''}` : 'no longer linked to tasks');
     if (!facts.length) continue;
     changed.push(`Changed ${ref(n)}: ${facts.join('; ')}.`);
     if (opts.withText) {
@@ -301,10 +306,47 @@ function prose(what: string, text: string | undefined, opts: DiffOptions): strin
 
 export function indent(text: string, by: number): string[] {
   const pad = ' '.repeat(by);
-  return text
-    .trim()
+  // Indented under a list item, a heading the user wrote would still read
+  // as one of the document's own: it is kept as bold text instead.
+  return nestHeadings(text.trim(), 6)
     .split('\n')
     .map((line) => (line.trim() ? `${pad}${line.trimEnd()}` : ''));
+}
+
+/** Text that continues a list item: its first line as is, the rest
+ *  indented `by`, so a multi-line comment stays inside its item. */
+export function hang(text: string, by: number): string {
+  return nestHeadings(text.trim(), 6)
+    .split('\n')
+    .map((line, i) => (i === 0 || !line.trim() ? line.trimEnd() : `${' '.repeat(by)}${line.trimEnd()}`))
+    .join('\n');
+}
+
+const HEADING = /^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/;
+
+/**
+ * User prose placed under one of the document's headings, at level
+ * `under`: its own headings move down below that level, so a section body
+ * holding "## Tasks" cannot start a second Tasks part of the prompt. Past
+ * level 6 a heading becomes bold text. Code blocks are left alone.
+ */
+export function nestHeadings(text: string, under: number): string {
+  let fence: string | null = null;
+  return text
+    .split('\n')
+    .map((line) => {
+      const marker = /^ {0,3}(```|~~~)/.exec(line)?.[1];
+      if (marker && (!fence || fence === marker)) {
+        fence = fence ? null : marker;
+        return line;
+      }
+      if (fence) return line;
+      const m = HEADING.exec(line);
+      if (!m) return line;
+      const level = m[1]!.length + under;
+      return level <= 6 ? `${'#'.repeat(level)} ${m[2]}` : `**${m[2]}**`;
+    })
+    .join('\n');
 }
 
 function oneLine(text: string): string {

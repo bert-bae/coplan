@@ -27,6 +27,12 @@ before(async () => {
   home = mkdtempSync(path.join(tmpdir(), 'cc-harness-mcp-'));
 
   server = http.createServer((req, res) => {
+    // Answered like the real daemon, so the lock below is believed.
+    if (req.url === '/health') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, version: '0.0.0', pid: process.pid }));
+      return;
+    }
     received.push(req.url ?? '');
     let body = '';
     req.on('data', (c) => (body += c));

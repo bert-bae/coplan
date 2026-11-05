@@ -7,11 +7,11 @@
  * makes the daemon debuggable when the hook wiring is the thing that broke.
  */
 import { spawn } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { readLiveLock, baseUrl, paths, ensureHome } from '../shared/paths.ts';
+import { readLiveLock, readVerifiedLock, probeLock, baseUrl, paths, ensureHome } from '../shared/paths.ts';
 import { runDoctor } from './doctor.ts';
 import { runCheck } from './check.ts';
 import { runInit } from './init.ts';
@@ -26,7 +26,7 @@ const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : 
 const DAEMON_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'daemon', 'main.js');
 
 async function ensureDaemon(): Promise<DaemonLock | null> {
-  const existing = readLiveLock();
+  const existing = (await readVerifiedLock());
   if (existing) return existing;
   ensureHome();
   const child = spawn(process.execPath, [DAEMON_ENTRY], {
@@ -43,7 +43,7 @@ async function ensureDaemon(): Promise<DaemonLock | null> {
   child.unref();
   for (let i = 0; i < 60; i++) {
     await sleep(100);
-    const lock = readLiveLock();
+    const lock = (await readVerifiedLock());
     if (lock) return lock;
   }
   return null;
@@ -54,7 +54,13 @@ async function api<T>(lock: DaemonLock, route: string, init?: RequestInit): Prom
     ...init,
     headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}`, ...(init?.headers ?? {}) },
   });
-  return (await res.json()) as T;
+  // Refusals (401, 403) come back as plain text: say what they said.
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`the daemon answered ${res.status}: ${text.trim().slice(0, 200)}`);
+  }
 }
 
 /**
@@ -100,6 +106,17 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
       console.log('not running');
       return 0;
     }
+    // A lock left by a daemon that died may name a pid that is someone
+    // else's process now: that is never signalled. One whose port takes the
+    // connection but is slow to answer is the daemon, hung — the very one
+    // to stop.
+    const state = await probeLock(lock);
+    if (state === 'stale') {
+      rmSync(paths.lockFile(), { force: true });
+      console.log('not running (removed a lock left by a daemon that is gone)');
+      return 0;
+    }
+    if (state === 'busy') console.log(`the daemon (pid ${lock.pid}) is not answering; stopping it anyway`);
     try {
       process.kill(lock.pid, 'SIGTERM');
       console.log(`stopped pid ${lock.pid}`);
@@ -118,14 +135,15 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
    * would move it to a fresh port and strand every tab that was watching.
    */
   async restart(args) {
-    const lock = readLiveLock();
+    const lock = (await readVerifiedLock());
     if (!lock) return commands['start']!(args);
 
     try {
+      // From this plugin's build: the daemon may be another install's, older.
       const result = await api<{ restarting?: boolean }>(
         lock,
         '/api/daemon/restart',
-        { method: 'POST', body: '{}' },
+        { method: 'POST', body: JSON.stringify({ entry: DAEMON_ENTRY }) },
       );
       if (result.restarting) {
         const next = await waitForNewDaemon(lock.pid);
@@ -174,7 +192,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
       : args.includes('--all')
         ? [...CLEANUP_GROUPS]
         : CLEANUP_GROUPS.filter((id) => id !== 'sessions');
-    const lock = readLiveLock();
+    const lock = (await readVerifiedLock());
     if (!lock) console.log('(no daemon running: live sessions are identified by age alone)');
 
     const outcome = lock
@@ -206,12 +224,13 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
 
   /** The daemon, and every session with where its plan stands. */
   async status() {
-    const lock = readLiveLock();
+    const lock = (await readVerifiedLock());
     if (!lock) {
       console.log('not running');
       return 0;
     }
     console.log(`coplan v${lock.version} on ${baseUrl(lock)} (pid ${lock.pid})`);
+    if (lock.version !== VERSION) console.log(`  this plugin is v${VERSION}: run \`coplan restart\` so the daemon runs it`);
     const { sessions } = await api<{ sessions: SessionSummary[] }>(lock, '/api/sessions');
     if (!sessions.length) {
       console.log('no sessions');
@@ -304,7 +323,7 @@ async function heldSessionBytes(lock: DaemonLock | null): Promise<number> {
 async function waitForNewDaemon(previousPid: number): Promise<DaemonLock | null> {
   for (let i = 0; i < 100; i++) {
     await sleep(100);
-    const lock = readLiveLock();
+    const lock = (await readVerifiedLock());
     if (lock && lock.pid !== previousPid) return lock;
   }
   return null;

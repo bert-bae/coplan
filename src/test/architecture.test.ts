@@ -173,7 +173,7 @@ test('task edits are reported as where the task ended up', () => {
 
 test('Claude\'s own edits are not reported back to it', () => {
   let plan = fresh();
-  plan = applyOps(plan, [{ op: 'upsert_task', id: 'cache-client', status: 'done' }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'cache-client', status: 'done' }], 'claude', undefined, { tracking: true }).plan;
   plan = applyOps(plan, [{ op: 'upsert_task', title: 'Load test' }], 'user').plan;
   const text = renderPlan(plan, { changesOnly: true });
   assert.match(text, /Added t1 "Load test"/);
@@ -278,6 +278,8 @@ test("Claude's edits made while the user's are unread are not reported as the us
       { op: 'upsert_section', title: 'Claude adds a section', body: 'x' },
     ],
     'claude',
+    undefined,
+    { tracking: true },
   ).plan;
   const text = renderPlan(plan, { changesOnly: true });
   assert.match(text, /Changed cache-client "Cache client \(Redis\)": renamed from "Cache client"\./, 'the user\'s rename is still news');
@@ -285,18 +287,25 @@ test("Claude's edits made while the user's are unread are not reported as the us
   assert.doesNotMatch(text, /Renamed the plan|Claude adds a section/);
 });
 
-test("Claude's edits to a diagram the user also changed are folded in, the user's are not", () => {
+test("Claude's edits around a diagram the user changed are folded in; the diagram itself waits for a read", () => {
   let plan = fresh();
   const d = () => plan.diagrams[0]!;
   plan = applyOps(plan, [{ op: 'upsert_diagram', id: d().id, nodes: d().nodes.map((n) => (n.id === 'db' ? { ...n, label: 'Postgres 16' } : n)), edges: d().edges }], 'user').plan;
-  plan = applyOps(
-    plan,
-    [{ op: 'upsert_diagram', id: d().id, nodes: [...d().nodes, { id: 'q', label: 'Queue', kind: 'queue' }], edges: [...d().edges, { source: 'api', target: 'q', label: 'enqueue' }] }],
-    'claude',
-  ).plan;
+  // Rewriting that diagram unread could undo the rename: refused.
+  assert.throws(
+    () =>
+      applyOps(
+        plan,
+        [{ op: 'upsert_diagram', id: d().id, nodes: [...d().nodes, { id: 'q', label: 'Queue', kind: 'queue' }], edges: [...d().edges, { source: 'api', target: 'q', label: 'enqueue' }] }],
+        'claude',
+      ),
+    /since you last read the plan/,
+  );
+  // A new diagram of Claude's goes in, and is not reported back as the user's.
+  plan = applyOps(plan, [{ op: 'upsert_diagram', title: 'Queueing', nodes: [{ id: 'q', label: 'Queue', kind: 'queue' }] }], 'claude').plan;
   const text = renderPlan(plan, { changesOnly: true });
   assert.match(text, /Changed Postgres 16 \(`db`\): renamed from "Postgres"\./);
-  assert.doesNotMatch(text, /Queue|enqueue/, 'Claude added those');
+  assert.doesNotMatch(text, /Queueing/, 'Claude added that');
 });
 
 test('reordering diagrams is reported, not called a no-op', () => {
@@ -393,4 +402,18 @@ test('content is compared without regard to field order or the order arrows are 
   assert.ok(sameContent(a, b));
   b.diagrams[0]!.edges[0]!.label = 'other';
   assert.ok(!sameContent(a, b));
+});
+
+test('a connection between boxes that share a label names them by id too', () => {
+  const nodes = [
+    { id: 'api', label: 'API', kind: 'service' as const },
+    { id: 'c1', label: 'Cache', kind: 'datastore' as const },
+    { id: 'c2', label: 'Cache', kind: 'datastore' as const },
+  ];
+  const before = { id: 'd1', title: 'D', nodes, edges: [{ id: 'e1', source: 'api', target: 'c1' }] };
+  const after = { id: 'd1', title: 'D', nodes, edges: [{ id: 'e1', source: 'api', target: 'c1' }, { id: 'e2', source: 'api', target: 'c2' }] };
+  const lines = diagramChanges(before, after);
+  assert.ok(lines.some((l) => /^Connected API → Cache \(`c2`\)\.$/.test(l)), lines.join('\n'));
+  // Unambiguous labels stay as they were.
+  assert.ok(!lines.some((l) => /API \(`api`\) →/.test(l)));
 });

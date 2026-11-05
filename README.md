@@ -445,7 +445,7 @@ Seven tools, none of which waits on you or asks you anything:
 
 | Tool | What it does |
 | --- | --- |
-| `harness_plan_publish` | Publish the whole plan. Items keep their comments, positions and statuses when their ids survive; refused while you have changes Claude hasn't read, so it can never overwrite your edits blind, and while a submitted plan is still being built. |
+| `harness_plan_publish` | Publish the whole plan. Items keep their comments, positions and statuses when their ids survive; refused while you have changes Claude hasn't read, so it can never overwrite your edits blind, and once you confirm the design (the task list then comes from `harness_tasks_publish`). |
 | `harness_plan_read` | The plan as text, leading with the net effect of your changes since the last read, with every id Claude needs. Diagrams read as an architecture: the system's shape, each part in flow order with its description, decisions and tasks, then every connection. `changes_only` skips the document and quotes edited text instead. |
 | `harness_plan_edit` | A batch of targeted edits — sections, diagrams, tasks, moves, comment replies, the build report — applied all or nothing. Once the design is confirmed, only tasks, task links and comments; once the plan is submitted, only task edits, comment replies and the report. |
 | `harness_tasks_publish` | Publish the task list for the confirmed design: replaces the task tree and nothing else, with dependencies, branches, review modes and the boxes each task builds. |

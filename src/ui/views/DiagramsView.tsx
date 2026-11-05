@@ -108,7 +108,8 @@ export function DiagramsView() {
                 lockNote: 'The design is confirmed; reopen it to change the design. Task links can still change.',
                 onLinkTasks: (nodeId: string, taskIds: string[]) => {
                   const nodes = diagram.nodes.map((n) => (n.id === nodeId ? { ...n, taskIds } : n));
-                  void store.commit([{ op: 'upsert_diagram', id: diagram.id, nodes }], sessionId);
+                  // Against the diagram on screen, so links the agent added since are not undone.
+                  void store.commit([{ op: 'upsert_diagram', id: diagram.id, nodes, expect: diagram.rev }], sessionId);
                 },
               }
             : {})}

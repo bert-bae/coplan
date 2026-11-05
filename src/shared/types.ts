@@ -201,6 +201,13 @@ export interface Task {
   round?: number;
   /** The checks last run against it. */
   checks?: CheckResult[];
+  /** What the task says — title, detail, note, files, dependencies, branch,
+   *  review — has been edited this many times (1 when new). Progress
+   *  (status, stage, checks) is not counted. */
+  rev?: number;
+  /** The revision each side last edited, so an edit made against an older
+   *  revision is refused only when the other side changed it since. */
+  revBy?: Partial<Record<Author, number>>;
   createdAt: number;
   updatedAt: number;
   createdBy: Author;
@@ -484,6 +491,9 @@ export type PlanOp =
       checks?: CheckResult[];
       /** Boxes this task builds, added to each (see `TaskInput.builds`). */
       builds?: string[];
+      /** The task's `rev` the edit was made against. Refused if the other
+       *  side has changed the task since. */
+      expect?: number;
     }
   | { op: 'move_task'; id: string; parentId: string | null; index: number }
   | { op: 'move_section'; id: string; index: number }

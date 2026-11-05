@@ -1391,7 +1391,7 @@ function patchOf(ns: FlowNode[], es: FlowEdge[], direction: DiagramDirection): G
       id: n.id,
       label: n.data.label,
       kind: n.data.kind,
-      ...(n.data.detail ? { detail: n.data.detail } : {}),
+      detail: n.data.detail ?? '',
       // Sent even when empty: leaving them out would keep the old text.
       description: n.data.description ?? '',
       notes: n.data.notes ?? '',

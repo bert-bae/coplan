@@ -203,7 +203,12 @@ test('pasting the build prompt into Cursor counts as delivering it', async () =>
   await hook('cursor', 'sessionStart', { ...base, hook_event_name: 'sessionStart' });
   await mcp('cursor', 'publish', PLAN);
   await submit(id);
+  // Only the whole prompt counts: an older prompt for the same plan starts
+  // the same way, and must not stand in for this one.
   await hook('cursor', 'beforeSubmitPrompt', { ...base, hook_event_name: 'beforeSubmitPrompt', prompt: `${BUILD_MARKER} "Add a cache" …` });
+  assert.equal((await session(id)).plan?.submission?.deliveredAt, null);
+  const prompt = (await session(id)).plan!.submission!.prompt;
+  await hook('cursor', 'beforeSubmitPrompt', { ...base, hook_event_name: 'beforeSubmitPrompt', prompt: `Here it is:\n\n${prompt}` });
   assert.ok((await session(id)).plan?.submission?.deliveredAt);
 });
 

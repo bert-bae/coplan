@@ -711,6 +711,21 @@ test('a snapshot from Claude replaces the plan and says so', async () => {
   assert.ok(store.getState().toasts.some((t) => /revision 2/.test(t.text)));
 });
 
+test('a snapshot older than the plan on the page never rolls it back', async () => {
+  const plan = makePlan();
+  plan.version = 10;
+  plan.title = 'Newest';
+  await boot(makeSession(plan));
+  const older = makePlan();
+  older.version = 9;
+  older.title = 'Older';
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: makeSession(older, { title: 'Session renamed' }) });
+  });
+  assert.equal(store.getState().session?.plan?.title, 'Newest');
+  assert.equal(store.getState().session?.title, 'Session renamed', 'the rest of the session still updates');
+});
+
 /* ---------------------------------------------------- layout and access */
 
 test('the header hides and shows the session list', async () => {
@@ -826,7 +841,7 @@ test('with the design confirmed, boxes still link to tasks but nothing else on t
 
 test('the task list says what waits on what, and the order the build takes', async () => {
   let plan = confirmedPlan();
-  plan = applyOps(plan, [{ op: 'upsert_task', id: 't3', status: 'todo', dependsOn: ['storage'], branch: 'cache/api', review: 'user' }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't3', status: 'todo', dependsOn: ['storage'], branch: 'cache/api', review: 'user' }], 'claude', undefined, { tracking: true }).plan;
   await boot(makeSession(plan));
   await openTab('Tasks');
   const row = document.getElementById('task-t3')!;
@@ -848,11 +863,12 @@ test('the task list says what waits on what, and the order the build takes', asy
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: 'Stop waiting on Storage layer' }));
   });
-  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 't3', dependsOn: [] });
+  // Made against the revision on screen (Claude's edit above made it 2), so a newer change is not undone.
+  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 't3', dependsOn: [], expect: 2 });
   await act(async () => {
     fireEvent.click(screen.getByRole('radio', { name: 'Self-review' }));
   });
-  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 't3', review: 'self' });
+  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 't3', review: 'self', expect: 2 });
 });
 
 test('the plan is submitted after reading the prompt it sends, with how the build runs', async () => {
@@ -989,7 +1005,7 @@ test('while building, the board follows Claude and a card that moves stands out'
   assert.match(strip.textContent ?? '', /Claude is on Wire into API/);
 
   // Claude reports a task done: it arrives in the Done column, and says so.
-  const next = applyOps(plan, [{ op: 'upsert_task', id: 't2', status: 'done', note: 'TTL-based' }], 'claude').plan;
+  const next = applyOps(plan, [{ op: 'upsert_task', id: 't2', status: 'done', note: 'TTL-based' }], 'claude', undefined, { tracking: true }).plan;
   await act(async () => {
     store.apply({ type: 'snapshot', session: makeSession(next) });
   });
@@ -1014,6 +1030,8 @@ test('each card on the board says where its task is in implement → review → 
       { op: 'upsert_task', id: 't3', stage: 'review' },
     ],
     'claude',
+    undefined,
+    { tracking: true },
   ).plan;
   await boot(makeSession(plan));
   await openTab('Tasks');

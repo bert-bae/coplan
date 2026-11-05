@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { openSync, writeSync, closeSync, unlinkSync, appendFileSync, existsSync } from 'node:fs';
+import { unlinkSync, appendFileSync, existsSync, linkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -10,17 +10,17 @@ import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from '
 import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
-import { MAX_NOTE, PlanError, cleanChecks, cleanNote, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
-import { PROMPT_BUDGET, buildPrompt, designPrompt, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
+import { MAX_NOTE, PlanError, cleanChecks, cleanNote, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
+import { PROMPT_BUDGET, buildPrompt, designPrompt, promptHash, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
 import { renderBrief, renderNext } from './brief.ts';
-import { cleanSettings, effectiveReview, readyTasks, waitingOn } from '../shared/build.ts';
-import { HOOK_STAGES, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
+import { cleanSettings, effectiveReview, hasSubtasks, readyTasks, waitingOn } from '../shared/build.ts';
+import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
 import { cleanStorage, scanStorage } from './housekeeping.ts';
 import { loadConfig, type HarnessConfig } from '../shared/config.ts';
-import { ensureHome, paths, readLiveLock, isPidAlive, baseUrl } from '../shared/paths.ts';
+import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
-import type { BuildSettings, CleanupGroupId, DaemonLock, PlanInput, PlanOp, ServerEvent, SessionState, TaskListInput, TaskStatus } from '../shared/types.ts';
+import type { BuildSettings, CleanupGroupId, DaemonLock, Plan, PlanInput, PlanOp, ServerEvent, SessionState, TaskListInput, TaskStatus } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
@@ -43,9 +43,13 @@ const MAX_OPS = 200;
  * ------------------------------------------------------------------ */
 
 async function main(): Promise<void> {
+  process.on('uncaughtException', (err) => log(`uncaught: ${err?.stack ?? err}`));
+  process.on('unhandledRejection', (err) => log(`unhandled rejection: ${(err as Error)?.stack ?? String(err)}`));
   ensureHome();
 
-  const existing = readLiveLock();
+  // A lock whose daemon does not answer is left over from one that died;
+  // its pid may belong to something else by now.
+  const existing = await readVerifiedLock();
   if (existing && !process.argv.includes('--force')) {
     // Another daemon owns the lock; report it and exit, so "start" is
     // idempotent from hooks, the CLI and the MCP server.
@@ -65,7 +69,7 @@ async function main(): Promise<void> {
 
   const clients = { count: 0 };
   const server = http.createServer();
-  const lifecycle = { restart: (): boolean => false };
+  const lifecycle = { restart: (_entry?: string): boolean => false };
   const router = buildRouter({ store, config, token, clients, lifecycle });
 
   server.on('request', (req, res) => {
@@ -92,12 +96,12 @@ async function main(): Promise<void> {
   const port = await listen(server, inheritedPort);
   boundPort = port;
   const lock: DaemonLock = { pid: process.pid, port, token, version: VERSION, startedAt: Date.now(), host: '127.0.0.1' };
-  writeLock(lock);
+  await claimLock(lock);
   log(`listening on ${baseUrl(lock)} (pid ${process.pid}, v${VERSION})`);
   process.stdout.write(`${JSON.stringify({ started: true, ...lock })}\n`);
 
   let shuttingDown = false;
-  const shutdown = (signal: string, respawn = false) => {
+  const shutdown = (signal: string, respawn = false, entry?: string) => {
     if (shuttingDown) {
       log(`second signal (${signal}); exiting now`);
       process.exit(0);
@@ -105,7 +109,10 @@ async function main(): Promise<void> {
     shuttingDown = true;
     log(`shutting down (${signal})`);
     reaper.stop();
-    store.persistAll();
+    lockWatch.stop();
+    // A daemon that lost the lock leaves the sessions to the one that has
+    // it: saving its own copies now would write over newer ones.
+    if (signal !== LOST_LOCK) store.persistAll();
     server.close();
     server.closeAllConnections?.();
     try {
@@ -113,27 +120,26 @@ async function main(): Promise<void> {
     } catch {
       /* ignore */
     }
-    if (respawn) respawnDaemon(lock);
+    if (respawn) respawnDaemon(lock, entry);
     // Let the last responses flush.
     setTimeout(() => process.exit(0), 150).unref();
   };
 
   /** Replace this daemon with one running the build on disk now. */
-  lifecycle.restart = () => {
+  lifecycle.restart = (entry?: string) => {
     if (shuttingDown) return false;
     log('restart requested; handing over to a fresh daemon');
-    setTimeout(() => shutdown('restart', true), RESTART_DELAY_MS).unref();
+    setTimeout(() => shutdown('restart', true, entry), RESTART_DELAY_MS).unref();
     return true;
   };
 
   const reaper = startReaper(store);
+  const lockWatch = watchLock(() => shutdown(LOST_LOCK));
   startIdleWatch(store, config, clients, () => shutdown('idle'));
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGHUP', () => shutdown('SIGHUP'));
-  process.on('uncaughtException', (err) => log(`uncaught: ${err?.stack ?? err}`));
-  process.on('unhandledRejection', (err) => log(`unhandled: ${String(err)}`));
 }
 
 /** The port this process listens on; the Origin check compares against it. */
@@ -141,6 +147,10 @@ let boundPort = 0;
 
 /** Grace for the restart response to flush before the socket is torn down. */
 const RESTART_DELAY_MS = 120;
+
+/** How often a daemon checks the lock is still its own. */
+const LOCK_WATCH_MS = 5_000;
+const LOST_LOCK = 'lost the lock';
 /** How long a successor keeps trying to claim its predecessor's port. */
 const PORT_CLAIM_MS = 5_000;
 /** Sessions remembered as "already opened a browser tab for". */
@@ -199,9 +209,28 @@ function bind(server: http.Server, port: number): Promise<number> {
   });
 }
 
+/**
+ * A path that is a Coplan daemon build: `<plugin>/dist/daemon/main.js`,
+ * where `<plugin>/package.json` is Coplan's. Anything else is refused, so
+ * a restart can only ever run Coplan.
+ */
+function daemonEntry(raw: unknown): string | null {
+  if (typeof raw !== 'string' || !path.isAbsolute(raw)) return null;
+  const entry = path.resolve(raw);
+  if (path.basename(entry) !== 'main.js' || path.basename(path.dirname(entry)) !== 'daemon') return null;
+  const dist = path.dirname(path.dirname(entry));
+  if (path.basename(dist) !== 'dist' || !existsSync(entry)) return null;
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(path.dirname(dist), 'package.json'), 'utf8')) as { name?: unknown };
+    return pkg.name === 'coplan' ? entry : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Start the replacement daemon, detached, from the bundle on disk. */
-function respawnDaemon(lock: DaemonLock): void {
-  const entry = process.argv[1];
+function respawnDaemon(lock: DaemonLock, from?: string): void {
+  const entry = from ?? process.argv[1];
   if (!entry) return;
   try {
     const child = spawn(process.execPath, [entry], {
@@ -218,25 +247,65 @@ function respawnDaemon(lock: DaemonLock): void {
   }
 }
 
-/** Atomic claim, with recovery from a lock left behind by a dead daemon. */
-function writeLock(lock: DaemonLock): void {
+/**
+ * Claim the lock atomically. It is written whole to a file of this
+ * process's own and then linked into place, which fails if a lock is
+ * already there — so no reader ever sees a half-written one, and of two
+ * daemons starting at once exactly one claims it. A lock already there is
+ * replaced only once its daemon has been shown gone (see probeLock).
+ */
+async function claimLock(lock: DaemonLock): Promise<void> {
   const file = paths.lockFile();
-  const payload = JSON.stringify(lock, null, 2);
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(lock, null, 2), { mode: 0o600 });
+  // process.exit skips `finally`: the temporary copy, token and all, is
+  // removed before any exit as well.
+  const lose = (why: string): never => {
+    rmSync(tmp, { force: true });
+    log(why);
+    process.exit(0);
+  };
   try {
-    const fd = openSync(file, 'wx', 0o600);
-    writeSync(fd, payload);
-    closeSync(fd);
-    return;
-  } catch {
-    const stale = readLiveLock();
-    if (stale && stale.pid !== lock.pid && isPidAlive(stale.pid)) {
-      log(`another daemon (pid ${stale.pid}) holds the lock; exiting`);
-      process.exit(0);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        linkSync(tmp, file);
+        return;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      }
+      const other = readLock();
+      if (other && other.pid !== lock.pid && isPidAlive(other.pid) && (await probeLock(other)) !== 'stale') {
+        lose(`another daemon (pid ${other.pid}) holds the lock; exiting`);
+      }
+      // Left by a daemon that is gone. Removed only if it is still the same
+      // stale lock. (Two daemons can still both get here; the one whose
+      // claim is then removed notices — see watchLock — and steps down.)
+      const again = readLock();
+      if (!again || (again.pid === other?.pid && again.startedAt === other?.startedAt)) rmSync(file, { force: true });
     }
-    const fd = openSync(file, 'w', 0o600);
-    writeSync(fd, payload);
-    closeSync(fd);
+    lose('could not claim the lock; another daemon is starting; exiting');
+  } finally {
+    rmSync(tmp, { force: true });
   }
+}
+
+/**
+ * Step down if the lock is no longer this daemon's. Two daemons replacing
+ * the same stale lock at the same moment can both believe they claimed it;
+ * the one whose claim was overwritten finds out here and shuts down, before
+ * its sessions drift apart from the other's.
+ */
+function watchLock(onLost: () => void): { stop(): void } {
+  const timer = setInterval(() => {
+    const now = readLock();
+    if (now && now.pid !== process.pid) {
+      log(`the lock now belongs to pid ${now.pid}; stepping down`);
+      clearInterval(timer);
+      onLost();
+    }
+  }, LOCK_WATCH_MS);
+  timer.unref?.();
+  return { stop: () => clearInterval(timer) };
 }
 
 function log(message: string): void {
@@ -318,7 +387,7 @@ interface Deps {
   token: string;
   /** Live SSE connections, so an open browser counts as "in use". */
   clients: { count: number };
-  lifecycle: { restart(): boolean };
+  lifecycle: { restart(entry?: string): boolean };
 }
 
 function buildRouter(deps: Deps): Router {
@@ -473,6 +542,7 @@ function buildRouter(deps: Deps): Router {
     const { prompt, trimmed } = buildPrompt(session.plan, { target, agent: session.agent, settings, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
     json(ctx.res, 200, {
       prompt,
+      hash: promptHash(prompt),
       trimmed,
       version: session.plan.version,
       budget: PROMPT_BUDGET,
@@ -494,7 +564,15 @@ function buildRouter(deps: Deps): Router {
     const note = cleanNote(body.note);
     const project = projectFor(session);
     const { prompt, trimmed } = designPrompt(session.plan, { agent: session.agent, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
-    json(ctx.res, 200, { prompt, trimmed, version: session.plan.version, budget: PROMPT_BUDGET, maxNote: MAX_NOTE, project: projectSummary(project) });
+    json(ctx.res, 200, {
+      prompt,
+      hash: promptHash(prompt),
+      trimmed,
+      version: session.plan.version,
+      budget: PROMPT_BUDGET,
+      maxNote: MAX_NOTE,
+      project: projectSummary(project),
+    });
   });
 
   /**
@@ -505,7 +583,7 @@ function buildRouter(deps: Deps): Router {
   router.post('/api/session/:id/plan/design/confirm', async (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
-    const body = await readJson<{ note?: unknown; expect?: unknown }>(ctx.req);
+    const body = await readJson<{ note?: unknown; expect?: unknown; hash?: unknown }>(ctx.req);
     const note = cleanNote(body.note);
     try {
       const plan = store.confirmDesign(session.sessionId, {
@@ -513,6 +591,7 @@ function buildRouter(deps: Deps): Router {
         ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
         ...(note ? { note } : {}),
         ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
+        ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
       });
       log(`design confirmed for ${session.sessionId}`);
       json(ctx.res, 200, { plan: forBrowser(plan) });
@@ -542,7 +621,7 @@ function buildRouter(deps: Deps): Router {
   router.post('/api/session/:id/plan/submit', async (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
-    const body = await readJson<{ note?: unknown; target?: unknown; expect?: unknown; settings?: unknown }>(ctx.req);
+    const body = await readJson<{ note?: unknown; target?: unknown; expect?: unknown; settings?: unknown; hash?: unknown }>(ctx.req);
     const target = validTarget(body.target);
     if (!target) throw new HttpError(400, 'Say who builds it: "session" or "elsewhere".');
     const note = cleanNote(body.note);
@@ -555,6 +634,7 @@ function buildRouter(deps: Deps): Router {
         ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
         ...(note ? { note } : {}),
         ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
+        ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
       });
       log(`plan submitted for ${session.sessionId} (${target})`);
       json(ctx.res, 200, { plan: forBrowser(plan) });
@@ -593,8 +673,17 @@ function buildRouter(deps: Deps): Router {
     json(ctx.res, 200, { result, report: scanStorage({ liveSessionIds: residentIds() }) });
   });
 
-  router.post('/api/daemon/restart', (ctx) => {
-    const started = lifecycle.restart();
+  /**
+   * Restart — from `entry` when the caller names its own build. The Claude
+   * Code, Codex and Cursor installs share one daemon: restarting from the
+   * plugin that was just updated must run that plugin's code, not this
+   * daemon's older copy.
+   */
+  router.post('/api/daemon/restart', async (ctx) => {
+    const body = await readJson<{ entry?: unknown }>(ctx.req);
+    const entry = body.entry === undefined ? undefined : daemonEntry(body.entry);
+    if (body.entry !== undefined && !entry) throw new HttpError(400, '`entry` is not a Coplan daemon build (…/dist/daemon/main.js).');
+    const started = lifecycle.restart(entry ?? undefined);
     json(ctx.res, started ? 200 : 409, {
       restarting: started,
       port: readLiveLock()?.port ?? null,
@@ -679,11 +768,24 @@ function buildRouter(deps: Deps): Router {
     // does not (an older relay, or the doctor).
     let agent = parseAgent(header('x-harness-agent'));
     let output: HookOutput = HOOK_NOOP;
+    // A prompt this hook hands over, so it can be taken back if the answer
+    // never reaches the agent.
+    let handed: { id: string; prior: Plan; version: number } | null = null;
+    // Listened for from the start: the relay may give up while the hook is
+    // still being handled, and a 'close' already past cannot be heard later.
+    const takeBack = () => {
+      if (!handed || ctx.res.writableFinished) return;
+      const { id, prior, version } = handed;
+      handed = null;
+      if (store.undeliver(id, prior, version)) log(`prompt for ${id} did not reach the agent; kept to deliver again`);
+    };
+    ctx.res.once('close', takeBack);
     try {
       const body = await readJson<Record<string, unknown>>(ctx.req);
       agent = hookAgent(agent, body);
       const { event, input } = readAgentHook(agent, raw, body);
       const session = typeof input.session_id === 'string' ? store.get(input.session_id) : undefined;
+      const prior = session?.plan && store.pending(session.sessionId) ? session.plan : null;
       if (event) {
         output = await ingestHook(event, input, {
           store,
@@ -698,11 +800,17 @@ function buildRouter(deps: Deps): Router {
           onWaiting: openClaude,
         });
       }
+      const after = session ? store.get(session.sessionId)?.plan : undefined;
+      if (prior && after && !store.pending(session!.sessionId)) handed = { id: session!.sessionId, prior, version: after.version };
     } catch (err) {
       // A hook must never break the session it is attached to.
       log(`hook ${agent}/${raw} failed: ${(err as Error)?.message}`);
       output = HOOK_NOOP;
     }
+    // The relay gave up (its curl timed out) or the connection dropped before
+    // the answer was out: the agent never got the prompt. Taken back, so the
+    // next hook — or harness_plan_read — hands it over.
+    if (ctx.res.destroyed || ctx.req.socket.destroyed) takeBack();
     if (!ctx.res.writableEnded) json(ctx.res, 200, writeAgentOutput(agent, raw, output));
   });
 
@@ -759,28 +867,79 @@ function buildRouter(deps: Deps): Router {
     const checks = cleaned?.length ? cleaned : undefined;
     const note = typeof body['note'] === 'string' ? body['note'] : undefined;
     if (!status && !stage && !checks && note === undefined) throw new PlanError('Say what changed: a status, a stage, checks or a note.');
+    const approved = body['user_approved'] === true;
+    if (approved && !note?.trim()) {
+      throw new PlanError('`user_approved` needs a `note` saying what the user told you in chat.');
+    }
     const project = projectFor(session);
+    const settings = before.submission?.settings ?? project.settings;
+
+    // A parent's progress is its subtasks': a status set on it would say
+    // something the board never shows.
+    if ((status || stage || checks) && hasSubtasks(before, task.id)) {
+      throw new PlanError(
+        `"${task.title}" has subtasks, so its progress is theirs: report on each subtask instead (harness_task_next lists them).`,
+      );
+    }
 
     // Starting includes resuming a task that was blocked before it began.
     const idle = task.status === 'todo' || task.status === 'blocked';
     const starting = idle && (status === 'in_progress' || (stage !== undefined && status !== 'done' && status !== 'blocked'));
     const waits = waitingOn(before, task);
-    if (starting && waits.length) {
+    const waitWords = () => waits.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ');
+    if ((starting || status === 'done') && waits.length) {
       throw new PlanError(
-        `"${task.title}" cannot start yet: it waits on ${waits.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ')}. ` +
+        `"${task.title}" cannot ${status === 'done' ? 'be done' : 'start'} yet: it waits on ${waitWords()}. ` +
           'Start a task that is ready instead — harness_task_next lists them. If the dependency is wrong, change it with ' +
-          'harness_plan_edit {op: "upsert_task", id, dependsOn: [...]} and tell the user why.',
+          'harness_plan_edit {ops: [{op: "upsert_task", id, dependsOn: [...]}]} and tell the user why.',
+      );
+    }
+    if (starting && !approved) {
+      const busy = before.tasks.filter((t) => t.status === 'in_progress' && t.id !== task.id && !hasSubtasks(before, t.id));
+      if (busy.length >= settings.parallel) {
+        throw new PlanError(
+          `"${task.title}" cannot start yet: ${busy.length} task(s) are in progress (${busy.map((t) => t.id).join(', ')}), ` +
+            `and the user allowed ${settings.parallel} at once. Finish one first.`,
+        );
+      }
+    }
+
+    // The round limit is the user's: past it, stop and ask them.
+    if (stage === 'review' && task.stage !== 'review' && (task.round ?? 0) >= settings.maxRounds && !approved) {
+      throw new PlanError(
+        `"${task.title}" has had ${task.round} review round(s), the most the user allowed (${settings.maxRounds}). Stop: mark it ` +
+          'blocked with a note on what still fails, and ask the user — another round, accept it as it is, or take it over. ' +
+          'If they say to go on, call again with user_approved: true and their answer in the note.',
       );
     }
 
-    if (status === 'done') {
-      const optional = new Set(HOOK_STAGES.flatMap((st) => project.hooks[st].filter((h) => h.optional).map((h) => h.name)));
-      const failing = (checks ?? task.checks ?? []).filter((c) => !c.ok && !optional.has(c.name));
-      if (failing.length) {
+    if (status === 'done' && !approved) {
+      // Done means the cycle ran: it went to review at least once, …
+      if (!task.round) {
         throw new PlanError(
-          `"${task.title}" is not done: its last checks failed (${failing.map((c) => `${c.name}${c.note ? `: ${c.note}` : ''}`).join('; ')}). ` +
-            'Refine it until they pass and report them again with `checks`. If a failure has nothing to do with this task, ' +
-            'mark it blocked with a note saying so and ask the user.',
+          `"${task.title}" has not been reviewed: take it through its cycle first — stage "review" (every review mode, ` +
+            '"skip" included, reports one), then done once it passes.',
+        );
+      }
+      // … and every check that gates it passed when it was last run.
+      const optional = new Set(HOOK_STAGES.flatMap((st) => project.hooks[st].filter((h) => h.optional).map((h) => h.name)));
+      const latest = mergeChecks(task.checks, checks ?? []);
+      const failing = latest.filter((c) => !c.ok && !optional.has(c.name));
+      const missing = hooksFor(project, 'review', task.files)
+        .filter((h) => !h.optional && !latest.some((c) => c.name === h.name))
+        .map((h) => h.name);
+      if (failing.length || missing.length) {
+        throw new PlanError(
+          `"${task.title}" is not done: ` +
+            [
+              failing.length ? `its last checks failed (${failing.map((c) => `${c.name}${c.note ? `: ${c.note}` : ''}`).join('; ')})` : '',
+              missing.length ? `the review checks ${missing.join(', ')} were never reported` : '',
+            ]
+              .filter(Boolean)
+              .join(', and ') +
+            '. Run them, refine until they pass, and report them with `checks`. If a failure has nothing to do with this ' +
+            'task, mark it blocked with a note saying so and ask the user; if they accept it as it is, call again with ' +
+            'user_approved: true and their answer in the note.',
         );
       }
     }
@@ -795,23 +954,26 @@ function buildRouter(deps: Deps): Router {
           ...(status ? { status } : {}),
           ...(stage ? { stage: stage as NonNullable<ReturnType<typeof validStage>> } : {}),
           ...(checks ? { checks } : {}),
-          ...(note !== undefined ? { note } : {}),
+          ...(note !== undefined ? { note: approved ? `${note} (approved by the user)` : note } : {}),
         },
       ],
       'claude',
+      { tracking: true },
     );
     const now = plan.tasks.find((t) => t.id === taskId)!;
-    const settings = plan.submission?.settings ?? project.settings;
     const out: string[] = [];
     const state = now.status === 'in_progress' && now.stage ? stageWords(now) : now.status.replace('_', ' ');
     out.push(`[cc-harness] "${now.title}" is ${state}.${changes.length ? '' : ' (It already was.)'}`);
+    if (starting && !plan.submission) {
+      out.push('The plan has not been submitted: build only if the user told you to start without submitting.');
+    }
     if (checks?.length) {
       const failed = checks.filter((c) => !c.ok);
       out.push(failed.length ? `Checks: ${failed.length} failed (${failed.map((c) => c.name).join(', ')}) — refine before review passes.` : `Checks: all ${checks.length} passed.`);
     }
     if (now.stage === 'review' && stage === 'review') {
-      if ((now.round ?? 0) > settings.maxRounds) {
-        out.push(`This is review round ${now.round}, past the ${settings.maxRounds} the user allowed: if it does not pass, stop and ask the user.`);
+      if ((now.round ?? 0) >= settings.maxRounds) {
+        out.push(`This is review round ${now.round} of the ${settings.maxRounds} the user allowed: if it does not pass, stop and ask the user.`);
       }
       if (effectiveReview(plan, now, settings.review) === 'user') {
         out.push(`This task's review is the user's: show them the change and ask with ${agentInfo(session.agent).askWith} before marking it done.`);
@@ -869,20 +1031,19 @@ function buildRouter(deps: Deps): Router {
             reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
             return;
           }
-          // Where no hook can hand a prompt over with the user's next message
-          // (Cursor), the first read after signing off carries it: the ask
-          // for a task list once the design is confirmed, the build prompt
-          // once the plan is submitted. Delivering it counts as the read —
-          // except for edits made after the design was confirmed, which are
-          // not in its prompt and stay unread.
-          if (!agentInfo(session.agent).promptContext) {
-            const handed = store.deliver(id);
-            if (handed) {
-              const later = store.get(id)?.plan;
-              const notice = later ? unreadNotice(later) : null;
-              reply(true, notice ? `${handed.prompt}\n\n${notice}` : handed.prompt);
-              return;
-            }
+          // A sign-off not yet handed over comes with the first read after
+          // it: the ask for a task list once the design is confirmed, the
+          // build prompt once the plan is submitted. That is how Cursor gets
+          // it (no hook can add it to the user's message), and how any agent
+          // gets one whose hook did not get through. Delivering it counts as
+          // the read — except for edits made after the design was confirmed,
+          // which are not in its prompt and stay unread.
+          const handed = store.deliver(id);
+          if (handed) {
+            const later = store.get(id)?.plan;
+            const notice = later ? unreadNotice(later) : null;
+            reply(true, notice ? `${handed.prompt}\n\n${notice}` : handed.prompt);
+            return;
           }
           const textOut = renderPlan(session.plan, { url, changesOnly: body['changes_only'] === true });
           store.markRead(id);
@@ -894,12 +1055,13 @@ function buildRouter(deps: Deps): Router {
           const ops = Array.isArray(body['ops']) ? (body['ops'] as PlanOp[]) : [];
           // All or nothing: a batch that cannot be applied whole is refused.
           if (ops.length > MAX_OPS) throw new PlanError(`At most ${MAX_OPS} edits per call; split the change.`);
-          const { changes } = store.applyOps(id, ops, 'claude');
+          const { plan, changes } = store.applyOps(id, ops, 'claude');
+          const notice = unreadNotice(plan);
           reply(
             true,
-            changes.length
+            (changes.length
               ? `[cc-harness] Applied ${changes.length} change(s):\n${changes.map((c) => `- ${c.summary} [${c.target.kind} ${c.target.id}]`.replace(' ]', ']')).join('\n')}`
-              : '[cc-harness] Nothing changed — every edit matched what was already there.',
+              : '[cc-harness] Nothing changed — every edit matched what was already there.') + (notice ? `\n\n${notice}` : ''),
           );
           return;
         }
@@ -1002,7 +1164,12 @@ function startReaper(store: SessionStore): { stop(): void } {
   return { stop: () => clearInterval(timer) };
 }
 
-void main();
+// A daemon that fails to start is spawned with no terminal: the log is the
+// only place the reason can go.
+main().catch((err: unknown) => {
+  log(`failed to start: ${(err as Error)?.stack ?? String(err)}`);
+  process.exit(1);
+});
 
 /**
  * What Claude last read is kept beside the plan so "since you last read" can

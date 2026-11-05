@@ -198,12 +198,17 @@ export async function runDoctor(): Promise<number> {
   );
 
   const childId = plan?.tasks.find((t) => t.parentId !== null)?.id ?? '';
-  const tracked = await mcp('task', { task_id: childId, status: 'done', note: 'probe' });
+  // Through the cycle, as the build does: done is refused before a review.
+  // The probe runs none of the repository's checks, so it finishes the way
+  // a task the user accepted as it is does — which works whatever this
+  // repository's .coplan/config.json requires.
+  const reviewed = await mcp('task', { task_id: childId, stage: 'review' });
+  const tracked = await mcp('task', { task_id: childId, status: 'done', user_approved: true, note: 'doctor probe' });
   const afterTrack = await getSession();
   record(
     'harness_task_update tracks progress',
-    tracked['ok'] !== false && afterTrack?.plan?.tasks.find((t) => t.id === childId)?.status === 'done',
-    undefined,
+    reviewed['ok'] !== false && tracked['ok'] !== false && afterTrack?.plan?.tasks.find((t) => t.id === childId)?.status === 'done',
+    reviewed['ok'] === false ? String(reviewed['text'] ?? '') : tracked['ok'] === false ? String(tracked['text'] ?? '') : undefined,
     true,
   );
 

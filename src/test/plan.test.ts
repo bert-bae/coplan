@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, countTasks, normalizePlan, outline, PlanError, publishPlan, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, countTasks, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import type { Plan, PlanInput } from '../shared/types.ts';
 
@@ -65,14 +65,14 @@ test('a user edit is unread by Claude until it reads the plan', () => {
 });
 
 test('Claude\'s own edits never show up as unread', () => {
-  const { plan } = applyOps(fresh(), [{ op: 'upsert_task', id: 't2', status: 'done', note: 'added client' }], 'claude');
+  const { plan } = applyOps(fresh(), [{ op: 'upsert_task', id: 't2', status: 'done', note: 'added client' }], 'claude', undefined, { tracking: true });
   assert.equal(unreadByClaude(plan).length, 0);
   assert.equal(unreadNotice(plan), null);
 });
 
 test('Claude editing does not swallow what the user did first', () => {
   let plan = applyOps(fresh(), [{ op: 'comment', target: { kind: 'task', id: 't4' }, text: 'do this first' }], 'user').plan;
-  plan = applyOps(plan, [{ op: 'upsert_task', id: 't2', status: 'in_progress' }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't2', status: 'in_progress' }], 'claude', undefined, { tracking: true }).plan;
   assert.equal(unreadByClaude(plan).length, 1, 'the comment is still unread');
 });
 
@@ -338,4 +338,142 @@ test('comment threads and plan items are bounded', () => {
   const replies = Array.from({ length: 200 }, () => ({ op: 'reply' as const, threadId: 'c1', text: 'r' }));
   plan = applyOps(plan, replies, 'user').plan;
   assert.throws(() => applyOps(plan, [{ op: 'reply', threadId: 'c1', text: 'one more' }], 'user'), /thread is full/);
+});
+
+test("Claude's edits are checked field by field: a misspelt field is refused, not ignored", () => {
+  const plan = fresh();
+  assert.throws(
+    () => applyOps(plan, [{ op: 'upsert_task', id: 't2', depends_on: ['t1'] } as never], 'claude'),
+    (err: Error) => err instanceof PlanError && /upsert_task does not take "depends_on"/.test(err.message) && /dependsOn/.test(err.message),
+  );
+  assert.throws(() => applyOps(plan, [{ op: 'rename_task', id: 't2' } as never], 'claude'), /Unknown edit "rename_task"/);
+  // Still all or nothing: the good edit before the bad one is not applied.
+  assert.throws(
+    () => applyOps(plan, [{ op: 'set_meta', title: 'New' }, { op: 'reply', threadId: 'c1', body: 'x' } as never], 'claude'),
+    /Edit 2 \(reply\): reply does not take "body"/,
+  );
+  const { changes } = applyOps(plan, [{ op: 'upsert_task', id: 't4', dependsOn: ['t1'] }], 'claude');
+  assert.equal(changes.length, 1);
+});
+
+test('an empty edit list says what shape to use', () => {
+  assert.throws(() => applyOps(fresh(), [], 'claude'), /pass them as \{ops: \[/);
+});
+
+test('a box kind, arrow style or direction that is not on the list is refused, not dropped', () => {
+  const plan = fresh();
+  const d = plan.diagrams[0]!;
+  const nodes = d.nodes.map((n) => ({ id: n.id, label: n.label }));
+  assert.throws(
+    () => applyOps(plan, [{ op: 'upsert_diagram', id: d.id, nodes: [...nodes, { id: 'q', label: 'Q', kind: 'kafka' as never }] }], 'claude'),
+    /"kafka" is not a box kind: use one of component, service/,
+  );
+  assert.throws(
+    () => applyOps(plan, [{ op: 'upsert_diagram', id: d.id, edges: [{ source: 'api', target: 'cache', arrows: 'two' as never }] }], 'claude'),
+    /"two" is not an arrow style/,
+  );
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_diagram', id: d.id, direction: 'RL' as never }], 'claude'), /"RL" is not a diagram direction/);
+  // Left out, they keep what was there.
+  const { plan: next } = applyOps(plan, [{ op: 'upsert_diagram', id: d.id, nodes }], 'claude');
+  assert.equal(next.diagrams[0]!.nodes.find((n) => n.id === 'cache')!.kind, 'datastore');
+});
+
+test('removing a node points at the edit that does it', () => {
+  assert.throws(() => applyOps(fresh(), [{ op: 'remove', kind: 'node' as never, id: 'cache' }], 'claude'), /upsert_diagram \{id, nodes, edges\}/);
+});
+
+/* ------------------------------------------------------------------ *
+ * Claude never writes over what the user changed and it has not read
+ * ------------------------------------------------------------------ */
+
+test("Claude's edit to a diagram the user changed unread is refused, so the user's new box survives", () => {
+  const plan = fresh();
+  const d = plan.diagrams[0]!;
+  const theirs = applyOps(plan, [{ op: 'upsert_diagram', id: d.id, nodes: [...d.nodes, { id: 'queue', label: 'Queue', kind: 'queue' }] }], 'user').plan;
+  // Claude, working from what it last read, rewords a box by resending the list it knew.
+  const mine = d.nodes.map((n) => (n.id === 'api' ? { ...n, description: 'Serves orders.' } : n));
+  assert.throws(
+    () => applyOps(theirs, [{ op: 'upsert_diagram', id: d.id, nodes: mine }], 'claude'),
+    (err: Error) => /The user changed diagram "Components" since you last read/.test(err.message) && /harness_plan_read/.test(err.message),
+  );
+  // Once Claude has read, the same edit goes through — on top of their version.
+  const read = structuredClone(theirs);
+  markReadByClaude(read);
+  const after = applyOps(read, [{ op: 'upsert_diagram', id: d.id, nodes: [...mine, { id: 'queue', label: 'Queue' }] }], 'claude').plan;
+  assert.ok(after.diagrams[0]!.nodes.some((n) => n.id === 'queue'));
+});
+
+test('the unread guard covers tasks, sections and the summary, but not progress, comments or other items', () => {
+  let plan = fresh();
+  plan = applyOps(
+    plan,
+    [
+      { op: 'upsert_task', id: 't4', detail: 'Their detail.' },
+      { op: 'upsert_section', id: plan.sections[0]!.id, body: 'Their context.' },
+      { op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Split this?' },
+    ],
+    'user',
+  ).plan;
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_task', id: 't4', title: 'Mine' }], 'claude'), /changed task/);
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_section', id: plan.sections[0]!.id, body: 'Mine.' }], 'claude'), /changed section/);
+  assert.throws(() => applyOps(plan, [{ op: 'remove', kind: 'task', id: 't4' }], 'claude'), /changed task/);
+  // Progress on the task they edited, a task they only commented on, and the
+  // diagram they did not touch all go through.
+  assert.doesNotThrow(() => applyOps(plan, [{ op: 'upsert_task', id: 't4', status: 'in_progress', note: 'started' }], 'claude', undefined, { tracking: true }));
+  assert.doesNotThrow(() => applyOps(plan, [{ op: 'upsert_task', id: 't2', title: 'Cache client (split)' }], 'claude'));
+  assert.doesNotThrow(() => applyOps(plan, [{ op: 'upsert_diagram', id: plan.diagrams[0]!.id, caption: 'Read path' }], 'claude'));
+});
+
+test("a box's detail and a task's detail survive an edit or republish that leaves them out", () => {
+  let plan = publishPlan(null, {
+    ...INPUT,
+    diagrams: [{ ...INPUT.diagrams![0]!, nodes: (INPUT.diagrams![0]!.nodes ?? []).map((n) => ({ ...n, detail: `${n.label} detail` })) }],
+    tasks: [{ id: 'a', title: 'A', detail: 'Keep me.' }],
+  }).plan;
+  const d = plan.diagrams[0]!;
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id: d.id, nodes: d.nodes.map((n) => ({ id: n.id, label: n.label })) }], 'claude').plan;
+  assert.equal(plan.diagrams[0]!.nodes.find((n) => n.id === 'cache')!.detail, 'Cache detail');
+  // Sending it empty still clears it.
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id: d.id, nodes: d.nodes.map((n) => ({ id: n.id, label: n.label, detail: '' })) }], 'claude').plan;
+  assert.equal(plan.diagrams[0]!.nodes.find((n) => n.id === 'cache')!.detail, undefined);
+
+  plan = publishPlan(plan, { ...INPUT, diagrams: undefined, tasks: [{ id: 'a', title: 'A, renamed' }] }).plan;
+  assert.equal(plan.tasks.find((t) => t.id === 'a')!.detail, 'Keep me.');
+});
+
+/* ------------------------------------------------------------------ *
+ * Tasks have a revision, like sections and diagrams
+ * ------------------------------------------------------------------ */
+
+test("a user's task edit made before Claude's newer change is refused, not saved over it", () => {
+  const plan = fresh();
+  const opened = plan.tasks.find((t) => t.id === 't4')!.rev ?? 1;
+  const claudes = applyOps(plan, [{ op: 'upsert_task', id: 't4', detail: 'Use the client from t2.' }], 'claude').plan;
+  assert.equal(claudes.tasks.find((t) => t.id === 't4')!.rev, opened + 1);
+  assert.throws(
+    () => applyOps(claudes, [{ op: 'upsert_task', id: 't4', detail: 'My older text.', expect: opened }], 'user'),
+    /Task "Wire into API" was changed by Claude while this edit was open/,
+  );
+  // Made against the current revision, it goes in.
+  const now = claudes.tasks.find((t) => t.id === 't4')!.rev;
+  assert.doesNotThrow(() => applyOps(claudes, [{ op: 'upsert_task', id: 't4', detail: 'Mine.', expect: now }], 'user'));
+});
+
+test("the user's own quick successive saves never conflict with each other, and progress is not a revision", () => {
+  let plan = fresh();
+  const opened = plan.tasks.find((t) => t.id === 't4')!.rev ?? 1;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't4', dependsOn: ['t2'], expect: opened }], 'user').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't4', dependsOn: ['t2', 't3'], expect: opened }], 'user').plan;
+  assert.deepEqual(plan.tasks.find((t) => t.id === 't4')!.dependsOn, ['t2', 't3']);
+  const rev = plan.tasks.find((t) => t.id === 't4')!.rev;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't4', status: 'in_progress', note: 'started' }], 'claude', undefined, { tracking: true }).plan;
+  assert.equal(plan.tasks.find((t) => t.id === 't4')!.rev, rev, 'a status report does not move the revision');
+});
+
+test("Claude republishing a task with new content moves its revision; unchanged tasks keep theirs", () => {
+  const plan = publishPlan(null, { ...INPUT, tasks: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }] }).plan;
+  const next = publishPlan(plan, { ...INPUT, tasks: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B', detail: 'New.' }] }).plan;
+  assert.equal(next.tasks.find((t) => t.id === 'a')!.rev ?? 1, 1);
+  assert.equal(next.tasks.find((t) => t.id === 'b')!.rev, 2);
+  assert.throws(() => applyOps(next, [{ op: 'upsert_task', id: 'b', title: 'B!', expect: 1 }], 'user'), /changed by Claude/);
 });

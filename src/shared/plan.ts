@@ -28,6 +28,7 @@ import type {
   PlanBaseline,
   PlanInput,
   PlanOp,
+  PlanOpName,
   PlanPhase,
   Section,
   Submission,
@@ -155,6 +156,10 @@ export function unreadItems(plan: Plan | null): number {
  *  summary edit, which shares the plan as its target. */
 const RENAMED_PLAN = 'renamed the plan';
 
+/** How a reopened sign-off is logged. */
+export const REOPENED_DESIGN = 'reopened the design';
+export const REOPENED_PLAN = 'reopened the submitted plan';
+
 /** Where the user's unread changes are — "the "Components" diagram",
  *  "tasks", "comments" — in the order they first touched each. */
 export function unreadAreas(plan: Plan | null): string[] {
@@ -162,6 +167,7 @@ export function unreadAreas(plan: Plan | null): string[] {
   const add = (what: string) => void (areas.includes(what) || areas.push(what));
   for (const c of unreadByClaude(plan)) {
     if (['commented', 'replied', 'resolved', 'reopened'].includes(c.kind)) add('comments');
+    else if (c.target.kind === 'plan' && c.kind === 'status') add(c.summary === REOPENED_DESIGN ? 'reopened the design' : 'reopened the plan');
     else if (c.target.kind === 'diagram') add(`the "${plan!.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
     else if (c.target.kind === 'task') add('tasks');
     else if (c.target.kind === 'section') add('sections');
@@ -516,9 +522,9 @@ function refuseUnread(prev: Plan | null, then: string): void {
 
 /**
  * Build a task tree from what Claude wrote. Ids that survive keep their
- * status, note, files and links; dependencies, branch and review mode left
- * out are kept too (the user may have set them), and `[]` or `""` clears
- * them. Dependencies may name any task by the id it was written with.
+ * status, detail, note, files and links; dependencies, branch and review
+ * mode left out are kept too (the user may have set them), and `[]` or `""`
+ * clears them. Dependencies may name any task by the id it was written with.
  */
 function buildTaskTree(
   base: Plan,
@@ -540,8 +546,13 @@ function buildTaskTree(
       const old = base.tasks.find((t) => t.id === raw.id);
       const id = old && !tasks.some((t) => t.id === old.id) ? old.id : claimIdAmong(next, 'task', raw.id, tasks);
       if (typeof raw.id === 'string' && raw.id.trim()) written.set(raw.id.trim(), id);
-      const status = validStatus(raw.status) ?? old?.status ?? 'todo';
-      const detail = clean(raw.detail, MAX_TEXT);
+      // A task that survives keeps its status: progress is reported through
+      // harness_task_update and its gates, never by publishing over it. Only
+      // a new task says where it starts.
+      const status = old ? old.status : (validStatus(raw.status) ?? 'todo');
+      // Left out, a task's detail is kept — as a box's prose is — so a
+      // republish to restructure the tree never wipes what was written.
+      const detail = raw.detail === undefined ? old?.detail : clean(raw.detail, MAX_TEXT);
       const note = clean(raw.note, MAX_TITLE * 2) ?? old?.note;
       const files = cleanList(raw.files) ?? old?.files;
       const branch = raw.branch === undefined ? old?.branch : cleanBranch(raw.branch);
@@ -589,6 +600,18 @@ function buildTaskTree(
       if (!resolved.includes(id)) resolved.push(id);
     }
     if (resolved.length) task.dependsOn = resolved;
+  }
+  // A task whose content Claude changed moves to a new revision, so an
+  // editor the user has open on it notices.
+  for (const task of tasks) {
+    const old = base.tasks.find((t) => t.id === task.id);
+    if (!old) continue;
+    if (old.rev !== undefined) task.rev = old.rev;
+    if (old.revBy) task.revBy = { ...old.revBy };
+    if (taskContent(old) !== taskContent(task)) {
+      task.rev = (old.rev ?? 1) + 1;
+      task.revBy = { ...old.revBy, claude: task.rev };
+    }
   }
   return { tasks, builds };
 }
@@ -766,19 +789,180 @@ function normalizeTask(task: Task): Task {
  * Apply a batch of ops to a copy of `plan`. All or nothing: the first op that
  * cannot apply throws, and the caller keeps the plan it had.
  */
+/**
+ * The fields each edit takes. Claude's edits are checked against it, so a
+ * misspelt field (`depends_on`) is refused with the right names instead of
+ * being ignored — an ignored field reads as "Nothing changed", which is
+ * worse than an error. The MCP tool schema is checked against this table
+ * in the tests.
+ */
+export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Extract<PlanOp, { op: K }>, 'op'>[] } = {
+  set_meta: ['title', 'summary'],
+  upsert_section: ['id', 'title', 'body', 'index', 'expect'],
+  upsert_diagram: ['id', 'title', 'nodes', 'edges', 'direction', 'caption', 'index', 'expect'],
+  upsert_task: [
+    'id',
+    'parentId',
+    'index',
+    'title',
+    'detail',
+    'status',
+    'files',
+    'note',
+    'dependsOn',
+    'branch',
+    'review',
+    'stage',
+    'checks',
+    'builds',
+    'expect',
+  ],
+  move_task: ['id', 'parentId', 'index'],
+  move_section: ['id', 'index'],
+  move_diagram: ['id', 'index'],
+  remove: ['kind', 'id'],
+  comment: ['target', 'text'],
+  reply: ['threadId', 'text'],
+  resolve: ['threadId', 'resolved'],
+  report: ['text'],
+};
+
+/** Refuses an edit Claude sent with a field its op does not take. */
+function checkOpFields(op: unknown): void {
+  if (!op || typeof op !== 'object' || Array.isArray(op)) throw new PlanError('Each edit is an object with an "op" field.');
+  const name = (op as { op?: unknown }).op;
+  const fields = typeof name === 'string' ? (OP_FIELDS as Record<string, readonly string[]>)[name] : undefined;
+  if (!fields) throw new PlanError(`Unknown edit ${JSON.stringify(name)}: use one of ${Object.keys(OP_FIELDS).join(', ')}.`);
+  const unknown = Object.keys(op).filter((k) => k !== 'op' && !fields.includes(k));
+  if (unknown.length) {
+    throw new PlanError(
+      `${name} does not take ${unknown.map((k) => `"${k}"`).join(', ')}: its fields are ${fields.join(', ')}. Nothing was changed.`,
+    );
+  }
+}
+
+/**
+ * The items whose content the user changed since Claude last read the
+ * plan, as `kind:id` — by the net effect, so edits that cancel out do not
+ * count. Comments, task progress and positions are not content: Claude
+ * acting on a comment it has not read yet loses nothing of the user's.
+ */
+function unreadContent(plan: Plan): Set<string> {
+  const touched = new Set(
+    unreadByClaude(plan)
+      .filter((c) => c.kind === 'created' || c.kind === 'edited' || c.kind === 'deleted' || c.kind === 'published')
+      .map((c) => `${c.target.kind}:${c.target.id}`),
+  );
+  const base = plan.claudeBaseline;
+  if (!base || touched.size === 0) return touched;
+  const now = baselineOf(plan);
+  const content = (b: PlanBaseline, kind: string, id: string): string => {
+    switch (kind) {
+      case 'plan':
+        return canonical({ title: b.title, summary: b.summary });
+      case 'section':
+        return canonical(b.sections.find((s) => s.id === id) ?? null);
+      case 'diagram':
+        return canonical(b.diagrams.find((d) => d.id === id) ?? null);
+      case 'task': {
+        const t = b.tasks.find((x) => x.id === id);
+        return canonical(t ? { ...t, status: undefined, order: undefined, parentId: undefined } : null);
+      }
+      default:
+        return '';
+    }
+  };
+  return new Set(
+    [...touched].filter((key) => {
+      const at = key.indexOf(':');
+      const [kind, id] = [key.slice(0, at), key.slice(at + 1)];
+      return content(base, kind, id) !== content(now, kind, id);
+    }),
+  );
+}
+
+/** What an edit of Claude's would overwrite, as `kind:id` — or null when
+ *  it only tracks progress, moves something, or talks in a thread. */
+function contentTargetOf(op: PlanOp): string | null {
+  const has = (...keys: string[]) => keys.some((k) => (op as unknown as Record<string, unknown>)[k] !== undefined);
+  switch (op.op) {
+    case 'set_meta':
+      return 'plan:';
+    case 'upsert_section':
+      return op.id && has('title', 'body') ? `section:${op.id}` : null;
+    case 'upsert_diagram':
+      return op.id && has('title', 'nodes', 'edges', 'direction', 'caption') ? `diagram:${op.id}` : null;
+    case 'upsert_task':
+      // A note with a status is a progress report (harness_task_update).
+      return op.id && (has('title', 'detail', 'files', 'dependsOn', 'branch', 'review') || (has('note') && !has('status', 'stage')))
+        ? `task:${op.id}`
+        : null;
+    case 'remove':
+      return `${op.kind}:${op.id}`;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Claude's edit to an item the user has changed since Claude last read the
+ * plan is refused, as a publish is: Claude would be writing over a version
+ * it has not seen, and a diagram's node list replaces the boxes the user
+ * just added. Reading the plan clears it.
+ */
+function refuseUnreadEdit(plan: Plan, op: PlanOp, unread: Set<string>): void {
+  const target = contentTargetOf(op);
+  if (!target || !unread.has(target)) return;
+  const [kind, id] = target.split(':') as [Target['kind'], string];
+  throw new PlanError(
+    `The user changed ${describeTarget(plan, { kind, id })} since you last read the plan, so this edit was not applied — ` +
+      'it could undo theirs. Call harness_plan_read to see their version, then make the edit on top of it.',
+  );
+}
+
+/** The fields of upsert_task that report progress rather than say what
+ *  the task is. Claude reports them only through harness_task_update. */
+export const PROGRESS_FIELDS = ['status', 'stage', 'checks'] as const;
+
+/**
+ * Claude's progress goes through harness_task_update, which refuses what
+ * would make the board untrue — starting a task that still waits, finishing
+ * one whose checks fail or that was never reviewed. An upsert_task carrying
+ * a status would walk straight past those gates.
+ */
+function refuseProgress(op: PlanOp): void {
+  if (op.op !== 'upsert_task') return;
+  const given = PROGRESS_FIELDS.filter((k) => op[k] !== undefined);
+  if (!given.length) return;
+  throw new PlanError(
+    `upsert_task does not set ${given.join(', ')}: report progress with harness_task_update {task_id, status, stage, checks, note}, ` +
+      'which checks what the task waits on and how its checks came out. A new task starts as todo.',
+  );
+}
+
 export function applyOps(
   plan: Plan,
   ops: PlanOp[],
   author: Author,
   now = Date.now(),
+  /** `tracking`: Claude's progress report, already through harness_task_update's gates. */
+  opts: { tracking?: boolean } = {},
 ): { plan: Plan; changes: Change[] } {
-  if (!Array.isArray(ops) || ops.length === 0) throw new PlanError('No edits were given.');
+  if (!Array.isArray(ops) || ops.length === 0) {
+    throw new PlanError('No edits were given: pass them as {ops: [{op: "upsert_task", id: "t3", note: "…"}, …]}.');
+  }
   if (plan.submission) checkLocked(ops, author);
   else if (plan.design) checkDesignLocked(ops, author);
   const next = structuredClone(plan);
   const changes: Change[] = [];
+  const unread = author === 'claude' ? unreadContent(plan) : null;
   ops.forEach((op, i) => {
     try {
+      if (author === 'claude') {
+        checkOpFields(op);
+        if (!opts.tracking) refuseProgress(op);
+        refuseUnreadEdit(plan, op, unread!);
+      }
       changes.push(...applyOne(next, op, author, now));
     } catch (err) {
       if (err instanceof PlanError && ops.length > 1) {
@@ -828,8 +1012,13 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         const title = clean(op.title, MAX_TITLE);
         const body = typeof op.body === 'string' ? clean(op.body, MAX_TEXT) ?? '' : undefined;
         const changed = (title && title !== existing.title) || (body !== undefined && body !== existing.body);
+        const at = plan.sections.indexOf(existing);
         if (typeof op.index === 'number') moveInList(plan.sections, existing.id, op.index);
-        if (!changed) return [];
+        // A reorder alone is still a change: logged, so the version moves
+        // and a preview made before it is refused.
+        if (!changed) {
+          return plan.sections.indexOf(existing) !== at ? [log('moved', ref('section', existing.id), `reordered section "${existing.title}"`)] : [];
+        }
         if (title) existing.title = title;
         if (body !== undefined) existing.body = body;
         existing.rev += 1;
@@ -867,6 +1056,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         const direction = validDirection(op.direction);
         if (direction) existing.direction = direction;
         if (typeof op.caption === 'string') setOptional(existing, 'caption', clean(op.caption, MAX_TEXT));
+        const at = plan.diagrams.indexOf(existing);
         if (typeof op.index === 'number') moveInList(plan.diagrams, existing.id, op.index);
         // A confirmed design can still be laid out, and its boxes linked to
         // the tasks that build them — but not redesigned.
@@ -875,7 +1065,10 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         }
         const what = describeDiagramEdit(before, existing);
         const relaid = layoutChanged(before, existing);
-        if (!what && !relaid) return [];
+        if (!what && !relaid) {
+          // A reorder alone is still a change, as for sections.
+          return plan.diagrams.indexOf(existing) !== at ? [log('moved', ref('diagram', existing.id), `reordered diagram "${existing.title}"`)] : [];
+        }
         existing.rev += 1;
         existing.updatedAt = now;
         // Dragging boxes around, or flipping which way the diagram is drawn,
@@ -1052,6 +1245,7 @@ function editTask(
   now: number,
   log: (kind: ChangeKind, target: Target, summary: string) => Change,
 ): Change[] {
+  checkTaskRev(task, op.expect, author);
   const out: Change[] = [];
   const edited: string[] = [];
   const title = clean(op.title, MAX_TITLE);
@@ -1064,12 +1258,18 @@ function editTask(
     edited.push('detail');
   }
   if (op.files) {
-    setOptional(task, 'files', cleanList(op.files)?.length ? cleanList(op.files) : undefined);
-    edited.push('files');
+    const files = cleanList(op.files);
+    if ((files ?? []).join('\n') !== (task.files ?? []).join('\n')) {
+      setOptional(task, 'files', files?.length ? files : undefined);
+      edited.push('files');
+    }
   }
   if (typeof op.note === 'string') {
-    setOptional(task, 'note', clean(op.note, MAX_TITLE * 2));
-    if (!op.status && !op.stage) edited.push('note');
+    const note = clean(op.note, MAX_TITLE * 2);
+    if (note !== task.note) {
+      setOptional(task, 'note', note);
+      if (!op.status && !op.stage) edited.push('note');
+    }
   }
   if (Array.isArray(op.dependsOn)) {
     // Checked with the whole batch, so a dependency can be added with it.
@@ -1108,8 +1308,17 @@ function editTask(
     }
     // Finished, or back in the pile: no longer anywhere in the cycle.
     if (status === 'done' || status === 'todo') delete task.stage;
+    // Put back in the pile by the user, it starts its cycle over: the rounds
+    // and checks of the work it had are not this work's. Claude cannot do
+    // that to itself — it would be a way round the round limit.
+    if (status === 'todo' && author === 'user') {
+      delete task.round;
+      delete task.checks;
+    }
   }
   const progress: string[] = [];
+  // Going into review is a round. Reporting review again while in it —
+  // with the review checks, say — is the same round.
   if (stage && task.status !== 'done' && task.status !== 'todo' && stage !== task.stage) {
     task.stage = stage;
     if (stage === 'review') task.round = (task.round ?? 0) + 1;
@@ -1117,7 +1326,9 @@ function editTask(
   }
   const checks = op.checks === undefined ? undefined : cleanChecks(op.checks);
   if (checks) {
-    if (checks.length) task.checks = checks;
+    // Merged by name: a refine that re-runs only the typecheck must not
+    // erase the test failure the review found.
+    if (checks.length) task.checks = mergeChecks(task.checks, checks);
     else delete task.checks;
     if (checks.length) progress.push(`checks ${checks.map((c) => `${c.name} ${c.ok ? '✓' : '✗'}`).join(', ')}`);
   }
@@ -1128,6 +1339,8 @@ function editTask(
 
   if (edited.length) {
     task.updatedAt = now;
+    task.rev = (task.rev ?? 1) + 1;
+    task.revBy = { ...task.revBy, [author]: task.rev };
     out.push(log('edited', ref('task', task.id), `edited the ${edited.join(', ')} of "${task.title}"`));
   }
   if (op.builds?.length) out.push(...logLinks(linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now), task, author, log));
@@ -1212,7 +1425,12 @@ function removeItem(
       break;
     }
     default:
-      throw new PlanError(`Cannot remove a "${kind}".`);
+      throw new PlanError(
+        kind === 'node' || kind === 'edge'
+          ? `Cannot remove a ${kind} on its own: send the diagram's ${kind === 'node' ? 'nodes (and edges)' : 'edges'} without it, ` +
+              'with upsert_diagram {id, nodes, edges}.'
+          : `Cannot remove a "${kind}": remove takes kind section, diagram or task.`,
+      );
   }
   plan.threads = plan.threads.map((t) => detachIfOrphaned(plan, before, t));
   return [log('deleted', { kind: kind as Target['kind'], id }, summary)];
@@ -1342,8 +1560,10 @@ export function reopenPlan(plan: Plan, now = Date.now()): Plan {
   if (!plan.submission) throw new PlanError('The plan is not locked.');
   const next = structuredClone(plan);
   delete next.submission;
-  next.version += 1;
-  next.updatedAt = now;
+  // Logged as the user's change, so Claude hears the plan is open again
+  // instead of finding out when an edit it no longer needs to hold back
+  // is refused — or not at all.
+  record(next, 'user', 'status', { kind: 'plan', id: '' }, REOPENED_PLAN, now);
   return next;
 }
 
@@ -1376,8 +1596,7 @@ export function reopenDesign(plan: Plan, now = Date.now()): Plan {
   if (!plan.design) throw new PlanError('The design is not confirmed.');
   const next = structuredClone(plan);
   delete next.design;
-  next.version += 1;
-  next.updatedAt = now;
+  record(next, 'user', 'status', { kind: 'plan', id: '' }, REOPENED_DESIGN, now);
   return next;
 }
 
@@ -1391,7 +1610,7 @@ export function markDesignDelivered(plan: Plan, now = Date.now()): Plan {
   // user changed since — tasks, comments — is not in it, so it stays unread
   // and Claude is told to read it.
   const confirmedAt = plan.design.seq ?? plan.seq;
-  if (!unreadByClaude(plan).some((c) => c.seq > confirmedAt)) markReadByClaude(next, now);
+  if (!plan.design.trimmed && !unreadByClaude(plan).some((c) => c.seq > confirmedAt)) markReadByClaude(next, now);
   next.version += 1;
   next.updatedAt = now;
   return next;
@@ -1410,7 +1629,10 @@ export function markDelivered(plan: Plan, now = Date.now()): Plan {
   // The build prompt carries the design too: a task-list ask not yet sent
   // has nothing left to say.
   if (next.design && !next.design.deliveredAt) next.design.deliveredAt = now;
-  markReadByClaude(next, now);
+  // A trimmed prompt points Claude at harness_plan_read for what it could
+  // not quote — the user's changes among them — so it is not Claude's read:
+  // that read is, and it still has them to show.
+  if (!plan.submission.trimmed) markReadByClaude(next, now);
   next.version += 1;
   next.updatedAt = now;
   return next;
@@ -1477,7 +1699,7 @@ function buildGraph(
     if (!id) throw new PlanError(`Diagram "${title}": every node needs an id.`);
     if (nodes.some((n) => n.id === id)) throw new PlanError(`Diagram "${title}": node id "${id}" is used twice.`);
     const prev = old?.nodes.find((n) => n.id === id);
-    const detail = clean(raw.detail, 400);
+    const detail = raw.detail === undefined ? prev?.detail : clean(raw.detail, 400);
     // Prose survives an edit that leaves it out, so Claude can rewire a
     // diagram without restating what the user wrote on every box.
     const description = raw.description === undefined ? prev?.description : clean(raw.description, MAX_DESCRIPTION);
@@ -1645,20 +1867,64 @@ function checkRev(item: { rev: number; title: string; updatedBy: Author }, expec
   );
 }
 
+/**
+ * A task edit made against revision `expect` is refused when the *other*
+ * side changed what the task says since — the user saving over Claude's
+ * newer text, or the other way round. One side's own quick successive
+ * saves (ticking dependencies one after another) never trip it, and
+ * progress (status, stage, checks) is not part of the revision.
+ */
+/** The latest result of each check: a new report replaces the one of the
+ *  same name and leaves the others as they were. */
+export function mergeChecks(before: readonly CheckResult[] | undefined, reported: readonly CheckResult[]): CheckResult[] {
+  const out = [...(before ?? [])];
+  for (const c of reported) {
+    const at = out.findIndex((x) => x.name === c.name);
+    if (at === -1) out.push(c);
+    else out[at] = c;
+  }
+  return out;
+}
+
+/** What a task says, as one comparable string: the fields its `rev` counts. */
+function taskContent(t: Task): string {
+  return JSON.stringify([t.title, t.detail ?? '', t.note ?? '', t.files ?? [], t.dependsOn ?? [], t.branch ?? '', t.review ?? '']);
+}
+
+function checkTaskRev(task: Task, expect: unknown, author: Author): void {
+  if (typeof expect !== 'number') return;
+  const other: Author = author === 'user' ? 'claude' : 'user';
+  const theirs = task.revBy?.[other];
+  if (theirs === undefined || theirs <= expect) return;
+  throw new PlanError(
+    `Task "${task.title}" was changed by ${other === 'claude' ? 'Claude' : 'the user'} while this edit was open, so it was not saved. ` +
+      (author === 'claude' ? 'Read the plan again (harness_plan_read), then redo the edit.' : 'It now shows the latest version.'),
+  );
+}
+
 function taskIdSet(plan: Pick<Plan, 'tasks'>): Set<string> {
   return new Set(plan.tasks.map((t) => t.id));
 }
 
+/** A value from a fixed list, or undefined when none was given. A value
+ *  that is not on the list is refused rather than quietly dropped: the
+ *  author meant something, and should hear it did not land. */
+function oneOf<T extends string>(value: unknown, allowed: readonly T[], what: string): T | undefined {
+  if (value === undefined || value === null) return undefined;
+  if ((allowed as readonly unknown[]).includes(value)) return value as T;
+  throw new PlanError(`${JSON.stringify(value)} is not ${what}: use one of ${allowed.join(', ')}.`);
+}
+
 function validKind(value: unknown): NodeKind | undefined {
-  return (NODE_KINDS as readonly string[]).includes(value as string) ? (value as NodeKind) : undefined;
+  return oneOf(value, NODE_KINDS, 'a box kind');
 }
 
 function validDirection(value: unknown): DiagramDirection | undefined {
-  return value === 'LR' || value === 'TB' ? value : undefined;
+  return oneOf(value, ['LR', 'TB'] as const, 'a diagram direction');
 }
 
 function validArrows(value: unknown): EdgeArrows | undefined {
-  return (EDGE_ARROWS as readonly string[]).includes(value as string) ? (value as EdgeArrows) : undefined;
+  return oneOf(value, EDGE_ARROWS, 'an arrow style');
 }
 
 /**

@@ -136,7 +136,7 @@ class Store {
     try {
       const { session } = await api.session(id);
       // Clicking through the rail quickly: only the last choice may land.
-      if (this.state.sessionId === id) this.set({ session });
+      if (this.state.sessionId === id) this.set({ session: this.newest(session) });
     } catch (err) {
       if (this.state.sessionId === id) this.set({ error: describeError(err) });
     }
@@ -171,7 +171,7 @@ class Store {
     if (this.state.connection === 'live' || !this.state.sessionId) return;
     try {
       const { session } = await api.session(this.state.sessionId);
-      this.set({ session, connection: 'live' });
+      this.set({ session: this.newest(session), connection: 'live' });
     } catch {
       /* the EventSource keeps retrying */
     }
@@ -197,12 +197,25 @@ class Store {
         } else if (before?.design && !before.design.deliveredAt && after?.design?.deliveredAt && !after.submission) {
           this.toast('success', `${agent} has the confirmed design and is making the task list.`);
         }
-        this.set({ session: event.session });
+        this.set({ session: this.newest(event.session) });
         return;
       }
       case 'ping':
         return;
     }
+  }
+
+  /**
+   * A session from the daemon, but never with an older plan than the page
+   * holds: a fetch that resolves after a newer snapshot (or a save's reply)
+   * would otherwise roll the page — and the canvas — back. The rest of the
+   * session (its status, its link) is taken as it comes.
+   */
+  private newest(incoming: SessionState): SessionState {
+    const current = this.state.session;
+    if (!current || current.sessionId !== incoming.sessionId || !current.plan || !incoming.plan) return incoming;
+    const order = (p: Plan) => p.version ?? p.seq;
+    return order(incoming.plan) < order(current.plan) ? { ...incoming, plan: current.plan } : incoming;
   }
 
   /* ---------------------------------------------------------------- *
@@ -267,7 +280,7 @@ class Store {
    * on the board. Resolves false when the daemon refused — most often
    * because the plan moved on since the preview was made.
    */
-  async submitPlan(input: { target: BuildTarget; note: string; expect: number; settings?: BuildSettings }): Promise<boolean> {
+  async submitPlan(input: { target: BuildTarget; note: string; expect: number; hash?: string; settings?: BuildSettings }): Promise<boolean> {
     const id = this.state.sessionId;
     if (!id) return false;
     try {
@@ -315,7 +328,7 @@ class Store {
    * Sign the design off. From here it is locked, and Claude gets the ask for
    * a task list with the user's next message.
    */
-  async confirmDesign(input: { note: string; expect: number }): Promise<boolean> {
+  async confirmDesign(input: { note: string; expect: number; hash?: string }): Promise<boolean> {
     const id = this.state.sessionId;
     if (!id) return false;
     try {

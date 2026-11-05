@@ -19,6 +19,7 @@ import {
   REVIEW_WORDS,
   ancestorsOf,
   branchPlan,
+  buildSteps,
   dependents,
   effectiveBranch,
   effectiveReview,
@@ -31,7 +32,7 @@ import {
   waitingOn,
 } from '../shared/build.ts';
 import { HOOK_STAGES, emptyProjectConfig, hasHooks, hooksFor, type ProjectConfig } from '../shared/project.ts';
-import { KIND_NOUN, edgePhrase, indent } from '../shared/architecture.ts';
+import { KIND_NOUN, edgePhrase, hang, indent, nestHeadings } from '../shared/architecture.ts';
 import { agentInfo, type AgentKind } from '../shared/agents.ts';
 import { checkWords, checksSection, renderBuildOrder, stageWords } from './render.ts';
 
@@ -79,7 +80,7 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
       branches.length
         ? `2. Push each branch and open the pull requests in stack order: ${branches.map((b) => `\`${b.branch}\`${b.base ? ` (onto \`${b.base}\`)` : ''}`).join(' → ')}.`
         : '2. Commit and push the work on the current branch, and open a pull request if the user wants one.',
-      '3. Write the build report with harness_plan_edit {op: "report", text}: what each task did, the branches and pull requests, the checks and how they came out, anything that differs from the plan, and follow-ups.',
+      '3. Write the build report with harness_plan_edit {ops: [{op: "report", text}]}: what each task did, the branches and pull requests, the checks and how they came out, anything that differs from the plan, and follow-ups.',
       '4. Give the user the final summary in chat, with the links.',
     );
     if (plan.report) out.push('', `_A build report was written ${new Date(plan.report.at).toISOString().slice(0, 16).replace('T', ' ')}; writing it again replaces it._`);
@@ -116,7 +117,7 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
       const state = [t.stage ? stageWords(t) : '', t.checks?.length ? `checks ${checkWords(t)}` : ''].filter(Boolean).join(' · ');
       out.push(`- ${line(t)}${state ? ` — ${state}` : ''}${t.note ? ` — ${t.note}` : ''}`);
       if (t.round && t.round >= settings.maxRounds && t.stage !== 'review') {
-        out.push(`  ⚠ ${t.round} review rounds already: if this one does not pass, stop and ask the user.`);
+        out.push(`  ⚠ ${t.round} of ${settings.maxRounds} review rounds used: another needs the user's go-ahead (user_approved).`);
       }
     }
   }
@@ -187,7 +188,7 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
       'This brief is everything needed to build this task — and where its job ends._',
   );
 
-  if (plan.summary.trim()) out.push('', '## The plan, in short', plan.summary.trim());
+  if (plan.summary.trim()) out.push('', '## The plan, in short', nestHeadings(plan.summary.trim(), 2));
 
   // The objective.
   out.push('', '## Your objective', `**${task.title}**`);
@@ -197,7 +198,10 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
   }
   if (hasSubtasks(plan, task.id)) {
     out.push('', 'Its subtasks — build them in this order, each through its own cycle:');
-    for (const leaf of leavesUnder(plan, task.id)) out.push(`- [${leaf.status === 'done' ? 'x' : ' '}] ${line(leaf)}`);
+    // In build order — what waits on another comes after it — not outline order.
+    const rank = new Map(buildSteps(plan).flatMap((step, i) => step.map((t) => [t.id, i] as const)));
+    const leaves = leavesUnder(plan, task.id).map((t, i) => ({ t, i })).sort((a, b) => (rank.get(a.t.id) ?? 0) - (rank.get(b.t.id) ?? 0) || a.i - b.i);
+    for (const { t: leaf } of leaves) out.push(`- [${leaf.status === 'done' ? 'x' : ' '}] ${line(leaf)}`);
   }
   const files = task.files?.length ? task.files : leavesUnder(plan, task.id).flatMap((t) => t.files ?? []);
   if (files.length) out.push('', `Files you expect to touch: ${[...new Set(files)].join(', ')}`);
@@ -296,8 +300,8 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
   if (threads.length) {
     out.push('', '## Comments on it');
     for (const t of threads) {
-      out.push(`- ${t.author === 'user' ? 'user' : 'planner'}: ${t.text}`);
-      for (const r of t.replies) out.push(`  ↳ ${r.author === 'user' ? 'user' : 'planner'}: ${r.text}`);
+      out.push(`- ${t.author === 'user' ? 'user' : 'planner'}: ${hang(t.text, 4)}`);
+      for (const r of t.replies) out.push(`  ↳ ${r.author === 'user' ? 'user' : 'planner'}: ${hang(r.text, 4)}`);
     }
   }
   return out.join('\n');

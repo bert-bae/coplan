@@ -103,6 +103,54 @@ function taskSchema(depth: number, build = false): Record<string, unknown> {
   return { type: 'object', properties, required: ['title'] };
 }
 
+/** The edits Claude is offered through harness_plan_edit. */
+export const AGENT_OPS = [
+  'set_meta',
+  'upsert_section',
+  'upsert_diagram',
+  'upsert_task',
+  'move_task',
+  'move_section',
+  'move_diagram',
+  'reply',
+  'resolve',
+  'remove',
+  'report',
+] as const;
+
+const STR_LIST = { type: 'array', items: { type: 'string' } };
+
+/**
+ * Every field an op in harness_plan_edit can carry: the union of what the
+ * ops in AGENT_OPS take (the daemon's OP_FIELDS, which a test holds this
+ * to). Which op takes which is in the tool's description, and the daemon
+ * refuses a field the op does not take.
+ */
+const OP_PROPERTIES: Record<string, unknown> = {
+  id: { type: 'string', description: 'The item to change. Omit it on upsert_* to add one.' },
+  title: { type: 'string' },
+  summary: { type: 'string', description: 'set_meta: the plan summary. Markdown.' },
+  body: { type: 'string', description: 'upsert_section: the section body. Markdown.' },
+  index: { type: 'integer', minimum: 0, description: 'Position among its siblings, from 0.' },
+  expect: { type: 'integer', description: 'upsert_section / upsert_diagram / upsert_task: the rev you read; refused if the user changed the item since.' },
+  nodes: { type: 'array', items: NODE, description: 'upsert_diagram: replaces the boxes.' },
+  edges: { type: 'array', items: EDGE, description: 'upsert_diagram: replaces the arrows.' },
+  direction: { type: 'string', enum: ['LR', 'TB'] },
+  caption: { type: 'string' },
+  parentId: { description: 'upsert_task (when adding) and move_task: the parent task id, or null for the top level.' },
+  detail: { type: 'string', description: 'upsert_task: objective, acceptance criteria, out of scope. Markdown.' },
+  files: STR_LIST,
+  note: { type: 'string', description: 'upsert_task: one line on the task.' },
+  dependsOn: { ...STR_LIST, description: 'upsert_task: replaces its dependencies; [] clears them.' },
+  branch: { type: 'string', description: 'upsert_task: "" clears it.' },
+  review: { type: 'string', enum: [...REVIEW.enum, ''], description: 'upsert_task: "" clears it.' },
+  builds: { ...STR_LIST, description: 'upsert_task: boxes it builds, as node ids or "diagramId/nodeId".' },
+  threadId: { type: 'string', description: 'reply / resolve: the comment thread.' },
+  text: { type: 'string', description: 'reply: your reply. report: the build report. Markdown.' },
+  resolved: { type: 'boolean' },
+  kind: { type: 'string', enum: ['section', 'diagram', 'task'], description: 'remove: what kind of item.' },
+};
+
 export const TOOLS: ToolDef[] = [
   {
     name: 'harness_plan_publish',
@@ -112,7 +160,7 @@ export const TOOLS: ToolDef[] = [
       'comments on it. Include: a summary; sections for context, architecture and risks; diagrams of the ' +
       'design as nodes and edges (the UI lays them out and the user can rearrange them); and a task tree ' +
       'broken into subtasks. Replaces the plan; items keep their comments and statuses when you keep their ' +
-      'ids, a box keeps its position, description and notes and an arrow between the same two boxes its ' +
+      'ids, a box keeps its position, detail, description and notes and an arrow between the same two boxes its ' +
       'label and style unless you restate them ("" clears a label). Refused if the user has changed the plan since you last read it, ' +
       'once they confirm the design (then harness_tasks_publish makes the task list), and while it is being built. ' +
       'Tasks here are the planned tasks, shown on the boxes that link them. Ask decisions you need with ' +
@@ -164,41 +212,32 @@ export const TOOLS: ToolDef[] = [
     name: 'harness_plan_edit',
     endpoint: 'edit',
     description:
-      'Make targeted changes to the plan, applied together or not at all. Each op is an object with an "op" ' +
-      'field: set_meta {title?, summary?}; upsert_section {id?, title?, body?, index?}; upsert_diagram {id?, ' +
-      'title?, nodes?, edges?, direction?, caption?} (nodes/edges replace the current ones; a box you keep ' +
-      'keeps its position, description and notes, and an arrow between the same two boxes keeps its label, ' +
-      'dashed and arrows, unless you give them); upsert_task {id?, parentId?, index?, title?, detail?, status?, files?, ' +
-      'note?, dependsOn?, branch?, review?, builds?} (omit id to add; parentId makes it a subtask); move_task {id, parentId, ' +
-      'index}; reply {threadId, text} (reply to a comment); resolve {threadId, resolved}; remove {kind: ' +
-      'section|diagram|task, id}; report {text} (the final build report). Once the user confirms the design only tasks, ' +
-      'task links and comments change; once they submit the plan only upsert_task, reply, resolve and report apply.',
+      'Make targeted changes to the plan, applied together or not at all. Call it as {ops: [ … ]}, where each op ' +
+      'is an object with an "op" field and only that op\'s fields: set_meta {title?, summary?}; upsert_section ' +
+      '{id?, title?, body?, index?}; upsert_diagram {id?, title?, nodes?, edges?, direction?, caption?, index?} ' +
+      '(nodes/edges replace the current ones; a box you keep keeps its position, detail, description and notes, and an ' +
+      'arrow between the same two boxes keeps its label, dashed and arrows, unless you give them); upsert_task ' +
+      '{id?, parentId?, index?, title?, detail?, files?, note?, dependsOn?, branch?, review?, builds?} ' +
+      '(omit id to add; parentId makes it a subtask); move_task {id, parentId, index}; move_section {id, index}; ' +
+      'move_diagram {id, index}; reply {threadId, text} (reply to a comment); resolve {threadId, resolved}; remove ' +
+      '{kind: section|diagram|task, id}; report {text} (the final build report). Example: {ops: [{op: "reply", ' +
+      'threadId: "c2", text: "Done: split the cache."}]}. Once the user confirms the design only tasks, task links ' +
+      'and comments change; once they submit the plan only upsert_task, reply, resolve and report apply.',
     inputSchema: {
       type: 'object',
       properties: {
         ops: {
           type: 'array',
+          minItems: 1,
           items: {
             type: 'object',
+            description: 'One edit: "op" plus the fields that op takes (see the tool description).',
             properties: {
-              op: {
-                type: 'string',
-                enum: [
-                  'set_meta',
-                  'upsert_section',
-                  'upsert_diagram',
-                  'upsert_task',
-                  'move_task',
-                  'move_section',
-                  'move_diagram',
-                  'reply',
-                  'resolve',
-                  'remove',
-                  'report',
-                ],
-              },
+              op: { type: 'string', enum: [...AGENT_OPS] },
+              ...OP_PROPERTIES,
             },
             required: ['op'],
+            additionalProperties: false,
           },
         },
       },
@@ -254,8 +293,10 @@ export const TOOLS: ToolDef[] = [
       'Track progress while you build; the user follows it on the board. Mark a task in_progress (stage ' +
       '"implement") when you start it, set stage "review" and "refine" as it goes round its implement → review → ' +
       'refine cycle, report the checks you ran, and mark it done with a one-line note once review passed — or ' +
-      'blocked with a note, asking the user with AskUserQuestion. Refused: starting a task that still waits on ' +
-      'another, and done while its last checks failed.',
+      'blocked with a note, asking the user with AskUserQuestion. The only way to report progress. Refused: ' +
+      'starting or finishing a task that still waits on another; starting more at once than the user allowed; a ' +
+      'review round past their limit; done before any review, or while a check fails or a review check was never ' +
+      'reported; progress on a task that has subtasks.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -272,6 +313,12 @@ export const TOOLS: ToolDef[] = [
           },
         },
         note: { type: 'string', description: 'One line: what was done, or what it is blocked on.' },
+        user_approved: {
+          type: 'boolean',
+          description:
+            'Only when the user told you in chat to go past a limit: another review round past their maximum, more ' +
+            'tasks at once, or done although a check fails. Put what they said in `note`.',
+        },
       },
       required: ['task_id'],
       additionalProperties: false,

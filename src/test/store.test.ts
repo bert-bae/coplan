@@ -175,3 +175,23 @@ test('a plan missing lists from an older build still loads', async () => {
   assert.deepEqual(plan!.diagrams, []);
   assert.equal(plan!.seq, 3);
 });
+
+test('a session saved by a newer Coplan is never read wrongly or saved over', async () => {
+  const dir = path.join(home, 'sessions', 'from-the-future');
+  mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'state.json');
+  const future = JSON.stringify({ schemaVersion: 99, sessionId: 'from-the-future', title: 'x', plan: { shape: 'new' } });
+  writeFileSync(file, future);
+  const store = await freshStore();
+  assert.equal(store.get('from-the-future'), undefined, 'not loaded');
+  // A hook for that session still works, from memory, and saving leaves the file alone.
+  store.ensure('from-the-future', process.cwd());
+  store.publishPlan('from-the-future', PLAN);
+  store.persistNow('from-the-future');
+  assert.equal(readFileSync(file, 'utf8'), future);
+
+  // What this build saves says which format it is.
+  store.ensure('today', process.cwd());
+  store.persistNow('today');
+  assert.equal((JSON.parse(readFileSync(path.join(home, 'sessions', 'today', 'state.json'), 'utf8')) as { schemaVersion?: number }).schemaVersion, 1);
+});

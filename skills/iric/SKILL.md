@@ -34,8 +34,8 @@ agent that briefed you instead, and it reports.
 
 ## 2. Review
 
-`harness_task_update {task_id, stage: "review"}` — each time counts as a
-round.
+`harness_task_update {task_id, stage: "review"}` — each time the task goes
+into review counts as a round (reporting again while in review does not).
 
 Run the **review** checks first; a review of code that fails its tests is
 wasted. Then review the way the brief says:
@@ -73,13 +73,16 @@ If the review found anything, or a review check failed:
 
 - Fix the findings that are in the task's scope. A finding that is really
   another task's work, or new work, becomes a task
-  (`harness_plan_edit {op: "upsert_task", ...}`) — say so in your note.
+  (`harness_plan_edit {ops: [{op: "upsert_task", ...}]}`) — say so in your note.
 - If you disagree with a finding, say why in one line; do not just skip it.
 - Run the implement checks again, then go back to **2. Review**.
 
-**Round limit.** After `maxRounds` reviews without a pass, stop. Mark the
-task blocked with a note on what is still failing, and ask the user with
-your question tool: another round, accept it as it is, or take it over.
+**Round limit.** After `maxRounds` reviews without a pass, stop: another
+review is refused. Mark the task blocked with a note on what is still
+failing, and ask the user with your question tool: another round, accept
+it as it is, or take it over. If they say another round, or accept it,
+call `harness_task_update` again with `user_approved: true` and their
+answer in the `note`.
 
 ## 4. Done
 
@@ -88,7 +91,11 @@ aside):
 
 `harness_task_update {task_id, status: "done", note: "<one line: what changed>"}`
 
-Marking a task done while its last reported checks fail is refused —
+Progress is reported only through `harness_task_update`; an
+`upsert_task` carrying a status, stage or checks is refused. Checks you
+report are merged by name, so the latest result of each counts. Done is
+refused before the task has been to review, while a check it last
+reported fails, or while a required review check was never reported —
 refine it, or, if the failure is unrelated to this task, mark it blocked
 and ask.
 

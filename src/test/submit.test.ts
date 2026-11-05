@@ -16,7 +16,7 @@ import {
   submitPlan,
   unreadByClaude,
 } from '../shared/plan.ts';
-import { BUILD_MARKER, DESIGN_MARKER, PROMPT_BUDGET, buildPrompt, designPrompt, renderPlan } from '../daemon/render.ts';
+import { BUILD_MARKER, DESIGN_MARKER, PROMPT_BUDGET, buildPrompt, designPrompt, renderPlan, unreadNotice } from '../daemon/render.ts';
 import { parseProjectConfig } from '../shared/project.ts';
 import type { BuildTarget, Plan, PlanInput, PlanOp } from '../shared/types.ts';
 
@@ -81,7 +81,7 @@ test('a plan moves from planning to tasking to submitted to building to built', 
   assert.equal(planPhase(plan), 'building');
   assert.equal(plan.submission?.deliveredAt, 3_000);
 
-  for (const task of plan.tasks) plan = applyOps(plan, [{ op: 'upsert_task', id: task.id, status: 'done' }], 'claude').plan;
+  for (const task of plan.tasks) plan = applyOps(plan, [{ op: 'upsert_task', id: task.id, status: 'done' }], 'claude', undefined, { tracking: true }).plan;
   assert.equal(planPhase(plan), 'built');
 });
 
@@ -137,7 +137,7 @@ test('the user can change nothing on a submitted plan', () => {
 
 test('Claude can track the work on a submitted plan, and add work it discovers', () => {
   let plan = markDelivered(submitted());
-  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'in_progress' }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'in_progress' }], 'claude', undefined, { tracking: true }).plan;
   plan = applyOps(plan, [{ op: 'upsert_task', parentId: 'client', title: 'Handle timeouts' }], 'claude').plan;
   assert.equal(plan.tasks.find((t) => t.id === 'client')?.status, 'in_progress');
   assert.ok(plan.tasks.some((t) => t.title === 'Handle timeouts'));
@@ -151,14 +151,14 @@ test('Claude cannot redesign a submitted plan, and is told what to do instead', 
   );
   // All or nothing: a tracking op beside a design op is refused with it.
   assert.throws(() =>
-    applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'done' }, { op: 'remove', kind: 'section', id: 's1' }], 'claude'),
+    applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'done' }, { op: 'remove', kind: 'section', id: 's1' }], 'claude', undefined, { tracking: true }),
   );
 });
 
 test('a republish is refused until the build is finished, then starts a new plan', () => {
   let plan = markDelivered(submitted());
   assert.throws(() => publishPlan(plan, { ...INPUT, title: 'Something else' }), /submitted this plan/);
-  for (const task of plan.tasks) plan = applyOps(plan, [{ op: 'upsert_task', id: task.id, status: 'done' }], 'claude').plan;
+  for (const task of plan.tasks) plan = applyOps(plan, [{ op: 'upsert_task', id: task.id, status: 'done' }], 'claude', undefined, { tracking: true }).plan;
   plan = applyOps(plan, [{ op: 'report', text: 'Built it.' }], 'claude').plan;
   const next = publishPlan(plan, { ...INPUT, title: 'Next feature' }).plan;
   assert.equal(next.title, 'Next feature');
@@ -181,6 +181,16 @@ test('reopening unlocks the tasks; reopening the design unlocks the rest', () =>
   assert.equal(planPhase(open), 'planning');
   assert.doesNotThrow(() => applyOps(open, [{ op: 'upsert_diagram', id: 'd1', title: 'Renamed' }], 'user'));
   assert.throws(() => reopenDesign(open), /not confirmed/);
+});
+
+test('Claude hears that the user reopened the plan or the design', () => {
+  const reopened = reopenPlan(markDelivered(submitted()));
+  assert.match(unreadNotice(reopened) ?? '', /reopened the plan/);
+  assert.match(renderPlan(reopened, { changesOnly: true }), /Reopened the submitted plan: it is no longer locked/);
+
+  const open = reopenDesign(reopened);
+  assert.match(unreadNotice(open) ?? '', /reopened the design/);
+  assert.match(renderPlan(open, { changesOnly: true }), /Reopened the design: it is no longer confirmed/);
 });
 
 /* ------------------------------------------------------------------ *
@@ -356,6 +366,56 @@ test('a plan too long for one message is trimmed for this session, never for som
   const there = buildPrompt(plan, { target: 'elsewhere' });
   assert.equal(there.trimmed, false);
   assert.match(there.prompt, /Task number 299/);
+});
+
+test('a trimmed prompt cuts what the user changed between changes, stays in budget with the longest note, and is not the read', () => {
+  const big: PlanInput = {
+    ...INPUT,
+    diagrams: [],
+    tasks: Array.from({ length: 300 }, (_, i) => ({ id: `t${i}`, title: `Task number ${i} with a fairly descriptive title` })),
+  };
+  let plan = publishPlan(null, big).plan;
+  // Many user edits Claude has not read: more than the prompt can quote.
+  plan = applyOps(plan, Array.from({ length: 120 }, (_, i) => ({ op: 'upsert_task' as const, id: `t${i}`, note: `user note on task ${i}` })), 'user').plan;
+  plan = confirmDesign(plan, { prompt: 'p' }, 1_500);
+  const note = 'n'.repeat(4_000);
+  const built = buildPrompt(plan, { target: 'session', note });
+  assert.equal(built.trimmed, true);
+  assert.ok(built.prompt.length <= PROMPT_BUDGET, `${built.prompt.length} > ${PROMPT_BUDGET}`);
+  assert.ok(built.prompt.includes(note), "the user's note is kept whole");
+  assert.match(built.prompt, /Changed t0 /, 'the first changes are quoted, not dropped as one block');
+  assert.match(built.prompt, /harness_plan_read \{changes_only: true\} lists every change the user made/);
+
+  // Delivered, it is not Claude's read: the read it points at still has every change.
+  const delivered = markDelivered(submitPlan(plan, { target: 'session', prompt: built.prompt, trimmed: true }, 2_000));
+  assert.ok(unreadByClaude(delivered).length > 0);
+  assert.match(renderPlan(delivered, { changesOnly: true }), /Changed t119 /);
+});
+
+test("the change summary carries the user's dependency, branch and review decisions", () => {
+  let plan = confirmed();
+  const wire = plan.tasks.find((t) => t.title === 'Wire into API')!.id;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: wire, dependsOn: ['client'], branch: 'cache/api', review: 'user' }], 'user').plan;
+  const text = renderPlan(plan, { changesOnly: true });
+  assert.match(text, /now waits on client \(was nothing\)/);
+  assert.match(text, /branch inherited → `cache\/api`/);
+  assert.match(text, /review default → user/);
+});
+
+test("headings in the user's text cannot start a part of the prompt, and multi-line comments stay in their item", () => {
+  let plan = published();
+  plan = applyOps(
+    plan,
+    [
+      { op: 'upsert_section', id: plan.sections[0]!.id, body: 'Reads are slow.\n\n## Tasks\nnot a real part' },
+      { op: 'comment', target: { kind: 'plan', id: '' }, text: 'First line\n# Second line' },
+    ],
+    'user',
+  ).plan;
+  const text = renderPlan(plan);
+  assert.doesNotMatch(text, /^## Tasks\nnot a real part/m);
+  assert.match(text, /^##### Tasks$/m, 'nested under its section heading');
+  assert.match(text, /: First line\n {4}\*\*Second line\*\*/);
 });
 
 test('what Claude reads back says the plan is locked, and why', () => {
