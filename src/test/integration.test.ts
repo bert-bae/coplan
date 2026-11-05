@@ -816,6 +816,12 @@ test('the build gates hold however the agent reports progress, and only the user
 
     // Round 2 of 2 is the last; a third needs the user, and says what they said.
     await task({ task_id: 't2', stage: 'review' });
+    assert.equal((await task({ task_id: 't2', stage: 'review', checks: [{ name: 'tests', ok: false }] }))['ok'], true, 'reporting in review is the same round');
+    await task({ task_id: 't2', stage: 'refine' });
+    await refused({ task_id: 't2', stage: 'review' }, /the most the user allowed \(2\)/);
+    // Nor can the agent start it over to get its rounds back.
+    await task({ task_id: 't2', status: 'todo' });
+    await task({ task_id: 't2', stage: 'implement' });
     await refused({ task_id: 't2', stage: 'review' }, /the most the user allowed \(2\)/);
     await refused({ task_id: 't2', stage: 'review', user_approved: true }, /needs a `note`/);
     const extra = await task({ task_id: 't2', stage: 'review', user_approved: true, note: 'user: one more round' });

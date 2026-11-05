@@ -34,8 +34,8 @@ agent that briefed you instead, and it reports.
 
 ## 2. Review
 
-`harness_task_update {task_id, stage: "review"}` — each time counts as a
-round.
+`harness_task_update {task_id, stage: "review"}` — each time the task goes
+into review counts as a round (reporting again while in review does not).
 
 Run the **review** checks first; a review of code that fails its tests is
 wasted. Then review the way the brief says:

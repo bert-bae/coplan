@@ -259,6 +259,11 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const version = plan?.version ?? 0;
+  // The prompt also moves when the agent reads the plan (its "since you
+  // last read" part), which is not a new version — and after a refused
+  // confirm, whatever moved it is fetched again.
+  const readAt = plan?.claudeReadAt ?? 0;
+  const [refresh, setRefresh] = useState(0);
   useEscape(onClose, busy);
 
   useEffect(() => {
@@ -275,7 +280,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
     return () => {
       live = false;
     };
-  }, [sessionId, settled, version]);
+  }, [sessionId, settled, version, readAt, refresh]);
 
   if (!session || !plan) return null;
   const current = Boolean(shown && shown.note === note && shown.preview.version >= version);
@@ -289,6 +294,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
     const ok = await store.confirmDesign({ note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}) });
     setBusy(false);
     if (ok) onClose();
+    else setRefresh((n) => n + 1);
   };
 
   return (
@@ -360,6 +366,10 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const version = plan?.version ?? 0;
+  // As for the design: the agent reading the plan moves the prompt without
+  // a new version, and a refused submit fetches it again.
+  const readAt = plan?.claudeReadAt ?? 0;
+  const [refresh, setRefresh] = useState(0);
   const key = settingsKey(settings);
   useEscape(onClose, submitting);
 
@@ -382,7 +392,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
     };
     // `settings` is read through `key`, which says when it changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, target, settled, version, key]);
+  }, [sessionId, target, settled, version, key, readAt, refresh]);
 
   if (!session || !plan) return null;
 
@@ -401,6 +411,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
     const ok = await store.submitPlan({ target, note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}), ...(settings ? { settings } : {}) });
     setSubmitting(false);
     if (ok) onClose();
+    else setRefresh((n) => n + 1);
   };
 
   return (

@@ -106,18 +106,17 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
       console.log('not running');
       return 0;
     }
-    // Only a daemon that answered with its own pid is signalled: a lock left
-    // by one that died may name a pid that is someone else's process now.
+    // A lock left by a daemon that died may name a pid that is someone
+    // else's process now: that is never signalled. One whose port takes the
+    // connection but is slow to answer is the daemon, hung — the very one
+    // to stop.
     const state = await probeLock(lock);
     if (state === 'stale') {
       rmSync(paths.lockFile(), { force: true });
       console.log('not running (removed a lock left by a daemon that is gone)');
       return 0;
     }
-    if (state === 'busy') {
-      console.error(`the daemon (pid ${lock.pid}) did not answer; not stopping it. See ${paths.logFile()}`);
-      return 1;
-    }
+    if (state === 'busy') console.log(`the daemon (pid ${lock.pid}) is not answering; stopping it anyway`);
     try {
       process.kill(lock.pid, 'SIGTERM');
       console.log(`stopped pid ${lock.pid}`);

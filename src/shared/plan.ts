@@ -546,7 +546,10 @@ function buildTaskTree(
       const old = base.tasks.find((t) => t.id === raw.id);
       const id = old && !tasks.some((t) => t.id === old.id) ? old.id : claimIdAmong(next, 'task', raw.id, tasks);
       if (typeof raw.id === 'string' && raw.id.trim()) written.set(raw.id.trim(), id);
-      const status = validStatus(raw.status) ?? old?.status ?? 'todo';
+      // A task that survives keeps its status: progress is reported through
+      // harness_task_update and its gates, never by publishing over it. Only
+      // a new task says where it starts.
+      const status = old ? old.status : (validStatus(raw.status) ?? 'todo');
       // Left out, a task's detail is kept — as a box's prose is — so a
       // republish to restructure the tree never wipes what was written.
       const detail = raw.detail === undefined ? old?.detail : clean(raw.detail, MAX_TEXT);
@@ -1305,17 +1308,18 @@ function editTask(
     }
     // Finished, or back in the pile: no longer anywhere in the cycle.
     if (status === 'done' || status === 'todo') delete task.stage;
-    // Back in the pile, it starts its cycle over: the rounds and checks of
-    // the work it had are not this work's.
-    if (status === 'todo') {
+    // Put back in the pile by the user, it starts its cycle over: the rounds
+    // and checks of the work it had are not this work's. Claude cannot do
+    // that to itself — it would be a way round the round limit.
+    if (status === 'todo' && author === 'user') {
       delete task.round;
       delete task.checks;
     }
   }
   const progress: string[] = [];
-  // Every report of the review stage is a round — going straight from one
-  // review to the next included — so the round limit cannot be walked past.
-  if (stage && task.status !== 'done' && task.status !== 'todo' && (stage !== task.stage || stage === 'review')) {
+  // Going into review is a round. Reporting review again while in it —
+  // with the review checks, say — is the same round.
+  if (stage && task.status !== 'done' && task.status !== 'todo' && stage !== task.stage) {
     task.stage = stage;
     if (stage === 'review') task.round = (task.round ?? 0) + 1;
     progress.push(stage === 'review' ? `in review (round ${task.round})` : STAGE_WORDS[stage]);

@@ -294,13 +294,13 @@ test('a task goes round its cycle: stages imply progress, reviews count rounds, 
   assert.throws(() => step({ stage: 'polish' }), /not a stage/);
 });
 
-test('every review report is a round, checks merge by name, and a task back in the pile starts over', () => {
+test('going into review is a round, checks merge by name, and only the user starts a task over', () => {
   let plan = tasked();
   const step = (op: Record<string, unknown>) => (plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', ...op }], 'claude', undefined, { tracking: true }).plan);
   const client = () => plan.tasks.find((t) => t.id === 'client')!;
-  step({ stage: 'review', checks: [{ name: 'tests', ok: false }, { name: 'lint', ok: true }] });
   step({ stage: 'review' });
-  assert.equal(client().round, 2, 'review straight after review is still a round');
+  step({ stage: 'review', checks: [{ name: 'tests', ok: false }, { name: 'lint', ok: true }] });
+  assert.equal(client().round, 1, 'reporting the review checks is the same round');
   step({ stage: 'refine', checks: [{ name: 'typecheck', ok: true }] });
   assert.deepEqual(
     client().checks?.map((c) => `${c.name}:${c.ok}`),
@@ -309,8 +309,12 @@ test('every review report is a round, checks merge by name, and a task back in t
   );
   step({ checks: [{ name: 'tests', ok: true }] });
   assert.equal(client().checks?.find((c) => c.name === 'tests')?.ok, true);
+  // Claude sending it back to todo keeps its rounds: no way round the limit.
   step({ status: 'todo' });
-  assert.equal(client().round, undefined);
+  assert.equal(client().round, 1);
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'in_progress' }], 'user').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'todo' }], 'user').plan;
+  assert.equal(client().round, undefined, 'the user putting it back starts it over');
   assert.equal(client().checks, undefined);
 });
 
@@ -324,6 +328,9 @@ test("Claude's upsert_task does not report progress: that is harness_task_update
   assert.throws(() => applyOps(tasked(), [{ op: 'upsert_task', title: 'New', status: 'done' }], 'claude'), /A new task starts as todo/);
   // The user marks progress on the board as before.
   assert.doesNotThrow(() => applyOps(tasked(), [{ op: 'upsert_task', id: 'client', status: 'done' }], 'user'));
+  // Nor does publishing again move a task that already exists.
+  const republished = publishTasks(tasked(), { tasks: TASKS.map((t) => ({ ...t, status: 'done' as const })) }).plan;
+  assert.equal(republished.tasks.find((t) => t.id === 'wire')!.status, 'todo');
 });
 
 test('review modes are inherited, with the build default last', () => {

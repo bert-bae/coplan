@@ -109,7 +109,10 @@ async function main(): Promise<void> {
     shuttingDown = true;
     log(`shutting down (${signal})`);
     reaper.stop();
-    store.persistAll();
+    lockWatch.stop();
+    // A daemon that lost the lock leaves the sessions to the one that has
+    // it: saving its own copies now would write over newer ones.
+    if (signal !== LOST_LOCK) store.persistAll();
     server.close();
     server.closeAllConnections?.();
     try {
@@ -131,6 +134,7 @@ async function main(): Promise<void> {
   };
 
   const reaper = startReaper(store);
+  const lockWatch = watchLock(() => shutdown(LOST_LOCK));
   startIdleWatch(store, config, clients, () => shutdown('idle'));
 
   process.on('SIGINT', () => shutdown('SIGINT'));
@@ -143,6 +147,10 @@ let boundPort = 0;
 
 /** Grace for the restart response to flush before the socket is torn down. */
 const RESTART_DELAY_MS = 120;
+
+/** How often a daemon checks the lock is still its own. */
+const LOCK_WATCH_MS = 5_000;
+const LOST_LOCK = 'lost the lock';
 /** How long a successor keeps trying to claim its predecessor's port. */
 const PORT_CLAIM_MS = 5_000;
 /** Sessions remembered as "already opened a browser tab for". */
@@ -250,6 +258,13 @@ async function claimLock(lock: DaemonLock): Promise<void> {
   const file = paths.lockFile();
   const tmp = `${file}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(lock, null, 2), { mode: 0o600 });
+  // process.exit skips `finally`: the temporary copy, token and all, is
+  // removed before any exit as well.
+  const lose = (why: string): never => {
+    rmSync(tmp, { force: true });
+    log(why);
+    process.exit(0);
+  };
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -260,19 +275,37 @@ async function claimLock(lock: DaemonLock): Promise<void> {
       }
       const other = readLock();
       if (other && other.pid !== lock.pid && isPidAlive(other.pid) && (await probeLock(other)) !== 'stale') {
-        log(`another daemon (pid ${other.pid}) holds the lock; exiting`);
-        process.exit(0);
+        lose(`another daemon (pid ${other.pid}) holds the lock; exiting`);
       }
       // Left by a daemon that is gone. Removed only if it is still the same
-      // stale lock, so a daemon that claimed it meanwhile keeps its claim.
+      // stale lock. (Two daemons can still both get here; the one whose
+      // claim is then removed notices — see watchLock — and steps down.)
       const again = readLock();
       if (!again || (again.pid === other?.pid && again.startedAt === other?.startedAt)) rmSync(file, { force: true });
     }
-    log('could not claim the lock; another daemon is starting; exiting');
-    process.exit(0);
+    lose('could not claim the lock; another daemon is starting; exiting');
   } finally {
     rmSync(tmp, { force: true });
   }
+}
+
+/**
+ * Step down if the lock is no longer this daemon's. Two daemons replacing
+ * the same stale lock at the same moment can both believe they claimed it;
+ * the one whose claim was overwritten finds out here and shuts down, before
+ * its sessions drift apart from the other's.
+ */
+function watchLock(onLost: () => void): { stop(): void } {
+  const timer = setInterval(() => {
+    const now = readLock();
+    if (now && now.pid !== process.pid) {
+      log(`the lock now belongs to pid ${now.pid}; stepping down`);
+      clearInterval(timer);
+      onLost();
+    }
+  }, LOCK_WATCH_MS);
+  timer.unref?.();
+  return { stop: () => clearInterval(timer) };
 }
 
 function log(message: string): void {
@@ -738,6 +771,15 @@ function buildRouter(deps: Deps): Router {
     // A prompt this hook hands over, so it can be taken back if the answer
     // never reaches the agent.
     let handed: { id: string; prior: Plan; version: number } | null = null;
+    // Listened for from the start: the relay may give up while the hook is
+    // still being handled, and a 'close' already past cannot be heard later.
+    const takeBack = () => {
+      if (!handed || ctx.res.writableFinished) return;
+      const { id, prior, version } = handed;
+      handed = null;
+      if (store.undeliver(id, prior, version)) log(`prompt for ${id} did not reach the agent; kept to deliver again`);
+    };
+    ctx.res.once('close', takeBack);
     try {
       const body = await readJson<Record<string, unknown>>(ctx.req);
       agent = hookAgent(agent, body);
@@ -765,15 +807,10 @@ function buildRouter(deps: Deps): Router {
       log(`hook ${agent}/${raw} failed: ${(err as Error)?.message}`);
       output = HOOK_NOOP;
     }
-    if (handed) {
-      // The relay gave up (its curl timed out) or the connection dropped
-      // before the answer was out: the agent never got the prompt. Take the
-      // delivery back so the next hook — or harness_plan_read — hands it over.
-      const { id, prior, version } = handed;
-      ctx.res.once('close', () => {
-        if (!ctx.res.writableFinished && store.undeliver(id, prior, version)) log(`prompt for ${id} did not reach the agent; kept to deliver again`);
-      });
-    }
+    // The relay gave up (its curl timed out) or the connection dropped before
+    // the answer was out: the agent never got the prompt. Taken back, so the
+    // next hook — or harness_plan_read — hands it over.
+    if (ctx.res.destroyed || ctx.req.socket.destroyed) takeBack();
     if (!ctx.res.writableEnded) json(ctx.res, 200, writeAgentOutput(agent, raw, output));
   });
 
@@ -868,7 +905,7 @@ function buildRouter(deps: Deps): Router {
     }
 
     // The round limit is the user's: past it, stop and ask them.
-    if (stage === 'review' && (task.round ?? 0) >= settings.maxRounds && !approved) {
+    if (stage === 'review' && task.stage !== 'review' && (task.round ?? 0) >= settings.maxRounds && !approved) {
       throw new PlanError(
         `"${task.title}" has had ${task.round} review round(s), the most the user allowed (${settings.maxRounds}). Stop: mark it ` +
           'blocked with a note on what still fails, and ask the user — another round, accept it as it is, or take it over. ' +

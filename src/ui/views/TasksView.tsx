@@ -766,11 +766,10 @@ function MoveButton({ op, glyph, label }: { op: PlanOp | null; glyph: string; la
  *  progress when any is. A parent has no status of its own to set — what
  *  is built, and what the agent reports, is its subtasks. */
 function derivedStatus(plan: Plan, task: Task): TaskStatus {
-  const leaves = descendants(plan, task.id).filter((t) => !hasSubtasks(plan, t.id));
-  if (leaves.length && leaves.every((t) => t.status === 'done')) return 'done';
-  if (leaves.some((t) => t.status === 'blocked')) return 'blocked';
-  if (leaves.some((t) => t.status === 'in_progress' || t.status === 'done')) return 'in_progress';
-  return 'todo';
+  // The same roll-up harness_task_next and the briefs use, so the board and
+  // the agent never disagree about a parent.
+  const r = readinessOf(plan, task);
+  return r === 'ready' || r === 'waiting' ? 'todo' : r;
 }
 
 function DerivedStatus({ plan, task }: { plan: Plan; task: Task }) {

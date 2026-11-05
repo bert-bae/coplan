@@ -62,7 +62,11 @@ read_lock() {
   # Every other event saves the round trip — a dead port fails fast anyway.
   case "$EVENT" in
     SessionStart|sessionStart)
-      HEALTH=$(curl -s --max-time 2 --connect-timeout 1 "http://127.0.0.1:$PORT/health" 2>/dev/null || true)
+      HEALTH=$(curl -s --max-time 2 --connect-timeout 1 "http://127.0.0.1:$PORT/health" 2>/dev/null)
+      RC=$?
+      # Slow to answer (curl's timeout, 28) is a busy daemon, not a dead one:
+      # starting another would only see it there and exit.
+      [ "$RC" -eq 28 ] && return 0
       case "$HEALTH" in
         *"\"pid\":$PID,"*|*"\"pid\":$PID}"*) ;;
         *) return 1 ;;
