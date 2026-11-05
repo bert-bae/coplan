@@ -9,7 +9,7 @@
  * the user see the same list.
  */
 
-import { ancestorsOf, branchPlan, effectiveBranch, hasSubtasks, inheritedDeps, leavesUnder } from './build.ts';
+import { SESSION_BRANCH, ancestorsOf, branchPlan, hasSubtasks } from './build.ts';
 import { planPhase } from './plan.ts';
 import type { Plan, Target, Task } from './types.ts';
 
@@ -20,7 +20,6 @@ export const GAP_RULES = [
   'task-undetailed',
   'node-id-shared',
   'branch-two-bases',
-  'branch-on-unbranched',
   'comment-unanswered',
 ] as const;
 export type GapRule = (typeof GAP_RULES)[number];
@@ -82,32 +81,18 @@ export function planGaps(plan: Plan): Gap[] {
     }
   }
 
-  // Branch layouts a stack of pull requests cannot follow.
-  const { branches } = branchPlan(plan);
-  for (const b of branches) {
+  // A branch layout a stack of pull requests cannot follow. Refused when a
+  // task list is made; a plan from before that was enforced can still hold
+  // one. (A branch built on the unbranched tasks' work stacks on the
+  // session's branch, which a stack can follow.)
+  for (const b of branchPlan(plan).branches) {
     if (b.needs.length > 1) {
+      const named = (n: string) => (n === SESSION_BRANCH ? 'the unbranched tasks' : `\`${n}\``);
       add(
         'branch-two-bases',
         { kind: 'plan', id: '' },
-        `Branch \`${b.branch}\` needs work from ${b.needs.map((n) => `\`${n}\``).join(' and ')}: a pull request has one base. Put the work on one branch, or make one of those stack on the other.`,
+        `Branch \`${b.branch}\` needs work from ${b.needs.map(named).join(' and ')}: a pull request has one base. Put the work on one branch, or make one of those stack on the other.`,
       );
-    }
-  }
-  if (branches.length) {
-    for (const t of leaves) {
-      const mine = effectiveBranch(plan, t);
-      if (!mine) continue;
-      // Waiting on a parent is waiting on each of its subtasks.
-      const deps = inheritedDeps(plan, t).flatMap((id) => leavesUnder(plan, id));
-      for (const dep of new Set(deps)) {
-        if (!effectiveBranch(plan, dep)) {
-          add(
-            'branch-on-unbranched',
-            { kind: 'task', id: t.id },
-            `Task ${t.id} on \`${mine}\` waits on ${dep.id} "${dep.title}", which has no branch: \`${mine}\` would be cut without that work. Give ${dep.id} a branch, or put both on one.`,
-          );
-        }
-      }
     }
   }
 

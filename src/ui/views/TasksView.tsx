@@ -10,7 +10,7 @@ import { Markdown } from '../components/Markdown.tsx';
 import { classNames } from '../lib/format.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
 import { childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
-import { ancestorsOf, branchPlan, buildSteps, effectiveBranch, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
+import { DEFAULT_BUILD_SETTINGS, SESSION_BRANCH, roundVerdict, stackStatus, type StackEntry, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
 import { REVIEW_MODES, TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type ReviewMode, type Task, type TaskStatus } from '../../shared/types.ts';
 
 /** Clicking the status dot steps through the common path; blocked is set
@@ -20,6 +20,7 @@ const NEXT_STATUS: Record<TaskStatus, TaskStatus> = {
   in_progress: 'done',
   blocked: 'in_progress',
   done: 'todo',
+  dropped: 'todo',
 };
 
 type DropZone = 'before' | 'inside' | 'after';
@@ -129,8 +130,34 @@ export function TasksView() {
  * side, and the branches the work lands on. Shown once tasks say what they
  * wait on or where they land.
  */
+/** A branch's pull request as the agent last reported it, and the restack
+ *  it needs when the branch below it merged. */
+function PullRequest({ entry }: { entry: StackEntry | undefined }) {
+  const pr = entry?.state?.pr;
+  if (!pr && !entry?.restack) return null;
+  const label = `PR${pr?.number ? ` #${pr.number}` : ''} ${pr?.state ?? ''}`.trim();
+  return (
+    <>
+      {pr &&
+        (pr.url ? (
+          <a className={classNames('chip', 'is-pr', `is-${pr.state}`)} href={pr.url} target="_blank" rel="noreferrer">
+            {label}
+          </a>
+        ) : (
+          <span className={classNames('chip', 'is-pr', `is-${pr.state}`)}>{label}</span>
+        ))}
+      {entry?.restack && (
+        <span className="chip is-warning" title={entry.restack}>
+          needs a restack
+        </span>
+      )}
+    </>
+  );
+}
+
 function BuildOrder({ plan, collapsible = false }: { plan: Plan; collapsible?: boolean }) {
   const { branches, unbranched } = branchPlan(plan);
+  const stack = stackStatus(plan);
   if (!hasDependencies(plan) && branches.length === 0) return null;
   const steps = buildSteps(plan);
   const numbers = new Map(outline(plan).map((r) => [r.task.id, r.number]));
@@ -163,8 +190,15 @@ function BuildOrder({ plan, collapsible = false }: { plan: Plan; collapsible?: b
             <li key={b.branch}>
               <code className="head-branch">{b.branch}</code>
               <span className="muted">
-                {b.needs.length > 1 ? ` needs ${b.needs.join(' and ')}` : b.base ? ` stacked on ${b.base}` : ' from the base branch'}
+                {b.needs.length > 1
+                  ? ` needs ${b.needs.map((n) => (n === SESSION_BRANCH ? 'the current branch' : n)).join(' and ')}`
+                  : b.base === SESSION_BRANCH
+                    ? ' stacked on the current branch'
+                    : b.base
+                      ? ` stacked on ${b.base}`
+                      : ' from the base branch'}
               </span>
+              <PullRequest entry={stack.find((s) => s.branch === b.branch)} />
               <span className="order-tasks">{b.tasks.map(chip)}</span>
             </li>
           ))}
@@ -489,6 +523,11 @@ function TaskRow(props: {
             </button>
           ))}
           {task.createdBy === 'user' && <span className="chip is-you">added by you</span>}
+          {task.addedInBuild && (
+            <span className="chip is-note" title="Found during the build: not part of the plan you submitted">
+              added during the build
+            </span>
+          )}
         </span>
         <span className="spacer" />
         <span className="task-actions">
@@ -834,7 +873,7 @@ function Board({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
 
   return (
     <div className={classNames('board', readOnly && 'is-readonly')}>
-      {TASK_STATUSES.map((status) => {
+      {TASK_STATUSES.filter((s) => s !== 'dropped' || leaves.some((t) => t.status === 'dropped')).map((status) => {
         const cards = leaves.filter((t) => t.status === status);
         return (
           <section
@@ -965,6 +1004,8 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
           {task.files?.length ? <p className="board-files mono">{task.files.join(', ')}</p> : null}
         </div>
       )}
+      <ReviewHistory task={task} />
+      <UserReview plan={plan} task={task} />
       <footer className="board-foot">
         <span className="item-id">{task.id}</span>
         {arrived && <span className="pill is-moved">just moved</span>}
@@ -972,6 +1013,66 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
         <span className={classNames('board-state', `is-${task.status}`)}>{STATUS_LABEL[task.status]}</span>
       </footer>
     </Focusable>
+  );
+}
+
+/** Each review round's verdict, newest last. */
+function ReviewHistory({ task }: { task: Task }) {
+  if (!task.reviews?.length) return null;
+  return (
+    <ul className="board-reviews plain-list" aria-label={`Reviews of ${task.title}`}>
+      {task.reviews.map((r, i) => (
+        <li key={`${r.round}:${i}`} className={classNames('muted', r.verdict === 'pass' ? 'is-pass' : 'is-changes')}>
+          Round {r.round}: {r.verdict === 'pass' ? 'passed' : 'changes asked'} by {r.by === 'user' ? 'you' : 'the agent'}
+          {r.summary ? ` — ${r.summary}` : ''}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * The user's verdict on a task they review, while it is in review: the
+ * agent cannot mark it done without their pass — given here, or in chat.
+ */
+function UserReview({ plan, task }: { plan: Plan; task: Task }) {
+  const agent = useAgent();
+  const [asking, setAsking] = useState(false);
+  const [why, setWhy] = useState('');
+  const mode = effectiveReview(plan, task, plan.submission?.settings?.review ?? DEFAULT_BUILD_SETTINGS.review);
+  if (mode !== 'user' || task.stage !== 'review') return null;
+  const decided = roundVerdict(task, 'user');
+  if (decided) return null;
+  const send = async (verdict: 'pass' | 'changes', summary?: string) => {
+    const ok = await store.op({ op: 'review_task', id: task.id, verdict, ...(summary ? { summary } : {}) });
+    if (ok) setAsking(false);
+  };
+  return (
+    <div className="board-review" role="group" aria-label={`Your review of ${task.title}`}>
+      <span className="field-label">Your review — round {task.round}</span>
+      {asking ? (
+        <>
+          <input className="input" value={why} placeholder={`What should ${agent.name} change?`} aria-label="What to change" onChange={(e) => setWhy(e.target.value)} />
+          <span className="board-review-actions">
+            <button type="button" className="btn btn-sm" disabled={!why.trim()} onClick={() => void send('changes', why.trim())}>
+              Send
+            </button>
+            <button type="button" className="btn btn-sm btn-ghost" onClick={() => setAsking(false)}>
+              Cancel
+            </button>
+          </span>
+        </>
+      ) : (
+        <span className="board-review-actions">
+          <button type="button" className="btn btn-sm btn-primary" onClick={() => void send('pass')}>
+            Approve
+          </button>
+          <button type="button" className="btn btn-sm" onClick={() => setAsking(true)}>
+            Request changes
+          </button>
+        </span>
+      )}
+    </div>
   );
 }
 

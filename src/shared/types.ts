@@ -136,7 +136,7 @@ export interface DiagramInput {
   caption?: string;
 }
 
-export const TASK_STATUSES = ['todo', 'in_progress', 'blocked', 'done'] as const;
+export const TASK_STATUSES = ['todo', 'in_progress', 'blocked', 'done', 'dropped'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 /**
@@ -150,6 +150,22 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
  */
 export const REVIEW_MODES = ['subagent', 'self', 'user', 'skip'] as const;
 export type ReviewMode = (typeof REVIEW_MODES)[number];
+
+/** A review's outcome: it passed, or it asked for changes. */
+export const VERDICTS = ['pass', 'changes'] as const;
+export type Verdict = (typeof VERDICTS)[number];
+
+export interface ReviewRecord {
+  round: number;
+  verdict: Verdict;
+  /** The user (in Coplan, or as the agent reports with their words), or the agent. */
+  by: Author;
+  /** The review mode in force when it was given. */
+  mode: ReviewMode;
+  /** One line: what the review found. */
+  summary?: string;
+  at: number;
+}
 
 /** Where a task in progress is in its implement → review → refine cycle. */
 export const IRIC_STAGES = ['implement', 'review', 'refine'] as const;
@@ -208,6 +224,12 @@ export interface Task {
   /** The revision each side last edited, so an edit made against an older
    *  revision is refused only when the other side changed it since. */
   revBy?: Partial<Record<Author, number>>;
+  /** Added once the plan was submitted: work found during the build, not
+   *  part of what the user signed off. */
+  addedInBuild?: boolean;
+  /** Each review's verdict, newest last: who gave it, in which round, under
+   *  which review mode. Done needs a pass for the current round. */
+  reviews?: ReviewRecord[];
   createdAt: number;
   updatedAt: number;
   createdBy: Author;
@@ -316,6 +338,8 @@ export interface Submission {
   trimmed?: boolean;
   /** How the build runs. Absent on plans submitted before it existed. */
   settings?: BuildSettings;
+  /** The repository's base branch when it was submitted, if it says. */
+  base?: string;
   /** When the prompt reached Claude. Null until the user's next message in
    *  Claude's chat carries it — and always null for `elsewhere`. */
   deliveredAt: number | null;
@@ -346,6 +370,21 @@ export interface DesignSignoff {
 export interface BuildReport {
   text: string;
   at: number;
+  /** The final checks, as they came out when the report was written. */
+  checks?: CheckResult[];
+}
+
+export const PR_STATES = ['draft', 'open', 'merged', 'closed'] as const;
+export type PrState = (typeof PR_STATES)[number];
+
+/** One branch of the build, as the agent reports it. */
+export interface BranchState {
+  /** Its pull request: the link, the number, and where it stands. */
+  pr?: { url?: string; number?: number; state: PrState };
+  /** The branch its pull request targets now — after a lower one merged,
+   *  the base branch rather than the one it was stacked on. */
+  base?: string;
+  updatedAt: number;
 }
 
 /**
@@ -354,7 +393,7 @@ export interface BuildReport {
  * confirmed, handed over and waiting for Claude to pick it up, being built,
  * built, or handed to something outside the harness.
  */
-export type PlanPhase = 'planning' | 'tasking' | 'submitted' | 'building' | 'built' | 'handed-off';
+export type PlanPhase = 'planning' | 'tasking' | 'submitted' | 'building' | 'finalizing' | 'built' | 'handed-off';
 
 export interface Plan {
   title: string;
@@ -389,6 +428,9 @@ export interface Plan {
   submission?: Submission;
   /** Claude's final report on the build. */
   report?: BuildReport;
+  /** What the build has done with each of its branches: the pull request
+   *  opened for it and where that stands, as the agent reports it. */
+  branches?: Record<string, BranchState>;
   /** Bumped each time Claude publishes the plan wholesale. */
   revision: number;
   createdAt: number;
@@ -530,11 +572,17 @@ export type PlanOp =
   /** One arrow, by id or by its ends. */
   | { op: 'remove_edge'; diagramId: string; id?: string; from?: string; to?: string; expect?: number }
   | { op: 'remove'; kind: 'section' | 'diagram' | 'task'; id: string }
+  /** A review's verdict on a task, for its current round: the user's from
+   *  Coplan, or the agent's through harness_task_update. */
+  | { op: 'review_task'; id: string; verdict: Verdict; summary?: string; userApproved?: boolean }
   | { op: 'comment'; target: Target; text: string }
   | { op: 'reply'; threadId: string; text: string }
   | { op: 'resolve'; threadId: string; resolved: boolean }
-  /** The final report on the build. Markdown; replaces any earlier one. */
-  | { op: 'report'; text: string };
+  /** The final report on the build. Markdown; replaces any earlier one.
+   *  `checks`: the final checks, as they came out. */
+  | { op: 'report'; text: string; checks?: CheckResult[] }
+  /** What became of one of the build's branches (harness_branch_update). */
+  | { op: 'set_branch'; branch: string; pr?: { url?: string; number?: number; state: string }; base?: string };
 
 export type PlanOpName = PlanOp['op'];
 

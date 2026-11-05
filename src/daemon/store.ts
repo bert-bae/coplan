@@ -330,6 +330,7 @@ export class SessionStore extends EventEmitter {
       trimmed,
       ...(input.note ? { note: input.note } : {}),
       ...(input.settings ? { settings: input.settings } : {}),
+      ...(input.project?.branches.base ? { base: input.project.branches.base } : {}),
     });
     this.mutate(id, (s) => {
       s.plan = next;

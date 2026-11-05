@@ -19,7 +19,7 @@ export interface ToolDef {
 /** Every tool only reads or writes harness state, so one budget fits all. */
 export const DEFAULT_BUDGET_MS = 30_000;
 
-const STATUS = { type: 'string', enum: ['todo', 'in_progress', 'blocked', 'done'] };
+const STATUS = { type: 'string', enum: ['todo', 'in_progress', 'blocked', 'done', 'dropped'] };
 
 const NODE = {
   type: 'object',
@@ -171,6 +171,11 @@ const OP_PROPERTIES: Record<string, unknown> = {
   builds: { ...STR_LIST, description: 'upsert_task: the boxes it builds now, as node ids or "diagramId/nodeId" (replaces its links; [] unlinks it).' },
   threadId: { type: 'string', description: 'reply / resolve: the comment thread.' },
   text: { type: 'string', description: 'reply: your reply. report: the build report. Markdown.' },
+  checks: {
+    type: 'array',
+    description: 'report: the final checks, as they came out.',
+    items: { type: 'object', properties: { name: { type: 'string' }, ok: { type: 'boolean' }, note: { type: 'string' } }, required: ['name', 'ok'] },
+  },
   resolved: { type: 'boolean' },
   kind: {
     type: 'string',
@@ -280,7 +285,7 @@ export const TOOLS: ToolDef[] = [
       '(by id to change one — an arrow\'s id is from->to unless the read shows another — or from and to to add one), ' +
       'remove_edge {diagramId, id? | from, to}; comment {target: {kind, id}, text} (start a thread — on a box: kind "node", id ' +
       '"diagramId/nodeId"; when you are unsure of a change, comment rather than overwrite); reply {threadId, text} ' +
-      '(reply to a comment); resolve {threadId, resolved}; remove {kind: section|diagram|task, id}; report {text} ' +
+      '(reply to a comment); resolve {threadId, resolved}; remove {kind: section|diagram|task, id}; report {text, checks?} ' +
       '(the final build report). upsert_section, upsert_diagram and upsert_task take expect: the rev you read. ' +
       'Example: {ops: [{op: "reply", threadId: "c2", text: "Done: split the cache."}]}. Once the user confirms the ' +
       'design only tasks, task links and comments change; once they submit the plan only upsert_task, comment, ' +
@@ -357,8 +362,9 @@ export const TOOLS: ToolDef[] = [
       'refine cycle, report the checks you ran, and mark it done with a one-line note once review passed — or ' +
       'blocked with a note, asking the user with AskUserQuestion. The only way to report progress. Refused: ' +
       'starting or finishing a task that still waits on another; starting more at once than the user allowed; a ' +
-      'review round past their limit; done before any review, or while a check fails or a review check was never ' +
-      'reported; progress on a task that has subtasks.',
+      'review round past their limit; done before any review, without a passing verdict for its last review round ' +
+      '(the user\'s own, when the user reviews it), or while a check fails or a review check was never reported; ' +
+      'progress on a task that has subtasks.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -375,14 +381,41 @@ export const TOOLS: ToolDef[] = [
           },
         },
         note: { type: 'string', description: 'One line: what was done, or what it is blocked on.' },
+        verdict: {
+          type: 'string',
+          enum: ['pass', 'changes'],
+          description: "The review's outcome, once it is in: pass, or changes (then refine). Recorded for the task's current review round.",
+        },
+        summary: { type: 'string', description: 'With verdict: one line on what the review found.' },
         user_approved: {
           type: 'boolean',
           description:
-            'Only when the user told you in chat to go past a limit: another review round past their maximum, more ' +
-            'tasks at once, or done although a check fails. Put what they said in `note`.',
+            'Only when the user told you in chat: their verdict on a task they review, another review round past ' +
+            'their maximum, more tasks at once, or done although a check fails. Put what they said in `note`.',
         },
       },
       required: ['task_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'harness_branch_update',
+    endpoint: 'branch',
+    description:
+      'Record what became of one of the build\'s branches, so the board shows the stack and harness_task_next can say ' +
+      'what to do when it moves: the pull request you opened for it (link, number, state), and later its state ' +
+      'again (merged, closed). When a branch below it merges, harness_task_next says to rebase this one onto the base ' +
+      'branch and point its pull request there — then record the new base.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        branch: { type: 'string', description: 'One of the plan\'s branches.' },
+        pr_url: { type: 'string', description: 'The pull request\'s link.' },
+        pr_number: { type: 'integer', minimum: 1 },
+        pr_state: { type: 'string', enum: ['draft', 'open', 'merged', 'closed'] },
+        base: { type: 'string', description: 'The branch its pull request targets now, when that changed (after a restack).' },
+      },
+      required: ['branch'],
       additionalProperties: false,
     },
   },

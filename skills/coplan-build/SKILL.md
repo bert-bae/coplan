@@ -87,8 +87,8 @@ Otherwise:
   branch it builds on.
 - When a lower branch changes after a branch above it was cut (a
   refinement, a fix), rebase the branches above onto it before going on.
-- A branch that needs work from two others: merge those first, or cut it
-  from the last of them and say so.
+- A branch built on the tasks with no branch is cut from the branch you
+  are on, where those land — the brief says so.
 - At the end, open the pull requests in stack order, each against the
   branch below it (the base branch for the bottom one), if the user wants
   pull requests and you have the tools for it. Say in each which tasks it
@@ -101,7 +101,14 @@ Otherwise:
   `request_user_input` in Codex, or plainly in chat). Keep building other ready tasks meanwhile.
 - **Work not on the plan** — add it first:
   `harness_plan_edit {ops: [{op: "upsert_task", parentId, title, detail, dependsOn}]}`,
-  then build it like any other.
+  then build it like any other. It shows as added during the build. Not
+  under a task that has already started: add it beside that task, depending
+  on it. The tasks the user signed off keep their title, detail, branch and
+  review; track them with notes, and ask if one is wrong.
+- **Work no longer needed** — drop it, saying why:
+  `harness_task_update {task_id, status: "dropped", note}`. It no longer
+  holds anything up; check the tasks that waited on it still have what they
+  need, and tell the user.
 - **A dependency is wrong** (a task really can start earlier, or needs
   something it does not list) — change it with `harness_plan_edit {ops: [{op: "upsert_task", id, dependsOn}]}`
   and tell the user why in chat.
@@ -117,9 +124,15 @@ When `harness_task_next` says every task is done:
 1. Run the **final** checks (`coplan check final`, or the commands the
    prompt lists). Fix what they find — as a task (`upsert_task`), through
    the cycle like any other.
-2. Push the branches; open the pull requests in stack order if wanted.
-3. Write the build report — `harness_plan_edit {ops: [{op: "report", text}]}` — in
-   markdown:
+2. Push the branches; open the pull requests in stack order if wanted, and
+   record each one — `harness_branch_update {branch, pr_url, pr_number, pr_state}`
+   — so the board shows the stack. When one merges, record that too: if a
+   branch above it now needs rebasing onto the base branch and its pull
+   request pointing there, `harness_task_next` says so; do it, then record
+   the new `base`.
+3. Write the build report — `harness_plan_edit {ops: [{op: "report", text, checks}]}`,
+   with the final checks as they came out in `checks` — in markdown. The
+   plan is built once the report is in:
    - **Built** — each top-level task, one line each, with its sub-results.
    - **Branches & PRs** — in stack order, with links.
    - **Checks** — the final checks and how they came out.

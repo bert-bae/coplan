@@ -4,6 +4,7 @@ import {
   PlanError,
   applyOps,
   confirmDesign,
+  countTasks,
   isDesignLocked,
   isLocked,
   markDelivered,
@@ -82,7 +83,11 @@ test('a plan moves from planning to tasking to submitted to building to built', 
   assert.equal(plan.submission?.deliveredAt, 3_000);
 
   for (const task of plan.tasks) plan = applyOps(plan, [{ op: 'upsert_task', id: task.id, status: 'done' }], 'claude', undefined, { tracking: true }).plan;
+  // Every task done, the build is finishing: final checks, pull requests, report.
+  assert.equal(planPhase(plan), 'finalizing');
+  plan = applyOps(plan, [{ op: 'report', text: '## Built', checks: [{ name: 'tests', ok: true }] }], 'claude').plan;
   assert.equal(planPhase(plan), 'built');
+  assert.match(renderPlan(plan), /Final checks: tests ✓/);
 });
 
 test('a plan handed off to be built elsewhere is locked, and never waits for delivery', () => {
@@ -138,9 +143,65 @@ test('the user can change nothing on a submitted plan', () => {
 test('Claude can track the work on a submitted plan, and add work it discovers', () => {
   let plan = markDelivered(submitted());
   plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'in_progress' }], 'claude', undefined, { tracking: true }).plan;
-  plan = applyOps(plan, [{ op: 'upsert_task', parentId: 'client', title: 'Handle timeouts' }], 'claude').plan;
+  // Under a task already started, it would take that task's progress away.
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_task', parentId: 'client', title: 'Handle timeouts' }], 'claude'), /already in progress, so it cannot take subtasks/);
+  plan = applyOps(plan, [{ op: 'upsert_task', title: 'Handle timeouts', dependsOn: ['client'] }], 'claude').plan;
   assert.equal(plan.tasks.find((t) => t.id === 'client')?.status, 'in_progress');
-  assert.ok(plan.tasks.some((t) => t.title === 'Handle timeouts'));
+  const added = plan.tasks.find((t) => t.title === 'Handle timeouts')!;
+  assert.equal(added.addedInBuild, true, 'marked as found during the build');
+  // Work Claude added is its own to shape; the signed-off tasks are not.
+  assert.doesNotThrow(() => applyOps(plan, [{ op: 'upsert_task', id: added.id, detail: 'Retry twice, then fail.' }], 'claude'));
+  assert.throws(
+    () => applyOps(plan, [{ op: 'upsert_task', id: 'client', detail: 'Actually, use memcached.' }], 'claude'),
+    /part of the plan the user submitted, so its detail cannot change now/,
+  );
+  assert.doesNotThrow(() => applyOps(plan, [{ op: 'upsert_task', id: 'client', note: 'wrapping ioredis' }], 'claude'));
+});
+
+test('dropped work is settled: it holds nothing up, and the plan is built without it', () => {
+  let plan = markDelivered(submitted());
+  const leaves = plan.tasks.filter((t) => !plan.tasks.some((c) => c.parentId === t.id));
+  const [first, ...rest] = leaves;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: first!.id, status: 'dropped', note: 'not needed after all' }], 'claude', undefined, { tracking: true }).plan;
+  assert.equal(countTasks(plan).total, leaves.length - 1, 'out of the count');
+  for (const t of rest) plan = applyOps(plan, [{ op: 'upsert_task', id: t.id, status: 'done' }], 'claude', undefined, { tracking: true }).plan;
+  assert.equal(planPhase(plan), 'finalizing', 'built once the report is in');
+});
+
+test('a build whose every task was dropped still finishes, and is built by its report', () => {
+  let plan = markDelivered(submitted());
+  for (const t of plan.tasks.filter((x) => !plan.tasks.some((c) => c.parentId === x.id))) {
+    plan = applyOps(plan, [{ op: 'upsert_task', id: t.id, status: 'dropped', note: 'out of scope now' }], 'claude', undefined, { tracking: true }).plan;
+  }
+  assert.equal(planPhase(plan), 'finalizing');
+  plan = applyOps(plan, [{ op: 'report', text: 'Nothing was built: the user dropped it all.' }], 'claude').plan;
+  assert.equal(planPhase(plan), 'built');
+});
+
+test('a verdict is given in review; a pass that closed a round goes when the task is taken up again', () => {
+  let plan = markDelivered(submitted());
+  const step = (op: Record<string, unknown>) =>
+    (plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', ...op } as PlanOp], 'claude', undefined, { tracking: true }).plan);
+  const verdict = (v: 'pass' | 'changes') => applyOps(plan, [{ op: 'review_task', id: 'client', verdict: v }], 'claude', undefined, { tracking: true }).plan;
+  step({ stage: 'review' });
+  plan = verdict('changes');
+  step({ stage: 'refine' });
+  // From refine, after it asked for changes, the round cannot be passed.
+  assert.throws(() => verdict('pass'), /not in review now/);
+  step({ stage: 'review' });
+  plan = verdict('pass');
+  step({ status: 'done' });
+  // Taken up again, the work changes: the pass that closed round 2 no longer stands.
+  step({ status: 'in_progress', stage: 'refine' });
+  assert.deepEqual(plan.tasks.find((t) => t.id === 'client')!.reviews!.map((r) => `${r.round}:${r.verdict}`), ['1:changes']);
+});
+
+test('a report whose final checks are not all whole is refused, not trimmed', () => {
+  const plan = markDelivered(submitted());
+  assert.throws(
+    () => applyOps(plan, [{ op: 'report', text: 'Built.', checks: [{ name: 'tests', ok: 'false' as never }, { name: 'lint', ok: true }] }], 'claude'),
+    /`ok` true or false/,
+  );
 });
 
 test('Claude cannot redesign a submitted plan, and is told what to do instead', () => {
@@ -423,4 +484,15 @@ test('what Claude reads back says the plan is locked, and why', () => {
   assert.match(renderPlan(plan), /\*\*Locked for building\.\*\*/);
   assert.match(renderPlan(submitted('elsewhere')), /built outside this session/);
   assert.doesNotMatch(renderPlan(published()), /Locked/);
+});
+
+test("on a locked plan the user's one say is their verdict; the agent gives its own through harness_task_update", () => {
+  let plan = markDelivered(submitted());
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', stage: 'review' }], 'claude', undefined, { tracking: true }).plan;
+  plan = applyOps(plan, [{ op: 'review_task', id: 'client', verdict: 'changes', summary: 'needs a timeout' }], 'user').plan;
+  assert.deepEqual(plan.tasks.find((t) => t.id === 'client')!.reviews!.map((r) => `${r.verdict}:${r.by}`), ['changes:user']);
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_task', id: 'client', title: 'x' }], 'user'), /locked/);
+  assert.throws(() => applyOps(plan, [{ op: 'review_task', id: 'client', verdict: 'pass' }], 'claude'), /harness_task_update/);
+  const wire = plan.tasks.find((t) => t.title === 'Wire into API')!.id;
+  assert.throws(() => applyOps(plan, [{ op: 'review_task', id: wire, verdict: 'pass' }], 'user'), /has not been to review yet/);
 });

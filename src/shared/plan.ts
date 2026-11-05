@@ -10,6 +10,7 @@
 import type {
   Author,
   BuildSettings,
+  BranchState,
   BuildTarget,
   Change,
   CheckResult,
@@ -30,6 +31,7 @@ import type {
   PlanOp,
   PlanOpName,
   PlanPhase,
+  ReviewRecord,
   Section,
   Submission,
   Target,
@@ -40,8 +42,11 @@ import type {
   TaskStatus,
   Thread,
 } from './types.ts';
-import { BUILD_TARGETS, EDGE_ARROWS, IRIC_STAGES, NODE_KINDS, TASK_STATUSES } from './types.ts';
-import { cleanSettings, dependencyProblem, validReview } from './build.ts';
+import { BUILD_TARGETS, EDGE_ARROWS, IRIC_STAGES, NODE_KINDS, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
+import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, validReview } from './build.ts';
+
+/** How many review verdicts a task keeps. */
+const MAX_REVIEWS = 20;
 
 /** Raised for an op that cannot apply. The message is shown verbatim to
  *  whoever sent it — the user in a toast, Claude in a tool result. */
@@ -714,12 +719,16 @@ function checkDependencies(plan: Plan): void {
 }
 
 function cleanBranch(value: unknown): string | undefined {
-  const name = clean(value, 120)?.replace(/\s+/g, '-');
+  const name = clean(value, 120);
   if (!name) return undefined;
-  // What git refuses, refused here, rather than discovered at checkout.
-  if (/[~^:?*[\\\x00-\x20\x7f]|\.\.|@\{|^[-/.]|[/.]$|\/\/|\.lock$/.test(name)) {
-    throw new PlanError(`"${name}" is not a usable git branch name.`);
-  }
+  if (/\s/.test(name)) throw new PlanError(`"${name}" has spaces, which git branch names cannot: use - instead, e.g. "${name.replace(/\s+/g, '-')}".`);
+  // What git refuses, refused here, rather than discovered at checkout —
+  // the whole name, and each part of its path.
+  const bad =
+    name === '@' ||
+    /[~^:?*[\\\x00-\x20\x7f]|\.\.|@\{|^[-/]|\/$|\/\//.test(name) ||
+    name.split('/').some((part) => part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'));
+  if (bad) throw new PlanError(`"${name}" is not a usable git branch name.`);
   return name;
 }
 
@@ -857,10 +866,12 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
   upsert_edge: ['diagramId', 'id', 'from', 'to', 'label', 'dashed', 'arrows', 'expect'],
   remove_edge: ['diagramId', 'id', 'from', 'to', 'expect'],
   remove: ['kind', 'id'],
+  review_task: ['id', 'verdict', 'summary', 'userApproved'],
   comment: ['target', 'text'],
   reply: ['threadId', 'text'],
   resolve: ['threadId', 'resolved'],
-  report: ['text'],
+  report: ['text', 'checks'],
+  set_branch: ['branch', 'pr', 'base'],
 };
 
 /** Refuses an edit Claude sent with a field its op does not take. */
@@ -1056,6 +1067,12 @@ export const PROGRESS_FIELDS = ['status', 'stage', 'checks'] as const;
  * a status would walk straight past those gates.
  */
 function refuseProgress(op: PlanOp): void {
+  if (op.op === 'set_branch') {
+    throw new PlanError('What became of a branch goes through harness_branch_update {branch, pr_url, pr_number, pr_state, base}.');
+  }
+  if (op.op === 'review_task') {
+    throw new PlanError('A review verdict goes through harness_task_update {task_id, verdict, summary}.');
+  }
   if (op.op !== 'upsert_task') return;
   const given = PROGRESS_FIELDS.filter((k) => op[k] !== undefined);
   if (!given.length) return;
@@ -1100,8 +1117,9 @@ export function applyOps(
   // it waits on can be added together in either order. A problem the plan
   // already had (written by an older build) does not block unrelated edits.
   if (ops.some((op) => TASK_SHAPE_OPS.has((op as { op?: string })?.op ?? '') || (op as { kind?: string })?.kind === 'task')) {
-    const problem = dependencyProblem(next);
-    if (problem && problem !== dependencyProblem(plan)) throw new PlanError(problem);
+    const had = new Set(dependencyProblems(plan));
+    const added = dependencyProblems(next).find((p) => !had.has(p));
+    if (added) throw new PlanError(added);
   }
   // A comment on a box or an arrow an edit took away is kept, on the plan,
   // saying what it was about — as for any removed item.
@@ -1240,6 +1258,15 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       if (!title) throw new PlanError(op.id ? `No task "${op.id}".` : 'A new task needs a title.');
       if (plan.tasks.length >= MAX_TASKS) throw new PlanError(`A plan holds at most ${MAX_TASKS} tasks.`);
       const parentId = op.parentId ? requireTask(plan, op.parentId).id : null;
+      // Under a task already started or finished, a subtask would make it a
+      // parent and take its progress — stage, rounds, checks — away.
+      const parent = parentId ? requireTask(plan, parentId) : null;
+      if (parent && parent.status !== 'todo' && !plan.tasks.some((t) => t.parentId === parent.id)) {
+        throw new PlanError(
+          `"${parent.title}" is already ${STATUS_WORDS[parent.status]}, so it cannot take subtasks: add the new work as its own ` +
+            `task beside it${parent.parentId ? ` (parentId "${parent.parentId}")` : ''}, depending on ${parent.id} if it builds on it.`,
+        );
+      }
       const detail = clean(op.detail, MAX_TEXT);
       const note = clean(op.note, MAX_TITLE * 2);
       const files = cleanList(op.files);
@@ -1263,6 +1290,8 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         ...(review ? { review } : {}),
         ...(stage && status === 'in_progress' ? { stage, ...(stage === 'review' ? { round: 1 } : {}) } : {}),
         ...(checks?.length ? { checks } : {}),
+        // Work found once the plan was signed off: the user did not sign it.
+        ...(plan.submission ? { addedInBuild: true } : {}),
         createdAt: now,
         updatedAt: now,
         createdBy: author,
@@ -1366,12 +1395,69 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       ];
     }
 
+    case 'review_task': {
+      const task = requireTask(plan, op.id);
+      if (plan.tasks.some((t) => t.parentId === task.id)) throw new PlanError(`"${task.title}" has subtasks: review each of them.`);
+      const verdict = oneOf(op.verdict, VERDICTS, 'a review verdict');
+      if (!verdict) throw new PlanError('Give the verdict: "pass", or "changes".');
+      if (!task.round) throw new PlanError(`"${task.title}" has not been to review yet.`);
+      // A verdict is the outcome of a review in progress: not a way to close
+      // a round from refine, after it asked for changes.
+      if (task.status !== 'in_progress' || task.stage !== 'review') {
+        throw new PlanError(`"${task.title}" is not in review now: a verdict is given while it is.`);
+      }
+      const by: Author = author === 'user' || op.userApproved ? 'user' : 'claude';
+      const summary = clean(op.summary, MAX_TITLE * 2);
+      const record: ReviewRecord = {
+        round: task.round,
+        verdict,
+        by,
+        mode: effectiveReview(plan, task, plan.submission?.settings?.review ?? DEFAULT_BUILD_SETTINGS.review),
+        ...(summary ? { summary } : {}),
+        at: now,
+      };
+      task.reviews = [...(task.reviews ?? []), record].slice(-MAX_REVIEWS);
+      task.updatedAt = now;
+      const who = by === 'user' ? 'the user' : 'Claude';
+      const what = verdict === 'pass' ? 'passed' : 'asked for changes to';
+      return [log('status', ref('task', task.id), `${who} ${what} "${task.title}" in review round ${task.round}${summary ? `: ${short(summary, 80)}` : ''}`)];
+    }
+
     case 'report': {
       const text = clean(op.text, MAX_TEXT);
       if (!text) throw new PlanError('A report needs text.');
-      if (plan.report?.text === text) return [];
-      plan.report = { text, at: now };
+      const checks = op.checks === undefined ? undefined : cleanChecks(op.checks);
+      // Every check whole, or none: a malformed one dropped quietly would erase
+      // the failure the report is there to record.
+      if (op.checks !== undefined && (!checks || !Array.isArray(op.checks) || checks.length !== Math.min(op.checks.length, 40))) {
+        throw new PlanError('`checks` is a list of {name, ok, note?}, with `ok` true or false.');
+      }
+      if (plan.report?.text === text && !checks) return [];
+      plan.report = { text, at: now, ...(checks?.length ? { checks } : {}) };
       return [log('edited', { kind: 'plan', id: '' }, 'wrote the build report')];
+    }
+
+    case 'set_branch': {
+      const name = cleanBranch(op.branch);
+      if (!name) throw new PlanError('Name the branch.');
+      if (!plan.tasks.some((t) => effectiveBranch(plan, t) === name)) {
+        throw new PlanError(`No task lands on \`${name}\`: the plan's branches are ${[...new Set(plan.tasks.map((t) => effectiveBranch(plan, t)).filter(Boolean))].map((b) => `\`${b}\``).join(', ') || 'none'}.`);
+      }
+      const was = plan.branches?.[name];
+      const state: BranchState = { ...(was ?? {}), updatedAt: now };
+      if (op.pr) {
+        const prState = oneOf(op.pr.state, PR_STATES, 'a pull request state');
+        if (!prState) throw new PlanError('A pull request needs its state: draft, open, merged or closed.');
+        const url = clean(op.pr.url, 400);
+        if (url && !/^https?:\/\//.test(url)) throw new PlanError(`"${url}" is not a link.`);
+        const number = typeof op.pr.number === 'number' && Number.isInteger(op.pr.number) && op.pr.number > 0 ? op.pr.number : was?.pr?.number;
+        state.pr = { state: prState, ...(url ?? was?.pr?.url ? { url: url ?? was?.pr?.url } : {}), ...(number ? { number } : {}) };
+      }
+      if (op.base !== undefined) state.base = cleanBranch(op.base) ?? '';
+      if (!state.base) delete state.base;
+      plan.branches = { ...(plan.branches ?? {}), [name]: state };
+      const pr = state.pr ? `pull request${state.pr.number ? ` #${state.pr.number}` : ''} ${state.pr.state}` : 'updated';
+      return [log('status', { kind: 'plan', id: '' }, `\`${name}\`: ${pr}${state.base ? `, onto \`${state.base}\`` : ''}`)];
     }
 
     default:
@@ -1388,6 +1474,19 @@ function editTask(
   log: (kind: ChangeKind, target: Target, summary: string) => Change,
 ): Change[] {
   checkTaskRev(task, op.expect, author);
+  // On a submitted plan, what a task the user signed off says is theirs:
+  // Claude tracks the work (a note, the files it touched, a dependency it
+  // found to be wrong) but does not re-scope it. Tasks it adds itself are
+  // its own to shape.
+  if (plan.submission && author === 'claude' && !task.addedInBuild) {
+    const scope = (['title', 'detail', 'branch', 'review', 'builds'] as const).filter((k) => op[k] !== undefined);
+    if (scope.length) {
+      throw new PlanError(
+        `"${task.title}" is part of the plan the user submitted, so its ${scope.join(', ')} cannot change now. Track the work with ` +
+          'a note; add work you discover as a new task; if the task itself is wrong, stop and ask the user — they can reopen the plan.',
+      );
+    }
+  }
   const out: Change[] = [];
   const edited: string[] = [];
   const title = clean(op.title, MAX_TITLE);
@@ -1443,25 +1542,32 @@ function editTask(
     const status = validStatus(wanted);
     if (!status) throw new PlanError(`"${wanted}" is not a task status (${TASK_STATUSES.join(', ')}).`);
     if (status !== task.status) {
+      // A finished task taken up again changes: the pass that closed its
+      // round passed the work as it was, not as it will be.
+      if (task.status === 'done' && status !== 'dropped' && task.reviews) {
+        task.reviews = task.reviews.filter((r) => r.round !== task.round);
+        if (!task.reviews.length) delete task.reviews;
+      }
       task.status = status;
       task.updatedAt = now;
       const note = task.note && typeof op.note === 'string' ? ` — ${short(task.note, 80)}` : '';
       out.push(log('status', ref('task', task.id), `marked "${task.title}" ${STATUS_WORDS[status]}${note}`));
     }
     // Finished, or back in the pile: no longer anywhere in the cycle.
-    if (status === 'done' || status === 'todo') delete task.stage;
+    if (status === 'done' || status === 'todo' || status === 'dropped') delete task.stage;
     // Put back in the pile by the user, it starts its cycle over: the rounds
     // and checks of the work it had are not this work's. Claude cannot do
     // that to itself — it would be a way round the round limit.
     if (status === 'todo' && author === 'user') {
       delete task.round;
       delete task.checks;
+      delete task.reviews;
     }
   }
   const progress: string[] = [];
   // Going into review is a round. Reporting review again while in it —
   // with the review checks, say — is the same round.
-  if (stage && task.status !== 'done' && task.status !== 'todo' && stage !== task.stage) {
+  if (stage && task.status !== 'done' && task.status !== 'todo' && task.status !== 'dropped' && stage !== task.stage) {
     task.stage = stage;
     if (stage === 'review') task.round = (task.round ?? 0) + 1;
     progress.push(stage === 'review' ? `in review (round ${task.round})` : STAGE_WORDS[stage]);
@@ -1588,7 +1694,7 @@ export const MAX_NOTE = 4_000;
 
 /** What Claude may still do to a locked plan: track the work it is doing,
  *  and answer comments. Everything else is the design the user signed off. */
-const TRACKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'comment', 'reply', 'resolve', 'report']);
+const TRACKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'review_task', 'comment', 'reply', 'resolve', 'report', 'set_branch']);
 
 /** Ops that can change which task waits on which. */
 const TASK_SHAPE_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task']);
@@ -1608,16 +1714,22 @@ const DESIGN_LOCKED_FOR_CLAUDE =
 
 /** What a confirmed design still lets anyone do: work on the tasks, link
  *  them to boxes (checked inside upsert_diagram), and talk about it. */
-const TASKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task', 'upsert_diagram', 'upsert_node', 'comment', 'reply', 'resolve', 'report']);
+const TASKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task', 'upsert_diagram', 'upsert_node', 'review_task', 'set_branch', 'comment', 'reply', 'resolve', 'report']);
 
 /** Where the plan is in its life. */
-export function planPhase(plan: Pick<Plan, 'submission' | 'tasks' | 'design'> | null): PlanPhase {
+export function planPhase(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> & Partial<Pick<Plan, 'report'>>) | null): PlanPhase {
   const submission = plan?.submission;
   if (!submission) return plan?.design ? 'tasking' : 'planning';
   if (submission.target === 'elsewhere') return 'handed-off';
   if (!submission.deliveredAt) return 'submitted';
-  const counts = countTasks(plan);
-  return counts.total > 0 && counts.done === counts.total ? 'built' : 'building';
+  // Every leaf settled — done, or dropped with a reason. All of them dropped
+  // is settled too: a build can end with nothing left to do.
+  const tasks = plan?.tasks ?? [];
+  const leaves = tasks.filter((t) => !tasks.some((c) => c.parentId === t.id));
+  if (!leaves.length || !leaves.every((t) => t.status === 'done' || t.status === 'dropped')) return 'building';
+  // Every task done is not the build done: the final checks, the pull
+  // requests and the report come after. The report closes it.
+  return plan?.report ? 'built' : 'finalizing';
 }
 
 /** Whether the plan is locked against editing. */
@@ -1632,7 +1744,11 @@ export function isDesignLocked(plan: Pick<Plan, 'submission' | 'design'> | null)
 }
 
 function checkLocked(ops: PlanOp[], author: Author): void {
-  if (author === 'user') throw new PlanError(LOCKED_FOR_USER);
+  // The user's one say on a locked plan: their verdict on a task they review.
+  if (author === 'user') {
+    if (ops.every((op) => (op as { op?: string })?.op === 'review_task')) return;
+    throw new PlanError(LOCKED_FOR_USER);
+  }
   const refused = ops.find((op) => !TRACKING_OPS.has((op as { op?: string })?.op ?? ''));
   if (refused) throw new PlanError(`${LOCKED_FOR_CLAUDE} (Refused: ${(refused as { op?: string })?.op ?? 'an edit'}.)`);
 }
@@ -1673,7 +1789,7 @@ export function cleanNote(value: unknown): string | undefined {
  */
 export function submitPlan(
   plan: Plan,
-  input: { target: BuildTarget; prompt: string; note?: string; trimmed?: boolean; settings?: BuildSettings },
+  input: { target: BuildTarget; prompt: string; note?: string; trimmed?: boolean; settings?: BuildSettings; base?: string },
   now = Date.now(),
 ): Plan {
   if (plan.submission) throw new PlanError('The plan has already been submitted.');
@@ -1681,6 +1797,11 @@ export function submitPlan(
     throw new PlanError('Confirm the design first: the task list is made from the confirmed design, and then the plan is submitted.');
   }
   if (!input.prompt.trim()) throw new PlanError('There is no prompt to submit.');
+  // What is submitted gets built: a plan that cannot be is refused here,
+  // not discovered by the agent halfway through.
+  if (!plan.tasks.length) throw new PlanError('The plan has no tasks to build: make the task list first.');
+  const problem = dependencyProblem(plan);
+  if (problem) throw new PlanError(`The task list cannot be built as it is. ${problem}`);
   const next = structuredClone(plan);
   const note = cleanNote(input.note);
   next.submission = {
@@ -1690,6 +1811,7 @@ export function submitPlan(
     prompt: input.prompt,
     ...(input.trimmed ? { trimmed: true } : {}),
     ...(input.settings ? { settings: cleanSettings(input.settings) } : {}),
+    ...(input.base ? { base: input.base } : {}),
     deliveredAt: null,
   };
   next.version += 1;
@@ -1793,6 +1915,7 @@ function validSubmission(raw: unknown): Submission | undefined {
     prompt: s.prompt,
     ...(s.trimmed === true ? { trimmed: true } : {}),
     ...(s.settings && typeof s.settings === 'object' ? { settings: cleanSettings(s.settings) } : {}),
+    ...(typeof s.base === 'string' && s.base ? { base: s.base } : {}),
     deliveredAt: typeof s.deliveredAt === 'number' ? s.deliveredAt : null,
   };
 }
@@ -2218,6 +2341,8 @@ export function countTasks(plan: Pick<Plan, 'tasks'> | null): TaskCounts {
   const parents = new Set(plan.tasks.map((t) => t.parentId).filter(Boolean));
   for (const t of plan.tasks) {
     if (parents.has(t.id)) continue;
+    // Dropped work is neither done nor left to do: it is out of the count.
+    if (t.status === 'dropped') continue;
     counts.total++;
     if (t.status === 'done') counts.done++;
     else if (t.status === 'in_progress') counts.inProgress++;
@@ -2235,6 +2360,7 @@ const STATUS_WORDS: Record<TaskStatus, string> = {
   in_progress: 'in progress',
   blocked: 'blocked',
   done: 'done',
+  dropped: 'dropped',
 };
 
 function ref(kind: Target['kind'], id: string): Target {

@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PlanError, applyOps, confirmDesign, markDelivered, publishPlan, publishTasks, normalizePlan, submitPlan } from '../shared/plan.ts';
 import {
+  SESSION_BRANCH,
+  stackStatus,
   branchPlan,
   buildSteps,
   cleanSettings,
@@ -150,18 +152,47 @@ test('branches are inherited, and one built on another stacks on it', () => {
   assert.match(renderPlan(plan), /- `cache\/api` from `cache\/storage` \(stacked\) — wire/);
 });
 
-test('a branch that needs two others cannot simply stack, and says so', () => {
+test('a branch that needs two others is refused: a pull request has one base', () => {
+  const twoBases = [
+    { id: 'a', title: 'A', branch: 'one' },
+    { id: 'b', title: 'B', branch: 'two' },
+    { id: 'c', title: 'C', branch: 'three', dependsOn: ['a', 'b'] },
+  ];
+  assert.throws(() => publishTasks(tasked(), { tasks: twoBases }), /`three` needs work from `one` and `two`, but a pull request has one base/);
+  // Made to stack, one on the other, it is a plain stack of three.
+  const plan = publishTasks(tasked(), { tasks: [twoBases[0]!, { ...twoBases[1]!, dependsOn: ['a'] }, twoBases[2]!] }).plan;
+  assert.deepEqual(
+    branchPlan(plan).branches.map((b) => `${b.branch}<-${b.base}`),
+    ['one<-null', 'two<-one', 'three<-two'],
+  );
+});
+
+test('a branch built on the unbranched tasks stacks on the session branch, not on base', () => {
   const plan = publishTasks(tasked(), {
     tasks: [
-      { id: 'a', title: 'A', branch: 'one' },
-      { id: 'b', title: 'B', branch: 'two' },
-      { id: 'c', title: 'C', branch: 'three', dependsOn: ['a', 'b'] },
+      { id: 'core', title: 'Core, on the current branch' },
+      { id: 'api', title: 'API', branch: 'cache/api', dependsOn: ['core'] },
     ],
   }).plan;
-  const three = branchPlan(plan).branches.find((b) => b.branch === 'three')!;
-  assert.equal(three.base, null);
-  assert.deepEqual(three.needs.sort(), ['one', 'two']);
-  assert.match(renderPlan(plan), /`three` needs `one` and `two`: merge those first/);
+  const api = branchPlan(plan).branches.find((b) => b.branch === 'cache/api')!;
+  assert.equal(api.base, SESSION_BRANCH);
+  assert.match(renderPlan(plan), /`cache\/api` from the branch you are on, where the unbranched tasks land \(stacked\)/);
+  assert.match(renderBrief(plan, plan.tasks.find((t) => t.id === 'api')!, {}), /Cut it from the branch you are on/);
+});
+
+test('branch names that are folders of each other are refused', () => {
+  assert.throws(
+    () => publishTasks(tasked(), { tasks: [{ id: 'a', title: 'A', branch: 'api' }, { id: 'b', title: 'B', branch: 'api/v2' }] }),
+    /`api` and `api\/v2` cannot both exist in git/,
+  );
+});
+
+test('submitting a plan whose tasks cannot be built is refused', () => {
+  const empty = confirmDesign(publishPlan(null, { ...DESIGN, tasks: [] }).plan, { prompt: 'p' });
+  assert.throws(() => submitPlan(empty, { target: 'session', prompt: 'build' }), /no tasks to build/);
+  const broken = structuredClone(tasked());
+  broken.tasks.find((t) => t.id === 'client')!.dependsOn = ['wire'];
+  assert.throws(() => submitPlan(broken, { target: 'session', prompt: 'build' }), /cannot be built as it is/);
 });
 
 test('branches that each need the other cannot stack, and are refused', () => {
@@ -197,6 +228,9 @@ test('a finished build takes no new task list: the next plan starts afresh', () 
   plan = submitPlan(plan, { target: 'session', prompt: 'build' });
   plan = markDelivered(plan);
   plan = done(plan, 'client', 'config', 'invalidate', 'wire', 'docs');
+  // Every task done is not yet built: the build is finished by its report.
+  assert.throws(() => publishTasks(plan, { tasks: [{ title: 'More' }] }), /locked/);
+  plan = applyOps(plan, [{ op: 'report', text: 'Built.' }], 'claude').plan;
   assert.throws(() => publishTasks(plan, { tasks: [{ title: 'More' }] }), /This plan is built/);
 });
 
@@ -213,8 +247,11 @@ test('linking a task to a box through `builds` is a change like any other', () =
 
 test('a branch name git would refuse is refused here', () => {
   assert.throws(() => applyOps(tasked(), [{ op: 'upsert_task', id: 'docs', branch: 'bad..name' }], 'user'), /not a usable git branch/);
-  const plan = applyOps(tasked(), [{ op: 'upsert_task', id: 'docs', branch: 'docs update' }], 'user').plan;
-  assert.equal(plan.tasks.find((t) => t.id === 'docs')?.branch, 'docs-update');
+  for (const bad of ['docs/.hidden', 'docs.lock/x', 'docs/', '@']) {
+    assert.throws(() => applyOps(tasked(), [{ op: 'upsert_task', id: 'docs', branch: bad }], 'user'), /not a usable git branch/, bad);
+  }
+  // Spaces are refused, with the name it could have been — not changed quietly.
+  assert.throws(() => applyOps(tasked(), [{ op: 'upsert_task', id: 'docs', branch: 'docs update' }], 'user'), /use - instead, e\.g\. "docs-update"/);
 });
 
 /* ------------------------------------------------------------------ *
@@ -480,4 +517,50 @@ test("a parent's brief lists its subtasks in the order they can be built, not th
   const brief = renderBrief(plan, plan.tasks.find((t) => t.id === 'storage')!, {});
   const order = [...brief.matchAll(/^- \[ \] (?:NOT DONE YET — )?(\w+) /gm)].map((m) => m[1]);
   assert.deepEqual(order.slice(0, 3), ['client', 'invalidate', 'config']);
+});
+
+test('dropped work shapes no branch, and a loop through the unbranched tasks is refused', () => {
+  let plan = publishTasks(tasked(), {
+    tasks: [
+      { id: 'a', title: 'A', branch: 'x/a' },
+      { id: 'b', title: 'B', branch: 'x/b', dependsOn: ['a'] },
+    ],
+  }).plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'a', status: 'dropped', note: 'not needed' }], 'claude', undefined, { tracking: true }).plan;
+  assert.deepEqual(branchPlan(plan).branches.map((b) => `${b.branch}<-${b.base}`), ['x/b<-null'], 'x/a is gone, and x/b no longer stacks on it');
+
+  // api waits on an unbranched task that itself waits on api.
+  assert.throws(
+    () =>
+      publishTasks(tasked(), {
+        tasks: [
+          { id: 'a1', title: 'API part one', branch: 'api' },
+          { id: 'u1', title: 'Glue', dependsOn: ['a1'] },
+          { id: 'a2', title: 'API part two', branch: 'api', dependsOn: ['u1'] },
+        ],
+      }),
+    /`api` → the unbranched tasks \(the current branch\)|the unbranched tasks \(the current branch\) → `api`/,
+  );
+});
+
+test('a restack goes down the stack to the first branch still open', () => {
+  let plan = publishTasks(tasked(), {
+    tasks: [
+      { id: 'a', title: 'A', branch: 'x/a' },
+      { id: 'b', title: 'B', branch: 'x/b', dependsOn: ['a'] },
+      { id: 'c', title: 'C', branch: 'x/c', dependsOn: ['b'] },
+    ],
+  }).plan;
+  const record = (branch: string, state: string, base?: string) =>
+    (plan = applyOps(plan, [{ op: 'set_branch', branch, pr: { state }, ...(base ? { base } : {}) }], 'claude', undefined, { tracking: true }).plan);
+  record('x/a', 'open');
+  record('x/b', 'merged');
+  record('x/c', 'open');
+  // x/b merged into x/a, which is still open: x/c goes onto x/a, not main.
+  assert.match(stackStatus(plan, 'main').find((s) => s.branch === 'x/c')!.restack!, /rebase `x\/c` onto `x\/a`/);
+  record('x/c', 'open', 'x/a');
+  assert.equal(stackStatus(plan, 'main').find((s) => s.branch === 'x/c')!.restack, undefined);
+  // Then x/a merges too: x/c goes onto main.
+  record('x/a', 'merged');
+  assert.match(stackStatus(plan, 'main').find((s) => s.branch === 'x/c')!.restack!, /rebase `x\/c` onto `main`/);
 });

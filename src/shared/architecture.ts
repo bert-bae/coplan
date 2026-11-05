@@ -33,7 +33,7 @@ export const KIND_NOUN: Record<NodeKind, string> = {
   note: 'note',
 };
 
-const STATUS_MARK = { todo: '[ ]', in_progress: '[~]', blocked: '[!]', done: '[x]' } as const;
+const STATUS_MARK = { todo: '[ ]', in_progress: '[~]', blocked: '[!]', done: '[x]', dropped: '[-]' } as const;
 
 /** The parts of a diagram the translation reads: no layout. */
 export type DiagramContent = Pick<Diagram, 'id' | 'title' | 'caption' | 'edges'> & {

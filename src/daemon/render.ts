@@ -24,6 +24,7 @@ import { contentOf, diagramChanges, diagramToMarkdown, hang, indent, nestHeading
 import {
   DEFAULT_BUILD_SETTINGS,
   REVIEW_WORDS,
+  baseWords,
   branchPlan,
   buildSteps,
   hasDependencies,
@@ -34,7 +35,7 @@ import {
 import { HOOK_STAGES, PROJECT_CONFIG_PATH, emptyProjectConfig, hasHooks, type ProjectConfig } from '../shared/project.ts';
 import { agentInfo, type AgentInfo, type AgentKind } from '../shared/agents.ts';
 
-const STATUS_MARK = { todo: '[ ]', in_progress: '[~]', blocked: '[!]', done: '[x]' } as const;
+const STATUS_MARK = { todo: '[ ]', in_progress: '[~]', blocked: '[!]', done: '[x]', dropped: '[-]' } as const;
 
 export interface RenderOptions {
   /** Address of the plan in the browser, for Claude to pass on. */
@@ -128,7 +129,11 @@ function renderDocument(plan: Plan, opts: DocumentOptions = {}): string[] {
   out.push('', ...renderTasks(plan, { attribution, details, revs }));
   const order = renderBuildOrder(plan, opts.base);
   if (order.length) out.push('', ...order);
-  if (plan.report) out.push('', '## Build report', plan.report.text.trim());
+  if (plan.report) {
+    out.push('', '## Build report', plan.report.text.trim());
+    const checks = plan.report.checks ?? [];
+    if (checks.length) out.push('', `Final checks: ${checks.map((c) => `${c.name} ${c.ok ? '✓' : `✗${c.note ? ` (${c.note})` : ''}`}`).join(', ')}`);
+  }
 
   const open = plan.threads.filter((t) => !t.resolved);
   if (open.length) {
@@ -220,14 +225,16 @@ export function renderBuildOrder(plan: Plan, base?: string): string[] {
   }
   if (branches.length) {
     if (out.length) out.push('');
-    const from = base ? `\`${base}\`` : 'the base branch';
     out.push('## Branches', `_Each branch is one pull request. A branch whose tasks build on another branch is cut from it — a stacked pull request._`);
     for (const b of branches) {
       const ids = b.tasks.map((t) => t.id).join(', ');
       if (b.needs.length > 1) {
-        out.push(`- \`${b.branch}\` needs ${b.needs.map((n) => `\`${n}\``).join(' and ')}: merge those first, then cut it from ${from} — ${ids}`);
+        // Refused when the task list is made; only an older plan has one.
+        out.push(`- \`${b.branch}\` needs work from ${b.needs.length} branches, which one pull request cannot: harness_plan_check says how to fix it — ${ids}`);
       } else {
-        out.push(`- \`${b.branch}\` from ${b.base ? `\`${b.base}\` (stacked)` : from} — ${ids}`);
+        const pr = plan.branches?.[b.branch]?.pr;
+        const prText = pr ? ` · pull request${pr.number ? ` #${pr.number}` : ''} ${pr.state}` : '';
+        out.push(`- \`${b.branch}\` from ${baseWords(b.base, base)} — ${ids}${prText}`);
       }
     }
     if (unbranched.length) out.push(`- no branch named (the session's current branch) — ${unbranched.map((t) => t.id).join(', ')}`);
@@ -248,6 +255,12 @@ function lockLine(plan: Plan): string | null {
       );
     case 'handed-off':
       return '> **Locked.** The user submitted this plan to be built outside this session; it no longer changes here.';
+    case 'finalizing':
+      return (
+        '> **Every task is done — finish the build.** Run the final checks, push the branches and open the pull ' +
+        'requests (record each with harness_branch_update), then write the build report; harness_task_next says how. ' +
+        'The plan is built once the report is in.'
+      );
     case 'built':
       return '> **Built.** The user submitted this plan and every task is done. Publishing a new plan replaces it.';
     default:
@@ -595,6 +608,13 @@ function renderChanges(plan: Plan, unread: Change[], changesOnly: boolean): stri
   // Comments are events, not state: each one is news.
   const said = unread.filter((c) => ['commented', 'replied', 'resolved', 'reopened'].includes(c.kind)).map((c) => `${capital(c.summary)}.`);
   block('Comments', [...new Set(said)]);
+
+  // So is the user's verdict on a task they review: it decides what the
+  // agent does next — mark it done, or refine.
+  const verdicts = unread
+    .filter((c) => c.kind === 'status' && c.target.kind === 'task' && / in review round \d+/.test(c.summary))
+    .map((c) => `${capital(c.summary)}.`);
+  block('Reviews', verdicts);
 
   const lead = changesOnly
     ? '_The net effect of their edits — not each step, and not where boxes were moved on the canvas._'

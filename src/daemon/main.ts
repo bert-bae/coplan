@@ -13,7 +13,7 @@ import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
 import { MAX_NOTE, PlanError, cleanChecks, cleanNote, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
 import { PROMPT_BUDGET, buildPrompt, designPrompt, promptHash, renderGaps, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
 import { renderBrief, renderNext } from './brief.ts';
-import { cleanSettings, effectiveReview, hasSubtasks, readyTasks, waitingOn } from '../shared/build.ts';
+import { cleanSettings, dependents, effectiveReview, hasSubtasks, readyTasks, roundVerdict, stackStatus, waitingOn } from '../shared/build.ts';
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
 import { cleanStorage, scanStorage } from './housekeeping.ts';
 import { loadConfig, type HarnessConfig } from '../shared/config.ts';
@@ -866,10 +866,29 @@ function buildRouter(deps: Deps): Router {
     }
     const checks = cleaned?.length ? cleaned : undefined;
     const note = typeof body['note'] === 'string' ? body['note'] : undefined;
-    if (!status && !stage && !checks && note === undefined) throw new PlanError('Say what changed: a status, a stage, checks or a note.');
+    const verdict = body['verdict'] === undefined ? undefined : body['verdict'] === 'pass' || body['verdict'] === 'changes' ? (body['verdict'] as 'pass' | 'changes') : null;
+    if (verdict === null) throw new PlanError('`verdict` is "pass" or "changes".');
+    const summary = typeof body['summary'] === 'string' ? body['summary'] : undefined;
+    // A verdict is the outcome of a review, so it is given while the task is in
+    // one — not from refine, after it asked for changes, to close the round.
+    if (verdict && !(task.status === 'in_progress' && task.stage === 'review') && stage !== 'review') {
+      throw new PlanError(`A verdict is given in review: "${task.title}" is not in review now. Report stage "review" (a new round) and give the verdict there.`);
+    }
+    if (!status && !stage && !checks && !verdict && note === undefined) throw new PlanError('Say what changed: a status, a stage, checks, a verdict or a note.');
     const approved = body['user_approved'] === true;
     if (approved && !note?.trim()) {
       throw new PlanError('`user_approved` needs a `note` saying what the user told you in chat.');
+    }
+    // Dropping work is a decision someone will want the reason for.
+    if (status === 'dropped' && !note?.trim()) {
+      throw new PlanError(`Dropping "${task.title}" needs a \`note\`: why it is no longer needed (and who said so).`);
+    }
+    // Work the user signed off is theirs to drop: the agent asks.
+    if (status === 'dropped' && before.submission && !task.addedInBuild && !approved) {
+      throw new PlanError(
+        `"${task.title}" is part of the plan the user submitted, so dropping it is theirs to decide: ask them with ` +
+          `${agentInfo(session.agent).askWith}. If they agree, call again with user_approved: true and their words in the note.`,
+      );
     }
     const project = projectFor(session);
     const settings = before.submission?.settings ?? project.settings;
@@ -883,7 +902,8 @@ function buildRouter(deps: Deps): Router {
     }
 
     // Starting includes resuming a task that was blocked before it began.
-    const idle = task.status === 'todo' || task.status === 'blocked';
+    // Picking a dropped task back up is starting it, with every check that brings.
+    const idle = task.status === 'todo' || task.status === 'blocked' || task.status === 'dropped';
     const starting = idle && (status === 'in_progress' || (stage !== undefined && status !== 'done' && status !== 'blocked'));
     const waits = waitingOn(before, task);
     const waitWords = () => waits.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ');
@@ -942,24 +962,44 @@ function buildRouter(deps: Deps): Router {
             'user_approved: true and their answer in the note.',
         );
       }
+      // … and its last review round passed — by whoever the user said reviews it.
+      const mode = effectiveReview(before, task, settings.review);
+      if (mode !== 'skip') {
+        // The verdict in this call, if any, is the round's latest — and only
+        // counts for a task the user reviews when it is theirs, which on
+        // this path (not user_approved) it is not.
+        const last = verdict ? (mode === 'user' ? roundVerdict(task, mode) : { verdict }) : roundVerdict(task, mode);
+        const passed = last?.verdict === 'pass';
+        if (!passed) {
+          throw new PlanError(
+            mode === 'user'
+              ? `"${task.title}" is the user's to review, and they have not passed it: show them the change and ask with ` +
+                  `${agentInfo(session.agent).askWith}. They can approve it on the board in Coplan; if they approve it in chat, call ` +
+                  'again with verdict "pass", user_approved: true and their words in the note.'
+              : `"${task.title}" has no passing verdict for review round ${task.round}: report the review's outcome — ` +
+                  'verdict "pass" (with this call is fine), or "changes" and refine.',
+          );
+        }
+      }
     }
 
     const readyBefore = new Set(readyTasks(before).map((t) => t.id));
-    const { plan, changes } = store.applyOps(
-      session.sessionId,
-      [
-        {
-          op: 'upsert_task',
-          id: taskId,
-          ...(status ? { status } : {}),
-          ...(stage ? { stage: stage as NonNullable<ReturnType<typeof validStage>> } : {}),
-          ...(checks ? { checks } : {}),
-          ...(note !== undefined ? { note: approved ? `${note} (approved by the user)` : note } : {}),
-        },
-      ],
-      'claude',
-      { tracking: true },
-    );
+    const progress: PlanOp = {
+      op: 'upsert_task',
+      id: taskId,
+      ...(status ? { status } : {}),
+      ...(stage ? { stage: stage as NonNullable<ReturnType<typeof validStage>> } : {}),
+      ...(checks ? { checks } : {}),
+      ...(note !== undefined ? { note: approved ? `${note} (approved by the user)` : note } : {}),
+    };
+    const review: PlanOp[] = verdict
+      ? [{ op: 'review_task', id: taskId, verdict, ...(summary ? { summary } : {}), ...(approved ? { userApproved: true } : {}) }]
+      : [];
+    // The verdict belongs to the review the task is in: given with a move
+    // into review, after it; otherwise before the rest (done ends the review).
+    const { plan, changes } = store.applyOps(session.sessionId, stage ? [progress, ...review] : [...review, progress], 'claude', {
+      tracking: true,
+    });
     const now = plan.tasks.find((t) => t.id === taskId)!;
     const out: string[] = [];
     const state = now.status === 'in_progress' && now.stage ? stageWords(now) : now.status.replace('_', ' ');
@@ -979,9 +1019,27 @@ function buildRouter(deps: Deps): Router {
         out.push(`This task's review is the user's: show them the change and ask with ${agentInfo(session.agent).askWith} before marking it done.`);
       }
     }
-    if (status === 'done' && changes.length) {
-      if (planPhase(plan) === 'built') {
-        out.push('That was the last task: the plan is built, and the board shows it done. Finish the build — harness_task_next says how.');
+    // The tasks that wait on this one: what dropping or reopening it means
+    // for them is worth saying out loud.
+    const waiting = dependents(plan, now);
+    if (status === 'dropped' && changes.length && waiting.length) {
+      out.push(
+        `${waiting.map((t) => `${t.id} "${t.title}"`).join(', ')} waited on it and no longer do${waiting.length === 1 ? 'es' : ''}: ` +
+          'check they do not need its work, and tell the user.',
+      );
+    }
+    if (task.status === 'done' && status && status !== 'done' && status !== 'dropped') {
+      const built = waiting.filter((t) => t.status !== 'todo');
+      if (built.length) {
+        out.push(
+          `${built.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ')} already went ahead on this task's work: ` +
+            'check they still hold once it changes.',
+        );
+      }
+    }
+    if ((status === 'done' || status === 'dropped') && changes.length) {
+      if (planPhase(plan) === 'finalizing' || planPhase(plan) === 'built') {
+        out.push('That was the last task. Finish the build — final checks, pull requests, then the report; harness_task_next says how.');
       } else {
         const fresh = readyTasks(plan).filter((t) => !readyBefore.has(t.id));
         if (fresh.length) out.push(`Now ready: ${fresh.map((t) => `${t.id} "${t.title}"`).join(', ')}.`);
@@ -1094,6 +1152,43 @@ function buildRouter(deps: Deps): Router {
               renderTaskList(plan, projectFor(session).branches.base) +
               // What the list leaves open, while it is still cheap to fix.
               ((gaps) => (gaps.length ? `\n\n${gaps.join('\n')}\n\nFix these, or say why in chat, before they review it.` : ''))(renderGaps(plan, 20)),
+          );
+          return;
+        }
+
+        case 'branch': {
+          if (!session.plan) {
+            reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
+            return;
+          }
+          const has = (k: string) => body[k] !== undefined && body[k] !== null && body[k] !== '';
+          if (has('pr_url') || has('pr_number')) {
+            if (!has('pr_state') && !session.plan.branches?.[String(body['branch'] ?? '')]?.pr) {
+              throw new PlanError('Say where the pull request stands: pr_state draft, open, merged or closed.');
+            }
+          }
+          const pr =
+            has('pr_state') || has('pr_url') || has('pr_number')
+              ? {
+                  state: String(body['pr_state'] ?? session.plan.branches?.[String(body['branch'] ?? '')]?.pr?.state ?? ''),
+                  ...(has('pr_url') ? { url: String(body['pr_url']) } : {}),
+                  ...(typeof body['pr_number'] === 'number' ? { number: body['pr_number'] } : {}),
+                }
+              : undefined;
+          if (!pr && !has('base')) throw new PlanError('Say what changed: the pull request (pr_url, pr_number, pr_state) or its base.');
+          const { plan } = store.applyOps(
+            id,
+            [{ op: 'set_branch', branch: String(body['branch'] ?? ''), ...(pr ? { pr } : {}), ...(has('base') ? { base: String(body['base']) } : {}) }],
+            'claude',
+            { tracking: true },
+          );
+          const stack = stackStatus(plan, projectFor(session).branches.base);
+          const now = stack.find((s) => s.branch === String(body['branch']));
+          const restacks = stack.filter((s) => s.restack).map((s) => `- ${s.restack}`);
+          reply(
+            true,
+            `[cc-harness] Recorded \`${now?.branch ?? body['branch']}\`${now?.state?.pr ? `: pull request${now.state.pr.number ? ` #${now.state.pr.number}` : ''} ${now.state.pr.state}` : ''}${now?.state?.base ? `, onto \`${now.state.base}\`` : ''}.` +
+              (restacks.length ? `\n\nThe stack moved:\n${restacks.join('\n')}` : ''),
           );
           return;
         }

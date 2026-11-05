@@ -1044,6 +1044,25 @@ test('each card on the board says where its task is in implement → review → 
   assert.match(strip.textContent ?? '', /Claude is on Wire into API — in review, round 2/);
 });
 
+test("a task the user reviews waits for their verdict on its card", async () => {
+  let plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't3', stage: 'review' }], 'claude', undefined, { tracking: true }).plan;
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  const review = within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  await act(async () => {
+    fireEvent.click(within(review).getByRole('button', { name: 'Request changes' }));
+  });
+  await act(async () => {
+    fireEvent.change(within(review).getByLabelText('What to change'), { target: { value: 'Add a timeout' } });
+  });
+  await act(async () => {
+    fireEvent.click(within(review).getByRole('button', { name: 'Send' }));
+  });
+  assert.deepEqual(opsSent().at(-1), { op: 'review_task', id: 't3', verdict: 'changes', summary: 'Add a timeout' });
+});
+
 test("a box's task on a submitted plan opens its card on the board", async () => {
   await boot(makeSession(lockedPlan(true)));
   await act(async () => {

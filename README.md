@@ -441,7 +441,7 @@ initials with the ☰ button or `[` to give the plan the width.
 
 ## What Claude gets
 
-Eight tools, none of which waits on you or asks you anything:
+Nine tools, none of which waits on you or asks you anything:
 
 | Tool | What it does |
 | --- | --- |
@@ -452,7 +452,8 @@ Eight tools, none of which waits on you or asks you anything:
 | `harness_tasks_publish` | Publish the task list for the confirmed design: replaces the task tree and nothing else, with dependencies, branches, review modes and the boxes each task builds. |
 | `harness_task_next` | What can be built now: ready tasks, how many to run at once, what is in progress and at which step, what the rest wait on, the branches — and, once every task is done, how to finish. |
 | `harness_task_brief` | One task's focused brief, written to hand to a subagent as is: objective, the boxes it builds and their connections, what it comes after and before, its scope, branch, and its implement → review → refine cycle with the exact checks. |
-| `harness_task_update` | Mark a task in progress, done or blocked, with a one-line note, and report its step of the cycle and the checks run. Refuses to start a task that still waits on another, or to finish one whose checks failed. |
+| `harness_task_update` | Mark a task in progress, done, blocked or dropped, with a one-line note, and report its step of the cycle, the checks run and the review's verdict. Refuses to start a task that still waits on another, or to finish one without a passing verdict (yours, for a task you review) or whose checks failed. |
+| `harness_branch_update` | Record a branch's pull request and where it stands, so the board shows the stack — and says what to restack when a branch below merges. |
 
 The hooks answer immediately and never hold a turn. They register the
 session, keep its working/idle/ended state, notice when Claude is waiting on

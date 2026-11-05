@@ -1458,6 +1458,8 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 }
 .status-dot.is-blocked { border-color: var(--attention-solid); background: var(--attention-solid); }
 .status-dot.is-done { border-color: var(--success-solid); background: var(--success-solid); }
+.status-dot.is-dropped { border-color: var(--border-strong); background: var(--surface-sunken); color: var(--text-tertiary); }
+.board-card.is-dropped, .task-row.is-dropped .task-title { opacity: 0.65; text-decoration: line-through; }
 
 .task-num { color: var(--text-tertiary); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; min-width: 2.2em; }
 .task-title { font-weight: 550; min-width: 0; }
@@ -1486,7 +1488,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .seg.status-blocked.is-active { background: var(--attention-solid); }
 .outline-help { font-size: var(--fs-sm); margin-top: var(--sp-3); }
 
-.board { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: var(--sp-3); align-items: start; }
+.board { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--sp-3); align-items: start; }
 .board-col {
   display: flex; flex-direction: column; min-height: 240px;
   border: 1px solid var(--border-default); border-radius: var(--r-xl);
@@ -1514,6 +1516,10 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .board-title { padding: 0; border: none; background: none; text-align: left; font-weight: 600; color: var(--text-primary); }
 .board-title:hover { color: var(--accent-fg); text-decoration: underline; }
 .board-note { margin: 0; font-size: var(--fs-sm); color: var(--text-secondary); }
+.board-reviews { margin: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-sm); }
+.board-reviews .is-changes { color: var(--attention-fg); }
+.board-review { display: flex; flex-direction: column; gap: var(--sp-1); padding: var(--sp-2); border: 1px solid var(--accent-border, var(--border-default)); border-radius: var(--r-md); background: var(--accent-subtle); }
+.board-review-actions { display: flex; gap: var(--sp-1); flex-wrap: wrap; }
 .board-foot { display: flex; align-items: center; gap: var(--sp-2); }
 .board-status {
   font-size: var(--fs-micro); padding: 2px 4px; border-radius: var(--r-sm);
@@ -1936,6 +1942,9 @@ span.board-title:hover { color: inherit; text-decoration: none; }
 /* What blocks what, where it lands, where it is in its cycle. */
 .chip.is-dep { background: var(--surface-sunken); border-style: dashed; }
 .chip.is-branch { font-family: var(--font-mono); font-weight: 500; }
+.chip.is-pr { text-decoration: none; }
+.chip.is-pr.is-merged { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
+.chip.is-pr.is-closed { opacity: 0.7; text-decoration: line-through; }
 .chip.is-ready { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
 .chip.is-waiting { background: var(--surface-sunken); color: var(--text-tertiary); }
 .chip.stage-chip { background: var(--accent-subtle); color: var(--accent-fg); border-color: var(--accent-border); }
