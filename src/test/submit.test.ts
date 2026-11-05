@@ -168,6 +168,42 @@ test('dropped work is settled: it holds nothing up, and the plan is built withou
   assert.equal(planPhase(plan), 'finalizing', 'built once the report is in');
 });
 
+test('a build whose every task was dropped still finishes, and is built by its report', () => {
+  let plan = markDelivered(submitted());
+  for (const t of plan.tasks.filter((x) => !plan.tasks.some((c) => c.parentId === x.id))) {
+    plan = applyOps(plan, [{ op: 'upsert_task', id: t.id, status: 'dropped', note: 'out of scope now' }], 'claude', undefined, { tracking: true }).plan;
+  }
+  assert.equal(planPhase(plan), 'finalizing');
+  plan = applyOps(plan, [{ op: 'report', text: 'Nothing was built: the user dropped it all.' }], 'claude').plan;
+  assert.equal(planPhase(plan), 'built');
+});
+
+test('a verdict is given in review; a pass that closed a round goes when the task is taken up again', () => {
+  let plan = markDelivered(submitted());
+  const step = (op: Record<string, unknown>) =>
+    (plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', ...op } as PlanOp], 'claude', undefined, { tracking: true }).plan);
+  const verdict = (v: 'pass' | 'changes') => applyOps(plan, [{ op: 'review_task', id: 'client', verdict: v }], 'claude', undefined, { tracking: true }).plan;
+  step({ stage: 'review' });
+  plan = verdict('changes');
+  step({ stage: 'refine' });
+  // From refine, after it asked for changes, the round cannot be passed.
+  assert.throws(() => verdict('pass'), /not in review now/);
+  step({ stage: 'review' });
+  plan = verdict('pass');
+  step({ status: 'done' });
+  // Taken up again, the work changes: the pass that closed round 2 no longer stands.
+  step({ status: 'in_progress', stage: 'refine' });
+  assert.deepEqual(plan.tasks.find((t) => t.id === 'client')!.reviews!.map((r) => `${r.round}:${r.verdict}`), ['1:changes']);
+});
+
+test('a report whose final checks are not all whole is refused, not trimmed', () => {
+  const plan = markDelivered(submitted());
+  assert.throws(
+    () => applyOps(plan, [{ op: 'report', text: 'Built.', checks: [{ name: 'tests', ok: 'false' as never }, { name: 'lint', ok: true }] }], 'claude'),
+    /`ok` true or false/,
+  );
+});
+
 test('Claude cannot redesign a submitted plan, and is told what to do instead', () => {
   const plan = markDelivered(submitted());
   assert.throws(

@@ -1401,6 +1401,11 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       const verdict = oneOf(op.verdict, VERDICTS, 'a review verdict');
       if (!verdict) throw new PlanError('Give the verdict: "pass", or "changes".');
       if (!task.round) throw new PlanError(`"${task.title}" has not been to review yet.`);
+      // A verdict is the outcome of a review in progress: not a way to close
+      // a round from refine, after it asked for changes.
+      if (task.status !== 'in_progress' || task.stage !== 'review') {
+        throw new PlanError(`"${task.title}" is not in review now: a verdict is given while it is.`);
+      }
       const by: Author = author === 'user' || op.userApproved ? 'user' : 'claude';
       const summary = clean(op.summary, MAX_TITLE * 2);
       const record: ReviewRecord = {
@@ -1422,7 +1427,11 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       const text = clean(op.text, MAX_TEXT);
       if (!text) throw new PlanError('A report needs text.');
       const checks = op.checks === undefined ? undefined : cleanChecks(op.checks);
-      if (op.checks !== undefined && !checks) throw new PlanError('`checks` is a list of {name, ok, note?}.');
+      // Every check whole, or none: a malformed one dropped quietly would erase
+      // the failure the report is there to record.
+      if (op.checks !== undefined && (!checks || !Array.isArray(op.checks) || checks.length !== Math.min(op.checks.length, 40))) {
+        throw new PlanError('`checks` is a list of {name, ok, note?}, with `ok` true or false.');
+      }
       if (plan.report?.text === text && !checks) return [];
       plan.report = { text, at: now, ...(checks?.length ? { checks } : {}) };
       return [log('edited', { kind: 'plan', id: '' }, 'wrote the build report')];
@@ -1533,6 +1542,12 @@ function editTask(
     const status = validStatus(wanted);
     if (!status) throw new PlanError(`"${wanted}" is not a task status (${TASK_STATUSES.join(', ')}).`);
     if (status !== task.status) {
+      // A finished task taken up again changes: the pass that closed its
+      // round passed the work as it was, not as it will be.
+      if (task.status === 'done' && status !== 'dropped' && task.reviews) {
+        task.reviews = task.reviews.filter((r) => r.round !== task.round);
+        if (!task.reviews.length) delete task.reviews;
+      }
       task.status = status;
       task.updatedAt = now;
       const note = task.note && typeof op.note === 'string' ? ` — ${short(task.note, 80)}` : '';
@@ -1699,7 +1714,7 @@ const DESIGN_LOCKED_FOR_CLAUDE =
 
 /** What a confirmed design still lets anyone do: work on the tasks, link
  *  them to boxes (checked inside upsert_diagram), and talk about it. */
-const TASKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task', 'upsert_diagram', 'upsert_node', 'review_task', 'comment', 'reply', 'resolve', 'report']);
+const TASKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task', 'upsert_diagram', 'upsert_node', 'review_task', 'set_branch', 'comment', 'reply', 'resolve', 'report']);
 
 /** Where the plan is in its life. */
 export function planPhase(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> & Partial<Pick<Plan, 'report'>>) | null): PlanPhase {
@@ -1707,8 +1722,11 @@ export function planPhase(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> &
   if (!submission) return plan?.design ? 'tasking' : 'planning';
   if (submission.target === 'elsewhere') return 'handed-off';
   if (!submission.deliveredAt) return 'submitted';
-  const counts = countTasks(plan);
-  if (counts.total === 0 || counts.done < counts.total) return 'building';
+  // Every leaf settled — done, or dropped with a reason. All of them dropped
+  // is settled too: a build can end with nothing left to do.
+  const tasks = plan?.tasks ?? [];
+  const leaves = tasks.filter((t) => !tasks.some((c) => c.parentId === t.id));
+  if (!leaves.length || !leaves.every((t) => t.status === 'done' || t.status === 'dropped')) return 'building';
   // Every task done is not the build done: the final checks, the pull
   // requests and the report come after. The report closes it.
   return plan?.report ? 'built' : 'finalizing';
@@ -1771,7 +1789,7 @@ export function cleanNote(value: unknown): string | undefined {
  */
 export function submitPlan(
   plan: Plan,
-  input: { target: BuildTarget; prompt: string; note?: string; trimmed?: boolean; settings?: BuildSettings },
+  input: { target: BuildTarget; prompt: string; note?: string; trimmed?: boolean; settings?: BuildSettings; base?: string },
   now = Date.now(),
 ): Plan {
   if (plan.submission) throw new PlanError('The plan has already been submitted.');
@@ -1793,6 +1811,7 @@ export function submitPlan(
     prompt: input.prompt,
     ...(input.trimmed ? { trimmed: true } : {}),
     ...(input.settings ? { settings: cleanSettings(input.settings) } : {}),
+    ...(input.base ? { base: input.base } : {}),
     deliveredAt: null,
   };
   next.version += 1;
@@ -1896,6 +1915,7 @@ function validSubmission(raw: unknown): Submission | undefined {
     prompt: s.prompt,
     ...(s.trimmed === true ? { trimmed: true } : {}),
     ...(s.settings && typeof s.settings === 'object' ? { settings: cleanSettings(s.settings) } : {}),
+    ...(typeof s.base === 'string' && s.base ? { base: s.base } : {}),
     deliveredAt: typeof s.deliveredAt === 'number' ? s.deliveredAt : null,
   };
 }

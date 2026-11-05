@@ -13,7 +13,7 @@ import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
 import { MAX_NOTE, PlanError, cleanChecks, cleanNote, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
 import { PROMPT_BUDGET, buildPrompt, designPrompt, promptHash, renderGaps, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
 import { renderBrief, renderNext } from './brief.ts';
-import { cleanSettings, dependents, effectiveReview, hasSubtasks, readyTasks, stackStatus, waitingOn } from '../shared/build.ts';
+import { cleanSettings, dependents, effectiveReview, hasSubtasks, readyTasks, roundVerdict, stackStatus, waitingOn } from '../shared/build.ts';
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
 import { cleanStorage, scanStorage } from './housekeeping.ts';
 import { loadConfig, type HarnessConfig } from '../shared/config.ts';
@@ -869,7 +869,11 @@ function buildRouter(deps: Deps): Router {
     const verdict = body['verdict'] === undefined ? undefined : body['verdict'] === 'pass' || body['verdict'] === 'changes' ? (body['verdict'] as 'pass' | 'changes') : null;
     if (verdict === null) throw new PlanError('`verdict` is "pass" or "changes".');
     const summary = typeof body['summary'] === 'string' ? body['summary'] : undefined;
-    if (verdict && !task.round && stage !== 'review') throw new PlanError(`"${task.title}" has not been to review yet: report stage "review" first (or with the verdict).`);
+    // A verdict is the outcome of a review, so it is given while the task is in
+    // one — not from refine, after it asked for changes, to close the round.
+    if (verdict && !(task.status === 'in_progress' && task.stage === 'review') && stage !== 'review') {
+      throw new PlanError(`A verdict is given in review: "${task.title}" is not in review now. Report stage "review" (a new round) and give the verdict there.`);
+    }
     if (!status && !stage && !checks && !verdict && note === undefined) throw new PlanError('Say what changed: a status, a stage, checks, a verdict or a note.');
     const approved = body['user_approved'] === true;
     if (approved && !note?.trim()) {
@@ -878,6 +882,13 @@ function buildRouter(deps: Deps): Router {
     // Dropping work is a decision someone will want the reason for.
     if (status === 'dropped' && !note?.trim()) {
       throw new PlanError(`Dropping "${task.title}" needs a \`note\`: why it is no longer needed (and who said so).`);
+    }
+    // Work the user signed off is theirs to drop: the agent asks.
+    if (status === 'dropped' && before.submission && !task.addedInBuild && !approved) {
+      throw new PlanError(
+        `"${task.title}" is part of the plan the user submitted, so dropping it is theirs to decide: ask them with ` +
+          `${agentInfo(session.agent).askWith}. If they agree, call again with user_approved: true and their words in the note.`,
+      );
     }
     const project = projectFor(session);
     const settings = before.submission?.settings ?? project.settings;
@@ -891,7 +902,8 @@ function buildRouter(deps: Deps): Router {
     }
 
     // Starting includes resuming a task that was blocked before it began.
-    const idle = task.status === 'todo' || task.status === 'blocked';
+    // Picking a dropped task back up is starting it, with every check that brings.
+    const idle = task.status === 'todo' || task.status === 'blocked' || task.status === 'dropped';
     const starting = idle && (status === 'in_progress' || (stage !== undefined && status !== 'done' && status !== 'blocked'));
     const waits = waitingOn(before, task);
     const waitWords = () => waits.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ');
@@ -953,11 +965,11 @@ function buildRouter(deps: Deps): Router {
       // … and its last review round passed — by whoever the user said reviews it.
       const mode = effectiveReview(before, task, settings.review);
       if (mode !== 'skip') {
-        // The verdict in this call, if any, is the round's latest.
-        const last = verdict
-          ? { verdict, by: approved ? 'user' : 'claude' }
-          : [...(task.reviews ?? [])].reverse().find((r) => r.round === task.round);
-        const passed = last?.verdict === 'pass' && (mode !== 'user' || last.by === 'user');
+        // The verdict in this call, if any, is the round's latest — and only
+        // counts for a task the user reviews when it is theirs, which on
+        // this path (not user_approved) it is not.
+        const last = verdict ? (mode === 'user' ? roundVerdict(task, mode) : { verdict }) : roundVerdict(task, mode);
+        const passed = last?.verdict === 'pass';
         if (!passed) {
           throw new PlanError(
             mode === 'user'
@@ -972,25 +984,22 @@ function buildRouter(deps: Deps): Router {
     }
 
     const readyBefore = new Set(readyTasks(before).map((t) => t.id));
-    const { plan, changes } = store.applyOps(
-      session.sessionId,
-      [
-        {
-          op: 'upsert_task',
-          id: taskId,
-          ...(status ? { status } : {}),
-          ...(stage ? { stage: stage as NonNullable<ReturnType<typeof validStage>> } : {}),
-          ...(checks ? { checks } : {}),
-          ...(note !== undefined ? { note: approved ? `${note} (approved by the user)` : note } : {}),
-        },
-        // The verdict, for the round the task is in once that is applied.
-        ...(verdict
-          ? [{ op: 'review_task' as const, id: taskId, verdict, ...(summary ? { summary } : {}), ...(approved ? { userApproved: true } : {}) }]
-          : []),
-      ],
-      'claude',
-      { tracking: true },
-    );
+    const progress: PlanOp = {
+      op: 'upsert_task',
+      id: taskId,
+      ...(status ? { status } : {}),
+      ...(stage ? { stage: stage as NonNullable<ReturnType<typeof validStage>> } : {}),
+      ...(checks ? { checks } : {}),
+      ...(note !== undefined ? { note: approved ? `${note} (approved by the user)` : note } : {}),
+    };
+    const review: PlanOp[] = verdict
+      ? [{ op: 'review_task', id: taskId, verdict, ...(summary ? { summary } : {}), ...(approved ? { userApproved: true } : {}) }]
+      : [];
+    // The verdict belongs to the review the task is in: given with a move
+    // into review, after it; otherwise before the rest (done ends the review).
+    const { plan, changes } = store.applyOps(session.sessionId, stage ? [progress, ...review] : [...review, progress], 'claude', {
+      tracking: true,
+    });
     const now = plan.tasks.find((t) => t.id === taskId)!;
     const out: string[] = [];
     const state = now.status === 'in_progress' && now.stage ? stageWords(now) : now.status.replace('_', ' ');

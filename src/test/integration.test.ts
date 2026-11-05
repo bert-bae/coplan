@@ -705,7 +705,7 @@ test('finishing the last task finishes the build, and a new plan may follow', as
   assert.match(String((await pr({ branch: 'nope', pr_state: 'open' }))['text']), /No task lands on `nope`/);
   const merged = String((await pr({ branch: 'cache/storage', pr_state: 'merged' }))['text']);
   assert.match(merged, /`cache\/storage` is merged: rebase `cache\/api` onto the base branch/);
-  assert.match(String((await mcpFor(built, 'next'))['text']), /`cache\/api` onto `cache\/storage`: pull request #12 open — https:\/\/github\.com\/o\/r\/pull\/12\n {2}⚠ `cache\/storage` is merged/);
+  assert.match(String((await mcpFor(built, 'next'))['text']), /`cache\/api` onto `cache\/storage` \(stacked\): pull request #12 open — https:\/\/github\.com\/o\/r\/pull\/12\n {2}⚠ `cache\/storage` is merged/);
   assert.doesNotMatch(String((await pr({ branch: 'cache/api', base: 'main' }))['text']), /The stack moved/, 'restacked onto main');
   assert.equal((await sessionFor(built)).plan!.branches!['cache/api']!.pr!.number, 12);
 
@@ -918,6 +918,42 @@ test("done needs the round's passing verdict — the user's own, when the user r
     ['1:changes:user', '2:pass:user'],
     "a refused call records nothing: the agent's pass was never taken",
   );
+});
+
+test('on a submitted build: verdicts come from review, signed-off work is the user\'s to drop, and a dropped task restarts like any other', async () => {
+  const id = 'submitted-review-session';
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await post(`/api/session/${id}/plan/design/confirm`);
+  await hookFor(id, 'UserPromptSubmit', { prompt: 'go' });
+  await mcpFor(id, 'tasks', {
+    tasks: [
+      { id: 'storage', title: 'Storage', subtasks: [{ id: 'client', title: 'Client' }, { id: 'cache', title: 'Cache', review: 'user' }] },
+      { id: 'wire', title: 'Wire up', dependsOn: ['storage'] },
+    ],
+  });
+  await post(`/api/session/${id}/plan/submit`, { target: 'session', settings: { review: 'self', parallel: 1, maxRounds: 3 } });
+  await hookFor(id, 'UserPromptSubmit', { prompt: 'build it' });
+
+  // A verdict comes from a review: not from refine, to close a round that asked for changes.
+  await task({ task_id: 'client', stage: 'review' });
+  await task({ task_id: 'client', verdict: 'changes', summary: 'needs a test' });
+  await task({ task_id: 'client', stage: 'refine' });
+  assert.match(String((await task({ task_id: 'client', status: 'done', verdict: 'pass', note: 'x' }))['text']), /not in review now/);
+  await task({ task_id: 'client', stage: 'review' });
+  assert.equal((await task({ task_id: 'client', status: 'done', verdict: 'pass', note: 'tested' }))['ok'], true);
+
+  // The agent's own pass on the user's task does not count, and next says it waits on them.
+  await task({ task_id: 'cache', stage: 'review' });
+  await task({ task_id: 'cache', verdict: 'pass' });
+  assert.match(String((await mcpFor(id, 'next'))['text']), /Cache.*\n.*waiting on the user's review/);
+
+  // Dropping signed-off work is the user's call.
+  assert.match(String((await task({ task_id: 'wire', status: 'dropped', note: 'not needed' }))['text']), /dropping it is theirs to decide/);
+  assert.equal((await task({ task_id: 'wire', status: 'dropped', note: 'user: drop it', user_approved: true }))['ok'], true);
+  // Picked back up, it is a start: cache is in progress and the user allowed one at once.
+  assert.match(String((await task({ task_id: 'wire', stage: 'implement' }))['text']), /cannot start yet/);
 });
 
 test('a submission needs to say who builds it', async () => {

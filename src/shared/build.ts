@@ -16,7 +16,7 @@
  *   each of its ancestors depends on, so "the API work waits for the cache"
  *   is said once, on the parent.
  */
-import type { BranchState, BuildSettings, Plan, ReviewMode, Task } from './types.ts';
+import type { BranchState, BuildSettings, Plan, ReviewMode, ReviewRecord, Task } from './types.ts';
 import { REVIEW_MODES } from './types.ts';
 
 type Tasks = Pick<Plan, 'tasks'>;
@@ -198,7 +198,7 @@ export function dependencyProblems(plan: Tasks): string[] {
   const loop = findCycle(branchGraph(plan));
   if (loop) {
     out.push(
-      `Branches ${loop.map((b) => `\`${b}\``).join(' → ')} each need work from the next, so they cannot stack: ` +
+      `Branches ${loop.map((b) => (b === SESSION_BRANCH ? 'the unbranched tasks (the current branch)' : `\`${b}\``)).join(' → ')} each need work from the next, so they cannot stack: ` +
         'put those tasks on one branch, or change what they depend on.',
     );
   }
@@ -228,10 +228,15 @@ export function dependencyProblems(plan: Tasks): string[] {
 /** Each branch and the other branches its tasks wait on. */
 function branchGraph(plan: Tasks): Map<string, Set<string>> {
   const graph = new Map<string, Set<string>>();
-  const of = new Map(leafTasks(plan).map((t) => [t.id, effectiveBranch(plan, t)]));
-  for (const leaf of leafTasks(plan)) {
-    const branch = of.get(leaf.id);
-    if (!branch) continue;
+  // Dropped work lands nowhere. Once any task names a branch, the tasks
+  // with none are a branch of their own — the session's — so a loop that
+  // runs through them (a branch on unbranched work that itself needs that
+  // branch) is a loop like any other.
+  const live = leafTasks(plan).filter((t) => t.status !== 'dropped');
+  if (!live.some((t) => effectiveBranch(plan, t))) return graph;
+  const of = new Map(live.map((t) => [t.id, effectiveBranch(plan, t) ?? SESSION_BRANCH]));
+  for (const leaf of live) {
+    const branch = of.get(leaf.id)!;
     const needs = graph.get(branch) ?? new Set<string>();
     graph.set(branch, needs);
     for (const id of inheritedDeps(plan, leaf)) {
@@ -356,7 +361,8 @@ export function baseWords(base: string | null, repoBase?: string): string {
 }
 
 export function branchPlan(plan: Tasks): { branches: BranchPlan[]; unbranched: Task[] } {
-  const order = buildSteps(plan).flat();
+  // Dropped work lands on no branch, and nothing needs it any more.
+  const order = buildSteps(plan).flat().filter((t) => t.status !== 'dropped');
   const of = new Map(order.map((t) => [t.id, effectiveBranch(plan, t)]));
   const unbranched = order.filter((t) => !of.get(t.id));
   if (unbranched.length === order.length) return { branches: [], unbranched: [] };
@@ -370,6 +376,7 @@ export function branchPlan(plan: Tasks): { branches: BranchPlan[]; unbranched: T
     entry.tasks.push(t);
     for (const id of inheritedDeps(plan, t)) {
       for (const leaf of leavesUnder(plan, id)) {
+        if (leaf.status === 'dropped') continue;
         const other = of.get(leaf.id) ?? SESSION_BRANCH;
         if (other !== branch && !entry.needs.includes(other)) entry.needs.push(other);
       }
@@ -403,6 +410,15 @@ export function branchPlan(plan: Tasks): { branches: BranchPlan[]; unbranched: T
   return { branches: placed, unbranched };
 }
 
+/**
+ * The verdict that stands for a task's current review round: the latest
+ * one given in it — and for a task the user reviews, the latest the user
+ * gave. Done needs this to be a pass.
+ */
+export function roundVerdict(task: Task, mode: ReviewMode): ReviewRecord | undefined {
+  return [...(task.reviews ?? [])].reverse().find((r) => r.round === task.round && (mode !== 'user' || r.by === 'user'));
+}
+
 export interface StackEntry extends BranchPlan {
   /** What the agent reported for it: its pull request, where it points. */
   state?: BranchState;
@@ -415,18 +431,31 @@ export interface StackEntry extends BranchPlan {
  * reported, and what needs doing when a branch it is stacked on merged — its
  * pull request still points at a branch that is gone into the base.
  */
-export function stackStatus(plan: Pick<Plan, 'tasks' | 'branches'>, repoBase?: string): StackEntry[] {
-  const base = repoBase ? `\`${repoBase}\`` : 'the base branch';
-  return branchPlan(plan).branches.map((b) => {
+export function stackStatus(plan: Pick<Plan, 'tasks' | 'branches' | 'submission'>, repoBase?: string): StackEntry[] {
+  // The base the plan was submitted against, so the board and the daemon
+  // name the same one.
+  const root = repoBase ?? plan.submission?.base;
+  const branches = branchPlan(plan).branches;
+  const planBase = new Map(branches.map((b) => [b.branch, b.base]));
+  const merged = (name: string) => plan.branches?.[name]?.pr?.state === 'merged';
+  return branches.map((b) => {
     const state = plan.branches?.[b.branch];
-    const below = b.base && b.base !== SESSION_BRANCH ? plan.branches?.[b.base] : undefined;
-    const merged = below?.pr?.state === 'merged';
     const settled = state?.pr?.state === 'merged' || state?.pr?.state === 'closed';
-    const pointsAtBase = repoBase ? state?.base === repoBase : Boolean(state?.base && state.base !== b.base);
-    const restack =
-      merged && !settled && !pointsAtBase
-        ? `\`${b.base}\` is merged: rebase \`${b.branch}\` onto ${base} and point its pull request at ${base}, then record it (harness_branch_update {branch, base}).`
-        : undefined;
+    if (!b.base || b.base === SESSION_BRANCH || !merged(b.base) || settled) return { ...b, ...(state ? { state } : {}) };
+    // Its base merged — into that branch's own base, which may have merged
+    // too: down the stack to the first branch still open, or the root.
+    let target: string | null = b.base;
+    const seen = new Set<string>();
+    while (target && target !== SESSION_BRANCH && merged(target) && !seen.has(target)) {
+      seen.add(target);
+      target = planBase.get(target) ?? null;
+    }
+    const onto = target && target !== SESSION_BRANCH ? target : root;
+    const done = onto ? state?.base === onto : Boolean(state?.base && state.base !== b.base);
+    const words = onto ? `\`${onto}\`` : 'the base branch';
+    const restack = done
+      ? undefined
+      : `\`${b.base}\` is merged: rebase \`${b.branch}\` onto ${words} and point its pull request at ${words}, then record it (harness_branch_update {branch, base}).`;
     return { ...b, ...(state ? { state } : {}), ...(restack ? { restack } : {}) };
   });
 }

@@ -338,6 +338,8 @@ export interface Submission {
   trimmed?: boolean;
   /** How the build runs. Absent on plans submitted before it existed. */
   settings?: BuildSettings;
+  /** The repository's base branch when it was submitted, if it says. */
+  base?: string;
   /** When the prompt reached Claude. Null until the user's next message in
    *  Claude's chat carries it — and always null for `elsewhere`. */
   deliveredAt: number | null;

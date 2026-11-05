@@ -10,7 +10,7 @@ import { Markdown } from '../components/Markdown.tsx';
 import { classNames } from '../lib/format.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
 import { childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
-import { SESSION_BRANCH, stackStatus, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
+import { DEFAULT_BUILD_SETTINGS, SESSION_BRANCH, roundVerdict, stackStatus, type StackEntry, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
 import { REVIEW_MODES, TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type ReviewMode, type Task, type TaskStatus } from '../../shared/types.ts';
 
 /** Clicking the status dot steps through the common path; blocked is set
@@ -132,8 +132,7 @@ export function TasksView() {
  */
 /** A branch's pull request as the agent last reported it, and the restack
  *  it needs when the branch below it merged. */
-function PullRequest({ plan, branch }: { plan: Plan; branch: string }) {
-  const entry = stackStatus(plan).find((s) => s.branch === branch);
+function PullRequest({ entry }: { entry: StackEntry | undefined }) {
   const pr = entry?.state?.pr;
   if (!pr && !entry?.restack) return null;
   const label = `PR${pr?.number ? ` #${pr.number}` : ''} ${pr?.state ?? ''}`.trim();
@@ -158,6 +157,7 @@ function PullRequest({ plan, branch }: { plan: Plan; branch: string }) {
 
 function BuildOrder({ plan, collapsible = false }: { plan: Plan; collapsible?: boolean }) {
   const { branches, unbranched } = branchPlan(plan);
+  const stack = stackStatus(plan);
   if (!hasDependencies(plan) && branches.length === 0) return null;
   const steps = buildSteps(plan);
   const numbers = new Map(outline(plan).map((r) => [r.task.id, r.number]));
@@ -198,7 +198,7 @@ function BuildOrder({ plan, collapsible = false }: { plan: Plan; collapsible?: b
                       ? ` stacked on ${b.base}`
                       : ' from the base branch'}
               </span>
-              <PullRequest plan={plan} branch={b.branch} />
+              <PullRequest entry={stack.find((s) => s.branch === b.branch)} />
               <span className="order-tasks">{b.tasks.map(chip)}</span>
             </li>
           ))}
@@ -1039,9 +1039,9 @@ function UserReview({ plan, task }: { plan: Plan; task: Task }) {
   const agent = useAgent();
   const [asking, setAsking] = useState(false);
   const [why, setWhy] = useState('');
-  const mode = effectiveReview(plan, task, plan.submission?.settings?.review ?? 'subagent');
+  const mode = effectiveReview(plan, task, plan.submission?.settings?.review ?? DEFAULT_BUILD_SETTINGS.review);
   if (mode !== 'user' || task.stage !== 'review') return null;
-  const decided = [...(task.reviews ?? [])].reverse().find((r) => r.round === task.round && r.by === 'user');
+  const decided = roundVerdict(task, 'user');
   if (decided) return null;
   const send = async (verdict: 'pass' | 'changes', summary?: string) => {
     const ok = await store.op({ op: 'review_task', id: task.id, verdict, ...(summary ? { summary } : {}) });

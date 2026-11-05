@@ -20,6 +20,8 @@ import {
   ancestorsOf,
   branchPlan,
   SESSION_BRANCH,
+  baseWords,
+  roundVerdict,
   stackStatus,
   buildSteps,
   dependents,
@@ -123,11 +125,12 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
       const state = [t.stage ? stageWords(t) : '', t.checks?.length ? `checks ${checkWords(t)}` : ''].filter(Boolean).join(' · ');
       out.push(`- ${line(t)}${state ? ` — ${state}` : ''}${t.note ? ` — ${t.note}` : ''}`);
       // The verdict on its current round, if one is in: what to do next.
-      const verdict = [...(t.reviews ?? [])].reverse().find((r) => r.round === t.round);
+      const mode = effectiveReview(plan, t, settings.review);
+      const verdict = roundVerdict(t, mode);
       if (verdict) {
         const who = verdict.by === 'user' ? 'the user' : 'review';
         out.push(`  ${verdict.verdict === 'pass' ? `✓ passed by ${who}: mark it done` : `✗ ${who} asked for changes: refine`}${verdict.summary ? ` — ${verdict.summary}` : ''}.`);
-      } else if (t.stage === 'review' && effectiveReview(plan, t, settings.review) === 'user') {
+      } else if (t.stage === 'review' && mode === 'user') {
         out.push('  ⏸ waiting on the user\'s review: ask them; they can approve it in Coplan.');
       }
       if (t.round && t.round >= settings.maxRounds && t.stage !== 'review') {
@@ -196,15 +199,7 @@ function renderStack(plan: Plan, repoBase: string | undefined): string[] {
   if (!stack.length) return [];
   const out = ['', '## Branches and pull requests'];
   for (const s of stack) {
-    const onto = s.state?.base
-      ? `\`${s.state.base}\``
-      : s.base === SESSION_BRANCH
-        ? 'the branch you are on'
-        : s.base
-          ? `\`${s.base}\``
-          : repoBase
-            ? `\`${repoBase}\``
-            : 'the base branch';
+    const onto = s.state?.base ? `\`${s.state.base}\`` : baseWords(s.base, repoBase);
     const pr = s.state?.pr
       ? `pull request${s.state.pr.number ? ` #${s.state.pr.number}` : ''} ${s.state.pr.state}${s.state.pr.url ? ` — ${s.state.pr.url}` : ''}`
       : 'no pull request yet';

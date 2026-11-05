@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { PlanError, applyOps, confirmDesign, markDelivered, publishPlan, publishTasks, normalizePlan, submitPlan } from '../shared/plan.ts';
 import {
   SESSION_BRANCH,
+  stackStatus,
   branchPlan,
   buildSteps,
   cleanSettings,
@@ -516,4 +517,50 @@ test("a parent's brief lists its subtasks in the order they can be built, not th
   const brief = renderBrief(plan, plan.tasks.find((t) => t.id === 'storage')!, {});
   const order = [...brief.matchAll(/^- \[ \] (?:NOT DONE YET — )?(\w+) /gm)].map((m) => m[1]);
   assert.deepEqual(order.slice(0, 3), ['client', 'invalidate', 'config']);
+});
+
+test('dropped work shapes no branch, and a loop through the unbranched tasks is refused', () => {
+  let plan = publishTasks(tasked(), {
+    tasks: [
+      { id: 'a', title: 'A', branch: 'x/a' },
+      { id: 'b', title: 'B', branch: 'x/b', dependsOn: ['a'] },
+    ],
+  }).plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'a', status: 'dropped', note: 'not needed' }], 'claude', undefined, { tracking: true }).plan;
+  assert.deepEqual(branchPlan(plan).branches.map((b) => `${b.branch}<-${b.base}`), ['x/b<-null'], 'x/a is gone, and x/b no longer stacks on it');
+
+  // api waits on an unbranched task that itself waits on api.
+  assert.throws(
+    () =>
+      publishTasks(tasked(), {
+        tasks: [
+          { id: 'a1', title: 'API part one', branch: 'api' },
+          { id: 'u1', title: 'Glue', dependsOn: ['a1'] },
+          { id: 'a2', title: 'API part two', branch: 'api', dependsOn: ['u1'] },
+        ],
+      }),
+    /`api` → the unbranched tasks \(the current branch\)|the unbranched tasks \(the current branch\) → `api`/,
+  );
+});
+
+test('a restack goes down the stack to the first branch still open', () => {
+  let plan = publishTasks(tasked(), {
+    tasks: [
+      { id: 'a', title: 'A', branch: 'x/a' },
+      { id: 'b', title: 'B', branch: 'x/b', dependsOn: ['a'] },
+      { id: 'c', title: 'C', branch: 'x/c', dependsOn: ['b'] },
+    ],
+  }).plan;
+  const record = (branch: string, state: string, base?: string) =>
+    (plan = applyOps(plan, [{ op: 'set_branch', branch, pr: { state }, ...(base ? { base } : {}) }], 'claude', undefined, { tracking: true }).plan);
+  record('x/a', 'open');
+  record('x/b', 'merged');
+  record('x/c', 'open');
+  // x/b merged into x/a, which is still open: x/c goes onto x/a, not main.
+  assert.match(stackStatus(plan, 'main').find((s) => s.branch === 'x/c')!.restack!, /rebase `x\/c` onto `x\/a`/);
+  record('x/c', 'open', 'x/a');
+  assert.equal(stackStatus(plan, 'main').find((s) => s.branch === 'x/c')!.restack, undefined);
+  // Then x/a merges too: x/c goes onto main.
+  record('x/a', 'merged');
+  assert.match(stackStatus(plan, 'main').find((s) => s.branch === 'x/c')!.restack!, /rebase `x\/c` onto `main`/);
 });
