@@ -67,3 +67,34 @@ export function readLiveLock(): DaemonLock | null {
 export function baseUrl(lock: DaemonLock): string {
   return `http://${lock.host || '127.0.0.1'}:${lock.port}`;
 }
+
+/**
+ * Whether the daemon a lock names is really there. A lock outlives a daemon
+ * that crashed, was killed or went down with the machine, and its pid may
+ * by now belong to some other process — which `kill -0` cannot tell apart.
+ * So ask the port: the daemon answers `/health` with its pid.
+ *
+ * - `live`: it answered, with the lock's pid.
+ * - `stale`: nothing listens there, or something else does.
+ * - `busy`: it did not answer in time. Not proof it is gone, so it is
+ *   neither replaced nor signalled.
+ */
+export async function probeLock(lock: DaemonLock, timeoutMs = 1_500): Promise<'live' | 'stale' | 'busy'> {
+  try {
+    const res = await fetch(`${baseUrl(lock)}/health`, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return 'stale';
+    const body = (await res.json().catch(() => null)) as { pid?: unknown } | null;
+    return body?.pid === lock.pid ? 'live' : 'stale';
+  } catch (err) {
+    const name = (err as Error)?.name;
+    return name === 'TimeoutError' || name === 'AbortError' ? 'busy' : 'stale';
+  }
+}
+
+/** The lock of a daemon that is running and answering — not merely one
+ *  whose pid exists. */
+export async function readVerifiedLock(timeoutMs?: number): Promise<DaemonLock | null> {
+  const lock = readLiveLock();
+  if (!lock) return null;
+  return (await probeLock(lock, timeoutMs)) === 'stale' ? null : lock;
+}

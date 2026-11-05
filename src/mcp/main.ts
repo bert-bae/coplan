@@ -11,7 +11,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { readLiveLock, baseUrl, ensureHome } from '../shared/paths.ts';
+import { readLiveLock, readVerifiedLock, probeLock, baseUrl, ensureHome } from '../shared/paths.ts';
 import { TOOLS, DEFAULT_BUDGET_MS } from './tools.ts';
 import { agentInfo, parseAgent, sessionFromEnv, workspaceFromEnv } from '../shared/agents.ts';
 import type { DaemonLock } from '../shared/types.ts';
@@ -99,10 +99,24 @@ let cachedLock: DaemonLock | null = null;
 
 async function daemon(): Promise<DaemonLock | null> {
   if (cachedLock && readLiveLock()?.pid === cachedLock.pid) return cachedLock;
-  cachedLock = readLiveLock();
+  // A lock is trusted once its daemon has answered: one left by a daemon
+  // that died may name a pid some other process has now.
+  cachedLock = await readVerifiedLock();
   if (cachedLock) return cachedLock;
   cachedLock = await startDaemon();
   return cachedLock;
+}
+
+/** Said once per server: the daemon runs another version of Coplan than
+ *  this plugin — another install's, or one from before an update. */
+let versionNoted = false;
+function versionNotice(lock: DaemonLock): string {
+  if (versionNoted || !lock.version || lock.version === VERSION) return '';
+  versionNoted = true;
+  return (
+    `\n\n[cc-harness] Coplan's daemon is v${lock.version} but this plugin is v${VERSION}, so some tools may not work as ` +
+    'described. Tell the user to run /coplan-restart (or `coplan restart`) to bring the daemon up to date.'
+  );
 }
 
 /** Start the daemon detached, so it outlives the session that spawned it. */
@@ -126,8 +140,9 @@ async function startDaemon(): Promise<DaemonLock | null> {
   }
   for (let i = 0; i < 60; i++) {
     await sleep(100);
+    // Not the stale lock the new daemon is about to replace: one that answers.
     const lock = readLiveLock();
-    if (lock) return lock;
+    if (lock && (await probeLock(lock, 500)) === 'live') return lock;
   }
   return null;
 }
@@ -175,9 +190,18 @@ async function callDaemon(
       }),
       signal: controller.signal,
     });
-    const body = (await res.json()) as { text?: string; ok?: boolean };
-    return { ok: body.ok !== false, text: body.text ?? JSON.stringify(body) };
+    // Refusals (401, 403) come back as plain text, not JSON.
+    const raw = await res.text();
+    let body: { text?: string; ok?: boolean };
+    try {
+      body = JSON.parse(raw) as { text?: string; ok?: boolean };
+    } catch {
+      return { ok: false, text: `[cc-harness] The daemon answered ${res.status}: ${raw.trim().slice(0, 200)}` };
+    }
+    return { ok: body.ok !== false, text: (body.text ?? JSON.stringify(body)) + versionNotice(lock) };
   } catch (err) {
+    // The daemon went away under us: find (or start) it afresh next call.
+    cachedLock = null;
     const aborted = (err as Error)?.name === 'AbortError';
     return {
       ok: false,

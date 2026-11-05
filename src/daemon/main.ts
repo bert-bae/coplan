@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { openSync, writeSync, closeSync, unlinkSync, appendFileSync, existsSync } from 'node:fs';
+import { unlinkSync, appendFileSync, existsSync, linkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -17,7 +17,7 @@ import { cleanSettings, effectiveReview, hasSubtasks, readyTasks, waitingOn } fr
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
 import { cleanStorage, scanStorage } from './housekeeping.ts';
 import { loadConfig, type HarnessConfig } from '../shared/config.ts';
-import { ensureHome, paths, readLiveLock, isPidAlive, baseUrl } from '../shared/paths.ts';
+import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
 import type { BuildSettings, CleanupGroupId, DaemonLock, Plan, PlanInput, PlanOp, ServerEvent, SessionState, TaskListInput, TaskStatus } from '../shared/types.ts';
@@ -43,9 +43,13 @@ const MAX_OPS = 200;
  * ------------------------------------------------------------------ */
 
 async function main(): Promise<void> {
+  process.on('uncaughtException', (err) => log(`uncaught: ${err?.stack ?? err}`));
+  process.on('unhandledRejection', (err) => log(`unhandled rejection: ${(err as Error)?.stack ?? String(err)}`));
   ensureHome();
 
-  const existing = readLiveLock();
+  // A lock whose daemon does not answer is left over from one that died;
+  // its pid may belong to something else by now.
+  const existing = await readVerifiedLock();
   if (existing && !process.argv.includes('--force')) {
     // Another daemon owns the lock; report it and exit, so "start" is
     // idempotent from hooks, the CLI and the MCP server.
@@ -65,7 +69,7 @@ async function main(): Promise<void> {
 
   const clients = { count: 0 };
   const server = http.createServer();
-  const lifecycle = { restart: (): boolean => false };
+  const lifecycle = { restart: (_entry?: string): boolean => false };
   const router = buildRouter({ store, config, token, clients, lifecycle });
 
   server.on('request', (req, res) => {
@@ -92,12 +96,12 @@ async function main(): Promise<void> {
   const port = await listen(server, inheritedPort);
   boundPort = port;
   const lock: DaemonLock = { pid: process.pid, port, token, version: VERSION, startedAt: Date.now(), host: '127.0.0.1' };
-  writeLock(lock);
+  await claimLock(lock);
   log(`listening on ${baseUrl(lock)} (pid ${process.pid}, v${VERSION})`);
   process.stdout.write(`${JSON.stringify({ started: true, ...lock })}\n`);
 
   let shuttingDown = false;
-  const shutdown = (signal: string, respawn = false) => {
+  const shutdown = (signal: string, respawn = false, entry?: string) => {
     if (shuttingDown) {
       log(`second signal (${signal}); exiting now`);
       process.exit(0);
@@ -113,16 +117,16 @@ async function main(): Promise<void> {
     } catch {
       /* ignore */
     }
-    if (respawn) respawnDaemon(lock);
+    if (respawn) respawnDaemon(lock, entry);
     // Let the last responses flush.
     setTimeout(() => process.exit(0), 150).unref();
   };
 
   /** Replace this daemon with one running the build on disk now. */
-  lifecycle.restart = () => {
+  lifecycle.restart = (entry?: string) => {
     if (shuttingDown) return false;
     log('restart requested; handing over to a fresh daemon');
-    setTimeout(() => shutdown('restart', true), RESTART_DELAY_MS).unref();
+    setTimeout(() => shutdown('restart', true, entry), RESTART_DELAY_MS).unref();
     return true;
   };
 
@@ -132,8 +136,6 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGHUP', () => shutdown('SIGHUP'));
-  process.on('uncaughtException', (err) => log(`uncaught: ${err?.stack ?? err}`));
-  process.on('unhandledRejection', (err) => log(`unhandled: ${String(err)}`));
 }
 
 /** The port this process listens on; the Origin check compares against it. */
@@ -199,9 +201,28 @@ function bind(server: http.Server, port: number): Promise<number> {
   });
 }
 
+/**
+ * A path that is a Coplan daemon build: `<plugin>/dist/daemon/main.js`,
+ * where `<plugin>/package.json` is Coplan's. Anything else is refused, so
+ * a restart can only ever run Coplan.
+ */
+function daemonEntry(raw: unknown): string | null {
+  if (typeof raw !== 'string' || !path.isAbsolute(raw)) return null;
+  const entry = path.resolve(raw);
+  if (path.basename(entry) !== 'main.js' || path.basename(path.dirname(entry)) !== 'daemon') return null;
+  const dist = path.dirname(path.dirname(entry));
+  if (path.basename(dist) !== 'dist' || !existsSync(entry)) return null;
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(path.dirname(dist), 'package.json'), 'utf8')) as { name?: unknown };
+    return pkg.name === 'coplan' ? entry : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Start the replacement daemon, detached, from the bundle on disk. */
-function respawnDaemon(lock: DaemonLock): void {
-  const entry = process.argv[1];
+function respawnDaemon(lock: DaemonLock, from?: string): void {
+  const entry = from ?? process.argv[1];
   if (!entry) return;
   try {
     const child = spawn(process.execPath, [entry], {
@@ -218,24 +239,39 @@ function respawnDaemon(lock: DaemonLock): void {
   }
 }
 
-/** Atomic claim, with recovery from a lock left behind by a dead daemon. */
-function writeLock(lock: DaemonLock): void {
+/**
+ * Claim the lock atomically. It is written whole to a file of this
+ * process's own and then linked into place, which fails if a lock is
+ * already there — so no reader ever sees a half-written one, and of two
+ * daemons starting at once exactly one claims it. A lock already there is
+ * replaced only once its daemon has been shown gone (see probeLock).
+ */
+async function claimLock(lock: DaemonLock): Promise<void> {
   const file = paths.lockFile();
-  const payload = JSON.stringify(lock, null, 2);
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(lock, null, 2), { mode: 0o600 });
   try {
-    const fd = openSync(file, 'wx', 0o600);
-    writeSync(fd, payload);
-    closeSync(fd);
-    return;
-  } catch {
-    const stale = readLiveLock();
-    if (stale && stale.pid !== lock.pid && isPidAlive(stale.pid)) {
-      log(`another daemon (pid ${stale.pid}) holds the lock; exiting`);
-      process.exit(0);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        linkSync(tmp, file);
+        return;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      }
+      const other = readLock();
+      if (other && other.pid !== lock.pid && isPidAlive(other.pid) && (await probeLock(other)) !== 'stale') {
+        log(`another daemon (pid ${other.pid}) holds the lock; exiting`);
+        process.exit(0);
+      }
+      // Left by a daemon that is gone. Removed only if it is still the same
+      // stale lock, so a daemon that claimed it meanwhile keeps its claim.
+      const again = readLock();
+      if (!again || (again.pid === other?.pid && again.startedAt === other?.startedAt)) rmSync(file, { force: true });
     }
-    const fd = openSync(file, 'w', 0o600);
-    writeSync(fd, payload);
-    closeSync(fd);
+    log('could not claim the lock; another daemon is starting; exiting');
+    process.exit(0);
+  } finally {
+    rmSync(tmp, { force: true });
   }
 }
 
@@ -318,7 +354,7 @@ interface Deps {
   token: string;
   /** Live SSE connections, so an open browser counts as "in use". */
   clients: { count: number };
-  lifecycle: { restart(): boolean };
+  lifecycle: { restart(entry?: string): boolean };
 }
 
 function buildRouter(deps: Deps): Router {
@@ -604,8 +640,17 @@ function buildRouter(deps: Deps): Router {
     json(ctx.res, 200, { result, report: scanStorage({ liveSessionIds: residentIds() }) });
   });
 
-  router.post('/api/daemon/restart', (ctx) => {
-    const started = lifecycle.restart();
+  /**
+   * Restart — from `entry` when the caller names its own build. The Claude
+   * Code, Codex and Cursor installs share one daemon: restarting from the
+   * plugin that was just updated must run that plugin's code, not this
+   * daemon's older copy.
+   */
+  router.post('/api/daemon/restart', async (ctx) => {
+    const body = await readJson<{ entry?: unknown }>(ctx.req);
+    const entry = body.entry === undefined ? undefined : daemonEntry(body.entry);
+    if (body.entry !== undefined && !entry) throw new HttpError(400, '`entry` is not a Coplan daemon build (…/dist/daemon/main.js).');
+    const started = lifecycle.restart(entry ?? undefined);
     json(ctx.res, started ? 200 : 409, {
       restarting: started,
       port: readLiveLock()?.port ?? null,
@@ -1082,7 +1127,12 @@ function startReaper(store: SessionStore): { stop(): void } {
   return { stop: () => clearInterval(timer) };
 }
 
-void main();
+// A daemon that fails to start is spawned with no terminal: the log is the
+// only place the reason can go.
+main().catch((err: unknown) => {
+  log(`failed to start: ${(err as Error)?.stack ?? String(err)}`);
+  process.exit(1);
+});
 
 /**
  * What Claude last read is kept beside the plan so "since you last read" can

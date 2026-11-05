@@ -62,9 +62,21 @@ export function newSession(sessionId: string, cwd: string, agent: AgentKind = DE
  * Every change broadcasts the whole session. A plan is a few kilobytes, and
  * one shape of update is far easier to keep correct than a family of patches.
  */
+/**
+ * The format of a session's `state.json`. Raise it when a change means an
+ * older build would misread the file; a build never writes over a file in
+ * a format newer than its own.
+ */
+export const STATE_SCHEMA = 1;
+
+/** readState's answer for a file in a newer format. */
+const NEWER = Symbol('newer');
+
 export class SessionStore extends EventEmitter {
   private sessions = new Map<string, SessionState>();
   private persistTimers = new Map<string, NodeJS.Timeout>();
+  /** Sessions on disk in a newer format than this build writes. */
+  private foreign = new Set<string>();
 
   constructor() {
     super();
@@ -94,6 +106,12 @@ export class SessionStore extends EventEmitter {
         continue;
       }
       const state = readState(file);
+      if (state === NEWER) {
+        // Written by a newer Coplan than this daemon: left exactly as it is,
+        // and never saved over (see persistNow), until that build runs.
+        this.foreign.add(entry.name);
+        continue;
+      }
       if (!state) continue;
       if ((state.updatedAt ?? 0) < cutoff) {
         expired.push(sessionDir);
@@ -167,12 +185,12 @@ export class SessionStore extends EventEmitter {
 
   persistNow(id: string): void {
     const state = this.sessions.get(id);
-    if (!state) return;
+    if (!state || this.foreign.has(id)) return;
     try {
       const dir = paths.sessionDir(id);
       mkdirSync(dir, { recursive: true });
       const tmp = path.join(dir, `.state.${process.pid}.tmp`);
-      writeFileSync(tmp, JSON.stringify(state, null, 2));
+      writeFileSync(tmp, JSON.stringify({ schemaVersion: STATE_SCHEMA, ...state }, null, 2));
       renameSync(tmp, path.join(dir, 'state.json'));
     } catch {
       /* persistence is best-effort; the live session must never break */
@@ -196,7 +214,10 @@ export class SessionStore extends EventEmitter {
   ensure(id: string, cwd?: string, agent?: AgentKind): SessionState {
     let state = this.sessions.get(id);
     if (!state) {
-      state = readState(paths.sessionState(id)) ?? newSession(id, cwd || process.cwd(), agent);
+      const saved = readState(paths.sessionState(id));
+      // A newer build's session is served blank from memory, never saved.
+      if (saved === NEWER) this.foreign.add(id);
+      state = saved && saved !== NEWER ? saved : newSession(id, cwd || process.cwd(), agent);
       this.sessions.set(id, state);
       mkdirSync(paths.sessionDir(id), { recursive: true });
       this.emitEvent({ type: 'snapshot', session: state });
@@ -486,11 +507,15 @@ export function summarize(s: SessionState): SessionSummary {
  * ignoring it would let the next save write a blank session over the top of
  * a plan that might still be recoverable by hand.
  */
-function readState(file: string): SessionState | undefined {
+function readState(file: string): SessionState | typeof NEWER | undefined {
   if (!existsSync(file)) return undefined;
   try {
-    const state = JSON.parse(readFileSync(file, 'utf8')) as SessionState;
+    const state = JSON.parse(readFileSync(file, 'utf8')) as SessionState & { schemaVersion?: unknown };
     if (!state || typeof state !== 'object' || typeof state.sessionId !== 'string') throw new Error('not a session');
+    // A newer build's format may mean something this one cannot see — a
+    // submission it would read as invalid, and so as unlocked. Hands off.
+    if (typeof state.schemaVersion === 'number' && state.schemaVersion > STATE_SCHEMA) return NEWER;
+    delete state.schemaVersion;
     migrate(state);
     return state;
   } catch {
