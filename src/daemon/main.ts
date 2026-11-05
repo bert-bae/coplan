@@ -16,7 +16,7 @@ import { renderBrief, renderNext } from './brief.ts';
 import { cleanSettings, dependents, effectiveReview, hasSubtasks, readyTasks, roundVerdict, stackStatus, waitingOn } from '../shared/build.ts';
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
 import { cleanStorage, scanStorage } from './housekeeping.ts';
-import { loadConfig, type HarnessConfig } from '../shared/config.ts';
+import { ConfigCache, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
@@ -58,7 +58,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const config = loadConfig({ configDir: paths.configDir() });
+  const config = new ConfigCache(paths.configDir(), (message) => log(`config: ${message}`));
   const store = new SessionStore();
   store.on('event', (event: ServerEvent) => {
     if (event.type === 'persist-error') log(`could not save session ${event.sessionId}: ${event.message}`);
@@ -164,8 +164,6 @@ const LOST_LOCK = 'lost the lock';
 const PORT_CLAIM_MS = 5_000;
 /** Sessions remembered as "already opened a browser tab for". */
 const MAX_TRACKED_OPENS = 200;
-/** Per-project resolved configs held in memory. */
-const MAX_CACHED_CONFIGS = 50;
 
 /** Why an MCP call found no session: the agent's hooks have not reported
  *  one, and what to do about it there. */
@@ -436,7 +434,7 @@ function redeemTicket(ticket: string | null): boolean {
 
 interface Deps {
   store: SessionStore;
-  config: HarnessConfig;
+  config: ConfigCache;
   token: string;
   /** Live SSE connections, so an open browser counts as "in use". */
   clients: { count: number };
@@ -466,17 +464,7 @@ function buildRouter(deps: Deps): Router {
     openInBrowser(authedUrl(session.sessionId));
   };
 
-  const configCache = new Map<string, HarnessConfig>();
-  const configFor = (session: SessionState): HarnessConfig => {
-    const key = session.repoRoot ?? session.cwd;
-    let resolved = configCache.get(key);
-    if (!resolved) {
-      resolved = loadConfig({ configDir: paths.configDir(), projectDir: key });
-      if (configCache.size > MAX_CACHED_CONFIGS) configCache.clear();
-      configCache.set(key, resolved);
-    }
-    return resolved;
-  };
+  const configFor = (session: SessionState): HarnessConfig => config.get(session.repoRoot ?? session.cwd);
 
   /** The repository's `.coplan/config.json`. Read on every use: it is one
    *  small file, and an edit to it should count at once. */
@@ -854,7 +842,7 @@ function buildRouter(deps: Deps): Router {
         output = await ingestHook(event, input, {
           store,
           agent,
-          config: session ? configFor(session) : config,
+          config: session ? configFor(session) : config.get(),
           env: agent !== 'claude' ? {} : {
             remoteSessionId: header('x-harness-remote-session'),
             remoteSdkUrl: header('x-harness-remote-sdk'),
@@ -1312,11 +1300,12 @@ function buildRouter(deps: Deps): Router {
  * Exit once nothing is using the daemon: no browser open and no session
  * active recently. The next hook starts a fresh one.
  */
-function startIdleWatch(store: SessionStore, config: HarnessConfig, clients: { count: number }, stop: () => void): void {
-  const minutes = config.idleShutdownMinutes;
-  if (!minutes || minutes <= 0) return;
-  const idleMs = minutes * 60_000;
+/** Read each minute, so changing `idleShutdownMinutes` needs no restart. */
+function startIdleWatch(store: SessionStore, config: ConfigCache, clients: { count: number }, stop: () => void): void {
   const timer = setInterval(() => {
+    const minutes = config.get().idleShutdownMinutes;
+    if (!minutes || minutes <= 0) return;
+    const idleMs = minutes * 60_000;
     if (clients.count > 0) return;
     const busy = store.all().some((s) => s.status !== 'ended' && Date.now() - s.updatedAt < idleMs);
     if (busy) return;

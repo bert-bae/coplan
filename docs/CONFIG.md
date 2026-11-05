@@ -2,20 +2,28 @@
 
 Three layers, merged in order:
 
-1. shipped defaults — [`config/defaults.json`](../config/defaults.json)
+1. the defaults in the table below
 2. user global — `~/.claude/cc-harness/config.json`
 3. project — `<repo>/.claude/harness.json`
 
-Later layers override earlier ones key by key. Unknown keys — including the
-ones the old review loop used (`gateHoldSeconds`, `stages`, `ship`, …) — are
-ignored, so an old config file does no harm.
+Later layers override earlier ones key by key, except `idleShutdownMinutes`,
+which only the global file sets: one daemon serves every repository. An edit
+to either file counts at once, with no restart.
+
+Both files are JSON with comments: `//` to the end of a line and `/* … */`
+anywhere outside a string, and a trailing comma is allowed. Nothing is
+skipped silently: a file that is not valid JSON, a key Coplan does not read,
+or a value of the wrong type or out of range is written to `daemon.log` and
+reported by `coplan doctor`, and the value from the layer before is used.
+The keys the old review loop used (`gateHoldSeconds`, `stages`, `ship`) are
+still ignored without a word, so an old config file does no harm.
 
 | Key | Default | What it does |
 | --- | --- | --- |
 | `autoOpen` | `false` | Open the plan in a browser the first time Claude publishes one in a session. Off by default: the plugin is installed globally, and a tool should not open windows you did not ask for. Use `/coplan-open`, `coplan open`, or the URL the tools print. |
 | `promptNotice` | `true` | When you type in Claude's chat after changing the plan in the browser, add one line to the prompt telling Claude to call `harness_plan_read`. Turn it off if you would rather always say so yourself. It does not affect the build prompt: submitting a plan for this session is itself the request to send it. |
 | `openClaudeOnQuestion` | `false` | When the agent asks you something (`AskUserQuestion` or `request_user_input`, or a permission prompt), open that session in its desktop app straight away instead of waiting for you to click *Answer in …*. Works for a local Claude Code session with Remote Control on and for a Codex thread (in the Codex app): those are the only local sessions with a documented link, and a cloud session's daemon has no screen to open anything on. Cursor has no link to a chat, so it is never opened. |
-| `idleShutdownMinutes` | `120` | Exit after this long with no active session and no browser attached. The next hook starts a fresh daemon. `0` disables it. |
+| `idleShutdownMinutes` | `120` | Exit after this long with no active session and no browser attached. The next hook starts a fresh daemon. `0` disables it. A whole number, 0 or more; global file only. |
 
 ## Files
 
@@ -36,9 +44,9 @@ directory: leave `CC_HARNESS_HOME` unset when you use Cursor.
 
 The settings above are about Coplan on your machine. What a *build* runs
 belongs to the repository, so it lives with the code — committed, so every
-build there runs the same checks: `<repo>/.coplan/config.json`. Line
-comments (`//`) are allowed. `coplan init` (or `/coplan-init` in Claude)
-writes a starting point from the repository's scripts.
+build there runs the same checks: `<repo>/.coplan/config.json`. Comments
+and trailing commas are allowed, as above. `coplan init` (or `/coplan-init`
+in Claude) writes a starting point from the repository's scripts.
 
 ```jsonc
 {
@@ -67,10 +75,12 @@ A hook is a command, run from the repository root, or an object:
 | Key | Meaning |
 | --- | --- |
 | `run` | The shell command. Required. |
-| `name` | What it is called in reports and on the board. Defaults to the script name (`pnpm lint` or `npm run lint` → `lint`). |
-| `timeout` | Seconds before `coplan check` stops it. Default 600. |
-| `paths` | Globs (`src/**`, `*.py`, `docs/`): the hook applies only to tasks that expect to touch a matching file. A task that lists no files gets every hook. |
-| `optional` | A failure is reported but does not hold the task back. |
+| `name` | What it is called in reports and on the board, up to 60 characters. Defaults to the script name (`pnpm lint` or `npm run lint` → `lint`). |
+| `timeout` | Seconds before `coplan check` stops it: 1 to 3600. Default 600. |
+| `paths` | Globs (`src/**`, `*.py`, `docs/`, `src/**/*.{ts,tsx}`): the hook applies only to tasks that expect to touch a matching file. A task that lists no files gets every hook. `**` crosses directories, `*` and `?` do not, `{a,b}` is either; a glob without a slash matches a file name anywhere, and one ending in `/` everything under it. A `!glob` takes files back out: `["src/**", "!src/gen/**"]`. |
+| `optional` | `true`: a failure is reported but does not hold the task back. |
+
+A stage holds at most 20 hooks.
 
 Coplan never runs these itself. They reach Claude in the build prompt and in
 each task's brief (`harness_task_brief`), and Claude runs them like any
@@ -83,8 +93,10 @@ Claude reports the checks it ran with each task. A task whose last reported
 checks include a failure (not `optional`) cannot be marked done.
 
 A file that cannot be read, a stage that does not exist, a hook without a
-command: each is reported — in the prompts, the review dialogs and `coplan
-check` — rather than silently skipped.
+command, a key Coplan does not read (often a typo of one it does), a value
+out of range: each is reported — in the prompts, the review dialogs, `coplan
+check` and `coplan doctor` — rather than silently skipped or clamped. Where
+a value cannot be used, its default is.
 
 ### `iric`
 
