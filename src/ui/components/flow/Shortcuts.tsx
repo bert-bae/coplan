@@ -55,6 +55,7 @@ export const SHORTCUTS: { group: string; keys: [string, string][] }[] = [
       ['⇧1', 'fit the whole diagram'],
       ['⇧2', 'zoom to the selection'],
       ['Space-drag', 'pan'],
+      ['F6', 'move between the canvas and its details'],
       ['?', 'these shortcuts'],
     ],
   },

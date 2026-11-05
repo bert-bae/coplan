@@ -159,6 +159,35 @@ test('Shift+Tab adds one before it, and Enter one beside it fed by the same boxe
   assert.ok(ends(g).includes(`api->${beside['id']}`), 'fed by Postgres’s parent');
 });
 
+test('on a toolbar button, Tab, Enter and typing are the button’s, even with a box selected', async () => {
+  await boot();
+  await selectBox('API');
+  const tidy = screen.getByRole('button', { name: 'Tidy layout' });
+  await act(async () => {
+    tidy.focus();
+  });
+  const before = saves();
+  await press('Tab');
+  await press('Enter');
+  await press('x');
+  await settle();
+  assert.equal(saves(), before, 'no box was added or renamed');
+  assert.equal(document.querySelector('.flow-node-input'), null);
+});
+
+test('F6 moves the keyboard to the details panel and back to the selected box', async () => {
+  await boot();
+  await selectBox('API');
+  await act(async () => {
+    nodeEl('API').focus();
+  });
+  await press('F6');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  assert.ok(panel.contains(document.activeElement), 'in the details panel');
+  await press('F6');
+  assert.equal(document.activeElement, nodeEl('API'), 'back on the box that was selected');
+});
+
 test('right-clicking empty canvas offers a box of any kind, right there', async () => {
   await boot();
   await act(async () => {

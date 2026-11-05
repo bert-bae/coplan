@@ -1191,6 +1191,10 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 }
 .arch-body > .flow { height: auto; min-height: 0; border: none; border-radius: 0; border-right: 1px solid var(--border-default); }
 .arch-panel { min-height: 0; overflow-y: auto; background: var(--surface-raised); }
+/* Focus lands on the canvas and the panel themselves (a click on empty
+   canvas, F6); only the keyboard's arrival is worth a ring. */
+.flow:focus:not(:focus-visible), .arch-panel:focus:not(:focus-visible) { outline: none; }
+.flow:focus-visible, .arch-panel:focus-visible { outline: 2px solid var(--border-focus); outline-offset: -2px; }
 .arch-panel-body { display: flex; flex-direction: column; gap: var(--sp-3); padding: var(--sp-4); animation: fade-in var(--dur) var(--ease-out-soft); }
 .arch-panel-body .field { margin-bottom: 0; }
 .panel-top { display: flex; align-items: center; gap: var(--sp-2); }

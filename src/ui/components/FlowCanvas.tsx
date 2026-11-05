@@ -158,6 +158,7 @@ function Editor({
   const theme = useResolvedTheme();
   const flow = useReactFlow<FlowNode, FlowEdge>();
   const wrapper = useRef<HTMLDivElement>(null);
+  const details = useRef<HTMLElement>(null);
   // Laid out once on mount; both pieces of state start from the same layout.
   const [initial] = useState(() => toFlow(diagram, plan));
   const [nodes, setNodes] = useState<FlowNode[]>(initial.nodes);
@@ -1037,8 +1038,38 @@ function Editor({
       e.preventDefault();
       paste(clip, 'pointer');
     };
+    /** A control on the canvas — a toolbar button, the zoom controls, the
+     *  minimap — keeps Tab, Enter and typing: they are how it is used and
+     *  left, not a box being worked on. */
+    const onControl = () => {
+      const active = document.activeElement as HTMLElement | null;
+      if (!active || !wrapper.current?.contains(active) || active === wrapper.current) return false;
+      if (active.closest('.react-flow__node')) return Boolean(active.closest('button, a[href], [role="button"]'));
+      return Boolean(active.closest('.react-flow__panel, .react-flow__controls, .react-flow__minimap, button, a[href], [role="button"]'));
+    };
+    /** F6 moves the keyboard between the canvas and its details panel. */
+    const toggleRegion = () => {
+      const canvas = wrapper.current;
+      const side = details.current;
+      if (!canvas || !side) return false;
+      const active = document.activeElement;
+      if (active && side.contains(active)) {
+        const one = nodesRef.current.find((n) => n.selected);
+        const node = one ? [...canvas.querySelectorAll<HTMLElement>('.react-flow__node')].find((el) => el.dataset.id === one.id) : undefined;
+        (node ?? canvas).focus();
+        return true;
+      }
+      if (!onCanvas()) return false;
+      const first = side.querySelector<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])');
+      (first ?? side).focus();
+      return true;
+    };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Alt') setTwoHops(true);
+      if (e.key === 'F6' && !e.metaKey && !e.ctrlKey && !e.altKey && !overlays.current.menu && !overlays.current.shortcuts) {
+        if (toggleRegion()) e.preventDefault();
+        return;
+      }
       if (busy(e.target) || !onCanvas()) return;
       const o = overlays.current;
       if (o.menu || o.shortcuts || o.reconnect) return;
@@ -1078,7 +1109,7 @@ function Editor({
         k.clearSelection();
         return;
       }
-      if (!one) return;
+      if (!one || onControl()) return;
       if (e.key === 'Tab') return claim(), e.shiftKey ? k.addBefore(one.id) : k.addAfter(one.id);
       if (e.key === 'Enter' && !e.altKey) return claim(), k.addBeside(one.id);
       if (e.key === 'F2') return claim(), setEditing(`node:${one.id}`);
@@ -1274,6 +1305,9 @@ function Editor({
       <div className="arch-body">
         <div
           ref={wrapper}
+          tabIndex={-1}
+          role="region"
+          aria-label="Diagram canvas"
           className={classNames('flow', reconnect && 'is-reconnecting', readOnly && 'is-readonly')}
           onMouseMove={(e) => {
             pointer.current = flow.screenToFlowPosition({ x: e.clientX, y: e.clientY });
@@ -1403,7 +1437,7 @@ function Editor({
           {menu && shownMenu && <ContextMenu at={menu.at} title={shownMenu.title} entries={shownMenu.entries} onClose={closeMenu} />}
           {shortcuts && <ShortcutsOverlay onClose={() => setShortcuts(false)} />}
         </div>
-        <aside className="arch-panel" aria-label="Details">
+        <aside ref={details} className="arch-panel" aria-label="Details" tabIndex={-1}>
           {panel}
         </aside>
       </div>
