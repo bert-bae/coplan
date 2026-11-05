@@ -36,12 +36,21 @@ PLUGIN_ROOT_DIR="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-$SEL
 PAYLOAD=$(cat)
 [ -n "$PAYLOAD" ] || exit 0
 
+# Every tool call's output comes with PostToolUse, and the daemon only needs
+# to hear that one finished. A huge one (a big file read, a long build log)
+# is not worth shipping and parsing: the next event says the same.
+case "$EVENT" in
+  PostToolUse|postToolUse) [ "${#PAYLOAD}" -gt 262144 ] && exit 0 ;;
+esac
+
 HOME_DIR="${CC_HARNESS_HOME:-$HOME/.claude/cc-harness}"
 LOCK="$HOME_DIR/daemon.json"
 
 # Nothing the harness does waits on the user, so every event is near instant.
+# Starting the daemon (up to 5s) plus the call stays inside the hook's
+# 20-second budget.
 case "$EVENT" in
-  SessionStart|sessionStart) MAX_TIME=15 ;;
+  SessionStart|sessionStart|UserPromptSubmit|beforeSubmitPrompt) MAX_TIME=10 ;;
   *) MAX_TIME=4 ;;
 esac
 
@@ -61,7 +70,7 @@ read_lock() {
   # the daemon may need starting, ask it: it answers /health with its pid.
   # Every other event saves the round trip — a dead port fails fast anyway.
   case "$EVENT" in
-    SessionStart|sessionStart)
+    SessionStart|sessionStart|UserPromptSubmit|beforeSubmitPrompt)
       HEALTH=$(curl -s --max-time 2 --connect-timeout 1 "http://127.0.0.1:$PORT/health" 2>/dev/null)
       RC=$?
       # Slow to answer (curl's timeout, 28) is a busy daemon, not a dead one:
@@ -77,10 +86,12 @@ read_lock() {
 }
 
 start_daemon() {
-  # Only the session's first event pays the cost of starting the daemon; every
-  # other event in a session that has no daemon simply no-ops.
+  # The session's first event, and each message the user sends, may start the
+  # daemon: one that shut down after a long idle comes back with the next
+  # message, so the sign-off it carries is not lost. Every other event in a
+  # session that has no daemon simply no-ops.
   case "$EVENT" in
-    SessionStart|sessionStart) ;;
+    SessionStart|sessionStart|UserPromptSubmit|beforeSubmitPrompt) ;;
     *) return 1 ;;
   esac
   [ -n "$PLUGIN_ROOT_DIR" ] || return 1
@@ -89,11 +100,12 @@ start_daemon() {
   [ -f "$ENTRY" ] || return 1
   mkdir -p "$HOME_DIR" 2>/dev/null || true
   (setsid node "$ENTRY" >/dev/null 2>&1 &) 2>/dev/null || (node "$ENTRY" >/dev/null 2>&1 &)
-  i=0
-  while [ "$i" -lt 50 ]; do
+  # Waited on by the clock, not by count: where sleep takes no fractions,
+  # fifty tries would be fifty seconds.
+  DEADLINE=$(( $(date +%s) + 5 ))
+  while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     sleep 0.1 2>/dev/null || sleep 1
     if read_lock; then return 0; fi
-    i=$((i + 1))
   done
   return 1
 }

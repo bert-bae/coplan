@@ -239,6 +239,14 @@ class Store {
       }
       case 'ping':
         return;
+      case 'persist-error':
+        if (event.sessionId === this.state.sessionId) {
+          this.toast(
+            'error',
+            `Coplan could not save this plan to disk (${event.message}): your latest edits are not saved. Free some space, or check the folder's permissions.`,
+          );
+        }
+        return;
     }
   }
 

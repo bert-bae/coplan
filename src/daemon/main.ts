@@ -60,6 +60,9 @@ async function main(): Promise<void> {
 
   const config = loadConfig({ configDir: paths.configDir() });
   const store = new SessionStore();
+  store.on('event', (event: ServerEvent) => {
+    if (event.type === 'persist-error') log(`could not save session ${event.sessionId}: ${event.message}`);
+  });
 
   // A restart hands its successor the token and the port, so the browser tab
   // that asked for it reconnects by itself. Out of the environment at once.
@@ -153,6 +156,9 @@ const RESTART_DELAY_MS = 120;
 
 /** How often a daemon checks the lock is still its own. */
 const LOCK_WATCH_MS = 5_000;
+
+/** How much a stalled live stream may hold unsent before it is dropped. */
+const SSE_BUFFER_LIMIT = 1024 * 1024;
 const LOST_LOCK = 'lost the lock';
 /** How long a successor keeps trying to claim its predecessor's port. */
 const PORT_CLAIM_MS = 5_000;
@@ -753,7 +759,16 @@ function buildRouter(deps: Deps): Router {
     res.write(': connected\n\n');
     clients.count++;
 
-    const send = (event: ServerEvent) => res.write(`data: ${JSON.stringify(forBrowser(event))}\n\n`);
+    const send = (event: ServerEvent) => {
+      // A tab that stopped reading (a laptop asleep with the socket open)
+      // would buffer a whole plan per edit without end. Past a megabyte it
+      // is let go: it opens the stream again, and a snapshot catches it up.
+      if (res.writableLength > SSE_BUFFER_LIMIT) {
+        res.destroy();
+        return;
+      }
+      res.write(`data: ${JSON.stringify(forBrowser(event))}\n\n`);
+    };
     send({ type: 'sessions', sessions: store.summaries() });
     const focus = ctx.url.searchParams.get('session');
     const focused = focus ? store.get(focus) : undefined;
@@ -1328,6 +1343,10 @@ function startReaper(store: SessionStore): { stop(): void } {
       }
       const dropped = store.sweep({ endedTtlMs: ENDED_SESSION_TTL_MS });
       if (dropped) log(`evicted ${dropped} session(s) from memory`);
+      // The log is appended to for the daemon's whole life: past its limit,
+      // its newest part is kept and the rest let go.
+      const trimmed = cleanStorage({ groups: ['log'] });
+      if (trimmed.removed) log(`trimmed the log by ${trimmed.freedBytes} bytes`);
     } catch (err) {
       log(`reaper failed: ${(err as Error)?.message}`);
     }

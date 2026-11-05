@@ -34,6 +34,12 @@ before(async () => {
   home = mkdtempSync(path.join(tmpdir(), 'cc-harness-relay-'));
 
   server = http.createServer((req, res) => {
+    // Answered like the real daemon, so the relay believes the lock.
+    if (req.url === '/health') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, version: '0.0.0', pid: process.pid }));
+      return;
+    }
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
@@ -125,6 +131,16 @@ test('a daemon that hangs cannot hold a turn open', async () => {
   assert.equal(result.code, 0);
   assert.equal(result.stdout, '');
   assert.ok(Date.now() - started < 8_000, `took ${Date.now() - started}ms`);
+});
+
+test('a huge PostToolUse is not shipped: the daemon only needs to hear a tool finished', async () => {
+  received = [];
+  const huge = JSON.stringify({ session_id: 's1', tool_response: 'x'.repeat(300_000) });
+  const result = await relay('PostToolUse', huge);
+  assert.equal(result.code, 0);
+  assert.equal(received.length, 0);
+  await relay('PostToolUse', '{"session_id":"s1","tool_name":"Read"}');
+  assert.equal(received.length, 1, 'an ordinary one still goes');
 });
 
 test('says nothing when there is no daemon', async () => {
