@@ -16,7 +16,7 @@
  *   each of its ancestors depends on, so "the API work waits for the cache"
  *   is said once, on the parent.
  */
-import type { BuildSettings, Plan, ReviewMode, Task } from './types.ts';
+import type { BranchState, BuildSettings, Plan, ReviewMode, Task } from './types.ts';
 import { REVIEW_MODES } from './types.ts';
 
 type Tasks = Pick<Plan, 'tasks'>;
@@ -401,6 +401,34 @@ export function branchPlan(plan: Tasks): { branches: BranchPlan[]; unbranched: T
   };
   for (const b of branches) place(b);
   return { branches: placed, unbranched };
+}
+
+export interface StackEntry extends BranchPlan {
+  /** What the agent reported for it: its pull request, where it points. */
+  state?: BranchState;
+  /** What it needs done now the stack below it moved, in words. */
+  restack?: string;
+}
+
+/**
+ * The stack as it stands: each branch in order, its pull request as last
+ * reported, and what needs doing when a branch it is stacked on merged — its
+ * pull request still points at a branch that is gone into the base.
+ */
+export function stackStatus(plan: Pick<Plan, 'tasks' | 'branches'>, repoBase?: string): StackEntry[] {
+  const base = repoBase ? `\`${repoBase}\`` : 'the base branch';
+  return branchPlan(plan).branches.map((b) => {
+    const state = plan.branches?.[b.branch];
+    const below = b.base && b.base !== SESSION_BRANCH ? plan.branches?.[b.base] : undefined;
+    const merged = below?.pr?.state === 'merged';
+    const settled = state?.pr?.state === 'merged' || state?.pr?.state === 'closed';
+    const pointsAtBase = repoBase ? state?.base === repoBase : Boolean(state?.base && state.base !== b.base);
+    const restack =
+      merged && !settled && !pointsAtBase
+        ? `\`${b.base}\` is merged: rebase \`${b.branch}\` onto ${base} and point its pull request at ${base}, then record it (harness_branch_update {branch, base}).`
+        : undefined;
+    return { ...b, ...(state ? { state } : {}), ...(restack ? { restack } : {}) };
+  });
 }
 
 /* ------------------------------------------------------------------ *

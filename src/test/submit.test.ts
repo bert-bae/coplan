@@ -83,7 +83,11 @@ test('a plan moves from planning to tasking to submitted to building to built', 
   assert.equal(plan.submission?.deliveredAt, 3_000);
 
   for (const task of plan.tasks) plan = applyOps(plan, [{ op: 'upsert_task', id: task.id, status: 'done' }], 'claude', undefined, { tracking: true }).plan;
+  // Every task done, the build is finishing: final checks, pull requests, report.
+  assert.equal(planPhase(plan), 'finalizing');
+  plan = applyOps(plan, [{ op: 'report', text: '## Built', checks: [{ name: 'tests', ok: true }] }], 'claude').plan;
   assert.equal(planPhase(plan), 'built');
+  assert.match(renderPlan(plan), /Final checks: tests ✓/);
 });
 
 test('a plan handed off to be built elsewhere is locked, and never waits for delivery', () => {
@@ -161,7 +165,7 @@ test('dropped work is settled: it holds nothing up, and the plan is built withou
   plan = applyOps(plan, [{ op: 'upsert_task', id: first!.id, status: 'dropped', note: 'not needed after all' }], 'claude', undefined, { tracking: true }).plan;
   assert.equal(countTasks(plan).total, leaves.length - 1, 'out of the count');
   for (const t of rest) plan = applyOps(plan, [{ op: 'upsert_task', id: t.id, status: 'done' }], 'claude', undefined, { tracking: true }).plan;
-  assert.equal(planPhase(plan), 'built');
+  assert.equal(planPhase(plan), 'finalizing', 'built once the report is in');
 });
 
 test('Claude cannot redesign a submitted plan, and is told what to do instead', () => {

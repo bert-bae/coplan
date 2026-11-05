@@ -32,7 +32,7 @@ prompt.
 
 Coplan's tools are the MCP server `harness`: `harness_plan_publish`,
 `harness_plan_read`, `harness_plan_check`, `harness_plan_edit`, `harness_tasks_publish`,
-`harness_task_next`, `harness_task_brief` and `harness_task_update`. Your
+`harness_task_next`, `harness_task_brief`, `harness_task_update` and `harness_branch_update`. Your
 agent may show them with a prefix that names the server (in Claude Code,
 `mcp__plugin_coplan_harness__…`); they are the same tools.
 

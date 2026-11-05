@@ -20,6 +20,7 @@ import {
   ancestorsOf,
   branchPlan,
   SESSION_BRANCH,
+  stackStatus,
   buildSteps,
   dependents,
   effectiveBranch,
@@ -81,11 +82,13 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
       branches.length
         ? `2. Push each branch and open the pull requests in stack order: ${branches
             .map((b) => `\`${b.branch}\`${b.base === SESSION_BRANCH ? ' (onto the branch you are on)' : b.base ? ` (onto \`${b.base}\`)` : ''}`)
-            .join(' → ')}.`
+            .join(' → ')}. Record each with harness_branch_update {branch, pr_url, pr_number, pr_state}, so the board ` +
+          'shows the stack.'
         : '2. Commit and push the work on the current branch, and open a pull request if the user wants one.',
-      '3. Write the build report with harness_plan_edit {ops: [{op: "report", text}]}: what each task did, the branches and pull requests, the checks and how they came out, anything that differs from the plan, and follow-ups.',
+      '3. Write the build report with harness_plan_edit {ops: [{op: "report", text, checks}]}: what each task did, the branches and pull requests, anything that differs from the plan, and follow-ups — with the final checks as they came out in `checks`. The plan is built once it is in.',
       '4. Give the user the final summary in chat, with the links.',
     );
+    out.push(...renderStack(plan, project.branches.base));
     if (plan.report) out.push('', `_A build report was written ${new Date(plan.report.at).toISOString().slice(0, 16).replace('T', ' ')}; writing it again replaces it._`);
     return out.join('\n');
   }
@@ -170,9 +173,13 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
     for (const t of blocked) out.push(`- ${line(t)}${t.note ? ` — ${t.note}` : ''}`);
   }
 
-  const order = renderBuildOrder(plan, project.branches.base).filter((l) => !l.startsWith('## Build order'));
-  const branchesAt = order.findIndex((l) => l.startsWith('## Branches'));
-  if (branchesAt >= 0) out.push('', ...order.slice(branchesAt));
+  // Once a pull request is out, the stack as it stands; before, the plan.
+  if (plan.branches && Object.keys(plan.branches).length) out.push(...renderStack(plan, project.branches.base));
+  else {
+    const order = renderBuildOrder(plan, project.branches.base).filter((l) => !l.startsWith('## Build order'));
+    const branchesAt = order.findIndex((l) => l.startsWith('## Branches'));
+    if (branchesAt >= 0) out.push('', ...order.slice(branchesAt));
+  }
 
   out.push(
     '',
@@ -180,6 +187,31 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
       'the iric cycle. Starting a task that still waits on another is refused.',
   );
   return out.join('\n');
+}
+
+/** The stack as it stands — each branch, what it is cut from, its pull
+ *  request — and what needs doing where a branch below merged. */
+function renderStack(plan: Plan, repoBase: string | undefined): string[] {
+  const stack = stackStatus(plan, repoBase);
+  if (!stack.length) return [];
+  const out = ['', '## Branches and pull requests'];
+  for (const s of stack) {
+    const onto = s.state?.base
+      ? `\`${s.state.base}\``
+      : s.base === SESSION_BRANCH
+        ? 'the branch you are on'
+        : s.base
+          ? `\`${s.base}\``
+          : repoBase
+            ? `\`${repoBase}\``
+            : 'the base branch';
+    const pr = s.state?.pr
+      ? `pull request${s.state.pr.number ? ` #${s.state.pr.number}` : ''} ${s.state.pr.state}${s.state.pr.url ? ` — ${s.state.pr.url}` : ''}`
+      : 'no pull request yet';
+    out.push(`- \`${s.branch}\` onto ${onto}: ${pr}`);
+    if (s.restack) out.push(`  ⚠ ${s.restack}`);
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ *

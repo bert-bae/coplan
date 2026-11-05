@@ -153,6 +153,7 @@ const PHASE_CHIP: Record<Exclude<PlanPhase, 'planning'>, string> = {
   tasking: 'Design confirmed',
   submitted: 'Submitted',
   building: 'Locked · building',
+  finalizing: 'Locked · finishing',
   built: 'Built',
   'handed-off': 'Locked · handed off',
 };
@@ -893,6 +894,10 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
         `${agent.name} has the plan. No task is in progress right now.`
       );
       break;
+    case 'finalizing':
+      head = 'Finishing';
+      text = `Every task is done (${counts.total}). ${agent.name} is running the final checks, opening the pull requests and writing the build report.`;
+      break;
     case 'built':
       head = 'Built';
       text = plan.report ? `Every task is done (${counts.total}), and ${agent.name} wrote the build report.` : `Every task is done (${counts.total}).`;
@@ -955,7 +960,7 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
                 Copy prompt
               </button>
             )}
-            {(phase === 'building' || phase === 'built') && tab !== 'tasks' && (
+            {(phase === 'building' || phase === 'finalizing' || phase === 'built') && tab !== 'tasks' && (
               <button type="button" className="btn btn-sm" onClick={() => store.set({ tab: 'tasks', taskMode: 'board' })}>
                 Follow on the board
               </button>

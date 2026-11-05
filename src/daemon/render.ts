@@ -129,7 +129,11 @@ function renderDocument(plan: Plan, opts: DocumentOptions = {}): string[] {
   out.push('', ...renderTasks(plan, { attribution, details, revs }));
   const order = renderBuildOrder(plan, opts.base);
   if (order.length) out.push('', ...order);
-  if (plan.report) out.push('', '## Build report', plan.report.text.trim());
+  if (plan.report) {
+    out.push('', '## Build report', plan.report.text.trim());
+    const checks = plan.report.checks ?? [];
+    if (checks.length) out.push('', `Final checks: ${checks.map((c) => `${c.name} ${c.ok ? '✓' : `✗${c.note ? ` (${c.note})` : ''}`}`).join(', ')}`);
+  }
 
   const open = plan.threads.filter((t) => !t.resolved);
   if (open.length) {
@@ -228,7 +232,9 @@ export function renderBuildOrder(plan: Plan, base?: string): string[] {
         // Refused when the task list is made; only an older plan has one.
         out.push(`- \`${b.branch}\` needs work from ${b.needs.length} branches, which one pull request cannot: harness_plan_check says how to fix it — ${ids}`);
       } else {
-        out.push(`- \`${b.branch}\` from ${baseWords(b.base, base)} — ${ids}`);
+        const pr = plan.branches?.[b.branch]?.pr;
+        const prText = pr ? ` · pull request${pr.number ? ` #${pr.number}` : ''} ${pr.state}` : '';
+        out.push(`- \`${b.branch}\` from ${baseWords(b.base, base)} — ${ids}${prText}`);
       }
     }
     if (unbranched.length) out.push(`- no branch named (the session's current branch) — ${unbranched.map((t) => t.id).join(', ')}`);
@@ -249,6 +255,12 @@ function lockLine(plan: Plan): string | null {
       );
     case 'handed-off':
       return '> **Locked.** The user submitted this plan to be built outside this session; it no longer changes here.';
+    case 'finalizing':
+      return (
+        '> **Every task is done — finish the build.** Run the final checks, push the branches and open the pull ' +
+        'requests (record each with harness_branch_update), then write the build report; harness_task_next says how. ' +
+        'The plan is built once the report is in.'
+      );
     case 'built':
       return '> **Built.** The user submitted this plan and every task is done. Publishing a new plan replaces it.';
     default:

@@ -124,9 +124,15 @@ When `harness_task_next` says every task is done:
 1. Run the **final** checks (`coplan check final`, or the commands the
    prompt lists). Fix what they find — as a task (`upsert_task`), through
    the cycle like any other.
-2. Push the branches; open the pull requests in stack order if wanted.
-3. Write the build report — `harness_plan_edit {ops: [{op: "report", text}]}` — in
-   markdown:
+2. Push the branches; open the pull requests in stack order if wanted, and
+   record each one — `harness_branch_update {branch, pr_url, pr_number, pr_state}`
+   — so the board shows the stack. When one merges, record that too: if a
+   branch above it now needs rebasing onto the base branch and its pull
+   request pointing there, `harness_task_next` says so; do it, then record
+   the new `base`.
+3. Write the build report — `harness_plan_edit {ops: [{op: "report", text, checks}]}`,
+   with the final checks as they came out in `checks` — in markdown. The
+   plan is built once the report is in:
    - **Built** — each top-level task, one line each, with its sub-results.
    - **Branches & PRs** — in stack order, with links.
    - **Checks** — the final checks and how they came out.

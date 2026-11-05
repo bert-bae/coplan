@@ -17,6 +17,7 @@ const PHASE_PILL: Record<Exclude<PlanPhase, 'planning'>, string> = {
   tasking: 'design confirmed',
   submitted: 'submitted',
   building: 'building',
+  finalizing: 'finishing',
   built: 'built',
   'handed-off': 'handed off',
 };
@@ -28,6 +29,8 @@ function phaseTitle(phase: Exclude<PlanPhase, 'planning'>, agent: string): strin
       return `Submitted: waiting for ${agent} to pick it up`;
     case 'building':
       return `Submitted and locked: ${agent} is building it`;
+    case 'finalizing':
+      return `Every task is done: ${agent} is running the final checks and writing the report`;
     case 'built':
       return 'Submitted and built: every task is done';
     default:

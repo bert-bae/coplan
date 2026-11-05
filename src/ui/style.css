@@ -1942,6 +1942,9 @@ span.board-title:hover { color: inherit; text-decoration: none; }
 /* What blocks what, where it lands, where it is in its cycle. */
 .chip.is-dep { background: var(--surface-sunken); border-style: dashed; }
 .chip.is-branch { font-family: var(--font-mono); font-weight: 500; }
+.chip.is-pr { text-decoration: none; }
+.chip.is-pr.is-merged { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
+.chip.is-pr.is-closed { opacity: 0.7; text-decoration: line-through; }
 .chip.is-ready { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
 .chip.is-waiting { background: var(--surface-sunken); color: var(--text-tertiary); }
 .chip.stage-chip { background: var(--accent-subtle); color: var(--accent-fg); border-color: var(--accent-border); }

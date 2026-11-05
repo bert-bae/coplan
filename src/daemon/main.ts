@@ -13,7 +13,7 @@ import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
 import { MAX_NOTE, PlanError, cleanChecks, cleanNote, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
 import { PROMPT_BUDGET, buildPrompt, designPrompt, promptHash, renderGaps, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
 import { renderBrief, renderNext } from './brief.ts';
-import { cleanSettings, dependents, effectiveReview, hasSubtasks, readyTasks, waitingOn } from '../shared/build.ts';
+import { cleanSettings, dependents, effectiveReview, hasSubtasks, readyTasks, stackStatus, waitingOn } from '../shared/build.ts';
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
 import { cleanStorage, scanStorage } from './housekeeping.ts';
 import { loadConfig, type HarnessConfig } from '../shared/config.ts';
@@ -1029,8 +1029,8 @@ function buildRouter(deps: Deps): Router {
       }
     }
     if ((status === 'done' || status === 'dropped') && changes.length) {
-      if (planPhase(plan) === 'built') {
-        out.push('That was the last task: the plan is built, and the board shows it done. Finish the build — harness_task_next says how.');
+      if (planPhase(plan) === 'finalizing' || planPhase(plan) === 'built') {
+        out.push('That was the last task. Finish the build — final checks, pull requests, then the report; harness_task_next says how.');
       } else {
         const fresh = readyTasks(plan).filter((t) => !readyBefore.has(t.id));
         if (fresh.length) out.push(`Now ready: ${fresh.map((t) => `${t.id} "${t.title}"`).join(', ')}.`);
@@ -1143,6 +1143,43 @@ function buildRouter(deps: Deps): Router {
               renderTaskList(plan, projectFor(session).branches.base) +
               // What the list leaves open, while it is still cheap to fix.
               ((gaps) => (gaps.length ? `\n\n${gaps.join('\n')}\n\nFix these, or say why in chat, before they review it.` : ''))(renderGaps(plan, 20)),
+          );
+          return;
+        }
+
+        case 'branch': {
+          if (!session.plan) {
+            reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
+            return;
+          }
+          const has = (k: string) => body[k] !== undefined && body[k] !== null && body[k] !== '';
+          if (has('pr_url') || has('pr_number')) {
+            if (!has('pr_state') && !session.plan.branches?.[String(body['branch'] ?? '')]?.pr) {
+              throw new PlanError('Say where the pull request stands: pr_state draft, open, merged or closed.');
+            }
+          }
+          const pr =
+            has('pr_state') || has('pr_url') || has('pr_number')
+              ? {
+                  state: String(body['pr_state'] ?? session.plan.branches?.[String(body['branch'] ?? '')]?.pr?.state ?? ''),
+                  ...(has('pr_url') ? { url: String(body['pr_url']) } : {}),
+                  ...(typeof body['pr_number'] === 'number' ? { number: body['pr_number'] } : {}),
+                }
+              : undefined;
+          if (!pr && !has('base')) throw new PlanError('Say what changed: the pull request (pr_url, pr_number, pr_state) or its base.');
+          const { plan } = store.applyOps(
+            id,
+            [{ op: 'set_branch', branch: String(body['branch'] ?? ''), ...(pr ? { pr } : {}), ...(has('base') ? { base: String(body['base']) } : {}) }],
+            'claude',
+            { tracking: true },
+          );
+          const stack = stackStatus(plan, projectFor(session).branches.base);
+          const now = stack.find((s) => s.branch === String(body['branch']));
+          const restacks = stack.filter((s) => s.restack).map((s) => `- ${s.restack}`);
+          reply(
+            true,
+            `[cc-harness] Recorded \`${now?.branch ?? body['branch']}\`${now?.state?.pr ? `: pull request${now.state.pr.number ? ` #${now.state.pr.number}` : ''} ${now.state.pr.state}` : ''}${now?.state?.base ? `, onto \`${now.state.base}\`` : ''}.` +
+              (restacks.length ? `\n\nThe stack moved:\n${restacks.join('\n')}` : ''),
           );
           return;
         }

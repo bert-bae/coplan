@@ -690,11 +690,25 @@ test('finishing the last task finishes the build, and a new plan may follow', as
     }
   }
   assert.deepEqual(left, []);
-  assert.match(String(last['text']), /That was the last task: the plan is built/);
+  assert.match(String(last['text']), /That was the last task. Finish the build/);
+  const { sessions: finishing } = await call<{ sessions: { sessionId: string; phase: string }[] }>('/api/sessions');
+  assert.equal(finishing.find((x) => x.sessionId === built)?.phase, 'finalizing');
   const finish = String((await mcpFor(built, 'next'))['text']);
   assert.match(finish, /Every task in "Add a cache" is done/);
   assert.match(finish, /pull requests in stack order: `cache\/storage` → `cache\/api` \(onto `cache\/storage`\)/);
   assert.match(finish, /op: "report"/);
+
+  // The pull requests, as they are opened and merged: the stack follows.
+  const pr = (body: Record<string, unknown>) => mcpFor(built, 'branch', body);
+  assert.equal((await pr({ branch: 'cache/storage', pr_url: 'https://github.com/o/r/pull/11', pr_number: 11, pr_state: 'open' }))['ok'], true);
+  await pr({ branch: 'cache/api', pr_url: 'https://github.com/o/r/pull/12', pr_number: 12, pr_state: 'open' });
+  assert.match(String((await pr({ branch: 'nope', pr_state: 'open' }))['text']), /No task lands on `nope`/);
+  const merged = String((await pr({ branch: 'cache/storage', pr_state: 'merged' }))['text']);
+  assert.match(merged, /`cache\/storage` is merged: rebase `cache\/api` onto the base branch/);
+  assert.match(String((await mcpFor(built, 'next'))['text']), /`cache\/api` onto `cache\/storage`: pull request #12 open — https:\/\/github\.com\/o\/r\/pull\/12\n {2}⚠ `cache\/storage` is merged/);
+  assert.doesNotMatch(String((await pr({ branch: 'cache/api', base: 'main' }))['text']), /The stack moved/, 'restacked onto main');
+  assert.equal((await sessionFor(built)).plan!.branches!['cache/api']!.pr!.number, 12);
+
   const report = await mcpFor(built, 'edit', { ops: [{ op: 'report', text: '## Built\n- Storage, Wire up' }] });
   assert.equal(report['ok'], true, String(report['text']));
   assert.match(String((await mcpFor(built, 'read'))['text']), /## Build report\n## Built/);

@@ -10,7 +10,7 @@ import { Markdown } from '../components/Markdown.tsx';
 import { classNames } from '../lib/format.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
 import { childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
-import { SESSION_BRANCH, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
+import { SESSION_BRANCH, stackStatus, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
 import { REVIEW_MODES, TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type ReviewMode, type Task, type TaskStatus } from '../../shared/types.ts';
 
 /** Clicking the status dot steps through the common path; blocked is set
@@ -130,6 +130,32 @@ export function TasksView() {
  * side, and the branches the work lands on. Shown once tasks say what they
  * wait on or where they land.
  */
+/** A branch's pull request as the agent last reported it, and the restack
+ *  it needs when the branch below it merged. */
+function PullRequest({ plan, branch }: { plan: Plan; branch: string }) {
+  const entry = stackStatus(plan).find((s) => s.branch === branch);
+  const pr = entry?.state?.pr;
+  if (!pr && !entry?.restack) return null;
+  const label = `PR${pr?.number ? ` #${pr.number}` : ''} ${pr?.state ?? ''}`.trim();
+  return (
+    <>
+      {pr &&
+        (pr.url ? (
+          <a className={classNames('chip', 'is-pr', `is-${pr.state}`)} href={pr.url} target="_blank" rel="noreferrer">
+            {label}
+          </a>
+        ) : (
+          <span className={classNames('chip', 'is-pr', `is-${pr.state}`)}>{label}</span>
+        ))}
+      {entry?.restack && (
+        <span className="chip is-warning" title={entry.restack}>
+          needs a restack
+        </span>
+      )}
+    </>
+  );
+}
+
 function BuildOrder({ plan, collapsible = false }: { plan: Plan; collapsible?: boolean }) {
   const { branches, unbranched } = branchPlan(plan);
   if (!hasDependencies(plan) && branches.length === 0) return null;
@@ -172,6 +198,7 @@ function BuildOrder({ plan, collapsible = false }: { plan: Plan; collapsible?: b
                       ? ` stacked on ${b.base}`
                       : ' from the base branch'}
               </span>
+              <PullRequest plan={plan} branch={b.branch} />
               <span className="order-tasks">{b.tasks.map(chip)}</span>
             </li>
           ))}

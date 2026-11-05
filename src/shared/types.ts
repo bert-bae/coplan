@@ -368,6 +368,21 @@ export interface DesignSignoff {
 export interface BuildReport {
   text: string;
   at: number;
+  /** The final checks, as they came out when the report was written. */
+  checks?: CheckResult[];
+}
+
+export const PR_STATES = ['draft', 'open', 'merged', 'closed'] as const;
+export type PrState = (typeof PR_STATES)[number];
+
+/** One branch of the build, as the agent reports it. */
+export interface BranchState {
+  /** Its pull request: the link, the number, and where it stands. */
+  pr?: { url?: string; number?: number; state: PrState };
+  /** The branch its pull request targets now — after a lower one merged,
+   *  the base branch rather than the one it was stacked on. */
+  base?: string;
+  updatedAt: number;
 }
 
 /**
@@ -376,7 +391,7 @@ export interface BuildReport {
  * confirmed, handed over and waiting for Claude to pick it up, being built,
  * built, or handed to something outside the harness.
  */
-export type PlanPhase = 'planning' | 'tasking' | 'submitted' | 'building' | 'built' | 'handed-off';
+export type PlanPhase = 'planning' | 'tasking' | 'submitted' | 'building' | 'finalizing' | 'built' | 'handed-off';
 
 export interface Plan {
   title: string;
@@ -411,6 +426,9 @@ export interface Plan {
   submission?: Submission;
   /** Claude's final report on the build. */
   report?: BuildReport;
+  /** What the build has done with each of its branches: the pull request
+   *  opened for it and where that stands, as the agent reports it. */
+  branches?: Record<string, BranchState>;
   /** Bumped each time Claude publishes the plan wholesale. */
   revision: number;
   createdAt: number;
@@ -558,8 +576,11 @@ export type PlanOp =
   | { op: 'comment'; target: Target; text: string }
   | { op: 'reply'; threadId: string; text: string }
   | { op: 'resolve'; threadId: string; resolved: boolean }
-  /** The final report on the build. Markdown; replaces any earlier one. */
-  | { op: 'report'; text: string };
+  /** The final report on the build. Markdown; replaces any earlier one.
+   *  `checks`: the final checks, as they came out. */
+  | { op: 'report'; text: string; checks?: CheckResult[] }
+  /** What became of one of the build's branches (harness_branch_update). */
+  | { op: 'set_branch'; branch: string; pr?: { url?: string; number?: number; state: string }; base?: string };
 
 export type PlanOpName = PlanOp['op'];
 

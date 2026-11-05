@@ -10,6 +10,7 @@
 import type {
   Author,
   BuildSettings,
+  BranchState,
   BuildTarget,
   Change,
   CheckResult,
@@ -41,8 +42,8 @@ import type {
   TaskStatus,
   Thread,
 } from './types.ts';
-import { BUILD_TARGETS, EDGE_ARROWS, IRIC_STAGES, NODE_KINDS, TASK_STATUSES, VERDICTS } from './types.ts';
-import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveReview, validReview } from './build.ts';
+import { BUILD_TARGETS, EDGE_ARROWS, IRIC_STAGES, NODE_KINDS, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
+import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, validReview } from './build.ts';
 
 /** How many review verdicts a task keeps. */
 const MAX_REVIEWS = 20;
@@ -869,7 +870,8 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
   comment: ['target', 'text'],
   reply: ['threadId', 'text'],
   resolve: ['threadId', 'resolved'],
-  report: ['text'],
+  report: ['text', 'checks'],
+  set_branch: ['branch', 'pr', 'base'],
 };
 
 /** Refuses an edit Claude sent with a field its op does not take. */
@@ -1065,6 +1067,9 @@ export const PROGRESS_FIELDS = ['status', 'stage', 'checks'] as const;
  * a status would walk straight past those gates.
  */
 function refuseProgress(op: PlanOp): void {
+  if (op.op === 'set_branch') {
+    throw new PlanError('What became of a branch goes through harness_branch_update {branch, pr_url, pr_number, pr_state, base}.');
+  }
   if (op.op === 'review_task') {
     throw new PlanError('A review verdict goes through harness_task_update {task_id, verdict, summary}.');
   }
@@ -1416,9 +1421,34 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
     case 'report': {
       const text = clean(op.text, MAX_TEXT);
       if (!text) throw new PlanError('A report needs text.');
-      if (plan.report?.text === text) return [];
-      plan.report = { text, at: now };
+      const checks = op.checks === undefined ? undefined : cleanChecks(op.checks);
+      if (op.checks !== undefined && !checks) throw new PlanError('`checks` is a list of {name, ok, note?}.');
+      if (plan.report?.text === text && !checks) return [];
+      plan.report = { text, at: now, ...(checks?.length ? { checks } : {}) };
       return [log('edited', { kind: 'plan', id: '' }, 'wrote the build report')];
+    }
+
+    case 'set_branch': {
+      const name = cleanBranch(op.branch);
+      if (!name) throw new PlanError('Name the branch.');
+      if (!plan.tasks.some((t) => effectiveBranch(plan, t) === name)) {
+        throw new PlanError(`No task lands on \`${name}\`: the plan's branches are ${[...new Set(plan.tasks.map((t) => effectiveBranch(plan, t)).filter(Boolean))].map((b) => `\`${b}\``).join(', ') || 'none'}.`);
+      }
+      const was = plan.branches?.[name];
+      const state: BranchState = { ...(was ?? {}), updatedAt: now };
+      if (op.pr) {
+        const prState = oneOf(op.pr.state, PR_STATES, 'a pull request state');
+        if (!prState) throw new PlanError('A pull request needs its state: draft, open, merged or closed.');
+        const url = clean(op.pr.url, 400);
+        if (url && !/^https?:\/\//.test(url)) throw new PlanError(`"${url}" is not a link.`);
+        const number = typeof op.pr.number === 'number' && Number.isInteger(op.pr.number) && op.pr.number > 0 ? op.pr.number : was?.pr?.number;
+        state.pr = { state: prState, ...(url ?? was?.pr?.url ? { url: url ?? was?.pr?.url } : {}), ...(number ? { number } : {}) };
+      }
+      if (op.base !== undefined) state.base = cleanBranch(op.base) ?? '';
+      if (!state.base) delete state.base;
+      plan.branches = { ...(plan.branches ?? {}), [name]: state };
+      const pr = state.pr ? `pull request${state.pr.number ? ` #${state.pr.number}` : ''} ${state.pr.state}` : 'updated';
+      return [log('status', { kind: 'plan', id: '' }, `\`${name}\`: ${pr}${state.base ? `, onto \`${state.base}\`` : ''}`)];
     }
 
     default:
@@ -1649,7 +1679,7 @@ export const MAX_NOTE = 4_000;
 
 /** What Claude may still do to a locked plan: track the work it is doing,
  *  and answer comments. Everything else is the design the user signed off. */
-const TRACKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'review_task', 'comment', 'reply', 'resolve', 'report']);
+const TRACKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'review_task', 'comment', 'reply', 'resolve', 'report', 'set_branch']);
 
 /** Ops that can change which task waits on which. */
 const TASK_SHAPE_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task']);
@@ -1672,13 +1702,16 @@ const DESIGN_LOCKED_FOR_CLAUDE =
 const TASKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task', 'upsert_diagram', 'upsert_node', 'review_task', 'comment', 'reply', 'resolve', 'report']);
 
 /** Where the plan is in its life. */
-export function planPhase(plan: Pick<Plan, 'submission' | 'tasks' | 'design'> | null): PlanPhase {
+export function planPhase(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> & Partial<Pick<Plan, 'report'>>) | null): PlanPhase {
   const submission = plan?.submission;
   if (!submission) return plan?.design ? 'tasking' : 'planning';
   if (submission.target === 'elsewhere') return 'handed-off';
   if (!submission.deliveredAt) return 'submitted';
   const counts = countTasks(plan);
-  return counts.total > 0 && counts.done === counts.total ? 'built' : 'building';
+  if (counts.total === 0 || counts.done < counts.total) return 'building';
+  // Every task done is not the build done: the final checks, the pull
+  // requests and the report come after. The report closes it.
+  return plan?.report ? 'built' : 'finalizing';
 }
 
 /** Whether the plan is locked against editing. */

@@ -227,6 +227,9 @@ test('a finished build takes no new task list: the next plan starts afresh', () 
   plan = submitPlan(plan, { target: 'session', prompt: 'build' });
   plan = markDelivered(plan);
   plan = done(plan, 'client', 'config', 'invalidate', 'wire', 'docs');
+  // Every task done is not yet built: the build is finished by its report.
+  assert.throws(() => publishTasks(plan, { tasks: [{ title: 'More' }] }), /locked/);
+  plan = applyOps(plan, [{ op: 'report', text: 'Built.' }], 'claude').plan;
   assert.throws(() => publishTasks(plan, { tasks: [{ title: 'More' }] }), /This plan is built/);
 });
 
