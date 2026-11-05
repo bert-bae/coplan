@@ -21,7 +21,7 @@ import {
   submitPlan,
   unreadItems,
 } from '../shared/plan.ts';
-import { BUILD_MARKER, DESIGN_MARKER, buildPrompt, designPrompt, type PromptOptions } from './render.ts';
+import { BUILD_MARKER, DESIGN_MARKER, PROMPT_MOVED, buildPrompt, designPrompt, promptHash, type PromptOptions } from './render.ts';
 import { DEFAULT_AGENT, isAgentKind, type AgentKind } from '../shared/agents.ts';
 import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ServerEvent, SessionState, SessionSummary, TaskListInput } from '../shared/types.ts';
 
@@ -293,7 +293,7 @@ export class SessionStore extends EventEmitter {
    * the plan as the daemon holds it, and only if that is still the version
    * the user previewed — what they read is what Claude gets.
    */
-  submit(id: string, input: PromptOptions & { target: BuildTarget; expect?: number }): Plan {
+  submit(id: string, input: PromptOptions & { target: BuildTarget; expect?: number; hash?: string }): Plan {
     const session = this.sessions.get(id);
     if (!session) throw new Error('unknown session');
     const plan = session.plan;
@@ -302,6 +302,7 @@ export class SessionStore extends EventEmitter {
       throw new PlanError('The plan changed while you were reviewing it. The preview now shows the latest version — check it, then submit again.');
     }
     const { prompt, trimmed } = buildPrompt(plan, { ...input, agent: session.agent });
+    if (input.hash !== undefined && input.hash !== promptHash(prompt)) throw new PlanError(PROMPT_MOVED('submit'));
     const next = submitPlan(plan, {
       target: input.target,
       prompt,
@@ -321,7 +322,7 @@ export class SessionStore extends EventEmitter {
    * from the plan as the daemon holds it, and only if that is the version
    * the user previewed.
    */
-  confirmDesign(id: string, input: PromptOptions & { expect?: number }): Plan {
+  confirmDesign(id: string, input: PromptOptions & { expect?: number; hash?: string }): Plan {
     const session = this.sessions.get(id);
     if (!session) throw new Error('unknown session');
     const plan = session.plan;
@@ -330,6 +331,7 @@ export class SessionStore extends EventEmitter {
       throw new PlanError('The plan changed while you were reviewing it. The preview now shows the latest version — check it, then confirm again.');
     }
     const { prompt, trimmed } = designPrompt(plan, { ...input, agent: session.agent });
+    if (input.hash !== undefined && input.hash !== promptHash(prompt)) throw new PlanError(PROMPT_MOVED('confirm'));
     const next = confirmDesign(plan, { prompt, trimmed, ...(input.note ? { note: input.note } : {}) });
     this.mutate(id, (s) => {
       s.plan = next;
@@ -377,6 +379,21 @@ export class SessionStore extends EventEmitter {
       return plan.submission.target === 'session' && !plan.submission.deliveredAt ? { prompt: plan.submission.prompt, marker: BUILD_MARKER } : null;
     }
     return plan.design && !plan.design.deliveredAt ? { prompt: plan.design.prompt, marker: DESIGN_MARKER } : null;
+  }
+
+  /**
+   * Take back a delivery that never reached the agent — the hook's answer
+   * was not received — so the next hook or harness_plan_read hands the
+   * prompt over again. Only while nothing else has changed the plan since.
+   */
+  undeliver(id: string, prior: Plan, deliveredVersion: number): boolean {
+    const session = this.sessions.get(id);
+    if (!session?.plan || session.plan.version !== deliveredVersion) return false;
+    this.mutate(id, (s) => {
+      s.plan = { ...prior, version: deliveredVersion + 1, updatedAt: Date.now() };
+    });
+    this.persistNow(id);
+    return true;
   }
 
   deliver(id: string): { prompt: string; marker: string } | null {

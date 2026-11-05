@@ -403,3 +403,17 @@ test('content is compared without regard to field order or the order arrows are 
   b.diagrams[0]!.edges[0]!.label = 'other';
   assert.ok(!sameContent(a, b));
 });
+
+test('a connection between boxes that share a label names them by id too', () => {
+  const nodes = [
+    { id: 'api', label: 'API', kind: 'service' as const },
+    { id: 'c1', label: 'Cache', kind: 'datastore' as const },
+    { id: 'c2', label: 'Cache', kind: 'datastore' as const },
+  ];
+  const before = { id: 'd1', title: 'D', nodes, edges: [{ id: 'e1', source: 'api', target: 'c1' }] };
+  const after = { id: 'd1', title: 'D', nodes, edges: [{ id: 'e1', source: 'api', target: 'c1' }, { id: 'e2', source: 'api', target: 'c2' }] };
+  const lines = diagramChanges(before, after);
+  assert.ok(lines.some((l) => /^Connected API → Cache \(`c2`\)\.$/.test(l)), lines.join('\n'));
+  // Unambiguous labels stay as they were.
+  assert.ok(!lines.some((l) => /API \(`api`\) →/.test(l)));
+});

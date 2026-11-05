@@ -5,6 +5,7 @@
  * from these renderings, so they carry every id it will need to quote back in
  * an edit, and they lead with what changed — the reason it is reading at all.
  */
+import { createHash } from 'node:crypto';
 import type { BuildSettings, BuildTarget, Change, Plan, PlanBaseline, Task, Thread } from '../shared/types.ts';
 import {
   baselineOf,
@@ -18,7 +19,7 @@ import {
   unreadAreas,
   unreadByClaude,
 } from '../shared/plan.ts';
-import { contentOf, diagramChanges, diagramToMarkdown, indent } from '../shared/architecture.ts';
+import { contentOf, diagramChanges, diagramToMarkdown, hang, indent, nestHeadings } from '../shared/architecture.ts';
 import {
   DEFAULT_BUILD_SETTINGS,
   REVIEW_WORDS,
@@ -87,13 +88,13 @@ interface DocumentOptions {
 function renderDocument(plan: Plan, opts: DocumentOptions = {}): string[] {
   const { attribution = true, details = true, reader = 'claude' } = opts;
   const out: string[] = [];
-  if (plan.summary.trim()) out.push('', '## Summary', plan.summary.trim());
+  if (plan.summary.trim()) out.push('', '## Summary', nestHeadings(plan.summary.trim(), 2));
 
   if (plan.sections.length) {
     out.push('', '## Sections');
     for (const s of plan.sections) {
       const by = attribution && s.updatedBy === 'user' ? ' _(edited by the user)_' : '';
-      out.push('', `### [${s.id}] ${s.title}${by}`, s.body.trim() || '_(empty)_');
+      out.push('', `### [${s.id}] ${s.title}${by}`, nestHeadings(s.body.trim(), 3) || '_(empty)_');
     }
   }
 
@@ -249,6 +250,21 @@ function lockLine(plan: Plan): string | null {
  */
 export const PROMPT_BUDGET = 9_000;
 
+/**
+ * A fingerprint of a prompt. The preview hands it to the page, and the
+ * sign-off hands it back: the prompt is rebuilt at sign-off, and if
+ * anything it is made from moved since the preview — the agent reading the
+ * plan in between, the repository's checks — the user would sign off on
+ * text they never read. The version alone does not catch those.
+ */
+export function promptHash(prompt: string): string {
+  return createHash('sha256').update(prompt).digest('hex').slice(0, 16);
+}
+
+export const PROMPT_MOVED = (what: 'submit' | 'confirm') =>
+  `The prompt changed since you previewed it (the agent read the plan, or the repository's checks changed). The preview now ` +
+  `shows what would be sent — read it, then ${what} again.`;
+
 /** How every build prompt for this session begins. The hook recognises it
  *  in a message the user pasted themselves, so it is not delivered twice. */
 export const BUILD_MARKER = '[cc-harness] Build the plan';
@@ -357,11 +373,19 @@ function fit(plan: Plan, head: string[], said: string[], changes: string[], doc:
   const pointer =
     `_The architecture (${plan.diagrams.length} diagram(s)), the sections and each task's detail are too long to quote ` +
     'here: call harness_plan_read for them before you start._';
-  const fixed = [...head, ...said, ...clip(changes, 2_500), '', pointer];
-  if (plan.summary.trim()) fixed.push('', '## Summary', ...clip(plan.summary.trim().split('\n'), 1_200));
+  // The instructions and what the user wrote are kept whole. What is left
+  // goes to what they changed first — it is what Claude must act on — then
+  // the summary, then the task list, each cut to the room that is left.
+  const room0 = () => PROMPT_BUDGET - fixed.join('\n').length - STATUS_LEGEND.length - 4;
+  const fixed = [...head, ...said];
+  const spare = PROMPT_BUDGET - [...fixed, '', pointer].join('\n').length - STATUS_LEGEND.length - 300;
+  fixed.push(...clip(changes, Math.max(300, Math.min(2_500, Math.floor(spare * 0.6))), CHANGES_CUT), '', pointer);
+  const summaryRoom = Math.min(1_200, room0() - 300);
+  if (plan.summary.trim() && summaryRoom > 150) fixed.push('', '## Summary', ...clip(nestHeadings(plan.summary.trim(), 2).split('\n'), summaryRoom));
   const order = renderBuildOrder(plan, base);
   const orderText = order.join('\n');
-  const room = PROMPT_BUDGET - fixed.join('\n').length - STATUS_LEGEND.length - 4 - (orderText.length < 1_500 ? orderText.length + 2 : 0);
+  const withOrder = orderText.length < 1_500 && orderText.length + 2 < room0() - 300;
+  const room = room0() - (withOrder ? orderText.length + 2 : 0);
   const tasks = renderTasks(plan, { details: false });
   const kept: string[] = [];
   let used = 0;
@@ -373,7 +397,7 @@ function fit(plan: Plan, head: string[], said: string[], changes: string[], doc:
     kept.push(line);
     used += line.length + 1;
   }
-  const tail = orderText.length < 1_500 && order.length ? ['', ...order] : [];
+  const tail = withOrder && order.length ? ['', ...order] : [];
   return { prompt: [...fixed, '', ...kept, ...tail, '', STATUS_LEGEND].join('\n').trim(), trimmed: true };
 }
 
@@ -449,16 +473,20 @@ export function checksSection(project: ProjectConfig, bin?: string, planning = f
 function changesSinceRead(plan: Plan): string[] {
   const unread = unreadByClaude(plan);
   if (!plan.claudeBaseline || unread.length === 0) return [];
-  return ['', renderChanges(plan, unread, false)];
+  // As lines, so a long summary is cut between changes, never dropped whole.
+  return ['', ...renderChanges(plan, unread, false).split('\n')];
 }
 
-/** Lines, cut to about `max` characters. */
-function clip(lines: string[], max: number): string[] {
+/** Where a change summary too long for the prompt is cut. */
+const CHANGES_CUT = '- …and more than fits here: harness_plan_read {changes_only: true} lists every change the user made.';
+
+/** Lines, cut to about `max` characters, ending with `more` where cut. */
+function clip(lines: string[], max: number, more = '…'): string[] {
   const out: string[] = [];
   let used = 0;
   for (const line of lines) {
     if (used + line.length > max) {
-      out.push('…');
+      out.push(more);
       break;
     }
     out.push(line);
@@ -592,6 +620,14 @@ function taskChanges(base: PlanBaseline, plan: Plan, ids: Set<string>, withText:
     if ((was.detail ?? '').trim() !== (now.detail ?? '').trim()) facts.push(now.detail?.trim() ? 'detail edited' : 'detail removed');
     if ((was.files ?? []).join() !== (now.files ?? []).join()) facts.push(`files now ${now.files?.join(', ') || 'none'}`);
     if ((was.note ?? '') !== (now.note ?? '')) facts.push(now.note ? `note "${now.note}"` : 'note removed');
+    // What a task waits on, where it lands and who reviews it are the
+    // user's build decisions: every one of them is news.
+    const deps = (t: { dependsOn?: string[] }) => [...(t.dependsOn ?? [])].sort().join(', ');
+    if (deps(was) !== deps(now)) facts.push(`now waits on ${deps(now) || 'nothing'} (was ${deps(was) || 'nothing'})`);
+    if ((was.branch ?? '') !== (now.branch ?? '')) {
+      facts.push(`branch ${was.branch ? `\`${was.branch}\`` : 'inherited'} → ${now.branch ? `\`${now.branch}\`` : 'inherited'}`);
+    }
+    if ((was.review ?? '') !== (now.review ?? '')) facts.push(`review ${was.review ?? 'default'} → ${now.review ?? 'default'}`);
     if (!facts.length) continue;
     out.push(`Changed ${now.id} "${now.title}": ${facts.join('; ')}.`);
     if (withText && (was.detail ?? '').trim() !== (now.detail ?? '').trim() && now.detail?.trim()) out.push('  Detail now:', ...indent(now.detail, 4));
@@ -642,8 +678,8 @@ function capital(text: string): string {
 
 function renderThread(plan: Plan, t: Thread, reader: 'claude' | 'outside' = 'claude'): string {
   const who = (author: 'user' | 'claude') => (author === 'user' ? 'user' : reader === 'claude' ? 'you' : 'planner');
-  const lines = [`- [${t.id}] on ${describeTarget(plan, t.target)} — ${who(t.author)}: ${t.text}`];
-  for (const r of t.replies) lines.push(`  ↳ ${who(r.author)}: ${r.text}`);
+  const lines = [`- [${t.id}] on ${describeTarget(plan, t.target)} — ${who(t.author)}: ${hang(t.text, 4)}`];
+  for (const r of t.replies) lines.push(`  ↳ ${who(r.author)}: ${hang(r.text, 4)}`);
   if (reader === 'claude' && lastAuthor(t) === 'user') lines.push(`  → reply with harness_plan_edit {ops: [{op: "reply", threadId: "${t.id}", text}]} once you have acted on it`);
   return lines.join('\n');
 }

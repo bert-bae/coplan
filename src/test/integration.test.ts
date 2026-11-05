@@ -587,6 +587,30 @@ test('a submission made against an older preview is refused', async () => {
   assert.equal((await sessionFor(built)).plan!.submission, undefined);
 });
 
+test('a submission whose prompt changed since the preview is refused, even at the same version', async () => {
+  // The preview quotes an edit the agent has not read …
+  await opsOn(built, [{ op: 'upsert_task', id: 't4', note: 'the user wants this last' }]);
+  const preview = await post<Preview & { hash: string }>(`/api/session/${built}/plan/prompt`, { target: 'session' });
+  assert.match(preview.prompt, /Since you last read/);
+  // … then the agent reads the plan: same version, different prompt.
+  await mcpFor(built, 'read', {});
+  const res = await post<{ error?: string }>(`/api/session/${built}/plan/submit`, { target: 'session', expect: preview.version, hash: preview.hash });
+  assert.match(res.error ?? '', /The prompt changed since you previewed it/);
+  assert.equal((await sessionFor(built)).plan!.submission, undefined);
+});
+
+test('a sign-off the hook did not hand over comes with the next harness_plan_read, for any agent', async () => {
+  const id = 'handover-session';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await post(`/api/session/${id}/plan/design/confirm`);
+  const read = String((await mcpFor(id, 'read', {}))['text']);
+  assert.match(read, /^\[cc-harness\] The design is confirmed/);
+  assert.ok((await sessionFor(id)).plan!.design!.deliveredAt);
+  // Once: the next read is the plan.
+  assert.doesNotMatch(String((await mcpFor(id, 'read', {}))['text']), /^\[cc-harness\] The design is confirmed/);
+});
+
 test('submitting locks the plan with exactly the previewed prompt', async () => {
   const settings = { review: 'self', parallel: 3, maxRounds: 2 };
   const preview = await post<Preview & { settings: unknown }>(`/api/session/${built}/plan/prompt`, { target: 'session', note: 'Go.', settings });

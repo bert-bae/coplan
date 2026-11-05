@@ -70,7 +70,7 @@ export const api = {
 
   /** Lock the plan and hand it over to be built. `expect` is the version
    *  the preview was made from; a plan that moved on since is refused. */
-  submitPlan: (id: string, body: { target: BuildTarget; note: string; expect: number; settings?: BuildSettings }) =>
+  submitPlan: (id: string, body: { target: BuildTarget; note: string; expect: number; hash?: string; settings?: BuildSettings }) =>
     request<{ plan: Plan }>(`/api/session/${id}/plan/submit`, { method: 'POST', body: JSON.stringify(body) }),
 
   reopenPlan: (id: string) => request<{ plan: Plan }>(`/api/session/${id}/plan/reopen`, { method: 'POST', body: '{}' }),
@@ -80,7 +80,7 @@ export const api = {
     request<PromptPreview>(`/api/session/${id}/plan/design/prompt`, { method: 'POST', body: JSON.stringify({ note }) }),
 
   /** Lock the design; Claude makes the task list from it. */
-  confirmDesign: (id: string, body: { note: string; expect: number }) =>
+  confirmDesign: (id: string, body: { note: string; expect: number; hash?: string }) =>
     request<{ plan: Plan }>(`/api/session/${id}/plan/design/confirm`, { method: 'POST', body: JSON.stringify(body) }),
 
   reopenDesign: (id: string) => request<{ plan: Plan }>(`/api/session/${id}/plan/design/reopen`, { method: 'POST', body: '{}' }),
@@ -105,6 +105,9 @@ export interface PromptPreview {
   prompt: string;
   /** The plan was too long to quote whole; the prompt points Claude at harness_plan_read. */
   trimmed: boolean;
+  /** The prompt's fingerprint, handed back at sign-off: a prompt that
+   *  changed since this preview is refused rather than sent unread. */
+  hash?: string;
   /** The plan version the prompt was built from. */
   version: number;
   /** The longest prompt a hook hands Claude. */

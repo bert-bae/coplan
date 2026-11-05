@@ -139,7 +139,7 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
     // harness_plan_read. All this hook can do is notice the paste, so it is
     // not sent twice.
     const pending = ctx.store.pending(sessionId);
-    if (pending && typed.includes(pending.marker)) ctx.store.deliver(sessionId);
+    if (pending && holdsPrompt(typed, pending.prompt)) ctx.store.deliver(sessionId);
   } else {
     const handed = ctx.store.deliver(sessionId);
     if (handed) {
@@ -147,7 +147,7 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
       // those edits are not in the prompt, and the agent is told to read them.
       const later = ctx.store.get(sessionId)?.plan;
       const notice = later && ctx.config.promptNotice ? unreadNotice(later) : null;
-      const text = [typed.includes(handed.marker) ? '' : handed.prompt, notice ?? ''].filter(Boolean).join('\n\n');
+      const text = [holdsPrompt(typed, handed.prompt) ? '' : handed.prompt, notice ?? ''].filter(Boolean).join('\n\n');
       return text ? additionalContext('UserPromptSubmit', text) : HOOK_NOOP;
     }
   }
@@ -155,6 +155,17 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
   if (!ctx.config.promptNotice) return HOOK_NOOP;
   const notice = unreadNotice(session.plan);
   return notice ? additionalContext('UserPromptSubmit', notice) : HOOK_NOOP;
+}
+
+/**
+ * The message already carries this prompt: the user pasted it. Matched on
+ * the whole prompt (whitespace aside), not its opening marker, so pasting
+ * an older prompt for the same plan never stands in for the newer one.
+ */
+function holdsPrompt(typed: string, prompt: string): boolean {
+  const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
+  const want = norm(prompt);
+  return want.length > 0 && norm(typed).includes(want);
 }
 
 function onPreToolUse(sessionId: string, input: PreToolUseInput, ctx: IngestContext): HookOutput {

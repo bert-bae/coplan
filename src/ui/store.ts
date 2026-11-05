@@ -280,7 +280,7 @@ class Store {
    * on the board. Resolves false when the daemon refused — most often
    * because the plan moved on since the preview was made.
    */
-  async submitPlan(input: { target: BuildTarget; note: string; expect: number; settings?: BuildSettings }): Promise<boolean> {
+  async submitPlan(input: { target: BuildTarget; note: string; expect: number; hash?: string; settings?: BuildSettings }): Promise<boolean> {
     const id = this.state.sessionId;
     if (!id) return false;
     try {
@@ -328,7 +328,7 @@ class Store {
    * Sign the design off. From here it is locked, and Claude gets the ask for
    * a task list with the user's next message.
    */
-  async confirmDesign(input: { note: string; expect: number }): Promise<boolean> {
+  async confirmDesign(input: { note: string; expect: number; hash?: string }): Promise<boolean> {
     const id = this.state.sessionId;
     if (!id) return false;
     try {

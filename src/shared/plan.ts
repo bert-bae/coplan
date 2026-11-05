@@ -1009,8 +1009,13 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         const title = clean(op.title, MAX_TITLE);
         const body = typeof op.body === 'string' ? clean(op.body, MAX_TEXT) ?? '' : undefined;
         const changed = (title && title !== existing.title) || (body !== undefined && body !== existing.body);
+        const at = plan.sections.indexOf(existing);
         if (typeof op.index === 'number') moveInList(plan.sections, existing.id, op.index);
-        if (!changed) return [];
+        // A reorder alone is still a change: logged, so the version moves
+        // and a preview made before it is refused.
+        if (!changed) {
+          return plan.sections.indexOf(existing) !== at ? [log('moved', ref('section', existing.id), `reordered section "${existing.title}"`)] : [];
+        }
         if (title) existing.title = title;
         if (body !== undefined) existing.body = body;
         existing.rev += 1;
@@ -1048,6 +1053,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         const direction = validDirection(op.direction);
         if (direction) existing.direction = direction;
         if (typeof op.caption === 'string') setOptional(existing, 'caption', clean(op.caption, MAX_TEXT));
+        const at = plan.diagrams.indexOf(existing);
         if (typeof op.index === 'number') moveInList(plan.diagrams, existing.id, op.index);
         // A confirmed design can still be laid out, and its boxes linked to
         // the tasks that build them — but not redesigned.
@@ -1056,7 +1062,10 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         }
         const what = describeDiagramEdit(before, existing);
         const relaid = layoutChanged(before, existing);
-        if (!what && !relaid) return [];
+        if (!what && !relaid) {
+          // A reorder alone is still a change, as for sections.
+          return plan.diagrams.indexOf(existing) !== at ? [log('moved', ref('diagram', existing.id), `reordered diagram "${existing.title}"`)] : [];
+        }
         existing.rev += 1;
         existing.updatedAt = now;
         // Dragging boxes around, or flipping which way the diagram is drawn,
@@ -1597,7 +1606,7 @@ export function markDesignDelivered(plan: Plan, now = Date.now()): Plan {
   // user changed since — tasks, comments — is not in it, so it stays unread
   // and Claude is told to read it.
   const confirmedAt = plan.design.seq ?? plan.seq;
-  if (!unreadByClaude(plan).some((c) => c.seq > confirmedAt)) markReadByClaude(next, now);
+  if (!plan.design.trimmed && !unreadByClaude(plan).some((c) => c.seq > confirmedAt)) markReadByClaude(next, now);
   next.version += 1;
   next.updatedAt = now;
   return next;
@@ -1616,7 +1625,10 @@ export function markDelivered(plan: Plan, now = Date.now()): Plan {
   // The build prompt carries the design too: a task-list ask not yet sent
   // has nothing left to say.
   if (next.design && !next.design.deliveredAt) next.design.deliveredAt = now;
-  markReadByClaude(next, now);
+  // A trimmed prompt points Claude at harness_plan_read for what it could
+  // not quote — the user's changes among them — so it is not Claude's read:
+  // that read is, and it still has them to show.
+  if (!plan.submission.trimmed) markReadByClaude(next, now);
   next.version += 1;
   next.updatedAt = now;
   return next;

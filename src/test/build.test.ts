@@ -413,3 +413,11 @@ test("a task's brief is self-contained: objective, where it fits, scope, branch 
   assert.match(parent, /\*\*Redis\*\* `cache`[\s\S]*Decisions:\n    TTL 10m\./, 'a parent builds what its subtasks build');
   assert.match(parent, /No checks are configured/);
 });
+
+test("a parent's brief lists its subtasks in the order they can be built, not the outline's", () => {
+  // Config, second in the outline, now waits on Invalidation, which is third.
+  const plan = applyOps(tasked(), [{ op: 'upsert_task', id: 'config', dependsOn: ['invalidate'] }], 'user').plan;
+  const brief = renderBrief(plan, plan.tasks.find((t) => t.id === 'storage')!, {});
+  const order = [...brief.matchAll(/^- \[ \] (?:NOT DONE YET — )?(\w+) /gm)].map((m) => m[1]);
+  assert.deepEqual(order.slice(0, 3), ['client', 'invalidate', 'config']);
+});

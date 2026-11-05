@@ -11,7 +11,7 @@ import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
 import { MAX_NOTE, PlanError, cleanChecks, cleanNote, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
-import { PROMPT_BUDGET, buildPrompt, designPrompt, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
+import { PROMPT_BUDGET, buildPrompt, designPrompt, promptHash, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
 import { renderBrief, renderNext } from './brief.ts';
 import { cleanSettings, effectiveReview, hasSubtasks, readyTasks, waitingOn } from '../shared/build.ts';
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
@@ -20,7 +20,7 @@ import { loadConfig, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
-import type { BuildSettings, CleanupGroupId, DaemonLock, PlanInput, PlanOp, ServerEvent, SessionState, TaskListInput, TaskStatus } from '../shared/types.ts';
+import type { BuildSettings, CleanupGroupId, DaemonLock, Plan, PlanInput, PlanOp, ServerEvent, SessionState, TaskListInput, TaskStatus } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
@@ -473,6 +473,7 @@ function buildRouter(deps: Deps): Router {
     const { prompt, trimmed } = buildPrompt(session.plan, { target, agent: session.agent, settings, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
     json(ctx.res, 200, {
       prompt,
+      hash: promptHash(prompt),
       trimmed,
       version: session.plan.version,
       budget: PROMPT_BUDGET,
@@ -494,7 +495,15 @@ function buildRouter(deps: Deps): Router {
     const note = cleanNote(body.note);
     const project = projectFor(session);
     const { prompt, trimmed } = designPrompt(session.plan, { agent: session.agent, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
-    json(ctx.res, 200, { prompt, trimmed, version: session.plan.version, budget: PROMPT_BUDGET, maxNote: MAX_NOTE, project: projectSummary(project) });
+    json(ctx.res, 200, {
+      prompt,
+      hash: promptHash(prompt),
+      trimmed,
+      version: session.plan.version,
+      budget: PROMPT_BUDGET,
+      maxNote: MAX_NOTE,
+      project: projectSummary(project),
+    });
   });
 
   /**
@@ -505,7 +514,7 @@ function buildRouter(deps: Deps): Router {
   router.post('/api/session/:id/plan/design/confirm', async (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
-    const body = await readJson<{ note?: unknown; expect?: unknown }>(ctx.req);
+    const body = await readJson<{ note?: unknown; expect?: unknown; hash?: unknown }>(ctx.req);
     const note = cleanNote(body.note);
     try {
       const plan = store.confirmDesign(session.sessionId, {
@@ -513,6 +522,7 @@ function buildRouter(deps: Deps): Router {
         ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
         ...(note ? { note } : {}),
         ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
+        ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
       });
       log(`design confirmed for ${session.sessionId}`);
       json(ctx.res, 200, { plan: forBrowser(plan) });
@@ -542,7 +552,7 @@ function buildRouter(deps: Deps): Router {
   router.post('/api/session/:id/plan/submit', async (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
-    const body = await readJson<{ note?: unknown; target?: unknown; expect?: unknown; settings?: unknown }>(ctx.req);
+    const body = await readJson<{ note?: unknown; target?: unknown; expect?: unknown; settings?: unknown; hash?: unknown }>(ctx.req);
     const target = validTarget(body.target);
     if (!target) throw new HttpError(400, 'Say who builds it: "session" or "elsewhere".');
     const note = cleanNote(body.note);
@@ -555,6 +565,7 @@ function buildRouter(deps: Deps): Router {
         ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
         ...(note ? { note } : {}),
         ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
+        ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
       });
       log(`plan submitted for ${session.sessionId} (${target})`);
       json(ctx.res, 200, { plan: forBrowser(plan) });
@@ -679,11 +690,15 @@ function buildRouter(deps: Deps): Router {
     // does not (an older relay, or the doctor).
     let agent = parseAgent(header('x-harness-agent'));
     let output: HookOutput = HOOK_NOOP;
+    // A prompt this hook hands over, so it can be taken back if the answer
+    // never reaches the agent.
+    let handed: { id: string; prior: Plan; version: number } | null = null;
     try {
       const body = await readJson<Record<string, unknown>>(ctx.req);
       agent = hookAgent(agent, body);
       const { event, input } = readAgentHook(agent, raw, body);
       const session = typeof input.session_id === 'string' ? store.get(input.session_id) : undefined;
+      const prior = session?.plan && store.pending(session.sessionId) ? session.plan : null;
       if (event) {
         output = await ingestHook(event, input, {
           store,
@@ -698,10 +713,21 @@ function buildRouter(deps: Deps): Router {
           onWaiting: openClaude,
         });
       }
+      const after = session ? store.get(session.sessionId)?.plan : undefined;
+      if (prior && after && !store.pending(session!.sessionId)) handed = { id: session!.sessionId, prior, version: after.version };
     } catch (err) {
       // A hook must never break the session it is attached to.
       log(`hook ${agent}/${raw} failed: ${(err as Error)?.message}`);
       output = HOOK_NOOP;
+    }
+    if (handed) {
+      // The relay gave up (its curl timed out) or the connection dropped
+      // before the answer was out: the agent never got the prompt. Take the
+      // delivery back so the next hook — or harness_plan_read — hands it over.
+      const { id, prior, version } = handed;
+      ctx.res.once('close', () => {
+        if (!ctx.res.writableFinished && store.undeliver(id, prior, version)) log(`prompt for ${id} did not reach the agent; kept to deliver again`);
+      });
     }
     if (!ctx.res.writableEnded) json(ctx.res, 200, writeAgentOutput(agent, raw, output));
   });
@@ -923,20 +949,19 @@ function buildRouter(deps: Deps): Router {
             reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
             return;
           }
-          // Where no hook can hand a prompt over with the user's next message
-          // (Cursor), the first read after signing off carries it: the ask
-          // for a task list once the design is confirmed, the build prompt
-          // once the plan is submitted. Delivering it counts as the read —
-          // except for edits made after the design was confirmed, which are
-          // not in its prompt and stay unread.
-          if (!agentInfo(session.agent).promptContext) {
-            const handed = store.deliver(id);
-            if (handed) {
-              const later = store.get(id)?.plan;
-              const notice = later ? unreadNotice(later) : null;
-              reply(true, notice ? `${handed.prompt}\n\n${notice}` : handed.prompt);
-              return;
-            }
+          // A sign-off not yet handed over comes with the first read after
+          // it: the ask for a task list once the design is confirmed, the
+          // build prompt once the plan is submitted. That is how Cursor gets
+          // it (no hook can add it to the user's message), and how any agent
+          // gets one whose hook did not get through. Delivering it counts as
+          // the read — except for edits made after the design was confirmed,
+          // which are not in its prompt and stay unread.
+          const handed = store.deliver(id);
+          if (handed) {
+            const later = store.get(id)?.plan;
+            const notice = later ? unreadNotice(later) : null;
+            reply(true, notice ? `${handed.prompt}\n\n${notice}` : handed.prompt);
+            return;
           }
           const textOut = renderPlan(session.plan, { url, changesOnly: body['changes_only'] === true });
           store.markRead(id);

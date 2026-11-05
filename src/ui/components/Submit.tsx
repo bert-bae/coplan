@@ -286,7 +286,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
     setBusy(true);
     // Where no hook can hand the prompt over (Cursor), the user pastes it.
     if (!agent.promptContext) await copyText(preview.prompt, `Copied — paste it into ${agent.name}'s chat.`);
-    const ok = await store.confirmDesign({ note, expect: preview.version });
+    const ok = await store.confirmDesign({ note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}) });
     setBusy(false);
     if (ok) onClose();
   };
@@ -398,7 +398,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
     if (target === 'elsewhere' || !agent.promptContext) {
       await copyText(preview.prompt, target === 'session' ? `Copied — paste it into ${agent.name}'s chat.` : 'Copied the prompt.');
     }
-    const ok = await store.submitPlan({ target, note, expect: preview.version, ...(settings ? { settings } : {}) });
+    const ok = await store.submitPlan({ target, note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}), ...(settings ? { settings } : {}) });
     setSubmitting(false);
     if (ok) onClose();
   };
