@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import type { DaemonLock } from './types.ts';
 
 /** Root for all harness state. Overridable so tests can run hermetically.
@@ -21,6 +21,9 @@ export const paths = {
   sessionEvents: (id: string) => path.join(harnessHome(), 'sessions', sanitizeId(id), 'events.jsonl'),
   configDir: harnessHome,
   instructionsDir: () => path.join(harnessHome(), 'instructions'),
+  /** The bearer header, for the hook relay to hand curl as a file: on the
+   *  command line, any local user could read the token from /proc. */
+  authHeader: () => path.join(harnessHome(), 'auth.header'),
 };
 
 /** Session ids come from the CLI, but they end up in filesystem paths. */
@@ -28,10 +31,21 @@ export function sanitizeId(id: string): string {
   return id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128) || 'unknown';
 }
 
+/**
+ * The home and its sessions folder, readable by this user alone: they hold
+ * plans, the token and the log. Tightened on an existing home too, which an
+ * older build created with the default umask.
+ */
 export function ensureHome(): string {
   const home = harnessHome();
-  mkdirSync(home, { recursive: true });
-  mkdirSync(path.join(home, 'sessions'), { recursive: true });
+  for (const dir of [home, path.join(home, 'sessions')]) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try {
+      chmodSync(dir, 0o700);
+    } catch {
+      /* not ours to change (a shared override): leave it */
+    }
+  }
   return home;
 }
 

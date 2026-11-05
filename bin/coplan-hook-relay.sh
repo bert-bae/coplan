@@ -106,12 +106,24 @@ fi
 # that says where the session lives — and therefore how to link back to it so
 # the user can answer the agent there. Remote Control can be switched on
 # mid-session, so this goes with every event rather than only SessionStart.
+# The token goes to curl in a file the daemon wrote for this user alone: on
+# curl's command line, any local user could read it from /proc. A daemon
+# from before that file existed gets it on the command line, as it did.
+AUTH_FILE="$HOME_DIR/auth.header"
+AUTH_LINE=""
+# Read with the shell's own builtin, not grep: no other process sees it.
+[ -r "$AUTH_FILE" ] && IFS= read -r AUTH_LINE < "$AUTH_FILE" 2>/dev/null
+if [ "$AUTH_LINE" = "Authorization: Bearer $TOKEN" ]; then
+  AUTH_ARG="@$AUTH_FILE"
+else
+  AUTH_ARG="Authorization: Bearer $TOKEN"
+fi
 RESPONSE=$(printf '%s' "$PAYLOAD" | curl -s -S \
   --max-time "$MAX_TIME" \
   --connect-timeout 2 \
   -X POST \
   -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "$AUTH_ARG" \
   -H "X-Harness-Agent: $AGENT" \
   -H "X-Harness-Remote-Session: ${CLAUDE_CODE_REMOTE_SESSION_ID:-}" \
   -H "X-Harness-Remote-Sdk: ${CLAUDE_CODE_REMOTE_SDK_URL:-}" \

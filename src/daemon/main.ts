@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { unlinkSync, appendFileSync, existsSync, linkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +21,7 @@ import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock,
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
 import type { BuildSettings, CleanupGroupId, DaemonLock, Plan, PlanInput, PlanOp, ServerEvent, SessionState, TaskListInput, TaskStatus } from '../shared/types.ts';
+import { CLEANUP_GROUPS } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
@@ -97,6 +98,8 @@ async function main(): Promise<void> {
   boundPort = port;
   const lock: DaemonLock = { pid: process.pid, port, token, version: VERSION, startedAt: Date.now(), host: '127.0.0.1' };
   await claimLock(lock);
+  // For the hook relay: the header as a file only this user can read.
+  writeFileSync(paths.authHeader(), `Authorization: Bearer ${token}\n`, { mode: 0o600 });
   log(`listening on ${baseUrl(lock)} (pid ${process.pid}, v${VERSION})`);
   process.stdout.write(`${JSON.stringify({ started: true, ...lock })}\n`);
 
@@ -311,7 +314,7 @@ function watchLock(onLost: () => void): { stop(): void } {
 function log(message: string): void {
   const line = `${new Date().toISOString()} ${message}\n`;
   try {
-    appendFileSync(paths.logFile(), line);
+    appendFileSync(paths.logFile(), line, { mode: 0o600 });
   } catch {
     /* ignore */
   }
@@ -347,6 +350,17 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, route
     return;
   }
 
+  // The page itself is code, not data: served to anyone on loopback. What it
+  // shows comes from the API, which takes the token.
+  const api = /^\/(api|mcp|hook)\//.test(url.pathname);
+  if (!api && (req.method === 'GET' || req.method === 'HEAD')) {
+    if (serveStatic(res, UI_DIR, url.pathname === '/' ? 'index.html' : url.pathname)) return;
+    if (url.pathname === '/') {
+      text(res, 500, 'UI bundle missing — run pnpm build');
+      return;
+    }
+  }
+
   if (!authorized(req, url, token)) {
     text(res, 401, 'unauthorized');
     return;
@@ -354,7 +368,6 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, route
 
   const match = router.match(req.method ?? 'GET', url.pathname);
   if (!match) {
-    if (req.method === 'GET' && serveStatic(res, UI_DIR, url.pathname === '/' ? 'index.html' : url.pathname)) return;
     text(res, 404, 'not found');
     return;
   }
@@ -371,10 +384,44 @@ function sameOrigin(origin: string): boolean {
   }
 }
 
+/**
+ * Who may call the API: whoever holds the token, sent as a bearer header —
+ * hooks, the MCP server, the CLI, and the page, which is handed it in its
+ * link. Never a cookie: a cookie is not scoped to a port, so every other
+ * server on 127.0.0.1 the browser visits would be sent it. The live stream,
+ * which a browser cannot send headers on, takes a single-use ticket instead.
+ */
 function authorized(req: http.IncomingMessage, url: URL, token: string): boolean {
-  if (req.headers.authorization === `Bearer ${token}`) return true;
-  if (url.searchParams.get('token') === token) return true;
-  return (req.headers.cookie ?? '').split(';').some((c) => c.trim() === `cc_harness=${token}`);
+  const header = req.headers.authorization ?? '';
+  if (header.startsWith('Bearer ') && sameSecret(header.slice(7), token)) return true;
+  if (req.method === 'GET' && url.pathname === '/api/events') return redeemTicket(url.searchParams.get('ticket'));
+  return false;
+}
+
+/** Compared in constant time, so the answer's timing says nothing of it. */
+function sameSecret(given: string, token: string): boolean {
+  const a = Buffer.from(given);
+  const b = Buffer.from(token);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** Tickets for the live stream: short-lived, each good once. */
+const tickets = new Map<string, number>();
+const TICKET_MS = 60_000;
+
+function issueTicket(): string {
+  const now = Date.now();
+  for (const [t, expires] of tickets) if (expires < now) tickets.delete(t);
+  const ticket = randomBytes(18).toString('hex');
+  tickets.set(ticket, now + TICKET_MS);
+  return ticket;
+}
+
+function redeemTicket(ticket: string | null): boolean {
+  if (!ticket) return false;
+  const expires = tickets.get(ticket);
+  tickets.delete(ticket);
+  return expires !== undefined && expires >= Date.now();
 }
 
 /* ------------------------------------------------------------------ *
@@ -452,12 +499,8 @@ function buildRouter(deps: Deps): Router {
 
   /* --------------------------- UI bootstrap ------------------------ */
 
-  router.get('/', (ctx) => {
-    if (ctx.url.searchParams.get('token') === token) {
-      ctx.res.setHeader('set-cookie', `cc_harness=${token}; Path=/; SameSite=Strict; HttpOnly`);
-    }
-    if (!serveStatic(ctx.res, UI_DIR, 'index.html')) text(ctx.res, 500, 'UI bundle missing — run pnpm build');
-  });
+  /** A ticket for the live stream, which a browser opens without headers. */
+  router.post('/api/events/ticket', (ctx) => json(ctx.res, 200, { ticket: issueTicket() }));
 
   /* --------------------------- Sessions ---------------------------- */
 
@@ -664,6 +707,12 @@ function buildRouter(deps: Deps): Router {
 
   router.post('/api/storage/clean', async (ctx) => {
     const body = await readJson<{ groups?: CleanupGroupId[]; dryRun?: boolean }>(ctx.req);
+    // Named, every time: no groups would mean all of them — session history
+    // included — and that is never a default.
+    const known = new Set<string>(CLEANUP_GROUPS);
+    if (!Array.isArray(body.groups) || !body.groups.length || body.groups.some((g) => !known.has(g))) {
+      throw new HttpError(400, `Name the groups to clean: ${[...known].join(', ')}.`);
+    }
     const result = cleanStorage({
       liveSessionIds: residentIds(),
       ...(body.groups ? { groups: body.groups } : {}),

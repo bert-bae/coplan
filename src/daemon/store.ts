@@ -190,7 +190,7 @@ export class SessionStore extends EventEmitter {
       const dir = paths.sessionDir(id);
       mkdirSync(dir, { recursive: true });
       const tmp = path.join(dir, `.state.${process.pid}.tmp`);
-      writeFileSync(tmp, JSON.stringify({ schemaVersion: STATE_SCHEMA, ...state }, null, 2));
+      writeFileSync(tmp, JSON.stringify({ schemaVersion: STATE_SCHEMA, ...state }, null, 2), { mode: 0o600 });
       renameSync(tmp, path.join(dir, 'state.json'));
     } catch {
       /* persistence is best-effort; the live session must never break */
