@@ -96,3 +96,10 @@ test('the read and the check tool say it the same way', () => {
   const clean = publishPlan(null, { title: 'Empty' }).plan;
   assert.deepEqual(renderGaps(clean), []);
 });
+
+test('a parent loop in a plan from disk does not hang the check', () => {
+  const plan = structuredClone(publishPlan(null, DESIGN).plan);
+  plan.tasks[0]!.parentId = 'docs';
+  plan.tasks[1]!.parentId = 'wire';
+  assert.ok(Array.isArray(planGaps(plan)));
+});

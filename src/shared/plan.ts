@@ -449,7 +449,7 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
   next.sections = sections;
   next.diagrams = diagrams;
   next.tasks = tasks;
-  linkBuilds(next, builds, now);
+  linkBuilds(next, builds, now, false);
   checkDependencies(next);
   next.threads = base.threads.map((thread) => detachIfOrphaned(next, base, thread));
   next.revision = base.revision + 1;
@@ -488,15 +488,11 @@ export function publishTasks(prev: Plan | null, input: TaskListInput, now = Date
   const { tasks, builds } = buildTaskTree(base, next, input.tasks, now);
   next.tasks = tasks;
   const live = new Set(tasks.map((t) => t.id));
-  // A task that restates `builds` builds those boxes now — not those plus
-  // whatever it built before — so its old links go first. Its brief, and
-  // the boxes' progress, then follow what the task list says.
-  const relinked = new Set(builds.map((b) => b.id));
   for (const d of next.diagrams) {
     let touched = false;
     for (const n of d.nodes) {
       if (!n.taskIds) continue;
-      const kept = n.taskIds.filter((id) => live.has(id) && !relinked.has(id));
+      const kept = n.taskIds.filter((id) => live.has(id));
       if (kept.length === n.taskIds.length) continue;
       touched = true;
       if (kept.length) n.taskIds = kept;
@@ -625,36 +621,67 @@ function buildTaskTree(
  * Link tasks to the boxes their `builds` names: a node id, or
  * `diagramId/nodeId` when the same id is in several diagrams.
  */
-function linkBuilds(plan: Plan, builds: { id: string; refs: string[] }[], now: number): { diagram: Diagram; node: DiagramNode }[] {
-  const linked: { diagram: Diagram; node: DiagramNode }[] = [];
+function linkBuilds(
+  plan: Plan,
+  builds: { id: string; refs: string[] }[],
+  now: number,
+  /** `builds` says which boxes the task builds now, so a box it no longer
+   *  names loses the link. Off when the diagrams themselves declare links
+   *  too (a whole publish), so the two add up. */
+  replace = true,
+): { linked: Part[]; unlinked: Part[] } {
+  const linked: Part[] = [];
+  const unlinked: Part[] = [];
   for (const { id, refs } of builds) {
     const title = plan.tasks.find((t) => t.id === id)?.title ?? id;
-    for (const ref of refs) {
+    const want = new Set(refs.map((ref) => {
       const { diagram, node } = findBox(plan, ref, title);
-      const links = node.taskIds ?? [];
-      if (links.includes(id)) continue;
-      node.taskIds = [...links, id];
-      // A canvas holding the old links must reload rather than save over them.
-      bumpDiagram(diagram, now);
-      linked.push({ diagram, node });
+      return `${diagram.id}/${node.id}`;
+    }));
+    for (const diagram of plan.diagrams) {
+      let touched = false;
+      for (const node of diagram.nodes) {
+        const has = node.taskIds?.includes(id) ?? false;
+        const wanted = want.has(`${diagram.id}/${node.id}`);
+        if (wanted && !has) {
+          node.taskIds = [...(node.taskIds ?? []), id];
+          linked.push({ diagram, node });
+          touched = true;
+        } else if (!wanted && has && replace) {
+          const kept = node.taskIds!.filter((x) => x !== id);
+          if (kept.length) node.taskIds = kept;
+          else delete node.taskIds;
+          unlinked.push({ diagram, node });
+          touched = true;
+        }
+      }
+      // A canvas holding the old links must reload rather than save over
+      // them — but only when a link actually changed.
+      if (touched) bumpDiagram(diagram, now);
     }
   }
-  return linked;
+  return { linked, unlinked };
 }
+
+type Part = { diagram: Diagram; node: DiagramNode };
 
 /** A task's `builds` changed which boxes it is linked to: logged per
  *  diagram, as the canvas logs a link made by hand. */
 function logLinks(
-  linked: { diagram: Diagram; node: DiagramNode }[],
+  { linked, unlinked }: { linked: Part[]; unlinked: Part[] },
   task: Task,
   author: Author,
   log: (kind: ChangeKind, target: Target, summary: string) => Change,
 ): Change[] {
   const out: Change[] = [];
-  for (const diagram of new Set(linked.map((l) => l.diagram))) {
-    const boxes = linked.filter((l) => l.diagram === diagram).map((l) => `"${l.node.label}"`);
+  for (const diagram of new Set([...linked, ...unlinked].map((l) => l.diagram))) {
+    const names = (list: Part[]) => list.filter((l) => l.diagram === diagram).map((l) => `"${l.node.label}"`);
+    const facts = [
+      names(linked).length ? `linked "${task.title}" to ${names(linked).join(', ')}` : '',
+      names(unlinked).length ? `unlinked it from ${names(unlinked).join(', ')}` : '',
+    ].filter(Boolean);
     diagram.updatedBy = author;
-    out.push(log('edited', ref('diagram', diagram.id), `linked "${task.title}" to ${boxes.join(', ')} in diagram "${diagram.title}"`));
+    out.push(log('edited', ref('diagram', diagram.id), `${facts.join(' and ')} in diagram "${diagram.title}"`.replace(/^unlinked it/, `unlinked "${task.title}"`)));
   }
   return out;
 }
@@ -963,7 +990,10 @@ function partEdit(d: Diagram, op: PartOp): { nodes: DiagramNodeInput[]; edges: D
       const style = given(['label', 'dashed', 'arrows'] as const);
       const at = op.id ? edges.findIndex((e) => e.id === op.id) : -1;
       if (at >= 0) {
-        const was = edges[at]!;
+        // From the arrow as it is, style and all: moved to another box it no
+        // longer pairs with its old self, and would otherwise lose its label.
+        const real = d.edges.find((e) => e.id === op.id)!;
+        const was: DiagramEdgeInput = { id: real.id, source: real.source, target: real.target, ...(real.label ? { label: real.label } : {}), ...(real.dashed ? { dashed: true } : {}), ...(real.arrows ? { arrows: real.arrows } : {}) };
         edges[at] = { ...was, ...(op.from ? { source: op.from } : {}), ...(op.to ? { target: op.to } : {}), ...style };
       } else {
         if (!op.from || !op.to) {
@@ -996,6 +1026,23 @@ function arrowId(d: Diagram, op: { id?: string; from?: string; to?: string }): s
       ? `${between.length} arrows run ${op.from} → ${op.to} in "${d.title}": name one by id (${between.map((e) => e.id).join(', ')}).`
       : `No arrow ${op.from ?? '?'} → ${op.to ?? '?'} in "${d.title}".`,
   );
+}
+
+/**
+ * A box or arrow op's `expect` is the diagram's rev as the caller read it —
+ * before this batch. Each such op is its own diagram edit and moves the
+ * rev, so it is checked here, against the plan the batch started from, and
+ * not again as the batch goes on: several ops on one diagram, each with the
+ * rev that was read, go through together.
+ */
+function expectAtStart(plan: Plan, op: PlanOp, author: Author): PlanOp {
+  if (!op || typeof op !== 'object') return op;
+  if (op.op !== 'upsert_node' && op.op !== 'remove_node' && op.op !== 'upsert_edge' && op.op !== 'remove_edge') return op;
+  if (op.expect === undefined) return op;
+  const d = plan.diagrams.find((x) => x.id === op.diagramId);
+  if (d) checkRev(d, op.expect, 'diagram', author);
+  const { expect: _checked, ...rest } = op;
+  return rest as PlanOp;
 }
 
 /** The fields of upsert_task that report progress rather than say what
@@ -1041,7 +1088,7 @@ export function applyOps(
         if (!opts.tracking) refuseProgress(op);
         refuseUnreadEdit(plan, op, unread!);
       }
-      changes.push(...applyOne(next, op, author, now));
+      changes.push(...applyOne(next, expectAtStart(plan, op, author), author, now));
     } catch (err) {
       if (err instanceof PlanError && ops.length > 1) {
         throw new PlanError(`Edit ${i + 1} (${(op as { op?: string })?.op ?? '?'}): ${err.message}`);
@@ -1224,7 +1271,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       placeAmongSiblings(plan, task, op.index);
       const where = parentId ? ` under "${requireTask(plan, parentId).title}"` : '';
       const created = log('created', ref('task', task.id), `added task "${title}"${where}`);
-      const linked = op.builds?.length ? linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now) : [];
+      const linked = op.builds?.length ? linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now) : { linked: [], unlinked: [] };
       return [created, ...logLinks(linked, task, author, log)];
     }
 
@@ -1438,7 +1485,8 @@ function editTask(
     task.revBy = { ...task.revBy, [author]: task.rev };
     out.push(log('edited', ref('task', task.id), `edited the ${edited.join(', ')} of "${task.title}"`));
   }
-  if (op.builds?.length) out.push(...logLinks(linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now), task, author, log));
+  // Given, builds says which boxes the task builds now ([] unlinks it).
+  if (op.builds !== undefined) out.push(...logLinks(linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now), task, author, log));
   if (typeof op.index === 'number') placeAmongSiblings(plan, task, op.index);
   return out;
 }
@@ -1522,8 +1570,8 @@ function removeItem(
     default:
       throw new PlanError(
         kind === 'node' || kind === 'edge'
-          ? `Cannot remove a ${kind} on its own: send the diagram's ${kind === 'node' ? 'nodes (and edges)' : 'edges'} without it, ` +
-              'with upsert_diagram {id, nodes, edges}.'
+          ? 'remove takes a section, diagram or task: remove a box with remove_node {diagramId, id} (its arrows go ' +
+              'with it), an arrow with remove_edge {diagramId, id} or {diagramId, from, to}.'
           : `Cannot remove a "${kind}": remove takes kind section, diagram or task.`,
       );
   }

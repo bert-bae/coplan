@@ -253,7 +253,7 @@ function lockLine(plan: Plan): string | null {
     default:
       return (
         '> **Locked for building.** The user submitted this plan: build it task by task, keeping statuses true with ' +
-        'harness_task_update. Only task updates and comment replies apply now; if the design has to change, ask ' +
+        'harness_task_update. Only task updates, comments and replies apply now; if the design has to change, ask ' +
         'the user in chat — they can reopen the plan in Coplan.'
       );
   }

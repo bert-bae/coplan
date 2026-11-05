@@ -379,7 +379,7 @@ test('a box kind, arrow style or direction that is not on the list is refused, n
 });
 
 test('removing a node points at the edit that does it', () => {
-  assert.throws(() => applyOps(fresh(), [{ op: 'remove', kind: 'node' as never, id: 'cache' }], 'claude'), /upsert_diagram \{id, nodes, edges\}/);
+  assert.throws(() => applyOps(fresh(), [{ op: 'remove', kind: 'node' as never, id: 'cache' }], 'claude'), /remove_node \{diagramId, id\}/);
 });
 
 /* ------------------------------------------------------------------ *
@@ -593,4 +593,48 @@ test('box and arrow edits keep to the diagram rules: the unread guard and the de
   assert.doesNotThrow(() => applyOps(confirmed, [{ op: 'upsert_node', diagramId: d.id, id: 'cache', taskIds: ['t2'] }], 'claude'));
   assert.throws(() => applyOps(confirmed, [{ op: 'upsert_node', diagramId: d.id, id: 'cache', label: 'Memcached' }], 'claude'), /design/);
   assert.throws(() => applyOps(confirmed, [{ op: 'remove_node', diagramId: d.id, id: 'cache' }], 'claude'), /design/);
+});
+
+test('an arrow moved to another box keeps its label and style', () => {
+  let plan = fresh();
+  const d = plan.diagrams[0]!;
+  plan = applyOps(plan, [{ op: 'upsert_edge', diagramId: d.id, id: 'cache->db', dashed: true }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_edge', diagramId: d.id, id: 'cache->db', from: 'api' }], 'claude').plan;
+  const moved = plan.diagrams[0]!.edges.find((e) => e.id === 'cache->db')!;
+  assert.equal(moved.source, 'api');
+  assert.equal(moved.label, 'miss');
+  assert.equal(moved.dashed, true);
+});
+
+test('several box ops on one diagram, each with the rev that was read, go through together', () => {
+  const plan = fresh();
+  const d = plan.diagrams[0]!;
+  const { plan: next } = applyOps(
+    plan,
+    [
+      { op: 'upsert_node', diagramId: d.id, id: 'api', description: 'A.', expect: d.rev },
+      { op: 'upsert_node', diagramId: d.id, id: 'cache', description: 'C.', expect: d.rev },
+    ],
+    'claude',
+  );
+  assert.equal(next.diagrams[0]!.nodes.find((n) => n.id === 'cache')!.description, 'C.');
+  // A rev that is not the one read is still refused.
+  assert.throws(() => applyOps(next, [{ op: 'upsert_node', diagramId: d.id, id: 'api', description: 'B.', expect: d.rev }], 'claude'), /was changed/);
+});
+
+test("upsert_task's builds says which boxes the task builds now; [] unlinks it", () => {
+  let plan = fresh();
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't2', builds: ['cache'] }], 'claude').plan;
+  const linked = (id: string) => plan.diagrams[0]!.nodes.find((n) => n.id === id)!.taskIds ?? [];
+  assert.ok(linked('cache').includes('t2'));
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't2', builds: ['db'] }], 'claude').plan;
+  assert.ok(!linked('cache').includes('t2'));
+  assert.ok(linked('db').includes('t2'));
+  // The same links again change nothing, so the diagram's rev stays.
+  const rev = plan.diagrams[0]!.rev;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't2', builds: ['db'] }], 'claude').plan;
+  assert.equal(plan.diagrams[0]!.rev, rev);
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't2', builds: [] }], 'claude').plan;
+  assert.ok(!linked('db').includes('t2'));
+  assert.match(plan.changes.at(-1)!.summary, /unlinked "Cache client" from "Postgres"/);
 });

@@ -143,7 +143,7 @@ const OP_PROPERTIES: Record<string, unknown> = {
   index: { type: 'integer', minimum: 0, description: 'Position among its siblings, from 0.' },
   expect: {
     type: 'integer',
-    description: "upsert_section / upsert_diagram / upsert_task, and the box and arrow ops (the diagram's rev): the rev you read; refused if the user changed it since.",
+    description: "upsert_section / upsert_diagram / upsert_task, and the box and arrow ops (the diagram's rev): the rev you read; refused if the item changed since.",
   },
   diagramId: { type: 'string', description: 'upsert_node / remove_node / upsert_edge / remove_edge: the diagram the box or arrow is in.' },
   label: { type: 'string', description: 'upsert_node: the box name. upsert_edge: what flows along it ("" clears it).' },
@@ -168,7 +168,7 @@ const OP_PROPERTIES: Record<string, unknown> = {
   dependsOn: { ...STR_LIST, description: 'upsert_task: replaces its dependencies; [] clears them.' },
   branch: { type: 'string', description: 'upsert_task: "" clears it.' },
   review: { type: 'string', enum: [...REVIEW.enum, ''], description: 'upsert_task: "" clears it.' },
-  builds: { ...STR_LIST, description: 'upsert_task: boxes it builds, as node ids or "diagramId/nodeId".' },
+  builds: { ...STR_LIST, description: 'upsert_task: the boxes it builds now, as node ids or "diagramId/nodeId" (replaces its links; [] unlinks it).' },
   threadId: { type: 'string', description: 'reply / resolve: the comment thread.' },
   text: { type: 'string', description: 'reply: your reply. report: the build report. Markdown.' },
   resolved: { type: 'boolean' },

@@ -491,7 +491,7 @@ export type PlanOp =
       review?: ReviewMode | '';
       stage?: IricStage;
       checks?: CheckResult[];
-      /** Boxes this task builds, added to each (see `TaskInput.builds`). */
+      /** The boxes this task builds now: replaces its links; [] unlinks it. */
       builds?: string[];
       /** The task's `rev` the edit was made against. Refused if the other
        *  side has changed the task since. */

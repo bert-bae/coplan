@@ -9,7 +9,7 @@
  * the user see the same list.
  */
 
-import { branchPlan, effectiveBranch, hasSubtasks, inheritedDeps, leavesUnder } from './build.ts';
+import { ancestorsOf, branchPlan, effectiveBranch, hasSubtasks, inheritedDeps, leavesUnder } from './build.ts';
 import { planPhase } from './plan.ts';
 import type { Plan, Target, Task } from './types.ts';
 
@@ -42,11 +42,8 @@ export function planGaps(plan: Plan): Gap[] {
 
   // Boxes and tasks that do not meet: the diagram and the task list are
   // the same plan, and each should account for the other.
-  const ancestors = (t: Task): string[] => {
-    const out: string[] = [];
-    for (let p = t.parentId; p; p = plan.tasks.find((x) => x.id === p)?.parentId ?? null) out.push(p);
-    return out;
-  };
+  // ancestorsOf stops at a parent loop, which a plan from disk may hold.
+  const ancestors = (t: Task): string[] => ancestorsOf(plan, t).map((a) => a.id);
   const built = new Set<string>();
   for (const d of plan.diagrams) {
     for (const n of d.nodes) {

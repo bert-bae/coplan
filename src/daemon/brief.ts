@@ -196,17 +196,19 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
   if (sections.length) {
     out.push('', '## From the plan');
     let room = SECTIONS_BUDGET;
+    let left = false;
     for (const s of sections) {
-      const body = nestHeadings(s.body.trim(), 3);
-      const cut = body.length > Math.min(SECTION_MAX, room);
-      const text = cut ? `${body.slice(0, Math.max(0, Math.min(SECTION_MAX, room))).trimEnd()} …` : body;
-      out.push('', `### ${s.title}`, text);
-      room -= text.length;
       if (room <= 0) {
-        out.push('', '_…more of the plan than fits here: harness_plan_read {peek: true} has all of it._');
+        left = true;
         break;
       }
+      const body = nestHeadings(s.body.trim(), 3);
+      const { text, cut } = clipProse(body, Math.min(SECTION_MAX, room));
+      out.push('', `### ${s.title}`, text);
+      room -= text.length;
+      if (cut) left = true;
     }
+    if (left) out.push('', '_…more of the plan than fits here: harness_plan_read {peek: true} has all of it._');
   }
 
   // The objective.
@@ -249,7 +251,7 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
   }
 
   // The edges of the job.
-  const mine = new Set([task.id, ...leavesUnder(plan, task.id).map((t) => t.id), ...ancestorsOf(plan, task).map((t) => t.id)]);
+  const mine = relatedTasks(plan, task);
   const neighbours = leafTasks(plan).filter((t) => !mine.has(t.id) && t.status !== 'done' && (readinessOf(plan, t) === 'in_progress' || sharedFiles(task, t).length));
   out.push('', '## Stay in scope');
   out.push(
@@ -323,7 +325,8 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
   const bears = (t: Thread): boolean => {
     const { kind, id } = t.target;
     if (kind === 'task') return mine.has(id);
-    if (kind === 'plan') return true;
+    // Every brief quotes every section, so a comment on one bears on all.
+    if (kind === 'plan' || kind === 'section') return true;
     if (kind === 'diagram') return diagrams.has(id);
     if (kind === 'node') return nodes.has(id);
     if (kind === 'edge') {
@@ -348,10 +351,35 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
 const SECTION_MAX = 1_200;
 const SECTIONS_BUDGET = 3_000;
 
+/**
+ * Markdown cut to about `max` characters, at a line, and never inside a
+ * code block: a fence left open would turn the rest of the brief into code.
+ */
+function clipProse(text: string, max: number): { text: string; cut: boolean } {
+  if (text.length <= max) return { text, cut: false };
+  const lines = text.split('\n');
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    if (used + line.length + 1 > max && kept.length) break;
+    kept.push(line);
+    used += line.length + 1;
+  }
+  const fences = kept.filter((l) => /^ {0,3}(```|~~~)/.test(l)).length;
+  if (fences % 2) kept.push('```');
+  return { text: `${kept.join('\n').trimEnd()}\n…`, cut: true };
+}
+
+/** The task, its parents and the subtasks under it: the work a brief is
+ *  about, for the boxes it builds and the comments that bear on it. */
+function relatedTasks(plan: Plan, task: Task): Set<string> {
+  return new Set([task.id, ...ancestorsOf(plan, task).map((t) => t.id), ...leavesUnder(plan, task.id).map((t) => t.id)]);
+}
+
 /** The diagrams and boxes (`diagramId/nodeId`) a task builds — through
  *  itself, a parent or a subtask. */
 function designOf(plan: Plan, task: Task): { diagrams: Set<string>; nodes: Set<string> } {
-  const related = new Set([task.id, ...ancestorsOf(plan, task).map((t) => t.id), ...leavesUnder(plan, task.id).map((t) => t.id)]);
+  const related = relatedTasks(plan, task);
   const diagrams = new Set<string>();
   const nodes = new Set<string>();
   for (const d of plan.diagrams) {
@@ -367,7 +395,7 @@ function designOf(plan: Plan, task: Task): { diagrams: Set<string>; nodes: Set<s
 /** The boxes a task builds — through itself, a parent or a subtask — with
  *  what each one is, what was decided and what it connects to. */
 function renderParts(plan: Plan, task: Task): string[] {
-  const related = new Set([task.id, ...ancestorsOf(plan, task).map((t) => t.id), ...leavesUnder(plan, task.id).map((t) => t.id)]);
+  const related = relatedTasks(plan, task);
   const out: string[] = [];
   for (const d of plan.diagrams) {
     const label = (id: string) => d.nodes.find((n) => n.id === id)?.label ?? id;
