@@ -357,8 +357,9 @@ export const TOOLS: ToolDef[] = [
       'refine cycle, report the checks you ran, and mark it done with a one-line note once review passed — or ' +
       'blocked with a note, asking the user with AskUserQuestion. The only way to report progress. Refused: ' +
       'starting or finishing a task that still waits on another; starting more at once than the user allowed; a ' +
-      'review round past their limit; done before any review, or while a check fails or a review check was never ' +
-      'reported; progress on a task that has subtasks.',
+      'review round past their limit; done before any review, without a passing verdict for its last review round ' +
+      '(the user\'s own, when the user reviews it), or while a check fails or a review check was never reported; ' +
+      'progress on a task that has subtasks.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -375,11 +376,17 @@ export const TOOLS: ToolDef[] = [
           },
         },
         note: { type: 'string', description: 'One line: what was done, or what it is blocked on.' },
+        verdict: {
+          type: 'string',
+          enum: ['pass', 'changes'],
+          description: "The review's outcome, once it is in: pass, or changes (then refine). Recorded for the task's current review round.",
+        },
+        summary: { type: 'string', description: 'With verdict: one line on what the review found.' },
         user_approved: {
           type: 'boolean',
           description:
-            'Only when the user told you in chat to go past a limit: another review round past their maximum, more ' +
-            'tasks at once, or done although a check fails. Put what they said in `note`.',
+            'Only when the user told you in chat: their verdict on a task they review, another review round past ' +
+            'their maximum, more tasks at once, or done although a check fails. Put what they said in `note`.',
         },
       },
       required: ['task_id'],

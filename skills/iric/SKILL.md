@@ -60,10 +60,16 @@ wasted. Then review the way the brief says:
 - **user** — summarize the change for the user (what it does, files,
   checks) and ask with your question tool (`AskUserQuestion` in Claude Code,
   `request_user_input` in Codex, or plainly in chat): approve, request changes (they
-  say which), or see the diff first. Their answer is the review.
+  say which), or see the diff first. Their answer is the review. They can
+  also approve it, or ask for changes, on the task's card in Coplan; that
+  verdict reaches you with your next read (and in `harness_task_next`).
 - **skip** — the review checks are the review.
 
-Report the review checks: `harness_task_update {task_id, checks: [...]}`.
+Report the review checks and the review's verdict:
+`harness_task_update {task_id, checks: [...], verdict: "pass", summary: "<one line>"}`
+— or `verdict: "changes"` with what it found, then refine. For a task the
+user reviews, only their verdict counts: given in Coplan, or in chat — then
+pass it on with `verdict: "pass", user_approved: true` and their words in the note.
 
 ## 3. Refine
 
@@ -94,7 +100,8 @@ aside):
 Progress is reported only through `harness_task_update`; an
 `upsert_task` carrying a status, stage or checks is refused. Checks you
 report are merged by name, so the latest result of each counts. Done is
-refused before the task has been to review, while a check it last
+refused before the task has been to review, without a passing verdict for
+its last review round (the user's, when they review it), while a check it last
 reported fails, or while a required review check was never reported —
 refine it, or, if the failure is unrelated to this task, mark it blocked
 and ask.

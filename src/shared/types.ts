@@ -151,6 +151,22 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 export const REVIEW_MODES = ['subagent', 'self', 'user', 'skip'] as const;
 export type ReviewMode = (typeof REVIEW_MODES)[number];
 
+/** A review's outcome: it passed, or it asked for changes. */
+export const VERDICTS = ['pass', 'changes'] as const;
+export type Verdict = (typeof VERDICTS)[number];
+
+export interface ReviewRecord {
+  round: number;
+  verdict: Verdict;
+  /** The user (in Coplan, or as the agent reports with their words), or the agent. */
+  by: Author;
+  /** The review mode in force when it was given. */
+  mode: ReviewMode;
+  /** One line: what the review found. */
+  summary?: string;
+  at: number;
+}
+
 /** Where a task in progress is in its implement → review → refine cycle. */
 export const IRIC_STAGES = ['implement', 'review', 'refine'] as const;
 export type IricStage = (typeof IRIC_STAGES)[number];
@@ -211,6 +227,9 @@ export interface Task {
   /** Added once the plan was submitted: work found during the build, not
    *  part of what the user signed off. */
   addedInBuild?: boolean;
+  /** Each review's verdict, newest last: who gave it, in which round, under
+   *  which review mode. Done needs a pass for the current round. */
+  reviews?: ReviewRecord[];
   createdAt: number;
   updatedAt: number;
   createdBy: Author;
@@ -533,6 +552,9 @@ export type PlanOp =
   /** One arrow, by id or by its ends. */
   | { op: 'remove_edge'; diagramId: string; id?: string; from?: string; to?: string; expect?: number }
   | { op: 'remove'; kind: 'section' | 'diagram' | 'task'; id: string }
+  /** A review's verdict on a task, for its current round: the user's from
+   *  Coplan, or the agent's through harness_task_update. */
+  | { op: 'review_task'; id: string; verdict: Verdict; summary?: string; userApproved?: boolean }
   | { op: 'comment'; target: Target; text: string }
   | { op: 'reply'; threadId: string; text: string }
   | { op: 'resolve'; threadId: string; resolved: boolean }

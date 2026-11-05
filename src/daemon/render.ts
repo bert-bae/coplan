@@ -597,6 +597,13 @@ function renderChanges(plan: Plan, unread: Change[], changesOnly: boolean): stri
   const said = unread.filter((c) => ['commented', 'replied', 'resolved', 'reopened'].includes(c.kind)).map((c) => `${capital(c.summary)}.`);
   block('Comments', [...new Set(said)]);
 
+  // So is the user's verdict on a task they review: it decides what the
+  // agent does next — mark it done, or refine.
+  const verdicts = unread
+    .filter((c) => c.kind === 'status' && c.target.kind === 'task' && / in review round \d+/.test(c.summary))
+    .map((c) => `${capital(c.summary)}.`);
+  block('Reviews', verdicts);
+
   const lead = changesOnly
     ? '_The net effect of their edits — not each step, and not where boxes were moved on the canvas._'
     : '_The net effect of their edits — not each step, and not where boxes were moved on the canvas. The full plan follows._';

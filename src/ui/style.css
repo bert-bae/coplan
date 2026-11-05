@@ -1516,6 +1516,10 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .board-title { padding: 0; border: none; background: none; text-align: left; font-weight: 600; color: var(--text-primary); }
 .board-title:hover { color: var(--accent-fg); text-decoration: underline; }
 .board-note { margin: 0; font-size: var(--fs-sm); color: var(--text-secondary); }
+.board-reviews { margin: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-sm); }
+.board-reviews .is-changes { color: var(--attention-fg); }
+.board-review { display: flex; flex-direction: column; gap: var(--sp-1); padding: var(--sp-2); border: 1px solid var(--accent-border, var(--border-default)); border-radius: var(--r-md); background: var(--accent-subtle); }
+.board-review-actions { display: flex; gap: var(--sp-1); flex-wrap: wrap; }
 .board-foot { display: flex; align-items: center; gap: var(--sp-2); }
 .board-status {
   font-size: var(--fs-micro); padding: 2px 4px; border-radius: var(--r-sm);

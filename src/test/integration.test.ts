@@ -315,7 +315,7 @@ test('task tracking moves statuses and reports them', async () => {
   assert.equal(unreviewed['ok'], false);
   assert.match(String(unreviewed['text']), /has not been reviewed/);
   await mcp('task', { task_id: 't2', stage: 'review' });
-  const res = await mcp('task', { task_id: 't2', status: 'done', note: 'client added' });
+  const res = await mcp('task', { task_id: 't2', status: 'done', verdict: 'pass', note: 'client added' });
   assert.match(String(res['text']), /"Client" is done/);
   // Where the user changed things, not how many saves it took.
   assert.match(String(res['text']), /The user has changed tasks since you last read the plan/);
@@ -581,7 +581,7 @@ test('a task goes round implement → review → refine, and is not done while i
   assert.equal((await sessionFor(built)).plan!.tasks.find((t) => t.id === 't2')?.checks?.[0]?.ok, false);
   await mcpFor(built, 'task', { task_id: 't2', stage: 'refine' });
   await mcpFor(built, 'task', { task_id: 't2', stage: 'review', checks: [{ name: 'tests', ok: true }] });
-  const done = await mcpFor(built, 'task', { task_id: 't2', status: 'done', note: 'wrapped the driver' });
+  const done = await mcpFor(built, 'task', { task_id: 't2', status: 'done', verdict: 'pass', note: 'wrapped the driver' });
   assert.equal(done['ok'], true, String(done['text']));
   assert.match(String(done['text']), /Now ready: t3 "Invalidation"/);
   const s = await sessionFor(built);
@@ -685,7 +685,7 @@ test('finishing the last task finishes the build, and a new plan may follow', as
   for (let pass = 0; left.length && pass < 10; pass++) {
     for (const id of [...left]) {
       if (!(await mcpFor(built, 'task', { task_id: id, stage: 'review' }))['ok']) continue;
-      last = await mcpFor(built, 'task', { task_id: id, status: 'done', note: 'done' });
+      last = await mcpFor(built, 'task', { task_id: id, status: 'done', verdict: 'pass', note: 'done' });
       left = left.filter((x) => x !== id);
     }
   }
@@ -778,7 +778,7 @@ test("the repository's .coplan/config.json reaches the prompts, the briefs and t
 
     // An optional check failing does not hold a task back; a required one does.
     await mcpFor(id, 'task', { task_id: 't2', stage: 'review', checks: [{ name: 'tests', ok: true }, { name: 'lint', ok: false }] });
-    const done = await mcpFor(id, 'task', { task_id: 't2', status: 'done' });
+    const done = await mcpFor(id, 'task', { task_id: 't2', status: 'done', verdict: 'pass' });
     assert.equal(done['ok'], true, String(done['text']));
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -847,7 +847,7 @@ test('the build gates hold however the agent reports progress, and only the user
     await task({ task_id: 't3', stage: 'review', checks: [{ name: 'lint', ok: true }] });
     await refused({ task_id: 't3', status: 'done', note: 'x' }, /the review checks tests were never reported/);
     await task({ task_id: 't3', checks: [{ name: 'tests', ok: true }] });
-    assert.equal((await task({ task_id: 't3', status: 'done', note: 'done' }))['ok'], true);
+    assert.equal((await task({ task_id: 't3', status: 'done', verdict: 'pass', note: 'done' }))['ok'], true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -866,12 +866,44 @@ test('dropping a task needs a reason; dropping or reopening one says what it mea
   assert.equal((await task({ task_id: 't2', status: 'dropped', note: 'the client already exists' }))['ok'], true);
 
   await task({ task_id: 't3', stage: 'review' });
-  const done = String((await task({ task_id: 't3', status: 'done', note: 'done' }))['text']);
+  const done = String((await task({ task_id: 't3', status: 'done', verdict: 'pass', note: 'done' }))['text']);
   assert.match(done, /Now ready: t4 "Wire up"/, 'dropped and done, t1 holds nothing up');
 
   await task({ task_id: 't4', stage: 'implement' });
   const reopened = String((await task({ task_id: 't3', status: 'in_progress', stage: 'refine' }))['text']);
   assert.match(reopened, /t4 "Wire up" \(in progress\) already went ahead on this task's work/);
+});
+
+test("done needs the round's passing verdict — the user's own, when the user reviews it", async () => {
+  const id = 'review-session';
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't2', review: 'user' }] });
+
+  // The agent's own review: done without a verdict, or after "changes", is refused.
+  await task({ task_id: 't3', stage: 'review' });
+  assert.match(String((await task({ task_id: 't3', status: 'done', note: 'x' }))['text']), /no passing verdict for review round 1/);
+  await task({ task_id: 't3', verdict: 'changes', summary: 'missing a test' });
+  assert.match(String((await task({ task_id: 't3', status: 'done', note: 'x' }))['text']), /no passing verdict/);
+  assert.equal((await task({ task_id: 't3', status: 'done', verdict: 'pass', note: 'done' }))['ok'], true);
+
+  // The user's review: the agent's pass does not count, theirs does.
+  await task({ task_id: 't2', stage: 'review' });
+  assert.match(String((await task({ task_id: 't2', status: 'done', verdict: 'pass', note: 'x' }))['text']), /the user's to review, and they have not passed it/);
+  assert.match(String((await mcpFor(id, 'next'))['text']), /waiting on the user's review/);
+  await opsOn(id, [{ op: 'review_task', id: 't2', verdict: 'changes', summary: 'rename the client' }]);
+  assert.match(String((await mcpFor(id, 'read', { changes_only: true }))['text']), /\*\*Reviews\*\*\n- The user asked for changes to "Client" in review round 1: rename the client\./);
+  await task({ task_id: 't2', stage: 'refine' });
+  await task({ task_id: 't2', stage: 'review' });
+  await opsOn(id, [{ op: 'review_task', id: 't2', verdict: 'pass' }]);
+  assert.equal((await task({ task_id: 't2', status: 'done', note: 'renamed' }))['ok'], true);
+  const reviews = (await sessionFor(id)).plan!.tasks.find((t) => t.id === 't2')!.reviews!;
+  assert.deepEqual(
+    reviews.map((r) => `${r.round}:${r.verdict}:${r.by}`),
+    ['1:changes:user', '2:pass:user'],
+    "a refused call records nothing: the agent's pass was never taken",
+  );
 });
 
 test('a submission needs to say who builds it', async () => {

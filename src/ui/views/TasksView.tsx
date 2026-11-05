@@ -10,7 +10,7 @@ import { Markdown } from '../components/Markdown.tsx';
 import { classNames } from '../lib/format.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
 import { childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
-import { SESSION_BRANCH, ancestorsOf, branchPlan, buildSteps, effectiveBranch, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
+import { SESSION_BRANCH, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
 import { REVIEW_MODES, TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type ReviewMode, type Task, type TaskStatus } from '../../shared/types.ts';
 
 /** Clicking the status dot steps through the common path; blocked is set
@@ -977,6 +977,8 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
           {task.files?.length ? <p className="board-files mono">{task.files.join(', ')}</p> : null}
         </div>
       )}
+      <ReviewHistory task={task} />
+      <UserReview plan={plan} task={task} />
       <footer className="board-foot">
         <span className="item-id">{task.id}</span>
         {arrived && <span className="pill is-moved">just moved</span>}
@@ -984,6 +986,66 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
         <span className={classNames('board-state', `is-${task.status}`)}>{STATUS_LABEL[task.status]}</span>
       </footer>
     </Focusable>
+  );
+}
+
+/** Each review round's verdict, newest last. */
+function ReviewHistory({ task }: { task: Task }) {
+  if (!task.reviews?.length) return null;
+  return (
+    <ul className="board-reviews plain-list" aria-label={`Reviews of ${task.title}`}>
+      {task.reviews.map((r, i) => (
+        <li key={`${r.round}:${i}`} className={classNames('muted', r.verdict === 'pass' ? 'is-pass' : 'is-changes')}>
+          Round {r.round}: {r.verdict === 'pass' ? 'passed' : 'changes asked'} by {r.by === 'user' ? 'you' : 'the agent'}
+          {r.summary ? ` — ${r.summary}` : ''}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * The user's verdict on a task they review, while it is in review: the
+ * agent cannot mark it done without their pass — given here, or in chat.
+ */
+function UserReview({ plan, task }: { plan: Plan; task: Task }) {
+  const agent = useAgent();
+  const [asking, setAsking] = useState(false);
+  const [why, setWhy] = useState('');
+  const mode = effectiveReview(plan, task, plan.submission?.settings?.review ?? 'subagent');
+  if (mode !== 'user' || task.stage !== 'review') return null;
+  const decided = [...(task.reviews ?? [])].reverse().find((r) => r.round === task.round && r.by === 'user');
+  if (decided) return null;
+  const send = async (verdict: 'pass' | 'changes', summary?: string) => {
+    const ok = await store.op({ op: 'review_task', id: task.id, verdict, ...(summary ? { summary } : {}) });
+    if (ok) setAsking(false);
+  };
+  return (
+    <div className="board-review" role="group" aria-label={`Your review of ${task.title}`}>
+      <span className="field-label">Your review — round {task.round}</span>
+      {asking ? (
+        <>
+          <input className="input" value={why} placeholder={`What should ${agent.name} change?`} aria-label="What to change" onChange={(e) => setWhy(e.target.value)} />
+          <span className="board-review-actions">
+            <button type="button" className="btn btn-sm" disabled={!why.trim()} onClick={() => void send('changes', why.trim())}>
+              Send
+            </button>
+            <button type="button" className="btn btn-sm btn-ghost" onClick={() => setAsking(false)}>
+              Cancel
+            </button>
+          </span>
+        </>
+      ) : (
+        <span className="board-review-actions">
+          <button type="button" className="btn btn-sm btn-primary" onClick={() => void send('pass')}>
+            Approve
+          </button>
+          <button type="button" className="btn btn-sm" onClick={() => setAsking(true)}>
+            Request changes
+          </button>
+        </span>
+      )}
+    </div>
   );
 }
 

@@ -866,7 +866,11 @@ function buildRouter(deps: Deps): Router {
     }
     const checks = cleaned?.length ? cleaned : undefined;
     const note = typeof body['note'] === 'string' ? body['note'] : undefined;
-    if (!status && !stage && !checks && note === undefined) throw new PlanError('Say what changed: a status, a stage, checks or a note.');
+    const verdict = body['verdict'] === undefined ? undefined : body['verdict'] === 'pass' || body['verdict'] === 'changes' ? (body['verdict'] as 'pass' | 'changes') : null;
+    if (verdict === null) throw new PlanError('`verdict` is "pass" or "changes".');
+    const summary = typeof body['summary'] === 'string' ? body['summary'] : undefined;
+    if (verdict && !task.round && stage !== 'review') throw new PlanError(`"${task.title}" has not been to review yet: report stage "review" first (or with the verdict).`);
+    if (!status && !stage && !checks && !verdict && note === undefined) throw new PlanError('Say what changed: a status, a stage, checks, a verdict or a note.');
     const approved = body['user_approved'] === true;
     if (approved && !note?.trim()) {
       throw new PlanError('`user_approved` needs a `note` saying what the user told you in chat.');
@@ -946,6 +950,25 @@ function buildRouter(deps: Deps): Router {
             'user_approved: true and their answer in the note.',
         );
       }
+      // … and its last review round passed — by whoever the user said reviews it.
+      const mode = effectiveReview(before, task, settings.review);
+      if (mode !== 'skip') {
+        // The verdict in this call, if any, is the round's latest.
+        const last = verdict
+          ? { verdict, by: approved ? 'user' : 'claude' }
+          : [...(task.reviews ?? [])].reverse().find((r) => r.round === task.round);
+        const passed = last?.verdict === 'pass' && (mode !== 'user' || last.by === 'user');
+        if (!passed) {
+          throw new PlanError(
+            mode === 'user'
+              ? `"${task.title}" is the user's to review, and they have not passed it: show them the change and ask with ` +
+                  `${agentInfo(session.agent).askWith}. They can approve it on the board in Coplan; if they approve it in chat, call ` +
+                  'again with verdict "pass", user_approved: true and their words in the note.'
+              : `"${task.title}" has no passing verdict for review round ${task.round}: report the review's outcome — ` +
+                  'verdict "pass" (with this call is fine), or "changes" and refine.',
+          );
+        }
+      }
     }
 
     const readyBefore = new Set(readyTasks(before).map((t) => t.id));
@@ -960,6 +983,10 @@ function buildRouter(deps: Deps): Router {
           ...(checks ? { checks } : {}),
           ...(note !== undefined ? { note: approved ? `${note} (approved by the user)` : note } : {}),
         },
+        // The verdict, for the round the task is in once that is applied.
+        ...(verdict
+          ? [{ op: 'review_task' as const, id: taskId, verdict, ...(summary ? { summary } : {}), ...(approved ? { userApproved: true } : {}) }]
+          : []),
       ],
       'claude',
       { tracking: true },

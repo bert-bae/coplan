@@ -445,3 +445,14 @@ test('what Claude reads back says the plan is locked, and why', () => {
   assert.match(renderPlan(submitted('elsewhere')), /built outside this session/);
   assert.doesNotMatch(renderPlan(published()), /Locked/);
 });
+
+test("on a locked plan the user's one say is their verdict; the agent gives its own through harness_task_update", () => {
+  let plan = markDelivered(submitted());
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', stage: 'review' }], 'claude', undefined, { tracking: true }).plan;
+  plan = applyOps(plan, [{ op: 'review_task', id: 'client', verdict: 'changes', summary: 'needs a timeout' }], 'user').plan;
+  assert.deepEqual(plan.tasks.find((t) => t.id === 'client')!.reviews!.map((r) => `${r.verdict}:${r.by}`), ['changes:user']);
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_task', id: 'client', title: 'x' }], 'user'), /locked/);
+  assert.throws(() => applyOps(plan, [{ op: 'review_task', id: 'client', verdict: 'pass' }], 'claude'), /harness_task_update/);
+  const wire = plan.tasks.find((t) => t.title === 'Wire into API')!.id;
+  assert.throws(() => applyOps(plan, [{ op: 'review_task', id: wire, verdict: 'pass' }], 'user'), /has not been to review yet/);
+});

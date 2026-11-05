@@ -119,6 +119,14 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
     for (const t of active) {
       const state = [t.stage ? stageWords(t) : '', t.checks?.length ? `checks ${checkWords(t)}` : ''].filter(Boolean).join(' · ');
       out.push(`- ${line(t)}${state ? ` — ${state}` : ''}${t.note ? ` — ${t.note}` : ''}`);
+      // The verdict on its current round, if one is in: what to do next.
+      const verdict = [...(t.reviews ?? [])].reverse().find((r) => r.round === t.round);
+      if (verdict) {
+        const who = verdict.by === 'user' ? 'the user' : 'review';
+        out.push(`  ${verdict.verdict === 'pass' ? `✓ passed by ${who}: mark it done` : `✗ ${who} asked for changes: refine`}${verdict.summary ? ` — ${verdict.summary}` : ''}.`);
+      } else if (t.stage === 'review' && effectiveReview(plan, t, settings.review) === 'user') {
+        out.push('  ⏸ waiting on the user\'s review: ask them; they can approve it in Coplan.');
+      }
       if (t.round && t.round >= settings.maxRounds && t.stage !== 'review') {
         out.push(`  ⚠ ${t.round} of ${settings.maxRounds} review rounds used: another needs the user's go-ahead (user_approved).`);
       }

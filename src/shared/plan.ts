@@ -30,6 +30,7 @@ import type {
   PlanOp,
   PlanOpName,
   PlanPhase,
+  ReviewRecord,
   Section,
   Submission,
   Target,
@@ -40,8 +41,11 @@ import type {
   TaskStatus,
   Thread,
 } from './types.ts';
-import { BUILD_TARGETS, EDGE_ARROWS, IRIC_STAGES, NODE_KINDS, TASK_STATUSES } from './types.ts';
-import { cleanSettings, dependencyProblem, dependencyProblems, validReview } from './build.ts';
+import { BUILD_TARGETS, EDGE_ARROWS, IRIC_STAGES, NODE_KINDS, TASK_STATUSES, VERDICTS } from './types.ts';
+import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveReview, validReview } from './build.ts';
+
+/** How many review verdicts a task keeps. */
+const MAX_REVIEWS = 20;
 
 /** Raised for an op that cannot apply. The message is shown verbatim to
  *  whoever sent it — the user in a toast, Claude in a tool result. */
@@ -861,6 +865,7 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
   upsert_edge: ['diagramId', 'id', 'from', 'to', 'label', 'dashed', 'arrows', 'expect'],
   remove_edge: ['diagramId', 'id', 'from', 'to', 'expect'],
   remove: ['kind', 'id'],
+  review_task: ['id', 'verdict', 'summary', 'userApproved'],
   comment: ['target', 'text'],
   reply: ['threadId', 'text'],
   resolve: ['threadId', 'resolved'],
@@ -1060,6 +1065,9 @@ export const PROGRESS_FIELDS = ['status', 'stage', 'checks'] as const;
  * a status would walk straight past those gates.
  */
 function refuseProgress(op: PlanOp): void {
+  if (op.op === 'review_task') {
+    throw new PlanError('A review verdict goes through harness_task_update {task_id, verdict, summary}.');
+  }
   if (op.op !== 'upsert_task') return;
   const given = PROGRESS_FIELDS.filter((k) => op[k] !== undefined);
   if (!given.length) return;
@@ -1382,6 +1390,29 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       ];
     }
 
+    case 'review_task': {
+      const task = requireTask(plan, op.id);
+      if (plan.tasks.some((t) => t.parentId === task.id)) throw new PlanError(`"${task.title}" has subtasks: review each of them.`);
+      const verdict = oneOf(op.verdict, VERDICTS, 'a review verdict');
+      if (!verdict) throw new PlanError('Give the verdict: "pass", or "changes".');
+      if (!task.round) throw new PlanError(`"${task.title}" has not been to review yet.`);
+      const by: Author = author === 'user' || op.userApproved ? 'user' : 'claude';
+      const summary = clean(op.summary, MAX_TITLE * 2);
+      const record: ReviewRecord = {
+        round: task.round,
+        verdict,
+        by,
+        mode: effectiveReview(plan, task, plan.submission?.settings?.review ?? DEFAULT_BUILD_SETTINGS.review),
+        ...(summary ? { summary } : {}),
+        at: now,
+      };
+      task.reviews = [...(task.reviews ?? []), record].slice(-MAX_REVIEWS);
+      task.updatedAt = now;
+      const who = by === 'user' ? 'the user' : 'Claude';
+      const what = verdict === 'pass' ? 'passed' : 'asked for changes to';
+      return [log('status', ref('task', task.id), `${who} ${what} "${task.title}" in review round ${task.round}${summary ? `: ${short(summary, 80)}` : ''}`)];
+    }
+
     case 'report': {
       const text = clean(op.text, MAX_TEXT);
       if (!text) throw new PlanError('A report needs text.');
@@ -1485,6 +1516,7 @@ function editTask(
     if (status === 'todo' && author === 'user') {
       delete task.round;
       delete task.checks;
+      delete task.reviews;
     }
   }
   const progress: string[] = [];
@@ -1617,7 +1649,7 @@ export const MAX_NOTE = 4_000;
 
 /** What Claude may still do to a locked plan: track the work it is doing,
  *  and answer comments. Everything else is the design the user signed off. */
-const TRACKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'comment', 'reply', 'resolve', 'report']);
+const TRACKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'review_task', 'comment', 'reply', 'resolve', 'report']);
 
 /** Ops that can change which task waits on which. */
 const TASK_SHAPE_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task']);
@@ -1637,7 +1669,7 @@ const DESIGN_LOCKED_FOR_CLAUDE =
 
 /** What a confirmed design still lets anyone do: work on the tasks, link
  *  them to boxes (checked inside upsert_diagram), and talk about it. */
-const TASKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task', 'upsert_diagram', 'upsert_node', 'comment', 'reply', 'resolve', 'report']);
+const TASKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task', 'upsert_diagram', 'upsert_node', 'review_task', 'comment', 'reply', 'resolve', 'report']);
 
 /** Where the plan is in its life. */
 export function planPhase(plan: Pick<Plan, 'submission' | 'tasks' | 'design'> | null): PlanPhase {
@@ -1661,7 +1693,11 @@ export function isDesignLocked(plan: Pick<Plan, 'submission' | 'design'> | null)
 }
 
 function checkLocked(ops: PlanOp[], author: Author): void {
-  if (author === 'user') throw new PlanError(LOCKED_FOR_USER);
+  // The user's one say on a locked plan: their verdict on a task they review.
+  if (author === 'user') {
+    if (ops.every((op) => (op as { op?: string })?.op === 'review_task')) return;
+    throw new PlanError(LOCKED_FOR_USER);
+  }
   const refused = ops.find((op) => !TRACKING_OPS.has((op as { op?: string })?.op ?? ''));
   if (refused) throw new PlanError(`${LOCKED_FOR_CLAUDE} (Refused: ${(refused as { op?: string })?.op ?? 'an edit'}.)`);
 }
