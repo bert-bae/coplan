@@ -6,6 +6,7 @@ import { ProgressBar } from './Progress.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { MAX_NOTE, countTasks, currentTask, planPhase, unreadAreas } from '../../shared/plan.ts';
 import { MAX_PARALLEL, MAX_ROUNDS, branchPlan, buildSteps, hasDependencies, readyTasks } from '../../shared/build.ts';
+import { planGaps } from '../../shared/check.ts';
 import { REVIEW_MODES, type BuildSettings, type BuildTarget, type Plan, type PlanPhase, type ReviewMode, type SessionState } from '../../shared/types.ts';
 import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
 
@@ -184,6 +185,30 @@ function useSettled(value: string): string {
   return settled;
 }
 
+/**
+ * What the plan leaves open — the same list the agent gets from
+ * harness_plan_check — so the user signs off knowing it. A warning, not a
+ * gate: some gaps are deliberate (a box that already exists).
+ */
+function GapList({ plan }: { plan: Plan }) {
+  const gaps = planGaps(plan);
+  if (!gaps.length) return null;
+  return (
+    <details className="field submit-gaps">
+      <summary className="field-label">
+        {gaps.length} gap{gaps.length === 1 ? '' : 's'} the plan leaves open
+      </summary>
+      <ul className="plain-list">
+        {gaps.map((g, i) => (
+          <li key={`${g.rule}:${g.target.kind}:${g.target.id}:${i}`} className="muted">
+            {g.message}
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
 /** The shared frame: the choices on the left, the prompt on the right. */
 function ReviewFrame(props: {
   id: string;
@@ -217,7 +242,10 @@ function ReviewFrame(props: {
           </button>
         </header>
         <div className="submit-grid">
-          <div className="submit-side">{props.side}</div>
+          <div className="submit-side">
+            <GapList plan={props.plan} />
+            {props.side}
+          </div>
           <section className="submit-preview" aria-label="The prompt">
             <header className="submit-preview-head">
               <span className="field-label">{props.previewLabel}</span>

@@ -6,6 +6,7 @@
  * an edit, and they lead with what changed — the reason it is reading at all.
  */
 import { createHash } from 'node:crypto';
+import { planGaps } from '../shared/check.ts';
 import type { BuildSettings, BuildTarget, Change, Plan, PlanBaseline, Task, Thread } from '../shared/types.ts';
 import {
   baselineOf,
@@ -68,7 +69,21 @@ export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
   }
 
   out.push(...renderDocument(plan, { revs: true }));
+  const gaps = renderGaps(plan, 12);
+  if (gaps.length) out.push('', ...gaps);
   return out.join('\n').trim();
+}
+
+/**
+ * What the plan leaves open (see planGaps), as a list for Claude — cut to
+ * `max` lines with a pointer to the whole list.
+ */
+export function renderGaps(plan: Plan, max = Infinity): string[] {
+  const gaps = planGaps(plan);
+  if (!gaps.length) return [];
+  const shown = gaps.slice(0, max).map((g) => `- ${g.message}`);
+  if (gaps.length > max) shown.push(`- …and ${gaps.length - max} more: harness_plan_check lists them all.`);
+  return [`## Gaps (${gaps.length}) — what the plan leaves open`, ...shown];
 }
 
 interface DocumentOptions {

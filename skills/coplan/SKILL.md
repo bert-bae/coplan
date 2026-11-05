@@ -31,7 +31,7 @@ you, call `harness_plan_read`: the first read after a sign-off returns its
 prompt.
 
 Coplan's tools are the MCP server `harness`: `harness_plan_publish`,
-`harness_plan_read`, `harness_plan_edit`, `harness_tasks_publish`,
+`harness_plan_read`, `harness_plan_check`, `harness_plan_edit`, `harness_tasks_publish`,
 `harness_task_next`, `harness_task_brief` and `harness_task_update`. Your
 agent may show them with a prefix that names the server (in Claude Code,
 `mcp__plugin_coplan_harness__…`); they are the same tools.
@@ -69,7 +69,9 @@ Read the code first. Then call `harness_plan_publish` with:
   detailed, linked task list comes after the design is confirmed.
 - **sections** — supporting prose: Context, Risks, Out of scope. Markdown.
 
-Then ask, with your question tool, whatever you need decided — several
+Run `harness_plan_check` and fix what it finds — a box with no
+description, a planned task that builds no box — or say in chat why a gap
+stays. Then ask, with your question tool, whatever you need decided — several
 questions at once, with options. Tell the user the design is ready, with the
 UI link the publish returned, and that they confirm it in Coplan when it is
 right.
@@ -142,8 +144,11 @@ tree and nothing else):
   trivial mechanical changes.
 
 The read-back then shows the **build order** (steps of tasks that can run
-side by side) and the **branches** (how they stack). Check that they say
-what you meant. Tell the user the task list is ready to review, and ask
+side by side) and the **branches** (how they stack), and the reply lists
+the **gaps** the list leaves open (`harness_plan_check` lists them any
+time): tasks with no detail, boxes no task builds, branches a stack of pull
+requests cannot follow. Check they say what you meant, and fix or explain
+each gap. Tell the user the task list is ready to review, and ask
 what you need decided. **Do not start building**: the user submits the plan
 from Coplan when the tasks are right.
 

@@ -250,6 +250,16 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: 'harness_plan_check',
+    endpoint: 'check',
+    description:
+      'Audit the plan for what it leaves open: boxes no task builds, tasks that build no box, boxes with no ' +
+      'description, tasks with no detail once the task list is being made, box ids shared across diagrams, branch ' +
+      'layouts a stack of pull requests cannot follow, and comments from the user nobody answered. Run it before ' +
+      'you tell the user the design or the task list is ready, and fix or explain each gap. Reads nothing as seen.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
     name: 'harness_plan_edit',
     endpoint: 'edit',
     description:
