@@ -421,6 +421,59 @@ test("a task's brief is self-contained: objective, where it fits, scope, branch 
   assert.match(parent, /No checks are configured/);
 });
 
+test("a subagent's brief carries the plan's sections and every open comment on the design it builds", () => {
+  const designed = publishPlan(null, { ...DESIGN, sections: [{ title: 'Out of scope', body: 'No write-through caching.' }] }, 1_000).plan;
+  let plan = publishTasks(confirmDesign(designed, { prompt: 'p' }, 1_100), { tasks: TASKS }, 1_200).plan;
+  plan = applyOps(
+    plan,
+    [
+      { op: 'comment', target: { kind: 'node', id: 'd1/cache' }, text: "Don't change the TTL." },
+      { op: 'comment', target: { kind: 'edge', id: 'd1/api->cache' }, text: 'Batch the gets.' },
+      { op: 'comment', target: { kind: 'node', id: 'd1/db' }, text: 'Postgres 16 only.' },
+    ],
+    'user',
+  ).plan;
+  const brief = renderBrief(plan, plan.tasks.find((t) => t.id === 'client')!, {});
+  assert.match(brief, /## From the plan\n\n### Out of scope\nNo write-through caching\./);
+  assert.match(brief, /user _\(on box "Redis" \(d1\/cache\) in diagram "Components"\)_: Don't change the TTL\./);
+  assert.match(brief, /Batch the gets\./, 'an arrow into a box it builds');
+  assert.doesNotMatch(brief, /Postgres 16 only/, 'a box it does not build');
+
+  // Every brief quotes every section, so a comment on one is in every brief.
+  const s = plan.sections[0]!.id;
+  plan = applyOps(plan, [{ op: 'comment', target: { kind: 'section', id: s }, text: 'Also no admin API.' }], 'user').plan;
+  assert.match(renderBrief(plan, plan.tasks.find((t) => t.id === 'docs')!, {}), /Also no admin API\./);
+});
+
+test('a long section is cut at a line, never inside a code block, and says where the rest is', () => {
+  const body = ['Intro.', '', '```ts', ...Array.from({ length: 80 }, (_, i) => `const line${i} = ${i};`), '```', '', 'After.'].join('\n');
+  const designed = publishPlan(null, { ...DESIGN, sections: [{ title: 'Context', body }] }, 1_000).plan;
+  const plan = publishTasks(confirmDesign(designed, { prompt: 'p' }, 1_100), { tasks: TASKS }, 1_200).plan;
+  const brief = renderBrief(plan, plan.tasks.find((t) => t.id === 'docs')!, {});
+  const quoted = brief.slice(brief.indexOf('### Context'), brief.indexOf('## Your objective'));
+  assert.equal((quoted.match(/^```/gm) ?? []).length % 2, 0, 'every fence it opens, it closes');
+  assert.match(quoted, /harness_plan_read \{peek: true\} has all of it/);
+  // A short section is quoted whole, with no note.
+  const short = renderBrief(tasked(), tasked().tasks.find((t) => t.id === 'docs')!, {});
+  assert.doesNotMatch(short, /more of the plan than fits/);
+});
+
+test('republishing a task list with the same builds leaves the diagram as it was', () => {
+  const plan = tasked();
+  const again = publishTasks(plan, { tasks: TASKS }).plan;
+  assert.equal(again.diagrams[0]!.rev, plan.diagrams[0]!.rev);
+});
+
+test('a task republished with new builds builds those boxes, not those and the old ones', () => {
+  const before = tasked();
+  assert.ok(before.diagrams[0]!.nodes.find((n) => n.id === 'cache')!.taskIds?.includes('client'));
+  const after = publishTasks(before, { tasks: TASKS.map((t) => ({ ...t, subtasks: t.subtasks?.map((s) => (s.id === 'client' ? { ...s, builds: ['db'] } : s)) })) }).plan;
+  const links = (id: string) => after.diagrams[0]!.nodes.find((n) => n.id === id)!.taskIds ?? [];
+  assert.ok(!links('cache').includes('client'), 'the old link is gone');
+  assert.ok(links('db').includes('client'));
+  assert.ok(links('api').includes('wire'), "other tasks' links stay");
+});
+
 test("a parent's brief lists its subtasks in the order they can be built, not the outline's", () => {
   // Config, second in the outline, now waits on Invalidation, which is third.
   const plan = applyOps(tasked(), [{ op: 'upsert_task', id: 'config', dependsOn: ['invalidate'] }], 'user').plan;

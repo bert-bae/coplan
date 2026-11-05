@@ -31,7 +31,7 @@ you, call `harness_plan_read`: the first read after a sign-off returns its
 prompt.
 
 Coplan's tools are the MCP server `harness`: `harness_plan_publish`,
-`harness_plan_read`, `harness_plan_edit`, `harness_tasks_publish`,
+`harness_plan_read`, `harness_plan_check`, `harness_plan_edit`, `harness_tasks_publish`,
 `harness_task_next`, `harness_task_brief` and `harness_task_update`. Your
 agent may show them with a prefix that names the server (in Claude Code,
 `mcp__plugin_coplan_harness__…`); they are the same tools.
@@ -69,7 +69,9 @@ Read the code first. Then call `harness_plan_publish` with:
   detailed, linked task list comes after the design is confirmed.
 - **sections** — supporting prose: Context, Risks, Out of scope. Markdown.
 
-Then ask, with your question tool, whatever you need decided — several
+Run `harness_plan_check` and fix what it finds — a box with no
+description, a planned task that builds no box — or say in chat why a gap
+stays. Then ask, with your question tool, whatever you need decided — several
 questions at once, with options. Tell the user the design is ready, with the
 UI link the publish returned, and that they confirm it in Coplan when it is
 right.
@@ -85,8 +87,28 @@ It leads with the net effect of their edits, then the plan.
   `harness_plan_edit {ops: [{op: "reply", threadId, text}]}`; resolve it
   (`{op: "resolve", threadId, resolved: true}`) if settled.
 
+**Auditing the plan.** When you review the design — yours or the user's —
+and are not sure a change is wanted, say so where it applies instead of
+overwriting: `harness_plan_edit {ops: [{op: "comment", target: {kind: "node",
+id: "d1/cache"}, text: "Should this be write-through? Reads lag writes by
+the TTL."}]}`. A target is the plan (`{kind: "plan", id: ""}`), a section,
+a diagram or a task by id, or one box (`node`, `"diagramId/nodeId"`) or
+arrow (`edge`, `"diagramId/edgeId"`). The user answers in the thread.
+
+A subagent that audits the plan for you reads it with
+`harness_plan_read {peek: true}`: it sees the plan as it stands, but the
+user's changes stay unread, so your next read still reports them to you.
+
+The read gives each section, diagram and task its revision (`rev`). Pass
+it as `expect` on an `upsert_section`, `upsert_diagram` or `upsert_task` to
+have the edit refused if the user changed that item since.
+
 Use `harness_plan_edit` for targeted changes, `harness_plan_publish` only
-for a wholesale rewrite (keeping the ids of items that survive). Publishing
+for a wholesale rewrite (keeping the ids of items that survive). To change
+one box or arrow, use `upsert_node`, `remove_node`, `upsert_edge` or
+`remove_edge` rather than restating the whole diagram:
+`harness_plan_edit {ops: [{op: "upsert_node", diagramId: "d1", id: "cache",
+description: "…"}]}` changes that box's description and nothing else. Publishing
 is refused while the user has changes you have not read, and so is an edit
 to any item (a diagram, section or task) they changed since your last read:
 it could undo theirs. Read first, then edit on top of their version.
@@ -122,8 +144,11 @@ tree and nothing else):
   trivial mechanical changes.
 
 The read-back then shows the **build order** (steps of tasks that can run
-side by side) and the **branches** (how they stack). Check that they say
-what you meant. Tell the user the task list is ready to review, and ask
+side by side) and the **branches** (how they stack), and the reply lists
+the **gaps** the list leaves open (`harness_plan_check` lists them any
+time): tasks with no detail, boxes no task builds, branches a stack of pull
+requests cannot follow. Check they say what you meant, and fix or explain
+each gap. Tell the user the task list is ready to review, and ask
 what you need decided. **Do not start building**: the user submits the plan
 from Coplan when the tasks are right.
 

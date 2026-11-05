@@ -1195,6 +1195,7 @@ function Editor({
         nodes={nodes}
         edges={edges}
         plan={plan}
+        {...(diagram.nodes.some((n) => n.id === node.id) ? { commentTarget: { kind: 'node' as const, id: `${diagram.id}/${node.id}` } } : {})}
         onChange={(patch) => updateNode(node.id, patch)}
         onSelect={select}
         onConnect={(target) => connect(node.id, target)}
@@ -1212,6 +1213,8 @@ function Editor({
         key={edge.id}
         edge={edge}
         nodes={nodes}
+        plan={plan}
+        {...(diagram.edges.some((e) => e.id === edge.id) ? { commentTarget: { kind: 'edge' as const, id: `${diagram.id}/${edge.id}` } } : {})}
         onChange={(patch) => updateEdge(edge.id, patch)}
         onReverse={() => reverseEdge(edge.id)}
         onSelect={select}

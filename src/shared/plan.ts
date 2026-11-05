@@ -449,7 +449,7 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
   next.sections = sections;
   next.diagrams = diagrams;
   next.tasks = tasks;
-  linkBuilds(next, builds, now);
+  linkBuilds(next, builds, now, false);
   checkDependencies(next);
   next.threads = base.threads.map((thread) => detachIfOrphaned(next, base, thread));
   next.revision = base.revision + 1;
@@ -579,7 +579,8 @@ function buildTaskTree(
       const explicit = raw.dependsOn !== undefined;
       deps.push({ task, explicit, ids: explicit ? (cleanList(raw.dependsOn) ?? []) : (old?.dependsOn ?? []) });
       const refs = cleanList(raw.builds);
-      if (refs?.length) builds.push({ id, refs });
+      // Restated (even as []), it says which boxes the task builds now.
+      if (raw.builds !== undefined) builds.push({ id, refs: refs ?? [] });
       walk(raw.subtasks, id, depth + 1);
     });
   };
@@ -620,36 +621,67 @@ function buildTaskTree(
  * Link tasks to the boxes their `builds` names: a node id, or
  * `diagramId/nodeId` when the same id is in several diagrams.
  */
-function linkBuilds(plan: Plan, builds: { id: string; refs: string[] }[], now: number): { diagram: Diagram; node: DiagramNode }[] {
-  const linked: { diagram: Diagram; node: DiagramNode }[] = [];
+function linkBuilds(
+  plan: Plan,
+  builds: { id: string; refs: string[] }[],
+  now: number,
+  /** `builds` says which boxes the task builds now, so a box it no longer
+   *  names loses the link. Off when the diagrams themselves declare links
+   *  too (a whole publish), so the two add up. */
+  replace = true,
+): { linked: Part[]; unlinked: Part[] } {
+  const linked: Part[] = [];
+  const unlinked: Part[] = [];
   for (const { id, refs } of builds) {
     const title = plan.tasks.find((t) => t.id === id)?.title ?? id;
-    for (const ref of refs) {
+    const want = new Set(refs.map((ref) => {
       const { diagram, node } = findBox(plan, ref, title);
-      const links = node.taskIds ?? [];
-      if (links.includes(id)) continue;
-      node.taskIds = [...links, id];
-      // A canvas holding the old links must reload rather than save over them.
-      bumpDiagram(diagram, now);
-      linked.push({ diagram, node });
+      return `${diagram.id}/${node.id}`;
+    }));
+    for (const diagram of plan.diagrams) {
+      let touched = false;
+      for (const node of diagram.nodes) {
+        const has = node.taskIds?.includes(id) ?? false;
+        const wanted = want.has(`${diagram.id}/${node.id}`);
+        if (wanted && !has) {
+          node.taskIds = [...(node.taskIds ?? []), id];
+          linked.push({ diagram, node });
+          touched = true;
+        } else if (!wanted && has && replace) {
+          const kept = node.taskIds!.filter((x) => x !== id);
+          if (kept.length) node.taskIds = kept;
+          else delete node.taskIds;
+          unlinked.push({ diagram, node });
+          touched = true;
+        }
+      }
+      // A canvas holding the old links must reload rather than save over
+      // them — but only when a link actually changed.
+      if (touched) bumpDiagram(diagram, now);
     }
   }
-  return linked;
+  return { linked, unlinked };
 }
+
+type Part = { diagram: Diagram; node: DiagramNode };
 
 /** A task's `builds` changed which boxes it is linked to: logged per
  *  diagram, as the canvas logs a link made by hand. */
 function logLinks(
-  linked: { diagram: Diagram; node: DiagramNode }[],
+  { linked, unlinked }: { linked: Part[]; unlinked: Part[] },
   task: Task,
   author: Author,
   log: (kind: ChangeKind, target: Target, summary: string) => Change,
 ): Change[] {
   const out: Change[] = [];
-  for (const diagram of new Set(linked.map((l) => l.diagram))) {
-    const boxes = linked.filter((l) => l.diagram === diagram).map((l) => `"${l.node.label}"`);
+  for (const diagram of new Set([...linked, ...unlinked].map((l) => l.diagram))) {
+    const names = (list: Part[]) => list.filter((l) => l.diagram === diagram).map((l) => `"${l.node.label}"`);
+    const facts = [
+      names(linked).length ? `linked "${task.title}" to ${names(linked).join(', ')}` : '',
+      names(unlinked).length ? `unlinked it from ${names(unlinked).join(', ')}` : '',
+    ].filter(Boolean);
     diagram.updatedBy = author;
-    out.push(log('edited', ref('diagram', diagram.id), `linked "${task.title}" to ${boxes.join(', ')} in diagram "${diagram.title}"`));
+    out.push(log('edited', ref('diagram', diagram.id), `${facts.join(' and ')} in diagram "${diagram.title}"`.replace(/^unlinked it/, `unlinked "${task.title}"`)));
   }
   return out;
 }
@@ -820,6 +852,10 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
   move_task: ['id', 'parentId', 'index'],
   move_section: ['id', 'index'],
   move_diagram: ['id', 'index'],
+  upsert_node: ['diagramId', 'id', 'label', 'kind', 'detail', 'description', 'notes', 'taskIds', 'expect'],
+  remove_node: ['diagramId', 'id', 'expect'],
+  upsert_edge: ['diagramId', 'id', 'from', 'to', 'label', 'dashed', 'arrows', 'expect'],
+  remove_edge: ['diagramId', 'id', 'from', 'to', 'expect'],
   remove: ['kind', 'id'],
   comment: ['target', 'text'],
   reply: ['threadId', 'text'],
@@ -892,6 +928,11 @@ function contentTargetOf(op: PlanOp): string | null {
       return op.id && has('title', 'body') ? `section:${op.id}` : null;
     case 'upsert_diagram':
       return op.id && has('title', 'nodes', 'edges', 'direction', 'caption') ? `diagram:${op.id}` : null;
+    case 'upsert_node':
+    case 'remove_node':
+    case 'upsert_edge':
+    case 'remove_edge':
+      return `diagram:${op.diagramId}`;
     case 'upsert_task':
       // A note with a status is a progress report (harness_task_update).
       return op.id && (has('title', 'detail', 'files', 'dependsOn', 'branch', 'review') || (has('note') && !has('status', 'stage')))
@@ -918,6 +959,90 @@ function refuseUnreadEdit(plan: Plan, op: PlanOp, unread: Set<string>): void {
     `The user changed ${describeTarget(plan, { kind, id })} since you last read the plan, so this edit was not applied — ` +
       'it could undo theirs. Call harness_plan_read to see their version, then make the edit on top of it.',
   );
+}
+
+type PartOp = Extract<PlanOp, { op: 'upsert_node' | 'remove_node' | 'upsert_edge' | 'remove_edge' }>;
+
+/**
+ * A diagram's boxes and arrows with one part changed. Untouched parts are
+ * restated by id alone: upsert_diagram keeps everything a part had that an
+ * edit leaves out, so nothing the user wrote on them is restated — or lost.
+ */
+function partEdit(d: Diagram, op: PartOp): { nodes: DiagramNodeInput[]; edges: DiagramEdgeInput[] } {
+  const nodes: DiagramNodeInput[] = d.nodes.map((n) => ({ id: n.id }));
+  const edges: DiagramEdgeInput[] = d.edges.map((e) => ({ id: e.id, source: e.source, target: e.target }));
+  const given = <K extends string>(keys: readonly K[]) =>
+    Object.fromEntries(keys.filter((k) => (op as Record<string, unknown>)[k] !== undefined).map((k) => [k, (op as Record<string, unknown>)[k]]));
+  switch (op.op) {
+    case 'upsert_node': {
+      const fields = given(['label', 'kind', 'detail', 'description', 'notes', 'taskIds'] as const);
+      const at = nodes.findIndex((n) => n.id === op.id);
+      if (at >= 0) nodes[at] = { id: op.id, ...fields };
+      else if (!clean(op.label, 120)) throw new PlanError(`No box "${op.id}" in "${d.title}" to change; to add it, give it a label.`);
+      else nodes.push({ id: op.id, ...fields });
+      return { nodes, edges };
+    }
+    case 'remove_node': {
+      if (!d.nodes.some((n) => n.id === op.id)) throw new PlanError(`No box "${op.id}" in "${d.title}".`);
+      return { nodes: nodes.filter((n) => n.id !== op.id), edges: edges.filter((e) => e.source !== op.id && e.target !== op.id) };
+    }
+    case 'upsert_edge': {
+      const style = given(['label', 'dashed', 'arrows'] as const);
+      const at = op.id ? edges.findIndex((e) => e.id === op.id) : -1;
+      if (at >= 0) {
+        // From the arrow as it is, style and all: moved to another box it no
+        // longer pairs with its old self, and would otherwise lose its label.
+        const real = d.edges.find((e) => e.id === op.id)!;
+        const was: DiagramEdgeInput = { id: real.id, source: real.source, target: real.target, ...(real.label ? { label: real.label } : {}), ...(real.dashed ? { dashed: true } : {}), ...(real.arrows ? { arrows: real.arrows } : {}) };
+        edges[at] = { ...was, ...(op.from ? { source: op.from } : {}), ...(op.to ? { target: op.to } : {}), ...style };
+      } else {
+        if (!op.from || !op.to) {
+          throw new PlanError(op.id ? `No arrow "${op.id}" in "${d.title}"; to add one, give from and to.` : 'A new arrow needs from and to (box ids).');
+        }
+        edges.push({ ...(op.id ? { id: op.id } : {}), source: op.from, target: op.to, ...style });
+      }
+      return { nodes, edges };
+    }
+    case 'remove_edge': {
+      const id = arrowId(d, op);
+      return { nodes, edges: edges.filter((e) => e.id !== id) };
+    }
+  }
+}
+
+/**
+ * The arrow an op names: by id (`source->target` unless the read shows
+ * another), or by its ends when only one arrow joins them that way.
+ */
+function arrowId(d: Diagram, op: { id?: string; from?: string; to?: string }): string {
+  if (op.id) {
+    if (!d.edges.some((e) => e.id === op.id)) throw new PlanError(`No arrow "${op.id}" in "${d.title}". An arrow's id is from->to unless the read shows another.`);
+    return op.id;
+  }
+  const between = d.edges.filter((e) => e.source === op.from && e.target === op.to);
+  if (between.length === 1) return between[0]!.id;
+  throw new PlanError(
+    between.length
+      ? `${between.length} arrows run ${op.from} → ${op.to} in "${d.title}": name one by id (${between.map((e) => e.id).join(', ')}).`
+      : `No arrow ${op.from ?? '?'} → ${op.to ?? '?'} in "${d.title}".`,
+  );
+}
+
+/**
+ * A box or arrow op's `expect` is the diagram's rev as the caller read it —
+ * before this batch. Each such op is its own diagram edit and moves the
+ * rev, so it is checked here, against the plan the batch started from, and
+ * not again as the batch goes on: several ops on one diagram, each with the
+ * rev that was read, go through together.
+ */
+function expectAtStart(plan: Plan, op: PlanOp, author: Author): PlanOp {
+  if (!op || typeof op !== 'object') return op;
+  if (op.op !== 'upsert_node' && op.op !== 'remove_node' && op.op !== 'upsert_edge' && op.op !== 'remove_edge') return op;
+  if (op.expect === undefined) return op;
+  const d = plan.diagrams.find((x) => x.id === op.diagramId);
+  if (d) checkRev(d, op.expect, 'diagram', author);
+  const { expect: _checked, ...rest } = op;
+  return rest as PlanOp;
 }
 
 /** The fields of upsert_task that report progress rather than say what
@@ -963,7 +1088,7 @@ export function applyOps(
         if (!opts.tracking) refuseProgress(op);
         refuseUnreadEdit(plan, op, unread!);
       }
-      changes.push(...applyOne(next, op, author, now));
+      changes.push(...applyOne(next, expectAtStart(plan, op, author), author, now));
     } catch (err) {
       if (err instanceof PlanError && ops.length > 1) {
         throw new PlanError(`Edit ${i + 1} (${(op as { op?: string })?.op ?? '?'}): ${err.message}`);
@@ -978,6 +1103,9 @@ export function applyOps(
     const problem = dependencyProblem(next);
     if (problem && problem !== dependencyProblem(plan)) throw new PlanError(problem);
   }
+  // A comment on a box or an arrow an edit took away is kept, on the plan,
+  // saying what it was about — as for any removed item.
+  next.threads = next.threads.map((t) => (t.target.kind === 'node' || t.target.kind === 'edge' ? detachIfOrphaned(next, plan, t) : t));
   if (author === 'claude') {
     if (next.claudeBaseline && unreadByClaude(next).length > 0) {
       next.claudeBaseline = foldClaudeEdit(next.claudeBaseline, baselineOf(plan), baselineOf(next));
@@ -1143,7 +1271,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       placeAmongSiblings(plan, task, op.index);
       const where = parentId ? ` under "${requireTask(plan, parentId).title}"` : '';
       const created = log('created', ref('task', task.id), `added task "${title}"${where}`);
-      const linked = op.builds?.length ? linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now) : [];
+      const linked = op.builds?.length ? linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now) : { linked: [], unlinked: [] };
       return [created, ...logLinks(linked, task, author, log)];
     }
 
@@ -1175,6 +1303,20 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       if (!diagram) throw new PlanError(`No diagram "${op.id}".`);
       moveInList(plan.diagrams, diagram.id, op.index);
       return [log('moved', ref('diagram', diagram.id), `reordered diagram "${diagram.title}"`)];
+    }
+
+    // One box or arrow at a time. Each is the diagram's current boxes and
+    // arrows with that one change, applied as upsert_diagram — so it is
+    // checked, locked and logged exactly as a whole-diagram edit is, and
+    // nothing else in the diagram is restated (or lost).
+    case 'upsert_node':
+    case 'remove_node':
+    case 'upsert_edge':
+    case 'remove_edge': {
+      const d = plan.diagrams.find((x) => x.id === op.diagramId);
+      if (!d) throw new PlanError(`No diagram "${op.diagramId}". The read lists each diagram's id.`);
+      const { nodes, edges } = partEdit(d, op);
+      return applyOne(plan, { op: 'upsert_diagram', id: d.id, nodes, edges, ...(op.expect !== undefined ? { expect: op.expect } : {}) }, author, now);
     }
 
     case 'remove':
@@ -1343,7 +1485,8 @@ function editTask(
     task.revBy = { ...task.revBy, [author]: task.rev };
     out.push(log('edited', ref('task', task.id), `edited the ${edited.join(', ')} of "${task.title}"`));
   }
-  if (op.builds?.length) out.push(...logLinks(linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now), task, author, log));
+  // Given, builds says which boxes the task builds now ([] unlinks it).
+  if (op.builds !== undefined) out.push(...logLinks(linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now), task, author, log));
   if (typeof op.index === 'number') placeAmongSiblings(plan, task, op.index);
   return out;
 }
@@ -1427,8 +1570,8 @@ function removeItem(
     default:
       throw new PlanError(
         kind === 'node' || kind === 'edge'
-          ? `Cannot remove a ${kind} on its own: send the diagram's ${kind === 'node' ? 'nodes (and edges)' : 'edges'} without it, ` +
-              'with upsert_diagram {id, nodes, edges}.'
+          ? 'remove takes a section, diagram or task: remove a box with remove_node {diagramId, id} (its arrows go ' +
+              'with it), an arrow with remove_edge {diagramId, id} or {diagramId, from, to}.'
           : `Cannot remove a "${kind}": remove takes kind section, diagram or task.`,
       );
   }
@@ -1445,7 +1588,7 @@ export const MAX_NOTE = 4_000;
 
 /** What Claude may still do to a locked plan: track the work it is doing,
  *  and answer comments. Everything else is the design the user signed off. */
-const TRACKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'reply', 'resolve', 'report']);
+const TRACKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'comment', 'reply', 'resolve', 'report']);
 
 /** Ops that can change which task waits on which. */
 const TASK_SHAPE_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task']);
@@ -1453,7 +1596,7 @@ const TASK_SHAPE_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task']
 const LOCKED_FOR_USER = 'The plan has been submitted to be built, so it is locked. Reopen it to make changes.';
 const LOCKED_FOR_CLAUDE =
   'The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or ' +
-  'upsert_task to add work you discover), comment replies (reply, resolve) and the build report apply. If the ' +
+  'upsert_task to add work you discover), comments (comment, reply, resolve) and the build report apply. If the ' +
   'design has to change, ask the user in chat — they can reopen the plan in Coplan.';
 const DESIGN_LOCKED_FOR_USER =
   'The design is confirmed, so the architecture, sections and summary are locked — only the tasks, the boxes they ' +
@@ -1465,7 +1608,7 @@ const DESIGN_LOCKED_FOR_CLAUDE =
 
 /** What a confirmed design still lets anyone do: work on the tasks, link
  *  them to boxes (checked inside upsert_diagram), and talk about it. */
-const TASKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task', 'upsert_diagram', 'comment', 'reply', 'resolve', 'report']);
+const TASKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task', 'upsert_diagram', 'upsert_node', 'comment', 'reply', 'resolve', 'report']);
 
 /** Where the plan is in its life. */
 export function planPhase(plan: Pick<Plan, 'submission' | 'tasks' | 'design'> | null): PlanPhase {
@@ -1740,7 +1883,9 @@ function buildGraph(
   for (const c of cleaned) {
     const { raw, source, target } = c;
     const prev = prevOf.get(c);
-    let id = c.id ?? `${source}->${target}`;
+    // The same arrow keeps its id — and so its comments — when an edit
+    // restates it without one.
+    let id = c.id ?? prev?.id ?? `${source}->${target}`;
     for (let n = 2; edges.some((e) => e.id === id); n++) id = `${source}->${target}#${n}`;
     const label = c.label === undefined ? prev?.label : c.label || undefined;
     const dashed = raw.dashed === undefined ? prev?.dashed : raw.dashed === true;
@@ -2112,9 +2257,34 @@ export function targetExists(plan: Plan, target: Target): boolean {
       return plan.diagrams.some((d) => d.id === target.id);
     case 'task':
       return plan.tasks.some((t) => t.id === target.id);
+    case 'node':
+      return Boolean(findPart(plan, target)?.node);
+    case 'edge':
+      return Boolean(findPart(plan, target)?.edge);
     default:
       return false;
   }
+}
+
+/** The box or arrow a `node` / `edge` target names (`diagramId/partId`). */
+export function findPart(
+  plan: Pick<Plan, 'diagrams'>,
+  target: Target,
+): { diagram: Diagram; node?: DiagramNode; edge?: DiagramEdge } | null {
+  const at = target.id.indexOf('/');
+  if (at <= 0) return null;
+  const diagram = plan.diagrams.find((d) => d.id === target.id.slice(0, at));
+  if (!diagram) return null;
+  const id = target.id.slice(at + 1);
+  if (target.kind === 'node') {
+    const node = diagram.nodes.find((n) => n.id === id);
+    return node ? { diagram, node } : null;
+  }
+  if (target.kind === 'edge') {
+    const edge = diagram.edges.find((e) => e.id === id);
+    return edge ? { diagram, edge } : null;
+  }
+  return null;
 }
 
 export function describeTarget(plan: Plan, target: Target): string {
@@ -2132,6 +2302,16 @@ export function describeTarget(plan: Plan, target: Target): string {
     case 'task': {
       const t = plan.tasks.find((x) => x.id === target.id);
       return t ? `task "${t.title}"` : `task ${target.id}`;
+    }
+    case 'node': {
+      const part = findPart(plan, target);
+      return part?.node ? `box "${part.node.label}" (${target.id}) in diagram "${part.diagram.title}"` : `box ${target.id}`;
+    }
+    case 'edge': {
+      const part = findPart(plan, target);
+      if (!part?.edge) return `arrow ${target.id}`;
+      const label = (id: string) => part.diagram.nodes.find((n) => n.id === id)?.label ?? id;
+      return `arrow ${label(part.edge.source)} → ${label(part.edge.target)} (${target.id}) in diagram "${part.diagram.title}"`;
     }
     default:
       return 'an item';

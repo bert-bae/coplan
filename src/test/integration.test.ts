@@ -333,6 +333,17 @@ test('a refused browser edit says why and changes nothing', async () => {
   assert.equal(after.plan!.seq, before.plan!.seq);
 });
 
+test('a peek shows the plan and leaves the user\'s changes unread for the real read', async () => {
+  await ops([{ op: 'upsert_task', id: 't2', title: 'Client (peeked)' }]);
+  const before = (await session()).plan!.claudeReadSeq;
+  const peek = String((await mcp('read', { peek: true }))['text']);
+  assert.match(peek, /^\[cc-harness\] A peek/);
+  assert.match(peek, /Client \(peeked\)/);
+  assert.equal((await session()).plan!.claudeReadSeq, before, 'nothing marked read');
+  const real = String((await mcp('read', { changes_only: true }))['text']);
+  assert.match(real, /renamed from "Client"/, 'the real read still reports the change');
+});
+
 test('the plan text endpoint shows exactly what Claude reads, without counting as a read', async () => {
   await ops([{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'peek' }]);
   const res = await call<{ status: number; text: string }>(`/api/session/${sessionId}/plan/text`);

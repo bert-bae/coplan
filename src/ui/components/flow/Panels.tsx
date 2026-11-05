@@ -4,8 +4,9 @@ import { MarkdownField } from '../Editable.tsx';
 import { Markdown } from '../Markdown.tsx';
 import { STATUS_GLYPH, STATUS_LABEL } from '../Progress.tsx';
 import { classNames } from '../../lib/format.ts';
-import { outline } from '../../../shared/plan.ts';
-import { NODE_KINDS, type NodeKind, type Plan } from '../../../shared/types.ts';
+import { isLocked, outline } from '../../../shared/plan.ts';
+import { NODE_KINDS, type NodeKind, type Plan, type Target } from '../../../shared/types.ts';
+import { ThreadPanel } from '../Threads.tsx';
 import { KIND_GLYPH, KIND_HINT, KIND_LABEL, type EdgePatch, type FlowEdge, type FlowNode, type NodePatch } from './shared.ts';
 
 /**
@@ -194,11 +195,14 @@ export function NodePanel({
   onDuplicate,
   onRemove,
   onClose,
+  commentTarget,
 }: {
   node: FlowNode;
   nodes: FlowNode[];
   edges: FlowEdge[];
   plan: Plan;
+  /** Where comments on this box live, once it is saved. */
+  commentTarget?: Target;
   onChange: (patch: NodePatch) => void;
   onSelect: (kind: 'node' | 'edge', id: string) => void;
   onConnect: (target: string) => void;
@@ -317,6 +321,8 @@ export function NodePanel({
         )}
       </div>
 
+      {commentTarget && <PartComments plan={plan} target={commentTarget} label={node.data.label} />}
+
       <div className="field">
         <span className="field-label">Connections</span>
         {outgoing.length + incoming.length > 0 ? (
@@ -398,6 +404,8 @@ export function NodePanel({
 export function EdgePanel({
   edge,
   nodes,
+  plan,
+  commentTarget,
   onChange,
   onReverse,
   onSelect,
@@ -406,6 +414,9 @@ export function EdgePanel({
 }: {
   edge: FlowEdge;
   nodes: FlowNode[];
+  plan?: Plan;
+  /** Where comments on this arrow live, once it is saved. */
+  commentTarget?: Target;
   onChange: (patch: EdgePatch) => void;
   onReverse: () => void;
   onSelect: (kind: 'node' | 'edge', id: string) => void;
@@ -487,11 +498,29 @@ export function EdgePanel({
 
       <p className="panel-hint">Or drag either end of the arrow on the canvas onto another box.</p>
 
+      {commentTarget && <PartComments plan={plan} target={commentTarget} label={`${name(edge.source)} → ${name(edge.target)}`} />}
+
       <footer className="panel-foot">
         <button type="button" className="link is-danger" onClick={onRemove}>
           Delete connection
         </button>
       </footer>
+    </div>
+  );
+}
+
+/**
+ * Comments on one box or arrow — where a remark about "this cache" belongs,
+ * rather than on the whole diagram. Shown while the plan can be commented
+ * on, and afterwards wherever there are comments to read.
+ */
+function PartComments({ plan, target, label }: { plan: Plan | undefined; target: Target; label: string }) {
+  const any = plan?.threads.some((t) => t.target.kind === target.kind && t.target.id === target.id);
+  if (!plan || (isLocked(plan) && !any)) return null;
+  return (
+    <div className="field">
+      <span className="field-label">Comments</span>
+      <ThreadPanel target={target} label={label} />
     </div>
   );
 }

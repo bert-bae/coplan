@@ -6,6 +6,7 @@
  * an edit, and they lead with what changed — the reason it is reading at all.
  */
 import { createHash } from 'node:crypto';
+import { planGaps } from '../shared/check.ts';
 import type { BuildSettings, BuildTarget, Change, Plan, PlanBaseline, Task, Thread } from '../shared/types.ts';
 import {
   baselineOf,
@@ -67,8 +68,22 @@ export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
     return out.join('\n').trim();
   }
 
-  out.push(...renderDocument(plan));
+  out.push(...renderDocument(plan, { revs: true }));
+  const gaps = renderGaps(plan, 12);
+  if (gaps.length) out.push('', ...gaps);
   return out.join('\n').trim();
+}
+
+/**
+ * What the plan leaves open (see planGaps), as a list for Claude — cut to
+ * `max` lines with a pointer to the whole list.
+ */
+export function renderGaps(plan: Plan, max = Infinity): string[] {
+  const gaps = planGaps(plan);
+  if (!gaps.length) return [];
+  const shown = gaps.slice(0, max).map((g) => `- ${g.message}`);
+  if (gaps.length > max) shown.push(`- …and ${gaps.length - max} more: harness_plan_check lists them all.`);
+  return [`## Gaps (${gaps.length}) — what the plan leaves open`, ...shown];
 }
 
 interface DocumentOptions {
@@ -81,12 +96,14 @@ interface DocumentOptions {
   details?: boolean;
   /** Who "you" is in a comment thread: Claude, or an outside reader. */
   reader?: 'claude' | 'outside';
+  /** Each section's, diagram's and task's revision, for an edit's `expect`. */
+  revs?: boolean;
 }
 
 /** The plan as a document: summary, sections, architecture, tasks and the
  *  comments still open. Shared by the read-back and the build prompt. */
 function renderDocument(plan: Plan, opts: DocumentOptions = {}): string[] {
-  const { attribution = true, details = true, reader = 'claude' } = opts;
+  const { attribution = true, details = true, reader = 'claude', revs = false } = opts;
   const out: string[] = [];
   if (plan.summary.trim()) out.push('', '## Summary', nestHeadings(plan.summary.trim(), 2));
 
@@ -94,19 +111,21 @@ function renderDocument(plan: Plan, opts: DocumentOptions = {}): string[] {
     out.push('', '## Sections');
     for (const s of plan.sections) {
       const by = attribution && s.updatedBy === 'user' ? ' _(edited by the user)_' : '';
-      out.push('', `### [${s.id}] ${s.title}${by}`, nestHeadings(s.body.trim(), 3) || '_(empty)_');
+      const rev = revs ? ` _(rev ${s.rev})_` : '';
+      out.push('', `### [${s.id}] ${s.title}${by}${rev}`, nestHeadings(s.body.trim(), 3) || '_(empty)_');
     }
   }
 
   if (plan.diagrams.length) {
     out.push('', '## Architecture');
     for (const d of plan.diagrams) {
-      const note = attribution && d.updatedBy === 'user' ? 'last edited by the user' : undefined;
+      const edited = attribution && d.updatedBy === 'user' ? 'last edited by the user' : '';
+      const note = [revs ? `rev ${d.rev}` : '', edited].filter(Boolean).join(' · ') || undefined;
       out.push('', diagramToMarkdown(d, { tasks: plan.tasks, note }));
     }
   }
 
-  out.push('', ...renderTasks(plan, { attribution, details }));
+  out.push('', ...renderTasks(plan, { attribution, details, revs }));
   const order = renderBuildOrder(plan, opts.base);
   if (order.length) out.push('', ...order);
   if (plan.report) out.push('', '## Build report', plan.report.text.trim());
@@ -123,7 +142,7 @@ function renderDocument(plan: Plan, opts: DocumentOptions = {}): string[] {
 
 const STATUS_LEGEND = `_Statuses: ${Object.entries(STATUS_MARK).map(([k, v]) => `${v} ${k}`).join(', ')}_`;
 
-function renderTasks(plan: Plan, opts: { attribution?: boolean; details?: boolean } = {}): string[] {
+function renderTasks(plan: Plan, opts: { attribution?: boolean; details?: boolean; revs?: boolean } = {}): string[] {
   const counts = countTasks(plan);
   const out = [`## Tasks${counts.total ? ` (${counts.done}/${counts.total} done)` : ''}`];
   const rows = outline(plan);
@@ -134,7 +153,8 @@ function renderTasks(plan: Plan, opts: { attribution?: boolean; details?: boolea
     const pad = '  '.repeat(depth);
     const by = opts.attribution !== false && task.createdBy === 'user' ? ' _(added by the user)_' : '';
     const note = task.note ? ` — ${task.note}` : '';
-    out.push(`${pad}- ${STATUS_MARK[task.status]} ${task.id} ${task.title}${taskFacts(plan, task, tracking)}${by}${note}`);
+    const rev = opts.revs ? ` · rev ${task.rev ?? 1}` : '';
+    out.push(`${pad}- ${STATUS_MARK[task.status]} ${task.id} ${task.title}${taskFacts(plan, task, tracking)}${by}${note}${rev}`);
     if (task.files?.length) out.push(`${pad}  files: ${task.files.join(', ')}`);
     if (opts.details !== false && task.detail) for (const line of task.detail.trim().split('\n')) out.push(`${pad}  ${line}`);
   }
@@ -233,7 +253,7 @@ function lockLine(plan: Plan): string | null {
     default:
       return (
         '> **Locked for building.** The user submitted this plan: build it task by task, keeping statuses true with ' +
-        'harness_task_update. Only task updates and comment replies apply now; if the design has to change, ask ' +
+        'harness_task_update. Only task updates, comments and replies apply now; if the design has to change, ask ' +
         'the user in chat — they can reopen the plan in Coplan.'
       );
   }

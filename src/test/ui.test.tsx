@@ -803,6 +803,8 @@ test('the design is confirmed from the architecture view, after reading what Cla
   await waitFor(() => assert.equal(preview(), 'DESIGN PROMPT'));
   assert.match(dialog.textContent ?? '', /1 diagram · 2 boxes · 4 planned tasks/);
   assert.match(dialog.textContent ?? '', /locks the design/);
+  // What the agent's harness_plan_check would say, before the user signs off.
+  assert.match(dialog.textContent ?? '', /\d+ gaps? the plan leaves open/);
   await act(async () => {
     fireEvent.change(within(dialog).getByLabelText('Anything else for Claude?'), { target: { value: 'split storage' } });
   });

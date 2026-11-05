@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, countTasks, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, confirmDesign, countTasks, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import type { Plan, PlanInput } from '../shared/types.ts';
 
@@ -379,7 +379,7 @@ test('a box kind, arrow style or direction that is not on the list is refused, n
 });
 
 test('removing a node points at the edit that does it', () => {
-  assert.throws(() => applyOps(fresh(), [{ op: 'remove', kind: 'node' as never, id: 'cache' }], 'claude'), /upsert_diagram \{id, nodes, edges\}/);
+  assert.throws(() => applyOps(fresh(), [{ op: 'remove', kind: 'node' as never, id: 'cache' }], 'claude'), /remove_node \{diagramId, id\}/);
 });
 
 /* ------------------------------------------------------------------ *
@@ -476,4 +476,165 @@ test("Claude republishing a task with new content moves its revision; unchanged 
   assert.equal(next.tasks.find((t) => t.id === 'a')!.rev ?? 1, 1);
   assert.equal(next.tasks.find((t) => t.id === 'b')!.rev, 2);
   assert.throws(() => applyOps(next, [{ op: 'upsert_task', id: 'b', title: 'B!', expect: 1 }], 'user'), /changed by Claude/);
+});
+
+/* ------------------------------------------------------------------ *
+ * Comments on one box or arrow
+ * ------------------------------------------------------------------ */
+
+test('Claude can comment on one box or one arrow, and the read says which', () => {
+  let plan = fresh();
+  const d = plan.diagrams[0]!;
+  const edge = d.edges.find((e) => e.source === 'api')!;
+  plan = applyOps(
+    plan,
+    [
+      { op: 'comment', target: { kind: 'node', id: `${d.id}/cache` }, text: 'Should this be write-through?' },
+      { op: 'comment', target: { kind: 'edge', id: `${d.id}/${edge.id}` }, text: 'Batch these gets?' },
+    ],
+    'claude',
+  ).plan;
+  const text = renderPlan(plan);
+  assert.match(text, /on box "Cache" \(d1\/cache\) in diagram "Components" — you: Should this be write-through\?/);
+  assert.match(text, /on arrow API → Cache \(d1\/[^)]+\) in diagram "Components" — you: Batch these gets\?/);
+  assert.throws(
+    () => applyOps(plan, [{ op: 'comment', target: { kind: 'node', id: `${d.id}/nope` }, text: 'x' }], 'claude'),
+    /Nothing to comment on at node/,
+  );
+});
+
+test('a comment on a box that is removed stays, on the plan, saying what it was about', () => {
+  let plan = fresh();
+  const d = plan.diagrams[0]!;
+  plan = applyOps(plan, [{ op: 'comment', target: { kind: 'node', id: `${d.id}/db` }, text: 'Which Postgres?' }], 'user').plan;
+  markReadByClaude(plan);
+  plan = applyOps(
+    plan,
+    [{ op: 'upsert_diagram', id: d.id, nodes: d.nodes.filter((n) => n.id !== 'db').map((n) => ({ id: n.id, label: n.label })), edges: [{ source: 'api', target: 'cache' }] }],
+    'claude',
+  ).plan;
+  const thread = plan.threads.find((t) => t.text.includes('Which Postgres?'))!;
+  assert.deepEqual(thread.target, { kind: 'plan', id: '' });
+  assert.match(thread.text, /^\(on removed box "Postgres"/);
+});
+
+test('an arrow restated without its id keeps it, and so keeps its comments', () => {
+  let plan = fresh();
+  const d = plan.diagrams[0]!;
+  const edge = d.edges.find((e) => e.source === 'api')!;
+  plan = applyOps(plan, [{ op: 'comment', target: { kind: 'edge', id: `${d.id}/${edge.id}` }, text: 'Batch?' }], 'user').plan;
+  markReadByClaude(plan);
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id: d.id, edges: [{ source: 'api', target: 'cache', label: 'get' }, { source: 'cache', target: 'db' }] }], 'claude').plan;
+  assert.ok(plan.diagrams[0]!.edges.some((e) => e.id === edge.id));
+  assert.equal(plan.threads.find((t) => t.text === 'Batch?')!.target.kind, 'edge');
+});
+
+test('the read gives each section, diagram and task its revision, for expect', () => {
+  const text = renderPlan(fresh());
+  assert.match(text, /### \[s1\] Context _\(rev 1\)_/);
+  assert.match(text, /^_rev 1_$/m);
+  assert.match(text, /t4 Wire into API.* · rev 1$/m);
+});
+
+/* ------------------------------------------------------------------ *
+ * One box or arrow at a time
+ * ------------------------------------------------------------------ */
+
+test('upsert_node changes only the fields it gives, and nothing else in the diagram', () => {
+  let plan = fresh();
+  const d = plan.diagrams[0]!;
+  // What the user wrote on another box must survive Claude's edit to this one.
+  plan = applyOps(plan, [{ op: 'upsert_node', diagramId: d.id, id: 'db', notes: 'Their notes.' }], 'user').plan;
+  markReadByClaude(plan);
+  plan = applyOps(plan, [{ op: 'upsert_node', diagramId: d.id, id: 'cache', description: 'Holds hot reads.' }], 'claude').plan;
+  const nodes = plan.diagrams[0]!.nodes;
+  assert.equal(nodes.find((n) => n.id === 'cache')!.description, 'Holds hot reads.');
+  assert.equal(nodes.find((n) => n.id === 'cache')!.kind, 'datastore');
+  assert.equal(nodes.find((n) => n.id === 'db')!.notes, 'Their notes.');
+  assert.equal(plan.diagrams[0]!.edges.length, 2);
+
+  plan = applyOps(plan, [{ op: 'upsert_node', diagramId: d.id, id: 'queue', label: 'Queue', kind: 'queue' }], 'claude').plan;
+  assert.ok(plan.diagrams[0]!.nodes.some((n) => n.id === 'queue'));
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_node', diagramId: d.id, id: 'ghost' }], 'claude'), /No box "ghost".*give it a label/);
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_node', diagramId: 'd9', id: 'x', label: 'X' }], 'claude'), /No diagram "d9"/);
+});
+
+test('remove_node takes its arrows with it; arrows are added, restyled and removed one at a time', () => {
+  let plan = fresh();
+  const d = plan.diagrams[0]!;
+  plan = applyOps(plan, [{ op: 'remove_node', diagramId: d.id, id: 'db' }], 'claude').plan;
+  assert.deepEqual(plan.diagrams[0]!.edges.map((e) => `${e.source}->${e.target}`), ['api->cache']);
+
+  plan = applyOps(plan, [{ op: 'upsert_node', diagramId: d.id, id: 'db', label: 'Postgres', kind: 'datastore' }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_edge', diagramId: d.id, from: 'cache', to: 'db', label: 'miss' }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_edge', diagramId: d.id, id: 'cache->db', dashed: true }], 'claude').plan;
+  const edge = plan.diagrams[0]!.edges.find((e) => e.id === 'cache->db')!;
+  assert.equal(edge.label, 'miss', 'a restyle keeps the label');
+  assert.equal(edge.dashed, true);
+
+  plan = applyOps(plan, [{ op: 'remove_edge', diagramId: d.id, from: 'cache', to: 'db' }], 'claude').plan;
+  assert.ok(!plan.diagrams[0]!.edges.some((e) => e.source === 'cache' && e.target === 'db'));
+  assert.throws(() => applyOps(plan, [{ op: 'remove_edge', diagramId: d.id, from: 'cache', to: 'db' }], 'claude'), /No arrow cache → db/);
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_edge', diagramId: d.id, from: 'cache', to: 'nope' }], 'claude'), /refers to node "nope"/);
+});
+
+test('box and arrow edits keep to the diagram rules: the unread guard and the design lock', () => {
+  let plan = fresh();
+  const d = plan.diagrams[0]!;
+  plan = applyOps(plan, [{ op: 'upsert_node', diagramId: d.id, id: 'api', label: 'Gateway' }], 'user').plan;
+  assert.throws(
+    () => applyOps(plan, [{ op: 'upsert_node', diagramId: d.id, id: 'cache', description: 'x' }], 'claude'),
+    /The user changed diagram "Components" since you last read/,
+  );
+  markReadByClaude(plan);
+
+  const confirmed = confirmDesign(plan, { prompt: 'p' });
+  // Linking a box to the tasks that build it is still allowed; redesigning it is not.
+  assert.doesNotThrow(() => applyOps(confirmed, [{ op: 'upsert_node', diagramId: d.id, id: 'cache', taskIds: ['t2'] }], 'claude'));
+  assert.throws(() => applyOps(confirmed, [{ op: 'upsert_node', diagramId: d.id, id: 'cache', label: 'Memcached' }], 'claude'), /design/);
+  assert.throws(() => applyOps(confirmed, [{ op: 'remove_node', diagramId: d.id, id: 'cache' }], 'claude'), /design/);
+});
+
+test('an arrow moved to another box keeps its label and style', () => {
+  let plan = fresh();
+  const d = plan.diagrams[0]!;
+  plan = applyOps(plan, [{ op: 'upsert_edge', diagramId: d.id, id: 'cache->db', dashed: true }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_edge', diagramId: d.id, id: 'cache->db', from: 'api' }], 'claude').plan;
+  const moved = plan.diagrams[0]!.edges.find((e) => e.id === 'cache->db')!;
+  assert.equal(moved.source, 'api');
+  assert.equal(moved.label, 'miss');
+  assert.equal(moved.dashed, true);
+});
+
+test('several box ops on one diagram, each with the rev that was read, go through together', () => {
+  const plan = fresh();
+  const d = plan.diagrams[0]!;
+  const { plan: next } = applyOps(
+    plan,
+    [
+      { op: 'upsert_node', diagramId: d.id, id: 'api', description: 'A.', expect: d.rev },
+      { op: 'upsert_node', diagramId: d.id, id: 'cache', description: 'C.', expect: d.rev },
+    ],
+    'claude',
+  );
+  assert.equal(next.diagrams[0]!.nodes.find((n) => n.id === 'cache')!.description, 'C.');
+  // A rev that is not the one read is still refused.
+  assert.throws(() => applyOps(next, [{ op: 'upsert_node', diagramId: d.id, id: 'api', description: 'B.', expect: d.rev }], 'claude'), /was changed/);
+});
+
+test("upsert_task's builds says which boxes the task builds now; [] unlinks it", () => {
+  let plan = fresh();
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't2', builds: ['cache'] }], 'claude').plan;
+  const linked = (id: string) => plan.diagrams[0]!.nodes.find((n) => n.id === id)!.taskIds ?? [];
+  assert.ok(linked('cache').includes('t2'));
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't2', builds: ['db'] }], 'claude').plan;
+  assert.ok(!linked('cache').includes('t2'));
+  assert.ok(linked('db').includes('t2'));
+  // The same links again change nothing, so the diagram's rev stays.
+  const rev = plan.diagrams[0]!.rev;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't2', builds: ['db'] }], 'claude').plan;
+  assert.equal(plan.diagrams[0]!.rev, rev);
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't2', builds: [] }], 'claude').plan;
+  assert.ok(!linked('db').includes('t2'));
+  assert.match(plan.changes.at(-1)!.summary, /unlinked "Cache client" from "Postgres"/);
 });

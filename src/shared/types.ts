@@ -213,8 +213,10 @@ export interface Task {
   createdBy: Author;
 }
 
-/** What a comment is attached to. `plan` targets the plan as a whole. */
-export const TARGET_KINDS = ['plan', 'section', 'diagram', 'task'] as const;
+/** What a comment is attached to. `plan` targets the plan as a whole; a
+ *  `node` or `edge` is one box or arrow, its id `diagramId/nodeId` or
+ *  `diagramId/edgeId`. */
+export const TARGET_KINDS = ['plan', 'section', 'diagram', 'task', 'node', 'edge'] as const;
 export type TargetKind = (typeof TARGET_KINDS)[number];
 
 export interface Target {
@@ -489,7 +491,7 @@ export type PlanOp =
       review?: ReviewMode | '';
       stage?: IricStage;
       checks?: CheckResult[];
-      /** Boxes this task builds, added to each (see `TaskInput.builds`). */
+      /** The boxes this task builds now: replaces its links; [] unlinks it. */
       builds?: string[];
       /** The task's `rev` the edit was made against. Refused if the other
        *  side has changed the task since. */
@@ -498,7 +500,36 @@ export type PlanOp =
   | { op: 'move_task'; id: string; parentId: string | null; index: number }
   | { op: 'move_section'; id: string; index: number }
   | { op: 'move_diagram'; id: string; index: number }
-  | { op: 'remove'; kind: Exclude<TargetKind, 'plan'>; id: string }
+  /** One box: changed (only the fields given) or added. */
+  | {
+      op: 'upsert_node';
+      diagramId: string;
+      id: string;
+      label?: string;
+      kind?: string;
+      detail?: string;
+      description?: string;
+      notes?: string;
+      taskIds?: string[];
+      expect?: number;
+    }
+  /** One box, and the arrows to and from it. */
+  | { op: 'remove_node'; diagramId: string; id: string; expect?: number }
+  /** One arrow: changed by id (only the fields given), or added from → to. */
+  | {
+      op: 'upsert_edge';
+      diagramId: string;
+      id?: string;
+      from?: string;
+      to?: string;
+      label?: string;
+      dashed?: boolean;
+      arrows?: string;
+      expect?: number;
+    }
+  /** One arrow, by id or by its ends. */
+  | { op: 'remove_edge'; diagramId: string; id?: string; from?: string; to?: string; expect?: number }
+  | { op: 'remove'; kind: 'section' | 'diagram' | 'task'; id: string }
   | { op: 'comment'; target: Target; text: string }
   | { op: 'reply'; threadId: string; text: string }
   | { op: 'resolve'; threadId: string; resolved: boolean }

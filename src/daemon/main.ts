@@ -11,7 +11,7 @@ import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
 import { MAX_NOTE, PlanError, cleanChecks, cleanNote, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
-import { PROMPT_BUDGET, buildPrompt, designPrompt, promptHash, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
+import { PROMPT_BUDGET, buildPrompt, designPrompt, promptHash, renderGaps, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
 import { renderBrief, renderNext } from './brief.ts';
 import { cleanSettings, effectiveReview, hasSubtasks, readyTasks, waitingOn } from '../shared/build.ts';
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
@@ -1031,6 +1031,17 @@ function buildRouter(deps: Deps): Router {
             reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
             return;
           }
+          // A peek is a look, not a read: an auditing subagent sees the plan
+          // as it stands, and the user's changes stay unread — and the
+          // sign-off undelivered — for the agent that has to act on them.
+          if (body['peek'] === true) {
+            reply(
+              true,
+              '[cc-harness] A peek: the user\'s changes below stay unread, for your next harness_plan_read.\n\n' +
+                renderPlan(session.plan, { url, changesOnly: body['changes_only'] === true }),
+            );
+            return;
+          }
           // A sign-off not yet handed over comes with the first read after
           // it: the ask for a task list once the design is confirmed, the
           // build prompt once the plan is submitted. That is how Cursor gets
@@ -1080,7 +1091,24 @@ function buildRouter(deps: Deps): Router {
                     ? 'and the build prompt comes with their next message.\n\n'
                     : 'and paste the build prompt here (or ask you to build, and harness_plan_read hands it to you).\n\n')
                 : 'Tell them in chat that the tasks are updated.\n\n') +
-              renderTaskList(plan, projectFor(session).branches.base),
+              renderTaskList(plan, projectFor(session).branches.base) +
+              // What the list leaves open, while it is still cheap to fix.
+              ((gaps) => (gaps.length ? `\n\n${gaps.join('\n')}\n\nFix these, or say why in chat, before they review it.` : ''))(renderGaps(plan, 20)),
+          );
+          return;
+        }
+
+        case 'check': {
+          if (!session.plan) {
+            reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
+            return;
+          }
+          const gaps = renderGaps(session.plan);
+          reply(
+            true,
+            gaps.length
+              ? `[cc-harness] ${gaps.join('\n')}\n\nFix each with harness_plan_edit, or tell the user in chat why it stays.`
+              : '[cc-harness] No gaps: every box is built by a task and described, every task builds a box, and nothing is waiting on an answer.',
           );
           return;
         }

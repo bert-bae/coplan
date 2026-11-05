@@ -86,7 +86,11 @@ const BUILD_FIELDS: Record<string, unknown> = {
   },
   branch: { type: 'string', description: 'Git branch the work lands on; subtasks inherit it. Omit for one PR on the current branch.' },
   review: { ...REVIEW, description: 'Only when not the build default: "user" for risky work, "skip" for trivial.' },
-  builds: { type: 'array', items: { type: 'string' }, description: 'Boxes it builds: node ids (or "diagramId/nodeId").' },
+  builds: {
+    type: 'array',
+    items: { type: 'string' },
+    description: 'Boxes it builds: node ids (or "diagramId/nodeId"). Given, it replaces the boxes the task built before; [] unlinks it.',
+  },
 };
 
 /** Nested task schema, a few levels deep — deep enough for any real breakdown. */
@@ -112,6 +116,11 @@ export const AGENT_OPS = [
   'move_task',
   'move_section',
   'move_diagram',
+  'upsert_node',
+  'remove_node',
+  'upsert_edge',
+  'remove_edge',
+  'comment',
   'reply',
   'resolve',
   'remove',
@@ -132,23 +141,53 @@ const OP_PROPERTIES: Record<string, unknown> = {
   summary: { type: 'string', description: 'set_meta: the plan summary. Markdown.' },
   body: { type: 'string', description: 'upsert_section: the section body. Markdown.' },
   index: { type: 'integer', minimum: 0, description: 'Position among its siblings, from 0.' },
-  expect: { type: 'integer', description: 'upsert_section / upsert_diagram / upsert_task: the rev you read; refused if the user changed the item since.' },
+  expect: {
+    type: 'integer',
+    description: "upsert_section / upsert_diagram / upsert_task, and the box and arrow ops (the diagram's rev): the rev you read; refused if the item changed since.",
+  },
+  diagramId: { type: 'string', description: 'upsert_node / remove_node / upsert_edge / remove_edge: the diagram the box or arrow is in.' },
+  label: { type: 'string', description: 'upsert_node: the box name. upsert_edge: what flows along it ("" clears it).' },
+  description: { type: 'string', description: 'upsert_node: two to four sentences on what the part does, owns, and how others talk to it.' },
+  notes: { type: 'string', description: 'upsert_node: Markdown — the decisions about this part and why.' },
+  taskIds: { ...STR_LIST, description: 'upsert_node: the tasks that build this box (replaces its links).' },
+  from: { type: 'string', description: 'upsert_edge / remove_edge: the box id the arrow starts at.' },
+  to: { type: 'string', description: 'upsert_edge / remove_edge: the box id it points to.' },
+  dashed: { type: 'boolean', description: 'upsert_edge: optional, async or future.' },
+  arrows: { type: 'string', enum: ['end', 'both', 'none'], description: 'upsert_edge: arrowheads.' },
   nodes: { type: 'array', items: NODE, description: 'upsert_diagram: replaces the boxes.' },
   edges: { type: 'array', items: EDGE, description: 'upsert_diagram: replaces the arrows.' },
   direction: { type: 'string', enum: ['LR', 'TB'] },
   caption: { type: 'string' },
   parentId: { description: 'upsert_task (when adding) and move_task: the parent task id, or null for the top level.' },
-  detail: { type: 'string', description: 'upsert_task: objective, acceptance criteria, out of scope. Markdown.' },
+  detail: {
+    type: 'string',
+    description: 'upsert_task: objective, acceptance criteria, out of scope (Markdown). upsert_node: a few words on the box, e.g. "Redis, read-through".',
+  },
   files: STR_LIST,
   note: { type: 'string', description: 'upsert_task: one line on the task.' },
   dependsOn: { ...STR_LIST, description: 'upsert_task: replaces its dependencies; [] clears them.' },
   branch: { type: 'string', description: 'upsert_task: "" clears it.' },
   review: { type: 'string', enum: [...REVIEW.enum, ''], description: 'upsert_task: "" clears it.' },
-  builds: { ...STR_LIST, description: 'upsert_task: boxes it builds, as node ids or "diagramId/nodeId".' },
+  builds: { ...STR_LIST, description: 'upsert_task: the boxes it builds now, as node ids or "diagramId/nodeId" (replaces its links; [] unlinks it).' },
   threadId: { type: 'string', description: 'reply / resolve: the comment thread.' },
   text: { type: 'string', description: 'reply: your reply. report: the build report. Markdown.' },
   resolved: { type: 'boolean' },
-  kind: { type: 'string', enum: ['section', 'diagram', 'task'], description: 'remove: what kind of item.' },
+  kind: {
+    type: 'string',
+    enum: ['section', 'diagram', 'task', 'component', 'service', 'datastore', 'queue', 'external', 'actor', 'note'],
+    description: 'remove: section, diagram or task. upsert_node: the kind of box.',
+  },
+  target: {
+    type: 'object',
+    description:
+      'comment: what it is about. kind "plan" (id ""), "section", "diagram" or "task" with its id, or one box or arrow: ' +
+      'kind "node" with id "diagramId/nodeId", kind "edge" with id "diagramId/edgeId".',
+    properties: {
+      kind: { type: 'string', enum: ['plan', 'section', 'diagram', 'task', 'node', 'edge'] },
+      id: { type: 'string' },
+    },
+    required: ['kind', 'id'],
+  },
 };
 
 export const TOOLS: ToolDef[] = [
@@ -196,7 +235,7 @@ export const TOOLS: ToolDef[] = [
       'Diagrams come back as an architecture: parts in flow order with their descriptions and decisions, ' +
       'then connections. Call it whenever the ' +
       'user says they have reviewed or updated the plan, and before publishing again. Every item carries its ' +
-      'id for harness_plan_edit.',
+      'id for harness_plan_edit, and sections, diagrams and tasks their revision (rev) for `expect`.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -204,9 +243,25 @@ export const TOOLS: ToolDef[] = [
           type: 'boolean',
           description: 'Only what changed and what is waiting on you, not the whole document. Default false.',
         },
+        peek: {
+          type: 'boolean',
+          description:
+            'Look without reading: the plan as it stands, but the user\'s changes stay unread for the next real read. ' +
+            'For an audit, or a subagent, that must not mark them seen for the agent that has to act on them. Default false.',
+        },
       },
       additionalProperties: false,
     },
+  },
+  {
+    name: 'harness_plan_check',
+    endpoint: 'check',
+    description:
+      'Audit the plan for what it leaves open: boxes no task builds, tasks that build no box, boxes with no ' +
+      'description, tasks with no detail once the task list is being made, box ids shared across diagrams, branch ' +
+      'layouts a stack of pull requests cannot follow, and comments from the user nobody answered. Run it before ' +
+      'you tell the user the design or the task list is ready, and fix or explain each gap. Reads nothing as seen.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'harness_plan_edit',
@@ -219,10 +274,17 @@ export const TOOLS: ToolDef[] = [
       'arrow between the same two boxes keeps its label, dashed and arrows, unless you give them); upsert_task ' +
       '{id?, parentId?, index?, title?, detail?, files?, note?, dependsOn?, branch?, review?, builds?} ' +
       '(omit id to add; parentId makes it a subtask); move_task {id, parentId, index}; move_section {id, index}; ' +
-      'move_diagram {id, index}; reply {threadId, text} (reply to a comment); resolve {threadId, resolved}; remove ' +
-      '{kind: section|diagram|task, id}; report {text} (the final build report). Example: {ops: [{op: "reply", ' +
-      'threadId: "c2", text: "Done: split the cache."}]}. Once the user confirms the design only tasks, task links ' +
-      'and comments change; once they submit the plan only upsert_task, reply, resolve and report apply.',
+      'move_diagram {id, index}; one box or arrow without restating the rest — upsert_node {diagramId, id, label?, ' +
+      'kind?, detail?, description?, notes?, taskIds?} (only the fields you give change; a new box needs a label), ' +
+      'remove_node {diagramId, id} (and its arrows), upsert_edge {diagramId, id?, from?, to?, label?, dashed?, arrows?} ' +
+      '(by id to change one — an arrow\'s id is from->to unless the read shows another — or from and to to add one), ' +
+      'remove_edge {diagramId, id? | from, to}; comment {target: {kind, id}, text} (start a thread — on a box: kind "node", id ' +
+      '"diagramId/nodeId"; when you are unsure of a change, comment rather than overwrite); reply {threadId, text} ' +
+      '(reply to a comment); resolve {threadId, resolved}; remove {kind: section|diagram|task, id}; report {text} ' +
+      '(the final build report). upsert_section, upsert_diagram and upsert_task take expect: the rev you read. ' +
+      'Example: {ops: [{op: "reply", threadId: "c2", text: "Done: split the cache."}]}. Once the user confirms the ' +
+      'design only tasks, task links and comments change; once they submit the plan only upsert_task, comment, ' +
+      'reply, resolve and report apply.',
     inputSchema: {
       type: 'object',
       properties: {
