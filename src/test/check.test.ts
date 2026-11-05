@@ -65,17 +65,28 @@ test('a box id two diagrams share, and branch layouts a PR stack cannot follow',
   }).plan;
   assert.ok(rules(two).some((r) => r.startsWith('node-id-shared')));
 
-  const stacked = publishTasks(confirmDesign(publishPlan(null, DESIGN).plan, { prompt: 'p' }), {
+  // A branch built on the unbranched work stacks on the session's branch:
+  // a stack can follow that, so it is not a gap.
+  const confirmed = confirmDesign(publishPlan(null, DESIGN).plan, { prompt: 'p' });
+  const onCurrent = publishTasks(confirmed, {
     tasks: [
       { id: 'base', title: 'Base work' },
-      { id: 'a', title: 'A', branch: 'x/a' },
-      { id: 'b', title: 'B', branch: 'x/b' },
-      { id: 'c', title: 'C', branch: 'x/c', dependsOn: ['a', 'b'] },
       { id: 'd', title: 'D', branch: 'x/d', dependsOn: ['base'] },
     ],
   }).plan;
-  assert.ok(rules(stacked).some((r) => r.startsWith('branch-two-bases')), 'x/c needs x/a and x/b');
-  assert.ok(has(stacked, 'branch-on-unbranched', 'd'), 'x/d would be cut without base');
+  assert.ok(!rules(onCurrent).some((r) => r.startsWith('branch-')));
+
+  // Two bases is refused when the list is made — and still flagged in a
+  // plan saved before that was enforced.
+  const twoBases = [
+    { id: 'a', title: 'A', branch: 'x/a' },
+    { id: 'b', title: 'B', branch: 'x/b' },
+    { id: 'c', title: 'C', branch: 'x/c', dependsOn: ['a', 'b'] },
+  ];
+  assert.throws(() => publishTasks(confirmed, { tasks: twoBases }), /needs work from `x\/a` and `x\/b`, but a pull request has one base/);
+  const old = structuredClone(publishTasks(confirmed, { tasks: twoBases.map(({ dependsOn: _d, ...t }) => t) }).plan);
+  old.tasks.find((t) => t.id === 'c')!.dependsOn = ['a', 'b'];
+  assert.ok(rules(old).some((r) => r.startsWith('branch-two-bases')), 'x/c needs x/a and x/b');
 });
 
 test('a comment from the user nobody answered, until it is answered', () => {

@@ -10,7 +10,7 @@ import { Markdown } from '../components/Markdown.tsx';
 import { classNames } from '../lib/format.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
 import { childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
-import { ancestorsOf, branchPlan, buildSteps, effectiveBranch, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
+import { SESSION_BRANCH, ancestorsOf, branchPlan, buildSteps, effectiveBranch, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
 import { REVIEW_MODES, TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type ReviewMode, type Task, type TaskStatus } from '../../shared/types.ts';
 
 /** Clicking the status dot steps through the common path; blocked is set
@@ -163,7 +163,13 @@ function BuildOrder({ plan, collapsible = false }: { plan: Plan; collapsible?: b
             <li key={b.branch}>
               <code className="head-branch">{b.branch}</code>
               <span className="muted">
-                {b.needs.length > 1 ? ` needs ${b.needs.join(' and ')}` : b.base ? ` stacked on ${b.base}` : ' from the base branch'}
+                {b.needs.length > 1
+                  ? ` needs ${b.needs.map((n) => (n === SESSION_BRANCH ? 'the current branch' : n)).join(' and ')}`
+                  : b.base === SESSION_BRANCH
+                    ? ' stacked on the current branch'
+                    : b.base
+                      ? ` stacked on ${b.base}`
+                      : ' from the base branch'}
               </span>
               <span className="order-tasks">{b.tasks.map(chip)}</span>
             </li>

@@ -137,8 +137,12 @@ tree and nothing else):
 - **`branch`** — leave it out when the change is one pull request. When it
   should land as several (separable concerns, a large change, an API before
   its consumers), give each group of tasks a branch. A branch whose tasks
-  depend on another branch's is cut from it: a **stacked** pull request. Use
-  the repository's base branch and prefix when the prompt names them.
+  depend on another branch's is cut from it: a **stacked** pull request —
+  and one whose tasks depend on tasks with no branch is cut from the branch
+  you are on. A pull request has one base, so a branch cannot need work
+  from two branches that do not stack: that is refused, and you either put
+  the work on one branch or make one stack on the other. Use the
+  repository's base branch and prefix when the prompt names them.
 - **`review`** — only when a task needs other than the build's default:
   `"user"` for risky, security-sensitive or user-facing work, `"skip"` for
   trivial mechanical changes.

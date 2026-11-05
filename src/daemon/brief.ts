@@ -19,6 +19,7 @@ import {
   REVIEW_WORDS,
   ancestorsOf,
   branchPlan,
+  SESSION_BRANCH,
   buildSteps,
   dependents,
   effectiveBranch,
@@ -78,7 +79,9 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
     const { branches } = branchPlan(plan);
     out.push(
       branches.length
-        ? `2. Push each branch and open the pull requests in stack order: ${branches.map((b) => `\`${b.branch}\`${b.base ? ` (onto \`${b.base}\`)` : ''}`).join(' → ')}.`
+        ? `2. Push each branch and open the pull requests in stack order: ${branches
+            .map((b) => `\`${b.branch}\`${b.base === SESSION_BRANCH ? ' (onto the branch you are on)' : b.base ? ` (onto \`${b.base}\`)` : ''}`)
+            .join(' → ')}.`
         : '2. Commit and push the work on the current branch, and open a pull request if the user wants one.',
       '3. Write the build report with harness_plan_edit {ops: [{op: "report", text}]}: what each task did, the branches and pull requests, the checks and how they came out, anything that differs from the plan, and follow-ups.',
       '4. Give the user the final summary in chat, with the links.',
@@ -271,10 +274,13 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
     const base = project.branches.base ? `\`${project.branches.base}\`` : 'the base branch';
     const from =
       entry?.needs.length && entry.needs.length > 1
-        ? `It needs ${entry.needs.map((n) => `\`${n}\``).join(' and ')}: cut it from ${base} once those are merged, or from the last of them.`
-        : entry?.base
-          ? `Cut it from \`${entry.base}\` (a stacked branch: it builds on that work), not from ${base}.`
-          : `Cut it from ${base} if it does not exist yet.`;
+        ? // Refused when the task list is made; only an older plan has one.
+          `It needs work from ${entry.needs.length} branches, which one pull request cannot stack on: stop and ask the user how to land it.`
+        : entry?.base === SESSION_BRANCH
+          ? `Cut it from the branch you are on, where the tasks with no branch land (a stacked branch: it builds on that work), not from ${base}.`
+          : entry?.base
+            ? `Cut it from \`${entry.base}\` (a stacked branch: it builds on that work), not from ${base}.`
+            : `Cut it from ${base} if it does not exist yet.`;
     out.push(`Commit this task's work on \`${branch}\`. ${from}`);
   } else {
     out.push('No branch is named for it: work on the current branch.');

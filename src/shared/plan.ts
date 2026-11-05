@@ -41,7 +41,7 @@ import type {
   Thread,
 } from './types.ts';
 import { BUILD_TARGETS, EDGE_ARROWS, IRIC_STAGES, NODE_KINDS, TASK_STATUSES } from './types.ts';
-import { cleanSettings, dependencyProblem, validReview } from './build.ts';
+import { cleanSettings, dependencyProblem, dependencyProblems, validReview } from './build.ts';
 
 /** Raised for an op that cannot apply. The message is shown verbatim to
  *  whoever sent it — the user in a toast, Claude in a tool result. */
@@ -714,12 +714,16 @@ function checkDependencies(plan: Plan): void {
 }
 
 function cleanBranch(value: unknown): string | undefined {
-  const name = clean(value, 120)?.replace(/\s+/g, '-');
+  const name = clean(value, 120);
   if (!name) return undefined;
-  // What git refuses, refused here, rather than discovered at checkout.
-  if (/[~^:?*[\\\x00-\x20\x7f]|\.\.|@\{|^[-/.]|[/.]$|\/\/|\.lock$/.test(name)) {
-    throw new PlanError(`"${name}" is not a usable git branch name.`);
-  }
+  if (/\s/.test(name)) throw new PlanError(`"${name}" has spaces, which git branch names cannot: use - instead, e.g. "${name.replace(/\s+/g, '-')}".`);
+  // What git refuses, refused here, rather than discovered at checkout —
+  // the whole name, and each part of its path.
+  const bad =
+    name === '@' ||
+    /[~^:?*[\\\x00-\x20\x7f]|\.\.|@\{|^[-/]|\/$|\/\//.test(name) ||
+    name.split('/').some((part) => part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'));
+  if (bad) throw new PlanError(`"${name}" is not a usable git branch name.`);
   return name;
 }
 
@@ -1100,8 +1104,9 @@ export function applyOps(
   // it waits on can be added together in either order. A problem the plan
   // already had (written by an older build) does not block unrelated edits.
   if (ops.some((op) => TASK_SHAPE_OPS.has((op as { op?: string })?.op ?? '') || (op as { kind?: string })?.kind === 'task')) {
-    const problem = dependencyProblem(next);
-    if (problem && problem !== dependencyProblem(plan)) throw new PlanError(problem);
+    const had = new Set(dependencyProblems(plan));
+    const added = dependencyProblems(next).find((p) => !had.has(p));
+    if (added) throw new PlanError(added);
   }
   // A comment on a box or an arrow an edit took away is kept, on the plan,
   // saying what it was about — as for any removed item.
@@ -1681,6 +1686,11 @@ export function submitPlan(
     throw new PlanError('Confirm the design first: the task list is made from the confirmed design, and then the plan is submitted.');
   }
   if (!input.prompt.trim()) throw new PlanError('There is no prompt to submit.');
+  // What is submitted gets built: a plan that cannot be is refused here,
+  // not discovered by the agent halfway through.
+  if (!plan.tasks.length) throw new PlanError('The plan has no tasks to build: make the task list first.');
+  const problem = dependencyProblem(plan);
+  if (problem) throw new PlanError(`The task list cannot be built as it is. ${problem}`);
   const next = structuredClone(plan);
   const note = cleanNote(input.note);
   next.submission = {

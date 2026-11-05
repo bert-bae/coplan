@@ -163,32 +163,60 @@ function leafGraph(plan: Tasks): Map<string, Set<string>> {
  * a loop — every task in it waiting on another, so none can ever start.
  */
 export function dependencyProblem(plan: Tasks): string | null {
+  return dependencyProblems(plan)[0] ?? null;
+}
+
+/**
+ * Every reason the dependencies and branches cannot be built — so an edit
+ * can be refused for a problem it adds, even behind one the plan had.
+ */
+export function dependencyProblems(plan: Tasks): string[] {
+  const out: string[] = [];
   const title = (id: string) => `"${byId(plan, id)?.title ?? id}"`;
   for (const t of plan.tasks) {
     for (const id of t.dependsOn ?? []) {
-      if (id === t.id) return `${title(t.id)} cannot depend on itself.`;
       const dep = byId(plan, id);
-      if (!dep) return `${title(t.id)} depends on "${id}", which is not a task in the plan.`;
-      if (ancestorsOf(plan, t).some((a) => a.id === id)) {
-        return `${title(t.id)} cannot depend on ${title(id)}: it is part of it. A task waits for subtasks by being their parent.`;
-      }
-      if (ancestorsOf(plan, dep).some((a) => a.id === t.id)) {
-        return `${title(t.id)} cannot depend on ${title(id)}, one of its own subtasks: its other subtasks can say so instead.`;
+      if (id === t.id) out.push(`${title(t.id)} cannot depend on itself.`);
+      else if (!dep) out.push(`${title(t.id)} depends on "${id}", which is not a task in the plan.`);
+      else if (ancestorsOf(plan, t).some((a) => a.id === id)) {
+        out.push(`${title(t.id)} cannot depend on ${title(id)}: it is part of it. A task waits for subtasks by being their parent.`);
+      } else if (ancestorsOf(plan, dep).some((a) => a.id === t.id)) {
+        out.push(`${title(t.id)} cannot depend on ${title(id)}, one of its own subtasks: its other subtasks can say so instead.`);
       }
     }
   }
   const cycle = findCycle(leafGraph(plan));
-  if (cycle) return `These tasks wait on each other, so none of them could ever start: ${cycle.map(title).join(' → ')}.`;
+  if (cycle) out.push(`These tasks wait on each other, so none of them could ever start: ${cycle.map(title).join(' → ')}.`);
   // Branches stack one on another; two that each need the other's work
   // cannot each be a pull request of their own.
   const loop = findCycle(branchGraph(plan));
   if (loop) {
-    return (
+    out.push(
       `Branches ${loop.map((b) => `\`${b}\``).join(' → ')} each need work from the next, so they cannot stack: ` +
-      'put those tasks on one branch, or change what they depend on.'
+        'put those tasks on one branch, or change what they depend on.',
     );
   }
-  return null;
+  // A pull request has one base. A branch that needs the work of two (that
+  // do not already stack one on the other) cannot be one. Only asked of a
+  // plan that can be ordered at all.
+  if (!cycle && !loop) {
+    const named = (b: string) => (b === SESSION_BRANCH ? 'the unbranched tasks (the current branch)' : `\`${b}\``);
+    for (const b of branchPlan(plan).branches) {
+      if (b.needs.length > 1) {
+        out.push(
+          `Branch \`${b.branch}\` needs work from ${b.needs.map(named).join(' and ')}, but a pull request has one base: ` +
+            "put that work on one branch, or make one of them stack on the other (have its tasks wait on the other's).",
+        );
+      }
+    }
+  }
+  // Git keeps branches as paths: `api` and `api/v2` cannot both exist.
+  const names = [...new Set(leafTasks(plan).map((t) => effectiveBranch(plan, t)).filter((b): b is string => Boolean(b)))];
+  for (const a of names) {
+    const inside = names.find((b) => b.startsWith(`${a}/`));
+    if (inside) out.push(`Branches \`${a}\` and \`${inside}\` cannot both exist in git: one is a folder of the other. Rename one.`);
+  }
+  return out;
 }
 
 /** Each branch and the other branches its tasks wait on. */
@@ -288,7 +316,8 @@ export function effectiveBranch(plan: Tasks, task: Task): string | null {
 export interface BranchPlan {
   branch: string;
   /** The branch it is cut from: another branch of this plan when it stacks
-   *  on one, else null for the repository's base branch. */
+   *  on one, SESSION_BRANCH when it builds on the unbranched tasks' work,
+   *  else null for the repository's base branch. */
   base: string | null;
   /** Every other branch of the plan it needs work from. More than one means
    *  it cannot simply stack: merge those first. */
@@ -304,6 +333,22 @@ export interface BranchPlan {
  * the ones it stacks on. Empty when no task names a branch: one change, on
  * whatever branch the session is on.
  */
+/**
+ * Where tasks with no branch land: the branch the session is on. A branch
+ * whose tasks wait on that work is cut from it, as from any other branch —
+ * cut from the base branch instead, it would be missing that work. Not a
+ * name git accepts, so it can never be mistaken for one of the plan's.
+ */
+export const SESSION_BRANCH = '@';
+
+/** Where a branch is cut from, in words: another of the plan's branches,
+ *  the session's own branch, or the repository's base branch. */
+export function baseWords(base: string | null, repoBase?: string): string {
+  if (base === SESSION_BRANCH) return 'the branch you are on, where the unbranched tasks land (stacked)';
+  if (base) return `\`${base}\` (stacked)`;
+  return repoBase ? `\`${repoBase}\`` : 'the base branch';
+}
+
 export function branchPlan(plan: Tasks): { branches: BranchPlan[]; unbranched: Task[] } {
   const order = buildSteps(plan).flat();
   const of = new Map(order.map((t) => [t.id, effectiveBranch(plan, t)]));
@@ -319,8 +364,8 @@ export function branchPlan(plan: Tasks): { branches: BranchPlan[]; unbranched: T
     entry.tasks.push(t);
     for (const id of inheritedDeps(plan, t)) {
       for (const leaf of leavesUnder(plan, id)) {
-        const other = of.get(leaf.id);
-        if (other && other !== branch && !entry.needs.includes(other)) entry.needs.push(other);
+        const other = of.get(leaf.id) ?? SESSION_BRANCH;
+        if (other !== branch && !entry.needs.includes(other)) entry.needs.push(other);
       }
     }
   }

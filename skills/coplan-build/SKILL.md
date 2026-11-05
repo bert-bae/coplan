@@ -87,8 +87,8 @@ Otherwise:
   branch it builds on.
 - When a lower branch changes after a branch above it was cut (a
   refinement, a fix), rebase the branches above onto it before going on.
-- A branch that needs work from two others: merge those first, or cut it
-  from the last of them and say so.
+- A branch built on the tasks with no branch is cut from the branch you
+  are on, where those land — the brief says so.
 - At the end, open the pull requests in stack order, each against the
   branch below it (the base branch for the bottom one), if the user wants
   pull requests and you have the tools for it. Say in each which tasks it

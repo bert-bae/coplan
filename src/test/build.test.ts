@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PlanError, applyOps, confirmDesign, markDelivered, publishPlan, publishTasks, normalizePlan, submitPlan } from '../shared/plan.ts';
 import {
+  SESSION_BRANCH,
   branchPlan,
   buildSteps,
   cleanSettings,
@@ -150,18 +151,47 @@ test('branches are inherited, and one built on another stacks on it', () => {
   assert.match(renderPlan(plan), /- `cache\/api` from `cache\/storage` \(stacked\) — wire/);
 });
 
-test('a branch that needs two others cannot simply stack, and says so', () => {
+test('a branch that needs two others is refused: a pull request has one base', () => {
+  const twoBases = [
+    { id: 'a', title: 'A', branch: 'one' },
+    { id: 'b', title: 'B', branch: 'two' },
+    { id: 'c', title: 'C', branch: 'three', dependsOn: ['a', 'b'] },
+  ];
+  assert.throws(() => publishTasks(tasked(), { tasks: twoBases }), /`three` needs work from `one` and `two`, but a pull request has one base/);
+  // Made to stack, one on the other, it is a plain stack of three.
+  const plan = publishTasks(tasked(), { tasks: [twoBases[0]!, { ...twoBases[1]!, dependsOn: ['a'] }, twoBases[2]!] }).plan;
+  assert.deepEqual(
+    branchPlan(plan).branches.map((b) => `${b.branch}<-${b.base}`),
+    ['one<-null', 'two<-one', 'three<-two'],
+  );
+});
+
+test('a branch built on the unbranched tasks stacks on the session branch, not on base', () => {
   const plan = publishTasks(tasked(), {
     tasks: [
-      { id: 'a', title: 'A', branch: 'one' },
-      { id: 'b', title: 'B', branch: 'two' },
-      { id: 'c', title: 'C', branch: 'three', dependsOn: ['a', 'b'] },
+      { id: 'core', title: 'Core, on the current branch' },
+      { id: 'api', title: 'API', branch: 'cache/api', dependsOn: ['core'] },
     ],
   }).plan;
-  const three = branchPlan(plan).branches.find((b) => b.branch === 'three')!;
-  assert.equal(three.base, null);
-  assert.deepEqual(three.needs.sort(), ['one', 'two']);
-  assert.match(renderPlan(plan), /`three` needs `one` and `two`: merge those first/);
+  const api = branchPlan(plan).branches.find((b) => b.branch === 'cache/api')!;
+  assert.equal(api.base, SESSION_BRANCH);
+  assert.match(renderPlan(plan), /`cache\/api` from the branch you are on, where the unbranched tasks land \(stacked\)/);
+  assert.match(renderBrief(plan, plan.tasks.find((t) => t.id === 'api')!, {}), /Cut it from the branch you are on/);
+});
+
+test('branch names that are folders of each other are refused', () => {
+  assert.throws(
+    () => publishTasks(tasked(), { tasks: [{ id: 'a', title: 'A', branch: 'api' }, { id: 'b', title: 'B', branch: 'api/v2' }] }),
+    /`api` and `api\/v2` cannot both exist in git/,
+  );
+});
+
+test('submitting a plan whose tasks cannot be built is refused', () => {
+  const empty = confirmDesign(publishPlan(null, { ...DESIGN, tasks: [] }).plan, { prompt: 'p' });
+  assert.throws(() => submitPlan(empty, { target: 'session', prompt: 'build' }), /no tasks to build/);
+  const broken = structuredClone(tasked());
+  broken.tasks.find((t) => t.id === 'client')!.dependsOn = ['wire'];
+  assert.throws(() => submitPlan(broken, { target: 'session', prompt: 'build' }), /cannot be built as it is/);
 });
 
 test('branches that each need the other cannot stack, and are refused', () => {
@@ -213,8 +243,11 @@ test('linking a task to a box through `builds` is a change like any other', () =
 
 test('a branch name git would refuse is refused here', () => {
   assert.throws(() => applyOps(tasked(), [{ op: 'upsert_task', id: 'docs', branch: 'bad..name' }], 'user'), /not a usable git branch/);
-  const plan = applyOps(tasked(), [{ op: 'upsert_task', id: 'docs', branch: 'docs update' }], 'user').plan;
-  assert.equal(plan.tasks.find((t) => t.id === 'docs')?.branch, 'docs-update');
+  for (const bad of ['docs/.hidden', 'docs.lock/x', 'docs/', '@']) {
+    assert.throws(() => applyOps(tasked(), [{ op: 'upsert_task', id: 'docs', branch: bad }], 'user'), /not a usable git branch/, bad);
+  }
+  // Spaces are refused, with the name it could have been — not changed quietly.
+  assert.throws(() => applyOps(tasked(), [{ op: 'upsert_task', id: 'docs', branch: 'docs update' }], 'user'), /use - instead, e\.g\. "docs-update"/);
 });
 
 /* ------------------------------------------------------------------ *

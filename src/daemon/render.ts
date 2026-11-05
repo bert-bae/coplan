@@ -24,6 +24,7 @@ import { contentOf, diagramChanges, diagramToMarkdown, hang, indent, nestHeading
 import {
   DEFAULT_BUILD_SETTINGS,
   REVIEW_WORDS,
+  baseWords,
   branchPlan,
   buildSteps,
   hasDependencies,
@@ -220,14 +221,14 @@ export function renderBuildOrder(plan: Plan, base?: string): string[] {
   }
   if (branches.length) {
     if (out.length) out.push('');
-    const from = base ? `\`${base}\`` : 'the base branch';
     out.push('## Branches', `_Each branch is one pull request. A branch whose tasks build on another branch is cut from it — a stacked pull request._`);
     for (const b of branches) {
       const ids = b.tasks.map((t) => t.id).join(', ');
       if (b.needs.length > 1) {
-        out.push(`- \`${b.branch}\` needs ${b.needs.map((n) => `\`${n}\``).join(' and ')}: merge those first, then cut it from ${from} — ${ids}`);
+        // Refused when the task list is made; only an older plan has one.
+        out.push(`- \`${b.branch}\` needs work from ${b.needs.length} branches, which one pull request cannot: harness_plan_check says how to fix it — ${ids}`);
       } else {
-        out.push(`- \`${b.branch}\` from ${b.base ? `\`${b.base}\` (stacked)` : from} — ${ids}`);
+        out.push(`- \`${b.branch}\` from ${baseWords(b.base, base)} — ${ids}`);
       }
     }
     if (unbranched.length) out.push(`- no branch named (the session's current branch) — ${unbranched.map((t) => t.id).join(', ')}`);
