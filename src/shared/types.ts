@@ -213,8 +213,10 @@ export interface Task {
   createdBy: Author;
 }
 
-/** What a comment is attached to. `plan` targets the plan as a whole. */
-export const TARGET_KINDS = ['plan', 'section', 'diagram', 'task'] as const;
+/** What a comment is attached to. `plan` targets the plan as a whole; a
+ *  `node` or `edge` is one box or arrow, its id `diagramId/nodeId` or
+ *  `diagramId/edgeId`. */
+export const TARGET_KINDS = ['plan', 'section', 'diagram', 'task', 'node', 'edge'] as const;
 export type TargetKind = (typeof TARGET_KINDS)[number];
 
 export interface Target {
@@ -498,7 +500,7 @@ export type PlanOp =
   | { op: 'move_task'; id: string; parentId: string | null; index: number }
   | { op: 'move_section'; id: string; index: number }
   | { op: 'move_diagram'; id: string; index: number }
-  | { op: 'remove'; kind: Exclude<TargetKind, 'plan'>; id: string }
+  | { op: 'remove'; kind: 'section' | 'diagram' | 'task'; id: string }
   | { op: 'comment'; target: Target; text: string }
   | { op: 'reply'; threadId: string; text: string }
   | { op: 'resolve'; threadId: string; resolved: boolean }

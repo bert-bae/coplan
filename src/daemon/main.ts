@@ -1031,6 +1031,17 @@ function buildRouter(deps: Deps): Router {
             reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
             return;
           }
+          // A peek is a look, not a read: an auditing subagent sees the plan
+          // as it stands, and the user's changes stay unread — and the
+          // sign-off undelivered — for the agent that has to act on them.
+          if (body['peek'] === true) {
+            reply(
+              true,
+              '[cc-harness] A peek: the user\'s changes below stay unread, for your next harness_plan_read.\n\n' +
+                renderPlan(session.plan, { url, changesOnly: body['changes_only'] === true }),
+            );
+            return;
+          }
           // A sign-off not yet handed over comes with the first read after
           // it: the ask for a task list once the design is confirmed, the
           // build prompt once the plan is submitted. That is how Cursor gets

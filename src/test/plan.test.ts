@@ -477,3 +477,61 @@ test("Claude republishing a task with new content moves its revision; unchanged 
   assert.equal(next.tasks.find((t) => t.id === 'b')!.rev, 2);
   assert.throws(() => applyOps(next, [{ op: 'upsert_task', id: 'b', title: 'B!', expect: 1 }], 'user'), /changed by Claude/);
 });
+
+/* ------------------------------------------------------------------ *
+ * Comments on one box or arrow
+ * ------------------------------------------------------------------ */
+
+test('Claude can comment on one box or one arrow, and the read says which', () => {
+  let plan = fresh();
+  const d = plan.diagrams[0]!;
+  const edge = d.edges.find((e) => e.source === 'api')!;
+  plan = applyOps(
+    plan,
+    [
+      { op: 'comment', target: { kind: 'node', id: `${d.id}/cache` }, text: 'Should this be write-through?' },
+      { op: 'comment', target: { kind: 'edge', id: `${d.id}/${edge.id}` }, text: 'Batch these gets?' },
+    ],
+    'claude',
+  ).plan;
+  const text = renderPlan(plan);
+  assert.match(text, /on box "Cache" \(d1\/cache\) in diagram "Components" — you: Should this be write-through\?/);
+  assert.match(text, /on arrow API → Cache \(d1\/[^)]+\) in diagram "Components" — you: Batch these gets\?/);
+  assert.throws(
+    () => applyOps(plan, [{ op: 'comment', target: { kind: 'node', id: `${d.id}/nope` }, text: 'x' }], 'claude'),
+    /Nothing to comment on at node/,
+  );
+});
+
+test('a comment on a box that is removed stays, on the plan, saying what it was about', () => {
+  let plan = fresh();
+  const d = plan.diagrams[0]!;
+  plan = applyOps(plan, [{ op: 'comment', target: { kind: 'node', id: `${d.id}/db` }, text: 'Which Postgres?' }], 'user').plan;
+  markReadByClaude(plan);
+  plan = applyOps(
+    plan,
+    [{ op: 'upsert_diagram', id: d.id, nodes: d.nodes.filter((n) => n.id !== 'db').map((n) => ({ id: n.id, label: n.label })), edges: [{ source: 'api', target: 'cache' }] }],
+    'claude',
+  ).plan;
+  const thread = plan.threads.find((t) => t.text.includes('Which Postgres?'))!;
+  assert.deepEqual(thread.target, { kind: 'plan', id: '' });
+  assert.match(thread.text, /^\(on removed box "Postgres"/);
+});
+
+test('an arrow restated without its id keeps it, and so keeps its comments', () => {
+  let plan = fresh();
+  const d = plan.diagrams[0]!;
+  const edge = d.edges.find((e) => e.source === 'api')!;
+  plan = applyOps(plan, [{ op: 'comment', target: { kind: 'edge', id: `${d.id}/${edge.id}` }, text: 'Batch?' }], 'user').plan;
+  markReadByClaude(plan);
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id: d.id, edges: [{ source: 'api', target: 'cache', label: 'get' }, { source: 'cache', target: 'db' }] }], 'claude').plan;
+  assert.ok(plan.diagrams[0]!.edges.some((e) => e.id === edge.id));
+  assert.equal(plan.threads.find((t) => t.text === 'Batch?')!.target.kind, 'edge');
+});
+
+test('the read gives each section, diagram and task its revision, for expect', () => {
+  const text = renderPlan(fresh());
+  assert.match(text, /### \[s1\] Context _\(rev 1\)_/);
+  assert.match(text, /^_rev 1_$/m);
+  assert.match(text, /t4 Wire into API.* · rev 1$/m);
+});

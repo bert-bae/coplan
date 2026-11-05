@@ -85,6 +85,22 @@ It leads with the net effect of their edits, then the plan.
   `harness_plan_edit {ops: [{op: "reply", threadId, text}]}`; resolve it
   (`{op: "resolve", threadId, resolved: true}`) if settled.
 
+**Auditing the plan.** When you review the design — yours or the user's —
+and are not sure a change is wanted, say so where it applies instead of
+overwriting: `harness_plan_edit {ops: [{op: "comment", target: {kind: "node",
+id: "d1/cache"}, text: "Should this be write-through? Reads lag writes by
+the TTL."}]}`. A target is the plan (`{kind: "plan", id: ""}`), a section,
+a diagram or a task by id, or one box (`node`, `"diagramId/nodeId"`) or
+arrow (`edge`, `"diagramId/edgeId"`). The user answers in the thread.
+
+A subagent that audits the plan for you reads it with
+`harness_plan_read {peek: true}`: it sees the plan as it stands, but the
+user's changes stay unread, so your next read still reports them to you.
+
+The read gives each section, diagram and task its revision (`rev`). Pass
+it as `expect` on an `upsert_section`, `upsert_diagram` or `upsert_task` to
+have the edit refused if the user changed that item since.
+
 Use `harness_plan_edit` for targeted changes, `harness_plan_publish` only
 for a wholesale rewrite (keeping the ids of items that survive). Publishing
 is refused while the user has changes you have not read, and so is an edit

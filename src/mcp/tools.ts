@@ -112,6 +112,7 @@ export const AGENT_OPS = [
   'move_task',
   'move_section',
   'move_diagram',
+  'comment',
   'reply',
   'resolve',
   'remove',
@@ -149,6 +150,17 @@ const OP_PROPERTIES: Record<string, unknown> = {
   text: { type: 'string', description: 'reply: your reply. report: the build report. Markdown.' },
   resolved: { type: 'boolean' },
   kind: { type: 'string', enum: ['section', 'diagram', 'task'], description: 'remove: what kind of item.' },
+  target: {
+    type: 'object',
+    description:
+      'comment: what it is about. kind "plan" (id ""), "section", "diagram" or "task" with its id, or one box or arrow: ' +
+      'kind "node" with id "diagramId/nodeId", kind "edge" with id "diagramId/edgeId".',
+    properties: {
+      kind: { type: 'string', enum: ['plan', 'section', 'diagram', 'task', 'node', 'edge'] },
+      id: { type: 'string' },
+    },
+    required: ['kind', 'id'],
+  },
 };
 
 export const TOOLS: ToolDef[] = [
@@ -196,13 +208,19 @@ export const TOOLS: ToolDef[] = [
       'Diagrams come back as an architecture: parts in flow order with their descriptions and decisions, ' +
       'then connections. Call it whenever the ' +
       'user says they have reviewed or updated the plan, and before publishing again. Every item carries its ' +
-      'id for harness_plan_edit.',
+      'id for harness_plan_edit, and sections, diagrams and tasks their revision (rev) for `expect`.',
     inputSchema: {
       type: 'object',
       properties: {
         changes_only: {
           type: 'boolean',
           description: 'Only what changed and what is waiting on you, not the whole document. Default false.',
+        },
+        peek: {
+          type: 'boolean',
+          description:
+            'Look without reading: the plan as it stands, but the user\'s changes stay unread for the next real read. ' +
+            'For an audit, or a subagent, that must not mark them seen for the agent that has to act on them. Default false.',
         },
       },
       additionalProperties: false,
@@ -219,10 +237,13 @@ export const TOOLS: ToolDef[] = [
       'arrow between the same two boxes keeps its label, dashed and arrows, unless you give them); upsert_task ' +
       '{id?, parentId?, index?, title?, detail?, files?, note?, dependsOn?, branch?, review?, builds?} ' +
       '(omit id to add; parentId makes it a subtask); move_task {id, parentId, index}; move_section {id, index}; ' +
-      'move_diagram {id, index}; reply {threadId, text} (reply to a comment); resolve {threadId, resolved}; remove ' +
-      '{kind: section|diagram|task, id}; report {text} (the final build report). Example: {ops: [{op: "reply", ' +
-      'threadId: "c2", text: "Done: split the cache."}]}. Once the user confirms the design only tasks, task links ' +
-      'and comments change; once they submit the plan only upsert_task, reply, resolve and report apply.',
+      'move_diagram {id, index}; comment {target: {kind, id}, text} (start a thread — on a box: kind "node", id ' +
+      '"diagramId/nodeId"; when you are unsure of a change, comment rather than overwrite); reply {threadId, text} ' +
+      '(reply to a comment); resolve {threadId, resolved}; remove {kind: section|diagram|task, id}; report {text} ' +
+      '(the final build report). upsert_section, upsert_diagram and upsert_task take expect: the rev you read. ' +
+      'Example: {ops: [{op: "reply", threadId: "c2", text: "Done: split the cache."}]}. Once the user confirms the ' +
+      'design only tasks, task links and comments change; once they submit the plan only upsert_task, comment, ' +
+      'reply, resolve and report apply.',
     inputSchema: {
       type: 'object',
       properties: {

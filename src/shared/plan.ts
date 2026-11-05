@@ -978,6 +978,9 @@ export function applyOps(
     const problem = dependencyProblem(next);
     if (problem && problem !== dependencyProblem(plan)) throw new PlanError(problem);
   }
+  // A comment on a box or an arrow an edit took away is kept, on the plan,
+  // saying what it was about — as for any removed item.
+  next.threads = next.threads.map((t) => (t.target.kind === 'node' || t.target.kind === 'edge' ? detachIfOrphaned(next, plan, t) : t));
   if (author === 'claude') {
     if (next.claudeBaseline && unreadByClaude(next).length > 0) {
       next.claudeBaseline = foldClaudeEdit(next.claudeBaseline, baselineOf(plan), baselineOf(next));
@@ -1445,7 +1448,7 @@ export const MAX_NOTE = 4_000;
 
 /** What Claude may still do to a locked plan: track the work it is doing,
  *  and answer comments. Everything else is the design the user signed off. */
-const TRACKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'reply', 'resolve', 'report']);
+const TRACKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'comment', 'reply', 'resolve', 'report']);
 
 /** Ops that can change which task waits on which. */
 const TASK_SHAPE_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task']);
@@ -1453,7 +1456,7 @@ const TASK_SHAPE_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task']
 const LOCKED_FOR_USER = 'The plan has been submitted to be built, so it is locked. Reopen it to make changes.';
 const LOCKED_FOR_CLAUDE =
   'The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or ' +
-  'upsert_task to add work you discover), comment replies (reply, resolve) and the build report apply. If the ' +
+  'upsert_task to add work you discover), comments (comment, reply, resolve) and the build report apply. If the ' +
   'design has to change, ask the user in chat — they can reopen the plan in Coplan.';
 const DESIGN_LOCKED_FOR_USER =
   'The design is confirmed, so the architecture, sections and summary are locked — only the tasks, the boxes they ' +
@@ -1740,7 +1743,9 @@ function buildGraph(
   for (const c of cleaned) {
     const { raw, source, target } = c;
     const prev = prevOf.get(c);
-    let id = c.id ?? `${source}->${target}`;
+    // The same arrow keeps its id — and so its comments — when an edit
+    // restates it without one.
+    let id = c.id ?? prev?.id ?? `${source}->${target}`;
     for (let n = 2; edges.some((e) => e.id === id); n++) id = `${source}->${target}#${n}`;
     const label = c.label === undefined ? prev?.label : c.label || undefined;
     const dashed = raw.dashed === undefined ? prev?.dashed : raw.dashed === true;
@@ -2112,9 +2117,34 @@ export function targetExists(plan: Plan, target: Target): boolean {
       return plan.diagrams.some((d) => d.id === target.id);
     case 'task':
       return plan.tasks.some((t) => t.id === target.id);
+    case 'node':
+      return Boolean(findPart(plan, target)?.node);
+    case 'edge':
+      return Boolean(findPart(plan, target)?.edge);
     default:
       return false;
   }
+}
+
+/** The box or arrow a `node` / `edge` target names (`diagramId/partId`). */
+export function findPart(
+  plan: Pick<Plan, 'diagrams'>,
+  target: Target,
+): { diagram: Diagram; node?: DiagramNode; edge?: DiagramEdge } | null {
+  const at = target.id.indexOf('/');
+  if (at <= 0) return null;
+  const diagram = plan.diagrams.find((d) => d.id === target.id.slice(0, at));
+  if (!diagram) return null;
+  const id = target.id.slice(at + 1);
+  if (target.kind === 'node') {
+    const node = diagram.nodes.find((n) => n.id === id);
+    return node ? { diagram, node } : null;
+  }
+  if (target.kind === 'edge') {
+    const edge = diagram.edges.find((e) => e.id === id);
+    return edge ? { diagram, edge } : null;
+  }
+  return null;
 }
 
 export function describeTarget(plan: Plan, target: Target): string {
@@ -2132,6 +2162,16 @@ export function describeTarget(plan: Plan, target: Target): string {
     case 'task': {
       const t = plan.tasks.find((x) => x.id === target.id);
       return t ? `task "${t.title}"` : `task ${target.id}`;
+    }
+    case 'node': {
+      const part = findPart(plan, target);
+      return part?.node ? `box "${part.node.label}" (${target.id}) in diagram "${part.diagram.title}"` : `box ${target.id}`;
+    }
+    case 'edge': {
+      const part = findPart(plan, target);
+      if (!part?.edge) return `arrow ${target.id}`;
+      const label = (id: string) => part.diagram.nodes.find((n) => n.id === id)?.label ?? id;
+      return `arrow ${label(part.edge.source)} → ${label(part.edge.target)} (${target.id}) in diagram "${part.diagram.title}"`;
     }
     default:
       return 'an item';
