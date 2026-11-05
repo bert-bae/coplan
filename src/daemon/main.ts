@@ -398,12 +398,12 @@ function buildRouter(deps: Deps): Router {
    *  for a cookie on first load. */
   const authedUrl = (sessionId?: string) => {
     const base = `http://127.0.0.1:${readLiveLock()?.port ?? 0}/?token=${token}`;
-    return sessionId ? `${base}#/session/${sessionId}` : base;
+    return sessionId ? `${base}#/session/${encodeURIComponent(sessionId)}` : base;
   };
 
   /** For Claude. Token-free: anything returned to the model is written to the
    *  transcript and carried in every later context window. */
-  const uiUrl = (sessionId: string) => `http://127.0.0.1:${readLiveLock()?.port ?? 0}/#/session/${sessionId}`;
+  const uiUrl = (sessionId: string) => `http://127.0.0.1:${readLiveLock()?.port ?? 0}/#/session/${encodeURIComponent(sessionId)}`;
 
   const opened = new Set<string>();
   const revealUi = (session: SessionState) => {
