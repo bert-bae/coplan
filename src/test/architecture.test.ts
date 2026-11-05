@@ -285,18 +285,25 @@ test("Claude's edits made while the user's are unread are not reported as the us
   assert.doesNotMatch(text, /Renamed the plan|Claude adds a section/);
 });
 
-test("Claude's edits to a diagram the user also changed are folded in, the user's are not", () => {
+test("Claude's edits around a diagram the user changed are folded in; the diagram itself waits for a read", () => {
   let plan = fresh();
   const d = () => plan.diagrams[0]!;
   plan = applyOps(plan, [{ op: 'upsert_diagram', id: d().id, nodes: d().nodes.map((n) => (n.id === 'db' ? { ...n, label: 'Postgres 16' } : n)), edges: d().edges }], 'user').plan;
-  plan = applyOps(
-    plan,
-    [{ op: 'upsert_diagram', id: d().id, nodes: [...d().nodes, { id: 'q', label: 'Queue', kind: 'queue' }], edges: [...d().edges, { source: 'api', target: 'q', label: 'enqueue' }] }],
-    'claude',
-  ).plan;
+  // Rewriting that diagram unread could undo the rename: refused.
+  assert.throws(
+    () =>
+      applyOps(
+        plan,
+        [{ op: 'upsert_diagram', id: d().id, nodes: [...d().nodes, { id: 'q', label: 'Queue', kind: 'queue' }], edges: [...d().edges, { source: 'api', target: 'q', label: 'enqueue' }] }],
+        'claude',
+      ),
+    /since you last read the plan/,
+  );
+  // A new diagram of Claude's goes in, and is not reported back as the user's.
+  plan = applyOps(plan, [{ op: 'upsert_diagram', title: 'Queueing', nodes: [{ id: 'q', label: 'Queue', kind: 'queue' }] }], 'claude').plan;
   const text = renderPlan(plan, { changesOnly: true });
   assert.match(text, /Changed Postgres 16 \(`db`\): renamed from "Postgres"\./);
-  assert.doesNotMatch(text, /Queue|enqueue/, 'Claude added those');
+  assert.doesNotMatch(text, /Queueing/, 'Claude added that');
 });
 
 test('reordering diagrams is reported, not called a no-op', () => {

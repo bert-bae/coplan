@@ -87,7 +87,9 @@ It leads with the net effect of their edits, then the plan.
 
 Use `harness_plan_edit` for targeted changes, `harness_plan_publish` only
 for a wholesale rewrite (keeping the ids of items that survive). Publishing
-is refused while the user has changes you have not read — read first.
+is refused while the user has changes you have not read, and so is an edit
+to any item (a diagram, section or task) they changed since your last read:
+it could undo theirs. Read first, then edit on top of their version.
 
 ## 3. Make the task list once the design is confirmed
 

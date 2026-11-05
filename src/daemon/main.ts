@@ -894,12 +894,13 @@ function buildRouter(deps: Deps): Router {
           const ops = Array.isArray(body['ops']) ? (body['ops'] as PlanOp[]) : [];
           // All or nothing: a batch that cannot be applied whole is refused.
           if (ops.length > MAX_OPS) throw new PlanError(`At most ${MAX_OPS} edits per call; split the change.`);
-          const { changes } = store.applyOps(id, ops, 'claude');
+          const { plan, changes } = store.applyOps(id, ops, 'claude');
+          const notice = unreadNotice(plan);
           reply(
             true,
-            changes.length
+            (changes.length
               ? `[cc-harness] Applied ${changes.length} change(s):\n${changes.map((c) => `- ${c.summary} [${c.target.kind} ${c.target.id}]`.replace(' ]', ']')).join('\n')}`
-              : '[cc-harness] Nothing changed — every edit matched what was already there.',
+              : '[cc-harness] Nothing changed — every edit matched what was already there.') + (notice ? `\n\n${notice}` : ''),
           );
           return;
         }

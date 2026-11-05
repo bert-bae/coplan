@@ -132,7 +132,7 @@ const OP_PROPERTIES: Record<string, unknown> = {
   summary: { type: 'string', description: 'set_meta: the plan summary. Markdown.' },
   body: { type: 'string', description: 'upsert_section: the section body. Markdown.' },
   index: { type: 'integer', minimum: 0, description: 'Position among its siblings, from 0.' },
-  expect: { type: 'integer', description: 'upsert_section / upsert_diagram: refused if the item changed since this revision.' },
+  expect: { type: 'integer', description: 'upsert_section / upsert_diagram / upsert_task: the rev you read; refused if the user changed the item since.' },
   nodes: { type: 'array', items: NODE, description: 'upsert_diagram: replaces the boxes.' },
   edges: { type: 'array', items: EDGE, description: 'upsert_diagram: replaces the arrows.' },
   direction: { type: 'string', enum: ['LR', 'TB'] },
@@ -167,7 +167,7 @@ export const TOOLS: ToolDef[] = [
       'comments on it. Include: a summary; sections for context, architecture and risks; diagrams of the ' +
       'design as nodes and edges (the UI lays them out and the user can rearrange them); and a task tree ' +
       'broken into subtasks. Replaces the plan; items keep their comments and statuses when you keep their ' +
-      'ids, a box keeps its position, description and notes and an arrow between the same two boxes its ' +
+      'ids, a box keeps its position, detail, description and notes and an arrow between the same two boxes its ' +
       'label and style unless you restate them ("" clears a label). Refused if the user has changed the plan since you last read it, ' +
       'once they confirm the design (then harness_tasks_publish makes the task list), and while it is being built. ' +
       'Tasks here are the planned tasks, shown on the boxes that link them. Ask decisions you need with ' +
@@ -222,7 +222,7 @@ export const TOOLS: ToolDef[] = [
       'Make targeted changes to the plan, applied together or not at all. Call it as {ops: [ … ]}, where each op ' +
       'is an object with an "op" field and only that op\'s fields: set_meta {title?, summary?}; upsert_section ' +
       '{id?, title?, body?, index?}; upsert_diagram {id?, title?, nodes?, edges?, direction?, caption?, index?} ' +
-      '(nodes/edges replace the current ones; a box you keep keeps its position, description and notes, and an ' +
+      '(nodes/edges replace the current ones; a box you keep keeps its position, detail, description and notes, and an ' +
       'arrow between the same two boxes keeps its label, dashed and arrows, unless you give them); upsert_task ' +
       '{id?, parentId?, index?, title?, detail?, status?, files?, note?, dependsOn?, branch?, review?, builds?} ' +
       '(omit id to add; parentId makes it a subtask); move_task {id, parentId, index}; move_section {id, index}; ' +

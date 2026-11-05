@@ -450,7 +450,8 @@ function TaskRow(props: {
           className="task-title"
           value={task.title}
           label="Task title"
-          onSave={(title) => store.op({ op: 'upsert_task', id: task.id, title })}
+          version={revOf(task)}
+          onSave={(title, rev) => store.op({ op: 'upsert_task', id: task.id, title, ...expecting(rev) })}
         />
         <span className="task-badges">
           {sub && (
@@ -555,7 +556,8 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
           value={task.note ?? ''}
           placeholder="One line — what it's blocked on, or what was done"
           label="Status note"
-          onSave={(note) => store.op({ op: 'upsert_task', id: task.id, note })}
+          version={revOf(task)}
+          onSave={(note, rev) => store.op({ op: 'upsert_task', id: task.id, note, ...expecting(rev) })}
         />
       </div>
       <div className="field-col">
@@ -565,7 +567,8 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
           label={`detail of "${task.title}"`}
           placeholder="No detail yet."
           emptyAction="Add approach or acceptance criteria"
-          onSave={(detail) => store.op({ op: 'upsert_task', id: task.id, detail })}
+          version={revOf(task)}
+          onSave={(detail, rev) => store.op({ op: 'upsert_task', id: task.id, detail, ...expecting(rev) })}
         />
       </div>
       <div className="field-col">
@@ -586,7 +589,8 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
             return inherited ? `${inherited} (from its parent)` : 'the current branch';
           })()}
           label="Branch"
-          onSave={(branch) => store.op({ op: 'upsert_task', id: task.id, branch })}
+          version={revOf(task)}
+          onSave={(branch, rev) => store.op({ op: 'upsert_task', id: task.id, branch, ...expecting(rev) })}
         />
       </div>
       <div className="field-row">
@@ -625,7 +629,9 @@ function DependsField({ plan, task }: { plan: Plan; task: Task }) {
   const excluded = new Set([task.id, ...deps, ...ancestorsOf(plan, task).map((t) => t.id), ...descendants(plan, task.id).map((t) => t.id)]);
   const rows = outline(plan);
   const numbers = new Map(rows.map((r) => [r.task.id, r.number]));
-  const set = (dependsOn: string[]) => void store.op({ op: 'upsert_task', id: task.id, dependsOn });
+  // Made against what is on screen: if the agent changed the list since,
+  // the whole-list save is refused rather than undoing its change.
+  const set = (dependsOn: string[]) => void store.op({ op: 'upsert_task', id: task.id, dependsOn, expect: revOf(task) });
   const inherited = ancestorsOf(plan, task).flatMap((a) => (a.dependsOn ?? []).map((id) => ({ via: a, id })));
   return (
     <div className="depends">
@@ -680,7 +686,7 @@ function ReviewPicker({ task }: { task: Task }) {
           aria-checked={(task.review ?? '') === mode}
           className={classNames('seg', (task.review ?? '') === mode && 'is-active')}
           title={mode ? undefined : "The build's default, or its parent's"}
-          onClick={() => void store.op({ op: 'upsert_task', id: task.id, review: mode })}
+          onClick={() => void store.op({ op: 'upsert_task', id: task.id, review: mode, expect: revOf(task) })}
         >
           {mode ? REVIEW_LABEL[mode] : 'Default'}
         </button>
@@ -693,6 +699,9 @@ function ReviewPicker({ task }: { task: Task }) {
 function FilesField({ task }: { task: Task }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState((task.files ?? []).join('\n'));
+  const [startedAt, setStartedAt] = useState(revOf(task));
+  const latest = useRef(revOf(task));
+  latest.current = revOf(task);
   if (!editing) {
     return (
       <div className="files">
@@ -710,6 +719,7 @@ function FilesField({ task }: { task: Task }) {
           className="link"
           onClick={() => {
             setDraft((task.files ?? []).join('\n'));
+            setStartedAt(revOf(task));
             setEditing(true);
           }}
         >
@@ -730,9 +740,11 @@ function FilesField({ task }: { task: Task }) {
         <button
           type="button"
           className="btn btn-sm btn-primary"
-          onClick={() => {
-            setEditing(false);
-            void store.op({ op: 'upsert_task', id: task.id, files: draft.split('\n').map((f) => f.trim()).filter(Boolean) });
+          onClick={async () => {
+            const files = draft.split('\n').map((f) => f.trim()).filter(Boolean);
+            // Refused when changed underneath: stay open, with the text.
+            if (await store.op({ op: 'upsert_task', id: task.id, files, expect: startedAt })) setEditing(false);
+            else setStartedAt(latest.current);
           }}
         >
           Save
@@ -1000,4 +1012,14 @@ function hasChildren(plan: Pick<Plan, 'tasks'>, id: string): boolean {
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   return Boolean(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable));
+}
+
+/** A task's content revision; tasks written before it existed are at 1. */
+function revOf(task: Task): number {
+  return task.rev ?? 1;
+}
+
+/** The `expect` for an edit made against `rev`, when one was captured. */
+function expecting(rev: number | undefined): { expect?: number } {
+  return rev === undefined ? {} : { expect: rev };
 }

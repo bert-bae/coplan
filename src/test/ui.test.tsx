@@ -711,6 +711,21 @@ test('a snapshot from Claude replaces the plan and says so', async () => {
   assert.ok(store.getState().toasts.some((t) => /revision 2/.test(t.text)));
 });
 
+test('a snapshot older than the plan on the page never rolls it back', async () => {
+  const plan = makePlan();
+  plan.version = 10;
+  plan.title = 'Newest';
+  await boot(makeSession(plan));
+  const older = makePlan();
+  older.version = 9;
+  older.title = 'Older';
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: makeSession(older, { title: 'Session renamed' }) });
+  });
+  assert.equal(store.getState().session?.plan?.title, 'Newest');
+  assert.equal(store.getState().session?.title, 'Session renamed', 'the rest of the session still updates');
+});
+
 /* ---------------------------------------------------- layout and access */
 
 test('the header hides and shows the session list', async () => {
@@ -848,11 +863,12 @@ test('the task list says what waits on what, and the order the build takes', asy
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: 'Stop waiting on Storage layer' }));
   });
-  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 't3', dependsOn: [] });
+  // Made against the revision on screen (Claude's edit above made it 2), so a newer change is not undone.
+  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 't3', dependsOn: [], expect: 2 });
   await act(async () => {
     fireEvent.click(screen.getByRole('radio', { name: 'Self-review' }));
   });
-  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 't3', review: 'self' });
+  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 't3', review: 'self', expect: 2 });
 });
 
 test('the plan is submitted after reading the prompt it sends, with how the build runs', async () => {

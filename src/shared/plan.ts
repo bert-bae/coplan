@@ -522,9 +522,9 @@ function refuseUnread(prev: Plan | null, then: string): void {
 
 /**
  * Build a task tree from what Claude wrote. Ids that survive keep their
- * status, note, files and links; dependencies, branch and review mode left
- * out are kept too (the user may have set them), and `[]` or `""` clears
- * them. Dependencies may name any task by the id it was written with.
+ * status, detail, note, files and links; dependencies, branch and review
+ * mode left out are kept too (the user may have set them), and `[]` or `""`
+ * clears them. Dependencies may name any task by the id it was written with.
  */
 function buildTaskTree(
   base: Plan,
@@ -547,7 +547,9 @@ function buildTaskTree(
       const id = old && !tasks.some((t) => t.id === old.id) ? old.id : claimIdAmong(next, 'task', raw.id, tasks);
       if (typeof raw.id === 'string' && raw.id.trim()) written.set(raw.id.trim(), id);
       const status = validStatus(raw.status) ?? old?.status ?? 'todo';
-      const detail = clean(raw.detail, MAX_TEXT);
+      // Left out, a task's detail is kept — as a box's prose is — so a
+      // republish to restructure the tree never wipes what was written.
+      const detail = raw.detail === undefined ? old?.detail : clean(raw.detail, MAX_TEXT);
       const note = clean(raw.note, MAX_TITLE * 2) ?? old?.note;
       const files = cleanList(raw.files) ?? old?.files;
       const branch = raw.branch === undefined ? old?.branch : cleanBranch(raw.branch);
@@ -595,6 +597,18 @@ function buildTaskTree(
       if (!resolved.includes(id)) resolved.push(id);
     }
     if (resolved.length) task.dependsOn = resolved;
+  }
+  // A task whose content Claude changed moves to a new revision, so an
+  // editor the user has open on it notices.
+  for (const task of tasks) {
+    const old = base.tasks.find((t) => t.id === task.id);
+    if (!old) continue;
+    if (old.rev !== undefined) task.rev = old.rev;
+    if (old.revBy) task.revBy = { ...old.revBy };
+    if (taskContent(old) !== taskContent(task)) {
+      task.rev = (old.rev ?? 1) + 1;
+      task.revBy = { ...old.revBy, claude: task.rev };
+    }
   }
   return { tasks, builds };
 }
@@ -798,6 +812,7 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
     'stage',
     'checks',
     'builds',
+    'expect',
   ],
   move_task: ['id', 'parentId', 'index'],
   move_section: ['id', 'index'],
@@ -823,6 +838,85 @@ function checkOpFields(op: unknown): void {
   }
 }
 
+/**
+ * The items whose content the user changed since Claude last read the
+ * plan, as `kind:id` — by the net effect, so edits that cancel out do not
+ * count. Comments, task progress and positions are not content: Claude
+ * acting on a comment it has not read yet loses nothing of the user's.
+ */
+function unreadContent(plan: Plan): Set<string> {
+  const touched = new Set(
+    unreadByClaude(plan)
+      .filter((c) => c.kind === 'created' || c.kind === 'edited' || c.kind === 'deleted' || c.kind === 'published')
+      .map((c) => `${c.target.kind}:${c.target.id}`),
+  );
+  const base = plan.claudeBaseline;
+  if (!base || touched.size === 0) return touched;
+  const now = baselineOf(plan);
+  const content = (b: PlanBaseline, kind: string, id: string): string => {
+    switch (kind) {
+      case 'plan':
+        return canonical({ title: b.title, summary: b.summary });
+      case 'section':
+        return canonical(b.sections.find((s) => s.id === id) ?? null);
+      case 'diagram':
+        return canonical(b.diagrams.find((d) => d.id === id) ?? null);
+      case 'task': {
+        const t = b.tasks.find((x) => x.id === id);
+        return canonical(t ? { ...t, status: undefined, order: undefined, parentId: undefined } : null);
+      }
+      default:
+        return '';
+    }
+  };
+  return new Set(
+    [...touched].filter((key) => {
+      const at = key.indexOf(':');
+      const [kind, id] = [key.slice(0, at), key.slice(at + 1)];
+      return content(base, kind, id) !== content(now, kind, id);
+    }),
+  );
+}
+
+/** What an edit of Claude's would overwrite, as `kind:id` — or null when
+ *  it only tracks progress, moves something, or talks in a thread. */
+function contentTargetOf(op: PlanOp): string | null {
+  const has = (...keys: string[]) => keys.some((k) => (op as unknown as Record<string, unknown>)[k] !== undefined);
+  switch (op.op) {
+    case 'set_meta':
+      return 'plan:';
+    case 'upsert_section':
+      return op.id && has('title', 'body') ? `section:${op.id}` : null;
+    case 'upsert_diagram':
+      return op.id && has('title', 'nodes', 'edges', 'direction', 'caption') ? `diagram:${op.id}` : null;
+    case 'upsert_task':
+      // A note with a status is a progress report (harness_task_update).
+      return op.id && (has('title', 'detail', 'files', 'dependsOn', 'branch', 'review') || (has('note') && !has('status', 'stage')))
+        ? `task:${op.id}`
+        : null;
+    case 'remove':
+      return `${op.kind}:${op.id}`;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Claude's edit to an item the user has changed since Claude last read the
+ * plan is refused, as a publish is: Claude would be writing over a version
+ * it has not seen, and a diagram's node list replaces the boxes the user
+ * just added. Reading the plan clears it.
+ */
+function refuseUnreadEdit(plan: Plan, op: PlanOp, unread: Set<string>): void {
+  const target = contentTargetOf(op);
+  if (!target || !unread.has(target)) return;
+  const [kind, id] = target.split(':') as [Target['kind'], string];
+  throw new PlanError(
+    `The user changed ${describeTarget(plan, { kind, id })} since you last read the plan, so this edit was not applied — ` +
+      'it could undo theirs. Call harness_plan_read to see their version, then make the edit on top of it.',
+  );
+}
+
 export function applyOps(
   plan: Plan,
   ops: PlanOp[],
@@ -836,9 +930,13 @@ export function applyOps(
   else if (plan.design) checkDesignLocked(ops, author);
   const next = structuredClone(plan);
   const changes: Change[] = [];
+  const unread = author === 'claude' ? unreadContent(plan) : null;
   ops.forEach((op, i) => {
     try {
-      if (author === 'claude') checkOpFields(op);
+      if (author === 'claude') {
+        checkOpFields(op);
+        refuseUnreadEdit(plan, op, unread!);
+      }
       changes.push(...applyOne(next, op, author, now));
     } catch (err) {
       if (err instanceof PlanError && ops.length > 1) {
@@ -1112,6 +1210,7 @@ function editTask(
   now: number,
   log: (kind: ChangeKind, target: Target, summary: string) => Change,
 ): Change[] {
+  checkTaskRev(task, op.expect, author);
   const out: Change[] = [];
   const edited: string[] = [];
   const title = clean(op.title, MAX_TITLE);
@@ -1124,12 +1223,18 @@ function editTask(
     edited.push('detail');
   }
   if (op.files) {
-    setOptional(task, 'files', cleanList(op.files)?.length ? cleanList(op.files) : undefined);
-    edited.push('files');
+    const files = cleanList(op.files);
+    if ((files ?? []).join('\n') !== (task.files ?? []).join('\n')) {
+      setOptional(task, 'files', files?.length ? files : undefined);
+      edited.push('files');
+    }
   }
   if (typeof op.note === 'string') {
-    setOptional(task, 'note', clean(op.note, MAX_TITLE * 2));
-    if (!op.status && !op.stage) edited.push('note');
+    const note = clean(op.note, MAX_TITLE * 2);
+    if (note !== task.note) {
+      setOptional(task, 'note', note);
+      if (!op.status && !op.stage) edited.push('note');
+    }
   }
   if (Array.isArray(op.dependsOn)) {
     // Checked with the whole batch, so a dependency can be added with it.
@@ -1188,6 +1293,8 @@ function editTask(
 
   if (edited.length) {
     task.updatedAt = now;
+    task.rev = (task.rev ?? 1) + 1;
+    task.revBy = { ...task.revBy, [author]: task.rev };
     out.push(log('edited', ref('task', task.id), `edited the ${edited.join(', ')} of "${task.title}"`));
   }
   if (op.builds?.length) out.push(...logLinks(linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now), task, author, log));
@@ -1543,7 +1650,7 @@ function buildGraph(
     if (!id) throw new PlanError(`Diagram "${title}": every node needs an id.`);
     if (nodes.some((n) => n.id === id)) throw new PlanError(`Diagram "${title}": node id "${id}" is used twice.`);
     const prev = old?.nodes.find((n) => n.id === id);
-    const detail = clean(raw.detail, 400);
+    const detail = raw.detail === undefined ? prev?.detail : clean(raw.detail, 400);
     // Prose survives an edit that leaves it out, so Claude can rewire a
     // diagram without restating what the user wrote on every box.
     const description = raw.description === undefined ? prev?.description : clean(raw.description, MAX_DESCRIPTION);
@@ -1708,6 +1815,29 @@ function checkRev(item: { rev: number; title: string; updatedBy: Author }, expec
   throw new PlanError(
     `${kind[0]!.toUpperCase()}${kind.slice(1)} "${item.title}" was changed by ${who} while this edit was open, so it was not saved. ` +
       'It now shows the latest version.',
+  );
+}
+
+/**
+ * A task edit made against revision `expect` is refused when the *other*
+ * side changed what the task says since — the user saving over Claude's
+ * newer text, or the other way round. One side's own quick successive
+ * saves (ticking dependencies one after another) never trip it, and
+ * progress (status, stage, checks) is not part of the revision.
+ */
+/** What a task says, as one comparable string: the fields its `rev` counts. */
+function taskContent(t: Task): string {
+  return JSON.stringify([t.title, t.detail ?? '', t.note ?? '', t.files ?? [], t.dependsOn ?? [], t.branch ?? '', t.review ?? '']);
+}
+
+function checkTaskRev(task: Task, expect: unknown, author: Author): void {
+  if (typeof expect !== 'number') return;
+  const other: Author = author === 'user' ? 'claude' : 'user';
+  const theirs = task.revBy?.[other];
+  if (theirs === undefined || theirs <= expect) return;
+  throw new PlanError(
+    `Task "${task.title}" was changed by ${other === 'claude' ? 'Claude' : 'the user'} while this edit was open, so it was not saved. ` +
+      (author === 'claude' ? 'Read the plan again (harness_plan_read), then redo the edit.' : 'It now shows the latest version.'),
   );
 }
 
