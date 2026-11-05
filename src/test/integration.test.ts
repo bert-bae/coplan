@@ -310,6 +310,11 @@ test('the session environment decides the link back to Claude', async () => {
 
 test('task tracking moves statuses and reports them', async () => {
   await ops([{ op: 'upsert_task', title: 'Profile it' }]);
+  // Done means the cycle ran: straight from todo, it is refused.
+  const unreviewed = await mcp('task', { task_id: 't2', status: 'done', note: 'client added' });
+  assert.equal(unreviewed['ok'], false);
+  assert.match(String(unreviewed['text']), /has not been reviewed/);
+  await mcp('task', { task_id: 't2', stage: 'review' });
   const res = await mcp('task', { task_id: 't2', status: 'done', note: 'client added' });
   assert.match(String(res['text']), /"Client" is done/);
   // Where the user changed things, not how many saves it took.
@@ -639,7 +644,17 @@ test('finishing the last task finishes the build, and a new plan may follow', as
   const s = await sessionFor(built);
   const leaves = s.plan!.tasks.filter((t) => !s.plan!.tasks.some((c) => c.parentId === t.id));
   let last: Record<string, unknown> = {};
-  for (const t of leaves) last = await mcpFor(built, 'task', { task_id: t.id, status: 'done', note: 'done' });
+  // In the order they become ready: a task cannot start, or be done, while
+  // it still waits on another.
+  let left = leaves.filter((t) => t.status !== 'done').map((t) => t.id);
+  for (let pass = 0; left.length && pass < 10; pass++) {
+    for (const id of [...left]) {
+      if (!(await mcpFor(built, 'task', { task_id: id, stage: 'review' }))['ok']) continue;
+      last = await mcpFor(built, 'task', { task_id: id, status: 'done', note: 'done' });
+      left = left.filter((x) => x !== id);
+    }
+  }
+  assert.deepEqual(left, []);
   assert.match(String(last['text']), /That was the last task: the plan is built/);
   const finish = String((await mcpFor(built, 'next'))['text']);
   assert.match(finish, /Every task in "Add a cache" is done/);
@@ -730,6 +745,68 @@ test("the repository's .coplan/config.json reaches the prompts, the briefs and t
     await mcpFor(id, 'task', { task_id: 't2', stage: 'review', checks: [{ name: 'tests', ok: true }, { name: 'lint', ok: false }] });
     const done = await mcpFor(id, 'task', { task_id: 't2', status: 'done' });
     assert.equal(done['ok'], true, String(done['text']));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the build gates hold however the agent reports progress, and only the user lifts them', async () => {
+  const id = 'gates-session';
+  const dir = path.join(repo, '.coplan');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, 'config.json'),
+    JSON.stringify({
+      hooks: { review: [{ name: 'tests', run: 'npm test' }, { name: 'lint', run: 'npm run lint', optional: true }] },
+      iric: { review: 'self', parallel: 1, maxRounds: 2 },
+    }),
+  );
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  const refused = async (body: Record<string, unknown>, why: RegExp) => {
+    const res = await task(body);
+    assert.equal(res['ok'], false, `expected a refusal: ${String(res['text'])}`);
+    assert.match(String(res['text']), why);
+  };
+  try {
+    await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+    await mcpFor(id, 'publish', PLAN);
+
+    // Progress cannot go round harness_task_update through an edit.
+    const sneak = await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't2', status: 'done' }] });
+    assert.equal(sneak['ok'], false);
+    assert.match(String(sneak['text']), /report progress with harness_task_update/);
+
+    // A parent's progress is its subtasks'.
+    await refused({ task_id: 't1', stage: 'implement' }, /has subtasks/);
+
+    // Not done while it waits, not started past the parallel limit.
+    await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't4', dependsOn: ['t1'] }] });
+    await refused({ task_id: 't4', status: 'done', note: 'x' }, /cannot be done yet: it waits on/);
+    assert.equal((await task({ task_id: 't2', stage: 'implement' }))['ok'], true);
+    await refused({ task_id: 't3', stage: 'implement' }, /the user allowed 1 at once/);
+
+    // A refine that re-runs only the typecheck does not erase the failing tests.
+    await task({ task_id: 't2', stage: 'review', checks: [{ name: 'tests', ok: false, note: '1 failing' }] });
+    await task({ task_id: 't2', stage: 'refine', checks: [{ name: 'typecheck', ok: true }] });
+    await refused({ task_id: 't2', status: 'done', note: 'x' }, /its last checks failed \(tests: 1 failing\)/);
+
+    // Round 2 of 2 is the last; a third needs the user, and says what they said.
+    await task({ task_id: 't2', stage: 'review' });
+    await refused({ task_id: 't2', stage: 'review' }, /the most the user allowed \(2\)/);
+    await refused({ task_id: 't2', stage: 'review', user_approved: true }, /needs a `note`/);
+    const extra = await task({ task_id: 't2', stage: 'review', user_approved: true, note: 'user: one more round' });
+    assert.equal(extra['ok'], true, String(extra['text']));
+    // Accepting it as it is, too, is theirs to say.
+    const accepted = await task({ task_id: 't2', status: 'done', user_approved: true, note: 'user accepted the flaky test' });
+    assert.equal(accepted['ok'], true, String(accepted['text']));
+    assert.match((await sessionFor(id)).plan!.tasks.find((t) => t.id === 't2')!.note ?? '', /approved by the user/);
+
+    // A required review check that was never reported holds it back.
+    await task({ task_id: 't3', stage: 'implement' });
+    await task({ task_id: 't3', stage: 'review', checks: [{ name: 'lint', ok: true }] });
+    await refused({ task_id: 't3', status: 'done', note: 'x' }, /the review checks tests were never reported/);
+    await task({ task_id: 't3', checks: [{ name: 'tests', ok: true }] });
+    assert.equal((await task({ task_id: 't3', status: 'done', note: 'done' }))['ok'], true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

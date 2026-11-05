@@ -917,11 +917,33 @@ function refuseUnreadEdit(plan: Plan, op: PlanOp, unread: Set<string>): void {
   );
 }
 
+/** The fields of upsert_task that report progress rather than say what
+ *  the task is. Claude reports them only through harness_task_update. */
+export const PROGRESS_FIELDS = ['status', 'stage', 'checks'] as const;
+
+/**
+ * Claude's progress goes through harness_task_update, which refuses what
+ * would make the board untrue — starting a task that still waits, finishing
+ * one whose checks fail or that was never reviewed. An upsert_task carrying
+ * a status would walk straight past those gates.
+ */
+function refuseProgress(op: PlanOp): void {
+  if (op.op !== 'upsert_task') return;
+  const given = PROGRESS_FIELDS.filter((k) => op[k] !== undefined);
+  if (!given.length) return;
+  throw new PlanError(
+    `upsert_task does not set ${given.join(', ')}: report progress with harness_task_update {task_id, status, stage, checks, note}, ` +
+      'which checks what the task waits on and how its checks came out. A new task starts as todo.',
+  );
+}
+
 export function applyOps(
   plan: Plan,
   ops: PlanOp[],
   author: Author,
   now = Date.now(),
+  /** `tracking`: Claude's progress report, already through harness_task_update's gates. */
+  opts: { tracking?: boolean } = {},
 ): { plan: Plan; changes: Change[] } {
   if (!Array.isArray(ops) || ops.length === 0) {
     throw new PlanError('No edits were given: pass them as {ops: [{op: "upsert_task", id: "t3", note: "…"}, …]}.');
@@ -935,6 +957,7 @@ export function applyOps(
     try {
       if (author === 'claude') {
         checkOpFields(op);
+        if (!opts.tracking) refuseProgress(op);
         refuseUnreadEdit(plan, op, unread!);
       }
       changes.push(...applyOne(next, op, author, now));
@@ -1273,16 +1296,26 @@ function editTask(
     }
     // Finished, or back in the pile: no longer anywhere in the cycle.
     if (status === 'done' || status === 'todo') delete task.stage;
+    // Back in the pile, it starts its cycle over: the rounds and checks of
+    // the work it had are not this work's.
+    if (status === 'todo') {
+      delete task.round;
+      delete task.checks;
+    }
   }
   const progress: string[] = [];
-  if (stage && task.status !== 'done' && task.status !== 'todo' && stage !== task.stage) {
+  // Every report of the review stage is a round — going straight from one
+  // review to the next included — so the round limit cannot be walked past.
+  if (stage && task.status !== 'done' && task.status !== 'todo' && (stage !== task.stage || stage === 'review')) {
     task.stage = stage;
     if (stage === 'review') task.round = (task.round ?? 0) + 1;
     progress.push(stage === 'review' ? `in review (round ${task.round})` : STAGE_WORDS[stage]);
   }
   const checks = op.checks === undefined ? undefined : cleanChecks(op.checks);
   if (checks) {
-    if (checks.length) task.checks = checks;
+    // Merged by name: a refine that re-runs only the typecheck must not
+    // erase the test failure the review found.
+    if (checks.length) task.checks = mergeChecks(task.checks, checks);
     else delete task.checks;
     if (checks.length) progress.push(`checks ${checks.map((c) => `${c.name} ${c.ok ? '✓' : '✗'}`).join(', ')}`);
   }
@@ -1825,6 +1858,18 @@ function checkRev(item: { rev: number; title: string; updatedBy: Author }, expec
  * saves (ticking dependencies one after another) never trip it, and
  * progress (status, stage, checks) is not part of the revision.
  */
+/** The latest result of each check: a new report replaces the one of the
+ *  same name and leaves the others as they were. */
+export function mergeChecks(before: readonly CheckResult[] | undefined, reported: readonly CheckResult[]): CheckResult[] {
+  const out = [...(before ?? [])];
+  for (const c of reported) {
+    const at = out.findIndex((x) => x.name === c.name);
+    if (at === -1) out.push(c);
+    else out[at] = c;
+  }
+  return out;
+}
+
 /** What a task says, as one comparable string: the fields its `rev` counts. */
 function taskContent(t: Task): string {
   return JSON.stringify([t.title, t.detail ?? '', t.note ?? '', t.files ?? [], t.dependsOn ?? [], t.branch ?? '', t.review ?? '']);

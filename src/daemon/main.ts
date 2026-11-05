@@ -10,11 +10,11 @@ import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from '
 import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
-import { MAX_NOTE, PlanError, cleanChecks, cleanNote, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
+import { MAX_NOTE, PlanError, cleanChecks, cleanNote, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
 import { PROMPT_BUDGET, buildPrompt, designPrompt, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
 import { renderBrief, renderNext } from './brief.ts';
-import { cleanSettings, effectiveReview, readyTasks, waitingOn } from '../shared/build.ts';
-import { HOOK_STAGES, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
+import { cleanSettings, effectiveReview, hasSubtasks, readyTasks, waitingOn } from '../shared/build.ts';
+import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
 import { cleanStorage, scanStorage } from './housekeeping.ts';
 import { loadConfig, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, isPidAlive, baseUrl } from '../shared/paths.ts';
@@ -759,28 +759,79 @@ function buildRouter(deps: Deps): Router {
     const checks = cleaned?.length ? cleaned : undefined;
     const note = typeof body['note'] === 'string' ? body['note'] : undefined;
     if (!status && !stage && !checks && note === undefined) throw new PlanError('Say what changed: a status, a stage, checks or a note.');
+    const approved = body['user_approved'] === true;
+    if (approved && !note?.trim()) {
+      throw new PlanError('`user_approved` needs a `note` saying what the user told you in chat.');
+    }
     const project = projectFor(session);
+    const settings = before.submission?.settings ?? project.settings;
+
+    // A parent's progress is its subtasks': a status set on it would say
+    // something the board never shows.
+    if ((status || stage || checks) && hasSubtasks(before, task.id)) {
+      throw new PlanError(
+        `"${task.title}" has subtasks, so its progress is theirs: report on each subtask instead (harness_task_next lists them).`,
+      );
+    }
 
     // Starting includes resuming a task that was blocked before it began.
     const idle = task.status === 'todo' || task.status === 'blocked';
     const starting = idle && (status === 'in_progress' || (stage !== undefined && status !== 'done' && status !== 'blocked'));
     const waits = waitingOn(before, task);
-    if (starting && waits.length) {
+    const waitWords = () => waits.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ');
+    if ((starting || status === 'done') && waits.length) {
       throw new PlanError(
-        `"${task.title}" cannot start yet: it waits on ${waits.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ')}. ` +
+        `"${task.title}" cannot ${status === 'done' ? 'be done' : 'start'} yet: it waits on ${waitWords()}. ` +
           'Start a task that is ready instead — harness_task_next lists them. If the dependency is wrong, change it with ' +
           'harness_plan_edit {ops: [{op: "upsert_task", id, dependsOn: [...]}]} and tell the user why.',
       );
     }
-
-    if (status === 'done') {
-      const optional = new Set(HOOK_STAGES.flatMap((st) => project.hooks[st].filter((h) => h.optional).map((h) => h.name)));
-      const failing = (checks ?? task.checks ?? []).filter((c) => !c.ok && !optional.has(c.name));
-      if (failing.length) {
+    if (starting && !approved) {
+      const busy = before.tasks.filter((t) => t.status === 'in_progress' && t.id !== task.id && !hasSubtasks(before, t.id));
+      if (busy.length >= settings.parallel) {
         throw new PlanError(
-          `"${task.title}" is not done: its last checks failed (${failing.map((c) => `${c.name}${c.note ? `: ${c.note}` : ''}`).join('; ')}). ` +
-            'Refine it until they pass and report them again with `checks`. If a failure has nothing to do with this task, ' +
-            'mark it blocked with a note saying so and ask the user.',
+          `"${task.title}" cannot start yet: ${busy.length} task(s) are in progress (${busy.map((t) => t.id).join(', ')}), ` +
+            `and the user allowed ${settings.parallel} at once. Finish one first.`,
+        );
+      }
+    }
+
+    // The round limit is the user's: past it, stop and ask them.
+    if (stage === 'review' && (task.round ?? 0) >= settings.maxRounds && !approved) {
+      throw new PlanError(
+        `"${task.title}" has had ${task.round} review round(s), the most the user allowed (${settings.maxRounds}). Stop: mark it ` +
+          'blocked with a note on what still fails, and ask the user — another round, accept it as it is, or take it over. ' +
+          'If they say to go on, call again with user_approved: true and their answer in the note.',
+      );
+    }
+
+    if (status === 'done' && !approved) {
+      // Done means the cycle ran: it went to review at least once, …
+      if (!task.round) {
+        throw new PlanError(
+          `"${task.title}" has not been reviewed: take it through its cycle first — stage "review" (every review mode, ` +
+            '"skip" included, reports one), then done once it passes.',
+        );
+      }
+      // … and every check that gates it passed when it was last run.
+      const optional = new Set(HOOK_STAGES.flatMap((st) => project.hooks[st].filter((h) => h.optional).map((h) => h.name)));
+      const latest = mergeChecks(task.checks, checks ?? []);
+      const failing = latest.filter((c) => !c.ok && !optional.has(c.name));
+      const missing = hooksFor(project, 'review', task.files)
+        .filter((h) => !h.optional && !latest.some((c) => c.name === h.name))
+        .map((h) => h.name);
+      if (failing.length || missing.length) {
+        throw new PlanError(
+          `"${task.title}" is not done: ` +
+            [
+              failing.length ? `its last checks failed (${failing.map((c) => `${c.name}${c.note ? `: ${c.note}` : ''}`).join('; ')})` : '',
+              missing.length ? `the review checks ${missing.join(', ')} were never reported` : '',
+            ]
+              .filter(Boolean)
+              .join(', and ') +
+            '. Run them, refine until they pass, and report them with `checks`. If a failure has nothing to do with this ' +
+            'task, mark it blocked with a note saying so and ask the user; if they accept it as it is, call again with ' +
+            'user_approved: true and their answer in the note.',
         );
       }
     }
@@ -795,23 +846,26 @@ function buildRouter(deps: Deps): Router {
           ...(status ? { status } : {}),
           ...(stage ? { stage: stage as NonNullable<ReturnType<typeof validStage>> } : {}),
           ...(checks ? { checks } : {}),
-          ...(note !== undefined ? { note } : {}),
+          ...(note !== undefined ? { note: approved ? `${note} (approved by the user)` : note } : {}),
         },
       ],
       'claude',
+      { tracking: true },
     );
     const now = plan.tasks.find((t) => t.id === taskId)!;
-    const settings = plan.submission?.settings ?? project.settings;
     const out: string[] = [];
     const state = now.status === 'in_progress' && now.stage ? stageWords(now) : now.status.replace('_', ' ');
     out.push(`[cc-harness] "${now.title}" is ${state}.${changes.length ? '' : ' (It already was.)'}`);
+    if (starting && !plan.submission) {
+      out.push('The plan has not been submitted: build only if the user told you to start without submitting.');
+    }
     if (checks?.length) {
       const failed = checks.filter((c) => !c.ok);
       out.push(failed.length ? `Checks: ${failed.length} failed (${failed.map((c) => c.name).join(', ')}) — refine before review passes.` : `Checks: all ${checks.length} passed.`);
     }
     if (now.stage === 'review' && stage === 'review') {
-      if ((now.round ?? 0) > settings.maxRounds) {
-        out.push(`This is review round ${now.round}, past the ${settings.maxRounds} the user allowed: if it does not pass, stop and ask the user.`);
+      if ((now.round ?? 0) >= settings.maxRounds) {
+        out.push(`This is review round ${now.round} of the ${settings.maxRounds} the user allowed: if it does not pass, stop and ask the user.`);
       }
       if (effectiveReview(plan, now, settings.review) === 'user') {
         out.push(`This task's review is the user's: show them the change and ask with ${agentInfo(session.agent).askWith} before marking it done.`);

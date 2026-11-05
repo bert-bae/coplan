@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AGENT_OPS, TOOLS } from '../mcp/tools.ts';
-import { OP_FIELDS } from '../shared/plan.ts';
+import { OP_FIELDS, PROGRESS_FIELDS } from '../shared/plan.ts';
 
 /**
  * The agent learns Coplan's API from three places: the tool schemas, the
@@ -162,7 +162,8 @@ test('the harness_plan_edit schema offers exactly the fields the daemon accepts'
   const props = item['properties'] as Record<string, { enum?: string[] }>;
   assert.deepEqual(props['op']!.enum, [...AGENT_OPS]);
   for (const op of AGENT_OPS) assert.ok(op in OP_FIELDS, `${op} is offered but the daemon has no field list for it`);
-  const union = new Set(AGENT_OPS.flatMap((op) => OP_FIELDS[op] as readonly string[]));
+  // Progress (status, stage, checks) is reported through harness_task_update only.
+  const union = new Set(AGENT_OPS.flatMap((op) => (OP_FIELDS[op] as readonly string[]).filter((f) => !(PROGRESS_FIELDS as readonly string[]).includes(f))));
   assert.deepEqual(
     Object.keys(props)
       .filter((k) => k !== 'op')

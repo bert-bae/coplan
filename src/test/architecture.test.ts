@@ -173,7 +173,7 @@ test('task edits are reported as where the task ended up', () => {
 
 test('Claude\'s own edits are not reported back to it', () => {
   let plan = fresh();
-  plan = applyOps(plan, [{ op: 'upsert_task', id: 'cache-client', status: 'done' }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'cache-client', status: 'done' }], 'claude', undefined, { tracking: true }).plan;
   plan = applyOps(plan, [{ op: 'upsert_task', title: 'Load test' }], 'user').plan;
   const text = renderPlan(plan, { changesOnly: true });
   assert.match(text, /Added t1 "Load test"/);
@@ -278,6 +278,8 @@ test("Claude's edits made while the user's are unread are not reported as the us
       { op: 'upsert_section', title: 'Claude adds a section', body: 'x' },
     ],
     'claude',
+    undefined,
+    { tracking: true },
   ).plan;
   const text = renderPlan(plan, { changesOnly: true });
   assert.match(text, /Changed cache-client "Cache client \(Redis\)": renamed from "Cache client"\./, 'the user\'s rename is still news');

@@ -841,7 +841,7 @@ test('with the design confirmed, boxes still link to tasks but nothing else on t
 
 test('the task list says what waits on what, and the order the build takes', async () => {
   let plan = confirmedPlan();
-  plan = applyOps(plan, [{ op: 'upsert_task', id: 't3', status: 'todo', dependsOn: ['storage'], branch: 'cache/api', review: 'user' }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't3', status: 'todo', dependsOn: ['storage'], branch: 'cache/api', review: 'user' }], 'claude', undefined, { tracking: true }).plan;
   await boot(makeSession(plan));
   await openTab('Tasks');
   const row = document.getElementById('task-t3')!;
@@ -1005,7 +1005,7 @@ test('while building, the board follows Claude and a card that moves stands out'
   assert.match(strip.textContent ?? '', /Claude is on Wire into API/);
 
   // Claude reports a task done: it arrives in the Done column, and says so.
-  const next = applyOps(plan, [{ op: 'upsert_task', id: 't2', status: 'done', note: 'TTL-based' }], 'claude').plan;
+  const next = applyOps(plan, [{ op: 'upsert_task', id: 't2', status: 'done', note: 'TTL-based' }], 'claude', undefined, { tracking: true }).plan;
   await act(async () => {
     store.apply({ type: 'snapshot', session: makeSession(next) });
   });
@@ -1030,6 +1030,8 @@ test('each card on the board says where its task is in implement → review → 
       { op: 'upsert_task', id: 't3', stage: 'review' },
     ],
     'claude',
+    undefined,
+    { tracking: true },
   ).plan;
   await boot(makeSession(plan));
   await openTab('Tasks');

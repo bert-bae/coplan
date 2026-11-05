@@ -444,7 +444,7 @@ function TaskRow(props: {
         ) : (
           <span className="twisty is-leaf" aria-hidden="true" />
         )}
-        <StatusDot task={task} />
+        {kids.length ? <DerivedStatus plan={plan} task={task} /> : <StatusDot task={task} />}
         <span className="task-num">{number}</span>
         <InlineText
           className="task-title"
@@ -547,7 +547,7 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
     <div className="task-detail-body">
       <div className="field-row">
         <span className="field-label">Status</span>
-        <StatusPicker task={task} />
+        {hasSubtasks(plan, task.id) ? <span className="muted">Follows its subtasks.</span> : <StatusPicker task={task} />}
       </div>
       <div className="field-row">
         <span className="field-label">Note</span>
@@ -759,6 +759,31 @@ function MoveButton({ op, glyph, label }: { op: PlanOp | null; glyph: string; la
     <button type="button" className="icon-btn is-tiny" disabled={!op} title={label} aria-label={label} onClick={() => op && void store.op(op)}>
       <span aria-hidden="true">{glyph}</span>
     </button>
+  );
+}
+
+/** Where a parent's subtasks stand: done when all are, blocked or in
+ *  progress when any is. A parent has no status of its own to set — what
+ *  is built, and what the agent reports, is its subtasks. */
+function derivedStatus(plan: Plan, task: Task): TaskStatus {
+  const leaves = descendants(plan, task.id).filter((t) => !hasSubtasks(plan, t.id));
+  if (leaves.length && leaves.every((t) => t.status === 'done')) return 'done';
+  if (leaves.some((t) => t.status === 'blocked')) return 'blocked';
+  if (leaves.some((t) => t.status === 'in_progress' || t.status === 'done')) return 'in_progress';
+  return 'todo';
+}
+
+function DerivedStatus({ plan, task }: { plan: Plan; task: Task }) {
+  const status = derivedStatus(plan, task);
+  return (
+    <span
+      className={classNames('status-dot', 'is-static', `is-${status}`)}
+      role="img"
+      title={`${STATUS_LABEL[status]}, from its subtasks`}
+      aria-label={`${task.title}: ${STATUS_LABEL[status]}, from its subtasks`}
+    >
+      <span aria-hidden="true">{STATUS_GLYPH[status]}</span>
+    </span>
   );
 }
 

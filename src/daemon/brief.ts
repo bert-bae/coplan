@@ -116,7 +116,7 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
       const state = [t.stage ? stageWords(t) : '', t.checks?.length ? `checks ${checkWords(t)}` : ''].filter(Boolean).join(' · ');
       out.push(`- ${line(t)}${state ? ` — ${state}` : ''}${t.note ? ` — ${t.note}` : ''}`);
       if (t.round && t.round >= settings.maxRounds && t.stage !== 'review') {
-        out.push(`  ⚠ ${t.round} review rounds already: if this one does not pass, stop and ask the user.`);
+        out.push(`  ⚠ ${t.round} of ${settings.maxRounds} review rounds used: another needs the user's go-ahead (user_approved).`);
       }
     }
   }

@@ -276,12 +276,12 @@ export class SessionStore extends EventEmitter {
 
   /** Apply edits from either side. Throws `PlanError` when any op fails, in
    *  which case nothing is changed. */
-  applyOps(id: string, ops: PlanOp[], author: Author): { plan: Plan; changes: Change[] } {
+  applyOps(id: string, ops: PlanOp[], author: Author, opts: { tracking?: boolean } = {}): { plan: Plan; changes: Change[] } {
     const session = this.sessions.get(id);
     if (!session) throw new Error('unknown session');
     // The user can start a plan from the browser before Claude has published.
     const base = session.plan ?? emptyPlan(session.title);
-    const result = applyOps(base, ops, author);
+    const result = applyOps(base, ops, author, Date.now(), opts);
     this.mutate(id, (s) => {
       s.plan = result.plan;
     });

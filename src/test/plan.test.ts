@@ -65,14 +65,14 @@ test('a user edit is unread by Claude until it reads the plan', () => {
 });
 
 test('Claude\'s own edits never show up as unread', () => {
-  const { plan } = applyOps(fresh(), [{ op: 'upsert_task', id: 't2', status: 'done', note: 'added client' }], 'claude');
+  const { plan } = applyOps(fresh(), [{ op: 'upsert_task', id: 't2', status: 'done', note: 'added client' }], 'claude', undefined, { tracking: true });
   assert.equal(unreadByClaude(plan).length, 0);
   assert.equal(unreadNotice(plan), null);
 });
 
 test('Claude editing does not swallow what the user did first', () => {
   let plan = applyOps(fresh(), [{ op: 'comment', target: { kind: 'task', id: 't4' }, text: 'do this first' }], 'user').plan;
-  plan = applyOps(plan, [{ op: 'upsert_task', id: 't2', status: 'in_progress' }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't2', status: 'in_progress' }], 'claude', undefined, { tracking: true }).plan;
   assert.equal(unreadByClaude(plan).length, 1, 'the comment is still unread');
 });
 
@@ -419,7 +419,7 @@ test('the unread guard covers tasks, sections and the summary, but not progress,
   assert.throws(() => applyOps(plan, [{ op: 'remove', kind: 'task', id: 't4' }], 'claude'), /changed task/);
   // Progress on the task they edited, a task they only commented on, and the
   // diagram they did not touch all go through.
-  assert.doesNotThrow(() => applyOps(plan, [{ op: 'upsert_task', id: 't4', status: 'in_progress', note: 'started' }], 'claude'));
+  assert.doesNotThrow(() => applyOps(plan, [{ op: 'upsert_task', id: 't4', status: 'in_progress', note: 'started' }], 'claude', undefined, { tracking: true }));
   assert.doesNotThrow(() => applyOps(plan, [{ op: 'upsert_task', id: 't2', title: 'Cache client (split)' }], 'claude'));
   assert.doesNotThrow(() => applyOps(plan, [{ op: 'upsert_diagram', id: plan.diagrams[0]!.id, caption: 'Read path' }], 'claude'));
 });
@@ -466,7 +466,7 @@ test("the user's own quick successive saves never conflict with each other, and 
   plan = applyOps(plan, [{ op: 'upsert_task', id: 't4', dependsOn: ['t2', 't3'], expect: opened }], 'user').plan;
   assert.deepEqual(plan.tasks.find((t) => t.id === 't4')!.dependsOn, ['t2', 't3']);
   const rev = plan.tasks.find((t) => t.id === 't4')!.rev;
-  plan = applyOps(plan, [{ op: 'upsert_task', id: 't4', status: 'in_progress', note: 'started' }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't4', status: 'in_progress', note: 'started' }], 'claude', undefined, { tracking: true }).plan;
   assert.equal(plan.tasks.find((t) => t.id === 't4')!.rev, rev, 'a status report does not move the revision');
 });
 

@@ -139,18 +139,11 @@ const OP_PROPERTIES: Record<string, unknown> = {
   caption: { type: 'string' },
   parentId: { description: 'upsert_task (when adding) and move_task: the parent task id, or null for the top level.' },
   detail: { type: 'string', description: 'upsert_task: objective, acceptance criteria, out of scope. Markdown.' },
-  status: STATUS,
   files: STR_LIST,
   note: { type: 'string', description: 'upsert_task: one line on the task.' },
   dependsOn: { ...STR_LIST, description: 'upsert_task: replaces its dependencies; [] clears them.' },
   branch: { type: 'string', description: 'upsert_task: "" clears it.' },
   review: { type: 'string', enum: [...REVIEW.enum, ''], description: 'upsert_task: "" clears it.' },
-  stage: { type: 'string', enum: ['implement', 'review', 'refine'], description: 'Prefer harness_task_update.' },
-  checks: {
-    type: 'array',
-    description: 'Prefer harness_task_update.',
-    items: { type: 'object', properties: { name: { type: 'string' }, ok: { type: 'boolean' }, note: { type: 'string' } }, required: ['name', 'ok'] },
-  },
   builds: { ...STR_LIST, description: 'upsert_task: boxes it builds, as node ids or "diagramId/nodeId".' },
   threadId: { type: 'string', description: 'reply / resolve: the comment thread.' },
   text: { type: 'string', description: 'reply: your reply. report: the build report. Markdown.' },
@@ -224,7 +217,7 @@ export const TOOLS: ToolDef[] = [
       '{id?, title?, body?, index?}; upsert_diagram {id?, title?, nodes?, edges?, direction?, caption?, index?} ' +
       '(nodes/edges replace the current ones; a box you keep keeps its position, detail, description and notes, and an ' +
       'arrow between the same two boxes keeps its label, dashed and arrows, unless you give them); upsert_task ' +
-      '{id?, parentId?, index?, title?, detail?, status?, files?, note?, dependsOn?, branch?, review?, builds?} ' +
+      '{id?, parentId?, index?, title?, detail?, files?, note?, dependsOn?, branch?, review?, builds?} ' +
       '(omit id to add; parentId makes it a subtask); move_task {id, parentId, index}; move_section {id, index}; ' +
       'move_diagram {id, index}; reply {threadId, text} (reply to a comment); resolve {threadId, resolved}; remove ' +
       '{kind: section|diagram|task, id}; report {text} (the final build report). Example: {ops: [{op: "reply", ' +
@@ -300,8 +293,10 @@ export const TOOLS: ToolDef[] = [
       'Track progress while you build; the user follows it on the board. Mark a task in_progress (stage ' +
       '"implement") when you start it, set stage "review" and "refine" as it goes round its implement → review → ' +
       'refine cycle, report the checks you ran, and mark it done with a one-line note once review passed — or ' +
-      'blocked with a note, asking the user with AskUserQuestion. Refused: starting a task that still waits on ' +
-      'another, and done while its last checks failed.',
+      'blocked with a note, asking the user with AskUserQuestion. The only way to report progress. Refused: ' +
+      'starting or finishing a task that still waits on another; starting more at once than the user allowed; a ' +
+      'review round past their limit; done before any review, or while a check fails or a review check was never ' +
+      'reported; progress on a task that has subtasks.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -318,6 +313,12 @@ export const TOOLS: ToolDef[] = [
           },
         },
         note: { type: 'string', description: 'One line: what was done, or what it is blocked on.' },
+        user_approved: {
+          type: 'boolean',
+          description:
+            'Only when the user told you in chat to go past a limit: another review round past their maximum, more ' +
+            'tasks at once, or done although a check fails. Put what they said in `note`.',
+        },
       },
       required: ['task_id'],
       additionalProperties: false,

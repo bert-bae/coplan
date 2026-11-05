@@ -81,7 +81,7 @@ test('a plan moves from planning to tasking to submitted to building to built', 
   assert.equal(planPhase(plan), 'building');
   assert.equal(plan.submission?.deliveredAt, 3_000);
 
-  for (const task of plan.tasks) plan = applyOps(plan, [{ op: 'upsert_task', id: task.id, status: 'done' }], 'claude').plan;
+  for (const task of plan.tasks) plan = applyOps(plan, [{ op: 'upsert_task', id: task.id, status: 'done' }], 'claude', undefined, { tracking: true }).plan;
   assert.equal(planPhase(plan), 'built');
 });
 
@@ -137,7 +137,7 @@ test('the user can change nothing on a submitted plan', () => {
 
 test('Claude can track the work on a submitted plan, and add work it discovers', () => {
   let plan = markDelivered(submitted());
-  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'in_progress' }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'in_progress' }], 'claude', undefined, { tracking: true }).plan;
   plan = applyOps(plan, [{ op: 'upsert_task', parentId: 'client', title: 'Handle timeouts' }], 'claude').plan;
   assert.equal(plan.tasks.find((t) => t.id === 'client')?.status, 'in_progress');
   assert.ok(plan.tasks.some((t) => t.title === 'Handle timeouts'));
@@ -151,14 +151,14 @@ test('Claude cannot redesign a submitted plan, and is told what to do instead', 
   );
   // All or nothing: a tracking op beside a design op is refused with it.
   assert.throws(() =>
-    applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'done' }, { op: 'remove', kind: 'section', id: 's1' }], 'claude'),
+    applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'done' }, { op: 'remove', kind: 'section', id: 's1' }], 'claude', undefined, { tracking: true }),
   );
 });
 
 test('a republish is refused until the build is finished, then starts a new plan', () => {
   let plan = markDelivered(submitted());
   assert.throws(() => publishPlan(plan, { ...INPUT, title: 'Something else' }), /submitted this plan/);
-  for (const task of plan.tasks) plan = applyOps(plan, [{ op: 'upsert_task', id: task.id, status: 'done' }], 'claude').plan;
+  for (const task of plan.tasks) plan = applyOps(plan, [{ op: 'upsert_task', id: task.id, status: 'done' }], 'claude', undefined, { tracking: true }).plan;
   plan = applyOps(plan, [{ op: 'report', text: 'Built it.' }], 'claude').plan;
   const next = publishPlan(plan, { ...INPUT, title: 'Next feature' }).plan;
   assert.equal(next.title, 'Next feature');
