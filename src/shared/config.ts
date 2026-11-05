@@ -136,10 +136,6 @@ export function loadConfigReport(opts: { configDir: string; projectDir?: string 
   return { config: cfg, errors, files };
 }
 
-export function loadConfig(opts: { configDir: string; projectDir?: string | null }): HarnessConfig {
-  return loadConfigReport(opts).config;
-}
-
 /**
  * The daemon's view of the config: read once per repository, and again as
  * soon as either file changes — an edit counts without a restart. What is

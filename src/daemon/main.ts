@@ -15,7 +15,7 @@ import { PROMPT_BUDGET, buildPrompt, designPrompt, promptHash, renderGaps, rende
 import { renderBrief, renderNext } from './brief.ts';
 import { cleanSettings, dependents, effectiveReview, hasSubtasks, readyTasks, roundVerdict, stackStatus, waitingOn } from '../shared/build.ts';
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
-import { cleanStorage, scanStorage } from './housekeeping.ts';
+import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
 import { ConfigCache, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
@@ -339,10 +339,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, route
     return;
   }
 
-  // A browser always says where a write comes from. The cookie is
-  // SameSite=Strict already; this refuses a cross-site write outright even if
-  // a browser were to send it. Hooks, the MCP server and the CLI send no
-  // Origin and authenticate with the bearer token instead.
+  // A browser always says where a write comes from. The token is never sent
+  // by a browser on its own (no cookie), so a cross-site write could not
+  // authenticate anyway; this refuses it outright, before that question.
+  // Hooks, the MCP server and the CLI send no Origin.
   const origin = req.headers.origin;
   if (origin && req.method !== 'GET' && req.method !== 'HEAD' && !sameOrigin(origin)) {
     text(res, 403, 'cross-origin request refused');
@@ -445,8 +445,8 @@ function buildRouter(deps: Deps): Router {
   const { store, config, token, clients, lifecycle } = deps;
   const router = new Router();
 
-  /** For the browser and the CLI: carries the token, which the daemon swaps
-   *  for a cookie on first load. */
+  /** For the browser and the CLI: carries the token, which the page keeps
+   *  (`src/ui/lib/api.ts`) and takes out of the address bar. */
   const authedUrl = (sessionId?: string) => {
     const base = `http://127.0.0.1:${readLiveLock()?.port ?? 0}/?token=${token}`;
     return sessionId ? `${base}#/session/${encodeURIComponent(sessionId)}` : base;
@@ -709,7 +709,7 @@ function buildRouter(deps: Deps): Router {
     }
     const result = cleanStorage({
       liveSessionIds: residentIds(),
-      ...(body.groups ? { groups: body.groups } : {}),
+      groups: body.groups,
       ...(body.dryRun ? { dryRun: true } : {}),
     });
     if (!result.dryRun && result.removed) log(`housekeeping removed ${result.removed} item(s), ${result.freedBytes} bytes`);
@@ -1334,8 +1334,8 @@ function startReaper(store: SessionStore): { stop(): void } {
       if (dropped) log(`evicted ${dropped} session(s) from memory`);
       // The log is appended to for the daemon's whole life: past its limit,
       // its newest part is kept and the rest let go.
-      const trimmed = cleanStorage({ groups: ['log'] });
-      if (trimmed.removed) log(`trimmed the log by ${trimmed.freedBytes} bytes`);
+      const freed = trimLog();
+      if (freed) log(`trimmed the log by ${freed} bytes`);
     } catch (err) {
       log(`reaper failed: ${(err as Error)?.message}`);
     }

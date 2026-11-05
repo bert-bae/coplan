@@ -34,12 +34,6 @@ export class History<T> {
     return after;
   }
 
-  /** Forget the last edit recorded: it was refused, so the state before it
-   *  is the state now, and undoing to it would do nothing. */
-  discardLast(): void {
-    this.past.pop();
-  }
-
   clear(): void {
     this.past = [];
     this.future = [];

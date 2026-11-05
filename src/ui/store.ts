@@ -110,13 +110,7 @@ class Store {
    * ---------------------------------------------------------------- */
 
   async init(): Promise<void> {
-    // Drop the one-time token from the address bar so copied links are clean.
-    const url = new URL(window.location.href);
-    if (url.searchParams.has('token')) {
-      url.searchParams.delete('token');
-      window.history.replaceState({}, '', `${url.pathname}${url.hash}`);
-    }
-
+    // The token was already taken out of the address bar, by `lib/api.ts`.
     try {
       const { sessions } = await api.sessions();
       this.set({ sessions });

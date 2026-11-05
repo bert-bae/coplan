@@ -28,8 +28,8 @@ export function ConnectionBar() {
       <div className="conn-bar" role="alert">
         <span aria-hidden="true">⚠</span>
         <span>
-          Coplan restarted and no longer knows this page. Reopen it with <code>coplan open</code> (or <code>/coplan-open</code>) — what
-          you see here is out of date and cannot be saved.
+          This page does not hold Coplan&apos;s current key — it was opened without it, or Coplan restarted since. Open it with{' '}
+          <code>coplan open</code> (or <code>/coplan-open</code>): until then nothing here can be loaded or saved.
         </span>
       </div>
     );

@@ -53,10 +53,17 @@ function makeSession(plan: Plan = makePlan()): SessionState {
 }
 
 let posts: { route: string; body: Record<string, unknown> }[];
+/** Set to refuse the next save, as the daemon does an invalid one. */
+let refuseNext = false;
 
 async function boot(session: SessionState = makeSession()): Promise<void> {
+  refuseNext = false;
   ({ posts } = stubFetch((route) => {
     if (route.startsWith('/api/sessions')) return { sessions: [], version: 'test' };
+    if (route.endsWith('/plan/ops') && refuseNext) {
+      refuseNext = false;
+      return { __status: 400, error: 'refused' };
+    }
     if (route.endsWith('/plan/ops')) return { plan: store.getState().session?.plan, changes: [] };
     if (route.startsWith('/api/session/')) return { session };
     return { ok: true };
@@ -292,6 +299,27 @@ test('undo is a toolbar button too, disabled until there is something to undo', 
   await selectBox('API');
   await press('Tab');
   assert.equal(undo.disabled, false);
+});
+
+test('a refused save — even an undo — leaves no history that no longer matches what is saved', async () => {
+  await boot();
+  await selectBox('API');
+  await press('Tab');
+  await press('Escape');
+  await selectBox('Postgres');
+  await press('Tab');
+  await press('Escape');
+  await settle();
+  await act(async () => {
+    (document.activeElement as HTMLElement | null)?.blur();
+  });
+  refuseNext = true;
+  await press('z', { ctrlKey: true });
+  await settle();
+  const undo = screen.getByRole('button', { name: 'Undo' }) as HTMLButtonElement;
+  const redo = screen.getByRole('button', { name: 'Redo' }) as HTMLButtonElement;
+  assert.equal(undo.disabled, true, 'nothing left to undo to');
+  assert.equal(redo.disabled, true, 'and no refused graph to redo');
 });
 
 test('undo will not revert a change made elsewhere, and says so', async () => {

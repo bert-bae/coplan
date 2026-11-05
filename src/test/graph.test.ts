@@ -85,14 +85,6 @@ test('undo steps back through recorded states, redo forward, and a new edit drop
   assert.equal(h.canRedo, false, 'a new edit forgets what was undone');
 });
 
-test('a refused edit leaves no step behind to undo to', () => {
-  const h = new History<number>();
-  h.record(0);
-  h.record(1); // the edit that took 1 → 2 was refused: the state is 1 again
-  h.discardLast();
-  assert.equal(h.undo(1), 0, 'one undo goes back past the refused edit, not to where it already is');
-});
-
 test('history keeps only so many steps', () => {
   const h = new History<number>(3);
   for (let i = 0; i < 10; i++) h.record(i);

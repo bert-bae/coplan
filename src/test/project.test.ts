@@ -115,26 +115,34 @@ test('a !glob takes files back out of a hook', () => {
   assert.ok(!pathsMatch(['!*.md'], 'README.md'));
 });
 
-test('unknown keys and values out of range are errors, and the default is used', () => {
+test('unknown keys and values out of range are errors, each saying what is used instead', () => {
   const config = parseProjectConfig({
     hook: {},
     iric: { review: 'Subagent', parallel: 20, maxRounds: '4', rounds: 2 },
     branches: { base: 'main', perfix: 'x/', prefix: 3 },
-    hooks: { review: [{ run: 'npm test', timeout: 99999, paths: 'src/**', optional: 'yes', timout: 5 }] },
+    hooks: {
+      review: [
+        { run: 'npm test', timeout: 99999, paths: 'src/**', optional: 'yes', timout: 5 },
+        { run: 'npm run e2e', timeout: 0.3 },
+      ],
+    },
   });
   const said = config.errors.join('\n');
   assert.match(said, /"hook" is not a setting Coplan reads/);
-  assert.match(said, /"iric\.review" must be one of subagent, self, user, skip; "Subagent" is not/);
-  assert.match(said, /"iric\.parallel" must be a whole number from 1 to 8; 20 is not/);
-  assert.match(said, /"iric\.maxRounds" must be a whole number from 1 to 10; "4" is not/);
+  assert.match(said, /"iric\.review" must be one of subagent, self, user, skip; "Subagent" is not, so subagent is used/);
+  assert.match(said, /"iric\.parallel" must be a whole number from 1 to 8; 20 is not, so 8 is used/);
+  assert.match(said, /"iric\.maxRounds" must be a whole number from 1 to 10; "4" is not, so 3 is used/);
+  assert.deepEqual(config.settings, { review: 'subagent', parallel: 8, maxRounds: 3 }, 'what the errors say is what is used');
   assert.match(said, /iric\."rounds" is not a setting/);
   assert.match(said, /branches\."perfix" is not a setting/);
   assert.match(said, /"branches\.prefix" must be a branch name/);
-  assert.match(said, /"hooks\.review\[0\]\.timeout" must be seconds, from 1 to 3600/);
+  assert.match(said, /"hooks\.review\[0\]\.timeout" is at most 3600 seconds; 3600 is used/);
+  assert.equal(config.hooks.review[0]!.timeout, 3600, 'too long is cut to the longest, not the default');
+  assert.match(said, /"hooks\.review\[1\]\.timeout" must be seconds, from 1 to 3600; the default 600 is used/);
+  assert.equal(config.hooks.review[1]!.timeout, undefined, 'never a 0-second timeout');
   assert.match(said, /"hooks\.review\[0\]\.paths" must be a list of globs/);
   assert.match(said, /"hooks\.review\[0\]\.optional" must be true or false/);
   assert.match(said, /hooks\.review\[0\]\."timout" is not a setting/);
-  assert.equal(config.hooks.review[0]!.timeout, undefined, 'the default timeout, not a clamped one');
   assert.deepEqual(config.branches, { base: 'main' });
 });
 

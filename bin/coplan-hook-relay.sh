@@ -37,10 +37,23 @@ PAYLOAD=$(cat)
 [ -n "$PAYLOAD" ] || exit 0
 
 # Every tool call's output comes with PostToolUse, and the daemon only needs
-# to hear that one finished. A huge one (a big file read, a long build log)
-# is not worth shipping and parsing: the next event says the same.
+# to hear which session's tool finished — that is what clears a question or
+# a permission prompt off the board. A huge one (a big file read, a long
+# build log) is not worth shipping and parsing, so only the session goes.
+# The id is the payload's first one (agents put it first); the shortest
+# match up to it, then a plain string, so nothing in the output is taken.
 case "$EVENT" in
-  PostToolUse|postToolUse) [ "${#PAYLOAD}" -gt 262144 ] && exit 0 ;;
+  PostToolUse|postToolUse)
+    if [ "${#PAYLOAD}" -gt 262144 ]; then
+      ID_KEY=session_id
+      [ "$AGENT" = cursor ] && ID_KEY=conversation_id
+      REST=${PAYLOAD#*\"$ID_KEY\"}
+      [ "$REST" = "$PAYLOAD" ] && exit 0
+      ID=$(printf '%s' "$REST" | sed -n '1s/^[[:space:]]*:[[:space:]]*"\([A-Za-z0-9._:-]*\)".*/\1/p')
+      [ -n "$ID" ] || exit 0
+      PAYLOAD=$(printf '{"%s":"%s","hook_event_name":"%s"}' "$ID_KEY" "$ID" "$EVENT")
+    fi
+    ;;
 esac
 
 # An installed but unbuilt plugin (`dist/` is not in the repository) has no
@@ -66,10 +79,11 @@ HOME_DIR="${CC_HARNESS_HOME:-$HOME/.claude/cc-harness}"
 LOCK="$HOME_DIR/daemon.json"
 
 # Nothing the harness does waits on the user, so every event is near instant.
-# Starting the daemon (up to 5s) plus the call stays inside the hook's
-# 20-second budget.
+# A session's first call, or the first to a daemon just started, may wait on
+# it loading: those get longer. Starting the daemon (up to 5s) plus the call
+# stays inside the hook's 20-second budget.
 case "$EVENT" in
-  SessionStart|sessionStart|UserPromptSubmit|beforeSubmitPrompt) MAX_TIME=10 ;;
+  SessionStart|sessionStart) MAX_TIME=10 ;;
   *) MAX_TIME=4 ;;
 esac
 
@@ -118,14 +132,27 @@ start_daemon() {
   ENTRY="$PLUGIN_ROOT_DIR/dist/daemon/main.js"
   [ -f "$ENTRY" ] || return 1
   mkdir -p "$HOME_DIR" 2>/dev/null || true
+  # A daemon that would not start a moment ago (an old node, a crash on
+  # start) will not now: a message the user sends does not wait five seconds
+  # on it again. A new session still tries.
+  FAILED="$HOME_DIR/start-failed"
+  case "$EVENT" in
+    UserPromptSubmit|beforeSubmitPrompt)
+      [ -n "$(find "$FAILED" -mmin -5 2>/dev/null)" ] && return 1 ;;
+  esac
   (setsid node "$ENTRY" >/dev/null 2>&1 &) 2>/dev/null || (node "$ENTRY" >/dev/null 2>&1 &)
   # Waited on by the clock, not by count: where sleep takes no fractions,
   # fifty tries would be fifty seconds.
   DEADLINE=$(( $(date +%s) + 5 ))
   while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     sleep 0.1 2>/dev/null || sleep 1
-    if read_lock; then return 0; fi
+    if read_lock; then
+      rm -f "$FAILED" 2>/dev/null
+      MAX_TIME=10
+      return 0
+    fi
   done
+  : > "$FAILED" 2>/dev/null
   return 1
 }
 

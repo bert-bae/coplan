@@ -95,8 +95,9 @@ checks include a failure (not `optional`) cannot be marked done.
 A file that cannot be read, a stage that does not exist, a hook without a
 command, a key Coplan does not read (often a typo of one it does), a value
 out of range: each is reported — in the prompts, the review dialogs, `coplan
-check` and `coplan doctor` — rather than silently skipped or clamped. Where
-a value cannot be used, its default is.
+check` and `coplan doctor` — rather than silently skipped or clamped. Each
+says what is used instead: a number past its limit is cut to the limit, and
+anything else that cannot be used falls back to its default.
 
 ### `iric`
 

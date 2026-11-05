@@ -14,16 +14,17 @@ import type {
 /**
  * Client for the daemon.
  *
- * The auth token arrives once, in the link that opened the page. It is kept
- * for this tab (sessionStorage — a reload keeps it, nothing else sees it),
- * taken out of the address bar, and sent as a header. Never a cookie: a
- * cookie is not scoped to a port, so every other server on 127.0.0.1 would
- * be handed it.
+ * The auth token arrives in the link `coplan open` hands out. It is taken out
+ * of the address bar, kept in localStorage, and sent as a header. Kept, so
+ * the plain links the tools print — a new tab, a bookmark — work once the
+ * page has been opened with the key, as they did with a cookie. Not a
+ * cookie: a cookie is not scoped to a port, so every other server on
+ * 127.0.0.1 would be handed it, and a browser sends one by itself; storage
+ * belongs to this origin alone and is sent only by this code.
  */
 const TOKEN_KEY = 'coplan.token';
 
 function readToken(): string | null {
-  let token: string | null = null;
   try {
     const url = new URL(window.location.href);
     const fromLink = url.searchParams.get('token');
@@ -31,30 +32,20 @@ function readToken(): string | null {
       url.searchParams.delete('token');
       window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
       try {
-        window.sessionStorage.setItem(TOKEN_KEY, fromLink);
+        window.localStorage.setItem(TOKEN_KEY, fromLink);
       } catch {
         /* private mode: kept in memory for this page */
       }
       return fromLink;
     }
-    token = window.sessionStorage.getItem(TOKEN_KEY);
+    return window.localStorage.getItem(TOKEN_KEY);
   } catch {
     /* no storage: nothing kept */
+    return null;
   }
-  return token;
 }
 
-let token: string | null = typeof window === 'undefined' ? null : readToken();
-
-/** Taken from a fresh link: after a daemon restart with a new token, the
- *  page is reopened with `coplan open` and picks it up. */
-export function setToken(next: string | null): void {
-  token = next;
-}
-
-export function hasToken(): boolean {
-  return Boolean(token);
-}
+const token: string | null = typeof window === 'undefined' ? null : readToken();
 
 const authHeaders = (): Record<string, string> => (token ? { authorization: `Bearer ${token}` } : {});
 

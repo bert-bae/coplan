@@ -150,15 +150,17 @@ export function parseProjectConfig(raw: unknown, file: string | null = null): Pr
  *  clamps or drops is not the build the file asked for. */
 function checkSettings(rec: Record<string, unknown>, errors: string[]): void {
   unknownKeys(rec, IRIC_KEYS, 'iric.', errors);
+  // What the build will actually use, so each error can say so.
+  const used = cleanSettings(rec, DEFAULT_BUILD_SETTINGS);
   const review = rec['review'];
-  if (review !== undefined && !(REVIEW_MODES as readonly string[]).includes(review as string)) {
-    errors.push(`"iric.review" must be one of ${REVIEW_MODES.join(', ')}; ${JSON.stringify(review)} is not, so ${DEFAULT_BUILD_SETTINGS.review} is used.`);
+  if (review !== undefined && review !== used.review) {
+    errors.push(`"iric.review" must be one of ${REVIEW_MODES.join(', ')}; ${JSON.stringify(review)} is not, so ${used.review} is used.`);
   }
   const whole = (key: 'parallel' | 'maxRounds', hi: number) => {
     const v = rec[key];
     if (v === undefined) return;
     if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > hi) {
-      errors.push(`"iric.${key}" must be a whole number from 1 to ${hi}; ${JSON.stringify(v)} is not.`);
+      errors.push(`"iric.${key}" must be a whole number from 1 to ${hi}; ${JSON.stringify(v)} is not, so ${used[key]} is used.`);
     }
   };
   whole('parallel', MAX_PARALLEL);
@@ -181,8 +183,14 @@ function parseHooks(list: unknown, stage: string, errors: string[]): CheckHook[]
     for (let n = 2; out.some((h) => h.name === name); n++) name = `${name.replace(/ #\d+$/, '')} #${n}`;
     const hook: CheckHook = { name, run };
     const timeout = rec['timeout'];
-    if (typeof timeout === 'number' && Number.isFinite(timeout) && timeout > 0 && timeout <= MAX_HOOK_TIMEOUT) hook.timeout = Math.round(timeout);
-    else if (timeout !== undefined) errors.push(`"${where}.timeout" must be seconds, from 1 to ${MAX_HOOK_TIMEOUT}; the default ${DEFAULT_HOOK_TIMEOUT} is used.`);
+    if (typeof timeout === 'number' && Number.isFinite(timeout) && timeout >= 1) {
+      // Too long is still long: the most allowed, said — not the default,
+      // which would stop a long suite early.
+      hook.timeout = Math.min(MAX_HOOK_TIMEOUT, Math.round(timeout));
+      if (timeout > MAX_HOOK_TIMEOUT) errors.push(`"${where}.timeout" is at most ${MAX_HOOK_TIMEOUT} seconds; ${MAX_HOOK_TIMEOUT} is used.`);
+    } else if (timeout !== undefined) {
+      errors.push(`"${where}.timeout" must be seconds, from 1 to ${MAX_HOOK_TIMEOUT}; the default ${DEFAULT_HOOK_TIMEOUT} is used.`);
+    }
     const rawPaths = rec['paths'];
     const paths = Array.isArray(rawPaths) ? rawPaths.filter((p): p is string => typeof p === 'string' && p.trim() !== '') : [];
     if (rawPaths !== undefined && (!Array.isArray(rawPaths) || paths.length !== rawPaths.length)) {

@@ -318,11 +318,14 @@ function Editor({
           baseRev.current = savedRev;
           ownRevs.current.add(savedRev);
         } else {
-          // Refused — changed elsewhere, or invalid. The step that recorded it
-          // goes too (undoing to it would do nothing, and redo would send the
-          // refused graph again); then show what is really saved.
+          // Refused — changed elsewhere, or invalid — and with it any edit
+          // still pending. History no longer matches what is saved: the
+          // refused save may have been an undo, a redo or several edits at
+          // once, so no one step can be taken out. It goes, as it does when
+          // the diagram changes elsewhere; then show what is really saved.
           q.pending = null;
-          history.current.discardLast();
+          history.current.clear();
+          historyLost.current = true;
           bumpHistory();
           resyncFromServer();
         }
@@ -450,6 +453,10 @@ function Editor({
       window.clearTimeout(nudge.current);
       nudge.current = undefined;
       persistRef.current(nodesRef.current, edgesRef.current);
+      // A move that came back to where it started saves nothing, and then
+      // nothing else would say the canvas is done saving.
+      const q = queue.current;
+      if (!q.busy && !q.pending) store.set({ canvasSaving: false });
     },
     [],
   );

@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync, writeSync, readdirSync, existsSync, renameSync, rmSync, statSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync, readdirSync, existsSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { paths, ensureHome, sanitizeId } from '../shared/paths.ts';
 import {
@@ -137,6 +137,7 @@ export class SessionStore extends EventEmitter {
       this.persistNow(id);
     }
     const removed = this.sessions.delete(id);
+    this.persistFailed.delete(id);
     if (removed) this.broadcastSessionList();
     return removed;
   }
@@ -152,6 +153,7 @@ export class SessionStore extends EventEmitter {
       this.persistTimers.delete(id);
     }
     const removed = this.sessions.delete(id);
+    this.persistFailed.delete(id);
     discardDir(paths.sessionDir(id));
     if (removed) this.broadcastSessionList();
     return removed;
@@ -196,7 +198,9 @@ export class SessionStore extends EventEmitter {
       // must leave the old state, not an empty new one.
       const fd = openSync(tmp, 'w', 0o600);
       try {
-        writeSync(fd, JSON.stringify({ schemaVersion: STATE_SCHEMA, ...state }, null, 2));
+        // writeFileSync on a descriptor loops until every byte is written;
+        // a single writeSync may stop short.
+        writeFileSync(fd, JSON.stringify({ schemaVersion: STATE_SCHEMA, ...state }, null, 2));
         fsyncSync(fd);
       } finally {
         closeSync(fd);

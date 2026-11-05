@@ -224,6 +224,15 @@ function partialWrites(now: number): Candidate[] {
   return out;
 }
 
+/** Trim the log if it is past its limit; the bytes given back, or 0. Only
+ *  the log is looked at: cheap enough for the daemon to call every few
+ *  minutes, unlike a whole `cleanStorage` scan. */
+export function trimLog(): number {
+  const [log] = oversizedLog();
+  if (!log || !discard(log)) return 0;
+  return reclaimable(log);
+}
+
 /** The log is appended to for the daemon's whole life and never rotated. */
 function oversizedLog(): Candidate[] {
   const file = paths.logFile();
