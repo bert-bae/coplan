@@ -43,6 +43,25 @@ case "$EVENT" in
   PostToolUse|postToolUse) [ "${#PAYLOAD}" -gt 262144 ] && exit 0 ;;
 esac
 
+# An installed but unbuilt plugin (`dist/` is not in the repository) has no
+# daemon to start and no MCP server: everything would fail silently, and the
+# only symptom would be a "connection closed" on the tools. Say so once, at
+# the start of the session, in each agent's own format — and nothing else.
+if [ -n "$PLUGIN_ROOT_DIR" ] && [ ! -f "$PLUGIN_ROOT_DIR/dist/daemon/main.js" ]; then
+  case "$EVENT" in
+    SessionStart|sessionStart)
+      CONTEXT="Coplan's plugin is installed but not built, so its tools and hooks are off. If the user wants Coplan, tell them to build it: /coplan-setup in Claude Code or Cursor, or ask Codex to set up Coplan (pnpm install in $PLUGIN_ROOT_DIR)."
+      CONTEXT=$(printf '%s' "$CONTEXT" | sed 's/\\/\\\\/g; s/"/\\"/g')
+      case "$AGENT" in
+        claude) printf '{"systemMessage":"Coplan is not built - run /coplan-setup, then start a new session.","hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}' "$CONTEXT" ;;
+        codex) printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}' "$CONTEXT" ;;
+        cursor) printf '{"additional_context":"%s"}' "$CONTEXT" ;;
+      esac
+      ;;
+  esac
+  exit 0
+fi
+
 HOME_DIR="${CC_HARNESS_HOME:-$HOME/.claude/cc-harness}"
 LOCK="$HOME_DIR/daemon.json"
 

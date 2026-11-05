@@ -84,7 +84,9 @@ function relay(
 ): Promise<RelayResult> {
   return new Promise((resolve) => {
     const child = spawn(RELAY, [event, ...extra], {
-      env: { ...process.env, CC_HARNESS_HOME: home, ...env },
+      // This checkout, built, is the plugin: not whichever one the agent
+      // running the tests was started from.
+      env: { ...process.env, CC_HARNESS_HOME: home, CLAUDE_PLUGIN_ROOT: path.dirname(path.dirname(RELAY)), PLUGIN_ROOT: '', CURSOR_PLUGIN_ROOT: '', ...env },
     });
     let stdout = '';
     child.stdout.on('data', (c: Buffer) => (stdout += c.toString()));
@@ -228,4 +230,27 @@ test('an agent it does not know is sent as Claude Code, never passed through', a
   received = [];
   await relay('SessionEnd', '{"session_id":"s1"}', {}, ['x"; rm -rf /']);
   assert.equal(received[0]?.agent, 'claude');
+});
+
+test('an unbuilt plugin says so at the start of a session, in each agent’s format, and nothing else', async () => {
+  const unbuilt = mkdtempSync(path.join(tmpdir(), 'cc-harness-unbuilt-'));
+  try {
+    received = [];
+    const env = { CLAUDE_PLUGIN_ROOT: unbuilt };
+    const claude = JSON.parse((await relay('SessionStart', '{"session_id":"s1"}', env)).stdout);
+    assert.match(claude.systemMessage, /not built - run \/coplan-setup/);
+    assert.equal(claude.hookSpecificOutput.hookEventName, 'SessionStart');
+    assert.ok(claude.hookSpecificOutput.additionalContext.includes(unbuilt), 'names where to build it');
+    const codex = JSON.parse((await relay('SessionStart', '{"session_id":"t1"}', env, ['codex'])).stdout);
+    assert.match(codex.hookSpecificOutput.additionalContext, /not built/);
+    assert.equal(codex.systemMessage, undefined);
+    const cursor = JSON.parse((await relay('sessionStart', '{"conversation_id":"c1"}', env, ['cursor'])).stdout);
+    assert.match(cursor.additional_context, /not built/);
+    const later = await relay('UserPromptSubmit', '{"session_id":"s1"}', env);
+    assert.equal(later.stdout, '', 'once, not on every prompt');
+    assert.equal(later.code, 0);
+    assert.equal(received.length, 0, 'nothing reaches a daemon');
+  } finally {
+    rmSync(unbuilt, { recursive: true, force: true });
+  }
 });
