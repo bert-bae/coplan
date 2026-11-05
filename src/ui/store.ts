@@ -44,6 +44,9 @@ export interface UiState {
   restarting: boolean;
   /** Edits in flight, so controls can say they are saving. */
   saving: number;
+  /** The canvas has an edit queued, in flight or about to be (a keyboard
+   *  nudge): what is on screen is not yet saved. */
+  canvasSaving: boolean;
   toasts: Toast[];
   error: string | null;
 }
@@ -67,6 +70,7 @@ const initial: UiState = {
   storageBusy: false,
   restarting: false,
   saving: 0,
+  canvasSaving: false,
   toasts: [],
   error: null,
 };
@@ -125,6 +129,14 @@ class Store {
     // Selecting a session opens the stream; with none to select, open it for
     // the session list alone.
     if (!this.source) this.connect();
+    // Closing or reloading with an edit still on its way would lose it
+    // without a word: the browser asks first.
+    window.addEventListener('beforeunload', (e) => {
+      if (this.state.saving > 0 || this.state.canvasSaving) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    });
     window.addEventListener('hashchange', () => {
       const id = readHash();
       if (id && id !== this.state.sessionId) void this.selectSession(id, false);
@@ -620,6 +632,11 @@ class Store {
  * ------------------------------------------------------------------ */
 
 export function describeError(err: unknown): string {
+  // fetch's own wording ("Failed to fetch", "NetworkError…") says nothing to
+  // a reader: the daemon could not be reached, and the edit was not saved.
+  if (err instanceof TypeError && /fetch|network|load failed/i.test(err.message)) {
+    return "Coplan's daemon is not reachable, so this was not saved. Run `coplan status` in a terminal to see why.";
+  }
   if (err instanceof Error) return err.message;
   return String(err);
 }

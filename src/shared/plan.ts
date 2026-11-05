@@ -1663,11 +1663,16 @@ function removeItem(
         else delete other.dependsOn;
       }
       for (const d of plan.diagrams) {
+        let touched = false;
         for (const n of d.nodes) {
-          if (!n.taskIds) continue;
+          if (!n.taskIds?.some((id) => doomed.has(id))) continue;
           n.taskIds = n.taskIds.filter((id) => !doomed.has(id));
           if (n.taskIds.length === 0) delete n.taskIds;
+          touched = true;
         }
+        // Its boxes' links changed: a canvas holding the old ones must
+        // reload rather than save them back — which would be refused.
+        if (touched) bumpDiagram(d, Date.now());
       }
       const extra = doomed.size > 1 ? ` and its ${doomed.size - 1} subtask(s)` : '';
       summary = `removed task "${t.title}"${extra}`;

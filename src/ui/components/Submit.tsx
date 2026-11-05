@@ -287,6 +287,8 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
   const [shown, setShown] = useState<{ preview: PromptPreview; note: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // An edit still on its way (the canvas, a field) is not in the prompt yet.
+  const unsaved = useStore((s) => s.saving > 0 || s.canvasSaving);
   const version = plan?.version ?? 0;
   // The prompt also moves when the agent reads the plan (its "since you
   // last read" part), which is not a new version — and after a refused
@@ -361,7 +363,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>
               Cancel
             </button>
-            <button type="button" className="btn btn-primary" disabled={!current || busy} onClick={() => void confirm()}>
+            <button type="button" className="btn btn-primary" disabled={!current || busy || unsaved} title={unsaved ? 'Saving your last edit first…' : undefined} onClick={() => void confirm()}>
               {busy ? 'Confirming…' : agent.promptContext ? 'Confirm design' : 'Copy and confirm design'}
             </button>
           </div>
@@ -394,6 +396,8 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
   const [shown, setShown] = useState<Shown | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // An edit still on its way (the canvas, a field) is not in the prompt yet.
+  const unsaved = useStore((s) => s.saving > 0 || s.canvasSaving);
   const version = plan?.version ?? 0;
   // As for the design: the agent reading the plan moves the prompt without
   // a new version, and a refused submit fetches it again.
@@ -500,7 +504,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={submitting}>
               Cancel
             </button>
-            <button type="button" className="btn btn-primary" disabled={!current || submitting} onClick={() => void submit()}>
+            <button type="button" className="btn btn-primary" disabled={!current || submitting || unsaved} title={unsaved ? 'Saving your last edit first…' : undefined} onClick={() => void submit()}>
               {submitting ? 'Submitting…' : target === 'session' && agent.promptContext ? 'Submit and lock' : 'Copy, submit and lock'}
             </button>
           </div>

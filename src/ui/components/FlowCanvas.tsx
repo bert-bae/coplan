@@ -228,7 +228,13 @@ function Editor({
     baseRev.current = source.rev;
     loaded.current = signatureOf(source);
     current.current = { nodes: ns, edges: es, direction: source.direction };
-    currentKey.current = JSON.stringify(patchOf(ns, es, source.direction));
+    const key = JSON.stringify(patchOf(ns, es, source.direction));
+    // The boxes and arrows are what undo steps through. A new revision that
+    // left them as they were (a title or caption edited beside the canvas)
+    // reverts nothing anyone did, so the history stands.
+    const sameGraph = key === currentKey.current;
+    currentKey.current = key;
+    if (sameGraph) ownRevs.current.add(source.rev);
     if (!ownRevs.current.has(source.rev)) {
       if (history.current.canUndo || history.current.canRedo) historyLost.current = true;
       history.current.clear();
@@ -287,10 +293,19 @@ function Editor({
     if (p && now) load(now, p);
   }, [diagram.id, load]);
 
+  /** Tell the page whether an edit here is not yet saved: Confirm and Submit
+   *  wait for it, and leaving the page warns. */
+  const syncSaving = () => {
+    const q = queue.current;
+    const busy = q.busy || Boolean(q.pending) || nudge.current !== undefined;
+    if (store.getState().canvasSaving !== busy) store.set({ canvasSaving: busy });
+  };
+
   const flush = useCallback(async () => {
     const q = queue.current;
     if (q.busy) return;
     q.busy = true;
+    syncSaving();
     try {
       while (q.pending) {
         const patch = q.pending;
@@ -302,13 +317,18 @@ function Editor({
           baseRev.current = savedRev;
           ownRevs.current.add(savedRev);
         } else {
-          // Refused — changed elsewhere, or invalid. Show what is really saved.
+          // Refused — changed elsewhere, or invalid. The step that recorded it
+          // goes too (undoing to it would do nothing, and redo would send the
+          // refused graph again); then show what is really saved.
           q.pending = null;
+          history.current.discardLast();
+          bumpHistory();
           resyncFromServer();
         }
       }
     } finally {
       q.busy = false;
+      syncSaving();
     }
     // Something newer than our last save may have arrived while we were busy
     // and been held back; take it now.
@@ -362,12 +382,18 @@ function Editor({
   const restore = useCallback(
     (snap: Snapshot) => {
       const selected = new Set(nodesRef.current.filter((n) => n.selected).map((n) => n.id));
-      const ns = snap.nodes.map((n) => ({
-        ...n,
-        selected: selected.has(n.id),
-        // Progress moves on whatever is undone; show it as it is now.
-        data: { ...n.data, ...progressOf(planRef.current, n.data.taskIds) },
-      }));
+      // A task removed since the snapshot cannot be linked back: the save
+      // would be refused, and every undo after it with it.
+      const tasks = new Set(planRef.current.tasks.map((t) => t.id));
+      const ns = snap.nodes.map((n) => {
+        const taskIds = n.data.taskIds?.filter((id) => tasks.has(id));
+        return {
+          ...n,
+          selected: selected.has(n.id),
+          // Progress moves on whatever is undone; show it as it is now.
+          data: { ...n.data, taskIds, ...progressOf(planRef.current, taskIds) },
+        };
+      });
       const es = snap.edges.map((e) => ({ ...e, selected: false }));
       setNodes(ns);
       setEdges(es);
@@ -408,7 +434,9 @@ function Editor({
       nudge.current = window.setTimeout(() => {
         nudge.current = undefined;
         persist(nodesRef.current, edgesRef.current);
+        syncSaving();
       }, 300);
+      syncSaving();
     },
     [persist],
   );
