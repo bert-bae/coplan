@@ -97,8 +97,9 @@ export async function runDoctor(): Promise<number> {
       const hooks = JSON.parse(readFileSync(path.join(PLUGIN_ROOT, file), 'utf8')) as { hooks?: Record<string, unknown[]> };
       const events = Object.keys(hooks.hooks ?? {});
       const missing = required.filter((e) => !events.includes(e));
-      // A hook file that forgets to name its agent registers its sessions as Claude's.
-      const unnamed = agent ? events.filter((e) => !JSON.stringify(hooks.hooks?.[e]).includes(` ${agent}"`)) : [];
+      // A hook file that forgets to name its agent registers its sessions as
+      // Claude's — and one that names another agent, as that agent's.
+      const unnamed = events.filter((e) => relayCalls(hooks.hooks?.[e]).some((call) => call.agent !== (agent ?? 'claude')));
       record(
         `${file} registers the required events`,
         missing.length === 0 && unnamed.length === 0,
@@ -409,6 +410,30 @@ function client(lock: DaemonLock): Client {
       await call(`/api/session/${encodeURIComponent(id)}`, { method: 'DELETE' });
     },
   };
+}
+
+/**
+ * Every relay call in one event's hook entries, with the agent it names.
+ * Claude Code passes the relay its arguments as `args`; Codex and Cursor
+ * put them in the command string. Either way the agent is the argument
+ * after the event, and Claude Code when there is none.
+ */
+export function relayCalls(entries: unknown): { event: string; agent: string }[] {
+  const out: { event: string; agent: string }[] = [];
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) return node.forEach(visit);
+    if (!node || typeof node !== 'object') return;
+    const rec = node as { command?: unknown; args?: unknown; hooks?: unknown };
+    if (typeof rec.command === 'string' && rec.command.includes('coplan-hook-relay.sh')) {
+      const words = Array.isArray(rec.args)
+        ? rec.args.map(String)
+        : rec.command.slice(rec.command.indexOf('coplan-hook-relay.sh') + 'coplan-hook-relay.sh'.length).replace(/^"/, '').trim().split(/\s+/);
+      out.push({ event: words[0] ?? '', agent: words[1] ?? 'claude' });
+    }
+    visit(rec.hooks);
+  };
+  visit(entries);
+  return out;
 }
 
 function summarize(checks: Check[]): number {

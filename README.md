@@ -474,9 +474,9 @@ differs is what each agent lets a plugin see and do:
 | Start a plan | `/coplan <task>` | `$coplan <task>`, or ask | `/coplan <task>` |
 | The build prompt reaches the agent | with your next message ("go") | with your next message ("go") | you paste it — submitting copies it — or say "build the plan" and it reads it with `harness_plan_read` |
 | "You changed the plan" note on your next message | yes | yes | where Cursor passes it on |
-| A question is noticed | `AskUserQuestion`, permission prompts, idle prompts, a turn ending on a question | `request_user_input` (Plan mode), permission requests, a turn ending on a question | a turn ending on a question |
+| A question is noticed | `AskUserQuestion`, permission prompts, idle prompts, a turn ending on a question | `request_user_input` (Plan mode), permission requests, a turn ending on a question; Codex has no hook for idle prompts | a turn ending on a question: Cursor's hooks see neither `AskQuestion` nor permission prompts |
 | *Answer in …* opens the session | cloud and Remote Control sessions | the Codex app (`codex://threads/…`) | no link: Cursor has none for a chat |
-| Slash commands | `/coplan-open`, `/coplan-doctor`, `/coplan-restart` | none; ask, and the skill runs `coplan` | `/coplan-open`, `/coplan-doctor`, `/coplan-restart` |
+| Slash commands | `/coplan-setup`, `/coplan-open`, `/coplan-doctor`, `/coplan-restart`, `/coplan-init` | none; ask, and the skill runs `coplan` | `/coplan-setup`, `/coplan-open`, `/coplan-doctor`, `/coplan-restart`, `/coplan-init` |
 
 How each one is wired:
 

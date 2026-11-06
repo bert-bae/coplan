@@ -18,7 +18,7 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" SessionEnd codex",
-            "timeout": 3
+            "timeout": 5
           }
         ]
       }
@@ -37,7 +37,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "request_user_input",
+        "matcher": "request_user_input|request_user_input_async",
         "hooks": [
           {
             "type": "command",
