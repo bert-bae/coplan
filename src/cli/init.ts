@@ -106,11 +106,19 @@ export function baseBranch(root: string): string | undefined {
   }
 }
 
-const SETTINGS = `  // How a build runs by default; the submit dialog can change it per plan.
+const SETTINGS = `  // How a Managed build runs. Setting it makes builds here Managed by default
+  // (implement → review → refine, held to the checks); Submit can change it.
   //   review:    subagent | self | user | skip
   //   parallel:  how many ready tasks are built at once
   //   maxRounds: review rounds before Claude stops and asks you
   "iric": ${JSON.stringify(DEFAULT_BUILD_SETTINGS).replace(/,"/g, ', "').replace(/":/g, '": ')},
+`;
+
+/** Without `iric`, the file still opts the repository in to Managed builds,
+ *  as `iric` does — with the user's own settings for them. */
+const MANAGED = `  // Builds here are Managed by default: implement → review → refine, held
+  // to the checks above. "tracked" leaves how to the agent; Submit can change it.
+  "mode": "managed",
 `;
 
 /**
@@ -138,7 +146,7 @@ export function renderConfig(hooks: Detected, base: string | undefined, opts: { 
     "review": ${stage('review')},
     "final": ${stage('final')}
   },
-${opts.settings === false ? '' : SETTINGS}  "branches": ${JSON.stringify({ ...(base ? { base } : {}), prefix: 'coplan/' }).replace(/,"/g, ', "').replace(/":/g, '": ')}
+${opts.settings === false ? MANAGED : SETTINGS}  "branches": ${JSON.stringify({ ...(base ? { base } : {}), prefix: 'coplan/' }).replace(/,"/g, ', "').replace(/":/g, '": ')}
 }
 `;
 }

@@ -11,10 +11,38 @@ import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
 import { MAX_NOTE, PlanError, cleanChecks, cleanNote, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
-import { PROMPT_BUDGET, buildPrompt, configRows, designPrompt, planBlocks, promptHash, renderGaps, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
+import {
+  PROMPT_BUDGET,
+  buildPrompt,
+  configRows,
+  designPrompt,
+  exportBlocks,
+  planBlocks,
+  promptHash,
+  renderGaps,
+  renderPlan,
+  renderTaskList,
+  stageWords,
+  unreadNotice,
+} from './render.ts';
 import { briefBlocks, renderBrief, renderNext } from './brief.ts';
 import { blocksText, joinBlocks } from '../shared/blocks.ts';
-import { cleanSettings, dependents, effectiveReview, hasSubtasks, readyTasks, roundVerdict, stackStatus, waitingOn } from '../shared/build.ts';
+import {
+  MODE_LABEL,
+  cleanSettings,
+  dependents,
+  effectiveReview,
+  hasSubtasks,
+  isManaged,
+  modeFor,
+  planMode,
+  readyTasks,
+  roundVerdict,
+  stackStatus,
+  targetOf,
+  validMode,
+  waitingOn,
+} from '../shared/build.ts';
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
 import { ConfigCache, configStamp, type HarnessConfig } from '../shared/config.ts';
@@ -510,6 +538,7 @@ function buildRouter(deps: Deps): Router {
   const projectSummary = (project: ProjectConfig, point: 'design' | 'build') => ({
     file: project.file,
     config: configRows(project, point),
+    mode: project.mode,
     defaults: project.settings,
     checks: Object.fromEntries(HOOK_STAGES.map((stage) => [stage, project.hooks[stage].map((h) => h.name)])),
     errors: [...project.errors, ...project.warnings],
@@ -630,16 +659,26 @@ function buildRouter(deps: Deps): Router {
   router.post('/api/session/:id/plan/prompt', async (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
-    const body = await readJson<{ note?: unknown; target?: unknown; settings?: unknown }>(ctx.req);
+    const body = await readJson<{ note?: unknown; target?: unknown; settings?: unknown; mode?: unknown }>(ctx.req);
     if (!session.plan) {
       json(ctx.res, 404, { error: 'no plan yet' });
       return;
     }
-    const target = validTarget(body.target) ?? 'session';
     const note = cleanNote(body.note);
     const project = projectFor(session);
+    // The mode asked for; else the target's; else the repository's default.
+    const chosen = validMode(body.mode);
+    const mode = modeFor(validTarget(body.target), chosen, project.mode);
     const settings = settingsFrom(body.settings, project);
-    const { prompt, trimmed, blocks } = buildPrompt(session.plan, { target, agent: session.agent, settings, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
+    const { prompt, trimmed, blocks } = buildPrompt(session.plan, {
+      target: targetOf(mode),
+      agent: session.agent,
+      settings,
+      project,
+      ...(chosen ? { mode } : {}),
+      ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
+      ...(note ? { note } : {}),
+    });
     json(ctx.res, 200, {
       prompt,
       hash: promptHash(prompt),
@@ -648,9 +687,26 @@ function buildRouter(deps: Deps): Router {
       version: session.plan.version,
       budget: PROMPT_BUDGET,
       maxNote: MAX_NOTE,
+      mode,
       settings,
       project: projectSummary(project, 'build'),
     });
+  });
+
+  /**
+   * The whole plan as Markdown, with no build instructions — for the user
+   * to take into another tool. In any phase, signing nothing off: a look,
+   * like the read-back, that changes nothing.
+   */
+  router.get('/api/session/:id/plan/export', (ctx) => {
+    const session = sessionOr404(ctx);
+    if (!session) return;
+    if (!session.plan) {
+      json(ctx.res, 404, { error: 'no plan yet' });
+      return;
+    }
+    const blocks = exportBlocks(session.plan, { project: projectFor(session) });
+    json(ctx.res, 200, { text: blocksText(blocks), blocks, version: session.plan.version });
   });
 
   /** The prompt the agent would be given if the design were confirmed now. */
@@ -723,22 +779,28 @@ function buildRouter(deps: Deps): Router {
   router.post('/api/session/:id/plan/submit', async (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
-    const body = await readJson<{ note?: unknown; target?: unknown; expect?: unknown; settings?: unknown; hash?: unknown }>(ctx.req);
-    const target = validTarget(body.target);
-    if (!target) throw new HttpError(400, 'Say who builds it: "session" or "elsewhere".');
+    const body = await readJson<{ note?: unknown; target?: unknown; mode?: unknown; expect?: unknown; settings?: unknown; hash?: unknown }>(ctx.req);
+    const asked = validTarget(body.target);
+    const chosen = validMode(body.mode);
+    if ((body.target !== undefined && !asked) || (!asked && !chosen)) {
+      throw new HttpError(400, 'Say how it is built: mode "tracked", "managed" or "export" (or target "session" or "elsewhere").');
+    }
     const note = cleanNote(body.note);
     const project = projectFor(session);
+    const mode = modeFor(asked, chosen, project.mode);
+    const target = targetOf(mode);
     try {
       const plan = store.submit(session.sessionId, {
         target,
         project,
         settings: settingsFrom(body.settings, project),
+        ...(chosen ? { mode } : {}),
         ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
         ...(note ? { note } : {}),
         ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
         ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
       });
-      log(`plan submitted for ${session.sessionId} (${target})`);
+      log(`plan submitted for ${session.sessionId} (${mode})`);
       json(ctx.res, 200, { plan: forBrowser(plan) });
     } catch (err) {
       if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
@@ -961,9 +1023,13 @@ function buildRouter(deps: Deps): Router {
 
   /**
    * `harness_task_update`: a status, a step of the iric cycle, the checks
-   * run — answered with what it means for the build. Two moves are refused,
-   * because the board would then say something untrue: starting a task that
-   * still waits on another, and finishing one whose checks last failed.
+   * run — answered with what it means for the build. Starting or finishing
+   * a task that still waits on another is refused in every mode: the board
+   * would say something untrue, and the agent can change the dependency.
+   * A Managed build is also held to its cycle — review before done, a
+   * passing verdict, green checks, the parallel and round limits, the
+   * user's say over dropping signed-off work. Any other mode gets each of
+   * those as a note in the reply instead (#62).
    */
   const updateTask = (session: SessionState, body: Record<string, unknown>): string => {
     const before = session.plan;
@@ -1000,15 +1066,25 @@ function buildRouter(deps: Deps): Router {
     if (status === 'dropped' && !note?.trim()) {
       throw new PlanError(`Dropping "${task.title}" needs a \`note\`: why it is no longer needed (and who said so).`);
     }
-    // Work the user signed off is theirs to drop: the agent asks.
-    if (status === 'dropped' && before.submission && !task.addedInBuild && !approved) {
-      throw new PlanError(
-        `"${task.title}" is part of the plan the user submitted, so dropping it is theirs to decide: ask them with ` +
-          `${agentInfo(session.agent).askWith}. If they agree, call again with user_approved: true and their words in the note.`,
-      );
-    }
     const project = projectFor(session);
     const settings = before.submission?.settings ?? project.settings;
+    // The gates below hold a Managed build to its cycle. In any other mode
+    // each is a note in the reply instead: what was skipped, and why it
+    // matters, for the agent to weigh — nothing is refused.
+    const managed = isManaged(planMode(before, project.mode));
+    const skipped: string[] = [];
+    const gate = (refusal: string, note: string) => {
+      if (managed) throw new PlanError(refusal);
+      skipped.push(note);
+    };
+    // Work the user signed off is theirs to drop: the agent asks.
+    if (status === 'dropped' && before.submission && !task.addedInBuild && !approved) {
+      gate(
+        `"${task.title}" is part of the plan the user submitted, so dropping it is theirs to decide: ask them with ` +
+          `${agentInfo(session.agent).askWith}. If they agree, call again with user_approved: true and their words in the note.`,
+        'it was part of the plan the user submitted: tell them you dropped it, and why',
+      );
+    }
 
     // A parent's progress is its subtasks': a status set on it would say
     // something the board never shows.
@@ -1034,28 +1110,31 @@ function buildRouter(deps: Deps): Router {
     if (starting && !approved) {
       const busy = before.tasks.filter((t) => t.status === 'in_progress' && t.id !== task.id && !hasSubtasks(before, t.id));
       if (busy.length >= settings.parallel) {
-        throw new PlanError(
+        gate(
           `"${task.title}" cannot start yet: ${busy.length} task(s) are in progress (${busy.map((t) => t.id).join(', ')}), ` +
             `and the user allowed ${settings.parallel} at once. Finish one first.`,
+          `${busy.length} other task${busy.length === 1 ? ' is' : 's are'} in progress too (${busy.map((t) => t.id).join(', ')}): keep them off each other's files`,
         );
       }
     }
 
     // The round limit is the user's: past it, stop and ask them.
     if (stage === 'review' && task.stage !== 'review' && (task.round ?? 0) >= settings.maxRounds && !approved) {
-      throw new PlanError(
+      gate(
         `"${task.title}" has had ${task.round} review round(s), the most the user allowed (${settings.maxRounds}). Stop: mark it ` +
           'blocked with a note on what still fails, and ask the user — another round, accept it as it is, or take it over. ' +
           'If they say to go on, call again with user_approved: true and their answer in the note.',
+        `this is review round ${(task.round ?? 0) + 1}, past the ${settings.maxRounds} a Managed build allows: decide whether another round is worth it, and say why in the task's note`,
       );
     }
 
     if (status === 'done' && !approved) {
       // Done means the cycle ran: it went to review at least once, …
       if (!task.round) {
-        throw new PlanError(
+        gate(
           `"${task.title}" has not been reviewed: take it through its cycle first — stage "review" (every review mode, ` +
             '"skip" included, reports one), then done once it passes.',
+          'it was never reviewed (no review round was reported)',
         );
       }
       // … and every check that gates it passed when it was last run.
@@ -1066,17 +1145,17 @@ function buildRouter(deps: Deps): Router {
         .filter((h) => !h.optional && !latest.some((c) => c.name === h.name))
         .map((h) => h.name);
       if (failing.length || missing.length) {
-        throw new PlanError(
+        const why = [
+          failing.length ? `its last checks failed (${failing.map((c) => `${c.name}${c.note ? `: ${c.note}` : ''}`).join('; ')})` : '',
+          missing.length ? `the review checks ${missing.join(', ')} were never reported` : '',
+        ].filter(Boolean);
+        gate(
           `"${task.title}" is not done: ` +
-            [
-              failing.length ? `its last checks failed (${failing.map((c) => `${c.name}${c.note ? `: ${c.note}` : ''}`).join('; ')})` : '',
-              missing.length ? `the review checks ${missing.join(', ')} were never reported` : '',
-            ]
-              .filter(Boolean)
-              .join(', and ') +
+            why.join(', and ') +
             '. Run them, refine until they pass, and report them with `checks`. If a failure has nothing to do with this ' +
             'task, mark it blocked with a note saying so and ask the user; if they accept it as it is, call again with ' +
             'user_approved: true and their answer in the note.',
+          why.join('; '),
         );
       }
       // … and its last review round passed — by whoever the user said reviews it.
@@ -1087,14 +1166,18 @@ function buildRouter(deps: Deps): Router {
         // this path (not user_approved) it is not.
         const last = verdict ? (mode === 'user' ? roundVerdict(task, mode) : { verdict }) : roundVerdict(task, mode);
         const passed = last?.verdict === 'pass';
-        if (!passed) {
-          throw new PlanError(
+        // Without a round there is no verdict to miss: that note is above.
+        if (!passed && task.round) {
+          gate(
             mode === 'user'
               ? `"${task.title}" is the user's to review, and they have not passed it: show them the change and ask with ` +
                   `${agentInfo(session.agent).askWith}. They can approve it on the board in Coplan; if they approve it in chat, call ` +
                   'again with verdict "pass", user_approved: true and their words in the note.'
               : `"${task.title}" has no passing verdict for review round ${task.round}: report the review's outcome — ` +
                   'verdict "pass" (with this call is fine), or "changes" and refine.',
+            mode === 'user'
+              ? "it is the user's to review, and they have not passed it: show them the change"
+              : `no passing verdict for review round ${task.round}`,
           );
         }
       }
@@ -1121,14 +1204,19 @@ function buildRouter(deps: Deps): Router {
     const out: string[] = [];
     const state = now.status === 'in_progress' && now.stage ? stageWords(now) : now.status.replace('_', ' ');
     out.push(`[cc-harness] "${now.title}" is ${state}.${changes.length ? '' : ' (It already was.)'}`);
+    if (skipped.length) out.push(`Noted, not refused (this build is ${MODE_LABEL[planMode(plan, project.mode)]}): ${skipped.join('; ')}.`);
     if (starting && !plan.submission) {
       out.push('The plan has not been submitted: build only if the user told you to start without submitting.');
     }
     if (checks?.length) {
       const failed = checks.filter((c) => !c.ok);
-      out.push(failed.length ? `Checks: ${failed.length} failed (${failed.map((c) => c.name).join(', ')}) — refine before review passes.` : `Checks: all ${checks.length} passed.`);
+      out.push(
+        failed.length
+          ? `Checks: ${failed.length} failed (${failed.map((c) => c.name).join(', ')})${managed ? ' — refine before review passes' : ''}.`
+          : `Checks: all ${checks.length} passed.`,
+      );
     }
-    if (now.stage === 'review' && stage === 'review') {
+    if (managed && now.stage === 'review' && stage === 'review') {
       if ((now.round ?? 0) >= settings.maxRounds) {
         out.push(`This is review round ${now.round} of the ${settings.maxRounds} the user allowed: if it does not pass, stop and ask the user.`);
       }

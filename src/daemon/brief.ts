@@ -12,10 +12,11 @@
  * It is written so Claude can hand it to a subagent as it is: the subagent
  * learns how its piece fits the whole, and where its job ends.
  */
-import type { BuildSettings, Plan, Task, Thread } from '../shared/types.ts';
+import type { BuildSettings, ExecutionMode, Plan, Task, Thread } from '../shared/types.ts';
 import { countTasks, describeTarget, findPart, outline, planPhase } from '../shared/plan.ts';
 import {
   DEFAULT_BUILD_SETTINGS,
+  MODE_LABEL,
   REVIEW_WORDS,
   ancestorsOf,
   branchPlan,
@@ -29,21 +30,25 @@ import {
   effectiveReview,
   hasSubtasks,
   inheritedDeps,
+  isManaged,
   leafTasks,
   leavesUnder,
+  planMode,
   readinessOf,
   sharedFiles,
   waitingOn,
 } from '../shared/build.ts';
 import { HOOK_STAGES, configSource, emptyProjectConfig, hasHooks, hookCommand, hooksFor, type ProjectConfig } from '../shared/project.ts';
-import { KIND_NOUN, edgePhrase, hang, indent, nestHeadings } from '../shared/architecture.ts';
+import { hang, indent, nestHeadings } from '../shared/architecture.ts';
 import { agentInfo, type AgentKind } from '../shared/agents.ts';
 import {
   checkWords,
   checksBlocks,
   finalWords,
   instructionBlocks,
+  partBlocks,
   pullRequestWords,
+  relatedTasks,
   renderBuildOrder,
   reviewerWords,
   stageWords,
@@ -55,6 +60,8 @@ export interface BriefOptions {
   /** The agent building it: how it is told to ask the user things. */
   agent?: AgentKind;
   settings?: BuildSettings;
+  /** The mode before the plan is submitted; a submitted plan's own wins. */
+  mode?: ExecutionMode;
   project?: ProjectConfig;
   /** The coplan CLI on this machine, for `coplan check`. */
   bin?: string;
@@ -62,6 +69,11 @@ export interface BriefOptions {
 
 function settingsOf(plan: Plan, opts: BriefOptions): BuildSettings {
   return plan.submission?.settings ?? opts.settings ?? opts.project?.settings ?? DEFAULT_BUILD_SETTINGS;
+}
+
+/** Managed or not: whether the brief and the next steps carry the cycle. */
+function managedFor(plan: Plan, opts: BriefOptions): boolean {
+  return isManaged(planMode(plan, opts.mode ?? opts.project?.mode ?? 'tracked'));
 }
 
 const line = (t: Task) => `${t.id} ${t.title}`;
@@ -107,9 +119,12 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
     return out.join('\n');
   }
 
+  const managed = managedFor(plan, opts);
   out.push(`# Next in "${plan.title}"`);
   out.push(
-    `_tasks ${counts.done}/${counts.total} done · up to ${settings.parallel} at once · review: ${settings.review} · at most ${settings.maxRounds} review round${settings.maxRounds === 1 ? '' : 's'}_`,
+    managed
+      ? `_tasks ${counts.done}/${counts.total} done · up to ${settings.parallel} at once · review: ${settings.review} · at most ${settings.maxRounds} review round${settings.maxRounds === 1 ? '' : 's'}_`
+      : `_tasks ${counts.done}/${counts.total} done · ${MODE_LABEL.tracked}: how each task is built and checked is yours to decide_`,
   );
   if (phase === 'planning' || phase === 'tasking') {
     out.push('', `> The plan is not submitted yet (${phase === 'planning' ? 'the design is still open' : 'the task list is being shaped'}). This is how the build would start; do not build until the user submits it.`);
@@ -136,6 +151,7 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
     for (const t of active) {
       const state = [t.stage ? stageWords(t) : '', t.checks?.length ? `checks ${checkWords(t)}` : ''].filter(Boolean).join(' · ');
       out.push(`- ${line(t)}${state ? ` — ${state}` : ''}${t.note ? ` — ${t.note}` : ''}`);
+      if (!managed) continue;
       // The verdict on its current round, if one is in: what to do next.
       const mode = effectiveReview(plan, t, settings.review);
       const verdict = roundVerdict(t, mode);
@@ -163,8 +179,11 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
         if (files.length && ready.includes(busy[j]!)) clashes.push(`${busy[i]!.id} and ${busy[j]!.id} both touch ${files.slice(0, 3).join(', ')}`);
       }
     }
-    const advice =
-      room === 0
+    const advice = !managed
+      ? ready.length === 1
+        ? '_Start it now._'
+        : '_None of these waits on another: start them in whatever order, and as many at once, as suits you._'
+      : room === 0
         ? `_${active.length} task${active.length === 1 ? ' is' : 's are'} already in progress, the most this build runs at once (${settings.parallel}). Start the next when one is done._`
         : settings.parallel === 1
           ? '_Build one at a time: start the first, and come back here when it is done._'
@@ -214,8 +233,11 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
 
   out.push(
     '',
-    'Start a task with harness_task_update {task_id, status: "in_progress", stage: "implement"}, then take it through ' +
-      'the iric cycle. Starting a task that still waits on another is refused.',
+    managed
+      ? 'Start a task with harness_task_update {task_id, status: "in_progress", stage: "implement"}, then take it through ' +
+          'the iric cycle. Starting a task that still waits on another is refused.'
+      : 'Start a task with harness_task_update {task_id, status: "in_progress"}, and mark it "done" with a one-line note ' +
+          'once it is finished. Starting a task that still waits on another is refused.',
   );
   return out.join('\n');
 }
@@ -305,7 +327,7 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
     // In build order — what waits on another comes after it — not outline order.
     const rank = new Map(buildSteps(plan).flatMap((step, i) => step.map((t) => [t.id, i] as const)));
     const leaves = leavesUnder(plan, task.id).map((t, i) => ({ t, i })).sort((a, b) => (rank.get(a.t.id) ?? 0) - (rank.get(b.t.id) ?? 0) || a.i - b.i);
-    b.gap().add('subtasks', TEMPLATE, 'Its subtasks — build them in this order, each through its own cycle:');
+    b.gap().add('subtasks', TEMPLATE, `Its subtasks — build them in this order${managedFor(plan, opts) ? ', each through its own cycle' : ''}:`);
     for (const { t: leaf } of leaves) b.add(`subtask:${leaf.id}`, field('task', leaf.id), `- [${leaf.status === 'done' ? 'x' : ' '}] ${line(leaf)}`);
   }
   const files = task.files?.length ? task.files : leavesUnder(plan, task.id).flatMap((t) => t.files ?? []);
@@ -371,48 +393,51 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
     b.add('branch:where', derived("each task's branch"), 'No branch is named for it: work on the current branch.');
   }
 
-  // The cycle.
-  const review = effectiveReview(plan, task, settings.review);
-  const reviewFrom = [task, ...ancestorsOf(plan, task)].find((t) => t.review);
-  b.gap().add('cycle', TEMPLATE, '## The cycle: implement → review → refine');
-  b.add('cycle:mode', TEMPLATE, 'Review: ')
-    .inline('cycle:mode:review', reviewFrom ? field('task', reviewFrom.id) : settingSource('review'), `${REVIEW_WORDS[review]}${review !== settings.review ? ' (set on this task)' : ''}`)
-    .inline('cycle:mode:rounds', settingSource('maxRounds'), `. At most ${settings.maxRounds} review round${settings.maxRounds === 1 ? '' : 's'} before stopping to ask the user.`);
-  const stage = (key: 'implement' | 'review', name: string, what: string, hooks: ReturnType<typeof hooksFor>, model = '') => {
-    b.gap().add(`cycle:${key}`, TEMPLATE, `**${name}.** ${what}`).inline(`cycle:${key}:model`, configSource(project, 'review.model'), model);
-    if (hooks.length) b.add(`cycle:${key}:checks`, configSource(project, `hooks.${key}`), hooks.map((h) => `- ${h.name}: \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`));
-  };
-  const filesArg = files.length ? ` --files ${[...new Set(files)].join(',')}` : '';
-  stage('implement', 'Implement', 'Make the change, then run the implement checks and fix what they find:', hooksFor(project, 'implement', files));
-  stage(
-    'review',
-    'Review',
-    review === 'user'
-      ? `Run the review checks, then show the user the change and ask them, with ${agentInfo(opts.agent).askWith}, whether it is right:`
-      : review === 'skip'
-        ? 'No reviewer: the review checks are the review. Run them:'
-        : review === 'self'
-          ? 'Read your own diff against the objective and the acceptance criteria, as a reviewer would, and run the review checks:'
-          : 'A fresh subagent that did not write the change reads the diff against this brief and runs the review checks.',
-    hooksFor(project, 'review', files),
-    review === 'subagent' ? reviewerWords(project) : '',
-  );
-  // What a reviewer looks for here, whoever reviews.
-  if (review !== 'skip') b.push(...instructionBlocks(project, 'review', '### What the review checks here'));
-  b.gap().add('cycle:refine', TEMPLATE, '**Refine.** Fix what the review found, run the implement checks again, and go back to review.');
-  if (opts.bin && HOOK_STAGES.some((s) => hooksFor(project, s, files).length)) {
-    b.gap().add('cycle:run', TEMPLATE, `Run a stage at once: \`"${opts.bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report.`);
-  } else if (!hasHooks(project)) {
-    // What to do without checks, under the cycle rather than a heading of its own.
-    for (const block of checksBlocks(project)) b.gap().add(block.id, block.source, block.text.split('\n').slice(1));
+  if (!managedFor(plan, opts)) b.push(...trackedChecks(plan, task, project, files, opts.bin));
+  else {
+    // The cycle.
+    const review = effectiveReview(plan, task, settings.review);
+    const reviewFrom = [task, ...ancestorsOf(plan, task)].find((t) => t.review);
+    b.gap().add('cycle', TEMPLATE, '## The cycle: implement → review → refine');
+    b.add('cycle:mode', TEMPLATE, 'Review: ')
+      .inline('cycle:mode:review', reviewFrom ? field('task', reviewFrom.id) : settingSource('review'), `${REVIEW_WORDS[review]}${review !== settings.review ? ' (set on this task)' : ''}`)
+      .inline('cycle:mode:rounds', settingSource('maxRounds'), `. At most ${settings.maxRounds} review round${settings.maxRounds === 1 ? '' : 's'} before stopping to ask the user.`);
+    const stage = (key: 'implement' | 'review', name: string, what: string, hooks: ReturnType<typeof hooksFor>, model = '') => {
+      b.gap().add(`cycle:${key}`, TEMPLATE, `**${name}.** ${what}`).inline(`cycle:${key}:model`, configSource(project, 'review.model'), model);
+      if (hooks.length) b.add(`cycle:${key}:checks`, configSource(project, `hooks.${key}`), hooks.map((h) => `- ${h.name}: \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`));
+    };
+    const filesArg = files.length ? ` --files ${[...new Set(files)].join(',')}` : '';
+    stage('implement', 'Implement', 'Make the change, then run the implement checks and fix what they find:', hooksFor(project, 'implement', files));
+    stage(
+      'review',
+      'Review',
+      review === 'user'
+        ? `Run the review checks, then show the user the change and ask them, with ${agentInfo(opts.agent).askWith}, whether it is right:`
+        : review === 'skip'
+          ? 'No reviewer: the review checks are the review. Run them:'
+          : review === 'self'
+            ? 'Read your own diff against the objective and the acceptance criteria, as a reviewer would, and run the review checks:'
+            : 'A fresh subagent that did not write the change reads the diff against this brief and runs the review checks.',
+      hooksFor(project, 'review', files),
+      review === 'subagent' ? reviewerWords(project) : '',
+    );
+    // What a reviewer looks for here, whoever reviews.
+    if (review !== 'skip') b.push(...instructionBlocks(project, 'review', '### What the review checks here'));
+    b.gap().add('cycle:refine', TEMPLATE, '**Refine.** Fix what the review found, run the implement checks again, and go back to review.');
+    if (opts.bin && HOOK_STAGES.some((s) => hooksFor(project, s, files).length)) {
+      b.gap().add('cycle:run', TEMPLATE, `Run a stage at once: \`"${opts.bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report.`);
+    } else if (!hasHooks(project)) {
+      // What to do without checks, under the cycle rather than a heading of its own.
+      for (const block of checksBlocks(project)) b.gap().add(block.id, block.source, block.text.split('\n').slice(1));
+    }
+    b.gap().add(
+      'report',
+      TEMPLATE,
+      `Report each step with harness_task_update {task_id: "${task.id}", stage: "implement" | "review" | "refine", checks: [{name, ok, note}]}, ` +
+        'and status "done" with a one-line note once the review passed. A subagent without the Coplan tools reports ' +
+        'back to the agent that gave it this brief instead: what it changed, the checks and how they came out, and anything left.',
+    );
   }
-  b.gap().add(
-    'report',
-    TEMPLATE,
-    `Report each step with harness_task_update {task_id: "${task.id}", stage: "implement" | "review" | "refine", checks: [{name, ok, note}]}, ` +
-      'and status "done" with a one-line note once the review passed. A subagent without the Coplan tools reports ' +
-      'back to the agent that gave it this brief instead: what it changed, the checks and how they came out, and anything left.',
-  );
   if (task.stage || task.round || task.checks?.length) {
     b.gap().add(
       'now',
@@ -452,6 +477,35 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
   return b.blocks;
 }
 
+/**
+ * A Tracked task's checks and how to report it: the repository's checks
+ * for its files, and its status as it goes — no cycle, no review mode,
+ * no round limit. How it is built and checked is the agent's call.
+ */
+function trackedChecks(plan: Plan, task: Task, project: ProjectConfig, files: string[], bin?: string): Block[] {
+  const b = new BlockList();
+  const stages = (['implement', 'review'] as const).filter((st) => hooksFor(project, st, files).length);
+  if (stages.length) {
+    b.gap().add('checks', TEMPLATE, ["## Checks", "The repository's checks for this task's files:"]);
+    for (const st of stages) {
+      b.add(`checks:${st}`, configSource(project, `hooks.${st}`), `- ${st}: ${hooksFor(project, st, files).map((h) => `${h.name} \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`).join('; ')}`);
+    }
+    const filesArg = files.length ? ` --files ${[...new Set(files)].join(',')}` : '';
+    if (bin) b.gap().add('checks:run', TEMPLATE, `Run a stage at once: \`"${bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report.`);
+  } else if (!hasHooks(project)) {
+    b.gap().push(...checksBlocks(project));
+  }
+  b.push(...instructionBlocks(project, 'review', '### What a review checks here'));
+  b.gap().add(
+    'report',
+    TEMPLATE,
+    `Report it with harness_task_update {task_id: "${task.id}", status: "in_progress" | "done" | "blocked", checks: [{name, ok, note}], note}: ` +
+      '"done" with a one-line note of what you did, "blocked" with what it waits on. A subagent without the Coplan tools ' +
+      'reports back to the agent that gave it this brief instead: what it changed, the checks and how they came out, and anything left.',
+  );
+  return b.blocks;
+}
+
 /** How much of the plan's sections a brief quotes: each, and in all. */
 const SECTION_MAX = 1_200;
 const SECTIONS_BUDGET = 3_000;
@@ -475,12 +529,6 @@ function clipProse(text: string, max: number): { text: string; cut: boolean } {
   return { text: `${kept.join('\n').trimEnd()}\n…`, cut: true };
 }
 
-/** The task, its parents and the subtasks under it: the work a brief is
- *  about, for the boxes it builds and the comments that bear on it. */
-function relatedTasks(plan: Plan, task: Task): Set<string> {
-  return new Set([task.id, ...ancestorsOf(plan, task).map((t) => t.id), ...leavesUnder(plan, task.id).map((t) => t.id)]);
-}
-
 /** The diagrams and boxes (`diagramId/nodeId`) a task builds — through
  *  itself, a parent or a subtask. */
 function designOf(plan: Plan, task: Task): { diagrams: Set<string>; nodes: Set<string> } {
@@ -495,26 +543,4 @@ function designOf(plan: Plan, task: Task): { diagrams: Set<string>; nodes: Set<s
     }
   }
   return { diagrams, nodes };
-}
-
-/** The boxes a task builds — through itself, a parent or a subtask — with
- *  what each one is, what was decided and what it connects to: a block each. */
-function partBlocks(plan: Plan, task: Task): Block[] {
-  const related = relatedTasks(plan, task);
-  const b = new BlockList();
-  for (const d of plan.diagrams) {
-    const label = (id: string) => d.nodes.find((n) => n.id === id)?.label ?? id;
-    for (const n of d.nodes) {
-      if (!n.taskIds?.some((id) => related.has(id))) continue;
-      const lines = [`- **${n.label}** \`${n.id}\` in "${d.title}" — ${KIND_NOUN[n.kind]}${n.detail ? `: ${n.detail}` : ''}`];
-      if (n.description?.trim()) lines.push(...indent(n.description, 2));
-      if (n.notes?.trim()) lines.push('  Decisions:', ...indent(n.notes, 4));
-      const edges = d.edges.filter((e) => e.source === n.id || e.target === n.id);
-      if (edges.length) lines.push(`  Connections: ${edges.map((e) => edgePhrase(e, label)).join('; ')}`);
-      const others = (n.taskIds ?? []).filter((id) => !related.has(id));
-      if (others.length) lines.push(`  Also built by: ${others.map((id) => plan.tasks.find((t) => t.id === id)).filter(Boolean).map((t) => line(t!)).join('; ')}`);
-      b.add(`node:${d.id}/${n.id}`, field('node', `${d.id}/${n.id}`), lines);
-    }
-  }
-  return b.blocks;
 }

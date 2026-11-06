@@ -2,7 +2,7 @@ import { useSyncExternalStore } from 'react';
 import { api, eventsUrl, Unauthorized } from './lib/api.ts';
 import { isLocked } from '../shared/plan.ts';
 import { agentInfo, type AgentInfo } from '../shared/agents.ts';
-import type { BuildSettings, BuildTarget, CleanupGroupId, Plan, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport, Target } from '../shared/types.ts';
+import type { BuildSettings, BuildTarget, CleanupGroupId, ExecutionMode, Plan, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport, Target } from '../shared/types.ts';
 
 export type Tab = 'diagrams' | 'tasks' | 'overview';
 /** The architecture comes first: it is where most of the plan is decided. */
@@ -63,6 +63,8 @@ export interface UiState {
   proposalPreview: string | null;
   /** The prompt viewer, when open. */
   viewer: ViewerState | null;
+  /** The Export plan dialog is open. */
+  exportOpen: boolean;
   /** Show the agent's bookkeeping in the viewer. Off until asked for. */
   showBookkeeping: boolean;
   toasts: Toast[];
@@ -91,6 +93,7 @@ const initial: UiState = {
   canvasSaving: false,
   proposalPreview: null,
   viewer: null,
+  exportOpen: false,
   showBookkeeping: false,
   toasts: [],
   error: null,
@@ -160,7 +163,7 @@ class Store {
 
   async selectSession(id: string, updateHash = true): Promise<void> {
     if (updateHash) window.location.hash = `#/session/${id}`;
-    this.set({ sessionId: id, session: null, diagramId: null, error: null });
+    this.set({ sessionId: id, session: null, diagramId: null, error: null, exportOpen: false });
     this.connect();
     try {
       const { session } = await api.session(id);
@@ -352,7 +355,7 @@ class Store {
    * on the board. Resolves false when the daemon refused — most often
    * because the plan moved on since the preview was made.
    */
-  async submitPlan(input: { target: BuildTarget; note: string; expect: number; hash?: string; settings?: BuildSettings }): Promise<boolean> {
+  async submitPlan(input: { target: BuildTarget; mode?: ExecutionMode; note: string; expect: number; hash?: string; settings?: BuildSettings }): Promise<boolean> {
     const id = this.state.sessionId;
     if (!id) return false;
     try {
@@ -481,6 +484,14 @@ class Store {
 
   closeViewer(): void {
     this.set({ viewer: null });
+  }
+
+  openExport(): void {
+    this.set({ exportOpen: true, viewer: null });
+  }
+
+  closeExport(): void {
+    this.set({ exportOpen: false });
   }
 
   /* ---------------------------------------------------------------- *

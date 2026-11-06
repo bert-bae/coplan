@@ -2,6 +2,7 @@ import type {
   BuildSettings,
   BuildTarget,
   Change,
+  ExecutionMode,
   CleanupGroupId,
   CleanupOutcome,
   Plan,
@@ -111,17 +112,22 @@ export const api = {
     request<{ text: string; blocks: Block[]; task: { id: string; title: string }; version: number }>(`/api/session/${id}/task/${encodeURIComponent(taskId)}/brief`),
 
   /** The prompt Claude would be given if the plan were submitted now.
-   *  Without `settings`, the repository's defaults are used — and returned. */
-  promptPreview: (id: string, target: BuildTarget, note: string, settings?: BuildSettings) =>
+   *  Without a mode or `settings`, the repository's defaults are used — and
+   *  returned. Export mode returns the plan as Markdown. */
+  promptPreview: (id: string, target: BuildTarget | null, note: string, settings?: BuildSettings, mode?: ExecutionMode) =>
     request<PromptPreview>(`/api/session/${id}/plan/prompt`, {
       method: 'POST',
-      body: JSON.stringify({ target, note, ...(settings ? { settings } : {}) }),
+      body: JSON.stringify({ ...(target ? { target } : {}), ...(mode ? { mode } : {}), note, ...(settings ? { settings } : {}) }),
     }),
 
   /** Lock the plan and hand it over to be built. `expect` is the version
    *  the preview was made from; a plan that moved on since is refused. */
-  submitPlan: (id: string, body: { target: BuildTarget; note: string; expect: number; hash?: string; settings?: BuildSettings }) =>
+  submitPlan: (id: string, body: { target: BuildTarget; mode?: ExecutionMode; note: string; expect: number; hash?: string; settings?: BuildSettings }) =>
     request<{ plan: Plan }>(`/api/session/${id}/plan/submit`, { method: 'POST', body: JSON.stringify(body) }),
+
+  /** The whole plan as Markdown, with no build instructions, as blocks.
+   *  Any phase; it signs nothing off and changes nothing. */
+  exportPlan: (id: string) => request<{ text: string; blocks: Block[]; version: number }>(`/api/session/${id}/plan/export`),
 
   reopenPlan: (id: string) => request<{ plan: Plan }>(`/api/session/${id}/plan/reopen`, { method: 'POST', body: '{}' }),
 
@@ -165,6 +171,8 @@ export interface PromptPreview {
   /** The longest prompt a hook hands Claude. */
   budget: number;
   maxNote: number;
+  /** The mode the prompt was built for (the build prompt only). */
+  mode?: ExecutionMode;
   /** The settings the prompt was built with (the build prompt only). */
   settings?: BuildSettings;
   /** What the repository's `.coplan/config.json` says. */
@@ -174,6 +182,8 @@ export interface PromptPreview {
 export interface ProjectSummary {
   /** Where the config was read from; null when there is none. */
   file: string | null;
+  /** The mode Submit starts from: the repository's default. */
+  mode?: ExecutionMode;
   defaults: BuildSettings;
   /** Hook names per stage. */
   checks: Record<'implement' | 'review' | 'final', string[]>;

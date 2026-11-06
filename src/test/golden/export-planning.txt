@@ -1,0 +1,151 @@
+# Add a read-through cache
+
+## Summary
+Put a read-through cache in front of the orders database.
+
+### Why
+Reads are slow at peak.
+
+## Sections
+
+### [context] Context
+p95 read latency is 900ms at peak.
+
+##### Numbers
+- 40k reads/min
+
+### [risks] Risks
+Stale reads after a write.
+A cold cache after deploys.
+
+### [empty] Open questions
+_(empty)_
+
+## Architecture
+
+### [d1] Components
+
+The read path.
+
+Entry points: Orders API. Data stores: Redis, Postgres.
+
+**Parts**
+- **Orders API** `api` — service
+  Serves orders.
+  Built by: [~] wire Wire into API
+- **Redis** `cache` — data store: managed
+  Hot orders.
+  Decisions:
+    Read-through, 10m TTL.
+  Built by: [x] client Cache client
+- **Postgres** `db` — data store
+  Source of truth.
+
+**Connections**
+- Orders API → Redis: get `api → cache`
+- Redis → Postgres: miss (dashed: optional, async or future) `cache → db`
+
+**Notes on the diagram**
+- Keep it simple (`n1`)
+  No write-behind.
+
+### [d2] Invalidation
+
+Queues: Event bus.
+
+**Parts**
+- **Event bus** `bus` — queue
+  Built by: [ ] inval Invalidation
+
+_Not connected to anything yet: Event bus._
+
+## Tasks (1/4 done)
+- [ ] storage Storage layer
+  - [x] client Cache client · branch `cache/client`
+    files: src/cache.ts
+  - [ ] inval Invalidation · after client · branch `cache/client`
+    files: src/cache.ts, src/events.ts
+- [~] wire Wire into API · after storage · branch `cache/api` — halfway
+- [ ] docs Document the cache in the README
+
+## Build order
+_Each step needs only the steps before it; the tasks within a step can be built side by side._
+1. [x] client Cache client; [ ] docs Document the cache in the README
+2. [ ] inval Invalidation
+3. [~] wire Wire into API
+
+## Branches
+_Each branch is one pull request. A branch whose tasks build on another branch is cut from it — a stacked pull request._
+- `cache/client` from `main` — client, inval
+- `cache/api` from `cache/client` (stacked) — wire
+- no branch named — docs
+
+## Task briefs
+_Each task on its own: what it is for, what it builds, what it comes after and where it lands._
+
+### client Cache client
+
+Wrap ioredis.
+
+Acceptance: get/set with TTL.
+
+From "Storage layer", which this is part of:
+  Everything below the API.
+
+Files: src/cache.ts
+
+It builds:
+- **Redis** `cache` in "Components" — data store: managed
+  Hot orders.
+  Decisions:
+    Read-through, 10m TTL.
+  Connections: Orders API → Redis: get; Redis → Postgres: miss (dashed: optional, async or future)
+
+Waiting on it: inval Invalidation; wire Wire into API.
+
+Lands on `cache/client`, cut from `main`.
+
+### inval Invalidation
+
+From "Storage layer", which this is part of:
+  Everything below the API.
+
+Files: src/cache.ts, src/events.ts
+
+It builds:
+- **Event bus** `bus` in "Invalidation" — queue
+
+It comes after:
+- [x] client Cache client
+
+Waiting on it: wire Wire into API.
+
+Lands on `cache/client`, cut from `main`.
+
+### wire Wire into API
+
+Use the client in the orders handler.
+
+It builds:
+- **Orders API** `api` in "Components" — service
+  Serves orders.
+  Connections: Orders API → Redis: get
+
+It comes after:
+- [ ] storage Storage layer
+
+Lands on `cache/api`, cut from `cache/client`, which it builds on.
+
+### docs Document the cache in the README
+
+## Open comments
+- [c1] on box "Redis" (d1/cache) in diagram "Components" — planner: Which Redis version?
+  ↳ user: Redis 7.
+- [c2] on the plan — planner: Proposal p1: Split the docs task
+
+    Two audiences.
+- [c3] on task "Wire into API" — user: Keep the old path behind a flag.
+    Remove it next release.
+- [c4] on the plan — user: Looks good overall.
+
+_Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_

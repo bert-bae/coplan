@@ -31,7 +31,11 @@ export type BlockSource =
   /** What the user wrote for the agent in the sign-off dialog. */
   | { kind: 'note' }
   /** How the build runs, as the user chose it in the Submit dialog. */
-  | { kind: 'setting'; key: 'review' | 'parallel' | 'maxRounds' };
+  | { kind: 'setting'; key: SettingKey };
+
+/** What the Submit dialog chooses: the execution mode, and a Managed
+ *  build's review, parallel and round settings. */
+export type SettingKey = 'mode' | 'review' | 'parallel' | 'maxRounds';
 
 export type BlockSourceKind = BlockSource['kind'];
 
@@ -170,7 +174,7 @@ export const NOTE: BlockSource = { kind: 'note' };
 
 export const field = (kind: Target['kind'], id = ''): BlockSource => ({ kind: 'field', target: { kind, id } });
 export const derived = (...from: string[]): BlockSource => ({ kind: 'derived', from });
-export const setting = (key: 'review' | 'parallel' | 'maxRounds'): BlockSource => ({ kind: 'setting', key });
+export const setting = (key: SettingKey): BlockSource => ({ kind: 'setting', key });
 
 /* ------------------------------------------------------------------ *
  * What was left out

@@ -12,8 +12,11 @@ import {
   effectiveBranch,
   effectiveReview,
   isComplete,
+  modeFor,
+  planMode,
   readinessOf,
   readyTasks,
+  targetOf,
   waitingOn,
 } from '../shared/build.ts';
 import { renderBrief, renderNext } from '../daemon/brief.ts';
@@ -410,14 +413,14 @@ test('the read-back marks what is ready and what waits, once the design is confi
 test('what is next says what to start, how many at once, and what the rest wait on', () => {
   let plan = tasked();
   plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', stage: 'implement' }], 'claude', undefined, { tracking: true }).plan;
-  const next = renderNext(plan, { project: PROJECT, settings: { review: 'subagent', parallel: 3, maxRounds: 3 } });
+  const next = renderNext(plan, { project: PROJECT, mode: 'managed', settings: { review: 'subagent', parallel: 3, maxRounds: 3 } });
   assert.match(next, /## In progress \(1\)\n- client Cache client — implementing/);
   assert.match(next, /## Ready to start \(2\)\n- config Config · branch `cache\/storage`[^\n]*\n- docs Docs · review: skip/);
   assert.match(next, /Start up to 2 now, each by its own subagent/);
   assert.match(next, /- invalidate Invalidation — waits on client/);
   assert.match(next, /- `cache\/api` from `cache\/storage` \(stacked\)/);
 
-  const one = renderNext(plan, { settings: { review: 'self', parallel: 1, maxRounds: 3 } });
+  const one = renderNext(plan, { mode: 'managed', settings: { review: 'self', parallel: 1, maxRounds: 3 } });
   assert.match(one, /already in progress, the most this build runs at once \(1\)/);
 });
 
@@ -432,7 +435,7 @@ test('when every task is done, next says how to finish', () => {
 
 test("a task's brief is self-contained: objective, where it fits, scope, branch and checks", () => {
   const plan = tasked();
-  const brief = renderBrief(plan, plan.tasks.find((t) => t.id === 'invalidate')!, { project: PROJECT, bin: '/x/coplan' });
+  const brief = renderBrief(plan, plan.tasks.find((t) => t.id === 'invalidate')!, { project: PROJECT, mode: 'managed', bin: '/x/coplan' });
   assert.match(brief, /^# Task invalidate: Invalidation/);
   assert.match(brief, /under "Storage"/);
   assert.match(brief, /## The plan, in short\nA read-through cache/);
@@ -446,13 +449,13 @@ test("a task's brief is self-contained: objective, where it fits, scope, branch 
   assert.match(brief, /- tests: `npm test`/);
   assert.match(brief, /"\/x\/coplan" check implement --files src\/cache\.ts/);
 
-  const wire = renderBrief(plan, plan.tasks.find((t) => t.id === 'wire')!, { project: PROJECT });
+  const wire = renderBrief(plan, plan.tasks.find((t) => t.id === 'wire')!, { project: PROJECT, mode: 'managed' });
   assert.match(wire, /\*\*API\*\* `api` in "Components" — service\n  Serves orders\.\n  Connections: API → Redis: get\/set; API → Postgres: SQL/);
   assert.match(wire, /Cut it from `cache\/storage` \(a stacked branch/);
   assert.match(wire, /Review: the user, before it is marked done \(set on this task\)/);
   assert.match(wire, /show the user the change and ask them, with AskUserQuestion/);
 
-  const parent = renderBrief(plan, plan.tasks.find((t) => t.id === 'storage')!, {});
+  const parent = renderBrief(plan, plan.tasks.find((t) => t.id === 'storage')!, { mode: 'managed' });
   assert.match(parent, /Its subtasks — build them in this order/);
   assert.match(parent, /\*\*Redis\*\* `cache`[\s\S]*Decisions:\n    TTL 10m\./, 'a parent builds what its subtasks build');
   assert.match(parent, /No checks are configured/);
@@ -597,13 +600,11 @@ test('the build is told how pull requests are opened, and each is due with the t
   next = renderNext(plan, { project: custom });
   assert.doesNotMatch(next, /Ready for a pull request/);
 
-  // Elsewhere there is no harness_task_next: the template comes with the
-  // prompt, and a dotted file name does not cut the sentence short.
+  // Elsewhere is an export (#62): the plan alone, with no instructions on
+  // how pull requests are opened and no template to fill in.
   const dotted = { ...custom, pullRequests: { ...custom.pullRequests, templateFile: '.github/pull_request_template.md' } };
   const outside = buildPrompt(submitted, { target: 'elsewhere', project: dotted }).prompt;
-  assert.doesNotMatch(outside, /harness_task_next|ask them first\.github/);
-  assert.match(outside, /as soon as a branch's tasks are done\.\n/);
-  assert.match(outside, /Fill in the pull request template \(\.github\/pull_request_template\.md\)[\s\S]*## Summary/);
+  assert.doesNotMatch(outside, /harness_|pull request template|gt submit|## Summary\n~~~~/);
 
   // A stacked branch is not due before the one it stacks on has its pull request.
   const stacked = done(markDelivered(submitted, 1_400), 'wire');
@@ -613,4 +614,51 @@ test('the build is told how pull requests are opened, and each is due with the t
   const never = parseProjectConfig({ pullRequests: { open: 'never' } });
   assert.match(buildPrompt(submitted, { target: 'session', project: never }).prompt, /Do not open pull requests: push the branches/);
   assert.doesNotMatch(renderNext(done(plan, 'wire', 'docs'), { project: never }), /gh pr create/);
+});
+
+/* ------------------------------------------------------------------ *
+ * Execution modes (#62)
+ * ------------------------------------------------------------------ */
+
+test('a plan is built in the mode it was submitted with; one submitted before modes was Managed here, Export elsewhere', () => {
+  const plan = tasked();
+  assert.equal(planMode(plan, 'tracked'), 'tracked', "before it is submitted: the repository's default");
+  assert.equal(planMode(submitPlan(plan, { target: 'session', prompt: 'p' }, 1_300), 'tracked'), 'managed');
+  assert.equal(planMode(submitPlan(plan, { target: 'elsewhere', prompt: 'p' }, 1_300), 'managed'), 'export');
+  assert.equal(planMode(submitPlan(plan, { target: 'session', mode: 'tracked', prompt: 'p' }, 1_300), 'managed'), 'tracked');
+  // A target and a mode say the same thing two ways: Export is elsewhere.
+  assert.equal(modeFor('elsewhere', 'managed', 'tracked'), 'export');
+  assert.equal(modeFor('session', 'export', 'managed'), 'managed', 'this session is never an export');
+  assert.equal(modeFor('session', undefined, 'export'), 'tracked');
+  assert.equal(modeFor(undefined, undefined, 'export'), 'export');
+  assert.equal(targetOf('export'), 'elsewhere');
+  assert.equal(targetOf('tracked'), 'session');
+});
+
+test('a Tracked build prompt has no implement → review → refine: no review mode, no rounds, no parallel limit, no subagents', () => {
+  const { prompt } = buildPrompt(tasked(), { target: 'session', project: PROJECT });
+  assert.equal(PROJECT.mode, 'tracked', 'no iric, no mode: Tracked');
+  assert.match(prompt, /The build is Tracked: how you build and check each task is yours to decide/);
+  assert.match(prompt, /harness_task_update as you go: status "in_progress" when you start it, "done"/);
+  assert.match(prompt, /- review: tests `npm test`/, "the repository's checks are still there to run");
+  for (const banned of [/implement → review → refine/, /iric/, /Review: /, /review rounds?/, /at once/, /subagent/, /worktree/]) assert.doesNotMatch(prompt, banned);
+  // Managed, the same plan and config: today's prompt.
+  const managed = buildPrompt(tasked(), { target: 'session', project: PROJECT, mode: 'managed' }).prompt;
+  assert.match(managed, /take each task through the iric skill — implement → review → refine/);
+});
+
+test("in a Tracked build, what is next and a task's brief carry no cycle, no limit and no subagent", () => {
+  let plan = tasked();
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'in_progress' }], 'claude', undefined, { tracking: true }).plan;
+  const next = renderNext(plan, { project: PROJECT });
+  assert.match(next, /Tracked: how each task is built and checked is yours to decide/);
+  assert.match(next, /## Ready to start \(2\)/);
+  assert.match(next, /start them in whatever order, and as many at once, as suits you/);
+  assert.match(next, /harness_task_update \{task_id, status: "in_progress"\}, and mark it "done"/);
+  for (const banned of [/iric/, /review round/, /subagent/, /worktree/, /up to \d+ at once/]) assert.doesNotMatch(next, banned);
+
+  const brief = renderBrief(plan, plan.tasks.find((t) => t.id === 'wire')!, { project: PROJECT });
+  assert.match(brief, /## Checks\nThe repository's checks for this task's files:\n- implement: typecheck `npm run typecheck`/);
+  assert.match(brief, /status: "in_progress" \| "done" \| "blocked"/);
+  for (const banned of [/## The cycle/, /Review: /, /review round/, /subagent that did not write/, /each through its own cycle/]) assert.doesNotMatch(brief, banned);
 });

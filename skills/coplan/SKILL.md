@@ -175,9 +175,12 @@ build runs the right checks instead of guessing.
 ## 4. Build when the user submits the plan
 
 A `[cc-harness] Build the plan …` prompt means the plan is final and
-locked. Run the build with the **`coplan-build`** skill, taking each task
-through the **`iric`** skill (implement → review → refine). While it is
-locked only tracking applies: `harness_task_update`, `upsert_task` for
+locked. Run the build with the **`coplan-build`** skill. The prompt says how
+much of the harness the user chose: in a **Managed** build take each task
+through the **`iric`** skill (implement → review → refine); in a
+**Tracked** build how you build and check each task is yours to decide, and
+Coplan refuses nothing — its replies note what it would have checked. While
+it is locked only tracking applies: `harness_task_update`, `upsert_task` for
 work you discover, `reply`/`resolve` on comments, and the final `report`.
 If the design has to change, stop and ask in chat — the user can reopen it.
 

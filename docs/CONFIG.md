@@ -58,6 +58,7 @@ in Claude) writes a starting point from the repository's scripts, and so does
 
 ```jsonc
 {
+  "mode": "managed",
   "hooks": {
     "implement": ["pnpm typecheck", { "name": "ruff", "run": "ruff check .", "paths": ["*.py"] }],
     "review": [{ "name": "tests", "run": "pnpm test", "timeout": 900 }],
@@ -67,6 +68,29 @@ in Claude) writes a starting point from the repository's scripts, and so does
   "branches": { "base": "main", "prefix": "coplan/" }
 }
 ```
+
+### `mode`
+
+How much of the build harness a plan takes by default. *Submit* starts from
+it, and you can choose another mode for each plan there:
+
+| Mode | What the agent is told | The board | What the daemon holds back |
+| --- | --- | --- | --- |
+| `export` | Nothing: you copy the plan out as Markdown, to build anywhere. Submitting locks a snapshot | Not followed | Nothing |
+| `tracked` | Build it your own way, and report each task | Follows each task | Nothing: what Managed would refuse comes back as a note in the reply |
+| `managed` | Take each task through implement → review → refine, with the checks below | Follows each task and its cycle | Done before a task went to review, without a passing verdict, or while a check fails or was never reported; more tasks at once than `iric.parallel`; a review round past `iric.maxRounds`; dropping work you signed off. Each needs your go-ahead |
+
+Without `mode`, a repository whose `.coplan/config.json` sets [`iric`](#iric)
+is Managed, as setting it has always meant; any other repository is
+Tracked. `mode` wins where both are set. Your own
+[`coplan.json`](#your-own-defaults-coplanjson) can set `mode` for every
+repository, and a repository's file overrides it; your own `iric` only sets
+how a Managed build runs, not the mode.
+
+**Export plan**, in the page's header, copies the whole plan as Markdown in
+any phase without submitting anything: the summary, sections, diagrams, the
+tasks with their briefs, the build order and the open comments — and no
+build instructions, review modes, round limits or Coplan tool names.
 
 ### `hooks`
 
@@ -117,8 +141,9 @@ said, and the checks run.
 
 ### `iric`
 
-The build's defaults, which the submit dialog starts from and the user can
-change for each plan:
+How a Managed build runs, which the submit dialog starts from and the user
+can change for each plan. Setting it in the repository's file makes builds
+there Managed by default (see [`mode`](#mode)):
 
 | Key | Default | Meaning |
 | --- | --- | --- |

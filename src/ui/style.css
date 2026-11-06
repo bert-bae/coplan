@@ -1878,6 +1878,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .submit-target.is-active { border-color: var(--accent-border); background: var(--accent-subtle); }
 .submit-target input { margin-top: 3px; }
 .submit-target-hint { display: block; margin-top: 2px; font-size: var(--fs-sm); color: var(--text-secondary); }
+.submit-target-default { font-size: var(--fs-sm); color: var(--text-tertiary); }
 .submit-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); }
 /* What the prompt takes from config: read-only, grouped by the file that
    sets it, each with its key. */

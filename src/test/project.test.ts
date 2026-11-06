@@ -7,7 +7,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HOOK_KEYS, INSTRUCTION_POINTS, PROJECT_KEYS, PR_OPEN, PR_TOOLS, expandBraces, globMatch, hookCommand, hooksFor, loadProjectConfig, nameFor, parseProjectConfig, pathsMatch } from '../shared/project.ts';
 import { GAP_RULES, GAP_SEVERITIES } from '../shared/check.ts';
-import { detectHooks } from '../cli/init.ts';
+import { EXECUTION_MODES } from '../shared/types.ts';
+import { detectHooks, renderConfig } from '../cli/init.ts';
+import { parseJsonc } from '../shared/jsonc.ts';
 
 /**
  * A repository's `.coplan/config.json`: the checks every task runs, so no
@@ -290,7 +292,7 @@ test('every key the config reads is documented, with every value it takes', () =
   const doc = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'docs', 'CONFIG.md'), 'utf8');
   for (const key of PROJECT_KEYS) assert.match(doc, new RegExp(`^### \`${key}\`$`, 'm'), `a section for ${key}`);
   for (const key of HOOK_KEYS) assert.match(doc, new RegExp(`^\\| \`${key}\` \\|`, 'm'), `hook key ${key}`);
-  for (const value of [...PR_TOOLS, ...PR_OPEN, ...INSTRUCTION_POINTS, ...GAP_RULES, ...GAP_SEVERITIES]) {
+  for (const value of [...EXECUTION_MODES, ...PR_TOOLS, ...PR_OPEN, ...INSTRUCTION_POINTS, ...GAP_RULES, ...GAP_SEVERITIES]) {
     assert.ok(doc.includes(`\`${value}\``), `${value} is named`);
   }
 });
@@ -498,5 +500,70 @@ test("the user's own layer sits under every repository's: key by key, instructio
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* ---------------------------------------------------- execution modes (#62) */
+
+test('the mode defaults to Tracked, to Managed where the repository sets iric, and `mode` says otherwise', () => {
+  const none = loadProjectConfig(null, { globalDir: null });
+  assert.equal(none.mode, 'tracked', 'neither: Tracked');
+  assert.equal(none.origins?.['mode'], undefined, "Coplan's default");
+
+  const iric = parseProjectConfig({ iric: { review: 'self' } }, '/r/.coplan/config.json');
+  assert.equal(iric.mode, 'managed', 'iric opts in to the harness');
+  assert.equal(iric.modeByIric, true);
+  assert.deepEqual(iric.origins?.['mode'], ['.coplan/config.json']);
+  assert.equal(parseProjectConfig({ iric: { review: 'self' }, mode: 'tracked' }).mode, 'tracked', 'mode wins over iric');
+  for (const mode of ['export', 'tracked', 'managed'] as const) assert.equal(parseProjectConfig({ mode }).mode, mode);
+
+  const wrong = parseProjectConfig({ mode: 'harness' });
+  assert.equal(wrong.mode, 'tracked');
+  assert.match(wrong.errors.join('\n'), /"mode" must be one of export, tracked, managed; "harness" is not/);
+});
+
+test("this repository's own config sets iric, so its builds are Managed by default", () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const own = loadProjectConfig(root, { globalDir: null });
+  assert.deepEqual(own.errors, []);
+  assert.equal(own.mode, 'managed');
+  assert.equal(own.modeByIric, true);
+});
+
+test("the user's own mode holds under every repository, a repository's iric or mode wins over it, and the user's own iric alone does not choose", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'coplan-mode-'));
+  const home = path.join(dir, 'home');
+  const repoDir = (name: string, config?: unknown) => {
+    const root = path.join(dir, name);
+    mkdirSync(path.join(root, '.coplan'), { recursive: true });
+    if (config !== undefined) writeFileSync(path.join(root, '.coplan', 'config.json'), JSON.stringify(config));
+    return root;
+  };
+  try {
+    mkdirSync(home, { recursive: true });
+    writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ mode: 'managed' }));
+    const mine = loadProjectConfig(repoDir('plain'), { globalDir: home });
+    assert.equal(mine.mode, 'managed');
+    assert.deepEqual(mine.origins?.['mode'], [path.join(home, 'coplan.json')]);
+    assert.equal(loadProjectConfig(repoDir('tracked', { mode: 'tracked' }), { globalDir: home }).mode, 'tracked');
+
+    writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ mode: 'tracked', iric: { review: 'self' } }));
+    const opted = loadProjectConfig(repoDir('opted', { iric: { parallel: 3 } }), { globalDir: home });
+    assert.equal(opted.mode, 'managed', "the repository's iric is more specific than the user's mode");
+    assert.deepEqual(opted.settings, { review: 'self', parallel: 3, maxRounds: 3 });
+
+    writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ iric: { review: 'self' } }));
+    assert.equal(loadProjectConfig(repoDir('other'), { globalDir: home }).mode, 'tracked', 'the user\'s iric says how a Managed build runs, not that every build is Managed');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('coplan init opts the repository in to Managed builds, with or without iric of its own', () => {
+  for (const settings of [true, false]) {
+    const text = renderConfig({ implement: [], review: [], final: [] }, 'main', { settings });
+    const config = parseProjectConfig(parseJsonc(text), '/r/.coplan/config.json');
+    assert.deepEqual(config.errors, []);
+    assert.equal(config.mode, 'managed', settings ? 'iric' : 'mode');
   }
 });

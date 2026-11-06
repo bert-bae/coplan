@@ -106,6 +106,7 @@ beforeEach(() => {
     focusTarget: null,
     proposalPreview: null,
     viewer: null,
+    exportOpen: false,
     showBookkeeping: false,
   });
 });
@@ -1112,16 +1113,17 @@ test('the plan is submitted after reading the prompt it sends, with how the buil
   const version = session.plan!.version;
   await boot(session, (route, init) => {
     if (route.endsWith('/plan/prompt')) {
-      const { target, note, settings } = JSON.parse(String(init?.body)) as { target: string; note: string; settings?: typeof DEFAULTS };
+      const { mode, note, settings } = JSON.parse(String(init?.body)) as { mode?: string; note: string; settings?: typeof DEFAULTS };
       const used = settings ?? DEFAULTS;
       return {
-        prompt: `PROMPT for ${target}${note ? ` with "${note}"` : ''}${settings ? ` reviewed by ${settings.review}` : ''}`,
+        prompt: `PROMPT for ${mode ?? 'the default'}${note ? ` with "${note}"` : ''}${settings ? ` reviewed by ${settings.review}` : ''}`,
         trimmed: false,
         version,
         budget: 9000,
         maxNote: 4000,
+        mode: mode ?? 'managed',
         settings: used,
-        project: { file: null, defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [] },
+        project: { file: null, mode: 'managed', defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [] },
       };
     }
     if (route.endsWith('/plan/submit')) return { plan: lockedPlan() };
@@ -1132,9 +1134,11 @@ test('the plan is submitted after reading the prompt it sends, with how the buil
   });
   const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
   const preview = () => within(dialog).getByTestId('prompt-preview').textContent;
-  // The repository's defaults come with the first preview, and are then
-  // what the prompt is built from.
-  await waitFor(() => assert.equal(preview(), 'PROMPT for session reviewed by subagent'));
+  // The repository's defaults — its mode, its settings — come with the
+  // first preview, and are then what the prompt is built from.
+  await waitFor(() => assert.equal(preview(), 'PROMPT for managed reviewed by subagent'));
+  assert.equal((within(dialog).getByLabelText(/^Managed/) as HTMLInputElement).checked, true);
+  assert.match(within(dialog).getByLabelText(/^Managed/).closest('label')?.textContent ?? '', /this repository's default/);
   assert.match(dialog.textContent ?? '', /1 diagram · 2 boxes · 3 tasks \(1 already done\)/);
   assert.match(dialog.textContent ?? '', /No checks are set up/);
 
@@ -1144,7 +1148,7 @@ test('the plan is submitted after reading the prompt it sends, with how the buil
   });
   const submit = within(dialog).getByRole('button', { name: 'Submit and lock' }) as HTMLButtonElement;
   assert.equal(submit.disabled, true, 'not while the preview is out of date');
-  await waitFor(() => assert.equal(preview(), 'PROMPT for session with "tests first" reviewed by subagent'));
+  await waitFor(() => assert.equal(preview(), 'PROMPT for managed with "tests first" reviewed by subagent'));
   await waitFor(() => assert.equal(submit.disabled, false));
   // A canvas edit still on its way to the daemon would be missing from the plan that locks.
   act(() => store.set({ canvasSaving: true }));
@@ -1156,27 +1160,101 @@ test('the plan is submitted after reading the prompt it sends, with how the buil
   await act(async () => {
     fireEvent.click(within(dialog).getByRole('radio', { name: 'You review' }));
   });
-  await waitFor(() => assert.equal(preview(), 'PROMPT for session with "tests first" reviewed by user'));
+  await waitFor(() => assert.equal(preview(), 'PROMPT for managed with "tests first" reviewed by user'));
 
-  // Choosing somewhere else rebuilds it, without the harness tools.
+  // Tracked leaves the cycle to the agent: no review, round or parallel settings.
   await act(async () => {
-    fireEvent.click(within(dialog).getByLabelText(/Somewhere else/));
+    fireEvent.click(within(dialog).getByLabelText(/^Tracked/));
   });
-  await waitFor(() => assert.equal(preview(), 'PROMPT for elsewhere with "tests first" reviewed by user'));
+  await waitFor(() => assert.equal(preview(), 'PROMPT for tracked with "tests first" reviewed by user'));
+  assert.equal(within(dialog).queryByRole('radio', { name: 'You review' }), null);
+  // Export rebuilds it as the plan alone, copied rather than sent.
   await act(async () => {
-    fireEvent.click(within(dialog).getByLabelText(/This Claude session/));
+    fireEvent.click(within(dialog).getByLabelText(/^Export/));
   });
-  await waitFor(() => assert.equal(preview(), 'PROMPT for session with "tests first" reviewed by user'));
+  await waitFor(() => assert.equal(preview(), 'PROMPT for export with "tests first" reviewed by user'));
+  assert.ok(within(dialog).getByRole('button', { name: 'Copy and lock' }));
+  assert.match(dialog.textContent ?? '', /The plan, as Markdown/);
+  await act(async () => {
+    fireEvent.click(within(dialog).getByLabelText(/^Managed/));
+  });
+  await waitFor(() => assert.equal(preview(), 'PROMPT for managed with "tests first" reviewed by user'));
   await waitFor(() => assert.equal(submit.disabled, false));
 
   await act(async () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Submit and lock' }));
   });
   const sent = posts.find((p) => p.route.endsWith('/plan/submit'));
-  assert.deepEqual(sent?.body, { target: 'session', note: 'tests first', expect: version, settings: { ...DEFAULTS, review: 'user' } });
+  assert.deepEqual(sent?.body, { target: 'session', mode: 'managed', note: 'tests first', expect: version, settings: { ...DEFAULTS, review: 'user' } });
   assert.equal(screen.queryByRole('dialog'), null);
   assert.equal(store.getState().tab, 'tasks', 'the board is where the build is followed');
   assert.ok(screen.getByRole('region', { name: 'To do' }));
+});
+
+test('a repository with no iric submits Tracked by default, with no review settings to choose (#62)', async () => {
+  const session = makeSession(confirmedPlan());
+  const version = session.plan!.version;
+  await boot(session, (route, init) => {
+    if (route.endsWith('/plan/prompt')) {
+      const { mode } = JSON.parse(String(init?.body)) as { mode?: string };
+      return {
+        prompt: `PROMPT for ${mode ?? 'the default'}`,
+        trimmed: false,
+        version,
+        budget: 9000,
+        maxNote: 4000,
+        mode: mode ?? 'tracked',
+        settings: DEFAULTS,
+        project: { file: null, mode: 'tracked', defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [] },
+      };
+    }
+    if (route.endsWith('/plan/submit')) return { plan: lockedPlan() };
+    return undefined;
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Review & submit plan' }));
+  });
+  const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
+  await waitFor(() => assert.equal(within(dialog).getByTestId('prompt-preview').textContent, 'PROMPT for tracked'));
+  assert.equal((within(dialog).getByLabelText(/^Tracked/) as HTMLInputElement).checked, true);
+  assert.equal(within(dialog).queryByRole('radiogroup', { name: 'Who reviews each task' }), null);
+  const submit = within(dialog).getByRole('button', { name: 'Submit and lock' }) as HTMLButtonElement;
+  await waitFor(() => assert.equal(submit.disabled, false));
+  await act(async () => {
+    fireEvent.click(submit);
+  });
+  const sent = posts.find((p) => p.route.endsWith('/plan/submit'));
+  assert.deepEqual(sent?.body, { target: 'session', mode: 'tracked', note: '', expect: version }, "a Tracked build carries no cycle settings");
+});
+
+test('Export plan opens from every view and phase, and copies the plan with no sign-off (#62)', async () => {
+  let copied = '';
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (t: string) => void (copied = t) }, configurable: true });
+  const exported = { text: '# Add a cache\n\n## Summary\nA cache.', blocks: [{ id: 'heading', source: { kind: 'field', target: { kind: 'plan', id: '' } }, text: '# Add a cache' }, { id: 'summary', source: { kind: 'field', target: { kind: 'plan', id: '' } }, text: '\n## Summary\nA cache.' }], version: 0 };
+  for (const plan of [makePlan(), confirmedPlan(), lockedPlan(true)]) {
+    cleanup();
+    store.set({ tab: 'diagrams', exportOpen: false, viewer: null });
+    await boot(makeSession(plan), (route) => (route.endsWith('/plan/export') ? { ...exported, version: plan.version } : undefined));
+    const before = posts.length;
+    for (const tab of ['Architecture', 'Tasks', 'Overview']) {
+      await openTab(tab);
+      assert.ok(screen.getByRole('button', { name: 'Export plan' }), `on ${tab}, in phase ${plan.submission ? 'built' : plan.design ? 'tasking' : 'planning'}`);
+    }
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Export plan' }));
+    });
+    const dialog = screen.getByRole('dialog', { name: 'Export the plan' });
+    await waitFor(() => assert.match(within(dialog).getByTestId('export-text').textContent ?? '', /## Summary/));
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Copy' }));
+    });
+    assert.equal(copied, exported.text);
+    assert.deepEqual(posts.slice(before), [], 'nothing is signed off or saved');
+    await act(async () => {
+      fireEvent.keyDown(window, { key: 'Escape' });
+    });
+    assert.equal(screen.queryByRole('dialog', { name: 'Export the plan' }), null);
+  }
 });
 
 test('a submitted plan is locked: the canvas shows the design, and the strip says how to hand it over', async () => {
@@ -1375,7 +1453,7 @@ test('in Cursor, submitting copies the prompt to paste, since no hook can hand i
     fireEvent.click(screen.getByRole('button', { name: 'Review & submit plan' }));
   });
   const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
-  assert.ok(within(dialog).getByLabelText(/This Cursor session/));
+  assert.ok(within(dialog).getByLabelText(/^Tracked — Cursor builds it here/));
   assert.match(dialog.textContent ?? '', /copied for you to paste into this Cursor chat/);
   const submit = within(dialog).getByRole('button', { name: 'Copy, submit and lock' }) as HTMLButtonElement;
   await waitFor(() => assert.equal(submit.disabled, false));

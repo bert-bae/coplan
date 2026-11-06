@@ -1,0 +1,30 @@
+# Task client: Cache client
+_Part of "Add a cache" · task 1. This brief is everything needed to build this task — and where its job ends._
+
+## The plan, in short
+Put a cache in front of the database.
+
+## From the plan
+
+### Context
+Reads are slow.
+
+## Your objective
+**Cache client**
+
+Wrap ioredis.
+
+## Where it fits
+It builds these parts of the architecture:
+- **API** `api` in "Components" — service
+
+## Stay in scope
+Build what this task describes and nothing more — the plan gives other parts to other tasks. If you find work outside it, say so in your report instead of doing it; it becomes a task of its own.
+
+## Branch
+No branch is named for it: work on the current branch.
+
+## Checks
+No checks are configured (.coplan/config.json). Work out what to run from the repository's scripts and CI, use the same commands for every task, and say which in each task's done note.
+
+Report it with harness_task_update {task_id: "client", status: "in_progress" | "done" | "blocked", checks: [{name, ok, note}], note}: "done" with a one-line note of what you did, "blocked" with what it waits on. A subagent without the Coplan tools reports back to the agent that gave it this brief instead: what it changed, the checks and how they came out, and anything left.

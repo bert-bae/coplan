@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { store, useAgent, usePlan, useSession, useStore, type ViewerState, type ViewerTab } from '../store.ts';
 import { api } from '../lib/api.ts';
 import { classNames } from '../lib/format.ts';
-import { droppedParts, type Block, type BlockSource } from '../../shared/blocks.ts';
+import { droppedParts, type Block, type BlockSource, type SettingKey } from '../../shared/blocks.ts';
 import { findPart, outline, planPhase } from '../../shared/plan.ts';
 import type { Plan, Target } from '../../shared/types.ts';
 
@@ -26,7 +26,7 @@ export function configDocs(key: string): string {
   return `${CONFIG_DOCS}#${(key.split('.')[0] ?? '').toLowerCase()}`;
 }
 
-const SETTING_LABEL = { review: 'who reviews', parallel: 'tasks at once', maxRounds: 'review rounds' } as const;
+const SETTING_LABEL: Record<SettingKey, string> = { mode: 'mode', review: 'who reviews', parallel: 'tasks at once', maxRounds: 'review rounds' };
 
 function short(text: string, max = 28): string {
   return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
@@ -302,7 +302,7 @@ function PromptViewer({ viewer }: { viewer: ViewerState }) {
       if (tab === 'readback') return { key, ...(await api.readback(sessionId)) };
       if (tab === 'brief') return { key, ...(await api.brief(sessionId, taskId)) };
       if (sent) return { key, text: sent.prompt };
-      const preview = phase === 'planning' ? await api.designPreview(sessionId, '') : await api.promptPreview(sessionId, 'session', '');
+      const preview = phase === 'planning' ? await api.designPreview(sessionId, '') : await api.promptPreview(sessionId, null, '');
       return { key, text: preview.prompt, ...(preview.blocks ? { blocks: preview.blocks } : {}) };
     };
     if (tab === 'brief' && !taskId) {
@@ -334,7 +334,7 @@ function PromptViewer({ viewer }: { viewer: ViewerState }) {
           ? `${sent.title}, exactly as it was sent${sent.meta ? ` · ${sent.meta}` : ''}. Each part's source was shown before you signed it off.`
           : phase === 'planning'
             ? `What Confirm design would send ${agent.name} now, without a note.`
-            : `What Submit would send ${agent.name} now, for this session with the repository's defaults and no note.`;
+            : `What Submit would send ${agent.name} now, with the repository's defaults and no note.`;
 
   return (
     <div className="lightbox" role="dialog" aria-modal="true" aria-label={`What ${agent.name} reads`}>

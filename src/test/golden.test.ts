@@ -10,7 +10,7 @@ import { FIXTURE_BIN, FIXTURE_HOME, FIXTURE_URL, bigPlan, fullProject, longPlan,
 // The instructions pointer names the user's own config by where Coplan's
 // home is: fixed, so the bytes are the same on every machine.
 process.env['CC_HARNESS_HOME'] = FIXTURE_HOME;
-const { PROMPT_BUDGET, buildPrompt, designPrompt, promptHash, renderPlan } = await import('../daemon/render.ts');
+const { PROMPT_BUDGET, buildPrompt, designPrompt, exportText, promptHash, renderPlan } = await import('../daemon/render.ts');
 const { renderBrief } = await import('../daemon/brief.ts');
 
 /**
@@ -50,16 +50,23 @@ const CASES: Record<string, () => Case> = {
   'design-over-with-order': () => asCase(designPrompt(longPlan(), { agent: 'claude', project: fullProject() })),
   'design-over': () => asCase(designPrompt(bigPlan(), { agent: 'claude', project: fullProject(true), bin: FIXTURE_BIN, note: NOTE })),
 
-  // The build prompt, for this session (cut to fit) and somewhere else (never cut).
+  // The build prompt for this session (cut to fit): Managed — the config
+  // sets `iric`, or the mode is chosen — and Tracked.
   'build-session-under': () => asCase(buildPrompt(richConfirmed(), { target: 'session', agent: 'claude', project: fullProject(), bin: FIXTURE_BIN, note: NOTE })),
-  'build-session-under-no-config': () => asCase(buildPrompt(plainPlan(), { target: 'session' })),
+  'build-session-under-no-config': () => asCase(buildPrompt(plainPlan(), { target: 'session', mode: 'managed' })),
   'build-session-under-settings': () =>
     asCase(buildPrompt(richConfirmed(), { target: 'session', agent: 'cursor', project: fullProject(), settings: { review: 'self', parallel: 1, maxRounds: 1 } })),
   'build-session-over': () => asCase(buildPrompt(bigPlan(), { target: 'session', agent: 'claude', project: fullProject(true), bin: FIXTURE_BIN, note: NOTE })),
   'build-session-over-with-order': () => asCase(buildPrompt(longPlan(), { target: 'session', agent: 'claude', project: fullProject(), bin: FIXTURE_BIN })),
-  'build-elsewhere-under': () => asCase(buildPrompt(richConfirmed(), { target: 'elsewhere', project: fullProject(), bin: FIXTURE_BIN, note: NOTE })),
-  'build-elsewhere-under-no-config': () => asCase(buildPrompt(plainPlan(), { target: 'elsewhere' })),
-  'build-elsewhere-over': () => asCase(buildPrompt(bigPlan(), { target: 'elsewhere', project: fullProject(true), note: NOTE })),
+  'build-tracked-under': () => asCase(buildPrompt(richConfirmed(), { target: 'session', mode: 'tracked', agent: 'claude', project: fullProject(), bin: FIXTURE_BIN, note: NOTE })),
+  'build-tracked-under-no-config': () => asCase(buildPrompt(plainPlan(), { target: 'session' })),
+  'build-tracked-over': () => asCase(buildPrompt(bigPlan(), { target: 'session', mode: 'tracked', agent: 'codex', project: fullProject(true), note: NOTE })),
+
+  // The plan exported (somewhere else): never cut, no instructions.
+  'export-under': () => asCase(buildPrompt(richConfirmed(), { target: 'elsewhere', project: fullProject(), bin: FIXTURE_BIN, note: NOTE })),
+  'export-under-no-config': () => asCase(buildPrompt(plainPlan(), { target: 'elsewhere' })),
+  'export-over': () => asCase(buildPrompt(bigPlan(), { target: 'elsewhere', project: fullProject(true), note: NOTE })),
+  'export-planning': () => ({ text: exportText(richPlan(), { project: fullProject() }) }),
 
   // What harness_plan_read returns.
   'readback': () => ({ text: renderPlan(richPlan(), { url: FIXTURE_URL, planCheck: { 'box-undescribed': 'error' } }) }),
@@ -71,7 +78,9 @@ const CASES: Record<string, () => Case> = {
   'brief-subtask': () => ({ text: brief(richConfirmed(), 'inval', { agent: 'claude', project: fullProject(), bin: FIXTURE_BIN }) }),
   'brief-parent': () => ({ text: brief(richConfirmed(), 'storage', { agent: 'claude', project: fullProject(), bin: FIXTURE_BIN }) }),
   'brief-in-progress': () => ({ text: brief(richConfirmed(), 'wire', { agent: 'codex', project: fullProject() }) }),
-  'brief-no-config': () => ({ text: brief(plainPlan(), 'client', {}) }),
+  'brief-no-config': () => ({ text: brief(plainPlan(), 'client', { mode: 'managed' }) }),
+  'brief-tracked': () => ({ text: brief(richConfirmed(), 'inval', { agent: 'claude', project: fullProject(), mode: 'tracked', bin: FIXTURE_BIN }) }),
+  'brief-tracked-no-config': () => ({ text: brief(plainPlan(), 'client', {}) }),
   'brief-long-sections': () => ({ text: brief(longPlan(), 'docs', { project: fullProject(), settings: { review: 'self', parallel: 1, maxRounds: 1 } }) }),
 };
 
@@ -80,7 +89,7 @@ function brief(plan: Plan, id: string, opts: BriefOptions): string {
 }
 
 /** Which cases are meant to be over the budget, and so cut. */
-const OVER = new Set(['design-over', 'design-over-with-order', 'build-session-over', 'build-session-over-with-order']);
+const OVER = new Set(['design-over', 'design-over-with-order', 'build-session-over', 'build-session-over-with-order', 'build-tracked-over']);
 
 const hashesFile = path.join(DIR, 'hashes.json');
 
@@ -107,7 +116,7 @@ for (const [name, make] of Object.entries(CASES)) {
     assert.equal(promptHash(text), recorded[name], `the prompt hash of ${name} moved`);
     if (trimmed !== undefined) {
       assert.equal(trimmed, OVER.has(name), `${name} is ${OVER.has(name) ? '' : 'not '}meant to be cut to fit`);
-      if (name.includes('session') || name.startsWith('design')) {
+      if (name.includes('session') || name.includes('tracked') || name.startsWith('design')) {
         assert.equal(text.length <= PROMPT_BUDGET, true, `${name} is ${text.length} characters, over the budget`);
       }
     }

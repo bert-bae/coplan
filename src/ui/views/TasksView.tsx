@@ -55,7 +55,7 @@ export function TasksView() {
           <p className="toolbar-note">
             <span aria-hidden="true">🔒</span>{' '}
             {phase === 'handed-off'
-              ? 'Handed off to be built elsewhere, so these statuses do not move.'
+              ? 'Exported to be built elsewhere, so these statuses do not move.'
               : phase === 'submitted'
                 ? `The plan is locked. Cards move across the board once ${agent.name} starts and reports each task.`
                 : `The plan is locked. Cards move across the board as ${agent.name} reports each task.`}

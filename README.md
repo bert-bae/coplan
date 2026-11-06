@@ -36,10 +36,12 @@ agent — Claude Code, Codex or Cursor — publishes its design: the architectur
 as diagrams, with the tasks it plans linked to the boxes they build. You
 reshape it in the browser and **confirm the design**. The agent then breaks it
 into a task list — focused tasks, what blocks what, which branch each lands
-on — and you shape that and **submit the plan**, choosing how much of each
-task's implement → review → refine cycle you keep for yourself. The plan
-locks, and as the agent builds, the same page follows each task across the
-board.
+on — and you shape that and **submit the plan**, choosing how much of the
+build harness you want: the agent builds it its own way while the board
+follows (*Tracked*), or takes each task through implement → review → refine
+with the checks and review you choose (*Managed*). The plan locks, and as the
+agent builds, the same page follows each task across the board. Or export the
+plan as Markdown, at any point, and build it wherever you like.
 
 Coplan is free and open source under the [MIT license](LICENSE). It runs
 entirely on your machine: a small local daemon, a browser UI, and one plugin
@@ -66,8 +68,8 @@ links you to its chat.
       <p><strong>2. Shape the task list.</strong> Once you confirm the design, Claude breaks it into focused tasks: what each waits on, which branch it lands on, which boxes it builds. Coplan works out the build order and how the branches stack.</p>
     </td>
     <td width="50%" valign="top">
-      <a href="docs/images/submit.png"><img src="docs/images/submit.png" alt="The Submit the plan dialog: who builds it, who reviews each task, how many tasks at once and how many review rounds on the left; the full build prompt Claude will get on the right" /></a>
-      <p><strong>3. Read the exact prompt, then submit.</strong> See every word Claude will be sent, choose who reviews each task, how many run at once and how many review rounds they get. Submitting locks the plan.</p>
+      <a href="docs/images/submit.png"><img src="docs/images/submit.png" alt="The Submit the plan dialog: how the plan is built — Tracked, Managed or Export — and, for a Managed build, who reviews each task, how many tasks at once and how many review rounds on the left; the full build prompt Claude will get on the right" /></a>
+      <p><strong>3. Read the exact prompt, then submit.</strong> See every word Claude will be sent and choose how it is built: Tracked, Managed — who reviews each task, how many run at once, how many review rounds — or Export. Submitting locks the plan.</p>
     </td>
   </tr>
   <tr>
@@ -107,10 +109,15 @@ seeds into a throwaway daemon, the way real hooks and tool calls would.
 - **Tasks that know what blocks them.** Each task says what it waits on and
   which branch it lands on. Coplan works out what can start now, what can run
   side by side, and how branches stack into pull requests.
-- **Implement → review → refine.** Every task is checked and reviewed before
-  it is done: by a fresh subagent, by Claude itself, by you, or by the checks
-  alone — your choice. The checks come from the repository's
-  `.coplan/config.json`, so no agent guesses what to run.
+- **A build harness you opt into.** Submit a plan *Tracked* and Claude builds
+  it its own way while the board follows; *Managed*, and every task goes
+  implement → review → refine — reviewed by a fresh subagent, by Claude
+  itself, by you, or by the checks alone — and is not done until it passes.
+  The checks come from the repository's `.coplan/config.json`, so no agent
+  guesses what to run.
+- **Export the plan.** The whole plan — summary, sections, diagrams, tasks and
+  their briefs — as Markdown with no build instructions, to take into any
+  tool, from any view and at any point.
 - **Claude reads back what you changed.** It gets the net effect of your edits
   (what is different now, not every drag), with each diagram written out as
   an architecture.
@@ -200,11 +207,15 @@ can do:
    message carries it to Claude.
 4. **Claude makes the task list** — dependencies, branches, the boxes each
    task builds — and **you shape it**.
-5. **You submit the plan,** choosing who reviews each task, how many run at
-   once and how many review rounds they get. The plan locks.
-6. **Claude builds it,** ready tasks first, independent ones side by side,
-   each through implement → review → refine against your repository's checks,
-   while the board follows along.
+5. **You submit the plan,** choosing how it is built: *Tracked* (Claude
+   builds it its own way and reports each task), *Managed* (each task through
+   implement → review → refine, with who reviews, how many run at once and
+   how many review rounds) or *Export* (the plan as Markdown, to build
+   somewhere else). The plan locks. **Export plan**, in the header, copies
+   the plan out at any point without submitting anything.
+6. **Claude builds it,** ready tasks first, while the board follows along —
+   in a Managed build, each through implement → review → refine against
+   your repository's checks.
 7. **Claude reports:** final checks, the pull requests in stack order the way
    the repository's `pullRequests` says (by default, once you say so), and a
    build report on the Overview.
@@ -287,8 +298,21 @@ and its build.
 
 ### When you submit
 
-13. **Match the reviewer to the risk.** The submit dialog sets the default;
-    a task can override it.
+13. **Choose how much of the harness you want.** Submit asks how the plan is
+    built; the repository's [`mode`](docs/CONFIG.md#mode) sets the default
+    (Managed where its `.coplan/config.json` sets `iric`, else Tracked).
+
+    | Mode | When | What happens |
+    | --- | --- | --- |
+    | Tracked | You want the plan followed, not policed | Claude builds it its own way and reports each task; the board follows. Nothing is refused: where Managed would hold a task back, Claude gets a note |
+    | Managed | You want every task checked and reviewed | Each task goes implement → review → refine against the repository's checks, and is not done until it passes — the rest of this list |
+    | Export | It is built somewhere else | The whole plan as Markdown, with no build instructions, to paste anywhere; this version locks here |
+
+    To take the plan out without submitting anything, use **Export plan** in
+    the header, from any view and at any point.
+
+14. **In a Managed build, match the reviewer to the risk.** The submit
+    dialog sets the default; a task can override it.
 
     | Kind of task | Review | Why |
     | --- | --- | --- |
@@ -297,31 +321,31 @@ and its build.
     | Small and low-risk | Self-review (`self`) | Claude rereads its own diff cold. |
     | Mechanical: renames, generated files, docs | Checks only (`skip`) | The review checks are the review. |
 
-14. **Set how many tasks run at once** (`parallel`, default 2, up to 8) for
+15. **Set how many tasks run at once** (`parallel`, default 2, up to 8) for
     your machine and your checks. Each one is its own subagent running its
     own checks, and a task on its own branch gets its own git worktree. Raise
     it for a large plan of independent tasks; use 1 on a laptop or when the
     test suite is heavy.
-15. **Cap the review rounds** (`maxRounds`, default 3, up to 10). Past it,
+16. **Cap the review rounds** (`maxRounds`, default 3, up to 10). Past it,
     Claude stops and asks you rather than spending more on a task that keeps
     failing review.
-16. **Pick the reviewer's model** with [`review.model`](docs/CONFIG.md#review),
+17. **Pick the reviewer's model** with [`review.model`](docs/CONFIG.md#review),
     in the repository's config or your own `coplan.json`, if it should not be
     the agent's own: a smaller one to spend less on review, a stronger one to
     review harder.
-17. **Use branches only when the change should be several pull requests.**
+18. **Use branches only when the change should be several pull requests.**
     Without them every task lands on the current branch.
 
 ### Day to day
 
-18. **Leave `autoOpen` off** on shared or remote machines; open the page with
+19. **Leave `autoOpen` off** on shared or remote machines; open the page with
     `/coplan-open` when you want it.
-19. **Don't share the page's link.** The link `coplan open` and `coplan url`
+20. **Don't share the page's link.** The link `coplan open` and `coplan url`
     print carries the daemon's access token (`?token=…`); the page moves it
     out of the address bar into its own storage.
-20. **To update:** `git pull && ./setup.sh` in the clone, then restart the
+21. **To update:** `git pull && ./setup.sh` in the clone, then restart the
     agent. Open tabs reconnect.
-21. **Now and then:** `coplan clean --dry-run` lists what could go — finished
+22. **Now and then:** `coplan clean --dry-run` lists what could go — finished
     sessions, interrupted writes, the older part of the log.
 
 ### Trust
@@ -372,7 +396,7 @@ it uses the skill.
 
 | Skill | The agent uses it when | It tells the agent to | So the agent may |
 | --- | --- | --- | --- |
-| [`coplan`](skills/coplan/SKILL.md) (12 KB) | you type `/coplan` or `$coplan`, ask to plan something in Coplan or to set Coplan up, or a confirmed design arrives | investigate the code, publish the design, read your edits back and answer your comments, propose changes that are yours to decide rather than make them, then break the confirmed design into a task list — and not build until you submit | call Coplan's tools; ask you questions in chat; propose edits for you to accept or reject; tell you to run `./setup.sh` in your clone when you ask it to set Coplan up or update it (or, in a checkout that was never built, run `pnpm install` there) |
+| [`coplan`](skills/coplan/SKILL.md) (13 KB) | you type `/coplan` or `$coplan`, ask to plan something in Coplan or to set Coplan up, or a confirmed design arrives | investigate the code, publish the design, read your edits back and answer your comments, propose changes that are yours to decide rather than make them, then break the confirmed design into a task list — and not build until you submit | call Coplan's tools; ask you questions in chat; propose edits for you to accept or reject; tell you to run `./setup.sh` in your clone when you ask it to set Coplan up or update it (or, in a checkout that was never built, run `pnpm install` there) |
 | [`coplan-build`](skills/coplan-build/SKILL.md) (8 KB) | a submitted plan's build prompt arrives, or you ask it to build a Coplan plan | start only tasks that are ready, build independent ones in parallel, land each on its branch, then run the final checks and write the report | start up to `parallel` subagents; create branches and git worktrees; commit once per task; rebase stacked branches; run the repository's checks; push the branches; open pull requests with `gh` or Graphite, as the repository's [`pullRequests`](docs/CONFIG.md#pullrequests) says — by default only once you say so — written from its pull request template if it has one |
 | [`iric`](skills/iric/SKILL.md) (6 KB) | building each task, or when you ask to run a task through iric | implement inside the task's scope, run the checks, have it reviewed the way you chose, refine until it passes or the round limit, and report each step | run the `implement` and `review` checks; start a reviewer subagent (review `subagent`), on the model [`review.model`](docs/CONFIG.md#review) names if one is set; stop and ask you (review `user`, or past `maxRounds`) |
 
@@ -604,7 +628,7 @@ counts against the model's tokens.
 | --- | --- | --- |
 | The ten tool definitions | About 32 KB of JSON schema — on the order of 8,000–10,000 tokens | Whenever the agent loads the server's tools |
 | The three skill descriptions | About 1.3 KB | Always listed |
-| A skill's body | 12.3 KB (`coplan`), 8.1 KB (`coplan-build`), 6.1 KB (`iric`) | When the agent uses that skill |
+| A skill's body | 12.9 KB (`coplan`), 8.4 KB (`coplan-build`), 6.1 KB (`iric`) | When the agent uses that skill |
 | The plan, read back | About 9,000 characters for two diagrams and ten tasks; about 140,000 for 150 boxes and 150 tasks | Each `harness_plan_read` (`changes_only` is shorter), and each publish's reply |
 | A sign-off prompt | About 6,000 characters for a seven-task plan; a hook adds at most about 10,000, and a longer plan is handed over as its summary and task list | Once per sign-off |
 | "You changed the plan" | One line | Your next message after you edit |
@@ -612,7 +636,8 @@ counts against the model's tokens.
 ### The build
 
 Coplan never runs a model or a check; the agent does, and the submit dialog
-decides how much:
+decides how much. A Tracked build costs what the agent chooses to spend; an
+exported plan costs nothing here. In a Managed build:
 
 - **Every task** gets one implementation pass, then review — and, until the
   review passes, a refinement and another review — up to `maxRounds`

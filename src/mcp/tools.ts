@@ -404,11 +404,12 @@ export const TOOLS: ToolDef[] = [
       'Track progress while you build; the user follows it on the board. Mark a task in_progress (stage ' +
       '"implement") when you start it, set stage "review" and "refine" as it goes round its implement → review → ' +
       'refine cycle, report the checks you ran, and mark it done with a one-line note once review passed — or ' +
-      'blocked with a note, asking the user with AskUserQuestion. The only way to report progress. Refused: ' +
-      'starting or finishing a task that still waits on another; starting more at once than the user allowed; a ' +
-      'review round past their limit; done before any review, without a passing verdict for its last review round ' +
+      'blocked with a note, asking the user with AskUserQuestion. The only way to report progress. Refused in every ' +
+      'build: starting or finishing a task that still waits on another; progress on a task that has subtasks. Refused ' +
+      'in a Managed build, and only noted in the reply in a Tracked one: starting more at once than the user allowed; ' +
+      'a review round past their limit; done before any review, without a passing verdict for its last review round ' +
       '(the user\'s own, when the user reviews it), or while a check fails or a review check was never reported; ' +
-      'progress on a task that has subtasks.',
+      'dropping work the user signed off.',
     inputSchema: {
       type: 'object',
       properties: {

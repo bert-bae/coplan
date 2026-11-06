@@ -1,0 +1,37 @@
+# Add a cache
+
+## Summary
+Put a cache in front of the database.
+
+## Sections
+
+### [s1] Context
+Reads are slow.
+
+## Architecture
+
+### [d1] Components
+
+**Parts**
+- **API** `api` — service
+  Built by: [ ] client Cache client
+
+_Not connected to anything yet: API._
+
+## Tasks (0/2 done)
+- [ ] client Cache client
+- [ ] t1 Wire into API
+
+## Task briefs
+_Each task on its own: what it is for, what it builds, what it comes after and where it lands._
+
+### client Cache client
+
+Wrap ioredis.
+
+It builds:
+- **API** `api` in "Components" — service
+
+### t1 Wire into API
+
+_Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_

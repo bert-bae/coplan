@@ -54,7 +54,7 @@ function badSource(block: Block, plan: Plan): string | null {
     case 'derived':
       return source.from.length && source.from.every(Boolean) ? null : 'says it is worked out, but not from what';
     case 'setting':
-      return ['review', 'parallel', 'maxRounds'].includes(source.key) ? null : `names a build setting there is none of (${source.key})`;
+      return ['mode', 'review', 'parallel', 'maxRounds'].includes(source.key) ? null : `names a build setting there is none of (${source.key})`;
     default:
       return null;
   }
@@ -193,7 +193,7 @@ test("a config source names each file that set it: the user's own, then the repo
   assert.deepEqual(project.origins?.['hooks.review'], ['.coplan/config.json']);
   assert.equal(project.origins?.['hooks.final'], undefined, 'not set anywhere: Coplan has no default checks');
 
-  const built = buildPrompt(richConfirmed(), { target: 'session', project });
+  const built = buildPrompt(richConfirmed(), { target: 'session', mode: 'managed', project });
   const at = (id: string) => built.blocks.find((b) => b.id === id);
   assert.deepEqual(at('step-7:pull-requests')?.source, { kind: 'config', key: 'pullRequests', files: [path.join(home, 'coplan.json'), '.coplan/config.json'] });
   assert.deepEqual(at('instructions:build')?.source, { kind: 'config', key: 'instructions.build', files: [path.join(home, 'instructions', 'build.md'), '.coplan/config.json'] });

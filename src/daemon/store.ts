@@ -23,6 +23,7 @@ import {
 } from '../shared/plan.ts';
 import { BUILD_MARKER, DESIGN_MARKER, PROMPT_MOVED, buildPrompt, designPrompt, promptHash, type PromptOptions } from './render.ts';
 import { blockingGaps } from '../shared/check.ts';
+import { modeFor } from '../shared/build.ts';
 import { DEFAULT_AGENT, isAgentKind, type AgentKind } from '../shared/agents.ts';
 import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ServerEvent, SessionState, SessionSummary, TaskListInput } from '../shared/types.ts';
 
@@ -353,12 +354,15 @@ export class SessionStore extends EventEmitter {
     refuseBlockingGaps(plan, input, 'submitted');
     const { prompt, trimmed } = buildPrompt(plan, { ...input, agent: session.agent });
     if (input.hash !== undefined && input.hash !== promptHash(prompt)) throw new PlanError(PROMPT_MOVED('submit'));
+    const mode = modeFor(input.target, input.mode, input.project?.mode ?? 'tracked');
     const next = submitPlan(plan, {
       target: input.target,
+      mode,
       prompt,
       trimmed,
       ...(input.note ? { note: input.note } : {}),
-      ...(input.settings ? { settings: input.settings } : {}),
+      // A Managed build's settings: what the other modes leave to the agent.
+      ...(input.settings && mode === 'managed' ? { settings: input.settings } : {}),
       ...(input.project?.branches.base ? { base: input.project.branches.base } : {}),
     });
     this.mutate(id, (s) => {

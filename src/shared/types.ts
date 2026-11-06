@@ -307,6 +307,22 @@ export const BUILD_TARGETS = ['session', 'elsewhere'] as const;
 export type BuildTarget = (typeof BUILD_TARGETS)[number];
 
 /**
+ * How much of the build harness a plan takes, chosen when it is submitted;
+ * the repository's default is `mode` in `.coplan/config.json` (Managed
+ * when it sets `iric`, else Tracked).
+ *
+ * - `export` — the user copies the plan out as Markdown, to build anywhere.
+ *   Nothing is asked of an agent: no board, no gates. Submitting it locks
+ *   a snapshot (the `elsewhere` target); exporting needs no sign-off.
+ * - `tracked` — this session builds it its own way and reports each task.
+ *   The board follows; what Managed would refuse comes back as a note.
+ * - `managed` — each task goes implement → review → refine with the
+ *   repository's checks, and the daemon holds a task back until it passes.
+ */
+export const EXECUTION_MODES = ['export', 'tracked', 'managed'] as const;
+export type ExecutionMode = (typeof EXECUTION_MODES)[number];
+
+/**
  * How the build runs, chosen by the user when they submit — the control they
  * keep over each task's implement → review → refine cycle. Defaults come from
  * the repository's `.coplan/config.json`.
@@ -336,7 +352,11 @@ export interface Submission {
   /** The plan was too long to quote whole in a prompt; it points Claude at
    *  `harness_plan_read` for the rest. */
   trimmed?: boolean;
-  /** How the build runs. Absent on plans submitted before it existed. */
+  /** How much of the harness the build takes. Absent on plans submitted
+   *  before modes existed: those were Managed (or, built elsewhere, Export). */
+  mode?: ExecutionMode;
+  /** How the build runs: a Managed build's review, parallel and round
+   *  settings. Absent on plans submitted before it existed. */
   settings?: BuildSettings;
   /** The repository's base branch when it was submitted, if it says. */
   base?: string;
