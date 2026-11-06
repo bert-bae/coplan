@@ -35,10 +35,21 @@ import {
   sharedFiles,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, emptyProjectConfig, hasHooks, hookCommand, hooksFor, type ProjectConfig } from '../shared/project.ts';
+import { HOOK_STAGES, configSource, emptyProjectConfig, hasHooks, hookCommand, hooksFor, type ProjectConfig } from '../shared/project.ts';
 import { KIND_NOUN, edgePhrase, hang, indent, nestHeadings } from '../shared/architecture.ts';
 import { agentInfo, type AgentKind } from '../shared/agents.ts';
-import { checkWords, checksSection, finalWords, instructionLines, pullRequestWords, renderBuildOrder, reviewerWords, stageWords, templateLines } from './render.ts';
+import {
+  checkWords,
+  checksBlocks,
+  finalWords,
+  instructionBlocks,
+  pullRequestWords,
+  renderBuildOrder,
+  reviewerWords,
+  stageWords,
+  templateLines,
+} from './render.ts';
+import { BlockList, TEMPLATE, derived, field, joinBlocks, setting, type Block, type BlockSource } from '../shared/blocks.ts';
 
 export interface BriefOptions {
   /** The agent building it: how it is told to ask the user things. */
@@ -231,100 +242,120 @@ function renderStack(plan: Plan, repoBase: string | undefined): string[] {
  * ------------------------------------------------------------------ */
 
 export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): string {
+  return joinBlocks(briefBlocks(plan, task, opts));
+}
+
+/**
+ * One task's brief as blocks, each naming its source: the task and its
+ * parents, the plan's summary and sections, the boxes it builds, what it
+ * comes after, the repository's checks and words, and Coplan's own
+ * instructions. Joined, they are what harness_task_brief returns.
+ */
+export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Block[] {
   const settings = settingsOf(plan, opts);
   const project = opts.project ?? emptyProjectConfig();
-  const out: string[] = [];
+  // The build settings: as the user chose them at submit, or the config's.
+  const chosen = Boolean(plan.submission?.settings ?? opts.settings);
+  const settingSource = (key: 'review' | 'maxRounds'): BlockSource => (chosen ? setting(key) : configSource(project, `iric.${key}`));
+  const me = field('task', task.id);
+  const b = new BlockList();
   const path = ancestorsOf(plan, task).reverse();
   const number = outline(plan).find((r) => r.task.id === task.id)?.number;
 
-  out.push(`# Task ${task.id}: ${task.title}`);
-  out.push(
+  b.add('heading', me, `# Task ${task.id}: ${task.title}`);
+  b.add(
+    'context',
+    derived("the plan's title", 'where the task sits in the outline'),
     `_Part of "${plan.title}"${number ? ` · task ${number}` : ''}${path.length ? ` · under ${path.map((t) => `"${t.title}"`).join(' › ')}` : ''}. ` +
       'This brief is everything needed to build this task — and where its job ends._',
   );
 
-  if (plan.summary.trim()) out.push('', '## The plan, in short', nestHeadings(plan.summary.trim(), 2));
+  if (plan.summary.trim()) b.gap().add('summary', field('plan'), ['## The plan, in short', nestHeadings(plan.summary.trim(), 2)]);
 
   // The plan's own prose — context, risks, what is out of scope — holds for
   // every task: a subagent given only this brief must have it too.
   const sections = plan.sections.filter((s) => s.body.trim());
   if (sections.length) {
-    out.push('', '## From the plan');
+    b.gap().add('sections', TEMPLATE, '## From the plan');
     let room = SECTIONS_BUDGET;
     let left = false;
     for (const s of sections) {
-      if (room <= 0) {
-        left = true;
-        break;
-      }
       const body = nestHeadings(s.body.trim(), 3);
+      if (room <= 0) {
+        // Past the budget: left out, and pointed to.
+        left = true;
+        b.add(`section:${s.id}`, field('section', s.id), [`### ${s.title}`, body], { dropped: true });
+        continue;
+      }
       const { text, cut } = clipProse(body, Math.min(SECTION_MAX, room));
-      out.push('', `### ${s.title}`, text);
+      b.gap().add(`section:${s.id}`, field('section', s.id), [`### ${s.title}`, text], cut ? { cut: true } : {});
       room -= text.length;
       if (cut) left = true;
     }
-    if (left) out.push('', '_…more of the plan than fits here: harness_plan_read {peek: true} has all of it._');
+    if (left) b.gap().add('sections:more', TEMPLATE, '_…more of the plan than fits here: harness_plan_read {peek: true} has all of it._');
   }
 
   // The objective.
-  out.push('', '## Your objective', `**${task.title}**`);
-  if (task.detail?.trim()) out.push('', task.detail.trim());
+  b.gap().add('objective', me, ['## Your objective', `**${task.title}**`]);
+  if (task.detail?.trim()) b.gap().add('objective:detail', me, task.detail.trim());
   for (const parent of path) {
-    if (parent.detail?.trim()) out.push('', `From "${parent.title}", which this is part of:`, ...indent(parent.detail, 2));
+    if (parent.detail?.trim()) b.gap().add(`parent:${parent.id}`, field('task', parent.id), [`From "${parent.title}", which this is part of:`, ...indent(parent.detail, 2)]);
   }
   if (hasSubtasks(plan, task.id)) {
-    out.push('', 'Its subtasks — build them in this order, each through its own cycle:');
     // In build order — what waits on another comes after it — not outline order.
     const rank = new Map(buildSteps(plan).flatMap((step, i) => step.map((t) => [t.id, i] as const)));
     const leaves = leavesUnder(plan, task.id).map((t, i) => ({ t, i })).sort((a, b) => (rank.get(a.t.id) ?? 0) - (rank.get(b.t.id) ?? 0) || a.i - b.i);
-    for (const { t: leaf } of leaves) out.push(`- [${leaf.status === 'done' ? 'x' : ' '}] ${line(leaf)}`);
+    b.gap().add('subtasks', TEMPLATE, 'Its subtasks — build them in this order, each through its own cycle:');
+    for (const { t: leaf } of leaves) b.add(`subtask:${leaf.id}`, field('task', leaf.id), `- [${leaf.status === 'done' ? 'x' : ' '}] ${line(leaf)}`);
   }
   const files = task.files?.length ? task.files : leavesUnder(plan, task.id).flatMap((t) => t.files ?? []);
-  if (files.length) out.push('', `Files you expect to touch: ${[...new Set(files)].join(', ')}`);
+  if (files.length) b.gap().add('files', task.files?.length ? me : derived("its subtasks' files"), `Files you expect to touch: ${[...new Set(files)].join(', ')}`);
 
   // Where it fits.
-  const fits = renderParts(plan, task);
+  const fits = partBlocks(plan, task);
   const before = inheritedDeps(plan, task).map((id) => plan.tasks.find((t) => t.id === id)!).filter(Boolean);
   const after = dependents(plan, task);
   if (fits.length || before.length || after.length) {
-    out.push('', '## Where it fits');
-    if (fits.length) out.push('It builds these parts of the architecture:', ...fits);
+    b.gap().add('fits', TEMPLATE, '## Where it fits');
+    if (fits.length) b.add('parts', TEMPLATE, 'It builds these parts of the architecture:').push(...fits);
     if (before.length) {
-      out.push('', 'It comes after — build on what these did:');
+      b.gap().add('comes-after', TEMPLATE, 'It comes after — build on what these did:');
       for (const t of before) {
         const done = leavesUnder(plan, t.id).every((l) => l.status === 'done');
         const branch = effectiveBranch(plan, t);
-        out.push(`- ${done ? '[x]' : '[ ] NOT DONE YET —'} ${line(t)}${t.note ? ` — ${t.note}` : ''}${branch ? ` · on \`${branch}\`` : ''}`);
+        b.add(`comes-after:${t.id}`, field('task', t.id), `- ${done ? '[x]' : '[ ] NOT DONE YET —'} ${line(t)}${t.note ? ` — ${t.note}` : ''}${branch ? ` · on \`${branch}\`` : ''}`);
       }
     }
-    if (after.length) out.push('', `Waiting on it: ${after.map(line).join('; ')}. Leave their work to them, but do not make it harder.`);
+    if (after.length) {
+      b.gap().add('waited-on', derived('the tasks that come after it (dependsOn)'), `Waiting on it: ${after.map(line).join('; ')}. Leave their work to them, but do not make it harder.`);
+    }
   }
 
   const waits = waitingOn(plan, task);
   if (waits.length && task.status !== 'done') {
-    out.push('', `> ⚠ This task cannot start yet: it waits on ${waits.map(line).join('; ')}.`);
+    b.gap().add('waits', derived('what it comes after, and how far each is'), `> ⚠ This task cannot start yet: it waits on ${waits.map(line).join('; ')}.`);
   }
 
   // The edges of the job.
   const mine = relatedTasks(plan, task);
   const neighbours = leafTasks(plan).filter((t) => !mine.has(t.id) && t.status !== 'done' && (readinessOf(plan, t) === 'in_progress' || sharedFiles(task, t).length));
-  out.push('', '## Stay in scope');
-  out.push(
+  b.gap().add('scope', TEMPLATE, [
+    '## Stay in scope',
     'Build what this task describes and nothing more — the plan gives other parts to other tasks. If you find work ' +
       'outside it, say so in your report instead of doing it; it becomes a task of its own.',
-  );
+  ]);
   for (const t of neighbours) {
     const shared = sharedFiles(task, t);
-    out.push(`- ${line(t)}${readinessOf(plan, t) === 'in_progress' ? ' is being built right now' : ''}${shared.length ? ` — also touches ${shared.join(', ')}` : ''}.`);
+    b.add(`neighbour:${t.id}`, field('task', t.id), `- ${line(t)}${readinessOf(plan, t) === 'in_progress' ? ' is being built right now' : ''}${shared.length ? ` — also touches ${shared.join(', ')}` : ''}.`);
   }
 
-  out.push(...instructionLines(project, 'brief'));
+  b.push(...instructionBlocks(project, 'brief'));
 
   // Where it lands.
   const branch = effectiveBranch(plan, task);
-  out.push('', '## Branch');
+  b.gap().add('branch', TEMPLATE, '## Branch');
   if (branch) {
-    const entry = branchPlan(plan).branches.find((b) => b.branch === branch);
+    const entry = branchPlan(plan).branches.find((e) => e.branch === branch);
     const base = project.branches.base ? `\`${project.branches.base}\`` : 'the base branch';
     const from =
       entry?.needs.length && entry.needs.length > 1
@@ -335,22 +366,26 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
           : entry?.base
             ? `Cut it from \`${entry.base}\` (a stacked branch: it builds on that work), not from ${base}.`
             : `Cut it from ${base} if it does not exist yet.`;
-    out.push(`Commit this task's work on \`${branch}\`. ${from}`);
+    b.add('branch:where', derived("each task's branch", ...(project.branches.base ? ['the base branch (branches.base)'] : [])), `Commit this task's work on \`${branch}\`. ${from}`);
   } else {
-    out.push('No branch is named for it: work on the current branch.');
+    b.add('branch:where', derived("each task's branch"), 'No branch is named for it: work on the current branch.');
   }
 
   // The cycle.
   const review = effectiveReview(plan, task, settings.review);
-  out.push('', '## The cycle: implement → review → refine');
-  out.push(`Review: ${REVIEW_WORDS[review]}${review !== settings.review ? ' (set on this task)' : ''}. At most ${settings.maxRounds} review round${settings.maxRounds === 1 ? '' : 's'} before stopping to ask the user.`);
-  const stage = (name: string, what: string, hooks: ReturnType<typeof hooksFor>) => {
-    out.push('', `**${name}.** ${what}`);
-    if (hooks.length) for (const h of hooks) out.push(`- ${h.name}: \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`);
+  const reviewFrom = [task, ...ancestorsOf(plan, task)].find((t) => t.review);
+  b.gap().add('cycle', TEMPLATE, '## The cycle: implement → review → refine');
+  b.add('cycle:mode', TEMPLATE, 'Review: ')
+    .inline('cycle:mode:review', reviewFrom ? field('task', reviewFrom.id) : settingSource('review'), `${REVIEW_WORDS[review]}${review !== settings.review ? ' (set on this task)' : ''}`)
+    .inline('cycle:mode:rounds', settingSource('maxRounds'), `. At most ${settings.maxRounds} review round${settings.maxRounds === 1 ? '' : 's'} before stopping to ask the user.`);
+  const stage = (key: 'implement' | 'review', name: string, what: string, hooks: ReturnType<typeof hooksFor>, model = '') => {
+    b.gap().add(`cycle:${key}`, TEMPLATE, `**${name}.** ${what}`).inline(`cycle:${key}:model`, configSource(project, 'review.model'), model);
+    if (hooks.length) b.add(`cycle:${key}:checks`, configSource(project, `hooks.${key}`), hooks.map((h) => `- ${h.name}: \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`));
   };
   const filesArg = files.length ? ` --files ${[...new Set(files)].join(',')}` : '';
-  stage('Implement', 'Make the change, then run the implement checks and fix what they find:', hooksFor(project, 'implement', files));
+  stage('implement', 'Implement', 'Make the change, then run the implement checks and fix what they find:', hooksFor(project, 'implement', files));
   stage(
+    'review',
     'Review',
     review === 'user'
       ? `Run the review checks, then show the user the change and ask them, with ${agentInfo(opts.agent).askWith}, whether it is right:`
@@ -358,25 +393,32 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
         ? 'No reviewer: the review checks are the review. Run them:'
         : review === 'self'
           ? 'Read your own diff against the objective and the acceptance criteria, as a reviewer would, and run the review checks:'
-          : `A fresh subagent that did not write the change reads the diff against this brief and runs the review checks.${reviewerWords(project)}`,
+          : 'A fresh subagent that did not write the change reads the diff against this brief and runs the review checks.',
     hooksFor(project, 'review', files),
+    review === 'subagent' ? reviewerWords(project) : '',
   );
   // What a reviewer looks for here, whoever reviews.
-  if (review !== 'skip') out.push(...instructionLines(project, 'review', '### What the review checks here'));
-  out.push('', '**Refine.** Fix what the review found, run the implement checks again, and go back to review.');
+  if (review !== 'skip') b.push(...instructionBlocks(project, 'review', '### What the review checks here'));
+  b.gap().add('cycle:refine', TEMPLATE, '**Refine.** Fix what the review found, run the implement checks again, and go back to review.');
   if (opts.bin && HOOK_STAGES.some((s) => hooksFor(project, s, files).length)) {
-    out.push('', `Run a stage at once: \`"${opts.bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report.`);
+    b.gap().add('cycle:run', TEMPLATE, `Run a stage at once: \`"${opts.bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report.`);
   } else if (!hasHooks(project)) {
-    out.push('', ...checksSection(project).slice(1));
+    // What to do without checks, under the cycle rather than a heading of its own.
+    for (const block of checksBlocks(project)) b.gap().add(block.id, block.source, block.text.split('\n').slice(1));
   }
-  out.push(
-    '',
+  b.gap().add(
+    'report',
+    TEMPLATE,
     `Report each step with harness_task_update {task_id: "${task.id}", stage: "implement" | "review" | "refine", checks: [{name, ok, note}]}, ` +
       'and status "done" with a one-line note once the review passed. A subagent without the Coplan tools reports ' +
       'back to the agent that gave it this brief instead: what it changed, the checks and how they came out, and anything left.',
   );
   if (task.stage || task.round || task.checks?.length) {
-    out.push('', `_Now: ${[task.stage ? stageWords(task) : task.status.replace('_', ' '), task.checks?.length ? `checks ${checkWords(task)}` : ''].filter(Boolean).join(' · ')}._`);
+    b.gap().add(
+      'now',
+      derived('where the task is in its cycle, as the agent reported it'),
+      `_Now: ${[task.stage ? stageWords(task) : task.status.replace('_', ' '), task.checks?.length ? `checks ${checkWords(task)}` : ''].filter(Boolean).join(' · ')}._`,
+    );
   }
 
   // Every open comment that bears on it: on the task, on the plan as a
@@ -399,14 +441,15 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
   };
   const threads = plan.threads.filter((t) => !t.resolved && bears(t));
   if (threads.length) {
-    out.push('', '## Open comments on it and its design');
+    b.gap().add('comments', TEMPLATE, '## Open comments on it and its design');
     for (const t of threads) {
       const on = t.target.kind === 'task' && mine.has(t.target.id) ? '' : ` _(on ${describeTarget(plan, t.target)})_`;
-      out.push(`- ${t.author === 'user' ? 'user' : 'planner'}${on}: ${hang(t.text, 4)}`);
-      for (const r of t.replies) out.push(`  ↳ ${r.author === 'user' ? 'user' : 'planner'}: ${hang(r.text, 4)}`);
+      const lines = [`- ${t.author === 'user' ? 'user' : 'planner'}${on}: ${hang(t.text, 4)}`];
+      for (const r of t.replies) lines.push(`  ↳ ${r.author === 'user' ? 'user' : 'planner'}: ${hang(r.text, 4)}`);
+      b.add(`thread:${t.id}`, { kind: 'field', target: t.target }, lines);
     }
   }
-  return out.join('\n');
+  return b.blocks;
 }
 
 /** How much of the plan's sections a brief quotes: each, and in all. */
@@ -455,22 +498,23 @@ function designOf(plan: Plan, task: Task): { diagrams: Set<string>; nodes: Set<s
 }
 
 /** The boxes a task builds — through itself, a parent or a subtask — with
- *  what each one is, what was decided and what it connects to. */
-function renderParts(plan: Plan, task: Task): string[] {
+ *  what each one is, what was decided and what it connects to: a block each. */
+function partBlocks(plan: Plan, task: Task): Block[] {
   const related = relatedTasks(plan, task);
-  const out: string[] = [];
+  const b = new BlockList();
   for (const d of plan.diagrams) {
     const label = (id: string) => d.nodes.find((n) => n.id === id)?.label ?? id;
     for (const n of d.nodes) {
       if (!n.taskIds?.some((id) => related.has(id))) continue;
-      out.push(`- **${n.label}** \`${n.id}\` in "${d.title}" — ${KIND_NOUN[n.kind]}${n.detail ? `: ${n.detail}` : ''}`);
-      if (n.description?.trim()) out.push(...indent(n.description, 2));
-      if (n.notes?.trim()) out.push('  Decisions:', ...indent(n.notes, 4));
+      const lines = [`- **${n.label}** \`${n.id}\` in "${d.title}" — ${KIND_NOUN[n.kind]}${n.detail ? `: ${n.detail}` : ''}`];
+      if (n.description?.trim()) lines.push(...indent(n.description, 2));
+      if (n.notes?.trim()) lines.push('  Decisions:', ...indent(n.notes, 4));
       const edges = d.edges.filter((e) => e.source === n.id || e.target === n.id);
-      if (edges.length) out.push(`  Connections: ${edges.map((e) => edgePhrase(e, label)).join('; ')}`);
+      if (edges.length) lines.push(`  Connections: ${edges.map((e) => edgePhrase(e, label)).join('; ')}`);
       const others = (n.taskIds ?? []).filter((id) => !related.has(id));
-      if (others.length) out.push(`  Also built by: ${others.map((id) => plan.tasks.find((t) => t.id === id)).filter(Boolean).map((t) => line(t!)).join('; ')}`);
+      if (others.length) lines.push(`  Also built by: ${others.map((id) => plan.tasks.find((t) => t.id === id)).filter(Boolean).map((t) => line(t!)).join('; ')}`);
+      b.add(`node:${d.id}/${n.id}`, field('node', `${d.id}/${n.id}`), lines);
     }
   }
-  return out;
+  return b.blocks;
 }

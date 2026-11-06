@@ -62,37 +62,49 @@ export interface RenderOptions {
 }
 
 export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
-  const unread = unreadByClaude(plan);
-  const out: string[] = [];
+  return blocksText(planBlocks(plan, opts));
+}
 
-  out.push(`# ${plan.title}`);
+/**
+ * What harness_plan_read returns, as blocks that each name their source.
+ * What only the agent needs — revisions, who edited what, how to reply,
+ * its proposals, the gaps and the legend — is marked as bookkeeping.
+ */
+export function planBlocks(plan: Plan, opts: RenderOptions = {}): Block[] {
+  const unread = unreadByClaude(plan);
+  const b = new BlockList();
+
+  b.add('heading', field('plan'), `# ${plan.title}`);
   const counts = countTasks(plan);
   const meta = [
     `revision ${plan.revision}`,
     counts.total ? `tasks ${counts.done}/${counts.total} done` : 'no tasks',
     `${plan.threads.filter((t) => !t.resolved).length} open comment(s)`,
   ];
-  out.push(`_${meta.join(' · ')}${opts.url ? ` · UI: ${opts.url}` : ''}_`);
+  b.add('meta', derived('its revision', 'the tasks and comments'), `_${meta.join(' · ')}${opts.url ? ` · UI: ${opts.url}` : ''}_`, { bookkeeping: true });
   const locked = lockLine(plan);
-  if (locked) out.push('', locked);
+  if (locked) b.gap().add('lock', TEMPLATE, locked);
 
-  out.push('');
-  out.push(renderChanges(plan, unread, Boolean(opts.changesOnly)));
+  b.gap().add('changes', CHANGES, renderChanges(plan, unread, Boolean(opts.changesOnly)));
 
   const proposals = renderProposals(plan);
+  const proposalBlock = () => b.gap().add('proposals', derived('its proposals, and your answers'), proposals, { bookkeeping: true });
   if (opts.changesOnly) {
     const touched = new Set(unread.map((c) => `${c.target.kind}:${c.target.id}`));
     const threads = plan.threads.filter((t) => !t.resolved && (touched.has(`${t.target.kind}:${t.target.id}`) || lastAuthor(t) === 'user'));
-    if (threads.length) out.push('', '## Comments waiting on you', ...threads.map((t) => renderThread(plan, t)));
-    if (proposals.length) out.push('', ...proposals);
-    return out.join('\n').trim();
+    if (threads.length) {
+      b.gap().add('comments', TEMPLATE, '## Comments waiting on you');
+      for (const t of threads) b.push(...threadBlocks(plan, t));
+    }
+    if (proposals.length) proposalBlock();
+    return b.blocks;
   }
 
-  out.push(...renderDocument(plan, { revs: true }));
-  if (proposals.length) out.push('', ...proposals);
+  b.push(...documentBlocks(documentParts(plan, { revs: true })));
+  if (proposals.length) proposalBlock();
   const gaps = renderGaps(plan, 12, opts.planCheck);
-  if (gaps.length) out.push('', ...gaps);
-  return out.join('\n').trim();
+  if (gaps.length) b.gap().add('gaps', derived('the plan check'), gaps, { bookkeeping: true });
+  return b.blocks;
 }
 
 /**
@@ -236,11 +248,6 @@ function documentParts(plan: Plan, opts: DocumentOptions = {}): DocumentParts {
 
 function documentBlocks(parts: DocumentParts): Block[] {
   return [...parts.summary, ...parts.sections, ...parts.architecture, ...parts.tasks, ...parts.order, ...parts.report, ...parts.comments, ...parts.legend];
-}
-
-/** The document as lines. */
-function renderDocument(plan: Plan, opts: DocumentOptions = {}): string[] {
-  return blockLines(documentBlocks(documentParts(plan, opts)));
 }
 
 const STATUS_LEGEND = `_Statuses: ${Object.entries(STATUS_MARK).map(([k, v]) => `${v} ${k}`).join(', ')}_`;
@@ -1063,10 +1070,6 @@ function threadBlocks(plan: Plan, t: Thread, reader: 'claude' | 'outside' = 'cla
     b.add(`thread:${t.id}:reply`, TEMPLATE, `  → reply with harness_plan_edit {ops: [{op: "reply", threadId: "${t.id}", text}]} once you have acted on it`, { bookkeeping: true });
   }
   return b.blocks;
-}
-
-function renderThread(plan: Plan, t: Thread, reader: 'claude' | 'outside' = 'claude'): string {
-  return joinBlocks(threadBlocks(plan, t, reader));
 }
 
 function lastAuthor(t: Thread): 'user' | 'claude' {

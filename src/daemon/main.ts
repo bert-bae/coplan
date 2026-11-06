@@ -11,8 +11,9 @@ import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
 import { MAX_NOTE, PlanError, cleanChecks, cleanNote, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
-import { PROMPT_BUDGET, buildPrompt, configRows, designPrompt, promptHash, renderGaps, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
-import { renderBrief, renderNext } from './brief.ts';
+import { PROMPT_BUDGET, buildPrompt, configRows, designPrompt, planBlocks, promptHash, renderGaps, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
+import { briefBlocks, renderBrief, renderNext } from './brief.ts';
+import { blocksText, joinBlocks } from '../shared/blocks.ts';
 import { cleanSettings, dependents, effectiveReview, hasSubtasks, readyTasks, roundVerdict, stackStatus, waitingOn } from '../shared/build.ts';
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
@@ -496,6 +497,10 @@ function buildRouter(deps: Deps): Router {
     return config;
   };
 
+  /** How a brief is rendered for a session: the same for the agent's tool
+   *  and the page, so both read the same text. */
+  const briefOptions = (session: SessionState) => ({ agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) });
+
   /** Settings as the page sent them, over the repository's defaults. */
   const settingsFrom = (raw: unknown, project: ProjectConfig): BuildSettings =>
     raw && typeof raw === 'object' ? cleanSettings(raw, project.settings) : project.settings;
@@ -586,6 +591,36 @@ function buildRouter(deps: Deps): Router {
       return;
     }
     text(ctx.res, 200, renderPlan(session.plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck }));
+  });
+
+  /** The read-back as blocks, each naming its source, for the page's
+   *  prompt viewer. A look, not a read: Claude's read position stays. */
+  router.get('/api/session/:id/plan/readback', (ctx) => {
+    const session = sessionOr404(ctx);
+    if (!session) return;
+    if (!session.plan) {
+      json(ctx.res, 404, { error: 'no plan yet' });
+      return;
+    }
+    const blocks = planBlocks(session.plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck });
+    json(ctx.res, 200, { text: blocksText(blocks), blocks, version: session.plan.version });
+  });
+
+  /**
+   * One task's brief, exactly as harness_task_brief returns it — what each
+   * implementer subagent is given — as blocks that name their sources. A
+   * look, not a read: nothing about the plan or the session changes.
+   */
+  router.get('/api/session/:id/task/:taskId/brief', (ctx) => {
+    const session = sessionOr404(ctx);
+    if (!session) return;
+    const task = session.plan?.tasks.find((t) => t.id === ctx.params['taskId']);
+    if (!session.plan || !task) {
+      json(ctx.res, 404, { error: session.plan ? `no task "${ctx.params['taskId'] ?? ''}"` : 'no plan yet' });
+      return;
+    }
+    const blocks = briefBlocks(session.plan, task, briefOptions(session));
+    json(ctx.res, 200, { text: joinBlocks(blocks), blocks, task: { id: task.id, title: task.title }, version: session.plan.version });
   });
 
   /**
@@ -1324,7 +1359,7 @@ function buildRouter(deps: Deps): Router {
           const taskId = String(body['task_id'] ?? '');
           const task = plan.tasks.find((t) => t.id === taskId);
           if (!task) throw new PlanError(`No task "${taskId}". harness_task_next lists the tasks that are ready.`);
-          reply(true, renderBrief(plan, task, { agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) }));
+          reply(true, renderBrief(plan, task, briefOptions(session)));
           return;
         }
 
