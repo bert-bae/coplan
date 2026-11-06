@@ -568,9 +568,6 @@ test('the prompt preview is the prompt, and reading it changes nothing', async (
 });
 
 test('confirming the design locks it, and the next message asks Claude for the task list — once', async () => {
-  const early = await post<{ error?: string }>(`/api/session/${built}/plan/submit`, { target: 'session' });
-  assert.match(early.error ?? '', /Confirm the design first/);
-
   const preview = await post<Preview>(`/api/session/${built}/plan/design/prompt`, { note: 'Split the storage work.' });
   assert.match(preview.prompt, /^\[cc-harness\] The design is confirmed for "Add a cache"/);
   assert.equal(blocksText(preview.blocks), preview.prompt);
@@ -633,7 +630,9 @@ test('Claude publishes the task list: linked tasks, the boxes they build, and wh
   assert.equal(res['ok'], true, String(res['text']));
   const text = String(res['text']);
   assert.match(text, /Published the task list/);
-  assert.match(text, /Do not start building/);
+  // Start when the user says so, in chat or in Coplan — never told to wait for a click (#65).
+  assert.match(text, /Start building when they say so: when they tell you here to go ahead, call harness_plan_advance/);
+  assert.doesNotMatch(text, /Do not start building/);
   assert.match(text, /## Build order/);
   assert.match(text, /`cache\/api` from `cache\/storage` \(stacked\)/);
 
@@ -1380,4 +1379,113 @@ test('opening any tab of the prompt viewer does not count as the agent reading t
   // The agent reads it all the same, next time it reads.
   const handed = String((await mcpFor(id, 'read'))['text']);
   assert.match(handed, /^\[cc-harness\] The design is confirmed/);
+});
+
+/* ------------------------------------------------------------------ *
+ * Proceeding from chat (#65)
+ * ------------------------------------------------------------------ */
+
+/**
+ * A scripted session: what the user types goes through the hook as it
+ * would from the agent, and what the agent does is its tool calls. The
+ * agent — not the hook — reads "build it" as the go-ahead, so the hook
+ * adds nothing to that message; the agent advances the plan, quoting it.
+ */
+test('"build it" in chat: the agent advances the plan, and it is building — locked, quoted, and handed over once (#65)', async () => {
+  const id = 'chat-build';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await hookFor(id, 'UserPromptSubmit', { prompt: '/coplan add a cache' });
+  await mcpFor(id, 'publish', PLAN);
+  await mcpFor(id, 'read');
+  // The user once chose Tracked in the Submit dialog, and closed it.
+  await post(`/api/session/${id}/plan/choice`, { mode: 'tracked' });
+  assert.equal((await sessionFor(id)).buildChoice?.mode, 'tracked');
+  const preview = await post<Preview & { mode: string }>(`/api/session/${id}/plan/prompt`, {});
+  assert.equal(preview.mode, 'tracked', 'the dialog opens on what the user last chose');
+
+  // The user, in chat. The hook reads nothing into it: deciding what it
+  // means is the agent's, which reads the chat.
+  const said = await hookFor(id, 'UserPromptSubmit', { prompt: 'looks good, build it' });
+  assert.equal(said.hookSpecificOutput?.additionalContext, undefined);
+
+  // The agent signs off for them — no question, no trip to the page.
+  const res = await mcpFor(id, 'advance', { to: 'build', user_said: 'looks good, build it' });
+  assert.equal(res['ok'], true, String(res['text']));
+  const text = String(res['text']);
+  assert.match(text, /^\[cc-harness\] Submitted the plan from chat, on the user's word \("looks good, build it"\): Tracked, as they last chose in Coplan\./);
+  assert.ok(text.includes(preview.prompt), 'the reply carries the prompt the page would have sent');
+
+  // Building: straight from the design, which was never confirmed.
+  const s = await sessionFor(id);
+  assert.equal(s.plan!.design, undefined);
+  assert.equal(s.plan!.submission?.via, 'chat');
+  assert.equal(s.plan!.submission?.userSaid, 'looks good, build it');
+  assert.equal(s.plan!.submission?.mode, 'tracked');
+  assert.equal(s.plan!.submission?.prompt, preview.prompt);
+  assert.ok(s.plan!.submission?.deliveredAt, 'handed over as the reply');
+  const { sessions } = await call<{ sessions: { sessionId: string; phase: string }[] }>('/api/sessions');
+  assert.equal(sessions.find((x) => x.sessionId === id)?.phase, 'building');
+
+  // Locked like a submitted plan, for both sides.
+  const redesign = await mcpFor(id, 'edit', { ops: [{ op: 'upsert_diagram', id: 'd1', title: 'Different' }] });
+  assert.equal(redesign['ok'], false);
+  assert.match(String(redesign['text']), /locked/);
+  assert.match((await opsOn(id, [{ op: 'upsert_task', title: 'sneak in' }])).error ?? '', /locked/);
+
+  // The prompt went with the reply, so the next message does not carry it again.
+  const next = await hookFor(id, 'UserPromptSubmit', { prompt: 'how is it going?' });
+  assert.equal(next.hookSpecificOutput?.additionalContext, undefined);
+  assert.match(String((await mcpFor(id, 'read'))['text']), /Locked for building/);
+
+  // The agent builds, with no "not submitted" note.
+  const leaf = s.plan!.tasks.find((t) => t.title === 'Client')!;
+  const started = await mcpFor(id, 'task', { task_id: leaf.id, status: 'in_progress' });
+  assert.equal(started['ok'], true, String(started['text']));
+  assert.doesNotMatch(String(started['text']), /not been submitted/);
+
+  // Signed off once: a second go-ahead is told to build, not refused silently.
+  const again = await mcpFor(id, 'advance', { to: 'build', user_said: 'build it' });
+  assert.equal(again['ok'], false);
+  assert.match(String(again['text']), /already submitted: build it/);
+});
+
+test('"make the task list" in chat confirms the design; with no choice made, a build takes the repository default (#65)', async () => {
+  const id = 'chat-tasks';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await mcpFor(id, 'read');
+
+  // Only on the user's word, quoted.
+  const unquoted = await mcpFor(id, 'advance', { to: 'build' });
+  assert.equal(unquoted['ok'], false);
+  assert.match(String(unquoted['text']), /`user_said` needs what the user told you in chat/);
+  assert.equal(String((await mcpFor(id, 'advance', { to: 'ship', user_said: 'go' }))['text']).includes('`to` is "tasks"'), true);
+  assert.equal((await sessionFor(id)).plan!.submission, undefined, 'nothing was signed off');
+
+  const design = await post<Preview>(`/api/session/${id}/plan/design/prompt`, {});
+  const res = await mcpFor(id, 'advance', { to: 'tasks', user_said: 'the design is right, make the tasks' });
+  assert.equal(res['ok'], true, String(res['text']));
+  assert.match(String(res['text']), /^\[cc-harness\] Confirmed the design from chat, on the user's word \("the design is right, make the tasks"\)/);
+  assert.ok(String(res['text']).includes(design.prompt), 'the ask Confirm would have sent');
+  let s = await sessionFor(id);
+  assert.equal(s.plan!.design?.via, 'chat');
+  assert.equal(s.plan!.design?.userSaid, 'the design is right, make the tasks');
+  assert.ok(s.plan!.design?.deliveredAt);
+  assert.match((await opsOn(id, [{ op: 'upsert_diagram', id: 'd1', title: 'Different' }])).error ?? '', /design is confirmed/);
+  const quiet = await hookFor(id, 'UserPromptSubmit', { prompt: 'ok' });
+  assert.equal(quiet.hookSpecificOutput?.additionalContext, undefined, 'not handed over a second time');
+  const twice = await mcpFor(id, 'advance', { to: 'tasks', user_said: 'again' });
+  assert.match(String(twice['text']), /already confirmed: make the task list/);
+
+  // The task list, then "build it" — with no choice made in the page, the
+  // repository's default (Managed in these tests).
+  await mcpFor(id, 'tasks', { tasks: [{ id: 't1', title: 'Client', detail: 'Wrap the driver.' }, { id: 't2', title: 'Wire up', dependsOn: ['t1'], detail: 'Use it.' }] });
+  const build = await mcpFor(id, 'advance', { to: 'build', user_said: 'ship it' });
+  assert.equal(build['ok'], true, String(build['text']));
+  assert.match(String(build['text']), /: Managed, this repository's default\./);
+  assert.match(String(build['text']), /\[cc-harness\] Build the plan "Add a cache"/);
+  s = await sessionFor(id);
+  assert.equal(s.plan!.submission?.mode, 'managed');
+  assert.equal(s.plan!.submission?.userSaid, 'ship it');
+  assert.ok(s.plan!.submission?.settings, "a Managed build records the settings it runs with");
 });

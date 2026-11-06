@@ -45,7 +45,7 @@ import type {
   TaskStatus,
   Thread,
 } from './types.ts';
-import { BUILD_TARGETS, EDGE_ARROWS, IRIC_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
+import { BUILD_TARGETS, EDGE_ARROWS, EXECUTION_MODES, IRIC_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
 import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, validReview } from './build.ts';
 import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from './proposal-ops.ts';
 
@@ -2098,19 +2098,28 @@ export function cleanNote(value: unknown): string | undefined {
   return clean(value, MAX_NOTE);
 }
 
+/** The longest quote of the user a sign-off in chat keeps. */
+export const MAX_USER_SAID = 1_000;
+
+/** What the user said in chat, as the agent quoted it when it signed off
+ *  for them (harness_plan_advance); undefined when it quoted nothing. */
+export function cleanUserSaid(value: unknown): string | undefined {
+  return clean(value, MAX_USER_SAID);
+}
+
 /**
  * Lock the plan for building. `prompt` is what the user previewed: it is
  * stored as it was shown, so what reaches Claude is exactly that.
  */
 export function submitPlan(
   plan: Plan,
-  input: { target: BuildTarget; mode?: ExecutionMode; prompt: string; note?: string; trimmed?: boolean; settings?: BuildSettings; base?: string },
+  input: { target: BuildTarget; mode?: ExecutionMode; prompt: string; note?: string; trimmed?: boolean; settings?: BuildSettings; base?: string; userSaid?: string },
   now = Date.now(),
 ): Plan {
   if (plan.submission) throw new PlanError('The plan has already been submitted.');
-  if (!plan.design) {
-    throw new PlanError('Confirm the design first: the task list is made from the confirmed design, and then the plan is submitted.');
-  }
+  // Confirming the design is a checkpoint the user may take, not a step
+  // they must (#65): a plan goes from planning straight to building when
+  // they say so, and the lock holds from there.
   if (!input.prompt.trim()) throw new PlanError('There is no prompt to submit.');
   // What is submitted gets built: a plan that cannot be is refused here,
   // not discovered by the agent halfway through.
@@ -2119,6 +2128,7 @@ export function submitPlan(
   if (problem) throw new PlanError(`The task list cannot be built as it is. ${problem}`);
   const next = structuredClone(plan);
   const note = cleanNote(input.note);
+  const said = cleanUserSaid(input.userSaid);
   next.submission = {
     at: now,
     target: input.target,
@@ -2128,6 +2138,7 @@ export function submitPlan(
     ...(input.trimmed ? { trimmed: true } : {}),
     ...(input.settings ? { settings: cleanSettings(input.settings) } : {}),
     ...(input.base ? { base: input.base } : {}),
+    ...(said ? { via: 'chat' as const, userSaid: said } : {}),
     deliveredAt: null,
   };
   next.version += 1;
@@ -2152,18 +2163,20 @@ export function reopenPlan(plan: Plan, now = Date.now()): Plan {
  * The user confirms the design. `prompt` is what they previewed — the ask
  * for a task list — and it reaches Claude with their next message, as is.
  */
-export function confirmDesign(plan: Plan, input: { prompt: string; note?: string; trimmed?: boolean }, now = Date.now()): Plan {
+export function confirmDesign(plan: Plan, input: { prompt: string; note?: string; trimmed?: boolean; userSaid?: string }, now = Date.now()): Plan {
   if (plan.submission) throw new PlanError('The plan has already been submitted.');
   if (plan.design) throw new PlanError('The design is already confirmed.');
   if (!input.prompt.trim()) throw new PlanError('There is no prompt to send.');
   const next = structuredClone(plan);
   const note = cleanNote(input.note);
+  const said = cleanUserSaid(input.userSaid);
   next.design = {
     at: now,
     seq: plan.seq,
     ...(note ? { note } : {}),
     prompt: input.prompt,
     ...(input.trimmed ? { trimmed: true } : {}),
+    ...(said ? { via: 'chat' as const, userSaid: said } : {}),
     deliveredAt: null,
   };
   next.version += 1;
@@ -2224,14 +2237,20 @@ function validSubmission(raw: unknown): Submission | undefined {
   if (!s || typeof s !== 'object') return undefined;
   const target = validTarget(s.target);
   if (!target || typeof s.at !== 'number' || typeof s.prompt !== 'string' || !s.prompt) return undefined;
+  const mode = (EXECUTION_MODES as readonly string[]).includes(s.mode as string) ? s.mode : undefined;
+  const said = s.via === 'chat' ? cleanUserSaid(s.userSaid) : undefined;
   return {
     at: s.at,
     target,
+    // Kept across a restart: without it a Tracked build would read back as
+    // Managed, and its gates would start refusing.
+    ...(mode ? { mode } : {}),
     ...(typeof s.note === 'string' && s.note ? { note: s.note } : {}),
     prompt: s.prompt,
     ...(s.trimmed === true ? { trimmed: true } : {}),
     ...(s.settings && typeof s.settings === 'object' ? { settings: cleanSettings(s.settings) } : {}),
     ...(typeof s.base === 'string' && s.base ? { base: s.base } : {}),
+    ...(said ? { via: 'chat' as const, userSaid: said } : {}),
     deliveredAt: typeof s.deliveredAt === 'number' ? s.deliveredAt : null,
   };
 }
@@ -2239,12 +2258,14 @@ function validSubmission(raw: unknown): Submission | undefined {
 function validDesign(raw: unknown): DesignSignoff | undefined {
   const d = raw as Partial<DesignSignoff> | null;
   if (!d || typeof d !== 'object' || typeof d.at !== 'number' || typeof d.prompt !== 'string' || !d.prompt) return undefined;
+  const said = d.via === 'chat' ? cleanUserSaid(d.userSaid) : undefined;
   return {
     at: d.at,
     ...(typeof d.seq === 'number' ? { seq: d.seq } : {}),
     ...(typeof d.note === 'string' && d.note ? { note: d.note } : {}),
     prompt: d.prompt,
     ...(d.trimmed === true ? { trimmed: true } : {}),
+    ...(said ? { via: 'chat' as const, userSaid: said } : {}),
     deliveredAt: typeof d.deliveredAt === 'number' ? d.deliveredAt : null,
   };
 }

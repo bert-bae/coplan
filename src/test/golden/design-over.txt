@@ -1,13 +1,13 @@
 [cc-harness] The design is confirmed for "Add a read-through cache" — now break it into the task list.
 
-The user has reviewed the design in Coplan and confirmed it: the architecture, sections and summary below are locked. What you make now is the task list the build will follow. The user reviews it, then submits the plan to start the build. Follow the coplan skill's guidance on the task list:
+The user has reviewed the design in Coplan and confirmed it: the architecture, sections and summary below are locked. What you make now is the task list the build will follow. The user reviews it, then starts the build — by telling you to in chat, or by submitting the plan in Coplan. Follow the coplan skill's guidance on the task list:
 
 1. Start from the tasks planned on the diagram. Break each into focused tasks: one objective, one area of the architecture, small enough to implement and review on its own. In `detail` put the objective, the acceptance criteria and what is out of scope; in `files` the files you expect to touch.
 2. Link them: `dependsOn` lists the tasks that must be done first (by id). Leave a task free of dependencies whenever it could be built alongside others — that is what lets the build run in parallel. A parent's dependencies hold for all its subtasks.
 3. Say what each task builds: `builds` names the boxes it implements (node ids), so the diagram tracks it.
 4. Decide how it lands. A change that is one pull request needs no `branch`. Otherwise give each group of tasks a `branch`: a branch whose tasks depend on another branch's is cut from it, as a stacked pull request. Branches are cut from `main` and named `coplan/…`.
 5. Each task is built implement → review → refine. Review is an independent reviewer (a fresh subagent) by default; set `review: "user"` on risky or user-facing tasks, `"skip"` on trivial ones.
-6. Publish it with harness_tasks_publish — keep the ids of planned tasks you keep, so the boxes stay linked — then tell the user in chat that the task list is ready to review. Do not start building: the user submits the plan when the tasks are right.
+6. Publish it with harness_tasks_publish — keep the ids of planned tasks you keep, so the boxes stay linked — then tell the user in chat that the task list is ready to review. Start building when they say so: told here, call harness_plan_advance {to: "build", user_said} and build; submitted in Coplan, the build prompt reaches you.
 
 **When to ask.** Ask the user, with AskUserQuestion, only when a decision cannot be undone or reaches outside this session (pushing, opening a pull request). Anything else in the task list, decide, and say what you decided in the task's detail: the user reviews the list before anything is built.
 
@@ -101,7 +101,6 @@ Reads are slow at peak.
 - [ ] bulk26 Bulk task number 26 with a descriptive title · after bulk25 — user note on bulk task 26
 - [ ] bulk27 Bulk task number 27 with a descriptive title · after bulk26 — user note on bulk task 27
 - [ ] bulk28 Bulk task number 28 with a descriptive title · after bulk27 — user note on bulk task 28
-- [ ] bulk29 Bulk task number 29 with a descriptive title · after bulk28 — user note on bulk task 29
-- …and 30 more line(s): harness_plan_read lists every task.
+- …and 31 more line(s): harness_plan_read lists every task.
 
 _Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_

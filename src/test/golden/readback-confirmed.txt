@@ -1,7 +1,7 @@
 # Add a read-through cache
 _revision 1 · tasks 1/4 done · 4 open comment(s)_
 
-> **Design confirmed.** The user confirmed the architecture, sections and summary, and they are locked. What changes now is the task list: build it from the design (harness_tasks_publish), then the user reviews and submits it. Do not start building before they do.
+> **Design confirmed.** The user confirmed the architecture, sections and summary, and they are locked. What changes now is the task list: build it from the design (harness_tasks_publish), then the user reviews it. Start building when they say so — here in chat (record it with harness_plan_advance {to: "build", user_said}) or by submitting the plan in Coplan.
 
 ## Since you last read — what the user changed
 _The net effect of their edits — not each step, and not where boxes were moved on the canvas. The full plan follows._

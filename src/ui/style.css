@@ -2077,6 +2077,8 @@ button.pv-chip { cursor: pointer; }
 .phase-head { margin: 0; font-weight: 700; }
 .phase-text { margin: 0; font-size: var(--fs-sm); color: var(--text-secondary); overflow-wrap: anywhere; }
 .phase-text strong { color: var(--text-primary); }
+.phase-said { margin: 0; font-size: var(--fs-sm); color: var(--text-secondary); overflow-wrap: anywhere; }
+.phase-said q { color: var(--text-primary); font-style: italic; }
 .phase-progress { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 120px; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
 .phase-actions { display: inline-flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
 

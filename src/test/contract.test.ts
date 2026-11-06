@@ -190,6 +190,31 @@ test('the harness_plan_edit description names every op it offers', () => {
   for (const op of AGENT_OPS) assert.match(description, new RegExp(`\\b${op} \\{`), `${op} is not described`);
 });
 
+test('every tool is named in the coplan skill\'s tool list and in the README\'s table', () => {
+  const skill = read('skills/coplan/SKILL.md');
+  const at = skill.indexOf("Coplan's tools are the MCP server");
+  const list = skill.slice(at, skill.indexOf('\n\n', at));
+  const readme = read('README.md');
+  const count = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen'][TOOLS.length];
+  assert.match(readme, new RegExp(`^The ${count} tools:$`, 'm'), 'the README counts them');
+  for (const tool of TOOLS) {
+    assert.ok(list.includes(`\`${tool.name}\``), `the coplan skill's tool list names ${tool.name}`);
+    assert.match(readme, new RegExp(`^\\| \`${tool.name}\` \\|`, 'm'), `the README's tool table has ${tool.name}`);
+  }
+});
+
+test('harness_plan_advance signs off only with the user\'s words, as user_approved does (#65)', () => {
+  const tool = toolOf('harness_plan_advance')!;
+  assert.deepEqual((tool.inputSchema['required'] as string[]).sort(), ['to', 'user_said']);
+  const props = tool.inputSchema['properties'] as Record<string, { enum?: string[] }>;
+  assert.deepEqual(props['to']!.enum, ['tasks', 'build']);
+  assert.equal(tool.inputSchema['additionalProperties'], false);
+  // Every example of it, anywhere the agent reads, quotes the user.
+  const calls = examples().filter((ex) => ex.tool === 'harness_plan_advance');
+  assert.ok(calls.length >= 5, `expected harness_plan_advance examples, found ${calls.length}`);
+  for (const ex of calls) assert.ok(fields(ex.body).some(([k]) => k === 'user_said'), `${ex.where}: no user_said`);
+});
+
 /* ------------------------------------------------------------------ *
  * When to ask (#63)
  * ------------------------------------------------------------------ */

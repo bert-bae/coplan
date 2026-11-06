@@ -121,6 +121,11 @@ export const api = {
       body: JSON.stringify({ ...(target ? { target } : {}), ...(mode ? { mode } : {}), note, ...(settings ? { settings } : {}) }),
     }),
 
+  /** Remember how the user chose to have the plan built, so telling the
+   *  agent to build it in chat builds it the same way. Changes no plan. */
+  saveChoice: (id: string, body: { mode: ExecutionMode; settings?: BuildSettings }) =>
+    request<{ buildChoice: unknown }>(`/api/session/${id}/plan/choice`, { method: 'POST', body: JSON.stringify(body) }),
+
   /** Lock the plan and hand it over to be built. `expect` is the version
    *  the preview was made from; a plan that moved on since is refused. */
   submitPlan: (id: string, body: { target: BuildTarget; mode?: ExecutionMode; note: string; expect: number; hash?: string; settings?: BuildSettings }) =>

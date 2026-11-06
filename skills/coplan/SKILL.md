@@ -1,12 +1,12 @@
 ---
 name: coplan
-description: Plan a task visually in the Coplan UI — architecture diagrams the user reshapes and confirms, then a linked task list (what blocks what, which branch each piece lands on) that the user submits to be built. Use when the user types /coplan or $coplan, asks to "plan this in Coplan" or to set Coplan up, wants to see and shape the plan before work starts, or when a "[cc-harness] The design is confirmed" prompt arrives.
+description: Plan a task visually in the Coplan UI — architecture diagrams the user reshapes and confirms, then a linked task list (what blocks what, which branch each piece lands on) that is built when the user says so, in chat or by submitting it. Use when the user types /coplan or $coplan, asks to "plan this in Coplan" or to set Coplan up, wants to see and shape the plan before work starts, tells you to go ahead with a Coplan plan, or when a "[cc-harness] The design is confirmed" prompt arrives.
 ---
 
 # Planning in Coplan
 
 Coplan is a planning workspace in the user's browser. A plan goes through
-two sign-offs before anything is built:
+two sign-offs, and the first is optional:
 
 1. **The design.** You publish the architecture — diagrams, sections, and
    the tasks you plan, linked to the boxes they build. The user reshapes
@@ -16,14 +16,26 @@ two sign-offs before anything is built:
    on the branches the change needs. The user shapes it and **submits the
    plan**. That starts the build — see the `coplan-build` skill.
 
-Each sign-off reaches you as a `[cc-harness]` prompt with the user's next
-message in chat — or, in Cursor, they paste it. If they tell you they have
-confirmed the design or submitted the plan and no such prompt has reached
-you, call `harness_plan_read`: the first read after a sign-off returns its
-prompt.
+The user signs off either way: **in Coplan**, with *Confirm design* or
+*Submit*, or **here in chat**, by telling you to go ahead. They may skip
+confirming the design and go straight to building.
+
+- **In Coplan**, the sign-off reaches you as a `[cc-harness]` prompt with
+  their next message in chat — or, in Cursor, they paste it. If they tell
+  you they have confirmed the design or submitted the plan and no such
+  prompt has reached you, call `harness_plan_read`: the first read after a
+  sign-off returns its prompt.
+- **In chat**, you decide whether what they said means go ahead — "looks
+  good, build it", "make the task list" — and record it with
+  `harness_plan_advance {to: "tasks", user_said: "…"}` to make the task
+  list, or `harness_plan_advance {to: "build", user_said: "…"}` to build,
+  quoting their words. It signs the plan off as the page would, with the
+  build settings they last chose there, locks it, and returns the prompt
+  the page would have sent: act on it at once, with no further question.
+  Their word is enough; there is no need to send them to Coplan to click.
 
 Coplan's tools are the MCP server `harness`: `harness_plan_publish`,
-`harness_plan_read`, `harness_plan_check`, `harness_plan_edit`, `harness_plan_propose`, `harness_tasks_publish`,
+`harness_plan_read`, `harness_plan_check`, `harness_plan_edit`, `harness_plan_propose`, `harness_plan_advance`, `harness_tasks_publish`,
 `harness_task_next`, `harness_task_brief`, `harness_task_update` and `harness_branch_update`. Your
 agent may show them with a prefix that names the server (in Claude Code,
 `mcp__plugin_coplan_harness__…`); they are the same tools.
@@ -91,8 +103,9 @@ Run `harness_plan_check` and fix what it finds — a box with no
 description, a planned task that builds no box — or say in chat why a gap
 stays. Where the code and the request leave a choice open, make it and write
 it on the box it is about (see *When to ask*). Tell the user the design is
-ready, with the UI link the publish returned, and that they confirm it in
-Coplan when it is right.
+ready, with the UI link the publish returned, and that when it is right they
+confirm it — in Coplan, or by telling you here — or tell you to go straight
+to building.
 
 ## 2. Read it back when they say so
 
@@ -145,7 +158,9 @@ it could undo theirs. Read first, then edit on top of their version.
 
 ## 3. Make the task list once the design is confirmed
 
-A `[cc-harness] The design is confirmed …` prompt carries the design. The
+A `[cc-harness] The design is confirmed …` prompt carries the design — with
+the user's next message, or as `harness_plan_advance {to: "tasks", user_said}`'s
+answer when they confirmed it in chat. The
 architecture, sections and summary are now locked; what you make is the
 task list. Publish it with **`harness_tasks_publish`** (it replaces the task
 tree and nothing else):
@@ -182,17 +197,22 @@ side by side) and the **branches** (how they stack), and the reply lists
 the **gaps** the list leaves open (`harness_plan_check` lists them any
 time): tasks with no detail, boxes no task builds, branches a stack of pull
 requests cannot follow. Check they say what you meant, and fix or explain
-each gap. Tell the user the task list is ready to review. **Do not start
-building**: the user submits the plan from Coplan when the tasks are right.
+each gap. Tell the user the task list is ready to review. **Start building
+when they say so**: told here in chat, call
+`harness_plan_advance {to: "build", user_said: "…"}` and build from the
+prompt it returns; submitted in Coplan, the build prompt reaches you.
 
 If the prompt says the repository has no `.coplan/config.json`, suggest
 setting one up (`coplan init`, or `/coplan-init` in Claude Code) so the
 build runs the right checks instead of guessing.
 
-## 4. Build when the user submits the plan
+## 4. Build when the user says so
 
 A `[cc-harness] Build the plan …` prompt means the plan is final and
-locked. Run the build with the **`coplan-build`** skill. The prompt says how
+locked: it comes with the user's next message once they submit in Coplan,
+or as `harness_plan_advance {to: "build", user_said}`'s answer when they said so
+in chat — from the task list, or straight from the design. Run the build
+with the **`coplan-build`** skill. The prompt says how
 much of the harness the user chose: in a **Managed** build take each task
 through the **`iric`** skill (implement → review → refine); in a
 **Tracked** build how you build and check each task is yours to decide, and
@@ -202,8 +222,8 @@ work you discover, `reply`/`resolve` on comments, and the final `report`.
 If the design has to change, stop that work and tell the user why in chat:
 only they can reopen it.
 
-If the user tells you to start without submitting, build all the same;
-the plan just stays open for them to edit.
+When the user tells you to build, record it with `harness_plan_advance`
+before you start, so the plan locks and the board follows the build.
 
 ## Setting up, and opening Coplan
 
@@ -242,6 +262,8 @@ In Claude Code and Cursor these are also `/coplan-setup`, `/coplan-open`,
 - Read before you republish, and never overwrite the user's structure.
 - A confirmed design is the user's sign-off on the architecture; a
   submitted plan is their sign-off on the build. Do not redesign either.
+- Sign off for the user (`harness_plan_advance`) only on their word in
+  chat, and quote it.
 - Keep ids stable; quote them exactly (`t4`, `d1`, `c3`, node ids).
 - If the Coplan tools return a daemon error, tell the user once and carry on
   in chat. The UI is an aid, not a dependency.

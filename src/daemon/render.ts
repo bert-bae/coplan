@@ -392,7 +392,8 @@ function lockLine(plan: Plan): string | null {
       return (
         '> **Design confirmed.** The user confirmed the architecture, sections and summary, and they are locked. ' +
         'What changes now is the task list: build it from the design (harness_tasks_publish), then the user reviews ' +
-        'and submits it. Do not start building before they do.'
+        'it. Start building when they say so — here in chat (record it with harness_plan_advance {to: "build", ' +
+        'user_said}) or by submitting the plan in Coplan.'
       );
     case 'handed-off':
       return '> **Locked.** The user submitted this plan to be built outside this session; it no longer changes here.';
@@ -531,8 +532,8 @@ export function designPrompt(plan: Plan, opts: PromptOptions = {}): BuildPrompt 
     'lead',
     TEMPLATE,
     'The user has reviewed the design in Coplan and confirmed it: the architecture, sections and summary below are ' +
-      'locked. What you make now is the task list the build will follow. The user reviews it, then submits the plan ' +
-      'to start the build. Follow the coplan skill\'s guidance on the task list:',
+      'locked. What you make now is the task list the build will follow. The user reviews it, then starts the build — ' +
+      'by telling you to in chat, or by submitting the plan in Coplan. Follow the coplan skill\'s guidance on the task list:',
   );
   b.gap().add(
     'step-1',
@@ -562,8 +563,8 @@ export function designPrompt(plan: Plan, opts: PromptOptions = {}): BuildPrompt 
     'step-6',
     TEMPLATE,
     '6. Publish it with harness_tasks_publish — keep the ids of planned tasks you keep, so the boxes stay linked — ' +
-      'then tell the user in chat that the task list is ready to review. Do not start building: the user submits the ' +
-      'plan when the tasks are right.',
+      'then tell the user in chat that the task list is ready to review. Start building when they say so: told here, ' +
+      'call harness_plan_advance {to: "build", user_said} and build; submitted in Coplan, the build prompt reaches you.',
   );
   b.push(...askRuleBlocks(agentInfo(opts.agent), 'tasks'));
   b.push(...instructionBlocks(project, 'design', undefined, PROMPT_INSTRUCTIONS));
@@ -1128,14 +1129,16 @@ function renderChanges(plan: Plan, unread: Change[], changesOnly: boolean): stri
     meta.push(
       plan.submission
         ? 'Reopened the submitted plan, then submitted it again.'
-        : 'Reopened the submitted plan: it is no longer locked, and the tasks can change again. Do not build until they submit it again.',
+        : 'Reopened the submitted plan: it is no longer locked, and the tasks can change again. Build on when they say so — ' +
+          'in chat (harness_plan_advance {to: "build", user_said}) or by submitting it again in Coplan.',
     );
   }
   if (reopened.includes(REOPENED_DESIGN)) {
     meta.push(
       plan.design
         ? 'Reopened the design, then confirmed it again.'
-        : 'Reopened the design: it is no longer confirmed, so the architecture can change again. Wait for them to confirm it before making the task list.',
+        : 'Reopened the design: it is no longer confirmed, so the architecture can change again. Make the task list ' +
+          'when they say so — in chat (harness_plan_advance {to: "tasks", user_said}) or by confirming it again in Coplan.',
     );
   }
   block('Plan', meta);

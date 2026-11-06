@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Proceed from chat: "build it" moves the plan, without the sign-off dialogs
+
+- **Tell the agent to go ahead, and it signs the plan off for you.** A new
+  tool, `harness_plan_advance {to: "tasks" | "build", user_said}`, confirms
+  the design or submits the plan exactly as *Confirm design* and *Submit*
+  would: the same prompt, the same lock, the same `planCheck` errors holding
+  it. The agent decides whether what you said means go ahead, and quotes
+  you: without your words the tool refuses. Its answer is the prompt the
+  page would have sent, so nothing is handed over again with your next
+  message.
+- **A go-ahead in chat builds the way you last chose.** Picking a mode or a
+  Managed setting in *Submit* is remembered for the session, even if you
+  close the dialog, and the dialog opens on it next time. With no choice
+  made, the repository's defaults apply.
+- **The page says when a sign-off came from chat**: *confirmed from chat* or
+  *submitted from chat* in the strip under the header, with what you said.
+- **Confirming the design is optional.** *Submit plan* sits beside *Confirm
+  design*, and "build it" works straight from the design: the build follows
+  the tasks planned on the diagram, and the design locks with the plan.
+- **No prompt or skill tells the agent to wait for a click in Coplan.** The
+  design prompt, the read-back's lock line, `harness_task_next` before
+  submission, the reply to publishing a task list and the `coplan` and
+  `coplan-build` skills now say to start when you say so — in chat or by
+  submitting in Coplan.
+- Fixed: a Tracked build read back as Managed after the daemon restarted,
+  because a submission's mode was not kept on disk.
+
 ### The diagram as the task breakdown: a task list on every box
 
 - **Every box but a note counts the tasks that build it**, in a chip at its

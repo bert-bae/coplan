@@ -360,9 +360,33 @@ export interface Submission {
   settings?: BuildSettings;
   /** The repository's base branch when it was submitted, if it says. */
   base?: string;
+  /** Given in the agent's chat rather than in Coplan: the user told the
+   *  agent to go ahead, and it recorded that with `harness_plan_advance`. */
+  via?: SignoffVia;
+  /** What the user said in chat, as the agent quoted it. */
+  userSaid?: string;
   /** When the prompt reached Claude. Null until the user's next message in
    *  Claude's chat carries it — and always null for `elsewhere`. */
   deliveredAt: number | null;
+}
+
+/**
+ * Where a sign-off was given. Absent is the page's dialogs; `chat` is the
+ * user saying so in the agent's chat, which the agent records with
+ * `harness_plan_advance`, quoting them (#65).
+ */
+export type SignoffVia = 'chat';
+
+/**
+ * How the user last chose to have the plan built, in the Submit dialog —
+ * kept on the session, so a go-ahead in chat builds it the way they last
+ * chose, and the dialog opens on it.
+ */
+export interface BuildChoice {
+  mode: ExecutionMode;
+  /** A Managed build's settings, when the user set them. */
+  settings?: BuildSettings;
+  at: number;
 }
 
 /**
@@ -381,6 +405,9 @@ export interface DesignSignoff {
   /** The prompt asking Claude for the task list, as the user previewed it. */
   prompt: string;
   trimmed?: boolean;
+  /** Confirmed in the agent's chat, on the user's word (see `Submission`). */
+  via?: SignoffVia;
+  userSaid?: string;
   /** When the prompt reached Claude, with the user's next message. */
   deliveredAt: number | null;
 }
@@ -710,6 +737,8 @@ export interface SessionState {
    *  the skill loaded, or one of its tools called. Every session with the
    *  plugin registers, but only these are the user's plans. */
   engagedAt?: number;
+  /** How the user last chose to have a plan built here (the Submit dialog). */
+  buildChoice?: BuildChoice;
   plan: Plan | null;
 }
 
