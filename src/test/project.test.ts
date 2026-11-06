@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -367,6 +367,37 @@ test('what a customization cannot use is said — and a file outside the reposit
   }
 });
 
+test('what is only taken differently than written is a warning, and the checks still run', () => {
+  const dir = repo({ 'long.md': 'x'.repeat(5000) });
+  try {
+    const config = parseProjectConfig(
+      { instructions: { build: { file: 'long.md' } }, hooks: { review: [{ run: 'npm test', cwd: 'packages/not-yet' }] } },
+      path.join(dir, '.coplan', 'config.json'),
+    );
+    assert.deepEqual(config.errors, [], 'nothing that stops coplan check');
+    assert.match(config.warnings.join('\n'), /"instructions\.build" \(long\.md\) is longer than 4000 characters; the rest is cut/);
+    assert.match(config.warnings.join('\n'), /"hooks\.review\[0\]\.cwd" names packages\/not-yet, which does not exist yet/);
+    assert.equal(config.instructions.build?.length, 4000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a file a config names is read only if it really is inside: a link out is refused', () => {
+  const outside = mkdtempSync(path.join(tmpdir(), 'coplan-secret-'));
+  const dir = repo({});
+  try {
+    writeFileSync(path.join(outside, 'credentials'), 'secret');
+    symlinkSync(path.join(outside, 'credentials'), path.join(dir, 'pr.md'));
+    const config = parseProjectConfig({ pullRequests: { template: 'pr.md' } }, path.join(dir, '.coplan', 'config.json'));
+    assert.equal(config.pullRequests.template, undefined);
+    assert.match(config.errors.join('\n'), /"pullRequests\.template" must name a file inside .*: pr\.md links to one outside it/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test("the user's own layer sits under every repository's: key by key, instructions adding up, checks never", () => {
   const home = mkdtempSync(path.join(tmpdir(), 'coplan-home-'));
   const dir = repo({
@@ -392,7 +423,7 @@ test("the user's own layer sits under every repository's: key by key, instructio
     assert.equal(config.instructions.build, 'My words.\n\nRepository words.');
     assert.equal(config.instructions.brief, 'Write tests first.');
     assert.deepEqual(config.hooks.review, [], 'checks belong to the repository');
-    assert.match(config.errors.join('\n'), /coplan\.json: "hooks" belong to each repository/);
+    assert.match(config.warnings.join('\n'), /coplan\.json: "hooks" belong to each repository/);
     assert.equal(config.globalFile, path.join(home, 'coplan.json'));
     // Without a repository config, the user's layer still counts.
     assert.equal(loadProjectConfig(path.join(dir, 'nowhere'), { globalDir: home }).pullRequests.open, 'auto');

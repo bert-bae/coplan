@@ -57,6 +57,7 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   const root = repoRootOf(cwd);
   const config = loadProjectConfig(root);
   // A config that cannot be read must not pass for one with nothing to run.
+  for (const w of config.warnings) console.error(`coplan: ${w}`);
   if (config.errors.length) {
     for (const e of config.errors) console.error(`coplan: ${e}`);
     console.error(`coplan: fix ${config.globalFile ? `${PROJECT_CONFIG_PATH} or ${config.globalFile}` : PROJECT_CONFIG_PATH} first; nothing was run.`);

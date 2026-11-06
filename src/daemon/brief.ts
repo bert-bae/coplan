@@ -181,9 +181,11 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
   // all done and that have none yet.
   const { open, tool } = project.pullRequests;
   if (open === 'auto' && tool !== 'none') {
-    const due = branchPlan(plan).branches.filter(
-      (b) => !plan.branches?.[b.branch]?.pr && leaves.filter((t) => effectiveBranch(plan, t) === b.branch).every((t) => t.status === 'done' || t.status === 'dropped'),
-    );
+    const finished = (branch: string) => leaves.filter((t) => effectiveBranch(plan, t) === branch).every((t) => t.status === 'done' || t.status === 'dropped');
+    // A stacked branch's pull request goes against the one below it, so that
+    // one is opened first: until then, the branch above waits, done or not.
+    const below = (b: { base?: string | null }) => !b.base || b.base === SESSION_BRANCH || Boolean(plan.branches?.[b.base]?.pr);
+    const due = branchPlan(plan).branches.filter((b) => !plan.branches?.[b.branch]?.pr && finished(b.branch) && below(b));
     if (due.length) {
       out.push('', `## Ready for a pull request (${due.length})`, ...due.map((b) => `- \`${b.branch}\`: every task on it is done.`), pullRequestWords(project), ...templateLines(project));
     }

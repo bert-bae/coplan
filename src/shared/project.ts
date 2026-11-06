@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import type { BuildSettings } from './types.ts';
 import { DEFAULT_BUILD_SETTINGS, MAX_PARALLEL, MAX_ROUNDS, cleanSettings } from './build.ts';
@@ -93,6 +93,9 @@ export interface ProjectConfig {
   /** What could not be read, said rather than silently ignored: a hook
    *  that is quietly dropped is a check nobody runs. */
   errors: string[];
+  /** What was read but taken differently than written, and said: text cut
+   *  to its limit, a folder that is not there yet. The checks still run. */
+  warnings: string[];
 }
 
 export const PROJECT_CONFIG_PATH = path.join('.coplan', 'config.json');
@@ -132,6 +135,7 @@ export function emptyProjectConfig(): ProjectConfig {
     instructions: {},
     planCheck: {},
     errors: [],
+    warnings: [],
   };
 }
 
@@ -156,6 +160,7 @@ function readConfigFile(file: string, label: string, errors: string[]): unknown 
 export function loadProjectConfig(root: string | null | undefined, opts: { globalDir?: string | null } = {}): ProjectConfig {
   const globalDir = opts.globalDir === undefined ? paths.configDir() : opts.globalDir;
   const errors: string[] = [];
+  const warnings: string[] = [];
   const layers: Layer[] = [];
   let globalFile: string | null = null;
   if (globalDir) {
@@ -163,9 +168,9 @@ export function loadProjectConfig(root: string | null | undefined, opts: { globa
     const raw = readConfigFile(file, file, errors);
     if (raw !== undefined) {
       globalFile = file;
-      layers.push(parseLayer(raw, { label: file, base: globalDir, global: true }, errors));
+      layers.push(parseLayer(raw, { label: file, base: globalDir, global: true }, errors, warnings));
     }
-    const words = instructionFiles(path.join(globalDir, 'instructions'), errors);
+    const words = instructionFiles(path.join(globalDir, 'instructions'), errors, warnings);
     if (Object.keys(words).length) layers.push({ instructions: words });
   }
   let file: string | null = null;
@@ -174,19 +179,20 @@ export function loadProjectConfig(root: string | null | undefined, opts: { globa
     if (existsSync(repoFile)) {
       file = repoFile;
       const raw = readConfigFile(repoFile, PROJECT_CONFIG_PATH, errors);
-      if (raw !== undefined) layers.push(parseLayer(raw, { label: PROJECT_CONFIG_PATH, base: root, global: false }, errors));
+      if (raw !== undefined) layers.push(parseLayer(raw, { label: PROJECT_CONFIG_PATH, base: root, global: false }, errors, warnings));
     }
   }
-  return { ...combine(layers), file, globalFile, errors };
+  return { ...combine(layers), file, globalFile, errors, warnings };
 }
 
 /** The repository's config from what its file holds. */
 export function parseProjectConfig(raw: unknown, file: string | null = null): ProjectConfig {
   const errors: string[] = [];
+  const warnings: string[] = [];
   // A config's files are named from the repository root, which holds `.coplan/`.
   const base = file ? path.dirname(path.dirname(file)) : null;
-  const layer = parseLayer(raw, { label: PROJECT_CONFIG_PATH, base, global: false }, errors);
-  return { ...combine([layer]), file, errors };
+  const layer = parseLayer(raw, { label: PROJECT_CONFIG_PATH, base, global: false }, errors, warnings);
+  return { ...combine([layer]), file, errors, warnings };
 }
 
 /** One file's settings, each checked, before the layers are put together. */
@@ -211,7 +217,7 @@ interface LayerContext {
 }
 
 /** Later layers win key by key; instructions add up, the user's first. */
-function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors'> {
+function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors' | 'warnings'> {
   const out = emptyProjectConfig();
   const iric: Record<string, unknown> = {};
   for (const l of layers) {
@@ -228,13 +234,13 @@ function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors'> {
     }
   }
   out.settings = cleanSettings(iric, DEFAULT_BUILD_SETTINGS);
-  const { file: _f, errors: _e, ...rest } = out;
+  const { file: _f, errors: _e, warnings: _w, ...rest } = out;
   return rest;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
 
-function parseLayer(raw: unknown, ctx: LayerContext, errors: string[]): Layer {
+function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings: string[]): Layer {
   const layer: Layer = {};
   const say = (message: string) => errors.push(ctx.global ? `${ctx.label}: ${message}` : message);
   if (!isRecord(raw)) {
@@ -242,12 +248,13 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[]): Layer {
     return layer;
   }
   const local: string[] = [];
+  const notes: string[] = [];
   unknownKeys(raw, PROJECT_KEYS, '', local);
 
   const hooks = raw['hooks'];
   if (hooks !== undefined) {
     if (ctx.global) {
-      local.push('"hooks" belong to each repository (.coplan/config.json), not to every one: they are ignored here.');
+      notes.push('"hooks" belong to each repository (.coplan/config.json), not to every one: they are ignored here.');
     } else if (!isRecord(hooks)) {
       local.push('"hooks" must map a stage (implement, review, final) to a list of commands.');
     } else {
@@ -257,7 +264,7 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[]): Layer {
           local.push(`"hooks.${stage}" is not a stage: use ${HOOK_STAGES.join(', ')}.`);
           continue;
         }
-        layer.hooks[stage as HookStage] = parseHooks(list, stage, local, ctx.base);
+        layer.hooks[stage as HookStage] = parseHooks(list, stage, local, ctx.base, notes);
       }
     }
   }
@@ -298,7 +305,7 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[]): Layer {
     const open = oneOf(prs['open'], PR_OPEN, 'pullRequests.open', local);
     if (open) layer.pullRequests.open = open;
     if (prs['template'] !== undefined) {
-      const text = typeof prs['template'] === 'string' ? readNamedFile(prs['template'], ctx.base, 'pullRequests.template', MAX_TEMPLATE, local) : null;
+      const text = typeof prs['template'] === 'string' ? readNamedFile(prs['template'], ctx.base, 'pullRequests.template', MAX_TEMPLATE, local, notes) : null;
       if (typeof prs['template'] !== 'string') local.push('"pullRequests.template" must name a file, e.g. ".github/pull_request_template.md".');
       if (text !== null) {
         layer.pullRequests.template = text;
@@ -332,10 +339,10 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[]): Layer {
       const where = `instructions.${point}`;
       let text: string | null = null;
       if (typeof v === 'string') text = v.trim();
-      else if (isRecord(v) && typeof v['file'] === 'string' && Object.keys(v).length === 1) text = readNamedFile(v['file'], ctx.base, where, MAX_INSTRUCTIONS, local);
+      else if (isRecord(v) && typeof v['file'] === 'string' && Object.keys(v).length === 1) text = readNamedFile(v['file'], ctx.base, where, MAX_INSTRUCTIONS, local, notes);
       else local.push(`"${where}" must be text, or { "file": "path" }.`);
       if (text && text.length > MAX_INSTRUCTIONS) {
-        local.push(`"${where}" is longer than ${MAX_INSTRUCTIONS} characters; the rest is cut.`);
+        notes.push(`"${where}" is longer than ${MAX_INSTRUCTIONS} characters; the rest is cut.`);
         text = text.slice(0, MAX_INSTRUCTIONS);
       }
       if (text) layer.instructions[point] = text;
@@ -356,6 +363,7 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[]): Layer {
   }
 
   for (const message of local) say(message);
+  for (const message of notes) warnings.push(ctx.global ? `${ctx.label}: ${message}` : message);
   return layer;
 }
 
@@ -371,7 +379,7 @@ function oneOf<T extends string>(value: unknown, allowed: readonly T[], where: s
  * to (the repository, or Coplan's home), so a committed config cannot pull
  * someone's private files into what the agent is told.
  */
-function readNamedFile(name: string, base: string | null, where: string, max: number, errors: string[]): string | null {
+function readNamedFile(name: string, base: string | null, where: string, max: number, errors: string[], warnings: string[]): string | null {
   const rel = name.trim();
   if (!base) {
     errors.push(`"${where}" names a file, but this config is not read from disk.`);
@@ -383,9 +391,17 @@ function readNamedFile(name: string, base: string | null, where: string, max: nu
     return null;
   }
   try {
-    const text = readFileSync(full, 'utf8').trim();
+    // Where it really is: a link committed inside the repository may point
+    // anywhere, and reading follows it.
+    const realBase = realpathSync(base);
+    const real = realpathSync(full);
+    if (real !== realBase && !real.startsWith(realBase + path.sep)) {
+      errors.push(`"${where}" must name a file inside ${base}: ${rel} links to one outside it.`);
+      return null;
+    }
+    const text = readFileSync(real, 'utf8').trim();
     if (text.length > max) {
-      errors.push(`"${where}" (${rel}) is longer than ${max} characters; the rest is cut.`);
+      warnings.push(`"${where}" (${rel}) is longer than ${max} characters; the rest is cut.`);
       return text.slice(0, max);
     }
     return text;
@@ -396,12 +412,12 @@ function readNamedFile(name: string, base: string | null, where: string, max: nu
 }
 
 /** `instructions/<point>.md` in Coplan's home: the user's own words. */
-function instructionFiles(dir: string, errors: string[]): ProjectConfig['instructions'] {
+function instructionFiles(dir: string, errors: string[], warnings: string[]): ProjectConfig['instructions'] {
   const out: ProjectConfig['instructions'] = {};
   for (const point of INSTRUCTION_POINTS) {
     const file = path.join(dir, `${point}.md`);
     if (!existsSync(file)) continue;
-    const text = readNamedFile(`${point}.md`, dir, `${file}`, MAX_INSTRUCTIONS, errors);
+    const text = readNamedFile(`${point}.md`, dir, `${file}`, MAX_INSTRUCTIONS, errors, warnings);
     if (text) out[point] = text;
   }
   return out;
@@ -428,7 +444,7 @@ function checkSettings(rec: Record<string, unknown>, errors: string[]): void {
   whole('maxRounds', MAX_ROUNDS);
 }
 
-function parseHooks(list: unknown, stage: string, errors: string[], root: string | null = null): CheckHook[] {
+function parseHooks(list: unknown, stage: string, errors: string[], root: string | null = null, warnings: string[] = errors): CheckHook[] {
   const items = Array.isArray(list) ? list : [list];
   const out: CheckHook[] = [];
   items.slice(0, MAX_HOOKS).forEach((item, i) => {
@@ -469,7 +485,7 @@ function parseHooks(list: unknown, stage: string, errors: string[], root: string
       if (!rel || rel.startsWith('/') || /^[A-Za-z]:/.test(rel) || rel.split('/').includes('..')) {
         errors.push(`"${where}.cwd" must be a folder inside the repository, e.g. "packages/api".`);
       } else if (root && !existsSync(path.join(root, rel))) {
-        errors.push(`"${where}.cwd" names ${rel}, which does not exist; it runs from the repository root instead.`);
+        warnings.push(`"${where}.cwd" names ${rel}, which does not exist yet; it runs from the repository root until it does.`);
       } else if (rel !== '.') hook.cwd = rel;
     }
     const env = rec['env'];

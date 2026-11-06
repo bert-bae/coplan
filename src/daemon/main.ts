@@ -480,7 +480,7 @@ function buildRouter(deps: Deps): Router {
     file: project.file,
     defaults: project.settings,
     checks: Object.fromEntries(HOOK_STAGES.map((stage) => [stage, project.hooks[stage].map((h) => h.name)])),
-    errors: project.errors,
+    errors: [...project.errors, ...project.warnings],
     planCheck: project.planCheck,
   });
 

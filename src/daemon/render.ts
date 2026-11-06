@@ -89,8 +89,10 @@ export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
 export function renderProposals(plan: Plan): string[] {
   const all = plan.proposals ?? [];
   const open = all.filter((p) => p.status === 'open');
-  const since = plan.claudeReadAt ?? 0;
-  const answered = all.filter((p) => (p.status === 'accepted' || p.status === 'rejected') && (p.resolvedAt ?? 0) > since);
+  // By the change log's sequence, as the rest of what Claude has read: a
+  // clock that steps back, or an answer in the read's own millisecond,
+  // must not swallow one.
+  const answered = all.filter((p) => (p.status === 'accepted' || p.status === 'rejected') && (p.resolvedSeq ?? 0) > plan.claudeReadSeq);
   if (!open.length && !answered.length) return [];
   const out = ['## Your proposals'];
   for (const p of answered) {
@@ -378,7 +380,7 @@ export function buildPrompt(plan: Plan, opts: PromptOptions & { target: BuildTar
   const project = opts.project ?? emptyProjectConfig();
   const head = [
     ...(here ? sessionBrief(plan, settings, agentInfo(opts.agent), project) : outsideBrief(plan, settings, project)),
-    ...instructionLines(project, 'build'),
+    ...instructionLines(project, 'build', undefined, PROMPT_INSTRUCTIONS),
     '',
     ...checksSection(project, here ? opts.bin : undefined),
   ];
@@ -420,7 +422,7 @@ export function designPrompt(plan: Plan, opts: PromptOptions = {}): BuildPrompt 
     '6. Publish it with harness_tasks_publish — keep the ids of planned tasks you keep, so the boxes stay linked — ' +
       'then tell the user in chat that the task list is ready to review, and ask what you need decided with ' +
       `${agentInfo(opts.agent).askWith}. Do not start building: the user submits the plan when the tasks are right.`,
-    ...instructionLines(project, 'design'),
+    ...instructionLines(project, 'design', undefined, PROMPT_INSTRUCTIONS),
     '',
     ...checksSection(project, opts.bin, true),
   ];
@@ -495,8 +497,8 @@ function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: P
     `5. If you are stuck, mark the task blocked with a note saying on what, and ask the user with ${agent.askWith}.`,
     '6. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.',
     ...(branches.length
-      ? [`7. Land each task on its branch (see Branches below): cut a stacked branch from the one it builds on. ${pullRequestWords(project)}`]
-      : [`7. Everything lands on the current branch: no task names a branch of its own. ${pullRequestWords(project)}`]),
+      ? [`7. Land each task on its branch (see Branches below): cut a stacked branch from the one it builds on. ${pullRequestWords(project, { pointer: true })}`]
+      : [`7. Everything lands on the current branch: no task names a branch of its own. ${pullRequestWords(project, { pointer: true })}`]),
     '8. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, ' +
       'stop and ask the user in chat — they can reopen the plan in Coplan.',
     '9. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) ' +
@@ -512,7 +514,7 @@ function outsideBrief(plan: Plan, s: BuildSettings, project: ProjectConfig): str
       'a build order, tasks in the same step do not depend on each other and can be built side by side.',
     `2. Take each task through implement → review → refine: implement it and run the implement checks; review the change (${REVIEW_WORDS[s.review]}) and run the review checks; refine until it passes. After ${s.maxRounds} round${s.maxRounds === 1 ? '' : 's'}, stop and ask.`,
     '3. Build the architecture as described: its parts, what each one does and decides, and how they connect.',
-    `4. Where tasks name branches, land each task on its branch; a branch built on another is cut from it. ${pullRequestWords(project).replace(/ Write each description from[^.]*\./, '')}`,
+    `4. Where tasks name branches, land each task on its branch; a branch built on another is cut from it. ${pullRequestWords(project)}`,
     '5. If the design turns out not to work, stop and say why rather than redesigning as you go.',
     `6. When every task is done, run the final checks and summarize what was built, where, and how it was checked.${project.final.blocking ? ' Do not call the build finished while a final check fails.' : ''}`,
     // No harness_task_next out there: the template comes with the prompt.
@@ -523,7 +525,7 @@ function outsideBrief(plan: Plan, s: BuildSettings, project: ProjectConfig): str
 /** The repository's checks, per stage — or what to do without any. */
 export function checksSection(project: ProjectConfig, bin?: string, planning = false): string[] {
   const out = ['## Checks'];
-  for (const e of project.errors) out.push(`- ⚠ ${e}`);
+  for (const e of [...project.errors, ...project.warnings]) out.push(`- ⚠ ${e}`);
   if (!hasHooks(project)) {
     out.push(
       planning
@@ -545,7 +547,7 @@ export function checksSection(project: ProjectConfig, bin?: string, planning = f
 
 /** How the build's pull requests are opened, as the repository says
  *  (`pullRequests` in .coplan/config.json). */
-export function pullRequestWords(project: ProjectConfig): string {
+export function pullRequestWords(project: ProjectConfig, opts: { pointer?: boolean } = {}): string {
   const { tool, open } = project.pullRequests;
   if (open === 'never') return 'Do not open pull requests: push the branches, and list each in the report with what it carries.';
   if (tool === 'none') return 'Push the branches, and leave opening the pull requests to the user: list each in the report with what it carries and what it stacks on.';
@@ -554,7 +556,7 @@ export function pullRequestWords(project: ProjectConfig): string {
       ? 'with Graphite: track each branch on the one below it (`gt track`), and open the stack with `gt submit --stack`'
       : 'with `gh pr create`, each against the branch below it (the base branch for the bottom one)';
   const when = open === 'auto' ? 'as soon as a branch\'s tasks are done' : 'once the user says to: ask them first';
-  return `Open the pull requests ${how}, ${when}.${project.pullRequests.template ? ` Write each description from the repository's template (${project.pullRequests.templateFile}), which harness_task_next shows when one is due.` : ''}`;
+  return `Open the pull requests ${how}, ${when}.${opts.pointer && project.pullRequests.template ? ` Write each description from the repository's template (${project.pullRequests.templateFile}), which harness_task_next shows when one is due.` : ''}`;
 }
 
 /** The repository's pull request template, to fill in for each one. */
@@ -573,11 +575,25 @@ export function templateLines(project: ProjectConfig): string[] {
 }
 
 /** The standing words the user and the repository add at one point. */
-export function instructionLines(project: ProjectConfig, point: InstructionPoint, heading = '## Standing instructions'): string[] {
-  const text = project.instructions[point];
-  if (!text) return [];
-  return ['', heading, '_From the user\'s and the repository\'s Coplan config; they hold for all of this._', '', nestHeadings(text, heading.startsWith('###') ? 3 : 2)];
+export function instructionLines(project: ProjectConfig, point: InstructionPoint, heading = '## Standing instructions', max = Infinity): string[] {
+  const whole = project.instructions[point];
+  if (!whole) return [];
+  // A prompt a hook hands over has a budget, and these sit in the part of it
+  // that is never trimmed: past `max`, the rest is pointed to, not lost.
+  const cut = whole.length > max;
+  const text = cut ? `${whole.slice(0, max).replace(/\s+\S*$/, '')} …` : whole;
+  return [
+    '',
+    heading,
+    '_From the user\'s and the repository\'s Coplan config; they hold for all of this._',
+    '',
+    nestHeadings(text, heading.startsWith('###') ? 3 : 2),
+    ...(cut ? ['', `_Cut to fit here: the whole text is \`instructions.${point}\` in .coplan/config.json and ~/.claude/cc-harness/coplan.json (or instructions/${point}.md there)._`] : []),
+  ];
 }
+
+/** How much of the standing instructions a prompt carries, within its budget. */
+const PROMPT_INSTRUCTIONS = 1_500;
 
 /** Who reviews, with the model the repository names for it. */
 export function reviewerWords(project: ProjectConfig): string {

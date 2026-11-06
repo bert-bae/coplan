@@ -737,6 +737,23 @@ test('once the design is confirmed a design proposal can be made, but accepting 
   assert.ok(plan.tasks.some((t) => t.title === 'Load test'));
 });
 
+test("moving boxes, linking tasks or a task's progress does not put a proposal out of date; what it changes does", () => {
+  let plan = applyOps(fresh(), [WRITE_THROUGH], 'claude').plan;
+  const d = plan.diagrams[0]!;
+  // The user drags every box, and links one to a task: layout and links, not the design.
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id: 'd1', nodes: d.nodes.map((n) => ({ ...n, x: (n.x ?? 0) + 40, y: (n.y ?? 0) + 10 })), edges: d.edges }], 'user').plan;
+  plan = applyOps(plan, [{ op: 'upsert_node', diagramId: 'd1', id: 'api', taskIds: ['t4'] }], 'user').plan;
+  assert.equal(applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user').plan.proposals![0]!.status, 'accepted');
+});
+
+test('a proposal cannot be built on a change of the user’s that Claude has not read', () => {
+  const plan = applyOps(fresh(), [{ op: 'upsert_node', diagramId: 'd1', id: 'cache', label: 'Memcached' }], 'user').plan;
+  assert.throws(() => applyOps(plan, [WRITE_THROUGH], 'claude'), /The user changed .* since you last read the plan/);
+  const read = structuredClone(plan);
+  markReadByClaude(read);
+  assert.equal(applyOps(read, [WRITE_THROUGH], 'claude').plan.proposals?.length, 1, 'read first, then propose');
+});
+
 test('proposals survive a reload; one that lost its edits does not', () => {
   const plan = applyOps(fresh(), [WRITE_THROUGH], 'claude').plan;
   const raw = JSON.parse(JSON.stringify(plan)) as Plan;

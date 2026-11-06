@@ -10,38 +10,61 @@ import type { Diagram, DiagramEdge, DiagramNode, Plan, Proposal } from './types.
 export type DiffMark = 'added' | 'changed' | 'removed';
 
 export interface ProposalPreview {
-  /** The plan with the proposal accepted; null when it cannot be. */
+  /** The plan with the proposal accepted (the lock aside); null when it
+   *  cannot be, even then. */
   after: Plan | null;
   /** What accepting it would change, in words. */
   changes: string[];
-  /** Why it cannot be accepted as it is. */
-  error: string | null;
-  /** What moved since it was made (then it cannot be accepted). */
-  stale: string[];
+  /** Why Accept would be refused now — out of date, or what it changes is
+   *  signed off — in the daemon's words; null when it would apply. */
+  blocker: string | null;
   /** The diagrams it changes, in the plan's order. */
   diagrams: string[];
 }
 
+/** One preview per proposal per plan: a plan is never changed in place, so
+ *  a new version is a new key, and every part of the page shares the run. */
+const cache = new WeakMap<Plan, Map<string, ProposalPreview>>();
+
 export function previewProposal(plan: Plan, p: Proposal): ProposalPreview {
-  const stale = proposalStaleness(plan, p);
+  let forPlan = cache.get(plan);
+  const hit = forPlan?.get(p.id);
+  if (hit) return hit;
+  const result = preview(plan, p);
+  if (!forPlan) cache.set(plan, (forPlan = new Map()));
+  forPlan.set(p.id, result);
+  return result;
+}
+
+function preview(plan: Plan, p: Proposal): ProposalPreview {
   const diagrams = plan.diagrams.map((d) => d.id).filter((id) => p.ops.some((op) => touchesDiagram(op, id)));
+  const accept = [{ op: 'accept_proposal' as const, id: p.id }];
+  const shaped = (after: Plan, changes: { summary: string }[], blocker: string | null): ProposalPreview => ({
+    after,
+    changes: changes.filter((c) => !c.summary.startsWith('accepted proposal')).map((c) => c.summary),
+    blocker,
+    diagrams: [...diagrams, ...after.diagrams.map((d) => d.id).filter((id) => !plan.diagrams.some((d) => d.id === id))],
+  });
+  // The accept itself, by the same code the daemon runs: if it applies, it
+  // is the preview too.
+  let blocker: string;
   try {
-    // Shown even where the design is signed off: accepting it then needs the
-    // design reopened, which the page says, but what it proposes is the same.
+    const { plan: after, changes } = applyOps(plan, accept, 'user');
+    return shaped(after, changes, null);
+  } catch (err) {
+    blocker = err instanceof Error ? err.message : String(err);
+  }
+  // Refused: still shown where it is only the sign-off that holds it — what
+  // it proposes is the same, and accepting it needs the design reopened.
+  if (proposalStaleness(plan, p).length) return { after: null, changes: [], blocker, diagrams };
+  try {
     const trial = structuredClone(plan);
     delete trial.design;
     delete trial.submission;
-    const { plan: after, changes } = applyOps(trial, [{ op: 'accept_proposal', id: p.id }], 'user');
-    const added = after.diagrams.map((d) => d.id).filter((id) => !plan.diagrams.some((d) => d.id === id));
-    return {
-      after,
-      changes: changes.filter((c) => !c.summary.startsWith('accepted proposal')).map((c) => c.summary),
-      error: null,
-      stale,
-      diagrams: [...diagrams, ...added],
-    };
-  } catch (err) {
-    return { after: null, changes: [], error: err instanceof Error ? err.message : String(err), stale, diagrams };
+    const { plan: after, changes } = applyOps(trial, accept, 'user');
+    return shaped(after, changes, blocker);
+  } catch {
+    return { after: null, changes: [], blocker, diagrams };
   }
 }
 

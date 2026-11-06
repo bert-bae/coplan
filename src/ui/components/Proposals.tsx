@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react';
 import { store, useAgent, useStore } from '../store.ts';
 import { Markdown } from './Markdown.tsx';
-import { applyOps } from '../../shared/plan.ts';
 import { previewProposal, type ProposalPreview } from '../../shared/proposals.ts';
 import type { Plan, Proposal } from '../../shared/types.ts';
 
@@ -22,22 +21,12 @@ export function ProposalsStrip({ plan }: { plan: Plan }) {
   );
 }
 
-/** Why Accept would be refused now — out of date, or what it changes is
- *  signed off — by the same code the daemon runs; null when it would apply. */
-export function acceptBlocker(plan: Plan, p: Proposal): string | null {
-  try {
-    applyOps(plan, [{ op: 'accept_proposal', id: p.id }], 'user');
-    return null;
-  } catch (err) {
-    return err instanceof Error ? err.message : String(err);
-  }
-}
-
 export function ProposalCard({ plan, proposal: p, compact = false }: { plan: Plan; proposal: Proposal; compact?: boolean }) {
   const agent = useAgent();
   const previewing = useStore((s) => s.proposalPreview);
+  // Shared with the canvas preview: one run per proposal per plan.
   const preview: ProposalPreview = useMemo(() => previewProposal(plan, p), [plan, p]);
-  const blocker = useMemo(() => acceptBlocker(plan, p), [plan, p]);
+  const blocker = preview.blocker;
   const [rejecting, setRejecting] = useState(false);
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);

@@ -1117,6 +1117,11 @@ export function applyOps(
         checkOpFields(op);
         if (!opts.tracking) refuseProgress(op);
         refuseUnreadEdit(plan, op, unread!);
+        // A proposal built on a version Claude never read could undo the
+        // user's change as surely as an edit — only later, when accepted.
+        if (op.op === 'propose' && Array.isArray(op.ops)) {
+          for (const inner of op.ops) if (inner && typeof inner === 'object') refuseUnreadEdit(plan, inner, unread!);
+        }
       }
       changes.push(...applyOne(next, expectAtStart(plan, op, author), author, now));
     } catch (err) {
@@ -1511,7 +1516,9 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       }
       const out = applyAsUser(plan, p.ops, now);
       settleProposal(plan, p, 'accepted', now, 'Accepted.');
-      out.push(log('edited', { kind: 'plan', id: '' }, `accepted proposal ${p.id} "${p.title}"`));
+      const accepted = log('edited', { kind: 'plan', id: '' }, `accepted proposal ${p.id} "${p.title}"`);
+      p.resolvedSeq = accepted.seq;
+      out.push(accepted);
       return out;
     }
 
@@ -1521,7 +1528,9 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       const note = clean(op.note, MAX_NOTE);
       if (note) p.note = note;
       settleProposal(plan, p, 'rejected', now, note ? `Rejected: ${note}` : 'Rejected.');
-      return [log('resolved', { kind: 'plan', id: '' }, `rejected proposal ${p.id} "${p.title}"${note ? `: ${short(note, 80)}` : ''}`)];
+      const rejected = log('resolved', { kind: 'plan', id: '' }, `rejected proposal ${p.id} "${p.title}"${note ? `: ${short(note, 80)}` : ''}`);
+      p.resolvedSeq = rejected.seq;
+      return [rejected];
     }
 
     case 'withdraw_proposal': {
@@ -1922,16 +1931,31 @@ function settleProposal(plan: Plan, p: Proposal, status: ProposalStatus, now: nu
   }
 }
 
-/** Each item a batch of edits touches, keyed `kind:id`, with its revision
- *  now (0 if it does not exist yet). */
+/**
+ * Each item a batch of edits touches, keyed `kind:id`, with a fingerprint of
+ * what it says now (0 if it does not exist yet). What it says, not its
+ * revision: a box dragged, the layout flipped, a task linked or a task's
+ * progress move a revision, and none of them is a reason a proposal no
+ * longer fits.
+ */
 export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, number | string> {
   const out: Record<string, number | string> = {};
-  const rev = (kind: 'section' | 'diagram' | 'task', id: string) =>
-    (kind === 'section' ? plan.sections : kind === 'diagram' ? plan.diagrams : plan.tasks).find((x) => x.id === id)?.rev ?? 0;
+  const rev = (kind: 'section' | 'diagram' | 'task', id: string): number | string => {
+    if (kind === 'section') {
+      const s = plan.sections.find((x) => x.id === id);
+      return s ? fingerprint(JSON.stringify([s.title, s.body])) : 0;
+    }
+    if (kind === 'diagram') {
+      const d = plan.diagrams.find((x) => x.id === id);
+      return d ? fingerprint(designWithoutLinks(d)) : 0;
+    }
+    const t = plan.tasks.find((x) => x.id === id);
+    return t ? fingerprint(JSON.stringify([t.title, t.detail ?? '', t.parentId, t.dependsOn ?? [], t.branch ?? '', t.review ?? '', t.files ?? []])) : 0;
+  };
   for (const op of ops) {
     switch (op.op) {
       case 'set_meta':
-        out['plan:meta'] = `${plan.title}\n${plan.summary}`;
+        out['plan:meta'] = fingerprint(`${plan.title}\n${plan.summary}`);
         break;
       case 'upsert_section':
       case 'move_section':
@@ -2036,6 +2060,16 @@ function checkDesignLocked(ops: PlanOp[], author: Author): void {
  *  design must keep. */
 function designWithoutLinks(d: Diagram): string {
   return JSON.stringify([d.title, d.caption ?? '', d.nodes.map(({ x: _x, y: _y, taskIds: _t, ...n }) => n), d.edges]);
+}
+
+/** A short stand-in for some text (FNV-1a): equal text, equal print. */
+function fingerprint(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(36);
 }
 
 export function validTarget(value: unknown): BuildTarget | undefined {

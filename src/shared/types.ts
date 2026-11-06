@@ -613,12 +613,16 @@ export interface Proposal {
   /** The thread that carries the reasoning, and the outcome as a reply. */
   threadId: string;
   createdAt: number;
-  /** Each item the edits touch (`kind:id`), as it was when proposed: its
-   *  revision, or 0 if it did not exist. If any moves, the proposal is out
-   *  of date and cannot be accepted — it was made for a plan that is gone. */
+  /** Each item the edits touch (`kind:id`), as it was when proposed: a
+   *  fingerprint of what it said (layout, task links and progress left
+   *  out), or 0 if it did not exist. If any moves, the proposal is out of
+   *  date and cannot be accepted — it was made for a plan that is gone. */
   base: Record<string, number | string>;
   status: ProposalStatus;
   resolvedAt?: number;
+  /** The change-log `seq` of the answer: Claude has heard it once its read
+   *  position passes this. */
+  resolvedSeq?: number;
   /** The user's reason for turning it down. */
   note?: string;
 }

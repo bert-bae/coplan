@@ -137,7 +137,7 @@ export async function runDoctor(): Promise<number> {
     project.errors.length === 0,
     project.file ? (project.errors.length ? undefined : project.file) : 'none in this repository',
   );
-  for (const e of project.errors) console.log(`    ${e}`);
+  for (const e of [...project.errors, ...project.warnings]) console.log(`    ${e}`);
 
   /* ---------------- live daemon ---------------- */
 

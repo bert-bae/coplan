@@ -6,7 +6,7 @@ import { ProgressBar } from './Progress.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { MAX_NOTE, countTasks, currentTask, planPhase, unreadAreas } from '../../shared/plan.ts';
 import { MAX_PARALLEL, MAX_ROUNDS, branchPlan, buildSteps, hasDependencies, readyTasks } from '../../shared/build.ts';
-import { planGaps, type GapSeverities } from '../../shared/check.ts';
+import { blockingGaps, planGaps, type GapSeverities } from '../../shared/check.ts';
 import { REVIEW_MODES, type BuildSettings, type BuildTarget, type Plan, type PlanPhase, type ReviewMode, type SessionState } from '../../shared/types.ts';
 import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
 
@@ -217,7 +217,7 @@ function GapList({ plan, severities }: { plan: Plan; severities: GapSeverities |
 
 /** Gaps the repository counts as errors: they hold Confirm and Submit. */
 function heldBy(plan: Plan, preview: PromptPreview | null): number {
-  return planGaps(plan, preview?.project?.planCheck).filter((g) => g.severity === 'error').length;
+  return blockingGaps(plan, preview?.project?.planCheck).length;
 }
 
 /** The shared frame: the choices on the left, the prompt on the right. */
@@ -338,6 +338,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
     else setRefresh((n) => n + 1);
   };
 
+  const held = heldBy(plan, preview) > 0;
   return (
     <ReviewFrame
       id="confirm-title"
@@ -373,7 +374,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>
               Cancel
             </button>
-            <button type="button" className="btn btn-primary" disabled={!current || busy || unsaved || heldBy(plan, preview) > 0} title={unsaved ? 'Saving your last edit first…' : heldBy(plan, preview) ? 'Fix the gaps this repository counts as errors first' : undefined} onClick={() => void confirm()}>
+            <button type="button" className="btn btn-primary" disabled={!current || busy || unsaved || held} title={unsaved ? 'Saving your last edit first…' : held ? 'Fix the gaps this repository counts as errors first' : undefined} onClick={() => void confirm()}>
               {busy ? 'Confirming…' : agent.promptContext ? 'Confirm design' : 'Copy and confirm design'}
             </button>
           </div>
@@ -457,6 +458,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
     else setRefresh((n) => n + 1);
   };
 
+  const held = heldBy(plan, preview) > 0;
   return (
     <ReviewFrame
       id="submit-title"
@@ -514,7 +516,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={submitting}>
               Cancel
             </button>
-            <button type="button" className="btn btn-primary" disabled={!current || submitting || unsaved || heldBy(plan, preview) > 0} title={unsaved ? 'Saving your last edit first…' : heldBy(plan, preview) ? 'Fix the gaps this repository counts as errors first' : undefined} onClick={() => void submit()}>
+            <button type="button" className="btn btn-primary" disabled={!current || submitting || unsaved || held} title={unsaved ? 'Saving your last edit first…' : held ? 'Fix the gaps this repository counts as errors first' : undefined} onClick={() => void submit()}>
               {submitting ? 'Submitting…' : target === 'session' && agent.promptContext ? 'Submit and lock' : 'Copy, submit and lock'}
             </button>
           </div>
