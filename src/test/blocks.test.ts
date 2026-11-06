@@ -288,7 +288,7 @@ test('each config row says what it is set to and where: the file, or none for a 
       ['hooks.implement', 'none', 0],
       ['hooks.review', 'none', 0],
       ['hooks.final', 'none', 0],
-      ['iric.review', 'an independent reviewer (a fresh subagent)', 0],
+      ['iric.review', 'self-review', 0],
       ['branches', 'cut from the base branch', 0],
       ['instructions.design', 'none', 0],
     ],

@@ -25,11 +25,11 @@ Build what this task describes and nothing more — the plan gives other parts t
 No branch is named for it: work on the current branch.
 
 ## The cycle: implement → review → refine
-Review: an independent reviewer (a fresh subagent). At most 3 review rounds before stopping to ask the user.
+Review: self-review. At most 3 review rounds; another is the user's call.
 
 **Implement.** Make the change, then run the implement checks and fix what they find:
 
-**Review.** A fresh subagent that did not write the change reads the diff against this brief and runs the review checks.
+**Review.** Read your own diff against the objective and the acceptance criteria, as a reviewer would, and run the review checks:
 
 **Refine.** Fix what the review found, run the implement checks again, and go back to review.
 

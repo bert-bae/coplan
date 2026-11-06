@@ -212,9 +212,10 @@ export const TOOLS: ToolDef[] = [
       'ids, a box keeps its position, detail, description and notes and an arrow between the same two boxes its ' +
       'label and style unless you restate them ("" clears a label). Refused if the user has changed the plan since you last read it, ' +
       'once they confirm the design (then harness_tasks_publish makes the task list), and while it is being built. ' +
-      'Tasks here are the planned tasks, shown on the boxes that link them. Ask decisions you need with ' +
-      'AskUserQuestion in chat, not in the plan. Does not wait for the user: afterwards, tell them in chat ' +
-      'that the plan is ready.',
+      'Tasks here are the planned tasks, shown on the boxes that link them. Ask the user, with AskUserQuestion in ' +
+      'chat (never in the plan), only when a decision cannot be undone or reaches outside this session; decide the ' +
+      "rest and write it into the plan (a box's notes, a section), where they can change it. Does not wait for the " +
+      'user: afterwards, tell them in chat that the plan is ready.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -404,7 +405,7 @@ export const TOOLS: ToolDef[] = [
       'Track progress while you build; the user follows it on the board. Mark a task in_progress (stage ' +
       '"implement") when you start it, set stage "review" and "refine" as it goes round its implement → review → ' +
       'refine cycle, report the checks you ran, and mark it done with a one-line note once review passed — or ' +
-      'blocked with a note, asking the user with AskUserQuestion. The only way to report progress. Refused in every ' +
+      'blocked with a note on what it waits on. The only way to report progress. Refused in every ' +
       'build: starting or finishing a task that still waits on another; progress on a task that has subtasks. Refused ' +
       'in a Managed build, and only noted in the reply in a Tracked one: starting more at once than the user allowed; ' +
       'a review round past their limit; done before any review, without a passing verdict for its last review round ' +

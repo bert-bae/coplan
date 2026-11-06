@@ -334,7 +334,7 @@ test('the build settings are kept with the submission, and survive a reload', ()
   assert.deepEqual(reloaded.submission?.settings, settings);
   assert.ok(reloaded.design, 'the design sign-off too');
   const wild = submitPlan(plan, { target: 'session', prompt, settings: { review: 'nobody' as never, parallel: 99, maxRounds: 0 } });
-  assert.deepEqual(wild.submission?.settings, { review: 'subagent', parallel: 8, maxRounds: 1 });
+  assert.deepEqual(wild.submission?.settings, { review: 'self', parallel: 8, maxRounds: 1 });
 });
 
 test('a submission survives a reload, and a damaged one unlocks rather than locks for good', () => {
@@ -358,8 +358,8 @@ test('the prompt for this session says how to report progress, then gives the pl
   assert.match(prompt, /iric skill/);
   assert.match(prompt, /harness_task_next/);
   assert.match(prompt, /harness_task_brief/);
-  assert.match(prompt, /Review: an independent reviewer/);
-  assert.match(prompt, /up to 2 at once/);
+  assert.match(prompt, /Review: self-review/, 'no config: the neutral defaults (#63)');
+  assert.match(prompt, /build them one at a time/);
   assert.match(prompt, /mark the task blocked with a note/);
   assert.match(prompt, /upsert_task with a parentId/);
   assert.match(prompt, /op: "report"/);
@@ -385,7 +385,7 @@ test('the prompt carries the settings the user chose and the repository\'s check
   const { prompt } = buildPrompt(published(), { target: 'session', mode: 'managed', settings: { review: 'user', parallel: 1, maxRounds: 4 }, project, bin: '/opt/coplan/bin/coplan' });
   assert.match(prompt, /Review: the user, before it is marked done/);
   assert.match(prompt, /build them one at a time/);
-  assert.match(prompt, /After 4 review rounds without passing, stop and ask the user/);
+  assert.match(prompt, /After 4 review rounds without passing, another round is the user's call/);
   assert.match(prompt, /- implement: typecheck `npm run typecheck`/);
   assert.match(prompt, /- review: tests `npm test`/);
   assert.match(prompt, /"\/opt\/coplan\/bin\/coplan" check <stage>/);

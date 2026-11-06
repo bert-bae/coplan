@@ -16,14 +16,6 @@ two sign-offs before anything is built:
    on the branches the change needs. The user shapes it and **submits the
    plan**. That starts the build — see the `coplan-build` skill.
 
-**All conversation stays here, in chat.** Coplan never talks to you and
-has no way to answer you. When you need a decision, ask it here with your
-question tool — `AskUserQuestion` in Claude Code, `request_user_input` in
-Codex, the ask-question tool in Cursor — or plainly in chat if you have none.
-Coplan shows the question and links the user back to this session to answer
-it. When the user has worked over the plan, they tell you so here, and you
-read it back.
-
 Each sign-off reaches you as a `[cc-harness]` prompt with the user's next
 message in chat — or, in Cursor, they paste it. If they tell you they have
 confirmed the design or submitted the plan and no such prompt has reached
@@ -39,6 +31,32 @@ agent may show them with a prefix that names the server (in Claude Code,
 `harness_plan_edit` takes a list of edits, even for one:
 `{ops: [{op: "reply", threadId: "c2", text: "…"}]}`. Each edit takes only
 its own fields, and a misspelt one is refused with the right names.
+
+## When to ask
+
+This is the one rule for asking the user anything, in every step below.
+Ask only when a decision:
+
+- **cannot be undone**,
+- **reaches outside this session** — pushing, opening a pull request,
+  anything other people will see — or
+- **is the user's by right** — in a Managed build, what its gates keep for
+  them: dropping work they signed off, a task they review, a review round
+  past their limit, or taking a task whose checks fail.
+
+Anything else, decide, write the decision where the user will see it — a
+box's notes or a section while you design, a task's detail while you make
+the task list, the task's note while you build — and carry on. The user
+reviews the design and the task list before anything is built, and changes
+what they disagree with.
+
+When you do ask, ask here in chat with your question tool —
+`AskUserQuestion` in Claude Code, `request_user_input` in Codex, the
+ask-question tool in Cursor — or plainly if you have none: everything
+pending at once, with options. **All conversation stays here.** Coplan never
+talks to you and cannot carry an answer: it shows the question and links the
+user back to this session to answer it. When the user has worked over the
+plan, they tell you so here, and you read it back.
 
 ## 1. Investigate, then publish the design
 
@@ -71,10 +89,10 @@ Read the code first. Then call `harness_plan_publish` with:
 
 Run `harness_plan_check` and fix what it finds — a box with no
 description, a planned task that builds no box — or say in chat why a gap
-stays. Then ask, with your question tool, whatever you need decided — several
-questions at once, with options. Tell the user the design is ready, with the
-UI link the publish returned, and that they confirm it in Coplan when it is
-right.
+stays. Where the code and the request leave a choice open, make it and write
+it on the box it is about (see *When to ask*). Tell the user the design is
+ready, with the UI link the publish returned, and that they confirm it in
+Coplan when it is right.
 
 ## 2. Read it back when they say so
 
@@ -141,9 +159,9 @@ tree and nothing else):
   files you expect to touch.
 - **`dependsOn`** — the ids of tasks that must be done first, because this
   one builds on their result. Only real dependencies: every task left free
-  can be built in parallel with the others, by its own subagent. A parent's
-  dependencies hold for all its subtasks, so say "the API waits for the
-  cache" once, on the parent. No loops.
+  can be built alongside the others. A parent's dependencies hold for all
+  its subtasks, so say "the API waits for the cache" once, on the parent.
+  No loops.
 - **`builds`** — the boxes the task implements (node ids, or
   `diagramId/nodeId`), so the diagram tracks its progress.
 - **`branch`** — leave it out when the change is one pull request. When it
@@ -164,9 +182,8 @@ side by side) and the **branches** (how they stack), and the reply lists
 the **gaps** the list leaves open (`harness_plan_check` lists them any
 time): tasks with no detail, boxes no task builds, branches a stack of pull
 requests cannot follow. Check they say what you meant, and fix or explain
-each gap. Tell the user the task list is ready to review, and ask
-what you need decided. **Do not start building**: the user submits the plan
-from Coplan when the tasks are right.
+each gap. Tell the user the task list is ready to review. **Do not start
+building**: the user submits the plan from Coplan when the tasks are right.
 
 If the prompt says the repository has no `.coplan/config.json`, suggest
 setting one up (`coplan init`, or `/coplan-init` in Claude Code) so the
@@ -182,7 +199,8 @@ through the **`iric`** skill (implement → review → refine); in a
 Coplan refuses nothing — its replies note what it would have checked. While
 it is locked only tracking applies: `harness_task_update`, `upsert_task` for
 work you discover, `reply`/`resolve` on comments, and the final `report`.
-If the design has to change, stop and ask in chat — the user can reopen it.
+If the design has to change, stop that work and tell the user why in chat:
+only they can reopen it.
 
 If the user tells you to start without submitting, build all the same;
 the plan just stays open for them to edit.
@@ -192,12 +210,12 @@ the plan just stays open for them to edit.
 Coplan is installed from a clone of its repository: `./setup.sh` there
 builds it and installs it in the user's agents.
 The plugin's folder is two levels up from this file (`../..`). If the user
-asks you to set Coplan up, update it, or change its settings:
+wants you to set Coplan up, update it, or change its settings:
 
 - If that folder holds `install.json`, `./setup.sh` installed it, already
   built. Tell the user to run `./setup.sh` in the clone `install.json` names
-  (`clone`), in a terminal, after a `git pull` to update: it asks them
-  questions, so do not run it for them.
+  (`clone`), in a terminal, after a `git pull` to update: it is interactive,
+  so do not run it for them.
 - Otherwise it is a checkout loaded directly. If it has no `dist/`, Coplan's
   tools are missing because it was never built: run `pnpm install` there,
   which builds it (`corepack pnpm install` if `pnpm` is not installed).
@@ -219,8 +237,8 @@ In Claude Code and Cursor these are also `/coplan-setup`, `/coplan-open`,
 
 ## Rules
 
-- Ask in chat with your question tool, never in the plan. Coplan links the
-  user to you; it cannot carry an answer.
+- Ask only as *When to ask* says, in chat, never in the plan. Coplan links
+  the user to you; it cannot carry an answer.
 - Read before you republish, and never overwrite the user's structure.
 - A confirmed design is the user's sign-off on the architecture; a
   submitted plan is their sign-off on the build. Do not redesign either.

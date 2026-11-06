@@ -13,7 +13,8 @@ and Cursor except where the README's
 - [Confirming the design](#confirming-the-design)
 - [Submitting the plan](#submitting-the-plan)
 - [Checks: `.coplan/config.json`](#checks-coplanconfigjson)
-- [Questions are answered in Claude](#questions-are-answered-in-claude)
+- [Questions are answered in Claude](#questions-are-answered-in-claude) — and
+  [when Claude asks](#when-claude-asks)
 - [The views](#the-views)
 - [Exporting the plan](#exporting-the-plan)
 - [Housekeeping](#housekeeping)
@@ -21,9 +22,11 @@ and Cursor except where the README's
 ## The loop
 
 1. **Claude publishes the design.** `/coplan add a cache to the orders API`
-   — Claude reads the code, calls `harness_plan_publish` with the
-   architecture and the tasks it plans, and asks what it needs decided with
-   `AskUserQuestion` in chat.
+   — Claude reads the code and calls `harness_plan_publish` with the
+   architecture and the tasks it plans. It decides what the code and your
+   request leave open and writes each decision on the box it is about, for
+   you to change; it asks you, with `AskUserQuestion` in chat, only what it
+   must (see [When Claude asks](#when-claude-asks)).
 2. **You shape the plan.** In the browser, rearrange and rewire the
    architecture, write down the decisions on each box, drag tasks into the
    order you want, nest and split them, and comment on anything. Every edit is
@@ -115,8 +118,10 @@ Tasks views) opens the review:
     refine. You choose who reviews — an *independent reviewer* (a fresh
     subagent), *self-review*, *you* (Claude stops after each task and asks),
     or *checks only* — how many ready tasks are built at once, and how many
-    review rounds a task gets before Claude stops and asks you. The defaults
-    come from the repository's `iric`.
+    review rounds a task gets before another is yours to allow. The defaults
+    come from the repository's `iric` — or, where it has none, self-review,
+    one task at a time and three rounds, which assume nothing about the
+    agent.
   - *Export*: the whole plan as Markdown — summary, sections, diagrams, the
     tasks and their briefs — with no build instructions, review modes or
     Coplan tool names, copied for you to paste anywhere. This version is
@@ -197,6 +202,28 @@ list, with Claude told to read the rest with `harness_plan_read`. The review
 says when that happens.
 
 ## Questions are answered in Claude
+
+### When Claude asks
+
+Claude follows one rule, stated in the `coplan` skill and in every prompt:
+it asks you only when a decision
+
+- cannot be undone,
+- reaches outside the session — pushing, opening a pull request (by
+  default it asks before opening one: [`pullRequests.open`](CONFIG.md#pullrequests)
+  is `"ask"`), or
+- is yours by right — in a Managed build: dropping work you signed off, a
+  task you review, a review round past your limit, or taking a task whose
+  checks fail.
+
+Anything else it decides, writes down where you will see it — a box's
+notes or a section while it designs, a task's detail or note while it makes
+the task list and builds — and carries on. You review the design and the
+task list before anything is built, and change what you disagree with. In a
+Tracked build Coplan's replies tell Claude what a Managed build would have
+held back, and Claude decides.
+
+### Answering
 
 Coplan has no question forms and no message box. When Claude stops on
 you — an `AskUserQuestion`, a permission prompt, an idle prompt, or a turn

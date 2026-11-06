@@ -31,6 +31,29 @@
 - `harness_task_next` and each task's brief follow the mode: a Tracked
   build's say nothing of the cycle, review rounds or subagents.
 
+### Fewer assumptions, fewer questions
+
+- **One rule for when the agent asks you anything**, stated once in the
+  `coplan` skill and in every prompt: only when a decision cannot be undone,
+  reaches outside the session (pushing, opening a pull request), or is yours
+  by right — in a Managed build, dropping work you signed off, a task you
+  review, a review round past your limit, or taking a task whose checks
+  fail. Anything else it decides, writes down where you will see it, and
+  carries on. The other instructions to ask are gone: no more "ask whatever
+  you need decided" after every publish and task list, or "stop and ask"
+  when stuck. A contract test fails if a new one appears outside those
+  cases.
+- **Neutral build defaults.** Without `iric`, a build's defaults are
+  self-review, one task at a time and three review rounds — no subagents or
+  worktrees assumed. A repository that wants a subagent reviewer or more at
+  once says so in `iric` (`coplan init` writes the defaults out to change),
+  or you choose it in Submit. Pull requests still wait for your go-ahead by
+  default (`pullRequests.open: "ask"`).
+- The `coplan-build` and `iric` skills no longer prescribe how the agent
+  works: subagents, worktrees and parallel work when the agent has them and
+  they help; commits in whatever granularity the repository's history uses;
+  the reviewer's prompt as a suggestion rather than a script.
+
 ### Every word traceable: where each part of a prompt comes from
 
 - The *Confirm design* and *Submit* dialogs list each setting the prompt

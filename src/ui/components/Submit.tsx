@@ -647,7 +647,7 @@ function SettingsFields({ settings, onChange }: { settings: BuildSettings; onCha
             value={settings.parallel}
             onChange={(e) => onChange({ ...settings, parallel: number(e.target.value, 1, MAX_PARALLEL, settings.parallel) })}
           />
-          <span>{settings.parallel === 1 ? 'task at a time' : 'tasks at once, each by its own subagent'}</span>
+          <span>{settings.parallel === 1 ? 'task at a time' : `tasks at once — with subagents, where ${agent.name} has them`}</span>
         </label>
         <label className="field-inline">
           <input
@@ -658,9 +658,7 @@ function SettingsFields({ settings, onChange }: { settings: BuildSettings; onCha
             value={settings.maxRounds}
             onChange={(e) => onChange({ ...settings, maxRounds: number(e.target.value, 1, MAX_ROUNDS, settings.maxRounds) })}
           />
-          <span>
-            review round{settings.maxRounds === 1 ? '' : 's'}, then {agent.name} asks you
-          </span>
+          <span>review round{settings.maxRounds === 1 ? '' : 's'}; another is yours to allow</span>
         </label>
       </div>
     </fieldset>

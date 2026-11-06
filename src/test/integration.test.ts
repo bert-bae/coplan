@@ -922,6 +922,8 @@ test("the repository's customizations reach the agent, and its errors and final 
     JSON.stringify({
       hooks: { final: [{ name: 'suite', run: 'npm test' }, { name: 'audit', run: 'npm audit', optional: true }] },
       pullRequests: { tool: 'graphite', open: 'auto', template: 'PR_TEMPLATE.md' },
+      // The reviewer's model is for a subagent's review, which is no longer the default (#63).
+      iric: { review: 'subagent' },
       review: { model: 'opus' },
       final: { blocking: true },
       instructions: { design: 'Name every box after its service.', brief: 'Write the test first.', review: 'Look for unparameterised SQL.' },
@@ -1313,6 +1315,7 @@ test("the page shows each task's brief exactly as harness_task_brief returns it,
     path.join(dir, 'config.json'),
     JSON.stringify({
       hooks: { implement: ['npm run typecheck'], review: [{ name: 'tests', run: 'npm test' }] },
+      iric: { review: 'subagent' },
       review: { model: 'opus' },
       instructions: { brief: 'Write the test first.', review: 'Look for unparameterised SQL.' },
     }),

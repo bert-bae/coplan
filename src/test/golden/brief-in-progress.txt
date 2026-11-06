@@ -47,7 +47,7 @@ Match the code style around you.
 Commit this task's work on `cache/api`. Cut it from `cache/client` (a stacked branch: it builds on that work), not from `main`.
 
 ## The cycle: implement → review → refine
-Review: an independent reviewer (a fresh subagent). At most 2 review rounds before stopping to ask the user.
+Review: an independent reviewer (a fresh subagent). At most 2 review rounds; another is the user's call.
 
 **Implement.** Make the change, then run the implement checks and fix what they find:
 - typecheck: `pnpm typecheck`

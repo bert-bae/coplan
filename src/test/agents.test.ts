@@ -222,7 +222,7 @@ test('in Cursor the design prompt is picked up by the next read, and a paste cou
     const confirmed = await call<{ plan?: { design?: { prompt: string } } }>(`/api/session/${id}/plan/design/confirm`, { method: 'POST', body: '{}' });
     const prompt = confirmed.plan!.design!.prompt;
     assert.match(prompt, /^\[cc-harness\] The design is confirmed/);
-    assert.match(prompt, /ask what you need decided with AskQuestion or plainly/, "Cursor's own question tool");
+    assert.match(prompt, /Ask the user, with AskQuestion or plainly, only when/, "Cursor's own question tool");
 
     // An ordinary message cannot carry it.
     await hook('cursor', 'beforeSubmitPrompt', { ...base, hook_event_name: 'beforeSubmitPrompt', prompt: 'go' });

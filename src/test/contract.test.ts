@@ -189,3 +189,128 @@ test('the harness_plan_edit description names every op it offers', () => {
   const description = toolOf('harness_plan_edit')!.description;
   for (const op of AGENT_OPS) assert.match(description, new RegExp(`\\b${op} \\{`), `${op} is not described`);
 });
+
+/* ------------------------------------------------------------------ *
+ * When to ask (#63)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Where the agent is told what to do: the skills, the slash commands, and
+ * the prose the daemon and the MCP server send — prompts, briefs, replies,
+ * refusals, tool descriptions. Code comments are not told to anyone.
+ */
+const TOLD = [
+  ...listDir('skills', '.md'),
+  ...listDir('commands', '.md'),
+  ...listDir('src/daemon', '.ts'),
+  ...listDir('src/mcp', '.ts'),
+  ...listDir('src/shared', '.ts'),
+];
+
+/** An instruction to ask the user: "ask the user", "ask them with …",
+ *  "stop and ask", "ask only …". Not "the review asks for changes", a
+ *  variable called `asked` or the `"ask"` setting. */
+const ASK_PHRASE = /\b(?:ask|asks|asking)\s+(?:the user|them|you|with|in chat|here|only|before|first|if|whatever|anything|what|several)\b|\b(?:and|stop and) ask\b/i;
+
+type Why = 'the rule' | 'cannot be undone' | 'reaches outside the session' | "the user's by right, in a Managed build";
+
+/**
+ * Every place the agent is told to ask the user, and which case of the
+ * rule allows it. A new one fails the test below until it is listed here
+ * under a case it belongs to — or, better, the agent is told to decide
+ * and carry on instead.
+ */
+const ALLOWED_ASKS: { file: string; text: string; why: Why }[] = [
+  // The rule itself: stated once in the coplan skill, and in each prompt.
+  { file: 'skills/coplan/SKILL.md', text: 'This is the one rule for asking the user anything', why: 'the rule' },
+  { file: 'skills/coplan/SKILL.md', text: 'Ask only when a decision:', why: 'the rule' },
+  { file: 'skills/coplan/SKILL.md', text: 'When you do ask, ask here in chat', why: 'the rule' },
+  { file: 'skills/coplan/SKILL.md', text: '- Ask only as *When to ask* says', why: 'the rule' },
+  { file: 'skills/coplan-build/SKILL.md', text: "Ask the user only as the `coplan` skill's *When to ask* says", why: 'the rule' },
+  { file: 'skills/iric/SKILL.md', text: "Ask the user only as the `coplan` skill's *When to ask* says", why: 'the rule' },
+  { file: 'src/daemon/render.ts', text: '`Ask the user, with ${agent.askWith}, only when', why: 'the rule' },
+  { file: 'src/mcp/tools.ts', text: "'Tasks here are the planned tasks, shown on the boxes that link them. Ask the user, with AskUserQuestion", why: 'the rule' },
+  // Cannot be undone: replacing a config the user may have written.
+  { file: 'commands/coplan-init.md', text: 'and ask before replacing it', why: 'cannot be undone' },
+  // Reaches outside the session: pull requests, by default (pullRequests.open "ask").
+  { file: 'src/daemon/render.ts', text: "'once the user says to: ask them first'", why: 'reaches outside the session' },
+  // The user's by right, in a Managed build: what its gates keep for them.
+  { file: 'skills/iric/SKILL.md', text: 'does, files, checks) and ask with your question tool', why: "the user's by right, in a Managed build" },
+  { file: 'src/daemon/brief.ts', text: 'show the user the change and ask them, with', why: "the user's by right, in a Managed build" },
+  { file: 'src/daemon/main.ts', text: 'so dropping it is theirs to decide: ask them with', why: "the user's by right, in a Managed build" },
+  { file: 'src/daemon/main.ts', text: 'and ask the user — another round, accept it as it is', why: "the user's by right, in a Managed build" },
+  { file: 'src/daemon/main.ts', text: 'mark it blocked with a note saying so and ask the user;', why: "the user's by right, in a Managed build" },
+  { file: 'src/daemon/main.ts', text: 'and they have not passed it: show them the change and ask with', why: "the user's by right, in a Managed build" },
+  { file: 'src/daemon/main.ts', text: "This task's review is the user's: show them the change and ask with", why: "the user's by right, in a Managed build" },
+];
+
+/** Each line of a source that tells the agent to ask, with where it is. */
+function asksIn(rel: string, text: string): { where: string; line: string }[] {
+  const out: { where: string; line: string }[] = [];
+  text.split('\n').forEach((line, i) => {
+    const t = line.trim();
+    if (rel.endsWith('.ts') && (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'))) return;
+    if (ASK_PHRASE.test(line)) out.push({ where: `${rel}:${i + 1}`, line });
+  });
+  return out;
+}
+
+/** What breaks the rule: asks no allowed case covers, and allowed cases
+ *  that no longer match exactly one line. */
+function askProblems(sources: { rel: string; text: string }[], allowed: typeof ALLOWED_ASKS): string[] {
+  const problems: string[] = [];
+  const used = new Map<(typeof ALLOWED_ASKS)[number], number>();
+  for (const { rel, text } of sources) {
+    for (const ask of asksIn(rel, text)) {
+      const entry = allowed.find((a) => a.file === rel && ask.line.includes(a.text));
+      if (!entry) problems.push(`${ask.where} tells the agent to ask outside the allowed cases: ${ask.line.trim()}`);
+      else used.set(entry, (used.get(entry) ?? 0) + 1);
+    }
+  }
+  for (const a of allowed) {
+    const n = used.get(a) ?? 0;
+    if (sources.some((s) => s.rel === a.file) && n !== 1) problems.push(`${a.file}: "${a.text}" (${a.why}) matches ${n} asks, not 1`);
+  }
+  return problems;
+}
+
+test('the agent is told to ask the user only where the one rule allows it', () => {
+  const sources = TOLD.map((rel) => ({ rel, text: read(rel) }));
+  assert.deepEqual(askProblems(sources, ALLOWED_ASKS), []);
+  // Counted: every allowed case is in use, and nothing else asks.
+  const total = sources.reduce((n, s) => n + asksIn(s.rel, s.text).length, 0);
+  assert.equal(total, ALLOWED_ASKS.length);
+});
+
+test('a new "ask the user" anywhere the agent reads fails the check', () => {
+  const skill = read('skills/coplan-build/SKILL.md');
+  const added = `${skill}\n- **A test is flaky** — mark the task blocked and ask the user what to do.\n`;
+  const problems = askProblems([{ rel: 'skills/coplan-build/SKILL.md', text: added }], ALLOWED_ASKS);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0]!, /tells the agent to ask outside the allowed cases: - \*\*A test is flaky\*\*/);
+  // In the daemon's prose too, but not in a comment.
+  const reply = "out.push('Tell them it is ready, and ask anything you need decided.');\n// the agent may ask the user here";
+  assert.equal(askProblems([{ rel: 'src/daemon/main.ts', text: reply }], []).length, 1);
+});
+
+test('the rule for asking is stated once in the coplan skill, and once in every prompt', async () => {
+  const skill = read('skills/coplan/SKILL.md');
+  assert.equal(skill.match(/^## When to ask$/gm)?.length, 1);
+  for (const point of ['cannot be undone', 'reaches outside this session', "is the user's by right"]) assert.ok(skill.includes(point), `the skill names "${point}"`);
+  const { buildPrompt, designPrompt } = await import('../daemon/render.ts');
+  const { publishPlan, confirmDesign } = await import('../shared/plan.ts');
+  const plan = confirmDesign(publishPlan(null, { title: 'P', tasks: [{ title: 'T' }] }).plan, { prompt: 'p' });
+  const prompts = {
+    design: designPrompt(plan),
+    managed: buildPrompt(plan, { target: 'session', mode: 'managed' }),
+    tracked: buildPrompt(plan, { target: 'session', mode: 'tracked' }),
+  };
+  for (const [name, built] of Object.entries(prompts)) {
+    assert.equal(built.blocks.filter((b) => b.id === 'ask-rule').length, 1, `${name}: one rule`);
+    assert.equal(built.prompt.match(/\*\*When to ask\.\*\*/g)?.length, 1, `${name}: stated once`);
+  }
+  assert.match(prompts.managed.prompt, /theirs by right — in this Managed build/);
+  assert.doesNotMatch(prompts.tracked.prompt, /by right/, 'a Tracked build keeps nothing back for the user');
+  const exported = buildPrompt(plan, { target: 'elsewhere' }).prompt;
+  assert.doesNotMatch(exported, /When to ask|\bask\b/i, 'an export tells no one anything');
+});

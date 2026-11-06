@@ -197,8 +197,10 @@ and gives you the page's link. From there a plan goes round this loop;
 [the guide](docs/GUIDE.md) has every step in detail, and everything each view
 can do:
 
-1. **Claude publishes the design** (`/coplan add a cache to the orders API`)
-   and asks what it needs decided, in chat.
+1. **Claude publishes the design** (`/coplan add a cache to the orders API`).
+   It decides what the code and your request leave open, writes each
+   decision on the box it is about, and asks you only what it must: a
+   decision that cannot be undone, or that reaches outside the session.
 2. **You shape it** in the browser — rewire the architecture, write decisions
    on the boxes, comment — then tell Claude in chat; it reads back the net
    effect of your edits, answers your comments, and proposes the changes that
@@ -312,7 +314,8 @@ and its build.
     the header, from any view and at any point.
 
 14. **In a Managed build, match the reviewer to the risk.** The submit
-    dialog sets the default; a task can override it.
+    dialog sets the default — self-review, unless the repository's `iric`
+    says otherwise; a task can override it.
 
     | Kind of task | Review | Why |
     | --- | --- | --- |
@@ -321,14 +324,14 @@ and its build.
     | Small and low-risk | Self-review (`self`) | Claude rereads its own diff cold. |
     | Mechanical: renames, generated files, docs | Checks only (`skip`) | The review checks are the review. |
 
-15. **Set how many tasks run at once** (`parallel`, default 2, up to 8) for
-    your machine and your checks. Each one is its own subagent running its
-    own checks, and a task on its own branch gets its own git worktree. Raise
-    it for a large plan of independent tasks; use 1 on a laptop or when the
-    test suite is heavy.
+15. **Set how many tasks run at once** (`parallel`, default 1, up to 8) for
+    your machine and your checks. With more than one, Claude builds ready
+    tasks side by side — with subagents and git worktrees where it has them —
+    each running its own checks. Raise it for a large plan of independent
+    tasks; keep 1 on a laptop or when the test suite is heavy.
 16. **Cap the review rounds** (`maxRounds`, default 3, up to 10). Past it,
-    Claude stops and asks you rather than spending more on a task that keeps
-    failing review.
+    another round is yours to allow, rather than Claude spending more on a
+    task that keeps failing review.
 17. **Pick the reviewer's model** with [`review.model`](docs/CONFIG.md#review),
     in the repository's config or your own `coplan.json`, if it should not be
     the agent's own: a smaller one to spend less on review, a stronger one to
@@ -396,9 +399,9 @@ it uses the skill.
 
 | Skill | The agent uses it when | It tells the agent to | So the agent may |
 | --- | --- | --- | --- |
-| [`coplan`](skills/coplan/SKILL.md) (13 KB) | you type `/coplan` or `$coplan`, ask to plan something in Coplan or to set Coplan up, or a confirmed design arrives | investigate the code, publish the design, read your edits back and answer your comments, propose changes that are yours to decide rather than make them, then break the confirmed design into a task list — and not build until you submit | call Coplan's tools; ask you questions in chat; propose edits for you to accept or reject; tell you to run `./setup.sh` in your clone when you ask it to set Coplan up or update it (or, in a checkout that was never built, run `pnpm install` there) |
-| [`coplan-build`](skills/coplan-build/SKILL.md) (8 KB) | a submitted plan's build prompt arrives, or you ask it to build a Coplan plan | start only tasks that are ready, build independent ones in parallel, land each on its branch, then run the final checks and write the report | start up to `parallel` subagents; create branches and git worktrees; commit once per task; rebase stacked branches; run the repository's checks; push the branches; open pull requests with `gh` or Graphite, as the repository's [`pullRequests`](docs/CONFIG.md#pullrequests) says — by default only once you say so — written from its pull request template if it has one |
-| [`iric`](skills/iric/SKILL.md) (6 KB) | building each task, or when you ask to run a task through iric | implement inside the task's scope, run the checks, have it reviewed the way you chose, refine until it passes or the round limit, and report each step | run the `implement` and `review` checks; start a reviewer subagent (review `subagent`), on the model [`review.model`](docs/CONFIG.md#review) names if one is set; stop and ask you (review `user`, or past `maxRounds`) |
+| [`coplan`](skills/coplan/SKILL.md) (14 KB) | you type `/coplan` or `$coplan`, ask to plan something in Coplan or to set Coplan up, or a confirmed design arrives | investigate the code, publish the design, read your edits back and answer your comments, propose changes that are yours to decide rather than make them, then break the confirmed design into a task list — and not build until you submit | call Coplan's tools; ask you in chat, only what it must; propose edits for you to accept or reject; tell you to run `./setup.sh` in your clone when you ask it to set Coplan up or update it (or, in a checkout that was never built, run `pnpm install` there) |
+| [`coplan-build`](skills/coplan-build/SKILL.md) (8 KB) | a submitted plan's build prompt arrives, or you ask it to build a Coplan plan | start only tasks that are ready, build independent ones side by side where it can, land each on its branch, keep the board true, then run the final checks and write the report | use subagents and git worktrees when it has them and they help (up to `parallel` tasks at once in a Managed build); create branches; commit in the granularity the repository's history uses; rebase stacked branches; run the repository's checks; push the branches; open pull requests with `gh` or Graphite, as the repository's [`pullRequests`](docs/CONFIG.md#pullrequests) says — by default only once you say so — written from its pull request template if it has one |
+| [`iric`](skills/iric/SKILL.md) (6 KB) | building each task of a Managed build, or when you ask to run a task through iric | implement inside the task's scope, run the checks, have it reviewed the way you chose, refine until it passes or the round limit, and report each step | run the `implement` and `review` checks; start a reviewer subagent where it has them (review `subagent`), on the model [`review.model`](docs/CONFIG.md#review) names if one is set; ask you only where a Managed build keeps the decision for you (review `user`, past `maxRounds`, a check that fails) |
 
 ### The MCP server: `harness`
 
@@ -628,7 +631,7 @@ counts against the model's tokens.
 | --- | --- | --- |
 | The ten tool definitions | About 32 KB of JSON schema — on the order of 8,000–10,000 tokens | Whenever the agent loads the server's tools |
 | The three skill descriptions | About 1.3 KB | Always listed |
-| A skill's body | 12.9 KB (`coplan`), 8.4 KB (`coplan-build`), 6.1 KB (`iric`) | When the agent uses that skill |
+| A skill's body | 13.7 KB (`coplan`), 8.0 KB (`coplan-build`), 6.4 KB (`iric`) | When the agent uses that skill |
 | The plan, read back | About 9,000 characters for two diagrams and ten tasks; about 140,000 for 150 boxes and 150 tasks | Each `harness_plan_read` (`changes_only` is shorter), and each publish's reply |
 | A sign-off prompt | About 6,000 characters for a seven-task plan; a hook adds at most about 10,000, and a longer plan is handed over as its summary and task list | Once per sign-off |
 | "You changed the plan" | One line | Your next message after you edit |
@@ -646,9 +649,10 @@ exported plan costs nothing here. In a Managed build:
   review round, reading the brief and the diff; self-review is a reread by the
   agent that built it; you cost your time; checks only costs no model at all.
   `review.model` runs the independent reviewer on a model of your choosing.
-- **How many at once:** `parallel` (default 2, up to 8) subagents at a time,
-  each running its own checks, and a git worktree — a whole checkout on
-  disk — for each task on a branch of its own.
+- **How many at once:** `parallel` (default 1, up to 8) tasks at a time,
+  each running its own checks — with subagents where the agent has them, and
+  a git worktree (a whole checkout on disk) for each task on a branch of its
+  own.
 - **The checks** are your repository's: `implement` after every pass,
   `review` every round, `final` once. Their CPU and time are whatever your
   commands take.

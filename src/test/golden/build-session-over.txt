@@ -2,15 +2,17 @@
 
 The plan is final. Its architecture is locked, and from here Coplan follows your progress on its task board, so keep every task's status true as you go. Run the build with the coplan-build skill, and take each task through the iric skill — implement → review → refine:
 
-1. Start only tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that are ready together do not depend on each other — build them side by side, up to 3 at once, each by its own subagent given that task's harness_task_brief. harness_task_brief gives one task's focused brief: its objective, where it fits, its branch and its checks.
+1. Start only tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that are ready together do not depend on each other — build them side by side, up to 3 at once — with subagents where your agent has them, each given that task's harness_task_brief. harness_task_brief gives one task's focused brief: its objective, where it fits, its branch and its checks.
 2. When you start a task, mark it in_progress with stage "implement" (harness_task_update) and run the implement checks. Set stage "review" when it goes to review, and "refine" when the review asks for changes. Report the checks you ran with `checks`.
-3. Review: an independent reviewer (a fresh subagent), unless a task says otherwise. Run the reviewer on the `opus` model. After 2 review rounds without passing, stop and ask the user.
+3. Review: an independent reviewer (a fresh subagent), unless a task says otherwise. Run the reviewer on the `opus` model. After 2 review rounds without passing, another round is the user's call.
 4. Mark a task done only once its review passed and its review checks are green, with a one-line note of what you did.
-5. If you are stuck, mark the task blocked with a note saying on what, and ask the user with AskUserQuestion.
+5. If you are stuck, mark the task blocked with a note saying on what, and go on with what else is ready.
 6. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.
 7. Land each task on its branch (see Branches below): cut a stacked branch from the one it builds on. Open the pull requests with Graphite: track each branch on the one below it (`gt track`), and open the stack with `gt submit --stack`, as soon as a branch's tasks are done. Write each description from the pull request template (.github/pull_request_template.md), which harness_task_next shows when one is due.
-8. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, stop and ask the user in chat — they can reopen the plan in Coplan.
+8. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, stop that work and tell the user why in chat: only they can reopen the plan in Coplan.
 9. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) and give the user the final summary: what was built, the branches and pull requests, and how it was checked. The report is refused until it carries every final check (check) passing, in `checks`.
+
+**When to ask.** Ask the user, with AskUserQuestion, only when a decision cannot be undone, reaches outside this session (pushing, opening a pull request), or is theirs by right — in this Managed build: dropping work they signed off, a task they review, a review round past their limit, or taking a task whose checks fail. Anything else, decide: say what you decided in the task's note, and carry on.
 
 ## Standing instructions
 _From the user's and the repository's Coplan config; they hold for all of this._
@@ -52,9 +54,6 @@ _The net effect of their edits — not each step, and not where boxes were moved
 - Changed bulk15 "Bulk task number 15 with a descriptive title": note "user note on bulk task 15".
 - Changed bulk16 "Bulk task number 16 with a descriptive title": note "user note on bulk task 16".
 - Changed bulk17 "Bulk task number 17 with a descriptive title": note "user note on bulk task 17".
-- Changed bulk18 "Bulk task number 18 with a descriptive title": note "user note on bulk task 18".
-- Changed bulk19 "Bulk task number 19 with a descriptive title": note "user note on bulk task 19".
-- Changed bulk20 "Bulk task number 20 with a descriptive title": note "user note on bulk task 20".
 - …and more than fits here: harness_plan_read {changes_only: true} lists every change the user made.
 
 _The architecture (3 diagram(s)), the sections and each task's detail are too long to quote here: call harness_plan_read for them before you start._
@@ -84,7 +83,6 @@ Reads are slow at peak.
 - [ ] bulk8 Bulk task number 8 with a descriptive title · after bulk7 — user note on bulk task 8
 - [ ] bulk9 Bulk task number 9 with a descriptive title · after bulk8 — user note on bulk task 9
 - [ ] bulk10 Bulk task number 10 with a descriptive title · after bulk9 — user note on bulk task 10
-- [ ] bulk11 Bulk task number 11 with a descriptive title · after bulk10 — user note on bulk task 11
-- …and 48 more line(s): harness_plan_read lists every task.
+- …and 49 more line(s): harness_plan_read lists every task.
 
 _Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_

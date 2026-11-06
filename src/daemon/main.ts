@@ -13,6 +13,7 @@ import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
 import { MAX_NOTE, PlanError, cleanChecks, cleanNote, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
 import {
   PROMPT_BUDGET,
+  askRule,
   buildPrompt,
   configRows,
   designPrompt,
@@ -1218,7 +1219,7 @@ function buildRouter(deps: Deps): Router {
     }
     if (managed && now.stage === 'review' && stage === 'review') {
       if ((now.round ?? 0) >= settings.maxRounds) {
-        out.push(`This is review round ${now.round} of the ${settings.maxRounds} the user allowed: if it does not pass, stop and ask the user.`);
+        out.push(`This is review round ${now.round} of the ${settings.maxRounds} the user allowed: if it does not pass, another round is theirs to allow.`);
       }
       if (effectiveReview(plan, now, settings.review) === 'user') {
         out.push(`This task's review is the user's: show them the change and ask with ${agentInfo(session.agent).askWith} before marking it done.`);
@@ -1283,9 +1284,8 @@ function buildRouter(deps: Deps): Router {
           reply(
             true,
             `[cc-harness] Published "${plan.title}" (revision ${plan.revision}). The user reviews it at ${url}\n` +
-              'Tell them in chat that the plan is ready, and ask anything you need decided with ' +
-              `${agentInfo(session.agent).askWith}, here in chat. Nothing in Coplan waits for them: when they say they ` +
-              'have reviewed it, call harness_plan_read.\n\n' +
+              'Tell them in chat that the plan is ready. Nothing in Coplan waits for them: when they say they ' +
+              `have reviewed it, call harness_plan_read. ${askRule(agentInfo(session.agent), 'plan')}\n\n` +
               renderPlan(plan, { url, planCheck: projectFor(session).planCheck }),
           );
           return;
@@ -1367,11 +1367,11 @@ function buildRouter(deps: Deps): Router {
             true,
             `[cc-harness] Published the task list for "${plan.title}". The user reviews it at ${url}\n` +
               (phase === 'tasking'
-                ? 'Tell them in chat that the task list is ready to review, and ask anything you need decided with ' +
-                  `${agentInfo(session.agent).askWith}. Do not start building: they submit the plan from Coplan when the tasks are right, ` +
+                ? 'Tell them in chat that the task list is ready to review. Do not start building: they submit the plan ' +
+                  'from Coplan when the tasks are right, ' +
                   (agentInfo(session.agent).promptContext
                     ? 'and the build prompt comes with their next message.\n\n'
-                    : 'and paste the build prompt here (or ask you to build, and harness_plan_read hands it to you).\n\n')
+                    : 'and paste the build prompt here (or tell you to build, and harness_plan_read hands it to you).\n\n')
                 : 'Tell them in chat that the tasks are updated.\n\n') +
               renderTaskList(plan, projectFor(session).branches.base) +
               // What the list leaves open, while it is still cheap to fix.
@@ -1488,7 +1488,7 @@ function refuseUnfinishedFinal(checks: unknown, project: ProjectConfig): void {
   throw new PlanError(
     'This repository holds the build report until its final checks pass (final.blocking in .coplan/config.json). ' +
       [failing.length ? `Failing: ${failing.join(', ')}.` : '', missing.length ? `Not reported in \`checks\`: ${missing.join(', ')}.` : ''].filter(Boolean).join(' ') +
-      ' Fix what fails and run them again, or ask the user how to finish.',
+      ' Fix what fails and run them again; if a failure is not this build\'s to fix, tell the user why in chat.',
   );
 }
 
