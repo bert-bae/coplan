@@ -49,6 +49,8 @@ export interface UiState {
   canvasSaving: boolean;
   /** The proposal shown on the canvas, as the plan would be with it. */
   proposalPreview: string | null;
+  /** What is wrong with Coplan's settings files now, each naming its file. */
+  configErrors: string[];
   toasts: Toast[];
   error: string | null;
 }
@@ -74,11 +76,32 @@ const initial: UiState = {
   saving: 0,
   canvasSaving: false,
   proposalPreview: null,
+  configErrors: [],
   toasts: [],
   error: null,
 };
 
 const PREFS_KEY = 'cc-harness:prefs';
+/** The settings errors this browser has already been told about. */
+const SEEN_CONFIG_ERRORS_KEY = 'cc-harness:config-errors-seen';
+
+/** A list kept in this browser; empty where storage is unavailable. */
+function readList(key: string): string[] {
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(key) ?? '[]') as unknown;
+    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeList(key: string, list: string[]): void {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(list.slice(0, 50)));
+  } catch {
+    /* a private window: told again next time, which is the safe side */
+  }
+}
 
 /**
  * A tiny external store read through `useSyncExternalStore`.
@@ -247,6 +270,9 @@ class Store {
         return;
       }
       case 'ping':
+        return;
+      case 'config-errors':
+        this.configErrors(event.errors, event.files ?? []);
         return;
       case 'persist-error':
         if (event.sessionId === this.state.sessionId) {
@@ -608,6 +634,24 @@ class Store {
   /* ---------------------------------------------------------------- *
    * Notices
    * ---------------------------------------------------------------- */
+
+  /**
+   * A settings file Coplan could not use: said once per distinct error in a
+   * toast — not again on a reload, a reconnect or a switch to another
+   * session — and listed in the rail's footer for as long as it is wrong.
+   * Once fixed it is forgotten, so the same mistake made again is said
+   * again. "Fixed" is only known for the files this page's session reads
+   * (`files`): an error in another repository's file is kept as seen.
+   */
+  private configErrors(errors: string[], files: string[]): void {
+    this.set({ configErrors: errors });
+    const seen = readList(SEEN_CONFIG_ERRORS_KEY);
+    for (const e of errors) {
+      if (!seen.includes(e)) this.toast('error', `A Coplan setting is ignored: ${e}`);
+    }
+    const fixed = (e: string) => !errors.includes(e) && files.some((f) => e.startsWith(f));
+    writeList(SEEN_CONFIG_ERRORS_KEY, [...errors, ...seen.filter((e) => !errors.includes(e) && !fixed(e))]);
+  }
 
   toast(kind: Toast['kind'], text: string): void {
     const toast: Toast = { id: `t${Date.now()}${Math.random().toString(36).slice(2, 6)}`, kind, text };

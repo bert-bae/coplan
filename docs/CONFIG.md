@@ -13,8 +13,11 @@ to either file counts at once, with no restart.
 Both files are JSON with comments: `//` to the end of a line and `/* … */`
 anywhere outside a string, and a trailing comma is allowed. Nothing is
 skipped silently: a file that is not valid JSON, a key Coplan does not read,
-or a value of the wrong type or out of range is written to `daemon.log` and
-reported by `coplan doctor`, and the value from the layer before is used.
+or a value of the wrong type or out of range is written to `daemon.log`,
+reported by `coplan doctor`, and shown in the Coplan page of every session
+that reads the file (a toast once per distinct error, and **⚠ settings** in
+the rail's footer until it is fixed); the value from the layer before is
+used.
 The keys the old review loop used (`gateHoldSeconds`, `stages`, `ship`) are
 still ignored without a word, so an old config file does no harm.
 

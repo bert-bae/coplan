@@ -748,6 +748,12 @@ what failed and what to do. Some things it cannot see:
   Codex keeps that state internally (a hash of its own making in
   `~/.codex/config.toml`), and the doctor tests the hooks by calling them
   itself.
+- **A setting that does nothing.** An error in `~/.claude/cc-harness/config.json`
+  or `.claude/harness.json` is shown in the page of each session that reads
+  it (a toast, and **⚠ settings** in the rail's footer until you fix it), in `coplan doctor` and in
+  `~/.claude/cc-harness/daemon.log`. One in `.coplan/config.json` is shown in
+  the prompts, the review dialogs, `coplan check` and the doctor. Each says
+  what is used instead.
 
 ## Configuration
 

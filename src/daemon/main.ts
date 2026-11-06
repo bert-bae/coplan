@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { unlinkSync, appendFileSync, existsSync, linkSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { SessionStore } from './store.ts';
@@ -17,7 +18,7 @@ import { cleanSettings, dependents, effectiveBranch, effectiveReview, hasSubtask
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
 import { changedFiles, defaultBase, filesForStage, sharesBranch, taskDiffRange, taskFiles, type Changed, type DiffRange } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
-import { ConfigCache, configStamp, type HarnessConfig } from '../shared/config.ts';
+import { ConfigCache, configStamp, globalConfigFile, projectHarnessFile, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
@@ -59,8 +60,10 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const config = new ConfigCache(paths.configDir(), (message) => log(`config: ${message}`));
   const store = new SessionStore();
+  // A setting that is ignored is said in the log once, and in the pages of
+  // its repository for as long as it is wrong.
+  const config = new ConfigCache(paths.configDir(), (message) => log(`config: ${message}`));
   store.on('event', (event: ServerEvent) => {
     if (event.type === 'persist-error') log(`could not save session ${event.sessionId}: ${event.message}`);
   });
@@ -790,6 +793,29 @@ function buildRouter(deps: Deps): Router {
     const focus = ctx.url.searchParams.get('session');
     const focused = focus ? store.get(focus) : undefined;
     if (focused) send({ type: 'snapshot', session: focused });
+    // The settings this page's session reads — the global file and its
+    // repository's — as they are now: read when it opens, then sent again
+    // whenever a read finds them changed. One timer for the daemon reads
+    // every open page's folder again (settingsWatch), so a fix is seen even
+    // while nothing else is going on.
+    const settingsDir = focused ? (focused.repoRoot ?? focused.cwd) : null;
+    let shownErrors: string | null = null;
+    const settingsFiles = [globalConfigFile(paths.configDir()), ...(settingsDir ? [projectHarnessFile(settingsDir)] : [])].map(homeRelative);
+    const sendSettings = (errors: string[]) => {
+      const shown = errors.map(homeRelative);
+      if (shown.join('\n') === shownErrors) return;
+      shownErrors = shown.join('\n');
+      send({ type: 'config-errors', errors: shown, files: settingsFiles });
+    };
+    sendSettings(config.errors(settingsDir));
+    const unwatch = config.subscribe(settingsDir, () => {
+      try {
+        sendSettings(config.held(settingsDir));
+      } catch {
+        /* cleanup below fires */
+      }
+    });
+    const unread = settingsWatch.add(settingsDir);
 
     // Only the session this page shows. The page reconnects with a new
     // `session` when the user switches, so nothing it needs is filtered out,
@@ -820,6 +846,8 @@ function buildRouter(deps: Deps): Router {
       clients.count = Math.max(0, clients.count - 1);
       clearInterval(heartbeat);
       store.off('event', listener);
+      unwatch();
+      unread();
     };
     ctx.req.on('close', cleanup);
     ctx.req.on('error', cleanup);
@@ -922,6 +950,33 @@ function buildRouter(deps: Deps): Router {
     if (body.pid && session.claudePid !== body.pid) store.update(session.sessionId, { claudePid: body.pid });
     return session;
   };
+
+  /** The settings folders open pages read, each read again on one timer
+   *  for the daemon — not once per page — so a fix reaches every page. */
+  const settingsWatch = (() => {
+    const dirs = new Map<string | null, number>();
+    let timer: NodeJS.Timeout | null = null;
+    return {
+      add(dir: string | null): () => void {
+        dirs.set(dir, (dirs.get(dir) ?? 0) + 1);
+        if (!timer) {
+          timer = setInterval(() => {
+            for (const d of dirs.keys()) config.get(d);
+          }, 25_000);
+          timer.unref?.();
+        }
+        return () => {
+          const n = (dirs.get(dir) ?? 1) - 1;
+          if (n > 0) dirs.set(dir, n);
+          else dirs.delete(dir);
+          if (!dirs.size && timer) {
+            clearInterval(timer);
+            timer = null;
+          }
+        };
+      },
+    };
+  })();
 
   /** A task on a branch of its own with nothing to compare: its branch is
    *  the base branch itself, or no base branch was found. */
@@ -1504,6 +1559,13 @@ main().catch((err: unknown) => {
   log(`failed to start: ${(err as Error)?.stack ?? String(err)}`);
   process.exit(1);
 });
+
+/** A path under the home folder as `~/…`: shorter in the page, and the
+ *  user's name stays out of it. */
+function homeRelative(text: string): string {
+  const home = os.homedir();
+  return home && home !== '/' ? text.split(home + path.sep).join(`~${path.sep}`) : text;
+}
 
 /**
  * What Claude last read is kept beside the plan so "since you last read" can

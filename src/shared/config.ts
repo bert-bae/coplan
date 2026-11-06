@@ -139,17 +139,53 @@ export function loadConfigReport(opts: { configDir: string; projectDir?: string 
 /**
  * The daemon's view of the config: read once per repository, and again as
  * soon as either file changes — an edit counts without a restart. What is
- * wrong with a file is handed to `onError` once, not on every read.
+ * wrong with a file is handed to `onError` once, not on every read. Whoever
+ * subscribes hears when what is wrong with a repository's files (or the
+ * global one) changes — so a page can show it, and stop once it is fixed.
  */
 export class ConfigCache {
-  private entries = new Map<string, { stamp: string; config: HarnessConfig }>();
+  private entries = new Map<string, { stamp: string; config: HarnessConfig; errors: string[] }>();
   private said = new Set<string>();
+  /** Watchers, by the folder they watch ('' for the global file alone). */
+  private watchers = new Map<string, Set<() => void>>();
+  /** What each folder's files were last found to hold wrong, kept apart
+   *  from the cache: a cache cleared at its limit is not news, and does
+   *  not lose what another folder's page shows. */
+  private known = new Map<string, string[]>();
+  private pending = new Set<string>();
 
   constructor(
     private readonly configDir: string,
     private readonly onError: (message: string) => void = () => {},
     private readonly max = 64,
   ) {}
+
+  /** What is wrong with the files one repository reads — the global file
+   *  and its own `.claude/harness.json` — read again if either changed. A
+   *  page is shown its own repository's errors, not every repository's. */
+  errors(projectDir?: string | null): string[] {
+    this.get(projectDir);
+    return this.held(projectDir);
+  }
+
+  /** The same, as last read, without looking at the files again: for a
+   *  watcher told of a change, which a read just found. */
+  held(projectDir?: string | null): string[] {
+    return [...(this.known.get(projectDir ?? '') ?? this.entries.get(projectDir ?? '')?.errors ?? [])];
+  }
+
+  /** `fn` is called — once, after the read that found it, never inside it
+   *  — whenever what is wrong with `projectDir`'s files changes. */
+  subscribe(projectDir: string | null, fn: () => void): () => void {
+    const key = projectDir ?? '';
+    let set = this.watchers.get(key);
+    if (!set) this.watchers.set(key, (set = new Set()));
+    set.add(fn);
+    return () => {
+      set.delete(fn);
+      if (!set.size) this.watchers.delete(key);
+    };
+  }
 
   get(projectDir?: string | null): HarnessConfig {
     const key = projectDir ?? '';
@@ -165,8 +201,27 @@ export class ConfigCache {
       this.onError(e);
     }
     if (this.entries.size >= this.max) this.entries.clear();
-    this.entries.set(key, { stamp, config: report.config });
+    this.entries.set(key, { stamp, config: report.config, errors: report.errors });
+    if ((this.known.get(key) ?? []).join('\n') !== report.errors.join('\n')) {
+      if (this.known.size > 1000) this.known.clear();
+      this.known.set(key, report.errors);
+      this.notify(key);
+    }
     return report.config;
+  }
+
+  /** A folder's watchers hear of its change once the read is done, and once
+   *  however many reads changed it: one watcher reading again does not set
+   *  off the next. */
+  private notify(key: string): void {
+    const first = this.pending.size === 0;
+    this.pending.add(key);
+    if (!first) return;
+    queueMicrotask(() => {
+      const keys = [...this.pending];
+      this.pending.clear();
+      for (const k of keys) for (const fn of this.watchers.get(k) ?? []) fn();
+    });
   }
 }
 

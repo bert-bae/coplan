@@ -25,7 +25,9 @@ const DEFAULT_SELECTION: CleanupGroupId[] = ['partial-writes', 'log', 'lock'];
 
 export function GlobalActions() {
   const restarting = useStore((s) => s.restarting);
+  const configErrors = useStore((s) => s.configErrors);
   const [panel, setPanel] = useState(false);
+  const [settings, setSettings] = useState(false);
   const [confirming, setConfirming] = useState(false);
 
   return (
@@ -35,6 +37,22 @@ export function GlobalActions() {
           v{typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : 'dev'}
         </span>
         {restarting && <span className="global-note">restarting…</span>}
+        {configErrors.length > 0 && (
+          <button
+            type="button"
+            className="link global-warn"
+            aria-expanded={settings}
+            title="Coplan ignored part of its settings: show what"
+            onClick={() => {
+              // A list the page already holds: nothing to scan or fetch.
+              setSettings(!settings);
+              setPanel(false);
+              setConfirming(false);
+            }}
+          >
+            ⚠ settings
+          </button>
+        )}
         <span className="spacer" />
         <button
           type="button"
@@ -45,6 +63,7 @@ export function GlobalActions() {
           onClick={() => {
             const next = !panel;
             setPanel(next);
+            setSettings(false);
             setConfirming(false);
             if (next) void store.loadStorage();
           }}
@@ -59,6 +78,7 @@ export function GlobalActions() {
           onClick={() => {
             setConfirming(!confirming);
             setPanel(false);
+            setSettings(false);
           }}
         >
           ⟳
@@ -86,6 +106,11 @@ export function GlobalActions() {
         </div>
       )}
 
+      {settings && configErrors.length > 0 && (
+        <div className="global-panel">
+          <ConfigErrors />
+        </div>
+      )}
       {panel && <StoragePanel />}
     </div>
   );
@@ -145,6 +170,22 @@ function StoragePanel() {
         </>
       )}
     </div>
+  );
+}
+
+/** What Coplan could not use in its own settings files, until it is fixed. */
+function ConfigErrors() {
+  const errors = useStore((s) => s.configErrors);
+  if (!errors.length) return null;
+  return (
+    <section className="global-config" aria-label="Settings problems">
+      <p className="global-config-head">Ignored in Coplan's settings — fix the file and it is read again:</p>
+      <ul>
+        {errors.map((e) => (
+          <li key={e}>{e}</li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

@@ -965,6 +965,13 @@ input[type='checkbox'] { accent-color: var(--accent-solid); cursor: pointer; }
   animation: fade-up var(--dur) var(--ease-out-soft);
 }
 .global-empty { margin: 0; }
+.global-warn { color: var(--danger-fg); font-weight: 650; white-space: nowrap; }
+.global-config {
+  padding: var(--sp-2); border: 1px solid var(--danger-border); border-radius: var(--r-md);
+  background: var(--danger-bg); color: var(--danger-fg);
+}
+.global-config-head { margin: 0 0 var(--sp-1); font-weight: 650; }
+.global-config ul { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
 .global-groups { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
 .global-group-head { display: flex; align-items: center; gap: var(--sp-2); cursor: pointer; }
 .global-group-name { flex: 1; min-width: 0; color: var(--text-primary); font-weight: 650; }
@@ -974,7 +981,8 @@ input[type='checkbox'] { accent-color: var(--accent-solid); cursor: pointer; }
 .sidebar.is-collapsed .global-panel,
 .sidebar.is-collapsed .global-confirm,
 .sidebar.is-collapsed .global-version,
-.sidebar.is-collapsed .global-note { display: none; }
+.sidebar.is-collapsed .global-note,
+.sidebar.is-collapsed .global-warn { display: none; }
 .sidebar.is-collapsed .global-bar { flex-direction: column; }
 
 /* ------------------------------------------------------------------ *
@@ -1644,7 +1652,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
   .sidebar.is-drawer-open .session-sub, .sidebar.is-drawer-open .session-foot,
   .sidebar.is-drawer-open .session-group-name, .sidebar.is-drawer-open .session-group-count,
   .sidebar.is-drawer-open .session-group-chevron,
-  .sidebar.is-drawer-open .global-version, .sidebar.is-drawer-open .global-note { display: flex; }
+  .sidebar.is-drawer-open .global-version, .sidebar.is-drawer-open .global-note, .sidebar.is-drawer-open .global-warn { display: flex; }
   .sidebar.is-drawer-open .sidebar-brand { display: flex; flex-direction: column; }
   .sidebar.is-drawer-open .session-group-head { justify-content: flex-start; }
   .sidebar.is-drawer-open .global-bar { flex-direction: row; }

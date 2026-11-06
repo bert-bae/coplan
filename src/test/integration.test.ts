@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -475,6 +475,76 @@ test('the live stream opens on a single-use ticket', async () => {
   assert.equal(await open(ticket), 200);
   assert.equal(await open(ticket), 401, 'spent');
   assert.equal(await open('made-up'), 401);
+});
+
+test("a mistake in Coplan's own settings reaches the page: when it opens, and as soon as it is made or fixed", async () => {
+  const id = 'settings-session';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  const file = path.join(repo, '.claude', 'harness.json');
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, '{ "promptNotice": "sometimes" }');
+  const events: string[][] = [];
+  let req: http.ClientRequest | undefined;
+  try {
+    const { ticket } = await call<{ ticket: string }>('/api/events/ticket', { method: 'POST', body: '{}' });
+    await new Promise<void>((resolve, reject) => {
+      req = http.get(`${baseUrl(lock)}/api/events?ticket=${ticket}&session=${id}`, (res) => {
+        let buf = '';
+        res.on('data', (chunk: Buffer) => {
+          buf += chunk.toString('utf8');
+          let cut: number;
+          while ((cut = buf.indexOf('\n\n')) >= 0) {
+            const frame = buf.slice(0, cut);
+            buf = buf.slice(cut + 2);
+            if (!frame.startsWith('data: ')) continue;
+            const event = JSON.parse(frame.slice(6)) as { type: string; errors?: string[] };
+            if (event.type === 'config-errors') events.push(event.errors!);
+          }
+        });
+        resolve();
+      });
+      req.on('error', reject);
+    });
+    const until = async (ok: () => boolean) => {
+      for (let i = 0; i < 50 && !ok(); i++) await sleep(50);
+      assert.ok(ok(), JSON.stringify(events));
+    };
+    // Opening the page: the repository's file is read, and its mistake said.
+    await until(() => events.some((e) => e.some((m) => /harness\.json: "promptNotice" must be true or false/.test(m))));
+    // A page for a session in another repository is not told of it.
+    const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-other-repo-'));
+    try {
+      await hookFor('settings-elsewhere', 'SessionStart', { start_reason: 'startup', cwd: other });
+      const ticket2 = (await call<{ ticket: string }>('/api/events/ticket', { method: 'POST', body: '{}' })).ticket;
+      const first = await new Promise<string>((resolve, reject) => {
+        const r = http.get(`${baseUrl(lock)}/api/events?ticket=${ticket2}&session=settings-elsewhere`, (res) => {
+          let buf = '';
+          res.on('data', (chunk: Buffer) => {
+            buf += chunk.toString('utf8');
+            const at = buf.indexOf('"type":"config-errors"');
+            const end = at < 0 ? -1 : buf.indexOf('\n\n', at);
+            if (end >= 0) {
+              r.destroy();
+              resolve(buf.slice(buf.lastIndexOf('data: ', at) + 6, end));
+            }
+          });
+        });
+        r.on('error', reject);
+      });
+      assert.deepEqual((JSON.parse(first) as { errors: string[] }).errors, []);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+
+    // Fixed: the next time the daemon reads it, every open page hears.
+    writeFileSync(file, '{ "promptNotice": false }');
+    utimesSync(file, new Date(), new Date(Date.now() + 2000));
+    await hookFor(id, 'UserPromptSubmit', { prompt: 'hello' });
+    await until(() => events.at(-1)?.length === 0);
+  } finally {
+    req?.destroy();
+    rmSync(path.join(repo, '.claude'), { recursive: true, force: true });
+  }
 });
 
 test('a foreign Host, a path out of the UI folder and a clean with no groups are all refused', async () => {

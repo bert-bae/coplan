@@ -27,6 +27,16 @@
   tools say no session is registered) and the fix, and the tools' own reply
   in Codex mentions the update case.
 
+### Settings errors in the page
+
+- A mistake in `~/.claude/cc-harness/config.json` or `.claude/harness.json`
+  (an unknown key, a value of the wrong type, a file that is not JSON) went
+  only to `daemon.log` and `coplan doctor`. The page of each session that
+  reads the file now shows it too: a toast once per distinct error, and
+  **⚠ settings** in the rail's footer,
+  which lists every current error until the file is fixed. A fix is picked up
+  the next time the daemon reads the file, without a restart.
+
 ### The README
 
 - **Screenshots** of each step, from demo plans that
