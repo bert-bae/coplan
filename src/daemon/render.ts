@@ -24,7 +24,7 @@ import {
   proposalStaleness,
 } from '../shared/plan.ts';
 import { contentOf, diagramBlocks, diagramChanges, diagramToMarkdown, hang, indent, nestHeadings } from '../shared/architecture.ts';
-import { BlockList, CHANGES, NOTE, TEMPLATE, blockLines, blocksText, derived, dropAll, field, joinBlocks, setting, type Block, type BlockSource } from '../shared/blocks.ts';
+import { BlockList, CHANGES, NOTE, TEMPLATE, blockLines, blocksText, derived, dropAll, field, joinBlocks, setting, type Block, type BlockSource, type ConfigRow } from '../shared/blocks.ts';
 import {
   DEFAULT_BUILD_SETTINGS,
   REVIEW_WORDS,
@@ -794,6 +794,36 @@ export function instructionBlocks(project: ProjectConfig, point: InstructionPoin
 
 export function instructionLines(project: ProjectConfig, point: InstructionPoint, heading = '## Standing instructions', max = Infinity): string[] {
   return blockLines(instructionBlocks(project, point, heading, max));
+}
+
+/**
+ * The config settings a prompt is made with, for the sign-off dialog to
+ * list beside it: every `config` source its blocks can name, set or not,
+ * with the files that set it. The design prompt's review mode is the
+ * config's default, since the Confirm dialog has no settings of its own;
+ * the build prompt's comes from the Submit dialog.
+ */
+export function configRows(project: ProjectConfig, point: 'design' | 'build'): ConfigRow[] {
+  const row = (key: string, label: string, value: string): ConfigRow => {
+    const source = configSource(project, key);
+    return { key, label, value, files: source.kind === 'config' ? source.files : [] };
+  };
+  const rows = HOOK_STAGES.map((stage) =>
+    row(`hooks.${stage}`, `${stage[0]!.toUpperCase()}${stage.slice(1)} checks`, project.hooks[stage].map((h) => h.name).join(', ') || 'none'),
+  );
+  if (point === 'design') rows.push(row('iric.review', 'Review, by default', REVIEW_WORDS[project.settings.review]));
+  const { base, prefix } = project.branches;
+  rows.push(row('branches', 'Branches', [base ? `cut from ${base}` : 'cut from the base branch', prefix ? `named ${prefix}…` : ''].filter(Boolean).join(', ')));
+  if (point === 'build') {
+    const { tool, open, templateFile } = project.pullRequests;
+    const how = open === 'never' ? 'none opened: the branches are pushed' : tool === 'none' ? 'you open them' : `${tool === 'graphite' ? 'Graphite' : 'gh pr create'}, ${open === 'auto' ? 'as each branch is done' : 'once you say'}`;
+    rows.push(row('pullRequests', 'Pull requests', `${how}${templateFile ? ` · template ${templateFile}` : ''}`));
+    rows.push(row('review.model', 'Reviewer model', project.review.model ?? "the agent's own"));
+    rows.push(row('final.blocking', 'Failing final checks', project.final.blocking ? 'hold the build report' : 'are reported; the report is not held'));
+  }
+  const words = project.instructions[point]?.trim();
+  rows.push(row(`instructions.${point}`, 'Standing instructions', words ? (words.length > 120 ? `${words.slice(0, 119).trimEnd()}…` : words) : 'none'));
+  return rows;
 }
 
 /** How much of the standing instructions a prompt carries, within its budget. */

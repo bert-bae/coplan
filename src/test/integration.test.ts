@@ -11,6 +11,7 @@ import { readLiveLock, baseUrl } from '../shared/paths.ts';
 import type { DaemonLock, SessionState } from '../shared/types.ts';
 import type { HookOutput } from '../shared/hooks.ts';
 import { asksForCoplan } from '../daemon/hookIngest.ts';
+import { blocksText, type Block, type ConfigRow } from '../shared/blocks.ts';
 
 /**
  * End-to-end: a real daemon subprocess, a real git repository, real hook
@@ -541,7 +542,7 @@ const built = 'submit-session';
 const opsOn = (id: string, list: unknown[]) =>
   call<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${id}/plan/ops`, { method: 'POST', body: JSON.stringify({ ops: list }) });
 const post = <T>(route: string, body: Record<string, unknown> = {}) => call<T>(route, { method: 'POST', body: JSON.stringify(body) });
-type Preview = { prompt: string; trimmed: boolean; version: number; budget: number };
+type Preview = { prompt: string; trimmed: boolean; version: number; budget: number; blocks: Block[] };
 
 test('the prompt preview is the prompt, and reading it changes nothing', async () => {
   await hookFor(built, 'SessionStart', { start_reason: 'startup' });
@@ -552,6 +553,11 @@ test('the prompt preview is the prompt, and reading it changes nothing', async (
   assert.match(preview.prompt, /^\[cc-harness\] Build the plan "Add a cache"/);
   assert.match(preview.prompt, /> Start with the client\./);
   assert.match(preview.prompt, /Added t\d+ "Load test"/, 'the edit Claude has not read leads');
+  // Block by block, each with its source; joined, they are the prompt.
+  assert.equal(blocksText(preview.blocks), preview.prompt);
+  assert.ok(preview.blocks.every((b) => b.source && b.id));
+  assert.equal(preview.blocks.find((b) => b.id === 'note')?.source.kind, 'note');
+  assert.equal(preview.blocks.find((b) => b.id === 'changes')?.source.kind, 'changes');
   assert.equal(preview.version, before.plan!.version);
   const after = await sessionFor(built);
   assert.equal(after.plan!.version, before.plan!.version);
@@ -564,6 +570,7 @@ test('confirming the design locks it, and the next message asks Claude for the t
 
   const preview = await post<Preview>(`/api/session/${built}/plan/design/prompt`, { note: 'Split the storage work.' });
   assert.match(preview.prompt, /^\[cc-harness\] The design is confirmed for "Add a cache"/);
+  assert.equal(blocksText(preview.blocks), preview.prompt);
   assert.match(preview.prompt, /harness_tasks_publish/);
   assert.match(preview.prompt, /> Split the storage work\./);
   const res = await post<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${built}/plan/design/confirm`, {
@@ -873,8 +880,17 @@ test("the repository's .coplan/config.json reaches the prompts, the briefs and t
   try {
     await hookFor(id, 'SessionStart', { start_reason: 'startup' });
     await mcpFor(id, 'publish', PLAN);
-    const design = await post<Preview & { project: { checks: Record<string, string[]> } }>(`/api/session/${id}/plan/design/prompt`);
+    const design = await post<Preview & { project: { checks: Record<string, string[]>; config: ConfigRow[] } }>(`/api/session/${id}/plan/design/prompt`);
     assert.deepEqual(design.project.checks['review'], ['tests', 'lint']);
+    // Read-only in the dialog, with where each is set.
+    const row = (key: string) => design.project.config.find((r) => r.key === key);
+    assert.deepEqual(row('hooks.review'), { key: 'hooks.review', label: 'Review checks', value: 'tests, lint', files: ['.coplan/config.json'] });
+    assert.deepEqual(row('iric.review'), { key: 'iric.review', label: 'Review, by default', value: 'self-review', files: ['.coplan/config.json'] });
+    assert.equal(row('hooks.final')?.files.length, 0, 'set nowhere');
+    assert.deepEqual(
+      design.blocks.find((b) => b.id === 'checks:review')?.source,
+      { kind: 'config', key: 'hooks.review', files: ['.coplan/config.json'] },
+    );
     assert.match(design.prompt, /- review: tests `npm test`; lint `npm run lint` \(optional\)/);
     const build = await post<Preview & { settings: unknown }>(`/api/session/${id}/plan/prompt`, { target: 'session' });
     assert.deepEqual(build.settings, { review: 'self', parallel: 1, maxRounds: 2 }, "the repository's defaults");

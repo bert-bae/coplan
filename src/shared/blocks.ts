@@ -136,6 +136,20 @@ function clean(flags: Flags): Flags {
   return out;
 }
 
+/**
+ * A config setting a prompt is made with, as the sign-off dialogs list it:
+ * read-only, with where it is set, so the user can follow it to the file.
+ */
+export interface ConfigRow {
+  /** Its key in `.coplan/config.json`, e.g. `hooks.review`, `pullRequests`. */
+  key: string;
+  label: string;
+  /** What it is set to, in words. */
+  value: string;
+  /** The files that set it; empty when none does and Coplan's default holds. */
+  files: string[];
+}
+
 /** The same blocks, every one marked dropped. */
 export function dropAll(blocks: readonly Block[]): Block[] {
   return blocks.map((b) => ({ ...b, dropped: true }));

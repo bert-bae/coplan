@@ -11,6 +11,7 @@ import type {
   StorageReport,
 } from '../../shared/types.ts';
 import type { GapSeverities } from '../../shared/check.ts';
+import type { Block, ConfigRow } from '../../shared/blocks.ts';
 
 /**
  * Client for the daemon.
@@ -147,6 +148,8 @@ export const api = {
 
 export interface PromptPreview {
   prompt: string;
+  /** The prompt as blocks, each naming its source; joined, they are `prompt`. */
+  blocks?: Block[];
   /** The plan was too long to quote whole; the prompt points Claude at harness_plan_read. */
   trimmed: boolean;
   /** The prompt's fingerprint, handed back at sign-off: a prompt that
@@ -172,4 +175,6 @@ export interface ProjectSummary {
   errors: string[];
   /** How each plan-check rule counts here; `error` holds the sign-off. */
   planCheck?: GapSeverities;
+  /** The config settings the prompt is made with, and where each is set. */
+  config?: ConfigRow[];
 }

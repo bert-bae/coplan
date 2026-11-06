@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { BLOCK_SOURCE_KINDS, blocksText, droppedParts, joinBlocks, type Block } from '../shared/blocks.ts';
+import { BLOCK_SOURCE_KINDS, blocksText, droppedParts, joinBlocks, type Block, type ConfigRow } from '../shared/blocks.ts';
 import { targetExists } from '../shared/plan.ts';
 import { loadProjectConfig } from '../shared/project.ts';
 import { TARGET_KINDS, type Plan } from '../shared/types.ts';
-import { PROMPT_BUDGET, buildPrompt, designPrompt, type BuildPrompt } from '../daemon/render.ts';
+import { PROMPT_BUDGET, buildPrompt, configRows, designPrompt, type BuildPrompt } from '../daemon/render.ts';
 import { FIXTURE_BIN, bigPlan, fullProject, longPlan, plainPlan, richConfirmed, richPlan } from './prompt-fixtures.ts';
 
 /**
@@ -197,4 +197,46 @@ test("the agent's bookkeeping is marked: revisions, who edited what, how to repl
   assert.ok(kept.includes('thread:c3:reply'));
   assert.ok(kept.includes('legend'));
   for (const b of built.blocks.filter((x) => x.bookkeeping)) assert.match(b.text, /edited by the user|added by the user|reply with harness_plan_edit|Statuses:|rev /);
+});
+
+test('the Confirm dialog shows every config setting the design prompt depends on, and the Submit dialog every one the build prompt does', () => {
+  const covers = (rows: ConfigRow[], key: string) => rows.some((r) => r.key === key || key.startsWith(`${r.key}.`) || r.key.startsWith(`${key}.`));
+  for (const project of [fullProject(), fullProject(true), loadProjectConfig(null, { globalDir: null })]) {
+    const design = designPrompt(richPlan(), { project, note: NOTE });
+    const rows = configRows(project, 'design');
+    for (const b of design.blocks) {
+      if (b.source.kind === 'config') assert.ok(covers(rows, b.source.key), `the design prompt's ${b.id} depends on ${b.source.key}, which the Confirm dialog does not show`);
+      // The Confirm dialog has no settings of its own: nothing in the prompt can come from one.
+      assert.notEqual(b.source.kind, 'setting', `${b.id} depends on a build setting the Confirm dialog does not have`);
+    }
+    for (const settings of [undefined, { review: 'subagent' as const, parallel: 2, maxRounds: 3 }]) {
+      const build = buildPrompt(richConfirmed(), { target: 'session', project, ...(settings ? { settings } : {}) });
+      const there = buildPrompt(richConfirmed(), { target: 'elsewhere', project, ...(settings ? { settings } : {}) });
+      const rows = configRows(project, 'build');
+      for (const b of [...build.blocks, ...there.blocks]) {
+        if (b.source.kind === 'config' && !b.source.key.startsWith('iric.')) assert.ok(covers(rows, b.source.key), `the build prompt's ${b.id} depends on ${b.source.key}, which the Submit dialog does not show`);
+      }
+    }
+  }
+});
+
+test('each config row says what it is set to and where: the file, or none for a default', () => {
+  const rows = configRows(fullProject(), 'build');
+  const at = (key: string) => rows.find((r) => r.key === key);
+  assert.deepEqual(at('hooks.review'), { key: 'hooks.review', label: 'Review checks', value: 'tests', files: ['.coplan/config.json'] });
+  assert.deepEqual(at('pullRequests'), { key: 'pullRequests', label: 'Pull requests', value: 'Graphite, as each branch is done · template .github/pull_request_template.md', files: ['.coplan/config.json'] });
+  assert.deepEqual(at('review.model'), { key: 'review.model', label: 'Reviewer model', value: 'opus', files: ['.coplan/config.json'] });
+  assert.equal(at('instructions.build')?.value, 'Small commits, each with a message that says why.');
+  const bare = configRows(loadProjectConfig(null, { globalDir: null }), 'design');
+  assert.deepEqual(
+    bare.map((r) => [r.key, r.value, r.files.length]),
+    [
+      ['hooks.implement', 'none', 0],
+      ['hooks.review', 'none', 0],
+      ['hooks.final', 'none', 0],
+      ['iric.review', 'an independent reviewer (a fresh subagent)', 0],
+      ['branches', 'cut from the base branch', 0],
+      ['instructions.design', 'none', 0],
+    ],
+  );
 });

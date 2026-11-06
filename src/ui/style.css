@@ -1879,6 +1879,19 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .submit-target input { margin-top: 3px; }
 .submit-target-hint { display: block; margin-top: 2px; font-size: var(--fs-sm); color: var(--text-secondary); }
 .submit-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); }
+/* What the prompt takes from config: read-only, grouped by the file that
+   sets it, each with its key. */
+.submit-config { display: flex; flex-direction: column; gap: var(--sp-1); font-size: var(--fs-sm); }
+.submit-config-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-2); }
+.config-group { display: flex; flex-direction: column; gap: 2px; }
+.config-file { margin: 0; color: var(--text-secondary); font-size: 11px; overflow-wrap: anywhere; }
+.config-rows { margin: 0; display: flex; flex-direction: column; border: 1px solid var(--border-default); border-radius: var(--r-md); }
+.config-row { padding: 4px var(--sp-2); }
+.config-row + .config-row { border-top: 1px solid var(--border-subtle); }
+.config-row dt { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-2); color: var(--text-secondary); }
+.config-row dd { margin: 0; overflow-wrap: anywhere; }
+.config-key { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); text-decoration: none; white-space: nowrap; }
+.config-key:hover { text-decoration: underline; }
 .submit-preview { display: flex; flex-direction: column; min-width: 0; }
 .submit-preview-head { display: flex; align-items: center; gap: var(--sp-2); }
 .submit-count { font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Every word traceable: where each part of a prompt comes from
+
+- The *Confirm design* and *Submit* dialogs list each setting the prompt
+  takes from config — the checks for each stage, the default review mode,
+  branches, how pull requests are opened, the reviewer model, whether
+  failing final checks hold the report, and your standing instructions —
+  read-only, grouped by the file that sets it (`.coplan/config.json`, or
+  your own `coplan.json` and `instructions/*.md`) with each key, and a link
+  to where [docs/CONFIG.md](docs/CONFIG.md) describes it. A setting no file
+  sets says so: it is Coplan's default.
+- A prompt too long for one message now says what it leaves out — "3
+  sections, the architecture (2 diagrams) and the detail of 12 tasks" —
+  instead of only that it is long.
+- Under the hood, the daemon builds each prompt from blocks that name their
+  source (a field of the plan, a config key, the dialog, what Coplan works
+  out, or its fixed instructions), and the preview endpoints return them.
+  The text the agent gets is unchanged, byte for byte.
+
 ### Installing: clone, then `./setup.sh`
 
 - Coplan is not listed in any agent's plugin directory, and the install

@@ -827,6 +827,66 @@ test('the design is confirmed from the architecture view, after reading what Cla
   assert.match(strip.textContent ?? '', /Design confirmed — waiting for Claude/);
 });
 
+test('the sign-off dialogs list each setting from config, read-only, with the file and key that set it', async () => {
+  const { designPrompt, configRows, promptHash } = await import('../daemon/render.ts');
+  const { parseProjectConfig } = await import('../shared/project.ts');
+  const project = parseProjectConfig({ hooks: { review: [{ name: 'tests', run: 'npm test' }] }, iric: { review: 'self' }, review: { model: 'opus' } });
+  const session = makeSession();
+  const version = session.plan!.version;
+  await boot(session, (route) => {
+    if (route.endsWith('/plan/design/prompt')) {
+      const { prompt, trimmed, blocks } = designPrompt(session.plan!, { project });
+      return { prompt, hash: promptHash(prompt), trimmed, blocks, version, budget: 9000, maxNote: 4000, project: { file: '/repo/.coplan/config.json', defaults: DEFAULTS, checks: { implement: [], review: ['tests'], final: [] }, errors: [], config: configRows(project, 'design') } };
+    }
+    return undefined;
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm design' }));
+  });
+  const dialog = screen.getByRole('dialog', { name: 'Confirm the design' });
+  const list = await waitFor(() => within(dialog).getByRole('region', { name: 'Set in config' }));
+  const row = (key: string) => list.querySelector(`[data-key="${key}"]`) as HTMLElement;
+  const file = (key: string) => row(key).closest('.config-group')?.querySelector('.config-file')?.textContent;
+  assert.match(row('hooks.review').textContent ?? '', /^Review checks#hooks\.reviewtests$/);
+  assert.equal(file('hooks.review'), '.coplan/config.json');
+  // The design prompt's review mode is the config's default: shown, since no control here sets it.
+  assert.match(row('iric.review').textContent ?? '', /Review, by default#iric\.reviewself-review/);
+  assert.equal(file('iric.review'), '.coplan/config.json');
+  assert.match(row('hooks.final').textContent ?? '', /Final checks\.coplan\/config\.json#hooks\.finalnone/);
+  assert.equal(file('hooks.final'), "Not set: Coplan's defaults");
+  assert.equal(within(list).queryAllByRole('textbox').length + within(list).queryAllByRole('checkbox').length, 0, 'read-only');
+  assert.equal(within(row('hooks.review')).getByRole('link').getAttribute('href'), 'https://github.com/bert-bae/coplan/blob/main/docs/CONFIG.md#hooks');
+  assert.equal(within(list).getByRole('link', { name: 'Where to change these' }).getAttribute('href'), 'https://github.com/bert-bae/coplan/blob/main/docs/CONFIG.md');
+  // Pull requests and the reviewer model shape the build, not the design: they are in Submit.
+  assert.equal(within(list).queryByText('Reviewer model'), null);
+});
+
+test('a prompt cut to fit says what it leaves out, and that the agent reads it with harness_plan_read', async () => {
+  const { buildPrompt, configRows, promptHash } = await import('../daemon/render.ts');
+  const { parseProjectConfig } = await import('../shared/project.ts');
+  const project = parseProjectConfig({ review: { model: 'opus' } });
+  const long = 'A long paragraph of detail that goes on and on about the work. '.repeat(20);
+  let plan = makePlan();
+  plan = confirmedPlan(applyOps(plan, [{ op: 'upsert_section', id: plan.sections[0]!.id, body: long.repeat(8) }], 'claude').plan);
+  const session = makeSession(plan);
+  await boot(session, (route) => {
+    if (route.endsWith('/plan/prompt')) {
+      const { prompt, trimmed, blocks } = buildPrompt(plan, { target: 'session', project, settings: { review: 'subagent', parallel: 2, maxRounds: 3 } });
+      return { prompt, hash: promptHash(prompt), trimmed, blocks, version: plan.version, budget: 9000, maxNote: 4000, settings: DEFAULTS, project: { file: null, defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [], config: configRows(project, 'build') } };
+    }
+    return undefined;
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Review & submit plan' }));
+  });
+  const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
+  await waitFor(() => assert.match(dialog.textContent ?? '', /The plan is longer than fits in one message: it leaves out 1 section and the architecture \(1 diagram\), so Claude reads it with harness_plan_read\./));
+  const list = within(dialog).getByRole('region', { name: 'Set in config' });
+  assert.equal(list.querySelector('[data-key="review.model"]')?.textContent, 'Reviewer model#review.modelopus');
+  assert.equal(list.querySelector('[data-key="pullRequests"]')?.textContent, 'Pull requests.coplan/config.json#pullRequestsgh pr create, once you say');
+  assert.match(list.querySelector('[data-key="instructions.build"]')?.textContent ?? '', /none$/);
+});
+
 test('with the design confirmed, boxes still link to tasks but nothing else on them changes', async () => {
   await boot(makeSession(confirmedPlan()));
   await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
