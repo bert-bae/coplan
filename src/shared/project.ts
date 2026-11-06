@@ -1,9 +1,9 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import type { BuildSettings } from './types.ts';
+import type { BuildSettings, ExecutionMode } from './types.ts';
 import { DEFAULT_BUILD_SETTINGS, MAX_PARALLEL, MAX_ROUNDS, cleanSettings } from './build.ts';
-import { REVIEW_MODES } from './types.ts';
+import { EXECUTION_MODES, REVIEW_MODES } from './types.ts';
 import { parseJsonc } from './jsonc.ts';
 import { GAP_RULES, GAP_SEVERITIES, type GapRule, type GapSeverity } from './check.ts';
 import { paths } from './paths.ts';
@@ -64,7 +64,13 @@ export interface ProjectConfig {
   /** Where it was read from; null when the repository has none. */
   file: string | null;
   hooks: Record<HookStage, CheckHook[]>;
-  /** Defaults for how a build runs; the user can change them per plan. */
+  /** The execution mode Submit starts from: `mode`, or Managed where the
+   *  repository's file sets `iric`, or else Tracked. */
+  mode: ExecutionMode;
+  /** The mode is Managed because the repository's file sets `iric`, not
+   *  `mode`. */
+  modeByIric?: true;
+  /** Defaults for how a Managed build runs; the user can change them per plan. */
   settings: BuildSettings;
   branches: {
     /** The branch work is cut from and merged back into. */
@@ -128,7 +134,7 @@ export const MAX_INSTRUCTIONS = 4_000;
 export const MAX_TEMPLATE = 8_000;
 const MAX_ENV = 20;
 
-export const PROJECT_KEYS = ['hooks', 'iric', 'branches', 'pullRequests', 'review', 'final', 'instructions', 'planCheck'];
+export const PROJECT_KEYS = ['mode', 'hooks', 'iric', 'branches', 'pullRequests', 'review', 'final', 'instructions', 'planCheck'];
 const IRIC_KEYS = ['review', 'parallel', 'maxRounds'];
 const BRANCH_KEYS = ['base', 'prefix'];
 const PR_KEYS = ['tool', 'open', 'template'];
@@ -146,6 +152,7 @@ export function emptyProjectConfig(): ProjectConfig {
   return {
     file: null,
     hooks: { implement: [], review: [], final: [] },
+    mode: 'tracked',
     settings: { ...DEFAULT_BUILD_SETTINGS },
     branches: {},
     pullRequests: { tool: 'gh', open: 'ask' },
@@ -243,6 +250,7 @@ export function parseProjectConfig(raw: unknown, file: string | null = null): Pr
 
 /** One file's settings, each checked, before the layers are put together. */
 interface Layer {
+  mode?: ExecutionMode;
   hooks?: Partial<Record<HookStage, CheckHook[]>>;
   iric?: Record<string, unknown>;
   branches?: ProjectConfig['branches'];
@@ -274,6 +282,18 @@ function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors' | 'warn
   const iric: Record<string, unknown> = {};
   const origins: Record<string, string[]> = {};
   for (const l of layers) {
+    // The mode: the most specific file that says, by `mode` — or, in the
+    // repository's own file, by setting `iric`, which is opting in to the
+    // harness. The user's own `iric` only sets how a Managed build runs.
+    if (l.mode) {
+      out.mode = l.mode;
+      delete out.modeByIric;
+      if (l.from) origins['mode'] = [l.from];
+    } else if (l.iric && l.from === PROJECT_CONFIG_PATH) {
+      out.mode = 'managed';
+      out.modeByIric = true;
+      origins['mode'] = [l.from];
+    }
     // Which file set each key: the last to set it wins, as its value does.
     const from = (section: string, rec: object | undefined, keys: readonly string[] = Object.keys(rec ?? {})) => {
       if (!l.from || !rec) return;
@@ -337,6 +357,9 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
   const local: string[] = [];
   const notes: string[] = [];
   unknownKeys(raw, PROJECT_KEYS, '', local);
+
+  const mode = oneOf(raw['mode'], EXECUTION_MODES, 'mode', local);
+  if (mode) layer.mode = mode;
 
   const hooks = raw['hooks'];
   if (hooks !== undefined) {

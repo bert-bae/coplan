@@ -84,7 +84,8 @@ MCP config names one that is missing.
 - `src/daemon/agentHooks.ts`: each agent's hook payloads and answers,
   translated to and from Claude Code's
 - `src/daemon`: the singleton server, covering sessions, the plan API,
-  rendering for Claude (`render.ts` for the read-back and the prompts,
+  rendering for Claude (`render.ts` for the read-back, the prompts and the
+  plan's Markdown export,
   `brief.ts` for what is next and one task's brief), hooks and housekeeping
 - `src/cli`: the `coplan` CLI, including `check` (runs a stage's hooks) and
   `init` (writes a starting `.coplan/config.json`)

@@ -1,0 +1,863 @@
+# Add a read-through cache
+
+## From the user
+> Start with the client.
+> Leave billing alone.
+
+## Summary
+Put a read-through cache in front of the orders database.
+
+### Why
+Reads are slow at peak.
+
+## Sections
+
+### [context] Context
+p95 read latency is 900ms at peak.
+
+##### Numbers
+- 40k reads/min
+
+### [risks] Risks
+Stale reads after a write.
+
+### [empty] Open questions
+_(empty)_
+
+## Architecture
+
+### [d1] Components
+
+The read path.
+
+Entry points: Orders API. Data stores: Redis, Postgres.
+
+**Parts**
+- **Orders API** `api` — service
+  Serves orders.
+  Built by: [~] wire Wire into API
+- **Redis** `cache` — data store: managed
+  Hot orders.
+  Decisions:
+    Read-through, 10m TTL.
+  Built by: [x] client Cache client
+- **Postgres** `db` — data store
+  Source of truth.
+
+**Connections**
+- Orders API → Redis: get `api → cache`
+- Redis → Postgres: miss (dashed: optional, async or future) `cache → db`
+
+**Notes on the diagram**
+- Keep it simple (`n1`)
+  No write-behind.
+
+### [d2] Invalidation
+
+Queues: Event bus.
+
+**Parts**
+- **Event bus** `bus` — queue
+  Built by: [ ] inval Invalidation
+
+_Not connected to anything yet: Event bus._
+
+### [big] Everything else
+
+Entry points: Part 0.
+
+**Parts**
+- **Part 0** `p0` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 1** `p1` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 2** `p2` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 3** `p3` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 4** `p4` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 5** `p5` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 6** `p6` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 7** `p7` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 8** `p8` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 9** `p9` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 10** `p10` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 11** `p11` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 12** `p12` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 13** `p13` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 14** `p14` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 15** `p15` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 16** `p16` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 17** `p17` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 18** `p18` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+- **Part 19** `p19` — service
+  A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+**Connections**
+- Part 0 → Part 1 `p0 → p1`
+- Part 1 → Part 2 `p1 → p2`
+- Part 2 → Part 3 `p2 → p3`
+- Part 3 → Part 4 `p3 → p4`
+- Part 4 → Part 5 `p4 → p5`
+- Part 5 → Part 6 `p5 → p6`
+- Part 6 → Part 7 `p6 → p7`
+- Part 7 → Part 8 `p7 → p8`
+- Part 8 → Part 9 `p8 → p9`
+- Part 9 → Part 10 `p9 → p10`
+- Part 10 → Part 11 `p10 → p11`
+- Part 11 → Part 12 `p11 → p12`
+- Part 12 → Part 13 `p12 → p13`
+- Part 13 → Part 14 `p13 → p14`
+- Part 14 → Part 15 `p14 → p15`
+- Part 15 → Part 16 `p15 → p16`
+- Part 16 → Part 17 `p16 → p17`
+- Part 17 → Part 18 `p17 → p18`
+- Part 18 → Part 19 `p18 → p19`
+
+## Tasks (1/64 done)
+- [ ] storage Storage layer
+  - [x] client Cache client · branch `cache/client`
+    files: src/cache.ts
+  - [ ] inval Invalidation · after client · branch `cache/client`
+    files: src/cache.ts, src/events.ts
+- [~] wire Wire into API · after storage · branch `cache/api` — halfway
+- [ ] docs Document the cache
+- [ ] bulk0 Bulk task number 0 with a descriptive title — user note on bulk task 0
+- [ ] bulk1 Bulk task number 1 with a descriptive title · after bulk0 — user note on bulk task 1
+- [ ] bulk2 Bulk task number 2 with a descriptive title · after bulk1 — user note on bulk task 2
+- [ ] bulk3 Bulk task number 3 with a descriptive title · after bulk2 — user note on bulk task 3
+- [ ] bulk4 Bulk task number 4 with a descriptive title · after bulk3 — user note on bulk task 4
+- [ ] bulk5 Bulk task number 5 with a descriptive title · after bulk4 — user note on bulk task 5
+- [ ] bulk6 Bulk task number 6 with a descriptive title · after bulk5 — user note on bulk task 6
+- [ ] bulk7 Bulk task number 7 with a descriptive title · after bulk6 — user note on bulk task 7
+- [ ] bulk8 Bulk task number 8 with a descriptive title · after bulk7 — user note on bulk task 8
+- [ ] bulk9 Bulk task number 9 with a descriptive title · after bulk8 — user note on bulk task 9
+- [ ] bulk10 Bulk task number 10 with a descriptive title · after bulk9 — user note on bulk task 10
+- [ ] bulk11 Bulk task number 11 with a descriptive title · after bulk10 — user note on bulk task 11
+- [ ] bulk12 Bulk task number 12 with a descriptive title · after bulk11 — user note on bulk task 12
+- [ ] bulk13 Bulk task number 13 with a descriptive title · after bulk12 — user note on bulk task 13
+- [ ] bulk14 Bulk task number 14 with a descriptive title · after bulk13 — user note on bulk task 14
+- [ ] bulk15 Bulk task number 15 with a descriptive title · after bulk14 — user note on bulk task 15
+- [ ] bulk16 Bulk task number 16 with a descriptive title · after bulk15 — user note on bulk task 16
+- [ ] bulk17 Bulk task number 17 with a descriptive title · after bulk16 — user note on bulk task 17
+- [ ] bulk18 Bulk task number 18 with a descriptive title · after bulk17 — user note on bulk task 18
+- [ ] bulk19 Bulk task number 19 with a descriptive title · after bulk18 — user note on bulk task 19
+- [ ] bulk20 Bulk task number 20 with a descriptive title · after bulk19 — user note on bulk task 20
+- [ ] bulk21 Bulk task number 21 with a descriptive title · after bulk20 — user note on bulk task 21
+- [ ] bulk22 Bulk task number 22 with a descriptive title · after bulk21 — user note on bulk task 22
+- [ ] bulk23 Bulk task number 23 with a descriptive title · after bulk22 — user note on bulk task 23
+- [ ] bulk24 Bulk task number 24 with a descriptive title · after bulk23 — user note on bulk task 24
+- [ ] bulk25 Bulk task number 25 with a descriptive title · after bulk24 — user note on bulk task 25
+- [ ] bulk26 Bulk task number 26 with a descriptive title · after bulk25 — user note on bulk task 26
+- [ ] bulk27 Bulk task number 27 with a descriptive title · after bulk26 — user note on bulk task 27
+- [ ] bulk28 Bulk task number 28 with a descriptive title · after bulk27 — user note on bulk task 28
+- [ ] bulk29 Bulk task number 29 with a descriptive title · after bulk28 — user note on bulk task 29
+- [ ] bulk30 Bulk task number 30 with a descriptive title · after bulk29 — user note on bulk task 30
+- [ ] bulk31 Bulk task number 31 with a descriptive title · after bulk30 — user note on bulk task 31
+- [ ] bulk32 Bulk task number 32 with a descriptive title · after bulk31 — user note on bulk task 32
+- [ ] bulk33 Bulk task number 33 with a descriptive title · after bulk32 — user note on bulk task 33
+- [ ] bulk34 Bulk task number 34 with a descriptive title · after bulk33 — user note on bulk task 34
+- [ ] bulk35 Bulk task number 35 with a descriptive title · after bulk34 — user note on bulk task 35
+- [ ] bulk36 Bulk task number 36 with a descriptive title · after bulk35 — user note on bulk task 36
+- [ ] bulk37 Bulk task number 37 with a descriptive title · after bulk36 — user note on bulk task 37
+- [ ] bulk38 Bulk task number 38 with a descriptive title · after bulk37 — user note on bulk task 38
+- [ ] bulk39 Bulk task number 39 with a descriptive title · after bulk38 — user note on bulk task 39
+- [ ] bulk40 Bulk task number 40 with a descriptive title · after bulk39
+- [ ] bulk41 Bulk task number 41 with a descriptive title · after bulk40
+- [ ] bulk42 Bulk task number 42 with a descriptive title · after bulk41
+- [ ] bulk43 Bulk task number 43 with a descriptive title · after bulk42
+- [ ] bulk44 Bulk task number 44 with a descriptive title · after bulk43
+- [ ] bulk45 Bulk task number 45 with a descriptive title · after bulk44
+- [ ] bulk46 Bulk task number 46 with a descriptive title · after bulk45
+- [ ] bulk47 Bulk task number 47 with a descriptive title · after bulk46
+- [ ] bulk48 Bulk task number 48 with a descriptive title · after bulk47
+- [ ] bulk49 Bulk task number 49 with a descriptive title · after bulk48
+- [ ] bulk50 Bulk task number 50 with a descriptive title · after bulk49
+- [ ] bulk51 Bulk task number 51 with a descriptive title · after bulk50
+- [ ] bulk52 Bulk task number 52 with a descriptive title · after bulk51
+- [ ] bulk53 Bulk task number 53 with a descriptive title · after bulk52
+- [ ] bulk54 Bulk task number 54 with a descriptive title · after bulk53
+- [ ] bulk55 Bulk task number 55 with a descriptive title · after bulk54
+- [ ] bulk56 Bulk task number 56 with a descriptive title · after bulk55
+- [ ] bulk57 Bulk task number 57 with a descriptive title · after bulk56
+- [ ] bulk58 Bulk task number 58 with a descriptive title · after bulk57
+- [ ] bulk59 Bulk task number 59 with a descriptive title · after bulk58
+
+## Build order
+_Each step needs only the steps before it; the tasks within a step can be built side by side._
+1. [x] client Cache client; [ ] docs Document the cache; [ ] bulk0 Bulk task number 0 with a descriptive title
+2. [ ] inval Invalidation; [ ] bulk1 Bulk task number 1 with a descriptive title
+3. [~] wire Wire into API; [ ] bulk2 Bulk task number 2 with a descriptive title
+4. [ ] bulk3 Bulk task number 3 with a descriptive title
+5. [ ] bulk4 Bulk task number 4 with a descriptive title
+6. [ ] bulk5 Bulk task number 5 with a descriptive title
+7. [ ] bulk6 Bulk task number 6 with a descriptive title
+8. [ ] bulk7 Bulk task number 7 with a descriptive title
+9. [ ] bulk8 Bulk task number 8 with a descriptive title
+10. [ ] bulk9 Bulk task number 9 with a descriptive title
+11. [ ] bulk10 Bulk task number 10 with a descriptive title
+12. [ ] bulk11 Bulk task number 11 with a descriptive title
+13. [ ] bulk12 Bulk task number 12 with a descriptive title
+14. [ ] bulk13 Bulk task number 13 with a descriptive title
+15. [ ] bulk14 Bulk task number 14 with a descriptive title
+16. [ ] bulk15 Bulk task number 15 with a descriptive title
+17. [ ] bulk16 Bulk task number 16 with a descriptive title
+18. [ ] bulk17 Bulk task number 17 with a descriptive title
+19. [ ] bulk18 Bulk task number 18 with a descriptive title
+20. [ ] bulk19 Bulk task number 19 with a descriptive title
+21. [ ] bulk20 Bulk task number 20 with a descriptive title
+22. [ ] bulk21 Bulk task number 21 with a descriptive title
+23. [ ] bulk22 Bulk task number 22 with a descriptive title
+24. [ ] bulk23 Bulk task number 23 with a descriptive title
+25. [ ] bulk24 Bulk task number 24 with a descriptive title
+26. [ ] bulk25 Bulk task number 25 with a descriptive title
+27. [ ] bulk26 Bulk task number 26 with a descriptive title
+28. [ ] bulk27 Bulk task number 27 with a descriptive title
+29. [ ] bulk28 Bulk task number 28 with a descriptive title
+30. [ ] bulk29 Bulk task number 29 with a descriptive title
+31. [ ] bulk30 Bulk task number 30 with a descriptive title
+32. [ ] bulk31 Bulk task number 31 with a descriptive title
+33. [ ] bulk32 Bulk task number 32 with a descriptive title
+34. [ ] bulk33 Bulk task number 33 with a descriptive title
+35. [ ] bulk34 Bulk task number 34 with a descriptive title
+36. [ ] bulk35 Bulk task number 35 with a descriptive title
+37. [ ] bulk36 Bulk task number 36 with a descriptive title
+38. [ ] bulk37 Bulk task number 37 with a descriptive title
+39. [ ] bulk38 Bulk task number 38 with a descriptive title
+40. [ ] bulk39 Bulk task number 39 with a descriptive title
+41. [ ] bulk40 Bulk task number 40 with a descriptive title
+42. [ ] bulk41 Bulk task number 41 with a descriptive title
+43. [ ] bulk42 Bulk task number 42 with a descriptive title
+44. [ ] bulk43 Bulk task number 43 with a descriptive title
+45. [ ] bulk44 Bulk task number 44 with a descriptive title
+46. [ ] bulk45 Bulk task number 45 with a descriptive title
+47. [ ] bulk46 Bulk task number 46 with a descriptive title
+48. [ ] bulk47 Bulk task number 47 with a descriptive title
+49. [ ] bulk48 Bulk task number 48 with a descriptive title
+50. [ ] bulk49 Bulk task number 49 with a descriptive title
+51. [ ] bulk50 Bulk task number 50 with a descriptive title
+52. [ ] bulk51 Bulk task number 51 with a descriptive title
+53. [ ] bulk52 Bulk task number 52 with a descriptive title
+54. [ ] bulk53 Bulk task number 53 with a descriptive title
+55. [ ] bulk54 Bulk task number 54 with a descriptive title
+56. [ ] bulk55 Bulk task number 55 with a descriptive title
+57. [ ] bulk56 Bulk task number 56 with a descriptive title
+58. [ ] bulk57 Bulk task number 57 with a descriptive title
+59. [ ] bulk58 Bulk task number 58 with a descriptive title
+60. [ ] bulk59 Bulk task number 59 with a descriptive title
+
+## Branches
+_Each branch is one pull request. A branch whose tasks build on another branch is cut from it — a stacked pull request._
+- `cache/client` from `main` — client, inval
+- `cache/api` from `cache/client` (stacked) — wire
+- no branch named — docs, bulk0, bulk1, bulk2, bulk3, bulk4, bulk5, bulk6, bulk7, bulk8, bulk9, bulk10, bulk11, bulk12, bulk13, bulk14, bulk15, bulk16, bulk17, bulk18, bulk19, bulk20, bulk21, bulk22, bulk23, bulk24, bulk25, bulk26, bulk27, bulk28, bulk29, bulk30, bulk31, bulk32, bulk33, bulk34, bulk35, bulk36, bulk37, bulk38, bulk39, bulk40, bulk41, bulk42, bulk43, bulk44, bulk45, bulk46, bulk47, bulk48, bulk49, bulk50, bulk51, bulk52, bulk53, bulk54, bulk55, bulk56, bulk57, bulk58, bulk59
+
+## Task briefs
+_Each task on its own: what it is for, what it builds, what it comes after and where it lands._
+
+### client Cache client
+
+Wrap ioredis.
+
+Acceptance: get/set with TTL.
+
+From "Storage layer", which this is part of:
+  Everything below the API.
+
+Files: src/cache.ts
+
+It builds:
+- **Redis** `cache` in "Components" — data store: managed
+  Hot orders.
+  Decisions:
+    Read-through, 10m TTL.
+  Connections: Orders API → Redis: get; Redis → Postgres: miss (dashed: optional, async or future)
+
+Waiting on it: inval Invalidation; wire Wire into API.
+
+Lands on `cache/client`, cut from `main`.
+
+### inval Invalidation
+
+From "Storage layer", which this is part of:
+  Everything below the API.
+
+Files: src/cache.ts, src/events.ts
+
+It builds:
+- **Event bus** `bus` in "Invalidation" — queue
+
+It comes after:
+- [x] client Cache client
+
+Waiting on it: wire Wire into API.
+
+Lands on `cache/client`, cut from `main`.
+
+### wire Wire into API
+
+Use the client in the orders handler.
+
+It builds:
+- **Orders API** `api` in "Components" — service
+  Serves orders.
+  Connections: Orders API → Redis: get
+
+It comes after:
+- [ ] storage Storage layer
+
+Lands on `cache/api`, cut from `cache/client`, which it builds on.
+
+### docs Document the cache
+
+### bulk0 Bulk task number 0 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+Waiting on it: bulk1 Bulk task number 1 with a descriptive title.
+
+### bulk1 Bulk task number 1 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk0 Bulk task number 0 with a descriptive title
+
+Waiting on it: bulk2 Bulk task number 2 with a descriptive title.
+
+### bulk2 Bulk task number 2 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk1 Bulk task number 1 with a descriptive title
+
+Waiting on it: bulk3 Bulk task number 3 with a descriptive title.
+
+### bulk3 Bulk task number 3 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk2 Bulk task number 2 with a descriptive title
+
+Waiting on it: bulk4 Bulk task number 4 with a descriptive title.
+
+### bulk4 Bulk task number 4 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk3 Bulk task number 3 with a descriptive title
+
+Waiting on it: bulk5 Bulk task number 5 with a descriptive title.
+
+### bulk5 Bulk task number 5 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk4 Bulk task number 4 with a descriptive title
+
+Waiting on it: bulk6 Bulk task number 6 with a descriptive title.
+
+### bulk6 Bulk task number 6 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk5 Bulk task number 5 with a descriptive title
+
+Waiting on it: bulk7 Bulk task number 7 with a descriptive title.
+
+### bulk7 Bulk task number 7 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk6 Bulk task number 6 with a descriptive title
+
+Waiting on it: bulk8 Bulk task number 8 with a descriptive title.
+
+### bulk8 Bulk task number 8 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk7 Bulk task number 7 with a descriptive title
+
+Waiting on it: bulk9 Bulk task number 9 with a descriptive title.
+
+### bulk9 Bulk task number 9 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk8 Bulk task number 8 with a descriptive title
+
+Waiting on it: bulk10 Bulk task number 10 with a descriptive title.
+
+### bulk10 Bulk task number 10 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk9 Bulk task number 9 with a descriptive title
+
+Waiting on it: bulk11 Bulk task number 11 with a descriptive title.
+
+### bulk11 Bulk task number 11 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk10 Bulk task number 10 with a descriptive title
+
+Waiting on it: bulk12 Bulk task number 12 with a descriptive title.
+
+### bulk12 Bulk task number 12 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk11 Bulk task number 11 with a descriptive title
+
+Waiting on it: bulk13 Bulk task number 13 with a descriptive title.
+
+### bulk13 Bulk task number 13 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk12 Bulk task number 12 with a descriptive title
+
+Waiting on it: bulk14 Bulk task number 14 with a descriptive title.
+
+### bulk14 Bulk task number 14 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk13 Bulk task number 13 with a descriptive title
+
+Waiting on it: bulk15 Bulk task number 15 with a descriptive title.
+
+### bulk15 Bulk task number 15 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk14 Bulk task number 14 with a descriptive title
+
+Waiting on it: bulk16 Bulk task number 16 with a descriptive title.
+
+### bulk16 Bulk task number 16 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk15 Bulk task number 15 with a descriptive title
+
+Waiting on it: bulk17 Bulk task number 17 with a descriptive title.
+
+### bulk17 Bulk task number 17 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk16 Bulk task number 16 with a descriptive title
+
+Waiting on it: bulk18 Bulk task number 18 with a descriptive title.
+
+### bulk18 Bulk task number 18 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk17 Bulk task number 17 with a descriptive title
+
+Waiting on it: bulk19 Bulk task number 19 with a descriptive title.
+
+### bulk19 Bulk task number 19 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk18 Bulk task number 18 with a descriptive title
+
+Waiting on it: bulk20 Bulk task number 20 with a descriptive title.
+
+### bulk20 Bulk task number 20 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk19 Bulk task number 19 with a descriptive title
+
+Waiting on it: bulk21 Bulk task number 21 with a descriptive title.
+
+### bulk21 Bulk task number 21 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk20 Bulk task number 20 with a descriptive title
+
+Waiting on it: bulk22 Bulk task number 22 with a descriptive title.
+
+### bulk22 Bulk task number 22 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk21 Bulk task number 21 with a descriptive title
+
+Waiting on it: bulk23 Bulk task number 23 with a descriptive title.
+
+### bulk23 Bulk task number 23 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk22 Bulk task number 22 with a descriptive title
+
+Waiting on it: bulk24 Bulk task number 24 with a descriptive title.
+
+### bulk24 Bulk task number 24 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk23 Bulk task number 23 with a descriptive title
+
+Waiting on it: bulk25 Bulk task number 25 with a descriptive title.
+
+### bulk25 Bulk task number 25 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk24 Bulk task number 24 with a descriptive title
+
+Waiting on it: bulk26 Bulk task number 26 with a descriptive title.
+
+### bulk26 Bulk task number 26 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk25 Bulk task number 25 with a descriptive title
+
+Waiting on it: bulk27 Bulk task number 27 with a descriptive title.
+
+### bulk27 Bulk task number 27 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk26 Bulk task number 26 with a descriptive title
+
+Waiting on it: bulk28 Bulk task number 28 with a descriptive title.
+
+### bulk28 Bulk task number 28 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk27 Bulk task number 27 with a descriptive title
+
+Waiting on it: bulk29 Bulk task number 29 with a descriptive title.
+
+### bulk29 Bulk task number 29 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk28 Bulk task number 28 with a descriptive title
+
+Waiting on it: bulk30 Bulk task number 30 with a descriptive title.
+
+### bulk30 Bulk task number 30 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk29 Bulk task number 29 with a descriptive title
+
+Waiting on it: bulk31 Bulk task number 31 with a descriptive title.
+
+### bulk31 Bulk task number 31 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk30 Bulk task number 30 with a descriptive title
+
+Waiting on it: bulk32 Bulk task number 32 with a descriptive title.
+
+### bulk32 Bulk task number 32 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk31 Bulk task number 31 with a descriptive title
+
+Waiting on it: bulk33 Bulk task number 33 with a descriptive title.
+
+### bulk33 Bulk task number 33 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk32 Bulk task number 32 with a descriptive title
+
+Waiting on it: bulk34 Bulk task number 34 with a descriptive title.
+
+### bulk34 Bulk task number 34 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk33 Bulk task number 33 with a descriptive title
+
+Waiting on it: bulk35 Bulk task number 35 with a descriptive title.
+
+### bulk35 Bulk task number 35 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk34 Bulk task number 34 with a descriptive title
+
+Waiting on it: bulk36 Bulk task number 36 with a descriptive title.
+
+### bulk36 Bulk task number 36 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk35 Bulk task number 35 with a descriptive title
+
+Waiting on it: bulk37 Bulk task number 37 with a descriptive title.
+
+### bulk37 Bulk task number 37 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk36 Bulk task number 36 with a descriptive title
+
+Waiting on it: bulk38 Bulk task number 38 with a descriptive title.
+
+### bulk38 Bulk task number 38 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk37 Bulk task number 37 with a descriptive title
+
+Waiting on it: bulk39 Bulk task number 39 with a descriptive title.
+
+### bulk39 Bulk task number 39 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk38 Bulk task number 38 with a descriptive title
+
+Waiting on it: bulk40 Bulk task number 40 with a descriptive title.
+
+### bulk40 Bulk task number 40 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk39 Bulk task number 39 with a descriptive title
+
+Waiting on it: bulk41 Bulk task number 41 with a descriptive title.
+
+### bulk41 Bulk task number 41 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk40 Bulk task number 40 with a descriptive title
+
+Waiting on it: bulk42 Bulk task number 42 with a descriptive title.
+
+### bulk42 Bulk task number 42 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk41 Bulk task number 41 with a descriptive title
+
+Waiting on it: bulk43 Bulk task number 43 with a descriptive title.
+
+### bulk43 Bulk task number 43 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk42 Bulk task number 42 with a descriptive title
+
+Waiting on it: bulk44 Bulk task number 44 with a descriptive title.
+
+### bulk44 Bulk task number 44 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk43 Bulk task number 43 with a descriptive title
+
+Waiting on it: bulk45 Bulk task number 45 with a descriptive title.
+
+### bulk45 Bulk task number 45 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk44 Bulk task number 44 with a descriptive title
+
+Waiting on it: bulk46 Bulk task number 46 with a descriptive title.
+
+### bulk46 Bulk task number 46 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk45 Bulk task number 45 with a descriptive title
+
+Waiting on it: bulk47 Bulk task number 47 with a descriptive title.
+
+### bulk47 Bulk task number 47 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk46 Bulk task number 46 with a descriptive title
+
+Waiting on it: bulk48 Bulk task number 48 with a descriptive title.
+
+### bulk48 Bulk task number 48 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk47 Bulk task number 47 with a descriptive title
+
+Waiting on it: bulk49 Bulk task number 49 with a descriptive title.
+
+### bulk49 Bulk task number 49 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk48 Bulk task number 48 with a descriptive title
+
+Waiting on it: bulk50 Bulk task number 50 with a descriptive title.
+
+### bulk50 Bulk task number 50 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk49 Bulk task number 49 with a descriptive title
+
+Waiting on it: bulk51 Bulk task number 51 with a descriptive title.
+
+### bulk51 Bulk task number 51 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk50 Bulk task number 50 with a descriptive title
+
+Waiting on it: bulk52 Bulk task number 52 with a descriptive title.
+
+### bulk52 Bulk task number 52 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk51 Bulk task number 51 with a descriptive title
+
+Waiting on it: bulk53 Bulk task number 53 with a descriptive title.
+
+### bulk53 Bulk task number 53 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk52 Bulk task number 52 with a descriptive title
+
+Waiting on it: bulk54 Bulk task number 54 with a descriptive title.
+
+### bulk54 Bulk task number 54 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk53 Bulk task number 53 with a descriptive title
+
+Waiting on it: bulk55 Bulk task number 55 with a descriptive title.
+
+### bulk55 Bulk task number 55 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk54 Bulk task number 54 with a descriptive title
+
+Waiting on it: bulk56 Bulk task number 56 with a descriptive title.
+
+### bulk56 Bulk task number 56 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk55 Bulk task number 55 with a descriptive title
+
+Waiting on it: bulk57 Bulk task number 57 with a descriptive title.
+
+### bulk57 Bulk task number 57 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk56 Bulk task number 56 with a descriptive title
+
+Waiting on it: bulk58 Bulk task number 58 with a descriptive title.
+
+### bulk58 Bulk task number 58 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk57 Bulk task number 57 with a descriptive title
+
+Waiting on it: bulk59 Bulk task number 59 with a descriptive title.
+
+### bulk59 Bulk task number 59 with a descriptive title
+
+A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work. A long paragraph of detail that goes on and on about the work.
+
+It comes after:
+- [ ] bulk58 Bulk task number 58 with a descriptive title
+
+_Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_

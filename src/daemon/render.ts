@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { paths } from '../shared/paths.ts';
 import { planGaps, type GapSeverities } from '../shared/check.ts';
-import type { BuildSettings, BuildTarget, Change, Plan, PlanBaseline, Task, Thread } from '../shared/types.ts';
+import type { BuildSettings, BuildTarget, Change, ExecutionMode, Plan, PlanBaseline, Task, Thread } from '../shared/types.ts';
 import {
   baselineOf,
   countTasks,
@@ -23,16 +23,25 @@ import {
   unreadByClaude,
   proposalStaleness,
 } from '../shared/plan.ts';
-import { contentOf, diagramBlocks, diagramChanges, diagramToMarkdown, hang, indent, nestHeadings } from '../shared/architecture.ts';
+import { KIND_NOUN, contentOf, diagramBlocks, diagramChanges, diagramToMarkdown, edgePhrase, hang, indent, nestHeadings } from '../shared/architecture.ts';
 import { BlockList, CHANGES, NOTE, TEMPLATE, blockLines, blocksText, derived, dropAll, field, joinBlocks, setting, type Block, type BlockSource, type ConfigRow } from '../shared/blocks.ts';
 import {
   DEFAULT_BUILD_SETTINGS,
+  MODE_LABEL,
   REVIEW_WORDS,
+  SESSION_BRANCH,
+  ancestorsOf,
   baseWords,
   branchPlan,
   buildSteps,
+  dependents,
+  effectiveBranch,
   hasDependencies,
   hasSubtasks,
+  inheritedDeps,
+  leafTasks,
+  leavesUnder,
+  modeFor,
   readinessOf,
   waitingOn,
 } from '../shared/build.ts';
@@ -164,6 +173,10 @@ interface DocumentOptions {
   reader?: 'claude' | 'outside';
   /** Each section's, diagram's and task's revision, for an edit's `expect`. */
   revs?: boolean;
+  /** The plan alone, for a reader outside any build: a task's line says
+   *  what it comes after and where it lands, not how it is reviewed or
+   *  how far it got, and nothing names a Coplan tool. */
+  plain?: boolean;
 }
 
 /** The plan as a document — summary, sections, architecture, tasks and
@@ -187,7 +200,7 @@ const REV = derived('its revision');
 const WHO = derived('who last edited it');
 
 function documentParts(plan: Plan, opts: DocumentOptions = {}): DocumentParts {
-  const { attribution = true, details = true, reader = 'claude', revs = false } = opts;
+  const { attribution = true, details = true, reader = 'claude', revs = false, plain = false } = opts;
   const summary = new BlockList();
   if (plan.summary.trim()) summary.gap().add('summary', field('plan'), ['## Summary', nestHeadings(plan.summary.trim(), 2)]);
 
@@ -213,9 +226,9 @@ function documentParts(plan: Plan, opts: DocumentOptions = {}): DocumentParts {
     }
   }
 
-  const tasks = new BlockList().gap().push(...taskBlocks(plan, { attribution, details, revs }));
+  const tasks = new BlockList().gap().push(...taskBlocks(plan, { attribution, details, revs, plain }));
   const order = new BlockList();
-  const steps = buildOrderBlocks(plan, opts.base);
+  const steps = buildOrderBlocks(plan, opts.base, { plain });
   if (steps.length) order.gap().push(...steps);
 
   const report = new BlockList();
@@ -253,7 +266,7 @@ function documentBlocks(parts: DocumentParts): Block[] {
 const STATUS_LEGEND = `_Statuses: ${Object.entries(STATUS_MARK).map(([k, v]) => `${v} ${k}`).join(', ')}_`;
 
 /** The task list, one task to a block: its line, its files, its detail. */
-function taskBlocks(plan: Plan, opts: { attribution?: boolean; details?: boolean; revs?: boolean } = {}): Block[] {
+function taskBlocks(plan: Plan, opts: { attribution?: boolean; details?: boolean; revs?: boolean; plain?: boolean } = {}): Block[] {
   const counts = countTasks(plan);
   const b = new BlockList();
   b.add('tasks', derived('the tasks and their statuses'), `## Tasks${counts.total ? ` (${counts.done}/${counts.total} done)` : ''}`);
@@ -265,7 +278,7 @@ function taskBlocks(plan: Plan, opts: { attribution?: boolean; details?: boolean
     const pad = '  '.repeat(depth);
     const me = field('task', task.id);
     const key = `task:${task.id}`;
-    b.add(key, me, `${pad}- ${STATUS_MARK[task.status]} ${task.id} ${task.title}${taskFacts(plan, task, tracking)}`);
+    b.add(key, me, `${pad}- ${STATUS_MARK[task.status]} ${task.id} ${task.title}${opts.plain ? plainFacts(task) : taskFacts(plan, task, tracking)}`);
     if (opts.attribution !== false && task.createdBy === 'user') b.inline(`${key}:by`, WHO, ' _(added by the user)_', { bookkeeping: true });
     if (task.note) b.inline(`${key}:note`, me, ` — ${task.note}`);
     if (opts.revs) b.inline(`${key}:rev`, REV, ` · rev ${task.rev ?? 1}`, { bookkeeping: true });
@@ -303,6 +316,15 @@ export function taskFacts(plan: Plan, task: Task, tracking: boolean): string {
   return facts.length ? ` · ${facts.join(' · ')}` : '';
 }
 
+/** What a task line says for a reader outside the build: what it comes
+ *  after and where it lands. */
+function plainFacts(task: Task): string {
+  const facts: string[] = [];
+  if (task.dependsOn?.length) facts.push(`after ${task.dependsOn.join(', ')}`);
+  if (task.branch) facts.push(`branch \`${task.branch}\``);
+  return facts.length ? ` · ${facts.join(' · ')}` : '';
+}
+
 export function stageWords(task: Task): string {
   switch (task.stage) {
     case 'implement':
@@ -325,7 +347,7 @@ export function checkWords(task: Task): string {
  * then the branches the work lands on and how they stack. Nothing when the
  * tasks say neither what they wait on nor where they land.
  */
-export function buildOrderBlocks(plan: Plan, base?: string): Block[] {
+export function buildOrderBlocks(plan: Plan, base?: string, opts: { plain?: boolean } = {}): Block[] {
   const { branches, unbranched } = branchPlan(plan);
   if (!hasDependencies(plan) && branches.length === 0) return [];
   const b = new BlockList();
@@ -344,14 +366,14 @@ export function buildOrderBlocks(plan: Plan, base?: string): Block[] {
       const ids = br.tasks.map((t) => t.id).join(', ');
       if (br.needs.length > 1) {
         // Refused when the task list is made; only an older plan has one.
-        lines.push(`- \`${br.branch}\` needs work from ${br.needs.length} branches, which one pull request cannot: harness_plan_check says how to fix it — ${ids}`);
+        lines.push(`- \`${br.branch}\` needs work from ${br.needs.length} branches, which one pull request cannot${opts.plain ? '' : ': harness_plan_check says how to fix it'} — ${ids}`);
       } else {
         const pr = plan.branches?.[br.branch]?.pr;
         const prText = pr ? ` · pull request${pr.number ? ` #${pr.number}` : ''} ${pr.state}` : '';
         lines.push(`- \`${br.branch}\` from ${baseWords(br.base, base)} — ${ids}${prText}`);
       }
     }
-    if (unbranched.length) lines.push(`- no branch named (the session's current branch) — ${unbranched.map((t) => t.id).join(', ')}`);
+    if (unbranched.length) lines.push(`- no branch named${opts.plain ? '' : " (the session's current branch)"} — ${unbranched.map((t) => t.id).join(', ')}`);
     b.add('branches', derived("each task's branch", ...(base ? ['the base branch (branches.base)'] : [])), lines);
   }
   return b.blocks;
@@ -440,6 +462,9 @@ export interface PromptOptions {
   note?: string;
   /** How the build runs, as the user chose it. */
   settings?: BuildSettings;
+  /** The execution mode, as the user chose it; the repository's default
+   *  (`mode` in its config) without. */
+  mode?: ExecutionMode;
   /** The repository's `.coplan/config.json`: its hooks and branch base. */
   project?: ProjectConfig;
   /** The coplan CLI on this machine, for `coplan check`. */
@@ -447,31 +472,41 @@ export interface PromptOptions {
 }
 
 /**
- * What Claude is told when the user submits the plan: build it, how — the
- * order, the parallelism, each task's implement → review → refine cycle,
- * the checks — and how to report progress; then the plan itself.
+ * What Claude is told when the user submits the plan, by the mode it is
+ * built in.
+ *
+ * - **Managed**: build it, and how — the order, the parallelism, each
+ *   task's implement → review → refine cycle, the checks — and how to
+ *   report progress; then the plan itself.
+ * - **Tracked**: build it your own way, keeping the board true; then the
+ *   plan. No cycle, no review mode, no round or parallel limit.
+ * - **Export**: no instructions at all — the plan as Markdown, for the
+ *   user to take wherever it is built (see `exportBlocks`).
  *
  * For this session the prompt reaches Claude with the user's next message,
  * so it is kept within what a hook can hand over; Claude can always read the
- * rest with `harness_plan_read`. A prompt for somewhere else is pasted by
- * the user into an agent that has no harness tools, so it never mentions
- * them and is never trimmed.
+ * rest with `harness_plan_read`. An export is pasted by the user wherever
+ * they like, so it never mentions Coplan's tools and is never trimmed.
  */
 export function buildPrompt(plan: Plan, opts: PromptOptions & { target: BuildTarget }): BuildPrompt {
-  const here = opts.target === 'session';
   const settings = opts.settings ?? opts.project?.settings ?? DEFAULT_BUILD_SETTINGS;
   const project = opts.project ?? emptyProjectConfig();
-  const chosen = settingSources(opts.settings !== undefined, project);
-  const head = new BlockList()
-    .push(...(here ? sessionBrief(plan, settings, agentInfo(opts.agent), project, chosen) : outsideBrief(plan, settings, project, chosen)))
-    .push(...instructionBlocks(project, 'build', undefined, PROMPT_INSTRUCTIONS))
-    .gap()
-    .push(...checksBlocks(project, here ? opts.bin : undefined)).blocks;
-  const doc = documentParts(plan, { attribution: here, reader: here ? 'claude' : 'outside', base: project.branches.base });
-  if (!here) {
-    const blocks = [...head, ...fromUser(opts.note), ...documentBlocks(doc)];
+  const mode = modeFor(opts.target, opts.mode, project.mode);
+  if (mode === 'export') {
+    const blocks = exportBlocks(plan, { project, ...(opts.note ? { note: opts.note } : {}) });
     return { prompt: blocksText(blocks), trimmed: false, blocks };
   }
+  const chosen = settingSources(opts.settings !== undefined, project);
+  const brief =
+    mode === 'managed'
+      ? sessionBrief(plan, settings, agentInfo(opts.agent), project, chosen)
+      : trackedBrief(plan, agentInfo(opts.agent), project, opts.mode !== undefined ? setting('mode') : configSource(project, 'mode'));
+  const head = new BlockList()
+    .push(...brief)
+    .push(...instructionBlocks(project, 'build', undefined, PROMPT_INSTRUCTIONS))
+    .gap()
+    .push(...checksBlocks(project, opts.bin)).blocks;
+  const doc = documentParts(plan, { attribution: true, reader: 'claude', base: project.branches.base });
   return fit(plan, head, fromUser(opts.note), changesSinceRead(plan), doc, project.branches.base);
 }
 
@@ -690,29 +725,173 @@ function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: P
   return b.blocks;
 }
 
-function outsideBrief(plan: Plan, s: BuildSettings, project: ProjectConfig, chosen: SettingSources): Block[] {
+/**
+ * The build prompt's instructions for a Tracked build: the board's tools
+ * and the plan's order, and nothing about how each task is built — no
+ * cycle, no review mode, no round or parallel limit. Coplan refuses none
+ * of what Managed would; its replies say what it would have checked.
+ */
+function trackedBrief(plan: Plan, agent: AgentInfo, project: ProjectConfig, modeSource: BlockSource): Block[] {
+  const { branches } = branchPlan(plan);
   const b = new BlockList();
-  b.add('intro', TEMPLATE, 'Build "')
+  b.add('intro', TEMPLATE, `${BUILD_MARKER} "`)
     .inline('title', field('plan'), plan.title)
-    .inline('intro:end', TEMPLATE, '". This plan was designed and reviewed before any code was written, and this is its final version.');
+    .inline('intro:end', TEMPLATE, '" — the user has reviewed it in Coplan and submitted it.');
+  b.gap()
+    .add(
+      'lead',
+      TEMPLATE,
+      'The plan is final. Its architecture is locked, and from here Coplan follows your progress on its task board, ' +
+        "so keep every task's status true as you go.",
+    )
+    .inline(
+      'lead:mode',
+      modeSource,
+      ` The build is ${MODE_LABEL.tracked}: how you build and check each task is yours to decide. Coplan holds no task back; ` +
+        'where it would have checked something, its reply says so.',
+    );
   b.gap().add(
     'step-1',
     TEMPLATE,
-    '1. Work through the tasks below. A task starts only once everything it comes after is done; where the plan gives ' +
-      'a build order, tasks in the same step do not depend on each other and can be built side by side.',
+    '1. Start with tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that ' +
+      "are ready together do not depend on each other. harness_task_brief gives one task's focused brief: its objective, " +
+      'where it fits, its branch and its checks.',
   );
-  b.add('step-2', TEMPLATE, '2. Take each task through implement → review → refine: implement it and run the implement checks; review the change (')
-    .inline('step-2:review', chosen('review'), REVIEW_WORDS[s.review])
-    .inline('step-2:end', TEMPLATE, ') and run the review checks; refine until it passes.')
-    .inline('step-2:rounds', chosen('maxRounds'), ` After ${s.maxRounds} round${s.maxRounds === 1 ? '' : 's'}, stop and ask.`);
-  b.add('step-3', TEMPLATE, '3. Build the architecture as described: its parts, what each one does and decides, and how they connect.');
-  b.add('step-4', TEMPLATE, '4. Where tasks name branches, land each task on its branch; a branch built on another is cut from it. ')
-    .inline('step-4:pull-requests', configSource(project, 'pullRequests'), pullRequestWords(project));
-  b.add('step-5', TEMPLATE, '5. If the design turns out not to work, stop and say why rather than redesigning as you go.');
-  b.add('step-6', TEMPLATE, '6. When every task is done, run the final checks and summarize what was built, where, and how it was checked.')
-    .inline('step-6:final', configSource(project, 'final.blocking'), project.final.blocking ? ' Do not call the build finished while a final check fails.' : '');
-  // No harness_task_next out there: the template comes with the prompt.
-  b.push(...templateBlocks(project));
+  b.add(
+    'step-2',
+    TEMPLATE,
+    '2. Report each task with harness_task_update as you go: status "in_progress" when you start it, "done" with a ' +
+      'one-line note of what you did, "blocked" with a note saying on what. Report the checks you ran with `checks`. ' +
+      `If only the user can unblock a task, ask them with ${agent.askWith}, and keep building what you can meanwhile.`,
+  );
+  b.add('step-3', TEMPLATE, '3. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.');
+  b.add(
+    'step-4',
+    TEMPLATE,
+    branches.length
+      ? '4. Land each task on its branch (see Branches below): cut a stacked branch from the one it builds on. '
+      : '4. Everything lands on the current branch: no task names a branch of its own. ',
+  ).inline('step-4:pull-requests', configSource(project, 'pullRequests'), pullRequestWords(project, { pointer: true }));
+  b.add(
+    'step-5',
+    TEMPLATE,
+    '5. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, ' +
+      'stop and ask the user in chat — they can reopen the plan in Coplan.',
+  );
+  b.add(
+    'step-6',
+    TEMPLATE,
+    '6. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) ' +
+      'and give the user the final summary: what was built, the branches and pull requests, and how it was checked.',
+  ).inline('step-6:final', configSource(project, 'final.blocking'), finalWords(project));
+  return b.blocks;
+}
+
+/* ------------------------------------------------------------------ *
+ * The export
+ * ------------------------------------------------------------------ */
+
+export interface ExportOptions {
+  /** The repository's config: only its base branch, which the order and
+   *  each brief name. Nothing else of it — no checks, no instructions —
+   *  is part of the plan. */
+  project?: ProjectConfig;
+  /** What the user wrote when submitting it as an Export. */
+  note?: string;
+}
+
+/**
+ * The whole plan as Markdown, for a reader outside Coplan: the summary,
+ * the sections, the architecture, the task list and its order, each
+ * task's brief — what it builds, where it fits, what it comes after and
+ * where it lands — the build report if there is one, and the open
+ * comments. No build instructions: no cycle, no review modes or round
+ * limits, no checks to run, and no Coplan tool names. Made from the same
+ * blocks as the prompts, so the page shows where each part comes from.
+ */
+export function exportBlocks(plan: Plan, opts: ExportOptions = {}): Block[] {
+  const base = opts.project?.branches.base;
+  const doc = documentParts(plan, { attribution: false, reader: 'outside', base, plain: true, details: false });
+  const b = new BlockList();
+  b.add('heading', field('plan'), `# ${plan.title}`);
+  b.push(...fromUser(opts.note), ...doc.summary, ...doc.sections, ...doc.architecture, ...doc.tasks, ...doc.order);
+  const leaves = leafTasks(plan);
+  if (leaves.length) {
+    b.gap().add('briefs', TEMPLATE, ['## Task briefs', "_Each task on its own: what it is for, what it builds, what it comes after and where it lands._"]);
+    for (const task of leaves) b.push(...exportBriefBlocks(plan, task, base));
+  }
+  b.push(...doc.report, ...doc.comments, ...doc.legend);
+  return b.blocks;
+}
+
+export function exportText(plan: Plan, opts: ExportOptions = {}): string {
+  return blocksText(exportBlocks(plan, opts));
+}
+
+/** One task's brief in an export: the task's own words and its parents',
+ *  the boxes it builds, what it comes after and before, and its branch. */
+function exportBriefBlocks(plan: Plan, task: Task, repoBase: string | undefined): Block[] {
+  const me = field('task', task.id);
+  const key = `brief:${task.id}`;
+  const b = new BlockList();
+  b.gap().add(key, me, `### ${task.id} ${task.title}`);
+  if (task.detail?.trim()) b.gap().add(`${key}:detail`, me, task.detail.trim());
+  for (const parent of ancestorsOf(plan, task).reverse()) {
+    if (parent.detail?.trim()) b.gap().add(`${key}:parent:${parent.id}`, field('task', parent.id), [`From "${parent.title}", which this is part of:`, ...indent(parent.detail, 2)]);
+  }
+  if (task.files?.length) b.gap().add(`${key}:files`, me, `Files: ${task.files.join(', ')}`);
+  const parts = partBlocks(plan, task).map((p) => ({ ...p, id: `${key}:${p.id}` }));
+  if (parts.length) b.gap().add(`${key}:parts`, TEMPLATE, 'It builds:').push(...parts);
+  const before = inheritedDeps(plan, task).map((id) => plan.tasks.find((t) => t.id === id)!).filter(Boolean);
+  if (before.length) {
+    b.gap().add(`${key}:after`, TEMPLATE, 'It comes after:');
+    for (const t of before) {
+      const done = leavesUnder(plan, t.id).every((l) => l.status === 'done');
+      b.add(`${key}:after:${t.id}`, field('task', t.id), `- ${done ? '[x]' : '[ ]'} ${t.id} ${t.title}`);
+    }
+  }
+  const after = dependents(plan, task);
+  if (after.length) b.gap().add(`${key}:before`, derived('the tasks that come after it (dependsOn)'), `Waiting on it: ${after.map((t) => `${t.id} ${t.title}`).join('; ')}.`);
+  const branch = effectiveBranch(plan, task);
+  if (branch) {
+    const entry = branchPlan(plan).branches.find((e) => e.branch === branch);
+    const from =
+      entry?.base === SESSION_BRANCH
+        ? 'cut from the branch the unbranched tasks land on'
+        : entry?.base
+          ? `cut from \`${entry.base}\`, which it builds on`
+          : `cut from ${repoBase ? `\`${repoBase}\`` : 'the base branch'}`;
+    b.gap().add(`${key}:branch`, derived("each task's branch", ...(repoBase ? ['the base branch (branches.base)'] : [])), `Lands on \`${branch}\`, ${from}.`);
+  }
+  return b.blocks;
+}
+
+/** The task, its parents and the subtasks under it: the work a brief is
+ *  about, for the boxes it builds and the comments that bear on it. */
+export function relatedTasks(plan: Plan, task: Task): Set<string> {
+  return new Set([task.id, ...ancestorsOf(plan, task).map((t) => t.id), ...leavesUnder(plan, task.id).map((t) => t.id)]);
+}
+
+/** The boxes a task builds — through itself, a parent or a subtask — with
+ *  what each one is, what was decided and what it connects to: a block each. */
+export function partBlocks(plan: Plan, task: Task): Block[] {
+  const related = relatedTasks(plan, task);
+  const line = (t: Task) => `${t.id} ${t.title}`;
+  const b = new BlockList();
+  for (const d of plan.diagrams) {
+    const label = (id: string) => d.nodes.find((n) => n.id === id)?.label ?? id;
+    for (const n of d.nodes) {
+      if (!n.taskIds?.some((id) => related.has(id))) continue;
+      const lines = [`- **${n.label}** \`${n.id}\` in "${d.title}" — ${KIND_NOUN[n.kind]}${n.detail ? `: ${n.detail}` : ''}`];
+      if (n.description?.trim()) lines.push(...indent(n.description, 2));
+      if (n.notes?.trim()) lines.push('  Decisions:', ...indent(n.notes, 4));
+      const edges = d.edges.filter((e) => e.source === n.id || e.target === n.id);
+      if (edges.length) lines.push(`  Connections: ${edges.map((e) => edgePhrase(e, label)).join('; ')}`);
+      const others = (n.taskIds ?? []).filter((id) => !related.has(id));
+      if (others.length) lines.push(`  Also built by: ${others.map((id) => plan.tasks.find((t) => t.id === id)).filter(Boolean).map((t) => line(t!)).join('; ')}`);
+      b.add(`node:${d.id}/${n.id}`, field('node', `${d.id}/${n.id}`), lines);
+    }
+  }
   return b.blocks;
 }
 
@@ -822,6 +1001,7 @@ export function configRows(project: ProjectConfig, point: 'design' | 'build'): C
   const { base, prefix } = project.branches;
   rows.push(row('branches', 'Branches', [base ? `cut from ${base}` : 'cut from the base branch', prefix ? `named ${prefix}…` : ''].filter(Boolean).join(', ')));
   if (point === 'build') {
+    rows.unshift(row('mode', 'Mode, by default', `${MODE_LABEL[project.mode]}${project.modeByIric ? ' (iric is set)' : ''}`));
     const { tool, open, templateFile } = project.pullRequests;
     const how = open === 'never' ? 'none opened: the branches are pushed' : tool === 'none' ? 'you open them' : `${tool === 'graphite' ? 'Graphite' : 'gh pr create'}, ${open === 'auto' ? 'as each branch is done' : 'once you say'}`;
     rows.push(row('pullRequests', 'Pull requests', `${how}${templateFile ? ` · template ${templateFile}` : ''}`));

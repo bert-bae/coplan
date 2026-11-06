@@ -19,7 +19,7 @@ const PHASE_PILL: Record<Exclude<PlanPhase, 'planning'>, string> = {
   building: 'building',
   finalizing: 'finishing',
   built: 'built',
-  'handed-off': 'handed off',
+  'handed-off': 'exported',
 };
 function phaseTitle(phase: Exclude<PlanPhase, 'planning'>, agent: string): string {
   switch (phase) {

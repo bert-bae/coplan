@@ -15,6 +15,7 @@ and Cursor except where the README's
 - [Checks: `.coplan/config.json`](#checks-coplanconfigjson)
 - [Questions are answered in Claude](#questions-are-answered-in-claude)
 - [The views](#the-views)
+- [Exporting the plan](#exporting-the-plan)
 - [Housekeeping](#housekeeping)
 
 ## The loop
@@ -44,15 +45,17 @@ and Cursor except where the README's
    and publishes them with `harness_tasks_publish`. You shape that list —
    dependencies, branches and review modes are editable on each task — and
    the Tasks view shows the build order it implies.
-7. **You submit it.** *Review & submit plan* shows the exact build prompt,
-   with how the build runs — who reviews each task, how many run at once,
-   how many review rounds before Claude asks you — and submitting locks the
-   plan.
+7. **You submit it.** *Review & submit plan* shows the exact build prompt
+   and asks how the plan is built — *Tracked*, *Managed* (with who reviews
+   each task, how many run at once, how many review rounds before Claude
+   asks you) or *Export* — and submitting locks the plan. To take the plan
+   elsewhere without submitting anything, *Export plan* in the header copies
+   it as Markdown at any point.
 8. **Claude builds against it.** Your next message in Claude carries the
-   prompt. Claude starts only tasks that are ready, builds independent ones
-   side by side with subagents, and takes each through implement → review →
-   refine, running the repository's checks. Cards move across the board,
-   showing each task's step and checks; boxes fill up as their tasks finish.
+   prompt. Claude starts only tasks that are ready and reports each one;
+   in a Managed build it takes each through implement → review → refine,
+   running the repository's checks. Cards move across the board, showing
+   each task's step and checks; boxes fill up as their tasks finish.
 9. **Claude reports.** Once every task is done it runs the final checks,
    opens the pull requests in stack order if you want them, and writes a
    build report that appears on the Overview.
@@ -90,28 +93,38 @@ the branches stack.
 When the tasks are right, **Review & submit plan** (on the Architecture and
 Tasks views) opens the review:
 
-<a href="images/submit.png"><img src="images/submit.png" alt="The Submit the plan dialog: who builds it, who reviews each task, how many tasks at once and how many review rounds on the left; the full build prompt Claude will get on the right" width="100%" /></a>
+<a href="images/submit.png"><img src="images/submit.png" alt="The Submit the plan dialog: how the plan is built — Tracked, Managed or Export — and, for a Managed build, who reviews each task, how many tasks at once and how many review rounds on the left; the full build prompt Claude will get on the right" width="100%" /></a>
 
 - **The prompt**, exactly as Claude will get it: what to do, how to report
   progress, anything you add for Claude, what you changed that Claude has not
   read yet, then the whole plan — summary, sections, the architecture and
   the task tree. It is rebuilt as you type, and *Submit* waits until what is
   on screen is what will be sent; a plan that moved on since is refused.
-- **Who builds it.** *This Claude session*: your next message in its chat —
-  "go" will do — carries the prompt, once, and the board follows each task
-  as Claude reports it. *Somewhere else*: the prompt is written for an agent
-  without the Coplan tools and copied for you to paste; the plan is locked,
-  but nothing reports back, so nothing moves here.
-- **How each task is built.** Every task goes implement → review → refine.
-  You choose who reviews — an *independent reviewer* (a fresh subagent),
-  *self-review*, *you* (Claude stops after each task and asks), or *checks
-  only* — how many ready tasks are built at once, and how many review rounds
-  a task gets before Claude stops and asks you. The defaults come from the
-  repository's `.coplan/config.json`.
-- **Set in config.** What the prompt takes from config, read-only: the checks
-  for each stage, branches, how pull requests are opened, the reviewer
-  model, whether failing final checks hold the report, and your standing
-  instructions for the build.
+- **How it is built.** The mode starts from the repository's
+  [`mode`](CONFIG.md#mode): Managed where its `.coplan/config.json` sets
+  `iric`, else Tracked.
+  - *Tracked*: Claude builds it its own way. Your next message in its chat —
+    "go" will do — carries the prompt, once, and the board follows each task
+    as Claude reports it. The prompt has no implement → review → refine:
+    how each task is built and checked is Claude's call, and nothing it
+    reports is refused. Where a Managed build would have held a task back —
+    done before any review, a failing check, past the round or parallel
+    limit, dropping work you signed off — Claude's reply carries a note
+    saying so instead.
+  - *Managed*: the same hand-over, and every task goes implement → review →
+    refine. You choose who reviews — an *independent reviewer* (a fresh
+    subagent), *self-review*, *you* (Claude stops after each task and asks),
+    or *checks only* — how many ready tasks are built at once, and how many
+    review rounds a task gets before Claude stops and asks you. The defaults
+    come from the repository's `iric`.
+  - *Export*: the whole plan as Markdown — summary, sections, diagrams, the
+    tasks and their briefs — with no build instructions, review modes or
+    Coplan tool names, copied for you to paste anywhere. This version is
+    locked here, but nothing reports back, so nothing moves.
+- **Set in config.** What the prompt takes from config, read-only: the mode
+  it starts from, the checks for each stage, branches, how pull requests are
+  opened, the reviewer model, whether failing final checks hold the report,
+  and your standing instructions for the build.
 
 ### Where the settings come from
 
@@ -141,10 +154,12 @@ refused, and so is publishing over it until every task is done. *Withdraw*
 (before Claude has the prompt) or *Reopen for changes* (after) unlocks the
 tasks; the design stays confirmed until you reopen that too.
 
-While it builds, starting a task that still waits on another is refused, and
-so is marking one done while its last checks failed. Each card shows where
-its task is — implementing, in review (and which round), refining — and how
-its checks came out.
+While it builds, starting a task that still waits on another is refused. In
+a Managed build so is marking one done before it went to review, without a
+passing verdict, or while its last checks failed; in a Tracked one Claude
+is told what it skipped instead. Each card shows where its task is —
+implementing, in review (and which round), refining — and how its checks
+came out.
 
 <a href="images/board.png"><img src="images/board.png" alt="The task board during a build: To do, In progress, Blocked and Done columns; cards show each task's branch, its review round and whether its checks passed" width="100%" /></a>
 
@@ -270,6 +285,21 @@ plan exists. Every other session the plugin sees stays out of it. The list
 groups sessions by project, lifts the ones waiting on you to the top, and
 shows each one's current task. Fold it to a rail of initials with the ☰
 button or `[` to give the plan the width.
+
+## Exporting the plan
+
+**Export plan**, in the header, shows the whole plan as Markdown: the
+summary, the sections, each diagram written out as an architecture, the task
+list and its build order, a brief for every task — what it is for, the boxes
+it builds, what it comes after and where it lands — the build report if
+there is one, and the open comments. It carries no build instructions,
+review modes, round limits or Coplan tool names, so it reads the same in any
+tool. *Copy* puts it on the clipboard and *Download .md* saves it.
+
+It works from every view and in every phase, and signs nothing off: the plan
+stays as it is, and Claude's read of it does not move. Each part shows where
+it comes from, as in *What Claude reads*. To lock the version you take away,
+submit the plan as *Export* instead.
 
 ## What Claude reads
 

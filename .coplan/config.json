@@ -15,6 +15,7 @@
     ]
   },
   // How a build runs by default; the submit dialog can change it per plan.
+  // Setting `iric` makes builds here Managed by default.
   "iric": { "review": "subagent", "parallel": 2, "maxRounds": 3 },
   "branches": { "base": "main" }
 }

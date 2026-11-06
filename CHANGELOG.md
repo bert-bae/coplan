@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### The build harness is opt-in: Export, Tracked and Managed
+
+- **Submit asks how the plan is built**, in place of *Who builds it?*:
+  - **Tracked**: the agent builds it its own way and reports each task, and
+    the board follows. The build prompt has no implement → review → refine,
+    no review mode, no round or parallel limit. Nothing the agent reports is
+    refused: where a Managed build would hold a task back — done before any
+    review, without a passing verdict, while a check fails or was never
+    reported, past the parallel or round limit, dropping work you signed
+    off — `harness_task_update` succeeds and its reply says what was skipped.
+  - **Managed**: today's build, unchanged — every task through implement →
+    review → refine, held to the repository's checks.
+  - **Export**: the plan as Markdown, copied to build somewhere else, with
+    this version locked here. It replaces *Somewhere else*, whose prompt
+    still prescribed the review cycle.
+- **The default comes from `.coplan/config.json`**: a new
+  [`mode`](docs/CONFIG.md#mode) key, or Managed where the file sets `iric`.
+  **A repository with neither now defaults to Tracked**; one with `iric` —
+  as `coplan init` writes — stays Managed. Your own `coplan.json` can set
+  `mode` for every repository.
+- **Export plan**, in the header, shows the whole plan as Markdown — summary,
+  sections, diagrams, the task list and order, a brief for every task, and
+  the open comments — with no build instructions, review modes, round
+  limits or Coplan tool names. It works from every view and in every phase,
+  copies or downloads it, and signs nothing off.
+  `GET /api/session/:id/plan/export` serves it.
+- `harness_task_next` and each task's brief follow the mode: a Tracked
+  build's say nothing of the cycle, review rounds or subagents.
+
 ### Every word traceable: where each part of a prompt comes from
 
 - The *Confirm design* and *Submit* dialogs list each setting the prompt

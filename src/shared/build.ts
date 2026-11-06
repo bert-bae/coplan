@@ -16,8 +16,8 @@
  *   each of its ancestors depends on, so "the API work waits for the cache"
  *   is said once, on the parent.
  */
-import type { BranchState, BuildSettings, Plan, ReviewMode, ReviewRecord, Task } from './types.ts';
-import { REVIEW_MODES } from './types.ts';
+import type { BranchState, BuildSettings, BuildTarget, ExecutionMode, Plan, ReviewMode, ReviewRecord, Task } from './types.ts';
+import { EXECUTION_MODES, REVIEW_MODES } from './types.ts';
 
 type Tasks = Pick<Plan, 'tasks'>;
 
@@ -486,6 +486,60 @@ export function cleanSettings(raw: unknown, fallback: BuildSettings = DEFAULT_BU
     maxRounds: int(rec['maxRounds'], 1, MAX_ROUNDS, fallback.maxRounds),
   };
 }
+
+/* ------------------------------------------------------------------ *
+ * Execution modes
+ * ------------------------------------------------------------------ */
+
+export function validMode(value: unknown): ExecutionMode | undefined {
+  return (EXECUTION_MODES as readonly string[]).includes(value as string) ? (value as ExecutionMode) : undefined;
+}
+
+/**
+ * The mode a plan is built in: the one it was submitted with — a plan
+ * submitted before modes existed was Managed here, or Export elsewhere —
+ * and before it is submitted, the repository's default.
+ */
+export function planMode(plan: Pick<Plan, 'submission'> | null | undefined, fallback: ExecutionMode): ExecutionMode {
+  const submission = plan?.submission;
+  if (!submission) return fallback;
+  return submission.mode ?? (submission.target === 'elsewhere' ? 'export' : 'managed');
+}
+
+/** Whether the daemon holds tasks to the implement → review → refine
+ *  cycle: only in Managed mode. Anywhere else its gates are notes. */
+export function isManaged(mode: ExecutionMode): boolean {
+  return mode === 'managed';
+}
+
+/**
+ * Where a mode builds, and the mode a target builds in. Export is the
+ * plan taken elsewhere; the other two build in this session — and a
+ * session build asked for with no mode takes the repository's default,
+ * or Tracked where that default is Export.
+ */
+export function targetOf(mode: ExecutionMode): BuildTarget {
+  return mode === 'export' ? 'elsewhere' : 'session';
+}
+
+export function modeFor(target: BuildTarget | undefined, mode: ExecutionMode | undefined, fallback: ExecutionMode): ExecutionMode {
+  if (target === 'elsewhere') return 'export';
+  if (mode && !(target === 'session' && mode === 'export')) return mode;
+  if (target === 'session') return fallback === 'export' ? 'tracked' : fallback;
+  return fallback;
+}
+
+export const MODE_LABEL: Record<ExecutionMode, string> = {
+  export: 'Export',
+  tracked: 'Tracked',
+  managed: 'Managed',
+};
+
+export const MODE_WORDS: Record<ExecutionMode, string> = {
+  export: 'Export: the plan is copied out as Markdown, to build anywhere',
+  tracked: 'Tracked: the agent builds it its own way and reports each task',
+  managed: 'Managed: each task goes implement → review → refine, held to its checks',
+};
 
 export const REVIEW_WORDS: Record<ReviewMode, string> = {
   subagent: 'an independent reviewer (a fresh subagent)',

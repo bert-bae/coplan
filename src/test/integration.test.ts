@@ -46,6 +46,9 @@ before(async () => {
   git(['checkout', '-qb', 'feature/change']);
 
   writeFileSync(path.join(home, 'config.json'), JSON.stringify({ idleShutdownMinutes: 0 }));
+  // The lifecycle tests below hold a Managed build to its gates (#62): the
+  // user's own default, under every repository these tests write a config for.
+  writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ mode: 'managed' }));
 
   daemon = spawn(process.execPath, [DAEMON], {
     env: { ...process.env, CC_HARNESS_HOME: home },
@@ -1059,6 +1062,149 @@ test('the build gates hold however the agent reports progress, and only the user
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('each build gate refuses in a Managed build, and in a Tracked one is a note that says what was skipped (#62)', async () => {
+  const dir = path.join(repo, '.coplan');
+  const GATED = {
+    title: 'Gates',
+    summary: 'One task per gate.',
+    tasks: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'].map((id) => ({ id, title: id.toUpperCase(), ...(id === 'e' ? { review: 'user' as const } : {}) })),
+  };
+  for (const mode of ['managed', 'tracked'] as const) {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path.join(dir, 'config.json'),
+      JSON.stringify({ mode, hooks: { review: [{ name: 'tests', run: 'npm test' }] }, iric: { review: 'self', parallel: 1, maxRounds: 1 } }),
+    );
+    const id = `gate-${mode}-session`;
+    const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+    /** A gate: refused when Managed, a note when Tracked — then settled the
+     *  way the user would settle it, so the next gate starts clean. */
+    const gate = async (body: Record<string, unknown>, refusal: RegExp, note: RegExp) => {
+      const res = await task(body);
+      const text = String(res['text']);
+      if (mode === 'managed') {
+        assert.equal(res['ok'], false, `Managed refuses: ${text}`);
+        assert.match(text, refusal);
+      } else {
+        assert.equal(res['ok'], true, `Tracked does not: ${text}`);
+        assert.match(text, /Noted, not refused \(this build is Tracked\): /);
+        assert.match(text, note);
+      }
+    };
+    const settle = async (taskId: string) => {
+      const res = await task({ task_id: taskId, status: 'done', user_approved: true, note: 'user: take it as it is' });
+      assert.equal(res['ok'], true, String(res['text']));
+    };
+    try {
+      await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+      await mcpFor(id, 'publish', GATED);
+      await post(`/api/session/${id}/plan/design/confirm`);
+      await hookFor(id, 'UserPromptSubmit', { prompt: 'go' });
+      // Submit starts from the repository's mode, and the submission keeps it.
+      const preview = await post<Preview & { mode: string; project: { mode: string } }>(`/api/session/${id}/plan/prompt`, {});
+      assert.equal(preview.mode, mode);
+      assert.equal(preview.project.mode, mode);
+      assert[mode === 'tracked' ? 'doesNotMatch' : 'match'](preview.prompt, /implement → review → refine/);
+      const submitted = await post<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${id}/plan/submit`, {
+        mode,
+        expect: preview.version,
+        settings: { review: 'self', parallel: 1, maxRounds: 1 },
+      });
+      assert.ok(submitted.plan, submitted.error);
+      assert.equal(submitted.plan!.submission?.mode, mode);
+      assert.equal(submitted.plan!.submission?.settings !== undefined, mode === 'managed', "only a Managed build keeps the cycle's settings");
+      await hookFor(id, 'UserPromptSubmit', { prompt: 'build it' });
+
+      // Done before any review round.
+      await task({ task_id: 'a', status: 'in_progress' });
+      await gate({ task_id: 'a', status: 'done', note: 'x' }, /"A" has not been reviewed/, /it was never reviewed \(no review round was reported\)/);
+      await settle('a');
+      // Done while a check fails.
+      await task({ task_id: 'b', stage: 'implement' });
+      await task({ task_id: 'b', stage: 'review', checks: [{ name: 'tests', ok: false, note: '1 failing' }] });
+      await gate({ task_id: 'b', status: 'done', verdict: 'pass', note: 'x' }, /its last checks failed \(tests: 1 failing\)/, /its last checks failed \(tests: 1 failing\)/);
+      await settle('b');
+      // Done with a required check never reported.
+      await task({ task_id: 'c', stage: 'implement' });
+      await task({ task_id: 'c', stage: 'review' });
+      await gate({ task_id: 'c', status: 'done', verdict: 'pass', note: 'x' }, /the review checks tests were never reported/, /the review checks tests were never reported/);
+      await settle('c');
+      // Done without a passing verdict.
+      await task({ task_id: 'd', stage: 'implement' });
+      await task({ task_id: 'd', stage: 'review', checks: [{ name: 'tests', ok: true }] });
+      await gate({ task_id: 'd', status: 'done', note: 'x' }, /no passing verdict for review round 1/, /no passing verdict for review round 1/);
+      await settle('d');
+      // Done on the agent's word when the user reviews it.
+      await task({ task_id: 'e', stage: 'implement' });
+      await task({ task_id: 'e', stage: 'review', checks: [{ name: 'tests', ok: true }] });
+      await gate({ task_id: 'e', status: 'done', verdict: 'pass', note: 'x' }, /the user's to review, and they have not passed it/, /it is the user's to review, and they have not passed it/);
+      await settle('e');
+      // Another review round past the limit.
+      await task({ task_id: 'f', stage: 'implement' });
+      await task({ task_id: 'f', stage: 'review' });
+      await task({ task_id: 'f', stage: 'refine' });
+      await gate({ task_id: 'f', stage: 'review' }, /the most the user allowed \(1\)/, /this is review round 2, past the 1 a Managed build allows/);
+      await settle('f');
+      // A start past the parallel limit.
+      await task({ task_id: 'g', stage: 'implement' });
+      await gate({ task_id: 'h', stage: 'implement' }, /the user allowed 1 at once/, /1 other task is in progress too \(g\)/);
+      await settle('g');
+      await settle('h');
+      // Dropping work the user signed off.
+      await gate({ task_id: 'i', status: 'dropped', note: 'not needed' }, /dropping it is theirs to decide/, /it was part of the plan the user submitted: tell them you dropped it/);
+
+      const plan = (await sessionFor(id)).plan!;
+      const statuses = Object.fromEntries(plan.tasks.map((t) => [t.id, t.status]));
+      assert.equal(statuses['i'], mode === 'managed' ? 'todo' : 'dropped', 'a refusal changes nothing; a note does not stop the move');
+      // What a Tracked build skipped stays out of the way: nothing is
+      // marked as approved by the user that they did not approve.
+      if (mode === 'tracked') assert.doesNotMatch(plan.tasks.find((t) => t.id === 'i')!.note ?? '', /approved by the user/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('Export plan: the whole plan as Markdown, in every phase, signing nothing off and naming no Coplan tool (#62)', async () => {
+  const id = 'export-session';
+  const exported = async () => {
+    const res = await call<{ text: string; blocks: Block[]; version: number }>(`/api/session/${id}/plan/export`);
+    assert.equal(blocksText(res.blocks), res.text, 'joined, the blocks are the text');
+    assert.match(res.text, /^# Add a cache\n/);
+    assert.match(res.text, /## Summary\nA read-through cache in front of Postgres\./);
+    assert.match(res.text, /## Architecture[\s\S]*\*\*Postgres\*\* `db`/);
+    assert.match(res.text, /## Task briefs\n/);
+    for (const banned of [/harness_/, /cc-harness/, /implement → review → refine/, /review round/i, /subagent/, /\breview: (user|self|skip|subagent)\b/]) {
+      assert.doesNotMatch(res.text, banned);
+    }
+    return res;
+  };
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  assert.equal((await call<{ error?: string }>(`/api/session/${id}/plan/export`)).error, 'no plan yet');
+  await mcpFor(id, 'publish', PLAN);
+  await opsOn(id, [{ op: 'upsert_task', id: 't2', review: 'user' }]);
+  const before = await sessionFor(id);
+  // Planning: nothing signed off, and looking is not the agent reading.
+  const planning = await exported();
+  const after = await sessionFor(id);
+  assert.equal(after.plan!.version, before.plan!.version);
+  assert.equal(after.plan!.claudeReadSeq, before.plan!.claudeReadSeq, 'the user\'s edit stays unread');
+  assert.equal(after.plan!.design, undefined);
+  // Tasking, and once submitted.
+  await post(`/api/session/${id}/plan/design/confirm`);
+  assert.match((await exported()).text, /- \[ \] t2 Client/);
+  const preview = await post<Preview>(`/api/session/${id}/plan/prompt`, { mode: 'export' });
+  assert.equal(preview.prompt, (await exported()).text, 'Submit as an Export locks exactly what Export plan copies');
+  await post(`/api/session/${id}/plan/submit`, { mode: 'export', expect: preview.version });
+  const locked = await sessionFor(id);
+  assert.equal(locked.plan!.submission?.target, 'elsewhere');
+  assert.equal(locked.plan!.submission?.mode, 'export');
+  const next = String((await hookFor(id, 'UserPromptSubmit', { prompt: 'hello' })).hookSpecificOutput?.additionalContext ?? '');
+  assert.doesNotMatch(next, /# Add a cache|\[cc-harness\] Build/, 'an export is never handed to this agent');
+  assert.equal((await sessionFor(id)).plan!.submission?.deliveredAt, null);
+  assert.equal((await exported()).text, planning.text, 'the plan reads the same in every phase');
 });
 
 test('dropping a task needs a reason; dropping or reopening one says what it means for the rest', async () => {

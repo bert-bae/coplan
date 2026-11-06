@@ -17,7 +17,7 @@ import {
   submitPlan,
   unreadByClaude,
 } from '../shared/plan.ts';
-import { BUILD_MARKER, DESIGN_MARKER, PROMPT_BUDGET, buildPrompt, designPrompt, renderPlan, unreadNotice } from '../daemon/render.ts';
+import { BUILD_MARKER, DESIGN_MARKER, PROMPT_BUDGET, buildPrompt, designPrompt, exportText, renderPlan, unreadNotice } from '../daemon/render.ts';
 import { parseProjectConfig } from '../shared/project.ts';
 import type { BuildTarget, Plan, PlanInput, PlanOp } from '../shared/types.ts';
 
@@ -350,7 +350,7 @@ test('a submission survives a reload, and a damaged one unlocks rather than lock
  * ------------------------------------------------------------------ */
 
 test('the prompt for this session says how to report progress, then gives the plan', () => {
-  const { prompt, trimmed } = buildPrompt(published(), { target: 'session', note: 'Start with the client.\nLeave billing alone.' });
+  const { prompt, trimmed } = buildPrompt(published(), { target: 'session', mode: 'managed', note: 'Start with the client.\nLeave billing alone.' });
   assert.equal(trimmed, false);
   assert.ok(prompt.startsWith(`${BUILD_MARKER} "Add a cache"`));
   assert.match(prompt, /mark it in_progress with stage "implement" \(harness_task_update\)/);
@@ -382,7 +382,7 @@ test('the prompt carries the settings the user chose and the repository\'s check
   const project = parseProjectConfig({
     hooks: { implement: ['npm run typecheck'], review: [{ name: 'tests', run: 'npm test', optional: false }], final: ['npm run check'] },
   });
-  const { prompt } = buildPrompt(published(), { target: 'session', settings: { review: 'user', parallel: 1, maxRounds: 4 }, project, bin: '/opt/coplan/bin/coplan' });
+  const { prompt } = buildPrompt(published(), { target: 'session', mode: 'managed', settings: { review: 'user', parallel: 1, maxRounds: 4 }, project, bin: '/opt/coplan/bin/coplan' });
   assert.match(prompt, /Review: the user, before it is marked done/);
   assert.match(prompt, /build them one at a time/);
   assert.match(prompt, /After 4 review rounds without passing, stop and ask the user/);
@@ -391,14 +391,15 @@ test('the prompt carries the settings the user chose and the repository\'s check
   assert.match(prompt, /"\/opt\/coplan\/bin\/coplan" check <stage>/);
 });
 
-test('the prompt for somewhere else never mentions harness tools', () => {
+test('the prompt for somewhere else is the export: the plan, never harness tools', () => {
   const plan = applyOps(published(), [{ op: 'upsert_task', title: 'Load test' }], 'user').plan;
   const { prompt, trimmed } = buildPrompt(plan, { target: 'elsewhere' });
   assert.equal(trimmed, false);
   assert.doesNotMatch(prompt, /harness_|cc-harness/);
   assert.doesNotMatch(prompt, /added by the user|edited by the user/);
-  assert.match(prompt, /^Build "Add a cache"/);
+  assert.match(prompt, /^# Add a cache/);
   assert.match(prompt, /- \[ \] client Cache client/);
+  assert.equal(prompt, exportText(plan), 'what Export plan copies');
 });
 
 test('a plan too long for one message is trimmed for this session, never for somewhere else', () => {

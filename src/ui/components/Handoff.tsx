@@ -56,6 +56,16 @@ export function Handoff() {
           What {agent.name} reads
         </button>
       )}
+      {plan && (
+        <button
+          type="button"
+          className="btn btn-sm btn-ghost"
+          title="The whole plan as Markdown, with no build instructions: copy it into any tool. Signs nothing off, in any phase"
+          onClick={() => store.openExport()}
+        >
+          Export plan
+        </button>
+      )}
     </div>
   );
 }

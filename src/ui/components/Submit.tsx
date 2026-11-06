@@ -5,9 +5,9 @@ import { OpenInClaude } from './Handoff.tsx';
 import { ProgressBar } from './Progress.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { MAX_NOTE, countTasks, currentTask, planPhase, unreadAreas } from '../../shared/plan.ts';
-import { MAX_PARALLEL, MAX_ROUNDS, branchPlan, buildSteps, hasDependencies, readyTasks } from '../../shared/build.ts';
+import { MAX_PARALLEL, MAX_ROUNDS, MODE_LABEL, branchPlan, buildSteps, hasDependencies, planMode, readyTasks, targetOf } from '../../shared/build.ts';
 import { blockingGaps, planGaps, type GapSeverities } from '../../shared/check.ts';
-import { REVIEW_MODES, type BuildSettings, type BuildTarget, type Plan, type PlanPhase, type ReviewMode, type SessionState } from '../../shared/types.ts';
+import { REVIEW_MODES, type BuildSettings, type BuildTarget, type ExecutionMode, type Plan, type PlanPhase, type ReviewMode, type SessionState } from '../../shared/types.ts';
 import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
 import { droppedParts, type ConfigRow } from '../../shared/blocks.ts';
 import { CONFIG_DOCS, PromptView, configDocs } from './PromptView.tsx';
@@ -32,19 +32,30 @@ import type { Target } from '../../shared/types.ts';
  * with the user's next message (Cursor), signing off copies it to paste.
  */
 
-function targets(agent: AgentInfo): { id: BuildTarget; label: string; hint: string }[] {
+/** The three ways a plan is built, in the order a user meets them. */
+function modes(agent: AgentInfo): { id: ExecutionMode; label: string; hint: string }[] {
+  const paste = agent.promptContext ? '' : ` The prompt is copied for you to paste into this ${agent.name} chat.`;
   return [
     {
-      id: 'session',
-      label: `This ${agent.name} session`,
-      hint: agent.promptContext
-        ? `Your next message in its chat carries this prompt, and the board follows each task as ${agent.name} works through it.`
-        : `The prompt is copied for you to paste into this ${agent.name} chat, and the board follows each task as ${agent.name} works through it.`,
+      id: 'tracked',
+      label: `Tracked — ${agent.name} builds it here, its own way`,
+      hint:
+        `${agent.name} decides how to build and check each task, and reports each one, so the board follows the build. ` +
+        `Nothing is held back: where Managed would refuse a step, ${agent.name} gets a note instead.${paste}`,
     },
     {
-      id: 'elsewhere',
-      label: 'Somewhere else',
-      hint: 'Copy the prompt into the agent that will build it. The plan is locked all the same, but its progress cannot be followed here.',
+      id: 'managed',
+      label: `Managed — ${agent.name} builds it here, through implement → review → refine`,
+      hint:
+        "Each task is checked and reviewed the way you choose below, and is not done until it passes the repository's " +
+        `checks and its review. The board follows each step.${paste}`,
+    },
+    {
+      id: 'export',
+      label: 'Export — take the plan somewhere else',
+      hint:
+        'Copies the whole plan as Markdown, with no build instructions, and locks this version of it here. Nothing reports ' +
+        'back. Export plan, in the header, copies it without locking anything.',
     },
   ];
 }
@@ -164,7 +175,7 @@ const PHASE_CHIP: Record<Exclude<PlanPhase, 'planning'>, string> = {
   building: 'Locked · building',
   finalizing: 'Locked · finishing',
   built: 'Built',
-  'handed-off': 'Locked · handed off',
+  'handed-off': 'Locked · exported',
 };
 
 /* ------------------------------------------------------------------ *
@@ -431,7 +442,8 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
 
 interface Shown {
   preview: PromptPreview;
-  target: BuildTarget;
+  /** The mode it was asked for; null for the repository's default. */
+  mode: ExecutionMode | null;
   note: string;
   /** The settings it was asked for with; '' for the repository's defaults. */
   key: string;
@@ -444,10 +456,10 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
   const plan = usePlan();
   const agent = useAgent();
   const sessionId = useStore((s) => s.sessionId);
-  const [target, setTarget] = useState<BuildTarget>('session');
+  // Both null until the first preview says what the repository's defaults are.
+  const [mode, setMode] = useState<ExecutionMode | null>(null);
   const [note, setNote, clearDraft] = useDraft(`${sessionId}:submit`);
   const settled = useSettled(note);
-  // Null until the first preview says what the repository's defaults are.
   const [settings, setSettings] = useState<BuildSettings | null>(null);
   const [shown, setShown] = useState<Shown | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -468,11 +480,12 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
     if (!sessionId) return;
     let live = true;
     api
-      .promptPreview(sessionId, target, settled, settings ?? undefined)
+      .promptPreview(sessionId, mode ? targetOf(mode) : null, settled, settings ?? undefined, mode ?? undefined)
       .then((preview) => {
         if (!live) return;
-        setShown({ preview, target, note: settled, key });
+        setShown({ preview, mode, note: settled, key });
         if (!settings && preview.settings) setSettings(preview.settings);
+        if (!mode) setMode(preview.mode ?? preview.project?.mode ?? 'tracked');
         setError(null);
       })
       .catch((err: unknown) => live && setError((err as Error).message));
@@ -481,23 +494,32 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
     };
     // `settings` is read through `key`, which says when it changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, target, settled, version, key, readAt, refresh]);
+  }, [sessionId, mode, settled, version, key, readAt, refresh]);
 
   if (!session || !plan) return null;
 
   // What is on screen is what is sent: the button waits until the preview
   // matches the choices, the note and the plan.
-  const current = Boolean(shown && shown.target === target && shown.note === note && shown.key === key && shown.preview.version >= version);
+  const current = Boolean(mode && shown && shown.mode === mode && shown.note === note && shown.key === key && shown.preview.version >= version);
   const preview = shown?.preview ?? null;
+  const target = mode ? targetOf(mode) : 'session';
+  const fallback = preview?.project?.mode;
 
   const submit = async () => {
-    if (!preview || !current) return;
+    if (!preview || !current || !mode) return;
     setSubmitting(true);
     // Where no hook can hand the prompt over (Cursor), the user pastes it.
     if (target === 'elsewhere' || !agent.promptContext) {
-      await copyText(preview.prompt, target === 'session' ? `Copied — paste it into ${agent.name}'s chat.` : 'Copied the prompt.');
+      await copyText(preview.prompt, target === 'session' ? `Copied — paste it into ${agent.name}'s chat.` : 'Copied the plan as Markdown.');
     }
-    const ok = await store.submitPlan({ target, note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}), ...(settings ? { settings } : {}) });
+    const ok = await store.submitPlan({
+      target,
+      mode,
+      note,
+      expect: preview.version,
+      ...(preview.hash ? { hash: preview.hash } : {}),
+      ...(settings && mode === 'managed' ? { settings } : {}),
+    });
     setSubmitting(false);
     if (ok) {
       clearDraft();
@@ -514,7 +536,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
       plan={plan}
       busy={submitting}
       onClose={onClose}
-      previewLabel={target === 'session' ? `The prompt ${agent.name} will get` : 'The prompt to paste'}
+      previewLabel={target === 'session' ? `The prompt ${agent.name} will get` : 'The plan, as Markdown'}
       preview={preview}
       current={current}
       error={error}
@@ -526,23 +548,24 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
             plan={plan}
             target={target}
             project={preview?.project}
-            left={preview?.trimmed && shown?.target === 'session' ? leftOut(preview) : null}
+            left={preview?.trimmed && shown?.mode !== 'export' ? leftOut(preview) : null}
           />
 
           <fieldset className="submit-targets">
-            <legend className="field-label">Who builds it?</legend>
-            {targets(agent).map((t) => (
-              <label key={t.id} className={classNames('submit-target', target === t.id && 'is-active')}>
-                <input type="radio" name="build-target" value={t.id} checked={target === t.id} onChange={() => setTarget(t.id)} />
+            <legend className="field-label">How is it built?</legend>
+            {modes(agent).map((m) => (
+              <label key={m.id} className={classNames('submit-target', mode === m.id && 'is-active')}>
+                <input type="radio" name="build-mode" value={m.id} checked={mode === m.id} disabled={!mode} onChange={() => setMode(m.id)} />
                 <span>
-                  <strong>{t.label}</strong>
-                  <span className="submit-target-hint">{t.hint}</span>
+                  <strong>{m.label}</strong>
+                  {fallback === m.id && <span className="submit-target-default"> · this repository's default</span>}
+                  <span className="submit-target-hint">{m.hint}</span>
                 </span>
               </label>
             ))}
           </fieldset>
 
-          {settings && <SettingsFields settings={settings} onChange={setSettings} />}
+          {settings && mode === 'managed' && <SettingsFields settings={settings} onChange={setSettings} />}
 
           <ConfigList rows={preview?.project?.config} />
 
@@ -559,8 +582,17 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
           </label>
 
           <p className="explain">
-            Submitting <strong>locks the plan</strong>: the tasks can no longer be edited, and the page follows the build on
-            the task board. You can reopen it if something has to change.
+            {mode === 'export' ? (
+              <>
+                Submitting <strong>locks this version of the plan</strong>: the tasks can no longer be edited here, and nothing
+                follows the build. You can reopen it if something has to change.
+              </>
+            ) : (
+              <>
+                Submitting <strong>locks the plan</strong>: the tasks can no longer be edited, and the page follows the build on
+                the task board. You can reopen it if something has to change.
+              </>
+            )}
           </p>
 
           <div className="submit-actions">
@@ -568,7 +600,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
               Cancel
             </button>
             <button type="button" className="btn btn-primary" disabled={!current || submitting || unsaved || held} title={unsaved ? 'Saving your last edit first…' : held ? 'Fix the gaps this repository counts as errors first' : undefined} onClick={() => void submit()}>
-              {submitting ? 'Submitting…' : target === 'session' && agent.promptContext ? 'Submit and lock' : 'Copy, submit and lock'}
+              {submitting ? 'Submitting…' : mode === 'export' ? 'Copy and lock' : target === 'session' && agent.promptContext ? 'Submit and lock' : 'Copy, submit and lock'}
             </button>
           </div>
         </>
@@ -588,7 +620,7 @@ function SettingsFields({ settings, onChange }: { settings: BuildSettings; onCha
   return (
     <fieldset className="submit-settings">
       <legend className="field-label">How each task is built</legend>
-      <p className="submit-target-hint">Every task goes implement → review → refine before it is done.</p>
+      <p className="submit-target-hint">In a Managed build every task goes implement → review → refine before it is done.</p>
       <div className="segmented is-small" role="radiogroup" aria-label="Who reviews each task">
         {REVIEW_MODES.map((mode) => (
           <button
@@ -1000,9 +1032,11 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
       text = plan.report ? `Every task is done (${counts.total}), and ${agent.name} wrote the build report.` : `Every task is done (${counts.total}).`;
       break;
     default:
-      head = 'Handed off';
-      text = 'The prompt was copied to build somewhere else, so progress is not followed here.';
+      head = 'Exported';
+      text = 'The plan was copied out as Markdown to build somewhere else. This version is locked here, and progress is not followed.';
   }
+  // How it is being built, beside when it was submitted: Tracked or Managed.
+  const mode = planMode(plan, 'managed');
 
   return (
     // A region, not a live one: the board announces each move as it happens.
@@ -1010,7 +1044,11 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
       <div className="phase-body">
         <p className="phase-head">
           <span aria-hidden="true">🔒</span> {head}
-          <span className="muted"> · submitted {relativeTime(submission.at)}</span>
+          <span className="muted">
+            {' '}
+            · submitted {relativeTime(submission.at)}
+            {mode !== 'export' && ` · ${MODE_LABEL[mode]}`}
+          </span>
         </p>
         <p className="phase-text">{text}</p>
       </div>
@@ -1051,10 +1089,10 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
                 className={classNames('btn btn-sm', phase === 'submitted' && (!session.link || !agent.promptContext) && 'btn-primary')}
                 title={phase === 'submitted' ? `Pasting it into ${agent.name} works too; it is not sent twice` : undefined}
                 onClick={() =>
-                  void copyText(submission.prompt, phase === 'submitted' ? `Copied — paste it into ${agent.name}'s chat.` : 'Copied the prompt.')
+                  void copyText(submission.prompt, phase === 'submitted' ? `Copied — paste it into ${agent.name}'s chat.` : 'Copied the plan as Markdown.')
                 }
               >
-                Copy prompt
+                {phase === 'handed-off' ? 'Copy export' : 'Copy prompt'}
               </button>
             )}
             {(phase === 'building' || phase === 'finalizing' || phase === 'built') && tab !== 'tasks' && (

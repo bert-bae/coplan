@@ -12,8 +12,14 @@ runs when, hand tasks to subagents, and you alone report status to Coplan.
 
 ## Before you start
 
-The build prompt tells you the user's settings — read them, they are the
-user's control over the build:
+The build prompt says how the plan is built. In a **Tracked** build there is
+no prescribed cycle: build and check each task as you see fit, keep the
+board true with `harness_task_update`, and read the notes in its replies —
+they say what a Managed build would have held back. The rest of this skill
+is how to run a **Managed** build, and a good default for a Tracked one.
+
+In a Managed build the prompt tells you the user's settings — read them,
+they are the user's control over the build:
 
 - **review** — who reviews a task by default (`subagent`, `self`, `user`,
   `skip`). A task may override it.

@@ -21,6 +21,7 @@ import type {
   DiagramEdge,
   EdgeArrows,
   DiagramEdgeInput,
+  ExecutionMode,
   DiagramNode,
   DiagramNodeInput,
   IricStage,
@@ -2103,7 +2104,7 @@ export function cleanNote(value: unknown): string | undefined {
  */
 export function submitPlan(
   plan: Plan,
-  input: { target: BuildTarget; prompt: string; note?: string; trimmed?: boolean; settings?: BuildSettings; base?: string },
+  input: { target: BuildTarget; mode?: ExecutionMode; prompt: string; note?: string; trimmed?: boolean; settings?: BuildSettings; base?: string },
   now = Date.now(),
 ): Plan {
   if (plan.submission) throw new PlanError('The plan has already been submitted.');
@@ -2121,6 +2122,7 @@ export function submitPlan(
   next.submission = {
     at: now,
     target: input.target,
+    ...(input.mode ? { mode: input.mode } : {}),
     ...(note ? { note } : {}),
     prompt: input.prompt,
     ...(input.trimmed ? { trimmed: true } : {}),

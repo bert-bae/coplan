@@ -1,0 +1,38 @@
+[cc-harness] Build the plan "Add a cache" — the user has reviewed it in Coplan and submitted it.
+
+The plan is final. Its architecture is locked, and from here Coplan follows your progress on its task board, so keep every task's status true as you go. The build is Tracked: how you build and check each task is yours to decide. Coplan holds no task back; where it would have checked something, its reply says so.
+
+1. Start with tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that are ready together do not depend on each other. harness_task_brief gives one task's focused brief: its objective, where it fits, its branch and its checks.
+2. Report each task with harness_task_update as you go: status "in_progress" when you start it, "done" with a one-line note of what you did, "blocked" with a note saying on what. Report the checks you ran with `checks`. If only the user can unblock a task, ask them with AskUserQuestion, and keep building what you can meanwhile.
+3. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.
+4. Everything lands on the current branch: no task names a branch of its own. Open the pull requests with `gh pr create`, each against the branch below it (the base branch for the bottom one), once the user says to: ask them first.
+5. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, stop and ask the user in chat — they can reopen the plan in Coplan.
+6. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) and give the user the final summary: what was built, the branches and pull requests, and how it was checked.
+
+## Checks
+No checks are configured (.coplan/config.json). Work out what to run from the repository's scripts and CI, use the same commands for every task, and say which in each task's done note.
+
+## Summary
+Put a cache in front of the database.
+
+## Sections
+
+### [s1] Context
+Reads are slow.
+
+## Architecture
+
+### [d1] Components
+
+**Parts**
+- **API** `api` — service
+  Built by: [ ] client Cache client
+
+_Not connected to anything yet: API._
+
+## Tasks (0/2 done)
+- [ ] client Cache client · ready
+  Wrap ioredis.
+- [ ] t1 Wire into API · ready
+
+_Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_
