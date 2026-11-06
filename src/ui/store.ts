@@ -2,13 +2,25 @@ import { useSyncExternalStore } from 'react';
 import { api, eventsUrl, Unauthorized } from './lib/api.ts';
 import { isLocked } from '../shared/plan.ts';
 import { agentInfo, type AgentInfo } from '../shared/agents.ts';
-import type { BuildSettings, BuildTarget, CleanupGroupId, Plan, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport } from '../shared/types.ts';
+import type { BuildSettings, BuildTarget, CleanupGroupId, Plan, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport, Target } from '../shared/types.ts';
 
 export type Tab = 'diagrams' | 'tasks' | 'overview';
 /** The architecture comes first: it is where most of the plan is decided. */
 export const TAB_IDS: Tab[] = ['diagrams', 'tasks', 'overview'];
 
 export type TaskMode = 'outline' | 'board';
+
+/** What the prompt viewer shows: the read-back, the next prompt (or one
+ *  already sent), or one task's brief. */
+export type ViewerTab = 'readback' | 'prompt' | 'brief';
+
+export interface ViewerState {
+  tab: ViewerTab;
+  /** The task whose brief is shown. */
+  taskId?: string;
+  /** A prompt already sent, shown as it was. */
+  sent?: { title: string; prompt: string; meta: string };
+}
 
 export type ConnectionState = 'connecting' | 'live' | 'reconnecting' | 'unauthorized';
 
@@ -49,6 +61,10 @@ export interface UiState {
   canvasSaving: boolean;
   /** The proposal shown on the canvas, as the plan would be with it. */
   proposalPreview: string | null;
+  /** The prompt viewer, when open. */
+  viewer: ViewerState | null;
+  /** Show the agent's bookkeeping in the viewer. Off until asked for. */
+  showBookkeeping: boolean;
   toasts: Toast[];
   error: string | null;
 }
@@ -74,6 +90,8 @@ const initial: UiState = {
   saving: 0,
   canvasSaving: false,
   proposalPreview: null,
+  viewer: null,
+  showBookkeeping: false,
   toasts: [],
   error: null,
 };
@@ -421,10 +439,11 @@ class Store {
   focus(kind: string, id: string): void {
     const tab: Tab = kind === 'diagram' ? 'diagrams' : kind === 'task' ? 'tasks' : 'overview';
     if (kind === 'diagram') this.set({ diagramId: id });
-    if (kind === 'node') {
-      // `node:<diagram>:<node>` — open that diagram; the editor selects the box.
+    if (kind === 'node' || kind === 'edge') {
+      // `node:<diagram>:<node>` — open that diagram; the editor selects the
+      // box (or the arrow).
       const [diagramId] = id.split(':');
-      this.set({ tab: 'diagrams', diagramId: diagramId ?? null, focusTarget: `node:${id}` });
+      this.set({ tab: 'diagrams', diagramId: diagramId ?? null, focusTarget: `${kind}:${id}` });
       return;
     }
     if (kind === 'task' && isLocked(this.state.session?.plan ?? null)) {
@@ -444,6 +463,24 @@ class Store {
       this.set({ collapsedTasks: this.state.collapsedTasks.filter((t) => !ancestors.has(t)), taskMode: 'outline' });
     }
     this.set({ tab, focusTarget: `${kind}:${id}` });
+  }
+
+  /** Jump to the item a comment or a prompt's block is about. */
+  focusField(target: Target): void {
+    if (target.kind === 'node' || target.kind === 'edge') {
+      // `diagramId/partId`: the diagram's id never holds a slash.
+      const cut = target.id.indexOf('/');
+      this.focus(target.kind, `${target.id.slice(0, cut)}:${target.id.slice(cut + 1)}`);
+    } else if (target.kind === 'plan') this.focus('plan', 'summary');
+    else this.focus(target.kind, target.id);
+  }
+
+  openViewer(viewer: ViewerState): void {
+    this.set({ viewer });
+  }
+
+  closeViewer(): void {
+    this.set({ viewer: null });
   }
 
   /* ---------------------------------------------------------------- *

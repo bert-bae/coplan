@@ -271,8 +271,40 @@ groups sessions by project, lifts the ones waiting on you to the top, and
 shows each one's current task. Fold it to a rail of initials with the ☰
 button or `[` to give the plan the width.
 
-*As Claude sees it*, in the header, shows the plan exactly as
-`harness_plan_read` returns it.
+## What Claude reads
+
+*What Claude reads*, in the header, shows everything the agent is sent, in
+one viewer with three tabs:
+
+- **Read-back** — the plan exactly as `harness_plan_read` returns it.
+- **Next prompt** — what the next sign-off sends: the ask for a task list
+  while you design, the build prompt once the design is confirmed. Once
+  you submit, the prompt as it was sent; *View prompt* opens it there too.
+- **Task brief** — one task's brief, exactly as `harness_task_brief` gives
+  it to the agent that builds it, and to the subagent it hands the task to.
+  *Brief*, on every task in the outline and on every card on the board,
+  opens it for that task.
+
+<a href="images/viewer.png"><img src="images/viewer.png" alt="The What Claude reads viewer on the Task brief tab: each part of the brief has a chip on the left naming where it comes from — the task, the plan, a section, a box, a config key, or Coplan's own instructions" width="100%" /></a>
+
+Every part carries a chip saying where it comes from. A box, an arrow, a
+section, a task or the summary goes to that item in the page when you click
+it; a config setting shows its file and key and links to what it does; what
+Coplan works out says from what (*Worked out: each task's branch*); Coplan's
+fixed instructions say *Coplan*. Words from somewhere else inside a sentence
+— the reviewer model, how pull requests are opened, the review mode you
+chose — are highlighted where they sit. The sign-off dialogs show their
+prompt the same way.
+
+*Agent bookkeeping*, off until you tick it, shows what only the agent needs:
+revision numbers, who last edited what, how to reply to a comment, its
+proposals, the gaps list and the status legend. When a prompt is too long
+for one message, what it leaves out is shown struck through: the agent
+reads it with `harness_plan_read`. *Copy* copies the text whole.
+
+Looking at any tab does not count as Claude reading the plan: your changes
+stay unread, and a confirmed design or submitted plan is still handed over
+with your next message.
 
 ## Housekeeping
 

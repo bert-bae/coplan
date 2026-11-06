@@ -102,8 +102,13 @@ export const api = {
       body: JSON.stringify({ ops }),
     }),
 
-  /** The plan exactly as Claude reads it. */
-  planText: (id: string) => request<string>(`/api/session/${id}/plan/text`),
+  /** The plan exactly as harness_plan_read returns it, as blocks that
+   *  name their sources. Looking does not count as the agent reading it. */
+  readback: (id: string) => request<{ text: string; blocks: Block[]; version: number }>(`/api/session/${id}/plan/readback`),
+
+  /** One task's brief, exactly as harness_task_brief returns it, as blocks. */
+  brief: (id: string, taskId: string) =>
+    request<{ text: string; blocks: Block[]; task: { id: string; title: string }; version: number }>(`/api/session/${id}/task/${encodeURIComponent(taskId)}/brief`),
 
   /** The prompt Claude would be given if the plan were submitted now.
    *  Without `settings`, the repository's defaults are used — and returned. */

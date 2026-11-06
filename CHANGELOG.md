@@ -15,10 +15,23 @@
 - A prompt too long for one message now says what it leaves out — "3
   sections, the architecture (2 diagrams) and the detail of 12 tasks" —
   instead of only that it is long.
-- Under the hood, the daemon builds each prompt from blocks that name their
-  source (a field of the plan, a config key, the dialog, what Coplan works
-  out, or its fixed instructions), and the preview endpoints return them.
-  The text the agent gets is unchanged, byte for byte.
+- **What Claude reads**, in the header (it was *As Claude sees it*), is one
+  viewer for everything the agent is sent: the read-back, the next prompt
+  (or the one already sent) and any task's brief, exactly as
+  `harness_task_brief` gives it. Every task in the outline and on the board
+  has a *Brief* button that opens it. Each part shows where it comes from:
+  click a box, arrow, section or task to go to it; a config setting shows
+  its file and key. The sign-off dialogs show their prompt the same way.
+- The agent's bookkeeping — revisions, who edited what, reply hints, its
+  proposals, the gaps and the status legend — is hidden behind an *Agent
+  bookkeeping* toggle, and what a prompt leaves out to fit is shown struck
+  through. Looking does not count as the agent reading the plan.
+- Under the hood, the daemon builds each prompt, the read-back and each
+  brief from blocks that name their source (a field of the plan, a config
+  key, the dialog, what Coplan works out, or its fixed instructions). The
+  preview endpoints return them, and `GET /api/session/:id/plan/readback`
+  and `GET /api/session/:id/task/:taskId/brief` serve the other two. The
+  text the agent gets is unchanged, byte for byte.
 
 ### Installing: clone, then `./setup.sh`
 

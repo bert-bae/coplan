@@ -271,13 +271,23 @@ function Editor({
   // Another part of the page asked to show a box: select it and bring it in.
   const focusTarget = useStore((s) => s.focusTarget);
   useEffect(() => {
-    const prefix = `node:${diagram.id}:`;
-    if (!focusTarget?.startsWith(prefix)) return;
-    const id = focusTarget.slice(prefix.length);
-    setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === id })));
-    setEdges((es) => es.map((e) => ({ ...e, selected: false })));
-    window.requestAnimationFrame(() => void flow.fitView({ nodes: [{ id }], padding: 1.2, duration: 250, maxZoom: 1.2 }));
+    const box = `node:${diagram.id}:`;
+    const arrow = `edge:${diagram.id}:`;
+    if (focusTarget?.startsWith(box)) {
+      const id = focusTarget.slice(box.length);
+      setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === id })));
+      setEdges((es) => es.map((e) => ({ ...e, selected: false })));
+      window.requestAnimationFrame(() => void flow.fitView({ nodes: [{ id }], padding: 1.2, duration: 250, maxZoom: 1.2 }));
+    } else if (focusTarget?.startsWith(arrow)) {
+      // An arrow: select it, and bring both its ends in.
+      const id = focusTarget.slice(arrow.length);
+      const edge = diagram.edges.find((e) => e.id === id);
+      setEdges((es) => es.map((e) => ({ ...e, selected: e.id === id })));
+      setNodes((ns) => ns.map((n) => ({ ...n, selected: false })));
+      if (edge) window.requestAnimationFrame(() => void flow.fitView({ nodes: [{ id: edge.source }, { id: edge.target }], padding: 1.2, duration: 250, maxZoom: 1.2 }));
+    } else return;
     store.set({ focusTarget: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the target
   }, [focusTarget, diagram.id, flow]);
 
   /* ---------------------------- saving ----------------------------- */
