@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, submitPlan, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, confirmDesign, countTasks, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, submitPlan, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
+import { previewProposal } from '../shared/proposals.ts';
 import type { Plan, PlanInput, PlanOp } from '../shared/types.ts';
 
 /**
@@ -765,6 +766,37 @@ test('mid-build, an accepted proposal may add a task, never re-scope one the use
   plan = applyOps(plan, [{ op: 'accept_proposal', id: 'p2' }], 'user').plan;
   assert.ok(plan.tasks.some((t) => t.title === 'Load test'));
   assert.equal(plan.tasks.find((t) => t.id === 't4')!.title, 'Wire into API', 'the signed-off task as it was');
+});
+
+test('Claude is told the user answered a proposal, not that they edited the summary', () => {
+  let plan = applyOps(fresh(), [{ op: 'propose', title: 'Load test', reason: 'Prove it.', ops: [{ op: 'upsert_task', title: 'Load test' }] }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user').plan;
+  const areas = unreadAreas(plan);
+  assert.ok(areas.includes('your proposals'));
+  assert.ok(areas.includes('tasks'), 'and what it changed');
+  assert.ok(!areas.includes('the summary'));
+});
+
+test('a proposal is held to the comment-thread limit, and an answer Claude has not heard is never trimmed away', () => {
+  let plan = fresh();
+  plan.threads = Array.from({ length: 500 }, (_, i) => ({ id: `c${i + 1}`, target: { kind: 'plan' as const, id: '' }, author: 'user' as const, text: 'x', ts: 1, resolved: true, replies: [] }));
+  assert.throws(() => applyOps(plan, [WRITE_THROUGH], 'claude'), /at most 500 comment threads/);
+
+  plan = applyOps(fresh(), [WRITE_THROUGH], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'reject_proposal', id: 'p1', note: 'No.' }], 'user').plan;
+  // Fill past the limit with proposals Claude withdraws itself.
+  plan.proposals!.push(...Array.from({ length: 70 }, (_, i) => ({ ...plan.proposals![0]!, id: `p${i + 2}`, status: 'withdrawn' as const, resolvedSeq: 0 })));
+  plan = applyOps(plan, [{ op: 'propose', title: 'One more', reason: 'r', ops: [{ op: 'upsert_task', title: 'More' }] }], 'claude').plan;
+  assert.ok(plan.proposals!.some((p) => p.id === 'p1' && p.status === 'rejected'), 'the unheard rejection is kept');
+});
+
+test("a proposal's preview says Accept is held once the design is signed off, not what it said before", () => {
+  const plan = applyOps(fresh(), [WRITE_THROUGH], 'claude').plan;
+  assert.equal(previewProposal(plan, plan.proposals![0]!).blocker, null);
+  const confirmed = confirmDesign(plan, { prompt: 'tasks' }, 9_000);
+  const after = previewProposal(confirmed, confirmed.proposals![0]!);
+  assert.match(after.blocker ?? '', /design/i, 'not the cached answer from before the sign-off');
+  assert.ok(after.after, 'still shown, as it would be once the design is reopened');
 });
 
 test('publishing the plan anew withdraws what was proposed for the old one, saying so', () => {

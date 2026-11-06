@@ -35,7 +35,7 @@ import {
   readinessOf,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, PROJECT_CONFIG_PATH, emptyProjectConfig, hasHooks, hookCommand, type InstructionPoint, type ProjectConfig } from '../shared/project.ts';
+import { GLOBAL_PROJECT_FILE, HOOK_STAGES, INSTRUCTIONS_DIR, PROJECT_CONFIG_PATH, emptyProjectConfig, hasHooks, hookCommand, type InstructionPoint, type ProjectConfig } from '../shared/project.ts';
 import { agentInfo, type AgentInfo, type AgentKind } from '../shared/agents.ts';
 
 const STATUS_MARK = { todo: '[ ]', in_progress: '[~]', blocked: '[!]', done: '[x]', dropped: '[-]' } as const;
@@ -558,17 +558,17 @@ export function pullRequestWords(project: ProjectConfig, opts: { pointer?: boole
       ? 'with Graphite: track each branch on the one below it (`gt track`), and open the stack with `gt submit --stack`'
       : 'with `gh pr create`, each against the branch below it (the base branch for the bottom one)';
   const when = open === 'auto' ? 'as soon as a branch\'s tasks are done' : 'once the user says to: ask them first';
-  return `Open the pull requests ${how}, ${when}.${opts.pointer && project.pullRequests.template ? ` Write each description from the repository's template (${project.pullRequests.templateFile}), which harness_task_next shows when one is due.` : ''}`;
+  return `Open the pull requests ${how}, ${when}.${opts.pointer && project.pullRequests.template ? ` Write each description from the pull request template (${project.pullRequests.templateFile}), which harness_task_next shows when one is due.` : ''}`;
 }
 
-/** The repository's pull request template, to fill in for each one. */
+/** The pull request template (the repository's, or the user's own), to fill in for each one. */
 export function templateLines(project: ProjectConfig): string[] {
   const { template, templateFile } = project.pullRequests;
   if (!template) return [];
   return [
     '',
     `### Each pull request's description`,
-    `Fill in the repository's template (${templateFile}) from the tasks the pull request carries, their checks and their review:`,
+    `Fill in the pull request template (${templateFile}) from the tasks the pull request carries, their checks and their review:`,
     '',
     '~~~~markdown',
     template,
@@ -590,7 +590,7 @@ export function instructionLines(project: ProjectConfig, point: InstructionPoint
     '_From the user\'s and the repository\'s Coplan config; they hold for all of this._',
     '',
     nestHeadings(text, heading.startsWith('###') ? 3 : 2),
-    ...(cut ? ['', `_Cut to fit here: the whole text is \`instructions.${point}\` in .coplan/config.json and ${path.join(paths.configDir(), 'coplan.json')} (or instructions/${point}.md beside it)._`] : []),
+    ...(cut ? ['', `_Cut to fit here: the whole text is \`instructions.${point}\` in .coplan/config.json and ${path.join(paths.configDir(), GLOBAL_PROJECT_FILE)} (or ${INSTRUCTIONS_DIR}/${point}.md beside it)._`] : []),
   ];
 }
 

@@ -110,6 +110,8 @@ export interface ProjectConfig {
 export const PROJECT_CONFIG_PATH = path.join('.coplan', 'config.json');
 /** The user's own layer, under every repository's: in Coplan's home. */
 export const GLOBAL_PROJECT_FILE = 'coplan.json';
+/** Beside it: the user's own words, one file per point. */
+export const INSTRUCTIONS_DIR = 'instructions';
 export const DEFAULT_HOOK_TIMEOUT = 600;
 export const MAX_HOOK_TIMEOUT = 3600;
 export const MAX_HOOKS = 20;
@@ -177,13 +179,13 @@ export function loadProjectConfig(root: string | null | undefined, opts: { globa
     let globalFile: string | null = null;
     if (globalDir) {
       const file = path.join(globalDir, GLOBAL_PROJECT_FILE);
-      sources.push(file, ...INSTRUCTION_POINTS.map((p) => path.join(globalDir, 'instructions', `${p}.md`)));
+      sources.push(file, ...INSTRUCTION_POINTS.map((p) => path.join(globalDir, INSTRUCTIONS_DIR, `${p}.md`)));
       if (existsSync(file)) globalFile = file;
       // What is wrong with the user's own layer is said, but holds back no
       // repository's checks: they are the repository's, and run as it says.
       const raw = readConfigFile(file, file, warnings);
       if (raw !== undefined) layers.push(parseLayer(raw, { label: file, base: globalDir, global: true }, warnings, warnings));
-      const words = instructionFiles(path.join(globalDir, 'instructions'), warnings, warnings);
+      const words = instructionFiles(path.join(globalDir, INSTRUCTIONS_DIR), warnings, warnings);
       if (Object.keys(words).length) layers.push({ instructions: words });
     }
     let file: string | null = null;
@@ -208,6 +210,13 @@ export function loadProjectConfig(root: string | null | undefined, opts: { globa
 /** The files the load in progress has read, for `sources`. Loading is
  *  synchronous, so one at a time. */
 let reading: string[] | null = null;
+
+/** Whether a hook's folder exists — watched like a file the config read, so
+ *  the folder appearing reads the config again (and drops the warning). */
+function folderThere(dir: string): boolean {
+  reading?.push(dir);
+  return existsSync(dir);
+}
 
 /** The repository's config from what its file holds. */
 export function parseProjectConfig(raw: unknown, file: string | null = null): ProjectConfig {
@@ -337,7 +346,8 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
       if (typeof prs['template'] !== 'string') local.push('"pullRequests.template" must name a file, e.g. ".github/pull_request_template.md".');
       if (text !== null) {
         layer.pullRequests.template = text;
-        layer.pullRequests.templateFile = (prs['template'] as string).trim();
+        // The repository's by its path in it; the user's own by where it is.
+        layer.pullRequests.templateFile = ctx.global ? path.join(ctx.base!, (prs['template'] as string).trim()) : (prs['template'] as string).trim();
       }
     }
   }
@@ -496,7 +506,7 @@ function parseHooks(list: unknown, stage: string, errors: string[], root: string
       // Too long is still long: the most allowed, said — not the default,
       // which would stop a long suite early.
       hook.timeout = Math.min(MAX_HOOK_TIMEOUT, Math.round(timeout));
-      if (timeout > MAX_HOOK_TIMEOUT) errors.push(`"${where}.timeout" is at most ${MAX_HOOK_TIMEOUT} seconds; ${MAX_HOOK_TIMEOUT} is used.`);
+      if (timeout > MAX_HOOK_TIMEOUT) warnings.push(`"${where}.timeout" is at most ${MAX_HOOK_TIMEOUT} seconds; ${MAX_HOOK_TIMEOUT} is used.`);
     } else if (timeout !== undefined) {
       errors.push(`"${where}.timeout" must be seconds, from 1 to ${MAX_HOOK_TIMEOUT}; the default ${DEFAULT_HOOK_TIMEOUT} is used.`);
     }
@@ -516,7 +526,7 @@ function parseHooks(list: unknown, stage: string, errors: string[], root: string
       // Inside the repository: a check runs where its code is, nowhere else.
       if (!rel || rel.startsWith('/') || /^[A-Za-z]:/.test(rel) || rel.split('/').includes('..')) {
         errors.push(`"${where}.cwd" must be a folder inside the repository, e.g. "packages/api".`);
-      } else if (root && !existsSync(path.join(root, rel))) {
+      } else if (root && !folderThere(path.join(root, rel))) {
         // Kept: run anywhere else, it would pass without checking what it is for.
         warnings.push(`"${where}.cwd" names ${rel}, which does not exist yet: the hook fails until it does.`);
         hook.cwd = rel;
@@ -532,7 +542,7 @@ function parseHooks(list: unknown, stage: string, errors: string[], root: string
     }
     out.push(hook);
   });
-  if (items.length > MAX_HOOKS) errors.push(`"hooks.${stage}" has more than ${MAX_HOOKS} commands; the rest are ignored.`);
+  if (items.length > MAX_HOOKS) warnings.push(`"hooks.${stage}" has more than ${MAX_HOOKS} commands; the rest are ignored.`);
   return out;
 }
 

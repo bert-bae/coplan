@@ -603,7 +603,7 @@ test('the build is told how pull requests are opened, and each is due with the t
   const outside = buildPrompt(submitted, { target: 'elsewhere', project: dotted }).prompt;
   assert.doesNotMatch(outside, /harness_task_next|ask them first\.github/);
   assert.match(outside, /as soon as a branch's tasks are done\.\n/);
-  assert.match(outside, /Fill in the repository's template \(\.github\/pull_request_template\.md\)[\s\S]*## Summary/);
+  assert.match(outside, /Fill in the pull request template \(\.github\/pull_request_template\.md\)[\s\S]*## Summary/);
 
   // A stacked branch is not due before the one it stacks on has its pull request.
   const stacked = done(markDelivered(submitted, 1_400), 'wire');

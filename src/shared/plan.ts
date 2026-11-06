@@ -46,6 +46,7 @@ import type {
 } from './types.ts';
 import { BUILD_TARGETS, EDGE_ARROWS, IRIC_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
 import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, validReview } from './build.ts';
+import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from './proposal-ops.ts';
 
 /** How many review verdicts a task keeps. */
 const MAX_REVIEWS = 20;
@@ -173,7 +174,10 @@ export function unreadAreas(plan: Plan | null): string[] {
   const areas: string[] = [];
   const add = (what: string) => void (areas.includes(what) || areas.push(what));
   for (const c of unreadByClaude(plan)) {
-    if (['commented', 'replied', 'resolved', 'reopened'].includes(c.kind)) add('comments');
+    // The answer is logged on the plan; what an accepted one changed is
+    // logged, as the user's, on each item it touched.
+    if (ANSWERED_PROPOSAL.test(c.summary)) add('your proposals');
+    else if (['commented', 'replied', 'resolved', 'reopened'].includes(c.kind)) add('comments');
     else if (c.target.kind === 'plan' && c.kind === 'status') add(c.summary === REOPENED_DESIGN ? 'reopened the design' : 'reopened the plan');
     else if (c.target.kind === 'diagram') add(`the "${plan!.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
     else if (c.target.kind === 'task') add('tasks');
@@ -183,6 +187,9 @@ export function unreadAreas(plan: Plan | null): string[] {
   }
   return areas;
 }
+
+/** How the user's answer to a proposal reads in the change log. */
+const ANSWERED_PROPOSAL = /^(accepted|rejected) proposal p\d+ /;
 
 export function markReadByClaude(plan: Plan, now = Date.now()): void {
   plan.claudeReadSeq = plan.seq;
@@ -1482,6 +1489,8 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         throw err;
       }
       const id = `p${proposals.reduce((n, p) => Math.max(n, Number(p.id.slice(1)) || 0), 0) + 1}`;
+      // Its reasoning is a comment thread, held to the same limit as any.
+      if (plan.threads.length >= MAX_THREADS) throw new PlanError(`A plan holds at most ${MAX_THREADS} comment threads, and a proposal starts one: resolve or remove some first.`);
       const target = proposalTarget(plan, op.ops);
       const thread: Thread = {
         id: claimId(plan, 'thread', undefined),
@@ -1502,8 +1511,10 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       });
       proposals.push({ id, title, reason, ops: kept, threadId: thread.id, createdAt: now, base: proposalTouches(plan, op.ops), status: 'open' });
       // Settled ones go first when there are too many; open ones never.
+      // An answer Claude has not heard yet is kept until it has: it is the
+      // one thing a rejection is for.
       while (proposals.length > MAX_PROPOSALS) {
-        const old = proposals.findIndex((p) => p.status !== 'open');
+        const old = proposals.findIndex((p) => p.status !== 'open' && (p.resolvedSeq ?? 0) <= plan.claudeReadSeq);
         if (old < 0) break;
         proposals.splice(old, 1);
       }
@@ -1846,23 +1857,8 @@ const PROPOSAL_OPS: ReadonlySet<string> = new Set(['propose', 'accept_proposal',
 /** What the user may still do once the plan is submitted. */
 const USER_ON_LOCKED: ReadonlySet<string> = new Set(['review_task', 'accept_proposal', 'reject_proposal']);
 
-/** The edits a proposal may carry: the plan's content — never progress, a
- *  comment, or another proposal. */
-export const PROPOSABLE_OPS: ReadonlySet<string> = new Set([
-  'set_meta',
-  'upsert_section',
-  'upsert_diagram',
-  'upsert_task',
-  'move_task',
-  'move_section',
-  'move_diagram',
-  'upsert_node',
-  'remove_node',
-  'upsert_edge',
-  'remove_edge',
-  'remove',
-]);
-export const MAX_PROPOSAL_OPS = 40;
+/** What a proposal may carry (src/shared/proposal-ops.ts), here too. */
+export { PROPOSABLE_OPS, MAX_PROPOSAL_OPS };
 export const MAX_OPEN_PROPOSALS = 20;
 const MAX_PROPOSALS = 60;
 
@@ -1943,7 +1939,10 @@ function settleProposal(plan: Plan, p: Proposal, status: ProposalStatus, now: nu
   p.resolvedAt = now;
   const thread = plan.threads.find((t) => t.id === p.threadId);
   if (thread && !thread.resolved) {
-    thread.replies.push({ id: `${thread.id}.${thread.replies.length + 1}`, author: status === 'withdrawn' ? 'claude' : 'user', text: reply, ts: now });
+    // A full thread is still resolved; the outcome is on the proposal and in the log.
+    if (thread.replies.length < MAX_REPLIES) {
+      thread.replies.push({ id: `${thread.id}.${thread.replies.length + 1}`, author: status === 'withdrawn' ? 'claude' : 'user', text: reply, ts: now });
+    }
     thread.resolved = true;
   }
 }

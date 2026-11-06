@@ -4,7 +4,7 @@
  * adds, changes or takes away. Pure, and shared, so the preview is the
  * accept — the same edits through the same code — not an imitation of it.
  */
-import { applyOps, proposalStaleness } from './plan.ts';
+import { applyOps, proposalStaleness, proposalTouches } from './plan.ts';
 import type { Diagram, DiagramEdge, DiagramNode, Plan, Proposal } from './types.ts';
 
 export type DiffMark = 'added' | 'changed' | 'removed';
@@ -24,32 +24,39 @@ export interface ProposalPreview {
 
 /** Exact: per plan object (a plan is never changed in place). */
 const exact = new WeakMap<Plan, Map<string, ProposalPreview>>();
-/** By what the plan says: its change-log position, which a drag or a
- *  relayout does not move. Whether a proposal applies, and what it changes
- *  in words, do not depend on where the boxes sit. */
-const bySeq = new Map<string, ProposalPreview>();
-const MAX_BY_SEQ = 200;
+/** By what the answer depends on: what the proposal touches (as the
+ *  out-of-date check sees it), the tasks' shape (what waits on what), and
+ *  whether the design or the plan is signed off. An edit elsewhere — a
+ *  section typed into, a box dragged — does not redo every proposal. */
+const byContent = new Map<string, ProposalPreview>();
+const MAX_BY_CONTENT = 200;
+
+function contentKey(plan: Plan, p: Proposal): string {
+  const lock = `${plan.design ? 'd' : ''}${plan.submission ? 's' : ''}`;
+  const shape = plan.tasks.map((t) => `${t.id}<${t.parentId ?? ''}<${(t.dependsOn ?? []).join(',')}`).join('|');
+  return `${plan.createdAt}:${plan.revision}:${p.id}:${lock}:${JSON.stringify(proposalTouches(plan, p.ops))}:${shape}`;
+}
 
 /**
  * What accepting `p` would do. `layout`: the plan exactly as it is, boxes'
  * positions included — for the canvas preview. Without it, a preview made
- * at the same change-log position is reused, so a page with many proposals
+ * for the same content is reused, so a page with many proposals
  * does not redo each one on every drag.
  */
 export function previewProposal(plan: Plan, p: Proposal, opts: { layout?: boolean } = {}): ProposalPreview {
   let forPlan = exact.get(plan);
   const hit = forPlan?.get(p.id);
   if (hit) return hit;
-  const key = `${plan.createdAt}:${plan.revision}:${plan.seq}:${p.id}`;
+  const key = contentKey(plan, p);
   if (!opts.layout) {
-    const near = bySeq.get(key);
+    const near = byContent.get(key);
     if (near) return near;
   }
   const result = preview(plan, p);
   if (!forPlan) exact.set(plan, (forPlan = new Map()));
   forPlan.set(p.id, result);
-  if (bySeq.size >= MAX_BY_SEQ) bySeq.clear();
-  bySeq.set(key, result);
+  if (byContent.size >= MAX_BY_CONTENT) byContent.clear();
+  byContent.set(key, result);
   return result;
 }
 

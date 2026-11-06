@@ -133,7 +133,7 @@ test('unknown keys and values out of range are errors, each saying what is used 
       ],
     },
   });
-  const said = config.errors.join('\n');
+  const said = [...config.errors, ...config.warnings].join('\n');
   assert.match(said, /"hook" is not a setting Coplan reads/);
   assert.match(said, /"iric\.review" must be one of subagent, self, user, skip; "Subagent" is not, so subagent is used/);
   assert.match(said, /"iric\.parallel" must be a whole number from 1 to 8; 20 is not, so 8 is used/);
@@ -412,6 +412,22 @@ test('only what breaks the checks stops coplan check; a hook whose folder is mis
     assert.equal(typo.status, 2, 'a misspelt "hooks" is the checks themselves');
     assert.match(typo.stderr, /fix the checks in \.coplan\/config\.json first/);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a template from the user's own layer is named by where it is, and a hook's folder is watched", () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'coplan-home-'));
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ run: 'true', cwd: 'packages/api' }] } }) });
+  try {
+    writeFileSync(path.join(home, 'pr.md'), '## Mine');
+    writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ pullRequests: { template: 'pr.md' } }));
+    const config = loadProjectConfig(dir, { globalDir: home });
+    assert.equal(config.pullRequests.templateFile, path.join(home, 'pr.md'), 'not "pr.md" in the repository');
+    assert.equal(config.pullRequests.template, '## Mine');
+    assert.ok(config.sources?.includes(path.join(dir, 'packages', 'api')), 'its creation reads the config again');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
 });

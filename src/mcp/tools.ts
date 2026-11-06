@@ -7,7 +7,7 @@
  * None of these tools waits for the user, and none asks them anything: every
  * question goes through AskUserQuestion in Claude's own chat.
  */
-import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from '../shared/plan.ts';
+import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from '../shared/proposal-ops.ts';
 
 export interface ToolDef {
   name: string;
