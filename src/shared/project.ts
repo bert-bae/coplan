@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import type { BuildSettings } from './types.ts';
 import { DEFAULT_BUILD_SETTINGS, MAX_PARALLEL, MAX_ROUNDS, cleanSettings } from './build.ts';
@@ -6,6 +7,7 @@ import { REVIEW_MODES } from './types.ts';
 import { parseJsonc } from './jsonc.ts';
 import { GAP_RULES, GAP_SEVERITIES, type GapRule, type GapSeverity } from './check.ts';
 import { paths } from './paths.ts';
+import type { BlockSource } from './blocks.ts';
 
 /**
  * A repository's own Coplan settings: `.coplan/config.json`, committed with
@@ -100,6 +102,12 @@ export interface ProjectConfig {
   /** Every file the config was read from or looked for: while none of them
    *  changes, neither does the config. */
   sources?: string[];
+  /** Which file set each setting, by key (`pullRequests.tool`,
+   *  `instructions.build`): the one that won, or — for instructions, which
+   *  add up — each that added to it, the user's first. A key no file sets
+   *  is not here: Coplan's default is used. Files in the user's home are
+   *  named from `~`, the repository's from its root. */
+  origins?: Record<string, string[]>;
   /** The checks themselves cannot be trusted: the file is unreadable, or
    *  `hooks` (or a top-level key, often a misspelt `hooks`) is wrong. Only
    *  this stops `coplan check`; an error elsewhere is said, and the checks
@@ -147,6 +155,7 @@ export function emptyProjectConfig(): ProjectConfig {
     planCheck: {},
     errors: [],
     warnings: [],
+    origins: {},
   };
 }
 
@@ -184,9 +193,13 @@ export function loadProjectConfig(root: string | null | undefined, opts: { globa
       // What is wrong with the user's own layer is said, but holds back no
       // repository's checks: they are the repository's, and run as it says.
       const raw = readConfigFile(file, file, warnings);
-      if (raw !== undefined) layers.push(parseLayer(raw, { label: file, base: globalDir, global: true }, warnings, warnings));
-      const words = instructionFiles(path.join(globalDir, INSTRUCTIONS_DIR), warnings, warnings);
-      if (Object.keys(words).length) layers.push({ instructions: words });
+      if (raw !== undefined) layers.push({ ...parseLayer(raw, { label: file, base: globalDir, global: true }, warnings, warnings), from: displayPath(file) });
+      const dir = path.join(globalDir, INSTRUCTIONS_DIR);
+      const words = instructionFiles(dir, warnings, warnings);
+      if (Object.keys(words).length) {
+        const from = Object.fromEntries(Object.keys(words).map((p) => [p, displayPath(path.join(dir, `${p}.md`))]));
+        layers.push({ instructions: words, instructionsFrom: from });
+      }
     }
     let file: string | null = null;
     let broken = false;
@@ -197,7 +210,7 @@ export function loadProjectConfig(root: string | null | undefined, opts: { globa
         file = repoFile;
         const raw = readConfigFile(repoFile, PROJECT_CONFIG_PATH, errors);
         if (raw === undefined) broken = true;
-        else layers.push(parseLayer(raw, { label: PROJECT_CONFIG_PATH, base: root, global: false }, errors, warnings));
+        else layers.push({ ...parseLayer(raw, { label: PROJECT_CONFIG_PATH, base: root, global: false }, errors, warnings), from: PROJECT_CONFIG_PATH });
       }
     }
     broken ||= layers.some((l) => l.checksBroken);
@@ -224,7 +237,7 @@ export function parseProjectConfig(raw: unknown, file: string | null = null): Pr
   const warnings: string[] = [];
   // A config's files are named from the repository root, which holds `.coplan/`.
   const base = file ? path.dirname(path.dirname(file)) : null;
-  const layer = parseLayer(raw, { label: PROJECT_CONFIG_PATH, base, global: false }, errors, warnings);
+  const layer = { ...parseLayer(raw, { label: PROJECT_CONFIG_PATH, base, global: false }, errors, warnings), from: PROJECT_CONFIG_PATH };
   return { ...combine([layer]), file, errors, warnings, ...(layer.checksBroken ? { checksBroken: true } : {}) };
 }
 
@@ -240,6 +253,10 @@ interface Layer {
   planCheck?: ProjectConfig['planCheck'];
   /** See ProjectConfig.checksBroken. */
   checksBroken?: boolean;
+  /** The file it was read from, as origins name it. */
+  from?: string;
+  /** For the user's instruction files: the file each point was read from. */
+  instructionsFrom?: Partial<Record<InstructionPoint, string>>;
 }
 
 interface LayerContext {
@@ -255,22 +272,56 @@ interface LayerContext {
 function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors' | 'warnings'> {
   const out = emptyProjectConfig();
   const iric: Record<string, unknown> = {};
+  const origins: Record<string, string[]> = {};
   for (const l of layers) {
+    // Which file set each key: the last to set it wins, as its value does.
+    const from = (section: string, rec: object | undefined, keys: readonly string[] = Object.keys(rec ?? {})) => {
+      if (!l.from || !rec) return;
+      for (const key of keys) if ((rec as Record<string, unknown>)[key] !== undefined) origins[`${section}.${key}`] = [l.from];
+    };
     for (const stage of HOOK_STAGES) if (l.hooks?.[stage]) out.hooks[stage] = l.hooks[stage]!;
+    from('hooks', l.hooks);
     Object.assign(iric, l.iric);
+    from('iric', l.iric);
     Object.assign(out.branches, l.branches);
+    from('branches', l.branches);
     Object.assign(out.pullRequests, l.pullRequests);
+    from('pullRequests', l.pullRequests, ['tool', 'open', 'template']);
     Object.assign(out.review, l.review);
+    from('review', l.review);
     Object.assign(out.final, l.final);
+    from('final', l.final);
     Object.assign(out.planCheck, l.planCheck);
+    from('planCheck', l.planCheck);
     for (const point of INSTRUCTION_POINTS) {
       const words = l.instructions?.[point];
       if (words) out.instructions[point] = out.instructions[point] ? `${out.instructions[point]}\n\n${words}` : words;
+      const file = l.instructionsFrom?.[point] ?? l.from;
+      if (words && file) origins[`instructions.${point}`] = [...(origins[`instructions.${point}`] ?? []), file];
     }
   }
+  out.origins = origins;
   out.settings = cleanSettings(iric, DEFAULT_BUILD_SETTINGS);
   const { file: _f, errors: _e, warnings: _w, ...rest } = out;
   return rest;
+}
+
+/**
+ * Where a setting a prompt names comes from: the files that set `key` —
+ * or, for a group (`pullRequests`, `hooks`), any key under it. No files:
+ * nothing sets it, and Coplan's default is used.
+ */
+export function configSource(project: ProjectConfig, key: string): BlockSource {
+  const origins = project.origins ?? {};
+  const files = origins[key] ?? [...new Set(Object.entries(origins).flatMap(([k, f]) => (k.startsWith(`${key}.`) ? f : [])))];
+  return { kind: 'config', key, files };
+}
+
+/** A file in the user's home, named from `~`: shorter, and the same
+ *  whoever reads it. */
+function displayPath(file: string): string {
+  const home = homedir();
+  return home && (file === home || file.startsWith(home + path.sep)) ? `~${file.slice(home.length)}` : file;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === 'object' && !Array.isArray(v);

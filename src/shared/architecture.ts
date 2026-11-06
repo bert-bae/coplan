@@ -21,6 +21,7 @@
  */
 import type { Diagram, DiagramEdge, DiagramNode, NodeKind, PlanBaseline, Task } from './types.ts';
 import { flowRanks, matchEdges } from './plan.ts';
+import { BlockList, derived, field, joinBlocks, type Block } from './blocks.ts';
 
 /** What each kind of box is, in words. */
 export const KIND_NOUN: Record<NodeKind, string> = {
@@ -62,35 +63,48 @@ export interface ArchitectureOptions {
  * line, each with what flows along it.
  */
 export function diagramToMarkdown(diagram: DiagramContent, opts: ArchitectureOptions = {}): string {
+  return joinBlocks(diagramBlocks(diagram, opts));
+}
+
+/**
+ * The same description as blocks, each naming what it comes from: the
+ * diagram's title and caption, each box, each arrow, and what is worked out
+ * from them. The note under the heading is the agent's bookkeeping.
+ */
+export function diagramBlocks(diagram: DiagramContent, opts: ArchitectureOptions = {}): Block[] {
   const ids = opts.ids ?? true;
   const hashes = '#'.repeat(Math.min(6, Math.max(1, opts.level ?? 3)));
-  const out: string[] = [`${hashes} ${ids ? `[${diagram.id}] ` : ''}${diagram.title}`];
-  if (opts.note) out.push(`_${opts.note}_`);
-  if (diagram.caption?.trim()) out.push('', diagram.caption.trim());
+  const me = field('diagram', diagram.id);
+  const b = new BlockList();
+  const key = `diagram:${diagram.id}`;
+  b.add(key, me, `${hashes} ${ids ? `[${diagram.id}] ` : ''}${diagram.title}`);
+  if (opts.note) b.add(`${key}:note`, derived('its revision', 'who last edited it'), `_${opts.note}_`, { bookkeeping: true });
+  if (diagram.caption?.trim()) b.gap().add(`${key}:caption`, me, diagram.caption.trim());
 
   const nodes = diagram.nodes;
   if (nodes.length === 0) {
-    out.push('', '_No parts yet._');
-    return out.join('\n');
+    b.gap().add(`${key}:empty`, me, '_No parts yet._');
+    return b.blocks;
   }
 
   const label = labeller(diagram);
   const ref = (n: { id: string; label: string }) => (ids ? `${n.label} (\`${n.id}\`)` : n.label);
   const { ordered, notes, isolated } = flowOrder(diagram);
+  const box = (n: { id: string }) => field('node', `${diagram.id}/${n.id}`);
 
   const shape = shapeOf(diagram, ordered);
-  if (shape) out.push('', shape);
+  if (shape) b.gap().add(`${key}:shape`, derived('its boxes and arrows'), shape);
 
   if (ordered.length) {
-    out.push('', '**Parts**');
-    for (const n of ordered) out.push(...renderPart(n, opts, ids));
+    b.gap().add(`${key}:parts`, me, '**Parts**');
+    for (const n of ordered) b.add(`node:${diagram.id}/${n.id}`, box(n), renderPart(n, opts, ids));
   }
   if (isolated.length) {
-    out.push('', `_Not connected to anything yet: ${isolated.map((n) => n.label).join(', ')}._`);
+    b.gap().add(`${key}:isolated`, derived('its boxes and arrows'), `_Not connected to anything yet: ${isolated.map((n) => n.label).join(', ')}._`);
   }
 
   if (diagram.edges.length) {
-    out.push('', '**Connections**');
+    b.gap().add(`${key}:connections`, me, '**Connections**');
     const rank = new Map(ordered.map((n, i) => [n.id, i]));
     const edges = [...diagram.edges].sort(
       (a, b) => (rank.get(a.source) ?? 1e9) - (rank.get(b.source) ?? 1e9) || (rank.get(a.target) ?? 1e9) - (rank.get(b.target) ?? 1e9),
@@ -98,17 +112,20 @@ export function diagramToMarkdown(diagram: DiagramContent, opts: ArchitectureOpt
     // An arrow's id is `source->target` unless it says otherwise (a second
     // arrow between the same boxes, one drawn in the browser).
     const own = (e: DiagramEdge) => (e.id !== `${e.source}->${e.target}` ? ` (arrow \`${e.id}\`)` : '');
-    for (const e of edges) out.push(`- ${edgePhrase(e, label)}${ids ? ` \`${e.source} ${ARROW[e.arrows ?? 'end']} ${e.target}\`${own(e)}` : ''}`);
+    for (const e of edges) {
+      b.add(`edge:${diagram.id}/${e.id}`, field('edge', `${diagram.id}/${e.id}`), `- ${edgePhrase(e, label)}${ids ? ` \`${e.source} ${ARROW[e.arrows ?? 'end']} ${e.target}\`${own(e)}` : ''}`);
+    }
   }
 
   if (notes.length) {
-    out.push('', '**Notes on the diagram**');
+    b.gap().add(`${key}:notes`, me, '**Notes on the diagram**');
     for (const n of notes) {
-      out.push(`- ${ref(n)}`);
-      for (const text of [n.detail, n.description, n.notes]) if (text?.trim()) out.push(...indent(text, 2));
+      const lines = [`- ${ref(n)}`];
+      for (const text of [n.detail, n.description, n.notes]) if (text?.trim()) lines.push(...indent(text, 2));
+      b.add(`node:${diagram.id}/${n.id}`, box(n), lines);
     }
   }
-  return out.join('\n');
+  return b.blocks;
 }
 
 function renderPart(n: DiagramContent['nodes'][number], opts: ArchitectureOptions, ids: boolean): string[] {
