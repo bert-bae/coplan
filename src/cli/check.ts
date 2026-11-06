@@ -7,6 +7,7 @@
  */
 import { spawn } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { HOOK_STAGES, DEFAULT_HOOK_TIMEOUT, PROJECT_CONFIG_PATH, hookCommand, hooksFor, loadProjectConfig, type CheckHook, type HookStage } from '../shared/project.ts';
 import type { CheckResult } from '../shared/types.ts';
@@ -57,10 +58,11 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   const root = repoRootOf(cwd);
   const config = loadProjectConfig(root);
   // A config that cannot be read must not pass for one with nothing to run.
-  for (const w of config.warnings) console.error(`coplan: ${w}`);
-  if (config.errors.length) {
-    for (const e of config.errors) console.error(`coplan: ${e}`);
-    console.error(`coplan: fix ${PROJECT_CONFIG_PATH} first; nothing was run.`);
+  // Anything else that is wrong — a template that is missing, a reviewer
+  // model misspelt — is said, and the checks run: they do not depend on it.
+  for (const w of [...config.errors, ...config.warnings]) console.error(`coplan: ${w}`);
+  if (config.checksBroken) {
+    console.error(`coplan: fix the checks in ${PROJECT_CONFIG_PATH} first; nothing was run.`);
     return 2;
   }
   if (!config.file) {
@@ -109,6 +111,11 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
 
 function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: string; ms: number; timedOut: boolean }> {
   const started = Date.now();
+  // A hook whose folder is not there fails, saying so: run anywhere else it
+  // could pass without checking what it is for.
+  if (hook.cwd && !existsSync(path.join(cwd, hook.cwd))) {
+    return Promise.resolve({ code: 1, output: `its folder ${hook.cwd} does not exist`, ms: 0, timedOut: false });
+  }
   return new Promise((resolve) => {
     let output = '';
     let timedOut = false;

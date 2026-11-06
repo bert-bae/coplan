@@ -80,7 +80,7 @@ A hook is a command, run from the repository root, or an object:
 | `name` | What it is called in reports and on the board, up to 60 characters. Defaults to the script name (`pnpm lint` or `npm run lint` → `lint`). |
 | `timeout` | Seconds before `coplan check` stops it: 1 to 3600. Default 600. |
 | `paths` | Globs (`src/**`, `*.py`, `docs/`, `src/**/*.{ts,tsx}`): the hook applies only to tasks that expect to touch a matching file. A task that lists no files gets every hook. `**` crosses directories, `*` and `?` do not, `{a,b}` is either; a glob without a slash matches a file name anywhere, and one ending in `/` everything under it. A `!glob` takes files back out: `["src/**", "!src/gen/**"]`. |
-| `cwd` | The folder it runs in, inside the repository: a package of a monorepo (`"packages/api"`). Default the repository root. |
+| `cwd` | The folder it runs in, inside the repository: a package of a monorepo (`"packages/api"`). Default the repository root. While the folder does not exist the hook fails, saying so, rather than run somewhere it would check nothing. |
 | `env` | Variables set for it, up to 20: `{ "NODE_ENV": "test" }`. The prompts show the command with both, as one line the agent can run from the root. |
 | `optional` | `true`: a failure is reported but does not hold the task back. |
 
@@ -102,6 +102,12 @@ out of range: each is reported — in the prompts, the review dialogs, `coplan
 check` and `coplan doctor` — rather than silently skipped or clamped. Each
 says what is used instead: a number past its limit is cut to the limit, and
 anything else that cannot be used falls back to its default.
+
+`coplan check` refuses to run only when the checks themselves cannot be
+trusted: the file cannot be read, `hooks` is wrong, or a top-level key is
+unknown (often a misspelt `hooks`). Anything else — a template that is
+missing, a reviewer model misspelt, a problem in your own `coplan.json` — is
+said, and the checks run.
 
 ### `iric`
 

@@ -58,7 +58,7 @@ export function DiagramsView() {
   const sessionId = useStore((s) => s.sessionId);
   const previewId = useStore((s) => s.proposalPreview);
   const proposal = plan?.proposals?.find((p) => p.id === previewId && p.status === 'open') ?? null;
-  const preview = useMemo(() => (plan && proposal ? previewProposal(plan, proposal) : null), [plan, proposal]);
+  const preview = useMemo(() => (plan && proposal ? previewProposal(plan, proposal, { layout: true }) : null), [plan, proposal]);
   if (!plan) return null;
   if (proposal && preview?.after) return <ProposalPreviewView plan={plan} proposal={proposal} after={preview.after} chosen={chosen} />;
   const diagram = plan.diagrams.find((d) => d.id === chosen) ?? plan.diagrams[0] ?? null;
@@ -148,14 +148,18 @@ export function DiagramsView() {
  */
 function ProposalPreviewView({ plan, proposal, after, chosen }: { plan: Plan; proposal: Proposal; after: Plan; chosen: string | null }) {
   const sessionId = useStore((s) => s.sessionId);
-  const diagram = after.diagrams.find((d) => d.id === chosen) ?? after.diagrams[0] ?? null;
+  // Every diagram either way: one the proposal removes is still shown, as an
+  // empty diagram after it, so everything on it reads as removed.
+  const gone = plan.diagrams.filter((d) => !after.diagrams.some((x) => x.id === d.id)).map((d) => ({ ...d, nodes: [], edges: [] }));
+  const shown = [...after.diagrams, ...gone];
+  const diagram = shown.find((d) => d.id === chosen) ?? shown[0] ?? null;
   const before = diagram ? plan.diagrams.find((d) => d.id === diagram.id) : undefined;
   const diff = useMemo(() => (diagram ? diagramDiff(before, diagram) : null), [before, diagram]);
   return (
     <div className="arch is-previewing">
       <div className="arch-bar">
         <nav className="arch-tabs" aria-label="Diagrams">
-          {after.diagrams.map((d) => (
+          {shown.map((d) => (
             <button
               key={d.id}
               type="button"
@@ -165,6 +169,7 @@ function ProposalPreviewView({ plan, proposal, after, chosen }: { plan: Plan; pr
             >
               {d.title}
               {!plan.diagrams.some((x) => x.id === d.id) && <span className="arch-tab-count">new</span>}
+              {gone.some((x) => x.id === d.id) && <span className="arch-tab-count">removed</span>}
             </button>
           ))}
         </nav>

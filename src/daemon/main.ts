@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { unlinkSync, appendFileSync, existsSync, linkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { unlinkSync, appendFileSync, existsSync, linkSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -477,9 +477,22 @@ function buildRouter(deps: Deps): Router {
     const root = session.repoRoot ?? session.cwd;
     const hit = projects.get(root);
     if (hit && hit.config.sources && configStamp(hit.config.sources) === hit.stamp) return hit.config;
+    const started = Date.now();
     const config = loadProjectConfig(root);
     if (projects.size >= MAX_PROJECT_CONFIGS) projects.clear();
-    projects.set(root, { stamp: configStamp(config.sources ?? []), config });
+    // A file saved while it was being read may have been read half old: if
+    // any changed since the load began, nothing is kept, and the next call
+    // reads it again.
+    const sources = config.sources ?? [];
+    const settled = !sources.some((f) => {
+      try {
+        return statSync(f).mtimeMs >= started - 1;
+      } catch {
+        return false;
+      }
+    });
+    if (settled) projects.set(root, { stamp: configStamp(sources), config });
+    else projects.delete(root);
     return config;
   };
 
@@ -571,7 +584,7 @@ function buildRouter(deps: Deps): Router {
       json(ctx.res, 404, { error: 'no plan yet' });
       return;
     }
-    text(ctx.res, 200, renderPlan(session.plan, { url: uiUrl(session.sessionId) }));
+    text(ctx.res, 200, renderPlan(session.plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck }));
   });
 
   /**

@@ -22,17 +22,34 @@ export interface ProposalPreview {
   diagrams: string[];
 }
 
-/** One preview per proposal per plan: a plan is never changed in place, so
- *  a new version is a new key, and every part of the page shares the run. */
-const cache = new WeakMap<Plan, Map<string, ProposalPreview>>();
+/** Exact: per plan object (a plan is never changed in place). */
+const exact = new WeakMap<Plan, Map<string, ProposalPreview>>();
+/** By what the plan says: its change-log position, which a drag or a
+ *  relayout does not move. Whether a proposal applies, and what it changes
+ *  in words, do not depend on where the boxes sit. */
+const bySeq = new Map<string, ProposalPreview>();
+const MAX_BY_SEQ = 200;
 
-export function previewProposal(plan: Plan, p: Proposal): ProposalPreview {
-  let forPlan = cache.get(plan);
+/**
+ * What accepting `p` would do. `layout`: the plan exactly as it is, boxes'
+ * positions included — for the canvas preview. Without it, a preview made
+ * at the same change-log position is reused, so a page with many proposals
+ * does not redo each one on every drag.
+ */
+export function previewProposal(plan: Plan, p: Proposal, opts: { layout?: boolean } = {}): ProposalPreview {
+  let forPlan = exact.get(plan);
   const hit = forPlan?.get(p.id);
   if (hit) return hit;
+  const key = `${plan.createdAt}:${plan.revision}:${plan.seq}:${p.id}`;
+  if (!opts.layout) {
+    const near = bySeq.get(key);
+    if (near) return near;
+  }
   const result = preview(plan, p);
-  if (!forPlan) cache.set(plan, (forPlan = new Map()));
+  if (!forPlan) exact.set(plan, (forPlan = new Map()));
   forPlan.set(p.id, result);
+  if (bySeq.size >= MAX_BY_SEQ) bySeq.clear();
+  bySeq.set(key, result);
   return result;
 }
 

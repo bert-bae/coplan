@@ -103,7 +103,7 @@ export async function runDoctor(): Promise<number> {
       record(
         `${file} registers the required events`,
         missing.length === 0 && unnamed.length === 0,
-        missing.length ? `missing ${missing.join(', ')}` : unnamed.length ? `not marked ${agent}: ${unnamed.join(', ')}` : `${events.length} events`,
+        missing.length ? `missing ${missing.join(', ')}` : unnamed.length ? `not marked ${agent ?? 'claude'}: ${unnamed.join(', ')}` : `${events.length} events`,
         true,
       );
     } catch (err) {

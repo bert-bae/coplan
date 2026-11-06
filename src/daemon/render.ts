@@ -6,6 +6,8 @@
  * an edit, and they lead with what changed — the reason it is reading at all.
  */
 import { createHash } from 'node:crypto';
+import path from 'node:path';
+import { paths } from '../shared/paths.ts';
 import { planGaps, type GapSeverities } from '../shared/check.ts';
 import type { BuildSettings, BuildTarget, Change, Plan, PlanBaseline, Task, Thread } from '../shared/types.ts';
 import {
@@ -588,7 +590,7 @@ export function instructionLines(project: ProjectConfig, point: InstructionPoint
     '_From the user\'s and the repository\'s Coplan config; they hold for all of this._',
     '',
     nestHeadings(text, heading.startsWith('###') ? 3 : 2),
-    ...(cut ? ['', `_Cut to fit here: the whole text is \`instructions.${point}\` in .coplan/config.json and ~/.claude/cc-harness/coplan.json (or instructions/${point}.md there)._`] : []),
+    ...(cut ? ['', `_Cut to fit here: the whole text is \`instructions.${point}\` in .coplan/config.json and ${path.join(paths.configDir(), 'coplan.json')} (or instructions/${point}.md beside it)._`] : []),
   ];
 }
 

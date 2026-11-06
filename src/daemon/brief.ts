@@ -184,7 +184,9 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
     const finished = (branch: string) => leaves.filter((t) => effectiveBranch(plan, t) === branch).every((t) => t.status === 'done' || t.status === 'dropped');
     // A stacked branch's pull request goes against the one below it, so that
     // one is opened first: until then, the branch above waits, done or not.
-    const below = (b: { base?: string | null }) => !b.base || b.base === SESSION_BRANCH || Boolean(plan.branches?.[b.base]?.pr);
+    // Every branch it needs, not only the one it is cut from: a branch built
+    // on two (a layout the plan check flags) waits for both.
+    const below = (b: { needs: string[] }) => b.needs.every((n) => n === SESSION_BRANCH || Boolean(plan.branches?.[n]?.pr));
     const due = branchPlan(plan).branches.filter((b) => !plan.branches?.[b.branch]?.pr && finished(b.branch) && below(b));
     if (due.length) {
       out.push('', `## Ready for a pull request (${due.length})`, ...due.map((b) => `- \`${b.branch}\`: every task on it is done.`), pullRequestWords(project), ...templateLines(project));

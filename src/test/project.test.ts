@@ -388,6 +388,34 @@ test('what is only taken differently than written is a warning, and the checks s
   }
 });
 
+test('only what breaks the checks stops coplan check; a hook whose folder is missing fails, saying so', () => {
+  const dir = repo({
+    '.coplan/config.json': JSON.stringify({
+      pullRequests: { template: 'missing.md' },
+      review: { model: 'not a model!' },
+      hooks: { review: ['true', { name: 'api', run: 'true', cwd: 'packages/api' }] },
+    }),
+  });
+  try {
+    const config = loadProjectConfig(dir);
+    assert.ok(config.errors.length >= 2, 'the template and the model are errors');
+    assert.equal(config.checksBroken, undefined, 'but not of the checks');
+    assert.equal(config.hooks.review[1]!.cwd, 'packages/api', 'kept, so the hook cannot pass somewhere else');
+    const run = spawnSync(process.execPath, [CLI, 'check', 'review'], { cwd: dir, encoding: 'utf8' });
+    assert.equal(run.status, 1, 'ran, and the api hook failed');
+    assert.match(run.stdout, /✓ true/);
+    assert.match(run.stdout, /✗ api[\s\S]*its folder packages\/api does not exist/);
+    assert.match(run.stderr, /missing\.md, which could not be read/);
+
+    writeFileSync(path.join(dir, '.coplan', 'config.json'), JSON.stringify({ hook: { review: ['true'] } }));
+    const typo = spawnSync(process.execPath, [CLI, 'check', 'review'], { cwd: dir, encoding: 'utf8' });
+    assert.equal(typo.status, 2, 'a misspelt "hooks" is the checks themselves');
+    assert.match(typo.stderr, /fix the checks in \.coplan\/config\.json first/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a user's own layer that cannot be read is said, and holds back no repository's checks", () => {
   const home = mkdtempSync(path.join(tmpdir(), 'coplan-home-'));
   const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: ['true'] } }) });

@@ -100,6 +100,11 @@ export interface ProjectConfig {
   /** Every file the config was read from or looked for: while none of them
    *  changes, neither does the config. */
   sources?: string[];
+  /** The checks themselves cannot be trusted: the file is unreadable, or
+   *  `hooks` (or a top-level key, often a misspelt `hooks`) is wrong. Only
+   *  this stops `coplan check`; an error elsewhere is said, and the checks
+   *  still run. */
+  checksBroken?: boolean;
 }
 
 export const PROJECT_CONFIG_PATH = path.join('.coplan', 'config.json');
@@ -182,16 +187,19 @@ export function loadProjectConfig(root: string | null | undefined, opts: { globa
       if (Object.keys(words).length) layers.push({ instructions: words });
     }
     let file: string | null = null;
+    let broken = false;
     if (root) {
       const repoFile = path.join(root, PROJECT_CONFIG_PATH);
       sources.push(repoFile);
       if (existsSync(repoFile)) {
         file = repoFile;
         const raw = readConfigFile(repoFile, PROJECT_CONFIG_PATH, errors);
-        if (raw !== undefined) layers.push(parseLayer(raw, { label: PROJECT_CONFIG_PATH, base: root, global: false }, errors, warnings));
+        if (raw === undefined) broken = true;
+        else layers.push(parseLayer(raw, { label: PROJECT_CONFIG_PATH, base: root, global: false }, errors, warnings));
       }
     }
-    return { ...combine(layers), file, globalFile, errors, warnings, sources };
+    broken ||= layers.some((l) => l.checksBroken);
+    return { ...combine(layers), file, globalFile, errors, warnings, sources, ...(broken ? { checksBroken: true } : {}) };
   } finally {
     reading = null;
   }
@@ -208,7 +216,7 @@ export function parseProjectConfig(raw: unknown, file: string | null = null): Pr
   // A config's files are named from the repository root, which holds `.coplan/`.
   const base = file ? path.dirname(path.dirname(file)) : null;
   const layer = parseLayer(raw, { label: PROJECT_CONFIG_PATH, base, global: false }, errors, warnings);
-  return { ...combine([layer]), file, errors, warnings };
+  return { ...combine([layer]), file, errors, warnings, ...(layer.checksBroken ? { checksBroken: true } : {}) };
 }
 
 /** One file's settings, each checked, before the layers are put together. */
@@ -221,6 +229,8 @@ interface Layer {
   final?: Partial<ProjectConfig['final']>;
   instructions?: ProjectConfig['instructions'];
   planCheck?: ProjectConfig['planCheck'];
+  /** See ProjectConfig.checksBroken. */
+  checksBroken?: boolean;
 }
 
 interface LayerContext {
@@ -261,6 +271,7 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
   const say = (message: string) => errors.push(ctx.global ? `${ctx.label}: ${message}` : message);
   if (!isRecord(raw)) {
     say(`${ctx.global ? 'it' : PROJECT_CONFIG_PATH} must hold an object.`);
+    if (!ctx.global) layer.checksBroken = true;
     return layer;
   }
   const local: string[] = [];
@@ -284,6 +295,7 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
       }
     }
   }
+  if (local.length && !ctx.global) layer.checksBroken = true;
 
   const section = (key: string, shape: string): Record<string, unknown> | null => {
     const v = raw[key];
@@ -505,7 +517,9 @@ function parseHooks(list: unknown, stage: string, errors: string[], root: string
       if (!rel || rel.startsWith('/') || /^[A-Za-z]:/.test(rel) || rel.split('/').includes('..')) {
         errors.push(`"${where}.cwd" must be a folder inside the repository, e.g. "packages/api".`);
       } else if (root && !existsSync(path.join(root, rel))) {
-        warnings.push(`"${where}.cwd" names ${rel}, which does not exist yet; it runs from the repository root until it does.`);
+        // Kept: run anywhere else, it would pass without checking what it is for.
+        warnings.push(`"${where}.cwd" names ${rel}, which does not exist yet: the hook fails until it does.`);
+        hook.cwd = rel;
       } else if (rel !== '.') hook.cwd = rel;
     }
     const env = rec['env'];
@@ -513,7 +527,7 @@ function parseHooks(list: unknown, stage: string, errors: string[], root: string
       const entries = env && typeof env === 'object' && !Array.isArray(env) ? Object.entries(env as Record<string, unknown>) : null;
       const good = entries?.filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && typeof v === 'string') ?? [];
       if (!entries || good.length !== entries.length) errors.push(`"${where}.env" must map variable names to text, e.g. { "NODE_ENV": "test" }.`);
-      if (good.length > MAX_ENV) errors.push(`"${where}.env" sets more than ${MAX_ENV} variables; the rest are ignored.`);
+      if (good.length > MAX_ENV) warnings.push(`"${where}.env" sets more than ${MAX_ENV} variables; the rest are ignored.`);
       if (good.length) hook.env = Object.fromEntries(good.slice(0, MAX_ENV)) as Record<string, string>;
     }
     out.push(hook);
