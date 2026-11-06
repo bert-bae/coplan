@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -252,14 +252,23 @@ test('settings: taking every default writes nothing', async () => {
   assert.equal(existsSync(path.join(home, 'config.json')), false);
 });
 
-test('settings: the current values are the defaults, keys set before are kept, and lost comments are said', async () => {
+test('settings: the current values are the defaults, keys set before are kept, and a file with comments is kept as .bak', async () => {
   const home = tmp('settings-old');
-  writeFileSync(path.join(home, 'config.json'), '{\n  // mine\n  "promptNotice": true,\n  "autoOpen": true,\n}\n');
+  const before = '{\n  // mine\n  "promptNotice": true,\n  "autoOpen": true,\n}\n';
+  writeFileSync(path.join(home, 'config.json'), before);
   const { io, asked, said } = scripted(['', 'n', '', '']);
   assert.equal(await askSettings(io, home), 'written');
   assert.match(asked[0]!, /\[Y\/n\]/, 'autoOpen, set to true, defaults to yes');
   assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'config.json'), 'utf8')), { promptNotice: false, autoOpen: true });
-  assert.ok(said.some((l) => /had comments; they are not kept/.test(l)));
+  assert.equal(readFileSync(path.join(home, 'config.json.bak'), 'utf8'), before);
+  assert.ok(said.some((l) => /had comments, which this rewrite drops: the file as it was is .*config\.json\.bak/.test(l)));
+});
+
+test('settings: a file without comments is rewritten with no copy left behind', async () => {
+  const home = tmp('settings-plain');
+  writeFileSync(path.join(home, 'config.json'), '{ "autoOpen": true }');
+  assert.equal(await askSettings(scripted(['n', '', '', '']).io, home), 'written');
+  assert.equal(existsSync(path.join(home, 'config.json.bak')), false);
 });
 
 test('settings: a file that cannot be read is left as it is', async () => {
@@ -307,7 +316,9 @@ test("a repository's checks are written from its scripts; a folder that is not t
   const dir = repo({ 'package.json': JSON.stringify({ scripts: { lint: 'eslint .', test: 'vitest run' } }) });
   const { io, said } = scripted(['/no/such/folder', dir, 'y', '']);
   const written = await askRepositories(io, tmp('home'), tmp('coplan-home'));
-  assert.deepEqual(written, [path.join(dir, '.coplan', 'config.json')]);
+  // git names the repository by its real path: macOS's temporary folder is
+  // behind a symlink.
+  assert.deepEqual(written, [path.join(realpathSync(dir), '.coplan', 'config.json')]);
   assert.ok(said.some((l) => /\/no\/such\/folder is not a folder/.test(l)));
   const config = loadProjectConfig(dir, { globalDir: null });
   assert.deepEqual(config.errors, []);
@@ -323,6 +334,18 @@ test("a repository's file leaves the build settings to yours when you have set t
   const written = await askRepositories(scripted([dir, 'y', '']).io, tmp('home'), coplanHome);
   assert.ok(!('iric' in (parseJsonc(readFileSync(written[0]!, 'utf8')) as object)));
   assert.equal(loadProjectConfig(dir, { globalDir: coplanHome }).settings.review, 'self');
+});
+
+test("a relative repository path is read from where the setup was run", async () => {
+  const dir = repo({ 'package.json': JSON.stringify({ scripts: { test: 'vitest run' } }) });
+  const was = process.cwd();
+  process.chdir(dir);
+  try {
+    const written = await askRepositories(scripted(['.', 'y', '']).io, tmp('home'), tmp('coplan-home'));
+    assert.deepEqual(written, [path.join(realpathSync(dir), '.coplan', 'config.json')]);
+  } finally {
+    process.chdir(was);
+  }
 });
 
 test("a repository's file that is already there is left alone", async () => {

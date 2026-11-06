@@ -11,10 +11,10 @@
  * reads that folder in place; Codex and Cursor take a copy of it.
  */
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { createInterface } from 'node:readline/promises';
+import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_CONFIG, globalConfigFile, mergeConfig, type HarnessConfig } from '../shared/config.ts';
 import { parseJsonc, stripJsonc } from '../shared/jsonc.ts';
@@ -296,8 +296,13 @@ function put(obj: Record<string, unknown>, key: string, value: unknown, dflt: un
   obj[key] = value;
 }
 
-function writeJsonc(file: string, header: string, obj: Record<string, unknown>): void {
+/** Write the file, keeping a copy of one whose comments the rewrite drops. */
+function writeJsonc(file: string, header: string, obj: Record<string, unknown>, comments: boolean, io: SetupIo): void {
   mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  if (comments) {
+    copyFileSync(file, `${file}.bak`);
+    io.say(`  (${file} had comments, which this rewrite drops: the file as it was is ${file}.bak)`);
+  }
   const body = JSON.stringify(obj, null, 2).split('\n');
   const lines = body.length === 1 ? ['{', `  // ${header}`, '}'] : ['{', `  // ${header}`, ...body.slice(1)];
   writeFileSync(file, `${lines.join('\n')}\n`);
@@ -322,8 +327,7 @@ export async function askSettings(io: SetupIo, coplanHome: string): Promise<'wri
   const raw = { ...read.raw };
   for (const key of Object.keys(next) as (keyof HarnessConfig)[]) put(raw, key, next[key], DEFAULT_CONFIG[key]);
   if (JSON.stringify(raw) === JSON.stringify(read.raw)) return 'unchanged';
-  writeJsonc(file, "Coplan's settings on this machine. docs/CONFIG.md says what each one does.", raw);
-  if (read.comments) io.say(`  (${file} had comments; they are not kept)`);
+  writeJsonc(file, "Coplan's settings on this machine. docs/CONFIG.md says what each one does.", raw, read.comments, io);
   return 'written';
 }
 
@@ -364,8 +368,7 @@ export async function askBuildDefaults(io: SetupIo, coplanHome: string): Promise
     put(o, 'open', open, 'ask');
   });
   if (JSON.stringify(raw) === JSON.stringify(read.raw)) return 'unchanged';
-  writeJsonc(file, "Your defaults for every repository's build. A repository's .coplan/config.json overrides them; docs/CONFIG.md has the rest.", raw);
-  if (read.comments) io.say(`  (${file} had comments; they are not kept)`);
+  writeJsonc(file, "Your defaults for every repository's build. A repository's .coplan/config.json overrides them; docs/CONFIG.md has the rest.", raw, read.comments, io);
   for (const w of loadProjectConfig(null, { globalDir: coplanHome }).warnings) io.say(`  ! ${w}`);
   return 'written';
 }
@@ -481,6 +484,30 @@ Builds Coplan, installs it in your agents, and walks through its settings.
   --yes          ask nothing: install in every agent found, keep the settings
   --agents LIST  install in these agents only, without asking which`;
 
+/** Ctrl+C, or the end of input, at a question: the walk stops there. */
+export class Stopped extends Error {}
+
+/**
+ * One question, on a readline opened for it alone. Between questions the
+ * terminal is left as it was, so Ctrl+C during an install stops the setup
+ * as it would any command; at a question it stops it too.
+ */
+function askTerminal(question: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    let answered = false;
+    rl.on('SIGINT', () => rl.close());
+    rl.on('close', () => {
+      if (!answered) reject(new Stopped());
+    });
+    rl.question(question, (a) => {
+      answered = true;
+      rl.close();
+      resolve(a);
+    });
+  });
+}
+
 function runCommand(command: string, args: string[]): RunResult {
   const r = spawnSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000 });
   return { ok: !r.error && r.status === 0, stdout: r.stdout ?? '', out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
@@ -510,11 +537,10 @@ export async function runSetup(args: string[]): Promise<number> {
   }
 
   const interactive = !parsed.yes && process.stdin.isTTY === true;
-  const rl = interactive ? createInterface({ input: process.stdin, output: process.stdout }) : null;
   const io: SetupIo = {
     say: (line) => console.log(line),
     run: runCommand,
-    ...(rl ? { ask: (q: string) => rl.question(q) } : {}),
+    ...(interactive ? { ask: askTerminal } : {}),
   };
 
   console.log(`Coplan ${VERSION} setup, from ${CLONE}`);
@@ -534,15 +560,18 @@ export async function runSetup(args: string[]): Promise<number> {
       },
       io,
     );
-  } finally {
-    rl?.close();
+  } catch (err) {
+    if (!(err instanceof Stopped)) throw err;
+    console.log('\n\nStopped. What was done so far stays; run ./setup.sh again to finish.');
+    return 130;
   }
 
-  // A daemon already running keeps the build it started from: move it to
-  // this one. It hands its address on, so open tabs reconnect.
+  // A daemon already running keeps the build it started from, whatever its
+  // version says (it is the same between releases): move it to this one. It
+  // hands its address on, so open tabs reconnect.
   const lock = await readVerifiedLock();
-  if (lock && lock.version !== VERSION) {
-    console.log(`\nThe running daemon is ${lock.version}; restarting it on ${VERSION}.`);
+  if (lock) {
+    console.log(`\nRestarting the running daemon (${lock.version}) on this build.`);
     const r = runCommand(path.join(CLONE, STAGE_DIR, 'bin', 'coplan'), ['restart']);
     console.log(r.out.trim());
     if (!r.ok) result.failed.push('restarting the daemon');

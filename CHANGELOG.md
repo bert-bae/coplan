@@ -10,7 +10,8 @@
   Codex, Cursor), and walks you through its settings: Coplan on this machine
   (`config.json`), your defaults for every repository's build
   (`coplan.json`), and a repository's checks (`.coplan/config.json`). It
-  writes only what you change. `--yes` asks nothing; `--agents` picks the
+  writes only what you change, and keeps a file you wrote comments in as
+  `<file>.bak` before rewriting it. `--yes` asks nothing; `--agents` picks the
   agents. `git pull` and `./setup.sh` again to update; it restarts a running
   daemon on the new build.
 - The agents install `.plugin/`, a copy of what runs staged in the clone:

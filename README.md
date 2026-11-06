@@ -212,7 +212,9 @@ In order, it:
      typecheck, lint, tests — from that repository's scripts.
 
    It writes only what you change, and you can edit any of these files by
-   hand later: [docs/CONFIG.md](docs/CONFIG.md) has every setting.
+   hand later: [docs/CONFIG.md](docs/CONFIG.md) has every setting. A file
+   you wrote comments in is copied to `<file>.bak` before it is rewritten,
+   since the rewrite drops them.
 
 `./setup.sh --yes` asks nothing: it installs in every agent it finds and
 leaves your settings as they are. `--agents claude,codex` picks the agents
