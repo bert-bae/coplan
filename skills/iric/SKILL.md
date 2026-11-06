@@ -40,9 +40,11 @@ into review counts as a round (reporting again while in review does not).
 Run the **review** checks first; a review of code that fails its tests is
 wasted. Then review the way the brief says:
 
-- **subagent** — a fresh subagent that did not write the change. Give it
-  the brief and the diff (`git diff <base>...HEAD`, or the working-tree diff
-  of the task's files) and this:
+- **subagent** — a fresh subagent that did not write the change, on the
+  model the brief names if it names one (the repository's `review.model`).
+  Give it the brief and the diff (`git diff <base>...HEAD`, or the
+  working-tree diff of the task's files), what the brief's *What the review
+  checks here* says, if anything, and this:
 
   > Review this change against the task brief below. You did not write it;
   > read it as its reviewer. Check, in order: (1) does it meet the

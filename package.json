@@ -1,6 +1,6 @@
 {
   "name": "coplan",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Open-source visual planning workspace for Claude Code, Codex and Cursor: shape the agent's plan as architecture diagrams and a task board in the browser, submit it, and follow the build.",
   "license": "MIT",
@@ -36,6 +36,7 @@
     "build:watch": "node scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit",
     "test": "node --test dist/test/*.test.js",
+    "test:runtime": "node scripts/test-runtime.mjs",
     "check": "pnpm typecheck && pnpm build && pnpm test",
     "prepare": "node scripts/build.mjs"
   },

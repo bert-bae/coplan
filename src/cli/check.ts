@@ -7,7 +7,9 @@
  */
 import { spawn } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
-import { HOOK_STAGES, DEFAULT_HOOK_TIMEOUT, PROJECT_CONFIG_PATH, hooksFor, loadProjectConfig, type CheckHook, type HookStage } from '../shared/project.ts';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { HOOK_STAGES, DEFAULT_HOOK_TIMEOUT, PROJECT_CONFIG_PATH, hookCommand, hooksFor, loadProjectConfig, type CheckHook, type HookStage } from '../shared/project.ts';
 import type { CheckResult } from '../shared/types.ts';
 
 /** Lines of a failing hook's output shown. Enough to see the error. */
@@ -56,9 +58,11 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   const root = repoRootOf(cwd);
   const config = loadProjectConfig(root);
   // A config that cannot be read must not pass for one with nothing to run.
-  if (config.errors.length) {
-    for (const e of config.errors) console.error(`coplan: ${e}`);
-    console.error(`coplan: fix ${PROJECT_CONFIG_PATH} first; nothing was run.`);
+  // Anything else that is wrong — a template that is missing, a reviewer
+  // model misspelt — is said, and the checks run: they do not depend on it.
+  for (const w of [...config.errors, ...config.warnings]) console.error(`coplan: ${w}`);
+  if (config.checksBroken) {
+    console.error(`coplan: fix the checks in ${PROJECT_CONFIG_PATH} first; nothing was run.`);
     return 2;
   }
   if (!config.file) {
@@ -76,7 +80,7 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
     return 0;
   }
   if (opts.list) {
-    for (const h of hooks) console.log(`${h.name}: ${h.run}${h.optional ? '  (optional)' : ''}`);
+    for (const h of hooks) console.log(`${h.name}: ${hookCommand(h)}${h.optional ? '  (optional)' : ''}`);
     return 0;
   }
 
@@ -107,14 +111,19 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
 
 function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: string; ms: number; timedOut: boolean }> {
   const started = Date.now();
+  // A hook whose folder is not there fails, saying so: run anywhere else it
+  // could pass without checking what it is for.
+  if (hook.cwd && !existsSync(path.join(cwd, hook.cwd))) {
+    return Promise.resolve({ code: 1, output: `its folder ${hook.cwd} does not exist`, ms: 0, timedOut: false });
+  }
   return new Promise((resolve) => {
     let output = '';
     let timedOut = false;
     // Its own process group, so a timeout stops everything it started — a
     // test runner's workers too — not just the shell.
     const child = spawn('sh', ['-c', hook.run], {
-      cwd,
-      env: { ...process.env, CI: process.env['CI'] ?? '1' },
+      cwd: hook.cwd ? path.join(cwd, hook.cwd) : cwd,
+      env: { ...process.env, CI: process.env['CI'] ?? '1', ...hook.env },
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     });

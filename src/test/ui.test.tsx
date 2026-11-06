@@ -104,6 +104,7 @@ beforeEach(() => {
     collapsedSidebar: false,
     toasts: [],
     focusTarget: null,
+    proposalPreview: null,
   });
 });
 
@@ -873,6 +874,37 @@ test('the task list says what waits on what, and the order the build takes', asy
   assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 't3', review: 'self', expect: 2 });
 });
 
+test('a gap the repository counts as an error holds Submit, and is shown first', async () => {
+  const plan = confirmedPlan();
+  const { planGaps } = await import('../shared/check.ts');
+  const rule = planGaps(plan)[0]?.rule;
+  assert.ok(rule, 'the fixture leaves a gap open');
+  await boot(makeSession(plan), (route) => {
+    if (route.endsWith('/plan/prompt')) {
+      return {
+        prompt: 'PROMPT',
+        trimmed: false,
+        version: plan.version,
+        budget: 9000,
+        maxNote: 4000,
+        settings: DEFAULTS,
+        project: { file: '/repo/.coplan/config.json', defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [], planCheck: { [rule]: 'error' } },
+      };
+    }
+    return undefined;
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Review & submit plan' }));
+  });
+  const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
+  await waitFor(() => assert.equal(within(dialog).getByTestId('prompt-preview').textContent, 'PROMPT'));
+  const submit = within(dialog).getByRole('button', { name: 'Submit and lock' }) as HTMLButtonElement;
+  assert.equal(submit.disabled, true, 'held by the error');
+  assert.equal(submit.title, 'Fix the gaps this repository counts as errors first');
+  assert.match(dialog.textContent ?? '', /gaps the plan leaves open — (one is an error|\d+ are errors) in this repository, to fix first/);
+  assert.match(dialog.querySelector('.submit-gap-error')?.textContent ?? '', /^Error: /);
+});
+
 test('the plan is submitted after reading the prompt it sends, with how the build runs', async () => {
   const session = makeSession(confirmedPlan());
   const version = session.plan!.version;
@@ -1187,4 +1219,76 @@ test('the session rail names each row\'s agent once there is more than one kind'
   const rail = screen.getByRole('navigation', { name: 'Live sessions' });
   assert.ok(within(rail).getByText('Codex'));
   assert.ok(within(rail).getByText('Claude'));
+});
+
+/* ------------------------------------------------------------ proposals */
+
+function proposed(): Plan {
+  return applyOps(
+    makePlan(),
+    [
+      {
+        op: 'propose',
+        title: 'Put Redis in front of Postgres',
+        reason: 'Reads are slow, and **most are repeats**.',
+        ops: [
+          { op: 'upsert_node', diagramId: 'd1', id: 'cache', label: 'Redis', kind: 'datastore' },
+          { op: 'upsert_node', diagramId: 'd1', id: 'db', description: 'Only on a miss.' },
+        ],
+      },
+    ],
+    'claude',
+  ).plan;
+}
+
+test("the agent's proposal waits beside the plan, with its reason and what it changes, until the user answers", async () => {
+  await boot(makeSession(proposed()));
+  const card = screen.getByRole('article', { name: 'Put Redis in front of Postgres' });
+  assert.match(card.textContent ?? '', /Claude proposes/);
+  assert.match(card.textContent ?? '', /most are repeats/);
+  assert.match(card.textContent ?? '', /2 changes/);
+  await act(async () => {
+    fireEvent.click(within(card).getByRole('button', { name: 'Accept' }));
+  });
+  assert.deepEqual(opsSent().at(-1), { op: 'accept_proposal', id: 'p1' });
+});
+
+test('rejecting a proposal sends the reason, if the user gives one', async () => {
+  await boot(makeSession(proposed()));
+  const card = screen.getByRole('article', { name: 'Put Redis in front of Postgres' });
+  await act(async () => {
+    fireEvent.click(within(card).getByRole('button', { name: 'Reject…' }));
+  });
+  await act(async () => {
+    fireEvent.change(within(card).getByLabelText(/Why not\?/), { target: { value: 'Not yet.' } });
+    fireEvent.click(within(card).getByRole('button', { name: 'Reject' }));
+  });
+  assert.deepEqual(opsSent().at(-1), { op: 'reject_proposal', id: 'p1', note: 'Not yet.' });
+});
+
+test('a proposal shown on the canvas marks what it adds and changes, and saves nothing', async () => {
+  await boot(makeSession(proposed()));
+  const card = screen.getByRole('article', { name: 'Put Redis in front of Postgres' });
+  await act(async () => {
+    fireEvent.click(within(card).getByRole('button', { name: 'Show on canvas' }));
+  });
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node.diff-added')));
+  const node = (label: string) => [...document.querySelectorAll<HTMLElement>('.react-flow__node')].find((n) => n.querySelector('.flow-node-label')?.textContent === label);
+  assert.ok(node('Redis')?.classList.contains('diff-added'), 'the new box');
+  assert.ok(node('Postgres')?.classList.contains('diff-changed'), 'the box it describes');
+  assert.ok(!node('API')?.className.includes('diff-'), 'the rest as they are');
+  assert.ok(screen.getAllByRole('status').some((s) => /Previewing p1: the plan as it would be/.test(s.textContent ?? '')));
+  assert.equal(opsSent().length, 0, 'a preview saves nothing');
+  await act(async () => {
+    fireEvent.click(screen.getAllByRole('button', { name: 'Close preview' })[0]!);
+  });
+  assert.equal(document.querySelector('.react-flow__node.diff-added'), null);
+});
+
+test('a proposal the plan has moved past cannot be accepted, and says what moved', async () => {
+  const plan = applyOps(proposed(), [{ op: 'upsert_node', diagramId: 'd1', id: 'api', label: 'Gateway' }], 'user').plan;
+  await boot(makeSession(plan));
+  const card = screen.getByRole('article', { name: 'Put Redis in front of Postgres' });
+  assert.equal((within(card).getByRole('button', { name: 'Accept' }) as HTMLButtonElement).disabled, true);
+  assert.match(within(card).getByRole('note').textContent ?? '', /out of date: diagram "Components" changed since it was made/);
 });

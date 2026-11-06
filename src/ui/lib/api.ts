@@ -10,6 +10,7 @@ import type {
   SessionSummary,
   StorageReport,
 } from '../../shared/types.ts';
+import type { GapSeverities } from '../../shared/check.ts';
 
 /**
  * Client for the daemon.
@@ -169,4 +170,6 @@ export interface ProjectSummary {
   /** Hook names per stage. */
   checks: Record<'implement' | 'review' | 'final', string[]>;
   errors: string[];
+  /** How each plan-check rule counts here; `error` holds the sign-off. */
+  planCheck?: GapSeverities;
 }

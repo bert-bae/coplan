@@ -24,17 +24,30 @@ export const GAP_RULES = [
 ] as const;
 export type GapRule = (typeof GAP_RULES)[number];
 
+/** How a rule counts, set per repository (`planCheck` in .coplan/config.json):
+ *  an `error` holds Confirm design and Submit, a `warn` is listed, an `off`
+ *  is not shown. Every rule is a `warn` unless the repository says. */
+export const GAP_SEVERITIES = ['error', 'warn', 'off'] as const;
+export type GapSeverity = (typeof GAP_SEVERITIES)[number];
+export type GapSeverities = Partial<Record<GapRule, GapSeverity>>;
+
 export interface Gap {
   rule: GapRule;
   target: Target;
   message: string;
+  severity: Exclude<GapSeverity, 'off'>;
+}
+
+/** The gaps that hold the sign-off: Confirm design, and Submit. */
+export function blockingGaps(plan: Plan, severities: GapSeverities = {}): Gap[] {
+  return planGaps(plan, severities).filter((g) => g.severity === 'error');
 }
 
 /** Box kinds that stand for something the plan does not build. */
 const NOT_BUILT = new Set(['external', 'actor', 'note']);
 
-export function planGaps(plan: Plan): Gap[] {
-  const gaps: Gap[] = [];
+export function planGaps(plan: Plan, severities: GapSeverities = {}): Gap[] {
+  const gaps: Omit<Gap, 'severity'>[] = [];
   const add = (rule: GapRule, target: Target, message: string) => gaps.push({ rule, target, message });
   const leaves = plan.tasks.filter((t) => !hasSubtasks(plan, t.id));
   const tasked = planPhase(plan) !== 'planning';
@@ -101,5 +114,9 @@ export function planGaps(plan: Plan): Gap[] {
     const last = th.replies.at(-1)?.author ?? th.author;
     if (!th.resolved && last === 'user') add('comment-unanswered', th.target, `Comment ${th.id} from the user has no answer yet: "${th.text.slice(0, 80)}${th.text.length > 80 ? '…' : ''}"`);
   }
-  return gaps;
+  // What holds the sign-off first; a rule turned off is not shown at all.
+  return gaps
+    .map((g) => ({ ...g, severity: severities[g.rule] ?? 'warn' }))
+    .filter((g): g is Gap => g.severity !== 'off')
+    .sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'error' ? -1 : 1));
 }

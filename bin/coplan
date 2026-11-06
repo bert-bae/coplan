@@ -1,7 +1,7 @@
 #!/bin/sh
 # Coplan operator CLI (`coplan`). Added to PATH by the plugin's bin/ directory.
-DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ROOT=$(CDPATH= cd -- "$DIR/.." && pwd)
+DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH='' cd -- "$DIR/.." && pwd)
 # dist/ is build output and is not committed: a fresh install has to build it.
 if [ ! -f "$ROOT/dist/cli/main.js" ]; then
   echo "coplan is not built yet. Build it once with:" >&2

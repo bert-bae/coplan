@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, confirmDesign, countTasks, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, submitPlan, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
-import type { Plan, PlanInput } from '../shared/types.ts';
+import { previewProposal } from '../shared/proposals.ts';
+import type { Plan, PlanInput, PlanOp } from '../shared/types.ts';
 
 /**
  * The plan document: publishing, editing from either side, and the change
@@ -647,4 +648,176 @@ test("removing a task its boxes link moves the diagram's revision, so a canvas h
   assert.equal(plan.diagrams[0]!.rev, rev + 1);
   // A save made against the old revision (the canvas, unaware) is refused, not applied.
   assert.throws(() => applyOps(plan, [{ op: 'upsert_diagram', id: plan.diagrams[0]!.id, caption: 'x', expect: rev }], 'user'), /was changed/);
+});
+
+/* ------------------------------------------------------------ proposals */
+
+const WRITE_THROUGH: PlanOp = {
+  op: 'propose',
+  title: 'Make the cache write-through',
+  reason: 'Reads after a write would otherwise see stale data for up to the TTL.',
+  ops: [
+    { op: 'upsert_node', diagramId: 'd1', id: 'cache', description: 'Write-through: every write updates it.' },
+    { op: 'upsert_edge', diagramId: 'd1', from: 'api', to: 'db', label: 'write' },
+  ],
+};
+
+test('a proposal changes nothing until the user accepts it, and its reasoning is a comment on what it changes', () => {
+  const before = fresh();
+  const { plan } = applyOps(before, [WRITE_THROUGH], 'claude');
+  const p = plan.proposals![0]!;
+  assert.equal(p.id, 'p1');
+  assert.equal(p.status, 'open');
+  assert.deepEqual(plan.diagrams, before.diagrams, 'the design is untouched');
+  const thread = plan.threads.find((t) => t.id === p.threadId)!;
+  assert.deepEqual(thread.target, { kind: 'node', id: 'd1/cache' });
+  assert.match(thread.text, /^Proposal p1: Make the cache write-through\n\nReads after a write/);
+  assert.match(plan.changes.at(-1)!.summary, /proposed p1 "Make the cache write-through" \(2 edits\)/);
+});
+
+test('accepting a proposal applies its edits as the user’s, settles its thread, and Claude hears of it', () => {
+  let plan = applyOps(fresh(), [WRITE_THROUGH], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user').plan;
+  const d = plan.diagrams[0]!;
+  assert.equal(d.nodes.find((n) => n.id === 'cache')!.description, 'Write-through: every write updates it.');
+  assert.ok(d.edges.some((e) => e.source === 'api' && e.target === 'db' && e.label === 'write'), 'both edits, though each moves the diagram');
+  assert.equal(plan.proposals![0]!.status, 'accepted');
+  const thread = plan.threads.find((t) => t.id === plan.proposals![0]!.threadId)!;
+  assert.ok(thread.resolved);
+  assert.equal(thread.replies.at(-1)!.text, 'Accepted.');
+  const unread = unreadByClaude(plan).map((c) => c.summary);
+  assert.ok(unread.some((s) => /accepted proposal p1/.test(s)), 'the outcome is unread by Claude');
+  assert.equal(d.updatedBy, 'user', 'the change is the user’s');
+  assert.throws(() => applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user'), /already accepted/);
+});
+
+test('rejecting says why; Claude cannot accept or reject, and the user cannot propose', () => {
+  let plan = applyOps(fresh(), [WRITE_THROUGH], 'claude').plan;
+  assert.throws(() => applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'claude'), /Only the user accepts/);
+  assert.throws(() => applyOps(plan, [{ op: 'reject_proposal', id: 'p1' }], 'claude'), /Only the user rejects/);
+  assert.throws(() => applyOps(plan, [WRITE_THROUGH], 'user'), /make yours directly/);
+  plan = applyOps(plan, [{ op: 'reject_proposal', id: 'p1', note: 'Writes are rare here.' }], 'user').plan;
+  assert.equal(plan.proposals![0]!.status, 'rejected');
+  assert.equal(plan.proposals![0]!.note, 'Writes are rare here.');
+  assert.match(plan.changes.at(-1)!.summary, /rejected proposal p1 "Make the cache write-through": Writes are rare here\./);
+  assert.equal(plan.diagrams[0]!.nodes.find((n) => n.id === 'cache')!.description, undefined);
+  // Claude may take back its own.
+  plan = applyOps(plan, [{ ...WRITE_THROUGH, title: 'Again' } as PlanOp], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'withdraw_proposal', id: 'p2' }], 'claude').plan;
+  assert.equal(plan.proposals![1]!.status, 'withdrawn');
+});
+
+test('a proposal made for a plan that has since moved cannot be accepted, and says what moved', () => {
+  let plan = applyOps(fresh(), [WRITE_THROUGH], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_node', diagramId: 'd1', id: 'db', label: 'Primary DB' }], 'user').plan;
+  assert.throws(() => applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user'), /p1 is out of date: diagram "Components" changed since it was made/);
+  assert.equal(plan.proposals![0]!.status, 'open', 'it can still be rejected');
+});
+
+test('a proposal that would not apply, or carries what a proposal cannot, is refused when made', () => {
+  const plan = fresh();
+  assert.throws(
+    () => applyOps(plan, [{ op: 'propose', title: 'x', reason: 'y', ops: [{ op: 'remove_node', diagramId: 'd1', id: 'nope' }] }], 'claude'),
+    /would not apply to the plan as it is/,
+  );
+  assert.throws(
+    () => applyOps(plan, [{ op: 'propose', title: 'x', reason: 'y', ops: [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'hi' }] }], 'claude'),
+    /carries edits to the plan's content .*not comment/,
+  );
+  assert.throws(() => applyOps(plan, [{ op: 'propose', title: 'x', reason: 'y', ops: [{ op: 'upsert_task', id: 't2', status: 'done' }] }], 'claude'), /harness_task_update/);
+  assert.throws(() => applyOps(plan, [{ op: 'propose', title: 'x', reason: '', ops: [WRITE_THROUGH.ops[0]!] } as PlanOp], 'claude'), /needs a reason/);
+});
+
+test('once the design is confirmed a design proposal can be made, but accepting it needs the design reopened', () => {
+  let plan = confirmDesign(fresh(), { prompt: 'tasks please' }, 2_000);
+  plan = applyOps(plan, [WRITE_THROUGH], 'claude').plan;
+  assert.throws(() => applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user'), /design/i);
+  // A task proposal fits the confirmed design.
+  plan = applyOps(plan, [{ op: 'propose', title: 'Load test', reason: 'Prove it.', ops: [{ op: 'upsert_task', title: 'Load test' }] }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'accept_proposal', id: 'p2' }], 'user').plan;
+  assert.ok(plan.tasks.some((t) => t.title === 'Load test'));
+});
+
+test("moving boxes, linking tasks or a task's progress does not put a proposal out of date; what it changes does", () => {
+  let plan = applyOps(fresh(), [WRITE_THROUGH], 'claude').plan;
+  const d = plan.diagrams[0]!;
+  // The user drags every box, and links one to a task: layout and links, not the design.
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id: 'd1', nodes: d.nodes.map((n) => ({ ...n, x: (n.x ?? 0) + 40, y: (n.y ?? 0) + 10 })), edges: d.edges }], 'user').plan;
+  plan = applyOps(plan, [{ op: 'upsert_node', diagramId: 'd1', id: 'api', taskIds: ['t4'] }], 'user').plan;
+  assert.equal(applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user').plan.proposals![0]!.status, 'accepted');
+});
+
+test("a proposal's `expect` checks it when made, and does not refuse the accept after a harmless move", () => {
+  const rev = fresh().diagrams[0]!.rev;
+  let plan = applyOps(fresh(), [{ ...WRITE_THROUGH, ops: WRITE_THROUGH.ops.map((o) => ({ ...o, expect: rev })) } as PlanOp], 'claude').plan;
+  assert.ok(plan.proposals![0]!.ops.every((o) => !('expect' in o)), 'kept without it');
+  const d = plan.diagrams[0]!;
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id: 'd1', nodes: d.nodes.map((n) => ({ ...n, x: (n.x ?? 0) + 5 })), edges: d.edges }], 'user').plan;
+  assert.equal(applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user').plan.proposals![0]!.status, 'accepted');
+  // A stale `expect` is caught when the proposal is made.
+  assert.throws(() => applyOps(plan, [{ ...WRITE_THROUGH, ops: [{ ...WRITE_THROUGH.ops[0]!, expect: rev - 1 }] } as PlanOp], 'claude'), /would not apply/);
+});
+
+test('mid-build, an accepted proposal may add a task, never re-scope one the user signed off', () => {
+  let plan = submitPlan(confirmDesign(fresh(), { prompt: 'tasks' }, 2_000), { target: 'session', prompt: 'build' }, 3_000);
+  plan = applyOps(plan, [{ op: 'propose', title: 'Rescope', reason: 'Bigger.', ops: [{ op: 'upsert_task', id: 't4', title: 'Rewrite the API', branch: 'other' }] }], 'claude').plan;
+  assert.throws(() => applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user'), /takes only new tasks from a proposal\. Reopen the plan/);
+  plan = applyOps(plan, [{ op: 'propose', title: 'Load test', reason: 'Prove it.', ops: [{ op: 'upsert_task', title: 'Load test' }] }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'accept_proposal', id: 'p2' }], 'user').plan;
+  assert.ok(plan.tasks.some((t) => t.title === 'Load test'));
+  assert.equal(plan.tasks.find((t) => t.id === 't4')!.title, 'Wire into API', 'the signed-off task as it was');
+});
+
+test('Claude is told the user answered a proposal, not that they edited the summary', () => {
+  let plan = applyOps(fresh(), [{ op: 'propose', title: 'Load test', reason: 'Prove it.', ops: [{ op: 'upsert_task', title: 'Load test' }] }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user').plan;
+  const areas = unreadAreas(plan);
+  assert.ok(areas.includes('your proposals'));
+  assert.ok(areas.includes('tasks'), 'and what it changed');
+  assert.ok(!areas.includes('the summary'));
+});
+
+test('a proposal is held to the comment-thread limit, and an answer Claude has not heard is never trimmed away', () => {
+  let plan = fresh();
+  plan.threads = Array.from({ length: 500 }, (_, i) => ({ id: `c${i + 1}`, target: { kind: 'plan' as const, id: '' }, author: 'user' as const, text: 'x', ts: 1, resolved: true, replies: [] }));
+  assert.throws(() => applyOps(plan, [WRITE_THROUGH], 'claude'), /at most 500 comment threads/);
+
+  plan = applyOps(fresh(), [WRITE_THROUGH], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'reject_proposal', id: 'p1', note: 'No.' }], 'user').plan;
+  // Fill past the limit with proposals Claude withdraws itself.
+  plan.proposals!.push(...Array.from({ length: 70 }, (_, i) => ({ ...plan.proposals![0]!, id: `p${i + 2}`, status: 'withdrawn' as const, resolvedSeq: 0 })));
+  plan = applyOps(plan, [{ op: 'propose', title: 'One more', reason: 'r', ops: [{ op: 'upsert_task', title: 'More' }] }], 'claude').plan;
+  assert.ok(plan.proposals!.some((p) => p.id === 'p1' && p.status === 'rejected'), 'the unheard rejection is kept');
+});
+
+test("a proposal's preview says Accept is held once the design is signed off, not what it said before", () => {
+  const plan = applyOps(fresh(), [WRITE_THROUGH], 'claude').plan;
+  assert.equal(previewProposal(plan, plan.proposals![0]!).blocker, null);
+  const confirmed = confirmDesign(plan, { prompt: 'tasks' }, 9_000);
+  const after = previewProposal(confirmed, confirmed.proposals![0]!);
+  assert.match(after.blocker ?? '', /design/i, 'not the cached answer from before the sign-off');
+  assert.ok(after.after, 'still shown, as it would be once the design is reopened');
+});
+
+test('publishing the plan anew withdraws what was proposed for the old one, saying so', () => {
+  let plan = applyOps(fresh(), [WRITE_THROUGH], 'claude').plan;
+  plan = publishPlan(plan, INPUT, 5_000).plan;
+  assert.equal(plan.proposals![0]!.status, 'withdrawn');
+  assert.equal(plan.threads.find((t) => t.id === plan.proposals![0]!.threadId)?.replies.at(-1)?.text, 'Withdrawn: the plan was published anew.');
+});
+
+test('a proposal cannot be built on a change of the user’s that Claude has not read', () => {
+  const plan = applyOps(fresh(), [{ op: 'upsert_node', diagramId: 'd1', id: 'cache', label: 'Memcached' }], 'user').plan;
+  assert.throws(() => applyOps(plan, [WRITE_THROUGH], 'claude'), /The user changed .* since you last read the plan/);
+  const read = structuredClone(plan);
+  markReadByClaude(read);
+  assert.equal(applyOps(read, [WRITE_THROUGH], 'claude').plan.proposals?.length, 1, 'read first, then propose');
+});
+
+test('proposals survive a reload; one that lost its edits does not', () => {
+  const plan = applyOps(fresh(), [WRITE_THROUGH], 'claude').plan;
+  const raw = JSON.parse(JSON.stringify(plan)) as Plan;
+  assert.equal(normalizePlan(raw as unknown as Parameters<typeof normalizePlan>[0], 'x').proposals?.length, 1);
+  (raw.proposals![0] as unknown as Record<string, unknown>)['ops'] = 'gone';
+  assert.equal(normalizePlan(raw as unknown as Parameters<typeof normalizePlan>[0], 'x').proposals, undefined);
 });

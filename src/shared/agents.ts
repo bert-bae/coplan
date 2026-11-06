@@ -59,8 +59,9 @@ export const AGENTS: Record<AgentKind, AgentInfo> = {
     name: 'Cursor',
     product: 'Cursor',
     app: 'Cursor',
-    // Cursor's hooks do not see AskQuestion today; a question is noticed
-    // when the turn ends on one. Listed for when they do.
+    // Cursor's hooks do not see AskQuestion today, so hooks/cursor.json
+    // registers none for it: a question is noticed when the turn ends on
+    // one. Named here for the prompts, which tell Cursor how to ask.
     askTools: ['AskQuestion'],
     askWith: 'AskQuestion or plainly',
     promptContext: false,

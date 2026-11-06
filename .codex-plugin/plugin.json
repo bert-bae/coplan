@@ -1,6 +1,6 @@
 {
   "name": "coplan",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Open-source visual planning workspace for coding agents: shape the plan as architecture diagrams and a task board in the browser, submit it, and follow the build.",
   "author": {
     "name": "Elbert B."

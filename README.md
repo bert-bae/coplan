@@ -99,6 +99,10 @@ where *Answer in Claude* links open. Install the plugin in each agent you
 use: they share one daemon and one page, and the session list says which
 agent each session runs in.
 
+It runs on **Linux and macOS**, both tested in CI. On **Windows**, run your
+agent in WSL: the hooks are a POSIX shell script, and native Windows is
+neither supported nor tested. From WSL, links open in your Windows browser.
+
 ### Claude Code, from GitHub
 
 ```bash
@@ -441,7 +445,7 @@ initials with the ☰ button or `[` to give the plan the width.
 
 ## What Claude gets
 
-Nine tools, none of which waits on you or asks you anything:
+Ten tools, none of which waits on you or asks you anything:
 
 | Tool | What it does |
 | --- | --- |
@@ -449,6 +453,7 @@ Nine tools, none of which waits on you or asks you anything:
 | `harness_plan_read` | The plan as text, leading with the net effect of your changes since the last read, with every id Claude needs. Diagrams read as an architecture: the system's shape, each part in flow order with its description, decisions and tasks, then every connection. `changes_only` skips the document and quotes edited text instead. |
 | `harness_plan_check` | What the plan leaves open: boxes no task builds, tasks that build no box, undescribed boxes, tasks with no detail, box ids two diagrams share, branch layouts a stack of pull requests cannot follow, and your comments nobody answered. The same list shows in the sign-off dialogs. |
 | `harness_plan_edit` | A batch of targeted edits — sections, diagrams, one box or arrow at a time, tasks, moves, comments (on the plan, an item, or one box or arrow) and replies, the build report — applied all or nothing. Once the design is confirmed, only tasks, task links and comments; once the plan is submitted, only task edits, comments and the report. |
+| `harness_plan_propose` | Suggest a change instead of making it: a batch of edits, with Claude's reason, that waits for you. You see it beside what it changes — and on the canvas, what it adds, changes and removes — and accept it (the edits apply, as yours) or reject it, saying why if you like. Claude hears your answer the next time it reads. A proposal you have moved past goes out of date and cannot be accepted. |
 | `harness_tasks_publish` | Publish the task list for the confirmed design: replaces the task tree and nothing else, with dependencies, branches, review modes and the boxes each task builds. |
 | `harness_task_next` | What can be built now: ready tasks, how many to run at once, what is in progress and at which step, what the rest wait on, the branches — and, once every task is done, how to finish. |
 | `harness_task_brief` | One task's focused brief, written to hand to a subagent as is: objective, the boxes it builds and their connections, what it comes after and before, its scope, branch, and its implement → review → refine cycle with the exact checks. |
@@ -474,9 +479,9 @@ differs is what each agent lets a plugin see and do:
 | Start a plan | `/coplan <task>` | `$coplan <task>`, or ask | `/coplan <task>` |
 | The build prompt reaches the agent | with your next message ("go") | with your next message ("go") | you paste it — submitting copies it — or say "build the plan" and it reads it with `harness_plan_read` |
 | "You changed the plan" note on your next message | yes | yes | where Cursor passes it on |
-| A question is noticed | `AskUserQuestion`, permission prompts, idle prompts, a turn ending on a question | `request_user_input` (Plan mode), permission requests, a turn ending on a question | a turn ending on a question |
+| A question is noticed | `AskUserQuestion`, permission prompts, idle prompts, a turn ending on a question | `request_user_input` (Plan mode), permission requests, a turn ending on a question; Codex has no hook for idle prompts | a turn ending on a question: Cursor's hooks see neither `AskQuestion` nor permission prompts |
 | *Answer in …* opens the session | cloud and Remote Control sessions | the Codex app (`codex://threads/…`) | no link: Cursor has none for a chat |
-| Slash commands | `/coplan-open`, `/coplan-doctor`, `/coplan-restart` | none; ask, and the skill runs `coplan` | `/coplan-open`, `/coplan-doctor`, `/coplan-restart` |
+| Slash commands | `/coplan-setup`, `/coplan-open`, `/coplan-doctor`, `/coplan-restart`, `/coplan-init` | none; ask, and the skill runs `coplan` | `/coplan-setup`, `/coplan-open`, `/coplan-doctor`, `/coplan-restart`, `/coplan-init` |
 
 How each one is wired:
 
@@ -539,6 +544,11 @@ pnpm check             # typecheck, build and test
 ```
 
 `dist/` is build output and is not committed; `pnpm install` builds it.
+
+A release is a version bump — `package.json` and the three plugin
+manifests, kept equal by a test — with a `## <version>` section in
+CHANGELOG.md. When it reaches `main`, CI tags it `v<version>` and publishes
+that section as the release notes.
 
 ## License
 

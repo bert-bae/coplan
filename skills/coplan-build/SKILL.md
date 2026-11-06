@@ -89,10 +89,17 @@ Otherwise:
   refinement, a fix), rebase the branches above onto it before going on.
 - A branch built on the tasks with no branch is cut from the branch you
   are on, where those land — the brief says so.
-- At the end, open the pull requests in stack order, each against the
-  branch below it (the base branch for the bottom one), if the user wants
-  pull requests and you have the tools for it. Say in each which tasks it
-  carries and what it stacks on.
+- Open the pull requests the way the build prompt says — the repository
+  chooses the tool (`gh`, Graphite, or none) and when (as each branch is
+  done, once the user says, or never) in `.coplan/config.json`
+  (`pullRequests`). `harness_task_next` lists the branches that are due and
+  shows the repository's pull request template, if it has one: write each
+  description from it. Each pull request goes against the branch below it
+  (the base branch for the bottom one); say in each which tasks it carries
+  and what it stacks on, and record it with `harness_branch_update`.
+- Where the repository holds the report on its final checks
+  (`final.blocking`), the report is refused until it carries each of them,
+  passing, in `checks`.
 
 ## When things go sideways
 

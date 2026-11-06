@@ -22,6 +22,7 @@ import {
   unreadItems,
 } from '../shared/plan.ts';
 import { BUILD_MARKER, DESIGN_MARKER, PROMPT_MOVED, buildPrompt, designPrompt, promptHash, type PromptOptions } from './render.ts';
+import { blockingGaps } from '../shared/check.ts';
 import { DEFAULT_AGENT, isAgentKind, type AgentKind } from '../shared/agents.ts';
 import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ServerEvent, SessionState, SessionSummary, TaskListInput } from '../shared/types.ts';
 
@@ -342,6 +343,7 @@ export class SessionStore extends EventEmitter {
     if (typeof input.expect === 'number' && input.expect !== plan.version) {
       throw new PlanError('The plan changed while you were reviewing it. The preview now shows the latest version — check it, then submit again.');
     }
+    refuseBlockingGaps(plan, input, 'submitted');
     const { prompt, trimmed } = buildPrompt(plan, { ...input, agent: session.agent });
     if (input.hash !== undefined && input.hash !== promptHash(prompt)) throw new PlanError(PROMPT_MOVED('submit'));
     const next = submitPlan(plan, {
@@ -372,6 +374,7 @@ export class SessionStore extends EventEmitter {
     if (typeof input.expect === 'number' && input.expect !== plan.version) {
       throw new PlanError('The plan changed while you were reviewing it. The preview now shows the latest version — check it, then confirm again.');
     }
+    refuseBlockingGaps(plan, input, 'confirmed');
     const { prompt, trimmed } = designPrompt(plan, { ...input, agent: session.agent });
     if (input.hash !== undefined && input.hash !== promptHash(prompt)) throw new PlanError(PROMPT_MOVED('confirm'));
     const next = confirmDesign(plan, { prompt, trimmed, ...(input.note ? { note: input.note } : {}) });
@@ -622,6 +625,18 @@ function mtimeOf(dir: string): number {
   } catch {
     return Date.now();
   }
+}
+
+/** The repository's `planCheck` errors hold the sign-off: what the user
+ *  would sign is a plan their own rules say is not finished. */
+function refuseBlockingGaps(plan: Plan, input: PromptOptions, what: 'confirmed' | 'submitted'): void {
+  const held = blockingGaps(plan, input.project?.planCheck);
+  if (!held.length) return;
+  const list = held.slice(0, 5).map((g) => `- ${g.message}`).join('\n');
+  throw new PlanError(
+    `The plan cannot be ${what} yet: this repository's plan check (planCheck in .coplan/config.json) counts ` +
+      `${held.length === 1 ? 'this gap' : `these ${held.length} gaps`} as errors:\n${list}${held.length > 5 ? `\n- …and ${held.length - 5} more` : ''}`,
+  );
 }
 
 function discardDir(dir: string): void {
