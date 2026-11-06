@@ -95,6 +95,28 @@ plugin build it once with `/coplan-setup`.
   with each agent's name
 - `.claude-plugin/`, `.codex-plugin/` and `.cursor-plugin/`: one manifest
   per agent. Keep their versions in step with `package.json`
+- `scripts/demo/`: the demo plans behind the README's screenshots, and the
+  script that takes them (below)
+
+## Screenshots and the README's numbers
+
+The README's screenshots come from demo plans seeded into a daemon of their
+own, so taking them again never touches your sessions. After a change to the
+page, build and run:
+
+```bash
+pnpm build && node scripts/demo/screenshots.mjs --repos /tmp/code
+```
+
+It needs Playwright with Chromium (not a dependency here: install it
+globally). `--only board,report` takes just those; Pillow, if Python has it,
+reduces each image to 256 colours. The page header shows each demo
+repository's path, which is why a short `--repos` reads better.
+
+The README's [Resource footprint](README.md#resource-footprint) and
+[What it installs](README.md#what-it-installs) describe this code: if you
+change a hook, a tool, a skill, what is stored, or anything that moves those
+numbers, update them in the same pull request.
 
 ## Ground rules
 
