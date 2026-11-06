@@ -15,6 +15,7 @@ and Cursor except where the README's
 - [Submitting the plan](#submitting-the-plan)
 - [Going ahead from chat](#going-ahead-from-chat)
 - [Where a plan stands: four statuses](#where-a-plan-stands-four-statuses)
+- [Requesting revisions](#requesting-revisions)
 - [Checks: `.coplan/config.json`](#checks-coplanconfigjson)
 - [Questions are answered in Claude](#questions-are-answered-in-claude) — and
   [when Claude asks](#when-claude-asks)
@@ -37,7 +38,9 @@ and Cursor except where the README's
    saved at once and recorded in the plan's change log as yours.
 3. **You hand it back in chat.** The header says when Claude hasn't read
    your changes and opens the session in Claude. If you just type in chat,
-   the next prompt carries a one-line note saying where the plan changed.
+   the next prompt carries a one-line note saying where the plan changed. Or
+   send your comments as one ask: **Request revisions**
+   ([below](#requesting-revisions)).
 4. **Claude reads it back.** `harness_plan_read` leads with the net effect of
    your edits since it last looked — what is different now, not each step
    you took, and never where you dragged boxes — then the plan, with each
@@ -226,6 +229,33 @@ Review is about what was built, not the plan before the build: a plan you are
 still reading is Planning. The session list can show one status at a time:
 the row of buttons over it filters the list, with how many plans each holds,
 and remembers your choice.
+
+## Requesting revisions
+
+You can comment on every part of the plan: the plan as a whole, a section, a
+diagram, a box, an arrow or a task. When the comments are in, **Request
+revisions** in the header (it counts the comments waiting on Claude) turns
+them into one explicit ask, with nothing more to type:
+
+- The dialog shows exactly what Claude will be sent: act on each comment,
+  reply in its thread, propose what is yours to decide rather than change it,
+  then say in chat what changed — and the comments, each on the item it is
+  about, named as the read-back names them. Add a note if you like.
+- It carries every open comment whose last word is yours. One Claude has
+  already answered stays out until you reply in it; so do Claude's own
+  proposals, which wait on you.
+- **Coplan never starts a turn.** The request is queued, and your next
+  message in Claude's chat carries it — "go" will do — once. Where the
+  session has a link, queuing opens it there, as *Answer in Claude* does.
+  Pasted by hand, it is not sent a second time.
+- In Cursor, whose hooks cannot add to a message, queuing copies the
+  request for you to paste; or ask Cursor to read the plan, and its next
+  `harness_plan_read` hands it over.
+- The header shows where it stands: *Revisions pending* until Claude has it
+  (with *Copy request* and *Withdraw*), *Revisions sent · 1/3* as the answers
+  come in, and *Revisions answered* once every comment it carried has a reply
+  from Claude, is resolved, or has a proposal from Claude on what it is
+  about. Queuing another before the first is sent replaces it.
 
 ## Checks: `.coplan/config.json`
 

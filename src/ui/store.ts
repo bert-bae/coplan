@@ -435,6 +435,48 @@ class Store {
     }
   }
 
+  /**
+   * Queue a request to revise the plan per the open comments (#67). It
+   * waits for the user's next message in the agent's chat: the page never
+   * starts a turn.
+   */
+  async queueRevision(input: { note: string; expect: number; hash?: string }, opts: { quiet?: boolean } = {}): Promise<boolean> {
+    const id = this.state.sessionId;
+    if (!id) return false;
+    try {
+      const { plan } = await api.queueRevision(id, input);
+      this.adoptPlan(id, plan);
+      const agent = agentInfo(this.state.session?.agent);
+      if (!opts.quiet) {
+        this.toast(
+          'success',
+          agent.promptContext
+            ? `Request queued. Send any message in ${agent.name}'s chat — "go" will do — and it goes with it.`
+            : `Request queued. Paste it into ${agent.name}'s chat, or ask ${agent.name} to read the plan.`,
+        );
+      }
+      return true;
+    } catch (err) {
+      this.fail(err);
+      return false;
+    }
+  }
+
+  /** Take back a revision request the agent has not been sent. */
+  async withdrawRevision(): Promise<boolean> {
+    const id = this.state.sessionId;
+    if (!id) return false;
+    try {
+      const { plan } = await api.withdrawRevision(id);
+      this.adoptPlan(id, plan);
+      this.toast('info', 'Request withdrawn: it will not be sent.');
+      return true;
+    } catch (err) {
+      this.fail(err);
+      return false;
+    }
+  }
+
   /** Unlock a confirmed design so it can be reshaped. */
   async reopenDesign(): Promise<boolean> {
     const id = this.state.sessionId;

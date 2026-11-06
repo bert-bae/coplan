@@ -1,0 +1,20 @@
+[cc-harness] Revise the plan "Add a read-through cache" — the user wants you to act on their open comments.
+
+The user sent these from Coplan as one ask. Read the plan first (harness_plan_read) if they changed it since you last did. Then, for each comment below:
+
+1. Act on it: make the change it asks for with harness_plan_edit, where the change is yours to make.
+2. Where the change is the user's to decide, or the plan is locked against it, propose it with harness_plan_propose instead of making it.
+3. Reply in its thread — harness_plan_edit {ops: [{op: "reply", threadId, text}]} — with what you did or proposed, and resolve it ({op: "resolve", threadId, resolved: true}) if it is settled.
+
+Then tell the user in chat what changed. Coplan marks the ask answered once every comment has a reply or a proposal.
+
+## From the user
+> Start with the client.
+> Leave billing alone.
+
+## Open comments (3)
+- [c1] on box "Redis" (d1/cache) in diagram "Components" — you: Which Redis version?
+  ↳ user: Redis 7.
+- [c3] on task "Wire into API" — user: Keep the old path behind a flag.
+    Remove it next release.
+- [c4] on the plan — user: Looks good overall.

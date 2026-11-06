@@ -1,6 +1,6 @@
 ---
 name: coplan
-description: Plan a task visually in the Coplan UI — architecture diagrams the user reshapes and confirms, then a linked task list (what blocks what, which branch each piece lands on) that is built when the user says so, in chat or by submitting it. Use when the user types /coplan or $coplan, asks to "plan this in Coplan" or to set Coplan up, wants to see and shape the plan before work starts, tells you to go ahead with a Coplan plan, or when a "[cc-harness] The design is confirmed" prompt arrives.
+description: Plan a task visually in the Coplan UI — architecture diagrams the user reshapes and confirms, then a linked task list (what blocks what, which branch each piece lands on) that is built when the user says so, in chat or by submitting it. Use when the user types /coplan or $coplan, asks to "plan this in Coplan" or to set Coplan up, wants to see and shape the plan before work starts, tells you to go ahead with a Coplan plan, or when a "[cc-harness] The design is confirmed" or "[cc-harness] Revise the plan" prompt arrives.
 ---
 
 # Planning in Coplan
@@ -117,6 +117,12 @@ It leads with the net effect of their edits, then the plan.
 - **Comments** — act on each, then reply in its thread with
   `harness_plan_edit {ops: [{op: "reply", threadId, text}]}`; resolve it
   (`{op: "resolve", threadId, resolved: true}`) if settled.
+
+A `[cc-harness] Revise the plan …` prompt is the user asking, from Coplan,
+for exactly that: it lists the comments waiting on you. Act on each, reply in
+its thread, propose what is theirs to decide, then tell them what changed.
+Coplan marks their ask answered once every comment has a reply or a
+proposal.
 
 **Auditing the plan.** When you review the design — yours or the user's —
 and are not sure a change is wanted, say so where it applies instead of

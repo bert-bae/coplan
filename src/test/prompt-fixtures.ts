@@ -147,6 +147,18 @@ export function bigPlan(): Plan {
   return plan;
 }
 
+/** The rich plan with more comments waiting on the agent than one
+ *  message holds: a revision request cut to fit (#67). */
+export function crowdedPlan(): Plan {
+  const said = 'This needs another look before it is built, because the way it is drawn now leaves the failure case open. ';
+  return applyOps(
+    richPlan(),
+    Array.from({ length: 45 }, (_, i) => ({ op: 'comment' as const, target: { kind: 'task' as const, id: i % 2 ? 'wire' : 'docs' }, text: `${i + 1}. ${said.repeat(2)}` })),
+    'user',
+    1_350,
+  ).plan;
+}
+
 /** The rich plan with one section too long to quote: cut to fit, with
  *  room left for every task line and the build order. */
 export function longPlan(): Plan {

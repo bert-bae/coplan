@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Request revisions from the page: open comments as one ask
+
+- **Request revisions**, in the header, sends every comment waiting on the
+  agent as one explicit ask: act on each, reply in its thread, propose what
+  is yours to decide, then say what changed. The dialog shows exactly what
+  is sent, with each comment on the item it is about, and takes a note.
+- **Coplan still never starts a turn.** The request is queued, like a
+  sign-off, and your next message in the agent's chat carries it — "go"
+  will do — once; a pasted copy is not sent again. Where the session has a
+  link, queuing opens it. In Cursor it is copied to paste, or handed over
+  with the agent's next `harness_plan_read`.
+- **The header shows where it stands**: *pending* (with *Copy request* and
+  *Withdraw*), *sent* with how many comments are answered, then *answered*
+  once each has a reply, a resolve or a proposal from the agent.
+
 ### Four plan statuses: Planning, In progress, Review, Done
 
 - **Every plan shows one of four statuses**, in the same words in the

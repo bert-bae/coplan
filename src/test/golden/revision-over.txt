@@ -1,0 +1,46 @@
+[cc-harness] Revise the plan "Add a read-through cache" — the user wants you to act on their open comments.
+
+The user sent these from Coplan as one ask. Read the plan first (harness_plan_read) if they changed it since you last did. Then, for each comment below:
+
+1. Act on it: make the change it asks for with harness_plan_edit, where the change is yours to make.
+2. Where the change is the user's to decide, or the plan is locked against it, propose it with harness_plan_propose instead of making it.
+3. Reply in its thread — harness_plan_edit {ops: [{op: "reply", threadId, text}]} — with what you did or proposed, and resolve it ({op: "resolve", threadId, resolved: true}) if it is settled.
+
+Then tell the user in chat what changed. Coplan marks the ask answered once every comment has a reply or a proposal.
+
+## Open comments (48)
+- [c1] on box "Redis" (d1/cache) in diagram "Components" — you: Which Redis version?
+  ↳ user: Redis 7.
+- [c3] on task "Wire into API" — user: Keep the old path behind a flag.
+    Remove it next release.
+- [c4] on the plan — user: Looks good overall.
+- [c5] on task "Document the cache in the README" — user: 1. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c6] on task "Wire into API" — user: 2. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c7] on task "Document the cache in the README" — user: 3. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c8] on task "Wire into API" — user: 4. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c9] on task "Document the cache in the README" — user: 5. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c10] on task "Wire into API" — user: 6. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c11] on task "Document the cache in the README" — user: 7. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c12] on task "Wire into API" — user: 8. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c13] on task "Document the cache in the README" — user: 9. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c14] on task "Wire into API" — user: 10. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c15] on task "Document the cache in the README" — user: 11. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c16] on task "Wire into API" — user: 12. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c17] on task "Document the cache in the README" — user: 13. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c18] on task "Wire into API" — user: 14. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c19] on task "Document the cache in the README" — user: 15. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c20] on task "Wire into API" — user: 16. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c21] on task "Document the cache in the README" — user: 17. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c22] on task "Wire into API" — user: 18. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c23] on task "Document the cache in the README" — user: 19. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c24] on task "Wire into API" — user: 20. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c25] on task "Document the cache in the README" — user: 21. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c26] on task "Wire into API" — user: 22. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c27] on task "Document the cache in the README" — user: 23. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c28] on task "Wire into API" — user: 24. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c29] on task "Document the cache in the README" — user: 25. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c30] on task "Wire into API" — user: 26. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c31] on task "Document the cache in the README" — user: 27. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c32] on task "Wire into API" — user: 28. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- [c33] on task "Document the cache in the README" — user: 29. This needs another look before it is built, because the way it is drawn now leaves the failure case open. This needs another look before it is built, because the way it is drawn now leaves the failure case open.
+- …and 16 more comments: harness_plan_read {changes_only: true} lists the comments waiting on you.

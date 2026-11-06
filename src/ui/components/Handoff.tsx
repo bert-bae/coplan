@@ -3,6 +3,7 @@ import { classNames, relativeTime } from '../lib/format.ts';
 import { isLocked, unreadAreas } from '../../shared/plan.ts';
 import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
 import type { SessionLink, SessionState, WaitingState } from '../../shared/types.ts';
+import { RevisionControl } from './Revisions.tsx';
 
 /** What to tell the agent once the plan has been worked over. */
 export const HANDOFF_MESSAGE =
@@ -45,6 +46,7 @@ export function Handoff() {
         ))}
       {/* Without a link, the fallback copies "read my changes" — the wrong
           words for a submitted plan; the strip below offers its prompt. */}
+      {plan && <RevisionControl />}
       {(!locked || session.link) && <OpenInClaude session={session} primary={unread > 0} />}
       {plan && (
         <button

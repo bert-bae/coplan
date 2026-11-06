@@ -495,6 +495,9 @@ export interface Plan {
   branches?: Record<string, BranchState>;
   /** Changes Claude suggested, open and settled; newest last, bounded. */
   proposals?: Proposal[];
+  /** The user's requests to revise the plan per their open comments:
+   *  newest last, bounded, at most one waiting to be sent (#67). */
+  revisions?: RevisionRequest[];
   /** Bumped each time Claude publishes the plan wholesale. */
   revision: number;
   createdAt: number;
@@ -688,6 +691,33 @@ export interface Proposal {
   /** The user's reason for turning it down. */
   note?: string;
 }
+
+/**
+ * The user asks, from the page, for the plan to be revised per their open
+ * comments: one explicit ask, queued like a sign-off and carried to the
+ * agent with their next message in chat — Coplan never starts a turn
+ * (#67). Each request is pending until it is sent, sent until every
+ * comment it carries has an answer, then answered (`revisionStatus`).
+ */
+export interface RevisionRequest {
+  /** `r1`, `r2`, …: never reused in a plan. */
+  id: string;
+  at: number;
+  /** What the user added to the ask, if anything. */
+  note?: string;
+  /** The comment threads it carries: those waiting on the agent when it
+   *  was queued. */
+  threadIds: string[];
+  /** The ask, exactly as the user previewed it and the agent gets it. */
+  prompt: string;
+  /** Too many comments to quote whole: the rest are pointed to. */
+  trimmed?: boolean;
+  /** When it reached the agent; null while it waits for the next message. */
+  deliveredAt: number | null;
+}
+
+export const REVISION_STATUSES = ['pending', 'sent', 'answered'] as const;
+export type RevisionStatus = (typeof REVISION_STATUSES)[number];
 
 /* ------------------------------------------------------------------ *
  * Sessions

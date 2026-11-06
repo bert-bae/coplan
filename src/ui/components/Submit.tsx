@@ -11,6 +11,7 @@ import { REVIEW_MODES, type BuildSettings, type BuildTarget, type ExecutionMode,
 import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
 import { droppedParts, type ConfigRow } from '../../shared/blocks.ts';
 import { PLAN_STATUS, statusDetail, statusFacts, statusTitle } from '../lib/status.ts';
+import { copyText } from '../lib/copy.ts';
 import { CONFIG_DOCS, PromptView, configDocs } from './PromptView.tsx';
 import type { Target } from '../../shared/types.ts';
 
@@ -1190,13 +1191,4 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
       </div>
     </section>
   );
-}
-
-async function copyText(text: string, ok: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text);
-    store.toast('success', ok);
-  } catch {
-    store.toast('error', 'The browser would not let the page use the clipboard. Select the prompt and copy it instead.');
-  }
 }

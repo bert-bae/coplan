@@ -8,8 +8,10 @@ import type { Author, Target, Thread } from '../../shared/types.ts';
  * Comments, anchored to one item of the plan.
  *
  * A comment is a note on the plan, not a message to Claude: it sits here
- * until the user tells Claude (in chat) to read the plan, at which point
- * Claude sees it, acts on it, and replies in the thread.
+ * until the user tells Claude (in chat) to read the plan — or sends the
+ * comments waiting on it as one ask with *Request revisions*, which their
+ * next message in chat carries (Revisions.tsx) — at which point Claude
+ * sees it, acts on it, and replies in the thread.
  */
 
 export function useThreads(target: Target): Thread[] {
@@ -91,7 +93,7 @@ function ThreadView({ thread }: { thread: Thread }) {
         <button type="button" className="link" onClick={() => void store.op({ op: 'resolve', threadId: thread.id, resolved: !thread.resolved })}>
           {thread.resolved ? 'Reopen' : 'Resolve'}
         </button>
-        {!thread.resolved && lastAuthor(thread) === 'user' && <span className="muted">{agent.name} sees this when it next reads the plan</span>}
+        {!thread.resolved && lastAuthor(thread) === 'user' && <span className="muted">{agent.name} sees this when it next reads the plan, or with <em>Request revisions</em></span>}
       </div>
       {replying && (
         <Composer

@@ -36,6 +36,8 @@ import type {
   Proposal,
   ProposalStatus,
   ReviewRecord,
+  RevisionRequest,
+  RevisionStatus,
   Section,
   Submission,
   Target,
@@ -822,6 +824,15 @@ export function normalizePlan(raw: Partial<Plan> & Record<string, unknown>, fall
   );
   if (proposals.length) plan.proposals = proposals.map((p) => ({ ...p, base: p.base && typeof p.base === 'object' ? p.base : {} }));
   else delete plan.proposals;
+  // A damaged request is dropped; so is a second one waiting, which only
+  // a hand-edited file could hold.
+  const revisions = list<unknown>(raw.revisions)
+    .map(validRevision)
+    .filter((r): r is RevisionRequest => Boolean(r))
+    .filter((r, i, all) => r.deliveredAt !== null || all.findIndex((x) => x.deliveredAt === null) === i)
+    .slice(-MAX_REVISIONS);
+  if (revisions.length) plan.revisions = revisions;
+  else delete plan.revisions;
   return plan;
 }
 
@@ -2279,6 +2290,140 @@ export function markDelivered(plan: Plan, now = Date.now()): Plan {
   next.version += 1;
   next.updatedAt = now;
   return next;
+}
+
+/* ------------------------------------------------------------------ *
+ * Revision requests (#67)
+ * ------------------------------------------------------------------ */
+
+/** Revision requests a plan keeps, newest last. */
+export const MAX_REVISIONS = 20;
+
+function lastWord(t: Thread): Author {
+  return t.replies.length ? t.replies[t.replies.length - 1]!.author : t.author;
+}
+
+/**
+ * The comments a revision request carries: every open thread whose last
+ * word is the user's — what is waiting on the agent. Not a proposal's own
+ * thread (that waits on the user), and not one the agent has already
+ * answered: the user replies in it to put it back.
+ */
+export function threadsForRevision(plan: Pick<Plan, 'threads' | 'proposals'> | null): Thread[] {
+  if (!plan) return [];
+  const proposed = new Set((plan.proposals ?? []).map((p) => p.threadId));
+  return plan.threads.filter((t) => !t.resolved && !proposed.has(t.id) && lastWord(t) === 'user');
+}
+
+/** The request waiting to reach the agent, if one is. */
+export function pendingRevision(plan: Pick<Plan, 'revisions'> | null): RevisionRequest | undefined {
+  return plan?.revisions?.find((r) => r.deliveredAt === null);
+}
+
+/** The newest request, sent or not. */
+export function latestRevision(plan: Pick<Plan, 'revisions'> | null): RevisionRequest | undefined {
+  return plan?.revisions?.at(-1);
+}
+
+/**
+ * Queue a request to revise the plan per the open comments. `prompt` is
+ * what the user previewed, and reaches the agent as is with their next
+ * message. A request not yet sent is replaced: there is one ask at a time.
+ */
+export function queueRevision(
+  plan: Plan,
+  input: { prompt: string; threadIds: string[]; note?: string; trimmed?: boolean },
+  now = Date.now(),
+): Plan {
+  if (!input.threadIds.length) throw new PlanError('No comment is waiting on the agent: there is nothing to revise the plan by.');
+  if (!input.prompt.trim()) throw new PlanError('There is no request to send.');
+  const next = structuredClone(plan);
+  const all = next.revisions ?? [];
+  const n = all.reduce((m, r) => Math.max(m, Number(r.id.slice(1)) || 0), 0) + 1;
+  const kept = all.filter((r) => r.deliveredAt !== null);
+  const note = cleanNote(input.note);
+  kept.push({
+    id: `r${n}`,
+    at: now,
+    ...(note ? { note } : {}),
+    threadIds: [...input.threadIds],
+    prompt: input.prompt,
+    ...(input.trimmed ? { trimmed: true } : {}),
+    deliveredAt: null,
+  });
+  while (kept.length > MAX_REVISIONS) kept.shift();
+  next.revisions = kept;
+  next.version += 1;
+  next.updatedAt = now;
+  return next;
+}
+
+/** Take back a request the agent has not been sent yet. */
+export function withdrawRevision(plan: Plan, now = Date.now()): Plan {
+  if (!pendingRevision(plan)) throw new PlanError('No revision request is waiting to be sent.');
+  const next = structuredClone(plan);
+  next.revisions = next.revisions!.filter((r) => r.deliveredAt !== null);
+  if (!next.revisions.length) delete next.revisions;
+  next.version += 1;
+  next.updatedAt = now;
+  return next;
+}
+
+/** The request reached the agent. Not a read of the plan: it carries the
+ *  comments, and the agent reads the rest. */
+export function markRevisionDelivered(plan: Plan, now = Date.now()): Plan {
+  if (!pendingRevision(plan)) return plan;
+  const next = structuredClone(plan);
+  pendingRevision(next)!.deliveredAt = now;
+  next.version += 1;
+  next.updatedAt = now;
+  return next;
+}
+
+/**
+ * Whether a comment the request carried has its answer since it was sent:
+ * a reply from the agent, the thread resolved, or a proposal the agent made
+ * on what the comment is about (a change that is the user's to decide).
+ */
+function threadAnswered(plan: Pick<Plan, 'threads' | 'proposals'>, id: string, since: number): boolean {
+  const thread = plan.threads.find((t) => t.id === id);
+  if (!thread || thread.resolved) return true;
+  if (thread.replies.some((r) => r.author === 'claude' && r.ts >= since)) return true;
+  return (plan.proposals ?? []).some((p) => {
+    if (p.createdAt < since) return false;
+    const on = plan.threads.find((t) => t.id === p.threadId)?.target;
+    return on !== undefined && on.kind === thread.target.kind && on.id === thread.target.id;
+  });
+}
+
+/** How many of the comments a request carried have their answer. */
+export function revisionProgress(plan: Pick<Plan, 'threads' | 'proposals'>, req: RevisionRequest): { answered: number; total: number } {
+  const total = req.threadIds.length;
+  if (req.deliveredAt === null) return { answered: 0, total };
+  return { answered: req.threadIds.filter((id) => threadAnswered(plan, id, req.deliveredAt!)).length, total };
+}
+
+/** Pending until sent; sent until every comment it carried has a reply or
+ *  a proposal; then answered. */
+export function revisionStatus(plan: Pick<Plan, 'threads' | 'proposals'>, req: RevisionRequest): RevisionStatus {
+  if (req.deliveredAt === null) return 'pending';
+  const { answered, total } = revisionProgress(plan, req);
+  return answered >= total ? 'answered' : 'sent';
+}
+
+function validRevision(raw: unknown): RevisionRequest | undefined {
+  const r = raw as Partial<RevisionRequest> | null;
+  if (!r || typeof r !== 'object' || typeof r.id !== 'string' || typeof r.at !== 'number' || typeof r.prompt !== 'string' || !r.prompt) return undefined;
+  if (!Array.isArray(r.threadIds)) return undefined;
+  return {
+    id: r.id,
+    at: r.at,
+    ...(typeof r.note === 'string' && r.note ? { note: r.note } : {}),
+    threadIds: r.threadIds.filter((t): t is string => typeof t === 'string'),
+    prompt: r.prompt,
+    ...(r.trimmed === true ? { trimmed: true } : {}),
+    deliveredAt: typeof r.deliveredAt === 'number' ? r.deliveredAt : null,
+  };
 }
 
 function validSubmission(raw: unknown): Submission | undefined {

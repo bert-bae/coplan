@@ -14,7 +14,7 @@ setupDom();
 const { render, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
 const { store } = await import('../ui/store.ts');
-const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan, confirmDesign } = await import('../shared/plan.ts');
+const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan, confirmDesign, queueRevision, markRevisionDelivered } = await import('../shared/plan.ts');
 
 const INPUT: PlanInput = {
   title: 'Add a cache',
@@ -1709,4 +1709,102 @@ test('a proposal the plan has moved past cannot be accepted, and says what moved
   const card = screen.getByRole('article', { name: 'Put Redis in front of Postgres' });
   assert.equal((within(card).getByRole('button', { name: 'Accept' }) as HTMLButtonElement).disabled, true);
   assert.match(within(card).getByRole('note').textContent ?? '', /out of date: diagram "Components" changed since it was made/);
+});
+
+/* ------------------------------------------------------ Request revisions (#67) */
+
+/** A plan with two comments waiting on the agent. */
+function commentedPlan(): Plan {
+  return applyOps(
+    makePlan(),
+    [
+      { op: 'comment', target: { kind: 'node', id: 'd1/db' }, text: 'Use a replica.' },
+      { op: 'comment', target: { kind: 'section', id: 's1' }, text: 'Say how slow.' },
+    ],
+    'user',
+  ).plan;
+}
+
+const REVISION = '[cc-harness] Revise the plan "Add a cache" — the user wants you to act on their open comments.\n\nTHE COMMENTS';
+
+function revisionAnswers(plan: Plan) {
+  return (route: string) =>
+    route.endsWith('/plan/revisions/prompt')
+      ? { prompt: REVISION, hash: 'h1', trimmed: false, version: plan.version, budget: 9000, maxNote: 4000, threadIds: plan.threads.map((t) => t.id) }
+      : route.endsWith('/plan/revisions')
+        ? { plan: queueRevision(plan, { prompt: REVISION, threadIds: plan.threads.map((t) => t.id) }) }
+        : undefined;
+}
+
+test('Request revisions sends every comment waiting on the agent as one ask, queued for the next message (#67)', async () => {
+  const plan = commentedPlan();
+  await boot(makeSession(plan), revisionAnswers(plan));
+  const button = screen.getByRole('button', { name: /^Request revisions/ });
+  assert.match(button.textContent ?? '', /2$/, 'how many comments it carries');
+  await act(async () => {
+    fireEvent.click(button);
+  });
+  const dialog = screen.getByRole('dialog', { name: 'Request revisions' });
+  await waitFor(() => assert.equal(within(dialog).getByTestId('revision-preview').textContent, REVISION));
+  assert.match(dialog.textContent ?? '', /2 comments waiting on Claude/);
+  assert.match(dialog.textContent ?? '', /box "Postgres"[^:]*: Use a replica\./);
+  assert.match(dialog.textContent ?? '', /Coplan never starts a turn: the request goes with your next message in Claude's chat/);
+  await act(async () => {
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Queue request' }));
+  });
+  const sent = posts.find((p) => p.route.endsWith('/plan/revisions'));
+  assert.deepEqual(sent?.body, { note: '', expect: plan.version, hash: 'h1' });
+  assert.equal(screen.queryByRole('dialog'), null);
+  // Pending, until the agent has it: with a copy to paste, and a way to take it back.
+  assert.equal(screen.getByTestId('revision-state').textContent, 'Revisions pending');
+  assert.match(screen.getByTestId('revision-state').getAttribute('title') ?? '', /goes to Claude with your next message/);
+  assert.ok(screen.getByRole('button', { name: 'Copy request' }));
+  assert.ok(screen.getByRole('button', { name: 'Withdraw' }));
+  assert.ok(screen.queryByRole('button', { name: /^Request revisions/ }) === null, 'one ask at a time');
+});
+
+test('a request shows as sent, with how many comments are answered, then as answered (#67)', async () => {
+  const plan = commentedPlan();
+  const [replica, slow] = plan.threads;
+  let sent = markRevisionDelivered(queueRevision(plan, { prompt: REVISION, threadIds: [replica!.id, slow!.id] }));
+  sent = applyOps(sent, [{ op: 'reply', threadId: slow!.id, text: 'Added the p99.' }], 'claude').plan;
+  await boot(makeSession(sent));
+  assert.equal(screen.getByTestId('revision-state').textContent, 'Revisions sent · 1/2');
+  assert.match(screen.getByTestId('revision-state').getAttribute('title') ?? '', /1 of 2 comments answered so far/);
+  // The comment still unanswered can be sent again, should the agent have let it drop.
+  assert.match(screen.getByRole('button', { name: /^Request revisions/ }).textContent ?? '', /1$/);
+
+  cleanup();
+  const answered = applyOps(sent, [{ op: 'resolve', threadId: replica!.id, resolved: true }], 'claude').plan;
+  await boot(makeSession(answered));
+  assert.equal(screen.getByTestId('revision-state').textContent, 'Revisions answered');
+  assert.ok(screen.queryByRole('button', { name: /^Request revisions/ }) === null, 'nothing waits on the agent now');
+});
+
+test('with a link, queuing opens the session where "Answer in" does; in Cursor the request is copied to paste (#67)', async () => {
+  const plan = commentedPlan();
+  await boot(makeSession(plan, { link: LINK }), revisionAnswers(plan));
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^Request revisions/ }));
+  });
+  let dialog = screen.getByRole('dialog', { name: 'Request revisions' });
+  await waitFor(() => assert.equal(within(dialog).getByTestId('revision-preview').textContent, REVISION));
+  assert.equal(within(dialog).getByText('Queue and open in Claude').closest('a')?.getAttribute('href'), LINK.app);
+
+  cleanup();
+  let copied = '';
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (t: string) => void (copied = t) }, configurable: true });
+  await boot(makeSession(plan, { agent: 'cursor' }), revisionAnswers(plan));
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^Request revisions/ }));
+  });
+  dialog = screen.getByRole('dialog', { name: 'Request revisions' });
+  await waitFor(() => assert.equal(within(dialog).getByTestId('revision-preview').textContent, REVISION));
+  assert.match(dialog.textContent ?? '', /paste it into Cursor's chat, or ask Cursor to read the plan/);
+  await act(async () => {
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Copy and queue request' }));
+  });
+  assert.equal(copied, REVISION, 'Cursor cannot carry it with a message: it is pasted');
+  assert.ok(posts.some((p) => p.route.endsWith('/plan/revisions')));
+  assert.match(screen.getByTestId('revision-state').getAttribute('title') ?? '', /paste it into Cursor's chat/);
 });
