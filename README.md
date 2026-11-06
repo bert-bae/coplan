@@ -115,7 +115,8 @@ seeds into a throwaway daemon, the way real hooks and tool calls would.
   (what is different now, not every drag), with each diagram written out as
   an architecture.
 - **Review, then sign off.** You see the exact prompt before each sign-off is
-  sent, and submitting locks the plan so the design can't drift mid-build.
+  sent, with every setting it takes from config and the file that sets it,
+  and submitting locks the plan so the design can't drift mid-build.
 - **Live progress.** Cards move across the board and boxes fill up as Claude
   marks tasks in progress, done or blocked.
 - **Your chat stays the chat.** Coplan never starts a turn or answers for you.

@@ -1,0 +1,36 @@
+Build "Add a cache". This plan was designed and reviewed before any code was written, and this is its final version.
+
+1. Work through the tasks below. A task starts only once everything it comes after is done; where the plan gives a build order, tasks in the same step do not depend on each other and can be built side by side.
+2. Take each task through implement → review → refine: implement it and run the implement checks; review the change (an independent reviewer (a fresh subagent)) and run the review checks; refine until it passes. After 3 rounds, stop and ask.
+3. Build the architecture as described: its parts, what each one does and decides, and how they connect.
+4. Where tasks name branches, land each task on its branch; a branch built on another is cut from it. Open the pull requests with `gh pr create`, each against the branch below it (the base branch for the bottom one), once the user says to: ask them first.
+5. If the design turns out not to work, stop and say why rather than redesigning as you go.
+6. When every task is done, run the final checks and summarize what was built, where, and how it was checked.
+
+## Checks
+No checks are configured (.coplan/config.json). Work out what to run from the repository's scripts and CI, use the same commands for every task, and say which in each task's done note.
+
+## Summary
+Put a cache in front of the database.
+
+## Sections
+
+### [s1] Context
+Reads are slow.
+
+## Architecture
+
+### [d1] Components
+
+**Parts**
+- **API** `api` — service
+  Built by: [ ] client Cache client
+
+_Not connected to anything yet: API._
+
+## Tasks (0/2 done)
+- [ ] client Cache client · ready
+  Wrap ioredis.
+- [ ] t1 Wire into API · ready
+
+_Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_

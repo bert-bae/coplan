@@ -1,0 +1,34 @@
+# Add a read-through cache
+_revision 1 · tasks 1/4 done · 4 open comment(s) · UI: http://127.0.0.1:4000/s/golden_
+
+## Since you last read — what the user changed
+_The net effect of their edits — not each step, and not where boxes were moved on the canvas._
+
+**Tasks**
+- Changed docs "Document the cache in the README": renamed from "Document the cache".
+
+**Sections**
+- Changed [risks] "Risks": text edited.
+  Stale reads after a write.
+  A cold cache after deploys.
+
+**Comments**
+- Replied on box "Redis" (d1/cache) in diagram "Components": Redis 7..
+- Commented on task "Wire into API": Keep the old path behind a flag. Remove it next release..
+- Commented on the plan: Looks good overall..
+
+## Comments waiting on you
+- [c1] on box "Redis" (d1/cache) in diagram "Components" — you: Which Redis version?
+  ↳ user: Redis 7.
+  → reply with harness_plan_edit {ops: [{op: "reply", threadId: "c1", text}]} once you have acted on it
+- [c2] on the plan — you: Proposal p1: Split the docs task
+
+    Two audiences.
+- [c3] on task "Wire into API" — user: Keep the old path behind a flag.
+    Remove it next release.
+  → reply with harness_plan_edit {ops: [{op: "reply", threadId: "c3", text}]} once you have acted on it
+- [c4] on the plan — user: Looks good overall.
+  → reply with harness_plan_edit {ops: [{op: "reply", threadId: "c4", text}]} once you have acted on it
+
+## Your proposals
+- p1 "Split the docs task" — waiting on the user (1 edit).

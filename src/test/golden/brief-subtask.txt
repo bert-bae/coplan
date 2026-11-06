@@ -1,0 +1,76 @@
+# Task inval: Invalidation
+_Part of "Add a read-through cache" · task 1.2 · under "Storage layer". This brief is everything needed to build this task — and where its job ends._
+
+## The plan, in short
+Put a read-through cache in front of the orders database.
+
+### Why
+Reads are slow at peak.
+
+## From the plan
+
+### Context
+p95 read latency is 900ms at peak.
+
+##### Numbers
+- 40k reads/min
+
+### Risks
+Stale reads after a write.
+A cold cache after deploys.
+
+## Your objective
+**Invalidation**
+
+From "Storage layer", which this is part of:
+  Everything below the API.
+
+Files you expect to touch: src/cache.ts, src/events.ts
+
+## Where it fits
+It builds these parts of the architecture:
+- **Event bus** `bus` in "Invalidation" — queue
+
+It comes after — build on what these did:
+- [x] client Cache client · on `cache/client`
+
+Waiting on it: wire Wire into API. Leave their work to them, but do not make it harder.
+
+## Stay in scope
+Build what this task describes and nothing more — the plan gives other parts to other tasks. If you find work outside it, say so in your report instead of doing it; it becomes a task of its own.
+- wire Wire into API is being built right now.
+
+## Standing instructions
+_From the user's and the repository's Coplan config; they hold for all of this._
+
+Match the code style around you.
+
+## Branch
+Commit this task's work on `cache/client`. Cut it from `main` if it does not exist yet.
+
+## The cycle: implement → review → refine
+Review: the user, before it is marked done (set on this task). At most 2 review rounds before stopping to ask the user.
+
+**Implement.** Make the change, then run the implement checks and fix what they find:
+- typecheck: `pnpm typecheck`
+- lint: `pnpm lint`
+
+**Review.** Run the review checks, then show the user the change and ask them, with AskUserQuestion, whether it is right:
+- tests: `env NODE_ENV=test sh -c 'pnpm test'`
+
+### What the review checks here
+_From the user's and the repository's Coplan config; they hold for all of this._
+
+Check error handling.
+
+**Refine.** Fix what the review found, run the implement checks again, and go back to review.
+
+Run a stage at once: `"/opt/coplan/bin/coplan" check implement --files src/cache.ts,src/events.ts` (or `review`); add `--json` for the `checks` to report.
+
+Report each step with harness_task_update {task_id: "inval", stage: "implement" | "review" | "refine", checks: [{name, ok, note}]}, and status "done" with a one-line note once the review passed. A subagent without the Coplan tools reports back to the agent that gave it this brief instead: what it changed, the checks and how they came out, and anything left.
+
+## Open comments on it and its design
+- planner _(on the plan)_: Proposal p1: Split the docs task
+
+    Two audiences.
+- user _(on the plan)_: Looks good overall.

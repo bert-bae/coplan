@@ -1,0 +1,74 @@
+# Task wire: Wire into API
+_Part of "Add a read-through cache" · task 2. This brief is everything needed to build this task — and where its job ends._
+
+## The plan, in short
+Put a read-through cache in front of the orders database.
+
+### Why
+Reads are slow at peak.
+
+## From the plan
+
+### Context
+p95 read latency is 900ms at peak.
+
+##### Numbers
+- 40k reads/min
+
+### Risks
+Stale reads after a write.
+A cold cache after deploys.
+
+## Your objective
+**Wire into API**
+
+Use the client in the orders handler.
+
+## Where it fits
+It builds these parts of the architecture:
+- **Orders API** `api` in "Components" — service
+  Serves orders.
+  Connections: Orders API → Redis: get
+
+It comes after — build on what these did:
+- [ ] NOT DONE YET — storage Storage layer
+
+> ⚠ This task cannot start yet: it waits on storage Storage layer.
+
+## Stay in scope
+Build what this task describes and nothing more — the plan gives other parts to other tasks. If you find work outside it, say so in your report instead of doing it; it becomes a task of its own.
+
+## Standing instructions
+_From the user's and the repository's Coplan config; they hold for all of this._
+
+Match the code style around you.
+
+## Branch
+Commit this task's work on `cache/api`. Cut it from `cache/client` (a stacked branch: it builds on that work), not from `main`.
+
+## The cycle: implement → review → refine
+Review: an independent reviewer (a fresh subagent). At most 2 review rounds before stopping to ask the user.
+
+**Implement.** Make the change, then run the implement checks and fix what they find:
+- typecheck: `pnpm typecheck`
+- lint: `pnpm lint`
+
+**Review.** A fresh subagent that did not write the change reads the diff against this brief and runs the review checks. Run the reviewer on the `opus` model.
+- tests: `env NODE_ENV=test sh -c 'pnpm test'`
+
+### What the review checks here
+_From the user's and the repository's Coplan config; they hold for all of this._
+
+Check error handling.
+
+**Refine.** Fix what the review found, run the implement checks again, and go back to review.
+
+Report each step with harness_task_update {task_id: "wire", stage: "implement" | "review" | "refine", checks: [{name, ok, note}]}, and status "done" with a one-line note once the review passed. A subagent without the Coplan tools reports back to the agent that gave it this brief instead: what it changed, the checks and how they came out, and anything left.
+
+## Open comments on it and its design
+- planner _(on the plan)_: Proposal p1: Split the docs task
+
+    Two audiences.
+- user: Keep the old path behind a flag.
+    Remove it next release.
+- user _(on the plan)_: Looks good overall.

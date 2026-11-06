@@ -11,7 +11,7 @@ import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
 import { MAX_NOTE, PlanError, cleanChecks, cleanNote, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
-import { PROMPT_BUDGET, buildPrompt, designPrompt, promptHash, renderGaps, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
+import { PROMPT_BUDGET, buildPrompt, configRows, designPrompt, promptHash, renderGaps, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
 import { renderBrief, renderNext } from './brief.ts';
 import { cleanSettings, dependents, effectiveReview, hasSubtasks, readyTasks, roundVerdict, stackStatus, waitingOn } from '../shared/build.ts';
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
@@ -502,8 +502,9 @@ function buildRouter(deps: Deps): Router {
 
   /** What the review dialogs show beside the prompt: the defaults and the
    *  checks this repository has, so the user sees what the build will run. */
-  const projectSummary = (project: ProjectConfig) => ({
+  const projectSummary = (project: ProjectConfig, point: 'design' | 'build') => ({
     file: project.file,
+    config: configRows(project, point),
     defaults: project.settings,
     checks: Object.fromEntries(HOOK_STAGES.map((stage) => [stage, project.hooks[stage].map((h) => h.name)])),
     errors: [...project.errors, ...project.warnings],
@@ -603,16 +604,17 @@ function buildRouter(deps: Deps): Router {
     const note = cleanNote(body.note);
     const project = projectFor(session);
     const settings = settingsFrom(body.settings, project);
-    const { prompt, trimmed } = buildPrompt(session.plan, { target, agent: session.agent, settings, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
+    const { prompt, trimmed, blocks } = buildPrompt(session.plan, { target, agent: session.agent, settings, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
     json(ctx.res, 200, {
       prompt,
       hash: promptHash(prompt),
       trimmed,
+      blocks,
       version: session.plan.version,
       budget: PROMPT_BUDGET,
       maxNote: MAX_NOTE,
       settings,
-      project: projectSummary(project),
+      project: projectSummary(project, 'build'),
     });
   });
 
@@ -627,15 +629,16 @@ function buildRouter(deps: Deps): Router {
     }
     const note = cleanNote(body.note);
     const project = projectFor(session);
-    const { prompt, trimmed } = designPrompt(session.plan, { agent: session.agent, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
+    const { prompt, trimmed, blocks } = designPrompt(session.plan, { agent: session.agent, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
     json(ctx.res, 200, {
       prompt,
       hash: promptHash(prompt),
       trimmed,
+      blocks,
       version: session.plan.version,
       budget: PROMPT_BUDGET,
       maxNote: MAX_NOTE,
-      project: projectSummary(project),
+      project: projectSummary(project, 'design'),
     });
   });
 

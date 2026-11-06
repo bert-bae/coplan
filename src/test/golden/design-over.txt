@@ -1,0 +1,108 @@
+[cc-harness] The design is confirmed for "Add a read-through cache" — now break it into the task list.
+
+The user has reviewed the design in Coplan and confirmed it: the architecture, sections and summary below are locked. What you make now is the task list the build will follow. The user reviews it, then submits the plan to start the build. Follow the coplan skill's guidance on the task list:
+
+1. Start from the tasks planned on the diagram. Break each into focused tasks: one objective, one area of the architecture, small enough to implement and review on its own. In `detail` put the objective, the acceptance criteria and what is out of scope; in `files` the files you expect to touch.
+2. Link them: `dependsOn` lists the tasks that must be done first (by id). Leave a task free of dependencies whenever it could be built alongside others — that is what lets the build run in parallel. A parent's dependencies hold for all its subtasks.
+3. Say what each task builds: `builds` names the boxes it implements (node ids), so the diagram tracks it.
+4. Decide how it lands. A change that is one pull request needs no `branch`. Otherwise give each group of tasks a `branch`: a branch whose tasks depend on another branch's is cut from it, as a stacked pull request. Branches are cut from `main` and named `coplan/…`.
+5. Each task is built implement → review → refine. Review is an independent reviewer (a fresh subagent) by default; set `review: "user"` on risky or user-facing tasks, `"skip"` on trivial ones.
+6. Publish it with harness_tasks_publish — keep the ids of planned tasks you keep, so the boxes stay linked — then tell the user in chat that the task list is ready to review, and ask what you need decided with AskUserQuestion. Do not start building: the user submits the plan when the tasks are right.
+
+## Standing instructions
+_From the user's and the repository's Coplan config; they hold for all of this._
+
+Split by layer.
+
+## Checks
+_From .coplan/config.json, run from the repository root:_
+- implement: typecheck `pnpm typecheck`; lint `pnpm lint` (for src/**)
+- review: tests `env NODE_ENV=test sh -c 'pnpm test'`
+- final: check `pnpm check`; audit `pnpm audit` (optional)
+Run a whole stage with `"/opt/coplan/bin/coplan" check <stage>` — `--files a,b` for one task's files, `--json` for harness_task_update's `checks`.
+
+## From the user
+> Start with the client.
+> Leave billing alone.
+
+## Since you last read — what the user changed
+_The net effect of their edits — not each step, and not where boxes were moved on the canvas. The full plan follows._
+
+**Tasks**
+- Changed bulk0 "Bulk task number 0 with a descriptive title": note "user note on bulk task 0".
+- Changed bulk1 "Bulk task number 1 with a descriptive title": note "user note on bulk task 1".
+- Changed bulk2 "Bulk task number 2 with a descriptive title": note "user note on bulk task 2".
+- Changed bulk3 "Bulk task number 3 with a descriptive title": note "user note on bulk task 3".
+- Changed bulk4 "Bulk task number 4 with a descriptive title": note "user note on bulk task 4".
+- Changed bulk5 "Bulk task number 5 with a descriptive title": note "user note on bulk task 5".
+- Changed bulk6 "Bulk task number 6 with a descriptive title": note "user note on bulk task 6".
+- Changed bulk7 "Bulk task number 7 with a descriptive title": note "user note on bulk task 7".
+- Changed bulk8 "Bulk task number 8 with a descriptive title": note "user note on bulk task 8".
+- Changed bulk9 "Bulk task number 9 with a descriptive title": note "user note on bulk task 9".
+- Changed bulk10 "Bulk task number 10 with a descriptive title": note "user note on bulk task 10".
+- Changed bulk11 "Bulk task number 11 with a descriptive title": note "user note on bulk task 11".
+- Changed bulk12 "Bulk task number 12 with a descriptive title": note "user note on bulk task 12".
+- Changed bulk13 "Bulk task number 13 with a descriptive title": note "user note on bulk task 13".
+- Changed bulk14 "Bulk task number 14 with a descriptive title": note "user note on bulk task 14".
+- Changed bulk15 "Bulk task number 15 with a descriptive title": note "user note on bulk task 15".
+- Changed bulk16 "Bulk task number 16 with a descriptive title": note "user note on bulk task 16".
+- Changed bulk17 "Bulk task number 17 with a descriptive title": note "user note on bulk task 17".
+- Changed bulk18 "Bulk task number 18 with a descriptive title": note "user note on bulk task 18".
+- Changed bulk19 "Bulk task number 19 with a descriptive title": note "user note on bulk task 19".
+- Changed bulk20 "Bulk task number 20 with a descriptive title": note "user note on bulk task 20".
+- Changed bulk21 "Bulk task number 21 with a descriptive title": note "user note on bulk task 21".
+- Changed bulk22 "Bulk task number 22 with a descriptive title": note "user note on bulk task 22".
+- …and more than fits here: harness_plan_read {changes_only: true} lists every change the user made.
+
+_The architecture (3 diagram(s)), the sections and each task's detail are too long to quote here: call harness_plan_read for them before you start._
+
+## Summary
+Put a read-through cache in front of the orders database.
+
+### Why
+Reads are slow at peak.
+
+## Tasks (1/64 done)
+- [ ] storage Storage layer
+  - [x] client Cache client · branch `cache/client`
+    files: src/cache.ts
+  - [ ] inval Invalidation · after client · branch `cache/client` · review: user
+    files: src/cache.ts, src/events.ts
+- [~] wire Wire into API · after storage · branch `cache/api` — halfway
+- [ ] docs Document the cache · review: skip
+- [ ] bulk0 Bulk task number 0 with a descriptive title — user note on bulk task 0
+- [ ] bulk1 Bulk task number 1 with a descriptive title · after bulk0 — user note on bulk task 1
+- [ ] bulk2 Bulk task number 2 with a descriptive title · after bulk1 — user note on bulk task 2
+- [ ] bulk3 Bulk task number 3 with a descriptive title · after bulk2 — user note on bulk task 3
+- [ ] bulk4 Bulk task number 4 with a descriptive title · after bulk3 — user note on bulk task 4
+- [ ] bulk5 Bulk task number 5 with a descriptive title · after bulk4 — user note on bulk task 5
+- [ ] bulk6 Bulk task number 6 with a descriptive title · after bulk5 — user note on bulk task 6
+- [ ] bulk7 Bulk task number 7 with a descriptive title · after bulk6 — user note on bulk task 7
+- [ ] bulk8 Bulk task number 8 with a descriptive title · after bulk7 — user note on bulk task 8
+- [ ] bulk9 Bulk task number 9 with a descriptive title · after bulk8 — user note on bulk task 9
+- [ ] bulk10 Bulk task number 10 with a descriptive title · after bulk9 — user note on bulk task 10
+- [ ] bulk11 Bulk task number 11 with a descriptive title · after bulk10 — user note on bulk task 11
+- [ ] bulk12 Bulk task number 12 with a descriptive title · after bulk11 — user note on bulk task 12
+- [ ] bulk13 Bulk task number 13 with a descriptive title · after bulk12 — user note on bulk task 13
+- [ ] bulk14 Bulk task number 14 with a descriptive title · after bulk13 — user note on bulk task 14
+- [ ] bulk15 Bulk task number 15 with a descriptive title · after bulk14 — user note on bulk task 15
+- [ ] bulk16 Bulk task number 16 with a descriptive title · after bulk15 — user note on bulk task 16
+- [ ] bulk17 Bulk task number 17 with a descriptive title · after bulk16 — user note on bulk task 17
+- [ ] bulk18 Bulk task number 18 with a descriptive title · after bulk17 — user note on bulk task 18
+- [ ] bulk19 Bulk task number 19 with a descriptive title · after bulk18 — user note on bulk task 19
+- [ ] bulk20 Bulk task number 20 with a descriptive title · after bulk19 — user note on bulk task 20
+- [ ] bulk21 Bulk task number 21 with a descriptive title · after bulk20 — user note on bulk task 21
+- [ ] bulk22 Bulk task number 22 with a descriptive title · after bulk21 — user note on bulk task 22
+- [ ] bulk23 Bulk task number 23 with a descriptive title · after bulk22 — user note on bulk task 23
+- [ ] bulk24 Bulk task number 24 with a descriptive title · after bulk23 — user note on bulk task 24
+- [ ] bulk25 Bulk task number 25 with a descriptive title · after bulk24 — user note on bulk task 25
+- [ ] bulk26 Bulk task number 26 with a descriptive title · after bulk25 — user note on bulk task 26
+- [ ] bulk27 Bulk task number 27 with a descriptive title · after bulk26 — user note on bulk task 27
+- [ ] bulk28 Bulk task number 28 with a descriptive title · after bulk27 — user note on bulk task 28
+- [ ] bulk29 Bulk task number 29 with a descriptive title · after bulk28 — user note on bulk task 29
+- [ ] bulk30 Bulk task number 30 with a descriptive title · after bulk29 — user note on bulk task 30
+- [ ] bulk31 Bulk task number 31 with a descriptive title · after bulk30 — user note on bulk task 31
+- [ ] bulk32 Bulk task number 32 with a descriptive title · after bulk31 — user note on bulk task 32
+- …and 27 more line(s): harness_plan_read lists every task.
+
+_Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_

@@ -61,8 +61,12 @@ and Cursor except where the README's
 
 When the architecture is right, **Confirm design** (top right of the
 Architecture view) shows what Claude will be asked — break this design into
-a task list — with the design itself, anything you add, and which checks the
-repository has. Confirming locks the diagrams, sections and summary; the
+a task list — with the design itself and anything you add. Beside it, *Set
+in config* lists what the ask takes from config: the checks for each stage,
+the review mode tasks get by default, how branches are cut and named, and
+your standing instructions for this step, each with the file and key that
+set it (see [Where the settings come from](#where-the-settings-come-from)).
+Confirming locks the diagrams, sections and summary; the
 title, the tasks, which boxes they link to, and comments still change. Your
 next message in Claude carries it, once — in Cursor, confirming copies it for
 you to paste, or the agent's next `harness_plan_read` picks it up. *Reopen
@@ -104,6 +108,27 @@ Tasks views) opens the review:
   only* — how many ready tasks are built at once, and how many review rounds
   a task gets before Claude stops and asks you. The defaults come from the
   repository's `.coplan/config.json`.
+- **Set in config.** What the prompt takes from config, read-only: the checks
+  for each stage, branches, how pull requests are opened, the reviewer
+  model, whether failing final checks hold the report, and your standing
+  instructions for the build.
+
+### Where the settings come from
+
+Both dialogs group these settings by the file that sets them —
+`.coplan/config.json` in the repository, or your own `coplan.json` and
+`instructions/<point>.md` in Coplan's home — and give each its key
+(`#pullRequests`, `#review.model`); standing instructions name every file
+that adds to them, yours first. A setting no file sets is listed under
+*Not set: Coplan's defaults*. They are read-only here, because the
+repository's file is committed and shared with your team: change them in
+the file, and the preview follows at once. Each key links to what it does in
+[CONFIG.md](CONFIG.md).
+
+A prompt too long for one message (about 9,000 characters) keeps the
+instructions, what you wrote and changed, the summary and the task list, and
+the dialog says what it leaves out — the sections, the architecture, each
+task's detail — which Claude reads with `harness_plan_read` before it starts.
 
 Submitting **locks the plan**. The canvas becomes the final design — boxes
 still fill up as the tasks that build them get done — and the Tasks tab

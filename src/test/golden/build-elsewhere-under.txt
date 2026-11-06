@@ -1,0 +1,131 @@
+Build "Add a read-through cache". This plan was designed and reviewed before any code was written, and this is its final version.
+
+1. Work through the tasks below. A task starts only once everything it comes after is done; where the plan gives a build order, tasks in the same step do not depend on each other and can be built side by side.
+2. Take each task through implement → review → refine: implement it and run the implement checks; review the change (an independent reviewer (a fresh subagent)) and run the review checks; refine until it passes. After 2 rounds, stop and ask.
+3. Build the architecture as described: its parts, what each one does and decides, and how they connect.
+4. Where tasks name branches, land each task on its branch; a branch built on another is cut from it. Open the pull requests with Graphite: track each branch on the one below it (`gt track`), and open the stack with `gt submit --stack`, as soon as a branch's tasks are done.
+5. If the design turns out not to work, stop and say why rather than redesigning as you go.
+6. When every task is done, run the final checks and summarize what was built, where, and how it was checked. Do not call the build finished while a final check fails.
+
+### Each pull request's description
+Fill in the pull request template (.github/pull_request_template.md) from the tasks the pull request carries, their checks and their review:
+
+~~~~markdown
+## What
+
+## Why
+
+## Checks
+~~~~
+
+## Standing instructions
+_From the user's and the repository's Coplan config; they hold for all of this._
+
+Small commits, each with a message that says why.
+
+## Checks
+_From .coplan/config.json, run from the repository root:_
+- implement: typecheck `pnpm typecheck`; lint `pnpm lint` (for src/**)
+- review: tests `env NODE_ENV=test sh -c 'pnpm test'`
+- final: check `pnpm check`; audit `pnpm audit` (optional)
+
+## From the user
+> Start with the client.
+> Leave billing alone.
+
+## Summary
+Put a read-through cache in front of the orders database.
+
+### Why
+Reads are slow at peak.
+
+## Sections
+
+### [context] Context
+p95 read latency is 900ms at peak.
+
+##### Numbers
+- 40k reads/min
+
+### [risks] Risks
+Stale reads after a write.
+A cold cache after deploys.
+
+### [empty] Open questions
+_(empty)_
+
+## Architecture
+
+### [d1] Components
+
+The read path.
+
+Entry points: Orders API. Data stores: Redis, Postgres.
+
+**Parts**
+- **Orders API** `api` — service
+  Serves orders.
+  Built by: [~] wire Wire into API
+- **Redis** `cache` — data store: managed
+  Hot orders.
+  Decisions:
+    Read-through, 10m TTL.
+  Built by: [x] client Cache client
+- **Postgres** `db` — data store
+  Source of truth.
+
+**Connections**
+- Orders API → Redis: get `api → cache`
+- Redis → Postgres: miss (dashed: optional, async or future) `cache → db`
+
+**Notes on the diagram**
+- Keep it simple (`n1`)
+  No write-behind.
+
+### [d2] Invalidation
+
+Queues: Event bus.
+
+**Parts**
+- **Event bus** `bus` — queue
+  Built by: [ ] inval Invalidation
+
+_Not connected to anything yet: Event bus._
+
+## Tasks (1/4 done)
+- [ ] storage Storage layer
+  Everything below the API.
+  - [x] client Cache client · branch `cache/client`
+    files: src/cache.ts
+    Wrap ioredis.
+    
+    Acceptance: get/set with TTL.
+  - [ ] inval Invalidation · after client · branch `cache/client` · review: user · ready
+    files: src/cache.ts, src/events.ts
+- [~] wire Wire into API · after storage · branch `cache/api` — halfway
+  Use the client in the orders handler.
+- [ ] docs Document the cache in the README · review: skip · ready
+
+## Build order
+_Each step needs only the steps before it; the tasks within a step can be built side by side._
+1. [x] client Cache client; [ ] docs Document the cache in the README
+2. [ ] inval Invalidation
+3. [~] wire Wire into API
+
+## Branches
+_Each branch is one pull request. A branch whose tasks build on another branch is cut from it — a stacked pull request._
+- `cache/client` from `main` — client, inval
+- `cache/api` from `cache/client` (stacked) — wire
+- no branch named (the session's current branch) — docs
+
+## Open comments
+- [c1] on box "Redis" (d1/cache) in diagram "Components" — planner: Which Redis version?
+  ↳ user: Redis 7.
+- [c2] on the plan — planner: Proposal p1: Split the docs task
+
+    Two audiences.
+- [c3] on task "Wire into API" — user: Keep the old path behind a flag.
+    Remove it next release.
+- [c4] on the plan — user: Looks good overall.
+
+_Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_

@@ -1,0 +1,143 @@
+[cc-harness] Build the plan "Add a read-through cache" — the user has reviewed it in Coplan and submitted it.
+
+The plan is final. Its architecture is locked, and from here Coplan follows your progress on its task board, so keep every task's status true as you go. Run the build with the coplan-build skill, and take each task through the iric skill — implement → review → refine:
+
+1. Start only tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that are ready together do not depend on each other — build them side by side, up to 3 at once, each by its own subagent given that task's harness_task_brief. harness_task_brief gives one task's focused brief: its objective, where it fits, its branch and its checks.
+2. When you start a task, mark it in_progress with stage "implement" (harness_task_update) and run the implement checks. Set stage "review" when it goes to review, and "refine" when the review asks for changes. Report the checks you ran with `checks`.
+3. Review: an independent reviewer (a fresh subagent), unless a task says otherwise. Run the reviewer on the `opus` model. After 2 review rounds without passing, stop and ask the user.
+4. Mark a task done only once its review passed and its review checks are green, with a one-line note of what you did.
+5. If you are stuck, mark the task blocked with a note saying on what, and ask the user with AskUserQuestion.
+6. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.
+7. Land each task on its branch (see Branches below): cut a stacked branch from the one it builds on. Open the pull requests with Graphite: track each branch on the one below it (`gt track`), and open the stack with `gt submit --stack`, as soon as a branch's tasks are done. Write each description from the pull request template (.github/pull_request_template.md), which harness_task_next shows when one is due.
+8. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, stop and ask the user in chat — they can reopen the plan in Coplan.
+9. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) and give the user the final summary: what was built, the branches and pull requests, and how it was checked. The report is refused until it carries every final check (check) passing, in `checks`.
+
+## Standing instructions
+_From the user's and the repository's Coplan config; they hold for all of this._
+
+Small commits, each with a message that says why.
+
+## Checks
+_From .coplan/config.json, run from the repository root:_
+- implement: typecheck `pnpm typecheck`; lint `pnpm lint` (for src/**)
+- review: tests `env NODE_ENV=test sh -c 'pnpm test'`
+- final: check `pnpm check`; audit `pnpm audit` (optional)
+Run a whole stage with `"/opt/coplan/bin/coplan" check <stage>` — `--files a,b` for one task's files, `--json` for harness_task_update's `checks`.
+
+## From the user
+> Start with the client.
+> Leave billing alone.
+
+## Since you last read — what the user changed
+_The net effect of their edits — not each step, and not where boxes were moved on the canvas. The full plan follows._
+
+**Tasks**
+- Changed docs "Document the cache in the README": renamed from "Document the cache".
+
+**Sections**
+- Changed [risks] "Risks": text edited.
+
+**Comments**
+- Replied on box "Redis" (d1/cache) in diagram "Components": Redis 7..
+- Commented on task "Wire into API": Keep the old path behind a flag. Remove it next release..
+- Commented on the plan: Looks good overall..
+
+## Summary
+Put a read-through cache in front of the orders database.
+
+### Why
+Reads are slow at peak.
+
+## Sections
+
+### [context] Context
+p95 read latency is 900ms at peak.
+
+##### Numbers
+- 40k reads/min
+
+### [risks] Risks _(edited by the user)_
+Stale reads after a write.
+A cold cache after deploys.
+
+### [empty] Open questions
+_(empty)_
+
+## Architecture
+
+### [d1] Components
+
+The read path.
+
+Entry points: Orders API. Data stores: Redis, Postgres.
+
+**Parts**
+- **Orders API** `api` — service
+  Serves orders.
+  Built by: [~] wire Wire into API
+- **Redis** `cache` — data store: managed
+  Hot orders.
+  Decisions:
+    Read-through, 10m TTL.
+  Built by: [x] client Cache client
+- **Postgres** `db` — data store
+  Source of truth.
+
+**Connections**
+- Orders API → Redis: get `api → cache`
+- Redis → Postgres: miss (dashed: optional, async or future) `cache → db`
+
+**Notes on the diagram**
+- Keep it simple (`n1`)
+  No write-behind.
+
+### [d2] Invalidation
+
+Queues: Event bus.
+
+**Parts**
+- **Event bus** `bus` — queue
+  Built by: [ ] inval Invalidation
+
+_Not connected to anything yet: Event bus._
+
+## Tasks (1/4 done)
+- [ ] storage Storage layer
+  Everything below the API.
+  - [x] client Cache client · branch `cache/client`
+    files: src/cache.ts
+    Wrap ioredis.
+    
+    Acceptance: get/set with TTL.
+  - [ ] inval Invalidation · after client · branch `cache/client` · review: user · ready
+    files: src/cache.ts, src/events.ts
+- [~] wire Wire into API · after storage · branch `cache/api` — halfway
+  Use the client in the orders handler.
+- [ ] docs Document the cache in the README · review: skip · ready
+
+## Build order
+_Each step needs only the steps before it; the tasks within a step can be built side by side._
+1. [x] client Cache client; [ ] docs Document the cache in the README
+2. [ ] inval Invalidation
+3. [~] wire Wire into API
+
+## Branches
+_Each branch is one pull request. A branch whose tasks build on another branch is cut from it — a stacked pull request._
+- `cache/client` from `main` — client, inval
+- `cache/api` from `cache/client` (stacked) — wire
+- no branch named (the session's current branch) — docs
+
+## Open comments
+- [c1] on box "Redis" (d1/cache) in diagram "Components" — you: Which Redis version?
+  ↳ user: Redis 7.
+  → reply with harness_plan_edit {ops: [{op: "reply", threadId: "c1", text}]} once you have acted on it
+- [c2] on the plan — you: Proposal p1: Split the docs task
+
+    Two audiences.
+- [c3] on task "Wire into API" — user: Keep the old path behind a flag.
+    Remove it next release.
+  → reply with harness_plan_edit {ops: [{op: "reply", threadId: "c3", text}]} once you have acted on it
+- [c4] on the plan — user: Looks good overall.
+  → reply with harness_plan_edit {ops: [{op: "reply", threadId: "c4", text}]} once you have acted on it
+
+_Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_

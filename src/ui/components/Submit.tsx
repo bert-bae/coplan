@@ -9,6 +9,7 @@ import { MAX_PARALLEL, MAX_ROUNDS, branchPlan, buildSteps, hasDependencies, read
 import { blockingGaps, planGaps, type GapSeverities } from '../../shared/check.ts';
 import { REVIEW_MODES, type BuildSettings, type BuildTarget, type Plan, type PlanPhase, type ReviewMode, type SessionState } from '../../shared/types.ts';
 import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
+import { droppedParts, type ConfigRow } from '../../shared/blocks.ts';
 
 /**
  * Signing the plan off, in two steps.
@@ -352,7 +353,8 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
       error={error}
       side={
         <>
-          <DesignChecklist session={session} plan={plan} project={preview?.project} trimmed={Boolean(preview?.trimmed)} />
+          <DesignChecklist session={session} plan={plan} project={preview?.project} left={preview?.trimmed ? leftOut(preview) : null} />
+          <ConfigList rows={preview?.project?.config} />
           <label className="field">
             <span className="field-label">Anything else for {agent.name}?</span>
             <textarea
@@ -477,7 +479,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
             plan={plan}
             target={target}
             project={preview?.project}
-            trimmed={Boolean(preview?.trimmed && shown?.target === 'session')}
+            left={preview?.trimmed && shown?.target === 'session' ? leftOut(preview) : null}
           />
 
           <fieldset className="submit-targets">
@@ -494,6 +496,8 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
           </fieldset>
 
           {settings && <SettingsFields settings={settings} onChange={setSettings} />}
+
+          <ConfigList rows={preview?.project?.config} />
 
           <label className="field">
             <span className="field-label">Anything else for {agent.name}?</span>
@@ -632,12 +636,10 @@ function checksNote(project: ProjectSummary | undefined, notes: Note[], agent: A
         </>
       ),
     });
-  } else {
-    notes.push({ tone: 'info', text: `Checks: ${stages.map((s) => `${s} — ${project.checks[s].join(', ')}`).join(' · ')}.` });
   }
 }
 
-function DesignChecklist({ session, plan, project, trimmed }: { session: SessionState; plan: Plan; project: ProjectSummary | undefined; trimmed: boolean }) {
+function DesignChecklist({ session, plan, project, left }: { session: SessionState; plan: Plan; project: ProjectSummary | undefined; left: string | null }) {
   const boxes = plan.diagrams.flatMap((d) => d.nodes.filter((n) => n.kind !== 'note'));
   const bare = boxes.filter((n) => !n.description?.trim());
   const counts = countTasks(plan);
@@ -653,7 +655,7 @@ function DesignChecklist({ session, plan, project, trimmed }: { session: Session
   if (open) notes.push({ tone: 'info', text: `${open} open comment${open === 1 ? '' : 's'} go${open === 1 ? 'es' : ''} with the design.` });
   sessionNotes(session, plan, notes);
   checksNote(project, notes, agent);
-  if (trimmed) notes.push({ tone: 'info', text: `The design is longer than fits in one message, so ${agent.name} reads the rest with harness_plan_read.` });
+  if (left !== null) notes.push({ tone: 'info', text: `The design is longer than fits in one message${left}, so ${agent.name} reads the rest with harness_plan_read.` });
   return (
     <NoteList
       summary={`${plan.diagrams.length} diagram${plan.diagrams.length === 1 ? '' : 's'} · ${boxes.length} box${boxes.length === 1 ? '' : 'es'} · ${plan.tasks.length} planned task${plan.tasks.length === 1 ? '' : 's'}`}
@@ -668,13 +670,14 @@ function Checklist({
   plan,
   target,
   project,
-  trimmed,
+  left,
 }: {
   session: SessionState;
   plan: Plan;
   target: BuildTarget;
   project: ProjectSummary | undefined;
-  trimmed: boolean;
+  /** What the prompt leaves out to fit, in words; null when it fits. */
+  left: string | null;
 }) {
   const counts = countTasks(plan);
   const steps = buildSteps(plan).length;
@@ -695,10 +698,10 @@ function Checklist({
   if (target === 'session') sessionNotes(session, plan, notes);
   checksNote(project, notes, agentInfo(session.agent));
   if (open) notes.push({ tone: 'info', text: `${open} open comment${open === 1 ? '' : 's'} go${open === 1 ? 'es' : ''} with the plan.` });
-  if (trimmed) {
+  if (left !== null) {
     notes.push({
       tone: 'info',
-      text: `The plan is longer than fits in one message, so the prompt carries the task list and ${agentInfo(session.agent).name} reads the rest with harness_plan_read.`,
+      text: `The plan is longer than fits in one message${left}, so ${agentInfo(session.agent).name} reads it with harness_plan_read.`,
     });
   }
   const boxes = plan.diagrams.reduce((n, d) => n + d.nodes.length, 0);
@@ -713,6 +716,66 @@ function Checklist({
       }
       notes={notes}
     />
+  );
+}
+
+/** What a prompt cut to fit leaves out, as the end of a sentence: ": it
+ *  leaves out 3 sections and the architecture (2 diagrams)". */
+function leftOut(preview: PromptPreview): string {
+  const parts = droppedParts(preview.blocks ?? []);
+  if (!parts.length) return '';
+  const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+  return `: it leaves out ${list}`;
+}
+
+/** Where `docs/CONFIG.md` describes each setting. */
+export const CONFIG_DOCS = 'https://github.com/bert-bae/coplan/blob/main/docs/CONFIG.md';
+
+export function configDocs(key: string): string {
+  return `${CONFIG_DOCS}#${(key.split('.')[0] ?? '').toLowerCase()}`;
+}
+
+/**
+ * The config settings the prompt is made with, read-only: what each is set
+ * to, grouped by the file that sets it, each with its key. The files are
+ * shared with the team on purpose, so they are changed there, not here.
+ */
+function ConfigList({ rows }: { rows: ConfigRow[] | undefined }) {
+  if (!rows?.length) return null;
+  const groups = new Map<string, ConfigRow[]>();
+  for (const r of rows) {
+    const where = r.files.join(' + ');
+    groups.set(where, [...(groups.get(where) ?? []), r]);
+  }
+  // What a file sets first; what nothing sets, and so is Coplan's default, last.
+  const ordered = [...groups].sort(([a], [b]) => Number(!a) - Number(!b));
+  return (
+    <section className="field submit-config" aria-label="Set in config">
+      <header className="submit-config-head">
+        <span className="field-label">Set in config</span>
+        <a className="link" href={CONFIG_DOCS} target="_blank" rel="noreferrer">
+          Where to change these
+        </a>
+      </header>
+      {ordered.map(([where, list]) => (
+        <div key={where} className="config-group">
+          <p className="config-file">{where ? <code>{where}</code> : <>Not set: Coplan&apos;s defaults</>}</p>
+          <dl className="config-rows">
+            {list.map((r) => (
+              <div key={r.key} className="config-row" data-key={r.key}>
+                <dt>
+                  {r.label}
+                  <a className="config-key" href={configDocs(r.key)} target="_blank" rel="noreferrer" title={`${where || '.coplan/config.json'}#${r.key} — what it does, in docs/CONFIG.md`}>
+                    {where ? '' : '.coplan/config.json'}#{r.key}
+                  </a>
+                </dt>
+                <dd>{r.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      ))}
+    </section>
   );
 }
 
