@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Checks follow the change, not only the plan
+
+- A review check limited by `paths` now applies when the task changed a
+  matching file, not only when it listed one: the brief, `coplan check review
+  --files` and the done check match the task's diff as well as its expected
+  files, for a task on a branch of its own (`git diff --name-only
+  <base>...<branch>`, plus what is not committed yet wherever the branch is
+  checked out). A task there is not done while a check for a file it changed
+  was never reported. On a branch other tasks share, the unbranched tasks'
+  included, their work cannot be told apart, so the expected files decide and
+  the brief lists the checks the change could add. The implement stage still
+  uses the expected files, since there is no diff yet. `coplan check` takes
+  `--base <ref>` and `--no-diff`; the brief gives the right one for the
+  task's branch, stacked branches included.
+
 ### The README
 
 - **Screenshots** of each step, from demo plans that

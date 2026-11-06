@@ -229,6 +229,59 @@ test('coplan check without a config says so, and how to make one', () => {
   }
 });
 
+test('coplan check review matches the change as well as --files: a check for a file the task touched anyway runs', () => {
+  const dir = repo({
+    '.coplan/config.json': JSON.stringify({
+      hooks: {
+        implement: [{ name: 'docs-lint', run: 'echo docs-lint', paths: ['docs/**'] }],
+        review: [
+          { name: 'unit', run: 'echo unit', paths: ['src/**'] },
+          { name: 'docs', run: 'echo docs', paths: ['docs/**'] },
+          { name: 'e2e', run: 'echo e2e', paths: ['e2e/**'] },
+        ],
+      },
+    }),
+    'src/a.ts': 'x\n',
+  });
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+  try {
+    git('symbolic-ref', 'HEAD', 'refs/heads/main');
+    git('add', '-A');
+    git('-c', 'user.email=t@example.com', '-c', 'user.name=T', 'commit', '-qm', 'initial');
+    git('checkout', '-qb', 'feature');
+    mkdirSync(path.join(dir, 'docs'));
+    writeFileSync(path.join(dir, 'docs', 'guide.md'), 'new\n');
+    const run = (...args: string[]) => spawnSync(process.execPath, [CLI, 'check', ...args], { cwd: dir, encoding: 'utf8' });
+
+    const review = run('review', '--files', 'src/a.ts', '--list');
+    assert.equal(review.status, 0, review.stderr);
+    assert.match(review.stdout, /^unit: /m);
+    assert.match(review.stdout, /^docs: /m, 'docs/guide.md changed, though the task did not list it');
+    assert.doesNotMatch(review.stdout, /^e2e: /m, 'nothing under e2e/ changed');
+    assert.match(review.stderr, /the change since main also touches files for docs/);
+    assert.match(run('review', '--files=src/a.ts', '--base=main', '--list').stdout, /^docs: /m, 'an explicit base');
+
+    // Implement runs before there is a diff: the expected files alone.
+    assert.doesNotMatch(run('implement', '--files', 'src/a.ts', '--list').stdout, /docs-lint/);
+    // Without --files every hook applies already; the diff does not narrow that.
+    assert.match(run('review', '--list').stdout, /^e2e: /m);
+
+    // Where the task's work cannot be told apart, --no-diff: --files alone.
+    assert.doesNotMatch(run('review', '--files', 'src/a.ts', '--no-diff', '--list').stdout, /^docs: /m);
+    // Committed work counts as much as work not committed yet.
+    git('add', 'docs');
+    git('-c', 'user.email=t@example.com', '-c', 'user.name=T', 'commit', '-qm', 'docs');
+    assert.match(run('review', '--files', 'src/a.ts', '--list').stdout, /^docs: /m);
+
+    const lost = run('review', '--files', 'src/a.ts', '--base', 'no-such-branch', '--list');
+    assert.match(lost.stderr, /could not read what changed since no-such-branch; the hooks are matched against --files alone/);
+    assert.doesNotMatch(lost.stdout, /^docs: /m);
+    assert.equal(run('review', '--base', '--list').status, 2, 'a flag is not a base');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a config coplan check cannot read fails, rather than passing with nothing run', () => {
   const dir = repo({ '.coplan/config.json': '{ "hooks": { "review": ["npm test"' });
   try {

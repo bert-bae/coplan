@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { SessionStore } from './store.ts';
 import type { HarnessConfig } from '../shared/config.ts';
-import { currentBranch, repoRoot } from './git.ts';
+import { currentBranch, repoRoot } from '../shared/git.ts';
 import { unreadNotice } from './render.ts';
 import { resolveLink, type SessionEnv } from '../shared/link.ts';
 import { DEFAULT_AGENT, agentInfo, type AgentKind } from '../shared/agents.ts';

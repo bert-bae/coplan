@@ -345,8 +345,10 @@ usage: coplan <command>
   url  [id]  print the UI url (with auth token)
   logs       tail the daemon log
   doctor     verify the plugin wiring end to end
-  check [implement|review|final] [--files a,b] [--list] [--json]
-             run that stage's hooks from .coplan/config.json (default: review)
+  check [implement|review|final] [--files a,b] [--base ref] [--no-diff] [--list] [--json]
+             run that stage's hooks from .coplan/config.json (default: review);
+             at review and final, --files also takes the files changed since --base
+             (--no-diff: --files alone)
   init [--print] [--force]
              write a starting .coplan/config.json from the repository's scripts
   version    print the version

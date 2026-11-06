@@ -15,7 +15,12 @@ the round limit, and the exact checks for each stage from
 `.coplan/config.json`. Run those checks — they are what the repository
 says "good" means. `coplan check <stage> --files <the task's files>` runs a
 whole stage at once; add `--json` to get results in the shape
-`harness_task_update` takes.
+`harness_task_update` takes. At review it also runs the checks for files
+you changed but the task did not list (`--base` sets what it diffs against;
+the brief gives it) — those gate the task too. On a branch other tasks
+share, nothing is read from git (the brief says `--no-diff`): it lists the
+checks your change could add — run the ones whose files you touched, and
+report them.
 
 Report every step with `harness_task_update` so the board shows where the
 task is. If you are a subagent without the Coplan tools, report back to the

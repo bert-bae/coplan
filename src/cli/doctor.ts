@@ -127,7 +127,7 @@ export async function runDoctor(): Promise<number> {
   /* ---------------- configuration ---------------- */
 
   const cwd = process.cwd();
-  const root = repoRootOf(cwd);
+  const root = await repoRootOf(cwd);
   const harness = loadConfigReport({ configDir: paths.configDir(), projectDir: root });
   record('the Coplan config reads cleanly', harness.errors.length === 0, harness.errors.length ? undefined : harness.files.filter(existsSync).join(', ') || 'defaults');
   for (const e of harness.errors) console.log(`    ${e}`);

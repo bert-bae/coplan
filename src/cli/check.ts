@@ -6,28 +6,31 @@
  * prints the results in the shape `harness_task_update` takes as `checks`.
  */
 import { spawn } from 'node:child_process';
-import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { HOOK_STAGES, DEFAULT_HOOK_TIMEOUT, PROJECT_CONFIG_PATH, hookCommand, hooksFor, loadProjectConfig, type CheckHook, type HookStage } from '../shared/project.ts';
 import type { CheckResult } from '../shared/types.ts';
+import { changedFiles, defaultBase, filesForStage } from '../shared/changes.ts';
+import { repoRoot } from '../shared/git.ts';
 
 /** Lines of a failing hook's output shown. Enough to see the error. */
 const TAIL_LINES = 40;
 /** Output kept per hook while it runs; the tail is all that is shown. */
 const KEEP_BYTES = 256 * 1024;
 
-export function repoRootOf(cwd: string): string {
-  try {
-    return execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || cwd;
-  } catch {
-    return cwd;
-  }
+/** The repository a folder is in — found as the daemon finds it — or the
+ *  folder itself outside one. */
+export async function repoRootOf(cwd: string): Promise<string> {
+  return (await repoRoot(cwd)) ?? cwd;
 }
 
 interface Options {
   stage: HookStage;
   files: string[];
+  /** What the change is diffed against at review and final. */
+  base?: string;
+  /** Match --files alone: the task's work cannot be told apart in git. */
+  noDiff: boolean;
   list: boolean;
   json: boolean;
 }
@@ -37,16 +40,37 @@ function parseArgs(args: string[]): Options | string {
   const files: string[] = [];
   let list = false;
   let json = false;
+  let noDiff = false;
+  let base: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
+    // `--flag value` or `--flag=value`. A flag with nothing after it — at
+    // the end, or followed by another flag, which is left to be read as one
+    // — has an empty value, which each flag refuses.
+    const value = (flag: string): string | null => {
+      if (a.startsWith(`${flag}=`)) return a.slice(flag.length + 1);
+      if (a !== flag) return null;
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith('--')) return '';
+      i++;
+      return next;
+    };
+    const commas = (v: string) => v.split(',').map((f) => f.trim()).filter(Boolean);
+    let v: string | null;
     if (a === '--list') list = true;
     else if (a === '--json') json = true;
-    else if (a === '--files') files.push(...(args[++i] ?? '').split(',').map((f) => f.trim()).filter(Boolean));
-    else if (a.startsWith('--files=')) files.push(...a.slice(8).split(',').map((f) => f.trim()).filter(Boolean));
-    else if ((HOOK_STAGES as readonly string[]).includes(a)) stage = a as HookStage;
+    else if (a === '--no-diff') noDiff = true;
+    else if ((v = value('--files')) !== null) {
+      if (!commas(v).length) return '"--files" needs the files, comma-separated: --files src/a.ts,src/b.ts.';
+      files.push(...commas(v));
+    }
+    else if ((v = value('--base')) !== null) {
+      if (!v || v.startsWith('-')) return `"--base${v ? ` ${v}` : ''}" needs a branch or commit.`;
+      base = v;
+    } else if ((HOOK_STAGES as readonly string[]).includes(a)) stage = a as HookStage;
     else return `unknown argument "${a}". Stages: ${HOOK_STAGES.join(', ')}.`;
   }
-  return { stage, files, list, json };
+  return { stage, files, list, json, noDiff, ...(base ? { base } : {}) };
 }
 
 export async function runCheck(args: string[], cwd = process.cwd()): Promise<number> {
@@ -55,7 +79,7 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
     console.error(opts);
     return 2;
   }
-  const root = repoRootOf(cwd);
+  const root = await repoRootOf(cwd);
   const config = loadProjectConfig(root);
   // A config that cannot be read must not pass for one with nothing to run.
   // Anything else that is wrong — a template that is missing, a reviewer
@@ -73,10 +97,33 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
     } else console.log(say);
     return 0;
   }
-  const hooks = hooksFor(config, opts.stage, opts.files);
+  // At review and final the change is there to read: a hook for a file the
+  // task touched without listing it applies too. Only a list of files can
+  // narrow the hooks, so only then is the diff read.
+  let files = opts.files;
+  if (opts.stage !== 'implement' && opts.files.length && !opts.noDiff) {
+    const base = opts.base ?? (await defaultBase(root, config.branches.base));
+    // What this checkout changed since it left the base, uncommitted work
+    // included. (Where its work cannot be told apart from another task's,
+    // the brief says --no-diff.)
+    const changed = base ? await changedFiles(root, { base, head: 'HEAD' }) : null;
+    const since = `since ${base}`;
+    if (changed === null) {
+      console.error(
+        `coplan: could not read what changed${base ? ` ${since}` : ': no base branch found (pass --base)'}; ` +
+          'the hooks are matched against --files alone.',
+      );
+    } else {
+      files = filesForStage(opts.stage, opts.files, changed);
+      const planned = new Set(hooksFor(config, opts.stage, opts.files));
+      const added = hooksFor(config, opts.stage, files).filter((h) => !planned.has(h));
+      if (added.length) console.error(`coplan: the change ${since} also touches files for ${added.map((h) => h.name).join(', ')}.`);
+    }
+  }
+  const hooks = hooksFor(config, opts.stage, files);
   if (!hooks.length) {
     if (opts.json) console.log('[]');
-    else console.log(`No ${opts.stage} hooks${opts.files.length ? ' apply to these files' : ''} in ${PROJECT_CONFIG_PATH}.`);
+    else console.log(`No ${opts.stage} hooks${files.length ? ' apply to these files' : ''} in ${PROJECT_CONFIG_PATH}.`);
     return 0;
   }
   if (opts.list) {

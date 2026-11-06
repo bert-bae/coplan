@@ -35,7 +35,8 @@ import {
   sharedFiles,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, emptyProjectConfig, hasHooks, hookCommand, hooksFor, type ProjectConfig } from '../shared/project.ts';
+import { HOOK_STAGES, emptyProjectConfig, hasHooks, hookCommand, hooksFor, shellQuote, type ProjectConfig } from '../shared/project.ts';
+import { filesForStage, taskFiles, type Changed } from '../shared/changes.ts';
 import { KIND_NOUN, edgePhrase, hang, indent, nestHeadings } from '../shared/architecture.ts';
 import { agentInfo, type AgentKind } from '../shared/agents.ts';
 import { checkWords, checksSection, finalWords, instructionLines, pullRequestWords, renderBuildOrder, reviewerWords, stageWords, templateLines } from './render.ts';
@@ -47,6 +48,14 @@ export interface BriefOptions {
   project?: ProjectConfig;
   /** The coplan CLI on this machine, for `coplan check`. */
   bin?: string;
+  /** What the task's work is diffed against at review (`git diff base...`). */
+  diffBase?: string;
+  /** Why what the task changed was not read: its branch is shared with
+   *  other tasks (their work and its cannot be told apart), there is no base
+   *  branch to compare with, or no repository. */
+  diffUnread?: 'shared' | 'no-base' | 'is-base' | 'no-repo';
+  /** The files the task has changed so far, when git could say. */
+  changed?: Changed;
 }
 
 function settingsOf(plan: Plan, opts: BriefOptions): BuildSettings {
@@ -279,7 +288,7 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
     const leaves = leavesUnder(plan, task.id).map((t, i) => ({ t, i })).sort((a, b) => (rank.get(a.t.id) ?? 0) - (rank.get(b.t.id) ?? 0) || a.i - b.i);
     for (const { t: leaf } of leaves) out.push(`- [${leaf.status === 'done' ? 'x' : ' '}] ${line(leaf)}`);
   }
-  const files = task.files?.length ? task.files : leavesUnder(plan, task.id).flatMap((t) => t.files ?? []);
+  const files = taskFiles(plan, task);
   if (files.length) out.push('', `Files you expect to touch: ${[...new Set(files)].join(', ')}`);
 
   // Where it fits.
@@ -348,8 +357,13 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
     out.push('', `**${name}.** ${what}`);
     if (hooks.length) for (const h of hooks) out.push(`- ${h.name}: \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`);
   };
-  const filesArg = files.length ? ` --files ${[...new Set(files)].join(',')}` : '';
+  // Every part of the command quoted: file and branch names are the plan's,
+  // and the agent runs what the brief says.
+  const filesArg = files.length ? ` --files ${shellQuote([...new Set(files)].join(','))}` : '';
   stage('Implement', 'Make the change, then run the implement checks and fix what they find:', hooksFor(project, 'implement', files));
+  // Review is matched against what the task changed as well as what it
+  // expected to: a hook for a file it touched anyway is part of its gate.
+  const reviewHooks = hooksFor(project, 'review', filesForStage('review', files, opts.changed));
   stage(
     'Review',
     review === 'user'
@@ -359,13 +373,39 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
         : review === 'self'
           ? 'Read your own diff against the objective and the acceptance criteria, as a reviewer would, and run the review checks:'
           : `A fresh subagent that did not write the change reads the diff against this brief and runs the review checks.${reviewerWords(project)}`,
-    hooksFor(project, 'review', files),
+    reviewHooks,
   );
+  const ifTouched = files.length ? project.hooks.review.filter((h) => h.paths?.length && !reviewHooks.includes(h)) : [];
+  if (ifTouched.length) {
+    out.push(
+      opts.diffUnread === 'shared'
+        ? 'These apply too if your change touches their files — this task shares its branch with other tasks, so what it changed is not read from git: run them yourself if it does, and report them:'
+        : opts.diffUnread === 'no-base'
+          ? 'These apply too if your change touches their files — no base branch was found to compare with (set `branches.base` in .coplan/config.json): run them yourself if it does:'
+          : opts.diffUnread === 'is-base'
+            ? "These apply too if your change touches their files — this task's branch is the base branch itself, so there is nothing to compare it with: run them yourself if it does:"
+          : opts.diffUnread === 'no-repo'
+            ? 'These apply too if your change touches their files — this folder is not a git repository, so what the task changed is not read: run them yourself if it does:'
+          : `These apply too once the change touches their files — matched against what you changed${opts.diffBase ? ` since \`${opts.diffBase}\`` : ''}, not only the files above:`,
+      ...ifTouched.map((h) => `- ${h.name} (${h.paths!.join(', ')}): \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`),
+    );
+  }
   // What a reviewer looks for here, whoever reviews.
   if (review !== 'skip') out.push(...instructionLines(project, 'review', '### What the review checks here'));
   out.push('', '**Refine.** Fix what the review found, run the implement checks again, and go back to review.');
-  if (opts.bin && HOOK_STAGES.some((s) => hooksFor(project, s, files).length)) {
-    out.push('', `Run a stage at once: \`"${opts.bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report.`);
+  if (opts.bin && (reviewHooks.length || HOOK_STAGES.some((s) => hooksFor(project, s, files).length))) {
+    const baseArg = !filesArg
+      ? ''
+      : opts.diffUnread === 'shared' || opts.diffUnread === 'no-repo' || opts.diffUnread === 'is-base'
+        ? ' --no-diff'
+        : opts.diffBase
+          ? ` --base ${shellQuote(opts.diffBase)}`
+          : '';
+    out.push(
+      '',
+      `Run a stage at once: \`"${opts.bin}" check implement${filesArg}\`, and \`"${opts.bin}" check review${filesArg}${baseArg}\`` +
+        `${filesArg ? ' (it adds the hooks for the files you changed)' : ''}; add \`--json\` for the \`checks\` to report.`,
+    );
   } else if (!hasHooks(project)) {
     out.push('', ...checksSection(project).slice(1));
   }

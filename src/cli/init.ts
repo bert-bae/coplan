@@ -5,7 +5,7 @@
  * not a guess to trust; `/coplan-init` has Claude check it against CI.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { remoteDefaultBranch } from '../shared/git.ts';
 import path from 'node:path';
 import { repoRootOf } from './check.ts';
 import { DEFAULT_BUILD_SETTINGS } from '../shared/build.ts';
@@ -96,15 +96,6 @@ export function detectHooks(root: string): { hooks: Detected; found: string[] } 
   return { hooks, found };
 }
 
-function baseBranch(root: string): string | undefined {
-  try {
-    const ref = execFileSync('git', ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    return ref.replace(/^refs\/remotes\/origin\//, '') || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 /** The file as written: commented, so it explains itself to whoever opens it. */
 export function renderConfig(hooks: Detected, base: string | undefined): string {
   const hook = (h: CheckHook) => {
@@ -137,11 +128,13 @@ export function renderConfig(hooks: Detected, base: string | undefined): string 
 }
 
 export async function runInit(args: string[], cwd = process.cwd()): Promise<number> {
-  const root = repoRootOf(cwd);
+  const root = await repoRootOf(cwd);
   const file = path.join(root, PROJECT_CONFIG_PATH);
   const print = args.includes('--print');
   const { hooks, found } = detectHooks(root);
-  const text = renderConfig(hooks, baseBranch(root));
+  // The branch `coplan check` and the briefs diff against when the file
+  // names none — so what init writes is what they would find anyway.
+  const text = renderConfig(hooks, (await remoteDefaultBranch(root)) ?? undefined);
   if (print) {
     process.stdout.write(text);
     return 0;

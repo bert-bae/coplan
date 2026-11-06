@@ -692,7 +692,7 @@ counts against the model's tokens.
 | --- | --- | --- |
 | The ten tool definitions | About 32 KB of JSON schema — on the order of 8,000–10,000 tokens | Whenever the agent loads the server's tools |
 | The three skill descriptions | About 1.3 KB | Always listed |
-| A skill's body | 12.3 KB (`coplan`), 8.1 KB (`coplan-build`), 6.1 KB (`iric`) | When the agent uses that skill |
+| A skill's body | 12.3 KB (`coplan`), 8.1 KB (`coplan-build`), 6.5 KB (`iric`) | When the agent uses that skill |
 | The plan, read back | About 9,000 characters for two diagrams and ten tasks; about 140,000 for 150 boxes and 150 tasks | Each `harness_plan_read` (`changes_only` is shorter), and each publish's reply |
 | A sign-off prompt | About 6,000 characters for a seven-task plan; a hook adds at most about 10,000, and a longer plan is handed over as its summary and task list | Once per sign-off |
 | "You changed the plan" | One line | Your next message after you edit |

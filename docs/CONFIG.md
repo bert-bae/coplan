@@ -79,7 +79,7 @@ A hook is a command, run from the repository root, or an object:
 | `run` | The shell command. Required. |
 | `name` | What it is called in reports and on the board, up to 60 characters. Defaults to the script name (`pnpm lint` or `npm run lint` → `lint`). |
 | `timeout` | Seconds before `coplan check` stops it: 1 to 3600. Default 600. |
-| `paths` | Globs (`src/**`, `*.py`, `docs/`, `src/**/*.{ts,tsx}`): the hook applies only to tasks that expect to touch a matching file. A task that lists no files gets every hook. `**` crosses directories, `*` and `?` do not, `{a,b}` is either; a glob without a slash matches a file name anywhere, and one ending in `/` everything under it. A `!glob` takes files back out: `["src/**", "!src/gen/**"]`. |
+| `paths` | Globs (`src/**`, `*.py`, `docs/`, `src/**/*.{ts,tsx}`): the hook applies only to tasks that touch a matching file: one the task expects to touch, and at review (and in `coplan check final --files`) one it did change. That is read only for a task on a branch of its own: `git diff --name-only <base>...<branch>`, plus what is not committed yet wherever the branch is checked out (a worktree too). On a branch other tasks share, the unbranched tasks' included, their work and the task's cannot be told apart: the expected files decide, and the task's brief lists the checks its change could add. A task that lists no files gets every hook. `**` crosses directories, `*` and `?` do not, `{a,b}` is either; a glob without a slash matches a file name anywhere, and one ending in `/` everything under it. A `!glob` takes files back out: `["src/**", "!src/gen/**"]`. |
 | `cwd` | The folder it runs in, inside the repository: a package of a monorepo (`"packages/api"`). Default the repository root. While the folder does not exist the hook fails, saying so, rather than run somewhere it would check nothing. |
 | `env` | Variables set for it, up to 20: `{ "NODE_ENV": "test" }`. The prompts show the command with both, as one line the agent can run from the root. |
 | `optional` | `true`: a failure is reported but does not hold the task back. |
@@ -91,7 +91,15 @@ each task's brief (`harness_task_brief`), and Claude runs them like any
 other command, under your permission settings. `coplan check <stage>` runs a
 whole stage at once and prints only the tail of what failed; `--files a,b`
 keeps to the hooks for those files, `--list` prints them without running,
-and `--json` prints results in the shape `harness_task_update` takes.
+and `--json` prints results in the shape `harness_task_update` takes. At
+`review` and `final`, `--files` also takes in the files changed since
+`--base <ref>` (default: `branches.base`, else the default branch, each
+as whichever of the local branch and `origin`'s is further on), uncommitted
+work included, so a hook for a file the task touched without listing it
+still runs (`--no-diff` keeps to `--files` alone). A task's brief gives the
+command with the right base for its branch, or `--no-diff` where it shares
+its branch with other tasks, and a task on a branch of its own is not done
+while a review check for a changed file was never reported.
 
 Claude reports the checks it ran with each task. A task whose last reported
 checks include a failure (not `optional`) cannot be marked done.

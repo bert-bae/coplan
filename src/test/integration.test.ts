@@ -1045,6 +1045,103 @@ test('the build gates hold however the agent reports progress, and only the user
   }
 });
 
+test('the done check follows the diff: a review check for a file the task changed but did not list still gates it', async () => {
+  const id = 'diff-gate-session';
+  const dir = path.join(repo, '.coplan');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, 'config.json'),
+    JSON.stringify({
+      hooks: {
+        review: [
+          { name: 'unit', run: 'npm test', paths: ['src/**'] },
+          { name: 'docs', run: 'npm run docs', paths: ['docs/**'] },
+        ],
+      },
+      iric: { review: 'skip', parallel: 2, maxRounds: 3 },
+      branches: { base: 'main' },
+    }),
+  );
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  const tree = path.join(tmpdir(), `cc-harness-int-tree-${process.pid}`);
+  let branched = false;
+  try {
+    await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+    await mcpFor(id, 'publish', PLAN);
+    // t2 lands on a branch of its own: what it changes there is its work.
+    await mcpFor(id, 'edit', {
+      ops: [
+        { op: 'upsert_task', id: 't2', files: ['src/client.ts'], branch: 'feat/client' },
+        { op: 'upsert_task', id: 't3', files: ['src/invalidate.ts'] },
+      ],
+    });
+    const brief = String((await mcpFor(id, 'brief', { task_id: 't2' }))['text']);
+    assert.match(brief, /- unit: `npm test`/);
+    assert.match(brief, /These apply too once the change touches their files — matched against what you changed since `main`[\s\S]*- docs \(docs\/\*\*\): `npm run docs`/);
+    assert.match(brief, /check review --files src\/client\.ts --base main`/);
+    // t3 shares the session's branch with the other tasks: nothing is read,
+    // and the brief says so — and tells coplan check not to read it either.
+    const shared = String((await mcpFor(id, 'brief', { task_id: 't3' }))['text']);
+    assert.match(shared, /this task shares its branch with other tasks, so what it changed is not read from git/);
+    assert.match(shared, /check review --files src\/invalidate\.ts --no-diff`/);
+
+    // The task writes a doc it never listed, in a worktree of its branch,
+    // not committed yet: the docs check is now its gate.
+    git(['worktree', 'add', '-q', '-b', 'feat/client', tree, 'main']);
+    branched = true;
+    mkdirSync(path.join(tree, 'docs'), { recursive: true });
+    writeFileSync(path.join(tree, 'docs', 'client.md'), '# Client\n');
+    assert.match(String((await mcpFor(id, 'brief', { task_id: 't2' }))['text']), /\*\*Review\.\*\*[^\n]*\n- unit: `npm test`\n- docs: `npm run docs`/);
+    await task({ task_id: 't2', stage: 'implement' });
+    await task({ task_id: 't2', stage: 'review', checks: [{ name: 'unit', ok: true }] });
+    const refused = await task({ task_id: 't2', status: 'done', note: 'x' });
+    assert.equal(refused['ok'], false);
+    assert.match(String(refused['text']), /the review checks docs \(the change touches its files: docs\/\*\*\) were never reported/);
+    await task({ task_id: 't2', checks: [{ name: 'docs', ok: true }] });
+    const done = await task({ task_id: 't2', status: 'done', note: 'done' });
+    assert.equal(done['ok'], true, String(done['text']));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    if (branched) {
+      git(['worktree', 'remove', '--force', tree]);
+      git(['branch', '-q', '-D', 'feat/client']);
+    }
+  }
+});
+
+
+test('where git cannot read what a task changed, the done check says so, rather than blame files it never touched', async () => {
+  const id = 'diff-unread-session';
+  const dir = path.join(repo, '.coplan');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, 'config.json'),
+    JSON.stringify({ hooks: { review: [{ name: 'e2e', run: 'npm run e2e', paths: ['e2e/**'] }] }, iric: { review: 'skip' }, branches: { base: 'main' } }),
+  );
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  try {
+    await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+    await mcpFor(id, 'publish', PLAN);
+    await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't2', files: ['src/client.ts'], branch: 'feat/alone' }] });
+    // A branch with no history in common with main: git has no answer.
+    git(['branch', 'feat/alone', 'main']);
+    git(['update-ref', 'refs/heads/feat/alone', execFileSync('git', ['commit-tree', '-m', 'alone', execFileSync('git', ['write-tree'], { cwd: repo, encoding: 'utf8' }).trim()], { cwd: repo, encoding: 'utf8' }).trim()]);
+    await task({ task_id: 't2', stage: 'implement' });
+    await task({ task_id: 't2', stage: 'review' });
+    const refused = await task({ task_id: 't2', status: 'done', note: 'x' });
+    assert.equal(refused['ok'], false);
+    assert.match(String(refused['text']), /git could not read what it changed \(too many files, or it took too long\), so every review check applies, and e2e were never reported/);
+    assert.doesNotMatch(String(refused['text']), /the change touches its files/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    try {
+      git(['branch', '-q', '-D', 'feat/alone']);
+    } catch {
+      /* not made */
+    }
+  }
+});
+
 test('dropping a task needs a reason; dropping or reopening one says what it means for the rest', async () => {
   const id = 'scope-session';
   const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);

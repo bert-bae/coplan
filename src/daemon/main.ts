@@ -13,14 +13,15 @@ import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
 import { MAX_NOTE, PlanError, cleanChecks, cleanNote, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
 import { PROMPT_BUDGET, buildPrompt, designPrompt, promptHash, renderGaps, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
 import { renderBrief, renderNext } from './brief.ts';
-import { cleanSettings, dependents, effectiveReview, hasSubtasks, readyTasks, roundVerdict, stackStatus, waitingOn } from '../shared/build.ts';
+import { cleanSettings, dependents, effectiveBranch, effectiveReview, hasSubtasks, readyTasks, roundVerdict, stackStatus, waitingOn } from '../shared/build.ts';
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
+import { changedFiles, defaultBase, filesForStage, sharesBranch, taskDiffRange, taskFiles, type Changed, type DiffRange } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
 import { ConfigCache, configStamp, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
-import type { BuildSettings, CleanupGroupId, DaemonLock, Plan, PlanInput, PlanOp, ServerEvent, SessionState, TaskListInput, TaskStatus } from '../shared/types.ts';
+import type { BuildSettings, CleanupGroupId, DaemonLock, Plan, PlanInput, PlanOp, ServerEvent, SessionState, Task, TaskListInput, TaskStatus } from '../shared/types.ts';
 import { CLEANUP_GROUPS } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
@@ -921,13 +922,37 @@ function buildRouter(deps: Deps): Router {
     return session;
   };
 
+  /** A task on a branch of its own with nothing to compare: its branch is
+   *  the base branch itself, or no base branch was found. */
+  const whyNoBase = async (root: string, plan: Plan, task: Task, project: ProjectConfig): Promise<'is-base' | 'no-base'> => {
+    const base = await defaultBase(root, plan.submission?.base ?? project.branches.base);
+    const branch = effectiveBranch(plan, task);
+    return base && branch && (base === branch || base === `origin/${branch}`) ? 'is-base' : 'no-base';
+  };
+
+  /** What a task's work is diffed against, and the files it changed: what
+   *  its review checks are matched against besides the files it expected
+   *  (only for a task on a branch of its own: see taskDiffRange). */
+  const taskChanges = async (session: SessionState, plan: Plan, task: Task, project: ProjectConfig): Promise<{ range: DiffRange | null; changed: Changed }> => {
+    // Outside a repository there is no diff to read.
+    const root = session.repoRoot;
+    if (!root) return { range: null, changed: null };
+    const range = await taskDiffRange(plan, task, { cwd: root, sessionBranch: session.branch, ...(project.branches.base ? { configuredBase: project.branches.base } : {}) });
+    return { range, changed: range ? await changedFiles(root, range) : null };
+  };
+
   /**
    * `harness_task_update`: a status, a step of the iric cycle, the checks
    * run — answered with what it means for the build. Two moves are refused,
    * because the board would then say something untrue: starting a task that
    * still waits on another, and finishing one whose checks last failed.
+   *
+   * The done check reads what the task changed last, from git, after every
+   * refusal that needs none. Should the plan change while git is read, the
+   * update starts over on the plan as it is then, so it is never decided on
+   * one plan and applied to another.
    */
-  const updateTask = (session: SessionState, body: Record<string, unknown>): string => {
+  const updateTask = async (session: SessionState, body: Record<string, unknown>, tries = 0): Promise<string> => {
     const before = session.plan;
     const taskId = String(body['task_id'] ?? '');
     if (!before) throw new PlanError(`No task "${taskId}": there is no plan yet. Publish one with harness_plan_publish.`);
@@ -1024,15 +1049,20 @@ function buildRouter(deps: Deps): Router {
       const optional = new Set(HOOK_STAGES.flatMap((st) => project.hooks[st].filter((h) => h.optional).map((h) => h.name)));
       const latest = mergeChecks(task.checks, checks ?? []);
       const failing = latest.filter((c) => !c.ok && !optional.has(c.name));
-      const missing = hooksFor(project, 'review', task.files)
-        .filter((h) => !h.optional && !latest.some((c) => c.name === h.name))
-        .map((h) => h.name);
-      if (failing.length || missing.length) {
-        throw new PlanError(
+      // Matched against the files the task changed as well as the ones it
+      // expected to: a check for a file it touched anyway still gates it.
+      const expected = taskFiles(before, task);
+      const planned = hooksFor(project, 'review', expected);
+      const missing = (files: string[]) =>
+        hooksFor(project, 'review', files)
+          .filter((h) => !h.optional && !latest.some((c) => c.name === h.name))
+          .map((h) => (planned.includes(h) || !h.paths?.length ? h.name : `${h.name} (the change touches its files: ${h.paths.join(', ')})`));
+      const notDone = (failed: typeof failing, unreported: string[]) =>
+        new PlanError(
           `"${task.title}" is not done: ` +
             [
-              failing.length ? `its last checks failed (${failing.map((c) => `${c.name}${c.note ? `: ${c.note}` : ''}`).join('; ')})` : '',
-              missing.length ? `the review checks ${missing.join(', ')} were never reported` : '',
+              failed.length ? `its last checks failed (${failed.map((c) => `${c.name}${c.note ? `: ${c.note}` : ''}`).join('; ')})` : '',
+              unreported.length ? `the review checks ${unreported.join(', ')} were never reported` : '',
             ]
               .filter(Boolean)
               .join(', and ') +
@@ -1040,7 +1070,9 @@ function buildRouter(deps: Deps): Router {
             'task, mark it blocked with a note saying so and ask the user; if they accept it as it is, call again with ' +
             'user_approved: true and their answer in the note.',
         );
-      }
+      // First what needs no git: failures, and checks for the files it expected.
+      const expectedMissing = missing(expected);
+      if (failing.length || expectedMissing.length) throw notDone(failing, expectedMissing);
       // … and its last review round passed — by whoever the user said reviews it.
       const mode = effectiveReview(before, task, settings.review);
       if (mode !== 'skip') {
@@ -1058,6 +1090,33 @@ function buildRouter(deps: Deps): Router {
               : `"${task.title}" has no passing verdict for review round ${task.round}: report the review's outcome — ` +
                   'verdict "pass" (with this call is fine), or "changes" and refine.',
           );
+        }
+      }
+      // Last, what it changed — read from git only now, past every other
+      // refusal, without holding up the daemon.
+      if (diffMatters(project, expected)) {
+        const { changed } = await taskChanges(session, before, task, project);
+        const now = store.get(session.sessionId);
+        if (!now) throw new PlanError('The session ended while its change was read; nothing was updated.');
+        if (now.plan !== before) {
+          // Edited meanwhile: decided again on the plan as it is now — a few
+          // times at most, then said, rather than read git without end.
+          if (tries >= 3) throw new PlanError(`"${task.title}" kept changing while its change was read; nothing was updated. Call again.`);
+          return updateTask(now, body, tries + 1);
+        }
+        const changedMissing = missing(filesForStage('review', expected, changed));
+        if (changedMissing.length) {
+          // Git could not say what changed: every check limited to some files
+          // applies — said as that, not as files the task touched.
+          if (changed === 'all') {
+            throw new PlanError(
+              `"${task.title}" is not done: git could not read what it changed (too many files, or it took too long), so ` +
+                `every review check applies, and ${changedMissing.map((m) => m.replace(/ \(the change touches its files: .*\)$/, '')).join(', ')} ` +
+                'were never reported. Run them and report them with `checks`, or, if they plainly do not apply, ask the user; ' +
+                'if they accept it as it is, call again with user_approved: true and their answer in the note.',
+            );
+          }
+          throw notDone([], changedMissing);
         }
       }
     }
@@ -1321,12 +1380,30 @@ function buildRouter(deps: Deps): Router {
           const taskId = String(body['task_id'] ?? '');
           const task = plan.tasks.find((t) => t.id === taskId);
           if (!task) throw new PlanError(`No task "${taskId}". harness_task_next lists the tasks that are ready.`);
-          reply(true, renderBrief(plan, task, { agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) }));
+          const project = projectFor(session);
+          // Git is asked only when its answer can change the brief: the task
+          // lists files, and a review check is limited to some.
+          const matters = diffMatters(project, taskFiles(plan, task));
+          const { range, changed } = matters ? await taskChanges(session, plan, task, project) : { range: null, changed: null };
+          // Why nothing was read, said as it is: the branch is shared, or
+          // there is nothing to compare with.
+          const unread = !matters || range ? undefined : sharesBranch(plan, task) ? 'shared' : !session.repoRoot ? 'no-repo' : await whyNoBase(session.repoRoot, plan, task, project);
+          reply(
+            true,
+            renderBrief(plan, task, {
+              agent: session.agent,
+              project,
+              changed,
+              ...(range ? { diffBase: range.base } : {}),
+              ...(unread ? { diffUnread: unread } : {}),
+              ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
+            }),
+          );
           return;
         }
 
         case 'task': {
-          reply(true, updateTask(session, body));
+          reply(true, await updateTask(session, body));
           return;
         }
 
@@ -1340,6 +1417,12 @@ function buildRouter(deps: Deps): Router {
   });
 
   return router;
+}
+
+/** Whether what a task changed can change which checks gate it: it lists
+ *  files (else every hook applies already), and a review hook has `paths`. */
+function diffMatters(project: ProjectConfig, files: readonly string[]): boolean {
+  return files.length > 0 && project.hooks.review.some((h) => h.paths?.length);
 }
 
 /**
