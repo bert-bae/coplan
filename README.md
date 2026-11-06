@@ -160,6 +160,10 @@ optional; it is where *Answer in Claude* links open. Install the plugin in
 each agent you use: they share one daemon and one page, and the session list
 says which agent each session runs in.
 
+It runs on **Linux and macOS**, both tested in CI. On **Windows**, run your
+agent in WSL: the hooks are a POSIX shell script, and native Windows is
+neither supported nor tested. From WSL, links open in your Windows browser.
+
 ### Claude Code, from GitHub
 
 ```bash
@@ -294,7 +298,8 @@ detail, and everything each view can do:
    and asks what it needs decided, in chat.
 2. **You shape it** in the browser — rewire the architecture, write decisions
    on the boxes, comment — then tell Claude in chat; it reads back the net
-   effect of your edits and answers your comments.
+   effect of your edits, answers your comments, and proposes the changes that
+   are yours to decide, for you to accept or reject.
 3. **You confirm the design.** That locks the architecture, and your next
    message carries it to Claude.
 4. **Claude makes the task list** — dependencies, branches, the boxes each
@@ -304,8 +309,9 @@ detail, and everything each view can do:
 6. **Claude builds it,** ready tasks first, independent ones side by side,
    each through implement → review → refine against your repository's checks,
    while the board follows along.
-7. **Claude reports:** final checks, the pull requests in stack order if you
-   want them, and a build report on the Overview.
+7. **Claude reports:** final checks, the pull requests in stack order the way
+   the repository's `pullRequests` says (by default, once you say so), and a
+   build report on the Overview.
 
 ## Recommended usage
 
@@ -337,66 +343,91 @@ and its build.
    tests in `review` and slow, repository-wide checks in `final`, and give
    language-specific checks `paths` so they only run for tasks that touch
    those files. See [CONFIG.md](docs/CONFIG.md#the-repository-coplanconfigjson).
+4. **Say how pull requests are opened** in the same file
+   ([`pullRequests`](docs/CONFIG.md#pullrequests)): with `gh`, Graphite or
+   not at all, and whether as each branch is done, once you say (the
+   default), or never. Point `template` at the repository's pull request
+   template so every description follows it.
+5. **Decide what must hold the build.** [`planCheck`](docs/CONFIG.md#plancheck)
+   turns a gap — an undescribed box, an unanswered comment — into one that
+   blocks *Confirm design* and *Submit*; [`final.blocking`](docs/CONFIG.md#final)
+   keeps the plan from being built while a final check fails.
+6. **Put your own defaults in `~/.claude/cc-harness/coplan.json`** — review
+   mode, pull requests, standing instructions — once, instead of in every
+   repository. A repository's own settings win key by key.
+   See [Your own defaults](docs/CONFIG.md#your-own-defaults-coplanjson).
 
 ### While you plan
 
-4. **Make your changes during the design.** Confirming locks the diagrams,
+7. **Make your changes during the design.** Confirming locks the diagrams,
    sections and summary; only the title, tasks, task links and comments stay
    editable. *Reopen design* unlocks it if you must.
-5. **Write decisions on the boxes,** not only in chat. A box's notes reach
+8. **Write decisions on the boxes,** not only in chat. A box's notes reach
    Claude with every read, and every task brief that builds that box.
-6. **Comment when you are unsure** rather than editing: Claude acts on it and
+9. **Comment when you are unsure** rather than editing: Claude acts on it and
    answers in the thread.
-7. **Keep the plan the size of the change.** One diagram per idea, a few to
-   about fifteen boxes each; tasks that a reviewer can judge one at a time.
-   The whole plan is text the agent reads: a plan with two diagrams and ten
-   tasks reads back in about 9,000 characters, one with 150 boxes and 150
-   tasks in about 140,000.
-8. **Answer in the agent's chat.** Coplan links you there and never answers
-   for you.
+10. **Ask Claude to audit the plan, and answer its proposals.** What it finds
+    that is yours to decide comes as a proposal — the change, its reason, and
+    on the canvas what it adds and removes — and nothing changes until you
+    accept it. Answer soon: one goes out of date once you change what it
+    touches.
+11. **Keep the plan the size of the change.** One diagram per idea, a few to
+    about fifteen boxes each; tasks that a reviewer can judge one at a time.
+    The whole plan is text the agent reads: a plan with two diagrams and ten
+    tasks reads back in about 9,000 characters, one with 150 boxes and 150
+    tasks in about 140,000.
+12. **Answer in the agent's chat.** Coplan links you there and never answers
+    for you.
 
 ### When you submit
 
-9. **Match the reviewer to the risk.** The submit dialog sets the default;
-   a task can override it.
+13. **Match the reviewer to the risk.** The submit dialog sets the default;
+    a task can override it.
 
-   | Kind of task | Review | Why |
-   | --- | --- | --- |
-   | Most work | Independent reviewer (`subagent`) | A fresh context reads each diff against the brief. The most thorough, and the most model usage. |
-   | Security-sensitive, user-facing, migrations | You (`user`) | Claude stops and asks you before the task is done. |
-   | Small and low-risk | Self-review (`self`) | Claude rereads its own diff cold. |
-   | Mechanical: renames, generated files, docs | Checks only (`skip`) | The review checks are the review. |
+    | Kind of task | Review | Why |
+    | --- | --- | --- |
+    | Most work | Independent reviewer (`subagent`) | A fresh context reads each diff against the brief. The most thorough, and the most model usage. |
+    | Security-sensitive, user-facing, migrations | You (`user`) | Claude stops and asks you before the task is done. |
+    | Small and low-risk | Self-review (`self`) | Claude rereads its own diff cold. |
+    | Mechanical: renames, generated files, docs | Checks only (`skip`) | The review checks are the review. |
 
-10. **Set how many tasks run at once** (`parallel`, default 2, up to 8) for
+14. **Set how many tasks run at once** (`parallel`, default 2, up to 8) for
     your machine and your checks. Each one is its own subagent running its
     own checks, and a task on its own branch gets its own git worktree. Raise
     it for a large plan of independent tasks; use 1 on a laptop or when the
     test suite is heavy.
-11. **Cap the review rounds** (`maxRounds`, default 3, up to 10). Past it,
+15. **Cap the review rounds** (`maxRounds`, default 3, up to 10). Past it,
     Claude stops and asks you rather than spending more on a task that keeps
     failing review.
-12. **Use branches only when the change should be several pull requests.**
+16. **Pick the reviewer's model** with [`review.model`](docs/CONFIG.md#review),
+    in the repository's config or your own `coplan.json`, if it should not be
+    the agent's own: a smaller one to spend less on review, a stronger one to
+    review harder.
+17. **Use branches only when the change should be several pull requests.**
     Without them every task lands on the current branch.
 
 ### Day to day
 
-13. **Leave `autoOpen` off** on shared or remote machines; open the page with
+18. **Leave `autoOpen` off** on shared or remote machines; open the page with
     `/coplan-open` when you want it.
-14. **Don't share the page's link.** The link `coplan open` and `coplan url`
+19. **Don't share the page's link.** The link `coplan open` and `coplan url`
     print carries the daemon's access token (`?token=…`); the page moves it
     out of the address bar into its own storage.
-15. **After updating the plugin:** `/coplan-setup`, restart the agent, then
+20. **After updating the plugin:** `/coplan-setup`, restart the agent, then
     `/coplan-restart` so the daemon runs the new build. Open tabs reconnect.
-16. **Now and then:** `coplan clean --dry-run` lists what could go — finished
+21. **Now and then:** `coplan clean --dry-run` lists what could go — finished
     sessions, interrupted writes, the older part of the log.
 
 ### Trust
 
 - **Read a repository's `.coplan/config.json` like its `package.json`
   scripts.** The commands in it are handed to the agent to run as each task's
-  checks. Coplan never runs them itself, and the agent runs them under your
-  permission settings — so in a repository you don't trust, read that file
-  before you build, and keep permission prompts on.
+  checks, and its `instructions` — text, or files in the repository they
+  name — are added to what the agent is told when it plans, builds and
+  reviews. Coplan never runs the commands itself, and the agent runs them
+  under your permission settings — so in a repository you don't trust, read
+  that file (and any instruction files it names) before you build, and keep
+  permission prompts on.
 - **The skills direct the agent; they grant it nothing.** Everything a build
   does to your repository — branches, commits, pushes, pull requests — is the
   agent acting under its normal permissions. See [Skills](#skills).
@@ -413,8 +444,8 @@ time; the one-time build fetches its packages from the npm registry with pnpm.
 
 | Part | What it is | Runs as | Lifetime |
 | --- | --- | --- | --- |
-| [MCP server](#the-mcp-server-harness) `harness` | Nine tools the agent calls to publish, read and track the plan | `node dist/mcp/main.js`, over stdio | One per agent session, started by the agent |
-| [Hooks](#hooks) | Seven lifecycle hooks per agent | `bin/coplan-hook-relay.sh` — `sh` and `curl` | About 20 ms per event |
+| [MCP server](#the-mcp-server-harness) `harness` | Ten tools the agent calls to publish, read, propose changes to and track the plan | `node dist/mcp/main.js`, over stdio | One per agent session, started by the agent |
+| [Hooks](#hooks) | Seven lifecycle hooks in Claude Code and Codex, five in Cursor | `bin/coplan-hook-relay.sh` — `sh` and `curl` | About 20 ms per event |
 | [Daemon](#what-it-reads-writes-and-connects-to) | Local server: keeps the plans, serves the page | `node dist/daemon/main.js` | One per user. The first hook starts it; it exits after two idle hours |
 | [Skills](#skills) | `coplan`, `coplan-build`, `iric` | Instructions the agent loads | When the agent uses one |
 | [Slash commands](#slash-commands-and-the-cli) | `/coplan-setup`, `-open`, `-init`, `-doctor`, `-restart` | Each runs `bin/coplan` | When you type one |
@@ -433,19 +464,20 @@ it uses the skill.
 
 | Skill | The agent uses it when | It tells the agent to | So the agent may |
 | --- | --- | --- | --- |
-| [`coplan`](skills/coplan/SKILL.md) (11 KB) | you type `/coplan` or `$coplan`, ask to plan something in Coplan or to set Coplan up, or a confirmed design arrives | investigate the code, publish the design, read your edits back and answer your comments, then break the confirmed design into a task list — and not build until you submit | call Coplan's tools; ask you questions in chat; run `pnpm install` in the plugin's folder when you ask it to set Coplan up |
-| [`coplan-build`](skills/coplan-build/SKILL.md) (7.6 KB) | a submitted plan's build prompt arrives, or you ask it to build a Coplan plan | start only tasks that are ready, build independent ones in parallel, land each on its branch, then run the final checks and write the report | start up to `parallel` subagents; create branches and git worktrees; commit once per task; rebase stacked branches; run the repository's checks; push the branches at the end, and open the pull requests in stack order if you want them and it has the tools |
-| [`iric`](skills/iric/SKILL.md) (6 KB) | building each task, or when you ask to run a task through iric | implement inside the task's scope, run the checks, have it reviewed the way you chose, refine until it passes or the round limit, and report each step | run the `implement` and `review` checks; start a reviewer subagent (review `subagent`); stop and ask you (review `user`, or past `maxRounds`) |
+| [`coplan`](skills/coplan/SKILL.md) (12 KB) | you type `/coplan` or `$coplan`, ask to plan something in Coplan or to set Coplan up, or a confirmed design arrives | investigate the code, publish the design, read your edits back and answer your comments, propose changes that are yours to decide rather than make them, then break the confirmed design into a task list — and not build until you submit | call Coplan's tools; ask you questions in chat; propose edits for you to accept or reject; run `pnpm install` in the plugin's folder when you ask it to set Coplan up |
+| [`coplan-build`](skills/coplan-build/SKILL.md) (8 KB) | a submitted plan's build prompt arrives, or you ask it to build a Coplan plan | start only tasks that are ready, build independent ones in parallel, land each on its branch, then run the final checks and write the report | start up to `parallel` subagents; create branches and git worktrees; commit once per task; rebase stacked branches; run the repository's checks; push the branches; open pull requests with `gh` or Graphite, as the repository's [`pullRequests`](docs/CONFIG.md#pullrequests) says — by default only once you say so — written from its pull request template if it has one |
+| [`iric`](skills/iric/SKILL.md) (6 KB) | building each task, or when you ask to run a task through iric | implement inside the task's scope, run the checks, have it reviewed the way you chose, refine until it passes or the round limit, and report each step | run the `implement` and `review` checks; start a reviewer subagent (review `subagent`), on the model [`review.model`](docs/CONFIG.md#review) names if one is set; stop and ask you (review `user`, or past `maxRounds`) |
 
 ### The MCP server: `harness`
 
 A stdio server (MCP protocol `2024-11-05`), hand-written with no
 dependencies. Each tool call is forwarded over loopback HTTP to the daemon —
 starting one if none is running — and the daemon's text comes back as the
-result, within 30 seconds. **None of the tools touch your repository, run a
-command or reach the network beyond `127.0.0.1`:** they read and change the
-plan the daemon holds, and none of them waits on you. In Claude Code they
-are named `mcp__plugin_coplan_harness__<tool>`.
+result, within 30 seconds. **None of the tools write to your repository, run
+a command or reach the network beyond `127.0.0.1`:** they read and change the
+plan the daemon holds — reading, from the repository, only its Coplan config
+and the files that names — and none of them waits on you. In Claude Code
+they are named `mcp__plugin_coplan_harness__<tool>`.
 
 | Agent | Declared in | Command | Environment | Timeouts |
 | --- | --- | --- | --- | --- |
@@ -453,7 +485,7 @@ are named `mcp__plugin_coplan_harness__<tool>`.
 | Codex | [`mcp/codex.json`](mcp/codex.json) | `node ./dist/mcp/main.js`, from the plugin's folder | `COPLAN_AGENT=codex`; passes `CC_HARNESS_HOME` on | 20 s to start, 60 s per call |
 | Cursor | [`mcp/cursor.json`](mcp/cursor.json) | `node ${CURSOR_PLUGIN_ROOT}/dist/mcp/main.js` | `COPLAN_AGENT=cursor`, `COPLAN_WORKSPACE=${workspaceFolder}` | Cursor's defaults |
 
-The nine tools:
+The ten tools:
 
 | Tool | Changes the plan? | What it does |
 | --- | --- | --- |
@@ -461,6 +493,7 @@ The nine tools:
 | `harness_plan_read` | No — marks your edits as read | The plan as text, leading with the net effect of your changes since the last read, with every id Claude needs. Diagrams read as an architecture: the system's shape, each part in flow order with its description, decisions and tasks, then every connection. `changes_only` skips the document and quotes edited text instead. |
 | `harness_plan_check` | No | What the plan leaves open: boxes no task builds, tasks that build no box, undescribed boxes, tasks with no detail, box ids two diagrams share, branch layouts a stack of pull requests cannot follow, and your comments nobody answered. The same list shows in the sign-off dialogs. |
 | `harness_plan_edit` | Yes | A batch of targeted edits — sections, diagrams, one box or arrow at a time, tasks, moves, comments (on the plan, an item, or one box or arrow) and replies, the build report — applied all or nothing. Once the design is confirmed, only tasks, task links and comments; once the plan is submitted, only task edits, comments and the report. |
+| `harness_plan_propose` | Not until you accept it | Suggest a change instead of making it: a batch of edits, with Claude's reason, that waits for you. You see it beside what it changes — and on the canvas, what it adds, changes and removes — and accept it (the edits apply, as yours) or reject it, saying why if you like. Claude hears your answer the next time it reads. A proposal you have moved past goes out of date and cannot be accepted. |
 | `harness_tasks_publish` | Yes | Publish the task list for the confirmed design: replaces the task tree and nothing else, with dependencies, branches, review modes and the boxes each task builds. |
 | `harness_task_next` | No | What can be built now: ready tasks, how many to run at once, what is in progress and at which step, what the rest wait on, the branches — and, once every task is done, how to finish. |
 | `harness_task_brief` | No | One task's focused brief, written to hand to a subagent as is: objective, the boxes it builds and their connections, what it comes after and before, its scope, branch, and its implement → review → refine cycle with the exact checks. |
@@ -495,10 +528,12 @@ Claude Code's hooks ([`hooks/hooks.json`](hooks/hooks.json)):
 | `SessionEnd` | — | 5 s | Marks the session ended. |
 
 Codex's ([`hooks/codex.json`](hooks/codex.json)) are the same events, except
-that `PreToolUse` matches `request_user_input` and `PermissionRequest` takes
-the place of `Notification`. Cursor's ([`hooks/cursor.json`](hooks/cursor.json))
-are its own: `sessionStart`, `beforeSubmitPrompt`, `preToolUse` and
-`postToolUse` on `AskQuestion`, `afterAgentResponse`, `stop` and `sessionEnd`.
+that `PreToolUse` matches `request_user_input` and `request_user_input_async`,
+and `PermissionRequest` takes the place of `Notification`. Cursor's five
+([`hooks/cursor.json`](hooks/cursor.json)) are its own: `sessionStart`,
+`beforeSubmitPrompt`, `afterAgentResponse`, `stop` and `sessionEnd` — its
+hooks see neither its question tool nor permission prompts, so a question
+is noticed when a turn ends on one.
 
 **What a hook sends, and what is kept.** A hook sends the event as the agent
 hands it over — for `UserPromptSubmit` that includes your message, for
@@ -546,9 +581,9 @@ plugin's folder:
 
 | Where | What | Written by |
 | --- | --- | --- |
-| `~/.claude/cc-harness/` (or `CC_HARNESS_HOME`), a directory only you can read | `daemon.json` (the daemon's address, pid and token), `auth.header` (the token, for the hook relay), `daemon.log`, `sessions/<id>/state.json` (each plan with its change log and sign-offs), `config.json` (your settings), and `start-failed`, a marker after a daemon that would not start | The daemon |
+| `~/.claude/cc-harness/` (or `CC_HARNESS_HOME`), a directory only you can read | `daemon.json` (the daemon's address, pid and token), `auth.header` (the token, for the hook relay), `daemon.log`, `sessions/<id>/state.json` (each plan with its change log and sign-offs), and `start-failed`, a marker after a daemon that would not start. Also yours, if you make them: `config.json` (Coplan's settings), `coplan.json` (your defaults for every repository's build) and `instructions/<point>.md` (your standing instructions) | The daemon; you |
 | The plugin's folder | `node_modules/` and `dist/` | The one-time build |
-| Your repository | Nothing. Coplan reads `.coplan/config.json` and `.claude/harness.json`; `coplan init` writes `.coplan/config.json` when you ask it to | — |
+| Your repository | Nothing. Coplan reads `.coplan/config.json`, `.claude/harness.json`, and the instruction files and pull request template the config names — only files inside the repository, a link that leads outside it is refused. `coplan init` writes `.coplan/config.json` when you ask it to | — |
 
 The agent changes your repository as it builds, of course — with its own
 permissions, as it would without Coplan.
@@ -584,9 +619,9 @@ differs is what each agent lets a plugin see and do:
 | Start a plan | `/coplan <task>` | `$coplan <task>`, or ask | `/coplan <task>` |
 | The build prompt reaches the agent | with your next message ("go") | with your next message ("go") | you paste it — submitting copies it — or say "build the plan" and it reads it with `harness_plan_read` |
 | "You changed the plan" note on your next message | yes | yes | where Cursor passes it on |
-| A question is noticed | `AskUserQuestion`, permission prompts, idle prompts, a turn ending on a question | `request_user_input` (Plan mode), permission requests, a turn ending on a question | a turn ending on a question |
+| A question is noticed | `AskUserQuestion`, permission prompts, idle prompts, a turn ending on a question | `request_user_input` (Plan mode), permission requests, a turn ending on a question; Codex has no hook for idle prompts | a turn ending on a question: Cursor's hooks see neither `AskQuestion` nor permission prompts |
 | *Answer in …* opens the session | cloud and Remote Control sessions | the Codex app (`codex://threads/…`) | no link: Cursor has none for a chat |
-| Slash commands | `/coplan-open`, `/coplan-doctor`, `/coplan-restart` | none; ask, and the skill runs `coplan` | `/coplan-open`, `/coplan-doctor`, `/coplan-restart` |
+| Slash commands | `/coplan-setup`, `/coplan-open`, `/coplan-doctor`, `/coplan-restart`, `/coplan-init` | none; ask, and the skill runs `coplan` | `/coplan-setup`, `/coplan-open`, `/coplan-doctor`, `/coplan-restart`, `/coplan-init` |
 
 How each one is wired:
 
@@ -617,10 +652,10 @@ as described [at the end of this section](#how-these-were-measured).
 
 | Process | How many | Memory (RSS) | CPU | Lives |
 | --- | --- | --- | --- | --- |
-| Daemon | One per user | 56 MB with no plans; 67 MB with four; 101 MB after a 150-box, 150-task plan took 500 edits | Idle: about 0.01% of one core. An edit takes about 6 ms | Starts in about 90 ms. Exits after `idleShutdownMinutes` (120) with no session active and no tab open; the next hook starts it again |
+| Daemon | One per user | 56 MB with no plans; 63–71 MB with four; 98 MB after a 150-box, 150-task plan took 500 edits | Idle: under 0.02% of one core. An edit takes about 6 ms | Starts in about 90 ms. Exits after `idleShutdownMinutes` (120) with no session active and no tab open; the next hook starts it again |
 | MCP server | One per agent session | About 68 MB (a bare `node` is 43 MB on the same machine) | Idle between calls; a call takes 5–50 ms | As long as its session |
-| Hook relay | One per event | `sh` and `curl` | About 20–26 ms per event; 6 ms when no daemon is running | Milliseconds |
-| Browser tab | Only if you open one | 9 MB of JavaScript heap; 780 KB loaded per page load | See below | While open |
+| Hook relay | One per event | `sh` and `curl` | About 20–28 ms per event; 7 ms when no daemon is running | Milliseconds |
+| Browser tab | Only if you open one | 10 MB of JavaScript heap; 830 KB loaded per page load | See below | While open |
 
 So three agent sessions at once come to roughly 270 MB, and the CPU cost of
 an idle Coplan is close to nothing. The daemon's only timers are a lock check
@@ -638,7 +673,7 @@ you aren't looking at costs next to nothing.
 | What | Size | Kept |
 | --- | --- | --- |
 | Build-time packages (React, React Flow, Tailwind, esbuild, TypeScript, jsdom for the tests) | About 115 MB in pnpm's store, linked into the plugin's `node_modules` | Until you remove the plugin |
-| `dist/` | 13 MB: 4.7 MB to run (the page is 3.5 MB of it, 2.7 MB of that a source map) and 8.3 MB of compiled tests | Rebuilt on each `/coplan-setup` |
+| `dist/` | 15 MB: 5 MB to run (the page is 3.6 MB of it, 2.9 MB of that a source map) and 9.6 MB of compiled tests | Rebuilt on each `/coplan-setup` |
 | One plan | 13–55 KB for the demo plans above; 520 KB for 150 boxes and 150 tasks after 500 edits | 30 days after its last change; at most 60 sessions in memory |
 | `daemon.log` | Trimmed to its newest 256 KB once past 1 MB | — |
 
@@ -652,9 +687,9 @@ counts against the model's tokens.
 
 | What | Size | When |
 | --- | --- | --- |
-| The nine tool definitions | About 25 KB of JSON schema — on the order of 6,000–8,000 tokens | Whenever the agent loads the server's tools |
+| The ten tool definitions | About 32 KB of JSON schema — on the order of 8,000–10,000 tokens | Whenever the agent loads the server's tools |
 | The three skill descriptions | About 1.3 KB | Always listed |
-| A skill's body | 11.5 KB (`coplan`), 7.6 KB (`coplan-build`), 6 KB (`iric`) | When the agent uses that skill |
+| A skill's body | 12.3 KB (`coplan`), 8.1 KB (`coplan-build`), 6.1 KB (`iric`) | When the agent uses that skill |
 | The plan, read back | About 9,000 characters for two diagrams and ten tasks; about 140,000 for 150 boxes and 150 tasks | Each `harness_plan_read` (`changes_only` is shorter), and each publish's reply |
 | A sign-off prompt | About 6,000 characters for a seven-task plan; a hook adds at most about 10,000, and a longer plan is handed over as its summary and task list | Once per sign-off |
 | "You changed the plan" | One line | Your next message after you edit |
@@ -670,6 +705,7 @@ decides how much:
 - **Who reviews:** an independent reviewer is a fresh subagent for every
   review round, reading the brief and the diff; self-review is a reread by the
   agent that built it; you cost your time; checks only costs no model at all.
+  `review.model` runs the independent reviewer on a model of your choosing.
 - **How many at once:** `parallel` (default 2, up to 8) subagents at a time,
   each running its own checks, and a git worktree — a whole checkout on
   disk — for each task on a branch of its own.
@@ -686,7 +722,7 @@ that each use all three rounds: about 60.
 ### How these were measured
 
 On Linux x86-64 (4 vCPUs, Xeon at 2.1 GHz, 16 GB), Node.js 22.23, curl 8.5,
-Coplan 0.2.0, with the demo plans the screenshots show. Memory is RSS from
+Coplan 0.3.0, with the demo plans the screenshots show. Memory is RSS from
 `/proc`; CPU is the daemon's user and system time over 60 idle seconds; a
 hook's latency is the average of 50 runs through the real relay script; the
 MCP server was started and called as an agent would; the tab was measured in
@@ -716,6 +752,11 @@ pnpm check             # typecheck, build and test
 ```
 
 `dist/` is build output and is not committed; `pnpm install` builds it.
+
+A release is a version bump — `package.json` and the three plugin
+manifests, kept equal by a test — with a `## <version>` section in
+CHANGELOG.md. When it reaches `main`, CI tags it `v<version>` and publishes
+that section as the release notes.
 
 ## License
 

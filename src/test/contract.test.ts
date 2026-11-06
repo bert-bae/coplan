@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AGENT_OPS, TOOLS } from '../mcp/tools.ts';
-import { OP_FIELDS, PROGRESS_FIELDS } from '../shared/plan.ts';
+import { AGENT_OPS, PROPOSAL_EDIT_OPS, TOOLS } from '../mcp/tools.ts';
+import { OP_FIELDS, PROGRESS_FIELDS, PROPOSABLE_OPS } from '../shared/plan.ts';
 
 /**
  * The agent learns Coplan's API from three places: the tool schemas, the
@@ -173,6 +173,16 @@ test('the harness_plan_edit schema offers exactly the fields the daemon accepts'
     [...union].sort(),
   );
   assert.equal(item['additionalProperties'], false);
+});
+
+test('harness_plan_propose offers the edits a proposal may carry, and the daemon takes them', () => {
+  const tool = toolOf('harness_plan_propose')!;
+  const item = (tool.inputSchema['properties'] as Record<string, { items: Record<string, unknown> }>)['ops']!.items;
+  const props = item['properties'] as Record<string, { enum?: string[] }>;
+  assert.deepEqual(props['op']!.enum, [...PROPOSAL_EDIT_OPS]);
+  assert.deepEqual([...PROPOSAL_EDIT_OPS].sort(), [...PROPOSABLE_OPS].sort(), 'the tool and the daemon agree on what a proposal carries');
+  assert.deepEqual(OP_FIELDS.propose, ['title', 'reason', 'ops']);
+  assert.deepEqual((tool.inputSchema['required'] as string[]).sort(), ['ops', 'reason', 'title']);
 });
 
 test('the harness_plan_edit description names every op it offers', () => {

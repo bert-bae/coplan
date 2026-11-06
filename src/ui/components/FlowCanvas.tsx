@@ -24,6 +24,7 @@ import { clipOrigin, parseClip, pasteClip, serializeClip, toClip, type Clip } fr
 import { useResolvedTheme } from '../lib/theme.ts';
 import { classNames } from '../lib/format.ts';
 import { NODE_KINDS, type Diagram, type DiagramDirection, type DiagramEdgeInput, type DiagramNodeInput, type NodeKind, type Plan } from '../../shared/types.ts';
+import type { DiffMark } from '../../shared/proposals.ts';
 import { PlanNode } from './flow/PlanNode.tsx';
 import { PlanEdge } from './flow/PlanEdge.tsx';
 import { EdgePanel, NodePanel, ReadOnlyPanel, SelectionPanel } from './flow/Panels.tsx';
@@ -94,6 +95,9 @@ export function DiagramEditor(props: {
   /** While the design is confirmed but not yet submitted, which tasks build
    *  each box can still change. */
   onLinkTasks?: (nodeId: string, taskIds: string[]) => void;
+  /** A proposal's preview: which boxes and arrows it adds, changes or
+   *  takes away, marked on the canvas. */
+  diff?: CanvasDiff;
 }) {
   return (
     <ReactFlowProvider>
@@ -146,6 +150,7 @@ function Editor({
   readOnly = false,
   lockNote,
   onLinkTasks,
+  diff,
 }: {
   diagram: Diagram;
   plan: Plan;
@@ -154,6 +159,7 @@ function Editor({
   readOnly?: boolean;
   lockNote?: string;
   onLinkTasks?: (nodeId: string, taskIds: string[]) => void;
+  diff?: CanvasDiff;
 }) {
   const theme = useResolvedTheme();
   const flow = useReactFlow<FlowNode, FlowEdge>();
@@ -1205,10 +1211,16 @@ function Editor({
         const rel = relations?.nodes.get(n.id);
         const dim = Boolean(relations) && !rel;
         const drop = reconnect?.over === n.id;
-        if (!rel && !dim && !drop) return n;
-        return { ...n, className: classNames(dim && 'rel-dim', rel && `rel-${rel}`), data: { ...n.data, ...(rel ? { rel } : {}), ...(drop ? { dropTarget: true } : {}) } };
+        const mark = diff?.nodes[n.id];
+        if (!rel && !dim && !drop && !mark) return n;
+        return {
+          ...n,
+          className: classNames(dim && 'rel-dim', rel && `rel-${rel}`, mark && `diff-${mark}`),
+          ...(mark ? { ariaLabel: `${n.data.label} (${DIFF_WORDS[mark]})` } : {}),
+          data: { ...n.data, ...(rel ? { rel } : {}), ...(drop ? { dropTarget: true } : {}) },
+        };
       }),
-    [nodes, relations, reconnect?.over],
+    [nodes, relations, reconnect?.over, diff],
   );
 
   // Arrows between the same two boxes are drawn side by side; arrows tied to
@@ -1222,19 +1234,20 @@ function Editor({
       const lane = offsets.get(e.id);
       const drop = dropEdge === e.id;
       const moving = reconnect?.edgeId === e.id;
-      if (!rel && !dim && !grips && lane === undefined && !drop && !moving) return e;
+      const mark = diff?.edges[e.id];
+      if (!rel && !dim && !grips && lane === undefined && !drop && !moving && !mark) return e;
       const colour = rel ? REL_COLOUR[rel] : undefined;
       const marker = (m: FlowEdge['markerEnd']) => (m && typeof m === 'object' && colour ? { ...m, color: colour } : m);
       return {
         ...e,
-        className: classNames(e.className, rel && `rel-${rel}`, dim && 'rel-dim', drop && 'is-drop-target', moving && 'is-reconnecting'),
+        className: classNames(e.className, rel && `rel-${rel}`, dim && 'rel-dim', drop && 'is-drop-target', moving && 'is-reconnecting', mark && `diff-${mark}`),
         animated: rel === 'out' || rel === 'in' || rel === 'out2' || rel === 'in2',
         markerEnd: marker(e.markerEnd),
         markerStart: marker(e.markerStart),
         data: { ...e.data, ...(lane !== undefined ? { lane } : {}), ...(rel ? { rel } : {}), ...(dim ? { dim } : {}), ...(grips ? { grips } : {}), ...(drop ? { dropTarget: true } : {}) },
       };
     });
-  }, [edges, relations, reconnect, hoverEdgeId, dropEdge, readOnly]);
+  }, [edges, relations, reconnect, hoverEdgeId, dropEdge, readOnly, diff]);
 
   /* ------------------------------ panel ----------------------------- */
 
@@ -1455,6 +1468,15 @@ function Editor({
 /** Fit the whole diagram, but never blow a small one up past its real size,
  *  and never shrink a large one past legibility. */
 const FIT = { padding: 0.14, maxZoom: 1, minZoom: 0.4, duration: 0 };
+
+/** Which boxes and arrows a previewed proposal adds, changes or takes away. */
+export interface CanvasDiff {
+  nodes: Record<string, DiffMark>;
+  edges: Record<string, DiffMark>;
+}
+
+/** Said to a screen reader along with the box's name: colour alone is not enough. */
+const DIFF_WORDS: Record<DiffMark, string> = { added: 'proposed: added', changed: 'proposed: changed', removed: 'proposed: removed' };
 
 /** What a save sends for a graph. */
 function patchOf(ns: FlowNode[], es: FlowEdge[], direction: DiagramDirection): GraphPatch & { direction: DiagramDirection } {

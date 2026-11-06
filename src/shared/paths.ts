@@ -20,7 +20,6 @@ export const paths = {
   sessionState: (id: string) => path.join(harnessHome(), 'sessions', sanitizeId(id), 'state.json'),
   sessionEvents: (id: string) => path.join(harnessHome(), 'sessions', sanitizeId(id), 'events.jsonl'),
   configDir: harnessHome,
-  instructionsDir: () => path.join(harnessHome(), 'instructions'),
   /** The bearer header, for the hook relay to hand curl as a file: on the
    *  command line, any local user could read the token from /proc. */
   authHeader: () => path.join(harnessHome(), 'auth.header'),

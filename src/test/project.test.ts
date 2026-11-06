@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { expandBraces, globMatch, hooksFor, loadProjectConfig, nameFor, parseProjectConfig, pathsMatch } from '../shared/project.ts';
+import { HOOK_KEYS, INSTRUCTION_POINTS, PROJECT_KEYS, PR_OPEN, PR_TOOLS, expandBraces, globMatch, hookCommand, hooksFor, loadProjectConfig, nameFor, parseProjectConfig, pathsMatch } from '../shared/project.ts';
+import { GAP_RULES, GAP_SEVERITIES } from '../shared/check.ts';
 import { detectHooks } from '../cli/init.ts';
 
 /**
@@ -15,6 +16,11 @@ import { detectHooks } from '../cli/init.ts';
  */
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'cli', 'main.js');
+
+// A home of its own: the developer's ~/.claude/cc-harness/coplan.json (their
+// own layer, read under every repository's) must not decide these tests.
+// Set before anything reads it; `coplan check` and `init` inherit it.
+process.env['CC_HARNESS_HOME'] = mkdtempSync(path.join(tmpdir(), 'coplan-project-home-'));
 
 function repo(files: Record<string, string>): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'coplan-project-'));
@@ -127,7 +133,7 @@ test('unknown keys and values out of range are errors, each saying what is used 
       ],
     },
   });
-  const said = config.errors.join('\n');
+  const said = [...config.errors, ...config.warnings].join('\n');
   assert.match(said, /"hook" is not a setting Coplan reads/);
   assert.match(said, /"iric\.review" must be one of subagent, self, user, skip; "Subagent" is not, so subagent is used/);
   assert.match(said, /"iric\.parallel" must be a whole number from 1 to 8; 20 is not, so 8 is used/);
@@ -274,6 +280,223 @@ test('coplan init writes a commented starting point from the scripts it finds, a
     assert.equal(again.status, 1);
     assert.match(again.stderr, /already exists/);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* ---------------------------------------------------- customization (#45) */
+
+test('every key the config reads is documented, with every value it takes', () => {
+  const doc = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'docs', 'CONFIG.md'), 'utf8');
+  for (const key of PROJECT_KEYS) assert.match(doc, new RegExp(`^### \`${key}\`$`, 'm'), `a section for ${key}`);
+  for (const key of HOOK_KEYS) assert.match(doc, new RegExp(`^\\| \`${key}\` \\|`, 'm'), `hook key ${key}`);
+  for (const value of [...PR_TOOLS, ...PR_OPEN, ...INSTRUCTION_POINTS, ...GAP_RULES, ...GAP_SEVERITIES]) {
+    assert.ok(doc.includes(`\`${value}\``), `${value} is named`);
+  }
+});
+
+test('pull requests, the reviewer, the final gate, instructions and plan-check severities are read, each checked', () => {
+  const dir = repo({
+    '.github/pull_request_template.md': '## What\n\n## Checks\n',
+    'packages/api/.keep': '',
+    'docs/review.md': 'Check every query is parameterised.',
+  });
+  try {
+    const config = parseProjectConfig(
+      {
+        pullRequests: { tool: 'graphite', open: 'auto', template: '.github/pull_request_template.md' },
+        review: { model: 'opus' },
+        final: { blocking: true },
+        instructions: { build: 'Keep commits small.', review: { file: 'docs/review.md' } },
+        planCheck: { 'box-unbuilt': 'error', 'box-undescribed': 'off' },
+        hooks: { review: [{ name: 'api tests', run: 'pnpm test', cwd: 'packages/api', env: { NODE_ENV: 'test' } }] },
+      },
+      path.join(dir, '.coplan', 'config.json'),
+    );
+    assert.deepEqual(config.errors, []);
+    assert.equal(config.pullRequests.tool, 'graphite');
+    assert.equal(config.pullRequests.open, 'auto');
+    assert.match(config.pullRequests.template ?? '', /## Checks/);
+    assert.equal(config.review.model, 'opus');
+    assert.equal(config.final.blocking, true);
+    assert.equal(config.instructions.build, 'Keep commits small.');
+    assert.equal(config.instructions.review, 'Check every query is parameterised.');
+    assert.deepEqual(config.planCheck, { 'box-unbuilt': 'error', 'box-undescribed': 'off' });
+    assert.deepEqual(config.hooks.review[0], { name: 'api tests', run: 'pnpm test', cwd: 'packages/api', env: { NODE_ENV: 'test' } });
+    assert.equal(hookCommand(config.hooks.review[0]!), "(cd packages/api && env NODE_ENV=test sh -c 'pnpm test')");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the defaults: gh, once the user says, no reviewer model, the report never held', () => {
+  const config = parseProjectConfig({});
+  assert.deepEqual(config.pullRequests, { tool: 'gh', open: 'ask' });
+  assert.deepEqual(config.review, {});
+  assert.deepEqual(config.final, { blocking: false });
+  assert.deepEqual(config.instructions, {});
+  assert.deepEqual(config.planCheck, {});
+});
+
+test('what a customization cannot use is said — and a file outside the repository is never read', () => {
+  const dir = repo({});
+  try {
+    const config = parseProjectConfig(
+      {
+        pullRequests: { tool: 'gitlab', open: 'later', template: '../../etc/passwd' },
+        review: { model: 'opus; rm -rf /' },
+        final: { blocking: 'yes' },
+        instructions: { build: 3, deploy: 'x', brief: { file: 'missing.md' } },
+        planCheck: { 'box-unbuilt': 'fatal', 'no-such-rule': 'error' },
+        hooks: { review: [{ run: 'pnpm test', cwd: '../elsewhere', env: { 'BAD NAME': 'x', OK: 1 } }] },
+      },
+      path.join(dir, '.coplan', 'config.json'),
+    );
+    const said = config.errors.join('\n');
+    assert.match(said, /"pullRequests\.tool" must be one of gh, graphite, none; "gitlab" is not/);
+    assert.match(said, /"pullRequests\.open" must be one of auto, ask, never/);
+    assert.match(said, /"pullRequests\.template" must name a file inside/);
+    assert.equal(config.pullRequests.template, undefined);
+    assert.match(said, /"review\.model" must be a model name/);
+    assert.match(said, /"final\.blocking" must be true or false/);
+    assert.match(said, /"instructions\.build" must be text/);
+    assert.match(said, /instructions\."deploy" is not a setting/);
+    assert.match(said, /"instructions\.brief" names missing\.md, which could not be read/);
+    assert.match(said, /"planCheck\.box-unbuilt" must be one of error, warn, off/);
+    assert.match(said, /"planCheck\.no-such-rule" is not a plan-check rule/);
+    assert.match(said, /"hooks\.review\[0\]\.cwd" must be a folder inside the repository/);
+    assert.match(said, /"hooks\.review\[0\]\.env" must map variable names to text/);
+    assert.equal(config.hooks.review[0]!.cwd, undefined, 'it runs from the root instead');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('what is only taken differently than written is a warning, and the checks still run', () => {
+  const dir = repo({ 'long.md': 'x'.repeat(5000) });
+  try {
+    const config = parseProjectConfig(
+      { instructions: { build: { file: 'long.md' } }, hooks: { review: [{ run: 'npm test', cwd: 'packages/not-yet' }] } },
+      path.join(dir, '.coplan', 'config.json'),
+    );
+    assert.deepEqual(config.errors, [], 'nothing that stops coplan check');
+    assert.match(config.warnings.join('\n'), /"instructions\.build" \(long\.md\) is longer than 4000 characters; the rest is cut/);
+    assert.match(config.warnings.join('\n'), /"hooks\.review\[0\]\.cwd" names packages\/not-yet, which does not exist yet/);
+    assert.equal(config.instructions.build?.length, 4000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('only what breaks the checks stops coplan check; a hook whose folder is missing fails, saying so', () => {
+  const dir = repo({
+    '.coplan/config.json': JSON.stringify({
+      pullRequests: { template: 'missing.md' },
+      review: { model: 'not a model!' },
+      hooks: { review: ['true', { name: 'api', run: 'true', cwd: 'packages/api' }] },
+    }),
+  });
+  try {
+    const config = loadProjectConfig(dir);
+    assert.ok(config.errors.length >= 2, 'the template and the model are errors');
+    assert.equal(config.checksBroken, undefined, 'but not of the checks');
+    assert.equal(config.hooks.review[1]!.cwd, 'packages/api', 'kept, so the hook cannot pass somewhere else');
+    const run = spawnSync(process.execPath, [CLI, 'check', 'review'], { cwd: dir, encoding: 'utf8' });
+    assert.equal(run.status, 1, 'ran, and the api hook failed');
+    assert.match(run.stdout, /✓ true/);
+    assert.match(run.stdout, /✗ api[\s\S]*its folder packages\/api does not exist/);
+    assert.match(run.stderr, /missing\.md, which could not be read/);
+
+    writeFileSync(path.join(dir, '.coplan', 'config.json'), JSON.stringify({ hook: { review: ['true'] } }));
+    const typo = spawnSync(process.execPath, [CLI, 'check', 'review'], { cwd: dir, encoding: 'utf8' });
+    assert.equal(typo.status, 2, 'a misspelt "hooks" is the checks themselves');
+    assert.match(typo.stderr, /fix the checks in \.coplan\/config\.json first/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a template from the user's own layer is named by where it is, and a hook's folder is watched", () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'coplan-home-'));
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ run: 'true', cwd: 'packages/api' }] } }) });
+  try {
+    writeFileSync(path.join(home, 'pr.md'), '## Mine');
+    writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ pullRequests: { template: 'pr.md' } }));
+    const config = loadProjectConfig(dir, { globalDir: home });
+    assert.equal(config.pullRequests.templateFile, path.join(home, 'pr.md'), 'not "pr.md" in the repository');
+    assert.equal(config.pullRequests.template, '## Mine');
+    assert.ok(config.sources?.includes(path.join(dir, 'packages', 'api')), 'its creation reads the config again');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a user's own layer that cannot be read is said, and holds back no repository's checks", () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'coplan-home-'));
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: ['true'] } }) });
+  try {
+    writeFileSync(path.join(home, 'coplan.json'), '{ "iric": { "review": "self" }, oops }');
+    const config = loadProjectConfig(dir, { globalDir: home });
+    assert.deepEqual(config.errors, []);
+    assert.match(config.warnings.join('\n'), /coplan\.json could not be read/);
+    assert.equal(config.globalFile, path.join(home, 'coplan.json'), 'named, so the user knows which file to fix');
+    assert.ok(config.sources?.includes(path.join(home, 'coplan.json')) && config.sources.includes(path.join(dir, '.coplan', 'config.json')));
+    const run = spawnSync(process.execPath, [CLI, 'check', 'review'], { cwd: dir, encoding: 'utf8', env: { ...process.env, CC_HARNESS_HOME: home } });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stderr, /coplan\.json could not be read/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a file a config names is read only if it really is inside: a link out is refused', () => {
+  const outside = mkdtempSync(path.join(tmpdir(), 'coplan-secret-'));
+  const dir = repo({});
+  try {
+    writeFileSync(path.join(outside, 'credentials'), 'secret');
+    symlinkSync(path.join(outside, 'credentials'), path.join(dir, 'pr.md'));
+    const config = parseProjectConfig({ pullRequests: { template: 'pr.md' } }, path.join(dir, '.coplan', 'config.json'));
+    assert.equal(config.pullRequests.template, undefined);
+    assert.match(config.errors.join('\n'), /"pullRequests\.template" must name a file inside .*: pr\.md links to one outside it/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("the user's own layer sits under every repository's: key by key, instructions adding up, checks never", () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'coplan-home-'));
+  const dir = repo({
+    '.coplan/config.json': JSON.stringify({ iric: { parallel: 4 }, pullRequests: { open: 'never' }, instructions: { build: 'Repository words.' } }),
+  });
+  try {
+    writeFileSync(
+      path.join(home, 'coplan.json'),
+      JSON.stringify({
+        iric: { review: 'self', parallel: 2 },
+        branches: { prefix: 'me/' },
+        pullRequests: { tool: 'graphite', open: 'auto' },
+        instructions: { build: 'My words.' },
+        hooks: { review: ['make test'] },
+      }),
+    );
+    mkdirSync(path.join(home, 'instructions'));
+    writeFileSync(path.join(home, 'instructions', 'brief.md'), 'Write tests first.');
+    const config = loadProjectConfig(dir, { globalDir: home });
+    assert.deepEqual(config.settings, { review: 'self', parallel: 4, maxRounds: 3 }, 'the repository wins where both say');
+    assert.equal(config.branches.prefix, 'me/');
+    assert.deepEqual(config.pullRequests, { tool: 'graphite', open: 'never' });
+    assert.equal(config.instructions.build, 'My words.\n\nRepository words.');
+    assert.equal(config.instructions.brief, 'Write tests first.');
+    assert.deepEqual(config.hooks.review, [], 'checks belong to the repository');
+    assert.match(config.warnings.join('\n'), /coplan\.json: "hooks" belong to each repository/);
+    assert.equal(config.globalFile, path.join(home, 'coplan.json'));
+    // Without a repository config, the user's layer still counts.
+    assert.equal(loadProjectConfig(path.join(dir, 'nowhere'), { globalDir: home }).pullRequests.open, 'auto');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
 });

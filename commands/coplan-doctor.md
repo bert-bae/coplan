@@ -1,4 +1,5 @@
 ---
+name: coplan-doctor
 description: Verify the Coplan plugin wiring against the running daemon
 ---
 
@@ -7,6 +8,10 @@ Run the Coplan self-test and report the result:
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/coplan" doctor
 ```
+
+If the path comes out empty (not every agent fills it in), use
+`${CURSOR_PLUGIN_ROOT}` in Cursor; failing that, the plugin's folder is the
+one that holds this command's `commands/` folder, and `bin/coplan` is in it.
 
 This checks what the hooks need from the machine (Node 20.11+ on the PATH,
 curl), reads both Coplan configs and the repository's `.coplan/config.json`

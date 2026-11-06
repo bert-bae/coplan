@@ -19,20 +19,6 @@
         "timeout": 10
       }
     ],
-    "preToolUse": [
-      {
-        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" preToolUse cursor",
-        "timeout": 5,
-        "matcher": "AskQuestion"
-      }
-    ],
-    "postToolUse": [
-      {
-        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" postToolUse cursor",
-        "timeout": 5,
-        "matcher": "AskQuestion"
-      }
-    ],
     "afterAgentResponse": [
       {
         "command": "\"${CURSOR_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" afterAgentResponse cursor",

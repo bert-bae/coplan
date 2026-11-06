@@ -17,7 +17,7 @@ import {
   waitingOn,
 } from '../shared/build.ts';
 import { renderBrief, renderNext } from '../daemon/brief.ts';
-import { renderPlan } from '../daemon/render.ts';
+import { buildPrompt, renderPlan } from '../daemon/render.ts';
 import { parseProjectConfig } from '../shared/project.ts';
 import type { Plan, PlanInput, TaskInput } from '../shared/types.ts';
 
@@ -563,4 +563,54 @@ test('a restack goes down the stack to the first branch still open', () => {
   // Then x/a merges too: x/c goes onto main.
   record('x/a', 'merged');
   assert.match(stackStatus(plan, 'main').find((s) => s.branch === 'x/c')!.restack!, /rebase `x\/c` onto `main`/);
+});
+
+/* ------------------------------------------------------------------ *
+ * How the repository opens pull requests (#45)
+ * ------------------------------------------------------------------ */
+
+test('long standing instructions are cut to fit the prompt, saying where the rest is; the brief carries them whole', () => {
+  const long = 'Keep every commit small and say why. '.repeat(100);
+  const custom = { ...parseProjectConfig({}), instructions: { build: long, brief: long } };
+  const submitted = submitPlan(tasked(), { target: 'session', prompt: 'build it' }, 1_300);
+  const prompt = buildPrompt(submitted, { target: 'session', project: custom }).prompt;
+  assert.ok(prompt.length < long.length + 4_000, 'not the whole text');
+  assert.match(prompt, /Cut to fit here: the whole text is `instructions\.build`/);
+  const brief = renderBrief(submitted, submitted.tasks.find((t) => t.id === 'client')!, { project: custom });
+  assert.ok(brief.includes(long.trim()), 'the brief has it all');
+});
+
+test('the build is told how pull requests are opened, and each is due with the template when its branch is done', () => {
+  const custom = { ...parseProjectConfig({ pullRequests: { tool: 'graphite', open: 'auto' } }), pullRequests: { tool: 'graphite' as const, open: 'auto' as const, template: '## Summary', templateFile: 'PR.md' } };
+  const submitted = submitPlan(tasked(), { target: 'session', prompt: 'build it', settings: { review: 'subagent', parallel: 2, maxRounds: 3 } }, 1_300);
+  const prompt = buildPrompt(submitted, { target: 'session', project: custom }).prompt;
+  assert.match(prompt, /Open the pull requests with Graphite: track each branch on the one below it \(`gt track`\), and open the stack with `gt submit --stack`, as soon as a branch's tasks are done\./);
+  assert.match(prompt, /template \(PR\.md\), which harness_task_next shows when one is due/);
+
+  // cache/storage is done: its pull request is due, with the template.
+  let plan = done(markDelivered(submitted, 1_400), 'client', 'config', 'invalidate');
+  let next = renderNext(plan, { project: custom });
+  assert.match(next, /## Ready for a pull request \(1\)\n- `cache\/storage`: every task on it is done\./);
+  assert.match(next, /~~~~markdown\n## Summary\n~~~~/);
+  // Once it is recorded, it is no longer due.
+  plan = applyOps(plan, [{ op: 'set_branch', branch: 'cache/storage', pr: { state: 'open', number: 1 } }], 'claude', undefined, { tracking: true }).plan;
+  next = renderNext(plan, { project: custom });
+  assert.doesNotMatch(next, /Ready for a pull request/);
+
+  // Elsewhere there is no harness_task_next: the template comes with the
+  // prompt, and a dotted file name does not cut the sentence short.
+  const dotted = { ...custom, pullRequests: { ...custom.pullRequests, templateFile: '.github/pull_request_template.md' } };
+  const outside = buildPrompt(submitted, { target: 'elsewhere', project: dotted }).prompt;
+  assert.doesNotMatch(outside, /harness_task_next|ask them first\.github/);
+  assert.match(outside, /as soon as a branch's tasks are done\.\n/);
+  assert.match(outside, /Fill in the pull request template \(\.github\/pull_request_template\.md\)[\s\S]*## Summary/);
+
+  // A stacked branch is not due before the one it stacks on has its pull request.
+  const stacked = done(markDelivered(submitted, 1_400), 'wire');
+  assert.doesNotMatch(renderNext(stacked, { project: custom }), /Ready for a pull request/, 'cache/api waits for cache/storage');
+
+  // Never: no pull requests at all, said where the build ends.
+  const never = parseProjectConfig({ pullRequests: { open: 'never' } });
+  assert.match(buildPrompt(submitted, { target: 'session', project: never }).prompt, /Do not open pull requests: push the branches/);
+  assert.doesNotMatch(renderNext(done(plan, 'wire', 'docs'), { project: never }), /gh pr create/);
 });

@@ -1,4 +1,5 @@
 ---
+name: coplan-setup
 description: Build the Coplan plugin after installing or updating it
 ---
 
@@ -12,9 +13,10 @@ pnpm) if not:
 cd "${CLAUDE_PLUGIN_ROOT}" && if command -v pnpm >/dev/null 2>&1; then pnpm install --frozen-lockfile; else COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack pnpm install --frozen-lockfile; fi && ./bin/coplan version
 ```
 
-If that path comes out empty (not every agent fills it in), the plugin's
-folder is the one that holds this command's `commands/` folder — the same
-one the `coplan` skill lives two levels below.
+If the path comes out empty (not every agent fills it in), use
+`${CURSOR_PLUGIN_ROOT}` in Cursor; failing that, the plugin's folder is the
+one that holds this command's `commands/` folder — the same one the
+`coplan` skill lives two levels below.
 
 It needs Node.js 20.11 or later. If neither pnpm nor corepack is available
 (corepack is not bundled with every Node.js release), run it with

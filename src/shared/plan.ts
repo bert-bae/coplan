@@ -31,6 +31,8 @@ import type {
   PlanOp,
   PlanOpName,
   PlanPhase,
+  Proposal,
+  ProposalStatus,
   ReviewRecord,
   Section,
   Submission,
@@ -42,8 +44,9 @@ import type {
   TaskStatus,
   Thread,
 } from './types.ts';
-import { BUILD_TARGETS, EDGE_ARROWS, IRIC_STAGES, NODE_KINDS, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
+import { BUILD_TARGETS, EDGE_ARROWS, IRIC_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
 import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, validReview } from './build.ts';
+import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from './proposal-ops.ts';
 
 /** How many review verdicts a task keeps. */
 const MAX_REVIEWS = 20;
@@ -171,7 +174,10 @@ export function unreadAreas(plan: Plan | null): string[] {
   const areas: string[] = [];
   const add = (what: string) => void (areas.includes(what) || areas.push(what));
   for (const c of unreadByClaude(plan)) {
-    if (['commented', 'replied', 'resolved', 'reopened'].includes(c.kind)) add('comments');
+    // The answer is logged on the plan; what an accepted one changed is
+    // logged, as the user's, on each item it touched.
+    if (ANSWERED_PROPOSAL.test(c.summary)) add('your proposals');
+    else if (['commented', 'replied', 'resolved', 'reopened'].includes(c.kind)) add('comments');
     else if (c.target.kind === 'plan' && c.kind === 'status') add(c.summary === REOPENED_DESIGN ? 'reopened the design' : 'reopened the plan');
     else if (c.target.kind === 'diagram') add(`the "${plan!.diagrams.find((d) => d.id === c.target.id)?.title ?? c.target.id}" diagram`);
     else if (c.target.kind === 'task') add('tasks');
@@ -181,6 +187,9 @@ export function unreadAreas(plan: Plan | null): string[] {
   }
   return areas;
 }
+
+/** How the user's answer to a proposal reads in the change log. */
+const ANSWERED_PROPOSAL = /^(accepted|rejected) proposal p\d+ /;
 
 export function markReadByClaude(plan: Plan, now = Date.now()): void {
   plan.claudeReadSeq = plan.seq;
@@ -400,6 +409,9 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
   delete base.submission;
   delete base.design;
   delete base.report;
+  // A proposal was made for the plan being replaced: one still open goes
+  // with it, said in its thread, rather than turning up against the new one.
+  for (const p of base.proposals ?? []) if (p.status === 'open') settleProposal(base, p, 'withdrawn', now, 'Withdrawn: the plan was published anew.');
   // Ids are minted against everything the plan has ever held, so build into
   // a working copy that still remembers the old items until the end.
   const next: Plan = { ...base, title, summary: clean(input.summary, MAX_TEXT) ?? base.summary };
@@ -801,6 +813,13 @@ export function normalizePlan(raw: Partial<Plan> & Record<string, unknown>, fall
   const report = raw.report as { text?: unknown; at?: unknown } | undefined;
   if (report && typeof report.text === 'string' && report.text && typeof report.at === 'number') plan.report = { text: report.text, at: report.at };
   else delete plan.report;
+  // A proposal from disk is kept only whole: one missing its edits could
+  // never be accepted, nor shown.
+  const proposals = list<Proposal>(raw.proposals).filter(
+    (p) => p && typeof p.id === 'string' && Array.isArray(p.ops) && typeof p.title === 'string' && (PROPOSAL_STATUSES as readonly string[]).includes(p.status),
+  );
+  if (proposals.length) plan.proposals = proposals.map((p) => ({ ...p, base: p.base && typeof p.base === 'object' ? p.base : {} }));
+  else delete plan.proposals;
   return plan;
 }
 
@@ -872,6 +891,10 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
   resolve: ['threadId', 'resolved'],
   report: ['text', 'checks'],
   set_branch: ['branch', 'pr', 'base'],
+  propose: ['title', 'reason', 'ops'],
+  accept_proposal: ['id'],
+  reject_proposal: ['id', 'note'],
+  withdraw_proposal: ['id'],
 };
 
 /** Refuses an edit Claude sent with a field its op does not take. */
@@ -1104,6 +1127,11 @@ export function applyOps(
         checkOpFields(op);
         if (!opts.tracking) refuseProgress(op);
         refuseUnreadEdit(plan, op, unread!);
+        // A proposal built on a version Claude never read could undo the
+        // user's change as surely as an edit — only later, when accepted.
+        if (op.op === 'propose' && Array.isArray(op.ops)) {
+          for (const inner of op.ops) if (inner && typeof inner === 'object') refuseUnreadEdit(plan, inner, unread!);
+        }
       }
       changes.push(...applyOne(next, expectAtStart(plan, op, author), author, now));
     } catch (err) {
@@ -1423,6 +1451,123 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       return [log('status', ref('task', task.id), `${who} ${what} "${task.title}" in review round ${task.round}${summary ? `: ${short(summary, 80)}` : ''}`)];
     }
 
+    case 'propose': {
+      if (author !== 'claude') throw new PlanError('A proposal is how the agent suggests a change; make yours directly.');
+      const title = clean(op.title, MAX_TITLE);
+      if (!title) throw new PlanError('A proposal needs a title: what it changes, in a few words.');
+      const reason = clean(op.reason, MAX_TEXT);
+      if (!reason) throw new PlanError('A proposal needs a reason: why the plan is better with it.');
+      if (!Array.isArray(op.ops) || op.ops.length === 0) throw new PlanError('A proposal carries its edits as `ops`, like harness_plan_edit: [{op: "upsert_node", …}, …].');
+      if (op.ops.length > MAX_PROPOSAL_OPS) throw new PlanError(`A proposal carries at most ${MAX_PROPOSAL_OPS} edits; propose the parts separately.`);
+      op.ops.forEach((inner, i) => {
+        try {
+          checkOpFields(inner);
+          if (!PROPOSABLE_OPS.has(inner.op)) {
+            throw new PlanError(`a proposal carries edits to the plan's content (${[...PROPOSABLE_OPS].join(', ')}), not ${inner.op}.`);
+          }
+          refuseProgress(inner);
+        } catch (err) {
+          if (err instanceof PlanError) throw new PlanError(`Proposed edit ${i + 1} (${(inner as { op?: string })?.op ?? '?'}): ${err.message}`);
+          throw err;
+        }
+      });
+      const proposals = (plan.proposals ??= []);
+      if (proposals.filter((p) => p.status === 'open').length >= MAX_OPEN_PROPOSALS) {
+        throw new PlanError(`${MAX_OPEN_PROPOSALS} proposals are already waiting on the user: withdraw one, or wait for their answers.`);
+      }
+      // As it would be taken: a proposal that cannot apply is refused now,
+      // not when the user presses Accept. The lock is left out of the trial:
+      // a design change proposed after sign-off is fair to suggest, and
+      // accepting it is where the lock holds.
+      try {
+        const trial = structuredClone(plan);
+        delete trial.design;
+        delete trial.submission;
+        applyAsUser(trial, op.ops, now);
+      } catch (err) {
+        if (err instanceof PlanError) throw new PlanError(`The proposal would not apply to the plan as it is: ${err.message}`);
+        throw err;
+      }
+      const id = `p${proposals.reduce((n, p) => Math.max(n, Number(p.id.slice(1)) || 0), 0) + 1}`;
+      // Its reasoning is a comment thread, held to the same limit as any.
+      if (plan.threads.length >= MAX_THREADS) throw new PlanError(`A plan holds at most ${MAX_THREADS} comment threads, and a proposal starts one: resolve or remove some first.`);
+      const target = proposalTarget(plan, op.ops);
+      const thread: Thread = {
+        id: claimId(plan, 'thread', undefined),
+        target,
+        author,
+        text: `Proposal ${id}: ${title}\n\n${reason}`,
+        ts: now,
+        resolved: false,
+        replies: [],
+      };
+      plan.threads.push(thread);
+      // Kept without their `expect`: it checked them against what Claude read,
+      // just now. From here `base` says whether the proposal still fits —
+      // and a rev that moved with a dragged box must not refuse the accept.
+      const kept = op.ops.map((inner) => {
+        const { expect: _read, ...rest } = structuredClone(inner) as PlanOp & { expect?: unknown };
+        return rest as PlanOp;
+      });
+      proposals.push({ id, title, reason, ops: kept, threadId: thread.id, createdAt: now, base: proposalTouches(plan, op.ops), status: 'open' });
+      // Settled ones go first when there are too many; open ones never.
+      // An answer Claude has not heard yet is kept until it has: it is the
+      // one thing a rejection is for.
+      while (proposals.length > MAX_PROPOSALS) {
+        const old = proposals.findIndex((p) => p.status !== 'open' && (p.resolvedSeq ?? 0) <= plan.claudeReadSeq);
+        if (old < 0) break;
+        proposals.splice(old, 1);
+      }
+      return [log('created', { kind: 'plan', id: '' }, `proposed ${id} "${title}" (${op.ops.length} edit${op.ops.length === 1 ? '' : 's'})`)];
+    }
+
+    case 'accept_proposal': {
+      if (author !== 'user') throw new PlanError('Only the user accepts a proposal: tell them it is waiting for them in Coplan.');
+      const p = openProposal(plan, op.id);
+      const stale = proposalStaleness(plan, p);
+      if (stale.length) {
+        throw new PlanError(`Proposal ${p.id} is out of date: ${stale.join(', ')} changed since it was made. Reject it, and ask for a fresh one.`);
+      }
+      // Accepting changes what the proposal changes: the lock holds for it.
+      if (plan.submission) {
+        // Mid-build, a proposal may add work — a new task — and nothing
+        // else: what the user signed off stays as they signed it.
+        const refused = p.ops.find((inner: PlanOp) => inner.op !== 'upsert_task' || Boolean(inner.id && plan.tasks.some((t) => t.id === inner.id)));
+        if (refused) {
+          throw new PlanError(
+            `Proposal ${p.id} changes what the submitted plan locked (${refused.op}${'id' in refused && refused.id ? ` ${refused.id}` : ''}): ` +
+              'a build in progress takes only new tasks from a proposal. Reopen the plan, then accept it.',
+          );
+        }
+      } else if (plan.design) {
+        checkDesignLocked(p.ops, 'user');
+      }
+      const out = applyAsUser(plan, p.ops, now);
+      settleProposal(plan, p, 'accepted', now, 'Accepted.');
+      const accepted = log('edited', { kind: 'plan', id: '' }, `accepted proposal ${p.id} "${p.title}"`);
+      p.resolvedSeq = accepted.seq;
+      out.push(accepted);
+      return out;
+    }
+
+    case 'reject_proposal': {
+      if (author !== 'user') throw new PlanError('Only the user rejects a proposal; withdraw your own with withdraw_proposal.');
+      const p = openProposal(plan, op.id);
+      const note = clean(op.note, MAX_NOTE);
+      if (note) p.note = note;
+      settleProposal(plan, p, 'rejected', now, note ? `Rejected: ${note}` : 'Rejected.');
+      const rejected = log('resolved', { kind: 'plan', id: '' }, `rejected proposal ${p.id} "${p.title}"${note ? `: ${short(note, 80)}` : ''}`);
+      p.resolvedSeq = rejected.seq;
+      return [rejected];
+    }
+
+    case 'withdraw_proposal': {
+      if (author !== 'claude') throw new PlanError('Reject a proposal to turn it down.');
+      const p = openProposal(plan, op.id);
+      settleProposal(plan, p, 'withdrawn', now, 'Withdrawn.');
+      return [log('resolved', { kind: 'plan', id: '' }, `withdrew proposal ${p.id} "${p.title}"`)];
+    }
+
     case 'report': {
       const text = clean(op.text, MAX_TEXT);
       if (!text) throw new PlanError('A report needs text.');
@@ -1704,6 +1849,19 @@ const TRACKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'review_task',
 /** Ops that can change which task waits on which. */
 const TASK_SHAPE_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task']);
 
+/** Proposing, and answering a proposal: allowed in every phase, since a
+ *  proposal changes nothing until the user accepts it — and accepting one
+ *  is checked against the lock for what it changes. */
+const PROPOSAL_OPS: ReadonlySet<string> = new Set(['propose', 'accept_proposal', 'reject_proposal', 'withdraw_proposal']);
+
+/** What the user may still do once the plan is submitted. */
+const USER_ON_LOCKED: ReadonlySet<string> = new Set(['review_task', 'accept_proposal', 'reject_proposal']);
+
+/** What a proposal may carry (src/shared/proposal-ops.ts), here too. */
+export { PROPOSABLE_OPS, MAX_PROPOSAL_OPS };
+export const MAX_OPEN_PROPOSALS = 20;
+const MAX_PROPOSALS = 60;
+
 const LOCKED_FOR_USER = 'The plan has been submitted to be built, so it is locked. Reopen it to make changes.';
 const LOCKED_FOR_CLAUDE =
   'The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or ' +
@@ -1742,6 +1900,146 @@ export function isLocked(plan: Pick<Plan, 'submission'> | null): boolean {
   return Boolean(plan?.submission);
 }
 
+/* ------------------------------------------------------------------ *
+ * Proposals
+ * ------------------------------------------------------------------ */
+
+/**
+ * Apply a proposal's edits as the user's, in `plan` itself, the way a batch
+ * is applied: each box or arrow edit's `expect` against the plan before the
+ * batch, and what waits on what checked on the batch as a whole.
+ */
+function applyAsUser(plan: Plan, ops: PlanOp[], now: number): Change[] {
+  const start = structuredClone(plan);
+  const had = new Set(dependencyProblems(plan));
+  const out: Change[] = [];
+  ops.forEach((inner, i) => {
+    try {
+      out.push(...applyOne(plan, expectAtStart(start, inner, 'user'), 'user', now));
+    } catch (err) {
+      if (err instanceof PlanError && ops.length > 1) throw new PlanError(`edit ${i + 1} (${inner.op}): ${err.message}`);
+      throw err;
+    }
+  });
+  const added = dependencyProblems(plan).find((p) => !had.has(p));
+  if (added) throw new PlanError(added);
+  plan.threads = plan.threads.map((t) => (t.target.kind === 'node' || t.target.kind === 'edge' ? detachIfOrphaned(plan, start, t) : t));
+  return out;
+}
+
+function openProposal(plan: Plan, id: unknown): Proposal {
+  const p = plan.proposals?.find((x) => x.id === id);
+  if (!p) throw new PlanError(`No proposal "${String(id)}"${plan.proposals?.length ? `: the plan's are ${plan.proposals.map((x) => x.id).join(', ')}` : ''}.`);
+  if (p.status !== 'open') throw new PlanError(`Proposal ${p.id} was already ${p.status}.`);
+  return p;
+}
+
+function settleProposal(plan: Plan, p: Proposal, status: ProposalStatus, now: number, reply: string): void {
+  p.status = status;
+  p.resolvedAt = now;
+  const thread = plan.threads.find((t) => t.id === p.threadId);
+  if (thread && !thread.resolved) {
+    // A full thread is still resolved; the outcome is on the proposal and in the log.
+    if (thread.replies.length < MAX_REPLIES) {
+      thread.replies.push({ id: `${thread.id}.${thread.replies.length + 1}`, author: status === 'withdrawn' ? 'claude' : 'user', text: reply, ts: now });
+    }
+    thread.resolved = true;
+  }
+}
+
+/**
+ * Each item a batch of edits touches, keyed `kind:id`, with a fingerprint of
+ * what it says now (0 if it does not exist yet). What it says, not its
+ * revision: a box dragged, the layout flipped, a task linked or a task's
+ * progress move a revision, and none of them is a reason a proposal no
+ * longer fits.
+ */
+export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, number | string> {
+  const out: Record<string, number | string> = {};
+  const rev = (kind: 'section' | 'diagram' | 'task', id: string): number | string => {
+    if (kind === 'section') {
+      const s = plan.sections.find((x) => x.id === id);
+      return s ? fingerprint(JSON.stringify([s.title, s.body])) : 0;
+    }
+    if (kind === 'diagram') {
+      const d = plan.diagrams.find((x) => x.id === id);
+      return d ? fingerprint(designWithoutLinks(d)) : 0;
+    }
+    const t = plan.tasks.find((x) => x.id === id);
+    return t ? fingerprint(JSON.stringify([t.title, t.detail ?? '', t.parentId, t.dependsOn ?? [], t.branch ?? '', t.review ?? '', t.files ?? []])) : 0;
+  };
+  for (const op of ops) {
+    switch (op.op) {
+      case 'set_meta':
+        out['plan:meta'] = fingerprint(`${plan.title}\n${plan.summary}`);
+        break;
+      case 'upsert_section':
+      case 'move_section':
+        if (op.id) out[`section:${op.id}`] = rev('section', op.id);
+        break;
+      case 'upsert_diagram':
+      case 'move_diagram':
+        if (op.id) out[`diagram:${op.id}`] = rev('diagram', op.id);
+        break;
+      case 'upsert_node':
+      case 'remove_node':
+      case 'upsert_edge':
+      case 'remove_edge':
+        out[`diagram:${op.diagramId}`] = rev('diagram', op.diagramId);
+        break;
+      case 'upsert_task':
+      case 'move_task':
+        if (op.id) out[`task:${op.id}`] = rev('task', op.id);
+        break;
+      case 'remove':
+        if (op.kind === 'section' || op.kind === 'diagram' || op.kind === 'task') out[`${op.kind}:${op.id}`] = rev(op.kind, op.id);
+        break;
+    }
+  }
+  return out;
+}
+
+/** What changed since a proposal was made, in words; empty while it still
+ *  fits the plan. */
+export function proposalStaleness(plan: Plan, p: Proposal): string[] {
+  const now = proposalTouches(plan, p.ops);
+  const out: string[] = [];
+  for (const [key, was] of Object.entries(p.base)) {
+    if (now[key] === was) continue;
+    const [kind, id] = key.split(/:(.*)/s) as [string, string];
+    if (kind === 'plan') out.push("the plan's title or summary");
+    else if (kind === 'section') out.push(`section "${plan.sections.find((s) => s.id === id)?.title ?? id}"`);
+    else if (kind === 'diagram') out.push(`diagram "${plan.diagrams.find((d) => d.id === id)?.title ?? id}"`);
+    else out.push(`task ${id}${plan.tasks.find((t) => t.id === id) ? ` "${plan.tasks.find((t) => t.id === id)!.title}"` : ''}`);
+  }
+  return out;
+}
+
+/** Where a proposal's reasoning is anchored: the first thing it changes
+ *  that exists, so the comment sits on it; else the plan. */
+function proposalTarget(plan: Plan, ops: PlanOp[]): Target {
+  for (const op of ops) {
+    const t: Target | null =
+      op.op === 'upsert_node' || op.op === 'remove_node'
+        ? op.id
+          ? { kind: 'node', id: `${op.diagramId}/${op.id}` }
+          : { kind: 'diagram', id: op.diagramId }
+        : op.op === 'upsert_edge' || op.op === 'remove_edge'
+          ? { kind: 'diagram', id: op.diagramId }
+          : op.op === 'upsert_section' && op.id
+            ? { kind: 'section', id: op.id }
+            : op.op === 'upsert_diagram' && op.id
+              ? { kind: 'diagram', id: op.id }
+              : (op.op === 'upsert_task' || op.op === 'move_task') && op.id
+                ? { kind: 'task', id: op.id }
+                : op.op === 'remove'
+                  ? { kind: op.kind, id: op.id }
+                  : null;
+    if (t && targetExists(plan, t)) return t;
+  }
+  return { kind: 'plan', id: '' };
+}
+
 /** Whether the design — diagrams, sections, summary — is locked: confirmed,
  *  or submitted. */
 export function isDesignLocked(plan: Pick<Plan, 'submission' | 'design'> | null): boolean {
@@ -1749,12 +2047,13 @@ export function isDesignLocked(plan: Pick<Plan, 'submission' | 'design'> | null)
 }
 
 function checkLocked(ops: PlanOp[], author: Author): void {
-  // The user's one say on a locked plan: their verdict on a task they review.
+  // The user's say on a locked plan: their verdict on a task they review,
+  // and on what Claude proposes (accepting one checks what it changes).
   if (author === 'user') {
-    if (ops.every((op) => (op as { op?: string })?.op === 'review_task')) return;
+    if (ops.every((op) => USER_ON_LOCKED.has((op as { op?: string })?.op ?? ''))) return;
     throw new PlanError(LOCKED_FOR_USER);
   }
-  const refused = ops.find((op) => !TRACKING_OPS.has((op as { op?: string })?.op ?? ''));
+  const refused = ops.find((op) => !TRACKING_OPS.has((op as { op?: string })?.op ?? '') && !PROPOSAL_OPS.has((op as { op?: string })?.op ?? ''));
   if (refused) throw new PlanError(`${LOCKED_FOR_CLAUDE} (Refused: ${(refused as { op?: string })?.op ?? 'an edit'}.)`);
 }
 
@@ -1766,7 +2065,7 @@ function checkDesignLocked(ops: PlanOp[], author: Author): void {
     if (op.op === 'set_meta') return op.summary !== undefined;
     // Moving a diagram is part of how the design reads, like move_diagram.
     if (op.op === 'upsert_diagram') return !op.id || typeof (raw as { index?: unknown }).index === 'number';
-    return !TASKING_OPS.has(op.op ?? '');
+    return !TASKING_OPS.has(op.op ?? '') && !PROPOSAL_OPS.has(op.op ?? '');
   });
   if (!refused) return;
   const name = (refused as { op?: string })?.op ?? 'an edit';
@@ -1777,6 +2076,16 @@ function checkDesignLocked(ops: PlanOp[], author: Author): void {
  *  design must keep. */
 function designWithoutLinks(d: Diagram): string {
   return JSON.stringify([d.title, d.caption ?? '', d.nodes.map(({ x: _x, y: _y, taskIds: _t, ...n }) => n), d.edges]);
+}
+
+/** A short stand-in for some text (FNV-1a): equal text, equal print. */
+function fingerprint(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(36);
 }
 
 export function validTarget(value: unknown): BuildTarget | undefined {

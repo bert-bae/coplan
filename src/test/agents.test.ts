@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -11,6 +11,7 @@ import { readLiveLock, baseUrl } from '../shared/paths.ts';
 import { BUILD_MARKER } from '../daemon/render.ts';
 import { readAgentHook, writeAgentOutput } from '../daemon/agentHooks.ts';
 import { agentInfo, parseAgent, sessionFromEnv, workspaceFromEnv } from '../shared/agents.ts';
+import { relayCalls } from '../cli/doctor.ts';
 import type { DaemonLock, SessionState } from '../shared/types.ts';
 
 /**
@@ -381,6 +382,87 @@ test('every agent manifest carries the package version and points at files that 
     }
   }
   assert.deepEqual(readJson('.codex-plugin/plugin.json')['commands'], [], "Codex does not turn Claude Code's slash commands into skills");
+});
+
+test("the Cursor and Codex manifests keep to each agent's rules", () => {
+  // Cursor's schema (cursor/plugins schemas/plugin.schema.json) allows no other key.
+  const CURSOR_KEYS = ['name', 'displayName', 'description', 'version', 'minClientVersions', 'author', 'publisher', 'homepage', 'repository', 'license', 'logo', 'keywords', 'category', 'tags', 'commands', 'agents', 'skills', 'rules', 'hooks', 'variables', 'mcpServers'];
+  const cursor = readJson('.cursor-plugin/plugin.json');
+  for (const key of Object.keys(cursor)) assert.ok(CURSOR_KEYS.includes(key), `Cursor does not know "${key}"`);
+  assert.match(cursor['name'] as string, /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/);
+  for (const manifest of ['.cursor-plugin/plugin.json', '.codex-plugin/plugin.json']) {
+    const m = readJson(manifest);
+    assert.match(m['version'] as string, /^\d+\.\d+\.\d+$/, `${manifest} version is X.Y.Z`);
+    // Both resolve a component path against the plugin folder: relative, and never outside it.
+    for (const key of ['skills', 'commands', 'hooks', 'mcpServers', 'logo']) {
+      const value = m[key];
+      for (const p of typeof value === 'string' ? [value] : Array.isArray(value) ? value : []) {
+        assert.match(p as string, /^\.\//, `${manifest} ${key} is relative: ${p}`);
+        assert.ok(!(p as string).includes('..'), `${manifest} ${key} stays inside the plugin: ${p}`);
+      }
+    }
+  }
+});
+
+test('a version is released with its changelog: no bump without a heading for it', () => {
+  const version = readJson('package.json')['version'] as string;
+  const changelog = readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8');
+  // Unreleased work may sit above it; the newest released heading is this version.
+  const released = [...changelog.matchAll(/^## (.+)$/gm)].map((m) => m[1]).filter((h) => h !== 'Unreleased');
+  assert.equal(released[0], version, `the newest version in CHANGELOG.md is ${version}, the one every manifest carries`);
+});
+
+const COMMANDS = readdirSync(path.join(ROOT, 'commands'))
+  .filter((f) => f.endsWith('.md'))
+  .map((f) => f.replace(/\.md$/, ''))
+  .sort();
+
+test('the docs list the slash commands each agent really ships', () => {
+  // Claude Code finds commands/ by itself; Cursor's manifest points at it; Codex's lists none.
+  assert.equal(readJson('.cursor-plugin/plugin.json')['commands'], './commands/');
+  const row = readFileSync(path.join(ROOT, 'README.md'), 'utf8').split('\n').find((l) => l.startsWith('| Slash commands |'))!;
+  const [, claude, codex, cursor] = row.split('|').map((c) => c.trim()).filter(Boolean);
+  const named = (cell: string) => [...cell.matchAll(/`\/([\w-]+)`/g)].map((m) => m[1]).sort();
+  assert.deepEqual(named(claude!), COMMANDS, 'Claude Code');
+  assert.deepEqual(named(cursor!), COMMANDS, 'Cursor');
+  assert.match(codex!, /^none/, 'Codex');
+  const skill = readFileSync(path.join(ROOT, 'skills', 'coplan', 'SKILL.md'), 'utf8');
+  const listed = skill.match(/In Claude Code and Cursor these are also ([^.]+)\./s)?.[1] ?? '';
+  assert.deepEqual(named(listed), COMMANDS, 'the skill');
+});
+
+test('every command names itself, and finds the plugin where an agent leaves its path empty', () => {
+  for (const name of COMMANDS) {
+    const text = readFileSync(path.join(ROOT, 'commands', `${name}.md`), 'utf8');
+    assert.match(text, new RegExp(`^---\\nname: ${name}\\ndescription: .+\\n---`), `${name} frontmatter`);
+    if (text.includes('${CLAUDE_PLUGIN_ROOT}')) assert.match(text, /CURSOR_PLUGIN_ROOT[\s\S]*commands\/` folder/, `${name} says where the plugin is without it`);
+  }
+});
+
+test('the hooks listen only where each agent can be heard, and give it the same time', () => {
+  const hooks = (agent: string) => readJson(`hooks/${agent}.json`)['hooks'] as Record<string, { matcher?: string; timeout?: number; hooks?: { timeout?: number }[] }[]>;
+  // Codex: every tool it asks with is matched.
+  const codexAsk = hooks('codex')['PreToolUse']!.map((g) => g.matcher ?? '').join('|').split('|');
+  for (const tool of agentInfo('codex').askTools) assert.ok(codexAsk.includes(tool), `Codex PreToolUse matches ${tool}`);
+  // Cursor: its hooks do not see AskQuestion, so nothing listens for it.
+  assert.ok(!JSON.stringify(hooks('cursor')).includes('AskQuestion'), 'no dead Cursor matcher');
+  // SessionEnd: the same budget everywhere.
+  const endTimeout = (agent: string, event: string) => {
+    const g = hooks(agent)[event]![0]!;
+    return g.timeout ?? g.hooks?.[0]?.timeout;
+  };
+  assert.equal(endTimeout('hooks', 'SessionEnd'), endTimeout('codex', 'SessionEnd'));
+  assert.equal(endTimeout('hooks', 'SessionEnd'), endTimeout('cursor', 'sessionEnd'));
+});
+
+test("doctor reads which agent a hook names, in either agent's hook form", () => {
+  assert.deepEqual(relayCalls([{ hooks: [{ command: '${CLAUDE_PLUGIN_ROOT}/bin/coplan-hook-relay.sh', args: ['Stop'] }] }]), [{ event: 'Stop', agent: 'claude' }]);
+  assert.deepEqual(relayCalls([{ command: '"${CURSOR_PLUGIN_ROOT}/bin/coplan-hook-relay.sh" stop cursor' }]), [{ event: 'stop', agent: 'cursor' }]);
+  for (const [file, agent] of [['hooks/hooks.json', 'claude'], ['hooks/codex.json', 'codex'], ['hooks/cursor.json', 'cursor']] as const) {
+    for (const [event, entries] of Object.entries(readJson(file)['hooks'] as Record<string, unknown>)) {
+      assert.deepEqual(relayCalls(entries), [{ event, agent }], `${file} ${event}`);
+    }
+  }
 });
 
 test("each agent's MCP config and hooks name that agent", () => {

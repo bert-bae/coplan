@@ -14,12 +14,18 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 22]
+        include:
+          # The oldest Node the plugin supports (package.json `engines`): the
+          # plugin's own tests. The browser tests' jsdom needs a newer Node.
+          - { os: ubuntu-latest, node: 20.11.0, suite: runtime }
+          - { os: ubuntu-latest, node: 22 }
+          # The relay's BSD sed, sleep and missing setsid live here.
+          - { os: macos-latest, node: 22 }
     steps:
       - uses: actions/checkout@v4
 
@@ -41,7 +47,7 @@ jobs:
         run: pnpm build
 
       - name: Test
-        run: pnpm test
+        run: ${{ matrix.suite == 'runtime' && 'pnpm test:runtime' || 'pnpm test' }}
 
       - name: The plugin wiring self-test
         env:
@@ -53,4 +59,28 @@ jobs:
           exit $status
 
       - name: Audit dependencies
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 22
         run: pnpm audit --audit-level high
+
+  lint-shell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # shellcheck is on the runner image. The relay runs under /bin/sh on
+      # every machine, so it is checked as POSIX sh.
+      - name: shellcheck
+        run: shellcheck --shell=sh --severity=warning bin/coplan-hook-relay.sh bin/coplan
+
+  validate-plugin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Claude Code's own validator; Codex and Cursor manifests are checked
+      # by the packaging tests (src/test/agents.test.ts).
+      - name: claude plugin validate
+        run: npx --yes @anthropic-ai/claude-code plugin validate .

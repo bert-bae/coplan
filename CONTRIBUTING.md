@@ -51,8 +51,13 @@ pnpm test
 pnpm check             # all three
 ```
 
-CI runs the same checks on Node 20 and 22, plus `./bin/coplan doctor` and
-`pnpm audit`. The repository's own [`.coplan/config.json`](.coplan/config.json)
+CI runs the same checks on Linux and macOS with Node 22, and on Node
+20.11.0 (the oldest the plugin supports) runs every test that needs no
+browser (`pnpm test:runtime`: jsdom needs a newer Node), plus
+`./bin/coplan doctor` and
+`pnpm audit`; it also runs `shellcheck` on the shell scripts and
+`claude plugin validate .`. A version bump that reaches `main` is tagged and
+released from its CHANGELOG.md section. The repository's own [`.coplan/config.json`](.coplan/config.json)
 lists them per stage, so `./bin/coplan check review` runs what a change needs.
 
 **`dist/` is not committed.** It is build output: `pnpm install` builds it (the

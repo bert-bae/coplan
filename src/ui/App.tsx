@@ -6,6 +6,7 @@ import { ConnectionBar } from './components/ConnectionBar.tsx';
 import { ThemeToggle } from './components/ThemeToggle.tsx';
 import { Handoff, WaitingBanner } from './components/Handoff.tsx';
 import { PhaseStrip } from './components/Submit.tsx';
+import { ProposalsStrip } from './components/Proposals.tsx';
 import { InlineText } from './components/Editable.tsx';
 import { ProgressBar } from './components/Progress.tsx';
 import { EmptyState } from './components/primitives.tsx';
@@ -80,6 +81,7 @@ export function App() {
             <ConnectionBar />
             <WaitingBanner session={session} />
             <PhaseStrip session={session} />
+            {plan && <ProposalsStrip plan={plan} />}
             {!plan ? (
               <NoPlan session={session} />
             ) : (

@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { unlinkSync, appendFileSync, existsSync, linkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { unlinkSync, appendFileSync, existsSync, linkSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -16,7 +16,7 @@ import { renderBrief, renderNext } from './brief.ts';
 import { cleanSettings, dependents, effectiveReview, hasSubtasks, readyTasks, roundVerdict, stackStatus, waitingOn } from '../shared/build.ts';
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
-import { ConfigCache, type HarnessConfig } from '../shared/config.ts';
+import { ConfigCache, configStamp, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
@@ -164,6 +164,8 @@ const LOST_LOCK = 'lost the lock';
 const PORT_CLAIM_MS = 5_000;
 /** Sessions remembered as "already opened a browser tab for". */
 const MAX_TRACKED_OPENS = 200;
+/** Repositories whose config is held in memory. */
+const MAX_PROJECT_CONFIGS = 50;
 
 /** Why an MCP call found no session: the agent's hooks have not reported
  *  one, and what to do about it there. */
@@ -466,9 +468,33 @@ function buildRouter(deps: Deps): Router {
 
   const configFor = (session: SessionState): HarnessConfig => config.get(session.repoRoot ?? session.cwd);
 
-  /** The repository's `.coplan/config.json`. Read on every use: it is one
-   *  small file, and an edit to it should count at once. */
-  const projectFor = (session: SessionState): ProjectConfig => loadProjectConfig(session.repoRoot ?? session.cwd);
+  /** The repository's `.coplan/config.json` over the user's own layer. Read
+   *  again as soon as any file it came from changes — an edit counts at
+   *  once — and otherwise kept: a stat per file, not a read and a parse of
+   *  every one, on each call. */
+  const projects = new Map<string, { stamp: string; config: ProjectConfig }>();
+  const projectFor = (session: SessionState): ProjectConfig => {
+    const root = session.repoRoot ?? session.cwd;
+    const hit = projects.get(root);
+    if (hit && hit.config.sources && configStamp(hit.config.sources) === hit.stamp) return hit.config;
+    const started = Date.now();
+    const config = loadProjectConfig(root);
+    if (projects.size >= MAX_PROJECT_CONFIGS) projects.clear();
+    // A file saved while it was being read may have been read half old: if
+    // any changed since the load began, nothing is kept, and the next call
+    // reads it again.
+    const sources = config.sources ?? [];
+    const settled = !sources.some((f) => {
+      try {
+        return statSync(f).mtimeMs >= started - 1;
+      } catch {
+        return false;
+      }
+    });
+    if (settled) projects.set(root, { stamp: configStamp(sources), config });
+    else projects.delete(root);
+    return config;
+  };
 
   /** Settings as the page sent them, over the repository's defaults. */
   const settingsFrom = (raw: unknown, project: ProjectConfig): BuildSettings =>
@@ -480,7 +506,8 @@ function buildRouter(deps: Deps): Router {
     file: project.file,
     defaults: project.settings,
     checks: Object.fromEntries(HOOK_STAGES.map((stage) => [stage, project.hooks[stage].map((h) => h.name)])),
-    errors: project.errors,
+    errors: [...project.errors, ...project.warnings],
+    planCheck: project.planCheck,
   });
 
   const residentIds = (): string[] => store.all().map((s) => s.sessionId);
@@ -557,7 +584,7 @@ function buildRouter(deps: Deps): Router {
       json(ctx.res, 404, { error: 'no plan yet' });
       return;
     }
-    text(ctx.res, 200, renderPlan(session.plan, { url: uiUrl(session.sessionId) }));
+    text(ctx.res, 200, renderPlan(session.plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck }));
   });
 
   /**
@@ -1131,7 +1158,7 @@ function buildRouter(deps: Deps): Router {
               'Tell them in chat that the plan is ready, and ask anything you need decided with ' +
               `${agentInfo(session.agent).askWith}, here in chat. Nothing in Coplan waits for them: when they say they ` +
               'have reviewed it, call harness_plan_read.\n\n' +
-              renderPlan(plan, { url }),
+              renderPlan(plan, { url, planCheck: projectFor(session).planCheck }),
           );
           return;
         }
@@ -1148,7 +1175,7 @@ function buildRouter(deps: Deps): Router {
             reply(
               true,
               '[cc-harness] A peek: the user\'s changes below stay unread, for your next harness_plan_read.\n\n' +
-                renderPlan(session.plan, { url, changesOnly: body['changes_only'] === true }),
+                renderPlan(session.plan, { url, changesOnly: body['changes_only'] === true, planCheck: projectFor(session).planCheck }),
             );
             return;
           }
@@ -1166,7 +1193,7 @@ function buildRouter(deps: Deps): Router {
             reply(true, notice ? `${handed.prompt}\n\n${notice}` : handed.prompt);
             return;
           }
-          const textOut = renderPlan(session.plan, { url, changesOnly: body['changes_only'] === true });
+          const textOut = renderPlan(session.plan, { url, changesOnly: body['changes_only'] === true, planCheck: projectFor(session).planCheck });
           store.markRead(id);
           reply(true, textOut);
           return;
@@ -1176,6 +1203,8 @@ function buildRouter(deps: Deps): Router {
           const ops = Array.isArray(body['ops']) ? (body['ops'] as PlanOp[]) : [];
           // All or nothing: a batch that cannot be applied whole is refused.
           if (ops.length > MAX_OPS) throw new PlanError(`At most ${MAX_OPS} edits per call; split the change.`);
+          const project = projectFor(session);
+          for (const op of ops) if (op && op.op === 'report') refuseUnfinishedFinal(op.checks, project);
           const { plan, changes } = store.applyOps(id, ops, 'claude');
           const notice = unreadNotice(plan);
           reply(
@@ -1183,6 +1212,21 @@ function buildRouter(deps: Deps): Router {
             (changes.length
               ? `[cc-harness] Applied ${changes.length} change(s):\n${changes.map((c) => `- ${c.summary} [${c.target.kind} ${c.target.id}]`.replace(' ]', ']')).join('\n')}`
               : '[cc-harness] Nothing changed — every edit matched what was already there.') + (notice ? `\n\n${notice}` : ''),
+          );
+          return;
+        }
+
+        case 'propose': {
+          const proposal = { op: 'propose', title: body['title'], reason: body['reason'], ops: body['ops'] } as unknown as PlanOp;
+          const { plan } = store.applyOps(id, [proposal], 'claude');
+          const p = plan.proposals!.at(-1)!;
+          revealUi(session);
+          reply(
+            true,
+            `[cc-harness] Proposed ${p.id} "${p.title}" (${p.ops.length} edit${p.ops.length === 1 ? '' : 's'}). Nothing has changed yet: ` +
+              `the user sees it in Coplan (${url}) beside what it changes, with Accept and Reject. Tell them in chat what you propose and why. ` +
+              'You hear their answer the next time you read the plan (harness_plan_read); until then, work from the plan as it is. ' +
+              `Take it back with harness_plan_edit {ops: [{op: "withdraw_proposal", id: "${p.id}"}]}.`,
           );
           return;
         }
@@ -1203,7 +1247,7 @@ function buildRouter(deps: Deps): Router {
                 : 'Tell them in chat that the tasks are updated.\n\n') +
               renderTaskList(plan, projectFor(session).branches.base) +
               // What the list leaves open, while it is still cheap to fix.
-              ((gaps) => (gaps.length ? `\n\n${gaps.join('\n')}\n\nFix these, or say why in chat, before they review it.` : ''))(renderGaps(plan, 20)),
+              ((gaps) => (gaps.length ? `\n\n${gaps.join('\n')}\n\nFix these, or say why in chat, before they review it.` : ''))(renderGaps(plan, 20, projectFor(session).planCheck)),
           );
           return;
         }
@@ -1250,7 +1294,7 @@ function buildRouter(deps: Deps): Router {
             reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
             return;
           }
-          const gaps = renderGaps(session.plan);
+          const gaps = renderGaps(session.plan, Infinity, projectFor(session).planCheck);
           reply(
             true,
             gaps.length
@@ -1297,10 +1341,34 @@ function buildRouter(deps: Deps): Router {
 }
 
 /**
- * Exit once nothing is using the daemon: no browser open and no session
- * active recently. The next hook starts a fresh one.
+ * Where the repository says the final checks hold the report
+ * (`final.blocking`), a report must carry each required one, passing: the
+ * plan is not built while the checks that say so fail.
  */
-/** Read each minute, so changing `idleShutdownMinutes` needs no restart. */
+function refuseUnfinishedFinal(checks: unknown, project: ProjectConfig): void {
+  if (!project.final.blocking) return;
+  const required = project.hooks.final.filter((h) => !h.optional).map((h) => h.name);
+  if (!required.length) return;
+  const reported = new Map(
+    (Array.isArray(checks) ? checks : [])
+      .filter((c): c is { name: string; ok: unknown } => Boolean(c) && typeof (c as { name?: unknown }).name === 'string')
+      .map((c) => [c.name, c.ok === true]),
+  );
+  const missing = required.filter((n) => !reported.has(n));
+  const failing = required.filter((n) => reported.get(n) === false);
+  if (!missing.length && !failing.length) return;
+  throw new PlanError(
+    'This repository holds the build report until its final checks pass (final.blocking in .coplan/config.json). ' +
+      [failing.length ? `Failing: ${failing.join(', ')}.` : '', missing.length ? `Not reported in \`checks\`: ${missing.join(', ')}.` : ''].filter(Boolean).join(' ') +
+      ' Fix what fails and run them again, or ask the user how to finish.',
+  );
+}
+
+/**
+ * Exit once nothing is using the daemon: no browser open and no session
+ * active recently. The next hook starts a fresh one. The setting is read
+ * each minute, so changing `idleShutdownMinutes` needs no restart.
+ */
 function startIdleWatch(store: SessionStore, config: ConfigCache, clients: { count: number }, stop: () => void): void {
   const timer = setInterval(() => {
     const minutes = config.get().idleShutdownMinutes;

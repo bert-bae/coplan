@@ -1,4 +1,5 @@
 ---
+name: coplan-init
 description: Set up .coplan/config.json — the checks each task runs in its implement → review → refine cycle
 ---
 
@@ -10,6 +11,11 @@ instead of guessing.
    ```bash
    "${CLAUDE_PLUGIN_ROOT}/bin/coplan" init --print
    ```
+
+   If the path comes out empty (not every agent fills it in), use
+   `${CURSOR_PLUGIN_ROOT}` in Cursor; failing that, the plugin's folder is
+   the one that holds this command's `commands/` folder, and `bin/coplan` is
+   in it. Use the same path below.
 
 2. Check it against how the project is really verified: the CI workflows
    (`.github/workflows`, `.gitlab-ci.yml`, …), `package.json` scripts, a

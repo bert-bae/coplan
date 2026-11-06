@@ -30,7 +30,7 @@ esac
 
 # Where the plugin lives. Claude Code and Codex say so in CLAUDE_PLUGIN_ROOT /
 # PLUGIN_ROOT; Cursor may not, and this script always knows where it is.
-SELF_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd) || SELF_ROOT=
+SELF_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd) || SELF_ROOT=
 PLUGIN_ROOT_DIR="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-$SELF_ROOT}}}"
 
 PAYLOAD=$(cat)

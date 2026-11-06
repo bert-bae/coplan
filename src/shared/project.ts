@@ -1,9 +1,11 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import type { BuildSettings } from './types.ts';
 import { DEFAULT_BUILD_SETTINGS, MAX_PARALLEL, MAX_ROUNDS, cleanSettings } from './build.ts';
 import { REVIEW_MODES } from './types.ts';
 import { parseJsonc } from './jsonc.ts';
+import { GAP_RULES, GAP_SEVERITIES, type GapRule, type GapSeverity } from './check.ts';
+import { paths } from './paths.ts';
 
 /**
  * A repository's own Coplan settings: `.coplan/config.json`, committed with
@@ -40,7 +42,21 @@ export interface CheckHook {
   paths?: string[];
   /** A failure is reported but does not hold the task back. */
   optional?: boolean;
+  /** Where it runs, from the repository root: a package of a monorepo. */
+  cwd?: string;
+  /** Variables set for it, on top of the environment it runs in. */
+  env?: Record<string, string>;
 }
+
+/** Which tool opens the pull requests of a stacked build. */
+export const PR_TOOLS = ['gh', 'graphite', 'none'] as const;
+export type PrTool = (typeof PR_TOOLS)[number];
+/** When they are opened: as each branch is ready, once the user says, or never. */
+export const PR_OPEN = ['auto', 'ask', 'never'] as const;
+export type PrOpen = (typeof PR_OPEN)[number];
+/** Where a repository or a user may add words to what the agent is told. */
+export const INSTRUCTION_POINTS = ['design', 'build', 'brief', 'review'] as const;
+export type InstructionPoint = (typeof INSTRUCTION_POINTS)[number];
 
 export interface ProjectConfig {
   /** Where it was read from; null when the repository has none. */
@@ -54,21 +70,61 @@ export interface ProjectConfig {
     /** Put in front of every branch a plan names, e.g. `coplan/`. */
     prefix?: string;
   };
+  /** How the pull requests of a build are opened, and what they say. */
+  pullRequests: {
+    tool: PrTool;
+    open: PrOpen;
+    /** The body to fill in for each pull request, read from its file. */
+    template?: string;
+    /** That file, as the config names it. */
+    templateFile?: string;
+  };
+  /** The reviewer subagent: which model reviews, when not the agent's own. */
+  review: { model?: string };
+  /** Whether failing final checks hold back the build report. */
+  final: { blocking: boolean };
+  /** Words added to what the agent is told, per point: the user's global
+   *  ones first, then the repository's. */
+  instructions: Partial<Record<InstructionPoint, string>>;
+  /** Plan-check rules counted other than the default (`warn`). */
+  planCheck: Partial<Record<GapRule, GapSeverity>>;
+  /** The user-wide layer (`coplan.json` in Coplan's home), when there is one. */
+  globalFile?: string | null;
   /** What could not be read, said rather than silently ignored: a hook
    *  that is quietly dropped is a check nobody runs. */
   errors: string[];
+  /** What was read but taken differently than written, and said: text cut
+   *  to its limit, a folder that is not there yet, anything amiss in the
+   *  user's own layer. The checks still run. */
+  warnings: string[];
+  /** Every file the config was read from or looked for: while none of them
+   *  changes, neither does the config. */
+  sources?: string[];
+  /** The checks themselves cannot be trusted: the file is unreadable, or
+   *  `hooks` (or a top-level key, often a misspelt `hooks`) is wrong. Only
+   *  this stops `coplan check`; an error elsewhere is said, and the checks
+   *  still run. */
+  checksBroken?: boolean;
 }
 
 export const PROJECT_CONFIG_PATH = path.join('.coplan', 'config.json');
+/** The user's own layer, under every repository's: in Coplan's home. */
+export const GLOBAL_PROJECT_FILE = 'coplan.json';
+/** Beside it: the user's own words, one file per point. */
+export const INSTRUCTIONS_DIR = 'instructions';
 export const DEFAULT_HOOK_TIMEOUT = 600;
 export const MAX_HOOK_TIMEOUT = 3600;
 export const MAX_HOOKS = 20;
 export const MAX_HOOK_NAME = 60;
+export const MAX_INSTRUCTIONS = 4_000;
+export const MAX_TEMPLATE = 8_000;
+const MAX_ENV = 20;
 
-const TOP_KEYS = ['hooks', 'iric', 'branches'];
+export const PROJECT_KEYS = ['hooks', 'iric', 'branches', 'pullRequests', 'review', 'final', 'instructions', 'planCheck'];
 const IRIC_KEYS = ['review', 'parallel', 'maxRounds'];
 const BRANCH_KEYS = ['base', 'prefix'];
-const HOOK_KEYS = ['name', 'run', 'timeout', 'paths', 'optional'];
+const PR_KEYS = ['tool', 'open', 'template'];
+export const HOOK_KEYS = ['name', 'run', 'timeout', 'paths', 'optional', 'cwd', 'env'];
 
 /** A key the file sets that nothing reads is most often a typo of one that
  *  is: said, so the setting the user meant is not silently lost. */
@@ -79,71 +135,334 @@ function unknownKeys(rec: Record<string, unknown>, known: string[], where: strin
 }
 
 export function emptyProjectConfig(): ProjectConfig {
-  return { file: null, hooks: { implement: [], review: [], final: [] }, settings: { ...DEFAULT_BUILD_SETTINGS }, branches: {}, errors: [] };
+  return {
+    file: null,
+    hooks: { implement: [], review: [], final: [] },
+    settings: { ...DEFAULT_BUILD_SETTINGS },
+    branches: {},
+    pullRequests: { tool: 'gh', open: 'ask' },
+    review: {},
+    final: { blocking: false },
+    instructions: {},
+    planCheck: {},
+    errors: [],
+    warnings: [],
+  };
 }
 
-/** The repository's config, or an empty one. Never throws. */
-export function loadProjectConfig(root: string | null | undefined): ProjectConfig {
-  if (!root) return emptyProjectConfig();
-  const file = path.join(root, PROJECT_CONFIG_PATH);
-  if (!existsSync(file)) return emptyProjectConfig();
-  let raw: unknown;
+function readConfigFile(file: string, label: string, errors: string[]): unknown {
+  if (!existsSync(file)) return undefined;
   try {
     // Comments are allowed, so the file can explain itself.
-    raw = parseJsonc(readFileSync(file, 'utf8'));
+    return parseJsonc(readFileSync(file, 'utf8'));
   } catch (err) {
-    return { ...emptyProjectConfig(), file, errors: [`${PROJECT_CONFIG_PATH} could not be read: ${(err as Error).message}`] };
+    errors.push(`${label} could not be read: ${(err as Error).message}`);
+    return undefined;
   }
-  return parseProjectConfig(raw, file);
 }
 
-export function parseProjectConfig(raw: unknown, file: string | null = null): ProjectConfig {
-  const config = { ...emptyProjectConfig(), file };
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    config.errors.push(`${PROJECT_CONFIG_PATH} must hold an object.`);
-    return config;
+/**
+ * The repository's config over the user's own, or an empty one. Never throws.
+ *
+ * `globalDir` is Coplan's home: its `coplan.json` sets the user's defaults
+ * for every repository (anything but the checks, which belong to the
+ * repository), and `instructions/<point>.md` add the user's own words.
+ */
+export function loadProjectConfig(root: string | null | undefined, opts: { globalDir?: string | null } = {}): ProjectConfig {
+  const globalDir = opts.globalDir === undefined ? paths.configDir() : opts.globalDir;
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const layers: Layer[] = [];
+  const sources: string[] = [];
+  reading = sources;
+  try {
+    let globalFile: string | null = null;
+    if (globalDir) {
+      const file = path.join(globalDir, GLOBAL_PROJECT_FILE);
+      sources.push(file, ...INSTRUCTION_POINTS.map((p) => path.join(globalDir, INSTRUCTIONS_DIR, `${p}.md`)));
+      if (existsSync(file)) globalFile = file;
+      // What is wrong with the user's own layer is said, but holds back no
+      // repository's checks: they are the repository's, and run as it says.
+      const raw = readConfigFile(file, file, warnings);
+      if (raw !== undefined) layers.push(parseLayer(raw, { label: file, base: globalDir, global: true }, warnings, warnings));
+      const words = instructionFiles(path.join(globalDir, INSTRUCTIONS_DIR), warnings, warnings);
+      if (Object.keys(words).length) layers.push({ instructions: words });
+    }
+    let file: string | null = null;
+    let broken = false;
+    if (root) {
+      const repoFile = path.join(root, PROJECT_CONFIG_PATH);
+      sources.push(repoFile);
+      if (existsSync(repoFile)) {
+        file = repoFile;
+        const raw = readConfigFile(repoFile, PROJECT_CONFIG_PATH, errors);
+        if (raw === undefined) broken = true;
+        else layers.push(parseLayer(raw, { label: PROJECT_CONFIG_PATH, base: root, global: false }, errors, warnings));
+      }
+    }
+    broken ||= layers.some((l) => l.checksBroken);
+    return { ...combine(layers), file, globalFile, errors, warnings, sources, ...(broken ? { checksBroken: true } : {}) };
+  } finally {
+    reading = null;
   }
-  const rec = raw as Record<string, unknown>;
-  unknownKeys(rec, TOP_KEYS, '', config.errors);
+}
 
-  const hooks = rec['hooks'];
+/** The files the load in progress has read, for `sources`. Loading is
+ *  synchronous, so one at a time. */
+let reading: string[] | null = null;
+
+/** Whether a hook's folder exists — watched like a file the config read, so
+ *  the folder appearing reads the config again (and drops the warning). */
+function folderThere(dir: string): boolean {
+  reading?.push(dir);
+  return existsSync(dir);
+}
+
+/** The repository's config from what its file holds. */
+export function parseProjectConfig(raw: unknown, file: string | null = null): ProjectConfig {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  // A config's files are named from the repository root, which holds `.coplan/`.
+  const base = file ? path.dirname(path.dirname(file)) : null;
+  const layer = parseLayer(raw, { label: PROJECT_CONFIG_PATH, base, global: false }, errors, warnings);
+  return { ...combine([layer]), file, errors, warnings, ...(layer.checksBroken ? { checksBroken: true } : {}) };
+}
+
+/** One file's settings, each checked, before the layers are put together. */
+interface Layer {
+  hooks?: Partial<Record<HookStage, CheckHook[]>>;
+  iric?: Record<string, unknown>;
+  branches?: ProjectConfig['branches'];
+  pullRequests?: Partial<ProjectConfig['pullRequests']>;
+  review?: ProjectConfig['review'];
+  final?: Partial<ProjectConfig['final']>;
+  instructions?: ProjectConfig['instructions'];
+  planCheck?: ProjectConfig['planCheck'];
+  /** See ProjectConfig.checksBroken. */
+  checksBroken?: boolean;
+}
+
+interface LayerContext {
+  /** How errors name the file. */
+  label: string;
+  /** Where the files it names are found; null when it is not on disk. */
+  base: string | null;
+  /** The user's own layer: everything but the checks. */
+  global: boolean;
+}
+
+/** Later layers win key by key; instructions add up, the user's first. */
+function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors' | 'warnings'> {
+  const out = emptyProjectConfig();
+  const iric: Record<string, unknown> = {};
+  for (const l of layers) {
+    for (const stage of HOOK_STAGES) if (l.hooks?.[stage]) out.hooks[stage] = l.hooks[stage]!;
+    Object.assign(iric, l.iric);
+    Object.assign(out.branches, l.branches);
+    Object.assign(out.pullRequests, l.pullRequests);
+    Object.assign(out.review, l.review);
+    Object.assign(out.final, l.final);
+    Object.assign(out.planCheck, l.planCheck);
+    for (const point of INSTRUCTION_POINTS) {
+      const words = l.instructions?.[point];
+      if (words) out.instructions[point] = out.instructions[point] ? `${out.instructions[point]}\n\n${words}` : words;
+    }
+  }
+  out.settings = cleanSettings(iric, DEFAULT_BUILD_SETTINGS);
+  const { file: _f, errors: _e, warnings: _w, ...rest } = out;
+  return rest;
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+
+function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings: string[]): Layer {
+  const layer: Layer = {};
+  const say = (message: string) => errors.push(ctx.global ? `${ctx.label}: ${message}` : message);
+  if (!isRecord(raw)) {
+    say(`${ctx.global ? 'it' : PROJECT_CONFIG_PATH} must hold an object.`);
+    if (!ctx.global) layer.checksBroken = true;
+    return layer;
+  }
+  const local: string[] = [];
+  const notes: string[] = [];
+  unknownKeys(raw, PROJECT_KEYS, '', local);
+
+  const hooks = raw['hooks'];
   if (hooks !== undefined) {
-    if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) {
-      config.errors.push('"hooks" must map a stage (implement, review, final) to a list of commands.');
+    if (ctx.global) {
+      notes.push('"hooks" belong to each repository (.coplan/config.json), not to every one: they are ignored here.');
+    } else if (!isRecord(hooks)) {
+      local.push('"hooks" must map a stage (implement, review, final) to a list of commands.');
     } else {
-      for (const [stage, list] of Object.entries(hooks as Record<string, unknown>)) {
+      layer.hooks = {};
+      for (const [stage, list] of Object.entries(hooks)) {
         if (!(HOOK_STAGES as readonly string[]).includes(stage)) {
-          config.errors.push(`"hooks.${stage}" is not a stage: use ${HOOK_STAGES.join(', ')}.`);
+          local.push(`"hooks.${stage}" is not a stage: use ${HOOK_STAGES.join(', ')}.`);
           continue;
         }
-        config.hooks[stage as HookStage] = parseHooks(list, stage, config.errors);
+        layer.hooks[stage as HookStage] = parseHooks(list, stage, local, ctx.base, notes);
+      }
+    }
+  }
+  if (local.length && !ctx.global) layer.checksBroken = true;
+
+  const section = (key: string, shape: string): Record<string, unknown> | null => {
+    const v = raw[key];
+    if (v === undefined) return null;
+    if (!isRecord(v)) {
+      local.push(`"${key}" must be an object: ${shape}.`);
+      return null;
+    }
+    return v;
+  };
+
+  const iric = section('iric', '{ "review", "parallel", "maxRounds" }');
+  if (iric) {
+    checkSettings(iric, local);
+    layer.iric = Object.fromEntries(IRIC_KEYS.filter((k) => iric[k] !== undefined).map((k) => [k, iric[k]]));
+  }
+
+  const branches = section('branches', '{ "base", "prefix" }');
+  if (branches) {
+    unknownKeys(branches, BRANCH_KEYS, 'branches.', local);
+    layer.branches = {};
+    for (const key of BRANCH_KEYS) {
+      const v = branches[key];
+      if (typeof v === 'string' && v.trim()) layer.branches[key as 'base' | 'prefix'] = v.trim();
+      else if (v !== undefined) local.push(`"branches.${key}" must be a branch name.`);
+    }
+  }
+
+  const prs = section('pullRequests', '{ "tool", "open", "template" }');
+  if (prs) {
+    unknownKeys(prs, PR_KEYS, 'pullRequests.', local);
+    layer.pullRequests = {};
+    const tool = oneOf(prs['tool'], PR_TOOLS, 'pullRequests.tool', local);
+    if (tool) layer.pullRequests.tool = tool;
+    const open = oneOf(prs['open'], PR_OPEN, 'pullRequests.open', local);
+    if (open) layer.pullRequests.open = open;
+    if (prs['template'] !== undefined) {
+      const text = typeof prs['template'] === 'string' ? readNamedFile(prs['template'], ctx.base, 'pullRequests.template', MAX_TEMPLATE, local, notes) : null;
+      if (typeof prs['template'] !== 'string') local.push('"pullRequests.template" must name a file, e.g. ".github/pull_request_template.md".');
+      if (text !== null) {
+        layer.pullRequests.template = text;
+        // The repository's by its path in it; the user's own by where it is.
+        layer.pullRequests.templateFile = ctx.global ? path.join(ctx.base!, (prs['template'] as string).trim()) : (prs['template'] as string).trim();
       }
     }
   }
 
-  const iric = rec['iric'];
-  if (iric !== undefined) {
-    if (!iric || typeof iric !== 'object' || Array.isArray(iric)) config.errors.push('"iric" must be an object: { "review", "parallel", "maxRounds" }.');
-    else {
-      checkSettings(iric as Record<string, unknown>, config.errors);
-      config.settings = cleanSettings(iric, DEFAULT_BUILD_SETTINGS);
+  const review = section('review', '{ "model" }');
+  if (review) {
+    unknownKeys(review, ['model'], 'review.', local);
+    const model = review['model'];
+    if (typeof model === 'string' && /^[\w.:/[\]-]{1,80}$/.test(model.trim())) layer.review = { model: model.trim() };
+    else if (model !== undefined) local.push('"review.model" must be a model name, e.g. "opus" or "sonnet".');
+  }
+
+  const final = section('final', '{ "blocking" }');
+  if (final) {
+    unknownKeys(final, ['blocking'], 'final.', local);
+    if (typeof final['blocking'] === 'boolean') layer.final = { blocking: final['blocking'] };
+    else if (final['blocking'] !== undefined) local.push('"final.blocking" must be true or false.');
+  }
+
+  const instructions = section('instructions', `{ ${INSTRUCTION_POINTS.map((p) => `"${p}"`).join(', ')} }, each text or { "file" }`);
+  if (instructions) {
+    unknownKeys(instructions, [...INSTRUCTION_POINTS], 'instructions.', local);
+    layer.instructions = {};
+    for (const point of INSTRUCTION_POINTS) {
+      const v = instructions[point];
+      if (v === undefined) continue;
+      const where = `instructions.${point}`;
+      let text: string | null = null;
+      if (typeof v === 'string') text = v.trim();
+      else if (isRecord(v) && typeof v['file'] === 'string' && Object.keys(v).length === 1) text = readNamedFile(v['file'], ctx.base, where, MAX_INSTRUCTIONS, local, notes);
+      else local.push(`"${where}" must be text, or { "file": "path" }.`);
+      if (text && text.length > MAX_INSTRUCTIONS) {
+        notes.push(`"${where}" is longer than ${MAX_INSTRUCTIONS} characters; the rest is cut.`);
+        text = text.slice(0, MAX_INSTRUCTIONS);
+      }
+      if (text) layer.instructions[point] = text;
     }
   }
 
-  const branches = rec['branches'];
-  if (branches !== undefined) {
-    if (!branches || typeof branches !== 'object' || Array.isArray(branches)) config.errors.push('"branches" must be an object: { "base", "prefix" }.');
-    else {
-      const b = branches as Record<string, unknown>;
-      unknownKeys(b, BRANCH_KEYS, 'branches.', config.errors);
-      for (const key of BRANCH_KEYS) {
-        const v = b[key];
-        if (typeof v === 'string' && v.trim()) config.branches[key as 'base' | 'prefix'] = v.trim();
-        else if (v !== undefined) config.errors.push(`"branches.${key}" must be a branch name.`);
+  const planCheck = section('planCheck', `{ "<rule>": ${GAP_SEVERITIES.map((s) => `"${s}"`).join(' | ')} }`);
+  if (planCheck) {
+    layer.planCheck = {};
+    for (const [rule, value] of Object.entries(planCheck)) {
+      if (!(GAP_RULES as readonly string[]).includes(rule)) {
+        local.push(`"planCheck.${rule}" is not a plan-check rule: use ${GAP_RULES.join(', ')}.`);
+        continue;
       }
+      const severity = oneOf(value, GAP_SEVERITIES, `planCheck.${rule}`, local);
+      if (severity) layer.planCheck[rule as GapRule] = severity;
     }
   }
-  return config;
+
+  for (const message of local) say(message);
+  for (const message of notes) warnings.push(ctx.global ? `${ctx.label}: ${message}` : message);
+  return layer;
+}
+
+function oneOf<T extends string>(value: unknown, allowed: readonly T[], where: string, errors: string[]): T | undefined {
+  if (value === undefined) return undefined;
+  if ((allowed as readonly unknown[]).includes(value)) return value as T;
+  errors.push(`"${where}" must be one of ${allowed.join(', ')}; ${JSON.stringify(value)} is not.`);
+  return undefined;
+}
+
+/**
+ * A file a config names, read — kept inside the folder the config belongs
+ * to (the repository, or Coplan's home), so a committed config cannot pull
+ * someone's private files into what the agent is told.
+ */
+function readNamedFile(name: string, base: string | null, where: string, max: number, errors: string[], warnings: string[]): string | null {
+  const rel = name.trim();
+  if (!base) {
+    errors.push(`"${where}" names a file, but this config is not read from disk.`);
+    return null;
+  }
+  // Both sides normalized: git names a Windows root with forward slashes,
+  // and path.resolve answers with back ones.
+  const root = path.resolve(base);
+  const full = path.resolve(root, rel);
+  if (!rel || path.isAbsolute(rel) || (full !== root && !full.startsWith(root + path.sep))) {
+    errors.push(`"${where}" must name a file inside ${base}: ${JSON.stringify(name)} is not.`);
+    return null;
+  }
+  reading?.push(full);
+  try {
+    // Where it really is: a link committed inside the repository may point
+    // anywhere, and reading follows it.
+    const realBase = realpathSync(base);
+    const real = realpathSync(full);
+    if (real !== realBase && !real.startsWith(realBase + path.sep)) {
+      errors.push(`"${where}" must name a file inside ${base}: ${rel} links to one outside it.`);
+      return null;
+    }
+    const text = readFileSync(real, 'utf8').trim();
+    if (text.length > max) {
+      warnings.push(`"${where}" (${rel}) is longer than ${max} characters; the rest is cut.`);
+      return text.slice(0, max);
+    }
+    return text;
+  } catch (err) {
+    errors.push(`"${where}" names ${rel}, which could not be read: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}.`);
+    return null;
+  }
+}
+
+/** `instructions/<point>.md` in Coplan's home: the user's own words. */
+function instructionFiles(dir: string, errors: string[], warnings: string[]): ProjectConfig['instructions'] {
+  const out: ProjectConfig['instructions'] = {};
+  for (const point of INSTRUCTION_POINTS) {
+    const file = path.join(dir, `${point}.md`);
+    if (!existsSync(file)) continue;
+    const text = readNamedFile(`${point}.md`, dir, `${file}`, MAX_INSTRUCTIONS, errors, warnings);
+    if (text) out[point] = text;
+  }
+  return out;
 }
 
 /** What `cleanSettings` would quietly correct, said instead: a value it
@@ -167,7 +486,7 @@ function checkSettings(rec: Record<string, unknown>, errors: string[]): void {
   whole('maxRounds', MAX_ROUNDS);
 }
 
-function parseHooks(list: unknown, stage: string, errors: string[]): CheckHook[] {
+function parseHooks(list: unknown, stage: string, errors: string[], root: string | null = null, warnings: string[] = errors): CheckHook[] {
   const items = Array.isArray(list) ? list : [list];
   const out: CheckHook[] = [];
   items.slice(0, MAX_HOOKS).forEach((item, i) => {
@@ -187,7 +506,7 @@ function parseHooks(list: unknown, stage: string, errors: string[]): CheckHook[]
       // Too long is still long: the most allowed, said — not the default,
       // which would stop a long suite early.
       hook.timeout = Math.min(MAX_HOOK_TIMEOUT, Math.round(timeout));
-      if (timeout > MAX_HOOK_TIMEOUT) errors.push(`"${where}.timeout" is at most ${MAX_HOOK_TIMEOUT} seconds; ${MAX_HOOK_TIMEOUT} is used.`);
+      if (timeout > MAX_HOOK_TIMEOUT) warnings.push(`"${where}.timeout" is at most ${MAX_HOOK_TIMEOUT} seconds; ${MAX_HOOK_TIMEOUT} is used.`);
     } else if (timeout !== undefined) {
       errors.push(`"${where}.timeout" must be seconds, from 1 to ${MAX_HOOK_TIMEOUT}; the default ${DEFAULT_HOOK_TIMEOUT} is used.`);
     }
@@ -201,10 +520,45 @@ function parseHooks(list: unknown, stage: string, errors: string[]): CheckHook[]
     if (paths.length) hook.paths = paths.map((p) => p.trim());
     if (rec['optional'] === true) hook.optional = true;
     else if (rec['optional'] !== undefined && rec['optional'] !== false) errors.push(`"${where}.optional" must be true or false.`);
+    const cwd = rec['cwd'];
+    if (cwd !== undefined) {
+      const rel = typeof cwd === 'string' ? cwd.trim().replace(/\\/g, '/').replace(/\/+$/, '') : '';
+      // Inside the repository: a check runs where its code is, nowhere else.
+      if (!rel || rel.startsWith('/') || /^[A-Za-z]:/.test(rel) || rel.split('/').includes('..')) {
+        errors.push(`"${where}.cwd" must be a folder inside the repository, e.g. "packages/api".`);
+      } else if (root && !folderThere(path.join(root, rel))) {
+        // Kept: run anywhere else, it would pass without checking what it is for.
+        warnings.push(`"${where}.cwd" names ${rel}, which does not exist yet: the hook fails until it does.`);
+        hook.cwd = rel;
+      } else if (rel !== '.') hook.cwd = rel;
+    }
+    const env = rec['env'];
+    if (env !== undefined) {
+      const entries = env && typeof env === 'object' && !Array.isArray(env) ? Object.entries(env as Record<string, unknown>) : null;
+      const good = entries?.filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && typeof v === 'string') ?? [];
+      if (!entries || good.length !== entries.length) errors.push(`"${where}.env" must map variable names to text, e.g. { "NODE_ENV": "test" }.`);
+      if (good.length > MAX_ENV) warnings.push(`"${where}.env" sets more than ${MAX_ENV} variables; the rest are ignored.`);
+      if (good.length) hook.env = Object.fromEntries(good.slice(0, MAX_ENV)) as Record<string, string>;
+    }
     out.push(hook);
   });
-  if (items.length > MAX_HOOKS) errors.push(`"hooks.${stage}" has more than ${MAX_HOOKS} commands; the rest are ignored.`);
+  if (items.length > MAX_HOOKS) warnings.push(`"hooks.${stage}" has more than ${MAX_HOOKS} commands; the rest are ignored.`);
   return out;
+}
+
+/**
+ * A hook as one command an agent can run from the repository root: its
+ * folder and variables included. A subshell, so the `cd` does not stay;
+ * `env … sh -c`, so the variables reach every part of a compound command.
+ */
+export function hookCommand(hook: CheckHook): string {
+  const vars = Object.entries(hook.env ?? {});
+  const run = vars.length ? `env ${vars.map(([k, v]) => `${k}=${shellQuote(v)}`).join(' ')} sh -c ${shellQuote(hook.run)}` : hook.run;
+  return hook.cwd ? `(cd ${shellQuote(hook.cwd)} && ${run})` : run;
+}
+
+function shellQuote(text: string): string {
+  return /^[\w@%+=:,./-]+$/.test(text) ? text : `'${text.replace(/'/g, `'\\''`)}'`;
 }
 
 /** "npm run typecheck" → "typecheck", "npm test" → "test", "make lint" → "lint". */

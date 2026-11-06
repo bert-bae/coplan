@@ -1,4 +1,5 @@
 ---
+name: coplan-restart
 description: Restart the Coplan daemon so a rebuilt plugin takes effect
 ---
 
@@ -8,6 +9,10 @@ address:
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/coplan" restart
 ```
+
+If the path comes out empty (not every agent fills it in), use
+`${CURSOR_PLUGIN_ROOT}` in Cursor; failing that, the plugin's folder is the
+one that holds this command's `commands/` folder, and `bin/coplan` is in it.
 
 The daemon hands its port and token to its replacement, so any browser tab
 already open on the UI reconnects by itself — say so rather than handing the

@@ -1,0 +1,48 @@
+name: release
+
+# A version that reaches main is released: tagged v<version>, with its
+# CHANGELOG.md section as the release notes. Plugin managers that update by
+# version then see each change, and every release has a tag to go back to.
+# Nothing happens when the version was already released.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag and release the version, once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="v$version"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "$tag is already released"
+            exit 0
+          fi
+          # This version's section of the changelog: from its heading to the next.
+          awk -v v="$version" '
+            $0 == "## " v { on = 1; next }
+            /^## / && on { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "CHANGELOG.md has no section for $version" >&2
+            exit 1
+          fi
+          gh release create "$tag" --target "$GITHUB_SHA" --title "Coplan $version" --notes-file notes.md
