@@ -35,7 +35,7 @@ export function OverviewView() {
       {/* A confirmed or submitted design reads the same, but every control
           in it is off. Comments stay open until the plan is submitted. */}
       <fieldset className="lockable" disabled={isDesignLocked(plan)}>
-      <section className="doc-block" aria-labelledby="summary-head">
+      <Focusable kind="plan" id="summary" className="doc-block" labelledBy="summary-head">
         <h2 id="summary-head" className="doc-label">
           Summary
         </h2>
@@ -46,7 +46,7 @@ export function OverviewView() {
           emptyAction="Write one"
           onSave={(summary) => store.op({ op: 'set_meta', summary })}
         />
-      </section>
+      </Focusable>
 
       {plan.sections.map((section, i) => (
         <SectionCard key={section.id} section={section} index={i} count={plan.sections.length} />

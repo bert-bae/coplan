@@ -114,6 +114,9 @@ seeds into a throwaway daemon, the way real hooks and tool calls would.
 - **Claude reads back what you changed.** It gets the net effect of your edits
   (what is different now, not every drag), with each diagram written out as
   an architecture.
+- **Every word traceable.** *What Claude reads* shows the read-back, the next
+  prompt and each task's brief, every part tagged with where it comes from:
+  click a box, section or task to go to it, or see the config file and key.
 - **Review, then sign off.** You see the exact prompt before each sign-off is
   sent, with every setting it takes from config and the file that sets it,
   and submitting locks the plan so the design can't drift mid-build.

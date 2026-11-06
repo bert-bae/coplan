@@ -14,12 +14,15 @@ export function Focusable({
   className,
   children,
   as: Tag = 'section',
+  labelledBy,
 }: {
   kind: string;
   id: string;
   className?: string;
   children: ReactNode;
   as?: 'section' | 'article' | 'div';
+  /** The heading that names it. */
+  labelledBy?: string;
 }) {
   const focusTarget = useStore((s) => s.focusTarget);
   const ref = useRef<HTMLElement>(null);
@@ -38,7 +41,7 @@ export function Focusable({
   }, [mine]);
 
   return (
-    <Tag ref={ref as never} id={`${kind}-${id}`} className={classNames(className, flash && 'is-flash')}>
+    <Tag ref={ref as never} id={`${kind}-${id}`} className={classNames(className, flash && 'is-flash')} aria-labelledby={labelledBy}>
       {children}
     </Tag>
   );

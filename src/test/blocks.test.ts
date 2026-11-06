@@ -7,7 +7,8 @@ import { BLOCK_SOURCE_KINDS, blocksText, droppedParts, joinBlocks, type Block, t
 import { targetExists } from '../shared/plan.ts';
 import { loadProjectConfig } from '../shared/project.ts';
 import { TARGET_KINDS, type Plan } from '../shared/types.ts';
-import { PROMPT_BUDGET, buildPrompt, configRows, designPrompt, type BuildPrompt } from '../daemon/render.ts';
+import { PROMPT_BUDGET, buildPrompt, configRows, designPrompt, planBlocks, renderPlan, type BuildPrompt } from '../daemon/render.ts';
+import { briefBlocks, renderBrief } from '../daemon/brief.ts';
 import { FIXTURE_BIN, bigPlan, fullProject, longPlan, plainPlan, richConfirmed, richPlan } from './prompt-fixtures.ts';
 
 /**
@@ -77,6 +78,59 @@ for (const [name, make] of Object.entries(PROMPTS)) {
     assert.ok(!built.blocks[0]!.inline, 'a prompt starts on a line of its own');
   });
 }
+
+/** The read-back and every task's brief: the rest of what the agent reads. */
+const READS: Record<string, () => { plan: Plan; blocks: Block[]; text: string }[]> = {
+  'read-back': () =>
+    [richPlan(), richConfirmed(), plainPlan(false), bigPlan()].flatMap((plan) => [
+      { plan, blocks: planBlocks(plan, { url: 'http://x' }), text: renderPlan(plan, { url: 'http://x' }) },
+      { plan, blocks: planBlocks(plan, { changesOnly: true }), text: renderPlan(plan, { changesOnly: true }) },
+    ]),
+  'task brief': () =>
+    [richConfirmed(), longPlan(), plainPlan()].flatMap((plan) =>
+      plan.tasks.flatMap((task) =>
+        [{ project: fullProject(), bin: FIXTURE_BIN }, {}].map((opts) => ({ plan, blocks: briefBlocks(plan, task, opts), text: renderBrief(plan, task, opts) })),
+      ),
+    ),
+};
+
+for (const [name, make] of Object.entries(READS)) {
+  test(`contract: every block of every ${name} names a source that holds up, and joined they are its text`, () => {
+    const cases = make();
+    assert.ok(cases.length > 3);
+    for (const { plan, blocks, text } of cases) {
+      const ids = new Set<string>();
+      for (const block of blocks) {
+        const why = badSource(block, plan);
+        assert.equal(why, null, `block ${block.id} ${why}: ${JSON.stringify(block.text.slice(0, 80))}`);
+        assert.ok(!ids.has(block.id), `two blocks are called ${block.id}`);
+        ids.add(block.id);
+      }
+      assert.equal(name === 'read-back' ? blocksText(blocks) : joinBlocks(blocks), text);
+    }
+  });
+}
+
+test('the read-back marks what only the agent needs as bookkeeping: revisions, reply hints, its proposals, the gaps, the legend', () => {
+  const blocks = planBlocks(richPlan());
+  const kept = new Set(blocks.filter((b) => b.bookkeeping).map((b) => b.id));
+  for (const id of ['meta', 'section:risks:rev', 'diagram:d1:note', 'task:wire:rev', 'thread:c3:reply', 'proposals', 'gaps', 'legend']) assert.ok(kept.has(id), `${id} is bookkeeping`);
+  // Without them, every revision and reply hint is gone from what is shown.
+  const shown = joinBlocks(blocks.filter((b) => !b.bookkeeping));
+  assert.doesNotMatch(shown, /\brev \d|reply with harness_plan_edit|_Statuses:/);
+  assert.match(shown, /Stale reads after a write\./, 'the content stays');
+});
+
+test('a brief that cannot quote every section leaves the rest out, and says so', () => {
+  const plan = longPlan();
+  const blocks = briefBlocks(plan, plan.tasks.find((t) => t.id === 'docs')!, {});
+  // The first section takes the room; the next is left out, and pointed to.
+  assert.equal(blocks.find((b) => b.id === 'section:context')?.dropped, undefined);
+  assert.equal(blocks.find((b) => b.id === 'section:risks')?.dropped, true);
+  assert.match(blocks.find((b) => b.id === 'section:risks')!.text, /A cold cache after deploys\./);
+  assert.ok(blocks.some((b) => b.id === 'sections:more'));
+  assert.deepEqual(droppedParts(blocks), ['1 section']);
+});
 
 test('contract: a block with no source fails the check', () => {
   const plan = richPlan();

@@ -1,6 +1,4 @@
-import { useEffect, useState } from 'react';
 import { store, useAgent, usePlan, useSession } from '../store.ts';
-import { api } from '../lib/api.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { isLocked, unreadAreas } from '../../shared/plan.ts';
 import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
@@ -22,7 +20,6 @@ export function Handoff() {
   const session = useSession();
   const plan = usePlan();
   const agent = useAgent();
-  const [viewing, setViewing] = useState(false);
   if (!session) return null;
   // No count: one box edited forty times and forty boxes are both "changes",
   // and Claude reads the net result either way. Say where instead.
@@ -50,11 +47,15 @@ export function Handoff() {
           words for a submitted plan; the strip below offers its prompt. */}
       {(!locked || session.link) && <OpenInClaude session={session} primary={unread > 0} />}
       {plan && (
-        <button type="button" className="btn btn-sm btn-ghost" onClick={() => setViewing(true)}>
-          As {agent.name} sees it
+        <button
+          type="button"
+          className="btn btn-sm btn-ghost"
+          title={`The read-back, the next prompt and each task's brief, with where every part comes from`}
+          onClick={() => store.openViewer({ tab: 'readback' })}
+        >
+          What {agent.name} reads
         </button>
       )}
-      {viewing && <ClaudeView onClose={() => setViewing(false)} />}
     </div>
   );
 }
@@ -184,50 +185,4 @@ async function copyHandoff(agent: AgentInfo): Promise<void> {
   } catch {
     store.toast('info', `Tell ${agent.name}: "${HANDOFF_MESSAGE}"`);
   }
-}
-
-/** The plan rendered exactly as `harness_plan_read` returns it. Opening this
- *  does not count as Claude reading it. */
-function ClaudeView({ onClose }: { onClose: () => void }) {
-  const session = useSession();
-  const plan = usePlan();
-  const agent = useAgent();
-  const [text, setText] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!session) return;
-    let live = true;
-    api
-      .planText(session.sessionId)
-      .then((t) => live && setText(t))
-      .catch((err: unknown) => live && setText(`Could not load: ${(err as Error).message}`));
-    return () => {
-      live = false;
-    };
-  }, [session?.sessionId, plan?.seq]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
-  return (
-    <div className="lightbox" role="dialog" aria-modal="true" aria-label={`The plan as ${agent.name} reads it`}>
-      <button type="button" className="lightbox-scrim" aria-label="Close" onClick={onClose} />
-      <div className="lightbox-body is-text">
-        <header className="item-head">
-          <h2 className="section-title">What {agent.name} reads</h2>
-          <span className="muted">the output of harness_plan_read</span>
-          <span className="spacer" />
-          <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>
-            ×
-          </button>
-        </header>
-        <pre className="claude-text">{text ?? 'Loading…'}</pre>
-      </div>
-    </div>
-  );
 }

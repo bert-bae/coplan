@@ -11,7 +11,7 @@ import { readLiveLock, baseUrl } from '../shared/paths.ts';
 import type { DaemonLock, SessionState } from '../shared/types.ts';
 import type { HookOutput } from '../shared/hooks.ts';
 import { asksForCoplan } from '../daemon/hookIngest.ts';
-import { blocksText, type Block, type ConfigRow } from '../shared/blocks.ts';
+import { blocksText, joinBlocks, type Block, type ConfigRow } from '../shared/blocks.ts';
 
 /**
  * End-to-end: a real daemon subprocess, a real git repository, real hook
@@ -1153,4 +1153,80 @@ test('on a submitted build: verdicts come from review, signed-off work is the us
 test('a submission needs to say who builds it', async () => {
   const res = await raw(`/api/session/${built}/plan/submit`, { method: 'POST', body: JSON.stringify({ target: 'mars' }) });
   assert.equal(res.status, 400);
+});
+
+/* ------------------------------------------------------------------ *
+ * What the agent reads, shown in the page
+ * ------------------------------------------------------------------ */
+
+test("the page shows each task's brief exactly as harness_task_brief returns it, and the read-back as harness_plan_read does", async () => {
+  const id = 'viewer-session';
+  const dir = path.join(repo, '.coplan');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, 'config.json'),
+    JSON.stringify({
+      hooks: { implement: ['npm run typecheck'], review: [{ name: 'tests', run: 'npm test' }] },
+      review: { model: 'opus' },
+      instructions: { brief: 'Write the test first.', review: 'Look for unparameterised SQL.' },
+    }),
+  );
+  try {
+    await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+    await mcpFor(id, 'publish', PLAN);
+    await opsOn(id, [{ op: 'comment', target: { kind: 'node', id: 'd1/db' }, text: 'Use the replica.' }]);
+    const plan = (await sessionFor(id)).plan!;
+    for (const task of plan.tasks) {
+      const page = await call<{ text: string; blocks: Block[]; task: { id: string } }>(`/api/session/${id}/task/${task.id}/brief`);
+      const tool = String((await mcpFor(id, 'brief', { task_id: task.id }))['text']);
+      assert.equal(page.text, tool, `the page and harness_task_brief give ${task.id} the same text`);
+      assert.equal(joinBlocks(page.blocks), tool);
+      assert.equal(page.task.id, task.id);
+      assert.ok(page.blocks.every((b) => b.source && b.id));
+    }
+    const brief = await call<{ blocks: Block[] }>(`/api/session/${id}/task/t2/brief`);
+    assert.deepEqual(brief.blocks.find((b) => b.id === 'cycle:review:model')?.source, { kind: 'config', key: 'review.model', files: ['.coplan/config.json'] });
+    assert.deepEqual(brief.blocks.find((b) => b.id === 'instructions:brief')?.source, { kind: 'config', key: 'instructions.brief', files: ['.coplan/config.json'] });
+    const missing = await raw(`/api/session/${id}/task/nope/brief`);
+    assert.equal(missing.status, 404);
+
+    // The read-back, as the agent would read it now — before it reads.
+    const readback = await call<{ text: string; blocks: Block[] }>(`/api/session/${id}/plan/readback`);
+    assert.equal(blocksText(readback.blocks), readback.text);
+    assert.match(readback.text, /Use the replica\./);
+    assert.ok(readback.blocks.some((b) => b.bookkeeping && /rev \d/.test(b.text)), 'revisions are marked as bookkeeping');
+    assert.ok(readback.blocks.some((b) => b.bookkeeping && /reply with harness_plan_edit/.test(b.text)), 'so are reply hints');
+    const read = String((await mcpFor(id, 'read'))['text']);
+    assert.equal(read, readback.text, 'what the page showed is what the agent then read');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('opening any tab of the prompt viewer does not count as the agent reading the plan', async () => {
+  const id = 'look-session';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await mcpFor(id, 'read');
+  await opsOn(id, [{ op: 'upsert_task', title: 'Load test' }]);
+  const before = (await sessionFor(id)).plan!;
+  assert.ok(before.seq > before.claudeReadSeq, 'the user has an edit the agent has not read');
+
+  await call(`/api/session/${id}/plan/readback`);
+  await call(`/api/session/${id}/plan/text`);
+  await call(`/api/session/${id}/task/t2/brief`);
+  await post(`/api/session/${id}/plan/design/prompt`);
+  const confirmed = await post<Preview>(`/api/session/${id}/plan/design/prompt`, {});
+  await post(`/api/session/${id}/plan/design/confirm`, { expect: confirmed.version, hash: (confirmed as Preview & { hash: string }).hash });
+  await post(`/api/session/${id}/plan/prompt`, { target: 'session' });
+  await call(`/api/session/${id}/plan/readback`);
+  await call(`/api/session/${id}/task/t2/brief`);
+
+  const after = (await sessionFor(id)).plan!;
+  assert.equal(after.claudeReadSeq, before.claudeReadSeq, "the agent's read position stays");
+  assert.equal(after.claudeReadAt, before.claudeReadAt);
+  assert.equal(after.design?.deliveredAt ?? null, null, 'the confirmed design is still waiting to be handed over');
+  // The agent reads it all the same, next time it reads.
+  const handed = String((await mcpFor(id, 'read'))['text']);
+  assert.match(handed, /^\[cc-harness\] The design is confirmed/);
 });

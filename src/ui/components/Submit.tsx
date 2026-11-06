@@ -10,6 +10,8 @@ import { blockingGaps, planGaps, type GapSeverities } from '../../shared/check.t
 import { REVIEW_MODES, type BuildSettings, type BuildTarget, type Plan, type PlanPhase, type ReviewMode, type SessionState } from '../../shared/types.ts';
 import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
 import { droppedParts, type ConfigRow } from '../../shared/blocks.ts';
+import { CONFIG_DOCS, PromptView, configDocs } from './PromptView.tsx';
+import type { Target } from '../../shared/types.ts';
 
 /**
  * Signing the plan off, in two steps.
@@ -76,7 +78,6 @@ export function SubmitControl() {
   const plan = usePlan();
   const agent = useAgent();
   const [open, setOpen] = useState(false);
-  const [viewing, setViewing] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   if (!plan) return null;
   const phase = planPhase(plan);
@@ -127,25 +128,32 @@ export function SubmitControl() {
       <span className={classNames('lock-chip', `is-${phase}`)} title="Submitted plans cannot be edited; reopen it to change it">
         <span aria-hidden="true">🔒</span> {PHASE_CHIP[phase]}
       </span>
-      <button type="button" className="btn btn-sm" onClick={() => setViewing(true)}>
+      <button
+        type="button"
+        className="btn btn-sm"
+        disabled={!plan.submission}
+        onClick={() =>
+          plan.submission &&
+          store.openViewer({
+            tab: 'prompt',
+            sent: {
+              title: 'The submitted prompt',
+              prompt: plan.submission.prompt,
+              meta: `submitted ${relativeTime(plan.submission.at)} · ${
+                plan.submission.deliveredAt
+                  ? `${agent.name} got it ${relativeTime(plan.submission.deliveredAt)}`
+                  : plan.submission.target === 'session'
+                    ? agent.promptContext
+                      ? `Not delivered yet: it goes with your next message in ${agent.name}`
+                      : `Not delivered yet: paste it into ${agent.name}'s chat`
+                    : 'Handed off to build elsewhere'
+              }`,
+            },
+          })
+        }
+      >
         View prompt
       </button>
-      {viewing && plan.submission && (
-        <PromptViewer
-          title="The submitted prompt"
-          prompt={plan.submission.prompt}
-          meta={`submitted ${relativeTime(plan.submission.at)} · ${
-            plan.submission.deliveredAt
-              ? `${agent.name} got it ${relativeTime(plan.submission.deliveredAt)}`
-              : plan.submission.target === 'session'
-                ? agent.promptContext
-                  ? `Not delivered yet: it goes with your next message in ${agent.name}`
-                  : `Not delivered yet: paste it into ${agent.name}'s chat`
-                : 'Handed off to build elsewhere'
-          }`}
-          onClose={() => setViewing(false)}
-        />
-      )}
     </span>
   );
 }
@@ -175,6 +183,31 @@ function useEscape(onClose: () => void, busy = false): void {
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [onClose, busy]);
+}
+
+/**
+ * What the user wrote for the agent in a dialog not yet signed off, by
+ * session and dialog: following a field from the prompt closes the dialog,
+ * and opening it again finds the note where it was left.
+ */
+const drafts = new Map<string, string>();
+
+function useDraft(key: string): [string, (note: string) => void, () => void] {
+  const [note, setNote] = useState(() => drafts.get(key) ?? '');
+  const set = (value: string) => {
+    setNote(value);
+    if (value) drafts.set(key, value);
+    else drafts.delete(key);
+  };
+  return [note, set, () => drafts.delete(key)];
+}
+
+/** Show a field a prompt quotes, from a sign-off dialog. */
+function followField(onClose: () => void): (target: Target) => void {
+  return (target) => {
+    onClose();
+    store.focusField(target);
+  };
 }
 
 /** The note, settled a moment after the last keystroke. */
@@ -233,6 +266,8 @@ function ReviewFrame(props: {
   preview: PromptPreview | null;
   current: boolean;
   error: string | null;
+  /** Show a field the prompt quotes: the dialog closes to show it. */
+  onField: (target: Target) => void;
 }) {
   const body = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -277,9 +312,13 @@ function ReviewFrame(props: {
                 Could not build the prompt: {props.error}
               </p>
             ) : (
-              <pre className={classNames('claude-text', 'submit-prompt', !props.current && 'is-stale')} data-testid="prompt-preview">
-                {preview?.prompt ?? 'Building the prompt…'}
-              </pre>
+              <PromptView
+                blocks={preview?.blocks}
+                text={preview?.prompt ?? 'Building the prompt…'}
+                className={classNames('submit-prompt', !props.current && 'is-stale')}
+                testId="prompt-preview"
+                onField={props.busy ? undefined : props.onField}
+              />
             )}
           </section>
         </div>
@@ -293,7 +332,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
   const plan = usePlan();
   const agent = useAgent();
   const sessionId = useStore((s) => s.sessionId);
-  const [note, setNote] = useState('');
+  const [note, setNote, clearDraft] = useDraft(`${sessionId}:design`);
   const settled = useSettled(note);
   const [shown, setShown] = useState<{ preview: PromptPreview; note: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -335,7 +374,10 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
     if (!agent.promptContext) await copyText(preview.prompt, `Copied — paste it into ${agent.name}'s chat.`);
     const ok = await store.confirmDesign({ note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}) });
     setBusy(false);
-    if (ok) onClose();
+    if (ok) {
+      clearDraft();
+      onClose();
+    }
     else setRefresh((n) => n + 1);
   };
 
@@ -351,6 +393,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
       preview={preview}
       current={current}
       error={error}
+      onField={followField(onClose)}
       side={
         <>
           <DesignChecklist session={session} plan={plan} project={preview?.project} left={preview?.trimmed ? leftOut(preview) : null} />
@@ -402,7 +445,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
   const agent = useAgent();
   const sessionId = useStore((s) => s.sessionId);
   const [target, setTarget] = useState<BuildTarget>('session');
-  const [note, setNote] = useState('');
+  const [note, setNote, clearDraft] = useDraft(`${sessionId}:submit`);
   const settled = useSettled(note);
   // Null until the first preview says what the repository's defaults are.
   const [settings, setSettings] = useState<BuildSettings | null>(null);
@@ -456,7 +499,10 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
     }
     const ok = await store.submitPlan({ target, note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}), ...(settings ? { settings } : {}) });
     setSubmitting(false);
-    if (ok) onClose();
+    if (ok) {
+      clearDraft();
+      onClose();
+    }
     else setRefresh((n) => n + 1);
   };
 
@@ -472,6 +518,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
       preview={preview}
       current={current}
       error={error}
+      onField={followField(onClose)}
       side={
         <>
           <Checklist
@@ -728,13 +775,6 @@ function leftOut(preview: PromptPreview): string {
   return `: it leaves out ${list}`;
 }
 
-/** Where `docs/CONFIG.md` describes each setting. */
-export const CONFIG_DOCS = 'https://github.com/bert-bae/coplan/blob/main/docs/CONFIG.md';
-
-export function configDocs(key: string): string {
-  return `${CONFIG_DOCS}#${(key.split('.')[0] ?? '').toLowerCase()}`;
-}
-
 /**
  * The config settings the prompt is made with, read-only: what each is set
  * to, grouped by the file that sets it, each with its key. The files are
@@ -779,32 +819,6 @@ function ConfigList({ rows }: { rows: ConfigRow[] | undefined }) {
   );
 }
 
-/** A prompt as it was sent, for reading back or copying again. */
-function PromptViewer({ title, prompt, meta, onClose }: { title: string; prompt: string; meta: string; onClose: () => void }) {
-  useEscape(onClose);
-  return (
-    <div className="lightbox" role="dialog" aria-modal="true" aria-labelledby="sent-prompt-title">
-      <button type="button" className="lightbox-scrim" aria-label="Close" onClick={onClose} />
-      <div className="lightbox-body is-text">
-        <header className="item-head">
-          <h2 className="section-title" id="sent-prompt-title">
-            {title}
-          </h2>
-          <span className="muted">{meta}</span>
-          <span className="spacer" />
-          <button type="button" className="btn btn-sm" onClick={() => void copyText(prompt, 'Copied the prompt.')}>
-            Copy
-          </button>
-          <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>
-            ×
-          </button>
-        </header>
-        <pre className="claude-text">{prompt}</pre>
-      </div>
-    </div>
-  );
-}
-
 /* ------------------------------------------------------------------ *
  * After signing off
  * ------------------------------------------------------------------ */
@@ -826,7 +840,6 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
   const tab = useStore((s) => s.tab);
   const agent = agentInfo(session.agent);
   const [confirming, setConfirming] = useState(false);
-  const [viewing, setViewing] = useState(false);
   const design = plan.design!;
   // The task list the agent published since the design was confirmed.
   const listed = plan.changes.some((c) => c.kind === 'published' && c.ts >= design.at && c.summary.startsWith('published the task list'));
@@ -903,7 +916,20 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
               </button>
             )}
             {design.deliveredAt && (
-              <button type="button" className="btn btn-sm" onClick={() => setViewing(true)}>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() =>
+                  store.openViewer({
+                    tab: 'prompt',
+                    sent: {
+                      title: `The confirmed design, as ${agent.name} got it`,
+                      prompt: design.prompt,
+                      meta: `confirmed ${relativeTime(design.at)}${design.deliveredAt ? ` · ${agent.name} got it ${relativeTime(design.deliveredAt)}` : ''}`,
+                    },
+                  })
+                }
+              >
                 View prompt
               </button>
             )}
@@ -918,14 +944,6 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
           </>
         )}
       </div>
-      {viewing && (
-        <PromptViewer
-          title={`The confirmed design, as ${agent.name} got it`}
-          prompt={design.prompt}
-          meta={`confirmed ${relativeTime(design.at)}${design.deliveredAt ? ` · ${agent.name} got it ${relativeTime(design.deliveredAt)}` : ''}`}
-          onClose={() => setViewing(false)}
-        />
-      )}
     </section>
   );
 }

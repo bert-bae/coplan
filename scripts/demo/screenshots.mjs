@@ -143,6 +143,16 @@ try {
       await settle(page, 1500);
       return page;
     },
+    // What the agent reads: one task's brief, each part with its source.
+    async viewer(page = open('S3', { height: 1100 })) {
+      page = await page;
+      await tab(page, 'Tasks');
+      await settle(page, 500);
+      await page.locator('.task-line').nth(1).hover();
+      await page.getByRole('button', { name: /^Brief for / }).nth(1).click();
+      await settle(page, 1200);
+      return page;
+    },
     // The board during a build.
     async board(page = open('S1')) {
       page = await page;

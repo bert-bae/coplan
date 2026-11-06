@@ -539,6 +539,7 @@ function TaskRow(props: {
           <MoveButton op={moves.up} glyph="↑" label={`Move ${task.title} up`} />
           <MoveButton op={moves.down} glyph="↓" label={`Move ${task.title} down`} />
         </span>
+        <BriefButton task={task} />
         <CommentToggle target={target} label={task.title} open={comments} onToggle={() => setComments((v) => !v)} />
         <button
           type="button"
@@ -1010,9 +1011,26 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
         <span className="item-id">{task.id}</span>
         {arrived && <span className="pill is-moved">just moved</span>}
         <span className="spacer" />
+        <BriefButton task={task} />
         <span className={classNames('board-state', `is-${task.status}`)}>{STATUS_LABEL[task.status]}</span>
       </footer>
     </Focusable>
+  );
+}
+
+/** One click to what the agent building this task is given: its brief,
+ *  exactly as harness_task_brief returns it. */
+function BriefButton({ task }: { task: Task }) {
+  return (
+    <button
+      type="button"
+      className="link task-brief"
+      title={`What the agent building "${task.title}" is given — its brief, with where each part comes from`}
+      aria-label={`Brief for ${task.title}`}
+      onClick={() => store.openViewer({ tab: 'brief', taskId: task.id })}
+    >
+      Brief
+    </button>
   );
 }
 

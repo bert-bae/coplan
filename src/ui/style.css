@@ -1898,6 +1898,61 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .submit-prompt { max-height: min(64vh, 640px); overflow-y: auto; margin-top: var(--sp-2); transition: opacity var(--t-fast) linear; }
 .submit-prompt.is-stale { opacity: 0.55; }
 
+/* ------------------------------------------------------- prompt viewer */
+
+/* What the agent reads, a line at a time with where each part comes from:
+   the source in a narrow column of chips, the text as the agent gets it. */
+.pv { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
+.pv-tools { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--sp-1) var(--sp-4); font-size: var(--fs-sm); color: var(--text-secondary); }
+.pv-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.pv-left-summary { color: var(--attention-fg); }
+.pv-doc {
+  display: flex; flex-direction: column; padding: var(--sp-2) var(--sp-3); min-width: 0;
+  border: 1px solid var(--border-default); border-radius: var(--r-lg); background: var(--surface-sunken);
+  font-family: var(--font-mono); font-size: var(--fs-code); line-height: 18px;
+}
+.pv-row { display: grid; grid-template-columns: 172px minmax(0, 1fr); gap: var(--sp-3); align-items: start; }
+.pv-row.has-gap { margin-top: 10px; }
+.pv-src { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; min-width: 0; padding-top: 1px; }
+.pv-text { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.pv-chip {
+  display: inline-block; max-width: 100%; padding: 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  border: 1px solid var(--border-default); border-radius: var(--r-full); background: var(--surface-base);
+  color: var(--text-secondary); font: 11px / 16px var(--font-sans); text-decoration: none;
+}
+button.pv-chip { cursor: pointer; }
+.pv-chip.is-template { border-color: transparent; background: transparent; color: var(--text-tertiary); }
+.pv-chip.is-field { color: var(--accent-fg); border-color: var(--accent-border); background: var(--accent-subtle); }
+.pv-chip.is-field:hover, a.pv-chip:hover { text-decoration: underline; }
+.pv-chip.is-config { color: var(--attention-fg); border-color: var(--attention-border); background: var(--attention-bg); font-family: var(--font-mono); }
+.pv-chip.is-config.is-default { border-style: dashed; background: transparent; }
+.pv-chip.is-note, .pv-chip.is-setting, .pv-chip.is-changes { color: var(--success-fg); border-color: var(--success-border); background: var(--success-bg); }
+.pv-chip.is-derived { border-style: dashed; }
+/* Words from somewhere else inside a line say so where they sit. */
+.pv-seg.is-field { text-decoration: underline; text-decoration-color: var(--accent-border); text-underline-offset: 3px; }
+.pv-seg.is-config { background: var(--attention-bg); border-radius: 3px; }
+.pv-seg.is-note, .pv-seg.is-setting { background: var(--success-bg); border-radius: 3px; }
+.pv-seg.is-bookkeeping, .pv-row.is-bookkeeping .pv-seg { color: var(--text-tertiary); font-style: italic; }
+/* Left out to fit: struck through, and kept short. */
+.pv-row.is-dropped .pv-text { max-height: 7.5em; overflow: hidden; color: var(--text-tertiary); }
+.pv-row.is-dropped .pv-seg { text-decoration: line-through; }
+.pv-left { display: block; margin-bottom: 2px; font: 11px / 16px var(--font-sans); color: var(--attention-fg); }
+.pv-cut { margin-left: 6px; font: 11px / 16px var(--font-sans); color: var(--attention-fg); }
+.lightbox-body.pv-viewer { width: min(1180px, 100%); }
+.lightbox-body.pv-viewer:focus { outline: none; }
+.pv-viewer .pv-doc { max-height: min(68vh, 760px); overflow-y: auto; }
+.pv-tabs { display: flex; align-items: center; gap: var(--sp-1); margin-top: var(--sp-2); border-bottom: 1px solid var(--border-default); }
+.pv-tab {
+  height: 32px; padding: 0 var(--sp-3); border: none; border-bottom: 2px solid transparent; background: none;
+  color: var(--text-secondary); font: inherit; font-weight: 600; cursor: pointer;
+}
+.pv-tab:hover { color: var(--text-primary); }
+.pv-tab.is-active { color: var(--accent-fg); border-bottom-color: var(--accent-solid); }
+.pv-task { margin-left: auto; max-width: 340px; height: auto; padding-top: 4px; padding-bottom: 4px; font-size: var(--fs-sm); line-height: 18px; }
+.pv-about { margin: var(--sp-2) 0; font-size: var(--fs-sm); }
+.pv-viewer .is-stale { opacity: 0.55; transition: opacity var(--t-fast) linear; }
+.task-brief { font-size: var(--fs-sm); padding: 0 4px; }
+
 /* The arch bar, once the plan is submitted. */
 .lock-control { display: inline-flex; align-items: center; gap: var(--sp-2); }
 .lock-chip {
@@ -2067,6 +2122,8 @@ span.board-title:hover { color: inherit; text-decoration: none; }
 
 @media (max-width: 900px) {
   .submit-grid { grid-template-columns: minmax(0, 1fr); }
+  .pv-row { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .pv-src { flex-direction: row; flex-wrap: wrap; justify-content: flex-start; }
   .submit-prompt { max-height: 48vh; }
   .phase { gap: var(--sp-2); }
 }

@@ -5,6 +5,7 @@ import { Toasts } from './components/Toasts.tsx';
 import { ConnectionBar } from './components/ConnectionBar.tsx';
 import { ThemeToggle } from './components/ThemeToggle.tsx';
 import { Handoff, WaitingBanner } from './components/Handoff.tsx';
+import { PromptViewerHost } from './components/PromptView.tsx';
 import { PhaseStrip } from './components/Submit.tsx';
 import { ProposalsStrip } from './components/Proposals.tsx';
 import { InlineText } from './components/Editable.tsx';
@@ -103,6 +104,7 @@ export function App() {
           </>
         )}
       </main>
+      <PromptViewerHost />
       <Toasts />
     </div>
   );

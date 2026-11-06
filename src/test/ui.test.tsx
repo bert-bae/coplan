@@ -105,6 +105,8 @@ beforeEach(() => {
     toasts: [],
     focusTarget: null,
     proposalPreview: null,
+    viewer: null,
+    showBookkeeping: false,
   });
 });
 
@@ -169,12 +171,124 @@ test('the header opens the session in Claude, and says when Claude is behind', a
   assert.equal(screen.getByText('Open in Claude').getAttribute('href'), LINK.app);
 });
 
-test('"As Claude sees it" shows the text harness_plan_read returns', async () => {
-  await boot();
+/** The daemon's answers for the prompt viewer, made by the daemon's own renderers. */
+async function viewerRoutes(session: SessionState): Promise<(route: string) => unknown> {
+  const { planBlocks, renderPlan, designPrompt, buildPrompt } = await import('../daemon/render.ts');
+  const { briefBlocks, renderBrief } = await import('../daemon/brief.ts');
+  return (route: string) => {
+    const plan = store.getState().session?.plan ?? session.plan!;
+    if (route.endsWith('/plan/readback')) return { text: renderPlan(plan), blocks: planBlocks(plan), version: plan.version };
+    const brief = /\/task\/([^/]+)\/brief$/.exec(route);
+    if (brief) {
+      const task = plan.tasks.find((t) => t.id === decodeURIComponent(brief[1]!))!;
+      return { text: renderBrief(plan, task), blocks: briefBlocks(plan, task), task: { id: task.id, title: task.title }, version: plan.version };
+    }
+    if (route.endsWith('/plan/design/prompt')) {
+      const { prompt, trimmed, blocks } = designPrompt(plan);
+      return { prompt, trimmed, blocks, version: plan.version, budget: 9000, maxNote: 4000 };
+    }
+    if (route.endsWith('/plan/prompt')) {
+      const { prompt, trimmed, blocks } = buildPrompt(plan, { target: 'session', settings: { review: 'subagent', parallel: 2, maxRounds: 3 } });
+      return { prompt, trimmed, blocks, version: plan.version, budget: 9000, maxNote: 4000, settings: { review: 'subagent', parallel: 2, maxRounds: 3 } };
+    }
+    return undefined;
+  };
+}
+
+test('"What Claude reads" shows the read-back block by block, each with its source, and the bookkeeping only when asked', async () => {
+  const session = makeSession(makePlan(true));
+  await boot(session, await viewerRoutes(session));
   await act(async () => {
-    fireEvent.click(screen.getByText('As Claude sees it'));
+    fireEvent.click(screen.getByRole('button', { name: 'What Claude reads' }));
   });
-  await waitFor(() => assert.match(document.querySelector('.claude-text')?.textContent ?? '', /as Claude reads it/));
+  const viewer = screen.getByRole('dialog', { name: 'What Claude reads' });
+  assert.equal(within(viewer).getByRole('tab', { name: 'Read-back' }).getAttribute('aria-selected'), 'true');
+  const text = () => within(viewer).getByTestId('viewer-text').textContent ?? '';
+  await waitFor(() => assert.match(text(), /# Add a cache/));
+  assert.match(text(), /Reads are \*\*slow\*\*\./, 'the content is there');
+  // Revisions and reply hints are the agent's bookkeeping: hidden until asked for.
+  assert.doesNotMatch(text(), /rev \d|reply with harness_plan_edit|_Statuses:/);
+  const toggle = within(viewer).getByRole('checkbox', { name: /Agent bookkeeping/ });
+  assert.equal((toggle as HTMLInputElement).checked, false);
+  await act(async () => {
+    fireEvent.click(toggle);
+  });
+  assert.match(text(), /rev \d/);
+  assert.match(text(), /reply with harness_plan_edit/);
+  assert.match(text(), /_Statuses:/);
+
+  // Each part names its source: a section, a box, the config, Coplan itself.
+  assert.ok(within(viewer).getByRole('button', { name: 'Section · Context' }));
+  assert.ok(within(viewer).getAllByRole('button', { name: 'Box · Postgres' }).length);
+  assert.ok(within(viewer).getAllByText('Coplan').length);
+  // A field chip shows that item in the page.
+  await act(async () => {
+    fireEvent.click(within(viewer).getAllByRole('button', { name: 'Box · Postgres' })[0]!);
+  });
+  assert.equal(screen.queryByRole('dialog', { name: 'What Claude reads' }), null, 'the viewer closes to show it');
+  assert.equal(store.getState().tab, 'diagrams');
+  const diagram = session.plan!.diagrams[0]!.id;
+  assert.equal(store.getState().diagramId, diagram);
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node.selected')?.textContent?.includes('Postgres'), 'the box is selected'));
+});
+
+test("from any task, one click shows its brief exactly as harness_task_brief gives it, with chips that go to what it quotes", async () => {
+  const session = makeSession();
+  const routes = await viewerRoutes(session);
+  await boot(session, routes);
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Brief for Invalidation' }));
+  });
+  const viewer = screen.getByRole('dialog', { name: 'What Claude reads' });
+  assert.equal(within(viewer).getByRole('tab', { name: 'Task brief' }).getAttribute('aria-selected'), 'true');
+  const task = session.plan!.tasks.find((t) => t.title === 'Invalidation')!;
+  assert.equal((within(viewer).getByRole('combobox', { name: 'Task' }) as HTMLSelectElement).value, task.id);
+  const { renderBrief } = await import('../daemon/brief.ts');
+  const tool = renderBrief(session.plan!, task);
+  await waitFor(() => assert.match(within(viewer).getByTestId('viewer-text').textContent ?? '', /# Task t\d+: Invalidation/));
+  // Copy gives the brief whole, exactly as the agent's tool returns it.
+  let copied = '';
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (t: string) => void (copied = t) }, configurable: true });
+  await act(async () => {
+    fireEvent.click(within(viewer).getByRole('button', { name: 'Copy' }));
+  });
+  assert.equal(copied, tool);
+
+  // Another task, from the picker.
+  const wire = session.plan!.tasks.find((t) => t.title === 'Wire into API')!;
+  await act(async () => {
+    fireEvent.change(within(viewer).getByRole('combobox', { name: 'Task' }), { target: { value: wire.id } });
+  });
+  await waitFor(() => assert.match(within(viewer).getByTestId('viewer-text').textContent ?? '', /# Task t\d+: Wire into API/));
+  // The objective's chip goes to the task in the outline.
+  await act(async () => {
+    fireEvent.click(within(viewer).getAllByRole('button', { name: /^Task t\d+ · Wire into API$/ })[0]!);
+  });
+  assert.equal(screen.queryByRole('dialog', { name: 'What Claude reads' }), null);
+  assert.equal(store.getState().tab, 'tasks');
+  await waitFor(() => assert.ok(document.getElementById(`task-${wire.id}`)?.classList.contains('is-flash')));
+});
+
+test('the next prompt is the one the next sign-off sends; what it leaves out to fit is struck through', async () => {
+  const long = 'A long paragraph of detail that goes on and on about the work. '.repeat(20);
+  let plan = makePlan();
+  plan = applyOps(plan, [{ op: 'upsert_section', id: plan.sections[0]!.id, body: long.repeat(8) }], 'claude').plan;
+  const session = makeSession(plan);
+  await boot(session, await viewerRoutes(session));
+  await act(async () => {
+    store.openViewer({ tab: 'prompt' });
+  });
+  const viewer = screen.getByRole('dialog', { name: 'What Claude reads' });
+  assert.match(viewer.textContent ?? '', /What Confirm design would send Claude now/);
+  await waitFor(() => assert.match(within(viewer).getByTestId('viewer-text').textContent ?? '', /The design is confirmed for "Add a cache"/));
+  const dropped = viewer.querySelectorAll('.pv-row.is-dropped');
+  assert.ok(dropped.length > 0);
+  assert.match(viewer.querySelector('.pv-left')?.textContent ?? '', /Left out to fit — the agent reads this with harness_plan_read/);
+  assert.match(viewer.textContent ?? '', /Left out to fit: 1 section, the architecture \(1 diagram\)/);
+  assert.ok([...dropped].some((r) => r.getAttribute('data-block') === `section:${plan.sections[0]!.id}`));
+  // The settings and config chips say where the words come from.
+  assert.ok(within(viewer).getAllByRole('link', { name: /\.coplan\/config\.json#/ }).length);
 });
 
 /* --------------------------------------------------------- architecture */
@@ -861,6 +975,34 @@ test('the sign-off dialogs list each setting from config, read-only, with the fi
   assert.equal(within(list).queryByText('Reviewer model'), null);
 });
 
+test("a chip in the sign-off dialog shows the field it quotes, and the dialog keeps the note for when it opens again", async () => {
+  const session = makeSession();
+  await boot(session, await viewerRoutes(session));
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm design' }));
+  });
+  let dialog = screen.getByRole('dialog', { name: 'Confirm the design' });
+  await waitFor(() => assert.ok(within(dialog).getByRole('button', { name: 'Section · Context' })));
+  await act(async () => {
+    fireEvent.change(within(dialog).getByLabelText('Anything else for Claude?'), { target: { value: 'keep it small' } });
+  });
+  await act(async () => {
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Section · Context' }));
+  });
+  assert.equal(screen.queryByRole('dialog', { name: 'Confirm the design' }), null);
+  assert.equal(store.getState().tab, 'overview');
+  await waitFor(() => assert.ok(document.getElementById(`section-${session.plan!.sections[0]!.id}`)?.classList.contains('is-flash')));
+  await openTab('Architecture');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm design' }));
+  });
+  dialog = screen.getByRole('dialog', { name: 'Confirm the design' });
+  assert.equal((within(dialog).getByLabelText('Anything else for Claude?') as HTMLTextAreaElement).value, 'keep it small');
+  await act(async () => {
+    fireEvent.change(within(dialog).getByLabelText('Anything else for Claude?'), { target: { value: '' } });
+  });
+});
+
 test('a prompt cut to fit says what it leaves out, and that the agent reads it with harness_plan_read', async () => {
   const { buildPrompt, configRows, promptHash } = await import('../daemon/render.ts');
   const { parseProjectConfig } = await import('../shared/project.ts');
@@ -1086,9 +1228,10 @@ test('the submitted prompt can be read back from the architecture view', async (
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: 'View prompt' }));
   });
-  const dialog = screen.getByRole('dialog', { name: 'The submitted prompt' });
-  assert.match(dialog.textContent ?? '', /THE PROMPT/);
-  assert.match(dialog.textContent ?? '', /Claude got it/);
+  const dialog = screen.getByRole('dialog', { name: 'What Claude reads' });
+  assert.equal(within(dialog).getByRole('tab', { name: 'Sent prompt' }).getAttribute('aria-selected'), 'true');
+  await waitFor(() => assert.match(within(dialog).getByTestId('viewer-text').textContent ?? '', /THE PROMPT/));
+  assert.match(dialog.textContent ?? '', /The submitted prompt, exactly as it was sent · submitted .* · Claude got it/);
 });
 
 test('while building, the board follows Claude and a card that moves stands out', async () => {
