@@ -368,10 +368,13 @@ test('a renamed session keeps its name', async () => {
 });
 
 test('the session list summarizes the plan', async () => {
-  const { sessions } = await call<{ sessions: { sessionId: string; planTitle: string; tasks: { total: number; done: number } }[] }>('/api/sessions');
+  const { sessions } = await call<{ sessions: { sessionId: string; planTitle: string; tasks: { total: number; done: number }; planStatus: string; awaitingReview: number }[] }>('/api/sessions');
   const row = sessions.find((s) => s.sessionId === sessionId)!;
   assert.equal(row.planTitle, 'Add a cache');
   assert.equal(row.tasks.done, 1);
+  // The status the list shows and filters on (#66).
+  assert.equal(row.planStatus, 'planning');
+  assert.equal(row.awaitingReview, 0);
 });
 
 test('only a session that used Coplan is marked for the session list', async () => {
@@ -1423,8 +1426,9 @@ test('"build it" in chat: the agent advances the plan, and it is building — lo
   assert.equal(s.plan!.submission?.mode, 'tracked');
   assert.equal(s.plan!.submission?.prompt, preview.prompt);
   assert.ok(s.plan!.submission?.deliveredAt, 'handed over as the reply');
-  const { sessions } = await call<{ sessions: { sessionId: string; phase: string }[] }>('/api/sessions');
+  const { sessions } = await call<{ sessions: { sessionId: string; phase: string; planStatus: string }[] }>('/api/sessions');
   assert.equal(sessions.find((x) => x.sessionId === id)?.phase, 'building');
+  assert.equal(sessions.find((x) => x.sessionId === id)?.planStatus, 'in_progress');
 
   // Locked like a submitted plan, for both sides.
   const redesign = await mcpFor(id, 'edit', { ops: [{ op: 'upsert_diagram', id: 'd1', title: 'Different' }] });

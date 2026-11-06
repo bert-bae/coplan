@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Four plan statuses: Planning, In progress, Review, Done
+
+- **Every plan shows one of four statuses**, in the same words in the
+  header, the session list and the strip under the header: *Planning*
+  (designing, or shaping the task list), *In progress* (submitted, or being
+  built), *Review* (every task done and the final checks and report under
+  way, or a task a Managed build holds for your review) and *Done* (built,
+  or exported). The detail follows it: *design confirmed*, *waiting for
+  Claude*, the task Claude is on, what waits on you, *exported*.
+- **Planning has a pill in the session list too**, where a plan still being
+  designed used to show none.
+- **The session list filters by status**, with how many plans each holds;
+  the choice is remembered.
+- `GET /api/sessions` carries each plan's `planStatus` and how many tasks
+  wait on your review (`awaitingReview`).
+
 ### Proceed from chat: "build it" moves the plan, without the sign-off dialogs
 
 - **Tell the agent to go ahead, and it signs the plan off for you.** A new

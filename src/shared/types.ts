@@ -440,7 +440,22 @@ export interface BranchState {
  * confirmed, handed over and waiting for Claude to pick it up, being built,
  * built, or handed to something outside the harness.
  */
-export type PlanPhase = 'planning' | 'tasking' | 'submitted' | 'building' | 'finalizing' | 'built' | 'handed-off';
+export const PLAN_PHASES = ['planning', 'tasking', 'submitted', 'building', 'finalizing', 'built', 'handed-off'] as const;
+export type PlanPhase = (typeof PLAN_PHASES)[number];
+
+/**
+ * The four statuses a user sees, the same in the header, the session list
+ * and the strip under the header (#66). The phases above are the detail
+ * under them:
+ *
+ * - `planning` — `planning`, `tasking`: the design and the task list.
+ * - `in_progress` — `submitted`, `building`: handed over, being built.
+ * - `review` — `finalizing`, and a Managed build with a task waiting on the
+ *   user's own review: what was built waits on the user.
+ * - `done` — `built`, `handed-off`.
+ */
+export const PLAN_STATUSES = ['planning', 'in_progress', 'review', 'done'] as const;
+export type PlanStatus = (typeof PLAN_STATUSES)[number];
 
 export interface Plan {
   title: string;
@@ -764,8 +779,12 @@ export interface SessionSummary {
   createdAt: number;
   updatedAt: number;
   tasks: TaskCounts;
-  /** Planning, or submitted and being built. */
+  /** Where the plan is in its life, in detail. */
   phase: PlanPhase;
+  /** The status the session list shows and filters on (see `planStatus`). */
+  planStatus: PlanStatus;
+  /** Tasks a Managed build holds for the user's own review. */
+  awaitingReview: number;
   /** The task Claude is on, for the rail. */
   current: string | null;
   waiting: WaitingState | null;

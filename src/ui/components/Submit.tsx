@@ -4,12 +4,13 @@ import { api, type PromptPreview, type ProjectSummary } from '../lib/api.ts';
 import { OpenInClaude } from './Handoff.tsx';
 import { ProgressBar } from './Progress.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
-import { MAX_NOTE, countTasks, currentTask, planPhase, unreadAreas } from '../../shared/plan.ts';
+import { MAX_NOTE, awaitingUserReview, countTasks, currentTask, planPhase, unreadAreas } from '../../shared/plan.ts';
 import { MAX_PARALLEL, MAX_ROUNDS, MODE_LABEL, branchPlan, buildSteps, hasDependencies, planMode, readyTasks, targetOf } from '../../shared/build.ts';
 import { blockingGaps, planGaps, type GapSeverities } from '../../shared/check.ts';
 import { REVIEW_MODES, type BuildSettings, type BuildTarget, type ExecutionMode, type Plan, type PlanPhase, type ReviewMode, type SessionState } from '../../shared/types.ts';
 import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
 import { droppedParts, type ConfigRow } from '../../shared/blocks.ts';
+import { PLAN_STATUS, statusDetail, statusFacts, statusTitle } from '../lib/status.ts';
 import { CONFIG_DOCS, PromptView, configDocs } from './PromptView.tsx';
 import type { Target } from '../../shared/types.ts';
 
@@ -102,6 +103,7 @@ export function SubmitControl() {
   if (phase === 'planning') {
     return (
       <span className="lock-control">
+        <StatusChip plan={plan} agent={agent} />
         <button
           type="button"
           className="btn btn-sm"
@@ -128,9 +130,7 @@ export function SubmitControl() {
   if (phase === 'tasking') {
     return (
       <span className="lock-control">
-        <span className="lock-chip is-tasking" title="The design is locked; the tasks can still change">
-          <span aria-hidden="true">✓</span> {PHASE_CHIP.tasking}
-        </span>
+        <StatusChip plan={plan} agent={agent} note="The design is locked; the tasks can still change." />
         <button
           ref={trigger}
           type="button"
@@ -147,12 +147,11 @@ export function SubmitControl() {
 
   return (
     <span className="lock-control">
-      <span
-        className={classNames('lock-chip', `is-${phase}`)}
-        title={`${plan.submission?.via === 'chat' ? `Submitted from chat: “${plan.submission.userSaid ?? ''}”. ` : ''}Submitted plans cannot be edited; reopen it to change it`}
-      >
-        <span aria-hidden="true">🔒</span> {PHASE_CHIP[phase]}
-      </span>
+      <StatusChip
+        plan={plan}
+        agent={agent}
+        note={`${plan.submission?.via === 'chat' ? `Submitted from chat: “${plan.submission.userSaid ?? ''}”. ` : ''}Submitted plans cannot be edited; reopen it to change it.`}
+      />
       <button
         type="button"
         className="btn btn-sm"
@@ -183,14 +182,26 @@ export function SubmitControl() {
   );
 }
 
-const PHASE_CHIP: Record<Exclude<PlanPhase, 'planning'>, string> = {
-  tasking: 'Design confirmed',
-  submitted: 'Submitted',
-  building: 'Locked · building',
-  finalizing: 'Locked · finishing',
-  built: 'Built',
-  'handed-off': 'Locked · exported',
-};
+/**
+ * The plan's status in the header: one of the four words the session list
+ * uses too (#66), with the detail under it — the phase, the task the agent
+ * is on, or what waits on the user.
+ */
+export function StatusChip({ plan, agent, note }: { plan: Plan; agent: AgentInfo; note?: string }) {
+  const facts = statusFacts(plan);
+  const status = PLAN_STATUS[facts.planStatus];
+  const detail = statusDetail(facts, agent.name);
+  return (
+    <span
+      className={classNames('lock-chip', 'status-chip', `is-status-${facts.planStatus}`)}
+      title={`${statusTitle(facts, agent.name)}.${note ? ` ${note}` : ''}`}
+      data-testid="plan-status"
+    >
+      <span aria-hidden="true">{status.mark}</span> {status.label}
+      {detail && <span className="status-detail"> · {detail}</span>}
+    </span>
+  );
+}
 
 /* ------------------------------------------------------------------ *
  * The dialogs
@@ -921,7 +932,7 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
   let head: string;
   let text: ReactNode;
   if (!design.deliveredAt) {
-    head = `Design confirmed — waiting for ${agent.name}`;
+    head = `${PLAN_STATUS.planning.label} · design confirmed — waiting for ${agent.name}`;
     text = !agent.promptContext ? (
       <>
         Paste the prompt into {agent.name}'s chat — or ask it to <q>make the task list</q>, and it picks the design up with
@@ -935,10 +946,10 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
       </>
     );
   } else if (!listed) {
-    head = `Design confirmed — ${agent.name} is making the task list`;
+    head = `${PLAN_STATUS.planning.label} · design confirmed — ${agent.name} is making the task list`;
     text = `${agent.name} has the design and is breaking it into focused tasks, what blocks what, and where each lands.`;
   } else {
-    head = 'Design confirmed — the task list is ready to review';
+    head = `${PLAN_STATUS.planning.label} · design confirmed — the task list is ready to review`;
     text = (
       <>
         {counts.total} task{counts.total === 1 ? '' : 's'} in {steps} build step{steps === 1 ? '' : 's'}. Shape them in Tasks, then
@@ -948,10 +959,10 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
   }
 
   return (
-    <section className="phase is-tasking" aria-label="The design">
+    <section className="phase is-tasking is-status-planning" aria-label="The design">
       <div className="phase-body">
         <p className="phase-head">
-          <span aria-hidden="true">✓</span> {head}
+          <span aria-hidden="true">{PLAN_STATUS.planning.mark}</span> {head}
           <span className="muted">
             {' '}
             · confirmed {design.via === 'chat' ? 'from chat ' : ''}
@@ -1045,12 +1056,15 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
   const counts = countTasks(plan);
   const now = currentTask(plan);
   const blocked = plan.tasks.filter((t) => t.status === 'blocked' && !plan.tasks.some((c) => c.parentId === t.id));
+  const facts = statusFacts(plan);
+  const label = PLAN_STATUS[facts.planStatus].label;
+  const reviewing = awaitingUserReview(plan);
 
   let head: string;
   let text: ReactNode;
   switch (phase) {
     case 'submitted':
-      head = `Submitted — waiting for ${agent.name} to start`;
+      head = `${label} · waiting for ${agent.name} to start`;
       text = !agent.promptContext ? (
         <>
           Paste the prompt into {agent.name}'s chat — or ask it to <q>build the plan</q>, and it picks the prompt up with
@@ -1065,8 +1079,14 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
       );
       break;
     case 'building':
-      head = 'Building';
-      text = now ? (
+      head = `${label} · ${reviewing.length ? statusDetail(facts, agent.name) : 'building'}`;
+      text = reviewing.length ? (
+        <>
+          <strong>{reviewing[0]!.title}</strong>
+          {reviewing.length > 1 ? ` and ${reviewing.length - 1} more` : ''} wait{reviewing.length === 1 ? 's' : ''} on your review: approve
+          it on its card in Tasks, or tell {agent.name} in chat.
+        </>
+      ) : now ? (
         <>
           {agent.name} is on <strong>{now.title}</strong>
           {now.stage ? ` — ${now.stage === 'review' ? `in review${now.round ? `, round ${now.round}` : ''}` : now.stage === 'refine' ? 'refining' : 'implementing'}` : ''}
@@ -1079,15 +1099,15 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
       );
       break;
     case 'finalizing':
-      head = 'Finishing';
+      head = `${label} · final checks and report`;
       text = `Every task is done (${counts.total}). ${agent.name} is running the final checks, opening the pull requests and writing the build report.`;
       break;
     case 'built':
-      head = 'Built';
+      head = `${label} · built`;
       text = plan.report ? `Every task is done (${counts.total}), and ${agent.name} wrote the build report.` : `Every task is done (${counts.total}).`;
       break;
     default:
-      head = 'Exported';
+      head = `${label} · exported`;
       text = 'The plan was copied out as Markdown to build somewhere else. This version is locked here, and progress is not followed.';
   }
   // How it is being built, beside when it was submitted: Tracked or Managed.
@@ -1095,10 +1115,10 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
 
   return (
     // A region, not a live one: the board announces each move as it happens.
-    <section className={classNames('phase', `is-${phase}`)} aria-label="The build">
+    <section className={classNames('phase', `is-${phase}`, `is-status-${facts.planStatus}`)} aria-label="The build">
       <div className="phase-body">
         <p className="phase-head">
-          <span aria-hidden="true">🔒</span> {head}
+          <span aria-hidden="true">{PLAN_STATUS[facts.planStatus].mark}</span> {head}
           <span className="muted">
             {' '}
             · submitted {submission.via === 'chat' ? 'from chat ' : ''}

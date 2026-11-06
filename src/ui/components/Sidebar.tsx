@@ -3,7 +3,8 @@ import { listedSessions, store, useStore } from '../store.ts';
 import { GlobalActions } from './GlobalActions.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { agentInfo } from '../../shared/agents.ts';
-import type { PlanPhase, SessionSummary } from '../../shared/types.ts';
+import { PLAN_STATUSES, type PlanStatus, type SessionSummary } from '../../shared/types.ts';
+import { PLAN_STATUS, statusTitle, summaryFacts } from '../lib/status.ts';
 
 /** What the agent session behind the plan is doing. */
 const SESSION_STATE_LABEL: Record<string, string> = {
@@ -12,30 +13,10 @@ const SESSION_STATE_LABEL: Record<string, string> = {
   ended: 'ended',
 };
 
-/** A plan past its design says how far it has got. */
-const PHASE_PILL: Record<Exclude<PlanPhase, 'planning'>, string> = {
-  tasking: 'design confirmed',
-  submitted: 'submitted',
-  building: 'building',
-  finalizing: 'finishing',
-  built: 'built',
-  'handed-off': 'exported',
-};
-function phaseTitle(phase: Exclude<PlanPhase, 'planning'>, agent: string): string {
-  switch (phase) {
-    case 'tasking':
-      return 'Design confirmed: the task list is being made and shaped';
-    case 'submitted':
-      return `Submitted: waiting for ${agent} to pick it up`;
-    case 'building':
-      return `Submitted and locked: ${agent} is building it`;
-    case 'finalizing':
-      return `Every task is done: ${agent} is running the final checks and writing the report`;
-    case 'built':
-      return 'Submitted and built: every task is done';
-    default:
-      return 'Submitted to be built somewhere else';
-  }
+/** The sessions the list shows under a status filter: all of them, or
+ *  those whose plan has that status (#66). */
+export function filterByStatus(sessions: SessionSummary[], status: PlanStatus | null): SessionSummary[] {
+  return status ? sessions.filter((s) => summaryFacts(s).planStatus === status) : sessions;
 }
 
 /** The lifted sections are groups like any other, with reserved keys. */
@@ -53,7 +34,9 @@ interface Group {
 export function Sidebar() {
   const all = useStore((s) => s.sessions);
   const current = useStore((s) => s.sessionId);
-  const sessions = listedSessions(all, current);
+  const listed = listedSessions(all, current);
+  const statusFilter = useStore((s) => s.statusFilter);
+  const sessions = filterByStatus(listed, statusFilter);
   const connection = useStore((s) => s.connection);
   const collapsed = useStore((s) => s.collapsedSidebar);
   const pinned = useStore((s) => s.pinned);
@@ -90,12 +73,20 @@ export function Sidebar() {
       </header>
 
       {collapsed && !drawerOpen ? (
-        <CollapsedRail sessions={sessions} current={current} />
+        <CollapsedRail sessions={listed} current={current} />
       ) : (
       <nav className="session-list" aria-label="Live sessions">
-        {sessions.length === 0 ? (
+        {listed.length > 0 && <StatusFilter sessions={listed} active={statusFilter} />}
+        {listed.length === 0 ? (
           <p className="sidebar-empty">
             No plans yet. Type <code>/coplan</code> in a session (<code>$coplan</code> in Codex) to start one.
+          </p>
+        ) : sessions.length === 0 ? (
+          <p className="sidebar-empty">
+            No plan is {PLAN_STATUS[statusFilter!].label.toLowerCase()}.{' '}
+            <button type="button" className="link" onClick={() => store.setStatusFilter(null)}>
+              Show all
+            </button>
           </p>
         ) : (
           groups.map((group) => (
@@ -119,6 +110,33 @@ export function Sidebar() {
 }
 
 /* ------------------------------------------------------------------ */
+
+/**
+ * One row of toggles over the list: every session, or only those whose
+ * plan is Planning, In progress, Review or Done — each with how many.
+ */
+function StatusFilter({ sessions, active }: { sessions: SessionSummary[]; active: PlanStatus | null }) {
+  const count = (status: PlanStatus) => filterByStatus(sessions, status).length;
+  return (
+    <div className="status-filter" role="group" aria-label="Show plans by status">
+      <button type="button" className={classNames('status-filter-btn', !active && 'is-active')} aria-pressed={!active} onClick={() => store.setStatusFilter(null)}>
+        All <span className="status-filter-count">{sessions.length}</span>
+      </button>
+      {PLAN_STATUSES.map((status) => (
+        <button
+          key={status}
+          type="button"
+          className={classNames('status-filter-btn', `is-status-${status}`, active === status && 'is-active')}
+          aria-pressed={active === status}
+          title={`Show only the plans that are ${PLAN_STATUS[status].label.toLowerCase()}`}
+          onClick={() => store.setStatusFilter(active === status ? null : status)}
+        >
+          {PLAN_STATUS[status].label} <span className="status-filter-count">{count(status)}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
 
 /**
  * Sessions bucketed by the repository they run in.
@@ -242,6 +260,7 @@ function SessionRow({
   const [confirming, setConfirming] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const agent = agentInfo(session.agent);
+  const facts = summaryFacts(session);
   // The session's own name under the plan's, unless it is only the folder
   // the group header (or, in a lifted group, the foot) already names.
   const stage = session.planTitle && session.planTitle !== session.title && session.title !== groupLabel(session) ? session.title : null;
@@ -304,17 +323,14 @@ function SessionRow({
             </span>
           )}
           <span>{relativeTime(session.updatedAt)}</span>
-          {session.phase !== 'planning' ? (
-            <span className={classNames('pill', `is-phase-${session.phase}`)} title={phaseTitle(session.phase, agent.name)}>
-              {PHASE_PILL[session.phase]}
+          {facts.planStatus === 'planning' && session.unreadByClaude > 0 && (
+            <span className="pill is-draft" title={`You changed the plan since ${agent.name} last read it`}>
+              unread
             </span>
-          ) : (
-            session.unreadByClaude > 0 && (
-              <span className="pill is-draft" title={`You changed the plan since ${agent.name} last read it`}>
-                unread
-              </span>
-            )
           )}
+          <span className={classNames('pill', 'status-pill', `is-status-${facts.planStatus}`)} title={statusTitle(facts, agent.name)}>
+            {PLAN_STATUS[facts.planStatus].label}
+          </span>
         </span>
       </button>
       )}
