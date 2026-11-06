@@ -1833,6 +1833,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 }
 .submit-side { display: flex; flex-direction: column; gap: var(--sp-3); }
 .submit-gaps summary { cursor: pointer; }
+.submit-gap-error { color: var(--danger-fg); }
 .submit-gaps ul { margin: var(--sp-1) 0 0; display: flex; flex-direction: column; gap: var(--sp-1); font-size: var(--fs-sm); }
 .submit-check { display: flex; flex-direction: column; gap: var(--sp-2); }
 .submit-summary { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }

@@ -6,7 +6,7 @@
  * an edit, and they lead with what changed — the reason it is reading at all.
  */
 import { createHash } from 'node:crypto';
-import { planGaps } from '../shared/check.ts';
+import { planGaps, type GapSeverities } from '../shared/check.ts';
 import type { BuildSettings, BuildTarget, Change, Plan, PlanBaseline, Task, Thread } from '../shared/types.ts';
 import {
   baselineOf,
@@ -32,7 +32,7 @@ import {
   readinessOf,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, PROJECT_CONFIG_PATH, emptyProjectConfig, hasHooks, type ProjectConfig } from '../shared/project.ts';
+import { HOOK_STAGES, PROJECT_CONFIG_PATH, emptyProjectConfig, hasHooks, hookCommand, type InstructionPoint, type ProjectConfig } from '../shared/project.ts';
 import { agentInfo, type AgentInfo, type AgentKind } from '../shared/agents.ts';
 
 const STATUS_MARK = { todo: '[ ]', in_progress: '[~]', blocked: '[!]', done: '[x]', dropped: '[-]' } as const;
@@ -42,6 +42,8 @@ export interface RenderOptions {
   url?: string;
   /** Only the changes and what is still open; skip the full document. */
   changesOnly?: boolean;
+  /** How the repository counts each plan-check rule. */
+  planCheck?: GapSeverities;
 }
 
 export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
@@ -70,7 +72,7 @@ export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
   }
 
   out.push(...renderDocument(plan, { revs: true }));
-  const gaps = renderGaps(plan, 12);
+  const gaps = renderGaps(plan, 12, opts.planCheck);
   if (gaps.length) out.push('', ...gaps);
   return out.join('\n').trim();
 }
@@ -79,12 +81,14 @@ export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
  * What the plan leaves open (see planGaps), as a list for Claude — cut to
  * `max` lines with a pointer to the whole list.
  */
-export function renderGaps(plan: Plan, max = Infinity): string[] {
-  const gaps = planGaps(plan);
+export function renderGaps(plan: Plan, max = Infinity, severities: GapSeverities = {}): string[] {
+  const gaps = planGaps(plan, severities);
   if (!gaps.length) return [];
-  const shown = gaps.slice(0, max).map((g) => `- ${g.message}`);
+  // Errors come first (planGaps sorts them), and are marked: they hold the sign-off.
+  const shown = gaps.slice(0, max).map((g) => `- ${g.severity === 'error' ? '⛔ (holds Confirm and Submit) ' : ''}${g.message}`);
   if (gaps.length > max) shown.push(`- …and ${gaps.length - max} more: harness_plan_check lists them all.`);
-  return [`## Gaps (${gaps.length}) — what the plan leaves open`, ...shown];
+  const errors = gaps.filter((g) => g.severity === 'error').length;
+  return [`## Gaps (${gaps.length}${errors ? `, ${errors} holding the sign-off` : ''}) — what the plan leaves open`, ...shown];
 }
 
 interface DocumentOptions {
@@ -340,7 +344,8 @@ export function buildPrompt(plan: Plan, opts: PromptOptions & { target: BuildTar
   const settings = opts.settings ?? opts.project?.settings ?? DEFAULT_BUILD_SETTINGS;
   const project = opts.project ?? emptyProjectConfig();
   const head = [
-    ...(here ? sessionBrief(plan, settings, agentInfo(opts.agent)) : outsideBrief(plan, settings)),
+    ...(here ? sessionBrief(plan, settings, agentInfo(opts.agent), project) : outsideBrief(plan, settings, project)),
+    ...instructionLines(project, 'build'),
     '',
     ...checksSection(project, here ? opts.bin : undefined),
   ];
@@ -382,6 +387,7 @@ export function designPrompt(plan: Plan, opts: PromptOptions = {}): BuildPrompt 
     '6. Publish it with harness_tasks_publish — keep the ids of planned tasks you keep, so the boxes stay linked — ' +
       'then tell the user in chat that the task list is ready to review, and ask what you need decided with ' +
       `${agentInfo(opts.agent).askWith}. Do not start building: the user submits the plan when the tasks are right.`,
+    ...instructionLines(project, 'design'),
     '',
     ...checksSection(project, opts.bin, true),
   ];
@@ -434,7 +440,7 @@ function fit(plan: Plan, head: string[], said: string[], changes: string[], doc:
   return { prompt: [...fixed, '', ...kept, ...tail, '', STATUS_LEGEND].join('\n').trim(), trimmed: true };
 }
 
-function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo): string[] {
+function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: ProjectConfig): string[] {
   const together =
     s.parallel > 1
       ? `build them side by side, up to ${s.parallel} at once, each by its own subagent given that task's harness_task_brief`
@@ -451,21 +457,21 @@ function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo): string[] 
     '2. When you start a task, mark it in_progress with stage "implement" (harness_task_update) and run the implement ' +
       'checks. Set stage "review" when it goes to review, and "refine" when the review asks for changes. Report the ' +
       'checks you ran with `checks`.',
-    `3. Review: ${REVIEW_WORDS[s.review]}, unless a task says otherwise. After ${s.maxRounds} review round${s.maxRounds === 1 ? '' : 's'} without passing, stop and ask the user.`,
+    `3. Review: ${REVIEW_WORDS[s.review]}, unless a task says otherwise.${s.review === 'subagent' ? reviewerWords(project) : ''} After ${s.maxRounds} review round${s.maxRounds === 1 ? '' : 's'} without passing, stop and ask the user.`,
     '4. Mark a task done only once its review passed and its review checks are green, with a one-line note of what you did.',
     `5. If you are stuck, mark the task blocked with a note saying on what, and ask the user with ${agent.askWith}.`,
     '6. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.',
     ...(branches.length
-      ? ['7. Land each task on its branch (see Branches below): cut a stacked branch from the one it builds on, and open the pull requests in stack order.']
-      : ['7. Everything lands on the current branch: no task names a branch of its own.']),
+      ? [`7. Land each task on its branch (see Branches below): cut a stacked branch from the one it builds on. ${pullRequestWords(project)}`]
+      : [`7. Everything lands on the current branch: no task names a branch of its own. ${pullRequestWords(project)}`]),
     '8. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, ' +
       'stop and ask the user in chat — they can reopen the plan in Coplan.',
-    '9. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text}]}) ' +
-      'and give the user the final summary: what was built, the branches and pull requests, and how it was checked.',
+    '9. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) ' +
+      `and give the user the final summary: what was built, the branches and pull requests, and how it was checked.${finalWords(project)}`,
   ];
 }
 
-function outsideBrief(plan: Plan, s: BuildSettings): string[] {
+function outsideBrief(plan: Plan, s: BuildSettings, project: ProjectConfig): string[] {
   return [
     `Build "${plan.title}". This plan was designed and reviewed before any code was written, and this is its final version.`,
     '',
@@ -473,9 +479,11 @@ function outsideBrief(plan: Plan, s: BuildSettings): string[] {
       'a build order, tasks in the same step do not depend on each other and can be built side by side.',
     `2. Take each task through implement → review → refine: implement it and run the implement checks; review the change (${REVIEW_WORDS[s.review]}) and run the review checks; refine until it passes. After ${s.maxRounds} round${s.maxRounds === 1 ? '' : 's'}, stop and ask.`,
     '3. Build the architecture as described: its parts, what each one does and decides, and how they connect.',
-    '4. Where tasks name branches, land each task on its branch; a branch built on another is cut from it.',
+    `4. Where tasks name branches, land each task on its branch; a branch built on another is cut from it. ${pullRequestWords(project).replace(/ Write each description from[^.]*\./, '')}`,
     '5. If the design turns out not to work, stop and say why rather than redesigning as you go.',
-    '6. When every task is done, run the final checks and summarize what was built, where, and how it was checked.',
+    `6. When every task is done, run the final checks and summarize what was built, where, and how it was checked.${project.final.blocking ? ' Do not call the build finished while a final check fails.' : ''}`,
+    // No harness_task_next out there: the template comes with the prompt.
+    ...templateLines(project),
   ];
 }
 
@@ -495,11 +503,59 @@ export function checksSection(project: ProjectConfig, bin?: string, planning = f
   for (const stage of HOOK_STAGES) {
     const hooks = project.hooks[stage];
     if (!hooks.length) continue;
-    const list = hooks.map((h) => `${h.name} \`${h.run}\`${h.paths ? ` (for ${h.paths.join(', ')})` : ''}${h.optional ? ' (optional)' : ''}`);
+    const list = hooks.map((h) => `${h.name} \`${hookCommand(h)}\`${h.paths ? ` (for ${h.paths.join(', ')})` : ''}${h.optional ? ' (optional)' : ''}`);
     out.push(`- ${stage}: ${list.join('; ')}`);
   }
   if (bin) out.push(`Run a whole stage with \`"${bin}" check <stage>\` — \`--files a,b\` for one task's files, \`--json\` for harness_task_update's \`checks\`.`);
   return out;
+}
+
+/** How the build's pull requests are opened, as the repository says
+ *  (`pullRequests` in .coplan/config.json). */
+export function pullRequestWords(project: ProjectConfig): string {
+  const { tool, open } = project.pullRequests;
+  if (open === 'never') return 'Do not open pull requests: push the branches, and list each in the report with what it carries.';
+  if (tool === 'none') return 'Push the branches, and leave opening the pull requests to the user: list each in the report with what it carries and what it stacks on.';
+  const how =
+    tool === 'graphite'
+      ? 'with Graphite: track each branch on the one below it (`gt track`), and open the stack with `gt submit --stack`'
+      : 'with `gh pr create`, each against the branch below it (the base branch for the bottom one)';
+  const when = open === 'auto' ? 'as soon as a branch\'s tasks are done' : 'once the user says to: ask them first';
+  return `Open the pull requests ${how}, ${when}.${project.pullRequests.template ? ` Write each description from the repository's template (${project.pullRequests.templateFile}), which harness_task_next shows when one is due.` : ''}`;
+}
+
+/** The repository's pull request template, to fill in for each one. */
+export function templateLines(project: ProjectConfig): string[] {
+  const { template, templateFile } = project.pullRequests;
+  if (!template) return [];
+  return [
+    '',
+    `### Each pull request's description`,
+    `Fill in the repository's template (${templateFile}) from the tasks the pull request carries, their checks and their review:`,
+    '',
+    '~~~~markdown',
+    template,
+    '~~~~',
+  ];
+}
+
+/** The standing words the user and the repository add at one point. */
+export function instructionLines(project: ProjectConfig, point: InstructionPoint, heading = '## Standing instructions'): string[] {
+  const text = project.instructions[point];
+  if (!text) return [];
+  return ['', heading, '_From the user\'s and the repository\'s Coplan config; they hold for all of this._', '', nestHeadings(text, heading.startsWith('###') ? 3 : 2)];
+}
+
+/** Who reviews, with the model the repository names for it. */
+export function reviewerWords(project: ProjectConfig): string {
+  return project.review.model ? ` Run the reviewer on the \`${project.review.model}\` model.` : '';
+}
+
+/** What a failing final check does to the report. */
+export function finalWords(project: ProjectConfig): string {
+  const held = project.hooks.final.filter((h) => !h.optional);
+  if (!project.final.blocking || !held.length) return '';
+  return ` The report is refused until it carries every final check (${held.map((h) => h.name).join(', ')}) passing, in \`checks\`.`;
 }
 
 /** What the user changed since Claude last read, when Claude has read before. */

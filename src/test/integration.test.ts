@@ -741,7 +741,8 @@ test('finishing the last task finishes the build, and a new plan may follow', as
   assert.equal(finishing.find((x) => x.sessionId === built)?.phase, 'finalizing');
   const finish = String((await mcpFor(built, 'next'))['text']);
   assert.match(finish, /Every task in "Add a cache" is done/);
-  assert.match(finish, /pull requests in stack order: `cache\/storage` → `cache\/api` \(onto `cache\/storage`\)/);
+  assert.match(finish, /Push each branch, in stack order: `cache\/storage` → `cache\/api` \(onto `cache\/storage`\)/);
+  assert.match(finish, /Open the pull requests with `gh pr create`, each against the branch below it .*, once the user says to: ask them first/, 'by default, gh, once the user says');
   assert.match(finish, /op: "report"/);
 
   // The pull requests, as they are opened and merged: the stack follows.
@@ -842,6 +843,56 @@ test("the repository's .coplan/config.json reaches the prompts, the briefs and t
     assert.equal(done['ok'], true, String(done['text']));
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the repository's customizations reach the agent, and its errors and final checks hold what they say", async () => {
+  const id = 'custom-session';
+  const dir = path.join(repo, '.coplan');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(repo, 'PR_TEMPLATE.md'), '## Summary\n\n## How it was tested\n');
+  writeFileSync(
+    path.join(dir, 'config.json'),
+    JSON.stringify({
+      hooks: { final: [{ name: 'suite', run: 'npm test' }, { name: 'audit', run: 'npm audit', optional: true }] },
+      pullRequests: { tool: 'graphite', open: 'auto', template: 'PR_TEMPLATE.md' },
+      review: { model: 'opus' },
+      final: { blocking: true },
+      instructions: { design: 'Name every box after its service.', brief: 'Write the test first.', review: 'Look for unparameterised SQL.' },
+      planCheck: { 'box-undescribed': 'error', 'comment-unanswered': 'off' },
+    }),
+  );
+  try {
+    await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+    await mcpFor(id, 'publish', PLAN);
+
+    // The repository's own words, where the agent reads them.
+    const design = await post<Preview & { project: { planCheck: Record<string, string> } }>(`/api/session/${id}/plan/design/prompt`);
+    assert.match(design.prompt, /## Standing instructions[\s\S]*Name every box after its service\./);
+    assert.deepEqual(design.project.planCheck, { 'box-undescribed': 'error', 'comment-unanswered': 'off' }, 'the page is told how gaps count');
+    const brief = String((await mcpFor(id, 'brief', { task_id: 't2' }))['text']);
+    assert.match(brief, /Write the test first\./);
+    assert.match(brief, /Run the reviewer on the `opus` model\./);
+    assert.match(brief, /### What the review checks here[\s\S]*Look for unparameterised SQL\./);
+
+    // A gap the repository counts as an error holds the sign-off, and says so.
+    const check = String((await mcpFor(id, 'check'))['text']);
+    assert.match(check, /⛔ \(holds Confirm and Submit\) Box "API" in "Components" has no description/);
+    const refused = await post<{ error?: string }>(`/api/session/${id}/plan/design/confirm`, {});
+    assert.match(refused.error ?? '', /cannot be confirmed yet: this repository's plan check[\s\S]*Box "API"/);
+
+    // The final checks hold the report until the required ones pass.
+    const report = (checks?: unknown[]) => mcpFor(id, 'edit', { ops: [{ op: 'report', text: 'Built it.', ...(checks ? { checks } : {}) }] });
+    const missing = await report();
+    assert.equal(missing['ok'], false);
+    assert.match(String(missing['text']), /holds the build report until its final checks pass[\s\S]*Not reported in `checks`: suite/);
+    const failing = await report([{ name: 'suite', ok: false }]);
+    assert.match(String(failing['text']), /Failing: suite\./);
+    const passed = await report([{ name: 'suite', ok: true }, { name: 'audit', ok: false }]);
+    assert.equal(passed['ok'], true, `an optional check does not hold it: ${String(passed['text'])}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(path.join(repo, 'PR_TEMPLATE.md'), { force: true });
   }
 });
 

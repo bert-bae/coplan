@@ -6,7 +6,7 @@ import { ProgressBar } from './Progress.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { MAX_NOTE, countTasks, currentTask, planPhase, unreadAreas } from '../../shared/plan.ts';
 import { MAX_PARALLEL, MAX_ROUNDS, branchPlan, buildSteps, hasDependencies, readyTasks } from '../../shared/build.ts';
-import { planGaps } from '../../shared/check.ts';
+import { planGaps, type GapSeverities } from '../../shared/check.ts';
 import { REVIEW_MODES, type BuildSettings, type BuildTarget, type Plan, type PlanPhase, type ReviewMode, type SessionState } from '../../shared/types.ts';
 import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
 
@@ -189,25 +189,35 @@ function useSettled(value: string): string {
 /**
  * What the plan leaves open — the same list the agent gets from
  * harness_plan_check — so the user signs off knowing it. A warning, not a
- * gate: some gaps are deliberate (a box that already exists).
+ * gate (some gaps are deliberate: a box that already exists) — unless the
+ * repository counts a rule as an error (`planCheck`), which holds the
+ * sign-off until it is fixed.
  */
-function GapList({ plan }: { plan: Plan }) {
-  const gaps = planGaps(plan);
+function GapList({ plan, severities }: { plan: Plan; severities: GapSeverities | undefined }) {
+  const gaps = planGaps(plan, severities);
   if (!gaps.length) return null;
+  const errors = gaps.filter((g) => g.severity === 'error').length;
   return (
-    <details className="field submit-gaps">
+    <details className="field submit-gaps" open={errors > 0}>
       <summary className="field-label">
         {gaps.length} gap{gaps.length === 1 ? '' : 's'} the plan leaves open
+        {errors ? ` — ${errors === 1 ? 'one is an error' : `${errors} are errors`} in this repository, to fix first` : ''}
       </summary>
       <ul className="plain-list">
         {gaps.map((g, i) => (
-          <li key={`${g.rule}:${g.target.kind}:${g.target.id}:${i}`} className="muted">
+          <li key={`${g.rule}:${g.target.kind}:${g.target.id}:${i}`} className={g.severity === 'error' ? 'submit-gap-error' : 'muted'}>
+            {g.severity === 'error' ? <strong>Error: </strong> : null}
             {g.message}
           </li>
         ))}
       </ul>
     </details>
   );
+}
+
+/** Gaps the repository counts as errors: they hold Confirm and Submit. */
+function heldBy(plan: Plan, preview: PromptPreview | null): number {
+  return planGaps(plan, preview?.project?.planCheck).filter((g) => g.severity === 'error').length;
 }
 
 /** The shared frame: the choices on the left, the prompt on the right. */
@@ -244,7 +254,7 @@ function ReviewFrame(props: {
         </header>
         <div className="submit-grid">
           <div className="submit-side">
-            <GapList plan={props.plan} />
+            <GapList plan={props.plan} severities={props.preview?.project?.planCheck} />
             {props.side}
           </div>
           <section className="submit-preview" aria-label="The prompt">
@@ -363,7 +373,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>
               Cancel
             </button>
-            <button type="button" className="btn btn-primary" disabled={!current || busy || unsaved} title={unsaved ? 'Saving your last edit first…' : undefined} onClick={() => void confirm()}>
+            <button type="button" className="btn btn-primary" disabled={!current || busy || unsaved || heldBy(plan, preview) > 0} title={unsaved ? 'Saving your last edit first…' : heldBy(plan, preview) ? 'Fix the gaps this repository counts as errors first' : undefined} onClick={() => void confirm()}>
               {busy ? 'Confirming…' : agent.promptContext ? 'Confirm design' : 'Copy and confirm design'}
             </button>
           </div>
@@ -504,7 +514,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={submitting}>
               Cancel
             </button>
-            <button type="button" className="btn btn-primary" disabled={!current || submitting || unsaved} title={unsaved ? 'Saving your last edit first…' : undefined} onClick={() => void submit()}>
+            <button type="button" className="btn btn-primary" disabled={!current || submitting || unsaved || heldBy(plan, preview) > 0} title={unsaved ? 'Saving your last edit first…' : heldBy(plan, preview) ? 'Fix the gaps this repository counts as errors first' : undefined} onClick={() => void submit()}>
               {submitting ? 'Submitting…' : target === 'session' && agent.promptContext ? 'Submit and lock' : 'Copy, submit and lock'}
             </button>
           </div>

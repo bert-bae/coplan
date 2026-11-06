@@ -7,7 +7,8 @@
  */
 import { spawn } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
-import { HOOK_STAGES, DEFAULT_HOOK_TIMEOUT, PROJECT_CONFIG_PATH, hooksFor, loadProjectConfig, type CheckHook, type HookStage } from '../shared/project.ts';
+import path from 'node:path';
+import { HOOK_STAGES, DEFAULT_HOOK_TIMEOUT, PROJECT_CONFIG_PATH, hookCommand, hooksFor, loadProjectConfig, type CheckHook, type HookStage } from '../shared/project.ts';
 import type { CheckResult } from '../shared/types.ts';
 
 /** Lines of a failing hook's output shown. Enough to see the error. */
@@ -58,7 +59,7 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   // A config that cannot be read must not pass for one with nothing to run.
   if (config.errors.length) {
     for (const e of config.errors) console.error(`coplan: ${e}`);
-    console.error(`coplan: fix ${PROJECT_CONFIG_PATH} first; nothing was run.`);
+    console.error(`coplan: fix ${config.globalFile ? `${PROJECT_CONFIG_PATH} or ${config.globalFile}` : PROJECT_CONFIG_PATH} first; nothing was run.`);
     return 2;
   }
   if (!config.file) {
@@ -76,7 +77,7 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
     return 0;
   }
   if (opts.list) {
-    for (const h of hooks) console.log(`${h.name}: ${h.run}${h.optional ? '  (optional)' : ''}`);
+    for (const h of hooks) console.log(`${h.name}: ${hookCommand(h)}${h.optional ? '  (optional)' : ''}`);
     return 0;
   }
 
@@ -113,8 +114,8 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
     // Its own process group, so a timeout stops everything it started — a
     // test runner's workers too — not just the shell.
     const child = spawn('sh', ['-c', hook.run], {
-      cwd,
-      env: { ...process.env, CI: process.env['CI'] ?? '1' },
+      cwd: hook.cwd ? path.join(cwd, hook.cwd) : cwd,
+      env: { ...process.env, CI: process.env['CI'] ?? '1', ...hook.env },
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     });

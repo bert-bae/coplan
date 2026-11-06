@@ -54,6 +54,23 @@
   `coplan doctor` checks node, curl, both configs, the daemon's version and
   pid, and a hook sent through the real relay, and cleans up after itself.
 
+### Make the build yours
+
+- `pullRequests` in `.coplan/config.json` chooses how a build's pull
+  requests are opened — `gh`, Graphite, or by you — and when: as each
+  branch is done, once you say, or never; with a `template` each
+  description is written from. `harness_task_next` says when each is due.
+- `instructions` add your own words to the design prompt, the build prompt,
+  every task's brief, and what its reviewer checks.
+- `review.model` picks the reviewer subagent's model; `final.blocking`
+  holds the build report until the final checks pass.
+- `planCheck` sets how each plan-check rule counts: an `error` holds
+  *Confirm design* and *Submit*, a rule turned `off` is not shown.
+- A hook can run in a folder (`cwd`) with its own variables (`env`), for a
+  monorepo.
+- `~/.claude/cc-harness/coplan.json` and `instructions/*.md` there are your
+  defaults for every repository, under each repository's own config.
+
 ### The same Coplan in every agent
 
 - The commands find the plugin where an agent leaves its path empty; the

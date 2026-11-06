@@ -873,6 +873,37 @@ test('the task list says what waits on what, and the order the build takes', asy
   assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 't3', review: 'self', expect: 2 });
 });
 
+test('a gap the repository counts as an error holds Submit, and is shown first', async () => {
+  const plan = confirmedPlan();
+  const { planGaps } = await import('../shared/check.ts');
+  const rule = planGaps(plan)[0]?.rule;
+  assert.ok(rule, 'the fixture leaves a gap open');
+  await boot(makeSession(plan), (route) => {
+    if (route.endsWith('/plan/prompt')) {
+      return {
+        prompt: 'PROMPT',
+        trimmed: false,
+        version: plan.version,
+        budget: 9000,
+        maxNote: 4000,
+        settings: DEFAULTS,
+        project: { file: '/repo/.coplan/config.json', defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [], planCheck: { [rule]: 'error' } },
+      };
+    }
+    return undefined;
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Review & submit plan' }));
+  });
+  const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
+  await waitFor(() => assert.equal(within(dialog).getByTestId('prompt-preview').textContent, 'PROMPT'));
+  const submit = within(dialog).getByRole('button', { name: 'Submit and lock' }) as HTMLButtonElement;
+  assert.equal(submit.disabled, true, 'held by the error');
+  assert.equal(submit.title, 'Fix the gaps this repository counts as errors first');
+  assert.match(dialog.textContent ?? '', /gaps the plan leaves open — (one is an error|\d+ are errors) in this repository, to fix first/);
+  assert.match(dialog.querySelector('.submit-gap-error')?.textContent ?? '', /^Error: /);
+});
+
 test('the plan is submitted after reading the prompt it sends, with how the build runs', async () => {
   const session = makeSession(confirmedPlan());
   const version = session.plan!.version;

@@ -35,10 +35,10 @@ import {
   sharedFiles,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, emptyProjectConfig, hasHooks, hooksFor, type ProjectConfig } from '../shared/project.ts';
+import { HOOK_STAGES, emptyProjectConfig, hasHooks, hookCommand, hooksFor, type ProjectConfig } from '../shared/project.ts';
 import { KIND_NOUN, edgePhrase, hang, indent, nestHeadings } from '../shared/architecture.ts';
 import { agentInfo, type AgentKind } from '../shared/agents.ts';
-import { checkWords, checksSection, renderBuildOrder, stageWords } from './render.ts';
+import { checkWords, checksSection, finalWords, instructionLines, pullRequestWords, renderBuildOrder, reviewerWords, stageWords, templateLines } from './render.ts';
 
 export interface BriefOptions {
   /** The agent building it: how it is told to ask the user things. */
@@ -76,20 +76,21 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
     const final = project.hooks.final;
     out.push(
       final.length
-        ? `1. Run the final checks: ${final.map((h) => `${h.name} \`${h.run}\``).join('; ')}${opts.bin ? ` — or all of them with \`"${opts.bin}" check final\`` : ''}. Fix anything they find, as a task.`
+        ? `1. Run the final checks: ${final.map((h) => `${h.name} \`${hookCommand(h)}\``).join('; ')}${opts.bin ? ` — or all of them with \`"${opts.bin}" check final\`` : ''}. Fix anything they find, as a task.`
         : '1. Run the repository\'s full checks (its test suite and build, as CI would) and fix anything they find, as a task.',
     );
     const { branches } = branchPlan(plan);
     out.push(
       branches.length
-        ? `2. Push each branch and open the pull requests in stack order: ${branches
+        ? `2. Push each branch, in stack order: ${branches
             .map((b) => `\`${b.branch}\`${b.base === SESSION_BRANCH ? ' (onto the branch you are on)' : b.base ? ` (onto \`${b.base}\`)` : ''}`)
-            .join(' → ')}. Record each with harness_branch_update {branch, pr_url, pr_number, pr_state}, so the board ` +
+            .join(' → ')}. ${pullRequestWords(project)} Record each pull request with harness_branch_update {branch, pr_url, pr_number, pr_state}, so the board ` +
           'shows the stack.'
-        : '2. Commit and push the work on the current branch, and open a pull request if the user wants one.',
-      '3. Write the build report with harness_plan_edit {ops: [{op: "report", text, checks}]}: what each task did, the branches and pull requests, anything that differs from the plan, and follow-ups — with the final checks as they came out in `checks`. The plan is built once it is in.',
+        : `2. Commit and push the work on the current branch. ${pullRequestWords(project)}`,
+      `3. Write the build report with harness_plan_edit {ops: [{op: "report", text, checks}]}: what each task did, the branches and pull requests, anything that differs from the plan, and follow-ups — with the final checks as they came out in \`checks\`. The plan is built once it is in.${finalWords(project)}`,
       '4. Give the user the final summary in chat, with the links.',
     );
+    out.push(...templateLines(project));
     out.push(...renderStack(plan, project.branches.base));
     if (plan.report) out.push('', `_A build report was written ${new Date(plan.report.at).toISOString().slice(0, 16).replace('T', ' ')}; writing it again replaces it._`);
     return out.join('\n');
@@ -174,6 +175,18 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
   if (blocked.length) {
     out.push('', `## Blocked (${blocked.length})`);
     for (const t of blocked) out.push(`- ${line(t)}${t.note ? ` — ${t.note}` : ''}`);
+  }
+
+  // Pull requests opened as branches finish: the branches whose tasks are
+  // all done and that have none yet.
+  const { open, tool } = project.pullRequests;
+  if (open === 'auto' && tool !== 'none') {
+    const due = branchPlan(plan).branches.filter(
+      (b) => !plan.branches?.[b.branch]?.pr && leaves.filter((t) => effectiveBranch(plan, t) === b.branch).every((t) => t.status === 'done' || t.status === 'dropped'),
+    );
+    if (due.length) {
+      out.push('', `## Ready for a pull request (${due.length})`, ...due.map((b) => `- \`${b.branch}\`: every task on it is done.`), pullRequestWords(project), ...templateLines(project));
+    }
   }
 
   // Once a pull request is out, the stack as it stands; before, the plan.
@@ -301,6 +314,8 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
     out.push(`- ${line(t)}${readinessOf(plan, t) === 'in_progress' ? ' is being built right now' : ''}${shared.length ? ` — also touches ${shared.join(', ')}` : ''}.`);
   }
 
+  out.push(...instructionLines(project, 'brief'));
+
   // Where it lands.
   const branch = effectiveBranch(plan, task);
   out.push('', '## Branch');
@@ -327,7 +342,7 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
   out.push(`Review: ${REVIEW_WORDS[review]}${review !== settings.review ? ' (set on this task)' : ''}. At most ${settings.maxRounds} review round${settings.maxRounds === 1 ? '' : 's'} before stopping to ask the user.`);
   const stage = (name: string, what: string, hooks: ReturnType<typeof hooksFor>) => {
     out.push('', `**${name}.** ${what}`);
-    if (hooks.length) for (const h of hooks) out.push(`- ${h.name}: \`${h.run}\`${h.optional ? ' (optional)' : ''}`);
+    if (hooks.length) for (const h of hooks) out.push(`- ${h.name}: \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`);
   };
   const filesArg = files.length ? ` --files ${[...new Set(files)].join(',')}` : '';
   stage('Implement', 'Make the change, then run the implement checks and fix what they find:', hooksFor(project, 'implement', files));
@@ -339,9 +354,11 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
         ? 'No reviewer: the review checks are the review. Run them:'
         : review === 'self'
           ? 'Read your own diff against the objective and the acceptance criteria, as a reviewer would, and run the review checks:'
-          : 'A fresh subagent that did not write the change reads the diff against this brief and runs the review checks:',
+          : `A fresh subagent that did not write the change reads the diff against this brief and runs the review checks.${reviewerWords(project)}`,
     hooksFor(project, 'review', files),
   );
+  // What a reviewer looks for here, whoever reviews.
+  if (review !== 'skip') out.push(...instructionLines(project, 'review', '### What the review checks here'));
   out.push('', '**Refine.** Fix what the review found, run the implement checks again, and go back to review.');
   if (opts.bin && HOOK_STAGES.some((s) => hooksFor(project, s, files).length)) {
     out.push('', `Run a stage at once: \`"${opts.bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report.`);
