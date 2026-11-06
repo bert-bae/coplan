@@ -320,6 +320,16 @@ async function liveProbes(
     );
     await agentHook('codex', 'SessionEnd', { session_id: thread, cwd, hook_event_name: 'SessionEnd', reason: 'other' });
   });
+  // Codex runs a plugin's hooks only once they are trusted, and asks again
+  // after each update. Where it keeps that is internal to Codex — a hash of
+  // its own making in ~/.codex/config.toml — so the doctor cannot read it,
+  // and the probe above sends the hooks itself. Said, so a pass here is not
+  // taken for "Codex will run them".
+  console.log(
+    '  note: Codex runs these hooks only after you trust them in /hooks, and again after each Coplan update ' +
+      '("Modified since last trusted"). The doctor cannot see that state: if Coplan\'s tools say no session is ' +
+      'registered in Codex, open /hooks there.',
+  );
 
   await probe('a Cursor chat registers as Cursor, from its own payload', async () => {
     const chat = `doctor-cursor-${randomUUID()}`;

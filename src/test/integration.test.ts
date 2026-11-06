@@ -407,6 +407,21 @@ test('only a session that used Coplan is marked for the session list', async () 
   }
 });
 
+test('a Codex call with no session says how to trust the hooks, after an update too', async (t) => {
+  const elsewhere = mkdtempSync(path.join(tmpdir(), 'cc-harness-unhooked-'));
+  t.after(() => rmSync(elsewhere, { recursive: true, force: true }));
+  const res = await call<Record<string, unknown>>('/mcp/read', {
+    method: 'POST',
+    // No thread id and a folder no session is in: what a Codex MCP server
+    // sees when Codex held back the hooks that would have registered one.
+    headers: { 'x-harness-session': '', 'x-harness-agent': 'codex' },
+    body: JSON.stringify({ cwd: elsewhere }),
+  });
+  assert.equal(res['ok'], false);
+  assert.match(String(res['text']), /No session is registered yet\. Codex has not run Coplan's hooks/);
+  assert.match(String(res['text']), /again after every Coplan update, when \/hooks lists them as "Modified since last trusted"\. Open \/hooks/);
+});
+
 test('/coplan is read as a command, and $coplan as a Codex skill mention', () => {
   for (const prompt of ['/coplan', '/coplan add a cache', '  /coplan:coplan x', 'use $coplan to plan this', 'plan it with $coplan.']) {
     assert.ok(asksForCoplan(prompt), prompt);

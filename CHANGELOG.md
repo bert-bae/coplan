@@ -17,6 +17,16 @@
   `--base <ref>` and `--no-diff`; the brief gives the right one for the
   task's branch, stacked branches included.
 
+### Codex hook trust
+
+- Codex runs a plugin's hooks only once you trust them in `/hooks`, and asks
+  again after every Coplan update ("Modified since last trusted"). Codex
+  keeps that state internally, as a hash of its own making, so `coplan
+  doctor` cannot read it reliably: it now says so instead of passing quietly.
+  The README has a new Troubleshooting section with the symptom (Coplan's
+  tools say no session is registered) and the fix, and the tools' own reply
+  in Codex mentions the update case.
+
 ### The README
 
 - **Screenshots** of each step, from demo plans that

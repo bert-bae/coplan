@@ -173,8 +173,9 @@ const MAX_PROJECT_CONFIGS = 50;
 const HOOKS_HINT: Record<AgentKind, string> = {
   claude: "This usually means Coplan's hooks have not fired; run `coplan doctor` to check the plugin wiring.",
   codex:
-    "Codex has not run Coplan's hooks: it holds a plugin's hooks until you approve them. Open /hooks in Codex, " +
-    'trust the Coplan hooks, then start a new session. `coplan doctor` checks the rest of the wiring.',
+    "Codex has not run Coplan's hooks: it holds a plugin's hooks until you approve them, and again after every " +
+    'Coplan update, when /hooks lists them as "Modified since last trusted". Open /hooks in Codex, trust the ' +
+    'Coplan hooks, then start a new session. `coplan doctor` checks the rest of the wiring.',
   cursor:
     "Cursor has not run Coplan's hooks for this chat yet. Check that the Coplan plugin is enabled, send a message " +
     'in the chat so its hooks fire, then try again. `coplan doctor` checks the rest of the wiring.',

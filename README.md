@@ -733,6 +733,22 @@ headless Chromium with Playwright and the DevTools performance metrics; sizes
 in the context are byte and character counts. Your numbers will differ with
 your machine and your plans, but not by an order of magnitude.
 
+## Troubleshooting
+
+`coplan doctor` (or `/coplan-doctor`) checks the wiring end to end: the
+plugin's files, the daemon, each agent's hooks and the MCP server. It says
+what failed and what to do. Some things it cannot see:
+
+- **Codex: Coplan's tools say "No session is registered yet".** Codex runs a
+  plugin's hooks only after you trust them, and asks again after every
+  Coplan update: `/hooks` then lists them as *New hook - review required* or
+  *Modified since last trusted - review required*. Until then they do not
+  run, so no session reaches Coplan. Open `/hooks` in Codex, trust the
+  Coplan hooks, and start a new session. The doctor cannot detect this:
+  Codex keeps that state internally (a hash of its own making in
+  `~/.codex/config.toml`), and the doctor tests the hooks by calling them
+  itself.
+
 ## Configuration
 
 `~/.claude/cc-harness/config.json`, overridden per repo by
