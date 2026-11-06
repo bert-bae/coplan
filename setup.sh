@@ -46,8 +46,11 @@ else
 fi
 
 echo "Building Coplan with $PNPM: the first build fetches about 115 MB of build-time packages, kept in this clone."
+# node_modules here is only the build's: when pnpm wants it rebuilt (its
+# store moved, say), it may, rather than stop to ask, which it cannot do
+# without a terminal (--yes, or run from an agent).
 # Split on purpose: PNPM is a command and its arguments.
 # shellcheck disable=SC2086
-$PNPM install --frozen-lockfile || die "the build failed; the lines above say why."
+$PNPM install --frozen-lockfile --config.confirm-modules-purge=false || die "the build failed; the lines above say why."
 
 exec node "$ROOT/dist/cli/main.js" setup "$@"
