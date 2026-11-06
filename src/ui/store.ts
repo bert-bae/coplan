@@ -117,7 +117,7 @@ class Store {
     try {
       const { sessions } = await api.sessions();
       this.set({ sessions });
-      const target = readHash() ?? sessions[0]?.sessionId ?? null;
+      const target = readHash() ?? listedSessions(sessions, null)[0]?.sessionId ?? null;
       if (target) await this.selectSession(target, false);
     } catch (err) {
       this.set({ error: describeError(err) });
@@ -535,7 +535,7 @@ class Store {
     if (this.state.sessionId === sessionId) {
       this.set({ sessionId: null, session: null });
       window.location.hash = '';
-      const next = sessions[0]?.sessionId;
+      const next = listedSessions(sessions, null)[0]?.sessionId;
       if (next) await this.selectSession(next);
     }
     this.toast('success', 'Session deleted.');
@@ -691,6 +691,17 @@ function savePrefs(prefs: Record<string, unknown>): void {
 }
 
 export const store = new Store();
+
+/**
+ * The sessions the rail lists: the ones that have used Coplan. Every session
+ * with the plugin registers (its hooks have to, to notice `/coplan`), but one
+ * that never asked for a plan is just someone else's chat. The session on
+ * screen is listed whatever it is (opened by its link, say), so the rail
+ * never loses where you are.
+ */
+export function listedSessions(sessions: SessionSummary[], current: string | null): SessionSummary[] {
+  return sessions.filter((s) => s.engaged || s.sessionId === current);
+}
 
 /* ------------------------------------------------------------------ *
  * React bindings

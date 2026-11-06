@@ -61,6 +61,7 @@ function summary(sessionId: string, repo: string, createdAt: number, updatedAt: 
     link: null,
     openThreads: 0,
     unreadByClaude: 0,
+    engaged: true,
   };
 }
 
@@ -342,6 +343,58 @@ test('a row shows the plan, its progress, and what Claude is on', async () => {
   assert.match(row.textContent ?? '', /unread/);
 });
 
+test('only sessions that used Coplan are listed, and the first of them opens', async () => {
+  // Every session with the plugin registers. One that never asked for a plan
+  // is someone's other chat, newest or not.
+  const now = Date.now();
+  await boot(() => [
+    { ...summary('chat', 'repo', now + 1000), engaged: false },
+    summary('s1', 'repo', now),
+    { ...summary('s2', 'other', now - 1000), engaged: false, waiting: { kind: 'input' as const, text: 'Go?', since: now } },
+    summary('s3', 'other', now - 2000),
+  ]);
+  assert.deepEqual(rowNames(), ['s1 title', 's3 title']);
+  assert.deepEqual(groupNames(), ['repo', 'other'], 'not even a waiting one is lifted in');
+  assert.equal(store.getState().sessionId, 's1', 'the page opens on a listed session');
+
+  await act(async () => {
+    fireEvent.click(screen.getByTitle('Collapse sidebar'));
+  });
+  assert.equal(document.querySelectorAll('.rail-item').length, 2, 'the folded rail holds the same sessions');
+});
+
+test('the session on screen is listed, even before it used Coplan', async () => {
+  // Opened by its link (`/coplan-open`): the rail must not lose where you are.
+  window.location.hash = '#/session/chat';
+  try {
+    const now = Date.now();
+    await boot(() => [summary('s1', 'repo', now), { ...summary('chat', 'repo', now - 1000), engaged: false }]);
+    assert.equal(store.getState().sessionId, 'chat');
+    assert.deepEqual(rowNames(), ['s1 title', 'chat title']);
+  } finally {
+    window.location.hash = '';
+  }
+});
+
+test('with no plans, the rail says how to start one', async () => {
+  await boot(() => [{ ...summary('chat', 'repo', Date.now()), engaged: false }]);
+  assert.deepEqual(rowNames(), []);
+  assert.equal(store.getState().sessionId, null);
+  assert.match(document.querySelector('.sidebar-empty')?.textContent ?? '', /\/coplan/);
+});
+
+test("a row leaves out the folder name its group already shows, but keeps a session's own name", async () => {
+  const now = Date.now();
+  await boot(() => [
+    { ...summary('s1', 'repo', now), title: 'repo', planTitle: 'Cache rewrite' },
+    { ...summary('s2', 'repo', now - 1000), title: 'Cache spike', planTitle: 'Cache rewrite v2' },
+  ]);
+  assert.equal(rowFor('Cache rewrite').querySelector('.session-stage'), null);
+  assert.equal(rowFor('Cache rewrite v2').querySelector('.session-stage')?.textContent, 'Cache spike');
+  // The branch is cut short on the row, so its full name is in the tooltip.
+  assert.match(rowFor('Cache rewrite').querySelector('.session-open')?.getAttribute('title') ?? '', /on main/);
+});
+
 test('a session waiting on the user is lifted to the top, with a way into Claude', async () => {
   const now = Date.now();
   const link = { app: 'claude://claude.ai/code/session_1', web: 'https://claude.ai/code/session_1', via: 'cloud' as const };
@@ -383,6 +436,9 @@ test('a session can be renamed from the rail', async () => {
   });
   const field = document.querySelector('.session-rename') as HTMLInputElement;
   assert.ok(field, 'the row becomes an input');
+  assert.equal(document.activeElement, field, 'with the cursor in it');
+  // The field takes the whole row: no buttons sit over its end.
+  assert.equal(field.closest('.session-row')?.querySelector('.session-actions'), null);
 
   await act(async () => {
     fireEvent.change(field, { target: { value: 'Cache rewrite' } });
@@ -414,6 +470,7 @@ test('abandoning a rename leaves the name alone', async () => {
   });
 
   assert.equal(posts.find((p) => p.route.includes('/title')), undefined, 'nothing was saved');
+  assert.ok(rowFor('s1 title').querySelector('.session-actions'), 'the row actions are back');
   assert.ok(rowNames().some((n) => n.includes('s1 title')), 'the original name is still there');
 });
 

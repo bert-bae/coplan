@@ -87,7 +87,7 @@ links you to its chat.
     </td>
     <td width="50%" valign="top">
       <a href="docs/images/board-dark.png"><img src="docs/images/board-dark.png" alt="The same task board in the dark theme" /></a>
-      <p><strong>Light or dark,</strong> following your system or your choice. One page holds every session: the rail lists them by project, with the ones waiting on you at the top.</p>
+      <p><strong>Light or dark,</strong> following your system or your choice. One page holds every session you plan in: the rail lists them by project, with the ones waiting on you at the top.</p>
     </td>
   </tr>
 </table>
@@ -520,9 +520,9 @@ Claude Code's hooks ([`hooks/hooks.json`](hooks/hooks.json)):
 | Event | Matches | Timeout | What Coplan does with it |
 | --- | --- | --- | --- |
 | `SessionStart` | — | 20 s | Registers the session and labels it with its repository and branch (`git rev-parse`, read-only). If the plugin isn't built, says so once. |
-| `UserPromptSubmit` | — | 10 s | Clears a pending question. Adds to your message the design or build prompt you signed off, once; or, if you changed the plan since Claude last read it, one line saying so ([`promptNotice`](docs/CONFIG.md)). |
+| `UserPromptSubmit` | — | 10 s | Clears a pending question, and lists the session on the page once your message starts with `/coplan`. Adds to your message the design or build prompt you signed off, once; or, if you changed the plan since Claude last read it, one line saying so ([`promptNotice`](docs/CONFIG.md)). |
 | `PreToolUse` | `AskUserQuestion` | 5 s | Shows the question on the page and moves the session to *Waiting on you*. |
-| `PostToolUse` | every tool | 5 s | Clears a question or permission prompt once a tool finishes. A payload over 256 KB is cut to the session id before it is sent. |
+| `PostToolUse` | every tool | 5 s | Clears a question or permission prompt once a tool finishes, and lists the session once the agent loads a Coplan skill. A payload over 256 KB is cut to the session id before it is sent. |
 | `Notification` | — | 5 s | Notices permission and idle prompts. |
 | `Stop` | — | 5 s | Marks the turn finished; if Claude's reply ends on a question, shows it. |
 | `SessionEnd` | — | 5 s | Marks the session ended. |
@@ -542,10 +542,13 @@ the session runs, so *Answer in Claude* can link back to it:
 `CLAUDE_CODE_REMOTE_SESSION_ID`, `CLAUDE_CODE_REMOTE_SDK_URL`,
 `CLAUDE_CODE_BRIDGE_SESSION_ID` and `CLAUDE_CODE_ENTRYPOINT`. It goes to
 `127.0.0.1` only. The daemon keeps the session's id, folder, repository,
-branch, agent and status, and the question it is waiting on — up to six
-questions with their options, each cut to 300 characters, or the last
-paragraph of a reply that ends on a question. Your messages and tool output
-are looked at and dropped; they are never written to disk.
+branch, agent and status, when it first used Coplan, and the question it is
+waiting on — up to six questions with their options, each cut to 300
+characters, or the last paragraph of a reply that ends on a question. Your
+messages and tool output are looked at — a message for whether it starts with
+`/coplan` (or holds `$coplan`), a tool for whether it loaded a Coplan skill —
+and dropped; they are never written to disk. Every session in an agent with
+the plugin registers, but only one that has used Coplan is listed on the page.
 
 ### Slash commands and the CLI
 

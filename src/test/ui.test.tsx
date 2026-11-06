@@ -1117,7 +1117,7 @@ test('the session rail says a plan is being built', async () => {
             {
               sessionId: 's1', agent: 'claude', title: 'repo', planTitle: 'Add a cache', cwd: '/repo', repoName: 'repo', repoRoot: '/repo', branch: 'main',
               status: 'active', createdAt: 1, updatedAt: 1, tasks: { total: 3, done: 1, inProgress: 1, blocked: 0 }, phase: 'building',
-              current: 'Wire into API', waiting: null, surface: 'unknown', link: null, openThreads: 0, unreadByClaude: 0,
+              current: 'Wire into API', waiting: null, surface: 'unknown', link: null, openThreads: 0, unreadByClaude: 0, engaged: true,
             },
           ],
           version: 'test',
@@ -1213,7 +1213,7 @@ test('the session rail names each row\'s agent once there is more than one kind'
   const row = (sessionId: string, agent: SessionState['agent']) => ({
     sessionId, agent, title: sessionId, planTitle: null, cwd: '/repo', repoName: 'repo', repoRoot: '/repo', branch: 'main',
     status: 'idle' as const, createdAt: 1, updatedAt: 1, tasks: { total: 0, done: 0, inProgress: 0, blocked: 0 }, phase: 'planning' as const,
-    current: null, waiting: null, surface: 'unknown' as const, link: null, openThreads: 0, unreadByClaude: 0,
+    current: null, waiting: null, surface: 'unknown' as const, link: null, openThreads: 0, unreadByClaude: 0, engaged: true,
   });
   await boot(makeSession(), (route) => (route.startsWith('/api/sessions') ? { sessions: [row('s1', 'claude'), row('s2', 'codex')], version: 'test' } : undefined));
   const rail = screen.getByRole('navigation', { name: 'Live sessions' });

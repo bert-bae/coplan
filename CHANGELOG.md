@@ -110,6 +110,20 @@
 - CI runs on macOS too, on the oldest supported Node (20.11.0), lints the
   shell scripts, and validates the Claude Code plugin; each release is tagged.
 
+### The session list holds only your plans
+
+- **Only sessions that used Coplan are listed.** Every session with the
+  plugin registers, so the list used to fill with chats that never asked for
+  a plan. A session now joins it once you type `/coplan` (`$coplan` in
+  Codex), the agent loads the skill itself, or it calls a Coplan tool;
+  sessions that already have a plan stay. The session on screen is always
+  listed, so a `/coplan-open` link never strands you.
+- **Row actions no longer sit on the title.** Rename, pin and delete keep a
+  space of their own at the end of a row's first line, on touch screens too,
+  and step aside while you rename. A long branch or folder name is cut short
+  on its line instead of breaking across several, and the folder name is
+  left out when the group header already says it.
+
 ### Build after installing, with pnpm
 
 - The project uses **pnpm**: `pnpm-lock.yaml` replaces `package-lock.json`,

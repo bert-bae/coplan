@@ -70,6 +70,7 @@ export async function ingestHook(event: string, input: HookInput, ctx: IngestCon
     case 'PreToolUse':
       return onPreToolUse(sessionId, input as PreToolUseInput, ctx);
     case 'PostToolUse': {
+      if (loadsCoplan(input as PreToolUseInput)) ctx.store.engage(sessionId);
       // Any tool finishing means Claude is moving again: an answered question,
       // an approved permission. Only write when something actually changes.
       const s = ctx.store.get(sessionId);
@@ -126,13 +127,14 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
   // The user has answered, in Claude, whatever was being waited on.
   const session = ctx.store.update(sessionId, { status: 'active', waiting: null });
   if (!session) return HOOK_NOOP;
+  const typed = String(input.prompt ?? input.user_input ?? '');
+  if (asksForCoplan(typed)) ctx.store.engage(sessionId);
 
   // The user signed something off for this session — the design, to be
   // broken into tasks, or the plan, to be built: their message is what
   // carries the prompt. Not subject to `promptNotice` — signing off was the
   // request to send it. A message that already holds the prompt (they pasted
   // it) is left as it is.
-  const typed = String(input.prompt ?? input.user_input ?? '');
   if (!agentInfo(ctx.agent).promptContext) {
     // An agent whose hooks cannot be relied on to add to a prompt (Cursor)
     // gets the prompt by the user pasting it, or from its next
@@ -155,6 +157,25 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
   if (!ctx.config.promptNotice) return HOOK_NOOP;
   const notice = unreadNotice(session.plan);
   return notice ? additionalContext('UserPromptSubmit', notice) : HOOK_NOOP;
+}
+
+/**
+ * The message starts Coplan: `/coplan` in Claude Code and Cursor (Claude Code
+ * may spell it `/coplan:coplan`, naming the plugin), at the start of the
+ * message as a command is; `$coplan` in Codex, which takes a skill anywhere
+ * in the message. `/coplan-open` and the other commands do not count: they
+ * look at Coplan, they do not plan in it.
+ */
+export function asksForCoplan(prompt: string): boolean {
+  return /^\s*\/(?:coplan:)?coplan(?![\w:/-])|(?:^|\s)\$coplan(?![\w:/-])/.test(prompt);
+}
+
+/** The agent loaded a Coplan skill itself (Claude Code's `Skill` tool), as it
+ *  does when asked to "plan this in Coplan" in so many words. */
+function loadsCoplan(input: PreToolUseInput): boolean {
+  if (input.tool_name !== 'Skill') return false;
+  const name = String(input.tool_input?.['skill'] ?? '');
+  return /^(?:coplan:)?coplan(?:-build)?$/.test(name);
 }
 
 /**

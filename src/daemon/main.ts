@@ -1144,6 +1144,8 @@ function buildRouter(deps: Deps): Router {
       return;
     }
     const id = session.sessionId;
+    // An agent calling Coplan's tools is using Coplan, however it got there.
+    store.engage(id);
     const url = uiUrl(id);
     const reply = (ok: boolean, message: string) => json(ctx.res, 200, { ok, text: message });
 
