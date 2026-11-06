@@ -31,36 +31,39 @@ const exact = new WeakMap<Plan, Map<string, ProposalPreview>>();
 const byContent = new Map<string, ProposalPreview>();
 const MAX_BY_CONTENT = 200;
 
-function contentKey(plan: Plan, p: Proposal): string {
+function contentKey(plan: Plan, p: Proposal, reserved: readonly string[]): string {
   const lock = `${plan.design ? 'd' : ''}${plan.submission ? 's' : ''}`;
   const shape = plan.tasks.map((t) => `${t.id}<${t.parentId ?? ''}<${(t.dependsOn ?? []).join(',')}`).join('|');
-  return `${plan.createdAt}:${plan.revision}:${p.id}:${lock}:${JSON.stringify(proposalTouches(plan, p.ops))}:${shape}`;
+  return `${plan.createdAt}:${plan.revision}:${p.id}:${lock}:${JSON.stringify(proposalTouches(plan, p.ops))}:${shape}:${reserved.join('\0')}`;
 }
 
 /**
  * What accepting `p` would do. `layout`: the plan exactly as it is, boxes'
  * positions included — for the canvas preview. Without it, a preview made
  * for the same content is reused, so a page with many proposals
- * does not redo each one on every drag.
+ * does not redo each one on every drag. `reserved`: the repository's check
+ * names, as the daemon refuses them on accepting — so the preview is the
+ * accept.
  */
-export function previewProposal(plan: Plan, p: Proposal, opts: { layout?: boolean } = {}): ProposalPreview {
+export function previewProposal(plan: Plan, p: Proposal, opts: { layout?: boolean; reserved?: readonly string[] } = {}): ProposalPreview {
+  const reserved = opts.reserved ?? [];
   let forPlan = exact.get(plan);
-  const hit = forPlan?.get(p.id);
+  const hit = forPlan?.get(`${p.id}\0${reserved.join('\0')}`);
   if (hit) return hit;
-  const key = contentKey(plan, p);
+  const key = contentKey(plan, p, reserved);
   if (!opts.layout) {
     const near = byContent.get(key);
     if (near) return near;
   }
-  const result = preview(plan, p);
+  const result = preview(plan, p, reserved);
   if (!forPlan) exact.set(plan, (forPlan = new Map()));
-  forPlan.set(p.id, result);
+  forPlan.set(`${p.id}\0${reserved.join('\0')}`, result);
   if (byContent.size >= MAX_BY_CONTENT) byContent.clear();
   byContent.set(key, result);
   return result;
 }
 
-function preview(plan: Plan, p: Proposal): ProposalPreview {
+function preview(plan: Plan, p: Proposal, reserved: readonly string[]): ProposalPreview {
   const diagrams = plan.diagrams.map((d) => d.id).filter((id) => p.ops.some((op) => touchesDiagram(op, id)));
   const accept = [{ op: 'accept_proposal' as const, id: p.id }];
   const shaped = (after: Plan, changes: { summary: string }[], blocker: string | null): ProposalPreview => ({
@@ -73,7 +76,7 @@ function preview(plan: Plan, p: Proposal): ProposalPreview {
   // is the preview too.
   let blocker: string;
   try {
-    const { plan: after, changes } = applyOps(plan, accept, 'user');
+    const { plan: after, changes } = applyOps(plan, accept, 'user', Date.now(), { reserved });
     return shaped(after, changes, null);
   } catch (err) {
     blocker = err instanceof Error ? err.message : String(err);
@@ -85,7 +88,7 @@ function preview(plan: Plan, p: Proposal): ProposalPreview {
     const trial = structuredClone(plan);
     delete trial.design;
     delete trial.submission;
-    const { plan: after, changes } = applyOps(trial, accept, 'user');
+    const { plan: after, changes } = applyOps(trial, accept, 'user', Date.now(), { reserved });
     return shaped(after, changes, blocker);
   } catch {
     return { after: null, changes: [], blocker, diagrams };

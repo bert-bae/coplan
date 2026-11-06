@@ -142,7 +142,8 @@ When `harness_task_next` says every task is done:
    plan is built once the report is in:
    - **Built** — each top-level task, one line each, with its sub-results.
    - **Branches & PRs** — in stack order, with links.
-   - **Checks** — the final checks and how they came out.
+   - **Checks** — the final checks and how they came out, and every check
+     the user skipped on a task (`harness_task_next` lists them).
    - **Changed from the plan** — anything built differently, and why.
    - **Follow-ups** — what was left out of scope, flaky checks, risks.
 4. Give the user the same summary in chat, shorter, with the links.

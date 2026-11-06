@@ -2028,6 +2028,15 @@ span.board-title:hover { color: inherit; text-decoration: none; }
 .chip.stage-chip.is-refine { background: var(--attention-bg); color: var(--attention-fg); border-color: var(--attention-border); }
 .chip.is-check-ok { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
 .chip.is-check-fail { background: var(--attention-bg); color: var(--attention-fg); border-color: var(--attention-border); }
+.chip.is-skip { background: var(--attention-bg); color: var(--attention-fg); border-color: var(--attention-border); border-style: dashed; }
+.task-checks { display: flex; flex-direction: column; gap: var(--sp-1); }
+.task-checks-list { display: flex; flex-direction: column; gap: 2px; }
+.task-check { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-2); }
+.task-check.is-skipped .mono { text-decoration: line-through; color: var(--text-secondary); }
+.task-check-skip, .task-check-add { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1); }
+.task-check-skip .input, .task-check-add .input { flex: 1 1 140px; min-width: 0; }
+.task-check-optional { display: inline-flex; align-items: center; gap: 4px; }
+.task-check-unknown { margin: 0; }
 .board-chips { margin: 0; display: flex; flex-wrap: wrap; gap: var(--sp-1); }
 .board-chips:empty { display: none; }
 

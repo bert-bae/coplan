@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { store, useAgent, useStore } from '../store.ts';
 import { Markdown } from './Markdown.tsx';
 import { previewProposal, type ProposalPreview } from '../../shared/proposals.ts';
+import { useReservedNames } from './TaskChecks.tsx';
 import type { Plan, Proposal } from '../../shared/types.ts';
 
 /**
@@ -25,7 +26,13 @@ export function ProposalCard({ plan, proposal: p, compact = false }: { plan: Pla
   const agent = useAgent();
   const previewing = useStore((s) => s.proposalPreview);
   // Shared with the canvas preview: one run per proposal per plan.
-  const preview: ProposalPreview = useMemo(() => previewProposal(plan, p), [plan, p]);
+  const reserved = useReservedNames();
+  // Worked out once the repository's check names are known: before, it
+  // would be worked out again the moment they arrive.
+  const preview: ProposalPreview = useMemo(
+    () => (reserved ? previewProposal(plan, p, { reserved }) : { after: null, changes: [], blocker: null, diagrams: [] }),
+    [plan, p, reserved],
+  );
   const blocker = preview.blocker;
   const [rejecting, setRejecting] = useState(false);
   const [note, setNote] = useState('');

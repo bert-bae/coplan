@@ -282,6 +282,34 @@ test('coplan check review matches the change as well as --files: a check for a f
   }
 });
 
+test('coplan check --skip leaves out the checks the user skipped on the task, except at final', () => {
+  const dir = repo({
+    '.coplan/config.json': JSON.stringify({ hooks: { review: ['echo tests', 'echo lint'], final: ['echo tests'] } }),
+  });
+  try {
+    const run = (...args: string[]) => spawnSync(process.execPath, [CLI, 'check', ...args], { cwd: dir, encoding: 'utf8' });
+    const review = run('review', '--skip', 'echo tests', '--list');
+    assert.doesNotMatch(review.stdout, /^echo tests:/m);
+    assert.match(review.stdout, /^echo lint:/m);
+    assert.match(review.stderr, /skipped on this task: echo tests/);
+    assert.match(run('final', '--skip=echo tests', '--list').stdout, /^echo tests:/m, 'the build skips none of its final checks');
+    // A flag left without its value is an error, not quietly left out.
+    for (const [flag, why] of [['--base', /"--base" needs a branch or commit/], ['--skip', /"--skip" needs the name of a check/]] as const) {
+      const bad = run('review', '--files', 'a.ts', flag);
+      assert.equal(bad.status, 2, flag);
+      assert.match(bad.stderr, why);
+    }
+    assert.match(run('review', '--base', '--list').stderr, /"--base" needs a branch or commit/, 'nor is the next flag taken for it');
+    assert.match(run('review', '--files', '--json').stderr, /"--files" needs the files/, '--files takes no flag for a file');
+    assert.doesNotMatch(run('review', '--skip=--odd', '--list').stderr, /needs the name/, 'a name may start with dashes, given with =');
+    const none = run('review', '--skip', 'echo tests', '--skip=echo lint');
+    assert.equal(none.status, 0);
+    assert.match(none.stdout, /Every review hook that applies was skipped on this task \(echo tests, echo lint\): nothing to run\./);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a config coplan check cannot read fails, rather than passing with nothing run', () => {
   const dir = repo({ '.coplan/config.json': '{ "hooks": { "review": ["npm test"' });
   try {

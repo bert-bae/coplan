@@ -1195,6 +1195,88 @@ test('the done check follows the diff: a review check for a file the task change
 });
 
 
+test("a task's checks: a skip the user set takes the check out of its gate, and a check it adds is part of it", async () => {
+  const id = 'task-checks-session';
+  const dir = path.join(repo, '.coplan');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, 'config.json'),
+    JSON.stringify({ hooks: { review: [{ name: 'tests', run: 'npm test' }] }, iric: { review: 'skip', parallel: 2, maxRounds: 3 } }),
+  );
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  try {
+    await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+    await mcpFor(id, 'publish', PLAN);
+    assert.deepEqual((await call<{ project: { checks: Record<string, string[]> } }>(`/api/session/${id}/project`)).project.checks['review'], ['tests']);
+
+    // The agent cannot skip the tests on its task; the user can.
+    const sneak = await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't2', skipChecks: ['tests'] }] });
+    assert.equal(sneak['ok'], false);
+    assert.match(String(sneak['text']), /Only the user skips/);
+    const skipped = await opsOn(id, [{ op: 'upsert_task', id: 't2', skipChecks: [{ name: 'tests', reason: 'docs only' }] }]);
+    assert.equal(skipped.error, undefined, skipped.error);
+    await mcpFor(id, 'read', {});
+    const skippedBrief = String((await mcpFor(id, 'brief', { task_id: 't2' }))['text']);
+    assert.match(skippedBrief, /Skipped on this task by the user:\*\* tests \(docs only\)/);
+    assert.doesNotMatch(skippedBrief, /--base/, 'no review check is limited by paths: git is not asked');
+    await task({ task_id: 't2', stage: 'implement' });
+    await task({ task_id: 't2', stage: 'review' });
+    const done = await task({ task_id: 't2', status: 'done', note: 'docs written' });
+    assert.equal(done['ok'], true, `a skipped check does not gate it: ${String(done['text'])}`);
+
+    // A check the agent adds gates its task like the repository's.
+    const added = await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't3', addChecks: [{ name: 'db', run: 'npm run db:check' }] }] });
+    assert.equal(added['ok'], true, String(added['text']));
+    await task({ task_id: 't3', stage: 'implement' });
+    await task({ task_id: 't3', stage: 'review', checks: [{ name: 'tests', ok: true }] });
+    const held = await task({ task_id: 't3', status: 'done', note: 'x' });
+    assert.equal(held['ok'], false);
+    assert.match(String(held['text']), /the review checks db were never reported/);
+    await task({ task_id: 't3', checks: [{ name: 'db', ok: false, note: 'drift' }] });
+    assert.match(String((await task({ task_id: 't3', status: 'done', note: 'x' }))['text']), /its last checks failed \(db: drift\)/);
+    await task({ task_id: 't3', checks: [{ name: 'db', ok: true }] });
+    assert.equal((await task({ task_id: 't3', status: 'done', note: 'done' }))['ok'], true);
+
+    // An own check cannot borrow the name of one of the repository's — by
+    // an edit, a proposal or from the page — …
+    const shadow = [{ op: 'upsert_task', id: 't4', addChecks: [{ name: 'tests', run: 'true', optional: true }] }];
+    for (const res of [await mcpFor(id, 'edit', { ops: shadow }), await mcpFor(id, 'propose', { title: 'x', reason: 'y', ops: shadow })]) {
+      assert.equal(res['ok'], false);
+      assert.match(String(res['text']), /"tests" is the name of one of the repository's checks/);
+    }
+    assert.match((await opsOn(id, shadow)).error ?? '', /"tests" is the name of one of the repository's checks/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("… and should the repository take a task's check's name later, the repository's stays required", async () => {
+  const id = 'shadow-session';
+  const dir = path.join(repo, '.coplan');
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  try {
+    await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+    await mcpFor(id, 'publish', PLAN);
+    const added = await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't2', addChecks: [{ name: 'tests', run: 'true', optional: true }] }] });
+    assert.equal(added['ok'], true, String(added['text']));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ hooks: { review: [{ name: 'tests', run: 'npm test' }] }, iric: { review: 'skip' } }));
+    await task({ task_id: 't2', stage: 'implement' });
+    await task({ task_id: 't2', stage: 'review', checks: [{ name: 'tests', ok: false, note: '3 failing' }] });
+    const held = await task({ task_id: 't2', status: 'done', note: 'x' });
+    assert.equal(held['ok'], false, 'an optional check of its own does not make the failing tests optional');
+    assert.match(String(held['text']), /its last checks failed \(tests: 3 failing\)/);
+    // The check it had before the repository took the name can be restated,
+    // so the task can still gain checks.
+    const more = await mcpFor(id, 'edit', {
+      ops: [{ op: 'upsert_task', id: 't2', addChecks: [{ name: 'tests', run: 'true', optional: true }, { name: 'db', run: 'npm run db:check' }] }],
+    });
+    assert.equal(more['ok'], true, String(more['text']));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('where git cannot read what a task changed, the done check says so, rather than blame files it never touched', async () => {
   const id = 'diff-unread-session';
   const dir = path.join(repo, '.coplan');

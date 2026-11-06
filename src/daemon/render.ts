@@ -32,7 +32,10 @@ import {
   buildSteps,
   hasDependencies,
   hasSubtasks,
+  ownCheckWords,
   readinessOf,
+  skipWords,
+  skippedChecks,
   waitingOn,
 } from '../shared/build.ts';
 import { GLOBAL_PROJECT_FILE, HOOK_STAGES, INSTRUCTIONS_DIR, PROJECT_CONFIG_PATH, emptyProjectConfig, hasHooks, hookCommand, type InstructionPoint, type ProjectConfig } from '../shared/project.ts';
@@ -174,6 +177,8 @@ function renderDocument(plan: Plan, opts: DocumentOptions = {}): string[] {
     out.push('', '## Build report', plan.report.text.trim());
     const checks = plan.report.checks ?? [];
     if (checks.length) out.push('', `Final checks: ${checks.map((c) => `${c.name} ${c.ok ? '✓' : `✗${c.note ? ` (${c.note})` : ''}`}`).join(', ')}`);
+    const skipped = skippedChecks(plan);
+    if (skipped.length) out.push('', `Checks skipped by the user: ${skipped.map(({ task, skips }) => `${task.id} "${task.title}": ${skipWords(skips)}`).join('; ')}`);
   }
 
   const open = plan.threads.filter((t) => !t.resolved);
@@ -202,6 +207,18 @@ function renderTasks(plan: Plan, opts: { attribution?: boolean; details?: boolea
     const rev = opts.revs ? ` · rev ${task.rev ?? 1}` : '';
     out.push(`${pad}- ${STATUS_MARK[task.status]} ${task.id} ${task.title}${taskFacts(plan, task, tracking)}${by}${note}${rev}`);
     if (task.files?.length) out.push(`${pad}  files: ${task.files.join(', ')}`);
+    if (task.skipChecks?.length) {
+      // A skip holds only on a task that is built: one left on a task since
+      // given subtasks is said as what it is, so it is not taken for a rule.
+      out.push(
+        hasSubtasks(plan, task.id)
+          ? `${pad}  a skip left from before it had subtasks, which gates nothing: ${skipWords(task.skipChecks)}`
+          : `${pad}  checks skipped by the user: ${skipWords(task.skipChecks)}`,
+      );
+    }
+    if (task.addChecks?.length) {
+      out.push(`${pad}  own checks: ${task.addChecks.map(ownCheckWords).join('; ')}`);
+    }
     if (opts.details !== false && task.detail) for (const line of task.detail.trim().split('\n')) out.push(`${pad}  ${line}`);
   }
   return out;
@@ -775,6 +792,11 @@ function taskChanges(base: PlanBaseline, plan: Plan, ids: Set<string>, withText:
       facts.push(`branch ${was.branch ? `\`${was.branch}\`` : 'inherited'} → ${now.branch ? `\`${now.branch}\`` : 'inherited'}`);
     }
     if ((was.review ?? '') !== (now.review ?? '')) facts.push(`review ${was.review ?? 'default'} → ${now.review ?? 'default'}`);
+    // A skip changes what gates the task: said by name, with the reason.
+    const skips = (t: BaseTask) => skipWords(t.skipChecks ?? []);
+    if (skips(was) !== skips(now)) facts.push(`checks skipped now: ${skips(now) || 'none'} (was ${skips(was) || 'none'})`);
+    const own = (t: BaseTask) => (t.addChecks ?? []).map(ownCheckWords).join(', ');
+    if (own(was) !== own(now)) facts.push(`own checks now: ${own(now) || 'none'}`);
     if (!facts.length) continue;
     out.push(`Changed ${now.id} "${now.title}": ${facts.join('; ')}.`);
     if (withText && (was.detail ?? '').trim() !== (now.detail ?? '').trim() && now.detail?.trim()) out.push('  Detail now:', ...indent(now.detail, 4));

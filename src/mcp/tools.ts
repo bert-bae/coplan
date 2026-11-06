@@ -77,6 +77,29 @@ const DIAGRAM = {
 
 const REVIEW = { type: 'string', enum: ['subagent', 'self', 'user', 'skip'] };
 
+/** A check one task adds for itself. */
+const TASK_CHECK = {
+  type: 'object',
+  properties: {
+    name: { type: 'string', description: 'What it is called on the board, up to 60 characters.' },
+    run: { type: 'string', description: 'The shell command, run from the repository root.' },
+    stage: { type: 'string', enum: ['implement', 'review'], description: 'When it runs. Default "review", where it gates the task.' },
+    optional: { type: 'boolean', description: 'A failure is reported but does not hold the task back.' },
+    timeout: { type: 'integer', minimum: 1, maximum: 3600, description: 'Seconds before it is stopped.' },
+    cwd: { type: 'string', description: 'Where it runs, inside the repository.' },
+  },
+  required: ['name', 'run'],
+  additionalProperties: false,
+};
+
+const ADD_CHECKS = {
+  type: 'array',
+  items: TASK_CHECK,
+  description:
+    "Checks of the task's own, on top of the repository's (a migration's `pnpm db:check`): required unless optional. " +
+    'You can add one, never remove or change one the task has: only the user does that.',
+};
+
 /** What a task says about how it is built: what it waits on, where it lands,
  *  how it is reviewed, which boxes it builds. */
 const BUILD_FIELDS: Record<string, unknown> = {
@@ -92,6 +115,7 @@ const BUILD_FIELDS: Record<string, unknown> = {
     items: { type: 'string' },
     description: 'Boxes it builds: node ids (or "diagramId/nodeId"). Given, it replaces the boxes the task built before; [] unlinks it.',
   },
+  addChecks: ADD_CHECKS,
 };
 
 /** Nested task schema, a few levels deep — deep enough for any real breakdown. */
@@ -174,6 +198,14 @@ const OP_PROPERTIES: Record<string, unknown> = {
   branch: { type: 'string', description: 'upsert_task: "" clears it.' },
   review: { type: 'string', enum: [...REVIEW.enum, ''], description: 'upsert_task: "" clears it.' },
   builds: { ...STR_LIST, description: 'upsert_task: the boxes it builds now, as node ids or "diagramId/nodeId" (replaces its links; [] unlinks it).' },
+  addChecks: { ...ADD_CHECKS, description: `upsert_task: the whole list of the task's own checks. ${ADD_CHECKS.description}` },
+  skipChecks: {
+    type: 'array',
+    items: { type: 'object', properties: { name: { type: 'string' }, reason: { type: 'string' } }, required: ['name'] },
+    description:
+      "upsert_task: the repository's checks skipped on the task, by name, with why. The user's alone: set by you it is " +
+      'refused — put it in a harness_plan_propose for the user to accept.',
+  },
   threadId: { type: 'string', description: 'reply / resolve: the comment thread.' },
   text: { type: 'string', description: 'reply: your reply. report: the build report. Markdown.' },
   checks: {
@@ -282,7 +314,7 @@ export const TOOLS: ToolDef[] = [
       '{id?, title?, body?, index?}; upsert_diagram {id?, title?, nodes?, edges?, direction?, caption?, index?} ' +
       '(nodes/edges replace the current ones; a box you keep keeps its position, detail, description and notes, and an ' +
       'arrow between the same two boxes keeps its label, dashed and arrows, unless you give them); upsert_task ' +
-      '{id?, parentId?, index?, title?, detail?, files?, note?, dependsOn?, branch?, review?, builds?} ' +
+      '{id?, parentId?, index?, title?, detail?, files?, note?, dependsOn?, branch?, review?, builds?, addChecks?} ' +
       '(omit id to add; parentId makes it a subtask); move_task {id, parentId, index}; move_section {id, index}; ' +
       'move_diagram {id, index}; one box or arrow without restating the rest — upsert_node {diagramId, id, label?, ' +
       'kind?, detail?, description?, notes?, taskIds?} (only the fields you give change; a new box needs a label), ' +
@@ -328,7 +360,9 @@ export const TOOLS: ToolDef[] = [
       'like). Use it when you audit the plan and find something the user should decide — a design flaw, a missing ' +
       'part, a task split — and when the plan is confirmed or submitted, for the changes it no longer lets you make. ' +
       'Nothing changes until they answer; you hear it the next time you read the plan. It is refused if it would ' +
-      'not apply to the plan as it is, and goes out of date if what it changes moves first. ' +
+      'not apply to the plan as it is, and goes out of date if what it changes moves first. Skipping one of the ' +
+      "repository's checks on a task is only ever proposed: upsert_task {id, skipChecks: [{name, reason}]} (a docs-only " +
+      'task skipping the tests); during a build it may change the checks of a task not yet done. ' +
       'Example: {title: "Make the cache write-through", reason: "Reads after a write see stale data for up to the TTL.", ' +
       'ops: [{op: "upsert_node", diagramId: "d1", id: "cache", description: "Write-through: every write updates it."}]}.',
     inputSchema: {

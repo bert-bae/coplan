@@ -493,3 +493,75 @@ export const REVIEW_WORDS: Record<ReviewMode, string> = {
   user: 'the user, before it is marked done',
   skip: 'checks only, no review',
 };
+
+/**
+ * The repository's checks the user skipped, task by task: what the build
+ * report has to say, so a gate taken away is never silent. Dropped tasks
+ * built nothing, so they skipped nothing.
+ */
+export function skippedChecks(plan: Tasks): { task: Task; skips: NonNullable<Task['skipChecks']> }[] {
+  // Only a task that is built skips anything: a skip left on a task that
+  // has since been given subtasks gates nothing, so it is not reported.
+  return leafTasks(plan)
+    .filter((t) => t.status !== 'dropped' && t.skipChecks?.length)
+    .map((task) => ({ task, skips: task.skipChecks! }));
+}
+
+/**
+ * The checks a task is held to beyond the repository's. Its own checks and
+ * its ancestors' — a check added to a parent holds every subtask under it,
+ * so giving a task subtasks never drops one. Its skips are its own only,
+ * and only while it has no subtasks: a skip is set on work that is built,
+ * and new work under it does not inherit one.
+ */
+export function effectiveChecks(plan: Tasks, task: Task): Pick<Task, 'addChecks' | 'skipChecks'> {
+  const skips = hasSubtasks(plan, task.id) ? [] : (task.skipChecks ?? []);
+  const skipped = new Set(skips.map((s) => s.name));
+  // What is set above holds, and the task's own cannot stand in for it: a
+  // check of its own by the same name — optional, or running `true` — would
+  // weaken the user's. (A new one is refused; one from before gives way.)
+  // An inherited check the user can skip on the task like one of the
+  // repository's; its own they remove instead.
+  // Where one from before shares a name, the required one holds.
+  const inherited = inheritedChecks(plan, task);
+  const own = task.addChecks ?? [];
+  const add: NonNullable<Task['addChecks']> = [
+    ...inherited
+      .filter(({ check }) => !skipped.has(check.name))
+      .map(({ check }) => {
+        const mine = own.find((c) => c.name === check.name);
+        return mine && check.optional && !mine.optional ? mine : check;
+      }),
+    // An own check of an inherited name the user skipped still holds: the
+    // skip was of the one above.
+    ...own.filter((c) => !inherited.some((i) => i.check.name === c.name && !skipped.has(c.name))),
+  ];
+  return { ...(add.length ? { addChecks: add } : {}), ...(skips.length ? { skipChecks: skips } : {}) };
+}
+
+/** The checks a task holds from its ancestors, nearest first, each with the
+ *  task it is set on: the nearest of a name holds. */
+export function inheritedChecks(plan: Tasks, task: Task): { check: NonNullable<Task['addChecks']>[number]; from: Task }[] {
+  const out: { check: NonNullable<Task['addChecks']>[number]; from: Task }[] = [];
+  const names = new Set<string>();
+  for (const from of ancestorsOf(plan, task)) {
+    for (const check of from.addChecks ?? []) {
+      if (names.has(check.name)) continue;
+      names.add(check.name);
+      out.push({ check, from });
+    }
+  }
+  return out;
+}
+
+/** "tests (docs only), lint" */
+export function skipWords(skips: readonly { name: string; reason?: string }[]): string {
+  return skips.map((s) => `${s.name}${s.reason ? ` (${s.reason})` : ''}`).join(', ');
+}
+
+/** "db `pnpm db:check` (review, optional, in packages/api, 900s)": all of
+ *  it, so whoever restates the check can restate it as it is. */
+export function ownCheckWords(c: Pick<NonNullable<Task['addChecks']>[number], 'name' | 'run' | 'stage' | 'optional' | 'cwd' | 'timeout'>): string {
+  const facts = [c.stage, c.optional ? 'optional' : '', c.cwd ? `in ${c.cwd}` : '', c.timeout ? `${c.timeout}s` : ''].filter(Boolean);
+  return `${c.name} \`${c.run}\` (${facts.join(', ')})`;
+}

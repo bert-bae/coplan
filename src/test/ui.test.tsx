@@ -588,6 +588,102 @@ test('a subtask is added under its parent', async () => {
   assert.deepEqual(opsSent()[0], { op: 'upsert_task', parentId: 't3', title: 'Feature flag' });
 });
 
+test("a task's details skip one of the repository's checks with a reason, and the outline says it is skipped", async () => {
+  const project = { file: '/repo/.coplan/config.json', defaults: {}, checks: { implement: ['typecheck'], review: ['tests'], final: ['build'] }, errors: [], planCheck: {} };
+  await boot(makeSession(), (route) => (route.endsWith('/project') ? { project } : undefined));
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Details of Wire into API'));
+  });
+  const list = await screen.findByRole('list', { name: "The repository's checks for Wire into API" });
+  assert.deepEqual([...list.querySelectorAll('.mono')].map((n) => n.textContent), ['typecheck', 'tests'], 'implement and review; the final checks are the build’s');
+  await act(async () => {
+    fireEvent.click(within(list).getAllByRole('button', { name: 'Skip on this task' })[1]!);
+  });
+  await act(async () => {
+    fireEvent.change(screen.getByLabelText('Why skip tests'), { target: { value: 'docs only' } });
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
+  });
+  const sent = opsSent().at(-1)!;
+  assert.deepEqual({ ...sent, expect: undefined }, { op: 'upsert_task', id: 't3', skipChecks: [{ name: 'tests', reason: 'docs only' }], expect: undefined });
+
+  // Once the daemon has it, the row says so, and the task's own checks are listed.
+  const plan = structuredClone(store.getState().session!.plan!);
+  const wire = plan.tasks.find((t) => t.id === 't3')!;
+  wire.skipChecks = [{ name: 'tests', reason: 'docs only', at: 1 }];
+  wire.addChecks = [{ name: 'db', run: 'pnpm db:check', stage: 'review', by: 'claude' }];
+  await act(async () => store.apply({ type: 'snapshot', session: makeSession(plan) }));
+  const chip = document.querySelector('.chip.is-skip');
+  assert.equal(chip?.textContent, 'skips tests');
+  assert.match(chip?.getAttribute('title') ?? '', /tests \(docs only\)/);
+  assert.match(screen.getByRole('list', { name: "Checks of Wire into API's own" }).textContent ?? '', /db.*pnpm db:check.*review · added by Claude/);
+
+  // A second skip: the one it has goes back as the op takes it, without
+  // the daemon's own fields, and a reason typed and cancelled is not reused.
+  const repoList = screen.getByRole('list', { name: "The repository's checks for Wire into API" });
+  await act(async () => {
+    fireEvent.click(within(repoList).getByRole('button', { name: 'Skip on this task' }));
+  });
+  await act(async () => {
+    fireEvent.change(screen.getByLabelText('Why skip typecheck'), { target: { value: 'stale reason' } });
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  });
+  await act(async () => {
+    fireEvent.click(within(repoList).getByRole('button', { name: 'Skip on this task' }));
+  });
+  assert.equal((screen.getByLabelText('Why skip typecheck') as HTMLInputElement).value, '');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
+  });
+  assert.deepEqual(opsSent().at(-1)!['skipChecks'], [{ name: 'tests', reason: 'docs only' }, { name: 'typecheck' }]);
+});
+
+test("a subtask lists the checks it holds from above, to skip; the parent lists its own, to remove", async () => {
+  const project = { file: '/repo/.coplan/config.json', defaults: {}, checks: { implement: [], review: ['tests'], final: [] }, errors: [], planCheck: {} };
+  const plan = makePlan();
+  plan.tasks.find((t) => t.id === 'storage')!.addChecks = [{ name: 'db', run: 'pnpm db:check', stage: 'review', by: 'claude' }];
+  await boot(makeSession(plan), (route) => (route.endsWith('/project') ? { project } : undefined));
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Details of Invalidation'));
+  });
+  const list = await screen.findByRole('list', { name: "The repository's checks for Invalidation" });
+  assert.match(list.textContent ?? '', /db\s*from "Storage layer"/);
+  await act(async () => {
+    fireEvent.click(within(list).getAllByRole('button', { name: 'Skip on this task' })[1]!);
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
+  });
+  assert.deepEqual(opsSent().at(-1)!['skipChecks'], [{ name: 'db' }]);
+
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Details of Storage layer'));
+  });
+  const own = screen.getByRole('list', { name: "Checks of Storage layer's own" });
+  // A skip left on it from before it had subtasks gates nothing: no chip says it does.
+  const parentPlan = structuredClone(store.getState().session!.plan!);
+  parentPlan.tasks.find((t) => t.id === 'storage')!.skipChecks = [{ name: 'tests', at: 1 }];
+  await act(async () => store.apply({ type: 'snapshot', session: makeSession(parentPlan) }));
+  assert.equal(document.querySelector('.task-line .chip.is-skip'), null);
+  // … and its details say what it is, and clear it.
+  const stale = document.querySelector('.task-check-unknown') as HTMLElement;
+  assert.match(stale.textContent ?? '', /A skip left from before it had subtasks gates nothing: tests/);
+  await act(async () => {
+    fireEvent.click(within(stale).getByRole('button', { name: 'Remove' }));
+  });
+  assert.deepEqual(opsSent().at(-1)!['skipChecks'], []);
+  assert.equal(screen.queryByRole('list', { name: "The repository's checks for Storage layer" }), null, 'nothing to skip on a parent');
+  await act(async () => {
+    fireEvent.click(within(own).getByRole('button', { name: 'Remove' }));
+  });
+  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 'storage', addChecks: [], expect: opsSent().at(-1)!['expect'] });
+});
+
 test('the board puts each leaf task in its status column', async () => {
   await boot();
   await openTab('Tasks');

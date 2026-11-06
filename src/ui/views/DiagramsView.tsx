@@ -12,6 +12,7 @@ import { diagramToMarkdown } from '../../shared/architecture.ts';
 import { NODE_KINDS, type Diagram, type DiagramEdgeInput, type DiagramNodeInput, type Plan, type Proposal } from '../../shared/types.ts';
 import { diagramDiff, previewDiagram, previewProposal } from '../../shared/proposals.ts';
 import { ProposalCard } from '../components/Proposals.tsx';
+import { useReservedNames } from '../components/TaskChecks.tsx';
 
 /** Starting points for a new diagram. */
 const TEMPLATES: { label: string; title: string; nodes: DiagramNodeInput[]; edges: DiagramEdgeInput[] }[] = [
@@ -58,7 +59,8 @@ export function DiagramsView() {
   const sessionId = useStore((s) => s.sessionId);
   const previewId = useStore((s) => s.proposalPreview);
   const proposal = plan?.proposals?.find((p) => p.id === previewId && p.status === 'open') ?? null;
-  const preview = useMemo(() => (plan && proposal ? previewProposal(plan, proposal, { layout: true }) : null), [plan, proposal]);
+  const reserved = useReservedNames();
+  const preview = useMemo(() => (plan && proposal && reserved ? previewProposal(plan, proposal, { layout: true, reserved }) : null), [plan, proposal, reserved]);
   if (!plan) return null;
   if (proposal && preview?.after) return <ProposalPreviewView plan={plan} proposal={proposal} after={preview.after} chosen={chosen} />;
   const diagram = plan.diagrams.find((d) => d.id === chosen) ?? plan.diagrams[0] ?? null;

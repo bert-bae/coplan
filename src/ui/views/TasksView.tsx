@@ -9,6 +9,7 @@ import { EmptyState } from '../components/primitives.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { classNames } from '../lib/format.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
+import { CheckChips, TaskChecks } from '../components/TaskChecks.tsx';
 import { childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
 import { DEFAULT_BUILD_SETTINGS, SESSION_BRANCH, roundVerdict, stackStatus, type StackEntry, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
 import { REVIEW_MODES, TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type ReviewMode, type Task, type TaskStatus } from '../../shared/types.ts';
@@ -510,6 +511,7 @@ function TaskRow(props: {
             </span>
           )}
           {task.review && <span className="chip" title="How this task is reviewed">review: {REVIEW_LABEL[task.review].toLowerCase()}</span>}
+          <CheckChips plan={plan} task={task} />
           {props.tracking && !kids.length && <ReadinessChip plan={plan} task={task} />}
           {parts.map(({ d, n }) => (
             <button
@@ -635,6 +637,10 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
       <div className="field-row">
         <span className="field-label">Review</span>
         <ReviewPicker task={task} />
+      </div>
+      <div className="field-col">
+        <span className="field-label">Checks</span>
+        <TaskChecks plan={plan} task={task} rev={revOf(task)} />
       </div>
       <div className="task-detail-foot">
         <span className="muted">
@@ -978,23 +984,21 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
     path.unshift(cursor.title);
     cursor = cursor.parentId ? plan.tasks.find((t) => t.id === cursor!.parentId) : undefined;
   }
-  const more = Boolean(task.detail?.trim() || task.files?.length);
   return (
     <Focusable kind="task" id={task.id} as="article" className={classNames('board-card', 'is-tracked', `is-${task.status}`, arrived && 'is-arrived')}>
       {path.length > 0 && <p className="board-path">{path.join(' › ')}</p>}
       <p className="board-title-row">
         {task.status === 'in_progress' && <span className="working-dot" title={`${agent.name} is on it`} aria-label={`${agent.name} is on it`} />}
-        {more ? (
-          <button type="button" className="board-title" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-            {task.title}
-          </button>
-        ) : (
-          <span className="board-title">{task.title}</span>
-        )}
+        {/* Open, a card shows its detail and files, and its checks: where
+            the user skips one, or adds one, while it is built. */}
+        <button type="button" className="board-title" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+          {task.title}
+        </button>
       </p>
       {task.note && <p className="board-note">{task.note}</p>}
       <p className="board-chips">
         <IricBadges task={task} />
+        <CheckChips plan={plan} task={task} />
         {task.status === 'todo' && <ReadinessChip plan={plan} task={task} />}
         {effectiveBranch(plan, task) && <span className="chip is-branch">⎇ {effectiveBranch(plan, task)}</span>}
       </p>
@@ -1002,6 +1006,7 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
         <div className="board-more">
           {task.detail?.trim() && <Markdown source={task.detail} />}
           {task.files?.length ? <p className="board-files mono">{task.files.join(', ')}</p> : null}
+          <TaskChecks plan={plan} task={task} rev={revOf(task)} />
         </div>
       )}
       <ReviewHistory task={task} />
@@ -1099,9 +1104,10 @@ function BoardCard({ plan, task }: { plan: Plan; task: Task }) {
         {task.title}
       </button>
       {task.note && <p className="board-note">{task.note}</p>}
-      {planPhase(plan) !== 'planning' && task.status === 'todo' && (
+      {(task.skipChecks?.length || task.addChecks?.length || (planPhase(plan) !== 'planning' && task.status === 'todo')) && (
         <p className="board-chips">
-          <ReadinessChip plan={plan} task={task} />
+          <CheckChips plan={plan} task={task} />
+          {planPhase(plan) !== 'planning' && task.status === 'todo' && <ReadinessChip plan={plan} task={task} />}
         </p>
       )}
       <footer className="board-foot">

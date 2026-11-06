@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import { api, eventsUrl, Unauthorized } from './lib/api.ts';
+import { api, eventsUrl, Unauthorized, type ProjectSummary } from './lib/api.ts';
 import { isLocked } from '../shared/plan.ts';
 import { agentInfo, type AgentInfo } from '../shared/agents.ts';
 import type { BuildSettings, BuildTarget, CleanupGroupId, Plan, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport } from '../shared/types.ts';
@@ -136,6 +136,8 @@ class Store {
    * ---------------------------------------------------------------- */
 
   async init(): Promise<void> {
+    // A page starting afresh asks the daemon afresh.
+    this.projects.clear();
     // The token was already taken out of the address bar, by `lib/api.ts`.
     try {
       const { sessions } = await api.sessions();
@@ -651,6 +653,28 @@ class Store {
     }
     const fixed = (e: string) => !errors.includes(e) && files.some((f) => e.startsWith(f));
     writeList(SEEN_CONFIG_ERRORS_KEY, [...errors, ...seen.filter((e) => !errors.includes(e) && !fixed(e))]);
+  }
+
+  private projects = new Map<string, { at: number; pending: Promise<ProjectSummary | null> }>();
+
+  /**
+   * The repository's checks for a session: one request however many task
+   * panels and cards ask, read again after half a minute — so an edit to
+   * .coplan/config.json shows — and never remembered when it failed.
+   */
+  project(sessionId: string): Promise<ProjectSummary | null> {
+    const hit = this.projects.get(sessionId);
+    if (hit && Date.now() - hit.at < 30_000) return hit.pending;
+    const pending = api.project(sessionId).then(
+      (r) => r.project ?? null,
+      () => {
+        this.projects.delete(sessionId);
+        return null;
+      },
+    );
+    if (this.projects.size > 50) this.projects.clear();
+    this.projects.set(sessionId, { at: Date.now(), pending });
+    return pending;
   }
 
   toast(kind: Toast['kind'], text: string): void {

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
-import type { BuildSettings } from './types.ts';
+import type { BuildSettings, Task } from './types.ts';
 import { DEFAULT_BUILD_SETTINGS, MAX_PARALLEL, MAX_ROUNDS, cleanSettings } from './build.ts';
 import { REVIEW_MODES } from './types.ts';
 import { parseJsonc } from './jsonc.ts';
@@ -580,6 +580,28 @@ export function nameFor(run: string): string {
  */
 export function hooksFor(config: ProjectConfig, stage: HookStage, files?: readonly string[]): CheckHook[] {
   return config.hooks[stage].filter((h) => !h.paths?.length || !files?.length || files.some((f) => pathsMatch(h.paths!, f)));
+}
+
+/**
+ * The hooks of one stage for one task: the repository's that apply to its
+ * files, less the ones the user skipped on it, plus the task's own checks
+ * for that stage. `checks` is the task's as it is held to them
+ * (`effectiveChecks`: its ancestors' own checks too).
+ */
+export function taskHooks(
+  config: ProjectConfig,
+  stage: HookStage,
+  files: readonly string[] | undefined,
+  checks: Pick<Task, 'addChecks' | 'skipChecks'> | undefined,
+): CheckHook[] {
+  const repo = hooksFor(config, stage, files);
+  // The build's final checks are the repository's: a task skips none of them.
+  if (stage === 'final') return repo;
+  const skips = new Set((checks?.skipChecks ?? []).map((s) => s.name));
+  const own = (checks?.addChecks ?? [])
+    .filter((c) => c.stage === stage)
+    .map(({ name, run, optional, timeout, cwd }): CheckHook => ({ name, run, ...(optional ? { optional } : {}), ...(timeout ? { timeout } : {}), ...(cwd ? { cwd } : {}) }));
+  return [...repo.filter((h) => !skips.has(h.name)), ...own];
 }
 
 /** A file is in a hook's `paths` when a glob matches it and no `!glob`

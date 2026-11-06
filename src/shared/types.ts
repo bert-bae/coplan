@@ -230,9 +230,47 @@ export interface Task {
   /** Each review's verdict, newest last: who gave it, in which round, under
    *  which review mode. Done needs a pass for the current round. */
   reviews?: ReviewRecord[];
+  /** Checks of its own, on top of the repository's: required unless
+   *  `optional`. Either side adds one; only the user removes or changes one. */
+  addChecks?: TaskCheck[];
+  /** The repository's checks the user skipped on this task, by name: they
+   *  do not gate it. Only the user sets these — in Coplan, or by accepting
+   *  a proposal — never the agent building the task. */
+  skipChecks?: CheckSkip[];
   createdAt: number;
   updatedAt: number;
   createdBy: Author;
+}
+
+/** The stages a task's own check can run at; `final` is the build's. */
+export const TASK_CHECK_STAGES = ['implement', 'review'] as const;
+export type TaskCheckStage = (typeof TASK_CHECK_STAGES)[number];
+
+/** A check one task adds for itself: `pnpm db:check` on a migration. */
+export interface TaskCheck {
+  name: string;
+  /** A shell command, run from the repository root. */
+  run: string;
+  /** When it runs. Default `review`, where it gates the task. */
+  stage: TaskCheckStage;
+  /** A failure is reported but does not hold the task back. */
+  optional?: boolean;
+  /** Seconds before it is stopped. */
+  timeout?: number;
+  /** Where it runs, from the repository root. */
+  cwd?: string;
+  /** Who added it. */
+  by: Author;
+}
+
+/** One of the repository's checks, skipped on one task by the user. */
+export interface CheckSkip {
+  /** The check's name, as `.coplan/config.json` names it. */
+  name: string;
+  /** Why: "docs only". Shown wherever the skip is. */
+  reason?: string;
+  /** When it was skipped. */
+  at: number;
 }
 
 /** What a comment is attached to. `plan` targets the plan as a whole; a
@@ -446,7 +484,10 @@ export interface PlanBaseline {
   summary: string;
   sections: Pick<Section, 'id' | 'title' | 'body'>[];
   diagrams: (Pick<Diagram, 'id' | 'title' | 'caption' | 'edges'> & { nodes: Omit<DiagramNode, 'x' | 'y'>[] })[];
-  tasks: Pick<Task, 'id' | 'parentId' | 'order' | 'title' | 'detail' | 'status' | 'files' | 'note' | 'dependsOn' | 'branch' | 'review'>[];
+  tasks: (Pick<Task, 'id' | 'parentId' | 'order' | 'title' | 'detail' | 'status' | 'files' | 'note' | 'dependsOn' | 'branch' | 'review'> & {
+    addChecks?: Omit<TaskCheck, 'by'>[];
+    skipChecks?: Omit<CheckSkip, 'at'>[];
+  })[];
 }
 
 /* ------------------------------------------------------------------ *
@@ -468,6 +509,8 @@ export interface TaskInput {
   /** Boxes this task builds: a node id, or `diagramId/nodeId` when the id
    *  is used in more than one diagram. Adds the task to each box. */
   builds?: string[];
+  /** Checks of its own. Added to what the task has; never removes one. */
+  addChecks?: (Omit<TaskCheck, 'by' | 'stage'> & { stage?: TaskCheckStage })[];
   subtasks?: TaskInput[];
 }
 
@@ -537,6 +580,12 @@ export type PlanOp =
       checks?: CheckResult[];
       /** The boxes this task builds now: replaces its links; [] unlinks it. */
       builds?: string[];
+      /** The task's own checks, the whole list (`[]` clears it). The agent
+       *  may add to it, never take one away or change one. */
+      addChecks?: (Omit<TaskCheck, 'by' | 'stage'> & { stage?: TaskCheckStage })[];
+      /** The repository's checks skipped on it, by name or {name, reason}:
+       *  the whole list. The user's alone — the agent proposes one. */
+      skipChecks?: (string | { name: string; reason?: string })[];
       /** The task's `rev` the edit was made against. Refused if the other
        *  side has changed the task since. */
       expect?: number;

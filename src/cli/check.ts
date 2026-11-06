@@ -29,6 +29,8 @@ interface Options {
   files: string[];
   /** What the change is diffed against at review and final. */
   base?: string;
+  /** Checks the user skipped on the task: not run. */
+  skip: string[];
   /** Match --files alone: the task's work cannot be told apart in git. */
   noDiff: boolean;
   list: boolean;
@@ -38,6 +40,7 @@ interface Options {
 function parseArgs(args: string[]): Options | string {
   let stage: HookStage = 'review';
   const files: string[] = [];
+  const skip: string[] = [];
   let list = false;
   let json = false;
   let noDiff = false;
@@ -64,13 +67,17 @@ function parseArgs(args: string[]): Options | string {
       if (!commas(v).length) return '"--files" needs the files, comma-separated: --files src/a.ts,src/b.ts.';
       files.push(...commas(v));
     }
-    else if ((v = value('--base')) !== null) {
+    // One check per --skip, as named: a name may hold a space or a comma.
+    else if ((v = value('--skip')) !== null) {
+      if (!v.trim()) return '"--skip" needs the name of a check.';
+      skip.push(v.trim());
+    } else if ((v = value('--base')) !== null) {
       if (!v || v.startsWith('-')) return `"--base${v ? ` ${v}` : ''}" needs a branch or commit.`;
       base = v;
     } else if ((HOOK_STAGES as readonly string[]).includes(a)) stage = a as HookStage;
     else return `unknown argument "${a}". Stages: ${HOOK_STAGES.join(', ')}.`;
   }
-  return { stage, files, list, json, noDiff, ...(base ? { base } : {}) };
+  return { stage, files, list, json, skip, noDiff, ...(base ? { base } : {}) };
 }
 
 export async function runCheck(args: string[], cwd = process.cwd()): Promise<number> {
@@ -120,9 +127,16 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
       if (added.length) console.error(`coplan: the change ${since} also touches files for ${added.map((h) => h.name).join(', ')}.`);
     }
   }
-  const hooks = hooksFor(config, opts.stage, files);
+  // A task's skips are the user's, and kept by the daemon: this only spares
+  // running what does not gate the task. The final checks skip nothing.
+  const skipping = new Set(opts.stage === 'final' ? [] : opts.skip);
+  const matched = hooksFor(config, opts.stage, files);
+  const hooks = matched.filter((h) => !skipping.has(h.name));
+  const skipped = matched.filter((h) => skipping.has(h.name));
+  if (skipped.length) console.error(`coplan: skipped on this task: ${skipped.map((h) => h.name).join(', ')}.`);
   if (!hooks.length) {
     if (opts.json) console.log('[]');
+    else if (skipped.length) console.log(`Every ${opts.stage} hook that applies was skipped on this task (${skipped.map((h) => h.name).join(', ')}): nothing to run.`);
     else console.log(`No ${opts.stage} hooks${files.length ? ' apply to these files' : ''} in ${PROJECT_CONFIG_PATH}.`);
     return 0;
   }

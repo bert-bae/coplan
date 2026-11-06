@@ -107,6 +107,32 @@ while a review check for a changed file was never reported.
 Claude reports the checks it ran with each task. A task whose last reported
 checks include a failure (not `optional`) cannot be marked done.
 
+#### Per task: adding a check, skipping one
+
+A task can add checks of its own on top of these, and you can skip one of
+the repository's on a single task: a docs-only task skipping the test
+suite, or a migration adding `pnpm db:check`. Both are set in Coplan, under
+**Checks** in the task's details (on the board, open the card while it is
+being built). They are stored with the task, not in this file.
+
+- **Adding.** A task's own check has a `name`, a `run` command, a `stage`
+  (`implement`, or `review`, the default, where it gates the task), and
+  optionally `optional`, `timeout` and `cwd`, as for a hook. It is
+  required unless `optional`. The agent may add one
+  (`upsert_task {id, addChecks}`), but only you can remove or change one.
+  A check added to a task holds every subtask under it too: a subtask
+  cannot have a check of its own by that name, and you can skip it on one
+  of them like one of the repository's. A proposal that adds a check keeps
+  the task's others.
+- **Skipping.** Skips are yours alone. The agent cannot skip a check on the
+  task it is building. It can propose a skip with `harness_plan_propose`,
+  which takes effect only when you accept it, and that works mid-build too
+  for a task not yet done. A skip names the check and why. It is set on a
+  task without subtasks, and new work under it does not inherit it. It shows in the
+  task's brief, as a chip on the board and in the outline, in the plan the
+  agent reads, and under the build report.
+- **Final checks** belong to the build: a task can neither skip nor add one.
+
 A file that cannot be read, a stage that does not exist, a hook without a
 command, a key Coplan does not read (often a typo of one it does), a value
 out of range: each is reported — in the prompts, the review dialogs, `coplan

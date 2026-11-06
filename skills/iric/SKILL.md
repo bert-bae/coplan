@@ -97,6 +97,21 @@ it as it is, or take it over. If they say another round, or accept it,
 call `harness_task_update` again with `user_approved: true` and their
 answer in the `note`.
 
+**A task's own checks.** The brief lists the checks the task adds for itself
+(marked *this task's own*) beside the repository's; they gate it the same
+way. `coplan check` runs only the repository's, so run these yourself. If a
+task needs a check the repository lacks (a migration's `pnpm db:check`),
+add it with `upsert_task {id, addChecks: [...]}` — the whole list: every
+check the task has, as the plan shows it, plus yours. You cannot remove or
+change one it has.
+
+**Skipped checks.** A check the user skipped on a task is listed as skipped
+in the brief: do not run it for that task, and say in your report that it
+was skipped. You cannot skip one yourself, not even on a docs-only task. If
+a check plainly does not apply, propose the skip with `harness_plan_propose`
+(`upsert_task {id, skipChecks: [{name, reason}]}`) and keep running it until
+the user accepts.
+
 ## 4. Done
 
 When the review passed and every review check is green (optional checks

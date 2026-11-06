@@ -8,7 +8,30 @@ import { scrollBehavior } from '../lib/motion.ts';
 import { countTasks, currentTask, isDesignLocked, isLocked } from '../../shared/plan.ts';
 import { Markdown } from '../components/Markdown.tsx';
 import { relativeTime } from '../lib/format.ts';
+import { skipWords, skippedChecks } from '../../shared/build.ts';
 import type { Plan, Section } from '../../shared/types.ts';
+
+/** The checks you skipped, task by task, under the report: whatever the
+ *  agent wrote, a gate taken away is said here. */
+function SkippedChecks({ plan }: { plan: Plan }) {
+  const skipped = skippedChecks(plan);
+  if (!skipped.length) return null;
+  return (
+    <div className="report-skips">
+      <p className="field-label">Checks you skipped</p>
+      <ul className="plain-list">
+        {skipped.map(({ task, skips }) => (
+          <li key={task.id}>
+            <button type="button" className="link" onClick={() => store.focus('task', task.id)}>
+              {task.title}
+            </button>
+            : {skipWords(skips)}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 /**
  * The plan as a document: what is being built and why, then the prose
@@ -29,6 +52,7 @@ export function OverviewView() {
             Build report <span className="muted">· {relativeTime(plan.report.at)}</span>
           </h2>
           <Markdown source={plan.report.text} />
+          <SkippedChecks plan={plan} />
         </section>
       )}
 

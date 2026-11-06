@@ -32,10 +32,14 @@ import {
   leafTasks,
   leavesUnder,
   readinessOf,
+  effectiveChecks,
+  inheritedChecks,
   sharedFiles,
+  skipWords,
+  skippedChecks,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, emptyProjectConfig, hasHooks, hookCommand, hooksFor, shellQuote, type ProjectConfig } from '../shared/project.ts';
+import { HOOK_STAGES, emptyProjectConfig, hasHooks, hookCommand, hooksFor, shellQuote, taskHooks, type ProjectConfig } from '../shared/project.ts';
 import { filesForStage, taskFiles, type Changed } from '../shared/changes.ts';
 import { KIND_NOUN, edgePhrase, hang, indent, nestHeadings } from '../shared/architecture.ts';
 import { agentInfo, type AgentKind } from '../shared/agents.ts';
@@ -99,6 +103,14 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
       `3. Write the build report with harness_plan_edit {ops: [{op: "report", text, checks}]}: what each task did, the branches and pull requests, anything that differs from the plan, and follow-ups — with the final checks as they came out in \`checks\`. The plan is built once it is in.${finalWords(project)}`,
       '4. Give the user the final summary in chat, with the links.',
     );
+    // A gate the user took away is part of how the build was checked.
+    const skipped = skippedChecks(plan);
+    if (skipped.length) {
+      out.push(
+        '',
+        `Checks the user skipped on tasks — say so in the report and the summary: ${skipped.map(({ task, skips }) => `${task.id} "${task.title}": ${skipWords(skips)}`).join('; ')}.`,
+      );
+    }
     out.push(...templateLines(project));
     out.push(...renderStack(plan, project.branches.base));
     if (plan.report) out.push('', `_A build report was written ${new Date(plan.report.at).toISOString().slice(0, 16).replace('T', ' ')}; writing it again replaces it._`);
@@ -353,17 +365,31 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
   const review = effectiveReview(plan, task, settings.review);
   out.push('', '## The cycle: implement → review → refine');
   out.push(`Review: ${REVIEW_WORDS[review]}${review !== settings.review ? ' (set on this task)' : ''}. At most ${settings.maxRounds} review round${settings.maxRounds === 1 ? '' : 's'} before stopping to ask the user.`);
+  // The task's own checks run with the repository's; the ones the user
+  // skipped on it are said, not dropped from sight.
+  const checks = effectiveChecks(plan, task);
+  const own = new Set((checks.addChecks ?? []).map((c) => c.name));
+  // Said of the check that holds — the task's own, or one set above it —
+  // as effectiveChecks chose it.
+  const inherited = inheritedChecks(plan, task);
+  const whose = (name: string) => {
+    const held = checks.addChecks?.find((c) => c.name === name);
+    if (!held) return '';
+    if (task.addChecks?.includes(held)) return " (this task's own)";
+    const above = inherited.find((i) => i.check === held)?.from;
+    return above ? ` (set on "${above.title}", above this task)` : '';
+  };
   const stage = (name: string, what: string, hooks: ReturnType<typeof hooksFor>) => {
     out.push('', `**${name}.** ${what}`);
-    if (hooks.length) for (const h of hooks) out.push(`- ${h.name}: \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`);
+    if (hooks.length) for (const h of hooks) out.push(`- ${h.name}: \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}${whose(h.name)}`);
   };
   // Every part of the command quoted: file and branch names are the plan's,
   // and the agent runs what the brief says.
   const filesArg = files.length ? ` --files ${shellQuote([...new Set(files)].join(','))}` : '';
-  stage('Implement', 'Make the change, then run the implement checks and fix what they find:', hooksFor(project, 'implement', files));
+  stage('Implement', 'Make the change, then run the implement checks and fix what they find:', taskHooks(project, 'implement', files, checks));
   // Review is matched against what the task changed as well as what it
   // expected to: a hook for a file it touched anyway is part of its gate.
-  const reviewHooks = hooksFor(project, 'review', filesForStage('review', files, opts.changed));
+  const reviewHooks = taskHooks(project, 'review', filesForStage('review', files, opts.changed), checks);
   stage(
     'Review',
     review === 'user'
@@ -375,7 +401,9 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
           : `A fresh subagent that did not write the change reads the diff against this brief and runs the review checks.${reviewerWords(project)}`,
     reviewHooks,
   );
-  const ifTouched = files.length ? project.hooks.review.filter((h) => h.paths?.length && !reviewHooks.includes(h)) : [];
+  const skips = checks.skipChecks ?? [];
+  const skippedNames = new Set(skips.map((s) => s.name));
+  const ifTouched = files.length ? project.hooks.review.filter((h) => h.paths?.length && !reviewHooks.includes(h) && !skippedNames.has(h.name)) : [];
   if (ifTouched.length) {
     out.push(
       opts.diffUnread === 'shared'
@@ -390,6 +418,16 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
       ...ifTouched.map((h) => `- ${h.name} (${h.paths!.join(', ')}): \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`),
     );
   }
+  if (skips.length) {
+    // Any of the repository's implement or review checks, whatever its
+    // paths: the user may skip one this task's files do not reach yet.
+    const real = new Set([...[...project.hooks.implement, ...project.hooks.review].map((h) => h.name), ...inherited.map(({ check }) => check.name)]);
+    out.push(
+      '',
+      `**Skipped on this task by the user:** ${skips.map((s) => `${skipWords([s])}${real.has(s.name) ? '' : ' — no check of the repository has that name'}`).join('; ')}. ` +
+        'They do not gate it: do not run them for it, and say in your report that they were skipped.',
+    );
+  }
   // What a reviewer looks for here, whoever reviews.
   if (review !== 'skip') out.push(...instructionLines(project, 'review', '### What the review checks here'));
   out.push('', '**Refine.** Fix what the review found, run the implement checks again, and go back to review.');
@@ -401,12 +439,18 @@ export function renderBrief(plan: Plan, task: Task, opts: BriefOptions = {}): st
         : opts.diffBase
           ? ` --base ${shellQuote(opts.diffBase)}`
           : '';
+    // One --skip per check, quoted: a name may hold a space ("go test").
+    // `--skip=<name>`: a name may also start with dashes ("--ci").
+    const skipArg = skips.map((s) => ` ${shellQuote(`--skip=${s.name}`)}`).join('');
     out.push(
       '',
-      `Run a stage at once: \`"${opts.bin}" check implement${filesArg}\`, and \`"${opts.bin}" check review${filesArg}${baseArg}\`` +
-        `${filesArg ? ' (it adds the hooks for the files you changed)' : ''}; add \`--json\` for the \`checks\` to report.`,
+      `Run a stage at once: \`"${opts.bin}" check implement${filesArg}${skipArg}\`, and \`"${opts.bin}" check review${filesArg}${baseArg}${skipArg}\`` +
+        `${filesArg ? ' (it adds the hooks for the files you changed)' : ''}; add \`--json\` for the \`checks\` to report.` +
+        (own.size ? ` It runs the repository's checks: run the ones set on this task (${[...own].join(', ')}) as listed above.` : ''),
     );
-  } else if (!hasHooks(project)) {
+  } else if (!hasHooks(project) && !own.size) {
+    // Nothing set anywhere: say so, and what to run instead. A task with
+    // checks of its own has them listed above, and is held to them.
     out.push('', ...checksSection(project).slice(1));
   }
   out.push(

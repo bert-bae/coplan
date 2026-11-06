@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Per-task checks
+
+- A task can add checks of its own (a migration's `pnpm db:check`), and you
+  can skip one of the repository's on a single task (the test suite on a
+  docs-only task), under **Checks** in the task's details or on its board
+  card during a build. Its own checks gate it like the repository's, unless
+  `optional`, and a check added to a parent holds its subtasks, which list
+  it and can skip it. A skip is set on a task without subtasks and is never
+  inherited.
+- The agent cannot take a check off the task it is building. It can add a
+  check but never remove or change one, and every path to a skip refuses
+  it: an edit, a new task, a republish. It can only propose a skip with
+  `harness_plan_propose`, and the skip applies when you accept it (mid-build
+  too, for a task not yet done).
+- A skip is never silent: it shows in the task's brief (`coplan check
+  --skip` leaves it out), as a chip on the board and in the outline, in the
+  plan and change summary the agent reads, in the list of what to report
+  once every task is done, and under the build report.
+
 ### Checks follow the change, not only the plan
 
 - A review check limited by `paths` now applies when the task changed a
@@ -14,8 +33,8 @@
   included, their work cannot be told apart, so the expected files decide and
   the brief lists the checks the change could add. The implement stage still
   uses the expected files, since there is no diff yet. `coplan check` takes
-  `--base <ref>` and `--no-diff`; the brief gives the right one for the
-  task's branch, stacked branches included.
+  `--base <ref>`, `--no-diff` and `--skip <name>` (once per check); the brief
+  gives the right ones for the task's branch, stacked branches included.
 
 ### Codex hook trust
 

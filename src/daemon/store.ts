@@ -302,10 +302,10 @@ export class SessionStore extends EventEmitter {
   }
 
   /** Claude publishes the plan wholesale. Throws `PlanError` when refused. */
-  publishPlan(id: string, input: PlanInput): { plan: Plan; changes: Change[] } {
+  publishPlan(id: string, input: PlanInput, opts: { reserved?: readonly string[] } = {}): { plan: Plan; changes: Change[] } {
     const session = this.sessions.get(id);
     if (!session) throw new Error('unknown session');
-    const result = publishPlan(session.plan, input);
+    const result = publishPlan(session.plan, input, Date.now(), opts);
     this.mutate(id, (s) => {
       s.plan = result.plan;
     });
@@ -313,10 +313,10 @@ export class SessionStore extends EventEmitter {
   }
 
   /** Claude publishes the task list for the design. Throws `PlanError`. */
-  publishTasks(id: string, input: TaskListInput): { plan: Plan; changes: Change[] } {
+  publishTasks(id: string, input: TaskListInput, opts: { reserved?: readonly string[] } = {}): { plan: Plan; changes: Change[] } {
     const session = this.sessions.get(id);
     if (!session) throw new Error('unknown session');
-    const result = publishTasks(session.plan, input);
+    const result = publishTasks(session.plan, input, Date.now(), opts);
     this.mutate(id, (s) => {
       s.plan = result.plan;
     });
@@ -325,7 +325,7 @@ export class SessionStore extends EventEmitter {
 
   /** Apply edits from either side. Throws `PlanError` when any op fails, in
    *  which case nothing is changed. */
-  applyOps(id: string, ops: PlanOp[], author: Author, opts: { tracking?: boolean } = {}): { plan: Plan; changes: Change[] } {
+  applyOps(id: string, ops: PlanOp[], author: Author, opts: { tracking?: boolean; reserved?: readonly string[] } = {}): { plan: Plan; changes: Change[] } {
     const session = this.sessions.get(id);
     if (!session) throw new Error('unknown session');
     // The user can start a plan from the browser before Claude has published.

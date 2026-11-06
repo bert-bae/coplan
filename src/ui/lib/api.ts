@@ -88,6 +88,9 @@ export const api = {
 
   session: (id: string) => request<{ session: SessionState }>(`/api/session/${id}`),
 
+  /** The repository's checks and defaults, from its .coplan/config.json. */
+  project: (id: string) => request<{ project: ProjectSummary }>(`/api/session/${id}/project`),
+
   /** Permanent: the daemon removes the session's on-disk directory too. */
   deleteSession: (id: string) => request<{ deleted: boolean }>(`/api/session/${id}`, { method: 'DELETE' }),
 

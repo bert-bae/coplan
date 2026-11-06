@@ -14,8 +14,8 @@ import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
 import { MAX_NOTE, PlanError, cleanChecks, cleanNote, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
 import { PROMPT_BUDGET, buildPrompt, designPrompt, promptHash, renderGaps, renderPlan, renderTaskList, stageWords, unreadNotice } from './render.ts';
 import { renderBrief, renderNext } from './brief.ts';
-import { cleanSettings, dependents, effectiveBranch, effectiveReview, hasSubtasks, readyTasks, roundVerdict, stackStatus, waitingOn } from '../shared/build.ts';
-import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
+import { cleanSettings, dependents, effectiveBranch, effectiveChecks, effectiveReview, hasSubtasks, readyTasks, roundVerdict, stackStatus, waitingOn } from '../shared/build.ts';
+import { HOOK_STAGES, hooksFor, loadProjectConfig, taskHooks, type ProjectConfig } from '../shared/project.ts';
 import { changedFiles, defaultBase, filesForStage, sharesBranch, taskDiffRange, taskFiles, type Changed, type DiffRange } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
 import { ConfigCache, configStamp, globalConfigFile, projectHarnessFile, type HarnessConfig } from '../shared/config.ts';
@@ -537,6 +537,12 @@ function buildRouter(deps: Deps): Router {
     if (session) json(ctx.res, 200, { session: forBrowser(session) });
   });
 
+  /** The repository's checks, for the page's per-task checks. */
+  router.get('/api/session/:id/project', (ctx) => {
+    const session = sessionOr404(ctx);
+    if (session) json(ctx.res, 200, { project: projectSummary(projectFor(session)) });
+  });
+
   router.delete('/api/session/:id', (ctx) => {
     const id = ctx.params['id'] ?? '';
     if (!store.get(id)) {
@@ -572,7 +578,7 @@ function buildRouter(deps: Deps): Router {
     const ops = Array.isArray(body.ops) ? body.ops : [];
     if (ops.length > MAX_OPS) throw new HttpError(400, `At most ${MAX_OPS} edits per request.`);
     try {
-      const { plan, changes } = store.applyOps(session.sessionId, ops, 'user');
+      const { plan, changes } = store.applyOps(session.sessionId, ops, 'user', { reserved: checkNames(projectFor(session)) });
       json(ctx.res, 200, { plan: forBrowser(plan), changes });
     } catch (err) {
       if (err instanceof PlanError) json(ctx.res, 400, { error: err.message });
@@ -1101,16 +1107,30 @@ function buildRouter(deps: Deps): Router {
             '"skip" included, reports one), then done once it passes.',
         );
       }
-      // … and every check that gates it passed when it was last run.
-      const optional = new Set(HOOK_STAGES.flatMap((st) => project.hooks[st].filter((h) => h.optional).map((h) => h.name)));
+      // … and every check that gates it passed when it was last run: the
+      // repository's, less what the user skipped on it, and its own.
+      // Checks are reported by name, so a name any required check has is
+      // required: an optional check of the task's own can never make one of
+      // the repository's optional by sharing its name.
+      const held = effectiveChecks(before, task);
+      const own = held.addChecks ?? [];
+      const skipped = new Set((held.skipChecks ?? []).map((s) => s.name));
+      const repo = (['implement', 'review'] as const).flatMap((st) => project.hooks[st]);
+      const required = new Set([
+        ...repo.filter((h) => !h.optional && !skipped.has(h.name)).map((h) => h.name),
+        ...own.filter((c) => !c.optional).map((c) => c.name),
+      ]);
+      const optional = new Set(
+        [...HOOK_STAGES.flatMap((st) => project.hooks[st].filter((h) => h.optional)), ...own.filter((c) => c.optional)].map((h) => h.name).filter((n) => !required.has(n)),
+      );
       const latest = mergeChecks(task.checks, checks ?? []);
-      const failing = latest.filter((c) => !c.ok && !optional.has(c.name));
+      const failing = latest.filter((c) => !c.ok && !optional.has(c.name) && (required.has(c.name) || !skipped.has(c.name)));
       // Matched against the files the task changed as well as the ones it
       // expected to: a check for a file it touched anyway still gates it.
       const expected = taskFiles(before, task);
       const planned = hooksFor(project, 'review', expected);
       const missing = (files: string[]) =>
-        hooksFor(project, 'review', files)
+        taskHooks(project, 'review', files, held)
           .filter((h) => !h.optional && !latest.some((c) => c.name === h.name))
           .map((h) => (planned.includes(h) || !h.paths?.length ? h.name : `${h.name} (the change touches its files: ${h.paths.join(', ')})`));
       const notDone = (failed: typeof failing, unreported: string[]) =>
@@ -1267,7 +1287,7 @@ function buildRouter(deps: Deps): Router {
     try {
       switch (ctx.params['tool']) {
         case 'publish': {
-          const { plan } = store.publishPlan(id, body as unknown as PlanInput);
+          const { plan } = store.publishPlan(id, body as unknown as PlanInput, { reserved: checkNames(projectFor(session)) });
           revealUi(session);
           reply(
             true,
@@ -1322,7 +1342,7 @@ function buildRouter(deps: Deps): Router {
           if (ops.length > MAX_OPS) throw new PlanError(`At most ${MAX_OPS} edits per call; split the change.`);
           const project = projectFor(session);
           for (const op of ops) if (op && op.op === 'report') refuseUnfinishedFinal(op.checks, project);
-          const { plan, changes } = store.applyOps(id, ops, 'claude');
+          const { plan, changes } = store.applyOps(id, ops, 'claude', { reserved: checkNames(project) });
           const notice = unreadNotice(plan);
           reply(
             true,
@@ -1335,7 +1355,7 @@ function buildRouter(deps: Deps): Router {
 
         case 'propose': {
           const proposal = { op: 'propose', title: body['title'], reason: body['reason'], ops: body['ops'] } as unknown as PlanOp;
-          const { plan } = store.applyOps(id, [proposal], 'claude');
+          const { plan } = store.applyOps(id, [proposal], 'claude', { reserved: checkNames(projectFor(session)) });
           const p = plan.proposals!.at(-1)!;
           revealUi(session);
           reply(
@@ -1349,7 +1369,7 @@ function buildRouter(deps: Deps): Router {
         }
 
         case 'tasks': {
-          const { plan } = store.publishTasks(id, { tasks: body['tasks'] } as unknown as TaskListInput);
+          const { plan } = store.publishTasks(id, { tasks: body['tasks'] } as unknown as TaskListInput, { reserved: checkNames(projectFor(session)) });
           revealUi(session);
           const phase = planPhase(plan);
           reply(
@@ -1479,6 +1499,13 @@ function buildRouter(deps: Deps): Router {
  *  files (else every hook applies already), and a review hook has `paths`. */
 function diffMatters(project: ProjectConfig, files: readonly string[]): boolean {
   return files.length > 0 && project.hooks.review.some((h) => h.paths?.length);
+}
+
+/** The repository's check names, which no task's own check may take:
+ *  checks are reported, and gated, by name. Enforced in plan.ts on every
+ *  path a task's checks take. */
+function checkNames(project: ProjectConfig): string[] {
+  return HOOK_STAGES.flatMap((st) => project.hooks[st].map((h) => h.name));
 }
 
 /**

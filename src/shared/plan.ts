@@ -38,14 +38,16 @@ import type {
   Submission,
   Target,
   Task,
+  TaskCheck,
+  CheckSkip,
   TaskCounts,
   TaskInput,
   TaskListInput,
   TaskStatus,
   Thread,
 } from './types.ts';
-import { BUILD_TARGETS, EDGE_ARROWS, IRIC_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
-import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, validReview } from './build.ts';
+import { BUILD_TARGETS, EDGE_ARROWS, IRIC_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_CHECK_STAGES, TASK_STATUSES, VERDICTS } from './types.ts';
+import { DEFAULT_BUILD_SETTINGS, ancestorsOf, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, validReview } from './build.ts';
 import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from './proposal-ops.ts';
 
 /** How many review verdicts a task keeps. */
@@ -366,7 +368,7 @@ export function baselineOf(plan: Plan): PlanBaseline {
       nodes: d.nodes.map(({ x: _x, y: _y, ...node }) => node),
       edges: d.edges,
     })),
-    tasks: plan.tasks.map(({ id, parentId, order, title, detail, status, files, note, dependsOn, branch, review }) => ({
+    tasks: plan.tasks.map(({ id, parentId, order, title, detail, status, files, note, dependsOn, branch, review, addChecks, skipChecks }) => ({
       id,
       parentId,
       order,
@@ -378,6 +380,8 @@ export function baselineOf(plan: Plan): PlanBaseline {
       ...(dependsOn?.length ? { dependsOn } : {}),
       ...(branch ? { branch } : {}),
       ...(review ? { review } : {}),
+      ...(addChecks?.length ? { addChecks: addChecks.map(({ by: _by, ...c }) => c) } : {}),
+      ...(skipChecks?.length ? { skipChecks: skipChecks.map(({ at: _at, ...s }) => s) } : {}),
     })),
   });
 }
@@ -395,7 +399,8 @@ export function baselineOf(plan: Plan): PlanBaseline {
  * written without them would silently discard the user's edits, which is the
  * one thing this tool must never do.
  */
-export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now()): { plan: Plan; changes: Change[] } {
+export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(), opts: { reserved?: readonly string[] } = {}): { plan: Plan; changes: Change[] } {
+  const reserved: Reserved = new Set(opts.reserved ?? []);
   // A finished build is history: the next plan may replace it. Until then
   // the plan is what the user signed off, and only they can reopen it.
   const finished = Boolean(prev?.submission && planPhase(prev) === 'built');
@@ -435,7 +440,7 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
     });
   }
 
-  const { tasks, builds } = buildTaskTree(base, next, input.tasks, now);
+  const { tasks, builds } = buildTaskTree(base, next, input.tasks, now, reserved);
 
   const diagrams: Diagram[] = [];
   for (const raw of input.diagrams ?? []) {
@@ -490,7 +495,8 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
  * box keeps the tasks it links that survive, and gains those whose `builds`
  * names it. Allowed while planning, too, to rework the planned tasks.
  */
-export function publishTasks(prev: Plan | null, input: TaskListInput, now = Date.now()): { plan: Plan; changes: Change[] } {
+export function publishTasks(prev: Plan | null, input: TaskListInput, now = Date.now(), opts: { reserved?: readonly string[] } = {}): { plan: Plan; changes: Change[] } {
+  const reserved: Reserved = new Set(opts.reserved ?? []);
   if (!prev) throw new PlanError('There is no plan yet. Publish the design with harness_plan_publish first.');
   if (prev.submission && planPhase(prev) === 'built') {
     // New tasks on a finished build would start a build nobody submitted.
@@ -502,7 +508,7 @@ export function publishTasks(prev: Plan | null, input: TaskListInput, now = Date
 
   const base = structuredClone(prev);
   const next: Plan = structuredClone(prev);
-  const { tasks, builds } = buildTaskTree(base, next, input.tasks, now);
+  const { tasks, builds } = buildTaskTree(base, next, input.tasks, now, reserved);
   next.tasks = tasks;
   const live = new Set(tasks.map((t) => t.id));
   for (const d of next.diagrams) {
@@ -548,6 +554,7 @@ function buildTaskTree(
   next: Plan,
   input: TaskInput[] | undefined,
   now: number,
+  reserved: Reserved,
 ): { tasks: Task[]; builds: { id: string; refs: string[] }[] } {
   const tasks: Task[] = [];
   const written = new Map<string, string>();
@@ -574,6 +581,23 @@ function buildTaskTree(
       const files = cleanList(raw.files) ?? old?.files;
       const branch = raw.branch === undefined ? old?.branch : cleanBranch(raw.branch);
       const review = raw.review === undefined ? old?.review : reviewOrThrow(raw.review, tTitle);
+      // Only the agent publishes: it can skip none of the repository's
+      // checks, and a republish keeps every check the task has — the ones it
+      // restates must be as they were, and any it adds are new.
+      const rawSkips = (raw as { skipChecks?: unknown }).skipChecks;
+      if (rawSkips !== undefined && !sameSkips(cleanSkips(rawSkips, tTitle), old?.skipChecks ?? [])) {
+        throw new PlanError(skipRefusal(old?.id ?? raw.id ?? 'the task', tTitle));
+      }
+      const kept = old?.addChecks ?? [];
+      const given = raw.addChecks === undefined ? [] : cleanTaskChecks(raw.addChecks, tTitle, kept, reserved);
+      refuseInheritedNames(ancestorsOf({ tasks }, { id, parentId } as Task), given, kept, tTitle);
+      for (const g of given) {
+        const was = kept.find((k) => k.name === g.name);
+        if (was && !sameCheck(was, g)) {
+          throw new PlanError(`"${tTitle}" has the check "${g.name}" already, and only the user changes one: restate it as it is, or leave it out (it is kept).`);
+        }
+      }
+      const addChecks: TaskCheck[] = [...kept, ...given.filter((g) => !kept.some((k) => k.name === g.name)).map((g) => ({ ...g, by: 'claude' as const }))];
       const task: Task = {
         id,
         parentId,
@@ -588,6 +612,8 @@ function buildTaskTree(
         ...(old?.stage && status === 'in_progress' ? { stage: old.stage } : {}),
         ...(old?.round ? { round: old.round } : {}),
         ...(old?.checks?.length ? { checks: old.checks } : {}),
+        ...(addChecks.length ? { addChecks } : {}),
+        ...(old?.skipChecks?.length ? { skipChecks: old.skipChecks } : {}),
         createdAt: old?.createdAt ?? now,
         updatedAt: now,
         createdBy: old?.createdBy ?? 'claude',
@@ -602,6 +628,14 @@ function buildTaskTree(
     });
   };
   walk(input, null, 0);
+  // A check new on a task, by the name of one a task under it has, would
+  // stand in for that one: refused, as for an edit.
+  for (const t of tasks) {
+    const before = base.tasks.find((o) => o.id === t.id)?.addChecks ?? [];
+    const added = (t.addChecks ?? []).filter((c) => !before.some((b) => b.name === c.name));
+    if (!added.length) continue;
+    refuseInheritedNames([], added, [], t.title, descendants({ tasks }, t.id));
+  }
 
   // Dependencies are resolved once every task has its id, so a task can
   // name one written after it.
@@ -838,6 +872,26 @@ function normalizeTask(task: Task): Task {
   const checks = cleanChecks(t.checks);
   if (checks?.length) t.checks = checks;
   else delete t.checks;
+  // A task's own checks and skips as stored: whatever is not whole is
+  // dropped, so a file written by hand cannot break the board.
+  const own = (Array.isArray(t.addChecks) ? t.addChecks : []).filter(
+    (c): c is TaskCheck =>
+      Boolean(c) &&
+      typeof c === 'object' &&
+      typeof c.name === 'string' &&
+      Boolean(c.name) &&
+      typeof c.run === 'string' &&
+      Boolean(c.run) &&
+      (TASK_CHECK_STAGES as readonly unknown[]).includes(c.stage) &&
+      (c.by === 'user' || c.by === 'claude'),
+  );
+  if (own.length) t.addChecks = own;
+  else delete t.addChecks;
+  const skips = (Array.isArray(t.skipChecks) ? t.skipChecks : []).filter(
+    (s): s is CheckSkip => Boolean(s) && typeof s === 'object' && typeof s.name === 'string' && Boolean(s.name) && (s.reason === undefined || typeof s.reason === 'string'),
+  );
+  if (skips.length) t.skipChecks = skips.map((s) => ({ ...s, at: typeof s.at === 'number' ? s.at : 0 }));
+  else delete t.skipChecks;
   return t;
 }
 
@@ -875,6 +929,8 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
     'stage',
     'checks',
     'builds',
+    'addChecks',
+    'skipChecks',
     'expect',
   ],
   move_task: ['id', 'parentId', 'index'],
@@ -1110,13 +1166,15 @@ export function applyOps(
   ops: PlanOp[],
   author: Author,
   now = Date.now(),
-  /** `tracking`: Claude's progress report, already through harness_task_update's gates. */
-  opts: { tracking?: boolean } = {},
+  /** `tracking`: Claude's progress report, already through harness_task_update's gates.
+   *  `reserved`: the repository's check names, which no task's own check may take. */
+  opts: { tracking?: boolean; reserved?: readonly string[] } = {},
 ): { plan: Plan; changes: Change[] } {
+  const reserved: Reserved = new Set(opts.reserved ?? []);
   if (!Array.isArray(ops) || ops.length === 0) {
     throw new PlanError('No edits were given: pass them as {ops: [{op: "upsert_task", id: "t3", note: "…"}, …]}.');
   }
-  if (plan.submission) checkLocked(ops, author);
+  if (plan.submission) checkLocked(plan, ops, author);
   else if (plan.design) checkDesignLocked(ops, author);
   const next = structuredClone(plan);
   const changes: Change[] = [];
@@ -1133,7 +1191,7 @@ export function applyOps(
           for (const inner of op.ops) if (inner && typeof inner === 'object') refuseUnreadEdit(plan, inner, unread!);
         }
       }
-      changes.push(...applyOne(next, expectAtStart(plan, op, author), author, now));
+      changes.push(...applyOne(next, expectAtStart(plan, op, author), author, now, reserved));
     } catch (err) {
       if (err instanceof PlanError && ops.length > 1) {
         throw new PlanError(`Edit ${i + 1} (${(op as { op?: string })?.op ?? '?'}): ${err.message}`);
@@ -1161,7 +1219,7 @@ export function applyOps(
   return { plan: next, changes };
 }
 
-function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[] {
+function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, reserved: Reserved): Change[] {
   const log = (kind: ChangeKind, target: Target, summary: string) => record(plan, author, kind, target, summary, now);
 
   switch (op?.op) {
@@ -1280,7 +1338,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
 
     case 'upsert_task': {
       const existing = op.id ? findTask(plan, op.id) : undefined;
-      if (existing) return editTask(plan, existing, op, author, now, log);
+      if (existing) return editTask(plan, existing, op, author, now, log, reserved);
 
       const title = clean(op.title, MAX_TITLE);
       if (!title) throw new PlanError(op.id ? `No task "${op.id}".` : 'A new task needs a title.');
@@ -1304,6 +1362,10 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       const stage = op.stage === undefined ? undefined : stageOrThrow(op.stage);
       const checks = cleanChecks(op.checks);
       const status = validStatus(op.status) ?? (stage ? 'in_progress' : 'todo');
+      const addChecks = op.addChecks === undefined ? [] : cleanTaskChecks(op.addChecks, title, [], reserved).map((c) => ({ ...c, by: author }));
+      if (parent) refuseInheritedNames([parent, ...ancestorsOf(plan, parent)], addChecks, [], title);
+      const skips = op.skipChecks === undefined ? [] : cleanSkips(op.skipChecks, title);
+      if (skips.length && author !== 'user') throw new PlanError(skipRefusal(op.id ?? 'the task', title));
       const task: Task = {
         id: claimId(plan, 'task', op.id),
         parentId,
@@ -1318,6 +1380,8 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         ...(review ? { review } : {}),
         ...(stage && status === 'in_progress' ? { stage, ...(stage === 'review' ? { round: 1 } : {}) } : {}),
         ...(checks?.length ? { checks } : {}),
+        ...(addChecks.length ? { addChecks } : {}),
+        ...(skips.length ? { skipChecks: skips.map((s) => ({ ...s, at: now })) } : {}),
         // Work found once the plan was signed off: the user did not sign it.
         ...(plan.submission ? { addedInBuild: true } : {}),
         createdAt: now,
@@ -1373,7 +1437,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       const d = plan.diagrams.find((x) => x.id === op.diagramId);
       if (!d) throw new PlanError(`No diagram "${op.diagramId}". The read lists each diagram's id.`);
       const { nodes, edges } = partEdit(d, op);
-      return applyOne(plan, { op: 'upsert_diagram', id: d.id, nodes, edges, ...(op.expect !== undefined ? { expect: op.expect } : {}) }, author, now);
+      return applyOne(plan, { op: 'upsert_diagram', id: d.id, nodes, edges, ...(op.expect !== undefined ? { expect: op.expect } : {}) }, author, now, reserved);
     }
 
     case 'remove':
@@ -1466,6 +1530,13 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
             throw new PlanError(`a proposal carries edits to the plan's content (${[...PROPOSABLE_OPS].join(', ')}), not ${inner.op}.`);
           }
           refuseProgress(inner);
+          // Accepting applies it as the user's, who may remove a check — but
+          // a proposal that reads as adding one must not take the others
+          // with it unseen: it keeps every check the task has, as it is.
+          if (inner.op === 'upsert_task' && inner.addChecks !== undefined && inner.id) {
+            const target = plan.tasks.find((t) => t.id === inner.id);
+            if (target) agentChecks(target, cleanTaskChecks(inner.addChecks, target.title, target.addChecks ?? [], reserved));
+          }
         } catch (err) {
           if (err instanceof PlanError) throw new PlanError(`Proposed edit ${i + 1} (${(inner as { op?: string })?.op ?? '?'}): ${err.message}`);
           throw err;
@@ -1483,7 +1554,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         const trial = structuredClone(plan);
         delete trial.design;
         delete trial.submission;
-        applyAsUser(trial, op.ops, now);
+        applyAsUser(trial, op.ops, now, reserved);
       } catch (err) {
         if (err instanceof PlanError) throw new PlanError(`The proposal would not apply to the plan as it is: ${err.message}`);
         throw err;
@@ -1530,9 +1601,13 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       }
       // Accepting changes what the proposal changes: the lock holds for it.
       if (plan.submission) {
-        // Mid-build, a proposal may add work — a new task — and nothing
-        // else: what the user signed off stays as they signed it.
-        const refused = p.ops.find((inner: PlanOp) => inner.op !== 'upsert_task' || Boolean(inner.id && plan.tasks.some((t) => t.id === inner.id)));
+        // Mid-build, a proposal may add work — a new task — or change the
+        // checks of a task not yet done, and nothing else: what the user
+        // signed off stays as they signed it.
+        const refused = p.ops.find(
+          (inner: PlanOp) =>
+            inner.op !== 'upsert_task' || Boolean(inner.id && plan.tasks.some((t) => t.id === inner.id) && !checksOnlyEdit(plan, inner)),
+        );
         if (refused) {
           throw new PlanError(
             `Proposal ${p.id} changes what the submitted plan locked (${refused.op}${'id' in refused && refused.id ? ` ${refused.id}` : ''}): ` +
@@ -1542,7 +1617,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       } else if (plan.design) {
         checkDesignLocked(p.ops, 'user');
       }
-      const out = applyAsUser(plan, p.ops, now);
+      const out = applyAsUser(plan, p.ops, now, reserved);
       settleProposal(plan, p, 'accepted', now, 'Accepted.');
       const accepted = log('edited', { kind: 'plan', id: '' }, `accepted proposal ${p.id} "${p.title}"`);
       p.resolvedSeq = accepted.seq;
@@ -1617,6 +1692,7 @@ function editTask(
   author: Author,
   now: number,
   log: (kind: ChangeKind, target: Target, summary: string) => Change,
+  reserved: Reserved,
 ): Change[] {
   checkTaskRev(task, op.expect, author);
   // On a submitted plan, what a task the user signed off says is theirs:
@@ -1677,6 +1753,54 @@ function editTask(
     if (review !== task.review) {
       setOptional(task, 'review', review);
       edited.push('review');
+    }
+  }
+  if (op.addChecks !== undefined) {
+    const given = cleanTaskChecks(op.addChecks, task.title, task.addChecks ?? [], reserved);
+    // A finished task's gate has been passed, or dropped with it: a check
+    // changed now would gate nothing, and stay on the board as if it had.
+    const had = task.addChecks ?? [];
+    const unchanged = given.length === had.length && given.every((g) => had.some((h) => sameCheck(g, h)));
+    if ((task.status === 'done' || task.status === 'dropped') && !unchanged) {
+      throw new PlanError(`"${task.title}" is ${task.status}: its checks no longer change. Add the check to the work still to do.`);
+    }
+    refuseInheritedNames(ancestorsOf(plan, task), given, task.addChecks ?? [], task.title, descendants(plan, task.id));
+    const next = author === 'user' ? userChecks(task.addChecks, given) : agentChecks(task, given);
+    if (JSON.stringify(next) !== JSON.stringify(task.addChecks ?? [])) {
+      // A check taken away or changed takes its last result with it — on
+      // this task and the ones under it that held it. A failure of a check
+      // no longer there would hold the task back with nothing to run again;
+      // a pass of its old command would let the new one go unrun.
+      const gone = new Set(
+        (task.addChecks ?? []).filter((c) => !next.some((n) => n.name === c.name && sameCheck(n, c))).map((c) => c.name),
+      );
+      if (gone.size) {
+        for (const t of [task, ...descendants(plan, task.id)]) {
+          if (t !== task && t.addChecks?.some((c) => gone.has(c.name))) continue;
+          const kept = t.checks?.filter((c) => !gone.has(c.name));
+          if (kept?.length !== t.checks?.length) setOptional(t, 'checks', kept?.length ? kept : undefined);
+        }
+      }
+      setOptional(task, 'addChecks', next.length ? next : undefined);
+      edited.push('own checks');
+    }
+  }
+  if (op.skipChecks !== undefined) {
+    const given = cleanSkips(op.skipChecks, task.title);
+    // The agent restating skips may leave reasons out; the user's list is
+    // the list, so they can clear a reason too.
+    if (author === 'user' ? !sameSkipsExactly(given, task.skipChecks ?? []) : !sameSkips(given, task.skipChecks ?? [])) {
+      // A skip takes part of the gate away from the task it is on: never
+      // the agent's to set on the work it is building, however it asks.
+      if (author !== 'user') throw new PlanError(skipRefusal(task.id, task.title));
+      // A skip is set on work that is built: a parent's would gate nothing,
+      // and its subtasks — new work among them — do not inherit one.
+      if (given.length && plan.tasks.some((t) => t.parentId === task.id)) {
+        throw new PlanError(`"${task.title}" has subtasks, so it is not built itself: skip the check on each subtask it applies to.`);
+      }
+      const kept = new Map((task.skipChecks ?? []).map((s) => [s.name, s.at]));
+      setOptional(task, 'skipChecks', given.length ? given.map((s) => ({ ...s, at: kept.get(s.name) ?? now })) : undefined);
+      edited.push('skipped checks');
     }
   }
 
@@ -1770,6 +1894,185 @@ export function cleanChecks(value: unknown): CheckResult[] | undefined {
     out.push({ name, ok: rec['ok'], ...(note ? { note } : {}) });
   }
   return out;
+}
+
+/* ------------------------------------------------------------------ *
+ * A task's own checks, and the repository's it skips
+ * ------------------------------------------------------------------ */
+
+const MAX_TASK_CHECKS = 10;
+
+/**
+ * The repository's check names, which no task's own check may take: handed
+ * in by whoever applies an edit or a publish (the daemon knows the config),
+ * and passed on to `cleanTaskChecks` on every path a task's checks take — an
+ * edit, a new task, a publish, a proposal and its acceptance.
+ */
+type Reserved = ReadonlySet<string>;
+const MAX_SKIPS = 20;
+const TASK_CHECK_KEYS = ['name', 'run', 'stage', 'optional', 'timeout', 'cwd'];
+type CheckInput = Omit<TaskCheck, 'by'>;
+
+/** What the agent is told when it tries to skip a check itself. */
+function skipRefusal(id: string, title: string): string {
+  return (
+    `Only the user skips one of the repository's checks on a task: a skip takes part of the gate away from "${title}". ` +
+    `Propose it — harness_plan_propose {title, reason, ops: [{op: "upsert_task", id: "${id}", skipChecks: [{name, reason}]}]} — ` +
+    'and the user accepts it in Coplan, or skips it there themselves. Until then the check gates the task.'
+  );
+}
+
+/** A task's own checks as written, each whole — or the edit is refused,
+ *  since a check quietly dropped is one nobody runs. */
+function cleanTaskChecks(value: unknown, title: string, existing: readonly TaskCheck[], reserved: Reserved): CheckInput[] {
+  const shape = '{name, run, stage?: "implement" | "review", optional?, timeout?, cwd?}';
+  if (!Array.isArray(value)) throw new PlanError(`addChecks of "${title}" is a list of ${shape}; [] clears it.`);
+  if (value.length > MAX_TASK_CHECKS) throw new PlanError(`A task adds at most ${MAX_TASK_CHECKS} checks of its own; "${title}" was given ${value.length}.`);
+  const out: CheckInput[] = [];
+  value.forEach((raw, i) => {
+    const where = `addChecks[${i}] of "${title}"`;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new PlanError(`${where} must be an object: ${shape}.`);
+    const rec = raw as Record<string, unknown>;
+    const unknown = Object.keys(rec).filter((k) => !TASK_CHECK_KEYS.includes(k));
+    if (unknown.length) throw new PlanError(`${where} does not take ${unknown.map((k) => `"${k}"`).join(', ')}: its keys are ${TASK_CHECK_KEYS.join(', ')}.`);
+    const name = typeof rec['name'] === 'string' ? rec['name'].trim() : '';
+    if (!name || name.length > 60) throw new PlanError(`${where} needs a "name" of 1 to 60 characters: what it is called on the board.`);
+    const run = typeof rec['run'] === 'string' ? rec['run'].trim() : '';
+    if (!run || run.length > 2000) throw new PlanError(`${where} needs a "run": the shell command, up to 2000 characters.`);
+    // A check the task has, restated with a field left out, keeps that
+    // field: leaving it out is not a change. A new one takes the defaults.
+    const old = existing.find((o) => o.name === name);
+    const stage = rec['stage'] === undefined ? (old?.stage ?? 'review') : rec['stage'];
+    if (!(TASK_CHECK_STAGES as readonly unknown[]).includes(stage)) throw new PlanError(`${where}: "stage" is ${TASK_CHECK_STAGES.join(' or ')}; the final checks are the repository's.`);
+    if (rec['optional'] !== undefined && typeof rec['optional'] !== 'boolean') throw new PlanError(`${where}: "optional" is true or false.`);
+    const optional = rec['optional'] === undefined ? old?.optional === true : rec['optional'] === true;
+    const timeout = rec['timeout'] === undefined ? old?.timeout : rec['timeout'];
+    if (timeout !== undefined && !(Number.isInteger(timeout) && (timeout as number) >= 1 && (timeout as number) <= 3600)) {
+      throw new PlanError(`${where}: "timeout" is a whole number of seconds, 1 to 3600.`);
+    }
+    const cwd = rec['cwd'] === undefined ? old?.cwd : rec['cwd'];
+    if (cwd !== undefined && (typeof cwd !== 'string' || !cwd.trim() || /^([/\\]|[A-Za-z]:)/.test(cwd) || cwd.split(/[/\\]/).includes('..'))) {
+      throw new PlanError(`${where}: "cwd" is a folder inside the repository, relative to its root ("packages/api").`);
+    }
+    if (out.some((c) => c.name === name)) throw new PlanError(`${where}: "${name}" is already one of its checks; give each its own name.`);
+    // Checks are reported by name: one of the task's own by the name of one
+    // of the repository's would stand in for it on the board, in the report
+    // and at the done check. One the task already had is not new.
+    if (reserved.has(name) && !old) {
+      throw new PlanError(
+        `"${name}" is the name of one of the repository's checks, so "${title}" cannot have a check of its own by that name: ` +
+          'checks are reported by name. Name it after what it checks ("db-check").',
+      );
+    }
+    out.push({
+      name,
+      run,
+      stage: stage as CheckInput['stage'],
+      ...(optional ? { optional: true } : {}),
+      ...(timeout !== undefined ? { timeout: timeout as number } : {}),
+      ...(typeof cwd === 'string' ? { cwd: cwd.trim() } : {}),
+    });
+  });
+  return out;
+}
+
+function sameCheck(a: CheckInput, b: CheckInput): boolean {
+  return a.name === b.name && a.run === b.run && a.stage === b.stage && Boolean(a.optional) === Boolean(b.optional) && a.timeout === b.timeout && a.cwd === b.cwd;
+}
+
+/** The user's list, as given: who added each check is kept while it is unchanged. */
+function userChecks(existing: TaskCheck[] | undefined, given: CheckInput[]): TaskCheck[] {
+  return given.map((g) => {
+    const old = existing?.find((o) => o.name === g.name);
+    return { ...g, by: old && sameCheck(old, g) ? old.by : 'user' };
+  });
+}
+
+/** The agent's list: it may add checks, never take one away or weaken it —
+ *  a check it could drop is one it could drop from its own gate. */
+function agentChecks(task: Task, given: CheckInput[]): TaskCheck[] {
+  for (const old of task.addChecks ?? []) {
+    const now = given.find((g) => g.name === old.name);
+    if (now && sameCheck(now, old)) continue;
+    throw new PlanError(
+      `"${task.title}" has the check "${old.name}" (added by ${old.by === 'user' ? 'the user' : 'you'}), and only the user ` +
+        `${now ? 'changes' : 'removes'} one: keep it as it is in addChecks. If it is wrong, tell them in chat: they change or ` +
+        'remove it under Checks in the task\'s details in Coplan.',
+    );
+  }
+  return given.map((g) => task.addChecks?.find((o) => o.name === g.name) ?? { ...g, by: 'claude' });
+}
+
+/**
+ * A check set on a task above holds this one, and cannot be stood in for: a
+ * check of the task's own by the same name — optional, or running `true` —
+ * would take its place. A name it already has is not new.
+ */
+function refuseInheritedNames(above: readonly Task[], given: readonly CheckInput[], had: readonly TaskCheck[], title: string, below: readonly Task[] = []): void {
+  for (const g of given) {
+    if (had.some((h) => h.name === g.name)) continue;
+    // Nor down: one set here by a subtask's name would stand in for the
+    // subtask's own (an optional "db" above a required one).
+    const under = below.find((b) => b.addChecks?.some((c) => c.name === g.name));
+    if (under) {
+      throw new PlanError(
+        `"${under.title}", under "${title}", has a check named "${g.name}" already, so "${title}" cannot have one by that name: ` +
+          'it would stand in for the subtask\'s. Name it after what it checks.',
+      );
+    }
+    const from = above.find((a) => a.addChecks?.some((c) => c.name === g.name));
+    if (from) {
+      throw new PlanError(
+        `"${title}" already holds the check "${g.name}" from "${from.title}", above it, so it cannot have one of its own by that name. ` +
+          'Name it after what it checks; to leave the inherited one out, the user skips it on this task.',
+      );
+    }
+  }
+}
+
+function sameSkipsExactly(given: readonly { name: string; reason?: string }[], had: readonly { name: string; reason?: string }[]): boolean {
+  return given.length === had.length && given.every((g, i) => g.name === had[i]!.name && (g.reason ?? '') === (had[i]!.reason ?? ''));
+}
+
+/** Whether `given` restates `had`: the same checks, in any order, and any
+ *  reason given the one it has — leaving a reason out is not a change. */
+function sameSkips(given: readonly { name: string; reason?: string }[], had: readonly { name: string; reason?: string }[]): boolean {
+  return (
+    given.length === had.length &&
+    given.every((g) => {
+      const h = had.find((x) => x.name === g.name);
+      return Boolean(h) && (!g.reason || g.reason === (h!.reason ?? ''));
+    })
+  );
+}
+
+/** Skips as written: names, or {name, reason}. */
+function cleanSkips(value: unknown, title: string): { name: string; reason?: string }[] {
+  if (!Array.isArray(value)) throw new PlanError(`skipChecks of "${title}" is a list of check names, or {name, reason}; [] clears it.`);
+  if (value.length > MAX_SKIPS) throw new PlanError(`A task skips at most ${MAX_SKIPS} checks.`);
+  const out: { name: string; reason?: string }[] = [];
+  for (const raw of value) {
+    const rec = typeof raw === 'string' ? { name: raw } : raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+    const name = typeof rec?.['name'] === 'string' ? rec['name'].trim() : '';
+    if (!rec || !name || name.length > 60) throw new PlanError(`skipChecks of "${title}": each is a check's name, or {name, reason}.`);
+    const extra = Object.keys(rec).filter((k) => k !== 'name' && k !== 'reason');
+    if (extra.length) throw new PlanError(`skipChecks of "${title}": a skip is {name, reason}, not ${extra.map((k) => `"${k}"`).join(', ')}.`);
+    const reason = clean(rec['reason'], 200);
+    if (out.some((s) => s.name === name)) continue;
+    out.push({ name, ...(reason ? { reason } : {}) });
+  }
+  return out;
+}
+
+/** An edit of a task's checks alone, on a task not yet done: what the user
+ *  may still change once the plan is submitted. */
+function checksOnlyEdit(plan: Plan, raw: PlanOp): boolean {
+  const op = raw as { op?: string; id?: unknown } & Record<string, unknown>;
+  if (op?.op !== 'upsert_task' || typeof op.id !== 'string') return false;
+  const task = plan.tasks.find((t) => t.id === op.id);
+  if (!task || task.status === 'done' || task.status === 'dropped') return false;
+  const keys = Object.keys(op).filter((k) => k !== 'op' && k !== 'id' && k !== 'expect');
+  return keys.length > 0 && keys.every((k) => k === 'addChecks' || k === 'skipChecks');
 }
 
 function removeItem(
@@ -1909,13 +2212,13 @@ export function isLocked(plan: Pick<Plan, 'submission'> | null): boolean {
  * is applied: each box or arrow edit's `expect` against the plan before the
  * batch, and what waits on what checked on the batch as a whole.
  */
-function applyAsUser(plan: Plan, ops: PlanOp[], now: number): Change[] {
+function applyAsUser(plan: Plan, ops: PlanOp[], now: number, reserved: Reserved): Change[] {
   const start = structuredClone(plan);
   const had = new Set(dependencyProblems(plan));
   const out: Change[] = [];
   ops.forEach((inner, i) => {
     try {
-      out.push(...applyOne(plan, expectAtStart(start, inner, 'user'), 'user', now));
+      out.push(...applyOne(plan, expectAtStart(start, inner, 'user'), 'user', now, reserved));
     } catch (err) {
       if (err instanceof PlanError && ops.length > 1) throw new PlanError(`edit ${i + 1} (${inner.op}): ${err.message}`);
       throw err;
@@ -1966,7 +2269,11 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
       return d ? fingerprint(designWithoutLinks(d)) : 0;
     }
     const t = plan.tasks.find((x) => x.id === id);
-    return t ? fingerprint(JSON.stringify([t.title, t.detail ?? '', t.parentId, t.dependsOn ?? [], t.branch ?? '', t.review ?? '', t.files ?? []])) : 0;
+    if (!t) return 0;
+    // A task's checks only once it has some: a proposal made before tasks
+    // had them keeps the fingerprint it was made with.
+    const checks = t.addChecks?.length || t.skipChecks?.length ? [t.addChecks ?? [], t.skipChecks ?? []] : [];
+    return fingerprint(JSON.stringify([t.title, t.detail ?? '', t.parentId, t.dependsOn ?? [], t.branch ?? '', t.review ?? '', t.files ?? [], ...checks]));
   };
   for (const op of ops) {
     switch (op.op) {
@@ -2046,11 +2353,12 @@ export function isDesignLocked(plan: Pick<Plan, 'submission' | 'design'> | null)
   return Boolean(plan?.design || plan?.submission);
 }
 
-function checkLocked(ops: PlanOp[], author: Author): void {
+function checkLocked(plan: Plan, ops: PlanOp[], author: Author): void {
   // The user's say on a locked plan: their verdict on a task they review,
-  // and on what Claude proposes (accepting one checks what it changes).
+  // what Claude proposes (accepting one checks what it changes), and the
+  // checks of a task not yet done.
   if (author === 'user') {
-    if (ops.every((op) => USER_ON_LOCKED.has((op as { op?: string })?.op ?? ''))) return;
+    if (ops.every((op) => USER_ON_LOCKED.has((op as { op?: string })?.op ?? '') || checksOnlyEdit(plan, op))) return;
     throw new PlanError(LOCKED_FOR_USER);
   }
   const refused = ops.find((op) => !TRACKING_OPS.has((op as { op?: string })?.op ?? '') && !PROPOSAL_OPS.has((op as { op?: string })?.op ?? ''));
@@ -2470,7 +2778,7 @@ export function mergeChecks(before: readonly CheckResult[] | undefined, reported
 
 /** What a task says, as one comparable string: the fields its `rev` counts. */
 function taskContent(t: Task): string {
-  return JSON.stringify([t.title, t.detail ?? '', t.note ?? '', t.files ?? [], t.dependsOn ?? [], t.branch ?? '', t.review ?? '']);
+  return JSON.stringify([t.title, t.detail ?? '', t.note ?? '', t.files ?? [], t.dependsOn ?? [], t.branch ?? '', t.review ?? '', t.addChecks ?? [], t.skipChecks ?? []]);
 }
 
 function checkTaskRev(task: Task, expect: unknown, author: Author): void {
