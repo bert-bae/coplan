@@ -58,6 +58,15 @@ jobs:
           ./bin/coplan stop
           exit $status
 
+      # ./setup.sh as a user runs it, with no agent to install in: it builds,
+      # stages .plugin/, and the staged copy's CLI runs on its own.
+      - name: Setup
+        env:
+          CC_HARNESS_HOME: ${{ runner.temp }}/harness
+        run: |
+          ./setup.sh --yes --agents none
+          ./.plugin/bin/coplan version
+
       - name: Audit dependencies
         if: matrix.os == 'ubuntu-latest' && matrix.node == 22
         run: pnpm audit --audit-level high
@@ -67,10 +76,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      # shellcheck is on the runner image. The relay runs under /bin/sh on
-      # every machine, so it is checked as POSIX sh.
+      # shellcheck is on the runner image. The relay and setup run under
+      # /bin/sh on every machine, so they are checked as POSIX sh.
       - name: shellcheck
-        run: shellcheck --shell=sh --severity=warning bin/coplan-hook-relay.sh bin/coplan
+        run: shellcheck --shell=sh --severity=warning bin/coplan-hook-relay.sh bin/coplan setup.sh
 
   validate-plugin:
     runs-on: ubuntu-latest

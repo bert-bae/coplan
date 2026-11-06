@@ -96,7 +96,8 @@ export function detectHooks(root: string): { hooks: Detected; found: string[] } 
   return { hooks, found };
 }
 
-function baseBranch(root: string): string | undefined {
+/** The branch the repository's remote calls its default, when it says. */
+export function baseBranch(root: string): string | undefined {
   try {
     const ref = execFileSync('git', ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     return ref.replace(/^refs\/remotes\/origin\//, '') || undefined;
@@ -105,8 +106,19 @@ function baseBranch(root: string): string | undefined {
   }
 }
 
-/** The file as written: commented, so it explains itself to whoever opens it. */
-export function renderConfig(hooks: Detected, base: string | undefined): string {
+const SETTINGS = `  // How a build runs by default; the submit dialog can change it per plan.
+  //   review:    subagent | self | user | skip
+  //   parallel:  how many ready tasks are built at once
+  //   maxRounds: review rounds before Claude stops and asks you
+  "iric": ${JSON.stringify(DEFAULT_BUILD_SETTINGS).replace(/,"/g, ', "').replace(/":/g, '": ')},
+`;
+
+/**
+ * The file as written: commented, so it explains itself to whoever opens it.
+ * `settings: false` leaves `iric` out, so the user's own defaults
+ * (`coplan.json`) hold here rather than being overridden by the built-in ones.
+ */
+export function renderConfig(hooks: Detected, base: string | undefined, opts: { settings?: boolean } = {}): string {
   const hook = (h: CheckHook) => {
     const rest = { ...(h.timeout ? { timeout: h.timeout } : {}), ...(h.paths ? { paths: h.paths } : {}), ...(h.optional ? { optional: true } : {}) };
     return `      ${JSON.stringify({ name: h.name, run: h.run, ...rest }).replace(/,"/g, ', "').replace(/":/g, '": ')}`;
@@ -126,12 +138,7 @@ export function renderConfig(hooks: Detected, base: string | undefined): string 
     "review": ${stage('review')},
     "final": ${stage('final')}
   },
-  // How a build runs by default; the submit dialog can change it per plan.
-  //   review:    subagent | self | user | skip
-  //   parallel:  how many ready tasks are built at once
-  //   maxRounds: review rounds before Claude stops and asks you
-  "iric": ${JSON.stringify(DEFAULT_BUILD_SETTINGS).replace(/,"/g, ', "').replace(/":/g, '": ')},
-  "branches": ${JSON.stringify({ ...(base ? { base } : {}), prefix: 'coplan/' }).replace(/,"/g, ', "').replace(/":/g, '": ')}
+${opts.settings === false ? '' : SETTINGS}  "branches": ${JSON.stringify({ ...(base ? { base } : {}), prefix: 'coplan/' }).replace(/,"/g, ', "').replace(/":/g, '": ')}
 }
 `;
 }

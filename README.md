@@ -150,122 +150,123 @@ note that you changed the plan) rides along with your next message there.
 
 ## Install
 
+Coplan is not listed in Anthropic's, OpenAI's or Cursor's plugin
+directories. You install it from a clone of this repository: `./setup.sh`
+builds it, installs it in each agent you use, and walks you through its
+settings.
+
 You need Node.js 20.11 or later, [pnpm](https://pnpm.io) (or Node's
-`corepack`, which provides it), `sh` and `curl`, and at least one of
+`corepack`, which provides it), `git`, `sh` and `curl`, and at least one of
 [Claude Code](https://code.claude.com), [Codex](https://developers.openai.com/codex)
-or [Cursor](https://cursor.com). Coplan itself can do without `git` — with
-it, sessions are labelled with their repository and branch — though a build
-that lands on branches needs it. The Claude desktop app is
-optional; it is where *Answer in Claude* links open. Install the plugin in
-each agent you use: they share one daemon and one page, and the session list
-says which agent each session runs in.
+or [Cursor](https://cursor.com). With `git`, sessions are also labelled with
+their repository and branch, and a build can land on branches. The Claude
+desktop app is optional; it is where *Answer in Claude* links open. Install
+Coplan in each agent you use: they share one daemon and one page, and the
+session list says which agent each session runs in.
 
 It runs on **Linux and macOS**, both tested in CI. On **Windows**, run your
 agent in WSL: the hooks are a POSIX shell script, and native Windows is
 neither supported nor tested. From WSL, links open in your Windows browser.
 
-### Claude Code, from GitHub
+### 1. Clone the repository
 
-```bash
-claude plugin marketplace add bert-bae/coplan
-```
-
-```bash
-claude plugin install coplan@coplan --scope user
-```
-
-Or, from inside a Claude Code session, run `/plugin marketplace add
-bert-bae/coplan` and then `/plugin install coplan@coplan`.
-
-### Codex
-
-```bash
-codex plugin marketplace add bert-bae/coplan
-```
-
-```bash
-codex plugin add coplan@coplan
-```
-
-Or browse for it with `/plugins` in Codex. **Then approve Coplan's hooks:**
-Codex holds a plugin's hooks until you review them, so open `/hooks` in Codex
-and trust the Coplan ones, then start a new session. Codex asks again after
-Coplan is updated. Until they are trusted, Coplan's tools answer that no
-session is registered.
-
-### Cursor
-
-In the editor, search for a plugin by its Git URL — paste
-`https://github.com/bert-bae/coplan` into the plugin search — and install it.
-From the Cursor CLI:
-
-```bash
-agent plugin marketplace add https://github.com/bert-bae/coplan
-```
-
-then install Coplan from `/plugin`. To load a clone instead, copy it to
-`~/.cursor/plugins/local/coplan` and run *Developer: Reload Window*.
-
-### Then build it
-
-The build output (`dist/`) is not in the repository, so **build the plugin
-once after installing it, and again after each update**:
-
-- **Claude Code or Cursor:** run `/coplan-setup` in a session. It runs
-  `pnpm install` in the installed plugin's directory, which builds it.
-- **Codex:** ask it to *set up Coplan*. The Coplan skill tells it to run
-  `pnpm install` in the plugin's folder.
-
-Then restart the agent (or start a new session) so the plugin's MCP server
-and hooks start from the build, and run `/coplan-doctor` (in Codex, ask it to
-run the Coplan doctor) to check the wiring end to end. Until it is built,
-Coplan's tools and hooks stay off, and `coplan` prints how to build it. The
-build installs about 115 MB of build-time packages; see
-[Resource footprint](#resource-footprint).
-
-### From source
+Clone it somewhere it can stay: Claude Code loads Coplan from the clone.
 
 ```bash
 git clone https://github.com/bert-bae/coplan.git
 ```
 
-```bash
-cd coplan && pnpm install
-```
-
-Then load the plugin for a single Claude Code session:
+### 2. Run the setup
 
 ```bash
-claude --plugin-dir /path/to/coplan
+cd coplan && ./setup.sh
 ```
 
-Or install it permanently from your clone (for Codex, `codex plugin
-marketplace add /path/to/coplan` and `codex plugin add coplan@coplan`):
+It builds and stages without asking, then asks before it installs anything
+or writes a setting; each question offers what you have now as its default.
+In order, it:
+
+1. **Builds Coplan** with `pnpm install`, which fetches about 115 MB of
+   build-time packages into the clone and builds `dist/`.
+2. **Stages what runs** in `.plugin/` in the clone: about 5 MB, without the
+   build-time packages. That folder is what your agents install.
+3. **Installs it in the agents you choose.** It looks for Claude Code, Codex
+   and Cursor, then asks about each:
+   - Claude Code: `claude plugin marketplace add <clone>/.plugin`, then
+     `claude plugin install coplan@coplan --scope user`. Claude Code loads
+     Coplan from that folder.
+   - Codex: `codex plugin marketplace add <clone>/.plugin`, then
+     `codex plugin add coplan@coplan`, which installs a copy.
+   - Cursor: copies it to `~/.cursor/plugins/local/coplan`.
+4. **Walks through your settings:**
+   - *Coplan on this machine* (`~/.claude/cc-harness/config.json`): whether
+     a plan opens in your browser by itself, whether your next message tells
+     the agent you changed the plan, whether a question from the agent
+     opens its session in the desktop app, and when the idle daemon stops.
+   - *Your build defaults* (`~/.claude/cc-harness/coplan.json`): who reviews
+     each task, how many tasks are built at once, how many review rounds a
+     task gets, and how pull requests are opened. These apply in every
+     repository.
+   - *A repository's checks* (`.coplan/config.json`): give it the path of a
+     repository you work in, and it proposes the commands each task runs —
+     typecheck, lint, tests — from that repository's scripts.
+
+   It writes only what you change, and you can edit any of these files by
+   hand later: [docs/CONFIG.md](docs/CONFIG.md) has every setting. A file
+   you wrote comments in is copied to `<file>.bak` before it is rewritten,
+   since the rewrite drops them.
+
+`./setup.sh --yes` asks nothing: it installs in every agent it finds and
+leaves your settings as they are. `--agents claude,codex` picks the agents
+without asking.
+
+### 3. Start your agent again
+
+- **Claude Code:** start a new session, or run `/reload-plugins`.
+- **Codex:** open `/hooks`, trust the Coplan hooks, then start a new thread.
+  Codex holds a plugin's hooks until you review them, and asks again after
+  each update. Until they are trusted, Coplan's tools answer that no session
+  is registered.
+- **Cursor:** run *Developer: Reload Window*.
+
+Then run `/coplan-doctor` (in Codex, ask it to run the Coplan doctor) to
+check the wiring end to end.
+
+### Updating
 
 ```bash
-claude plugin marketplace add /path/to/coplan
+git pull
 ```
 
 ```bash
-claude plugin install coplan@coplan --scope user
+./setup.sh
 ```
 
-Verify the wiring against your installed CLI:
+The setup rebuilds Coplan and installs the new build in your agents. If the
+daemon is running, it restarts it on the new build, and open tabs reconnect
+by themselves. Codex asks you to trust the hooks again.
 
-```bash
-./bin/coplan doctor
-```
+If you moved the clone, run `./setup.sh` again from its new place.
 
 ### Removing it
 
-1. Stop the daemon while the CLI is still there: `coplan stop`
-   (`bin/coplan stop` in the plugin's folder).
-2. Uninstall the plugin from your agent's plugin manager (`/plugin` in Claude
-   Code and Cursor, `/plugins` in Codex). Its hooks, MCP server and skills go
+1. Stop the daemon: `.plugin/bin/coplan stop` in the clone.
+2. Uninstall Coplan from each agent. Its hooks, MCP server and skills go
    with it.
-3. To delete your saved plans and Coplan's settings too, remove
+   - Claude Code: `claude plugin uninstall coplan@coplan`, then
+     `claude plugin marketplace remove coplan`.
+   - Codex: `codex plugin remove coplan@coplan`, then
+     `codex plugin marketplace remove coplan`.
+   - Cursor: delete `~/.cursor/plugins/local/coplan`.
+3. Delete the clone.
+4. To delete your saved plans and Coplan's settings too, remove
    `~/.claude/cc-harness` (or wherever `CC_HARNESS_HOME` points).
    A repository's `.coplan/config.json` is yours; keep or delete it.
+
+> **Installed Coplan straight from GitHub before?** If you ran
+> `claude plugin marketplace add bert-bae/coplan` (or the Codex
+> equivalent), running `./setup.sh` from a clone moves the `coplan`
+> marketplace to the clone. You don't need to remove anything first.
 
 > **Coming from cc-harness?** Coplan was previously called cc-harness. The
 > slash commands and CLI are now `/coplan*` and `coplan`; the MCP tools and
@@ -279,7 +280,8 @@ In any session with the plugin enabled:
 - `/coplan <task>` (in Codex, `$coplan <task>`, or just ask it to plan the
   task in Coplan): the agent investigates, then publishes a plan to the UI
 - `/coplan-open`: open this session's plan in the browser
-- `/coplan-setup`: build the plugin after installing or updating it
+- `/coplan-setup`: say how to update Coplan or change its settings (in a
+  checkout you load directly, build it)
 - `/coplan-init`: set up `.coplan/config.json`, the checks every task runs
 - `/coplan-doctor`: check the wiring
 - `/coplan-restart`: restart the daemon after a rebuild
@@ -333,10 +335,11 @@ and its build.
 
 ### Before the first plan
 
-1. **Build, then check the wiring:** `/coplan-setup`, restart the agent,
-   `/coplan-doctor`.
+1. **Set up, then check the wiring:** `./setup.sh` in the clone, restart
+   the agent, `/coplan-doctor`.
 2. **Give each repository a `.coplan/config.json` and commit it**
-   (`/coplan-init` writes one from the repository's scripts and CI). Without
+   (`./setup.sh` proposes one from the repository's scripts, and
+   `/coplan-init` checks one against its CI). Without
    it the agent picks the checks itself, once per build, and says which.
 3. **Keep the `implement` checks to seconds** — typecheck, lint, format. They
    run after every implementation and refinement pass of every task. Put the
@@ -413,8 +416,9 @@ and its build.
 19. **Don't share the page's link.** The link `coplan open` and `coplan url`
     print carries the daemon's access token (`?token=…`); the page moves it
     out of the address bar into its own storage.
-20. **After updating the plugin:** `/coplan-setup`, restart the agent, then
-    `/coplan-restart` so the daemon runs the new build. Open tabs reconnect.
+20. **To update:** `git pull` and `./setup.sh` in the clone, then restart
+    the agent. The setup restarts the daemon on the new build; open tabs
+    reconnect.
 21. **Now and then:** `coplan clean --dry-run` lists what could go — finished
     sessions, interrupted writes, the older part of the log.
 
@@ -439,8 +443,10 @@ and its build.
 One plugin, in this repository, with a manifest per agent:
 [`.claude-plugin/`](.claude-plugin/plugin.json),
 [`.codex-plugin/`](.codex-plugin/plugin.json) and
-[`.cursor-plugin/`](.cursor-plugin/plugin.json). Nothing is downloaded at run
-time; the one-time build fetches its packages from the npm registry with pnpm.
+[`.cursor-plugin/`](.cursor-plugin/plugin.json). [`./setup.sh`](setup.sh)
+builds it in your clone, fetching its build-time packages from the npm
+registry with pnpm, and installs what runs (`.plugin/`, about 5 MB) in each
+agent you choose. Nothing is downloaded at run time.
 
 | Part | What it is | Runs as | Lifetime |
 | --- | --- | --- | --- |
@@ -448,7 +454,7 @@ time; the one-time build fetches its packages from the npm registry with pnpm.
 | [Hooks](#hooks) | Seven lifecycle hooks in Claude Code and Codex, five in Cursor | `bin/coplan-hook-relay.sh` — `sh` and `curl` | About 20 ms per event |
 | [Daemon](#what-it-reads-writes-and-connects-to) | Local server: keeps the plans, serves the page | `node dist/daemon/main.js` | One per user. The first hook starts it; it exits after two idle hours |
 | [Skills](#skills) | `coplan`, `coplan-build`, `iric` | Instructions the agent loads | When the agent uses one |
-| [Slash commands](#slash-commands-and-the-cli) | `/coplan-setup`, `-open`, `-init`, `-doctor`, `-restart` | Each runs `bin/coplan` | When you type one |
+| [Slash commands](#slash-commands-and-the-cli) | `/coplan-setup`, `-open`, `-init`, `-doctor`, `-restart` | Each has the agent run `bin/coplan`, or say what to run | When you type one |
 | [CLI](#slash-commands-and-the-cli) | `coplan` | `bin/coplan` | When you run it |
 | Browser page | React and React Flow, served by the daemon | A tab | While you have it open |
 
@@ -464,7 +470,7 @@ it uses the skill.
 
 | Skill | The agent uses it when | It tells the agent to | So the agent may |
 | --- | --- | --- | --- |
-| [`coplan`](skills/coplan/SKILL.md) (12 KB) | you type `/coplan` or `$coplan`, ask to plan something in Coplan or to set Coplan up, or a confirmed design arrives | investigate the code, publish the design, read your edits back and answer your comments, propose changes that are yours to decide rather than make them, then break the confirmed design into a task list — and not build until you submit | call Coplan's tools; ask you questions in chat; propose edits for you to accept or reject; run `pnpm install` in the plugin's folder when you ask it to set Coplan up |
+| [`coplan`](skills/coplan/SKILL.md) (12 KB) | you type `/coplan` or `$coplan`, ask to plan something in Coplan or to set Coplan up, or a confirmed design arrives | investigate the code, publish the design, read your edits back and answer your comments, propose changes that are yours to decide rather than make them, then break the confirmed design into a task list — and not build until you submit | call Coplan's tools; ask you questions in chat; propose edits for you to accept or reject; tell you to run `./setup.sh` in your clone when you ask it to set Coplan up or update it (or, in a checkout that was never built, run `pnpm install` there) |
 | [`coplan-build`](skills/coplan-build/SKILL.md) (8 KB) | a submitted plan's build prompt arrives, or you ask it to build a Coplan plan | start only tasks that are ready, build independent ones in parallel, land each on its branch, then run the final checks and write the report | start up to `parallel` subagents; create branches and git worktrees; commit once per task; rebase stacked branches; run the repository's checks; push the branches; open pull requests with `gh` or Graphite, as the repository's [`pullRequests`](docs/CONFIG.md#pullrequests) says — by default only once you say so — written from its pull request template if it has one |
 | [`iric`](skills/iric/SKILL.md) (6 KB) | building each task, or when you ask to run a task through iric | implement inside the task's scope, run the checks, have it reviewed the way you chose, refine until it passes or the round limit, and report each step | run the `implement` and `review` checks; start a reviewer subagent (review `subagent`), on the model [`review.model`](docs/CONFIG.md#review) names if one is set; stop and ask you (review `user`, or past `maxRounds`) |
 
@@ -557,7 +563,7 @@ that has the agent run the CLI:
 
 | Command | Runs | For |
 | --- | --- | --- |
-| `/coplan-setup` | `pnpm install --frozen-lockfile` in the plugin's folder (with corepack's pnpm if pnpm is missing), then `coplan version` | Building after an install or update |
+| `/coplan-setup` | `coplan version`, and the clone to run `./setup.sh` in. In a checkout you load directly that was never built, `pnpm install --frozen-lockfile` there (with corepack's pnpm if pnpm is missing) | Updating Coplan or changing its settings |
 | `/coplan-open` | `coplan open` | Opening this session's plan |
 | `/coplan-init` | `coplan init --print`; the agent checks it against your CI and scripts, asks before replacing an existing file, writes `.coplan/config.json` and reads it back with `coplan check implement --list` | Setting up a repository's checks |
 | `/coplan-doctor` | `coplan doctor` | Checking Node and curl, both configs and the repository's, the daemon's version, and the whole round trip with real hook payloads. Its test sessions are deleted afterwards |
@@ -575,6 +581,7 @@ plugin's folder:
 | `doctor` | Check the wiring end to end |
 | `check [implement\|review\|final]` | Run a stage of the repository's checks and print only what failed (`--files`, `--list`, `--json`) |
 | `init` | Write a starting `.coplan/config.json` from the repository's scripts (`--print` to only show it, `--force` to replace one) |
+| `setup` | Install in your agents and walk through the settings: what `./setup.sh` runs once it has built the clone (`--yes`, `--agents`) |
 | `clean` | Remove stale files (`--dry-run` to only list them) |
 | `version` | Print the version |
 
@@ -585,8 +592,10 @@ plugin's folder:
 | Where | What | Written by |
 | --- | --- | --- |
 | `~/.claude/cc-harness/` (or `CC_HARNESS_HOME`), a directory only you can read | `daemon.json` (the daemon's address, pid and token), `auth.header` (the token, for the hook relay), `daemon.log`, `sessions/<id>/state.json` (each plan with its change log and sign-offs), and `start-failed`, a marker after a daemon that would not start. Also yours, if you make them: `config.json` (Coplan's settings), `coplan.json` (your defaults for every repository's build) and `instructions/<point>.md` (your standing instructions) | The daemon; you |
-| The plugin's folder | `node_modules/` and `dist/` | The one-time build |
-| Your repository | Nothing. Coplan reads `.coplan/config.json`, `.claude/harness.json`, and the instruction files and pull request template the config names — only files inside the repository, a link that leads outside it is refused. `coplan init` writes `.coplan/config.json` when you ask it to | — |
+| Your clone | `node_modules/` and `dist/` (the build), and `.plugin/` (what runs, staged for your agents) | `./setup.sh` |
+| Your agents' plugins | Claude Code reads `.plugin/` in place; Codex keeps a copy in its plugin cache, Cursor in `~/.cursor/plugins/local/coplan` | `./setup.sh`, through each agent's own plugin commands |
+| Coplan's settings | `config.json` and `coplan.json` in Coplan's home, and a repository's `.coplan/config.json`, each only when you answer the setup's questions | `./setup.sh` |
+| Your repository | Nothing. Coplan reads `.coplan/config.json`, `.claude/harness.json`, and the instruction files and pull request template the config names — only files inside the repository, a link that leads outside it is refused. `coplan init` and `./setup.sh` write `.coplan/config.json` when you ask them to | — |
 
 The agent changes your repository as it builds, of course — with its own
 permissions, as it would without Coplan.
@@ -675,8 +684,9 @@ you aren't looking at costs next to nothing.
 
 | What | Size | Kept |
 | --- | --- | --- |
-| Build-time packages (React, React Flow, Tailwind, esbuild, TypeScript, jsdom for the tests) | About 115 MB in pnpm's store, linked into the plugin's `node_modules` | Until you remove the plugin |
-| `dist/` | 15 MB: 5 MB to run (the page is 3.6 MB of it, 2.9 MB of that a source map) and 9.6 MB of compiled tests | Rebuilt on each `/coplan-setup` |
+| Build-time packages (React, React Flow, Tailwind, esbuild, TypeScript, jsdom for the tests) | About 115 MB in pnpm's store, linked into the clone's `node_modules` | Until you delete the clone |
+| `dist/` | 15 MB: 5 MB to run (the page is 3.6 MB of it, 2.9 MB of that a source map) and 9.6 MB of compiled tests | Rebuilt on each `./setup.sh` |
+| `.plugin/`, and each agent's copy of it | About 5 MB each: what runs, without the tests or the build-time packages. Claude Code reads `.plugin/` itself; Codex and Cursor each keep a copy | Replaced on each `./setup.sh` |
 | One plan | 13–55 KB for the demo plans above; 520 KB for 150 boxes and 150 tasks after 500 edits | 30 days after its last change; at most 60 sessions in memory |
 | `daemon.log` | Trimmed to its newest 256 KB once past 1 MB | — |
 
@@ -738,7 +748,8 @@ your machine and your plans, but not by an order of magnitude.
 `~/.claude/cc-harness/config.json`, overridden per repo by
 `.claude/harness.json` — for every agent, Codex and Cursor included. The
 build's checks and defaults live in the repository's `.coplan/config.json`.
-See [docs/CONFIG.md](docs/CONFIG.md).
+`./setup.sh` walks through them; [docs/CONFIG.md](docs/CONFIG.md) has every
+setting.
 
 ## Contributing
 
