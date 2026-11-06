@@ -1,0 +1,35 @@
+# Add a cache
+_revision 1 · tasks 0/2 done · 0 open comment(s)_
+
+## Since you last read
+Nothing — the user has not changed the plan.
+
+## Summary
+Put a cache in front of the database.
+
+## Sections
+
+### [s1] Context _(rev 1)_
+Reads are slow.
+
+## Architecture
+
+### [d1] Components
+_rev 1_
+
+**Parts**
+- **API** `api` — service
+  Built by: [ ] client Cache client
+
+_Not connected to anything yet: API._
+
+## Tasks (0/2 done)
+- [ ] client Cache client · rev 1
+  Wrap ioredis.
+- [ ] t1 Wire into API · rev 1
+
+_Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_
+
+## Gaps (2) — what the plan leaves open
+- Box "API" in "Components" has no description: what it does, owns, and how others talk to it.
+- Task t1 "Wire into API" builds no box — link it to the parts it changes (builds).

@@ -1,0 +1,135 @@
+[cc-harness] The design is confirmed for "Add a read-through cache" — now break it into the task list.
+
+The user has reviewed the design in Coplan and confirmed it: the architecture, sections and summary below are locked. What you make now is the task list the build will follow. The user reviews it, then submits the plan to start the build. Follow the coplan skill's guidance on the task list:
+
+1. Start from the tasks planned on the diagram. Break each into focused tasks: one objective, one area of the architecture, small enough to implement and review on its own. In `detail` put the objective, the acceptance criteria and what is out of scope; in `files` the files you expect to touch.
+2. Link them: `dependsOn` lists the tasks that must be done first (by id). Leave a task free of dependencies whenever it could be built alongside others — that is what lets the build run in parallel. A parent's dependencies hold for all its subtasks.
+3. Say what each task builds: `builds` names the boxes it implements (node ids), so the diagram tracks it.
+4. Decide how it lands. A change that is one pull request needs no `branch`. Otherwise give each group of tasks a `branch`: a branch whose tasks depend on another branch's is cut from it, as a stacked pull request. Branches are cut from `main` and named `coplan/…`.
+5. Each task is built implement → review → refine. Review is an independent reviewer (a fresh subagent) by default; set `review: "user"` on risky or user-facing tasks, `"skip"` on trivial ones.
+6. Publish it with harness_tasks_publish — keep the ids of planned tasks you keep, so the boxes stay linked — then tell the user in chat that the task list is ready to review, and ask what you need decided with request_user_input (in Plan mode) or plainly. Do not start building: the user submits the plan when the tasks are right.
+
+## Standing instructions
+_From the user's and the repository's Coplan config; they hold for all of this._
+
+Split by layer.
+
+## Checks
+_From .coplan/config.json, run from the repository root:_
+- implement: typecheck `pnpm typecheck`; lint `pnpm lint` (for src/**)
+- review: tests `env NODE_ENV=test sh -c 'pnpm test'`
+- final: check `pnpm check`; audit `pnpm audit` (optional)
+
+## Since you last read — what the user changed
+_The net effect of their edits — not each step, and not where boxes were moved on the canvas. The full plan follows._
+
+**Tasks**
+- Changed docs "Document the cache in the README": renamed from "Document the cache".
+
+**Sections**
+- Changed [risks] "Risks": text edited.
+
+**Comments**
+- Replied on box "Redis" (d1/cache) in diagram "Components": Redis 7..
+- Commented on task "Wire into API": Keep the old path behind a flag. Remove it next release..
+- Commented on the plan: Looks good overall..
+
+## Summary
+Put a read-through cache in front of the orders database.
+
+### Why
+Reads are slow at peak.
+
+## Sections
+
+### [context] Context
+p95 read latency is 900ms at peak.
+
+##### Numbers
+- 40k reads/min
+
+### [risks] Risks _(edited by the user)_
+Stale reads after a write.
+A cold cache after deploys.
+
+### [empty] Open questions
+_(empty)_
+
+## Architecture
+
+### [d1] Components
+
+The read path.
+
+Entry points: Orders API. Data stores: Redis, Postgres.
+
+**Parts**
+- **Orders API** `api` — service
+  Serves orders.
+  Built by: [~] wire Wire into API
+- **Redis** `cache` — data store: managed
+  Hot orders.
+  Decisions:
+    Read-through, 10m TTL.
+  Built by: [x] client Cache client
+- **Postgres** `db` — data store
+  Source of truth.
+
+**Connections**
+- Orders API → Redis: get `api → cache`
+- Redis → Postgres: miss (dashed: optional, async or future) `cache → db`
+
+**Notes on the diagram**
+- Keep it simple (`n1`)
+  No write-behind.
+
+### [d2] Invalidation
+
+Queues: Event bus.
+
+**Parts**
+- **Event bus** `bus` — queue
+  Built by: [ ] inval Invalidation
+
+_Not connected to anything yet: Event bus._
+
+## Tasks (1/4 done)
+- [ ] storage Storage layer
+  Everything below the API.
+  - [x] client Cache client · branch `cache/client`
+    files: src/cache.ts
+    Wrap ioredis.
+    
+    Acceptance: get/set with TTL.
+  - [ ] inval Invalidation · after client · branch `cache/client` · review: user
+    files: src/cache.ts, src/events.ts
+- [~] wire Wire into API · after storage · branch `cache/api` — halfway
+  Use the client in the orders handler.
+- [ ] docs Document the cache in the README · review: skip
+
+## Build order
+_Each step needs only the steps before it; the tasks within a step can be built side by side._
+1. [x] client Cache client; [ ] docs Document the cache in the README
+2. [ ] inval Invalidation
+3. [~] wire Wire into API
+
+## Branches
+_Each branch is one pull request. A branch whose tasks build on another branch is cut from it — a stacked pull request._
+- `cache/client` from `main` — client, inval
+- `cache/api` from `cache/client` (stacked) — wire
+- no branch named (the session's current branch) — docs
+
+## Open comments
+- [c1] on box "Redis" (d1/cache) in diagram "Components" — you: Which Redis version?
+  ↳ user: Redis 7.
+  → reply with harness_plan_edit {ops: [{op: "reply", threadId: "c1", text}]} once you have acted on it
+- [c2] on the plan — you: Proposal p1: Split the docs task
+
+    Two audiences.
+- [c3] on task "Wire into API" — user: Keep the old path behind a flag.
+    Remove it next release.
+  → reply with harness_plan_edit {ops: [{op: "reply", threadId: "c3", text}]} once you have acted on it
+- [c4] on the plan — user: Looks good overall.
+  → reply with harness_plan_edit {ops: [{op: "reply", threadId: "c4", text}]} once you have acted on it
+
+_Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_

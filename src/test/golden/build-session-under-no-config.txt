@@ -1,0 +1,41 @@
+[cc-harness] Build the plan "Add a cache" — the user has reviewed it in Coplan and submitted it.
+
+The plan is final. Its architecture is locked, and from here Coplan follows your progress on its task board, so keep every task's status true as you go. Run the build with the coplan-build skill, and take each task through the iric skill — implement → review → refine:
+
+1. Start only tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that are ready together do not depend on each other — build them side by side, up to 2 at once, each by its own subagent given that task's harness_task_brief. harness_task_brief gives one task's focused brief: its objective, where it fits, its branch and its checks.
+2. When you start a task, mark it in_progress with stage "implement" (harness_task_update) and run the implement checks. Set stage "review" when it goes to review, and "refine" when the review asks for changes. Report the checks you ran with `checks`.
+3. Review: an independent reviewer (a fresh subagent), unless a task says otherwise. After 3 review rounds without passing, stop and ask the user.
+4. Mark a task done only once its review passed and its review checks are green, with a one-line note of what you did.
+5. If you are stuck, mark the task blocked with a note saying on what, and ask the user with AskUserQuestion.
+6. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.
+7. Everything lands on the current branch: no task names a branch of its own. Open the pull requests with `gh pr create`, each against the branch below it (the base branch for the bottom one), once the user says to: ask them first.
+8. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, stop and ask the user in chat — they can reopen the plan in Coplan.
+9. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) and give the user the final summary: what was built, the branches and pull requests, and how it was checked.
+
+## Checks
+No checks are configured (.coplan/config.json). Work out what to run from the repository's scripts and CI, use the same commands for every task, and say which in each task's done note.
+
+## Summary
+Put a cache in front of the database.
+
+## Sections
+
+### [s1] Context
+Reads are slow.
+
+## Architecture
+
+### [d1] Components
+
+**Parts**
+- **API** `api` — service
+  Built by: [ ] client Cache client
+
+_Not connected to anything yet: API._
+
+## Tasks (0/2 done)
+- [ ] client Cache client · ready
+  Wrap ioredis.
+- [ ] t1 Wire into API · ready
+
+_Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_

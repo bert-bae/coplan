@@ -1,0 +1,38 @@
+[cc-harness] The design is confirmed for "Add a cache" — now break it into the task list.
+
+The user has reviewed the design in Coplan and confirmed it: the architecture, sections and summary below are locked. What you make now is the task list the build will follow. The user reviews it, then submits the plan to start the build. Follow the coplan skill's guidance on the task list:
+
+1. Start from the tasks planned on the diagram. Break each into focused tasks: one objective, one area of the architecture, small enough to implement and review on its own. In `detail` put the objective, the acceptance criteria and what is out of scope; in `files` the files you expect to touch.
+2. Link them: `dependsOn` lists the tasks that must be done first (by id). Leave a task free of dependencies whenever it could be built alongside others — that is what lets the build run in parallel. A parent's dependencies hold for all its subtasks.
+3. Say what each task builds: `builds` names the boxes it implements (node ids), so the diagram tracks it.
+4. Decide how it lands. A change that is one pull request needs no `branch`. Otherwise give each group of tasks a `branch`: a branch whose tasks depend on another branch's is cut from it, as a stacked pull request.
+5. Each task is built implement → review → refine. Review is an independent reviewer (a fresh subagent) by default; set `review: "user"` on risky or user-facing tasks, `"skip"` on trivial ones.
+6. Publish it with harness_tasks_publish — keep the ids of planned tasks you keep, so the boxes stay linked — then tell the user in chat that the task list is ready to review, and ask what you need decided with AskUserQuestion. Do not start building: the user submits the plan when the tasks are right.
+
+## Checks
+This repository has no .coplan/config.json with checks. Suggest /coplan-init to the user, so the build runs the right checks instead of guessing.
+
+## Summary
+Put a cache in front of the database.
+
+## Sections
+
+### [s1] Context
+Reads are slow.
+
+## Architecture
+
+### [d1] Components
+
+**Parts**
+- **API** `api` — service
+  Built by: [ ] client Cache client
+
+_Not connected to anything yet: API._
+
+## Tasks (0/2 done)
+- [ ] client Cache client
+  Wrap ioredis.
+- [ ] t1 Wire into API
+
+_Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_
