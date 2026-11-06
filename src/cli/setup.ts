@@ -1,9 +1,10 @@
 /**
  * `coplan setup` — the second half of `./setup.sh`, run once the build is in
- * place: install Coplan in the agents you pick, then walk through its
- * settings. Run `./setup.sh` again after `git pull` to update.
+ * place: install Coplan in your agents and, if you want, adjust a few
+ * settings. `--uninstall` takes it out again. Run `./setup.sh` again after
+ * `git pull` to update.
  *
- *   coplan setup [--yes] [--agents claude,codex,cursor|none]
+ *   coplan setup [--yes] [--agents claude,codex,cursor|none] [--uninstall]
  *
  * Every agent copies what it is pointed at, and the clone holds about 150 MB
  * of build-time packages, so the agents are pointed at a staged copy that
@@ -11,23 +12,20 @@
  * reads that folder in place; Codex and Cursor take a copy of it.
  */
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_CONFIG, globalConfigFile, mergeConfig, type HarnessConfig } from '../shared/config.ts';
+import { DEFAULT_CONFIG, globalConfigFile, mergeConfig } from '../shared/config.ts';
 import { parseJsonc, stripJsonc } from '../shared/jsonc.ts';
-import { DEFAULT_BUILD_SETTINGS, MAX_PARALLEL, MAX_ROUNDS } from '../shared/build.ts';
+import { DEFAULT_BUILD_SETTINGS, MAX_PARALLEL } from '../shared/build.ts';
 import { GLOBAL_PROJECT_FILE, HOOK_STAGES, PROJECT_CONFIG_PATH, PR_OPEN, PR_TOOLS, loadProjectConfig } from '../shared/project.ts';
 import { REVIEW_MODES } from '../shared/types.ts';
 import { AGENTS, AGENT_KINDS, type AgentKind } from '../shared/agents.ts';
 import { paths, readVerifiedLock } from '../shared/paths.ts';
 import { baseBranch, detectHooks, renderConfig } from './init.ts';
 import { repoRootOf } from './check.ts';
-
-declare const __HARNESS_VERSION__: string;
-const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
 
 /** The clone this CLI was built in: `dist/cli/main.js` is two levels down. */
 const CLONE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -71,16 +69,16 @@ export interface SetupOptions {
   home: string;
   /** Coplan's home, which holds `config.json` and `coplan.json`. */
   coplanHome: string;
-  /** The agents to install in, chosen up front (`--agents`). Unset: asked,
-   *  or, with nothing asked, every agent found. */
+  /** The agents to install in, chosen up front (`--agents`). Unset: every
+   *  agent found, once the user says yes. */
   agents?: AgentKind[];
 }
 
 export interface SetupResult {
   /** The agents Coplan was installed in. */
   installed: AgentKind[];
-  /** What went wrong, each said where it happened. */
-  failed: string[];
+  /** The agents it could not be installed in. */
+  failed: AgentKind[];
 }
 
 /* ---------------- questions ---------------- */
@@ -125,6 +123,12 @@ export async function whole(io: SetupIo, question: string, min: number, max: num
   return dflt;
 }
 
+/** "Claude Code", "Claude Code and Codex", "Claude Code, Codex and Cursor". */
+function names(kinds: readonly AgentKind[]): string {
+  const n = kinds.map((k) => AGENTS[k].product);
+  return n.length < 2 ? n.join('') : `${n.slice(0, -1).join(', ')} and ${n[n.length - 1]}`;
+}
+
 /* ---------------- the staged plugin ---------------- */
 
 /**
@@ -133,7 +137,7 @@ export async function whole(io: SetupIo, question: string, min: number, max: num
  * daemon restart checks it) but has nothing to install or build. Built
  * beside the old copy and swapped in, so no agent reads a half-written one.
  */
-export function stagePlugin(root: string, stage: string): { bytes: number } {
+export function stagePlugin(root: string, stage: string): void {
   const tmp = `${stage}.tmp`;
   const old = `${stage}.old`;
   rmSync(tmp, { recursive: true, force: true });
@@ -151,50 +155,29 @@ export function stagePlugin(root: string, stage: string): { bytes: number } {
   if (existsSync(stage)) renameSync(stage, old);
   renameSync(tmp, stage);
   rmSync(old, { recursive: true, force: true });
-  return { bytes: sizeOf(stage) };
-}
-
-function sizeOf(dir: string): number {
-  let total = 0;
-  for (const entry of readdirSync(dir, { withFileTypes: true, recursive: true })) {
-    // `parentPath` from Node 20.12; `path` before it.
-    const parent = entry.parentPath ?? (entry as unknown as { path: string }).path;
-    if (entry.isFile()) total += statSync(path.join(parent, entry.name)).size;
-  }
-  return total;
 }
 
 /* ---------------- the agents ---------------- */
 
-/** Each agent this machine has, with what says so; null when it has not. */
-export function findAgents(io: SetupIo, home: string): Record<AgentKind, string | null> {
-  const version = (command: string) => {
-    const r = io.run(command, ['--version']);
-    return r.ok ? r.stdout.split('\n').map((l) => l.trim()).find(Boolean) ?? command : null;
-  };
-  const cursorDir = path.join(home, '.cursor');
-  return {
-    claude: version('claude'),
-    codex: version('codex'),
-    cursor: existsSync(cursorDir) ? cursorDir : version('cursor-agent'),
-  };
+/** The agents this machine has. */
+export function findAgents(io: SetupIo, home: string): AgentKind[] {
+  const has = (command: string) => io.run(command, ['--version']).ok;
+  return AGENT_KINDS.filter((kind) =>
+    kind === 'claude' ? has('claude') : kind === 'codex' ? has('codex') : existsSync(path.join(home, '.cursor')) || has('cursor-agent'),
+  );
 }
 
-/** Run each step in turn, saying it; stop at the first that fails. */
-function steps(io: SetupIo, list: [string, string[]][], failed: string[], who: string): boolean {
+/** Run each step in turn; at the first that fails, stop and say why. */
+function steps(io: SetupIo, list: [string, string[]][]): string | null {
   for (const [command, args] of list) {
-    io.say(`  $ ${[command, ...args].join(' ')}`);
     const r = io.run(command, args);
     if (!r.ok) {
       // Without a Rust backtrace's frames, which crowd out the message.
       const lines = r.out.split('\n').filter((l) => l.trim() && !/^\s*(\d+: |at |Stack backtrace:)/.test(l));
-      const tail = lines.slice(-6).map((l) => `    ${l.trim()}`).join('\n');
-      if (tail) io.say(tail);
-      failed.push(`${who}: \`${[command, ...args].join(' ')}\` failed`);
-      return false;
+      return [`\`${[command, ...args].join(' ')}\` failed`, ...lines.slice(-6).map((l) => l.trim())].join('\n      ');
     }
   }
-  return true;
+  return null;
 }
 
 /**
@@ -202,19 +185,27 @@ function steps(io: SetupIo, list: [string, string[]][], failed: string[], who: s
  * one added from elsewhere, such as GitHub, to it) and install from it.
  * Claude Code reads a folder marketplace's plugin in place, so a later
  * `./setup.sh` takes effect at the next session; `update` records a new
- * version, and changes nothing when there is none.
+ * version, and changes nothing when there is none. Null when it worked;
+ * otherwise what failed.
  */
-export function installClaude(io: SetupIo, stage: string, failed: string[]): boolean {
-  return steps(
-    io,
-    [
-      ['claude', ['plugin', 'marketplace', 'add', stage]],
-      ['claude', ['plugin', 'install', PLUGIN_ID, '--scope', 'user']],
-      ['claude', ['plugin', 'update', PLUGIN_ID]],
-    ],
-    failed,
-    'Claude Code',
-  );
+export function installClaude(io: SetupIo, stage: string): string | null {
+  return steps(io, [
+    ['claude', ['plugin', 'marketplace', 'add', stage]],
+    ['claude', ['plugin', 'install', PLUGIN_ID, '--scope', 'user']],
+    ['claude', ['plugin', 'update', PLUGIN_ID]],
+  ]);
+}
+
+/** Codex's `coplan` marketplace, from `plugin marketplace list --json`. */
+function codexMarketplace(io: SetupIo): { root?: string } | null {
+  const listed = io.run('codex', ['plugin', 'marketplace', 'list', '--json']);
+  if (!listed.ok) return null;
+  try {
+    const { marketplaces = [] } = JSON.parse(listed.stdout) as { marketplaces?: { name?: string; root?: string }[] };
+    return marketplaces.find((m) => m.name === 'coplan') ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -222,50 +213,74 @@ export function installClaude(io: SetupIo, stage: string, failed: string[]): boo
  * one from elsewhere (an earlier install from GitHub) is removed first. It
  * installs a copy, and `plugin add` copies again each time.
  */
-export function installCodex(io: SetupIo, stage: string, failed: string[]): boolean {
-  const listed = io.run('codex', ['plugin', 'marketplace', 'list', '--json']);
+export function installCodex(io: SetupIo, stage: string): string | null {
+  const ours = codexMarketplace(io);
   const list: [string, string[]][] = [];
-  if (listed.ok) {
-    try {
-      const { marketplaces = [] } = JSON.parse(listed.stdout) as { marketplaces?: { name?: string; root?: string }[] };
-      const ours = marketplaces.find((m) => m.name === 'coplan');
-      if (ours && (!ours.root || path.resolve(ours.root) !== path.resolve(stage))) list.push(['codex', ['plugin', 'marketplace', 'remove', 'coplan']]);
-    } catch {
-      /* an answer this cannot read: `add` says whether it is in the way */
-    }
-  }
+  if (ours && (!ours.root || path.resolve(ours.root) !== path.resolve(stage))) list.push(['codex', ['plugin', 'marketplace', 'remove', 'coplan']]);
   list.push(['codex', ['plugin', 'marketplace', 'add', stage]], ['codex', ['plugin', 'add', PLUGIN_ID]]);
-  return steps(io, list, failed, 'Codex');
+  return steps(io, list);
+}
+
+function cursorDir(home: string): string {
+  return path.join(home, '.cursor', 'plugins', 'local', 'coplan');
+}
+
+/** Whether `dir` holds Coplan's Cursor plugin, and so is Coplan's to replace. */
+function isCoplan(dir: string): boolean {
+  try {
+    return (JSON.parse(readFileSync(path.join(dir, '.cursor-plugin', 'plugin.json'), 'utf8')) as { name?: unknown }).name === 'coplan';
+  } catch {
+    return false;
+  }
 }
 
 /** Cursor loads a plugin copied into its local plugins folder. One already
  *  there is replaced only when it is Coplan. */
-export function installCursor(io: SetupIo, stage: string, home: string, failed: string[]): boolean {
-  const dest = path.join(home, '.cursor', 'plugins', 'local', 'coplan');
-  io.say(`  copying the plugin to ${dest}`);
+export function installCursor(stage: string, home: string): string | null {
+  const dest = cursorDir(home);
   if (existsSync(dest)) {
-    let name: unknown;
-    try {
-      name = (JSON.parse(readFileSync(path.join(dest, '.cursor-plugin', 'plugin.json'), 'utf8')) as { name?: unknown }).name;
-    } catch {
-      name = undefined;
-    }
-    if (name !== 'coplan') {
-      io.say(`    ${dest} is there and is not Coplan: left as it is.`);
-      failed.push(`Cursor: ${dest} holds something else`);
-      return false;
-    }
+    if (!isCoplan(dest)) return `${dest} holds something else, so it was left as it is`;
     rmSync(dest, { recursive: true, force: true });
   }
   try {
     mkdirSync(path.dirname(dest), { recursive: true });
     cpSync(stage, dest, { recursive: true });
-    return true;
+    return null;
   } catch (err) {
-    io.say(`    ${(err as Error).message}`);
-    failed.push(`Cursor: could not copy to ${dest}`);
-    return false;
+    return `could not copy to ${dest}: ${(err as Error).message}`;
   }
+}
+
+/** Install in the agents chosen, saying how each went. */
+function install(io: SetupIo, kinds: readonly AgentKind[], opts: SetupOptions): SetupResult {
+  const result: SetupResult = { installed: [], failed: [] };
+  for (const kind of kinds) {
+    const error =
+      kind === 'claude' ? installClaude(io, opts.stage) : kind === 'codex' ? installCodex(io, opts.stage) : installCursor(opts.stage, opts.home);
+    if (error) {
+      io.say(`  ✗ ${AGENTS[kind].product}: ${error}`);
+      result.failed.push(kind);
+    } else {
+      io.say(`  ✓ ${AGENTS[kind].product}`);
+      result.installed.push(kind);
+    }
+  }
+  return result;
+}
+
+/** Which agents to install in: those found, once the user says so, or the
+ *  ones they pick when they do not want them all. */
+export async function chooseAgents(io: SetupIo, found: AgentKind[]): Promise<AgentKind[]> {
+  if (!found.length) {
+    io.say('No coding agent found. Install Claude Code, Codex or Cursor, then run ./setup.sh again.');
+    return [];
+  }
+  io.say(`Found ${names(found)}.`);
+  if (await yesNo(io, `Install Coplan in ${found.length > 1 ? (found.length > 2 ? 'all three' : 'both') : names(found)}?`, true)) return found;
+  if (found.length === 1) return [];
+  const picked: AgentKind[] = [];
+  for (const kind of found) if (await yesNo(io, `  In ${AGENTS[kind].product}?`, false)) picked.push(kind);
+  return picked;
 }
 
 /* ---------------- settings ---------------- */
@@ -296,81 +311,73 @@ function put(obj: Record<string, unknown>, key: string, value: unknown, dflt: un
   obj[key] = value;
 }
 
-/** Write the file, keeping a copy of one whose comments the rewrite drops. */
-function writeJsonc(file: string, header: string, obj: Record<string, unknown>, comments: boolean, io: SetupIo): void {
+/** Set keys in the object under `key`, creating it only when it gets one. */
+function section(raw: Record<string, unknown>, key: string, set: (obj: Record<string, unknown>) => void): void {
+  const had = isRecord(raw[key]);
+  const obj = had ? { ...(raw[key] as Record<string, unknown>) } : {};
+  set(obj);
+  if (had || Object.keys(obj).length) raw[key] = obj;
+}
+
+/** Write the file if it changed, keeping a copy of one whose comments the
+ *  rewrite drops. Whether it was written. */
+function save(file: string, header: string, before: { raw: Record<string, unknown>; comments: boolean }, raw: Record<string, unknown>, io: SetupIo): boolean {
+  if (JSON.stringify(raw) === JSON.stringify(before.raw)) return false;
   mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  if (comments) {
+  if (before.comments) {
     copyFileSync(file, `${file}.bak`);
     io.say(`  (${file} had comments, which this rewrite drops: the file as it was is ${file}.bak)`);
   }
-  const body = JSON.stringify(obj, null, 2).split('\n');
+  const body = JSON.stringify(raw, null, 2).split('\n');
   const lines = body.length === 1 ? ['{', `  // ${header}`, '}'] : ['{', `  // ${header}`, ...body.slice(1)];
   writeFileSync(file, `${lines.join('\n')}\n`);
+  return true;
 }
 
-/** Coplan on this machine: `config.json` in Coplan's home. */
-export async function askSettings(io: SetupIo, coplanHome: string): Promise<'written' | 'unchanged' | 'unreadable'> {
-  const file = globalConfigFile(coplanHome);
-  const read = readJsonc(file, io);
-  if (!read) return 'unreadable';
-  const now: HarnessConfig = mergeConfig(DEFAULT_CONFIG, read.raw);
-  const next: HarnessConfig = {
-    autoOpen: await yesNo(io, '  Open the plan in your browser the first time the agent publishes one?', now.autoOpen),
-    promptNotice: await yesNo(io, '  When you change the plan in the browser, add a line to your next message telling the agent to read it?', now.promptNotice),
-    openClaudeOnQuestion: await yesNo(
-      io,
-      "  When the agent asks you something, open its session in the desktop app straight away (Claude Code with Remote Control, or the Codex app)?",
-      now.openClaudeOnQuestion,
-    ),
-    idleShutdownMinutes: await whole(io, '  Stop the daemon after how many idle minutes (0: never)?', 0, 100_000, now.idleShutdownMinutes),
-  };
-  const raw = { ...read.raw };
-  for (const key of Object.keys(next) as (keyof HarnessConfig)[]) put(raw, key, next[key], DEFAULT_CONFIG[key]);
-  if (JSON.stringify(raw) === JSON.stringify(read.raw)) return 'unchanged';
-  writeJsonc(file, "Coplan's settings on this machine. docs/CONFIG.md says what each one does.", raw, read.comments, io);
-  return 'written';
-}
+/**
+ * The settings most people change, each starting from what is set now: how
+ * a build runs (`coplan.json`, for every repository) and whether the plan
+ * opens by itself (`config.json`). The rest are in docs/CONFIG.md. The files
+ * written, if any.
+ */
+export async function askSettings(io: SetupIo, coplanHome: string): Promise<string[]> {
+  const saved: string[] = [];
 
-/** Your defaults for every repository's build: `coplan.json` in Coplan's home. */
-export async function askBuildDefaults(io: SetupIo, coplanHome: string): Promise<'written' | 'unchanged' | 'unreadable'> {
-  const file = path.join(coplanHome, GLOBAL_PROJECT_FILE);
-  const read = readJsonc(file, io);
-  if (!read) return 'unreadable';
-  const now = loadProjectConfig(null, { globalDir: coplanHome });
-  const review = await choose(
-    io,
-    '  Who reviews each task: a fresh subagent, the agent itself (self), you (user), or nobody (skip: the checks only)?',
-    REVIEW_MODES,
-    now.settings.review,
-  );
-  const parallel = await whole(io, `  How many ready tasks are built at once (1-${MAX_PARALLEL})?`, 1, MAX_PARALLEL, now.settings.parallel);
-  const maxRounds = await whole(io, `  How many review rounds may a task take before the agent stops and asks you (1-${MAX_ROUNDS})?`, 1, MAX_ROUNDS, now.settings.maxRounds);
-  const tool = await choose(io, '  Open pull requests with gh, graphite, or none (the agent pushes the branches and you open them)?', PR_TOOLS, now.pullRequests.tool);
-  const open =
-    tool === 'none'
-      ? now.pullRequests.open
-      : await choose(io, '  Open them as soon as a branch is done (auto), once you say to (ask), or never?', PR_OPEN, now.pullRequests.open);
+  const defaultsFile = path.join(coplanHome, GLOBAL_PROJECT_FILE);
+  const defaults = readJsonc(defaultsFile, io);
+  if (defaults) {
+    const now = loadProjectConfig(null, { globalDir: coplanHome });
+    const review = await choose(io, '  Who reviews each task: a fresh subagent, the agent itself (self), you (user), or only the checks (skip)?', REVIEW_MODES, now.settings.review);
+    const parallel = await whole(io, `  How many tasks are built at once? (1-${MAX_PARALLEL})`, 1, MAX_PARALLEL, now.settings.parallel);
+    const tool = await choose(io, '  Open pull requests with', PR_TOOLS, now.pullRequests.tool);
+    const open = tool === 'none' ? now.pullRequests.open : await choose(io, '  Open them as each branch is done (auto), when you say (ask), or never?', PR_OPEN, now.pullRequests.open);
+    const raw = { ...defaults.raw };
+    section(raw, 'iric', (o) => {
+      put(o, 'review', review, DEFAULT_BUILD_SETTINGS.review);
+      put(o, 'parallel', parallel, DEFAULT_BUILD_SETTINGS.parallel);
+    });
+    section(raw, 'pullRequests', (o) => {
+      put(o, 'tool', tool, 'gh');
+      put(o, 'open', open, 'ask');
+    });
+    if (save(defaultsFile, "Your defaults for every repository's build. A repository's .coplan/config.json overrides them; docs/CONFIG.md has the rest.", defaults, raw, io)) {
+      saved.push(defaultsFile);
+      for (const w of loadProjectConfig(null, { globalDir: coplanHome }).warnings) io.say(`  ! ${w}`);
+    }
+  }
 
-  const raw = { ...read.raw };
-  const section = (key: string, set: (obj: Record<string, unknown>) => void) => {
-    const had = isRecord(raw[key]);
-    const obj = had ? { ...(raw[key] as Record<string, unknown>) } : {};
-    set(obj);
-    if (had || Object.keys(obj).length) raw[key] = obj;
-  };
-  section('iric', (o) => {
-    put(o, 'review', review, DEFAULT_BUILD_SETTINGS.review);
-    put(o, 'parallel', parallel, DEFAULT_BUILD_SETTINGS.parallel);
-    put(o, 'maxRounds', maxRounds, DEFAULT_BUILD_SETTINGS.maxRounds);
-  });
-  section('pullRequests', (o) => {
-    put(o, 'tool', tool, 'gh');
-    put(o, 'open', open, 'ask');
-  });
-  if (JSON.stringify(raw) === JSON.stringify(read.raw)) return 'unchanged';
-  writeJsonc(file, "Your defaults for every repository's build. A repository's .coplan/config.json overrides them; docs/CONFIG.md has the rest.", raw, read.comments, io);
-  for (const w of loadProjectConfig(null, { globalDir: coplanHome }).warnings) io.say(`  ! ${w}`);
-  return 'written';
+  const machineFile = globalConfigFile(coplanHome);
+  const machine = readJsonc(machineFile, io);
+  if (machine) {
+    const now = mergeConfig(DEFAULT_CONFIG, machine.raw);
+    const autoOpen = await yesNo(io, '  Open the plan in your browser by itself when the agent publishes one?', now.autoOpen);
+    const raw = { ...machine.raw };
+    put(raw, 'autoOpen', autoOpen, DEFAULT_CONFIG.autoOpen);
+    if (save(machineFile, "Coplan's settings on this machine. docs/CONFIG.md says what each one does.", machine, raw, io)) saved.push(machineFile);
+  }
+
+  io.say(saved.length ? `  Saved to ${saved.join(' and ')}.` : '  Nothing changed.');
+  return saved;
 }
 
 /** A repository's checks: `.coplan/config.json`, from what it already runs. */
@@ -380,11 +387,11 @@ export async function askRepositories(io: SetupIo, home: string, coplanHome: str
   // user's own, which a repository's file does key by key.
   const own = readJsonc(path.join(coplanHome, GLOBAL_PROJECT_FILE), { ...io, say: () => {} })?.raw['iric'];
   const settings = !(isRecord(own) && Object.keys(own).length > 0);
-  let question = "  A repository to set up checks for (its path; Enter to skip):";
+  let question = "  Set up a repository's checks (typecheck, lint, tests)? Its path, or Enter to skip:";
   for (;;) {
     const a = await answer(io, `${question} `);
     if (!a) return written;
-    question = '  Another repository (Enter to finish):';
+    question = '  Another repository? Its path, or Enter to finish:';
     const dir = path.resolve(a.replace(/^~(?=$|\/)/, home));
     if (!existsSync(dir) || !statSync(dir).isDirectory()) {
       io.say(`  ${dir} is not a folder.`);
@@ -393,11 +400,11 @@ export async function askRepositories(io: SetupIo, home: string, coplanHome: str
     const root = repoRootOf(dir);
     const file = path.join(root, PROJECT_CONFIG_PATH);
     if (existsSync(file)) {
-      io.say(`  ${file} is already there: left as it is. /coplan-init in that repository reviews it against CI.`);
+      io.say(`  ${file} is already there: left as it is.`);
       continue;
     }
     const { hooks, found } = detectHooks(root);
-    io.say(found.length ? `  From ${found.join(', ')}:` : '  Nothing to run was found; the file will have empty stages to fill in.');
+    if (!found.length) io.say('  Found nothing to run there; the file will have empty stages to fill in.');
     for (const stage of HOOK_STAGES) {
       if (hooks[stage].length) io.say(`    ${stage}: ${hooks[stage].map((h) => h.run).join(', ')}`);
     }
@@ -405,84 +412,110 @@ export async function askRepositories(io: SetupIo, home: string, coplanHome: str
     mkdirSync(path.dirname(file), { recursive: true });
     writeFileSync(file, renderConfig(hooks, baseBranch(root), { settings }));
     written.push(file);
-    io.say(`  Wrote it${settings ? '' : ', without build settings, so your defaults hold there'}. Commit it so every build there runs the same checks; /coplan-init has the agent check it against CI.`);
+    io.say('  Written. Commit it; /coplan-init in that repository checks it against your CI.');
   }
 }
 
 /* ---------------- the whole walk ---------------- */
 
 export async function setup(opts: SetupOptions, io: SetupIo): Promise<SetupResult> {
-  const failed: string[] = [];
-  const installed: AgentKind[] = [];
-
-  io.say('\n1. The plugin');
-  const { bytes } = stagePlugin(opts.root, opts.stage);
-  io.say(`  Staged what runs in ${opts.stage} (${(bytes / (1024 * 1024)).toFixed(1)} MB). Your agents install it from there.`);
-
-  io.say('\n2. Your agents');
-  const found = findAgents(io, opts.home);
-  for (const kind of AGENT_KINDS) io.say(`  ${AGENTS[kind].product}: ${found[kind] ?? 'not found'}`);
-  for (const kind of AGENT_KINDS) {
-    const want = opts.agents ? opts.agents.includes(kind) : await yesNo(io, `  Install Coplan in ${AGENTS[kind].product}?`, found[kind] !== null);
-    if (!want) continue;
-    io.say(`  ${AGENTS[kind].product}:`);
-    const ok =
-      kind === 'claude'
-        ? installClaude(io, opts.stage, failed)
-        : kind === 'codex'
-          ? installCodex(io, opts.stage, failed)
-          : installCursor(io, opts.stage, opts.home, failed);
-    if (ok) installed.push(kind);
-  }
-  if (!installed.length && !failed.length) io.say('  Installed in none. Run ./setup.sh again to add one.');
-
-  if (io.ask) {
-    io.say(`\n3. Your settings (${globalConfigFile(opts.coplanHome)})`);
-    if (await yesNo(io, '  Go through them now?', true)) {
-      const r = await askSettings(io, opts.coplanHome);
-      if (r !== 'unreadable') io.say(r === 'written' ? '  Saved.' : '  Unchanged.');
-    }
-
-    io.say(`\n4. Your build defaults (${path.join(opts.coplanHome, GLOBAL_PROJECT_FILE)})`);
-    io.say('  How a build runs, in every repository; the submit dialog can still change it for each plan.');
-    if (await yesNo(io, '  Set them now?', existsSync(path.join(opts.coplanHome, GLOBAL_PROJECT_FILE)))) {
-      const r = await askBuildDefaults(io, opts.coplanHome);
-      if (r !== 'unreadable') io.say(r === 'written' ? '  Saved.' : '  Unchanged.');
-    }
-
-    io.say(`\n5. A repository's checks (${PROJECT_CONFIG_PATH})`);
-    io.say('  The commands each task runs while it is built and reviewed: typecheck, lint, tests.');
+  stagePlugin(opts.root, opts.stage);
+  const kinds = opts.agents ?? (await chooseAgents(io, findAgents(io, opts.home)));
+  const result = install(io, kinds, opts);
+  if (io.ask && (await yesNo(io, 'Adjust settings now? The defaults are fine to start.', false))) {
+    await askSettings(io, opts.coplanHome);
     await askRepositories(io, opts.home, opts.coplanHome);
+    io.say('  More settings: docs/CONFIG.md');
+  }
+  return result;
+}
+
+/**
+ * Take Coplan out of every agent it is in, and the staged plugin out of the
+ * clone. The saved plans and settings stay unless the user says otherwise.
+ * The agents it could not be taken out of.
+ */
+export async function uninstall(opts: SetupOptions, io: SetupIo): Promise<AgentKind[]> {
+  const failed: AgentKind[] = [];
+  const done = (kind: AgentKind, error: string | null) => {
+    io.say(error ? `  ✗ ${AGENTS[kind].product}: ${error}` : `  ✓ Removed from ${AGENTS[kind].product}`);
+    if (error) failed.push(kind);
+  };
+  const json = (r: RunResult): unknown => {
+    try {
+      return r.ok ? JSON.parse(r.stdout) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  if (io.run('claude', ['--version']).ok) {
+    const plugins = json(io.run('claude', ['plugin', 'list', '--json']));
+    const markets = json(io.run('claude', ['plugin', 'marketplace', 'list', '--json']));
+    const list: [string, string[]][] = [];
+    if (Array.isArray(plugins) && plugins.some((p) => isRecord(p) && p['id'] === PLUGIN_ID)) list.push(['claude', ['plugin', 'uninstall', PLUGIN_ID]]);
+    if (Array.isArray(markets) && markets.some((m) => isRecord(m) && m['name'] === 'coplan')) list.push(['claude', ['plugin', 'marketplace', 'remove', 'coplan']]);
+    if (list.length) done('claude', steps(io, list));
   }
 
-  return { installed, failed };
+  if (io.run('codex', ['--version']).ok) {
+    const plugins = json(io.run('codex', ['plugin', 'list', '--json']));
+    const installed = isRecord(plugins) && Array.isArray(plugins['installed']) ? plugins['installed'] : [];
+    const list: [string, string[]][] = [];
+    if (installed.some((p) => isRecord(p) && p['pluginId'] === PLUGIN_ID)) list.push(['codex', ['plugin', 'remove', PLUGIN_ID]]);
+    if (codexMarketplace(io)) list.push(['codex', ['plugin', 'marketplace', 'remove', 'coplan']]);
+    if (list.length) done('codex', steps(io, list));
+  }
+
+  const cursor = cursorDir(opts.home);
+  if (existsSync(cursor)) {
+    if (isCoplan(cursor)) {
+      rmSync(cursor, { recursive: true, force: true });
+      done('cursor', null);
+    } else done('cursor', `${cursor} holds something else, so it was left as it is`);
+  }
+
+  rmSync(opts.stage, { recursive: true, force: true });
+
+  if (existsSync(opts.coplanHome) && (await yesNo(io, `Also delete your saved plans and Coplan's settings (${opts.coplanHome})?`, false))) {
+    rmSync(opts.coplanHome, { recursive: true, force: true });
+    io.say(`  Deleted ${opts.coplanHome}.`);
+  }
+  return failed;
 }
 
 /* ---------------- the command ---------------- */
 
-function parseArgs(args: string[]): { yes: boolean; agents?: AgentKind[] } | string {
-  let yes = false;
-  let agents: AgentKind[] | undefined;
+interface Args {
+  yes: boolean;
+  uninstall: boolean;
+  agents?: AgentKind[];
+}
+
+function parseArgs(args: string[]): Args | string {
+  const out: Args = { yes: false, uninstall: false };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
-    if (arg === '--yes' || arg === '-y') yes = true;
+    if (arg === '--yes' || arg === '-y') out.yes = true;
+    else if (arg === '--uninstall') out.uninstall = true;
     else if (arg === '--agents' || arg.startsWith('--agents=')) {
       const value = arg === '--agents' ? args[++i] : arg.slice('--agents='.length);
       if (value === undefined) return '--agents needs a list: claude,codex,cursor, or none';
-      const names = value.split(',').map((s) => s.trim()).filter(Boolean);
-      const bad = names.filter((n) => n !== 'none' && !(AGENT_KINDS as readonly string[]).includes(n));
+      const list = value.split(',').map((s) => s.trim()).filter(Boolean);
+      const bad = list.filter((n) => n !== 'none' && !(AGENT_KINDS as readonly string[]).includes(n));
       if (bad.length) return `unknown agent(s): ${bad.join(', ')}; use claude, codex, cursor, or none`;
-      agents = names.filter((n): n is AgentKind => n !== 'none');
+      out.agents = list.filter((n): n is AgentKind => n !== 'none');
     } else return `unknown option: ${arg}`;
   }
-  return { yes, ...(agents ? { agents } : {}) };
+  return out;
 }
 
-const USAGE = `usage: ./setup.sh [--yes] [--agents claude,codex,cursor|none]
+const USAGE = `usage: ./setup.sh [--yes] [--agents claude,codex,cursor|none] [--uninstall]
 
-Builds Coplan, installs it in your agents, and walks through its settings.
-  --yes          ask nothing: install in every agent found, keep the settings
-  --agents LIST  install in these agents only, without asking which`;
+Builds Coplan and installs it in your agents.
+  --yes          ask nothing: install in every agent found
+  --agents LIST  install in these agents, without asking
+  --uninstall    take Coplan out of every agent, and stop its daemon`;
 
 /** Ctrl+C, or the end of input, at a question: the walk stops there. */
 export class Stopped extends Error {}
@@ -511,6 +544,15 @@ function askTerminal(question: string): Promise<string> {
 function runCommand(command: string, args: string[]): RunResult {
   const r = spawnSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000 });
   return { ok: !r.error && r.status === 0, stdout: r.stdout ?? '', out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+}
+
+/** What to do now, for the agents Coplan went into. */
+function nextSteps(installed: readonly AgentKind[]): string[] {
+  const lines: string[] = [];
+  if (installed.includes('claude')) lines.push('  Claude Code: start a new session, then /coplan <task>');
+  if (installed.includes('codex')) lines.push("  Codex: trust Coplan's hooks in /hooks, start a new thread, then $coplan <task>");
+  if (installed.includes('cursor')) lines.push('  Cursor: run Developer: Reload Window, then /coplan <task>');
+  return lines;
 }
 
 export async function runSetup(args: string[]): Promise<number> {
@@ -542,57 +584,61 @@ export async function runSetup(args: string[]): Promise<number> {
     run: runCommand,
     ...(interactive ? { ask: askTerminal } : {}),
   };
+  const opts: SetupOptions = {
+    root: CLONE,
+    stage: path.join(CLONE, STAGE_DIR),
+    home: homedir(),
+    coplanHome: paths.configDir(),
+    ...(parsed.agents ? { agents: parsed.agents } : {}),
+  };
+  const stop = (err: unknown) => {
+    if (!(err instanceof Stopped)) throw err;
+    console.log('\n\nStopped. What was done so far stays; run ./setup.sh again to finish.');
+    return 130;
+  };
 
-  console.log(`Coplan ${VERSION} setup, from ${CLONE}`);
-  if (!parsed.yes && !interactive) console.log('(no terminal to ask in: every question takes its default, and the settings stay as they are)');
+  if (parsed.uninstall) {
+    // The daemon first, while its CLI is still here.
+    runCommand(process.execPath, [path.join(CLONE, 'dist', 'cli', 'main.js'), 'stop']);
+    let failed: AgentKind[];
+    try {
+      failed = await uninstall(opts, io);
+    } catch (err) {
+      return stop(err);
+    }
+    if (failed.length) {
+      console.log(`\nNot removed from ${names(failed)}: see above.`);
+      return 1;
+    }
+    console.log(`\nCoplan is uninstalled. Delete this clone (${CLONE}) whenever you like.`);
+    return 0;
+  }
+
+  if (!parsed.yes && !interactive) console.log('(No terminal to ask in: installing in every agent found, and leaving the settings as they are.)');
   if (!runCommand('curl', ['--version']).ok) console.log('! curl is not installed: the hooks need it to reach Coplan. Install it before you use Coplan.');
   if (!runCommand('git', ['--version']).ok) console.log('! git is not installed: sessions will not be labelled with their repository, and builds cannot land on branches.');
 
   let result: SetupResult;
   try {
-    result = await setup(
-      {
-        root: CLONE,
-        stage: path.join(CLONE, STAGE_DIR),
-        home: homedir(),
-        coplanHome: paths.configDir(),
-        ...(parsed.agents ? { agents: parsed.agents } : {}),
-      },
-      io,
-    );
+    result = await setup(opts, io);
   } catch (err) {
-    if (!(err instanceof Stopped)) throw err;
-    console.log('\n\nStopped. What was done so far stays; run ./setup.sh again to finish.');
-    return 130;
+    return stop(err);
   }
 
   // A daemon already running keeps the build it started from, whatever its
   // version says (it is the same between releases): move it to this one. It
   // hands its address on, so open tabs reconnect.
-  const lock = await readVerifiedLock();
-  if (lock) {
-    console.log(`\nRestarting the running daemon (${lock.version}) on this build.`);
-    const r = runCommand(path.join(CLONE, STAGE_DIR, 'bin', 'coplan'), ['restart']);
-    console.log(r.out.trim());
-    if (!r.ok) result.failed.push('restarting the daemon');
+  if (await readVerifiedLock()) {
+    const r = runCommand(path.join(opts.stage, 'bin', 'coplan'), ['restart']);
+    console.log(r.ok ? 'Restarted the Coplan daemon on this build.' : `! Could not restart the Coplan daemon:\n${r.out.trim()}`);
   }
 
-  console.log('\nNext');
-  const done = new Set(result.installed);
-  if (done.has('claude')) console.log('  Claude Code: start a new session (or run /reload-plugins).');
-  if (done.has('codex')) console.log('  Codex: open /hooks and trust the Coplan hooks, then start a new thread. Codex asks again after each update.');
-  if (done.has('cursor')) console.log('  Cursor: run Developer: Reload Window.');
-  if (done.size) {
-    const codex = done.has('codex');
-    console.log(`  Then check the wiring with /coplan-doctor${codex ? ' (in Codex, ask it to run the Coplan doctor)' : ''},`);
-    console.log(`  and plan something: /coplan <task>${codex ? ' ($coplan <task> in Codex)' : ''}.`);
-  }
-  if (done.has('claude')) console.log(`  Keep this clone where it is: Claude Code loads Coplan from ${path.join(CLONE, STAGE_DIR)}.`);
-  console.log('  To update: git pull, then ./setup.sh again.');
-
+  const next = nextSteps(result.installed);
+  if (next.length) console.log(['', 'Done. Now:', ...next].join('\n'));
+  else if (!result.failed.length) console.log('\nNothing installed. Run ./setup.sh again to install Coplan in an agent.');
+  console.log('\nUpdate: git pull && ./setup.sh    Remove: ./setup.sh --uninstall');
   if (result.failed.length) {
-    console.log('\nNot done:');
-    for (const f of result.failed) console.log(`  ✗ ${f}`);
+    console.log(`\nNot installed in ${names(result.failed)}: see above, then run ./setup.sh again.`);
     return 1;
   }
   return 0;

@@ -4,7 +4,7 @@ description: Say how to update Coplan or change its settings, or build a checkou
 ---
 
 Coplan is installed from a clone of its repository: `./setup.sh` there
-builds it, installs it in the user's agents and walks through its settings.
+builds it and installs it in the user's agents.
 Which case this is depends on the plugin's folder, `${CLAUDE_PLUGIN_ROOT}`.
 If the path comes out empty (not every agent fills it in), use
 `${CURSOR_PLUGIN_ROOT}` in Cursor; failing that, the plugin's folder is the

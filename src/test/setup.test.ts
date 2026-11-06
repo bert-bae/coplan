@@ -7,14 +7,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   INSTALL_FILE,
-  askBuildDefaults,
   askRepositories,
   askSettings,
+  chooseAgents,
   installClaude,
   installCodex,
   installCursor,
   setup,
   stagePlugin,
+  uninstall,
   type RunResult,
   type SetupIo,
 } from '../cli/setup.ts';
@@ -143,6 +144,7 @@ test('setup says what it takes, and refuses an agent it does not know', () => {
   const help = spawnSync(process.execPath, [CLI, 'setup', '--help'], { encoding: 'utf8' });
   assert.equal(help.status, 0);
   assert.match(help.stdout, /--agents/);
+  assert.match(help.stdout, /--uninstall/);
   const bad = spawnSync(process.execPath, [CLI, 'setup', '--agents', 'claude,vim'], { encoding: 'utf8' });
   assert.equal(bad.status, 2);
   assert.match(bad.stderr, /unknown agent\(s\): vim/);
@@ -152,32 +154,27 @@ test('setup says what it takes, and refuses an agent it does not know', () => {
 
 test('Claude Code: the staged folder becomes the coplan marketplace, and Coplan is installed from it', () => {
   const { io, ran } = scripted(null);
-  const failed: string[] = [];
-  assert.equal(installClaude(io, '/c/.plugin', failed), true);
+  assert.equal(installClaude(io, '/c/.plugin'), null);
   assert.deepEqual(ran, [
     'claude plugin marketplace add /c/.plugin',
     'claude plugin install coplan@coplan --scope user',
     'claude plugin update coplan@coplan',
   ]);
-  assert.deepEqual(failed, []);
 });
 
-test('a step that fails stops the agent, and its message is shown without a backtrace', () => {
+test('a step that fails stops the agent, and says why without a backtrace', () => {
   const out = 'Error: no such marketplace\n\nStack backtrace:\n   0: <unknown>\n   1: <unknown>\n';
-  const { io, ran, said } = scripted(null, { 'claude plugin install': { ok: false, stdout: '', out } });
-  const failed: string[] = [];
-  assert.equal(installClaude(io, '/c/.plugin', failed), false);
+  const { io, ran } = scripted(null, { 'claude plugin install': { ok: false, stdout: '', out } });
+  const error = installClaude(io, '/c/.plugin');
   assert.equal(ran.length, 2, 'nothing runs after the step that failed');
-  assert.match(failed[0]!, /Claude Code: `claude plugin install coplan@coplan --scope user` failed/);
-  assert.ok(said.includes('    Error: no such marketplace'));
-  assert.ok(!said.some((l) => /<unknown>|backtrace/.test(l)));
+  assert.match(error!, /^`claude plugin install coplan@coplan --scope user` failed\n\s+Error: no such marketplace$/);
 });
 
 test('Codex: a coplan marketplace from elsewhere is removed first; the same one is kept', () => {
   const list = (root: string): RunResult => ({ ok: true, stdout: JSON.stringify({ marketplaces: [{ name: 'coplan', root }] }), out: '' });
 
   const moved = scripted(null, { 'codex plugin marketplace list': list('/home/u/.codex/.tmp/marketplaces/coplan') });
-  assert.equal(installCodex(moved.io, '/c/.plugin', []), true);
+  assert.equal(installCodex(moved.io, '/c/.plugin'), null);
   assert.deepEqual(moved.ran.slice(1), [
     'codex plugin marketplace remove coplan',
     'codex plugin marketplace add /c/.plugin',
@@ -185,81 +182,138 @@ test('Codex: a coplan marketplace from elsewhere is removed first; the same one 
   ]);
 
   const same = scripted(null, { 'codex plugin marketplace list': list('/c/.plugin') });
-  assert.equal(installCodex(same.io, '/c/.plugin', []), true);
+  assert.equal(installCodex(same.io, '/c/.plugin'), null);
   assert.deepEqual(same.ran.slice(1), ['codex plugin marketplace add /c/.plugin', 'codex plugin add coplan@coplan']);
 
   const unreadable = scripted(null, { 'codex plugin marketplace list': { ok: true, stdout: 'not json', out: '' } });
-  assert.equal(installCodex(unreadable.io, '/c/.plugin', []), true);
+  assert.equal(installCodex(unreadable.io, '/c/.plugin'), null);
   assert.deepEqual(unreadable.ran.slice(1), ['codex plugin marketplace add /c/.plugin', 'codex plugin add coplan@coplan']);
 });
 
 test("Cursor: the plugin is copied to its local plugins; a folder that is not Coplan is left alone", () => {
   const home = tmp('cursor');
   const dest = path.join(home, '.cursor', 'plugins', 'local', 'coplan');
-  const failed: string[] = [];
-  assert.equal(installCursor(scripted(null).io, staged(), home, failed), true);
+  assert.equal(installCursor(staged(), home), null);
   assert.ok(existsSync(path.join(dest, '.cursor-plugin', 'plugin.json')));
   assert.ok(existsSync(path.join(dest, 'dist', 'mcp', 'main.js')));
 
   // Again: the old copy is replaced.
   writeFileSync(path.join(dest, 'left-over'), 'x');
-  assert.equal(installCursor(scripted(null).io, staged(), home, failed), true);
+  assert.equal(installCursor(staged(), home), null);
   assert.equal(existsSync(path.join(dest, 'left-over')), false);
 
   const other = tmp('cursor-other');
   const theirs = path.join(other, '.cursor', 'plugins', 'local', 'coplan');
   mkdirSync(theirs, { recursive: true });
   writeFileSync(path.join(theirs, 'mine.txt'), 'keep');
-  assert.equal(installCursor(scripted(null).io, staged(), other, failed), false);
+  assert.match(installCursor(staged(), other)!, /holds something else/);
   assert.equal(readFileSync(path.join(theirs, 'mine.txt'), 'utf8'), 'keep');
-  assert.match(failed.join('\n'), /holds something else/);
+});
+
+const missing: RunResult = { ok: false, stdout: '', out: 'not found' };
+
+test('agents: one question for every agent found; no to it asks about each', async () => {
+  const both: ['claude', 'codex'] = ['claude', 'codex'];
+  const yes = scripted(['']);
+  assert.deepEqual(await chooseAgents(yes.io, both), both);
+  assert.deepEqual(yes.said, ['Found Claude Code and Codex.']);
+  assert.deepEqual(yes.asked, ['Install Coplan in both? [Y/n] ']);
+
+  const some = scripted(['n', '', 'y']);
+  assert.deepEqual(await chooseAgents(some.io, both), ['codex']);
+  assert.equal(some.left(), 0);
+
+  const one = scripted(['n']);
+  assert.deepEqual(await chooseAgents(one.io, ['cursor']), []);
+  assert.deepEqual(one.asked, ['Install Coplan in Cursor? [Y/n] ']);
+
+  assert.deepEqual(await chooseAgents(scripted(null).io, both), both, 'with nothing asked, every agent found');
+
+  const none = scripted([]);
+  assert.deepEqual(await chooseAgents(none.io, []), []);
+  assert.match(none.said[0]!, /No coding agent found/);
 });
 
 test('with nothing asked, setup installs in the agents found and writes no settings', async () => {
-  const home = tmp('home');
   const coplanHome = tmp('coplan-home');
-  const { io, ran, said } = scripted(null, { 'codex --version': { ok: false, stdout: '', out: 'not found' }, 'cursor-agent --version': { ok: false, stdout: '', out: '' } });
-  const stage = path.join(tmp('clone'), '.plugin');
-  const result = await setup({ root: ROOT, stage, home, coplanHome }, io);
+  const { io, ran, said } = scripted(null, { 'codex --version': missing, 'cursor-agent --version': missing });
+  const result = await setup({ root: ROOT, stage: path.join(tmp('clone'), '.plugin'), home: tmp('home'), coplanHome }, io);
   assert.deepEqual(result, { installed: ['claude'], failed: [] });
   assert.ok(!ran.some((l) => l.startsWith('codex plugin')), 'Codex, not found, is not installed in');
-  assert.ok(said.some((l) => /Codex: not found/.test(l)));
+  assert.deepEqual(said, ['Found Claude Code.', '  ✓ Claude Code']);
   assert.deepEqual(readdirSync(coplanHome), [], 'no settings written');
 });
 
 test('--agents installs in exactly those, found or not', async () => {
-  const { io, ran } = scripted(null, { 'claude --version': { ok: false, stdout: '', out: '' } });
+  const { io, ran } = scripted(null, { 'claude --version': missing });
   const result = await setup({ root: ROOT, stage: path.join(tmp('clone'), '.plugin'), home: tmp('home'), coplanHome: tmp('coplan-home'), agents: ['codex'] }, io);
   assert.deepEqual(result.installed, ['codex']);
   assert.ok(!ran.some((l) => l.startsWith('claude plugin')));
 });
 
+test('settings are asked only when the user wants to adjust them, which is not the default', async () => {
+  const coplanHome = tmp('coplan-home');
+  const skip = scripted(['', ''], { 'codex --version': missing, 'cursor-agent --version': missing });
+  await setup({ root: ROOT, stage: path.join(tmp('clone'), '.plugin'), home: tmp('home'), coplanHome }, skip.io);
+  assert.deepEqual(skip.asked.slice(-1), ['Adjust settings now? The defaults are fine to start. [y/N] ']);
+  assert.deepEqual(readdirSync(coplanHome), []);
+
+  const adjust = scripted(['', 'y', 'self', '', '', '', '', ''], { 'codex --version': missing, 'cursor-agent --version': missing });
+  await setup({ root: ROOT, stage: path.join(tmp('clone'), '.plugin'), home: tmp('home'), coplanHome }, adjust.io);
+  assert.equal(adjust.left(), 0);
+  assert.deepEqual(parseJsonc(readFileSync(path.join(coplanHome, 'coplan.json'), 'utf8')), { iric: { review: 'self' } });
+  assert.ok(adjust.said.includes('  More settings: docs/CONFIG.md'));
+});
+
+test('a failed agent is said, and the others still go in', async () => {
+  const { io, said } = scripted(null, { 'codex plugin add': { ok: false, stdout: '', out: 'Error: boom' }, 'cursor-agent --version': missing });
+  const result = await setup({ root: ROOT, stage: path.join(tmp('clone'), '.plugin'), home: tmp('home'), coplanHome: tmp('coplan-home') }, io);
+  assert.deepEqual(result, { installed: ['claude'], failed: ['codex'] });
+  assert.ok(said.some((l) => /^  ✗ Codex: `codex plugin add coplan@coplan` failed\n\s+Error: boom$/.test(l)));
+});
+
 /* ---------------- settings ---------------- */
 
-test('settings: only what differs from the default is written, and a wrong answer is asked again', async () => {
+test('settings: the five that matter, written only where they differ from the default', async () => {
   const home = tmp('settings');
-  const { io, said, left } = scripted(['y', 'maybe', '', '', 'lots', '30']);
-  assert.equal(await askSettings(io, home), 'written');
+  const { io, said, left } = scripted(['self', '9', '4', 'graphite', 'auto', 'y']);
+  assert.deepEqual(await askSettings(io, home), [path.join(home, 'coplan.json'), path.join(home, 'config.json')]);
   assert.equal(left(), 0);
-  assert.ok(said.includes('  Answer y or n.'));
-  assert.ok(said.includes('  Answer a whole number from 0 to 100000.'));
-  assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'config.json'), 'utf8')), { autoOpen: true, idleShutdownMinutes: 30 });
+  assert.ok(said.includes('  Answer a whole number from 1 to 8.'));
+  assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'coplan.json'), 'utf8')), {
+    iric: { review: 'self', parallel: 4 },
+    pullRequests: { tool: 'graphite', open: 'auto' },
+  });
+  assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'config.json'), 'utf8')), { autoOpen: true });
+  const read = loadProjectConfig(null, { globalDir: home });
+  assert.deepEqual(read.warnings, []);
+  assert.deepEqual(read.settings, { review: 'self', parallel: 4, maxRounds: 3 });
 });
 
 test('settings: taking every default writes nothing', async () => {
   const home = tmp('settings-same');
-  assert.equal(await askSettings(scripted(['', '', '', '']).io, home), 'unchanged');
-  assert.equal(existsSync(path.join(home, 'config.json')), false);
+  const { io, said } = scripted(['', '', '', '', '']);
+  assert.deepEqual(await askSettings(io, home), []);
+  assert.deepEqual(readdirSync(home), []);
+  assert.ok(said.includes('  Nothing changed.'));
+});
+
+test('settings: with no pull requests, when to open them is not asked', async () => {
+  const home = tmp('settings-none');
+  const { io, asked } = scripted(['', '', 'none', '']);
+  await askSettings(io, home);
+  assert.equal(asked.length, 4);
+  assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'coplan.json'), 'utf8')), { pullRequests: { tool: 'none' } });
 });
 
 test('settings: the current values are the defaults, keys set before are kept, and a file with comments is kept as .bak', async () => {
   const home = tmp('settings-old');
-  const before = '{\n  // mine\n  "promptNotice": true,\n  "autoOpen": true,\n}\n';
+  const before = '{\n  // mine\n  "promptNotice": false,\n  "autoOpen": true,\n}\n';
   writeFileSync(path.join(home, 'config.json'), before);
-  const { io, asked, said } = scripted(['', 'n', '', '']);
-  assert.equal(await askSettings(io, home), 'written');
-  assert.match(asked[0]!, /\[Y\/n\]/, 'autoOpen, set to true, defaults to yes');
-  assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'config.json'), 'utf8')), { promptNotice: false, autoOpen: true });
+  const { io, asked, said } = scripted(['', '', '', '', 'n']);
+  await askSettings(io, home);
+  assert.match(asked[4]!, /\[Y\/n\]/, 'autoOpen, set to true, defaults to yes');
+  assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'config.json'), 'utf8')), { promptNotice: false, autoOpen: false });
   assert.equal(readFileSync(path.join(home, 'config.json.bak'), 'utf8'), before);
   assert.ok(said.some((l) => /had comments, which this rewrite drops: the file as it was is .*config\.json\.bak/.test(l)));
 });
@@ -267,40 +321,60 @@ test('settings: the current values are the defaults, keys set before are kept, a
 test('settings: a file without comments is rewritten with no copy left behind', async () => {
   const home = tmp('settings-plain');
   writeFileSync(path.join(home, 'config.json'), '{ "autoOpen": true }');
-  assert.equal(await askSettings(scripted(['n', '', '', '']).io, home), 'written');
+  await askSettings(scripted(['', '', '', '', 'n']).io, home);
   assert.equal(existsSync(path.join(home, 'config.json.bak')), false);
 });
 
-test('settings: a file that cannot be read is left as it is', async () => {
+test('settings: a file that cannot be read is left as it is, and not asked about', async () => {
   const home = tmp('settings-bad');
   writeFileSync(path.join(home, 'config.json'), '{ "autoOpen": ');
-  const { io, said } = scripted([]);
-  assert.equal(await askSettings(io, home), 'unreadable');
+  const { io, said, asked } = scripted(['', '', '', '']);
+  await askSettings(io, home);
+  assert.equal(asked.length, 4, 'the build defaults only');
   assert.equal(readFileSync(path.join(home, 'config.json'), 'utf8'), '{ "autoOpen": ');
   assert.ok(said.some((l) => /cannot be read/.test(l)));
 });
 
-test('build defaults: written to coplan.json, which reads back cleanly as chosen', async () => {
-  const home = tmp('defaults');
-  const { io, left } = scripted(['self', '9', '4', '', 'graphite', 'auto']);
-  assert.equal(await askBuildDefaults(io, home), 'written');
-  assert.equal(left(), 0);
-  assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'coplan.json'), 'utf8')), {
-    iric: { review: 'self', parallel: 4 },
-    pullRequests: { tool: 'graphite', open: 'auto' },
+/* ---------------- uninstall ---------------- */
+
+test('uninstall takes Coplan out of every agent it is in, and the staged plugin out of the clone', async () => {
+  const home = tmp('home');
+  const coplanHome = tmp('coplan-home');
+  const stage = path.join(tmp('clone'), '.plugin');
+  stagePlugin(ROOT, stage);
+  assert.equal(installCursor(stage, home), null);
+  const ok = (value: unknown): RunResult => ({ ok: true, stdout: JSON.stringify(value), out: '' });
+  const { io, ran, said } = scripted(['n'], {
+    'claude plugin list': ok([{ id: 'coplan@coplan' }]),
+    'claude plugin marketplace list': ok([{ name: 'coplan' }]),
+    'codex plugin list': ok({ installed: [{ pluginId: 'coplan@coplan' }] }),
+    'codex plugin marketplace list': ok({ marketplaces: [{ name: 'coplan', root: stage }] }),
   });
-  const read = loadProjectConfig(null, { globalDir: home });
-  assert.deepEqual(read.warnings, []);
-  assert.deepEqual(read.settings, { review: 'self', parallel: 4, maxRounds: 3 });
-  assert.equal(read.pullRequests.tool, 'graphite');
+  assert.deepEqual(await uninstall({ root: ROOT, stage, home, coplanHome }, io), []);
+  for (const step of ['claude plugin uninstall coplan@coplan', 'claude plugin marketplace remove coplan', 'codex plugin remove coplan@coplan', 'codex plugin marketplace remove coplan']) {
+    assert.ok(ran.includes(step), step);
+  }
+  assert.deepEqual(said, ['  ✓ Removed from Claude Code', '  ✓ Removed from Codex', '  ✓ Removed from Cursor']);
+  assert.equal(existsSync(path.join(home, '.cursor', 'plugins', 'local', 'coplan')), false);
+  assert.equal(existsSync(stage), false);
+  assert.ok(existsSync(coplanHome), 'saved plans and settings stay unless the user says');
 });
 
-test('build defaults: with no pull requests, when to open them is not asked', async () => {
-  const home = tmp('defaults-none');
-  const { io, asked } = scripted(['', '', '', 'none']);
-  assert.equal(await askBuildDefaults(io, home), 'written');
-  assert.equal(asked.length, 4);
-  assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'coplan.json'), 'utf8')), { pullRequests: { tool: 'none' } });
+test('uninstall touches nothing that is not Coplan, and deletes the saved plans only when asked to', async () => {
+  const home = tmp('home');
+  const coplanHome = tmp('coplan-home');
+  const theirs = path.join(home, '.cursor', 'plugins', 'local', 'coplan');
+  mkdirSync(theirs, { recursive: true });
+  const { io, ran, said } = scripted(['y'], {
+    'claude plugin list': { ok: true, stdout: '[]', out: '' },
+    'claude plugin marketplace list': { ok: true, stdout: '[]', out: '' },
+    'codex --version': missing,
+  });
+  assert.deepEqual(await uninstall({ root: ROOT, stage: path.join(tmp('clone'), '.plugin'), home, coplanHome }, io), ['cursor']);
+  assert.ok(!ran.some((l) => / (uninstall|remove) /.test(l)), 'nothing to remove from Claude Code');
+  assert.ok(existsSync(theirs));
+  assert.match(said[0]!, /Cursor: .* holds something else/);
+  assert.equal(existsSync(coplanHome), false);
 });
 
 /* ---------------- a repository ---------------- */

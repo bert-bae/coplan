@@ -66,6 +66,8 @@ jobs:
         run: |
           ./setup.sh --yes --agents none
           ./.plugin/bin/coplan version
+          ./setup.sh --uninstall --yes
+          test ! -e .plugin
 
       - name: Audit dependencies
         if: matrix.os == 'ubuntu-latest' && matrix.node == 22
