@@ -1,6 +1,67 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
+
+### The plan the agent reads is the plan you see
+
+- The agent can no longer write over a change you made that it has not read
+  yet: the edit is refused with what to read first. Tasks carry a revision,
+  so two writers cannot silently overwrite each other.
+- The agent is sent every change you made, and the build prompt it receives
+  is exactly the one you read in the dialog: a prompt that changed after you
+  read it is refused, not sent. Text you write cannot break the prompt's
+  structure.
+- Skills and docs use the real `harness_plan_edit` API; a test checks every
+  example against the tool schemas.
+- A daemon's lock is trusted only once that daemon answers, and is claimed
+  atomically, so two daemons cannot both think they own it.
+
+### The agent as auditor
+
+- The agent can comment on the plan, a box or an arrow without changing it,
+  read the plan without marking it read (`peek`), and add, change or remove
+  one box or arrow without restating the whole diagram.
+- `harness_plan_check` lists what the plan leaves open: tasks with no
+  detail, boxes no task builds, branches a stack of pull requests cannot
+  follow.
+- A subagent's brief carries the plan's sections and the comments on the
+  boxes it builds.
+
+### Stacked pull requests and the build lifecycle
+
+- Branches are planned so a stack of pull requests can follow them, and
+  tracked as they are pushed and opened (`harness_branch_update`); a build
+  ends with its report.
+- Every path to *done* goes through the task's gates: a review round with a
+  verdict, passing checks, and every required review hook reported.
+- Scope can change mid-build without re-scoping what you signed off.
+
+### Hardening
+
+- The access token is never a cookie and never on a command line: the page
+  keeps it for its own origin and sends it as a header, the live stream uses
+  single-use tickets, and Coplan's files are readable by you alone.
+- A plan that cannot be saved says so instead of failing silently. A save is
+  written whole and synced before it replaces the old one.
+- *Answer in …* opens Claude, Codex and Cursor session links, checked first.
+- The canvas keeps undo consistent with what is saved, waits for a save in
+  flight before Confirm or Submit, leaves Tab and Enter to the toolbar, and
+  F6 moves between the canvas and its details.
+- Hook `paths` take `{a,b}` and `!glob`; config files take comments and
+  trailing commas; unknown keys and bad values are reported, saying what is
+  used instead. `config/defaults.json` is gone.
+- An installed but unbuilt plugin says so at the start of a session.
+  `coplan doctor` checks node, curl, both configs, the daemon's version and
+  pid, and a hook sent through the real relay, and cleans up after itself.
+
+### The same Coplan in every agent
+
+- The commands find the plugin where an agent leaves its path empty; the
+  docs list the commands each agent really ships; Codex's question hook
+  covers `request_user_input_async`.
+- Platform support is stated: Linux and macOS, and Windows through WSL.
+- CI runs on macOS too, on the oldest supported Node (20.11.0), lints the
+  shell scripts, and validates the Claude Code plugin; each release is tagged.
 
 ### Build after installing, with pnpm
 

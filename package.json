@@ -1,6 +1,6 @@
 {
   "name": "coplan",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Open-source visual planning workspace for Claude Code, Codex and Cursor: shape the agent's plan as architecture diagrams and a task board in the browser, submit it, and follow the build.",
   "license": "MIT",

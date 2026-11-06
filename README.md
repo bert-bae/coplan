@@ -99,6 +99,10 @@ where *Answer in Claude* links open. Install the plugin in each agent you
 use: they share one daemon and one page, and the session list says which
 agent each session runs in.
 
+It runs on **Linux and macOS**, both tested in CI. On **Windows**, run your
+agent in WSL: the hooks are a POSIX shell script, and native Windows is
+neither supported nor tested. From WSL, links open in your Windows browser.
+
 ### Claude Code, from GitHub
 
 ```bash
@@ -539,6 +543,11 @@ pnpm check             # typecheck, build and test
 ```
 
 `dist/` is build output and is not committed; `pnpm install` builds it.
+
+A release is a version bump — `package.json` and the three plugin
+manifests, kept equal by a test — with a `## <version>` section in
+CHANGELOG.md. When it reaches `main`, CI tags it `v<version>` and publishes
+that section as the release notes.
 
 ## License
 

@@ -384,6 +384,34 @@ test('every agent manifest carries the package version and points at files that 
   assert.deepEqual(readJson('.codex-plugin/plugin.json')['commands'], [], "Codex does not turn Claude Code's slash commands into skills");
 });
 
+test("the Cursor and Codex manifests keep to each agent's rules", () => {
+  // Cursor's schema (cursor/plugins schemas/plugin.schema.json) allows no other key.
+  const CURSOR_KEYS = ['name', 'displayName', 'description', 'version', 'minClientVersions', 'author', 'publisher', 'homepage', 'repository', 'license', 'logo', 'keywords', 'category', 'tags', 'commands', 'agents', 'skills', 'rules', 'hooks', 'variables', 'mcpServers'];
+  const cursor = readJson('.cursor-plugin/plugin.json');
+  for (const key of Object.keys(cursor)) assert.ok(CURSOR_KEYS.includes(key), `Cursor does not know "${key}"`);
+  assert.match(cursor['name'] as string, /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/);
+  for (const manifest of ['.cursor-plugin/plugin.json', '.codex-plugin/plugin.json']) {
+    const m = readJson(manifest);
+    assert.match(m['version'] as string, /^\d+\.\d+\.\d+$/, `${manifest} version is X.Y.Z`);
+    // Both resolve a component path against the plugin folder: relative, and never outside it.
+    for (const key of ['skills', 'commands', 'hooks', 'mcpServers', 'logo']) {
+      const value = m[key];
+      for (const p of typeof value === 'string' ? [value] : Array.isArray(value) ? value : []) {
+        assert.match(p as string, /^\.\//, `${manifest} ${key} is relative: ${p}`);
+        assert.ok(!(p as string).includes('..'), `${manifest} ${key} stays inside the plugin: ${p}`);
+      }
+    }
+  }
+});
+
+test('a version is released with its changelog: no bump without a heading for it', () => {
+  const version = readJson('package.json')['version'] as string;
+  const changelog = readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8');
+  // Unreleased work may sit above it; the newest released heading is this version.
+  const released = [...changelog.matchAll(/^## (.+)$/gm)].map((m) => m[1]).filter((h) => h !== 'Unreleased');
+  assert.equal(released[0], version, `the newest version in CHANGELOG.md is ${version}, the one every manifest carries`);
+});
+
 const COMMANDS = readdirSync(path.join(ROOT, 'commands'))
   .filter((f) => f.endsWith('.md'))
   .map((f) => f.replace(/\.md$/, ''))
