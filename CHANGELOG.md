@@ -214,6 +214,22 @@ every drag and keystroke.
   markdown editor for decisions; a visual kind picker. Several selected
   boxes can have their kind changed at once.
 
+### The README
+
+- **Screenshots** of each step, from demo plans that
+  `scripts/demo/screenshots.mjs` seeds into a throwaway daemon, so they can be
+  taken again when the page changes.
+- **What it installs:** every skill (when the agent uses it, and what it may
+  lead the agent to do), the MCP server and its nine tools, every hook with
+  what it sends and what is kept, the slash commands, the CLI, and what
+  Coplan reads, writes and connects to.
+- **Resource footprint:** measured memory, CPU, latency, disk and context
+  size for the daemon, the MCP server, the hooks and the page, and what
+  drives the cost of a build.
+- **Recommended usage:** when Coplan is worth it, and how to set up checks,
+  size a plan, and choose the review mode, parallelism and round limit.
+- The step-by-step walkthrough moved to [docs/GUIDE.md](docs/GUIDE.md).
+
 ## 0.2.0
 
 The harness is now a planning workspace: architecture and task breakdown in,
