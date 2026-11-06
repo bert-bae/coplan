@@ -432,6 +432,9 @@
 .session-repo { font-family: var(--font-mono); }
 
 .session-row {
+  /* The hover actions: three tiny buttons and the gaps between them. */
+  --row-action: 22px;
+  --row-actions-w: calc(3 * var(--row-action) + 2 * 2px);
   position: relative;
   display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left;
   padding: var(--sp-2); border-radius: var(--r-md);
@@ -439,8 +442,6 @@
   transition: background var(--t-fast) linear, border-color var(--t-fast) linear,
               box-shadow var(--t-fast) linear, transform var(--t-fast) var(--ease-out-soft);
 }
-/* Leave room for the hover actions so a long branch name never runs under them. */
-.session-row .session-name, .session-row .session-sub { padding-right: 46px; }
 .session-row:hover { background: var(--surface-hover); border-color: var(--border-subtle); }
 .session-row:active { transform: scale(0.995); }
 .session-row.is-active {
@@ -457,6 +458,7 @@
    rail reads as a list of sessions rather than a list of buttons. */
 .session-actions {
   position: absolute; top: 5px; right: 5px; display: flex; gap: 2px;
+  z-index: 1;
   opacity: 0; transform: translateX(4px); pointer-events: none;
   transition: opacity var(--t-fast) linear, transform var(--t-fast) var(--ease-out-soft);
 }
@@ -474,8 +476,34 @@
   border: 1px solid var(--border-focus); border-radius: var(--r-sm);
   background: var(--surface-base); color: var(--text-primary); font-weight: 600;
 }
-.session-name { display: flex; align-items: center; gap: var(--sp-2); font-weight: 600; }
-.session-sub { display: flex; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--text-secondary); flex-wrap: wrap; }
+.session-name { display: flex; align-items: flex-start; gap: var(--sp-2); font-weight: 600; }
+/* Level with the first line of a title that wraps. */
+.session-name > .dot, .session-name > .working-dot { margin-top: 6px; }
+.session-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+/* The hover actions sit at the end of the first line, so that line, and only
+   that line, keeps clear of them: the title flows around this float. It is
+   there whether or not they show, so hovering never rewraps the title. Its
+   width and height are how far the actions (5px in from the row's edge) reach
+   into the row's content (8px in), plus a gap before the text. */
+.session-title::before {
+  content: ''; float: right;
+  width: calc(var(--row-actions-w) - 3px + var(--sp-1));
+  height: calc(var(--row-action) - 3px);
+}
+/* One line, whatever is in it: a long folder or branch name is cut short
+   rather than broken across several lines. The full branch is in the row's
+   tooltip. */
+.session-sub {
+  display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0;
+  font-size: var(--fs-sm); color: var(--text-secondary); white-space: nowrap;
+}
+.session-sub > * { flex: none; }
+.session-sub > .session-stage, .session-sub > .session-branch {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+/* The branch gives way first: a session's own name is what tells rows apart. */
+.session-sub > .session-stage { max-width: 60%; }
+.session-sub > .session-branch { flex: 0 1 auto; }
 .session-branch { font-family: var(--font-mono); font-size: var(--fs-micro); }
 /* Which agent a session runs in, once the rail holds more than one kind. */
 .session-agent {
@@ -497,7 +525,7 @@
 }
 
 /* What a row is doing right now, under its name. */
-.session-now, .session-waiting { font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 46px; }
+.session-now, .session-waiting { font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-now { color: var(--text-secondary); }
 .session-waiting { color: var(--attention-fg); font-weight: 600; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .session-answer { align-self: flex-start; margin-top: var(--sp-1); text-decoration: none; }
@@ -1661,6 +1689,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
   .btn-sm { height: 34px; }
   .icon-btn { width: 40px; height: 40px; }
   .icon-btn.is-tiny { width: 32px; height: 32px; }
+  .session-row { --row-action: 32px; }
   .seg { height: 40px; }
   .session-actions, .task-actions, .md-edit { opacity: 1; transform: none; pointer-events: auto; }
   .flow .react-flow__handle { opacity: 1; width: 14px; height: 14px; }

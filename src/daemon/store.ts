@@ -281,6 +281,13 @@ export class SessionStore extends EventEmitter {
     return this.mutate(id, (s) => Object.assign(s, patch));
   }
 
+  /** The session has started using Coplan, so the rail lists it. Stamped
+   *  once: a later /coplan does not move when it began. */
+  engage(id: string): void {
+    const s = this.sessions.get(id);
+    if (s && !s.engagedAt) this.update(id, { engagedAt: Date.now() });
+  }
+
   /** Mutate in place, persist, and broadcast the whole session. */
   mutate(id: string, fn: (s: SessionState) => void): SessionState | undefined {
     const state = this.sessions.get(id);
@@ -518,6 +525,8 @@ export function summarize(s: SessionState): SessionSummary {
     link: s.link,
     openThreads: plan?.threads.filter((t) => !t.resolved).length ?? 0,
     unreadByClaude: unreadItems(plan),
+    // A plan saved before sessions were stamped still counts.
+    engaged: Boolean(s.engagedAt) || plan !== null,
   };
 }
 

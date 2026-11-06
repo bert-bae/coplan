@@ -10,6 +10,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { readLiveLock, baseUrl } from '../shared/paths.ts';
 import type { DaemonLock, SessionState } from '../shared/types.ts';
 import type { HookOutput } from '../shared/hooks.ts';
+import { asksForCoplan } from '../daemon/hookIngest.ts';
 
 /**
  * End-to-end: a real daemon subprocess, a real git repository, real hook
@@ -367,6 +368,52 @@ test('the session list summarizes the plan', async () => {
   const row = sessions.find((s) => s.sessionId === sessionId)!;
   assert.equal(row.planTitle, 'Add a cache');
   assert.equal(row.tasks.done, 1);
+});
+
+test('only a session that used Coplan is marked for the session list', async () => {
+  const engaged = async (id: string) => {
+    const { sessions } = await call<{ sessions: { sessionId: string; engaged: boolean }[] }>('/api/sessions');
+    return sessions.find((s) => s.sessionId === id)?.engaged;
+  };
+  const ids = ['engage-chat', 'engage-typed', 'engage-skill', 'engage-tool'];
+  for (const id of ids) await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  try {
+    // Every session with the plugin registers; a chat that never asked for a
+    // plan is not one of the user's plans, nor is one that only opened the UI.
+    await hookFor('engage-chat', 'UserPromptSubmit', { prompt: 'fix the flaky test' });
+    await hookFor('engage-chat', 'UserPromptSubmit', { prompt: '/coplan-open' });
+    await hookFor('engage-chat', 'PostToolUse', { tool_name: 'Skill', tool_input: { skill: 'review' } });
+    assert.equal(await engaged('engage-chat'), false);
+
+    // Typing the command lists it at once, before there is any plan.
+    await hookFor('engage-typed', 'UserPromptSubmit', { prompt: '/coplan:coplan add a cache' });
+    assert.equal(await engaged('engage-typed'), true);
+    const stamped = (await sessionFor('engage-typed')).engagedAt;
+    await hookFor('engage-typed', 'UserPromptSubmit', { prompt: '/coplan again' });
+    assert.equal((await sessionFor('engage-typed')).engagedAt, stamped, 'a second /coplan does not move when it began');
+
+    // So does the agent loading the skill itself …
+    await hookFor('engage-skill', 'PostToolUse', { tool_name: 'Skill', tool_input: { skill: 'coplan:coplan' } });
+    assert.equal(await engaged('engage-skill'), true);
+
+    // … or calling one of Coplan's tools, however it got there.
+    await mcpFor('engage-tool', 'read');
+    assert.equal(await engaged('engage-tool'), true);
+
+    // A session with a plan is listed whatever started it.
+    assert.equal(await engaged(sessionId), true);
+  } finally {
+    for (const id of ids) await call(`/api/session/${id}`, { method: 'DELETE' });
+  }
+});
+
+test('/coplan is read as a command, and $coplan as a Codex skill mention', () => {
+  for (const prompt of ['/coplan', '/coplan add a cache', '  /coplan:coplan x', 'use $coplan to plan this', 'plan it with $coplan.']) {
+    assert.ok(asksForCoplan(prompt), prompt);
+  }
+  for (const prompt of ['/coplan-open', '/coplan-doctor', '$coplan-open', 'see /coplan', 'src/coplan', '/coplan/x', '/coplans', 'a$coplan']) {
+    assert.ok(!asksForCoplan(prompt), prompt);
+  }
 });
 
 /* ------------------------------------------------------------------ *

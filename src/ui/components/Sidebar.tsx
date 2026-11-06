@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { store, useStore } from '../store.ts';
+import { listedSessions, store, useStore } from '../store.ts';
 import { GlobalActions } from './GlobalActions.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { agentInfo } from '../../shared/agents.ts';
@@ -51,8 +51,9 @@ interface Group {
 }
 
 export function Sidebar() {
-  const sessions = useStore((s) => s.sessions);
+  const all = useStore((s) => s.sessions);
   const current = useStore((s) => s.sessionId);
+  const sessions = listedSessions(all, current);
   const connection = useStore((s) => s.connection);
   const collapsed = useStore((s) => s.collapsedSidebar);
   const pinned = useStore((s) => s.pinned);
@@ -93,7 +94,9 @@ export function Sidebar() {
       ) : (
       <nav className="session-list" aria-label="Live sessions">
         {sessions.length === 0 ? (
-          <p className="sidebar-empty">No sessions yet.</p>
+          <p className="sidebar-empty">
+            No plans yet. Type <code>/coplan</code> in a session (<code>$coplan</code> in Codex) to start one.
+          </p>
         ) : (
           groups.map((group) => (
             <ProjectGroup
@@ -235,10 +238,13 @@ function SessionRow({
   const pinned = useStore((s) => s.pinned.includes(session.sessionId));
   // Which agent a row belongs to is only worth a word once there is more
   // than one kind in the list.
-  const mixed = useStore((s) => s.sessions.some((other) => other.agent !== session.agent));
+  const mixed = useStore((s) => listedSessions(s.sessions, s.sessionId).some((other) => other.agent !== session.agent));
   const [confirming, setConfirming] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const agent = agentInfo(session.agent);
+  // The session's own name under the plan's, unless it is only the folder
+  // the group header (or, in a lifted group, the foot) already names.
+  const stage = session.planTitle && session.planTitle !== session.title && session.title !== groupLabel(session) ? session.title : null;
 
   return (
     <div
@@ -264,7 +270,7 @@ function SessionRow({
           store.setDrawer(false);
         }}
         onDoubleClick={() => setRenaming(true)}
-        title={`${session.title}\n${session.cwd}\nDouble-click to rename`}
+        title={[session.title, session.branch && `on ${session.branch}`, session.cwd, 'Double-click to rename'].filter(Boolean).join('\n')}
       >
         <span className="session-name">
           {session.waiting ? (
@@ -274,7 +280,7 @@ function SessionRow({
               <span className="working-dot" title={`${agent.name} is working`} aria-label={`${agent.name} is working`} />
             )
           )}
-          {session.planTitle ?? session.title}
+          <span className="session-title">{session.planTitle ?? session.title}</span>
         </span>
         {session.waiting ? (
           <span className="session-waiting">{session.waiting.text}</span>
@@ -282,7 +288,7 @@ function SessionRow({
           session.current && <span className="session-now">now: {session.current}</span>
         )}
         <span className="session-sub">
-          {session.planTitle && session.planTitle !== session.title && <span className="session-stage">{session.title}</span>}
+          {stage && <span className="session-stage">{stage}</span>}
           {!session.planTitle && <span className="session-stage">no plan yet</span>}
           {mixed && <span className={classNames('session-agent', `is-${agent.kind}`)}>{agent.name}</span>}
           <span className={classNames('session-state', `is-${session.status}`)}>
@@ -319,6 +325,8 @@ function SessionRow({
         </a>
       )}
 
+      {/* Absent while renaming: the field takes the whole row. */}
+      {!renaming && (
       <div className="session-actions">
         <button
           type="button"
@@ -349,6 +357,7 @@ function SessionRow({
           <span aria-hidden="true">×</span>
         </button>
       </div>
+      )}
 
       {confirming && (
         <div className="session-confirm">
@@ -382,6 +391,8 @@ function RenameField({ session, onDone }: { session: SessionSummary; onDone: () 
   const done = useRef(false);
 
   useEffect(() => {
+    // Focused explicitly: the button that opened it has just gone.
+    input.current?.focus();
     input.current?.select();
   }, []);
 
