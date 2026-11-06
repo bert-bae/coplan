@@ -1876,6 +1876,41 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
   animation: fade-up var(--dur) var(--ease-out-soft);
 }
 .phase.is-built { background: var(--success-bg); border-bottom-color: var(--success-border); box-shadow: inset 4px 0 0 var(--success-solid); }
+
+/* What the agent proposes, waiting on the user. */
+.proposals {
+  display: flex; flex-direction: column; gap: var(--sp-2); flex: none;
+  padding: var(--sp-2) var(--inset);
+  background: var(--surface-raised); border-bottom: 1px solid var(--border-default);
+  max-height: 40vh; overflow-y: auto;
+}
+.proposal {
+  display: flex; flex-direction: column; gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--accent-border); border-radius: var(--radius-md);
+  box-shadow: inset 3px 0 0 var(--accent-solid);
+  background: var(--surface-base);
+}
+.proposal-head { display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap; }
+.proposal-title { margin: 0; font-size: var(--fs-md); font-weight: 700; overflow-wrap: anywhere; }
+.proposal-reason { font-size: var(--fs-sm); color: var(--text-secondary); }
+.proposal-changes summary { cursor: pointer; font-size: var(--fs-sm); }
+.proposal-changes ul { margin: var(--sp-1) 0 0; font-size: var(--fs-sm); display: flex; flex-direction: column; gap: 2px; }
+.proposal-blocked { margin: 0; font-size: var(--fs-sm); color: var(--danger-fg); overflow-wrap: anywhere; }
+.proposal-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.proposal-reject { display: flex; flex-direction: column; gap: var(--sp-1); }
+
+/* A proposal on the canvas: what it adds, changes, and takes away. */
+.react-flow__node.diff-added { outline: 2px solid var(--success-solid); outline-offset: 2px; border-radius: var(--radius-md); }
+.react-flow__node.diff-changed { outline: 2px dashed var(--accent-solid); outline-offset: 2px; border-radius: var(--radius-md); }
+.react-flow__node.diff-removed { opacity: 0.45; outline: 2px dashed var(--danger-solid); outline-offset: 2px; border-radius: var(--radius-md); }
+.react-flow__edge.diff-added path { stroke: var(--success-solid); stroke-width: 2.5; }
+.react-flow__edge.diff-changed path { stroke: var(--accent-solid); stroke-width: 2.5; }
+.react-flow__edge.diff-removed path { stroke: var(--danger-solid); stroke-dasharray: 6 4; opacity: 0.6; }
+.diff-key { display: inline-block; padding: 0 6px; border-radius: 999px; font-size: var(--fs-micro); border: 1.5px solid; }
+.diff-key-added { border-color: var(--success-solid); }
+.diff-key-changed { border-color: var(--accent-solid); border-style: dashed; }
+.diff-key-removed { border-color: var(--danger-solid); border-style: dashed; opacity: 0.7; }
 .phase.is-handed-off { background: var(--surface-raised); border-bottom-color: var(--border-default); box-shadow: inset 4px 0 0 var(--border-strong); }
 .phase-body { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 2px; }
 .phase-head { margin: 0; font-weight: 700; }

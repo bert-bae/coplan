@@ -431,6 +431,8 @@ export interface Plan {
   /** What the build has done with each of its branches: the pull request
    *  opened for it and where that stands, as the agent reports it. */
   branches?: Record<string, BranchState>;
+  /** Changes Claude suggested, open and settled; newest last, bounded. */
+  proposals?: Proposal[];
   /** Bumped each time Claude publishes the plan wholesale. */
   revision: number;
   createdAt: number;
@@ -582,9 +584,44 @@ export type PlanOp =
    *  `checks`: the final checks, as they came out. */
   | { op: 'report'; text: string; checks?: CheckResult[] }
   /** What became of one of the build's branches (harness_branch_update). */
-  | { op: 'set_branch'; branch: string; pr?: { url?: string; number?: number; state: string }; base?: string };
+  | { op: 'set_branch'; branch: string; pr?: { url?: string; number?: number; state: string }; base?: string }
+  /** Claude suggests a batch of edits, for the user to accept or reject. */
+  | { op: 'propose'; title: string; reason: string; ops: PlanOp[] }
+  /** The user takes a proposal: its edits apply, as theirs. */
+  | { op: 'accept_proposal'; id: string }
+  /** The user turns a proposal down, saying why if they like. */
+  | { op: 'reject_proposal'; id: string; note?: string }
+  /** Claude takes back a proposal it no longer stands by. */
+  | { op: 'withdraw_proposal'; id: string };
 
 export type PlanOpName = PlanOp['op'];
+
+export const PROPOSAL_STATUSES = ['open', 'accepted', 'rejected', 'withdrawn'] as const;
+export type ProposalStatus = (typeof PROPOSAL_STATUSES)[number];
+
+/**
+ * A change Claude suggests rather than makes: a batch of edits held until
+ * the user accepts it (and it applies, as theirs) or rejects it. Its
+ * reasoning is a comment thread, so the user can answer it there.
+ */
+export interface Proposal {
+  /** `p1`, `p2`, …: never reused in a plan. */
+  id: string;
+  title: string;
+  reason: string;
+  ops: PlanOp[];
+  /** The thread that carries the reasoning, and the outcome as a reply. */
+  threadId: string;
+  createdAt: number;
+  /** Each item the edits touch (`kind:id`), as it was when proposed: its
+   *  revision, or 0 if it did not exist. If any moves, the proposal is out
+   *  of date and cannot be accepted — it was made for a plan that is gone. */
+  base: Record<string, number | string>;
+  status: ProposalStatus;
+  resolvedAt?: number;
+  /** The user's reason for turning it down. */
+  note?: string;
+}
 
 /* ------------------------------------------------------------------ *
  * Sessions

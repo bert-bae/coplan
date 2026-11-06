@@ -1190,6 +1190,21 @@ function buildRouter(deps: Deps): Router {
           return;
         }
 
+        case 'propose': {
+          const proposal = { op: 'propose', title: body['title'], reason: body['reason'], ops: body['ops'] } as unknown as PlanOp;
+          const { plan } = store.applyOps(id, [proposal], 'claude');
+          const p = plan.proposals!.at(-1)!;
+          revealUi(session);
+          reply(
+            true,
+            `[cc-harness] Proposed ${p.id} "${p.title}" (${p.ops.length} edit${p.ops.length === 1 ? '' : 's'}). Nothing has changed yet: ` +
+              `the user sees it in Coplan (${url}) beside what it changes, with Accept and Reject. Tell them in chat what you propose and why. ` +
+              'You hear their answer the next time you read the plan (harness_plan_read); until then, work from the plan as it is. ' +
+              `Take it back with harness_plan_edit {ops: [{op: "withdraw_proposal", id: "${p.id}"}]}.`,
+          );
+          return;
+        }
+
         case 'tasks': {
           const { plan } = store.publishTasks(id, { tasks: body['tasks'] } as unknown as TaskListInput);
           revealUi(session);

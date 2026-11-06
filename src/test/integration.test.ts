@@ -896,6 +896,40 @@ test("the repository's customizations reach the agent, and its errors and final 
   }
 });
 
+test('an audit proposes instead of overwriting: the user answers in Coplan, and Claude reads the answer once', async () => {
+  const id = 'propose-session';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  const made = await mcpFor(id, 'propose', {
+    title: 'Add a cache in front of Postgres',
+    reason: 'Reads are slow (see Context).',
+    ops: [
+      { op: 'upsert_node', diagramId: 'd1', id: 'cache', label: 'Redis', kind: 'datastore' },
+      { op: 'upsert_edge', diagramId: 'd1', from: 'api', to: 'cache', label: 'get' },
+    ],
+  });
+  assert.equal(made['ok'], true, String(made['text']));
+  assert.match(String(made['text']), /Proposed p1 "Add a cache in front of Postgres" \(2 edits\)\. Nothing has changed yet/);
+  assert.ok(!(await sessionFor(id)).plan!.diagrams[0]!.nodes.some((n) => n.id === 'cache'), 'nothing changed');
+  assert.match(String((await mcpFor(id, 'read', { changes_only: true }))['text']), /p1 "Add a cache in front of Postgres" — waiting on the user \(2 edits\)/);
+
+  // Only the user answers it.
+  const self = await mcpFor(id, 'edit', { ops: [{ op: 'accept_proposal', id: 'p1' }] });
+  assert.equal(self['ok'], false);
+  const accepted = await opsOn(id, [{ op: 'accept_proposal', id: 'p1' }]);
+  assert.equal(accepted.error, undefined, accepted.error);
+  assert.ok(accepted.plan!.diagrams[0]!.nodes.some((n) => n.id === 'cache' && n.label === 'Redis'));
+
+  const read = String((await mcpFor(id, 'read', {}))['text']);
+  assert.match(read, /p1 "Add a cache in front of Postgres" — \*\*accepted\*\* by the user/);
+  assert.doesNotMatch(String((await mcpFor(id, 'read', {}))['text']), /accepted\*\* by the user/, 'heard once');
+
+  // A second one, rejected with a reason.
+  await mcpFor(id, 'propose', { title: 'Drop Postgres', reason: 'Simpler.', ops: [{ op: 'remove_node', diagramId: 'd1', id: 'db' }] });
+  await opsOn(id, [{ op: 'reject_proposal', id: 'p2', note: 'We need durability.' }]);
+  assert.match(String((await mcpFor(id, 'read', { changes_only: true }))['text']), /p2 "Drop Postgres" — \*\*rejected\*\* by the user: We need durability\./);
+});
+
 test('the build gates hold however the agent reports progress, and only the user lifts them', async () => {
   const id = 'gates-session';
   const dir = path.join(repo, '.coplan');

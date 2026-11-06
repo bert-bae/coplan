@@ -31,7 +31,7 @@ you, call `harness_plan_read`: the first read after a sign-off returns its
 prompt.
 
 Coplan's tools are the MCP server `harness`: `harness_plan_publish`,
-`harness_plan_read`, `harness_plan_check`, `harness_plan_edit`, `harness_tasks_publish`,
+`harness_plan_read`, `harness_plan_check`, `harness_plan_edit`, `harness_plan_propose`, `harness_tasks_publish`,
 `harness_task_next`, `harness_task_brief`, `harness_task_update` and `harness_branch_update`. Your
 agent may show them with a prefix that names the server (in Claude Code,
 `mcp__plugin_coplan_harness__…`); they are the same tools.
@@ -94,6 +94,18 @@ id: "d1/cache"}, text: "Should this be write-through? Reads lag writes by
 the TTL."}]}`. A target is the plan (`{kind: "plan", id: ""}`), a section,
 a diagram or a task by id, or one box (`node`, `"diagramId/nodeId"`) or
 arrow (`edge`, `"diagramId/edgeId"`). The user answers in the thread.
+
+When you know the change you would make and it is the user's to decide —
+a design flaw your audit found, a part the plan is missing, a task to
+split — **propose it** instead of making it: `harness_plan_propose {title,
+reason, ops}`, with the same edits as `harness_plan_edit`. The user sees it
+in Coplan beside what it changes, with your reason, and accepts it (the
+edits apply, as theirs) or rejects it. Nothing changes until they answer;
+`harness_plan_read` tells you how they did, once. Propose too once the
+design is confirmed or the plan submitted, for what you may no longer
+change yourself. A proposal goes out of date if what it changes moves
+first: withdraw it (`{op: "withdraw_proposal", id}`) and propose again.
+Keep each to one idea, so it can be taken or left whole.
 
 A subagent that audits the plan for you reads it with
 `harness_plan_read {peek: true}`: it sees the plan as it stands, but the

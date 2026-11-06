@@ -47,6 +47,8 @@ export interface UiState {
   /** The canvas has an edit queued, in flight or about to be (a keyboard
    *  nudge): what is on screen is not yet saved. */
   canvasSaving: boolean;
+  /** The proposal shown on the canvas, as the plan would be with it. */
+  proposalPreview: string | null;
   toasts: Toast[];
   error: string | null;
 }
@@ -71,6 +73,7 @@ const initial: UiState = {
   restarting: false,
   saving: 0,
   canvasSaving: false,
+  proposalPreview: null,
   toasts: [],
   error: null,
 };

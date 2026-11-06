@@ -125,6 +125,23 @@ export const AGENT_OPS = [
   'resolve',
   'remove',
   'report',
+  'withdraw_proposal',
+] as const;
+
+/** The edits a proposal may carry (the daemon's PROPOSABLE_OPS). */
+export const PROPOSAL_EDIT_OPS = [
+  'set_meta',
+  'upsert_section',
+  'upsert_diagram',
+  'upsert_task',
+  'move_task',
+  'move_section',
+  'move_diagram',
+  'upsert_node',
+  'remove_node',
+  'upsert_edge',
+  'remove_edge',
+  'remove',
 ] as const;
 
 const STR_LIST = { type: 'array', items: { type: 'string' } };
@@ -286,7 +303,8 @@ export const TOOLS: ToolDef[] = [
       'remove_edge {diagramId, id? | from, to}; comment {target: {kind, id}, text} (start a thread — on a box: kind "node", id ' +
       '"diagramId/nodeId"; when you are unsure of a change, comment rather than overwrite); reply {threadId, text} ' +
       '(reply to a comment); resolve {threadId, resolved}; remove {kind: section|diagram|task, id}; report {text, checks?} ' +
-      '(the final build report). upsert_section, upsert_diagram and upsert_task take expect: the rev you read. ' +
+      '(the final build report); withdraw_proposal {id} (take back a proposal of yours). upsert_section, upsert_diagram and upsert_task take expect: the rev you read. ' +
+      'To suggest a change rather than make it, use harness_plan_propose. ' +
       'Example: {ops: [{op: "reply", threadId: "c2", text: "Done: split the cache."}]}. Once the user confirms the ' +
       'design only tasks, task links and comments change; once they submit the plan only upsert_task, comment, ' +
       'reply, resolve and report apply.',
@@ -309,6 +327,44 @@ export const TOOLS: ToolDef[] = [
         },
       },
       required: ['ops'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'harness_plan_propose',
+    endpoint: 'propose',
+    description:
+      'Suggest a change to the plan instead of making it: a batch of edits (the same ops as harness_plan_edit, for the ' +
+      "plan's content — sections, diagrams, boxes, arrows, tasks) that waits for the user. They see it in Coplan beside " +
+      'what it changes, with your reason, and accept it (the edits apply, as theirs) or reject it (saying why if they ' +
+      'like). Use it when you audit the plan and find something the user should decide — a design flaw, a missing ' +
+      'part, a task split — and when the plan is confirmed or submitted, for the changes it no longer lets you make. ' +
+      'Nothing changes until they answer; you hear it the next time you read the plan. It is refused if it would ' +
+      'not apply to the plan as it is, and goes out of date if what it changes moves first. ' +
+      'Example: {title: "Make the cache write-through", reason: "Reads after a write see stale data for up to the TTL.", ' +
+      'ops: [{op: "upsert_node", diagramId: "d1", id: "cache", description: "Write-through: every write updates it."}]}.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'What it changes, in a few words.' },
+        reason: { type: 'string', description: 'Why the plan is better with it. Markdown.' },
+        ops: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 40,
+          items: {
+            type: 'object',
+            description: 'One edit, as in harness_plan_edit.',
+            properties: {
+              op: { type: 'string', enum: [...PROPOSAL_EDIT_OPS] },
+              ...OP_PROPERTIES,
+            },
+            required: ['op'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['title', 'reason', 'ops'],
       additionalProperties: false,
     },
   },

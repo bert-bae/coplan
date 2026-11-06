@@ -54,6 +54,18 @@
   `coplan doctor` checks node, curl, both configs, the daemon's version and
   pid, and a hook sent through the real relay, and cleans up after itself.
 
+### Proposals: the agent suggests, you decide
+
+- `harness_plan_propose` lets the agent suggest a change instead of making
+  it: a batch of edits with its reason. It waits beside the plan with
+  *Accept* and *Reject*, and *Show on canvas* draws the diagram as it would
+  be, marking what it adds, changes and removes. Accepting applies the
+  edits as yours; rejecting keeps the plan and tells the agent why. The
+  agent hears the answer the next time it reads.
+- A proposal is checked when it is made, and goes out of date if what it
+  changes moves first. Once the design is confirmed or the plan submitted,
+  it is how the agent suggests what it may no longer change itself.
+
 ### Make the build yours
 
 - `pullRequests` in `.coplan/config.json` chooses how a build's pull

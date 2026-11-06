@@ -19,6 +19,7 @@ import {
   sameContent,
   unreadAreas,
   unreadByClaude,
+  proposalStaleness,
 } from '../shared/plan.ts';
 import { contentOf, diagramChanges, diagramToMarkdown, hang, indent, nestHeadings } from '../shared/architecture.ts';
 import {
@@ -64,17 +65,49 @@ export function renderPlan(plan: Plan, opts: RenderOptions = {}): string {
   out.push('');
   out.push(renderChanges(plan, unread, Boolean(opts.changesOnly)));
 
+  const proposals = renderProposals(plan);
   if (opts.changesOnly) {
     const touched = new Set(unread.map((c) => `${c.target.kind}:${c.target.id}`));
     const threads = plan.threads.filter((t) => !t.resolved && (touched.has(`${t.target.kind}:${t.target.id}`) || lastAuthor(t) === 'user'));
     if (threads.length) out.push('', '## Comments waiting on you', ...threads.map((t) => renderThread(plan, t)));
+    if (proposals.length) out.push('', ...proposals);
     return out.join('\n').trim();
   }
 
   out.push(...renderDocument(plan, { revs: true }));
+  if (proposals.length) out.push('', ...proposals);
   const gaps = renderGaps(plan, 12, opts.planCheck);
   if (gaps.length) out.push('', ...gaps);
   return out.join('\n').trim();
+}
+
+/**
+ * Claude's proposals: the ones still waiting on the user, and how the user
+ * answered each since Claude last read — so an answer is heard once, where
+ * Claude reads.
+ */
+export function renderProposals(plan: Plan): string[] {
+  const all = plan.proposals ?? [];
+  const open = all.filter((p) => p.status === 'open');
+  const since = plan.claudeReadAt ?? 0;
+  const answered = all.filter((p) => (p.status === 'accepted' || p.status === 'rejected') && (p.resolvedAt ?? 0) > since);
+  if (!open.length && !answered.length) return [];
+  const out = ['## Your proposals'];
+  for (const p of answered) {
+    out.push(
+      p.status === 'accepted'
+        ? `- ${p.id} "${p.title}" — **accepted** by the user: its edits are in the plan above, as theirs.`
+        : `- ${p.id} "${p.title}" — **rejected** by the user${p.note ? `: ${hang(p.note, 4)}` : '.'} The plan stays as it was.`,
+    );
+  }
+  for (const p of open) {
+    const stale = proposalStaleness(plan, p);
+    out.push(
+      `- ${p.id} "${p.title}" — waiting on the user (${p.ops.length} edit${p.ops.length === 1 ? '' : 's'})` +
+        (stale.length ? `. ⚠ Out of date: ${stale.join(', ')} changed since, so it can no longer be accepted — withdraw it, and propose again if it still holds.` : '.'),
+    );
+  }
+  return out;
 }
 
 /**

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { store, useAgent, usePlan, useStore } from '../store.ts';
 import { InlineText, MarkdownField } from '../components/Editable.tsx';
 import { Markdown } from '../components/Markdown.tsx';
@@ -9,7 +9,9 @@ import { SubmitControl } from '../components/Submit.tsx';
 import { isDesignLocked, isLocked } from '../../shared/plan.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { diagramToMarkdown } from '../../shared/architecture.ts';
-import { NODE_KINDS, type Diagram, type DiagramEdgeInput, type DiagramNodeInput, type Plan } from '../../shared/types.ts';
+import { NODE_KINDS, type Diagram, type DiagramEdgeInput, type DiagramNodeInput, type Plan, type Proposal } from '../../shared/types.ts';
+import { diagramDiff, previewDiagram, previewProposal } from '../../shared/proposals.ts';
+import { ProposalCard } from '../components/Proposals.tsx';
 
 /** Starting points for a new diagram. */
 const TEMPLATES: { label: string; title: string; nodes: DiagramNodeInput[]; edges: DiagramEdgeInput[] }[] = [
@@ -54,7 +56,11 @@ export function DiagramsView() {
   const plan = usePlan();
   const chosen = useStore((s) => s.diagramId);
   const sessionId = useStore((s) => s.sessionId);
+  const previewId = useStore((s) => s.proposalPreview);
+  const proposal = plan?.proposals?.find((p) => p.id === previewId && p.status === 'open') ?? null;
+  const preview = useMemo(() => (plan && proposal ? previewProposal(plan, proposal) : null), [plan, proposal]);
   if (!plan) return null;
+  if (proposal && preview?.after) return <ProposalPreviewView plan={plan} proposal={proposal} after={preview.after} chosen={chosen} />;
   const diagram = plan.diagrams.find((d) => d.id === chosen) ?? plan.diagrams[0] ?? null;
   // Confirmed or submitted: the design is settled, and the canvas only shows
   // it — boxes still fill up as the tasks that build them get done. While
@@ -129,6 +135,66 @@ export function DiagramsView() {
                 : `Ask ${agent.name} to draw the architecture — components, data flow, boundaries — or start one from a template.`
             }
           />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A proposal shown on the canvas: the diagram as it would be with it —
+ * what it adds, changes and takes away marked — read-only, beside its
+ * Accept and Reject. Nothing is saved from here.
+ */
+function ProposalPreviewView({ plan, proposal, after, chosen }: { plan: Plan; proposal: Proposal; after: Plan; chosen: string | null }) {
+  const sessionId = useStore((s) => s.sessionId);
+  const diagram = after.diagrams.find((d) => d.id === chosen) ?? after.diagrams[0] ?? null;
+  const before = diagram ? plan.diagrams.find((d) => d.id === diagram.id) : undefined;
+  const diff = useMemo(() => (diagram ? diagramDiff(before, diagram) : null), [before, diagram]);
+  return (
+    <div className="arch is-previewing">
+      <div className="arch-bar">
+        <nav className="arch-tabs" aria-label="Diagrams">
+          {after.diagrams.map((d) => (
+            <button
+              key={d.id}
+              type="button"
+              className={classNames('arch-tab', d.id === diagram?.id && 'is-active')}
+              aria-current={d.id === diagram?.id ? 'true' : undefined}
+              onClick={() => store.set({ diagramId: d.id })}
+            >
+              {d.title}
+              {!plan.diagrams.some((x) => x.id === d.id) && <span className="arch-tab-count">new</span>}
+            </button>
+          ))}
+        </nav>
+        <span className="spacer" />
+        <p className="toolbar-hint" role="status">
+          Previewing <strong>{proposal.id}</strong>: the plan as it would be. <span className="diff-key diff-key-added">added</span>{' '}
+          <span className="diff-key diff-key-changed">changed</span> <span className="diff-key diff-key-removed">removed</span>
+        </p>
+        <button type="button" className="btn btn-sm" onClick={() => store.set({ proposalPreview: null })}>
+          Close preview
+        </button>
+      </div>
+      {diagram && diff ? (
+        <DiagramEditor
+          key={`${sessionId}:preview:${proposal.id}:${diagram.id}:${plan.version}`}
+          diagram={previewDiagram(before, diagram, diff)}
+          plan={after}
+          readOnly
+          lockNote={`A preview of ${proposal.id}: accept it to make it so`}
+          diff={diff}
+          onSave={async () => null}
+          aside={
+            <div className="arch-panel-body">
+              <ProposalCard plan={plan} proposal={proposal} compact />
+            </div>
+          }
+        />
+      ) : (
+        <div className="view-pad">
+          <ProposalCard plan={plan} proposal={proposal} compact />
         </div>
       )}
     </div>
