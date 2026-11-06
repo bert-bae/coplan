@@ -147,9 +147,14 @@ there Managed by default (see [`mode`](#mode)):
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `review` | `subagent` | Who reviews a task that does not say otherwise: `subagent` (a fresh agent that did not write the change), `self`, `user` (Claude stops and asks you), or `skip` (the review checks only). |
-| `parallel` | `2` | How many ready tasks are built at once, each by its own subagent. 1 to 8. |
-| `maxRounds` | `3` | Review rounds a task may take before Claude stops and asks you. 1 to 10. |
+| `review` | `self` | Who reviews a task that does not say otherwise: `subagent` (a fresh agent that did not write the change, where the agent has subagents), `self`, `user` (Claude stops and asks you), or `skip` (the review checks only). |
+| `parallel` | `1` | How many ready tasks are built at once — with subagents, where the agent has them. 1 to 8. |
+| `maxRounds` | `3` | Review rounds a task may take; another past them is yours to allow. 1 to 10. |
+
+The defaults assume nothing about the agent: it reviews its own change,
+one task at a time. Set `review: "subagent"` or a higher `parallel` where
+your agent and your machine make them worth it; `coplan init` writes the
+defaults out for you to change.
 
 ### `branches`
 
@@ -166,7 +171,7 @@ How a build's pull requests are opened. The build prompt says so, and
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `tool` | `gh` | `gh` (`gh pr create`, each against the branch below it), `graphite` (`gt track` each branch, `gt submit --stack`), or `none` (the agent pushes the branches and you open the pull requests). |
-| `open` | `ask` | `auto`: as soon as a branch's tasks are done. `ask`: once you say to. `never`: no pull requests; the branches are pushed and listed in the report. |
+| `open` | `ask` | `auto`: as soon as a branch's tasks are done. `ask`: once you say to — opening a pull request reaches outside the session, so by default Claude asks first. `never`: no pull requests; the branches are pushed and listed in the report. |
 | `template` | — | A file in the repository (`.github/pull_request_template.md`) each description is written from, filled in from the tasks the pull request carries, their checks and their review. Up to 8,000 characters. |
 
 ### `review`

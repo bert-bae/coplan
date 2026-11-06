@@ -1,30 +1,31 @@
 ---
 name: coplan-build
-description: Run the build of a submitted Coplan plan — start tasks only when what they depend on is done, build independent ones in parallel with subagents, land each on its branch (stacked pull requests when branches build on each other), take every task through the iric cycle, and finish with the final checks and report. Use when a "[cc-harness] Build the plan" prompt arrives, or the user asks to build a Coplan plan.
+description: Run the build of a submitted Coplan plan — start tasks only when what they depend on is done, build independent ones side by side where your agent can, land each on its branch (stacked pull requests when branches build on each other), keep the board true, and finish with the final checks and report. Use when a "[cc-harness] Build the plan" prompt arrives, or the user asks to build a Coplan plan.
 ---
 
 # Building a Coplan plan
 
 The plan is the map; your job is to get every task to done in an order
-the dependencies allow, with each task checked and reviewed, and to keep
-the board true while you do. You are the **orchestrator**: you decide what
-runs when, hand tasks to subagents, and you alone report status to Coplan.
+the dependencies allow, and to keep the board true while you do. You decide
+what runs when, and you alone report status to Coplan.
+
+Ask the user only as the `coplan` skill's *When to ask* says. Anything else,
+decide, write what you decided in the task's note, and carry on.
 
 ## Before you start
 
-The build prompt says how the plan is built. In a **Tracked** build there is
-no prescribed cycle: build and check each task as you see fit, keep the
-board true with `harness_task_update`, and read the notes in its replies —
-they say what a Managed build would have held back. The rest of this skill
-is how to run a **Managed** build, and a good default for a Tracked one.
+The build prompt says how the plan is built:
 
-In a Managed build the prompt tells you the user's settings — read them,
-they are the user's control over the build:
-
-- **review** — who reviews a task by default (`subagent`, `self`, `user`,
-  `skip`). A task may override it.
-- **parallel** — how many tasks may be in progress at once.
-- **maxRounds** — review rounds a task may take before you stop and ask.
+- **Tracked** — there is no prescribed cycle. Build and check each task as
+  you see fit, keep the board true with `harness_task_update`, and read the
+  notes in its replies: they say what a Managed build would have held back.
+- **Managed** — every task goes implement → review → refine through the
+  `iric` skill, and the prompt carries the user's settings:
+  - **review** — who reviews a task by default (`subagent`, `self`,
+    `user`, `skip`). A task may override it.
+  - **parallel** — how many tasks may be in progress at once.
+  - **maxRounds** — review rounds a task may take; another past them is
+    the user's to allow.
 
 It also lists the repository's **checks** from `.coplan/config.json`, per
 stage (`implement`, `review`, `final`). Run those — do not invent others.
@@ -38,50 +39,44 @@ waits on what, and the branches.
 
 Repeat until `harness_task_next` says every task is done:
 
-1. **Pick.** Take ready tasks, up to `parallel` minus those in progress.
-   Ready means everything it depends on is done; starting anything else is
-   refused. Do not start two tasks at once in the same working tree if
-   they touch the same files (`harness_task_next` warns you).
+1. **Pick.** Take ready tasks — in a Managed build, up to `parallel` minus
+   those in progress. Ready means everything it depends on is done;
+   starting anything else is refused. Do not build two tasks at once in the
+   same working tree if they touch the same files (`harness_task_next`
+   warns you).
 2. **Brief.** Call `harness_task_brief` for each. The brief is
    self-contained: objective, acceptance criteria, the boxes it builds and
    how they connect, what it comes after and before, what is out of
    scope, the branch, and the exact checks.
-3. **Start.** `harness_task_update {task_id, status: "in_progress", stage: "implement"}`.
-4. **Build it through the `iric` skill** — implement → review → refine —
-   yourself or by subagents (below).
-5. **Done.** Once review passed and the review checks are green:
-   commit the task's work (one commit per task, message
-   `<title> (<task id>)`), then
+3. **Start.** `harness_task_update {task_id, status: "in_progress", stage: "implement"}`
+   — in a Tracked build the stage is optional.
+4. **Build it.** In a Managed build, through the `iric` skill — implement →
+   review → refine. In a Tracked build, however suits the task.
+5. **Done.** Commit the task's work in whatever granularity the
+   repository's history uses, then
    `harness_task_update {task_id, status: "done", note: "<one line: what changed>"}`.
    The reply says what became ready. Go to 1.
 
-## Parallel work with subagents
+## Working in parallel
 
-With `parallel` > 1 and several ready tasks, give each its own subagent
-(in Claude Code, the Agent tool in the background; whatever your agent
-offers for delegating work) and keep working on the others as they run. An
-agent without subagents builds ready tasks one after another instead. Each implementer gets the task's brief **verbatim** plus this:
+Use subagents, worktrees and parallel work when your agent has them and
+they help: a large plan of independent tasks goes faster side by side, and a
+large task kept out of your own context leaves room for the rest. Without
+them, build ready tasks one after another — the order is the same.
 
-> You are implementing one task of a larger plan. The brief below is your
-> whole job: build its objective, stay inside its scope, and run its
-> implement checks until they pass. Do not do work the brief gives to other
-> tasks — if you find some, list it in your report instead. Do not report
-> status to Coplan; report back to me: the files you changed, the commands
-> you ran and their results (pass/fail with the failing lines), and
-> anything left open or out of scope.
+If you hand a task to a subagent, give it the task's brief as it is; the
+brief says where its job ends. Ask it to stay inside that scope, run the
+implement checks, and report back to you rather than to Coplan: the files
+it changed, the commands it ran and how they came out, and anything left
+open. You report its status.
 
-Where they work:
+Where parallel tasks work:
 
-- **Different branches** — each subagent works in its own git worktree
-  (in Claude Code, `isolation: "worktree"`), on its task's branch, cut from
+- **Different branches** — each in a working tree of its own (a git
+  worktree, where your agent offers one), on its task's branch, cut from
   the base the brief names.
-- **Same branch, different files** — they may share the working tree; you
-  commit each task's files separately once it is reviewed.
-- **Same branch, same files** — not in parallel. Sequence them.
-
-Keep the main thread for orchestration: briefs, reviews, status, commits.
-With `parallel` = 1, build one task at a time — still through a subagent
-for a large task, so its detail does not crowd your context.
+- **Same branch, different files** — they may share the working tree.
+- **Same branch, same files** — not at the same time. Sequence them.
 
 ## Branches and stacked pull requests
 
@@ -109,34 +104,34 @@ Otherwise:
 
 ## When things go sideways
 
-- **Blocked** — `harness_task_update {status: "blocked", note}` and ask the
-  user with your question tool (`AskUserQuestion` in Claude Code,
-  `request_user_input` in Codex, or plainly in chat). Keep building other ready tasks meanwhile.
+- **Blocked** — `harness_task_update {status: "blocked", note}`, saying on
+  what. Keep building other ready tasks meanwhile.
 - **Work not on the plan** — add it first:
   `harness_plan_edit {ops: [{op: "upsert_task", parentId, title, detail, dependsOn}]}`,
   then build it like any other. It shows as added during the build. Not
   under a task that has already started: add it beside that task, depending
   on it. The tasks the user signed off keep their title, detail, branch and
-  review; track them with notes, and ask if one is wrong.
+  review; track them with notes, and if one is wrong, say so in its note.
 - **Work no longer needed** — drop it, saying why:
   `harness_task_update {task_id, status: "dropped", note}`. It no longer
   holds anything up; check the tasks that waited on it still have what they
-  need, and tell the user.
+  need, and tell the user. In a Managed build, dropping work the user signed
+  off is theirs to decide.
 - **A dependency is wrong** (a task really can start earlier, or needs
   something it does not list) — change it with `harness_plan_edit {ops: [{op: "upsert_task", id, dependsOn}]}`
   and tell the user why in chat.
-- **The design does not work** — stop and ask. The plan is locked; the user
-  can reopen it in Coplan.
+- **The design does not work** — stop that work and tell the user why in
+  chat. The plan is locked; only they can reopen it in Coplan.
 - **The user says something in chat** — it overrides the settings: if they
-  ask to see each task, review each with them; if they say go faster, so be it.
+  want to see each task, review each with them; if they say go faster, so be it.
 
 ## Finish: the final output
 
 When `harness_task_next` says every task is done:
 
 1. Run the **final** checks (`coplan check final`, or the commands the
-   prompt lists). Fix what they find — as a task (`upsert_task`), through
-   the cycle like any other.
+   prompt lists). Fix what they find — as a task (`upsert_task`), built like
+   any other.
 2. Push the branches; open the pull requests in stack order if wanted, and
    record each one — `harness_branch_update {branch, pr_url, pr_number, pr_state}`
    — so the board shows the stack. When one merges, record that too: if a

@@ -19,7 +19,7 @@ and it is built. Read `install.json` — `clone` names the clone — and run:
 
 Then tell the user, in a few lines, which version is installed and that to
 update Coplan, add it to another agent, or change its settings, they run this
-in a terminal (it asks them questions, so do not run it for them):
+in a terminal (it is interactive, so do not run it for them):
 
 ```bash
 cd "<clone>" && git pull && ./setup.sh

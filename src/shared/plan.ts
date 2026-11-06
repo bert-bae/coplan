@@ -1527,7 +1527,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       const p = openProposal(plan, op.id);
       const stale = proposalStaleness(plan, p);
       if (stale.length) {
-        throw new PlanError(`Proposal ${p.id} is out of date: ${stale.join(', ')} changed since it was made. Reject it, and ask for a fresh one.`);
+        throw new PlanError(`Proposal ${p.id} is out of date: ${stale.join(', ')} changed since it was made. Reject it; the agent can propose it again.`);
       }
       // Accepting changes what the proposal changes: the lock holds for it.
       if (plan.submission) {
@@ -1629,7 +1629,7 @@ function editTask(
     if (scope.length) {
       throw new PlanError(
         `"${task.title}" is part of the plan the user submitted, so its ${scope.join(', ')} cannot change now. Track the work with ` +
-          'a note; add work you discover as a new task; if the task itself is wrong, stop and ask the user — they can reopen the plan.',
+          'a note; add work you discover as a new task; if the task itself is wrong, say so in its note and tell the user — only they can reopen the plan.',
       );
     }
   }
@@ -1867,14 +1867,14 @@ const LOCKED_FOR_USER = 'The plan has been submitted to be built, so it is locke
 const LOCKED_FOR_CLAUDE =
   'The user has submitted this plan to be built, so it is locked: only task updates (harness_task_update, or ' +
   'upsert_task to add work you discover), comments (comment, reply, resolve) and the build report apply. If the ' +
-  'design has to change, ask the user in chat — they can reopen the plan in Coplan.';
+  'design has to change, tell the user why in chat — only they can reopen the plan in Coplan.';
 const DESIGN_LOCKED_FOR_USER =
   'The design is confirmed, so the architecture, sections and summary are locked — only the tasks, the boxes they ' +
   'build and comments change now. Reopen the design to change it.';
 const DESIGN_LOCKED_FOR_CLAUDE =
   'The user has confirmed the design, so the architecture, sections and summary are locked. Build the task list ' +
   'from it: harness_tasks_publish, or upsert_task / move_task / remove with harness_plan_edit (a task\'s `builds` ' +
-  'links it to boxes). If the design itself has to change, ask the user in chat — they can reopen the design in Coplan.';
+  'links it to boxes). If the design itself has to change, tell the user why in chat — only they can reopen the design in Coplan.';
 
 /** What a confirmed design still lets anyone do: work on the tasks, link
  *  them to boxes (checked inside upsert_diagram), and talk about it. */

@@ -21,8 +21,13 @@ import { EXECUTION_MODES, REVIEW_MODES } from './types.ts';
 
 type Tasks = Pick<Plan, 'tasks'>;
 
-/** How a build runs when neither the repository nor the user said. */
-export const DEFAULT_BUILD_SETTINGS: BuildSettings = { review: 'subagent', parallel: 2, maxRounds: 3 };
+/**
+ * How a Managed build runs when neither the repository nor the user said:
+ * no assumptions about the agent (#63). The agent reviews its own change,
+ * one task at a time; a repository that wants subagents, or more at once,
+ * says so in `iric`, and the user can choose either per plan.
+ */
+export const DEFAULT_BUILD_SETTINGS: BuildSettings = { review: 'self', parallel: 1, maxRounds: 3 };
 export const MAX_PARALLEL = 8;
 export const MAX_ROUNDS = 10;
 

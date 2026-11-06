@@ -407,8 +407,8 @@ function lockLine(plan: Plan): string | null {
     default:
       return (
         '> **Locked for building.** The user submitted this plan: build it task by task, keeping statuses true with ' +
-        'harness_task_update. Only task updates, comments and replies apply now; if the design has to change, ask ' +
-        'the user in chat — they can reopen the plan in Coplan.'
+        'harness_task_update. Only task updates, comments and replies apply now; if the design has to change, tell ' +
+        'the user why in chat — only they can reopen the plan in Coplan.'
       );
   }
 }
@@ -562,9 +562,10 @@ export function designPrompt(plan: Plan, opts: PromptOptions = {}): BuildPrompt 
     'step-6',
     TEMPLATE,
     '6. Publish it with harness_tasks_publish — keep the ids of planned tasks you keep, so the boxes stay linked — ' +
-      'then tell the user in chat that the task list is ready to review, and ask what you need decided with ' +
-      `${agentInfo(opts.agent).askWith}. Do not start building: the user submits the plan when the tasks are right.`,
+      'then tell the user in chat that the task list is ready to review. Do not start building: the user submits the ' +
+      'plan when the tasks are right.',
   );
+  b.push(...askRuleBlocks(agentInfo(opts.agent), 'tasks'));
   b.push(...instructionBlocks(project, 'design', undefined, PROMPT_INSTRUCTIONS));
   b.gap().push(...checksBlocks(project, opts.bin, true));
   const doc = documentParts(plan, { base: project.branches.base });
@@ -671,7 +672,7 @@ function fit(plan: Plan, head: Block[], said: Block[], changes: Block[], doc: Do
 function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: ProjectConfig, chosen: SettingSources): Block[] {
   const together =
     s.parallel > 1
-      ? `build them side by side, up to ${s.parallel} at once, each by its own subagent given that task's harness_task_brief`
+      ? `build them side by side, up to ${s.parallel} at once — with subagents where your agent has them, each given that task's harness_task_brief`
       : 'build them one at a time';
   const { branches } = branchPlan(plan);
   const b = new BlockList();
@@ -699,9 +700,9 @@ function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: P
     .inline('step-3:review', chosen('review'), REVIEW_WORDS[s.review])
     .inline('step-3:end', TEMPLATE, ', unless a task says otherwise.')
     .inline('step-3:model', configSource(project, 'review.model'), s.review === 'subagent' ? reviewerWords(project) : '')
-    .inline('step-3:rounds', chosen('maxRounds'), ` After ${s.maxRounds} review round${s.maxRounds === 1 ? '' : 's'} without passing, stop and ask the user.`);
+    .inline('step-3:rounds', chosen('maxRounds'), ` After ${s.maxRounds} review round${s.maxRounds === 1 ? '' : 's'} without passing, another round is the user's call.`);
   b.add('step-4', TEMPLATE, '4. Mark a task done only once its review passed and its review checks are green, with a one-line note of what you did.');
-  b.add('step-5', TEMPLATE, `5. If you are stuck, mark the task blocked with a note saying on what, and ask the user with ${agent.askWith}.`);
+  b.add('step-5', TEMPLATE, '5. If you are stuck, mark the task blocked with a note saying on what, and go on with what else is ready.');
   b.add('step-6', TEMPLATE, '6. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.');
   b.add(
     'step-7',
@@ -714,7 +715,7 @@ function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: P
     'step-8',
     TEMPLATE,
     '8. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, ' +
-      'stop and ask the user in chat — they can reopen the plan in Coplan.',
+      'stop that work and tell the user why in chat: only they can reopen the plan in Coplan.',
   );
   b.add(
     'step-9',
@@ -722,6 +723,7 @@ function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: P
     '9. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) ' +
       'and give the user the final summary: what was built, the branches and pull requests, and how it was checked.',
   ).inline('step-9:final', configSource(project, 'final.blocking'), finalWords(project));
+  b.push(...askRuleBlocks(agent, 'managed'));
   return b.blocks;
 }
 
@@ -761,8 +763,7 @@ function trackedBrief(plan: Plan, agent: AgentInfo, project: ProjectConfig, mode
     'step-2',
     TEMPLATE,
     '2. Report each task with harness_task_update as you go: status "in_progress" when you start it, "done" with a ' +
-      'one-line note of what you did, "blocked" with a note saying on what. Report the checks you ran with `checks`. ' +
-      `If only the user can unblock a task, ask them with ${agent.askWith}, and keep building what you can meanwhile.`,
+      'one-line note of what you did, "blocked" with a note saying on what. Report the checks you ran with `checks`.',
   );
   b.add('step-3', TEMPLATE, '3. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.');
   b.add(
@@ -776,7 +777,7 @@ function trackedBrief(plan: Plan, agent: AgentInfo, project: ProjectConfig, mode
     'step-5',
     TEMPLATE,
     '5. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, ' +
-      'stop and ask the user in chat — they can reopen the plan in Coplan.',
+      'stop that work and tell the user why in chat: only they can reopen the plan in Coplan.',
   );
   b.add(
     'step-6',
@@ -784,7 +785,42 @@ function trackedBrief(plan: Plan, agent: AgentInfo, project: ProjectConfig, mode
     '6. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) ' +
       'and give the user the final summary: what was built, the branches and pull requests, and how it was checked.',
   ).inline('step-6:final', configSource(project, 'final.blocking'), finalWords(project));
+  b.push(...askRuleBlocks(agent, 'tracked'));
   return b.blocks;
+}
+
+/**
+ * The one rule for asking the user (#63), as each prompt states it: only
+ * a decision that cannot be undone, that reaches outside the session, or
+ * that is the user's by right — which, in a Managed build, its gates name.
+ * Anything else the agent decides, says so in the task's note, and carries
+ * on. The coplan skill states the same rule; nothing else tells the agent
+ * to ask, and src/test/contract.test.ts holds it to that.
+ */
+export function askRuleBlocks(agent: AgentInfo, scope: AskScope): Block[] {
+  return new BlockList().gap().add('ask-rule', TEMPLATE, `**When to ask.** ${askRule(agent, scope)}`).blocks;
+}
+
+/** Where the rule is stated: publishing the design, making the task list
+ *  from it, or building — Managed or Tracked. */
+export type AskScope = 'plan' | 'tasks' | 'managed' | 'tracked';
+
+export function askRule(agent: AgentInfo, scope: AskScope): string {
+  const right =
+    scope === 'managed'
+      ? ', or is theirs by right — in this Managed build: dropping work they signed off, a task they review, a review ' +
+        'round past their limit, or taking a task whose checks fail'
+      : '';
+  const otherwise =
+    scope === 'plan'
+      ? " Anything else, decide, and write the decision into the plan — a box's notes, a section — where the user sees it and can change it."
+      : scope === 'tasks'
+        ? " Anything else in the task list, decide, and say what you decided in the task's detail: the user reviews the list before anything is built."
+        : " Anything else, decide: say what you decided in the task's note, and carry on.";
+  return (
+    `Ask the user, with ${agent.askWith}, only when a decision cannot be undone${right ? ',' : ' or'} reaches outside this ` +
+    `session (pushing, opening a pull request)${right}.${otherwise}`
+  );
 }
 
 /* ------------------------------------------------------------------ *

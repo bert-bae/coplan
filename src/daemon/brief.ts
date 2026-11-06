@@ -159,7 +159,7 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
         const who = verdict.by === 'user' ? 'the user' : 'review';
         out.push(`  ${verdict.verdict === 'pass' ? `✓ passed by ${who}: mark it done` : `✗ ${who} asked for changes: refine`}${verdict.summary ? ` — ${verdict.summary}` : ''}.`);
       } else if (t.stage === 'review' && mode === 'user') {
-        out.push('  ⏸ waiting on the user\'s review: ask them; they can approve it in Coplan.');
+        out.push('  ⏸ waiting on the user\'s review: show them the change; they approve it in chat or in Coplan.');
       }
       if (t.round && t.round >= settings.maxRounds && t.stage !== 'review') {
         out.push(`  ⚠ ${t.round} of ${settings.maxRounds} review rounds used: another needs the user's go-ahead (user_approved).`);
@@ -188,9 +188,9 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
         : settings.parallel === 1
           ? '_Build one at a time: start the first, and come back here when it is done._'
           : ready.length === 1 || room === 1
-            ? `_Start ${ready.length === 1 ? 'it' : 'the first'} now${active.length ? ', alongside what is in progress' : ''} — by a subagent given its harness_task_brief, or yourself._`
-            : `_None of these waits on another. Start up to ${Math.min(room, ready.length)} now, each by its own subagent given its harness_task_brief${
-                branchPlan(plan).branches.length ? ' — in its own worktree when it is on a different branch' : ''
+            ? `_Start ${ready.length === 1 ? 'it' : 'the first'} now${active.length ? ', alongside what is in progress' : ''} — yourself, or by a subagent given its harness_task_brief where your agent has them._`
+            : `_None of these waits on another. Start up to ${Math.min(room, ready.length)} now, side by side — with subagents where your agent has them, each given its harness_task_brief${
+                branchPlan(plan).branches.length ? ', and a working tree of its own for a task on a different branch' : ''
               }._`;
     out.push(advice);
     if (clashes.length) out.push(`_Not at the same time in one working tree: ${clashes.join('; ')}._`);
@@ -382,7 +382,7 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
     const from =
       entry?.needs.length && entry.needs.length > 1
         ? // Refused when the task list is made; only an older plan has one.
-          `It needs work from ${entry.needs.length} branches, which one pull request cannot stack on: stop and ask the user how to land it.`
+          `It needs work from ${entry.needs.length} branches, which one pull request cannot stack on: decide how to land it — one branch, or one stacked on the other — and say so in the task's note.`
         : entry?.base === SESSION_BRANCH
           ? `Cut it from the branch you are on, where the tasks with no branch land (a stacked branch: it builds on that work), not from ${base}.`
           : entry?.base
@@ -401,7 +401,7 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
     b.gap().add('cycle', TEMPLATE, '## The cycle: implement → review → refine');
     b.add('cycle:mode', TEMPLATE, 'Review: ')
       .inline('cycle:mode:review', reviewFrom ? field('task', reviewFrom.id) : settingSource('review'), `${REVIEW_WORDS[review]}${review !== settings.review ? ' (set on this task)' : ''}`)
-      .inline('cycle:mode:rounds', settingSource('maxRounds'), `. At most ${settings.maxRounds} review round${settings.maxRounds === 1 ? '' : 's'} before stopping to ask the user.`);
+      .inline('cycle:mode:rounds', settingSource('maxRounds'), `. At most ${settings.maxRounds} review round${settings.maxRounds === 1 ? '' : 's'}; another is the user's call.`);
     const stage = (key: 'implement' | 'review', name: string, what: string, hooks: ReturnType<typeof hooksFor>, model = '') => {
       b.gap().add(`cycle:${key}`, TEMPLATE, `**${name}.** ${what}`).inline(`cycle:${key}:model`, configSource(project, 'review.model'), model);
       if (hooks.length) b.add(`cycle:${key}:checks`, configSource(project, `hooks.${key}`), hooks.map((h) => `- ${h.name}: \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`));

@@ -258,10 +258,10 @@ test('settings are asked only when the user wants to adjust them, which is not t
   assert.deepEqual(skip.asked.slice(-1), ['Adjust settings now? The defaults are fine to start. [y/N] ']);
   assert.deepEqual(readdirSync(coplanHome), []);
 
-  const adjust = scripted(['', 'y', 'self', '', '', '', '', ''], { 'codex --version': missing, 'cursor-agent --version': missing });
+  const adjust = scripted(['', 'y', 'subagent', '', '', '', '', ''], { 'codex --version': missing, 'cursor-agent --version': missing });
   await setup({ root: ROOT, stage: path.join(tmp('clone'), '.plugin'), home: tmp('home'), coplanHome }, adjust.io);
   assert.equal(adjust.left(), 0);
-  assert.deepEqual(parseJsonc(readFileSync(path.join(coplanHome, 'coplan.json'), 'utf8')), { iric: { review: 'self' } });
+  assert.deepEqual(parseJsonc(readFileSync(path.join(coplanHome, 'coplan.json'), 'utf8')), { iric: { review: 'subagent' } });
   assert.ok(adjust.said.includes('  More settings: docs/CONFIG.md'));
 });
 
@@ -276,18 +276,18 @@ test('a failed agent is said, and the others still go in', async () => {
 
 test('settings: the five that matter, written only where they differ from the default', async () => {
   const home = tmp('settings');
-  const { io, said, left } = scripted(['self', '9', '4', 'graphite', 'auto', 'y']);
+  const { io, said, left } = scripted(['subagent', '9', '4', 'graphite', 'auto', 'y']);
   assert.deepEqual(await askSettings(io, home), [path.join(home, 'coplan.json'), path.join(home, 'config.json')]);
   assert.equal(left(), 0);
   assert.ok(said.includes('  Answer a whole number from 1 to 8.'));
   assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'coplan.json'), 'utf8')), {
-    iric: { review: 'self', parallel: 4 },
+    iric: { review: 'subagent', parallel: 4 },
     pullRequests: { tool: 'graphite', open: 'auto' },
   });
   assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'config.json'), 'utf8')), { autoOpen: true });
   const read = loadProjectConfig(null, { globalDir: home });
   assert.deepEqual(read.warnings, []);
-  assert.deepEqual(read.settings, { review: 'self', parallel: 4, maxRounds: 3 });
+  assert.deepEqual(read.settings, { review: 'subagent', parallel: 4, maxRounds: 3 });
 });
 
 test('settings: taking every default writes nothing', async () => {

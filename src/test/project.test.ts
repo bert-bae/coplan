@@ -137,10 +137,10 @@ test('unknown keys and values out of range are errors, each saying what is used 
   });
   const said = [...config.errors, ...config.warnings].join('\n');
   assert.match(said, /"hook" is not a setting Coplan reads/);
-  assert.match(said, /"iric\.review" must be one of subagent, self, user, skip; "Subagent" is not, so subagent is used/);
+  assert.match(said, /"iric\.review" must be one of subagent, self, user, skip; "Subagent" is not, so self is used/);
   assert.match(said, /"iric\.parallel" must be a whole number from 1 to 8; 20 is not, so 8 is used/);
   assert.match(said, /"iric\.maxRounds" must be a whole number from 1 to 10; "4" is not, so 3 is used/);
-  assert.deepEqual(config.settings, { review: 'subagent', parallel: 8, maxRounds: 3 }, 'what the errors say is what is used');
+  assert.deepEqual(config.settings, { review: 'self', parallel: 8, maxRounds: 3 }, 'what the errors say is what is used');
   assert.match(said, /iric\."rounds" is not a setting/);
   assert.match(said, /branches\."perfix" is not a setting/);
   assert.match(said, /"branches\.prefix" must be a branch name/);

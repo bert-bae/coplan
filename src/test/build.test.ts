@@ -385,7 +385,7 @@ test('review modes are inherited, with the build default last', () => {
 
 test('settings are bounded and filled in', () => {
   assert.deepEqual(cleanSettings({ review: 'user', parallel: 50, maxRounds: -2 }), { review: 'user', parallel: 8, maxRounds: 1 });
-  assert.deepEqual(cleanSettings(null), { review: 'subagent', parallel: 2, maxRounds: 3 });
+  assert.deepEqual(cleanSettings(null), { review: 'self', parallel: 1, maxRounds: 3 }, 'no assumptions about the agent (#63)');
 });
 
 /* ------------------------------------------------------------------ *
@@ -416,7 +416,7 @@ test('what is next says what to start, how many at once, and what the rest wait 
   const next = renderNext(plan, { project: PROJECT, mode: 'managed', settings: { review: 'subagent', parallel: 3, maxRounds: 3 } });
   assert.match(next, /## In progress \(1\)\n- client Cache client — implementing/);
   assert.match(next, /## Ready to start \(2\)\n- config Config · branch `cache\/storage`[^\n]*\n- docs Docs · review: skip/);
-  assert.match(next, /Start up to 2 now, each by its own subagent/);
+  assert.match(next, /Start up to 2 now, side by side — with subagents where your agent has them/);
   assert.match(next, /- invalidate Invalidation — waits on client/);
   assert.match(next, /- `cache\/api` from `cache\/storage` \(stacked\)/);
 

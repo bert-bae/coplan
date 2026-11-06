@@ -49,7 +49,7 @@ Match the code style around you.
 Commit this task's work on `cache/client`. Cut it from `main` if it does not exist yet.
 
 ## The cycle: implement → review → refine
-Review: the user, before it is marked done (set on this task). At most 2 review rounds before stopping to ask the user.
+Review: the user, before it is marked done (set on this task). At most 2 review rounds; another is the user's call.
 
 **Implement.** Make the change, then run the implement checks and fix what they find:
 - typecheck: `pnpm typecheck`

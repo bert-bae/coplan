@@ -31,7 +31,7 @@ Match the code style around you.
 No branch is named for it: work on the current branch.
 
 ## The cycle: implement → review → refine
-Review: checks only, no review (set on this task). At most 1 review round before stopping to ask the user.
+Review: checks only, no review (set on this task). At most 1 review round; another is the user's call.
 
 **Implement.** Make the change, then run the implement checks and fix what they find:
 - typecheck: `pnpm typecheck`

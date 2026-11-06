@@ -3,11 +3,13 @@
 The plan is final. Its architecture is locked, and from here Coplan follows your progress on its task board, so keep every task's status true as you go. The build is Tracked: how you build and check each task is yours to decide. Coplan holds no task back; where it would have checked something, its reply says so.
 
 1. Start with tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that are ready together do not depend on each other. harness_task_brief gives one task's focused brief: its objective, where it fits, its branch and its checks.
-2. Report each task with harness_task_update as you go: status "in_progress" when you start it, "done" with a one-line note of what you did, "blocked" with a note saying on what. Report the checks you ran with `checks`. If only the user can unblock a task, ask them with request_user_input (in Plan mode) or plainly, and keep building what you can meanwhile.
+2. Report each task with harness_task_update as you go: status "in_progress" when you start it, "done" with a one-line note of what you did, "blocked" with a note saying on what. Report the checks you ran with `checks`.
 3. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.
 4. Land each task on its branch (see Branches below): cut a stacked branch from the one it builds on. Open the pull requests with Graphite: track each branch on the one below it (`gt track`), and open the stack with `gt submit --stack`, as soon as a branch's tasks are done. Write each description from the pull request template (.github/pull_request_template.md), which harness_task_next shows when one is due.
-5. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, stop and ask the user in chat — they can reopen the plan in Coplan.
+5. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, stop that work and tell the user why in chat: only they can reopen the plan in Coplan.
 6. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) and give the user the final summary: what was built, the branches and pull requests, and how it was checked. The report is refused until it carries every final check (check) passing, in `checks`.
+
+**When to ask.** Ask the user, with request_user_input (in Plan mode) or plainly, only when a decision cannot be undone or reaches outside this session (pushing, opening a pull request). Anything else, decide: say what you decided in the task's note, and carry on.
 
 ## Standing instructions
 _From the user's and the repository's Coplan config; they hold for all of this._
@@ -85,7 +87,6 @@ Reads are slow at peak.
 - [ ] bulk11 Bulk task number 11 with a descriptive title · after bulk10 — user note on bulk task 11
 - [ ] bulk12 Bulk task number 12 with a descriptive title · after bulk11 — user note on bulk task 12
 - [ ] bulk13 Bulk task number 13 with a descriptive title · after bulk12 — user note on bulk task 13
-- [ ] bulk14 Bulk task number 14 with a descriptive title · after bulk13 — user note on bulk task 14
-- …and 45 more line(s): harness_plan_read lists every task.
+- …and 46 more line(s): harness_plan_read lists every task.
 
 _Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_
