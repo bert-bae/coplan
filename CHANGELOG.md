@@ -6,14 +6,19 @@
 
 - Coplan is not listed in any agent's plugin directory, and the install
   instructions now say so. You clone the repository and run `./setup.sh`,
-  which builds Coplan, installs it in each agent you choose (Claude Code,
-  Codex, Cursor), and walks you through its settings: Coplan on this machine
-  (`config.json`), your defaults for every repository's build
-  (`coplan.json`), and a repository's checks (`.coplan/config.json`). It
+  which builds Coplan and, once you say yes, installs it in every agent it
+  finds (Claude Code, Codex, Cursor). The README's install is two commands;
+  [docs/INSTALL.md](docs/INSTALL.md) has the rest.
+- *Adjust settings now?* (default no) asks for the settings people most
+  often change — who reviews each task, how many are built at once, how pull
+  requests are opened, whether the plan opens by itself — and offers to
+  write a repository's checks (`.coplan/config.json`) from its scripts. It
   writes only what you change, and keeps a file you wrote comments in as
-  `<file>.bak` before rewriting it. `--yes` asks nothing; `--agents` picks the
-  agents. `git pull` and `./setup.sh` again to update; it restarts a running
-  daemon on the new build.
+  `<file>.bak` before rewriting it.
+- `git pull && ./setup.sh` updates, and restarts a running daemon on the
+  new build. `./setup.sh --uninstall` takes Coplan out of every agent, stops
+  the daemon, and asks before deleting your saved plans. `--yes` asks
+  nothing; `--agents` picks the agents.
 - The agents install `.plugin/`, a copy of what runs staged in the clone:
   about 5 MB, where installing the clone itself copied its 150 MB of
   build-time packages into each agent.

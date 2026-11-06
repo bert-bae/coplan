@@ -187,7 +187,7 @@ the plan just stays open for them to edit.
 ## Setting up, and opening Coplan
 
 Coplan is installed from a clone of its repository: `./setup.sh` there
-builds it, installs it in the user's agents and walks through its settings.
+builds it and installs it in the user's agents.
 The plugin's folder is two levels up from this file (`../..`). If the user
 asks you to set Coplan up, update it, or change its settings:
 

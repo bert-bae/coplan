@@ -6,10 +6,10 @@ Three layers, merged in order:
 2. user global — `~/.claude/cc-harness/config.json`
 3. project — `<repo>/.claude/harness.json`
 
-`./setup.sh` asks for the global ones and writes them for you, along with
-[your build defaults](#your-own-defaults-coplanjson) and a
-[repository's checks](#the-repository-coplanconfigjson). Run it again to
-change them, or edit the files by hand.
+`./setup.sh` can set the main ones for you — answer yes to *Adjust settings
+now?* — along with [your build defaults](#your-own-defaults-coplanjson) and a
+[repository's checks](#the-repository-coplanconfigjson). Everything else is
+set here, by hand.
 
 Later layers override earlier ones key by key, except `idleShutdownMinutes`,
 which only the global file sets: one daemon serves every repository. An edit

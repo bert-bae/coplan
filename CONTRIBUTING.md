@@ -36,7 +36,7 @@ claude --plugin-dir "$PWD"
 Codex and Cursor take a copy of a plugin, so install your build in them with
 `./setup.sh --agents codex,cursor`, and run it again after a rebuild. In
 Codex, trust the hooks in `/hooks` again each time. Add `--yes` to skip the
-settings questions.
+questions.
 
 The daemon runs whatever was in `dist/` when it started, so after a rebuild
 restart it with `./bin/coplan restart` (or `/coplan-restart`). Open tabs
