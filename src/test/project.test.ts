@@ -17,6 +17,11 @@ import { detectHooks } from '../cli/init.ts';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'cli', 'main.js');
 
+// A home of its own: the developer's ~/.claude/cc-harness/coplan.json (their
+// own layer, read under every repository's) must not decide these tests.
+// Set before anything reads it; `coplan check` and `init` inherit it.
+process.env['CC_HARNESS_HOME'] = mkdtempSync(path.join(tmpdir(), 'coplan-project-home-'));
+
 function repo(files: Record<string, string>): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'coplan-project-'));
   execFileSync('git', ['init', '-q'], { cwd: dir });
@@ -379,6 +384,25 @@ test('what is only taken differently than written is a warning, and the checks s
     assert.match(config.warnings.join('\n'), /"hooks\.review\[0\]\.cwd" names packages\/not-yet, which does not exist yet/);
     assert.equal(config.instructions.build?.length, 4000);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a user's own layer that cannot be read is said, and holds back no repository's checks", () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'coplan-home-'));
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: ['true'] } }) });
+  try {
+    writeFileSync(path.join(home, 'coplan.json'), '{ "iric": { "review": "self" }, oops }');
+    const config = loadProjectConfig(dir, { globalDir: home });
+    assert.deepEqual(config.errors, []);
+    assert.match(config.warnings.join('\n'), /coplan\.json could not be read/);
+    assert.equal(config.globalFile, path.join(home, 'coplan.json'), 'named, so the user knows which file to fix');
+    assert.ok(config.sources?.includes(path.join(home, 'coplan.json')) && config.sources.includes(path.join(dir, '.coplan', 'config.json')));
+    const run = spawnSync(process.execPath, [CLI, 'check', 'review'], { cwd: dir, encoding: 'utf8', env: { ...process.env, CC_HARNESS_HOME: home } });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stderr, /coplan\.json could not be read/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -402,6 +402,9 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
   delete base.submission;
   delete base.design;
   delete base.report;
+  // A proposal was made for the plan being replaced: one still open goes
+  // with it, said in its thread, rather than turning up against the new one.
+  for (const p of base.proposals ?? []) if (p.status === 'open') settleProposal(base, p, 'withdrawn', now, 'Withdrawn: the plan was published anew.');
   // Ids are minted against everything the plan has ever held, so build into
   // a working copy that still remembers the old items until the end.
   const next: Plan = { ...base, title, summary: clean(input.summary, MAX_TEXT) ?? base.summary };
@@ -1490,7 +1493,14 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         replies: [],
       };
       plan.threads.push(thread);
-      proposals.push({ id, title, reason, ops: structuredClone(op.ops), threadId: thread.id, createdAt: now, base: proposalTouches(plan, op.ops), status: 'open' });
+      // Kept without their `expect`: it checked them against what Claude read,
+      // just now. From here `base` says whether the proposal still fits —
+      // and a rev that moved with a dragged box must not refuse the accept.
+      const kept = op.ops.map((inner) => {
+        const { expect: _read, ...rest } = structuredClone(inner) as PlanOp & { expect?: unknown };
+        return rest as PlanOp;
+      });
+      proposals.push({ id, title, reason, ops: kept, threadId: thread.id, createdAt: now, base: proposalTouches(plan, op.ops), status: 'open' });
       // Settled ones go first when there are too many; open ones never.
       while (proposals.length > MAX_PROPOSALS) {
         const old = proposals.findIndex((p) => p.status !== 'open');
@@ -1509,8 +1519,15 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       }
       // Accepting changes what the proposal changes: the lock holds for it.
       if (plan.submission) {
-        const refused = p.ops.find((inner: PlanOp) => !TRACKING_OPS.has(inner.op));
-        if (refused) throw new PlanError(`Proposal ${p.id} changes what the submitted plan locked (${refused.op}): reopen the plan, then accept it.`);
+        // Mid-build, a proposal may add work — a new task — and nothing
+        // else: what the user signed off stays as they signed it.
+        const refused = p.ops.find((inner: PlanOp) => inner.op !== 'upsert_task' || Boolean(inner.id && plan.tasks.some((t) => t.id === inner.id)));
+        if (refused) {
+          throw new PlanError(
+            `Proposal ${p.id} changes what the submitted plan locked (${refused.op}${'id' in refused && refused.id ? ` ${refused.id}` : ''}): ` +
+              'a build in progress takes only new tasks from a proposal. Reopen the plan, then accept it.',
+          );
+        }
       } else if (plan.design) {
         checkDesignLocked(p.ops, 'user');
       }

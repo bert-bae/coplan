@@ -60,7 +60,7 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   for (const w of config.warnings) console.error(`coplan: ${w}`);
   if (config.errors.length) {
     for (const e of config.errors) console.error(`coplan: ${e}`);
-    console.error(`coplan: fix ${config.globalFile ? `${PROJECT_CONFIG_PATH} or ${config.globalFile}` : PROJECT_CONFIG_PATH} first; nothing was run.`);
+    console.error(`coplan: fix ${PROJECT_CONFIG_PATH} first; nothing was run.`);
     return 2;
   }
   if (!config.file) {

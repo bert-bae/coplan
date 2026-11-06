@@ -7,6 +7,7 @@
  * None of these tools waits for the user, and none asks them anything: every
  * question goes through AskUserQuestion in Claude's own chat.
  */
+import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from '../shared/plan.ts';
 
 export interface ToolDef {
   name: string;
@@ -128,21 +129,8 @@ export const AGENT_OPS = [
   'withdraw_proposal',
 ] as const;
 
-/** The edits a proposal may carry (the daemon's PROPOSABLE_OPS). */
-export const PROPOSAL_EDIT_OPS = [
-  'set_meta',
-  'upsert_section',
-  'upsert_diagram',
-  'upsert_task',
-  'move_task',
-  'move_section',
-  'move_diagram',
-  'upsert_node',
-  'remove_node',
-  'upsert_edge',
-  'remove_edge',
-  'remove',
-] as const;
+/** The edits a proposal may carry: the daemon's own list, so the two cannot drift. */
+export const PROPOSAL_EDIT_OPS: readonly string[] = [...PROPOSABLE_OPS];
 
 const STR_LIST = { type: 'array', items: { type: 'string' } };
 
@@ -351,7 +339,7 @@ export const TOOLS: ToolDef[] = [
         ops: {
           type: 'array',
           minItems: 1,
-          maxItems: 40,
+          maxItems: MAX_PROPOSAL_OPS,
           items: {
             type: 'object',
             description: 'One edit, as in harness_plan_edit.',

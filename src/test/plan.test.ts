@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, confirmDesign, countTasks, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, submitPlan, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import type { Plan, PlanInput, PlanOp } from '../shared/types.ts';
 
@@ -744,6 +744,34 @@ test("moving boxes, linking tasks or a task's progress does not put a proposal o
   plan = applyOps(plan, [{ op: 'upsert_diagram', id: 'd1', nodes: d.nodes.map((n) => ({ ...n, x: (n.x ?? 0) + 40, y: (n.y ?? 0) + 10 })), edges: d.edges }], 'user').plan;
   plan = applyOps(plan, [{ op: 'upsert_node', diagramId: 'd1', id: 'api', taskIds: ['t4'] }], 'user').plan;
   assert.equal(applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user').plan.proposals![0]!.status, 'accepted');
+});
+
+test("a proposal's `expect` checks it when made, and does not refuse the accept after a harmless move", () => {
+  const rev = fresh().diagrams[0]!.rev;
+  let plan = applyOps(fresh(), [{ ...WRITE_THROUGH, ops: WRITE_THROUGH.ops.map((o) => ({ ...o, expect: rev })) } as PlanOp], 'claude').plan;
+  assert.ok(plan.proposals![0]!.ops.every((o) => !('expect' in o)), 'kept without it');
+  const d = plan.diagrams[0]!;
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id: 'd1', nodes: d.nodes.map((n) => ({ ...n, x: (n.x ?? 0) + 5 })), edges: d.edges }], 'user').plan;
+  assert.equal(applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user').plan.proposals![0]!.status, 'accepted');
+  // A stale `expect` is caught when the proposal is made.
+  assert.throws(() => applyOps(plan, [{ ...WRITE_THROUGH, ops: [{ ...WRITE_THROUGH.ops[0]!, expect: rev - 1 }] } as PlanOp], 'claude'), /would not apply/);
+});
+
+test('mid-build, an accepted proposal may add a task, never re-scope one the user signed off', () => {
+  let plan = submitPlan(confirmDesign(fresh(), { prompt: 'tasks' }, 2_000), { target: 'session', prompt: 'build' }, 3_000);
+  plan = applyOps(plan, [{ op: 'propose', title: 'Rescope', reason: 'Bigger.', ops: [{ op: 'upsert_task', id: 't4', title: 'Rewrite the API', branch: 'other' }] }], 'claude').plan;
+  assert.throws(() => applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user'), /takes only new tasks from a proposal\. Reopen the plan/);
+  plan = applyOps(plan, [{ op: 'propose', title: 'Load test', reason: 'Prove it.', ops: [{ op: 'upsert_task', title: 'Load test' }] }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'accept_proposal', id: 'p2' }], 'user').plan;
+  assert.ok(plan.tasks.some((t) => t.title === 'Load test'));
+  assert.equal(plan.tasks.find((t) => t.id === 't4')!.title, 'Wire into API', 'the signed-off task as it was');
+});
+
+test('publishing the plan anew withdraws what was proposed for the old one, saying so', () => {
+  let plan = applyOps(fresh(), [WRITE_THROUGH], 'claude').plan;
+  plan = publishPlan(plan, INPUT, 5_000).plan;
+  assert.equal(plan.proposals![0]!.status, 'withdrawn');
+  assert.equal(plan.threads.find((t) => t.id === plan.proposals![0]!.threadId)?.replies.at(-1)?.text, 'Withdrawn: the plan was published anew.');
 });
 
 test('a proposal cannot be built on a change of the user’s that Claude has not read', () => {

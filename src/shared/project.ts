@@ -94,8 +94,12 @@ export interface ProjectConfig {
    *  that is quietly dropped is a check nobody runs. */
   errors: string[];
   /** What was read but taken differently than written, and said: text cut
-   *  to its limit, a folder that is not there yet. The checks still run. */
+   *  to its limit, a folder that is not there yet, anything amiss in the
+   *  user's own layer. The checks still run. */
   warnings: string[];
+  /** Every file the config was read from or looked for: while none of them
+   *  changes, neither does the config. */
+  sources?: string[];
 }
 
 export const PROJECT_CONFIG_PATH = path.join('.coplan', 'config.json');
@@ -162,28 +166,40 @@ export function loadProjectConfig(root: string | null | undefined, opts: { globa
   const errors: string[] = [];
   const warnings: string[] = [];
   const layers: Layer[] = [];
-  let globalFile: string | null = null;
-  if (globalDir) {
-    const file = path.join(globalDir, GLOBAL_PROJECT_FILE);
-    const raw = readConfigFile(file, file, errors);
-    if (raw !== undefined) {
-      globalFile = file;
-      layers.push(parseLayer(raw, { label: file, base: globalDir, global: true }, errors, warnings));
+  const sources: string[] = [];
+  reading = sources;
+  try {
+    let globalFile: string | null = null;
+    if (globalDir) {
+      const file = path.join(globalDir, GLOBAL_PROJECT_FILE);
+      sources.push(file, ...INSTRUCTION_POINTS.map((p) => path.join(globalDir, 'instructions', `${p}.md`)));
+      if (existsSync(file)) globalFile = file;
+      // What is wrong with the user's own layer is said, but holds back no
+      // repository's checks: they are the repository's, and run as it says.
+      const raw = readConfigFile(file, file, warnings);
+      if (raw !== undefined) layers.push(parseLayer(raw, { label: file, base: globalDir, global: true }, warnings, warnings));
+      const words = instructionFiles(path.join(globalDir, 'instructions'), warnings, warnings);
+      if (Object.keys(words).length) layers.push({ instructions: words });
     }
-    const words = instructionFiles(path.join(globalDir, 'instructions'), errors, warnings);
-    if (Object.keys(words).length) layers.push({ instructions: words });
-  }
-  let file: string | null = null;
-  if (root) {
-    const repoFile = path.join(root, PROJECT_CONFIG_PATH);
-    if (existsSync(repoFile)) {
-      file = repoFile;
-      const raw = readConfigFile(repoFile, PROJECT_CONFIG_PATH, errors);
-      if (raw !== undefined) layers.push(parseLayer(raw, { label: PROJECT_CONFIG_PATH, base: root, global: false }, errors, warnings));
+    let file: string | null = null;
+    if (root) {
+      const repoFile = path.join(root, PROJECT_CONFIG_PATH);
+      sources.push(repoFile);
+      if (existsSync(repoFile)) {
+        file = repoFile;
+        const raw = readConfigFile(repoFile, PROJECT_CONFIG_PATH, errors);
+        if (raw !== undefined) layers.push(parseLayer(raw, { label: PROJECT_CONFIG_PATH, base: root, global: false }, errors, warnings));
+      }
     }
+    return { ...combine(layers), file, globalFile, errors, warnings, sources };
+  } finally {
+    reading = null;
   }
-  return { ...combine(layers), file, globalFile, errors, warnings };
 }
+
+/** The files the load in progress has read, for `sources`. Loading is
+ *  synchronous, so one at a time. */
+let reading: string[] | null = null;
 
 /** The repository's config from what its file holds. */
 export function parseProjectConfig(raw: unknown, file: string | null = null): ProjectConfig {
@@ -385,11 +401,15 @@ function readNamedFile(name: string, base: string | null, where: string, max: nu
     errors.push(`"${where}" names a file, but this config is not read from disk.`);
     return null;
   }
-  const full = path.resolve(base, rel);
-  if (!rel || path.isAbsolute(rel) || (full !== base && !full.startsWith(base + path.sep))) {
+  // Both sides normalized: git names a Windows root with forward slashes,
+  // and path.resolve answers with back ones.
+  const root = path.resolve(base);
+  const full = path.resolve(root, rel);
+  if (!rel || path.isAbsolute(rel) || (full !== root && !full.startsWith(root + path.sep))) {
     errors.push(`"${where}" must name a file inside ${base}: ${JSON.stringify(name)} is not.`);
     return null;
   }
+  reading?.push(full);
   try {
     // Where it really is: a link committed inside the repository may point
     // anywhere, and reading follows it.

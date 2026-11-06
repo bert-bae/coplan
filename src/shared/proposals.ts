@@ -128,12 +128,8 @@ export function diagramDiff(before: Diagram | undefined, after: Diagram | undefi
 
 /** The diagram as the preview draws it: as it would be, with what it takes
  *  away still in place, to be drawn struck out. */
-export function previewDiagram(before: Diagram | undefined, after: Diagram, diff: DiagramDiff): Diagram {
-  const keptIds = new Set(after.nodes.map((n) => n.id));
-  return {
-    ...after,
-    nodes: [...after.nodes, ...diff.removedNodes.filter((n) => !keptIds.has(n.id))],
-    // An arrow to a box that is gone is drawn while the box still is.
-    edges: [...after.edges, ...diff.removedEdges.filter((e) => before?.edges.some((b) => b.id === e.id))],
-  };
+export function previewDiagram(after: Diagram, diff: DiagramDiff): Diagram {
+  // What it removes is drawn alongside, boxes and their arrows alike, so the
+  // preview shows what goes, not just what stays.
+  return { ...after, nodes: [...after.nodes, ...diff.removedNodes], edges: [...after.edges, ...diff.removedEdges] };
 }

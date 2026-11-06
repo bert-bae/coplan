@@ -180,7 +180,7 @@ function ProposalPreviewView({ plan, proposal, after, chosen }: { plan: Plan; pr
       {diagram && diff ? (
         <DiagramEditor
           key={`${sessionId}:preview:${proposal.id}:${diagram.id}:${plan.version}`}
-          diagram={previewDiagram(before, diagram, diff)}
+          diagram={previewDiagram(diagram, diff)}
           plan={after}
           readOnly
           lockNote={`A preview of ${proposal.id}: accept it to make it so`}

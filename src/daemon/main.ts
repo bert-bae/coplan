@@ -16,7 +16,7 @@ import { renderBrief, renderNext } from './brief.ts';
 import { cleanSettings, dependents, effectiveReview, hasSubtasks, readyTasks, roundVerdict, stackStatus, waitingOn } from '../shared/build.ts';
 import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
-import { ConfigCache, type HarnessConfig } from '../shared/config.ts';
+import { ConfigCache, configStamp, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
@@ -164,6 +164,8 @@ const LOST_LOCK = 'lost the lock';
 const PORT_CLAIM_MS = 5_000;
 /** Sessions remembered as "already opened a browser tab for". */
 const MAX_TRACKED_OPENS = 200;
+/** Repositories whose config is held in memory. */
+const MAX_PROJECT_CONFIGS = 50;
 
 /** Why an MCP call found no session: the agent's hooks have not reported
  *  one, and what to do about it there. */
@@ -466,9 +468,20 @@ function buildRouter(deps: Deps): Router {
 
   const configFor = (session: SessionState): HarnessConfig => config.get(session.repoRoot ?? session.cwd);
 
-  /** The repository's `.coplan/config.json`. Read on every use: it is one
-   *  small file, and an edit to it should count at once. */
-  const projectFor = (session: SessionState): ProjectConfig => loadProjectConfig(session.repoRoot ?? session.cwd);
+  /** The repository's `.coplan/config.json` over the user's own layer. Read
+   *  again as soon as any file it came from changes — an edit counts at
+   *  once — and otherwise kept: a stat per file, not a read and a parse of
+   *  every one, on each call. */
+  const projects = new Map<string, { stamp: string; config: ProjectConfig }>();
+  const projectFor = (session: SessionState): ProjectConfig => {
+    const root = session.repoRoot ?? session.cwd;
+    const hit = projects.get(root);
+    if (hit && hit.config.sources && configStamp(hit.config.sources) === hit.stamp) return hit.config;
+    const config = loadProjectConfig(root);
+    if (projects.size >= MAX_PROJECT_CONFIGS) projects.clear();
+    projects.set(root, { stamp: configStamp(config.sources ?? []), config });
+    return config;
+  };
 
   /** Settings as the page sent them, over the repository's defaults. */
   const settingsFrom = (raw: unknown, project: ProjectConfig): BuildSettings =>
@@ -1315,10 +1328,6 @@ function buildRouter(deps: Deps): Router {
 }
 
 /**
- * Exit once nothing is using the daemon: no browser open and no session
- * active recently. The next hook starts a fresh one.
- */
-/**
  * Where the repository says the final checks hold the report
  * (`final.blocking`), a report must carry each required one, passing: the
  * plan is not built while the checks that say so fail.
@@ -1342,7 +1351,11 @@ function refuseUnfinishedFinal(checks: unknown, project: ProjectConfig): void {
   );
 }
 
-/** Read each minute, so changing `idleShutdownMinutes` needs no restart. */
+/**
+ * Exit once nothing is using the daemon: no browser open and no session
+ * active recently. The next hook starts a fresh one. The setting is read
+ * each minute, so changing `idleShutdownMinutes` needs no restart.
+ */
 function startIdleWatch(store: SessionStore, config: ConfigCache, clients: { count: number }, stop: () => void): void {
   const timer = setInterval(() => {
     const minutes = config.get().idleShutdownMinutes;
