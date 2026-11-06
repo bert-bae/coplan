@@ -53,10 +53,17 @@ function makeSession(plan: Plan = makePlan()): SessionState {
 }
 
 let posts: { route: string; body: Record<string, unknown> }[];
+/** Set to refuse the next save, as the daemon does an invalid one. */
+let refuseNext = false;
 
 async function boot(session: SessionState = makeSession()): Promise<void> {
+  refuseNext = false;
   ({ posts } = stubFetch((route) => {
     if (route.startsWith('/api/sessions')) return { sessions: [], version: 'test' };
+    if (route.endsWith('/plan/ops') && refuseNext) {
+      refuseNext = false;
+      return { __status: 400, error: 'refused' };
+    }
     if (route.endsWith('/plan/ops')) return { plan: store.getState().session?.plan, changes: [] };
     if (route.startsWith('/api/session/')) return { session };
     return { ok: true };
@@ -157,6 +164,35 @@ test('Shift+Tab adds one before it, and Enter one beside it fed by the same boxe
   const beside = g.nodes.at(-1)!;
   assert.equal(beside['kind'], 'datastore', 'the same kind as its neighbour');
   assert.ok(ends(g).includes(`api->${beside['id']}`), 'fed by Postgres’s parent');
+});
+
+test('on a toolbar button, Tab, Enter and typing are the button’s, even with a box selected', async () => {
+  await boot();
+  await selectBox('API');
+  const tidy = screen.getByRole('button', { name: 'Tidy layout' });
+  await act(async () => {
+    tidy.focus();
+  });
+  const before = saves();
+  await press('Tab');
+  await press('Enter');
+  await press('x');
+  await settle();
+  assert.equal(saves(), before, 'no box was added or renamed');
+  assert.equal(document.querySelector('.flow-node-input'), null);
+});
+
+test('F6 moves the keyboard to the details panel and back to the selected box', async () => {
+  await boot();
+  await selectBox('API');
+  await act(async () => {
+    nodeEl('API').focus();
+  });
+  await press('F6');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  assert.ok(panel.contains(document.activeElement), 'in the details panel');
+  await press('F6');
+  assert.equal(document.activeElement, nodeEl('API'), 'back on the box that was selected');
 });
 
 test('right-clicking empty canvas offers a box of any kind, right there', async () => {
@@ -263,6 +299,27 @@ test('undo is a toolbar button too, disabled until there is something to undo', 
   await selectBox('API');
   await press('Tab');
   assert.equal(undo.disabled, false);
+});
+
+test('a refused save — even an undo — leaves no history that no longer matches what is saved', async () => {
+  await boot();
+  await selectBox('API');
+  await press('Tab');
+  await press('Escape');
+  await selectBox('Postgres');
+  await press('Tab');
+  await press('Escape');
+  await settle();
+  await act(async () => {
+    (document.activeElement as HTMLElement | null)?.blur();
+  });
+  refuseNext = true;
+  await press('z', { ctrlKey: true });
+  await settle();
+  const undo = screen.getByRole('button', { name: 'Undo' }) as HTMLButtonElement;
+  const redo = screen.getByRole('button', { name: 'Redo' }) as HTMLButtonElement;
+  assert.equal(undo.disabled, true, 'nothing left to undo to');
+  assert.equal(redo.disabled, true, 'and no refused graph to redo');
 });
 
 test('undo will not revert a change made elsewhere, and says so', async () => {

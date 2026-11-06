@@ -1,7 +1,8 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -202,7 +203,8 @@ test('what the user does in the browser is what Claude reads back', async () => 
   // The diagram edit is reported as the design it produced, not the save.
   assert.match(read, /\*\*Diagram \[d1\] "Components"\*\*\n- Added Redis \(`cache`\) — data store\./);
   assert.match(read, /- Connected API → Redis\.\n- Connected Redis → Postgres\.\n- Disconnected API → Postgres\./);
-  assert.doesNotMatch(read, /x: |"x"|200/, 'no coordinates reach Claude');
+  // Whole numbers only: the daemon's port, in the read's link, may contain the digits.
+  assert.doesNotMatch(read, /x: |"x"|\b200\b/, 'no coordinates reach Claude');
   // And the architecture reads in flow order, with what was decided.
   assert.match(read, /\*\*Parts\*\*\n- \*\*API\*\* `api` — service\n- \*\*Redis\*\* `cache` — data store\n  Decisions:\n    Already deployed\.\n  Built by: \[ \] t2 Client\n- \*\*Postgres\*\* `db` — data store/);
 });
@@ -386,6 +388,50 @@ test('the UI is served with a strict content policy and no referrer', async () =
   assert.match(csp, /frame-ancestors 'none'/);
   assert.equal(res.headers.get('referrer-policy'), 'no-referrer', 'the token in the first URL never leaks');
   assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+});
+
+test('the token travels only as a header: no cookie is set, and a link or a cookie does not open the API', async () => {
+  const page = await fetch(`${baseUrl(lock)}/?token=${lock.token}`);
+  assert.equal(page.headers.get('set-cookie'), null, 'a cookie would go to every server on 127.0.0.1');
+  assert.equal((await fetch(`${baseUrl(lock)}/`)).status, 200, 'the page itself is code, served to anyone');
+  assert.equal((await fetch(`${baseUrl(lock)}/api/sessions?token=${lock.token}`)).status, 401);
+  assert.equal((await fetch(`${baseUrl(lock)}/api/sessions`, { headers: { cookie: `cc_harness=${lock.token}` } })).status, 401);
+  assert.equal((await fetch(`${baseUrl(lock)}/api/sessions`, { headers: { authorization: 'Bearer nope' } })).status, 401);
+  assert.equal((await raw('/api/sessions')).status, 200);
+});
+
+test('the live stream opens on a single-use ticket', async () => {
+  const { ticket } = await call<{ ticket: string }>('/api/events/ticket', { method: 'POST', body: '{}' });
+  const open = (t: string) =>
+    new Promise<number>((resolve) => {
+      const req = http.get(`${baseUrl(lock)}/api/events?ticket=${t}`, (res) => {
+        resolve(res.statusCode ?? 0);
+        res.destroy();
+      });
+      req.on('error', () => resolve(0));
+    });
+  assert.equal(await open(ticket), 200);
+  assert.equal(await open(ticket), 401, 'spent');
+  assert.equal(await open('made-up'), 401);
+});
+
+test('a foreign Host, a path out of the UI folder and a clean with no groups are all refused', async () => {
+  const foreign = await new Promise<number>((resolve) => {
+    http.get({ host: '127.0.0.1', port: lock.port, path: '/health', headers: { host: 'evil.example' } }, (res) => {
+      resolve(res.statusCode ?? 0);
+      res.resume();
+    });
+  });
+  assert.equal(foreign, 403, 'DNS rebinding');
+  for (const p of ['/..%2fdaemon.json', '/%2e%2e/%2e%2e/etc/passwd']) assert.notEqual((await fetch(`${baseUrl(lock)}${p}`)).status, 200, p);
+  assert.equal((await raw('/api/storage/clean', { method: 'POST', body: '{}' })).status, 400);
+  assert.equal((await raw('/api/storage/clean', { method: 'POST', body: JSON.stringify({ groups: [] }) })).status, 400);
+});
+
+test("the daemon's files are this user's alone", { skip: process.platform === 'win32' }, () => {
+  assert.equal(statSync(home).mode & 0o777, 0o700);
+  assert.equal(statSync(path.join(home, 'auth.header')).mode & 0o777, 0o600);
+  assert.match(readFileSync(path.join(home, 'auth.header'), 'utf8'), /^Authorization: Bearer [0-9a-f]+\n$/);
 });
 
 test('malformed input is a 400, not a 500', async () => {

@@ -638,3 +638,13 @@ test("upsert_task's builds says which boxes the task builds now; [] unlinks it",
   assert.ok(!linked('db').includes('t2'));
   assert.match(plan.changes.at(-1)!.summary, /unlinked "Cache client" from "Postgres"/);
 });
+
+test("removing a task its boxes link moves the diagram's revision, so a canvas holding the old links reloads", () => {
+  let plan = applyOps(fresh(), [{ op: 'upsert_task', id: 't2', builds: ['cache'] }], 'claude').plan;
+  const rev = plan.diagrams[0]!.rev;
+  plan = applyOps(plan, [{ op: 'remove', kind: 'task', id: 't2' }], 'user').plan;
+  assert.ok(!plan.diagrams[0]!.nodes.some((n) => n.taskIds?.includes('t2')));
+  assert.equal(plan.diagrams[0]!.rev, rev + 1);
+  // A save made against the old revision (the canvas, unaware) is refused, not applied.
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_diagram', id: plan.diagrams[0]!.id, caption: 'x', expect: rev }], 'user'), /was changed/);
+});

@@ -1,5 +1,6 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { parseJsonc } from './jsonc.ts';
 
 /**
  * Harness configuration: `~/.claude/cc-harness/config.json`, overridden per
@@ -33,36 +34,152 @@ export const DEFAULT_CONFIG: HarnessConfig = {
   idleShutdownMinutes: 120,
 };
 
+/** Settings about this machine's daemon, which serves every repository at
+ *  once: a repository cannot set them. */
+export const GLOBAL_ONLY: readonly (keyof HarnessConfig)[] = ['idleShutdownMinutes'];
+
+/** Keys older versions read; an old file still holding them is not wrong. */
+const RETIRED = ['gateHoldSeconds', 'stages', 'ship'];
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-export function mergeConfig(base: HarnessConfig, override: unknown): HarnessConfig {
-  if (!isRecord(override)) return base;
+/** Why a value cannot be used, or null when it can. */
+function invalid(key: keyof HarnessConfig, value: unknown): string | null {
+  const want = typeof DEFAULT_CONFIG[key];
+  if (typeof value !== want) return `must be ${want === 'boolean' ? 'true or false' : `a ${want}`}`;
+  if (key === 'idleShutdownMinutes' && (!Number.isInteger(value) || (value as number) < 0)) return 'must be a whole number of minutes, 0 or more';
+  return null;
+}
+
+/** Layer `override` on `base`, key by key. What cannot be used is left out
+ *  and, given `errors`, said there, prefixed with `where`. */
+export function mergeConfig(
+  base: HarnessConfig,
+  override: unknown,
+  opts: { errors?: string[]; where?: string; globalOnly?: boolean } = {},
+): HarnessConfig {
+  const { errors, where = '', globalOnly = true } = opts;
+  if (override === undefined) return base;
+  if (!isRecord(override)) {
+    errors?.push(`${where}must hold an object.`);
+    return base;
+  }
   const out: HarnessConfig = { ...base };
-  for (const key of Object.keys(DEFAULT_CONFIG) as (keyof HarnessConfig)[]) {
-    const value = override[key];
-    if (value !== undefined && typeof value === typeof DEFAULT_CONFIG[key]) {
-      (out as unknown as Record<string, unknown>)[key] = value;
+  const known = Object.keys(DEFAULT_CONFIG) as (keyof HarnessConfig)[];
+  for (const key of Object.keys(override)) {
+    if (RETIRED.includes(key)) continue;
+    if (!(known as string[]).includes(key)) {
+      errors?.push(`${where}"${key}" is not a setting Coplan reads: use ${known.join(', ')}.`);
+      continue;
     }
+    const k = key as keyof HarnessConfig;
+    if (!globalOnly && GLOBAL_ONLY.includes(k)) {
+      errors?.push(`${where}"${key}" can only be set in the global config: one daemon serves every repository.`);
+      continue;
+    }
+    const why = invalid(k, override[key]);
+    if (why) {
+      errors?.push(`${where}"${key}" ${why}; ${JSON.stringify(override[key])} is not, so ${JSON.stringify(base[k])} is used.`);
+      continue;
+    }
+    (out as unknown as Record<string, unknown>)[key] = override[key];
   }
   return out;
 }
 
-function readJson(file: string): unknown {
+export interface ConfigReport {
+  config: HarnessConfig;
+  /** What could not be read or used, each naming its file. */
+  errors: string[];
+  /** The files looked at; the config is current while none of them changes. */
+  files: string[];
+}
+
+function readLayer(file: string, errors: string[]): unknown {
+  let text: string;
   try {
     if (!existsSync(file)) return undefined;
-    // Tolerate line comments so a config file can explain itself.
-    const raw = readFileSync(file, 'utf8').replace(/^\s*\/\/.*$/gm, '');
-    return JSON.parse(raw);
-  } catch {
+    text = readFileSync(file, 'utf8');
+  } catch (err) {
+    errors.push(`${file} could not be read: ${(err as Error).message}`);
+    return undefined;
+  }
+  try {
+    return parseJsonc(text);
+  } catch (err) {
+    errors.push(`${file} is not valid JSON, so none of it is used: ${(err as Error).message}`);
     return undefined;
   }
 }
 
-export function loadConfig(opts: { configDir: string; projectDir?: string | null }): HarnessConfig {
-  let cfg = DEFAULT_CONFIG;
-  cfg = mergeConfig(cfg, readJson(path.join(opts.configDir, 'config.json')));
-  if (opts.projectDir) cfg = mergeConfig(cfg, readJson(path.join(opts.projectDir, '.claude', 'harness.json')));
-  return cfg;
+export function globalConfigFile(configDir: string): string {
+  return path.join(configDir, 'config.json');
+}
+
+export function projectHarnessFile(projectDir: string): string {
+  return path.join(projectDir, '.claude', 'harness.json');
+}
+
+/** The config, with everything wrong with it said rather than skipped. */
+export function loadConfigReport(opts: { configDir: string; projectDir?: string | null }): ConfigReport {
+  const errors: string[] = [];
+  const global = globalConfigFile(opts.configDir);
+  const files = [global];
+  let cfg = mergeConfig(DEFAULT_CONFIG, readLayer(global, errors), { errors, where: `${global}: ` });
+  if (opts.projectDir) {
+    const project = projectHarnessFile(opts.projectDir);
+    files.push(project);
+    cfg = mergeConfig(cfg, readLayer(project, errors), { errors, where: `${project}: `, globalOnly: false });
+  }
+  return { config: cfg, errors, files };
+}
+
+/**
+ * The daemon's view of the config: read once per repository, and again as
+ * soon as either file changes — an edit counts without a restart. What is
+ * wrong with a file is handed to `onError` once, not on every read.
+ */
+export class ConfigCache {
+  private entries = new Map<string, { stamp: string; config: HarnessConfig }>();
+  private said = new Set<string>();
+
+  constructor(
+    private readonly configDir: string,
+    private readonly onError: (message: string) => void = () => {},
+    private readonly max = 64,
+  ) {}
+
+  get(projectDir?: string | null): HarnessConfig {
+    const key = projectDir ?? '';
+    const files = projectDir ? [globalConfigFile(this.configDir), projectHarnessFile(projectDir)] : [globalConfigFile(this.configDir)];
+    const stamp = configStamp(files);
+    const hit = this.entries.get(key);
+    if (hit?.stamp === stamp) return hit.config;
+    const report = loadConfigReport({ configDir: this.configDir, projectDir });
+    for (const e of report.errors) {
+      if (this.said.has(e)) continue;
+      if (this.said.size > 256) this.said.clear();
+      this.said.add(e);
+      this.onError(e);
+    }
+    if (this.entries.size >= this.max) this.entries.clear();
+    this.entries.set(key, { stamp, config: report.config });
+    return report.config;
+  }
+}
+
+/** A stamp of the files a config was read from: when it changes, read again. */
+export function configStamp(files: readonly string[]): string {
+  return files
+    .map((f) => {
+      try {
+        const st = statSync(f);
+        return `${st.mtimeMs}:${st.size}`;
+      } catch {
+        return '-';
+      }
+    })
+    .join('|');
 }

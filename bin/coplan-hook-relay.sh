@@ -36,12 +36,54 @@ PLUGIN_ROOT_DIR="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-$SEL
 PAYLOAD=$(cat)
 [ -n "$PAYLOAD" ] || exit 0
 
+# Every tool call's output comes with PostToolUse, and the daemon only needs
+# to hear which session's tool finished — that is what clears a question or
+# a permission prompt off the board. A huge one (a big file read, a long
+# build log) is not worth shipping and parsing, so only the session goes.
+# The id is the payload's first one (agents put it first); the shortest
+# match up to it, then a plain string, so nothing in the output is taken.
+case "$EVENT" in
+  PostToolUse|postToolUse)
+    if [ "${#PAYLOAD}" -gt 262144 ]; then
+      ID_KEY=session_id
+      [ "$AGENT" = cursor ] && ID_KEY=conversation_id
+      REST=${PAYLOAD#*\"$ID_KEY\"}
+      [ "$REST" = "$PAYLOAD" ] && exit 0
+      ID=$(printf '%s' "$REST" | sed -n '1s/^[[:space:]]*:[[:space:]]*"\([A-Za-z0-9._:-]*\)".*/\1/p')
+      [ -n "$ID" ] || exit 0
+      PAYLOAD=$(printf '{"%s":"%s","hook_event_name":"%s"}' "$ID_KEY" "$ID" "$EVENT")
+    fi
+    ;;
+esac
+
+# An installed but unbuilt plugin (`dist/` is not in the repository) has no
+# daemon to start and no MCP server: everything would fail silently, and the
+# only symptom would be a "connection closed" on the tools. Say so once, at
+# the start of the session, in each agent's own format — and nothing else.
+if [ -n "$PLUGIN_ROOT_DIR" ] && [ ! -f "$PLUGIN_ROOT_DIR/dist/daemon/main.js" ]; then
+  case "$EVENT" in
+    SessionStart|sessionStart)
+      CONTEXT="Coplan's plugin is installed but not built, so its tools and hooks are off. If the user wants Coplan, tell them to build it: /coplan-setup in Claude Code or Cursor, or ask Codex to set up Coplan (pnpm install in $PLUGIN_ROOT_DIR)."
+      CONTEXT=$(printf '%s' "$CONTEXT" | sed 's/\\/\\\\/g; s/"/\\"/g')
+      case "$AGENT" in
+        claude) printf '{"systemMessage":"Coplan is not built - run /coplan-setup, then start a new session.","hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}' "$CONTEXT" ;;
+        codex) printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}' "$CONTEXT" ;;
+        cursor) printf '{"additional_context":"%s"}' "$CONTEXT" ;;
+      esac
+      ;;
+  esac
+  exit 0
+fi
+
 HOME_DIR="${CC_HARNESS_HOME:-$HOME/.claude/cc-harness}"
 LOCK="$HOME_DIR/daemon.json"
 
 # Nothing the harness does waits on the user, so every event is near instant.
+# A session's first call, or the first to a daemon just started, may wait on
+# it loading: those get longer. Starting the daemon (up to 5s) plus the call
+# stays inside the hook's 20-second budget.
 case "$EVENT" in
-  SessionStart|sessionStart) MAX_TIME=15 ;;
+  SessionStart|sessionStart) MAX_TIME=10 ;;
   *) MAX_TIME=4 ;;
 esac
 
@@ -61,7 +103,7 @@ read_lock() {
   # the daemon may need starting, ask it: it answers /health with its pid.
   # Every other event saves the round trip — a dead port fails fast anyway.
   case "$EVENT" in
-    SessionStart|sessionStart)
+    SessionStart|sessionStart|UserPromptSubmit|beforeSubmitPrompt)
       HEALTH=$(curl -s --max-time 2 --connect-timeout 1 "http://127.0.0.1:$PORT/health" 2>/dev/null)
       RC=$?
       # Slow to answer (curl's timeout, 28) is a busy daemon, not a dead one:
@@ -77,10 +119,12 @@ read_lock() {
 }
 
 start_daemon() {
-  # Only the session's first event pays the cost of starting the daemon; every
-  # other event in a session that has no daemon simply no-ops.
+  # The session's first event, and each message the user sends, may start the
+  # daemon: one that shut down after a long idle comes back with the next
+  # message, so the sign-off it carries is not lost. Every other event in a
+  # session that has no daemon simply no-ops.
   case "$EVENT" in
-    SessionStart|sessionStart) ;;
+    SessionStart|sessionStart|UserPromptSubmit|beforeSubmitPrompt) ;;
     *) return 1 ;;
   esac
   [ -n "$PLUGIN_ROOT_DIR" ] || return 1
@@ -88,13 +132,27 @@ start_daemon() {
   ENTRY="$PLUGIN_ROOT_DIR/dist/daemon/main.js"
   [ -f "$ENTRY" ] || return 1
   mkdir -p "$HOME_DIR" 2>/dev/null || true
+  # A daemon that would not start a moment ago (an old node, a crash on
+  # start) will not now: a message the user sends does not wait five seconds
+  # on it again. A new session still tries.
+  FAILED="$HOME_DIR/start-failed"
+  case "$EVENT" in
+    UserPromptSubmit|beforeSubmitPrompt)
+      [ -n "$(find "$FAILED" -mmin -5 2>/dev/null)" ] && return 1 ;;
+  esac
   (setsid node "$ENTRY" >/dev/null 2>&1 &) 2>/dev/null || (node "$ENTRY" >/dev/null 2>&1 &)
-  i=0
-  while [ "$i" -lt 50 ]; do
+  # Waited on by the clock, not by count: where sleep takes no fractions,
+  # fifty tries would be fifty seconds.
+  DEADLINE=$(( $(date +%s) + 5 ))
+  while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     sleep 0.1 2>/dev/null || sleep 1
-    if read_lock; then return 0; fi
-    i=$((i + 1))
+    if read_lock; then
+      rm -f "$FAILED" 2>/dev/null
+      MAX_TIME=10
+      return 0
+    fi
   done
+  : > "$FAILED" 2>/dev/null
   return 1
 }
 
@@ -106,12 +164,24 @@ fi
 # that says where the session lives — and therefore how to link back to it so
 # the user can answer the agent there. Remote Control can be switched on
 # mid-session, so this goes with every event rather than only SessionStart.
+# The token goes to curl in a file the daemon wrote for this user alone: on
+# curl's command line, any local user could read it from /proc. A daemon
+# from before that file existed gets it on the command line, as it did.
+AUTH_FILE="$HOME_DIR/auth.header"
+AUTH_LINE=""
+# Read with the shell's own builtin, not grep: no other process sees it.
+[ -r "$AUTH_FILE" ] && IFS= read -r AUTH_LINE < "$AUTH_FILE" 2>/dev/null
+if [ "$AUTH_LINE" = "Authorization: Bearer $TOKEN" ]; then
+  AUTH_ARG="@$AUTH_FILE"
+else
+  AUTH_ARG="Authorization: Bearer $TOKEN"
+fi
 RESPONSE=$(printf '%s' "$PAYLOAD" | curl -s -S \
   --max-time "$MAX_TIME" \
   --connect-timeout 2 \
   -X POST \
   -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "$AUTH_ARG" \
   -H "X-Harness-Agent: $AGENT" \
   -H "X-Harness-Remote-Session: ${CLAUDE_CODE_REMOTE_SESSION_ID:-}" \
   -H "X-Harness-Remote-Sdk: ${CLAUDE_CODE_REMOTE_SDK_URL:-}" \

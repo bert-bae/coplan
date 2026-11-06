@@ -2,7 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
-import { mkdtempSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +34,12 @@ before(async () => {
   home = mkdtempSync(path.join(tmpdir(), 'cc-harness-relay-'));
 
   server = http.createServer((req, res) => {
+    // Answered like the real daemon, so the relay believes the lock.
+    if (req.url === '/health') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, version: '0.0.0', pid: process.pid }));
+      return;
+    }
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
@@ -78,7 +84,9 @@ function relay(
 ): Promise<RelayResult> {
   return new Promise((resolve) => {
     const child = spawn(RELAY, [event, ...extra], {
-      env: { ...process.env, CC_HARNESS_HOME: home, ...env },
+      // This checkout, built, is the plugin: not whichever one the agent
+      // running the tests was started from.
+      env: { ...process.env, CC_HARNESS_HOME: home, CLAUDE_PLUGIN_ROOT: path.dirname(path.dirname(RELAY)), PLUGIN_ROOT: '', CURSOR_PLUGIN_ROOT: '', ...env },
     });
     let stdout = '';
     child.stdout.on('data', (c: Buffer) => (stdout += c.toString()));
@@ -125,6 +133,20 @@ test('a daemon that hangs cannot hold a turn open', async () => {
   assert.equal(result.code, 0);
   assert.equal(result.stdout, '');
   assert.ok(Date.now() - started < 8_000, `took ${Date.now() - started}ms`);
+});
+
+test('a huge PostToolUse sends only its session: the daemon needs to hear a tool finished, not what it said', async () => {
+  received = [];
+  const huge = JSON.stringify({ session_id: 's-1', tool_input: { session_id: 'not-this' }, tool_response: `"session_id":"nor-this" ${'x'.repeat(300_000)}` });
+  const result = await relay('PostToolUse', huge);
+  assert.equal(result.code, 0);
+  assert.equal(received.length, 1, 'still heard: it is what clears a permission prompt off the board');
+  assert.deepEqual(JSON.parse(received[0]!.body), { session_id: 's-1', hook_event_name: 'PostToolUse' });
+  const cursor = JSON.stringify({ conversation_id: 'c-1', output: 'y'.repeat(300_000) });
+  await relay('postToolUse', cursor, {}, ['cursor']);
+  assert.deepEqual(JSON.parse(received[1]!.body), { conversation_id: 'c-1', hook_event_name: 'postToolUse' });
+  await relay('PostToolUse', '{"session_id":"s1","tool_name":"Read"}');
+  assert.equal(received[2]!.body, '{"session_id":"s1","tool_name":"Read"}', 'an ordinary one goes as it is');
 });
 
 test('says nothing when there is no daemon', async () => {
@@ -212,4 +234,48 @@ test('an agent it does not know is sent as Claude Code, never passed through', a
   received = [];
   await relay('SessionEnd', '{"session_id":"s1"}', {}, ['x"; rm -rf /']);
   assert.equal(received[0]?.agent, 'claude');
+});
+
+test('a daemon that will not start is not waited on again by every message the user sends', async () => {
+  const plugin = mkdtempSync(path.join(tmpdir(), 'cc-harness-crashing-'));
+  const empty = mkdtempSync(path.join(tmpdir(), 'cc-harness-nostart-'));
+  try {
+    mkdirSync(path.join(plugin, 'dist', 'daemon'), { recursive: true });
+    writeFileSync(path.join(plugin, 'dist', 'daemon', 'main.js'), 'process.exit(1);\n');
+    const env = { CLAUDE_PLUGIN_ROOT: plugin, CC_HARNESS_HOME: empty };
+    let started = Date.now();
+    await relay('UserPromptSubmit', '{"session_id":"s1"}', env);
+    assert.ok(Date.now() - started >= 4000, 'the first message waits for it to start');
+    assert.ok(existsSync(path.join(empty, 'start-failed')));
+    started = Date.now();
+    const again = await relay('UserPromptSubmit', '{"session_id":"s1"}', env);
+    assert.equal(again.code, 0);
+    assert.ok(Date.now() - started < 2000, 'the next one does not');
+  } finally {
+    rmSync(plugin, { recursive: true, force: true });
+    rmSync(empty, { recursive: true, force: true });
+  }
+});
+
+test('an unbuilt plugin says so at the start of a session, in each agent’s format, and nothing else', async () => {
+  const unbuilt = mkdtempSync(path.join(tmpdir(), 'cc-harness-unbuilt-'));
+  try {
+    received = [];
+    const env = { CLAUDE_PLUGIN_ROOT: unbuilt };
+    const claude = JSON.parse((await relay('SessionStart', '{"session_id":"s1"}', env)).stdout);
+    assert.match(claude.systemMessage, /not built - run \/coplan-setup/);
+    assert.equal(claude.hookSpecificOutput.hookEventName, 'SessionStart');
+    assert.ok(claude.hookSpecificOutput.additionalContext.includes(unbuilt), 'names where to build it');
+    const codex = JSON.parse((await relay('SessionStart', '{"session_id":"t1"}', env, ['codex'])).stdout);
+    assert.match(codex.hookSpecificOutput.additionalContext, /not built/);
+    assert.equal(codex.systemMessage, undefined);
+    const cursor = JSON.parse((await relay('sessionStart', '{"conversation_id":"c1"}', env, ['cursor'])).stdout);
+    assert.match(cursor.additional_context, /not built/);
+    const later = await relay('UserPromptSubmit', '{"session_id":"s1"}', env);
+    assert.equal(later.stdout, '', 'once, not on every prompt');
+    assert.equal(later.code, 0);
+    assert.equal(received.length, 0, 'nothing reaches a daemon');
+  } finally {
+    rmSync(unbuilt, { recursive: true, force: true });
+  }
 });

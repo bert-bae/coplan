@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import { api } from './lib/api.ts';
+import { api, eventsUrl, Unauthorized } from './lib/api.ts';
 import { isLocked } from '../shared/plan.ts';
 import { agentInfo, type AgentInfo } from '../shared/agents.ts';
 import type { BuildSettings, BuildTarget, CleanupGroupId, Plan, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport } from '../shared/types.ts';
@@ -10,7 +10,7 @@ export const TAB_IDS: Tab[] = ['diagrams', 'tasks', 'overview'];
 
 export type TaskMode = 'outline' | 'board';
 
-export type ConnectionState = 'connecting' | 'live' | 'reconnecting';
+export type ConnectionState = 'connecting' | 'live' | 'reconnecting' | 'unauthorized';
 
 export interface Toast {
   id: string;
@@ -44,6 +44,9 @@ export interface UiState {
   restarting: boolean;
   /** Edits in flight, so controls can say they are saving. */
   saving: number;
+  /** The canvas has an edit queued, in flight or about to be (a keyboard
+   *  nudge): what is on screen is not yet saved. */
+  canvasSaving: boolean;
   toasts: Toast[];
   error: string | null;
 }
@@ -67,6 +70,7 @@ const initial: UiState = {
   storageBusy: false,
   restarting: false,
   saving: 0,
+  canvasSaving: false,
   toasts: [],
   error: null,
 };
@@ -86,6 +90,8 @@ class Store {
   private listeners = new Set<() => void>();
   private source: EventSource | null = null;
   private reconnectTimer: number | undefined;
+  private retries = 0;
+  private connectAttempt = 0;
 
   getState = (): UiState => this.state;
 
@@ -104,13 +110,7 @@ class Store {
    * ---------------------------------------------------------------- */
 
   async init(): Promise<void> {
-    // Drop the one-time token from the address bar so copied links are clean.
-    const url = new URL(window.location.href);
-    if (url.searchParams.has('token')) {
-      url.searchParams.delete('token');
-      window.history.replaceState({}, '', `${url.pathname}${url.hash}`);
-    }
-
+    // The token was already taken out of the address bar, by `lib/api.ts`.
     try {
       const { sessions } = await api.sessions();
       this.set({ sessions });
@@ -123,6 +123,14 @@ class Store {
     // Selecting a session opens the stream; with none to select, open it for
     // the session list alone.
     if (!this.source) this.connect();
+    // Closing or reloading with an edit still on its way would lose it
+    // without a word: the browser asks first.
+    window.addEventListener('beforeunload', (e) => {
+      if (this.state.saving > 0 || this.state.canvasSaving) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    });
     window.addEventListener('hashchange', () => {
       const id = readHash();
       if (id && id !== this.state.sessionId) void this.selectSession(id, false);
@@ -146,34 +154,69 @@ class Store {
    * Live connection
    * ---------------------------------------------------------------- */
 
+  /**
+   * Open the live stream. Each opening takes a fresh single-use ticket, so
+   * the browser's own retry (which would reuse a spent one) is not relied
+   * on: on any error the stream is closed and opened again here, backing off
+   * — and stops, saying so, if the daemon no longer knows the page's token.
+   */
   private connect(): void {
     this.source?.close();
+    this.source = null;
     window.clearTimeout(this.reconnectTimer);
-    const query = this.state.sessionId ? `?session=${encodeURIComponent(this.state.sessionId)}` : '';
-    const source = new EventSource(`/api/events${query}`);
-    this.source = source;
-    source.onopen = () => this.set({ connection: 'live' });
-    source.onerror = () => {
-      this.set({ connection: 'reconnecting' });
-      window.clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = window.setTimeout(() => void this.resync(), 5000);
-    };
-    source.onmessage = (message) => {
-      try {
-        this.apply(JSON.parse(message.data as string) as ServerEvent);
-      } catch {
-        /* a malformed frame is not worth breaking the UI over */
-      }
-    };
+    const attempt = ++this.connectAttempt;
+    void eventsUrl(this.state.sessionId)
+      .then((url) => {
+        if (attempt !== this.connectAttempt) return;
+        const source = new EventSource(url);
+        this.source = source;
+        source.onopen = () => {
+          this.retries = 0;
+          this.set({ connection: 'live' });
+        };
+        source.onerror = () => {
+          source.close();
+          if (this.source === source) this.source = null;
+          this.retry();
+        };
+        source.onmessage = (message) => {
+          try {
+            this.apply(JSON.parse(message.data as string) as ServerEvent);
+          } catch {
+            /* a malformed frame is not worth breaking the UI over */
+          }
+        };
+      })
+      .catch((err: unknown) => {
+        if (attempt !== this.connectAttempt) return;
+        if (err instanceof Unauthorized) {
+          this.set({ connection: 'unauthorized' });
+          return;
+        }
+        this.retry();
+      });
   }
 
+  /** Try again, a little later each time, up to half a minute apart. */
+  private retry(): void {
+    this.set({ connection: 'reconnecting' });
+    window.clearTimeout(this.reconnectTimer);
+    const delay = Math.min(30_000, 1_000 * 2 ** Math.min(this.retries++, 5));
+    this.reconnectTimer = window.setTimeout(() => {
+      this.connect();
+      void this.resync();
+    }, delay);
+  }
+
+  /** Catch up on what was missed while the stream was down. The stream
+   *  says when it is live again; a fetch does not. */
   private async resync(): Promise<void> {
-    if (this.state.connection === 'live' || !this.state.sessionId) return;
+    if (!this.state.sessionId) return;
     try {
       const { session } = await api.session(this.state.sessionId);
-      this.set({ session: this.newest(session), connection: 'live' });
+      if (session.sessionId === this.state.sessionId) this.set({ session: this.newest(session) });
     } catch {
-      /* the EventSource keeps retrying */
+      /* the next connect says what is wrong */
     }
   }
 
@@ -201,6 +244,14 @@ class Store {
         return;
       }
       case 'ping':
+        return;
+      case 'persist-error':
+        if (event.sessionId === this.state.sessionId) {
+          this.toast(
+            'error',
+            `Coplan could not save this plan to disk (${event.message}): your latest edits are not saved. Free some space, or check the folder's permissions.`,
+          );
+        }
         return;
     }
   }
@@ -575,6 +626,11 @@ class Store {
  * ------------------------------------------------------------------ */
 
 export function describeError(err: unknown): string {
+  // fetch's own wording ("Failed to fetch", "NetworkError…") says nothing to
+  // a reader: the daemon could not be reached, and the edit was not saved.
+  if (err instanceof TypeError && /fetch|network|load failed/i.test(err.message)) {
+    return "Coplan's daemon is not reachable, so this was not saved. Run `coplan status` in a terminal to see why.";
+  }
   if (err instanceof Error) return err.message;
   return String(err);
 }

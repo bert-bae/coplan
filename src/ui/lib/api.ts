@@ -14,16 +14,59 @@ import type {
 /**
  * Client for the daemon.
  *
- * The auth token arrives once in the query string and is exchanged for a
- * cookie by the daemon, so requests here carry no credentials of their own.
+ * The auth token arrives in the link `coplan open` hands out. It is taken out
+ * of the address bar, kept in localStorage, and sent as a header. Kept, so
+ * the plain links the tools print — a new tab, a bookmark — work once the
+ * page has been opened with the key, as they did with a cookie. Not a
+ * cookie: a cookie is not scoped to a port, so every other server on
+ * 127.0.0.1 would be handed it, and a browser sends one by itself; storage
+ * belongs to this origin alone and is sent only by this code.
  */
+const TOKEN_KEY = 'coplan.token';
+
+function readToken(): string | null {
+  try {
+    const url = new URL(window.location.href);
+    const fromLink = url.searchParams.get('token');
+    if (fromLink) {
+      url.searchParams.delete('token');
+      window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+      try {
+        window.localStorage.setItem(TOKEN_KEY, fromLink);
+      } catch {
+        /* private mode: kept in memory for this page */
+      }
+      return fromLink;
+    }
+    return window.localStorage.getItem(TOKEN_KEY);
+  } catch {
+    /* no storage: nothing kept */
+    return null;
+  }
+}
+
+const token: string | null = typeof window === 'undefined' ? null : readToken();
+
+const authHeaders = (): Record<string, string> => (token ? { authorization: `Bearer ${token}` } : {});
+
+/** The address of the live stream, with a single-use ticket for it: a
+ *  browser cannot send the token as a header on an EventSource. */
+export async function eventsUrl(sessionId: string | null): Promise<string> {
+  const { ticket } = await request<{ ticket: string }>('/api/events/ticket', { method: 'POST', body: '{}' });
+  const query = new URLSearchParams({ ticket, ...(sessionId ? { session: sessionId } : {}) });
+  return `/api/events?${query.toString()}`;
+}
+
+/** A refusal for want of the token (the daemon restarted with a new one). */
+export class Unauthorized extends Error {}
 
 async function request<T>(route: string, init?: RequestInit): Promise<T> {
   const res = await fetch(route, {
-    credentials: 'same-origin',
+    credentials: 'omit',
     ...init,
-    headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
+    headers: { 'content-type': 'application/json', ...authHeaders(), ...(init?.headers ?? {}) },
   });
+  if (res.status === 401) throw new Unauthorized("Unauthorized: this page does not hold Coplan's current key. Reopen it with `coplan open`.");
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     // The daemon's refusals are written for the reader; show them as they are.

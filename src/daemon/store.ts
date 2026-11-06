@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync, renameSync, rmSync, statSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync, readdirSync, existsSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { paths, ensureHome, sanitizeId } from '../shared/paths.ts';
 import {
@@ -77,6 +77,8 @@ export class SessionStore extends EventEmitter {
   private persistTimers = new Map<string, NodeJS.Timeout>();
   /** Sessions on disk in a newer format than this build writes. */
   private foreign = new Set<string>();
+  /** The last write failure said for each session, so it is said once. */
+  private persistFailed = new Map<string, string>();
 
   constructor() {
     super();
@@ -135,6 +137,7 @@ export class SessionStore extends EventEmitter {
       this.persistNow(id);
     }
     const removed = this.sessions.delete(id);
+    this.persistFailed.delete(id);
     if (removed) this.broadcastSessionList();
     return removed;
   }
@@ -150,6 +153,7 @@ export class SessionStore extends EventEmitter {
       this.persistTimers.delete(id);
     }
     const removed = this.sessions.delete(id);
+    this.persistFailed.delete(id);
     discardDir(paths.sessionDir(id));
     if (removed) this.broadcastSessionList();
     return removed;
@@ -190,10 +194,26 @@ export class SessionStore extends EventEmitter {
       const dir = paths.sessionDir(id);
       mkdirSync(dir, { recursive: true });
       const tmp = path.join(dir, `.state.${process.pid}.tmp`);
-      writeFileSync(tmp, JSON.stringify({ schemaVersion: STATE_SCHEMA, ...state }, null, 2));
+      // On disk before it replaces the old file: a power cut between the two
+      // must leave the old state, not an empty new one.
+      const fd = openSync(tmp, 'w', 0o600);
+      try {
+        // writeFileSync on a descriptor loops until every byte is written;
+        // a single writeSync may stop short.
+        writeFileSync(fd, JSON.stringify({ schemaVersion: STATE_SCHEMA, ...state }, null, 2));
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
       renameSync(tmp, path.join(dir, 'state.json'));
-    } catch {
-      /* persistence is best-effort; the live session must never break */
+      this.persistFailed.delete(id);
+    } catch (err) {
+      // The live session goes on — but nobody may be told their edits are
+      // saved when they are not. Said once per kind of failure, not per edit.
+      const message = (err as NodeJS.ErrnoException)?.code ?? (err as Error)?.message ?? String(err);
+      if (this.persistFailed.get(id) === message) return;
+      this.persistFailed.set(id, message);
+      this.emitEvent({ type: 'persist-error', sessionId: id, message });
     }
   }
 

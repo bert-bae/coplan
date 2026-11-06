@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { globMatch, hooksFor, loadProjectConfig, nameFor, parseProjectConfig } from '../shared/project.ts';
+import { expandBraces, globMatch, hooksFor, loadProjectConfig, nameFor, parseProjectConfig, pathsMatch } from '../shared/project.ts';
 import { detectHooks } from '../cli/init.ts';
 
 /**
@@ -90,6 +90,73 @@ test('globs: ** crosses directories, * does not, a bare pattern matches names an
   assert.ok(!globMatch('docs/', 'src/docs.ts'));
   assert.ok(globMatch('file?.txt', 'file1.txt'));
   assert.ok(!globMatch('a.b', 'aXb'), 'dots are literal');
+});
+
+test('globs: {a,b} is either, nested too; an unclosed brace is literal', () => {
+  assert.ok(globMatch('src/**/*.{ts,tsx}', 'src/ui/App.tsx'));
+  assert.ok(globMatch('src/**/*.{ts,tsx}', 'src/a.ts'));
+  assert.ok(!globMatch('src/**/*.{ts,tsx}', 'src/a.js'));
+  assert.ok(globMatch('{src,lib}/**', 'lib/x.py'));
+  assert.ok(globMatch('*.{c,{h,hpp}}', 'inc/a.hpp'));
+  assert.ok(globMatch('a{b', 'a{b'));
+  assert.deepEqual(expandBraces('x.{a,b,c}'), ['x.a', 'x.b', 'x.c']);
+  assert.equal(expandBraces('{a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,n}', 10).length, 10, 'bounded');
+});
+
+test('a hook limited by a brace glob runs for the files it names — the gate is not silently skipped', () => {
+  const config = parseProjectConfig({ hooks: { review: [{ name: 'tests', run: 'npm test', paths: ['src/**/*.{ts,tsx}'] }] } });
+  assert.deepEqual(hooksFor(config, 'review', ['src/ui/App.tsx']).map((h) => h.name), ['tests']);
+});
+
+test('a !glob takes files back out of a hook', () => {
+  assert.ok(pathsMatch(['src/**', '!src/gen/**'], 'src/a.ts'));
+  assert.ok(!pathsMatch(['src/**', '!src/gen/**'], 'src/gen/a.ts'));
+  assert.ok(pathsMatch(['!*.md'], 'src/a.ts'), 'only !globs: everything else');
+  assert.ok(!pathsMatch(['!*.md'], 'README.md'));
+});
+
+test('unknown keys and values out of range are errors, each saying what is used instead', () => {
+  const config = parseProjectConfig({
+    hook: {},
+    iric: { review: 'Subagent', parallel: 20, maxRounds: '4', rounds: 2 },
+    branches: { base: 'main', perfix: 'x/', prefix: 3 },
+    hooks: {
+      review: [
+        { run: 'npm test', timeout: 99999, paths: 'src/**', optional: 'yes', timout: 5 },
+        { run: 'npm run e2e', timeout: 0.3 },
+      ],
+    },
+  });
+  const said = config.errors.join('\n');
+  assert.match(said, /"hook" is not a setting Coplan reads/);
+  assert.match(said, /"iric\.review" must be one of subagent, self, user, skip; "Subagent" is not, so subagent is used/);
+  assert.match(said, /"iric\.parallel" must be a whole number from 1 to 8; 20 is not, so 8 is used/);
+  assert.match(said, /"iric\.maxRounds" must be a whole number from 1 to 10; "4" is not, so 3 is used/);
+  assert.deepEqual(config.settings, { review: 'subagent', parallel: 8, maxRounds: 3 }, 'what the errors say is what is used');
+  assert.match(said, /iric\."rounds" is not a setting/);
+  assert.match(said, /branches\."perfix" is not a setting/);
+  assert.match(said, /"branches\.prefix" must be a branch name/);
+  assert.match(said, /"hooks\.review\[0\]\.timeout" is at most 3600 seconds; 3600 is used/);
+  assert.equal(config.hooks.review[0]!.timeout, 3600, 'too long is cut to the longest, not the default');
+  assert.match(said, /"hooks\.review\[1\]\.timeout" must be seconds, from 1 to 3600; the default 600 is used/);
+  assert.equal(config.hooks.review[1]!.timeout, undefined, 'never a 0-second timeout');
+  assert.match(said, /"hooks\.review\[0\]\.paths" must be a list of globs/);
+  assert.match(said, /"hooks\.review\[0\]\.optional" must be true or false/);
+  assert.match(said, /hooks\.review\[0\]\."timout" is not a setting/);
+  assert.deepEqual(config.branches, { base: 'main' });
+});
+
+test('comments anywhere outside strings, and trailing commas, are allowed', () => {
+  const dir = repo({
+    '.coplan/config.json': '{\n  "hooks": { "review": ["curl http://x/health", /* inline */ "npm test",], }, // the gate\n}\n',
+  });
+  try {
+    const config = loadProjectConfig(dir);
+    assert.deepEqual(config.errors, []);
+    assert.deepEqual(config.hooks.review.map((h) => h.run), ['curl http://x/health', 'npm test'], 'a // inside a string is kept');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('hook names come from the command', () => {

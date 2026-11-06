@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -194,4 +194,26 @@ test('a session saved by a newer Coplan is never read wrongly or saved over', as
   store.ensure('today', process.cwd());
   store.persistNow('today');
   assert.equal((JSON.parse(readFileSync(path.join(home, 'sessions', 'today', 'state.json'), 'utf8')) as { schemaVersion?: number }).schemaVersion, 1);
+});
+
+test('a save that fails is said — once — instead of being dropped', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async () => {
+  const store = await freshStore();
+  store.ensure('readonly', process.cwd());
+  store.persistNow('readonly');
+  const dir = path.join(home, 'sessions', 'readonly');
+  const events: unknown[] = [];
+  store.on('event', (e: { type: string }) => e.type === 'persist-error' && events.push(e));
+  chmodSync(dir, 0o500);
+  try {
+    store.publishPlan('readonly', PLAN);
+    store.persistNow('readonly');
+    store.persistNow('readonly');
+    assert.equal(events.length, 1, 'once per kind of failure, not per save');
+    assert.match(JSON.stringify(events[0]), /"sessionId":"readonly"/);
+  } finally {
+    chmodSync(dir, 0o700);
+  }
+  // Once it works again it is quiet, and a later failure is said again.
+  store.persistNow('readonly');
+  assert.ok(existsSync(path.join(dir, 'state.json')));
 });

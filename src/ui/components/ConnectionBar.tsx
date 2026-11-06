@@ -21,6 +21,20 @@ export function ConnectionBar() {
     return () => window.clearInterval(timer);
   }, [connection]);
 
+  // The daemon restarted with a new token: nothing here will reconnect it,
+  // and saying "reconnecting" forever would be a lie.
+  if (connection === 'unauthorized') {
+    return (
+      <div className="conn-bar" role="alert">
+        <span aria-hidden="true">⚠</span>
+        <span>
+          This page does not hold Coplan&apos;s current key — it was opened without it, or Coplan restarted since. Open it with{' '}
+          <code>coplan open</code> (or <code>/coplan-open</code>): until then nothing here can be loaded or saved.
+        </span>
+      </div>
+    );
+  }
+
   // A one-second blip should not flash the interface.
   if (connection === 'live' || !since || now - since < 2000) return null;
 

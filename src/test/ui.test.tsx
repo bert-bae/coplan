@@ -912,6 +912,11 @@ test('the plan is submitted after reading the prompt it sends, with how the buil
   assert.equal(submit.disabled, true, 'not while the preview is out of date');
   await waitFor(() => assert.equal(preview(), 'PROMPT for session with "tests first" reviewed by subagent'));
   await waitFor(() => assert.equal(submit.disabled, false));
+  // A canvas edit still on its way to the daemon would be missing from the plan that locks.
+  act(() => store.set({ canvasSaving: true }));
+  assert.equal(submit.disabled, true, 'not while the canvas is still saving');
+  act(() => store.set({ canvasSaving: false }));
+  assert.equal(submit.disabled, false);
 
   // The user's control over each task's cycle: who reviews it.
   await act(async () => {

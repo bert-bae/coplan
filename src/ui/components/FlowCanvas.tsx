@@ -158,6 +158,7 @@ function Editor({
   const theme = useResolvedTheme();
   const flow = useReactFlow<FlowNode, FlowEdge>();
   const wrapper = useRef<HTMLDivElement>(null);
+  const details = useRef<HTMLElement>(null);
   // Laid out once on mount; both pieces of state start from the same layout.
   const [initial] = useState(() => toFlow(diagram, plan));
   const [nodes, setNodes] = useState<FlowNode[]>(initial.nodes);
@@ -228,7 +229,13 @@ function Editor({
     baseRev.current = source.rev;
     loaded.current = signatureOf(source);
     current.current = { nodes: ns, edges: es, direction: source.direction };
-    currentKey.current = JSON.stringify(patchOf(ns, es, source.direction));
+    const key = JSON.stringify(patchOf(ns, es, source.direction));
+    // The boxes and arrows are what undo steps through. A new revision that
+    // left them as they were (a title or caption edited beside the canvas)
+    // reverts nothing anyone did, so the history stands.
+    const sameGraph = key === currentKey.current;
+    currentKey.current = key;
+    if (sameGraph) ownRevs.current.add(source.rev);
     if (!ownRevs.current.has(source.rev)) {
       if (history.current.canUndo || history.current.canRedo) historyLost.current = true;
       history.current.clear();
@@ -287,10 +294,19 @@ function Editor({
     if (p && now) load(now, p);
   }, [diagram.id, load]);
 
+  /** Tell the page whether an edit here is not yet saved: Confirm and Submit
+   *  wait for it, and leaving the page warns. */
+  const syncSaving = () => {
+    const q = queue.current;
+    const busy = q.busy || Boolean(q.pending) || nudge.current !== undefined;
+    if (store.getState().canvasSaving !== busy) store.set({ canvasSaving: busy });
+  };
+
   const flush = useCallback(async () => {
     const q = queue.current;
     if (q.busy) return;
     q.busy = true;
+    syncSaving();
     try {
       while (q.pending) {
         const patch = q.pending;
@@ -302,13 +318,21 @@ function Editor({
           baseRev.current = savedRev;
           ownRevs.current.add(savedRev);
         } else {
-          // Refused — changed elsewhere, or invalid. Show what is really saved.
+          // Refused — changed elsewhere, or invalid — and with it any edit
+          // still pending. History no longer matches what is saved: the
+          // refused save may have been an undo, a redo or several edits at
+          // once, so no one step can be taken out. It goes, as it does when
+          // the diagram changes elsewhere; then show what is really saved.
           q.pending = null;
+          history.current.clear();
+          historyLost.current = true;
+          bumpHistory();
           resyncFromServer();
         }
       }
     } finally {
       q.busy = false;
+      syncSaving();
     }
     // Something newer than our last save may have arrived while we were busy
     // and been held back; take it now.
@@ -362,12 +386,18 @@ function Editor({
   const restore = useCallback(
     (snap: Snapshot) => {
       const selected = new Set(nodesRef.current.filter((n) => n.selected).map((n) => n.id));
-      const ns = snap.nodes.map((n) => ({
-        ...n,
-        selected: selected.has(n.id),
-        // Progress moves on whatever is undone; show it as it is now.
-        data: { ...n.data, ...progressOf(planRef.current, n.data.taskIds) },
-      }));
+      // A task removed since the snapshot cannot be linked back: the save
+      // would be refused, and every undo after it with it.
+      const tasks = new Set(planRef.current.tasks.map((t) => t.id));
+      const ns = snap.nodes.map((n) => {
+        const taskIds = n.data.taskIds?.filter((id) => tasks.has(id));
+        return {
+          ...n,
+          selected: selected.has(n.id),
+          // Progress moves on whatever is undone; show it as it is now.
+          data: { ...n.data, taskIds, ...progressOf(planRef.current, taskIds) },
+        };
+      });
       const es = snap.edges.map((e) => ({ ...e, selected: false }));
       setNodes(ns);
       setEdges(es);
@@ -408,7 +438,9 @@ function Editor({
       nudge.current = window.setTimeout(() => {
         nudge.current = undefined;
         persist(nodesRef.current, edgesRef.current);
+        syncSaving();
       }, 300);
+      syncSaving();
     },
     [persist],
   );
@@ -421,6 +453,10 @@ function Editor({
       window.clearTimeout(nudge.current);
       nudge.current = undefined;
       persistRef.current(nodesRef.current, edgesRef.current);
+      // A move that came back to where it started saves nothing, and then
+      // nothing else would say the canvas is done saving.
+      const q = queue.current;
+      if (!q.busy && !q.pending) store.set({ canvasSaving: false });
     },
     [],
   );
@@ -1009,8 +1045,38 @@ function Editor({
       e.preventDefault();
       paste(clip, 'pointer');
     };
+    /** A control on the canvas — a toolbar button, the zoom controls, the
+     *  minimap — keeps Tab, Enter and typing: they are how it is used and
+     *  left, not a box being worked on. */
+    const onControl = () => {
+      const active = document.activeElement as HTMLElement | null;
+      if (!active || !wrapper.current?.contains(active) || active === wrapper.current) return false;
+      if (active.closest('.react-flow__node')) return Boolean(active.closest('button, a[href], [role="button"]'));
+      return Boolean(active.closest('.react-flow__panel, .react-flow__controls, .react-flow__minimap, button, a[href], [role="button"]'));
+    };
+    /** F6 moves the keyboard between the canvas and its details panel. */
+    const toggleRegion = () => {
+      const canvas = wrapper.current;
+      const side = details.current;
+      if (!canvas || !side) return false;
+      const active = document.activeElement;
+      if (active && side.contains(active)) {
+        const one = nodesRef.current.find((n) => n.selected);
+        const node = one ? [...canvas.querySelectorAll<HTMLElement>('.react-flow__node')].find((el) => el.dataset.id === one.id) : undefined;
+        (node ?? canvas).focus();
+        return true;
+      }
+      if (!onCanvas()) return false;
+      const first = side.querySelector<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])');
+      (first ?? side).focus();
+      return true;
+    };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Alt') setTwoHops(true);
+      if (e.key === 'F6' && !e.metaKey && !e.ctrlKey && !e.altKey && !overlays.current.menu && !overlays.current.shortcuts) {
+        if (toggleRegion()) e.preventDefault();
+        return;
+      }
       if (busy(e.target) || !onCanvas()) return;
       const o = overlays.current;
       if (o.menu || o.shortcuts || o.reconnect) return;
@@ -1050,7 +1116,7 @@ function Editor({
         k.clearSelection();
         return;
       }
-      if (!one) return;
+      if (!one || onControl()) return;
       if (e.key === 'Tab') return claim(), e.shiftKey ? k.addBefore(one.id) : k.addAfter(one.id);
       if (e.key === 'Enter' && !e.altKey) return claim(), k.addBeside(one.id);
       if (e.key === 'F2') return claim(), setEditing(`node:${one.id}`);
@@ -1246,6 +1312,9 @@ function Editor({
       <div className="arch-body">
         <div
           ref={wrapper}
+          tabIndex={-1}
+          role="region"
+          aria-label="Diagram canvas"
           className={classNames('flow', reconnect && 'is-reconnecting', readOnly && 'is-readonly')}
           onMouseMove={(e) => {
             pointer.current = flow.screenToFlowPosition({ x: e.clientX, y: e.clientY });
@@ -1375,7 +1444,7 @@ function Editor({
           {menu && shownMenu && <ContextMenu at={menu.at} title={shownMenu.title} entries={shownMenu.entries} onClose={closeMenu} />}
           {shortcuts && <ShortcutsOverlay onClose={() => setShortcuts(false)} />}
         </div>
-        <aside className="arch-panel" aria-label="Details">
+        <aside ref={details} className="arch-panel" aria-label="Details" tabIndex={-1}>
           {panel}
         </aside>
       </div>
