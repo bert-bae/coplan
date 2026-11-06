@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Installing: clone, then `./setup.sh`
+
+- Coplan is not listed in any agent's plugin directory, and the install
+  instructions now say so. You clone the repository and run `./setup.sh`,
+  which builds Coplan, installs it in each agent you choose (Claude Code,
+  Codex, Cursor), and walks you through its settings: Coplan on this machine
+  (`config.json`), your defaults for every repository's build
+  (`coplan.json`), and a repository's checks (`.coplan/config.json`). It
+  writes only what you change. `--yes` asks nothing; `--agents` picks the
+  agents. `git pull` and `./setup.sh` again to update; it restarts a running
+  daemon on the new build.
+- The agents install `.plugin/`, a copy of what runs staged in the clone:
+  about 5 MB, where installing the clone itself copied its 150 MB of
+  build-time packages into each agent.
+- If you installed Coplan straight from GitHub, `./setup.sh` from a clone
+  moves the `coplan` marketplace to the clone, in Claude Code and in Codex.
+- `/coplan-setup` now says which version is installed and where to run
+  `./setup.sh`; it still builds a checkout loaded with `--plugin-dir`.
+- `coplan setup` writes a repository's `.coplan/config.json` without the
+  build settings when you have your own defaults, so they hold there.
+  `coplan init` is unchanged.
+
 ### The README
 
 - **Screenshots** of each step, from demo plans that

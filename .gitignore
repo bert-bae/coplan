@@ -8,3 +8,9 @@ node_modules/
 # Build output: `pnpm install` (or `pnpm build`) makes it, after cloning
 # and after installing the plugin.
 dist/
+
+# The plugin ./setup.sh stages for your agents to install: what runs, without
+# the build-time packages.
+/.plugin/
+/.plugin.tmp/
+/.plugin.old/

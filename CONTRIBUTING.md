@@ -33,10 +33,10 @@ Load your checkout instead of an installed copy:
 claude --plugin-dir "$PWD"
 ```
 
-In Codex, add the checkout as a marketplace (`codex plugin marketplace add
-"$PWD"`, then `codex plugin add coplan@coplan`) and trust its hooks in
-`/hooks`. Codex installs a copy, so add it again after a rebuild. In Cursor,
-copy the checkout to `~/.cursor/plugins/local/coplan` and reload the window.
+Codex and Cursor take a copy of a plugin, so install your build in them with
+`./setup.sh --agents codex,cursor`, and run it again after a rebuild. In
+Codex, trust the hooks in `/hooks` again each time. Add `--yes` to skip the
+settings questions.
 
 The daemon runs whatever was in `dist/` when it started, so after a rebuild
 restart it with `./bin/coplan restart` (or `/coplan-restart`). Open tabs
@@ -61,8 +61,12 @@ released from its CHANGELOG.md section. The repository's own [`.coplan/config.js
 lists them per stage, so `./bin/coplan check review` runs what a change needs.
 
 **`dist/` is not committed.** It is build output: `pnpm install` builds it (the
-`prepare` script), and `pnpm build` rebuilds it. People who install the
-plugin build it once with `/coplan-setup`.
+`prepare` script), and `pnpm build` rebuilds it. People install Coplan with
+[`./setup.sh`](setup.sh), which builds it and installs `.plugin/`, a copy of
+what runs, in their agents. The staged copy holds the paths in `STAGED` in
+[`src/cli/setup.ts`](src/cli/setup.ts): a new file the plugin needs at run time
+goes there too, and `src/test/setup.test.ts` fails when a manifest, hook or
+MCP config names one that is missing.
 
 ## How the code is laid out
 

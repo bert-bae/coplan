@@ -6,6 +6,11 @@ Three layers, merged in order:
 2. user global — `~/.claude/cc-harness/config.json`
 3. project — `<repo>/.claude/harness.json`
 
+`./setup.sh` asks for the global ones and writes them for you, along with
+[your build defaults](#your-own-defaults-coplanjson) and a
+[repository's checks](#the-repository-coplanconfigjson). Run it again to
+change them, or edit the files by hand.
+
 Later layers override earlier ones key by key, except `idleShutdownMinutes`,
 which only the global file sets: one daemon serves every repository. An edit
 to either file counts at once, with no restart.
@@ -48,7 +53,8 @@ The settings above are about Coplan on your machine. What a *build* runs
 belongs to the repository, so it lives with the code — committed, so every
 build there runs the same checks: `<repo>/.coplan/config.json`. Comments
 and trailing commas are allowed, as above. `coplan init` (or `/coplan-init`
-in Claude) writes a starting point from the repository's scripts.
+in Claude) writes a starting point from the repository's scripts, and so does
+`./setup.sh` when you give it the repository's path.
 
 ```jsonc
 {

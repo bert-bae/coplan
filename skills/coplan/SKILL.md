@@ -186,12 +186,21 @@ the plan just stays open for them to edit.
 
 ## Setting up, and opening Coplan
 
-Coplan's build output is not in its repository: after it is installed or
-updated, it has to be built once. If Coplan's tools are missing, or the
-user asks you to set Coplan up, run `pnpm install` in the plugin's folder —
-two levels up from this file (`../..`) — which builds it; use
-`corepack pnpm install` if `pnpm` is not installed. Then tell the user to
-restart the agent (or start a new session) so Coplan's tools and hooks load.
+Coplan is installed from a clone of its repository: `./setup.sh` there
+builds it, installs it in the user's agents and walks through its settings.
+The plugin's folder is two levels up from this file (`../..`). If the user
+asks you to set Coplan up, update it, or change its settings:
+
+- If that folder holds `install.json`, `./setup.sh` installed it, already
+  built. Tell the user to run `./setup.sh` in the clone `install.json` names
+  (`clone`), in a terminal, after a `git pull` to update: it asks them
+  questions, so do not run it for them.
+- Otherwise it is a checkout loaded directly. If it has no `dist/`, Coplan's
+  tools are missing because it was never built: run `pnpm install` there,
+  which builds it (`corepack pnpm install` if `pnpm` is not installed).
+
+Then tell the user to restart the agent (or start a new session) so Coplan's
+tools and hooks load.
 
 The publish result carries the plan's address. To open it in a browser, or
 to check the wiring, use the `coplan` CLI: it is `bin/coplan` in the

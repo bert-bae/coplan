@@ -1,7 +1,7 @@
 /**
  * `coplan` — the operator CLI.
  *
- *   coplan start|stop|restart|status|open|url|logs|doctor|check|init
+ *   coplan start|stop|restart|status|open|url|logs|doctor|check|init|setup
  *
  * Everything here is also reachable from the plugin, but a plain CLI is what
  * makes the daemon debuggable when the hook wiring is the thing that broke.
@@ -15,6 +15,7 @@ import { readLiveLock, readVerifiedLock, probeLock, baseUrl, paths, ensureHome }
 import { runDoctor } from './doctor.ts';
 import { runCheck } from './check.ts';
 import { runInit } from './init.ts';
+import { runSetup } from './setup.ts';
 import { AGENT_KINDS, agentInfo, sessionFromEnv } from '../shared/agents.ts';
 import { openInBrowser } from '../daemon/browser.ts';
 import { cleanStorage, scanStorage } from '../daemon/housekeeping.ts';
@@ -291,6 +292,12 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
     return runInit(args);
   },
 
+  /** Install in your agents and walk through the settings: what
+   *  ./setup.sh runs once it has built the clone. */
+  async setup(args) {
+    return runSetup(args);
+  },
+
   async version() {
     console.log(VERSION);
     return 0;
@@ -349,6 +356,9 @@ usage: coplan <command>
              run that stage's hooks from .coplan/config.json (default: review)
   init [--print] [--force]
              write a starting .coplan/config.json from the repository's scripts
+  setup [--yes] [--agents claude,codex,cursor|none]
+             install in your agents and walk through the settings
+             (./setup.sh in the clone builds first, then runs this)
   version    print the version
 `);
 }
