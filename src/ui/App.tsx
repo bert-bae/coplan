@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { store, useStore, useSession, TAB_IDS, type Tab } from './store.ts';
+import { listedSessions, store, useStore, useSession, TAB_IDS, type Tab } from './store.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { Toasts } from './components/Toasts.tsx';
 import { ConnectionBar } from './components/ConnectionBar.tsx';
@@ -274,7 +274,7 @@ function Loading() {
 function SessionUnavailable({ error }: { error: string }) {
   const sessions = useStore((s) => s.sessions);
   const unauthorized = /401|unauthorized/i.test(error);
-  const other = sessions[0];
+  const other = listedSessions(sessions, null)[0];
   return (
     <div className="view">
       <EmptyState
@@ -310,8 +310,8 @@ function NoSession({ error }: { error: string | null }) {
         hint={
           <>
             Start Claude Code, Codex or Cursor in a project with Coplan enabled, then ask for a plan:{' '}
-            <code>/coplan</code> in Claude Code and Cursor, <code>$coplan</code> in Codex. Sessions appear here the moment
-            they register.
+            <code>/coplan</code> in Claude Code and Cursor, <code>$coplan</code> in Codex. The session appears here as soon
+            as you do.
             {error && <span className="error-text"> · {error}</span>}
           </>
         }

@@ -686,6 +686,10 @@ export interface SessionState {
   createdAt: number;
   updatedAt: number;
   endedAt?: number;
+  /** When the session first used Coplan: `/coplan` (or `$coplan`) typed,
+   *  the skill loaded, or one of its tools called. Every session with the
+   *  plugin registers, but only these are the user's plans. */
+  engagedAt?: number;
   plan: Plan | null;
 }
 
@@ -721,6 +725,9 @@ export interface SessionSummary {
   openThreads: number;
   /** Items the user changed that Claude has not read yet. */
   unreadByClaude: number;
+  /** The session has used Coplan (see `SessionState.engagedAt`), or has a
+   *  plan. Only these are listed in the rail. */
+  engaged: boolean;
 }
 
 /* ------------------------------------------------------------------ *

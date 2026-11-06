@@ -436,9 +436,12 @@ Rate limiter — service*, *Connected API gateway → Rate limiter: check*,
 **Overview.** The summary, supporting sections, and tiles for progress, what
 Claude is on right now, diagrams and open comments.
 
-**The session list** groups sessions by project, lifts the ones waiting on
-you to the top, and shows each one's current task. Fold it to a rail of
-initials with the ☰ button or `[` to give the plan the width.
+**The session list** holds the sessions you have planned in: the ones where
+you typed `/coplan` (`$coplan` in Codex), the agent loaded the skill, or a
+plan exists. Every other session the plugin sees stays out of it. The list
+groups sessions by project, lifts the ones waiting on you to the top, and
+shows each one's current task. Fold it to a rail of initials with the ☰
+button or `[` to give the plan the width.
 
 *As Claude sees it*, in the header, shows the plan exactly as
 `harness_plan_read` returns it.
