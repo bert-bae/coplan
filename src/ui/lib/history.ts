@@ -34,6 +34,13 @@ export class History<T> {
     return after;
   }
 
+  /** Rewrite every remembered state: for a change made outside the
+   *  history (a task linked from a box) that no undo should take back. */
+  map(fn: (state: T) => T): void {
+    this.past = this.past.map(fn);
+    this.future = this.future.map(fn);
+  }
+
   clear(): void {
     this.past = [];
     this.future = [];

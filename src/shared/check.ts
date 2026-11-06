@@ -11,7 +11,7 @@
 
 import { SESSION_BRANCH, ancestorsOf, branchPlan, hasSubtasks } from './build.ts';
 import { planPhase } from './plan.ts';
-import type { Plan, Target, Task } from './types.ts';
+import type { DiagramNode, Plan, Target, Task } from './types.ts';
 
 export const GAP_RULES = [
   'box-unbuilt',
@@ -46,6 +46,15 @@ export function blockingGaps(plan: Plan, severities: GapSeverities = {}): Gap[] 
 /** Box kinds that stand for something the plan does not build. */
 const NOT_BUILT = new Set(['external', 'actor', 'note']);
 
+/**
+ * A box no task builds (`box-unbuilt`): a part the plan builds, with no task
+ * linked, once the plan has tasks at all. The canvas marks the same boxes
+ * the check lists, from what is drawn.
+ */
+export function boxUnbuilt(plan: Pick<Plan, 'tasks'>, node: Pick<DiagramNode, 'kind' | 'taskIds'>): boolean {
+  return plan.tasks.length > 0 && !NOT_BUILT.has(node.kind) && !node.taskIds?.length;
+}
+
 export function planGaps(plan: Plan, severities: GapSeverities = {}): Gap[] {
   const gaps: Omit<Gap, 'severity'>[] = [];
   const add = (rule: GapRule, target: Target, message: string) => gaps.push({ rule, target, message });
@@ -64,7 +73,7 @@ export function planGaps(plan: Plan, severities: GapSeverities = {}): Gap[] {
         add('box-undescribed', ref, `Box "${n.label}" in "${d.title}" has no description: what it does, owns, and how others talk to it.`);
       }
       for (const id of n.taskIds ?? []) built.add(id);
-      if (plan.tasks.length && !NOT_BUILT.has(n.kind) && !n.taskIds?.length) {
+      if (boxUnbuilt(plan, n)) {
         add('box-unbuilt', ref, `No task builds box "${n.label}" in "${d.title}": link the task that does, or say it already exists.`);
       }
     }

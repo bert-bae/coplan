@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyOps, confirmDesign, publishPlan, publishTasks } from '../shared/plan.ts';
-import { planGaps, type GapRule } from '../shared/check.ts';
+import { boxUnbuilt, planGaps, type GapRule } from '../shared/check.ts';
 import { renderGaps, renderPlan } from '../daemon/render.ts';
 import type { Plan, PlanInput } from '../shared/types.ts';
 
@@ -43,6 +43,20 @@ test('boxes and tasks that do not account for each other', () => {
   assert.ok(!has(plan, 'task-builds-nothing', 'wire'));
   assert.ok(has(plan, 'box-undescribed', 'd1/cache'));
   assert.ok(!has(plan, 'box-undescribed', 'd1/api'));
+});
+
+test("the canvas's \"no task\" marks exactly the boxes box-unbuilt lists", () => {
+  const plan = publishPlan(null, {
+    ...DESIGN,
+    diagrams: [{ ...DESIGN.diagrams![0]!, nodes: [...(DESIGN.diagrams![0]!.nodes ?? []), { id: 'why', label: 'Why Redis', kind: 'note' }, { id: 'pay', label: 'Stripe', kind: 'external' }] }],
+  }).plan;
+  const marked = plan.diagrams.flatMap((d) => d.nodes.filter((n) => boxUnbuilt(plan, n)).map((n) => `${d.id}/${n.id}`));
+  const listed = planGaps(plan).filter((g) => g.rule === 'box-unbuilt').map((g) => g.target.id);
+  assert.deepEqual(marked, listed);
+  assert.deepEqual(marked, ['d1/cache']);
+  const d = DESIGN.diagrams![0]!;
+  const untasked = publishPlan(null, { ...DESIGN, tasks: [], diagrams: [{ ...d, nodes: (d.nodes ?? []).map(({ taskIds: _t, ...n }) => n) }] }).plan;
+  assert.ok(!untasked.diagrams[0]!.nodes.some((n) => boxUnbuilt(untasked, n)), 'no box is unbuilt before the plan has tasks');
 });
 
 test('once the task list is being made, every task must say what done means', () => {

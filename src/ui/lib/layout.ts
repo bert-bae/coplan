@@ -65,10 +65,13 @@ const DETAIL_CHAR = 6.1; // 11px
 const LABEL_CHROME = 70; // glyph, info button, padding and borders around the label
 const DETAIL_CHROME = 25;
 const MIN_WIDTH = 170;
+/** The foot of a box: its task chip (`.flow-node-foot`), and the gap above it. */
+const FOOT = 20;
 const MAX_WIDTH = 250;
 
 /** A box's size from its text: a width band that fits the label on one or
- *  two lines, taller for a subtitle and for a progress strip. */
+ *  two lines, taller for a subtitle and for the foot with its task chip —
+ *  which every box but a note has, so linking a task never resizes one. */
 export function nodeSize(node: SizedNode): Box {
   const label = node.label.length * LABEL_CHAR;
   const detail = node.detail ? Math.min(node.detail.length, 46) * DETAIL_CHAR : 0;
@@ -76,7 +79,8 @@ export function nodeSize(node: SizedNode): Box {
   const width = Math.round(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, raw)) / 10) * 10;
   const labelLines = Math.min(2, Math.max(1, Math.ceil(label / (width - LABEL_CHROME))));
   const detailLines = node.detail ? Math.min(2, Math.max(1, Math.ceil((node.detail.length * DETAIL_CHAR) / (width - DETAIL_CHROME)))) : 0;
-  let height = 18 + labelLines * 17 + (detailLines ? 2 + detailLines * 14 : 0) + (node.taskIds?.length ? 16 : 0);
+  const foot = node.kind !== 'note' ? FOOT : node.taskIds?.length ? 16 : 0;
+  let height = 18 + labelLines * 17 + (detailLines ? 2 + detailLines * 14 : 0) + foot;
   if (node.kind === 'datastore') height += 6;
   return { width, height: Math.max(44, height) };
 }

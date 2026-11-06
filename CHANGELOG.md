@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### The diagram as the task breakdown: a task list on every box
+
+- **Every box but a note counts the tasks that build it**, in a chip at its
+  foot: `☐ 0` before any task does, `☐ 1/3` once one of three is done
+  (a linked task counts as its subtasks), with their progress beside it.
+  It shows while you design and during the build.
+- **The chip opens the box's task list**: each task with its status and its
+  *Brief*, and, until the plan is submitted, a field to add one — it is
+  created with `builds: [this box]` and appears in the Tasks view, linked —
+  a title to rename and a way to unlink it. The list is reached without the
+  mouse: **Tab** to the chip, or **Alt+Enter** on a selected box, or the
+  box's menu; **Esc** closes it, back on the chip. Keys in it stay in it, so
+  typing there never renames or deletes the box, and Tab, Enter and typing on
+  the chip are the chip's (#30's rules hold). Adding a task from a box is not
+  a drawing edit: undo leaves it linked, and the canvas's history stands.
+- **A box no task builds says *no task*,** exactly where the plan check lists
+  `box-unbuilt` — never on a note, an actor or an external system, nor
+  before the plan has tasks — and not at all when the repository's
+  [`planCheck`](docs/CONFIG.md#plancheck) turns that rule off.
+  `GET /api/session/:id` now carries `planCheck` for it.
+- **The Tasks view lists them *By box***, beside the outline and the board
+  (and beside the board once the plan is submitted): each box with the tasks
+  that build it, and *Not on the diagram* for the tasks that build no box.
+- Every box but a note now has room for its chip, so boxes are a little
+  taller, and linking a task never resizes one.
+- Closing *What Claude reads* puts the keyboard back where it was opened
+  from, and saving or abandoning an inline title from the keyboard leaves
+  the keyboard on it.
+
 ### The build harness is opt-in: Export, Tracked and Managed
 
 - **Submit asks how the plan is built**, in place of *Who builds it?*:

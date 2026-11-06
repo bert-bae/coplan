@@ -43,6 +43,9 @@ export function InlineText({
   const latest = useRef<number | undefined>(version);
   latest.current = version;
   const input = useRef<HTMLInputElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  /** Finished from the keyboard: the keyboard stays on the text. */
+  const refocus = useRef(false);
 
   useEffect(() => {
     if (!editing) setDraft(value);
@@ -50,6 +53,10 @@ export function InlineText({
 
   useEffect(() => {
     if (editing) input.current?.select();
+    else if (refocus.current) {
+      refocus.current = false;
+      trigger.current?.focus();
+    }
   }, [editing]);
 
   const start = () => {
@@ -94,10 +101,12 @@ export function InlineText({
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
             e.preventDefault();
+            refocus.current = true;
             commit();
           }
           if (e.key === 'Escape') {
             e.stopPropagation();
+            refocus.current = true;
             abandon();
           }
         }}
@@ -107,7 +116,7 @@ export function InlineText({
 
   return (
     <Tag className={classNames('inline-text', !value && 'is-empty', className)}>
-      <button type="button" className="inline-trigger" onClick={start} title="Click to edit" aria-label={`${label}: ${value || placeholder}. Edit`}>
+      <button ref={trigger} type="button" className="inline-trigger" onClick={start} title="Click to edit" aria-label={`${label}: ${value || placeholder}. Edit`}>
         {value || placeholder}
       </button>
     </Tag>

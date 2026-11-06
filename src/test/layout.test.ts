@@ -183,11 +183,16 @@ test('a new box with no placed neighbours goes past the arranged ones', () => {
   assert.deepEqual(overlaps(d.nodes, positions), []);
 });
 
-test('boxes with a subtitle or linked tasks are taller; long labels wrap rather than run on', () => {
+test('boxes with a subtitle are taller; long labels wrap rather than run on', () => {
   assert.ok(nodeSize(node('a', { detail: 'does things' })).height > nodeSize(node('a')).height);
-  assert.ok(nodeSize(node('a', { taskIds: ['t1'] })).height > nodeSize(node('a')).height);
   const long = nodeSize(node('a', { label: 'A component with a really very long name indeed' }));
   assert.ok(long.width <= 250 && long.height > nodeSize(node('a')).height);
+});
+
+test('every box but a note has room for its task chip, so linking a task never resizes it', () => {
+  assert.equal(nodeSize(node('a', { taskIds: ['t1'] })).height, nodeSize(node('a')).height);
+  assert.ok(nodeSize(node('a', { kind: 'note' })).height < nodeSize(node('a')).height, 'a note has no chip');
+  assert.ok(nodeSize(node('a', { kind: 'note', taskIds: ['t1'] })).height > nodeSize(node('a', { kind: 'note' })).height, 'unless tasks were linked to it anyway');
 });
 
 test('the same graph is laid out once, however often it is asked for', () => {

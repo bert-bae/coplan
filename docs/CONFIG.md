@@ -207,7 +207,8 @@ come first, then the repository's.
 How each rule of the plan check (`harness_plan_check`, and the gaps the
 sign-off dialogs list) counts here: `error` holds *Confirm design* and
 *Submit* until it is fixed, `warn` (the default) lists it, `off` does not
-show it.
+show it. The canvas follows `box-unbuilt` too: a box no task builds says *no
+task* on it unless the rule is `off`.
 
 ```jsonc
 "planCheck": { "box-undescribed": "error", "comment-unanswered": "error", "task-builds-nothing": "off" }

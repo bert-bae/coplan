@@ -1,7 +1,8 @@
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, stubFetch } from './dom-env.ts';
-import type { Plan, SessionState } from '../shared/types.ts';
+import type { GapSeverities } from '../shared/check.ts';
+import type { Plan, PlanOp, SessionState } from '../shared/types.ts';
 
 /**
  * Editing on the canvas, end to end in a browser: shortcuts, menus,
@@ -15,7 +16,7 @@ setupDom();
 const { render, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
 const { store } = await import('../ui/store.ts');
-const { publishPlan } = await import('../shared/plan.ts');
+const { publishPlan, applyOps, confirmDesign, submitPlan } = await import('../shared/plan.ts');
 
 /** user → gw → api → db, api → cache */
 function makePlan(): Plan {
@@ -52,20 +53,49 @@ function makeSession(plan: Plan = makePlan()): SessionState {
   return { sessionId: 's1', agent: 'claude', cwd: '/repo', repoRoot: '/repo', branch: 'main', title: 'repo', status: 'idle', waiting: null, surface: 'unknown', link: null, createdAt: now, updatedAt: now, plan };
 }
 
+/** The same diagram with a note on it, and two tasks: one builds the API,
+ *  the other — with a subtask — builds Postgres. */
+function taskedPlan(): Plan {
+  const plan = makePlan();
+  plan.diagrams[0]!.nodes.push({ id: 'memo', label: 'Why Redis', kind: 'note' });
+  return applyOps(
+    plan,
+    [
+      { op: 'upsert_task', id: 'routes', title: 'Add the routes', builds: ['api'] },
+      { op: 'upsert_task', id: 'schema', title: 'Write the schema', builds: ['db'] },
+      { op: 'upsert_task', id: 'migrate', parentId: 'schema', title: 'Migrate the data' },
+    ],
+    'user',
+  ).plan;
+}
+
 let posts: { route: string; body: Record<string, unknown> }[];
 /** Set to refuse the next save, as the daemon does an invalid one. */
 let refuseNext = false;
+/** While set, every batch is applied to this plan and answered with it, as
+ *  the daemon does; otherwise a save is answered with the plan as it was. */
+let live: Plan | null = null;
 
-async function boot(session: SessionState = makeSession()): Promise<void> {
+async function boot(session: SessionState = makeSession(), opts: { live?: boolean; planCheck?: GapSeverities } = {}): Promise<void> {
   refuseNext = false;
-  ({ posts } = stubFetch((route) => {
+  live = opts.live ? session.plan : null;
+  ({ posts } = stubFetch((route, init) => {
     if (route.startsWith('/api/sessions')) return { sessions: [], version: 'test' };
     if (route.endsWith('/plan/ops') && refuseNext) {
       refuseNext = false;
       return { __status: 400, error: 'refused' };
     }
+    if (route.endsWith('/plan/ops') && live) {
+      try {
+        live = applyOps(live, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+        return { plan: live, changes: [] };
+      } catch (err) {
+        return { __status: 400, error: (err as Error).message };
+      }
+    }
     if (route.endsWith('/plan/ops')) return { plan: store.getState().session?.plan, changes: [] };
-    if (route.startsWith('/api/session/')) return { session };
+    if (route.includes('/brief')) return { text: 'THE BRIEF', blocks: [], task: { id: 'routes', title: 'Add the routes' }, version: 1 };
+    if (route.startsWith('/api/session/')) return { session, ...(opts.planCheck ? { planCheck: opts.planCheck } : {}) };
     return { ok: true };
   }));
   render(<App />);
@@ -86,6 +116,7 @@ const lastGraph = () => {
   return { nodes: op['nodes'] as Record<string, unknown>[], edges: op['edges'] as Record<string, unknown>[] };
 };
 const saves = () => posts.filter((p) => p.route.endsWith('/plan/ops')).length;
+const opsSent = () => posts.filter((p) => p.route.endsWith('/plan/ops')).flatMap((p) => p.body['ops'] as Record<string, unknown>[]);
 const ends = (g = lastGraph()) => g.edges.map((e) => `${e['source']}->${e['target']}`).sort();
 
 const nodeEl = (label: string) => [...document.querySelectorAll<HTMLElement>('.react-flow__node')].find((n) => n.querySelector('.flow-node-label')?.textContent === label)!;
@@ -99,6 +130,18 @@ const press = async (key: string, init: KeyboardEventInit = {}) => {
     fireEvent.keyDown(document.activeElement ?? document.body, { key, ...init });
   });
 };
+/** A box's task chip. Found by its name: React Flow keeps boxes jsdom cannot
+ *  measure hidden, so they are not in the accessibility tree. */
+const chipOf = (label: string) => document.querySelector<HTMLButtonElement>(`button.flow-task-chip[aria-label^="Tasks for ${label}:"]`);
+const taskList = () => document.querySelector<HTMLElement>('.flow-tasks[role="dialog"]');
+const openTasks = async (label: string) => {
+  await act(async () => {
+    fireEvent.click(chipOf(label)!);
+  });
+  const list = taskList();
+  assert.ok(list, 'the task list is open');
+  return list;
+};
 const settle = () =>
   act(async () => {
     await new Promise((r) => setTimeout(r, 30));
@@ -107,7 +150,7 @@ const settle = () =>
 beforeEach(() => {
   cleanup();
   window.localStorage.clear();
-  store.set({ sessions: [], sessionId: null, session: null, tab: 'diagrams', diagramId: null, toasts: [], focusTarget: null, collapsedSidebar: false });
+  store.set({ sessions: [], sessionId: null, session: null, planCheck: {}, tab: 'diagrams', diagramId: null, toasts: [], focusTarget: null, collapsedSidebar: false, viewer: null, taskMode: 'outline' });
 });
 
 after(() => cleanup());
@@ -393,4 +436,228 @@ test('? shows every shortcut, and Escape puts it away', async () => {
     fireEvent.keyDown(sheet, { key: 'Escape' });
   });
   assert.equal(screen.queryByRole('dialog'), null);
+});
+
+/* ------------------------------------------------------- tasks on a box */
+
+test('every box but a note counts the tasks that build it, even none', async () => {
+  await boot(makeSession(taskedPlan()));
+  assert.equal(chipOf('API')?.textContent, '☐0/1');
+  assert.equal(chipOf('API')?.getAttribute('aria-label'), 'Tasks for API: 0 of 1 done');
+  assert.equal(chipOf('Postgres')?.getAttribute('aria-label'), 'Tasks for Postgres: 0 of 1 done', 'a parent counts as its subtasks');
+  assert.equal(chipOf('Gateway')?.textContent, '☐0');
+  assert.equal(chipOf('Gateway')?.getAttribute('aria-label'), 'Tasks for Gateway: no tasks yet');
+  assert.ok(chipOf('Customer'), 'an actor has one too: a task can build what talks to it');
+  assert.ok(!chipOf('Why Redis'), 'a note is not a part of the system');
+});
+
+test('a box no task builds says so, as the plan check would — and not for an actor or a note', async () => {
+  await boot(makeSession(taskedPlan()));
+  const gap = (label: string) => nodeEl(label).querySelector('.flow-node-gap')?.textContent ?? null;
+  assert.equal(gap('Gateway'), 'no task');
+  assert.equal(gap('Redis'), 'no task');
+  assert.equal(gap('API'), null);
+  assert.equal(gap('Customer'), null);
+  assert.equal(gap('Why Redis'), null);
+});
+
+test('with no tasks in the plan yet, or the rule turned off in planCheck, no box is marked', async () => {
+  await boot();
+  assert.equal(chipOf('Gateway')?.textContent, '☐0');
+  assert.ok(!document.querySelector('.flow-node-gap'), 'nothing is built by tasks yet');
+  cleanup();
+  await boot(makeSession(taskedPlan()), { planCheck: { 'box-unbuilt': 'off' } });
+  await waitFor(() => assert.equal(store.getState().planCheck['box-unbuilt'], 'off'));
+  assert.ok(!document.querySelector('.flow-node-gap'), 'the repository turned it off');
+});
+
+test("a box's chip opens its tasks, ready to add one; a task added there builds the box", async () => {
+  await boot(makeSession(taskedPlan()), { live: true });
+  const list = await openTasks('Gateway');
+  assert.equal(list.getAttribute('aria-label'), 'Tasks for Gateway');
+  assert.equal(chipOf('Gateway')?.getAttribute('aria-expanded'), 'true');
+  assert.match(list.textContent ?? '', /No task builds this box yet/);
+  const field = within(list).getByRole('textbox', { name: 'New task for Gateway' });
+  assert.ok(document.activeElement === field, 'the keyboard is on the field to add one');
+  await act(async () => {
+    fireEvent.change(field, { target: { value: 'Rate limits' } });
+    fireEvent.submit(field.closest('form')!);
+  });
+  await settle();
+  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', title: 'Rate limits', builds: ['d1/gw'] });
+  await waitFor(() => assert.equal(chipOf('Gateway')?.getAttribute('aria-label'), 'Tasks for Gateway: 0 of 1 done'));
+  assert.match(taskList()?.textContent ?? '', /Rate limits/, 'listed on the box');
+  assert.equal(nodeEl('Gateway').querySelector('.flow-node-gap'), null, 'and no longer a gap');
+  const made = live!.tasks.find((t) => t.title === 'Rate limits')!;
+  assert.deepEqual(live!.diagrams[0]!.nodes.find((n) => n.id === 'gw')!.taskIds, [made.id], 'linked on the plan itself');
+});
+
+test("a box's tasks are renamed and unlinked in its list, and each opens its brief", async () => {
+  await boot(makeSession(taskedPlan()));
+  let list = await openTasks('Postgres');
+  const rows = [...list.querySelectorAll('.flow-tasks-row')].map((r) => r.textContent);
+  assert.equal(rows.length, 2, 'the task, and its subtask under it');
+  assert.match(rows[1] ?? '', /Migrate the data/);
+  assert.ok(!within(list).queryByRole('button', { name: 'Unlink Migrate the data from Postgres' }), 'a subtask builds it through its parent');
+
+  await act(async () => {
+    fireEvent.click(within(list).getByRole('button', { name: /^Title of task 2: Write the schema/ }));
+  });
+  const title = within(list).getByRole('textbox', { name: 'Title of task 2' });
+  await act(async () => {
+    fireEvent.change(title, { target: { value: 'Write the schema, with indexes' } });
+    fireEvent.keyDown(title, { key: 'Enter' });
+  });
+  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 'schema', title: 'Write the schema, with indexes', expect: 1 });
+  assert.equal(document.activeElement?.getAttribute('aria-label'), 'Title of task 2: Write the schema. Edit', 'the keyboard stays on the title');
+
+  await act(async () => {
+    fireEvent.click(within(list).getByRole('button', { name: 'Unlink Write the schema from Postgres' }));
+  });
+  const db = lastGraph().nodes.find((n) => n['id'] === 'db')!;
+  assert.deepEqual(db['taskIds'], [], 'unlinked as the panel does, on the canvas');
+  assert.ok(taskList(), 'the list stays open');
+
+  list = await openTasks('API');
+  await act(async () => {
+    fireEvent.click(within(list).getByRole('button', { name: 'Brief for Add the routes' }));
+  });
+  assert.deepEqual(store.getState().viewer, { tab: 'brief', taskId: 'routes' });
+  assert.ok(!taskList(), 'the list makes way for the viewer');
+  await waitFor(() => assert.ok(screen.getByRole('dialog', { name: 'What Claude reads' })));
+  await act(async () => {
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+  });
+  assert.equal(store.getState().viewer, null);
+  assert.ok(document.activeElement === chipOf('API'), 'closing the brief goes back to the chip');
+});
+
+test('adding a task from a box is not a drawing edit: undo keeps the link, and the history stands', async () => {
+  await boot(makeSession(taskedPlan()), { live: true });
+  await selectBox('Gateway');
+  await press('E');
+  const input = document.querySelector<HTMLInputElement>('.flow-node-input')!;
+  await act(async () => {
+    fireEvent.change(input, { target: { value: 'Edge' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+  });
+  await settle();
+  const list = await openTasks('Edge');
+  await act(async () => {
+    const field = within(list).getByRole('textbox', { name: 'New task for Edge' });
+    fireEvent.change(field, { target: { value: 'TLS' } });
+    fireEvent.submit(field.closest('form')!);
+  });
+  await settle();
+  const tls = live!.tasks.find((t) => t.title === 'TLS')!.id;
+  await act(async () => {
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+  });
+  assert.ok(!taskList());
+  await press('z', { ctrlKey: true });
+  await settle();
+  const gw = lastGraph().nodes.find((n) => n['id'] === 'gw')!;
+  assert.equal(gw['label'], 'Gateway', 'the rename is undone');
+  assert.deepEqual(gw['taskIds'], [tls], 'and the task added since is still linked');
+  assert.doesNotMatch(store.getState().toasts.at(-1)?.text ?? '', /changed elsewhere/);
+});
+
+test('the chip is a control on the box: Tab, Enter and typing on it are its own (#30)', async () => {
+  await boot(makeSession(taskedPlan()));
+  await selectBox('API');
+  const chip = chipOf('API')!;
+  assert.equal(chip.tabIndex, 0, 'reached with Tab, like any button');
+  await act(async () => {
+    chip.focus();
+  });
+  const before = saves();
+  await press('Tab');
+  await press('Enter');
+  await press('x');
+  await press('Backspace');
+  await settle();
+  assert.equal(saves(), before, 'no box was added, renamed or deleted');
+  assert.ok(!document.querySelector('.flow-node-input'));
+  assert.ok(nodeEl('API'), 'the box is still there');
+});
+
+test('Alt+Enter opens the selected box’s tasks; Escape puts them away, back on the chip, with the box still selected', async () => {
+  await boot(makeSession(taskedPlan()));
+  await selectBox('API');
+  await act(async () => {
+    nodeEl('API').focus();
+  });
+  await press('Enter', { altKey: true });
+  const list = taskList()!;
+  assert.ok(list, 'opened from the keyboard');
+  assert.equal(saves(), 0, 'and no box was added beside it');
+  assert.ok(list.contains(document.activeElement));
+  await press('Escape');
+  assert.ok(!taskList());
+  assert.ok(document.activeElement === chipOf('API'));
+  assert.ok(nodeEl('API').closest('.react-flow__node')?.classList.contains('selected'), 'Escape closed the list, not the selection');
+});
+
+test('keys in a box’s task list stay there: typing, Backspace, undo and Tab never reach the canvas', async () => {
+  await boot(makeSession(taskedPlan()));
+  await selectBox('API');
+  const list = await openTasks('API');
+  const field = within(list).getByRole('textbox', { name: 'New task for API' });
+  await press('x');
+  assert.ok(document.activeElement === field);
+  assert.ok(!document.querySelector('.flow-node-input'), 'typing did not rename the box');
+  const brief = within(list).getByRole('button', { name: 'Brief for Add the routes' });
+  await act(async () => {
+    brief.focus();
+  });
+  await press('Backspace');
+  await press('Delete');
+  await press('z', { ctrlKey: true });
+  await press('Tab');
+  await press('Enter', { altKey: true });
+  await settle();
+  assert.equal(saves(), 0, 'nothing was deleted, undone or added');
+  assert.ok(nodeEl('API'));
+});
+
+test('the box’s menu opens its tasks too, and the shortcuts sheet says how', async () => {
+  await boot(makeSession(taskedPlan()));
+  await selectBox('Redis');
+  await press('F10', { shiftKey: true });
+  const menu = screen.getByRole('menu', { name: 'Redis' });
+  assert.match(menu.textContent ?? '', /Tasks that build it…(⌥|Alt\+)Enter/);
+  await act(async () => {
+    fireEvent.click(within(menu).getByRole('menuitem', { name: /Tasks that build it/ }));
+  });
+  assert.equal(taskList()?.getAttribute('aria-label'), 'Tasks for Redis');
+  await act(async () => {
+    fireEvent.pointerDown(document.querySelector('.react-flow__pane')!);
+  });
+  assert.ok(!taskList(), 'a click elsewhere closes it');
+  await press('?');
+  assert.match(screen.getByRole('dialog', { name: 'Keyboard shortcuts' }).textContent ?? '', /(⌥|Alt\+)Enterthe selected box’s tasks/);
+});
+
+test('once the design is confirmed, tasks are still added from a box; once submitted, its list only reads', async () => {
+  await boot(makeSession(confirmDesign(taskedPlan(), { prompt: 'THE DESIGN' })), { live: true });
+  let list = await openTasks('Redis');
+  await act(async () => {
+    const field = within(list).getByRole('textbox', { name: 'New task for Redis' });
+    fireEvent.change(field, { target: { value: 'Cache keys' } });
+    fireEvent.submit(field.closest('form')!);
+  });
+  await settle();
+  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', title: 'Cache keys', builds: ['d1/cache'] });
+  await waitFor(() => assert.equal(chipOf('Redis')?.getAttribute('aria-label'), 'Tasks for Redis: 0 of 1 done'));
+
+  cleanup();
+  const locked = submitPlan(confirmDesign(taskedPlan(), { prompt: 'THE DESIGN' }), { target: 'session', prompt: 'THE PROMPT' });
+  await boot(makeSession(locked));
+  assert.equal(chipOf('API')?.textContent, '☐0/1', 'counted during the build too');
+  list = await openTasks('API');
+  assert.match(list.textContent ?? '', /Add the routes/);
+  assert.ok(within(list).getByRole('button', { name: 'Brief for Add the routes' }));
+  assert.ok(!within(list).queryByRole('textbox'), 'nothing to add');
+  assert.ok(!within(list).queryByRole('button', { name: /^Unlink/ }), 'or unlink');
+  assert.ok(!within(list).queryByRole('button', { name: /^Title of task/ }), 'or rename');
 });

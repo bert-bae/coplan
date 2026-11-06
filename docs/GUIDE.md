@@ -28,8 +28,9 @@ and Cursor except where the README's
    you to change; it asks you, with `AskUserQuestion` in chat, only what it
    must (see [When Claude asks](#when-claude-asks)).
 2. **You shape the plan.** In the browser, rearrange and rewire the
-   architecture, write down the decisions on each box, drag tasks into the
-   order you want, nest and split them, and comment on anything. Every edit is
+   architecture, write down the decisions on each box, add the tasks each box
+   needs from the box itself, drag tasks into the order you want, nest and
+   split them, and comment on anything. Every edit is
    saved at once and recorded in the plan's change log as yours.
 3. **You hand it back in chat.** The header says when Claude hasn't read
    your changes and opens the session in Claude. If you just type in chat,
@@ -73,7 +74,8 @@ the review mode tasks get by default, how branches are cut and named, and
 your standing instructions for this step, each with the file and key that
 set it (see [Where the settings come from](#where-the-settings-come-from)).
 Confirming locks the diagrams, sections and summary; the
-title, the tasks, which boxes they link to, and comments still change. Your
+title, the tasks, which boxes they link to, and comments still change — a
+box's task list still adds, renames and unlinks them. Your
 next message in Claude carries it, once — in Cursor, confirming copies it for
 you to paste, or the agent's next `harness_plan_read` picks it up. *Reopen
 design* unlocks it again.
@@ -149,9 +151,10 @@ the dialog says what it leaves out — the sections, the architecture, each
 task's detail — which Claude reads with `harness_plan_read` before it starts.
 
 Submitting **locks the plan**. The canvas becomes the final design — boxes
-still fill up as the tasks that build them get done — and the Tasks tab
-becomes a read-only board where each card glows as it arrives in its new
-column. A strip under the header says where the build stands: waiting for
+still fill up as the tasks that build them get done, and each box's task list
+still shows their status and briefs — and the Tasks tab becomes a read-only
+board where each card glows as it arrives in its new column, or the same
+tasks *By box*. A strip under the header says where the build stands: waiting for
 Claude (with *Copy prompt*, in case you would rather paste it), building and
 what Claude is on, or built. Claude can still report tasks, add work it
 discovers and answer comments; anything that would redesign the plan is
@@ -265,6 +268,7 @@ direction toggle flips it.
 | Rename a box or an arrow | Start typing on a selected box, or double-click (F2) |
 | See what a box connects to | Hover or select it: what it sends to, what sends to it and two-way links light up in their own colours, arrows flow in their direction, the rest fades. Hold **Alt** for two steps out |
 | See what a box is | Hover its ⓘ: description, decisions, tasks, connections |
+| See and change a box's tasks | Click the ☐ chip at its foot (**Tab** reaches it too), or select the box and press **Alt+Enter**: each task with its status and *Brief*; add one (it builds this box), rename one, or unlink it. **Esc** closes the list and leaves you on the chip |
 | Everything you can do to it | Right-click it, or **⇧F10** |
 | Copy, cut, paste, duplicate | ⌘/Ctrl + C, X, V, D — across diagrams and tabs |
 | Undo, redo | ⌘/Ctrl+Z, ⇧⌘/Ctrl+Z — or the toolbar's ↶ ↷ |
@@ -274,7 +278,10 @@ direction toggle flips it.
 
 Undo covers your own edits on the canvas. If Claude (or another tab) changes
 the diagram, history up to that point is dropped rather than letting an undo
-quietly revert their change, and the page says so.
+quietly revert their change, and the page says so. A task added from a box
+is a task edit, not a drawing one: undo leaves it, linked, and the rest of
+the history stands. Unlinking one from a box is a canvas edit, like *Built
+by* in the panel, so undo links it again.
 
 *In the panel.* Select a box and the panel edits it: its name and the few
 words shown on it (inputs), its **kind**, a **description** of what it does
@@ -286,14 +293,21 @@ or with heads at both ends or none. Select several boxes to change their kind
 at once. With nothing selected the panel describes the diagram, holds its
 comments, and copies it as Markdown — the same text Claude reads.
 
-Boxes linked to tasks show those tasks' progress, so the picture doubles as
-a progress map. Your edits reach Claude as the design they produced: *Added
+**Tasks on every box.** Every box but a note carries a chip at its foot
+counting the tasks that build it — `☐ 0` before any do, `☐ 1/3` once one of
+three is done, counting a linked task's subtasks — with their progress
+beside it, so the picture doubles as a progress map. The chip opens the
+box's task list (above). A box the plan check would list as built by no task
+(`box-unbuilt`) says *no task* beside its chip; an actor, an external system
+and a note never do, nor does any box before the plan has tasks, nor any
+box in a repository whose [`planCheck`](CONFIG.md#plancheck) turns the rule
+off. Your edits reach Claude as the design they produced: *Added
 Rate limiter — service*, *Connected API gateway → Rate limiter: check*,
 *Changed Redis: description edited*.
 
-<a href="images/progress.png"><img src="images/progress.png" alt="The locked architecture during a build: each box shows a progress bar for the tasks that build it; the selected Redis cache box lists its description, decisions, the task building it and its connections" width="100%" /></a>
+<a href="images/progress.png"><img src="images/progress.png" alt="The locked architecture during a build: each box counts the tasks that build it and how many are done, with a progress bar, and boxes no task builds say so; the selected Redis cache box lists its description, decisions, the task building it and its connections" width="100%" /></a>
 
-**Tasks.** The breakdown, two ways:
+**Tasks.** The breakdown, three ways:
 
 - *Outline* is for shaping it. Rows nest to any depth with outline numbers.
   Drag a row onto another to nest it, or onto its top or bottom edge to place
@@ -302,6 +316,12 @@ Rate limiter — service*, *Connected API gateway → Rate limiter: check*,
   builds; click one to see it on the canvas.
 - *Board* is for following Claude: every leaf task in a To do / In progress /
   Blocked / Done column.
+- *By box* is the diagram as the breakdown: under each box (notes aside),
+  the tasks that build it and their subtasks — a task that builds two boxes
+  is under both — with how far along they are, and *no task* where none
+  does. Last comes *Not on the diagram*: the tasks that build no box, which
+  the plan check lists as `task-builds-nothing`. Once the plan is submitted it
+  sits beside the board.
 
 **Overview.** The summary, supporting sections, and tiles for progress, what
 Claude is on right now, diagrams and open comments.
@@ -339,8 +359,9 @@ one viewer with three tabs:
   you submit, the prompt as it was sent; *View prompt* opens it there too.
 - **Task brief** — one task's brief, exactly as `harness_task_brief` gives
   it to the agent that builds it, and to the subagent it hands the task to.
-  *Brief*, on every task in the outline and on every card on the board,
-  opens it for that task.
+  *Brief*, on every task in the outline and *By box*, in each box's task
+  list on the canvas, and on every card on the board, opens it for that
+  task.
 
 <a href="images/viewer.png"><img src="images/viewer.png" alt="The What Claude reads viewer on the Task brief tab: each part of the brief has a chip on the left naming where it comes from — the task, the plan, a section, a box, a config key, or Coplan's own instructions" width="100%" /></a>
 

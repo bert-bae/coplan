@@ -282,7 +282,12 @@ function PromptViewer({ viewer }: { viewer: ViewerState }) {
   const key = `${tab}:${taskId}:${stamp}`;
 
   useEffect(() => {
+    // Closing goes back to whatever opened it: a task's Brief, a box's chip.
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     body.current?.focus();
+    return () => {
+      if (opener?.isConnected) opener.focus();
+    };
   }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

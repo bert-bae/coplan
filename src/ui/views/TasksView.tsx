@@ -8,10 +8,13 @@ import { ProgressBar, STATUS_GLYPH, STATUS_LABEL } from '../components/Progress.
 import { EmptyState } from '../components/primitives.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { classNames } from '../lib/format.ts';
+import { boxRows } from '../lib/tasks.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
+import { boxUnbuilt } from '../../shared/check.ts';
 import { childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
 import { DEFAULT_BUILD_SETTINGS, SESSION_BRANCH, roundVerdict, stackStatus, type StackEntry, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
 import { REVIEW_MODES, TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type ReviewMode, type Task, type TaskStatus } from '../../shared/types.ts';
+import type { TaskMode } from '../store.ts';
 
 /** Clicking the status dot steps through the common path; blocked is set
  *  from the detail panel or the board, where it can carry a reason. */
@@ -29,13 +32,15 @@ const NO_PARTS: Part[] = [];
 const DRAG_TYPE = 'application/x-harness-task';
 
 /**
- * The breakdown. Two layouts over the same tree:
+ * The breakdown. Three layouts over the same tree:
  *
  * - **Outline** is for shaping it: nest, reorder, rename, add detail. Drag a
  *   row onto another to nest it, or onto its top or bottom edge to place it
  *   beside; or use Alt+arrows on a focused row.
  * - **Board** is for following it: every leaf task in a status column, the
  *   way progress is tracked while Claude works through the plan.
+ * - **By box** is the diagram as the breakdown: the tasks under each box
+ *   they build, and those that build none under "Not on the diagram".
  */
 export function TasksView() {
   const agent = useAgent();
@@ -61,6 +66,7 @@ export function TasksView() {
                 : `The plan is locked. Cards move across the board as ${agent.name} reports each task.`}
           </p>
           <span className="spacer" />
+          {plan.tasks.length > 0 && <ModeSwitch mode={mode === 'boxes' ? 'boxes' : 'board'} modes={['board', 'boxes']} />}
           <span className="toolbar-progress">
             <ProgressBar counts={counts} />
             <span className="muted">
@@ -70,6 +76,8 @@ export function TasksView() {
         </div>
         {plan.tasks.length === 0 ? (
           <EmptyState title="No tasks" hint="This plan was submitted without a task breakdown." />
+        ) : mode === 'boxes' ? (
+          <ByBox plan={plan} readOnly />
         ) : (
           <>
             <Board key={sessionId} plan={plan} readOnly />
@@ -84,14 +92,7 @@ export function TasksView() {
   return (
     <div className="view-pad">
       <div className="toolbar">
-        <div className="segmented" role="group" aria-label="Task layout">
-          <button type="button" className={classNames('seg', mode === 'outline' && 'is-active')} aria-pressed={mode === 'outline'} onClick={() => store.setTaskMode('outline')}>
-            Outline
-          </button>
-          <button type="button" className={classNames('seg', mode === 'board' && 'is-active')} aria-pressed={mode === 'board'} onClick={() => store.setTaskMode('board')}>
-            Board
-          </button>
-        </div>
+        <ModeSwitch mode={mode} modes={['outline', 'board', 'boxes']} />
         {mode === 'outline' && (
           <label className="toggle">
             <input type="checkbox" checked={hideDone} onChange={() => store.toggleHideDone()} />
@@ -118,10 +119,152 @@ export function TasksView() {
           <Outline plan={plan} hideDone={hideDone} />
           <BuildOrder plan={plan} />
         </>
+      ) : mode === 'boxes' ? (
+        <ByBox plan={plan} />
       ) : (
         <Board plan={plan} />
       )}
     </div>
+  );
+}
+
+const MODE_LABEL: Record<TaskMode, string> = { outline: 'Outline', board: 'Board', boxes: 'By box' };
+const MODE_HINT: Record<TaskMode, string> = {
+  outline: 'Shape the breakdown: nest, reorder, rename',
+  board: 'Follow it: each task in its status column',
+  boxes: 'The diagram as the breakdown: the tasks under each box they build',
+};
+
+function ModeSwitch({ mode, modes }: { mode: TaskMode; modes: TaskMode[] }) {
+  return (
+    <div className="segmented" role="group" aria-label="Task layout">
+      {modes.map((m) => (
+        <button key={m} type="button" className={classNames('seg', mode === m && 'is-active')} aria-pressed={mode === m} title={MODE_HINT[m]} onClick={() => store.setTaskMode(m)}>
+          {MODE_LABEL[m]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * By box
+ * ------------------------------------------------------------------ */
+
+/**
+ * The breakdown by the architecture. Under each box (in diagram order, notes
+ * left out), the tasks that build it, and their subtasks, which build it
+ * through them: a task that builds two boxes is under both. Every task that
+ * builds no box — itself, through a parent or through a subtask — is under
+ * "Not on the diagram" at the end, as the plan check's task-builds-nothing
+ * would have it. Each box says how far along its tasks are, and when no
+ * task builds it.
+ */
+function ByBox({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
+  const severity = useStore((s) => s.planCheck['box-unbuilt']);
+  const rows = outline(plan);
+  const linked = new Set(plan.diagrams.flatMap((d) => d.nodes.flatMap((n) => n.taskIds ?? [])));
+  const builds = (t: Task) => linked.has(t.id) || ancestorsOf(plan, t).some((a) => linked.has(a.id)) || descendants(plan, t.id).some((x) => linked.has(x.id));
+  const off = rows.filter((r) => !builds(r.task));
+  const several = plan.diagrams.filter((d) => d.nodes.some((n) => n.kind !== 'note')).length > 1;
+  return (
+    <div className="by-box">
+      {plan.diagrams.map((d) => {
+        const boxes = d.nodes.filter((n) => n.kind !== 'note');
+        if (!boxes.length) return null;
+        return (
+          <section key={d.id} className="by-box-diagram" aria-label={several ? d.title : undefined}>
+            {several && <h2 className="field-label by-box-diagram-title">{d.title}</h2>}
+            {boxes.map((n) => {
+              const items = boxRows(plan, n.taskIds);
+              const counts = countTasks({ tasks: items.map((r) => r.task) });
+              const gap = severity !== 'off' && boxUnbuilt(plan, n);
+              return (
+                <section key={n.id} className={classNames('by-box-group', `kind-${n.kind}`)} aria-label={n.label}>
+                  <header className="by-box-head">
+                    <span className="kind-swatch" aria-hidden="true">
+                      {KIND_GLYPH[n.kind]}
+                    </span>
+                    <button type="button" className="link by-box-name" title="Show it on the diagram" onClick={() => store.focus('node', `${d.id}:${n.id}`)}>
+                      {n.label}
+                    </button>
+                    {gap && (
+                      <span className={classNames('chip', severity === 'error' ? 'is-warning' : 'is-gap')} title="No task builds this box: link the task that does, or say it already exists.">
+                        no task
+                      </span>
+                    )}
+                    <span className="spacer" />
+                    {items.length > 0 && (
+                      <span className="toolbar-progress">
+                        <ProgressBar counts={counts} compact />
+                        <span className="muted">
+                          {counts.done}/{counts.total}
+                        </span>
+                      </span>
+                    )}
+                  </header>
+                  {items.length ? (
+                    <ul className="by-box-list" aria-label={`Tasks that build ${n.label}`}>
+                      {items.map((r) => (
+                        <ByBoxRow key={r.task.id} plan={plan} task={r.task} number={r.number} depth={r.depth} readOnly={readOnly} />
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="muted by-box-empty">No task builds this box.</p>
+                  )}
+                </section>
+              );
+            })}
+          </section>
+        );
+      })}
+      <section className="by-box-group is-off" aria-label="Not on the diagram">
+        <header className="by-box-head">
+          <span className="by-box-name">Not on the diagram</span>
+          <span className="spacer" />
+          <span className="muted">{off.length}</span>
+        </header>
+        {off.length ? (
+          <ul className="by-box-list" aria-label="Tasks that build no box">
+            {off.map((r) => (
+              <ByBoxRow key={r.task.id} plan={plan} task={r.task} number={r.number} depth={r.depth} readOnly={readOnly} />
+            ))}
+          </ul>
+        ) : (
+          <p className="muted by-box-empty">Every task builds a box.</p>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function ByBoxRow({ plan, task, number, depth, readOnly }: { plan: Plan; task: Task; number: string; depth: number; readOnly: boolean }) {
+  const parent = hasChildren(plan, task.id);
+  return (
+    <li className={classNames('by-box-row', `is-${task.status}`)} style={{ ['--depth' as string]: depth }}>
+      {parent || readOnly ? (
+        parent ? (
+          <DerivedStatus plan={plan} task={task} />
+        ) : (
+          <span className={classNames('status-dot is-static', `is-${task.status}`)} role="img" aria-label={`${task.title}: ${STATUS_LABEL[task.status]}`}>
+            <span aria-hidden="true">{STATUS_GLYPH[task.status]}</span>
+          </span>
+        )
+      ) : (
+        <StatusDot task={task} />
+      )}
+      <span className="task-num">{number}</span>
+      <button type="button" className="link by-box-title" title={readOnly ? 'Show its card on the board' : 'Show it in the outline'} onClick={() => store.focus('task', task.id)}>
+        {task.title}
+      </button>
+      {task.note && (
+        <span className={classNames('chip is-note', task.status === 'blocked' && 'is-warning')} title={task.note}>
+          {task.note}
+        </span>
+      )}
+      <span className="spacer" />
+      <BriefButton task={task} />
+    </li>
   );
 }
 

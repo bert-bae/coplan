@@ -938,6 +938,8 @@ test("the repository's customizations reach the agent, and its errors and final 
     const design = await post<Preview & { project: { planCheck: Record<string, string> } }>(`/api/session/${id}/plan/design/prompt`);
     assert.match(design.prompt, /## Standing instructions[\s\S]*Name every box after its service\./);
     assert.deepEqual(design.project.planCheck, { 'box-undescribed': 'error', 'comment-unanswered': 'off' }, 'the page is told how gaps count');
+    const opened = await call<{ planCheck?: Record<string, string> }>(`/api/session/${id}`);
+    assert.deepEqual(opened.planCheck, { 'box-undescribed': 'error', 'comment-unanswered': 'off' }, 'and so is the canvas, which marks the boxes the check lists');
     const brief = String((await mcpFor(id, 'brief', { task_id: 't2' }))['text']);
     assert.match(brief, /Write the test first\./);
     assert.match(brief, /Run the reviewer on the `opus` model\./);
