@@ -20,8 +20,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The oldest Node the plugin supports (package.json `engines`).
-          - { os: ubuntu-latest, node: 20.11.0 }
+          # The oldest Node the plugin supports (package.json `engines`): the
+          # plugin's own tests. The browser tests' jsdom needs a newer Node.
+          - { os: ubuntu-latest, node: 20.11.0, suite: runtime }
           - { os: ubuntu-latest, node: 22 }
           # The relay's BSD sed, sleep and missing setsid live here.
           - { os: macos-latest, node: 22 }
@@ -46,7 +47,7 @@ jobs:
         run: pnpm build
 
       - name: Test
-        run: pnpm test
+        run: ${{ matrix.suite == 'runtime' && 'pnpm test:runtime' || 'pnpm test' }}
 
       - name: The plugin wiring self-test
         env:

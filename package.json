@@ -36,6 +36,7 @@
     "build:watch": "node scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit",
     "test": "node --test dist/test/*.test.js",
+    "test:runtime": "node scripts/test-runtime.mjs",
     "check": "pnpm typecheck && pnpm build && pnpm test",
     "prepare": "node scripts/build.mjs"
   },
