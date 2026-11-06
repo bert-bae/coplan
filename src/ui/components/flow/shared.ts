@@ -67,6 +67,17 @@ export interface CanvasApi {
   finishNodeLabel(id: string, label: string | null): void;
   finishEdgeLabel(id: string, label: string | null): void;
   selectEdge(id: string): void;
+  /** The box whose task list is open, if any. */
+  tasksOpen: string | null;
+  /** Open a box's task list, or close it (null). */
+  showTasks(id: string | null): void;
+  /** Tasks can be added, renamed and unlinked from a box: the plan is not
+   *  submitted, and this is the plan itself rather than a preview. */
+  tasksEditable: boolean;
+  /** A new task that builds the box. Resolves false when it was refused. */
+  addTask(nodeId: string, title: string): Promise<boolean>;
+  /** The box stops linking the task. The task stays in the plan. */
+  unlinkTask(nodeId: string, taskId: string): void;
 }
 
 export const CanvasContext = createContext<CanvasApi | null>(null);

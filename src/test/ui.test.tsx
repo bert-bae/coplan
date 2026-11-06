@@ -99,6 +99,7 @@ beforeEach(() => {
     tab: 'diagrams',
     diagramId: null,
     taskMode: 'outline',
+    planCheck: {},
     hideDone: false,
     collapsedTasks: [],
     collapsedSidebar: false,
@@ -308,8 +309,11 @@ test('the diagram fills the view, with the diagram itself in the panel', async (
 
 test('a box shows the progress of the tasks that build it', async () => {
   await boot();
-  await waitFor(() => assert.ok(document.querySelector('.flow-node.kind-datastore .flow-node-progress')));
-  assert.match(document.querySelector('.flow-node.kind-datastore .flow-node-progress')?.textContent ?? '', /1\/2/);
+  await waitFor(() => assert.ok(document.querySelector('.flow-node.kind-datastore .flow-node-foot .progress')));
+  // Found by its name: React Flow hides boxes jsdom cannot measure.
+  const chip = document.querySelector<HTMLButtonElement>('button[aria-label^="Tasks for Postgres:"]')!;
+  assert.equal(chip.textContent, '☐1/2');
+  assert.equal(chip.getAttribute('aria-label'), 'Tasks for Postgres: 1 of 2 done', 'leaves of what it links: a parent counts as its subtasks');
 });
 
 const selectBox = async (label: string) => {
@@ -660,6 +664,48 @@ test('the outline shows the breakdown, and which part each task builds', async (
     fireEvent.click(part);
   });
   assert.equal(store.getState().tab, 'diagrams', 'the part opens on the canvas');
+});
+
+/** Each "By box" group: its name, and the tasks listed under it. */
+const byBox = () =>
+  [...document.querySelectorAll<HTMLElement>('.by-box-group')].map((g) => [
+    g.querySelector('.by-box-name')?.textContent,
+    ...[...g.querySelectorAll('.by-box-row')].map((r) => `${r.querySelector('.task-num')?.textContent} ${r.querySelector('.by-box-title')?.textContent}`),
+  ]);
+
+test('"By box" lists every task under each box it builds, and the tasks that build none apart', async () => {
+  const plan = applyOps(makePlan(), [{ op: 'upsert_task', title: 'Health check', builds: ['api', 'db'] }], 'user').plan;
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'By box' }));
+  });
+  assert.equal(store.getState().taskMode, 'boxes');
+  assert.deepEqual(byBox(), [
+    ['API', '3 Health check'],
+    ['Postgres', '1 Storage layer', '1.1 Cache client', '1.2 Invalidation', '3 Health check'],
+    ['Not on the diagram', '2 Wire into API'],
+  ]);
+  const postgres = screen.getByRole('region', { name: 'Postgres' });
+  assert.match(postgres.textContent ?? '', /1\/3/, 'how far along the tasks that build it are');
+  assert.ok(within(postgres).getByRole('button', { name: 'Brief for Storage layer' }), 'each with its brief');
+  await act(async () => {
+    fireEvent.click(within(postgres).getByRole('button', { name: 'Postgres' }));
+  });
+  assert.equal(store.getState().tab, 'diagrams', 'a box opens on the canvas');
+  assert.equal(store.getState().focusTarget === null || store.getState().focusTarget === 'node:d1:db', true);
+});
+
+test('"By box" marks a box no task builds, as the plan check would', async () => {
+  await boot();
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'By box' }));
+  });
+  const api = screen.getByRole('region', { name: 'API' });
+  assert.match(api.textContent ?? '', /no task/);
+  assert.match(api.textContent ?? '', /No task builds this box/);
+  assert.doesNotMatch(screen.getByRole('region', { name: 'Postgres' }).textContent ?? '', /no task/);
 });
 
 test('clicking a status dot moves the task along', async () => {
@@ -1316,7 +1362,8 @@ test('while building, the board follows Claude and a card that moves stands out'
   const plan = lockedPlan(true);
   await boot(makeSession(plan));
   await openTab('Tasks');
-  assert.equal(screen.queryByRole('group', { name: 'Task layout' }), null, 'the board is the only view');
+  const layouts = within(screen.getByRole('group', { name: 'Task layout' })).getAllByRole('button').map((b) => b.textContent);
+  assert.deepEqual(layouts, ['Board', 'By box'], 'the board, or by box: no outline to reshape');
   assert.match(document.querySelector('.toolbar-note')?.textContent ?? '', /Cards move across the board as Claude reports each task/);
   assert.equal(screen.queryAllByRole('combobox').length, 0, 'no status pickers');
   assert.equal(document.querySelector('[draggable="true"]'), null, 'nothing to drag');
@@ -1379,6 +1426,23 @@ test("a task the user reviews waits for their verdict on its card", async () => 
     fireEvent.click(within(review).getByRole('button', { name: 'Send' }));
   });
   assert.deepEqual(opsSent().at(-1), { op: 'review_task', id: 't3', verdict: 'changes', summary: 'Add a timeout' });
+});
+
+test('a submitted plan is followed by box too, beside the board, with nothing on it to edit', async () => {
+  await boot(makeSession(lockedPlan(true)));
+  await openTab('Tasks');
+  assert.ok(document.querySelector('.board'), 'the board first');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'By box' }));
+  });
+  assert.ok(!document.querySelector('.board'));
+  assert.deepEqual(byBox()[1]?.slice(0, 2), ['Postgres', '1 Storage layer']);
+  const postgres = screen.getByRole('region', { name: 'Postgres' });
+  assert.equal(within(postgres).queryAllByRole('button', { name: /Mark / }).length, 0, 'statuses are the agent’s to move');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Board' }));
+  });
+  assert.ok(document.querySelector('.board'));
 });
 
 test("a box's task on a submitted plan opens its card on the board", async () => {

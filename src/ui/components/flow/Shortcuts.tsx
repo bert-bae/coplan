@@ -39,6 +39,14 @@ export const SHORTCUTS: { group: string; keys: [string, string][] }[] = [
     ],
   },
   {
+    group: 'Tasks',
+    keys: [
+      ['Click a box’s ☐ chip, or Tab to it', 'the tasks that build it: add, rename, unlink, brief'],
+      [`${ALT}Enter`, 'the selected box’s tasks'],
+      ['Esc', 'close them, back on the chip'],
+    ],
+  },
+  {
     group: 'Select and move',
     keys: [
       ['Click / ⇧-drag', 'select one / select an area'],

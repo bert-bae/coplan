@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, type FocusEvent, type MouseEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type FocusEvent, type MouseEvent, type RefObject } from 'react';
 import { Handle, NodeToolbar, Position, useEdges, useNodes, type NodeProps } from '@xyflow/react';
 import { usePlan } from '../../store.ts';
 import { Markdown } from '../Markdown.tsx';
 import { ProgressBar, STATUS_GLYPH, STATUS_LABEL } from '../Progress.tsx';
 import { classNames } from '../../lib/format.ts';
+import { BoxFoot, BoxTasks } from './BoxTasks.tsx';
 import { KIND_GLYPH, KIND_LABEL, useCanvas, type FlowData, type FlowEdge, type FlowNode } from './shared.ts';
 
 /** How a box relates to the one in focus, said on the box. The words carry
@@ -31,7 +32,8 @@ const SIDES = [
  * between whichever sides face each other, so where you grab from does not
  * matter. Double-click (or F2) renames it in place. The ⓘ in its corner
  * opens a summary on hover — what the part is, what was decided about it,
- * what builds it and what it talks to — without leaving the canvas.
+ * what builds it and what it talks to — without leaving the canvas. The
+ * chip at its foot counts the tasks that build it, and opens their list.
  */
 export function PlanNode({ id, data, selected }: NodeProps<FlowNode>) {
   const api = useCanvas();
@@ -40,9 +42,14 @@ export function PlanNode({ id, data, selected }: NodeProps<FlowNode>) {
   const state = !p ? null : p.blocked ? 'blocked' : p.inProgress ? 'in_progress' : p.done === p.total ? 'done' : 'todo';
   const summary = useHoverSummary();
   const hasStory = Boolean(data.description?.trim() || data.notes?.trim());
+  const tasksOpen = api.tasksOpen === id;
+  const chip = useRef<HTMLButtonElement>(null);
+  const box = useRef<HTMLDivElement>(null);
+  const place = usePlacement(box, tasksOpen);
 
   return (
     <div
+      ref={box}
       className={classNames(
         'flow-node',
         `kind-${data.kind}`,
@@ -88,22 +95,32 @@ export function PlanNode({ id, data, selected }: NodeProps<FlowNode>) {
         </button>
       </div>
       {data.detail && <div className="flow-node-detail">{data.detail}</div>}
-      {p && (
-        <div
-          className="flow-node-progress"
-          title={`${p.done} of ${p.total} tasks done${p.inProgress ? `, ${p.inProgress} in progress` : ''}${p.blocked ? `, ${p.blocked} blocked` : ''}`}
-        >
-          <ProgressBar counts={p} compact />
-          <span>
-            {p.done}/{p.total}
-          </span>
-        </div>
-      )}
-      <NodeToolbar isVisible={summary.open} position={summary.side} align={summary.align} offset={10} className="flow-summary-layer">
-        {summary.open && <NodeSummary id={id} data={data} onEnter={summary.keep} onLeave={summary.hideSoon} />}
+      <BoxFoot ref={chip} id={id} data={data} />
+      <NodeToolbar isVisible={summary.open && !tasksOpen} position={summary.side} align={summary.align} offset={10} className="flow-summary-layer">
+        {summary.open && !tasksOpen && <NodeSummary id={id} data={data} onEnter={summary.keep} onLeave={summary.hideSoon} />}
+      </NodeToolbar>
+      <NodeToolbar isVisible={tasksOpen} position={place.side} align={place.align} offset={8} className="flow-summary-layer">
+        {tasksOpen && <BoxTasks id={id} data={data} chip={chip} />}
       </NodeToolbar>
     </div>
   );
+}
+
+/** Where a box's task list opens: below it, where its chip is, unless the
+ *  box is near the bottom of the canvas; lined up with its left edge
+ *  unless that would run off the right. */
+function usePlacement(box: RefObject<HTMLDivElement | null>, open: boolean) {
+  const [place, setPlace] = useState<{ side: Position; align: 'start' | 'end' }>({ side: Position.Bottom, align: 'start' });
+  useLayoutEffect(() => {
+    if (!open) return;
+    const rect = box.current?.getBoundingClientRect();
+    const frame = box.current?.closest('.react-flow')?.getBoundingClientRect();
+    if (!rect || !frame || !frame.height) return;
+    const below = frame.bottom - rect.bottom;
+    const above = rect.top - frame.top;
+    setPlace({ side: below < 300 && above > below ? Position.Top : Position.Bottom, align: frame.right - rect.left < 330 ? 'end' : 'start' });
+  }, [box, open]);
+  return place;
 }
 
 /**

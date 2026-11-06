@@ -1430,14 +1430,57 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 
 .flow-toolbar { display: flex; gap: var(--sp-1); flex-wrap: wrap; }
 .flow-toolbar .btn { box-shadow: var(--shadow-1); }
-/* A box's linked tasks, as a strip along its foot. */
-.flow-node-progress { display: flex; align-items: center; gap: 6px; margin-top: 3px; font-size: 10px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
-.flow-node-progress .progress { flex: 1; width: auto; }
 .flow-node.progress-in_progress { box-shadow: 0 0 0 2px var(--accent-veil), var(--shadow-1); }
 .flow-node.progress-blocked { border-color: var(--attention-border); }
 .flow-node.progress-done { --kind-bg: var(--surface-raised); }
 .flow-node.is-selected { box-shadow: 0 0 0 2px var(--accent-solid), var(--shadow-2); }
 .flow-node-flag { margin-left: auto; color: var(--text-tertiary); font-size: 11px; }
+
+/* A box's foot: the chip that counts the tasks building it (and opens their
+   list), their progress, and a quiet "no task" where the plan check would
+   list the box. Its height is FOOT in lib/layout.ts, less the gap above. */
+.flow-node-foot { display: flex; align-items: center; gap: 6px; height: 18px; font-size: 10px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.flow-node-foot .progress { flex: 1; width: auto; }
+.flow-task-chip {
+  flex: none; display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 7px 0 5px;
+  border: 1px solid var(--border-default); border-radius: var(--r-full); background: var(--surface-base);
+  color: var(--text-secondary); font: inherit; font-size: 10.5px; font-weight: 650; line-height: 1; cursor: pointer;
+  transition: border-color var(--t-fast) linear, color var(--t-fast) linear, background var(--t-fast) linear;
+}
+.flow-task-chip:hover, .flow-task-chip.is-open { border-color: var(--accent-border); color: var(--accent-fg); background: var(--accent-subtle); }
+.flow-task-chip:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.flow-task-chip.is-empty { border-style: dashed; color: var(--text-tertiary); font-weight: 500; }
+.flow-task-chip.is-done { color: var(--success-fg); border-color: var(--success-border); }
+.flow-task-glyph { font-size: 11px; }
+.flow-node-gap { margin-left: auto; font-style: italic; letter-spacing: 0.01em; }
+.flow-node-gap.is-error { color: var(--attention-fg); font-style: normal; font-weight: 650; }
+
+/* A box's task list: floats beside it at its real size, like the summary. */
+.flow-tasks {
+  width: 330px; max-height: 400px; overflow-y: auto; overscroll-behavior: contain;
+  padding: var(--sp-3) var(--sp-3) var(--sp-2);
+  background: var(--surface-overlay); color: var(--text-primary);
+  border: 1px solid var(--border-default); border-radius: var(--r-lg); box-shadow: var(--shadow-3);
+  font-size: var(--fs-sm); line-height: 18px; text-align: left; cursor: default;
+  animation: fade-in var(--t-fast) var(--ease-out-soft);
+}
+.flow-tasks:focus { outline: none; }
+.flow-tasks-head { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-2); min-width: 0; }
+.flow-tasks-title { min-width: 0; font-weight: 700; font-size: var(--fs-md); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow-tasks-progress { display: inline-flex; align-items: center; gap: 6px; flex: none; font-size: var(--fs-micro); color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.flow-tasks-progress .progress { width: 48px; }
+.flow-tasks-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.flow-tasks-row { display: flex; align-items: center; gap: 6px; min-height: 26px; padding: 1px 2px 1px calc(4px + var(--depth, 0) * 18px); border-radius: var(--r-sm); }
+.flow-tasks-row:hover { background: var(--surface-hover); }
+.flow-tasks-row .task-num { min-width: 0; flex: none; }
+.flow-tasks-name { flex: 1; min-width: 0; display: flex; }
+.flow-tasks-name.is-readonly { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.flow-tasks-row.is-done .flow-tasks-name, .flow-tasks-row.is-dropped .flow-tasks-name { color: var(--text-tertiary); text-decoration: line-through; text-decoration-color: var(--border-strong); }
+.flow-tasks-row .task-brief { flex: none; }
+.flow-tasks-via { width: 22px; flex: none; }
+.flow-tasks-empty { margin: 0; color: var(--text-tertiary); font-style: italic; }
+.flow-tasks .add-field { margin-top: var(--sp-2); }
+.flow-tasks-hint { margin: 4px 0 0; font-size: var(--fs-micro); line-height: 15px; color: var(--text-tertiary); }
 
 /* --------------------------------------------------------------- tasks */
 
@@ -1519,6 +1562,26 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .seg.status-done.is-active { background: var(--success-solid); }
 .seg.status-blocked.is-active { background: var(--attention-solid); }
 .outline-help { font-size: var(--fs-sm); margin-top: var(--sp-3); }
+
+/* By box: the diagram as the breakdown, a group per box. */
+.by-box { display: flex; flex-direction: column; gap: var(--sp-2); max-width: 920px; }
+.by-box-diagram { display: flex; flex-direction: column; gap: var(--sp-2); }
+.by-box-diagram-title { margin: var(--sp-3) 0 0; }
+.by-box-group {
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-default); border-left: 4px solid var(--kind, var(--border-strong)); border-radius: var(--r-md);
+  background: var(--surface-base);
+}
+.by-box-group.is-off { margin-top: var(--sp-2); border-left-style: dashed; background: var(--surface-sunken); }
+.by-box-head { display: flex; align-items: center; gap: var(--sp-2); min-height: 26px; }
+.by-box-name { font-size: var(--fs-md); font-weight: 650; color: var(--text-primary); }
+.by-box-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.by-box-row { display: flex; align-items: center; gap: var(--sp-2); min-height: 28px; padding: 1px 4px 1px calc(4px + var(--depth, 0) * 22px); border-radius: var(--r-sm); }
+.by-box-row:hover { background: var(--surface-hover); }
+.by-box-title { min-width: 0; font-size: var(--fs-md); font-weight: 500; color: var(--text-primary); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.by-box-row.is-done .by-box-title, .by-box-row.is-dropped .by-box-title { color: var(--text-tertiary); text-decoration: line-through; }
+.by-box-empty { margin: 4px 0 0; font-size: var(--fs-sm); font-style: italic; }
+.chip.is-gap { font-style: italic; font-weight: 500; }
 
 .board { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--sp-3); align-items: start; }
 .board-col {

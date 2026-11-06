@@ -2,13 +2,16 @@ import { useSyncExternalStore } from 'react';
 import { api, eventsUrl, Unauthorized } from './lib/api.ts';
 import { isLocked } from '../shared/plan.ts';
 import { agentInfo, type AgentInfo } from '../shared/agents.ts';
+import type { GapSeverities } from '../shared/check.ts';
 import type { BuildSettings, BuildTarget, CleanupGroupId, ExecutionMode, Plan, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport, Target } from '../shared/types.ts';
 
 export type Tab = 'diagrams' | 'tasks' | 'overview';
 /** The architecture comes first: it is where most of the plan is decided. */
 export const TAB_IDS: Tab[] = ['diagrams', 'tasks', 'overview'];
 
-export type TaskMode = 'outline' | 'board';
+/** How the Tasks view lays out the tree: an editable outline, status
+ *  columns, or grouped under the boxes each task builds. */
+export type TaskMode = 'outline' | 'board' | 'boxes';
 
 /** What the prompt viewer shows: the read-back, the next prompt (or one
  *  already sent), or one task's brief. */
@@ -34,11 +37,15 @@ export interface UiState {
   sessions: SessionSummary[];
   sessionId: string | null;
   session: SessionState | null;
+  /** How the open session's repository counts each plan-check rule
+   *  (`planCheck` in .coplan/config.json); empty means every rule warns. */
+  planCheck: GapSeverities;
   tab: Tab;
   /** The diagram open on the Architecture tab; the first one when unset. */
   diagramId: string | null;
   connection: ConnectionState;
-  /** How the task tree is laid out: an editable outline, or status columns. */
+  /** How the task tree is laid out: an editable outline, status columns, or
+   *  by the box each task builds. */
   taskMode: TaskMode;
   /** Hide finished tasks in the outline. */
   hideDone: boolean;
@@ -75,6 +82,7 @@ const initial: UiState = {
   sessions: [],
   sessionId: null,
   session: null,
+  planCheck: {},
   tab: 'diagrams',
   diagramId: null,
   connection: 'connecting',
@@ -163,12 +171,12 @@ class Store {
 
   async selectSession(id: string, updateHash = true): Promise<void> {
     if (updateHash) window.location.hash = `#/session/${id}`;
-    this.set({ sessionId: id, session: null, diagramId: null, error: null, exportOpen: false });
+    this.set({ sessionId: id, session: null, planCheck: {}, diagramId: null, error: null, exportOpen: false });
     this.connect();
     try {
-      const { session } = await api.session(id);
+      const { session, planCheck } = await api.session(id);
       // Clicking through the rail quickly: only the last choice may land.
-      if (this.state.sessionId === id) this.set({ session: this.newest(session) });
+      if (this.state.sessionId === id) this.set({ session: this.newest(session), planCheck: planCheck ?? {} });
     } catch (err) {
       if (this.state.sessionId === id) this.set({ error: describeError(err) });
     }
@@ -237,8 +245,8 @@ class Store {
   private async resync(): Promise<void> {
     if (!this.state.sessionId) return;
     try {
-      const { session } = await api.session(this.state.sessionId);
-      if (session.sessionId === this.state.sessionId) this.set({ session: this.newest(session) });
+      const { session, planCheck } = await api.session(this.state.sessionId);
+      if (session.sessionId === this.state.sessionId) this.set({ session: this.newest(session), planCheck: planCheck ?? {} });
     } catch {
       /* the next connect says what is wrong */
     }
@@ -722,7 +730,7 @@ function loadPrefs(): Partial<UiState> {
     if (Array.isArray(saved['pinned'])) prefs.pinned = strings(saved['pinned']);
     if (Array.isArray(saved['collapsedProjects'])) prefs.collapsedProjects = strings(saved['collapsedProjects']);
     if (Array.isArray(saved['collapsedTasks'])) prefs.collapsedTasks = strings(saved['collapsedTasks']);
-    if (saved['taskMode'] === 'outline' || saved['taskMode'] === 'board') prefs.taskMode = saved['taskMode'];
+    if (saved['taskMode'] === 'outline' || saved['taskMode'] === 'board' || saved['taskMode'] === 'boxes') prefs.taskMode = saved['taskMode'];
     if (typeof saved['hideDone'] === 'boolean') prefs.hideDone = saved['hideDone'];
     return prefs;
   } catch {

@@ -9,7 +9,7 @@ import { SubmitControl } from '../components/Submit.tsx';
 import { isDesignLocked, isLocked } from '../../shared/plan.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { diagramToMarkdown } from '../../shared/architecture.ts';
-import { NODE_KINDS, type Diagram, type DiagramEdgeInput, type DiagramNodeInput, type Plan, type Proposal } from '../../shared/types.ts';
+import { NODE_KINDS, type Diagram, type DiagramEdgeInput, type DiagramNodeInput, type Plan, type PlanOp, type Proposal } from '../../shared/types.ts';
 import { diagramDiff, previewDiagram, previewProposal } from '../../shared/proposals.ts';
 import { ProposalCard } from '../components/Proposals.tsx';
 
@@ -88,9 +88,9 @@ export function DiagramsView() {
         {!locked && <NewDiagram />}
         <span className="spacer" />
         {tasking ? (
-          <p className="toolbar-hint">The design is confirmed · select a box to link the tasks that build it</p>
+          <p className="toolbar-hint">The design is confirmed · each box's ☐ chip lists the tasks that build it, and adds one</p>
         ) : locked ? (
-          <p className="toolbar-hint">Hover a box to see its connections · each box fills up as the tasks that build it get done</p>
+          <p className="toolbar-hint">Hover a box to see its connections · each box's ☐ chip lists the tasks that build it, done or not</p>
         ) : (
           <p className="toolbar-hint">
             Right-click for everything · <kbd>Tab</kbd> adds the next box · drag from a box's edge to connect ·{' '}
@@ -109,6 +109,8 @@ export function DiagramsView() {
           diagram={diagram}
           plan={plan}
           readOnly={locked}
+          // Tasks are added to a box from it until the plan is submitted.
+          {...(!isLocked(plan) ? { onTaskOps: (ops: PlanOp[]) => store.commit(ops, sessionId) } : {})}
           {...(tasking
             ? {
                 lockNote: 'The design is confirmed; reopen it to change the design. Task links can still change.',

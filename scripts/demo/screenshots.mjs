@@ -117,12 +117,14 @@ try {
   const settle = (page, ms = 1200) => page.waitForTimeout(ms);
 
   const shots = {
-    // Shaping the design, with a box selected, while Codex waits on a question.
+    // Shaping the design, with a box selected and its task list open, while
+    // Codex waits on a question.
     async architecture(page = open('S2')) {
       page = await page;
       await tab(page, 'Architecture');
       await settle(page, 600);
       await box(page, 'Share links').click();
+      await page.getByRole('button', { name: /^Tasks for Share links/ }).click();
       await page.mouse.move(1150, 960);
       await settle(page);
       return page;

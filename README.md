@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="docs/images/architecture.png"><img src="docs/images/architecture.png" alt="Coplan's Architecture view: a diagram of a saved-views feature on a canvas, one box selected with its description and a comment thread in the side panel, and a banner saying Codex is asking a question, with an Answer in Codex button" width="100%" /></a>
+  <a href="docs/images/architecture.png"><img src="docs/images/architecture.png" alt="Coplan's Architecture view: a diagram of a saved-views feature on a canvas, every box with a chip counting the tasks that build it, one box selected with its task list open beside it and its description and a comment thread in the side panel, and a banner saying Codex is asking a question, with an Answer in Codex button" width="100%" /></a>
 </p>
 
 <p align="center">
@@ -58,8 +58,9 @@ otherwise.
 
 **1. Shape the design** (the screenshot at the top). Claude's architecture
 on a canvas you can rewire, with each box's description, decisions and
-comments beside it. When the agent asks you something, the page says so and
-links you to its chat.
+comments beside it. Every box counts the tasks that build it, and its chip
+opens their list: add one there and it builds that box. When the agent asks
+you something, the page says so and links you to its chat.
 
 <table>
   <tr>
@@ -78,8 +79,8 @@ links you to its chat.
       <p><strong>4. Follow the build.</strong> Cards move across the board as Claude reports each task: which step of implement → review → refine it is on, the review round, and how its checks came out.</p>
     </td>
     <td width="50%" valign="top">
-      <a href="docs/images/progress.png"><img src="docs/images/progress.png" alt="The locked architecture during a build: each box shows a progress bar for the tasks that build it; the selected Redis cache box lists its description, decisions, the task building it and its connections" /></a>
-      <p><strong>5. Watch the design fill in.</strong> The final diagram doubles as a progress map: each box fills up as the tasks that build it are done.</p>
+      <a href="docs/images/progress.png"><img src="docs/images/progress.png" alt="The locked architecture during a build: each box counts the tasks that build it and how many are done, with a progress bar, and boxes no task builds say so; the selected Redis cache box lists its description, decisions, the task building it and its connections" /></a>
+      <p><strong>5. Watch the design fill in.</strong> The final diagram doubles as a progress map: each box counts the tasks that build it and fills up as they are done.</p>
     </td>
   </tr>
   <tr>
@@ -104,6 +105,11 @@ seeds into a throwaway daemon, the way real hooks and tool calls would.
   and annotate boxes, with keyboard shortcuts, context menus and undo.
 - **A task breakdown you can shape.** Nest, split and reorder tasks in an
   outline, link them to the boxes they build, and follow them on a board.
+- **The diagram is the task breakdown.** Every box shows how many tasks
+  build it, even none, and opens their list: add, rename and unlink tasks
+  without leaving the canvas, and read each one's brief. A box no task builds
+  says so, as the plan check would. The Tasks view lists them *By box* too,
+  with the tasks that build no box apart.
 - **Design first, then tasks.** You confirm the architecture before the task
   list is made from it, so the tasks build the design you agreed to.
 - **Tasks that know what blocks them.** Each task says what it waits on and
@@ -596,7 +602,7 @@ as described [at the end of this section](#how-these-were-measured).
 | Daemon | One per user | 56 MB with no plans; 63–71 MB with four; 98 MB after a 150-box, 150-task plan took 500 edits | Idle: under 0.02% of one core. An edit takes about 6 ms | Starts in about 90 ms. Exits after `idleShutdownMinutes` (120) with no session active and no tab open; the next hook starts it again |
 | MCP server | One per agent session | About 68 MB (a bare `node` is 43 MB on the same machine) | Idle between calls; a call takes 5–50 ms | As long as its session |
 | Hook relay | One per event | `sh` and `curl` | About 20–28 ms per event; 7 ms when no daemon is running | Milliseconds |
-| Browser tab | Only if you open one | 10 MB of JavaScript heap; 830 KB loaded per page load | See below | While open |
+| Browser tab | Only if you open one | 10 MB of JavaScript heap; 850 KB loaded per page load | See below | While open |
 
 So three agent sessions at once come to roughly 270 MB, and the CPU cost of
 an idle Coplan is close to nothing. The daemon's only timers are a lock check

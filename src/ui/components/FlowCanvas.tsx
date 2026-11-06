@@ -23,7 +23,7 @@ import { History } from '../lib/history.ts';
 import { clipOrigin, parseClip, pasteClip, serializeClip, toClip, type Clip } from '../lib/clipboard.ts';
 import { useResolvedTheme } from '../lib/theme.ts';
 import { classNames } from '../lib/format.ts';
-import { NODE_KINDS, type Diagram, type DiagramDirection, type DiagramEdgeInput, type DiagramNodeInput, type NodeKind, type Plan } from '../../shared/types.ts';
+import { NODE_KINDS, type Diagram, type DiagramDirection, type DiagramEdgeInput, type DiagramNodeInput, type NodeKind, type Plan, type PlanOp } from '../../shared/types.ts';
 import type { DiffMark } from '../../shared/proposals.ts';
 import { PlanNode } from './flow/PlanNode.tsx';
 import { PlanEdge } from './flow/PlanEdge.tsx';
@@ -68,6 +68,9 @@ export { KIND_GLYPH, KIND_LABEL };
  *   duplicate; delete, or delete keeping the flow; undo and redo.
  * - **Seeing** — hover or select a box and everything it connects to lights
  *   up by direction, the rest fades; hold Alt for two steps out.
+ * - **Tasks** — every box but a note counts the tasks that build it, and
+ *   its chip (or Alt+Enter) opens their list, where one is added, renamed
+ *   or unlinked without leaving the canvas.
  *
  * Every change saves the whole graph back. Where boxes sit is saved too,
  * but it is layout, not design: Claude is never told about it.
@@ -95,6 +98,10 @@ export function DiagramEditor(props: {
   /** While the design is confirmed but not yet submitted, which tasks build
    *  each box can still change. */
   onLinkTasks?: (nodeId: string, taskIds: string[]) => void;
+  /** Task edits made from a box — adding one that builds it. Resolves with
+   *  the plan as the daemon left it, or null when refused. Without it, a
+   *  box's task list is only read. */
+  onTaskOps?: (ops: PlanOp[]) => Promise<Plan | null>;
   /** A proposal's preview: which boxes and arrows it adds, changes or
    *  takes away, marked on the canvas. */
   diff?: CanvasDiff;
@@ -118,6 +125,13 @@ interface Snapshot {
   nodes: FlowNode[];
   edges: FlowEdge[];
   direction: DiagramDirection;
+}
+
+/** A task added from a box, waiting its turn among the canvas's saves. */
+interface TaskJob {
+  nodeId: string;
+  title: string;
+  done: (ok: boolean) => void;
 }
 
 /** Where a new box goes relative to one already there. */
@@ -150,6 +164,7 @@ function Editor({
   readOnly = false,
   lockNote,
   onLinkTasks,
+  onTaskOps,
   diff,
 }: {
   diagram: Diagram;
@@ -159,6 +174,7 @@ function Editor({
   readOnly?: boolean;
   lockNote?: string;
   onLinkTasks?: (nodeId: string, taskIds: string[]) => void;
+  onTaskOps?: (ops: PlanOp[]) => Promise<Plan | null>;
   diff?: CanvasDiff;
 }) {
   const theme = useResolvedTheme();
@@ -178,6 +194,8 @@ function Editor({
   const [shortcuts, setShortcuts] = useState(false);
   const [reconnect, setReconnect] = useState<Reconnect | null>(null);
   const [dropEdge, setDropEdge] = useState<string | null>(null);
+  /** The box whose task list is open. */
+  const [tasksFor, setTasksFor] = useState<string | null>(null);
   const [, setHistoryTick] = useState(0);
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
@@ -188,7 +206,7 @@ function Editor({
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
   const dragging = useRef(false);
-  const queue = useRef<{ pending: GraphPatch | null; busy: boolean }>({ pending: null, busy: false });
+  const queue = useRef<{ pending: GraphPatch | null; busy: boolean; jobs: TaskJob[] }>({ pending: null, busy: false, jobs: [] });
   /** Where the pointer is on the canvas, in flow coordinates, for pasting. */
   const pointer = useRef<Point | null>(null);
   const pastes = useRef(0);
@@ -318,13 +336,23 @@ function Editor({
     if (store.getState().canvasSaving !== busy) store.set({ canvasSaving: busy });
   };
 
+  /** Runs a task added from a box; set once it is defined, below. */
+  const taskJob = useRef<(job: TaskJob) => Promise<boolean>>(async () => false);
+
   const flush = useCallback(async () => {
     const q = queue.current;
     if (q.busy) return;
     q.busy = true;
     syncSaving();
     try {
-      while (q.pending) {
+      while (q.pending || q.jobs.length) {
+        // The graph first: a task added to a box just drawn needs the box
+        // saved before it.
+        if (!q.pending) {
+          const job = q.jobs.shift()!;
+          job.done(await taskJob.current(job));
+          continue;
+        }
         const patch = q.pending;
         q.pending = null;
         const savedRev = await onSave({ ...patch, expect: baseRev.current });
@@ -356,6 +384,43 @@ function Editor({
     if (now && now.rev !== baseRev.current) resyncFromServer();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reads live state through refs
   }, [onSave, resyncFromServer]);
+
+  /**
+   * A task added from a box. It is a task edit, not a drawing one — undo
+   * leaves it be, as it leaves a task added in the Tasks view — but it links
+   * the box, which moves the diagram on. So it takes its turn among the
+   * canvas's saves, and the link is carried into what the canvas holds (the
+   * boxes, the graph as last saved, its undo history and any save still
+   * waiting) rather than reloaded over them. If anything else changed the
+   * diagram meanwhile, the canvas reloads as it would for that change.
+   */
+  const runTaskJob = async ({ nodeId, title }: TaskJob): Promise<boolean> => {
+    if (!onTaskOps) return false;
+    const known = new Set((store.getState().session?.plan ?? planRef.current).tasks.map((t) => t.id));
+    for (const t of planRef.current.tasks) known.add(t.id);
+    const from = baseRev.current;
+    const after = await onTaskOps([{ op: 'upsert_task', title, builds: [`${diagram.id}/${nodeId}`] }]);
+    if (!after) return false;
+    const saved = after.diagrams.find((d) => d.id === diagram.id);
+    const fresh = (saved?.nodes.find((n) => n.id === nodeId)?.taskIds ?? []).filter((t) => !known.has(t));
+    const task = fresh.length > 1 ? (fresh.find((t) => after.tasks.find((x) => x.id === t)?.title === title.trim()) ?? fresh[0]) : fresh[0];
+    if (!saved || !task || readOnlyRef.current || saved.rev !== from + 1) return true;
+    baseRev.current = saved.rev;
+    ownRevs.current.add(saved.rev);
+    const link = (ns: FlowNode[]) =>
+      ns.map((n) => (n.id !== nodeId || n.data.taskIds?.includes(task) ? n : { ...n, data: { ...n.data, taskIds: [...(n.data.taskIds ?? []), task] } }));
+    history.current.map((snap) => ({ ...snap, nodes: link(snap.nodes) }));
+    const cur = current.current;
+    current.current = { ...cur, nodes: link(cur.nodes) };
+    currentKey.current = JSON.stringify(patchOf(current.current.nodes, cur.edges, cur.direction));
+    const q = queue.current;
+    if (q.pending) {
+      q.pending = { ...q.pending, nodes: q.pending.nodes.map((n) => (n.id !== nodeId || n.taskIds?.includes(task) ? n : { ...n, taskIds: [...(n.taskIds ?? []), task] })) };
+    }
+    setNodes((ns) => link(ns).map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, ...progressOf(after, n.data.taskIds) } } : n)));
+    return true;
+  };
+  taskJob.current = runTaskJob;
 
   /**
    * Save a graph — every edit on the canvas comes through here, so this is
@@ -938,6 +1003,7 @@ function Editor({
         entries: [
           { kind: 'item', label: 'Rename', hint: 'F2', onSelect: () => setEditing(`node:${node.id}`) },
           { kind: 'choices', label: 'Kind', options: kindChoices(node.data.kind), onSelect: (k) => updateNode(node.id, { kind: k as NodeKind }) },
+          ...(node.data.kind !== 'note' ? [{ kind: 'item' as const, label: 'Tasks that build it…', hint: `${ALT}Enter`, onSelect: () => showTasks(node.id) }] : []),
           { kind: 'separator' },
           { kind: 'item', label: 'Add a box after it', hint: 'Tab', onSelect: () => addAfter(node.id) },
           { kind: 'item', label: 'Add a box before it', hint: '⇧Tab', onSelect: () => addBefore(node.id) },
@@ -1014,8 +1080,14 @@ function Editor({
 
   /* --------------------------- keyboard ----------------------------- */
 
-  const keys = useRef({ undo, redo, duplicate, selectAll, addAfter, addBefore, addBeside, removeKeepingFlow, fitAll, fitSelection, openMenuForSelection, clearSelection });
-  keys.current = { undo, redo, duplicate, selectAll, addAfter, addBefore, addBeside, removeKeepingFlow, fitAll, fitSelection, openMenuForSelection, clearSelection };
+  /** Open a box's task list, or close it. A note has none. */
+  const showTasks = useCallback((id: string | null) => {
+    setMenu(null);
+    setTasksFor(id && nodesRef.current.some((n) => n.id === id && n.data.kind !== 'note') ? id : null);
+  }, []);
+
+  const keys = useRef({ undo, redo, duplicate, selectAll, addAfter, addBefore, addBeside, removeKeepingFlow, fitAll, fitSelection, openMenuForSelection, clearSelection, showTasks });
+  keys.current = { undo, redo, duplicate, selectAll, addAfter, addBefore, addBeside, removeKeepingFlow, fitAll, fitSelection, openMenuForSelection, clearSelection, showTasks };
   const overlays = useRef({ menu: false, shortcuts: false, reconnect: false });
   overlays.current = { menu: Boolean(menu), shortcuts, reconnect: Boolean(reconnect) };
 
@@ -1025,6 +1097,9 @@ function Editor({
       if (!el || !(el instanceof HTMLElement)) return false;
       return el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName);
     };
+    /** A box's task list keeps every key: Tab, Enter, Escape and typing are
+     *  how it is used, and it closes itself. */
+    const inTasks = (target: EventTarget | null) => target instanceof HTMLElement && Boolean(target.closest('.flow-tasks'));
     /** Keys belong to the canvas when the keyboard is on it — or on nothing
      *  in particular: the page, or the view around the canvas, which takes
      *  focus when empty canvas is clicked. A control elsewhere keeps them. */
@@ -1037,7 +1112,7 @@ function Editor({
     /** The canvas speaks for the clipboard when the keyboard is on it, and no
      *  text is selected that the user means to copy. */
     const ours = (e: Event) => {
-      if (busy(e.target) || busy(document.activeElement)) return false;
+      if (busy(e.target) || busy(document.activeElement) || inTasks(document.activeElement)) return false;
       const text = window.getSelection?.()?.toString() ?? '';
       return onCanvas() && !text;
     };
@@ -1093,7 +1168,7 @@ function Editor({
         if (toggleRegion()) e.preventDefault();
         return;
       }
-      if (busy(e.target) || !onCanvas()) return;
+      if (busy(e.target) || inTasks(e.target) || !onCanvas()) return;
       const o = overlays.current;
       if (o.menu || o.shortcuts || o.reconnect) return;
       const k = keys.current;
@@ -1112,6 +1187,7 @@ function Editor({
         if (mod && key === 'a' && !e.shiftKey) return claim(), k.selectAll();
         if (!mod && e.shiftKey && e.code === 'Digit1') return claim(), k.fitAll();
         if (!mod && e.shiftKey && e.code === 'Digit2') return claim(), k.fitSelection();
+        if (e.key === 'Enter' && e.altKey && one && !onControl()) return claim(), k.showTasks(one.id);
         if (e.key === 'Escape') k.clearSelection();
         return;
       }
@@ -1133,6 +1209,7 @@ function Editor({
         return;
       }
       if (!one || onControl()) return;
+      if (e.key === 'Enter' && e.altKey) return claim(), k.showTasks(one.id);
       if (e.key === 'Tab') return claim(), e.shiftKey ? k.addBefore(one.id) : k.addAfter(one.id);
       if (e.key === 'Enter' && !e.altKey) return claim(), k.addBeside(one.id);
       if (e.key === 'F2') return claim(), setEditing(`node:${one.id}`);
@@ -1161,6 +1238,15 @@ function Editor({
 
   /* ------------------------ canvas context ------------------------- */
 
+  // A box's tasks can be changed from it until the plan is submitted: while
+  // drawing, and once the design is confirmed. A preview only shows them.
+  const tasksEditable = Boolean(onTaskOps) && (!readOnly || Boolean(onLinkTasks));
+  // The box whose list was open may have gone.
+  const tasksOpen = tasksFor && nodes.some((n) => n.id === tasksFor) ? tasksFor : null;
+  // Both change identity with every render of the view around the canvas;
+  // the boxes should not re-render for that.
+  const live = useRef({ flush, onLinkTasks });
+  live.current = { flush, onLinkTasks };
   const api = useMemo<CanvasApi>(
     () => ({
       direction: diagram.direction,
@@ -1185,9 +1271,27 @@ function Editor({
         if (edge && label !== null && label.trim() !== (edge.data?.label ?? '')) updateEdge(id, { label: label.trim() });
       },
       selectEdge: (id) => select('edge', id),
+      tasksOpen,
+      showTasks,
+      tasksEditable,
+      addTask: (nodeId, title) =>
+        new Promise<boolean>((done) => {
+          if (!tasksEditable) return done(false);
+          queue.current.jobs.push({ nodeId, title, done });
+          void live.current.flush();
+        }),
+      unlinkTask: (nodeId, taskId) => {
+        const node = nodesRef.current.find((n) => n.id === nodeId);
+        if (!node || !tasksEditable) return;
+        const taskIds = (node.data.taskIds ?? []).filter((t) => t !== taskId);
+        // As "Built by" in the panel does: a link edit on the canvas, which
+        // undo can put back — or, once the design is confirmed, on the plan.
+        if (readOnly) live.current.onLinkTasks?.(nodeId, taskIds);
+        else updateNode(nodeId, { taskIds });
+      },
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the updaters read live state through refs
-    [diagram.direction, editing, editSeed, select, startReconnect, hoverEdge, setEditing, readOnly],
+    [diagram.direction, editing, editSeed, select, startReconnect, hoverEdge, setEditing, readOnly, tasksOpen, showTasks, tasksEditable],
   );
 
   /* ------------------------ what is drawn -------------------------- */

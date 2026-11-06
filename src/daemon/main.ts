@@ -563,9 +563,12 @@ function buildRouter(deps: Deps): Router {
 
   router.get('/api/sessions', (ctx) => json(ctx.res, 200, { sessions: store.summaries(), version: VERSION }));
 
+  /** The session, and how its repository counts each plan-check rule, so
+   *  the canvas marks the gaps the check would list — and not those it
+   *  turns off. */
   router.get('/api/session/:id', (ctx) => {
     const session = sessionOr404(ctx);
-    if (session) json(ctx.res, 200, { session: forBrowser(session) });
+    if (session) json(ctx.res, 200, { session: forBrowser(session), planCheck: projectFor(session).planCheck });
   });
 
   router.delete('/api/session/:id', (ctx) => {
