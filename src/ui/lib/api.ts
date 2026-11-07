@@ -147,6 +147,18 @@ export const api = {
 
   reopenDesign: (id: string) => request<{ plan: Plan }>(`/api/session/${id}/plan/design/reopen`, { method: 'POST', body: '{}' }),
 
+  /** The request to revise the plan per the open comments, as the agent
+   *  would get it now. Changes nothing. */
+  revisionPreview: (id: string, note: string) =>
+    request<PromptPreview & { threadIds: string[] }>(`/api/session/${id}/plan/revisions/prompt`, { method: 'POST', body: JSON.stringify({ note }) }),
+
+  /** Queue it: it goes to the agent with the user's next message in chat. */
+  queueRevision: (id: string, body: { note: string; expect: number; hash?: string }) =>
+    request<{ plan: Plan }>(`/api/session/${id}/plan/revisions`, { method: 'POST', body: JSON.stringify(body) }),
+
+  /** Take back a request not yet sent. */
+  withdrawRevision: (id: string) => request<{ plan: Plan }>(`/api/session/${id}/plan/revisions/withdraw`, { method: 'POST', body: '{}' }),
+
   /* ---------------------- daemon-wide actions ---------------------- */
 
   storage: () => request<{ report: StorageReport }>('/api/storage'),

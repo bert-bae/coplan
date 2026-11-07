@@ -23,6 +23,7 @@ import {
   renderGaps,
   renderPlan,
   renderTaskList,
+  revisionPrompt,
   stageWords,
   unreadNotice,
 } from './render.ts';
@@ -800,6 +801,60 @@ function buildRouter(deps: Deps): Router {
   });
 
   /**
+   * The request to revise the plan per the open comments, as the agent
+   * would get it if it were sent now — for the user to read first (#67).
+   * Changes nothing.
+   */
+  router.post('/api/session/:id/plan/revisions/prompt', async (ctx) => {
+    const session = sessionOr404(ctx);
+    if (!session) return;
+    const body = await readJson<{ note?: unknown }>(ctx.req);
+    if (!session.plan) {
+      json(ctx.res, 404, { error: 'no plan yet' });
+      return;
+    }
+    const note = cleanNote(body.note);
+    const { prompt, trimmed, blocks, threadIds } = revisionPrompt(session.plan, note ? { note } : {});
+    json(ctx.res, 200, { prompt, hash: promptHash(prompt), trimmed, blocks, threadIds, version: session.plan.version, budget: PROMPT_BUDGET, maxNote: MAX_NOTE });
+  });
+
+  /**
+   * Queue the request. It reaches the agent with the user's next message
+   * in its chat (or, in Cursor, when they paste it or its next
+   * harness_plan_read), once: Coplan never starts a turn itself.
+   */
+  router.post('/api/session/:id/plan/revisions', async (ctx) => {
+    const session = sessionOr404(ctx);
+    if (!session) return;
+    const body = await readJson<{ note?: unknown; expect?: unknown; hash?: unknown }>(ctx.req);
+    const note = cleanNote(body.note);
+    try {
+      const plan = store.queueRevision(session.sessionId, {
+        ...(note ? { note } : {}),
+        ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
+        ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
+      });
+      log(`revision request queued for ${session.sessionId}`);
+      json(ctx.res, 200, { plan: forBrowser(plan) });
+    } catch (err) {
+      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
+      else throw err;
+    }
+  });
+
+  /** Take back a revision request not yet sent. */
+  router.post('/api/session/:id/plan/revisions/withdraw', (ctx) => {
+    const session = sessionOr404(ctx);
+    if (!session) return;
+    try {
+      json(ctx.res, 200, { plan: forBrowser(store.withdrawRevision(session.sessionId)) });
+    } catch (err) {
+      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
+      else throw err;
+    }
+  });
+
+  /**
    * The user changed how the plan is built in the Submit dialog. Kept, so
    * telling the agent to build it in chat builds it that way too. Changes
    * nothing about the plan.
@@ -1010,7 +1065,8 @@ function buildRouter(deps: Deps): Router {
       agent = hookAgent(agent, body);
       const { event, input } = readAgentHook(agent, raw, body);
       const session = typeof input.session_id === 'string' ? store.get(input.session_id) : undefined;
-      const prior = session?.plan && store.pending(session.sessionId) ? session.plan : null;
+      const queued = (id: string) => Boolean(store.pending(id) || store.pendingRevision(id));
+      const prior = session?.plan && queued(session.sessionId) ? session.plan : null;
       if (event) {
         output = await ingestHook(event, input, {
           store,
@@ -1026,7 +1082,7 @@ function buildRouter(deps: Deps): Router {
         });
       }
       const after = session ? store.get(session.sessionId)?.plan : undefined;
-      if (prior && after && !store.pending(session!.sessionId)) handed = { id: session!.sessionId, prior, version: after.version };
+      if (prior && after && !queued(session!.sessionId)) handed = { id: session!.sessionId, prior, version: after.version };
     } catch (err) {
       // A hook must never break the session it is attached to.
       log(`hook ${agent}/${raw} failed: ${(err as Error)?.message}`);
@@ -1440,16 +1496,21 @@ function buildRouter(deps: Deps): Router {
           // gets one whose hook did not get through. Delivering it counts as
           // the read — except for edits made after the design was confirmed,
           // which are not in its prompt and stay unread.
+          //
+          // A revision request the user queued (#67) comes with it too: ahead
+          // of the plan itself, which this read then returns as usual.
           const handed = store.deliver(id);
+          const revision = store.deliverRevision(id);
           if (handed) {
             const later = store.get(id)?.plan;
             const notice = later ? unreadNotice(later) : null;
-            reply(true, notice ? `${handed.prompt}\n\n${notice}` : handed.prompt);
+            reply(true, [handed.prompt, revision?.prompt ?? '', notice ?? ''].filter(Boolean).join('\n\n'));
             return;
           }
-          const textOut = renderPlan(session.plan, { url, changesOnly: body['changes_only'] === true, planCheck: projectFor(session).planCheck });
+          const now = store.get(id)?.plan ?? session.plan;
+          const textOut = renderPlan(now, { url, changesOnly: body['changes_only'] === true, planCheck: projectFor(session).planCheck });
           store.markRead(id);
-          reply(true, textOut);
+          reply(true, revision ? `${revision.prompt}\n\n---\n\n${textOut}` : textOut);
           return;
         }
 

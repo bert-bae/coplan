@@ -5,12 +5,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Plan } from '../shared/types.ts';
 import type { BriefOptions } from '../daemon/brief.ts';
-import { FIXTURE_BIN, FIXTURE_HOME, FIXTURE_URL, bigPlan, fullProject, longPlan, plainPlan, richConfirmed, richPlan } from './prompt-fixtures.ts';
+import { FIXTURE_BIN, FIXTURE_HOME, FIXTURE_URL, bigPlan, crowdedPlan, fullProject, longPlan, plainPlan, richConfirmed, richPlan } from './prompt-fixtures.ts';
 
 // The instructions pointer names the user's own config by where Coplan's
 // home is: fixed, so the bytes are the same on every machine.
 process.env['CC_HARNESS_HOME'] = FIXTURE_HOME;
-const { PROMPT_BUDGET, buildPrompt, designPrompt, exportText, promptHash, renderPlan } = await import('../daemon/render.ts');
+const { PROMPT_BUDGET, buildPrompt, designPrompt, exportText, promptHash, renderPlan, revisionPrompt } = await import('../daemon/render.ts');
 const { renderBrief } = await import('../daemon/brief.ts');
 
 /**
@@ -68,6 +68,10 @@ const CASES: Record<string, () => Case> = {
   'export-over': () => asCase(buildPrompt(bigPlan(), { target: 'elsewhere', project: fullProject(true), note: NOTE })),
   'export-planning': () => ({ text: exportText(richPlan(), { project: fullProject() }) }),
 
+  // A request to revise the plan per the open comments (#67).
+  'revision-under': () => asCase(revisionPrompt(richPlan(), { note: NOTE })),
+  'revision-over': () => asCase(revisionPrompt(crowdedPlan())),
+
   // What harness_plan_read returns.
   'readback': () => ({ text: renderPlan(richPlan(), { url: FIXTURE_URL, planCheck: { 'box-undescribed': 'error' } }) }),
   'readback-changes-only': () => ({ text: renderPlan(richPlan(), { url: FIXTURE_URL, changesOnly: true }) }),
@@ -89,7 +93,7 @@ function brief(plan: Plan, id: string, opts: BriefOptions): string {
 }
 
 /** Which cases are meant to be over the budget, and so cut. */
-const OVER = new Set(['design-over', 'design-over-with-order', 'build-session-over', 'build-session-over-with-order', 'build-tracked-over']);
+const OVER = new Set(['design-over', 'design-over-with-order', 'build-session-over', 'build-session-over-with-order', 'build-tracked-over', 'revision-over']);
 
 const hashesFile = path.join(DIR, 'hashes.json');
 
@@ -116,7 +120,7 @@ for (const [name, make] of Object.entries(CASES)) {
     assert.equal(promptHash(text), recorded[name], `the prompt hash of ${name} moved`);
     if (trimmed !== undefined) {
       assert.equal(trimmed, OVER.has(name), `${name} is ${OVER.has(name) ? '' : 'not '}meant to be cut to fit`);
-      if (name.includes('session') || name.includes('tracked') || name.startsWith('design')) {
+      if (name.includes('session') || name.includes('tracked') || name.startsWith('design') || name.startsWith('revision')) {
         assert.equal(text.length <= PROMPT_BUDGET, true, `${name} is ${text.length} characters, over the budget`);
       }
     }

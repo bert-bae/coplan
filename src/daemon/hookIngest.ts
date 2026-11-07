@@ -135,6 +135,9 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
   // carries the prompt. Not subject to `promptNotice` — signing off was the
   // request to send it. A message that already holds the prompt (they pasted
   // it) is left as it is.
+  //
+  // A revision request the user queued from the page (#67) rides along the
+  // same way, after any sign-off: one explicit ask, sent once.
   if (!agentInfo(ctx.agent).promptContext) {
     // An agent whose hooks cannot be relied on to add to a prompt (Cursor)
     // gets the prompt by the user pasting it, or from its next
@@ -142,14 +145,23 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
     // not sent twice.
     const pending = ctx.store.pending(sessionId);
     if (pending && holdsPrompt(typed, pending.prompt)) ctx.store.deliver(sessionId);
+    const revision = ctx.store.pendingRevision(sessionId);
+    if (revision && holdsPrompt(typed, revision.prompt)) ctx.store.deliverRevision(sessionId);
   } else {
     const handed = ctx.store.deliver(sessionId);
-    if (handed) {
+    const revision = ctx.store.deliverRevision(sessionId);
+    if (handed || revision) {
       // The user can still edit tasks and comment after confirming the design;
       // those edits are not in the prompt, and the agent is told to read them.
       const later = ctx.store.get(sessionId)?.plan;
       const notice = later && ctx.config.promptNotice ? unreadNotice(later) : null;
-      const text = [holdsPrompt(typed, handed.prompt) ? '' : handed.prompt, notice ?? ''].filter(Boolean).join('\n\n');
+      const text = [
+        handed && !holdsPrompt(typed, handed.prompt) ? handed.prompt : '',
+        revision && !holdsPrompt(typed, revision.prompt) ? revision.prompt : '',
+        notice ?? '',
+      ]
+        .filter(Boolean)
+        .join('\n\n');
       return text ? additionalContext('UserPromptSubmit', text) : HOOK_NOOP;
     }
   }

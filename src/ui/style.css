@@ -2034,6 +2034,14 @@ button.pv-chip { cursor: pointer; }
 .lock-chip.is-status-done, .pill.is-status-done { background: var(--success-bg); border-color: var(--success-border); color: var(--success-fg); }
 .phase.is-status-review { background: var(--attention-bg); border-bottom-color: var(--attention-border); box-shadow: inset 4px 0 0 var(--attention-solid); }
 
+/* A request to revise the plan per the open comments (#67). */
+.revision-control { display: inline-flex; align-items: center; gap: var(--sp-2); }
+.pill.revision-state.is-pending { background: var(--attention-bg); color: var(--attention-fg); border-color: var(--attention-border); }
+.pill.revision-state.is-sent { background: var(--accent-subtle); color: var(--accent-fg); border-color: var(--accent-border); }
+.pill.revision-state.is-answered { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
+.revision-comments { max-height: 240px; overflow-y: auto; }
+.btn.is-disabled { opacity: 0.5; pointer-events: none; }
+
 .status-filter { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 0 var(--sp-2); }
 .status-filter-btn {
   display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: var(--r-full);

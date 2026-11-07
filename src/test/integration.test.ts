@@ -1493,3 +1493,145 @@ test('"make the task list" in chat confirms the design; with no choice made, a b
   assert.equal(s.plan!.submission?.userSaid, 'ship it');
   assert.ok(s.plan!.submission?.settings, "a Managed build records the settings it runs with");
 });
+
+/* ------------------------------------------------------------------ *
+ * Requesting revisions from the page (#67)
+ * ------------------------------------------------------------------ */
+
+type RevisionPreview = Preview & { hash: string; threadIds: string[] };
+const latest = (s: SessionState) => s.plan!.revisions?.at(-1);
+
+test('a revision request is queued in the page, carried by the next message once, and answered in its threads (#67)', async () => {
+  const id = 'revise-session';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await mcpFor(id, 'read');
+  await opsOn(id, [
+    { op: 'comment', target: { kind: 'node', id: 'd1/db' }, text: 'Use a read replica here.' },
+    { op: 'comment', target: { kind: 'section', id: 's1' }, text: 'Say how slow.' },
+  ]);
+  // A comment the agent already answered is not waiting on it, and is not carried.
+  const answered = (await opsOn(id, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'Name it?' }])).plan!.threads.at(-1)!;
+  await mcpFor(id, 'edit', { ops: [{ op: 'reply', threadId: answered.id, text: 'Named it.' }] });
+
+  const preview = await post<RevisionPreview>(`/api/session/${id}/plan/revisions/prompt`, { note: 'Keep it small.' });
+  assert.match(preview.prompt, /^\[cc-harness\] Revise the plan "Add a cache" — the user wants you to act on their open comments\./);
+  assert.match(preview.prompt, /harness_plan_propose/);
+  assert.match(preview.prompt, /> Keep it small\./);
+  assert.match(preview.prompt, /## Open comments \(2\)/);
+  // Each comment on what it is about, named as the read-back names it.
+  assert.match(preview.prompt, /\[c\d+\] on box "Postgres" \(d1\/db\) in diagram "Components" — user: Use a read replica here\./);
+  assert.match(preview.prompt, /\[c\d+\] on section "Context" — user: Say how slow\./);
+  assert.doesNotMatch(preview.prompt, /Name it\?/);
+  assert.equal(blocksText(preview.blocks), preview.prompt);
+  assert.equal(preview.threadIds.length, 2);
+  const before = await sessionFor(id);
+  assert.equal(before.plan!.revisions, undefined, 'reading the request changes nothing');
+
+  const queued = await post<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${id}/plan/revisions`, {
+    note: 'Keep it small.',
+    expect: preview.version,
+    hash: preview.hash,
+  });
+  assert.ok(queued.plan, queued.error);
+  const req = queued.plan!.revisions!.at(-1)!;
+  assert.equal(req.prompt, preview.prompt, 'what the user read is what is sent');
+  assert.equal(req.deliveredAt, null, 'pending: Coplan starts no turn');
+
+  // The user's next message — even "go" — carries it.
+  const first = await hookFor(id, 'UserPromptSubmit', { prompt: 'go' });
+  const delivered = String(first.hookSpecificOutput?.additionalContext ?? '');
+  assert.ok(delivered.startsWith(preview.prompt), 'the request rides along with the message');
+  assert.ok(latest(await sessionFor(id))?.deliveredAt, 'sent');
+  // The comments are news to the agent too, so it is told to read the plan.
+  assert.match(delivered.slice(preview.prompt.length), /Call harness_plan_read before acting on the plan/);
+  // Once: the next message carries that line, never the request again.
+  const second = await hookFor(id, 'UserPromptSubmit', { prompt: 'and?' });
+  assert.doesNotMatch(String(second.hookSpecificOutput?.additionalContext ?? ''), /Revise the plan/);
+  await mcpFor(id, 'read');
+  assert.equal((await hookFor(id, 'UserPromptSubmit', { prompt: 'well?' })).hookSpecificOutput?.additionalContext, undefined);
+
+  // The agent answers in each thread — one by reply, one by proposing: answered.
+  const [replica, slow] = req.threadIds;
+  await mcpFor(id, 'edit', { ops: [{ op: 'reply', threadId: slow, text: 'Added the p99.' }] });
+  const { plan: halfway } = await sessionFor(id);
+  const { revisionStatus } = await import('../shared/plan.ts');
+  assert.equal(revisionStatus(halfway!, latest({ plan: halfway } as SessionState)!), 'sent', 'one of two answered');
+  const proposed = await mcpFor(id, 'propose', {
+    title: 'Read from a replica',
+    reason: 'As asked.',
+    ops: [{ op: 'upsert_node', diagramId: 'd1', id: 'db', description: 'Primary, with a read replica.' }],
+  });
+  assert.equal(proposed['ok'], true, String(proposed['text']));
+  const { plan: done } = await sessionFor(id);
+  assert.equal(revisionStatus(done!, latest({ plan: done } as SessionState)!), 'answered');
+  assert.ok(replica);
+});
+
+test('a pasted revision request is not sent twice, and one not yet sent can be replaced or withdrawn (#67)', async () => {
+  const id = 'revise-paste';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await mcpFor(id, 'read');
+  // Nothing waiting on the agent: nothing to send.
+  const empty = await post<{ error?: string }>(`/api/session/${id}/plan/revisions`, {});
+  assert.match(empty.error ?? '', /No comment is waiting on the agent/);
+
+  await opsOn(id, [{ op: 'comment', target: { kind: 'task', id: 't4' }, text: 'Split this.' }]);
+  const one = await post<RevisionPreview>(`/api/session/${id}/plan/revisions/prompt`, {});
+  // A comment added after the preview moves the request: refused, so the user reads it again.
+  await opsOn(id, [{ op: 'comment', target: { kind: 'task', id: 't1' }, text: 'Rename this.' }]);
+  const stale = await post<{ error?: string }>(`/api/session/${id}/plan/revisions`, { hash: one.hash });
+  assert.match(stale.error ?? '', /The plan changed while you were reading the request|The request changed since you read it/);
+
+  const two = await post<RevisionPreview>(`/api/session/${id}/plan/revisions/prompt`, {});
+  assert.equal(two.threadIds.length, 2);
+  await post(`/api/session/${id}/plan/revisions`, { expect: two.version, hash: two.hash });
+  // Queued again before it was sent: replaced, not stacked.
+  const again = await post<RevisionPreview>(`/api/session/${id}/plan/revisions/prompt`, { note: 'Both, please.' });
+  await post(`/api/session/${id}/plan/revisions`, { note: 'Both, please.', expect: again.version, hash: again.hash });
+  let s = await sessionFor(id);
+  assert.equal(s.plan!.revisions!.length, 1);
+  assert.equal(s.plan!.revisions![0]!.id, 'r2', 'ids are never reused');
+
+  // The user pastes it themselves: delivered, and not added a second time
+  // (the one line saying the plan changed still comes: the agent has not
+  // read the comments yet).
+  const pasted = await hookFor(id, 'UserPromptSubmit', { prompt: `${again.prompt}\n\nthanks` });
+  assert.doesNotMatch(String(pasted.hookSpecificOutput?.additionalContext ?? ''), /Revise the plan/);
+  s = await sessionFor(id);
+  assert.ok(latest(s)?.deliveredAt);
+  const after = await hookFor(id, 'UserPromptSubmit', { prompt: 'ok' });
+  assert.doesNotMatch(String(after.hookSpecificOutput?.additionalContext ?? ''), /Revise the plan/);
+
+  // A withdrawn request is never sent.
+  await opsOn(id, [{ op: 'reply', threadId: s.plan!.threads.at(-1)!.id, text: 'Still waiting.' }]);
+  const three = await post<RevisionPreview>(`/api/session/${id}/plan/revisions/prompt`, {});
+  await post(`/api/session/${id}/plan/revisions`, { expect: three.version, hash: three.hash });
+  assert.equal(latest(await sessionFor(id))?.deliveredAt, null);
+  const withdrawn = await post<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${id}/plan/revisions/withdraw`, {});
+  assert.ok(withdrawn.plan, withdrawn.error);
+  assert.equal(withdrawn.plan!.revisions!.every((r) => r.deliveredAt !== null), true);
+  const quiet = await hookFor(id, 'UserPromptSubmit', { prompt: 'hello' });
+  assert.doesNotMatch(String(quiet.hookSpecificOutput?.additionalContext ?? ''), /Revise the plan/);
+});
+
+test('in Cursor, the request is pasted or picked up by harness_plan_read — once (#67)', async () => {
+  const id = 'revise-cursor';
+  const cursor = { 'x-harness-agent': 'cursor' };
+  await hookFor(id, 'sessionStart', { conversation_id: id, workspace_roots: [repo] }, cursor);
+  await mcpFor(id, 'publish', PLAN);
+  await mcpFor(id, 'read');
+  await opsOn(id, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'Shorter summary.' }]);
+  const preview = await post<RevisionPreview>(`/api/session/${id}/plan/revisions/prompt`, {});
+  await post(`/api/session/${id}/plan/revisions`, { expect: preview.version, hash: preview.hash });
+  // Cursor's hook cannot add to a prompt: a message that does not hold the request leaves it waiting.
+  await hookFor(id, 'beforeSubmitPrompt', { conversation_id: id, prompt: 'revise per my comments' }, cursor);
+  assert.equal(latest(await sessionFor(id))?.deliveredAt, null);
+  // The agent reads the plan: the request comes first, then the plan, and only once.
+  const read = String((await mcpFor(id, 'read'))['text']);
+  assert.ok(read.startsWith(preview.prompt));
+  assert.match(read, /# Add a cache/);
+  assert.ok(latest(await sessionFor(id))?.deliveredAt);
+  assert.doesNotMatch(String((await mcpFor(id, 'read'))['text']), /Revise the plan/);
+});

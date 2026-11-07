@@ -13,7 +13,11 @@ import {
   markDelivered,
   markDesignDelivered,
   markReadByClaude,
+  markRevisionDelivered,
   normalizePlan,
+  pendingRevision,
+  queueRevision,
+  withdrawRevision,
   planPhase,
   planStatus,
   publishPlan,
@@ -23,7 +27,10 @@ import {
   submitPlan,
   unreadItems,
 } from '../shared/plan.ts';
-import { BUILD_MARKER, DESIGN_MARKER, PROMPT_MOVED, buildPrompt, designPrompt, promptHash, type PromptOptions } from './render.ts';
+import { BUILD_MARKER, DESIGN_MARKER, PROMPT_MOVED, REVISION_MARKER, buildPrompt, designPrompt, promptHash, revisionPrompt, type PromptOptions } from './render.ts';
+
+const REVISION_MOVED =
+  'The request changed since you read it (a comment was added, answered or resolved). It now shows what would be sent — read it, then send it again.';
 import { blockingGaps } from '../shared/check.ts';
 import { modeFor } from '../shared/build.ts';
 import { DEFAULT_AGENT, isAgentKind, type AgentKind } from '../shared/agents.ts';
@@ -476,6 +483,67 @@ export class SessionStore extends EventEmitter {
     });
     this.persistNow(id);
     return out;
+  }
+
+  /**
+   * The user asks for the plan to be revised per their open comments (#67).
+   * Like a sign-off, the request is built here from the plan as the daemon
+   * holds it, and only if that is what the user previewed; it waits for
+   * their next message in chat. Coplan starts no turn.
+   */
+  queueRevision(id: string, input: { note?: string; expect?: number; hash?: string }): Plan {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error('unknown session');
+    const plan = session.plan;
+    if (!plan) throw new PlanError('There is no plan to revise yet.');
+    if (typeof input.expect === 'number' && input.expect !== plan.version) {
+      throw new PlanError('The plan changed while you were reading the request. It now shows the latest — check it, then send it again.');
+    }
+    const built = revisionPrompt(plan, input.note ? { note: input.note } : {});
+    if (input.hash !== undefined && input.hash !== promptHash(built.prompt)) throw new PlanError(REVISION_MOVED);
+    const next = queueRevision(plan, {
+      prompt: built.prompt,
+      threadIds: built.threadIds,
+      ...(input.note ? { note: input.note } : {}),
+      ...(built.trimmed ? { trimmed: true } : {}),
+    });
+    this.mutate(id, (s) => {
+      s.plan = next;
+    });
+    this.persistNow(id);
+    return next;
+  }
+
+  /** Take back a revision request the agent has not been sent. */
+  withdrawRevision(id: string): Plan {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error('unknown session');
+    if (!session.plan) throw new PlanError('There is no plan.');
+    const next = withdrawRevision(session.plan);
+    this.mutate(id, (s) => {
+      s.plan = next;
+    });
+    this.persistNow(id);
+    return next;
+  }
+
+  /** The revision request waiting to reach the agent, without sending it. */
+  pendingRevision(id: string): { prompt: string; marker: string } | null {
+    const req = pendingRevision(this.sessions.get(id)?.plan ?? null);
+    return req ? { prompt: req.prompt, marker: REVISION_MARKER } : null;
+  }
+
+  /** Hand the waiting revision request over, recorded as sent. Once. */
+  deliverRevision(id: string): { prompt: string; marker: string } | null {
+    const plan = this.sessions.get(id)?.plan;
+    const req = pendingRevision(plan ?? null);
+    if (!plan || !req) return null;
+    const next = markRevisionDelivered(plan);
+    this.mutate(id, (s) => {
+      s.plan = next;
+    });
+    this.persistNow(id);
+    return { prompt: req.prompt, marker: REVISION_MARKER };
   }
 
   /** Move Claude's read position to the end of the change log. */

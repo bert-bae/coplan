@@ -22,6 +22,7 @@ import {
   unreadAreas,
   unreadByClaude,
   proposalStaleness,
+  threadsForRevision,
 } from '../shared/plan.ts';
 import { KIND_NOUN, contentOf, diagramBlocks, diagramChanges, diagramToMarkdown, edgePhrase, hang, indent, nestHeadings } from '../shared/architecture.ts';
 import { BlockList, CHANGES, NOTE, TEMPLATE, blockLines, blocksText, derived, dropAll, field, joinBlocks, setting, type Block, type BlockSource, type ConfigRow } from '../shared/blocks.ts';
@@ -456,6 +457,9 @@ export interface BuildPrompt {
 /** How every task-list prompt begins; recognised in a pasted message too. */
 export const DESIGN_MARKER = '[cc-harness] The design is confirmed';
 
+/** How every revision request begins (#67). */
+export const REVISION_MARKER = '[cc-harness] Revise the plan';
+
 export interface PromptOptions {
   /** The agent the prompt is for: how it is told to ask the user things. */
   agent?: AgentKind;
@@ -822,6 +826,75 @@ export function askRule(agent: AgentInfo, scope: AskScope): string {
     `Ask the user, with ${agent.askWith}, only when a decision cannot be undone${right ? ',' : ' or'} reaches outside this ` +
     `session (pushing, opening a pull request)${right}.${otherwise}`
   );
+}
+
+/* ------------------------------------------------------------------ *
+ * A revision request (#67)
+ * ------------------------------------------------------------------ */
+
+export interface RevisionPrompt extends BuildPrompt {
+  /** The comment threads it carries. */
+  threadIds: string[];
+}
+
+/**
+ * What the agent is told when the user asks, from the page, for the plan
+ * to be revised per their open comments: act on each, reply in its thread,
+ * propose what is the user's to decide, then say in chat what changed —
+ * and the comments themselves, each on the item it is about, named as the
+ * read-back names it. Carried with the user's next message, so it is kept
+ * within what a hook can hand over; comments past that are pointed to.
+ */
+export function revisionPrompt(plan: Plan, opts: { note?: string } = {}): RevisionPrompt {
+  const threads = threadsForRevision(plan);
+  const b = new BlockList();
+  b.add('intro', TEMPLATE, `${REVISION_MARKER} "`)
+    .inline('title', field('plan'), plan.title)
+    .inline('intro:end', TEMPLATE, '" — the user wants you to act on their open comments.');
+  b.gap().add(
+    'lead',
+    TEMPLATE,
+    'The user sent these from Coplan as one ask. Read the plan first (harness_plan_read) if they changed it since you ' +
+      'last did. Then, for each comment below:',
+  );
+  b.gap().add('step-1', TEMPLATE, '1. Act on it: make the change it asks for with harness_plan_edit, where the change is yours to make.');
+  b.add(
+    'step-2',
+    TEMPLATE,
+    "2. Where the change is the user's to decide, or the plan is locked against it, propose it with harness_plan_propose " +
+      'instead of making it.',
+  );
+  b.add(
+    'step-3',
+    TEMPLATE,
+    '3. Reply in its thread — harness_plan_edit {ops: [{op: "reply", threadId, text}]} — with what you did or proposed, ' +
+      'and resolve it ({op: "resolve", threadId, resolved: true}) if it is settled.',
+  );
+  b.gap().add('step-4', TEMPLATE, 'Then tell the user in chat what changed. Coplan marks the ask answered once every comment has a reply or a proposal.');
+  const said = fromUser(opts.note);
+  const head = [...b.blocks, ...said];
+  const list = new BlockList().gap().add('comments', derived('the open comments waiting on you'), `## Open comments (${threads.length})`);
+  const listed: Block[][] = threads.map((t) => threadBlocks(plan, t, 'claude', false));
+  const whole = [...head, ...list.blocks, ...listed.flat()];
+  const text = blocksText(whole);
+  if (text.length <= PROMPT_BUDGET) return { prompt: text, trimmed: false, blocks: whole, threadIds: threads.map((t) => t.id) };
+
+  // Too long: whole comments while they fit, then a pointer to the rest.
+  const more = (n: number) =>
+    `- …and ${n} more comment${n === 1 ? '' : 's'}: harness_plan_read {changes_only: true} lists the comments waiting on you.`;
+  const out = [...head, ...list.blocks];
+  let used = joinBlocks(out).length;
+  let kept = 0;
+  for (const blocks of listed) {
+    const size = joinBlocks(blocks).length + 1;
+    if (used + size + more(listed.length).length + 2 > PROMPT_BUDGET) break;
+    out.push(...blocks);
+    used += size;
+    kept++;
+  }
+  out.push({ id: 'comments:more', source: TEMPLATE, text: more(listed.length - kept) });
+  for (const blocks of listed.slice(kept)) out.push(...dropAll(blocks));
+  return { prompt: blocksText(out), trimmed: true, blocks: out, threadIds: threads.map((t) => t.id) };
 }
 
 /* ------------------------------------------------------------------ *
@@ -1280,12 +1353,12 @@ function capital(text: string): string {
 
 /** One open comment, on the item it is about; the hint on how to reply
  *  is the agent's bookkeeping. */
-function threadBlocks(plan: Plan, t: Thread, reader: 'claude' | 'outside' = 'claude'): Block[] {
+function threadBlocks(plan: Plan, t: Thread, reader: 'claude' | 'outside' = 'claude', hint = true): Block[] {
   const who = (author: 'user' | 'claude') => (author === 'user' ? 'user' : reader === 'claude' ? 'you' : 'planner');
   const lines = [`- [${t.id}] on ${describeTarget(plan, t.target)} — ${who(t.author)}: ${hang(t.text, 4)}`];
   for (const r of t.replies) lines.push(`  ↳ ${who(r.author)}: ${hang(r.text, 4)}`);
   const b = new BlockList().add(`thread:${t.id}`, { kind: 'field', target: t.target }, lines);
-  if (reader === 'claude' && lastAuthor(t) === 'user') {
+  if (hint && reader === 'claude' && lastAuthor(t) === 'user') {
     b.add(`thread:${t.id}:reply`, TEMPLATE, `  → reply with harness_plan_edit {ops: [{op: "reply", threadId: "${t.id}", text}]} once you have acted on it`, { bookkeeping: true });
   }
   return b.blocks;
