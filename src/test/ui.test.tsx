@@ -985,7 +985,9 @@ test('the design is confirmed from the architecture view, after reading what Cla
   assert.equal(screen.queryByRole('button', { name: /\+ Box/ }), null);
   assert.ok(screen.getByRole('button', { name: 'Review & submit plan' }));
   const strip = screen.getByRole('region', { name: 'The design' });
-  assert.match(strip.textContent ?? '', /Design confirmed — waiting for Claude/);
+  assert.match(strip.textContent ?? '', /Planning · design confirmed — waiting for Claude/);
+  // One status, in the same words in the header (#66).
+  assert.match(screen.getByTestId('plan-status').textContent ?? '', /^✎ Planning · design confirmed$/);
 });
 
 test('the sign-off dialogs list each setting from config, read-only, with the file and key that set it', async () => {
@@ -1310,7 +1312,8 @@ test('a submitted plan is locked: the canvas shows the design, and the strip say
   assert.equal(screen.queryByRole('button', { name: /New diagram/ }), null);
   assert.ok(screen.getByText('Final design'));
   const strip = screen.getByRole('region', { name: 'The build' });
-  assert.match(strip.textContent ?? '', /Submitted — waiting for Claude to start/);
+  assert.match(strip.textContent ?? '', /In progress · waiting for Claude to start/);
+  assert.match(screen.getByTestId('plan-status').textContent ?? '', /^▶ In progress · waiting for Claude$/);
   assert.match(strip.textContent ?? '', /Send any message in Claude's chat/);
 
   // A box reads its details; nothing there edits it.
@@ -1344,7 +1347,7 @@ test('a plan signed off in chat says so, with the words the user said there (#65
   const strip = screen.getByRole('region', { name: 'The build' });
   assert.match(strip.textContent ?? '', /submitted from chat/);
   assert.match(within(strip).getByTestId('said-in-chat').textContent ?? '', /^You told Claude in chat: looks good, build it$/);
-  assert.match(screen.getByText(/Locked/).closest('.lock-chip')?.getAttribute('title') ?? '', /Submitted from chat: “looks good, build it”/);
+  assert.match(screen.getByTestId('plan-status').getAttribute('title') ?? '', /Submitted from chat: “looks good, build it”/);
   // Reopened, a plan that skipped Confirm design is back to planning.
   assert.match(strip.textContent ?? '', /Reopen for changes/);
   // A sign-off made in the page says nothing of the kind.
@@ -1432,7 +1435,7 @@ test('while building, the board follows Claude and a card that moves stands out'
   assert.equal(screen.queryAllByRole('combobox').length, 0, 'no status pickers');
   assert.equal(document.querySelector('[draggable="true"]'), null, 'nothing to drag');
   const strip = screen.getByRole('region', { name: 'The build' });
-  assert.match(strip.textContent ?? '', /Building/);
+  assert.match(strip.textContent ?? '', /In progress · building/);
   assert.match(strip.textContent ?? '', /Claude is on Wire into API/);
 
   // Claude reports a task done: it arrives in the Done column, and says so.
@@ -1478,6 +1481,11 @@ test("a task the user reviews waits for their verdict on its card", async () => 
   plan.tasks.find((t) => t.id === 't3')!.review = 'user';
   plan = applyOps(plan, [{ op: 'upsert_task', id: 't3', stage: 'review' }], 'claude', undefined, { tracking: true }).plan;
   await boot(makeSession(plan));
+  // What was built waits on the user: the plan's status is Review (#66).
+  assert.match(screen.getByTestId('plan-status').textContent ?? '', /^⏸ Review · 1 task waits on your review$/);
+  const strip = screen.getByRole('region', { name: 'The build' });
+  assert.match(strip.textContent ?? '', /Review · 1 task waits on your review/);
+  assert.match(strip.textContent ?? '', /Wire into API waits on your review: approve it on its card in Tasks, or tell Claude in chat\./);
   await openTab('Tasks');
   const review = within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
   await act(async () => {
@@ -1533,8 +1541,9 @@ test('the session rail says a plan is being built', async () => {
         }
       : undefined,
   );
+  // A summary from a daemon that predates statuses still shows one, from its phase.
   const rail = screen.getByRole('navigation', { name: 'Live sessions' });
-  assert.ok(within(rail).getByText('building'));
+  assert.ok(within(rail).getByText('In progress', { selector: '.status-pill' }));
 });
 
 

@@ -90,7 +90,7 @@ you something, the page says so and links you to its chat.
     </td>
     <td width="50%" valign="top">
       <a href="docs/images/board-dark.png"><img src="docs/images/board-dark.png" alt="The same task board in the dark theme" /></a>
-      <p><strong>Light or dark,</strong> following your system or your choice. One page holds every session you plan in: the rail lists them by project, with the ones waiting on you at the top.</p>
+      <p><strong>Light or dark,</strong> following your system or your choice. One page holds every session you plan in: the rail lists them by project, with the ones waiting on you at the top, and each one's status — Planning, In progress, Review or Done — to filter by.</p>
     </td>
   </tr>
 </table>
@@ -137,6 +137,10 @@ seeds into a throwaway daemon, the way real hooks and tool calls would.
   drift mid-build. Or tell Claude in chat — "looks good, build it" — and it
   signs off for you, with the settings you last chose; the page shows it was
   given in chat, in your words.
+- **Four statuses you recognise.** Every plan is *Planning*, *In progress*,
+  *Review* (what was built waits on you) or *Done*, in the same words in the
+  header, the session list and the strip under the header — and the session
+  list filters by them.
 - **Live progress.** Cards move across the board and boxes fill up as Claude
   marks tasks in progress, done or blocked.
 - **Your chat stays the chat.** Coplan never starts a turn or answers for you.

@@ -55,6 +55,8 @@ function summary(sessionId: string, repo: string, createdAt: number, updatedAt: 
     updatedAt,
     tasks: { total: 0, done: 0, inProgress: 0, blocked: 0 },
     phase: 'planning',
+    planStatus: 'planning',
+    awaitingReview: 0,
     current: null,
     waiting: null,
     surface: 'unknown',
@@ -154,6 +156,7 @@ beforeEach(() => {
     toasts: [],
     pinned: [],
     collapsedProjects: [],
+    statusFilter: null,
     collapsedSidebar: false,
     storage: null,
     storageBusy: false,
@@ -341,6 +344,66 @@ test('a row shows the plan, its progress, and what Claude is on', async () => {
   assert.match(row.textContent ?? '', /now: Read-through wrapper/);
   assert.match(row.textContent ?? '', /2\/5 tasks/);
   assert.match(row.textContent ?? '', /unread/);
+});
+
+test('every row shows its plan\'s status in one of four words — Planning too — and the list filters by it (#66)', async () => {
+  const now = Date.now();
+  await boot(() => [
+    { ...summary('s1', 'repo', now), planTitle: 'Designing' },
+    { ...summary('s2', 'repo', now - 1000), planTitle: 'Tasking', phase: 'tasking' },
+    { ...summary('s3', 'repo', now - 2000), planTitle: 'Building', phase: 'building', planStatus: 'in_progress', current: 'Wire it in' },
+    { ...summary('s4', 'other', now - 3000), planTitle: 'Your review', phase: 'building', planStatus: 'review', awaitingReview: 1 },
+    { ...summary('s5', 'other', now - 4000), planTitle: 'Finishing', phase: 'finalizing', planStatus: 'review' },
+    { ...summary('s6', 'other', now - 5000), planTitle: 'Exported', phase: 'handed-off', planStatus: 'done' },
+  ]);
+  const pill = (name: string) => rowFor(name).querySelector('.status-pill');
+  assert.equal(pill('Designing')?.textContent, 'Planning', 'a plan still being designed shows its status too');
+  assert.equal(pill('Tasking')?.textContent, 'Planning');
+  assert.match(pill('Tasking')?.getAttribute('title') ?? '', /design is confirmed/);
+  assert.equal(pill('Building')?.textContent, 'In progress');
+  assert.match(pill('Building')?.getAttribute('title') ?? '', /now Wire it in/);
+  assert.equal(pill('Your review')?.textContent, 'Review');
+  assert.match(pill('Your review')?.getAttribute('title') ?? '', /1 task waits on your review/);
+  assert.equal(pill('Finishing')?.textContent, 'Review');
+  assert.equal(pill('Exported')?.textContent, 'Done');
+  assert.match(pill('Exported')?.getAttribute('title') ?? '', /exported/);
+
+  const filter = screen.getByRole('group', { name: 'Show plans by status' });
+  const buttons = within(filter).getAllByRole('button').map((b) => b.textContent);
+  assert.deepEqual(buttons, ['All 6', 'Planning 2', 'In progress 1', 'Review 2', 'Done 1']);
+  await act(async () => {
+    fireEvent.click(within(filter).getByRole('button', { name: /^Review/ }));
+  });
+  assert.deepEqual(rowNames(), ['Your review', 'Finishing']);
+  assert.equal(within(filter).getByRole('button', { name: /^Review/ }).getAttribute('aria-pressed'), 'true');
+  assert.match(window.localStorage.getItem('cc-harness:prefs') ?? '', /"statusFilter":"review"/, 'remembered');
+  // Pressed again, it lets go.
+  await act(async () => {
+    fireEvent.click(within(filter).getByRole('button', { name: /^Review/ }));
+  });
+  assert.equal(rowNames().length, 6);
+  await act(async () => {
+    fireEvent.click(within(filter).getByRole('button', { name: /^Done/ }));
+  });
+  assert.deepEqual(rowNames(), ['Exported']);
+  await act(async () => {
+    fireEvent.click(within(filter).getByRole('button', { name: /^All/ }));
+  });
+  assert.equal(rowNames().length, 6);
+});
+
+test('a status no plan has says so, with a way back to all of them (#66)', async () => {
+  await boot(() => [summary('s1', 'repo', Date.now())]);
+  await act(async () => {
+    fireEvent.click(within(screen.getByRole('group', { name: 'Show plans by status' })).getByRole('button', { name: /^Done/ }));
+  });
+  assert.deepEqual(rowNames(), []);
+  const empty = document.querySelector('.sidebar-empty');
+  assert.match(empty?.textContent ?? '', /No plan is done\./);
+  await act(async () => {
+    fireEvent.click(within(empty as HTMLElement).getByRole('button', { name: 'Show all' }));
+  });
+  assert.deepEqual(rowNames(), ['s1 title']);
 });
 
 test('only sessions that used Coplan are listed, and the first of them opens', async () => {

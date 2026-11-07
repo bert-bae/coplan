@@ -3,7 +3,8 @@ import { api, eventsUrl, Unauthorized } from './lib/api.ts';
 import { isLocked } from '../shared/plan.ts';
 import { agentInfo, type AgentInfo } from '../shared/agents.ts';
 import type { GapSeverities } from '../shared/check.ts';
-import type { BuildSettings, BuildTarget, CleanupGroupId, ExecutionMode, Plan, PlanOp, ServerEvent, SessionState, SessionSummary, StorageReport, Target } from '../shared/types.ts';
+import type { BuildSettings, BuildTarget, CleanupGroupId, ExecutionMode, Plan, PlanOp, PlanStatus, ServerEvent, SessionState, SessionSummary, StorageReport, Target } from '../shared/types.ts';
+import { PLAN_STATUSES } from '../shared/types.ts';
 
 export type Tab = 'diagrams' | 'tasks' | 'overview';
 /** The architecture comes first: it is where most of the plan is decided. */
@@ -56,6 +57,8 @@ export interface UiState {
   drawerOpen: boolean;
   pinned: string[];
   collapsedProjects: string[];
+  /** The session list shows only plans with this status; all when null. */
+  statusFilter: PlanStatus | null;
   /** Bumped to ask a view to scroll an item into view: `kind:id`. */
   focusTarget: string | null;
   storage: StorageReport | null;
@@ -93,6 +96,7 @@ const initial: UiState = {
   drawerOpen: false,
   pinned: [],
   collapsedProjects: [],
+  statusFilter: null,
   focusTarget: null,
   storage: null,
   storageBusy: false,
@@ -515,10 +519,17 @@ class Store {
       collapsedSidebar: this.state.collapsedSidebar,
       pinned: this.state.pinned,
       collapsedProjects: this.state.collapsedProjects,
+      statusFilter: this.state.statusFilter,
       taskMode: this.state.taskMode,
       hideDone: this.state.hideDone,
       collapsedTasks: this.state.collapsedTasks,
     });
+  }
+
+  /** Show only the plans with one status in the session list (#66). */
+  setStatusFilter(statusFilter: PlanStatus | null): void {
+    this.set({ statusFilter });
+    this.persistPrefs();
   }
 
   setTaskMode(taskMode: TaskMode): void {
@@ -732,6 +743,7 @@ function loadPrefs(): Partial<UiState> {
     if (Array.isArray(saved['collapsedTasks'])) prefs.collapsedTasks = strings(saved['collapsedTasks']);
     if (saved['taskMode'] === 'outline' || saved['taskMode'] === 'board' || saved['taskMode'] === 'boxes') prefs.taskMode = saved['taskMode'];
     if (typeof saved['hideDone'] === 'boolean') prefs.hideDone = saved['hideDone'];
+    if ((PLAN_STATUSES as readonly unknown[]).includes(saved['statusFilter'])) prefs.statusFilter = saved['statusFilter'] as PlanStatus;
     return prefs;
   } catch {
     return {};

@@ -2024,8 +2024,25 @@ button.pv-chip { cursor: pointer; }
   border: 1px solid var(--border-default); border-radius: var(--r-full);
   background: var(--surface-sunken); color: var(--text-secondary); font-size: var(--fs-sm); font-weight: 600;
 }
-.lock-chip.is-building, .lock-chip.is-submitted { background: var(--accent-subtle); border-color: var(--accent-border); color: var(--accent-fg); }
-.lock-chip.is-built { background: var(--success-bg); border-color: var(--success-border); color: var(--success-fg); }
+
+/* The plan's status (#66): one colour per status, the same on the header's
+   chip, the session list's pill and the filter over it. */
+.status-chip { max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.status-detail { font-weight: 500; opacity: 0.85; overflow: hidden; text-overflow: ellipsis; }
+.lock-chip.is-status-in_progress, .pill.is-status-in_progress { background: var(--accent-subtle); border-color: var(--accent-border); color: var(--accent-fg); }
+.lock-chip.is-status-review, .pill.is-status-review { background: var(--attention-bg); border-color: var(--attention-border); color: var(--attention-fg); }
+.lock-chip.is-status-done, .pill.is-status-done { background: var(--success-bg); border-color: var(--success-border); color: var(--success-fg); }
+.phase.is-status-review { background: var(--attention-bg); border-bottom-color: var(--attention-border); box-shadow: inset 4px 0 0 var(--attention-solid); }
+
+.status-filter { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 0 var(--sp-2); }
+.status-filter-btn {
+  display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: var(--r-full);
+  border: 1px solid var(--border-subtle); background: transparent; color: var(--text-secondary);
+  font-size: var(--fs-micro); font-weight: 600; cursor: pointer;
+}
+.status-filter-btn:hover:not(.is-active) { background: var(--surface-hover); color: var(--text-primary); }
+.status-filter-btn.is-active { background: var(--accent-solid); border-color: var(--accent-solid); color: var(--accent-on-solid); }
+.status-filter-count { font-variant-numeric: tabular-nums; opacity: 0.75; }
 
 /* Under the header on every view: where the build stands. */
 .phase {
@@ -2122,14 +2139,9 @@ span.board-title:hover { color: inherit; text-decoration: none; }
   35%  { opacity: 1; transform: none; }
   100% { box-shadow: var(--shadow-1); }
 }
-.pill.is-phase-submitted, .pill.is-phase-building { background: var(--accent-subtle); color: var(--accent-fg); border-color: var(--accent-border); }
-.pill.is-phase-built { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
-.pill.is-phase-handed-off { background: var(--surface-sunken); color: var(--text-tertiary); }
 
 /* The design, confirmed: the tasks are shaped against it. */
-.lock-chip.is-tasking { background: var(--success-bg); border-color: var(--success-border); color: var(--success-fg); }
 .phase.is-tasking { background: var(--success-bg); border-bottom-color: var(--success-border); box-shadow: inset 4px 0 0 var(--success-solid); }
-.pill.is-phase-tasking { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
 
 /* How the build runs: chosen when submitting. */
 .submit-settings { margin: 0; padding: 0; border: 0; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }

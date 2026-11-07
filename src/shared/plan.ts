@@ -32,6 +32,7 @@ import type {
   PlanOp,
   PlanOpName,
   PlanPhase,
+  PlanStatus,
   Proposal,
   ProposalStatus,
   ReviewRecord,
@@ -46,7 +47,7 @@ import type {
   Thread,
 } from './types.ts';
 import { BUILD_TARGETS, EDGE_ARROWS, EXECUTION_MODES, IRIC_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
-import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, validReview } from './build.ts';
+import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, planMode, roundVerdict, validReview } from './build.ts';
 import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from './proposal-ops.ts';
 
 /** How many review verdicts a task keeps. */
@@ -1894,6 +1895,54 @@ export function planPhase(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> &
   // Every task done is not the build done: the final checks, the pull
   // requests and the report come after. The report closes it.
   return plan?.report ? 'built' : 'finalizing';
+}
+
+/**
+ * The tasks a Managed build is holding for the user's own review: in
+ * review, reviewed by the user (the task's own mode, or the build's), with
+ * no verdict from them for this round yet. A Tracked build holds nothing
+ * for anyone, so it has none.
+ */
+export function awaitingUserReview(plan: Pick<Plan, 'submission' | 'tasks'> | null): Task[] {
+  if (!plan?.submission || planMode(plan, 'managed') !== 'managed') return [];
+  const fallback = plan.submission.settings?.review ?? DEFAULT_BUILD_SETTINGS.review;
+  return plan.tasks.filter(
+    (t) =>
+      t.status === 'in_progress' &&
+      t.stage === 'review' &&
+      !plan.tasks.some((c) => c.parentId === t.id) &&
+      effectiveReview(plan, t, fallback) === 'user' &&
+      !roundVerdict(t, 'user'),
+  );
+}
+
+/**
+ * What the user sees of where the plan is: one of four statuses (#66).
+ * Review is what was built waiting on the user — the final checks and the
+ * report once every task is done, or a task a Managed build holds for
+ * their review — not the plan before the build: that is Planning.
+ */
+export function planStatus(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> & Partial<Pick<Plan, 'report'>>) | null): PlanStatus {
+  const phase = planPhase(plan);
+  return statusOfPhase(phase, (phase === 'submitted' || phase === 'building') && awaitingUserReview(plan).length > 0);
+}
+
+/** The status a phase shows as; `waitingOnUser` is a task held for the
+ *  user's review, which turns a build in progress into Review. */
+export function statusOfPhase(phase: PlanPhase, waitingOnUser = false): PlanStatus {
+  switch (phase) {
+    case 'planning':
+    case 'tasking':
+      return 'planning';
+    case 'submitted':
+    case 'building':
+      return waitingOnUser ? 'review' : 'in_progress';
+    case 'finalizing':
+      return 'review';
+    case 'built':
+    case 'handed-off':
+      return 'done';
+  }
 }
 
 /** Whether the plan is locked against editing. */

@@ -14,6 +14,7 @@ and Cursor except where the README's
 - [Confirming the design](#confirming-the-design)
 - [Submitting the plan](#submitting-the-plan)
 - [Going ahead from chat](#going-ahead-from-chat)
+- [Where a plan stands: four statuses](#where-a-plan-stands-four-statuses)
 - [Checks: `.coplan/config.json`](#checks-coplanconfigjson)
 - [Questions are answered in Claude](#questions-are-answered-in-claude) — and
   [when Claude asks](#when-claude-asks)
@@ -165,9 +166,10 @@ Submitting **locks the plan**. The canvas becomes the final design — boxes
 still fill up as the tasks that build them get done, and each box's task list
 still shows their status and briefs — and the Tasks tab becomes a read-only
 board where each card glows as it arrives in its new column, or the same
-tasks *By box*. A strip under the header says where the build stands: waiting for
+tasks *By box*. A strip under the header says where the build stands, under
+its [status](#where-a-plan-stands-four-statuses): waiting for
 Claude (with *Copy prompt*, in case you would rather paste it), building and
-what Claude is on, or built — and, when you said go ahead in chat, that it
+what Claude is on, a task waiting on your review, finishing, or built — and, when you said go ahead in chat, that it
 was submitted from chat, with your words. Claude can still report tasks, add work it
 discovers and answer comments; anything that would redesign the plan is
 refused, and so is publishing over it until every task is done. *Withdraw*
@@ -206,6 +208,24 @@ as the tool's answer, so nothing is handed over again with your next
 message. The strip under the header says *confirmed from chat* or
 *submitted from chat*, with what you said. Claude cannot sign off without
 your words: the tool refuses a call with none.
+
+## Where a plan stands: four statuses
+
+Every plan shows one of four statuses, in the same words in the header, in
+the session list and in the strip under the header, with a few words of
+detail after it:
+
+| Status | When | The detail says |
+| --- | --- | --- |
+| **Planning** | You and Claude are shaping the design, then the task list | *design confirmed*, once it is |
+| **In progress** | Submitted, and Claude is picking it up or building it | *waiting for Claude*, or the task it is on |
+| **Review** | What was built waits on you: every task is done and Claude is running the final checks and writing the report — or, in a Managed build, a task you review is waiting for your verdict | what is waiting on you |
+| **Done** | Built, with the report in — or exported to be built somewhere else | *built*, or *exported* |
+
+Review is about what was built, not the plan before the build: a plan you are
+still reading is Planning. The session list can show one status at a time:
+the row of buttons over it filters the list, with how many plans each holds,
+and remembers your choice.
 
 ## Checks: `.coplan/config.json`
 
@@ -366,7 +386,8 @@ Claude is on right now, diagrams and open comments.
 you typed `/coplan` (`$coplan` in Codex), the agent loaded the skill, or a
 plan exists. Every other session the plugin sees stays out of it. The list
 groups sessions by project, lifts the ones waiting on you to the top, and
-shows each one's current task. Fold it to a rail of initials with the ☰
+shows each one's current task and its [status](#where-a-plan-stands-four-statuses)
+— and filters by status. Fold it to a rail of initials with the ☰
 button or `[` to give the plan the width.
 
 ## Exporting the plan
