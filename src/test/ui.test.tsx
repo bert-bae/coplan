@@ -1331,6 +1331,70 @@ test('a submitted plan is locked: the canvas shows the design, and the strip say
   assert.equal(opsSent().length, 0);
 });
 
+test('a plan signed off in chat says so, with the words the user said there (#65)', async () => {
+  const design = confirmDesign(makePlan(), { prompt: '[cc-harness] The design is confirmed\n\nTHE DESIGN', userSaid: 'the design is right' });
+  await boot(makeSession(design));
+  const tasking = screen.getByRole('region', { name: 'The design' });
+  assert.match(tasking.textContent ?? '', /confirmed from chat/);
+  assert.match(within(tasking).getByTestId('said-in-chat').textContent ?? '', /^You told Claude in chat: the design is right$/);
+
+  cleanup();
+  const built = markDelivered(submitPlan(makePlan(), { target: 'session', mode: 'tracked', prompt: '[cc-harness] Build the plan\n\nTHE PROMPT', userSaid: 'looks good, build it' }));
+  await boot(makeSession(built));
+  const strip = screen.getByRole('region', { name: 'The build' });
+  assert.match(strip.textContent ?? '', /submitted from chat/);
+  assert.match(within(strip).getByTestId('said-in-chat').textContent ?? '', /^You told Claude in chat: looks good, build it$/);
+  assert.match(screen.getByText(/Locked/).closest('.lock-chip')?.getAttribute('title') ?? '', /Submitted from chat: “looks good, build it”/);
+  // Reopened, a plan that skipped Confirm design is back to planning.
+  assert.match(strip.textContent ?? '', /Reopen for changes/);
+  // A sign-off made in the page says nothing of the kind.
+  cleanup();
+  await boot(makeSession(lockedPlan(true)));
+  assert.equal(screen.queryByTestId('said-in-chat'), null);
+  assert.doesNotMatch(screen.getByRole('region', { name: 'The build' }).textContent ?? '', /from chat/);
+});
+
+test('confirming the design is optional: Submit is offered while designing, and what is chosen there is kept for chat (#65)', async () => {
+  const session = makeSession();
+  const version = session.plan!.version;
+  await boot(session, (route, init) => {
+    if (route.endsWith('/plan/prompt')) {
+      const { mode } = JSON.parse(String(init?.body)) as { mode?: string };
+      return {
+        prompt: `PROMPT for ${mode ?? 'the default'}`,
+        trimmed: false,
+        version,
+        budget: 9000,
+        maxNote: 4000,
+        mode: mode ?? 'tracked',
+        settings: DEFAULTS,
+        project: { file: null, mode: 'tracked', defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [] },
+      };
+    }
+    return undefined;
+  });
+  assert.ok(screen.getByRole('button', { name: 'Confirm design' }), 'the checkpoint is still offered');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Submit plan' }));
+  });
+  const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
+  // The repository's default (Tracked here) until the user picks another.
+  await waitFor(() => assert.equal(within(dialog).getByTestId('prompt-preview').textContent, 'PROMPT for tracked'));
+  assert.match(dialog.textContent ?? '', /The design is not confirmed: the build follows the tasks planned on the diagram/);
+  assert.match(dialog.textContent ?? '', /Or skip this dialog: tell Claude in chat — build it — and it signs this off for you, built the way you last chose here/);
+  // Choosing how it is built is remembered, for a go-ahead given in chat.
+  await act(async () => {
+    fireEvent.click(within(dialog).getByLabelText(/^Managed/));
+  });
+  await waitFor(() => assert.ok(posts.some((p) => p.route.endsWith('/plan/choice'))));
+  assert.deepEqual(posts.filter((p) => p.route.endsWith('/plan/choice')).at(-1)?.body, { mode: 'managed', settings: DEFAULTS });
+  await act(async () => {
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'Self-review' }));
+  });
+  assert.deepEqual(posts.filter((p) => p.route.endsWith('/plan/choice')).at(-1)?.body, { mode: 'managed', settings: { ...DEFAULTS, review: 'self' } });
+  assert.equal(posts.filter((p) => p.route.endsWith('/plan/submit')).length, 0, 'choosing submits nothing');
+});
+
 test('withdrawing a submission Claude has not picked up unlocks the plan', async () => {
   const locked = lockedPlan();
   // As the daemon answers: the same plan, unlocked, one version on.

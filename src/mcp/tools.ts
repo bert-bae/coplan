@@ -365,13 +365,42 @@ export const TOOLS: ToolDef[] = [
       'planned tasks into focused ones (one objective each), link them with dependsOn (what must be done first — ' +
       'anything without one can run in parallel), say which boxes each builds, and give branches when the work lands ' +
       'as several (stacked) pull requests. Ids you keep keep their status, comments and box links. Then tell the user ' +
-      'in chat it is ready to review; they submit the plan to start the build.',
+      'in chat it is ready to review. The build starts when they say so: here in chat (then call harness_plan_advance) ' +
+      'or by submitting the plan in Coplan.',
     inputSchema: {
       type: 'object',
       properties: {
         tasks: { type: 'array', description: 'The task tree, in build order.', items: taskSchema(3, true) },
       },
       required: ['tasks'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'harness_plan_advance',
+    endpoint: 'advance',
+    description:
+      'The user told you in chat to go ahead: sign the plan off for them, as Coplan\'s Confirm or Submit would. ' +
+      'to "tasks" when they are happy with the design and want the task list; to "build" when they say to build it ' +
+      '(from the design or the task list: confirming the design first is optional). Only on their word, quoted in ' +
+      'user_said — "looks good, build it" — and decide yourself whether what they said means go ahead. It uses the ' +
+      'build settings they last chose in Coplan, or the repository\'s defaults, locks the plan as the page would, shows ' +
+      'them in Coplan that it was signed off in chat with their words, and returns the prompt the page would have sent: ' +
+      'act on it straight away. Refused if the plan has no tasks to build, or is already past that step.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: {
+          type: 'string',
+          enum: ['tasks', 'build'],
+          description: '"tasks": confirm the design and make the task list. "build": submit the plan and build it.',
+        },
+        user_said: {
+          type: 'string',
+          description: 'What the user said in chat that means go ahead, in their words. Required.',
+        },
+      },
+      required: ['to', 'user_said'],
       additionalProperties: false,
     },
   },

@@ -10,7 +10,7 @@ import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from '
 import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
-import { MAX_NOTE, PlanError, cleanChecks, cleanNote, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
+import { MAX_NOTE, MAX_USER_SAID, PlanError, cleanChecks, cleanNote, cleanUserSaid, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
 import {
   PROMPT_BUDGET,
   askRule,
@@ -50,7 +50,7 @@ import { ConfigCache, configStamp, type HarnessConfig } from '../shared/config.t
 import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
-import type { BuildSettings, CleanupGroupId, DaemonLock, Plan, PlanInput, PlanOp, ServerEvent, SessionState, TaskListInput, TaskStatus } from '../shared/types.ts';
+import type { BuildChoice, BuildSettings, CleanupGroupId, DaemonLock, ExecutionMode, Plan, PlanInput, PlanOp, ServerEvent, SessionState, TaskListInput, TaskStatus } from '../shared/types.ts';
 import { CLEANUP_GROUPS } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
@@ -534,6 +534,27 @@ function buildRouter(deps: Deps): Router {
   const settingsFrom = (raw: unknown, project: ProjectConfig): BuildSettings =>
     raw && typeof raw === 'object' ? cleanSettings(raw, project.settings) : project.settings;
 
+  /**
+   * How the user last chose to have this session's plan built, in the
+   * Submit dialog — the mode, and a Managed build's settings — or nothing
+   * when they never chose: then the repository's defaults hold. A go-ahead
+   * given in chat builds it this way, and the dialog opens on it (#65).
+   */
+  const lastChoice = (session: SessionState): BuildChoice | undefined => {
+    const choice = store.get(session.sessionId)?.buildChoice ?? session.buildChoice;
+    const mode = validMode(choice?.mode);
+    return choice && mode ? { mode, ...(choice.settings ? { settings: cleanSettings(choice.settings) } : {}), at: choice.at } : undefined;
+  };
+
+  /** Remember what the user chose in the Submit dialog. Session state, not
+   *  the plan's: it moves no version, and nothing is sent to the agent. */
+  const rememberChoice = (session: SessionState, mode: ExecutionMode, settings: BuildSettings | undefined) => {
+    const choice: BuildChoice = { mode, ...(settings ? { settings: cleanSettings(settings) } : {}), at: Date.now() };
+    const was = session.buildChoice;
+    if (was && was.mode === choice.mode && JSON.stringify(was.settings ?? null) === JSON.stringify(choice.settings ?? null)) return;
+    store.update(session.sessionId, { buildChoice: choice });
+  };
+
   /** What the review dialogs show beside the prompt: the defaults and the
    *  checks this repository has, so the user sees what the build will run. */
   const projectSummary = (project: ProjectConfig, point: 'design' | 'build') => ({
@@ -670,10 +691,13 @@ function buildRouter(deps: Deps): Router {
     }
     const note = cleanNote(body.note);
     const project = projectFor(session);
-    // The mode asked for; else the target's; else the repository's default.
-    const chosen = validMode(body.mode);
-    const mode = modeFor(validTarget(body.target), chosen, project.mode);
-    const settings = settingsFrom(body.settings, project);
+    // The mode asked for; else the target's; else the one the user last
+    // chose here; else the repository's default.
+    const last = lastChoice(session);
+    const asked = validTarget(body.target);
+    const chosen = validMode(body.mode) ?? last?.mode;
+    const mode = modeFor(asked, chosen, project.mode);
+    const settings = body.settings ? settingsFrom(body.settings, project) : (last?.settings ?? project.settings);
     const { prompt, trimmed, blocks } = buildPrompt(session.plan, {
       target: targetOf(mode),
       agent: session.agent,
@@ -776,6 +800,22 @@ function buildRouter(deps: Deps): Router {
   });
 
   /**
+   * The user changed how the plan is built in the Submit dialog. Kept, so
+   * telling the agent to build it in chat builds it that way too. Changes
+   * nothing about the plan.
+   */
+  router.post('/api/session/:id/plan/choice', async (ctx) => {
+    const session = sessionOr404(ctx);
+    if (!session) return;
+    const body = await readJson<{ mode?: unknown; settings?: unknown }>(ctx.req);
+    const mode = validMode(body.mode);
+    if (!mode) throw new HttpError(400, 'Say how it is built: mode "tracked", "managed" or "export".');
+    const project = projectFor(session);
+    rememberChoice(session, mode, mode === 'managed' ? settingsFrom(body.settings, project) : undefined);
+    json(ctx.res, 200, { buildChoice: store.get(session.sessionId)?.buildChoice ?? null });
+  });
+
+  /**
    * The user signs the plan off. It is locked from here: Claude gets the
    * prompt they previewed with their next message in its chat, and the page
    * follows the build on the task board.
@@ -793,11 +833,12 @@ function buildRouter(deps: Deps): Router {
     const project = projectFor(session);
     const mode = modeFor(asked, chosen, project.mode);
     const target = targetOf(mode);
+    const settings = settingsFrom(body.settings, project);
     try {
       const plan = store.submit(session.sessionId, {
         target,
         project,
-        settings: settingsFrom(body.settings, project),
+        settings,
         ...(chosen ? { mode } : {}),
         ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
         ...(note ? { note } : {}),
@@ -805,6 +846,7 @@ function buildRouter(deps: Deps): Router {
         ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
       });
       log(`plan submitted for ${session.sessionId} (${mode})`);
+      if (chosen) rememberChoice(session, mode, mode === 'managed' ? settings : undefined);
       json(ctx.res, 200, { plan: forBrowser(plan) });
     } catch (err) {
       if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
@@ -1210,7 +1252,10 @@ function buildRouter(deps: Deps): Router {
     out.push(`[cc-harness] "${now.title}" is ${state}.${changes.length ? '' : ' (It already was.)'}`);
     if (skipped.length) out.push(`Noted, not refused (this build is ${MODE_LABEL[planMode(plan, project.mode)]}): ${skipped.join('; ')}.`);
     if (starting && !plan.submission) {
-      out.push('The plan has not been submitted: build only if the user told you to start without submitting.');
+      out.push(
+        'The plan has not been submitted. If the user told you to build it, record that with harness_plan_advance ' +
+          '{to: "build", user_said: "<their words>"}: it locks the plan as a submit does, and the board follows the build.',
+      );
     }
     if (checks?.length) {
       const failed = checks.filter((c) => !c.ok);
@@ -1260,6 +1305,84 @@ function buildRouter(deps: Deps): Router {
     const areas = unreadAreas(plan);
     if (areas.length) out.push(`The user has changed ${areas.join(', ')} since you last read the plan — call harness_plan_read.`);
     return out.join(' ');
+  };
+
+  /**
+   * `harness_plan_advance`: the user said in chat to go ahead — make the
+   * task list, or build it — and the agent signs off for them, quoting
+   * what they said. The same sign-off the page makes: the prompt is built
+   * here, from the plan as the daemon holds it, with what the user last
+   * chose in the Submit dialog or else the repository's defaults, and the
+   * plan locks as it would. The prompt is the tool's answer, so it is
+   * handed over now, never again with the next message (#65).
+   */
+  const advancePlan = (session: SessionState, body: Record<string, unknown>): string => {
+    const id = session.sessionId;
+    const to = body['to'];
+    if (to !== 'tasks' && to !== 'build') {
+      throw new PlanError('`to` is "tasks" (the user confirmed the design: make the task list) or "build" (the user said to build it).');
+    }
+    const raw = body['user_said'];
+    const said = cleanUserSaid(raw);
+    if (!said) {
+      throw new PlanError(
+        '`user_said` needs what the user told you in chat that means go ahead, in their words. Advance the plan only on ' +
+          "the user's word: if they have not said so, tell them it is ready and carry on when they do.",
+      );
+    }
+    if (typeof raw === 'string' && raw.trim().length > MAX_USER_SAID) {
+      throw new PlanError(`\`user_said\` is the user's words, at most ${MAX_USER_SAID} characters: quote the part that says to go ahead.`);
+    }
+    const plan = session.plan;
+    if (!plan) throw new PlanError('There is no plan yet. Publish one with harness_plan_publish.');
+    const project = projectFor(session);
+    const bin = COPLAN_BIN ? { bin: COPLAN_BIN } : {};
+    const quote = said.length > 200 ? `${said.slice(0, 199).trimEnd()}…` : said;
+    let lead: string;
+    if (to === 'tasks') {
+      if (plan.submission) throw new PlanError('The plan is already submitted: there is no design left to confirm. harness_task_next says what to build.');
+      if (plan.design) throw new PlanError('The design is already confirmed: make the task list with harness_tasks_publish.');
+      store.confirmDesign(id, { project, agent: session.agent, userSaid: said, ...bin });
+      log(`design confirmed from chat for ${id}`);
+      lead =
+        `[cc-harness] Confirmed the design from chat, on the user's word ("${quote}"). It is locked now, as a confirm ` +
+        "in Coplan locks it, and the page says it was confirmed in chat. Make the task list as the prompt below says — it is the one Coplan's Confirm would have sent:";
+    } else {
+      if (plan.submission) {
+        throw new PlanError(
+          planPhase(plan) === 'submitted'
+            ? 'The plan is already submitted: call harness_plan_read for its build prompt.'
+            : 'The plan is already submitted: build it — harness_task_next says what is ready.',
+        );
+      }
+      // The way the user last chose in the Submit dialog; else the
+      // repository's default. "Build it" in chat builds it in this session,
+      // so a last choice of Export falls back to that default too.
+      const last = lastChoice(session);
+      const mode = modeFor('session', last?.mode, project.mode);
+      const chosen = last?.mode === mode;
+      const settings = (chosen && last?.settings) || project.settings;
+      store.submit(id, {
+        target: 'session',
+        project,
+        settings,
+        agent: session.agent,
+        userSaid: said,
+        ...(chosen ? { mode } : {}),
+        ...bin,
+      });
+      log(`plan submitted from chat for ${id} (${mode})`);
+      lead =
+        `[cc-harness] Submitted the plan from chat, on the user's word ("${quote}"): ${MODE_LABEL[mode]}` +
+        `${chosen ? ', as they last chose in Coplan' : ", this repository's default"}. It is locked now, as a submit in ` +
+        "Coplan locks it, and the page says it was submitted in chat. Build it now, as the prompt below says — it is the one Coplan's Submit would have sent:";
+    }
+    const handed = store.deliver(id);
+    const later = store.get(id)?.plan;
+    const prompt = handed?.prompt ?? (to === 'tasks' ? later?.design?.prompt : later?.submission?.prompt) ?? '';
+    const notice = later ? unreadNotice(later) : null;
+    revealUi(session);
+    return [lead, prompt, notice ?? ''].filter(Boolean).join('\n\n');
   };
 
   router.post('/mcp/:tool', async (ctx) => {
@@ -1370,16 +1493,22 @@ function buildRouter(deps: Deps): Router {
             true,
             `[cc-harness] Published the task list for "${plan.title}". The user reviews it at ${url}\n` +
               (phase === 'tasking'
-                ? 'Tell them in chat that the task list is ready to review. Do not start building: they submit the plan ' +
-                  'from Coplan when the tasks are right, ' +
+                ? 'Tell them in chat that the task list is ready to review. Start building when they say so: when they ' +
+                  'tell you here to go ahead, call harness_plan_advance {to: "build", user_said: "<their words>"}, which ' +
+                  'submits the plan and gives you the build prompt; when they submit it in Coplan instead, ' +
                   (agentInfo(session.agent).promptContext
-                    ? 'and the build prompt comes with their next message.\n\n'
-                    : 'and paste the build prompt here (or tell you to build, and harness_plan_read hands it to you).\n\n')
+                    ? 'the build prompt comes with their next message.\n\n'
+                    : 'they paste the build prompt here, or harness_plan_read hands it to you.\n\n')
                 : 'Tell them in chat that the tasks are updated.\n\n') +
               renderTaskList(plan, projectFor(session).branches.base) +
               // What the list leaves open, while it is still cheap to fix.
               ((gaps) => (gaps.length ? `\n\n${gaps.join('\n')}\n\nFix these, or say why in chat, before they review it.` : ''))(renderGaps(plan, 20, projectFor(session).planCheck)),
           );
+          return;
+        }
+
+        case 'advance': {
+          reply(true, advancePlan(session, body));
           return;
         }
 

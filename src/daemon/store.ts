@@ -343,7 +343,7 @@ export class SessionStore extends EventEmitter {
    * the plan as the daemon holds it, and only if that is still the version
    * the user previewed — what they read is what Claude gets.
    */
-  submit(id: string, input: PromptOptions & { target: BuildTarget; expect?: number; hash?: string }): Plan {
+  submit(id: string, input: PromptOptions & { target: BuildTarget; expect?: number; hash?: string; userSaid?: string }): Plan {
     const session = this.sessions.get(id);
     if (!session) throw new Error('unknown session');
     const plan = session.plan;
@@ -364,6 +364,7 @@ export class SessionStore extends EventEmitter {
       // A Managed build's settings: what the other modes leave to the agent.
       ...(input.settings && mode === 'managed' ? { settings: input.settings } : {}),
       ...(input.project?.branches.base ? { base: input.project.branches.base } : {}),
+      ...(input.userSaid ? { userSaid: input.userSaid } : {}),
     });
     this.mutate(id, (s) => {
       s.plan = next;
@@ -377,7 +378,7 @@ export class SessionStore extends EventEmitter {
    * from the plan as the daemon holds it, and only if that is the version
    * the user previewed.
    */
-  confirmDesign(id: string, input: PromptOptions & { expect?: number; hash?: string }): Plan {
+  confirmDesign(id: string, input: PromptOptions & { expect?: number; hash?: string; userSaid?: string }): Plan {
     const session = this.sessions.get(id);
     if (!session) throw new Error('unknown session');
     const plan = session.plan;
@@ -388,7 +389,7 @@ export class SessionStore extends EventEmitter {
     refuseBlockingGaps(plan, input, 'confirmed');
     const { prompt, trimmed } = designPrompt(plan, { ...input, agent: session.agent });
     if (input.hash !== undefined && input.hash !== promptHash(prompt)) throw new PlanError(PROMPT_MOVED('confirm'));
-    const next = confirmDesign(plan, { prompt, trimmed, ...(input.note ? { note: input.note } : {}) });
+    const next = confirmDesign(plan, { prompt, trimmed, ...(input.note ? { note: input.note } : {}), ...(input.userSaid ? { userSaid: input.userSaid } : {}) });
     this.mutate(id, (s) => {
       s.plan = next;
     });

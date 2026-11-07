@@ -14,6 +14,11 @@ decide, write what you decided in the task's note, and carry on.
 
 ## Before you start
 
+If the user told you in chat to build a plan they have not submitted, sign
+it off for them first with `harness_plan_advance {to: "build", user_said: "…"}`,
+quoting them: the plan locks, the board follows, and the reply is the build
+prompt.
+
 The build prompt says how the plan is built:
 
 - **Tracked** — there is no prescribed cycle. Build and check each task as

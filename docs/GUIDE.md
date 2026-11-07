@@ -1,7 +1,8 @@
 # Using Coplan
 
 The whole loop in detail: what happens at each step, what the two sign-offs
-lock, how checks and questions work, and everything the views can do. The
+lock — and how to give either in chat — how checks and questions work, and
+everything the views can do. The
 [README](../README.md) has the overview, what Coplan installs, and what it
 costs to run; [CONFIG.md](CONFIG.md) has every setting.
 
@@ -12,6 +13,7 @@ and Cursor except where the README's
 - [The loop](#the-loop)
 - [Confirming the design](#confirming-the-design)
 - [Submitting the plan](#submitting-the-plan)
+- [Going ahead from chat](#going-ahead-from-chat)
 - [Checks: `.coplan/config.json`](#checks-coplanconfigjson)
 - [Questions are answered in Claude](#questions-are-answered-in-claude) — and
   [when Claude asks](#when-claude-asks)
@@ -42,21 +44,26 @@ and Cursor except where the README's
    comment threads.
 5. **You confirm the design.** *Confirm design* shows exactly what Claude
    will be asked, and confirming locks the architecture, sections and
-   summary.
+   summary. Or tell Claude in chat — "make the task list" — and it confirms
+   it for you ([Going ahead from chat](#going-ahead-from-chat)). Confirming
+   is optional: *Submit plan*, or "build it" in chat, goes straight to step 8
+   and builds the tasks planned on the diagram.
 6. **Claude makes the task list.** Your next message carries the design.
    Claude breaks the planned tasks into focused ones, links them by what
    blocks what, names the boxes each builds and the branch each lands on,
    and publishes them with `harness_tasks_publish`. You shape that list —
    dependencies, branches and review modes are editable on each task — and
    the Tasks view shows the build order it implies.
-7. **You submit it.** *Review & submit plan* shows the exact build prompt
-   and asks how the plan is built — *Tracked*, *Managed* (with who reviews
-   each task, how many run at once, how many review rounds before Claude
-   asks you) or *Export* — and submitting locks the plan. To take the plan
+7. **You submit it** — in Coplan or in chat. *Review & submit plan* shows
+   the exact build prompt and asks how the plan is built — *Tracked*,
+   *Managed* (with who reviews each task, how many run at once, how many
+   review rounds before Claude asks you) or *Export* — and submitting locks
+   the plan. Or tell Claude in chat — "looks good, build it" — and it submits
+   it for you, the way you last chose in that dialog. To take the plan
    elsewhere without submitting anything, *Export plan* in the header copies
    it as Markdown at any point.
 8. **Claude builds against it.** Your next message in Claude carries the
-   prompt. Claude starts only tasks that are ready and reports each one;
+   prompt — or, submitted from chat, Claude has it already. Claude starts only tasks that are ready and reports each one;
    in a Managed build it takes each through implement → review → refine,
    running the repository's checks. Cards move across the board, showing
    each task's step and checks; boxes fill up as their tasks finish.
@@ -79,6 +86,10 @@ box's task list still adds, renames and unlinks them. Your
 next message in Claude carries it, once — in Cursor, confirming copies it for
 you to paste, or the agent's next `harness_plan_read` picks it up. *Reopen
 design* unlocks it again.
+
+Confirming is a checkpoint you may skip. *Submit plan*, beside *Confirm
+design*, opens the Submit dialog straight from the design, and the build
+then follows the tasks planned on the diagram.
 
 Claude answers with the task list. Each task can say:
 
@@ -156,11 +167,13 @@ still shows their status and briefs — and the Tasks tab becomes a read-only
 board where each card glows as it arrives in its new column, or the same
 tasks *By box*. A strip under the header says where the build stands: waiting for
 Claude (with *Copy prompt*, in case you would rather paste it), building and
-what Claude is on, or built. Claude can still report tasks, add work it
+what Claude is on, or built — and, when you said go ahead in chat, that it
+was submitted from chat, with your words. Claude can still report tasks, add work it
 discovers and answer comments; anything that would redesign the plan is
 refused, and so is publishing over it until every task is done. *Withdraw*
 (before Claude has the prompt) or *Reopen for changes* (after) unlocks the
-tasks; the design stays confirmed until you reopen that too.
+tasks; the design stays confirmed, if you confirmed it, until you reopen that
+too.
 
 While it builds, starting a task that still waits on another is refused. In
 a Managed build so is marking one done before it went to review, without a
@@ -170,6 +183,29 @@ implementing, in review (and which round), refining — and how its checks
 came out.
 
 <a href="images/board.png"><img src="images/board.png" alt="The task board during a build: To do, In progress, Blocked and Done columns; cards show each task's branch, its review round and whether its checks passed" width="100%" /></a>
+
+## Going ahead from chat
+
+The dialogs are for reading the prompt before it is sent. When you have
+read enough, say so in Claude's chat instead — "the design is right, make
+the task list", "looks good, build it". Claude decides whether what you
+said means go ahead (it reads the chat; Coplan does not) and records it with
+`harness_plan_advance`, quoting you:
+
+- `to: "tasks"` confirms the design, exactly as *Confirm design* would.
+- `to: "build"` submits the plan, from the task list or straight from the
+  design, exactly as *Submit* would — built the way you last chose in the
+  Submit dialog (picking a mode or a setting there is remembered, even if
+  you close it without submitting), or else the repository's defaults. A
+  last choice of *Export* builds here in the repository's default mode
+  instead: "build it" means build it in this session.
+
+The plan locks as it would from the page, the repository's `planCheck`
+errors still hold it, and Claude gets the prompt the page would have sent
+as the tool's answer, so nothing is handed over again with your next
+message. The strip under the header says *confirmed from chat* or
+*submitted from chat*, with what you said. Claude cannot sign off without
+your words: the tool refuses a call with none.
 
 ## Checks: `.coplan/config.json`
 

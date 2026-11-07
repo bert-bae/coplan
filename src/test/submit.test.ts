@@ -97,9 +97,35 @@ test('a plan handed off to be built elsewhere is locked, and never waits for del
   assert.equal(markDelivered(plan).submission?.deliveredAt, null, 'markDelivered is for this session only');
 });
 
-test('a plan is submitted only once its design is confirmed', () => {
+test('confirming the design is optional: a plan goes from planning straight to building (#65)', () => {
   const plan = published();
-  assert.throws(() => submitPlan(plan, { target: 'session', prompt: 'p' }), /Confirm the design first/);
+  assert.equal(planPhase(plan), 'planning');
+  const next = submitPlan(plan, { target: 'session', mode: 'tracked', prompt: 'p' });
+  assert.equal(next.design, undefined, 'no design sign-off was made');
+  assert.equal(planPhase(next), 'submitted');
+  assert.equal(isLocked(next), true);
+  assert.throws(() => applyOps(next, [{ op: 'upsert_diagram', id: 'd1', title: 'Another' }], 'claude'), /locked/, 'the design is locked with the plan');
+  assert.equal(planPhase(markDelivered(next)), 'building');
+  // Reopened, it is back in planning: no design was ever confirmed.
+  assert.equal(planPhase(reopenPlan(next)), 'planning');
+});
+
+test('a sign-off given in chat keeps the user\'s words, and a restart keeps them and the mode (#65)', () => {
+  const plan = published();
+  const design = confirmDesign(plan, { prompt: 'd', userSaid: '  looks right, make the tasks  ' });
+  assert.deepEqual([design.design?.via, design.design?.userSaid], ['chat', 'looks right, make the tasks']);
+  const sub = submitPlan(design, { target: 'session', mode: 'tracked', prompt: 'p', userSaid: 'build it' });
+  assert.deepEqual([sub.submission?.via, sub.submission?.userSaid], ['chat', 'build it']);
+  // From the page: no via, no words.
+  assert.equal(submitPlan(design, { target: 'session', prompt: 'p' }).submission?.via, undefined);
+  const back = normalizePlan(JSON.parse(JSON.stringify(sub)) as Plan & Record<string, unknown>, 'x');
+  assert.deepEqual([back.submission?.via, back.submission?.userSaid, back.design?.via, back.design?.userSaid], ['chat', 'build it', 'chat', 'looks right, make the tasks']);
+  // A Tracked build stays Tracked across a restart: it used to read back as Managed.
+  assert.equal(back.submission?.mode, 'tracked');
+  // A damaged quote is dropped, not kept half: the sign-off stands as the page's.
+  const odd = normalizePlan({ ...JSON.parse(JSON.stringify(sub)), submission: { ...sub.submission, via: 'fax' } } as Plan & Record<string, unknown>, 'x');
+  assert.equal(odd.submission?.via, undefined);
+  assert.equal(odd.submission?.userSaid, undefined);
 });
 
 test('submitting moves the version, so a page never rolls back past it', () => {
@@ -296,7 +322,10 @@ test('the design prompt asks for a linked task list, and not for the build', () 
   assert.match(prompt, /`builds`/);
   assert.match(prompt, /stacked pull request/);
   assert.match(prompt, /cut from `main` and named `coplan\/…`/);
-  assert.match(prompt, /Do not start building/);
+  // The build starts when the user says so — in chat or by submitting —
+  // and nothing tells the agent to wait for a click in the page (#65).
+  assert.match(prompt, /Start building when they say so: told here, call harness_plan_advance \{to: "build", user_said\}/);
+  assert.doesNotMatch(prompt, /Do not start building/);
   assert.match(prompt, /> Land the client first\./);
   assert.match(prompt, /suggest \/coplan-init|Suggest \/coplan-init/i, 'no checks configured');
   assert.match(prompt, /Read-through, 10m TTL\./, 'the design itself follows');

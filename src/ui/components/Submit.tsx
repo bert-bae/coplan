@@ -89,6 +89,8 @@ export function SubmitControl() {
   const plan = usePlan();
   const agent = useAgent();
   const [open, setOpen] = useState(false);
+  // Straight to Submit from the design: confirming it is optional (#65).
+  const [skipping, setSkipping] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   if (!plan) return null;
   const phase = planPhase(plan);
@@ -99,7 +101,15 @@ export function SubmitControl() {
 
   if (phase === 'planning') {
     return (
-      <>
+      <span className="lock-control">
+        <button
+          type="button"
+          className="btn btn-sm"
+          title={`Confirming the design is optional: choose how the build runs, read the prompt ${agent.name} will be given, then lock the plan and hand it over`}
+          onClick={() => setSkipping(true)}
+        >
+          Submit plan
+        </button>
         <button
           ref={trigger}
           type="button"
@@ -110,7 +120,8 @@ export function SubmitControl() {
           Confirm design
         </button>
         {open && <ConfirmDesignDialog onClose={close} />}
-      </>
+        {skipping && <SubmitDialog onClose={() => setSkipping(false)} />}
+      </span>
     );
   }
 
@@ -136,7 +147,10 @@ export function SubmitControl() {
 
   return (
     <span className="lock-control">
-      <span className={classNames('lock-chip', `is-${phase}`)} title="Submitted plans cannot be edited; reopen it to change it">
+      <span
+        className={classNames('lock-chip', `is-${phase}`)}
+        title={`${plan.submission?.via === 'chat' ? `Submitted from chat: “${plan.submission.userSaid ?? ''}”. ` : ''}Submitted plans cannot be edited; reopen it to change it`}
+      >
         <span aria-hidden="true">🔒</span> {PHASE_CHIP[phase]}
       </span>
       <button
@@ -150,7 +164,7 @@ export function SubmitControl() {
             sent: {
               title: 'The submitted prompt',
               prompt: plan.submission.prompt,
-              meta: `submitted ${relativeTime(plan.submission.at)} · ${
+              meta: `submitted ${plan.submission.via === 'chat' ? 'from chat ' : ''}${relativeTime(plan.submission.at)} · ${
                 plan.submission.deliveredAt
                   ? `${agent.name} got it ${relativeTime(plan.submission.deliveredAt)}`
                   : plan.submission.target === 'session'
@@ -424,8 +438,9 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
             Confirming <strong>locks the design</strong> — the diagrams, sections and summary.{' '}
             {agent.promptContext ? `${agent.name} gets it with your next message in chat` : `You paste it into ${agent.name}'s chat`} and
             it breaks the planned tasks into the task list: focused tasks, what blocks what, and which branch each lands on. You
-            shape that list, then submit the plan to start the build.
+            shape that list, then start the build.
           </p>
+          <ChatHint agent={agent} words="make the task list" />
           <div className="submit-actions">
             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>
               Cancel
@@ -473,6 +488,15 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
   const [refresh, setRefresh] = useState(0);
   const key = settingsKey(settings);
   useEscape(onClose, submitting);
+
+  /** What the user picks here is kept: "build it" in chat builds it so. */
+  const choose = (next: { mode?: ExecutionMode; settings?: BuildSettings }) => {
+    const m = next.mode ?? mode;
+    const s = next.settings ?? settings;
+    if (next.mode) setMode(next.mode);
+    if (next.settings) setSettings(next.settings);
+    if (sessionId && m) void api.saveChoice(sessionId, { mode: m, ...(s && m === 'managed' ? { settings: s } : {}) }).catch(() => undefined);
+  };
 
   // Rebuilt whenever what it is built from changes: the choices, the note,
   // or the plan itself (the agent can still move it while this is open).
@@ -555,7 +579,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
             <legend className="field-label">How is it built?</legend>
             {modes(agent).map((m) => (
               <label key={m.id} className={classNames('submit-target', mode === m.id && 'is-active')}>
-                <input type="radio" name="build-mode" value={m.id} checked={mode === m.id} disabled={!mode} onChange={() => setMode(m.id)} />
+                <input type="radio" name="build-mode" value={m.id} checked={mode === m.id} disabled={!mode} onChange={() => choose({ mode: m.id })} />
                 <span>
                   <strong>{m.label}</strong>
                   {fallback === m.id && <span className="submit-target-default"> · this repository's default</span>}
@@ -565,7 +589,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
             ))}
           </fieldset>
 
-          {settings && mode === 'managed' && <SettingsFields settings={settings} onChange={setSettings} />}
+          {settings && mode === 'managed' && <SettingsFields settings={settings} onChange={(next) => choose({ settings: next })} />}
 
           <ConfigList rows={preview?.project?.config} />
 
@@ -594,6 +618,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
               </>
             )}
           </p>
+          {mode !== 'export' && <ChatHint agent={agent} words="build it" build />}
 
           <div className="submit-actions">
             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={submitting}>
@@ -606,6 +631,20 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
         </>
       }
     />
+  );
+}
+
+/**
+ * The other way to sign off: say so in the agent's chat. It records the
+ * sign-off with harness_plan_advance, quoting the user, and the page says
+ * it was given there (#65).
+ */
+function ChatHint({ agent, words, build = false }: { agent: AgentInfo; words: string; build?: boolean }) {
+  return (
+    <p className="explain chat-hint">
+      Or skip this dialog: tell {agent.name} in chat — <q>{words}</q> — and it signs this off for you
+      {build ? ', built the way you last chose here' : ''}. The page shows it was given in chat, with your words.
+    </p>
   );
 }
 
@@ -762,6 +801,9 @@ function Checklist({
   const ready = readyTasks(plan).length;
   const open = plan.threads.filter((t) => !t.resolved).length;
   const notes: Note[] = [];
+  if (!plan.design && target === 'session') {
+    notes.push({ tone: 'info', text: 'The design is not confirmed: the build follows the tasks planned on the diagram, and the design locks with the plan.' });
+  }
   if (counts.total === 0) notes.push({ tone: 'warn', text: 'There are no tasks, so there will be nothing to follow on the board.' });
   else if (!hasDependencies(plan) && counts.total > 1) {
     notes.push({ tone: 'info', text: 'No task says what it depends on, so every task is free to start — and to run alongside the others.' });
@@ -899,8 +941,8 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
     head = 'Design confirmed — the task list is ready to review';
     text = (
       <>
-        {counts.total} task{counts.total === 1 ? '' : 's'} in {steps} build step{steps === 1 ? '' : 's'}. Shape them in Tasks, then{' '}
-        <strong>Review &amp; submit</strong> to start the build.
+        {counts.total} task{counts.total === 1 ? '' : 's'} in {steps} build step{steps === 1 ? '' : 's'}. Shape them in Tasks, then
+        start the build: <strong>Review &amp; submit</strong>, or tell {agent.name} in chat to <q>build it</q>.
       </>
     );
   }
@@ -910,9 +952,14 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
       <div className="phase-body">
         <p className="phase-head">
           <span aria-hidden="true">✓</span> {head}
-          <span className="muted"> · confirmed {relativeTime(design.at)}</span>
+          <span className="muted">
+            {' '}
+            · confirmed {design.via === 'chat' ? 'from chat ' : ''}
+            {relativeTime(design.at)}
+          </span>
         </p>
         <p className="phase-text">{text}</p>
+        {design.via === 'chat' && <SaidInChat said={design.userSaid} agent={agent} />}
       </div>
       <div className="phase-actions">
         {confirming ? (
@@ -955,7 +1002,7 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
                     sent: {
                       title: `The confirmed design, as ${agent.name} got it`,
                       prompt: design.prompt,
-                      meta: `confirmed ${relativeTime(design.at)}${design.deliveredAt ? ` · ${agent.name} got it ${relativeTime(design.deliveredAt)}` : ''}`,
+                      meta: `confirmed ${design.via === 'chat' ? 'from chat ' : ''}${relativeTime(design.at)}${design.deliveredAt ? ` · ${agent.name} got it ${relativeTime(design.deliveredAt)}` : ''}`,
                     },
                   })
                 }
@@ -975,6 +1022,16 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
         )}
       </div>
     </section>
+  );
+}
+
+/** A sign-off given in chat: the user's words, as the agent quoted them. */
+function SaidInChat({ said, agent }: { said: string | undefined; agent: AgentInfo }) {
+  if (!said) return null;
+  return (
+    <p className="phase-said" data-testid="said-in-chat">
+      You told {agent.name} in chat: <q>{said}</q>
+    </p>
   );
 }
 
@@ -1044,11 +1101,13 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
           <span aria-hidden="true">🔒</span> {head}
           <span className="muted">
             {' '}
-            · submitted {relativeTime(submission.at)}
+            · submitted {submission.via === 'chat' ? 'from chat ' : ''}
+            {relativeTime(submission.at)}
             {mode !== 'export' && ` · ${MODE_LABEL[mode]}`}
           </span>
         </p>
         <p className="phase-text">{text}</p>
+        {submission.via === 'chat' && <SaidInChat said={submission.userSaid} agent={agent} />}
       </div>
       {counts.total > 0 && phase !== 'handed-off' && (
         <span className="phase-progress">
@@ -1062,7 +1121,7 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
         {confirming ? (
           <span className="item-confirm">
             {submission.deliveredAt
-              ? `Unlock the tasks? The design stays confirmed, and ${agent.name} keeps building until you tell it otherwise in chat.`
+              ? `Unlock the ${plan.design ? 'tasks? The design stays confirmed, and' : 'plan?'} ${agent.name} keeps building until you tell it otherwise in chat.`
               : 'Withdraw the submission?'}
             <button
               type="button"
