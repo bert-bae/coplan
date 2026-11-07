@@ -784,6 +784,11 @@ export interface SessionState {
   engagedAt?: number;
   /** How the user last chose to have a plan built here (the Submit dialog). */
   buildChoice?: BuildChoice;
+  /** When the first of its hooks reached Coplan; null while none has — a
+   *  session known only from its tool calls, whose agent is not running
+   *  Coplan's hooks (in Codex: not trusted, or changed by an update and not
+   *  trusted again). Absent on sessions saved before it was recorded. */
+  hookedAt?: number | null;
   plan: Plan | null;
 }
 
@@ -826,6 +831,8 @@ export interface SessionSummary {
   /** The session has used Coplan (see `SessionState.engagedAt`), or has a
    *  plan. Only these are listed in the rail. */
   engaged: boolean;
+  /** At least one of its hooks has reached Coplan (see `hookedAt`). */
+  hooked: boolean;
 }
 
 /* ------------------------------------------------------------------ *

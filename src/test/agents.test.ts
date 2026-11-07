@@ -11,8 +11,8 @@ import { readLiveLock, baseUrl } from '../shared/paths.ts';
 import { BUILD_MARKER } from '../daemon/render.ts';
 import { readAgentHook, writeAgentOutput } from '../daemon/agentHooks.ts';
 import { agentInfo, parseAgent, sessionFromEnv, workspaceFromEnv } from '../shared/agents.ts';
-import { relayCalls } from '../cli/doctor.ts';
-import type { DaemonLock, SessionState } from '../shared/types.ts';
+import { codexHooks, relayCalls } from '../cli/doctor.ts';
+import type { DaemonLock, SessionState, SessionSummary } from '../shared/types.ts';
 
 /**
  * Coplan with Codex and Cursor: the same daemon, reached through each
@@ -124,6 +124,35 @@ test("Codex's MCP server finds its session by thread id, and is told to ask with
   assert.equal(res.ok, true, res.text);
   assert.match(res.text, /request_user_input/);
   assert.doesNotMatch(res.text, /AskUserQuestion/);
+});
+
+test("a Codex thread whose hooks Codex does not run shows as one, and the doctor says how to fix it (#52)", async () => {
+  // Codex skips a plugin's hooks until the user trusts them in /hooks — and
+  // again after an update changes them. The tools still work, by thread id.
+  const untrusted = '0199a213-81c0-7800-8aa1-0000000000aa';
+  const res = await mcp('codex', 'publish', { ...PLAN, title: 'Hookless' }, untrusted);
+  assert.equal(res.ok, true, res.text);
+  const rows = () => call<{ sessions: SessionSummary[] }>('/api/sessions').then((r) => r.sessions);
+  let row = (await rows()).find((r) => r.sessionId === untrusted)!;
+  assert.equal(row.hooked, false, 'known only from its tool calls');
+  assert.equal((await rows()).find((r) => r.sessionId === THREAD)?.hooked, true, 'a thread whose SessionStart arrived');
+  let verdict = codexHooks(await rows());
+  assert.equal(verdict?.ok, false);
+  assert.match(verdict!.detail, /"Hookless" used Coplan's tools, but none of its hooks reached Coplan: open \/hooks in Codex, trust Coplan's hooks — again after every update/);
+
+  // Trusted, its next hook counts: the latest thread runs them now.
+  await hook('codex', 'UserPromptSubmit', { session_id: untrusted, cwd: repo, hook_event_name: 'UserPromptSubmit', prompt: 'go' });
+  row = (await rows()).find((r) => r.sessionId === untrusted)!;
+  assert.equal(row.hooked, true);
+  verdict = codexHooks(await rows());
+  assert.equal(verdict?.ok, true);
+
+  // No Codex thread has used Coplan: nothing to say. An older thread without
+  // hooks does not outweigh the latest one with them.
+  assert.equal(codexHooks([]), null);
+  const summary = (id: string, updatedAt: number, hooked: boolean) => ({ sessionId: id, agent: 'codex', engaged: true, updatedAt, hooked, title: id, planTitle: null }) as SessionSummary;
+  assert.deepEqual(codexHooks([summary('old', 1, false), summary('new', 2, true)]), { ok: true, detail: "its latest thread's hooks reach Coplan (1 earlier thread did not)" });
+  assert.equal(codexHooks([summary('old', 1, true), summary('new', 2, false)])?.ok, false);
 });
 
 test('a Codex request_user_input is shown as a question, and cleared when answered', async () => {

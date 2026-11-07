@@ -217,6 +217,40 @@ test('coplan check runs a stage, shows only what failed, and exits by the requir
   }
 });
 
+test('at review, coplan check also runs the hooks for files the change touched outside --files (#52)', () => {
+  const dir = repo({
+    '.coplan/config.json': JSON.stringify({
+      hooks: {
+        implement: [{ name: 'py lint', run: 'echo linted', paths: ['*.py'] }],
+        review: [
+          { name: 'ts tests', run: 'echo ts', paths: ['*.ts'] },
+          { name: 'py tests', run: 'echo py', paths: ['*.py'] },
+        ],
+      },
+    }),
+    'app.ts': 'export {};\n',
+  });
+  try {
+    execFileSync('git', ['-c', 'user.email=t@e', '-c', 'user.name=t', 'commit', '--allow-empty', '-qm', 'base'], { cwd: dir });
+    // The task planned app.ts; it also wrote a Python helper.
+    writeFileSync(path.join(dir, 'helper.py'), 'x = 1\n');
+    const run = (...args: string[]) => spawnSync(process.execPath, [CLI, 'check', ...args], { cwd: dir, encoding: 'utf8' });
+    const review = run('review', '--files', 'app.ts');
+    assert.equal(review.status, 0, review.stderr);
+    assert.match(review.stdout, /✓ ts tests/);
+    assert.match(review.stdout, /✓ py tests/, 'the check for the file it edited outside its plan runs');
+    assert.match(review.stdout, /also running py tests — the change touches files outside --files \(.*helper\.py/);
+    const json = run('review', '--files', 'app.ts', '--json');
+    assert.deepEqual((JSON.parse(json.stdout) as { name: string }[]).map((r) => r.name), ['ts tests', 'py tests']);
+    assert.match(json.stderr, /also running py tests/, 'said on stderr, so stdout stays parseable');
+    // --no-diff keeps to the files named; implement never reads a diff.
+    assert.doesNotMatch(run('review', '--files', 'app.ts', '--no-diff').stdout, /py tests/);
+    assert.match(run('implement', '--files', 'app.ts').stdout, /No implement hooks apply to these files/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('coplan check without a config says so, and how to make one', () => {
   const dir = repo({});
   try {

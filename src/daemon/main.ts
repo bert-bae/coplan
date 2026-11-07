@@ -45,7 +45,8 @@ import {
   validMode,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, hooksFor, loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
+import { HOOK_STAGES, hooksFor, loadProjectConfig, pathsMatch, type ProjectConfig } from '../shared/project.ts';
+import { changedFiles, filesForStage, type ChangedFiles } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
 import { ConfigCache, configStamp, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
@@ -590,7 +591,16 @@ function buildRouter(deps: Deps): Router {
    *  turns off. */
   router.get('/api/session/:id', (ctx) => {
     const session = sessionOr404(ctx);
-    if (session) json(ctx.res, 200, { session: forBrowser(session), planCheck: projectFor(session).planCheck });
+    // What is wrong with the harness config this session reads (its
+    // repository's .claude/harness.json and the global config.json), for
+    // the page to say: otherwise only daemon.log and the doctor would (#52).
+    if (session) {
+      json(ctx.res, 200, {
+        session: forBrowser(session),
+        planCheck: projectFor(session).planCheck,
+        configErrors: config.errors(session.repoRoot ?? session.cwd),
+      });
+    }
   });
 
   router.delete('/api/session/:id', (ctx) => {
@@ -1133,7 +1143,27 @@ function buildRouter(deps: Deps): Router {
    * user's say over dropping signed-off work. Any other mode gets each of
    * those as a note in the reply instead (#62).
    */
-  const updateTask = (session: SessionState, body: Record<string, unknown>): string => {
+  const updateTask = async (session: SessionState, body: Record<string, unknown>): Promise<string> => {
+    const changed = await reviewDiff(session, body);
+    return updateTaskNow(store.get(session.sessionId) ?? session, body, changed);
+  };
+
+  /**
+   * What the change touched, as git says, when it bears on marking a task
+   * done: a review hook limited to some files must run for a file the task
+   * edited outside its plan too (#52). Read only when it can matter — a
+   * task going done, on its own word, with files of its own, in a
+   * repository whose review hooks are limited by `paths`.
+   */
+  const reviewDiff = async (session: SessionState, body: Record<string, unknown>): Promise<ChangedFiles | null> => {
+    if (body['status'] !== 'done' || body['user_approved'] === true || !session.plan) return null;
+    const task = session.plan.tasks.find((t) => t.id === String(body['task_id'] ?? ''));
+    const project = projectFor(session);
+    if (!task?.files?.length || !project.hooks.review.some((h) => h.paths?.length)) return null;
+    return changedFiles(session.repoRoot ?? session.cwd, session.plan.submission?.base ?? project.branches.base);
+  };
+
+  const updateTaskNow = (session: SessionState, body: Record<string, unknown>, changed: ChangedFiles | null): string => {
     const before = session.plan;
     const taskId = String(body['task_id'] ?? '');
     if (!before) throw new PlanError(`No task "${taskId}": there is no plan yet. Publish one with harness_plan_publish.`);
@@ -1243,9 +1273,16 @@ function buildRouter(deps: Deps): Router {
       const optional = new Set(HOOK_STAGES.flatMap((st) => project.hooks[st].filter((h) => h.optional).map((h) => h.name)));
       const latest = mergeChecks(task.checks, checks ?? []);
       const failing = latest.filter((c) => !c.ok && !optional.has(c.name));
-      const missing = hooksFor(project, 'review', task.files)
+      // The files it planned to touch, and those the change touched (#52).
+      const own = new Set(hooksFor(project, 'review', task.files).map((h) => h.name));
+      const outside = changed ? changed.files.filter((f) => !task.files?.includes(f)) : [];
+      const missing = hooksFor(project, 'review', filesForStage('review', task.files, changed?.files))
         .filter((h) => !h.optional && !latest.some((c) => c.name === h.name))
-        .map((h) => h.name);
+        .map((h) =>
+          own.has(h.name)
+            ? h.name
+            : `${h.name} (for ${outside.filter((f) => pathsMatch(h.paths ?? [], f)).slice(0, 3).join(', ')}, which the change touches outside the task's files)`,
+        );
       if (failing.length || missing.length) {
         const why = [
           failing.length ? `its last checks failed (${failing.map((c) => `${c.name}${c.note ? `: ${c.note}` : ''}`).join('; ')})` : '',
@@ -1645,7 +1682,7 @@ function buildRouter(deps: Deps): Router {
         }
 
         case 'task': {
-          reply(true, updateTask(session, body));
+          reply(true, await updateTask(session, body));
           return;
         }
 

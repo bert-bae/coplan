@@ -56,6 +56,8 @@ export async function ingestHook(event: string, input: HookInput, ctx: IngestCon
   const agent = ctx.agent ?? DEFAULT_AGENT;
   const existing = ctx.store.ensure(sessionId, input.cwd, agent);
   if (existing.agent !== agent) ctx.store.update(sessionId, { agent });
+  // Its hooks run: what `coplan doctor` checks a Codex thread for (#52).
+  if (existing.hookedAt == null) ctx.store.update(sessionId, { hookedAt: Date.now() });
   applyEnv(sessionId, ctx);
 
   switch (event) {

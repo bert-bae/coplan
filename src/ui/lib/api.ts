@@ -88,8 +88,9 @@ async function request<T>(route: string, init?: RequestInit): Promise<T> {
 export const api = {
   sessions: () => request<{ sessions: SessionSummary[]; version: string }>('/api/sessions'),
 
-  /** The session, and how its repository counts each plan-check rule. */
-  session: (id: string) => request<{ session: SessionState; planCheck?: GapSeverities }>(`/api/session/${id}`),
+  /** The session, how its repository counts each plan-check rule, and what
+   *  is wrong with the harness config it reads. */
+  session: (id: string) => request<{ session: SessionState; planCheck?: GapSeverities; configErrors?: string[] }>(`/api/session/${id}`),
 
   /** Permanent: the daemon removes the session's on-disk directory too. */
   deleteSession: (id: string) => request<{ deleted: boolean }>(`/api/session/${id}`, { method: 'DELETE' }),

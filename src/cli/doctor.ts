@@ -21,7 +21,7 @@ import { readLiveLock, baseUrl, paths } from '../shared/paths.ts';
 import { loadConfigReport } from '../shared/config.ts';
 import { loadProjectConfig, PROJECT_CONFIG_PATH } from '../shared/project.ts';
 import { repoRootOf } from './check.ts';
-import type { DaemonLock, SessionState } from '../shared/types.ts';
+import type { DaemonLock, SessionState, SessionSummary } from '../shared/types.ts';
 import type { HookOutput } from '../shared/hooks.ts';
 
 declare const __HARNESS_VERSION__: string;
@@ -321,6 +321,16 @@ async function liveProbes(
     await agentHook('codex', 'SessionEnd', { session_id: thread, cwd, hook_event_name: 'SessionEnd', reason: 'other' });
   });
 
+  // Codex runs a plugin's hooks only once the user trusts them in /hooks,
+  // and again after every update changes them; where it keeps that is not
+  // documented, so the doctor looks at what it causes: a thread that called
+  // Coplan's tools with no hook of its own ever reaching Coplan (#52).
+  await probe("Codex runs Coplan's hooks", async () => {
+    const { sessions } = (await http.get('/api/sessions')) as { sessions: SessionSummary[] };
+    const verdict = codexHooks(sessions.filter((s) => !made.has(s.sessionId)));
+    if (verdict) record("Codex runs Coplan's hooks", verdict.ok, verdict.detail);
+  });
+
   await probe('a Cursor chat registers as Cursor, from its own payload', async () => {
     const chat = `doctor-cursor-${randomUUID()}`;
     made.add(chat);
@@ -336,6 +346,27 @@ async function liveProbes(
     );
     await agentHook('cursor', 'sessionEnd', { ...cursorBase, hook_event_name: 'sessionEnd', reason: 'completed' });
   });
+}
+
+/**
+ * Whether Codex runs Coplan's hooks, judged by its latest thread that used
+ * Coplan: one whose tool calls arrived while none of its hooks did is not
+ * running them. Null when no Codex thread has used Coplan yet.
+ */
+export function codexHooks(sessions: readonly SessionSummary[]): { ok: boolean; detail: string } | null {
+  const codex = sessions.filter((s) => s.agent === 'codex' && s.engaged).sort((a, b) => b.updatedAt - a.updatedAt);
+  const latest = codex[0];
+  if (!latest) return null;
+  if (latest.hooked) {
+    const earlier = codex.filter((s) => !s.hooked).length;
+    return { ok: true, detail: `its latest thread's hooks reach Coplan${earlier ? ` (${earlier} earlier thread${earlier === 1 ? '' : 's'} did not)` : ''}` };
+  }
+  return {
+    ok: false,
+    detail:
+      `"${latest.planTitle ?? latest.title}" used Coplan's tools, but none of its hooks reached Coplan: open /hooks in Codex, trust ` +
+      "Coplan's hooks — again after every update, which changes them — and start a new thread. Until then, sign-offs do not ride along with your messages and questions are not shown.",
+  };
 }
 
 /** What the hooks and the daemon need from this machine, beyond the plugin. */

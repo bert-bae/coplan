@@ -62,6 +62,8 @@ export function newSession(sessionId: string, cwd: string, agent: AgentKind = DE
     link: null,
     createdAt: now,
     updatedAt: now,
+    // Known only from a tool call until one of its hooks arrives.
+    hookedAt: null,
     plan: null,
   };
 }
@@ -607,6 +609,7 @@ export function summarize(s: SessionState): SessionSummary {
     unreadByClaude: unreadItems(plan),
     // A plan saved before sessions were stamped still counts.
     engaged: Boolean(s.engagedAt) || plan !== null,
+    hooked: s.hookedAt !== null,
   };
 }
 
@@ -695,6 +698,8 @@ function migrate(state: SessionState): void {
   state.link ??= null;
   // Sessions saved before Coplan worked with agents other than Claude Code.
   state.agent = isAgentKind(state.agent) ? state.agent : DEFAULT_AGENT;
+  // Saved before hooks were recorded: nothing says they did not run.
+  if (state.hookedAt === undefined) state.hookedAt = state.createdAt;
 
   for (const key of [
     'worktree', 'transcriptPath', 'stage', 'stageNote', 'baseRef', 'startCommit', 'reviewRound',

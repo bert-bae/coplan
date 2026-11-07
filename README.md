@@ -539,7 +539,7 @@ plugin's folder:
 | `open [id]`, `url [id]` | Open the page, or print its link with the access token |
 | `logs` | Follow the daemon's log |
 | `doctor` | Check the wiring end to end |
-| `check [implement\|review\|final]` | Run a stage of the repository's checks and print only what failed (`--files`, `--list`, `--json`) |
+| `check [implement\|review\|final]` | Run a stage of the repository's checks and print only what failed (`--files`, which at review and final adds the files git says changed; `--base`, `--no-diff`, `--list`, `--json`) |
 | `init` | Write a starting `.coplan/config.json` from the repository's scripts (`--print` to only show it, `--force` to replace one) |
 | `setup` | Install in your agents, or take Coplan out again: what `./setup.sh` runs once it has built the clone (`--yes`, `--agents`, `--uninstall`) |
 | `clean` | Remove stale files (`--dry-run` to only list them) |
@@ -587,7 +587,7 @@ differs is what each agent lets a plugin see and do:
 
 | | Claude Code | Codex | Cursor |
 | --- | --- | --- | --- |
-| Hooks | run once installed | run once you trust them in `/hooks` | run once installed |
+| Hooks | run once installed | run once you trust them in `/hooks`, and again after each update; `coplan doctor` says when a thread used Coplan without them | run once installed |
 | Start a plan | `/coplan <task>` | `$coplan <task>`, or ask | `/coplan <task>` |
 | The build prompt reaches the agent | with your next message ("go"), or as `harness_plan_advance`'s answer when you say "build it" in chat | with your next message ("go"), or as `harness_plan_advance`'s answer | you paste it — submitting copies it — or say "build it" and it submits the plan with `harness_plan_advance` (or, already submitted, reads it with `harness_plan_read`) |
 | A revision request (*Request revisions*) reaches the agent | with your next message | with your next message | you paste it — queuing copies it — or it comes with the agent's next `harness_plan_read` |

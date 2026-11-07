@@ -178,9 +178,10 @@ class Store {
     this.set({ sessionId: id, session: null, planCheck: {}, diagramId: null, error: null, exportOpen: false });
     this.connect();
     try {
-      const { session, planCheck } = await api.session(id);
+      const { session, planCheck, configErrors } = await api.session(id);
       // Clicking through the rail quickly: only the last choice may land.
       if (this.state.sessionId === id) this.set({ session: this.newest(session), planCheck: planCheck ?? {} });
+      this.sayConfigErrors(configErrors);
     } catch (err) {
       if (this.state.sessionId === id) this.set({ error: describeError(err) });
     }
@@ -249,8 +250,9 @@ class Store {
   private async resync(): Promise<void> {
     if (!this.state.sessionId) return;
     try {
-      const { session, planCheck } = await api.session(this.state.sessionId);
+      const { session, planCheck, configErrors } = await api.session(this.state.sessionId);
       if (session.sessionId === this.state.sessionId) this.set({ session: this.newest(session), planCheck: planCheck ?? {} });
+      this.sayConfigErrors(configErrors);
     } catch {
       /* the next connect says what is wrong */
     }
@@ -717,6 +719,19 @@ class Store {
   /* ---------------------------------------------------------------- *
    * Notices
    * ---------------------------------------------------------------- */
+
+  /** Harness config errors already said on this page: each is said once. */
+  private saidConfigErrors = new Set<string>();
+
+  /** Say what is wrong with the harness config, once per distinct error
+   *  (#52): a setting that is quietly ignored is worse than a toast. */
+  private sayConfigErrors(errors: string[] | undefined): void {
+    for (const e of errors ?? []) {
+      if (this.saidConfigErrors.has(e)) continue;
+      this.saidConfigErrors.add(e);
+      this.toast('error', `Coplan's config: ${e} Run coplan doctor to see every problem.`);
+    }
+  }
 
   toast(kind: Toast['kind'], text: string): void {
     const toast: Toast = { id: `t${Date.now()}${Math.random().toString(36).slice(2, 6)}`, kind, text };

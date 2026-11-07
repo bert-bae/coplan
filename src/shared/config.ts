@@ -142,7 +142,7 @@ export function loadConfigReport(opts: { configDir: string; projectDir?: string 
  * wrong with a file is handed to `onError` once, not on every read.
  */
 export class ConfigCache {
-  private entries = new Map<string, { stamp: string; config: HarnessConfig }>();
+  private entries = new Map<string, { stamp: string; config: HarnessConfig; errors: string[] }>();
   private said = new Set<string>();
 
   constructor(
@@ -165,8 +165,15 @@ export class ConfigCache {
       this.onError(e);
     }
     if (this.entries.size >= this.max) this.entries.clear();
-    this.entries.set(key, { stamp, config: report.config });
+    this.entries.set(key, { stamp, config: report.config, errors: report.errors });
     return report.config;
+  }
+
+  /** What is wrong with the config for `projectDir` now — its own file and
+   *  the global one — each naming its file: for the page to say (#52). */
+  errors(projectDir?: string | null): string[] {
+    this.get(projectDir);
+    return [...(this.entries.get(projectDir ?? '')?.errors ?? [])];
   }
 }
 

@@ -1635,3 +1635,70 @@ test('in Cursor, the request is pasted or picked up by harness_plan_read — onc
   assert.ok(latest(await sessionFor(id))?.deliveredAt);
   assert.doesNotMatch(String((await mcpFor(id, 'read'))['text']), /Revise the plan/);
 });
+
+/* ------------------------------------------------------------------ *
+ * Checks for what the change touched (#52)
+ * ------------------------------------------------------------------ */
+
+test('done waits on the review checks for files the change touched outside the task\'s own (#52)', async () => {
+  const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-diff-'));
+  const g = (...args: string[]) => execFileSync('git', args, { cwd: other, stdio: 'pipe' });
+  try {
+    g('init', '-q', '-b', 'main');
+    g('config', 'user.email', 'test@example.com');
+    g('config', 'user.name', 'Test');
+    mkdirSync(path.join(other, '.coplan'), { recursive: true });
+    writeFileSync(
+      path.join(other, '.coplan', 'config.json'),
+      JSON.stringify({ hooks: { review: [{ name: 'ts tests', run: 'true', paths: ['*.ts'] }, { name: 'py tests', run: 'true', paths: ['*.py'] }] } }),
+    );
+    writeFileSync(path.join(other, 'app.ts'), 'export {};\n');
+    g('add', '-A');
+    g('commit', '-qm', 'initial');
+    g('checkout', '-qb', 'feature');
+
+    const id = 'diff-session';
+    await call(`/hook/SessionStart`, { method: 'POST', body: JSON.stringify({ session_id: id, cwd: other, start_reason: 'startup' }) });
+    const task = (body: Record<string, unknown>) =>
+      call<Record<string, unknown>>('/mcp/task', { method: 'POST', headers: { 'x-harness-session': id }, body: JSON.stringify({ cwd: other, task_id: 'app', ...body }) });
+    await call('/mcp/publish', {
+      method: 'POST',
+      headers: { 'x-harness-session': id },
+      body: JSON.stringify({ cwd: other, title: 'Wire the app', tasks: [{ id: 'app', title: 'Wire the app', files: ['app.ts'] }] }),
+    });
+    await task({ stage: 'review' });
+    await task({ verdict: 'pass', checks: [{ name: 'ts tests', ok: true }] });
+
+    // Only its own file changed: its own check is all done waits on.
+    writeFileSync(path.join(other, 'app.ts'), 'export const x = 1;\n');
+    // …but it also wrote a Python helper, which has a check of its own.
+    writeFileSync(path.join(other, 'helper.py'), 'x = 1\n');
+    const refused = await task({ status: 'done', note: 'wired' });
+    assert.equal(refused['ok'], false);
+    assert.match(String(refused['text']), /the review checks py tests \(for helper\.py, which the change touches outside the task's files\) were never reported/);
+
+    await task({ checks: [{ name: 'py tests', ok: true }] });
+    const done = await task({ status: 'done', note: 'wired' });
+    assert.equal(done['ok'], true, String(done['text']));
+  } finally {
+    rmSync(other, { recursive: true, force: true });
+  }
+});
+
+test('what is wrong with the harness config reaches the page with the session (#52)', async () => {
+  const id = 'config-errors';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  const file = path.join(repo, '.claude', 'harness.json');
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ promptNotice: 'sometimes', idleShutdownMinutes: 5 }));
+  try {
+    const { configErrors } = await call<{ configErrors: string[] }>(`/api/session/${id}`);
+    assert.equal(configErrors.length, 2);
+    assert.match(configErrors.join('\n'), /harness\.json: "promptNotice" must be true or false/);
+    assert.match(configErrors.join('\n'), /harness\.json: "idleShutdownMinutes" can only be set in the global config/);
+  } finally {
+    rmSync(file);
+  }
+  const { configErrors } = await call<{ configErrors: string[] }>(`/api/session/${id}`);
+  assert.deepEqual(configErrors, [], 'fixed, nothing is said');
+});
