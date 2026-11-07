@@ -7,6 +7,7 @@ import { ProgressBar } from '../components/Progress.tsx';
 import { scrollBehavior } from '../lib/motion.ts';
 import { countTasks, currentTask, isDesignLocked, isLocked } from '../../shared/plan.ts';
 import { Markdown } from '../components/Markdown.tsx';
+import { SkippedChecks } from '../components/TaskChecks.tsx';
 import { relativeTime } from '../lib/format.ts';
 import type { Plan, Section } from '../../shared/types.ts';
 
@@ -29,6 +30,7 @@ export function OverviewView() {
             Build report <span className="muted">· {relativeTime(plan.report.at)}</span>
           </h2>
           <Markdown source={plan.report.text} />
+          <SkippedChecks plan={plan} />
         </section>
       )}
 

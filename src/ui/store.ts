@@ -1,5 +1,7 @@
 import { useSyncExternalStore } from 'react';
-import { api, eventsUrl, Unauthorized } from './lib/api.ts';
+import { api, eventsUrl, Unauthorized, type ProjectChecks } from './lib/api.ts';
+
+const NO_CHECKS: ProjectChecks = { implement: [], review: [] };
 import { isLocked } from '../shared/plan.ts';
 import { agentInfo, type AgentInfo } from '../shared/agents.ts';
 import type { GapSeverities } from '../shared/check.ts';
@@ -41,6 +43,8 @@ export interface UiState {
   /** How the open session's repository counts each plan-check rule
    *  (`planCheck` in .coplan/config.json); empty means every rule warns. */
   planCheck: GapSeverities;
+  /** The open session's repository checks by stage, which a task can skip. */
+  projectChecks: ProjectChecks;
   tab: Tab;
   /** The diagram open on the Architecture tab; the first one when unset. */
   diagramId: string | null;
@@ -86,6 +90,7 @@ const initial: UiState = {
   sessionId: null,
   session: null,
   planCheck: {},
+  projectChecks: { implement: [], review: [] },
   tab: 'diagrams',
   diagramId: null,
   connection: 'connecting',
@@ -178,9 +183,9 @@ class Store {
     this.set({ sessionId: id, session: null, planCheck: {}, diagramId: null, error: null, exportOpen: false });
     this.connect();
     try {
-      const { session, planCheck, configErrors } = await api.session(id);
+      const { session, planCheck, configErrors, projectChecks } = await api.session(id);
       // Clicking through the rail quickly: only the last choice may land.
-      if (this.state.sessionId === id) this.set({ session: this.newest(session), planCheck: planCheck ?? {} });
+      if (this.state.sessionId === id) this.set({ session: this.newest(session), planCheck: planCheck ?? {}, projectChecks: projectChecks ?? NO_CHECKS });
       this.sayConfigErrors(configErrors);
     } catch (err) {
       if (this.state.sessionId === id) this.set({ error: describeError(err) });
@@ -250,8 +255,8 @@ class Store {
   private async resync(): Promise<void> {
     if (!this.state.sessionId) return;
     try {
-      const { session, planCheck, configErrors } = await api.session(this.state.sessionId);
-      if (session.sessionId === this.state.sessionId) this.set({ session: this.newest(session), planCheck: planCheck ?? {} });
+      const { session, planCheck, configErrors, projectChecks } = await api.session(this.state.sessionId);
+      if (session.sessionId === this.state.sessionId) this.set({ session: this.newest(session), planCheck: planCheck ?? {}, projectChecks: projectChecks ?? NO_CHECKS });
       this.sayConfigErrors(configErrors);
     } catch {
       /* the next connect says what is wrong */

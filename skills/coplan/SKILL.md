@@ -197,6 +197,11 @@ tree and nothing else):
 - **`review`** — only when a task needs other than the build's default:
   `"user"` for risky, security-sensitive or user-facing work, `"skip"` for
   trivial mechanical changes.
+- **Its checks** are the repository's. Which checks a task runs is the
+  user's alone: when one should skip a check (a docs-only task, the test
+  suite) or needs one of its own (a migration, `pnpm db:check`), propose it —
+  `harness_plan_propose {title, reason, ops: [{op: "set_checks", id, skip: ["tests"]}]}`
+  (or `add: [{name, run, stage}]`) — and the user accepts it in Coplan.
 
 The read-back then shows the **build order** (steps of tasks that can run
 side by side) and the **branches** (how they stack), and the reply lists

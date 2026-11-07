@@ -37,6 +37,7 @@ import type {
   ProposalStatus,
   ReviewRecord,
   RevisionRequest,
+  TaskCheck,
   RevisionStatus,
   Section,
   Submission,
@@ -48,7 +49,7 @@ import type {
   TaskStatus,
   Thread,
 } from './types.ts';
-import { BUILD_TARGETS, EDGE_ARROWS, EXECUTION_MODES, IRIC_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
+import { BUILD_TARGETS, EDGE_ARROWS, EXECUTION_MODES, IRIC_STAGES, TASK_CHECK_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
 import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, planMode, roundVerdict, validReview } from './build.ts';
 import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from './proposal-ops.ts';
 
@@ -370,7 +371,7 @@ export function baselineOf(plan: Plan): PlanBaseline {
       nodes: d.nodes.map(({ x: _x, y: _y, ...node }) => node),
       edges: d.edges,
     })),
-    tasks: plan.tasks.map(({ id, parentId, order, title, detail, status, files, note, dependsOn, branch, review }) => ({
+    tasks: plan.tasks.map(({ id, parentId, order, title, detail, status, files, note, dependsOn, branch, review, addChecks, skipChecks }) => ({
       id,
       parentId,
       order,
@@ -382,6 +383,8 @@ export function baselineOf(plan: Plan): PlanBaseline {
       ...(dependsOn?.length ? { dependsOn } : {}),
       ...(branch ? { branch } : {}),
       ...(review ? { review } : {}),
+      ...(addChecks?.length ? { addChecks } : {}),
+      ...(skipChecks?.length ? { skipChecks } : {}),
     })),
   });
 }
@@ -851,7 +854,23 @@ function normalizeTask(task: Task): Task {
   const checks = cleanChecks(t.checks);
   if (checks?.length) t.checks = checks;
   else delete t.checks;
+  // What a task's own checks say, from disk: anything malformed is dropped,
+  // never allowed to break a gate.
+  const added = Array.isArray(t.addChecks) ? t.addChecks.map(validTaskCheck).filter((c): c is TaskCheck => Boolean(c)) : [];
+  if (added.length) t.addChecks = added;
+  else delete t.addChecks;
+  const skipped = strings(t.skipChecks);
+  if (skipped.length) t.skipChecks = skipped;
+  else delete t.skipChecks;
   return t;
+}
+
+/** A task's own check as stored, or undefined when it is not whole. */
+function validTaskCheck(raw: unknown): TaskCheck | undefined {
+  const c = raw as Partial<TaskCheck> | null;
+  if (!c || typeof c !== 'object' || typeof c.name !== 'string' || !c.name || typeof c.run !== 'string' || !c.run.trim()) return undefined;
+  if (!(TASK_CHECK_STAGES as readonly string[]).includes(c.stage as string)) return undefined;
+  return { name: c.name, run: c.run, stage: c.stage!, ...(c.optional === true ? { optional: true } : {}) };
 }
 
 /* ------------------------------------------------------------------ *
@@ -899,6 +918,7 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
   remove_edge: ['diagramId', 'id', 'from', 'to', 'expect'],
   remove: ['kind', 'id'],
   review_task: ['id', 'verdict', 'summary', 'userApproved'],
+  set_checks: ['id', 'add', 'skip'],
   comment: ['target', 'text'],
   reply: ['threadId', 'text'],
   resolve: ['threadId', 'resolved'],
@@ -987,6 +1007,8 @@ function contentTargetOf(op: PlanOp): string | null {
         : null;
     case 'remove':
       return `${op.kind}:${op.id}`;
+    case 'set_checks':
+      return `task:${op.id}`;
     default:
       return null;
   }
@@ -1138,6 +1160,8 @@ export function applyOps(
     try {
       if (author === 'claude') {
         checkOpFields(op);
+        // Its own reason first: whatever else is wrong, this is the user's.
+        if (op.op === 'set_checks') throw new PlanError(AGENT_SET_CHECKS);
         if (!opts.tracking) refuseProgress(op);
         refuseUnreadEdit(plan, op, unread!);
         // A proposal built on a version Claude never read could undo the
@@ -1464,6 +1488,25 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       return [log('status', ref('task', task.id), `${who} ${what} "${task.title}" in review round ${task.round}${summary ? `: ${short(summary, 80)}` : ''}`)];
     }
 
+    case 'set_checks': {
+      // Which checks gate a task is the user's: an agent that could skip a
+      // check on the task it builds could take away its own gate (#54).
+      if (author !== 'user') throw new PlanError(AGENT_SET_CHECKS);
+      const task = requireTask(plan, op.id);
+      const add = op.add === undefined ? undefined : cleanTaskChecks(op.add);
+      const skip = op.skip === undefined ? undefined : cleanSkips(op.skip);
+      if (add === undefined && skip === undefined) throw new PlanError('Say what changes: `add` (checks of its own) or `skip` (repository checks it does not run).');
+      const before = JSON.stringify([task.addChecks ?? [], task.skipChecks ?? []]);
+      if (add !== undefined) setOptional(task, 'addChecks', add.length ? add : undefined);
+      if (skip !== undefined) setOptional(task, 'skipChecks', skip.length ? skip : undefined);
+      if (JSON.stringify([task.addChecks ?? [], task.skipChecks ?? []]) === before) return [];
+      task.updatedAt = now;
+      task.rev = (task.rev ?? 1) + 1;
+      task.revBy = { ...task.revBy, [author]: task.rev };
+      const words = taskCheckWords(task);
+      return [log('edited', ref('task', task.id), words ? `set the checks of "${task.title}": ${words}` : `cleared the checks set for "${task.title}"`)];
+    }
+
     case 'propose': {
       if (author !== 'claude') throw new PlanError('A proposal is how the agent suggests a change; make yours directly.');
       const title = clean(op.title, MAX_TITLE);
@@ -1545,7 +1588,10 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       if (plan.submission) {
         // Mid-build, a proposal may add work — a new task — and nothing
         // else: what the user signed off stays as they signed it.
-        const refused = p.ops.find((inner: PlanOp) => inner.op !== 'upsert_task' || Boolean(inner.id && plan.tasks.some((t) => t.id === inner.id)));
+        // A task's checks are the user's say on a locked plan too (#54).
+        const refused = p.ops.find(
+          (inner: PlanOp) => inner.op !== 'set_checks' && (inner.op !== 'upsert_task' || Boolean(inner.id && plan.tasks.some((t) => t.id === inner.id))),
+        );
         if (refused) {
           throw new PlanError(
             `Proposal ${p.id} changes what the submitted plan locked (${refused.op}${'id' in refused && refused.id ? ` ${refused.id}` : ''}): ` +
@@ -1772,6 +1818,52 @@ function stageOrThrow(value: unknown): IricStage {
 }
 
 /** Check results as reported: each with a name, at most a few dozen. */
+/** Why the agent cannot set a task's checks, and what it does instead. */
+const AGENT_SET_CHECKS =
+  "Which checks a task runs is the user's to set: skipping one takes away part of the gate the task is held to. " +
+  'Propose it instead — harness_plan_propose {title, reason, ops: [{op: "set_checks", id, skip: ["tests"]}]} — ' +
+  'and the user accepts it in Coplan.';
+
+/** At most this many checks of its own per task, and skips. */
+export const MAX_TASK_CHECKS = 10;
+const MAX_SKIPS = 20;
+
+/** A task's own checks as the user gave them: whole, named, each once. */
+function cleanTaskChecks(value: unknown): TaskCheck[] {
+  if (!Array.isArray(value)) throw new PlanError('`add` is a list of checks: [{name?, run, stage?: "implement" | "review", optional?}].');
+  if (value.length > MAX_TASK_CHECKS) throw new PlanError(`A task adds at most ${MAX_TASK_CHECKS} checks of its own.`);
+  const out: TaskCheck[] = [];
+  for (const raw of value) {
+    const c = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+    const run = clean(c['run'], 1_000);
+    if (!run) throw new PlanError('Each check a task adds needs `run`: the command, run from the repository root.');
+    const name = clean(c['name'], 60) ?? run.split(/\s+/).slice(0, 3).join(' ').slice(0, 60);
+    const stage = c['stage'] === undefined ? 'review' : oneOf(c['stage'], TASK_CHECK_STAGES, 'a stage for a task\'s own check');
+    if (!stage) throw new PlanError('A task\'s own check runs at "implement" or "review".');
+    if (out.some((x) => x.name === name)) throw new PlanError(`Two of the task's checks are called "${name}": give each a name of its own.`);
+    out.push({ name, run, stage, ...(c['optional'] === true ? { optional: true } : {}) });
+  }
+  return out;
+}
+
+/** The repository checks a task leaves out, by name. */
+function cleanSkips(value: unknown): string[] {
+  if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) throw new PlanError('`skip` is a list of the names of repository checks, e.g. ["tests"].');
+  const names = [...new Set((value as string[]).map((v) => v.trim().slice(0, 60)).filter(Boolean))];
+  if (names.length > MAX_SKIPS) throw new PlanError(`A task skips at most ${MAX_SKIPS} checks.`);
+  return names;
+}
+
+/** What a task's own checks say, in words: "skips tests; adds db:check (review)". */
+export function taskCheckWords(task: Pick<Task, 'addChecks' | 'skipChecks'>): string {
+  return [
+    task.skipChecks?.length ? `skips ${task.skipChecks.join(', ')}` : '',
+    task.addChecks?.length ? `adds ${task.addChecks.map((c) => `${c.name} (${c.stage}${c.optional ? ', optional' : ''})`).join(', ')}` : '',
+  ]
+    .filter(Boolean)
+    .join('; ');
+}
+
 export function cleanChecks(value: unknown): CheckResult[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const out: CheckResult[] = [];
@@ -1868,7 +1960,7 @@ const TASK_SHAPE_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task']
 const PROPOSAL_OPS: ReadonlySet<string> = new Set(['propose', 'accept_proposal', 'reject_proposal', 'withdraw_proposal']);
 
 /** What the user may still do once the plan is submitted. */
-const USER_ON_LOCKED: ReadonlySet<string> = new Set(['review_task', 'accept_proposal', 'reject_proposal']);
+const USER_ON_LOCKED: ReadonlySet<string> = new Set(['review_task', 'set_checks', 'accept_proposal', 'reject_proposal']);
 
 /** What a proposal may carry (src/shared/proposal-ops.ts), here too. */
 export { PROPOSABLE_OPS, MAX_PROPOSAL_OPS };
@@ -1890,7 +1982,7 @@ const DESIGN_LOCKED_FOR_CLAUDE =
 
 /** What a confirmed design still lets anyone do: work on the tasks, link
  *  them to boxes (checked inside upsert_diagram), and talk about it. */
-const TASKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task', 'upsert_diagram', 'upsert_node', 'review_task', 'set_branch', 'comment', 'reply', 'resolve', 'report']);
+const TASKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task', 'upsert_diagram', 'upsert_node', 'review_task', 'set_checks', 'set_branch', 'comment', 'reply', 'resolve', 'report']);
 
 /** Where the plan is in its life. */
 export function planPhase(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> & Partial<Pick<Plan, 'report'>>) | null): PlanPhase {
@@ -2027,7 +2119,10 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
       return d ? fingerprint(designWithoutLinks(d)) : 0;
     }
     const t = plan.tasks.find((x) => x.id === id);
-    return t ? fingerprint(JSON.stringify([t.title, t.detail ?? '', t.parentId, t.dependsOn ?? [], t.branch ?? '', t.review ?? '', t.files ?? []])) : 0;
+    // A task's own checks count once it has some — so a fingerprint taken
+    // before they existed still matches a task that has none.
+    const checks = t?.addChecks?.length || t?.skipChecks?.length ? [t.addChecks ?? [], t.skipChecks ?? []] : [];
+    return t ? fingerprint(JSON.stringify([t.title, t.detail ?? '', t.parentId, t.dependsOn ?? [], t.branch ?? '', t.review ?? '', t.files ?? [], ...checks])) : 0;
   };
   for (const op of ops) {
     switch (op.op) {
@@ -2050,6 +2145,7 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
         break;
       case 'upsert_task':
       case 'move_task':
+      case 'set_checks':
         if (op.id) out[`task:${op.id}`] = rev('task', op.id);
         break;
       case 'remove':
@@ -2091,7 +2187,7 @@ function proposalTarget(plan: Plan, ops: PlanOp[]): Target {
             ? { kind: 'section', id: op.id }
             : op.op === 'upsert_diagram' && op.id
               ? { kind: 'diagram', id: op.id }
-              : (op.op === 'upsert_task' || op.op === 'move_task') && op.id
+              : (op.op === 'upsert_task' || op.op === 'move_task' || op.op === 'set_checks') && op.id
                 ? { kind: 'task', id: op.id }
                 : op.op === 'remove'
                   ? { kind: op.kind, id: op.id }
@@ -2114,7 +2210,11 @@ function checkLocked(ops: PlanOp[], author: Author): void {
     if (ops.every((op) => USER_ON_LOCKED.has((op as { op?: string })?.op ?? ''))) return;
     throw new PlanError(LOCKED_FOR_USER);
   }
-  const refused = ops.find((op) => !TRACKING_OPS.has((op as { op?: string })?.op ?? '') && !PROPOSAL_OPS.has((op as { op?: string })?.op ?? ''));
+  // set_checks is refused to the agent by its own, plainer reason.
+  const refused = ops.find((op) => {
+    const name = (op as { op?: string })?.op ?? '';
+    return !TRACKING_OPS.has(name) && !PROPOSAL_OPS.has(name) && name !== 'set_checks';
+  });
   if (refused) throw new PlanError(`${LOCKED_FOR_CLAUDE} (Refused: ${(refused as { op?: string })?.op ?? 'an edit'}.)`);
 }
 

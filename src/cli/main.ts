@@ -352,7 +352,7 @@ usage: coplan <command>
   url  [id]  print the UI url (with auth token)
   logs       tail the daemon log
   doctor     verify the plugin wiring end to end
-  check [implement|review|final] [--files a,b] [--base ref] [--no-diff] [--list] [--json]
+  check [implement|review|final] [--files a,b] [--base ref] [--no-diff] [--skip a,b] [--list] [--json]
              run that stage's hooks from .coplan/config.json (default: review);
              at review and final, --files also takes the files git says changed
   init [--print] [--force]

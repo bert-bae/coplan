@@ -90,7 +90,8 @@ export const api = {
 
   /** The session, how its repository counts each plan-check rule, and what
    *  is wrong with the harness config it reads. */
-  session: (id: string) => request<{ session: SessionState; planCheck?: GapSeverities; configErrors?: string[] }>(`/api/session/${id}`),
+  session: (id: string) =>
+    request<{ session: SessionState; planCheck?: GapSeverities; configErrors?: string[]; projectChecks?: ProjectChecks }>(`/api/session/${id}`),
 
   /** Permanent: the daemon removes the session's on-disk directory too. */
   deleteSession: (id: string) => request<{ deleted: boolean }>(`/api/session/${id}`, { method: 'DELETE' }),
@@ -175,6 +176,12 @@ export const api = {
   /** Unauthenticated liveness; `pid` tells a successor from a survivor. */
   health: () => request<{ ok: boolean; version: string; pid: number }>('/health'),
 };
+
+/** The repository's checks by stage, for a task to skip (#54). */
+export interface ProjectChecks {
+  implement: string[];
+  review: string[];
+}
 
 export interface PromptPreview {
   prompt: string;

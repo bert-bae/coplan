@@ -16,7 +16,7 @@
  *   each of its ancestors depends on, so "the API work waits for the cache"
  *   is said once, on the parent.
  */
-import type { BranchState, BuildSettings, BuildTarget, ExecutionMode, Plan, ReviewMode, ReviewRecord, Task } from './types.ts';
+import type { BranchState, BuildSettings, BuildTarget, ExecutionMode, Plan, ReviewMode, ReviewRecord, Task, TaskCheck } from './types.ts';
 import { EXECUTION_MODES, REVIEW_MODES } from './types.ts';
 
 type Tasks = Pick<Plan, 'tasks'>;
@@ -475,6 +475,18 @@ export function validReview(value: unknown): ReviewMode | undefined {
 
 /** How a task is reviewed: its own setting, the nearest ancestor's, or the
  *  build's default. */
+/**
+ * The checks a task sets for itself, its parents' included (#54): every
+ * repository check any of them skips, and every check any of them adds —
+ * the nearest one's, where two add a check of the same name.
+ */
+export function effectiveChecks(plan: Tasks, task: Task): { add: TaskCheck[]; skip: string[] } {
+  const chain = [task, ...ancestorsOf(plan, task)];
+  const add: TaskCheck[] = [];
+  for (const t of chain) for (const c of t.addChecks ?? []) if (!add.some((a) => a.name === c.name)) add.push(c);
+  return { add, skip: [...new Set(chain.flatMap((t) => t.skipChecks ?? []))] };
+}
+
 export function effectiveReview(plan: Tasks, task: Task, fallback: ReviewMode): ReviewMode {
   for (const t of [task, ...ancestorsOf(plan, task)]) if (t.review) return t.review;
   return fallback;

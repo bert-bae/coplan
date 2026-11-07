@@ -200,6 +200,33 @@ const OP_PROPERTIES: Record<string, unknown> = {
   },
 };
 
+/**
+ * What a proposal's edits can carry besides harness_plan_edit's: the
+ * fields of set_checks, which only the user applies — so the agent only
+ * ever proposes it (#54).
+ */
+const PROPOSE_PROPERTIES: Record<string, unknown> = {
+  ...OP_PROPERTIES,
+  add: {
+    type: 'array',
+    description: 'set_checks: checks of the task\'s own, replacing those it had ([] clears them).',
+    items: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        run: { type: 'string', description: 'The command, run from the repository root.' },
+        stage: { type: 'string', enum: ['implement', 'review'], description: 'Default "review": done waits on it.' },
+        optional: { type: 'boolean' },
+      },
+      required: ['run'],
+    },
+  },
+  skip: {
+    ...STR_LIST,
+    description: 'set_checks: names of the repository\'s checks the task does not run, replacing the list ([] clears it).',
+  },
+};
+
 export const TOOLS: ToolDef[] = [
   {
     name: 'harness_plan_publish',
@@ -329,7 +356,9 @@ export const TOOLS: ToolDef[] = [
       'like). Use it when you audit the plan and find something the user should decide — a design flaw, a missing ' +
       'part, a task split — and when the plan is confirmed or submitted, for the changes it no longer lets you make. ' +
       'Nothing changes until they answer; you hear it the next time you read the plan. It is refused if it would ' +
-      'not apply to the plan as it is, and goes out of date if what it changes moves first. ' +
+      'not apply to the plan as it is, and goes out of date if what it changes moves first. Which checks a task runs ' +
+      'is the user\'s alone, so it is only ever proposed: set_checks {id, add?, skip?} — skip names repository checks the ' +
+      'task leaves out (a docs-only task skipping the tests), add gives it checks of its own ({name?, run, stage?, optional?}). ' +
       'Example: {title: "Make the cache write-through", reason: "Reads after a write see stale data for up to the TTL.", ' +
       'ops: [{op: "upsert_node", diagramId: "d1", id: "cache", description: "Write-through: every write updates it."}]}.',
     inputSchema: {
@@ -346,7 +375,7 @@ export const TOOLS: ToolDef[] = [
             description: 'One edit, as in harness_plan_edit.',
             properties: {
               op: { type: 'string', enum: [...PROPOSAL_EDIT_OPS] },
-              ...OP_PROPERTIES,
+              ...PROPOSE_PROPERTIES,
             },
             required: ['op'],
             additionalProperties: false,

@@ -102,6 +102,7 @@ Claude answers with the task list. Each task can say:
 | Starts after (`dependsOn`) | Tasks that must be done first. A parent's apply to all its subtasks, and depending on a parent means waiting for all of it. Loops are refused. Anything without one can run alongside the rest. |
 | Branch | Where the work lands; subtasks inherit it. A branch whose tasks build on another branch's is *stacked* on it. No branch means the session's current branch. |
 | Review | `subagent`, `self`, `user` or `skip`, when a task needs other than the build's default. |
+| Checks | The repository's, unless you set them for the task: untick one to skip it (a docs-only task skipping the tests), or add one of its own (a migration adding `pnpm db:check`). Only you set them — Claude proposes — even mid-build, from the task's card. A skip shows on the task, in its brief and under the build report; an added check gates the task like the repository's, unless optional. |
 | Builds (`builds`) | The boxes it implements, so the diagram tracks it. |
 
 The Tasks view marks each task *ready* or what it *waits on*, and shows the

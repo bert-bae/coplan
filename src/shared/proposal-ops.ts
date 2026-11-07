@@ -19,6 +19,8 @@ export const PROPOSABLE_OPS: ReadonlySet<string> = new Set([
   'upsert_edge',
   'remove_edge',
   'remove',
+  // Which checks a task runs: the user's alone, so the agent proposes it (#54).
+  'set_checks',
 ]);
 
 export const MAX_PROPOSAL_OPS = 40;

@@ -243,6 +243,10 @@ test('at review, coplan check also runs the hooks for files the change touched o
     const json = run('review', '--files', 'app.ts', '--json');
     assert.deepEqual((JSON.parse(json.stdout) as { name: string }[]).map((r) => r.name), ['ts tests', 'py tests']);
     assert.match(json.stderr, /also running py tests/, 'said on stderr, so stdout stays parseable');
+    // A check the user skipped for the task is not run, and that is said (#54).
+    const skipped = run('review', '--files', 'app.ts', '--skip', 'py tests');
+    assert.doesNotMatch(skipped.stdout, /✓ py tests/);
+    assert.match(skipped.stdout, /not running py tests — skipped for this task/);
     // --no-diff keeps to the files named; implement never reads a diff.
     assert.doesNotMatch(run('review', '--files', 'app.ts', '--no-diff').stdout, /py tests/);
     assert.match(run('implement', '--files', 'app.ts').stdout, /No implement hooks apply to these files/);

@@ -146,6 +146,10 @@ seeds into a throwaway daemon, the way real hooks and tool calls would.
   *Review* (what was built waits on you) or *Done*, in the same words in the
   header, the session list and the strip under the header — and the session
   list filters by them.
+- **Checks per task, set by you.** A docs-only task can skip the test suite,
+  a migration can add its own check. Only you set them — Claude proposes —
+  and a skipped check shows on the task, in its brief and under the report,
+  so a gate is never dropped quietly.
 - **Live progress.** Cards move across the board and boxes fill up as Claude
   marks tasks in progress, done or blocked.
 - **Your chat stays the chat.** Coplan never starts a turn or answers for you.
@@ -429,9 +433,9 @@ it uses the skill.
 
 | Skill | The agent uses it when | It tells the agent to | So the agent may |
 | --- | --- | --- | --- |
-| [`coplan`](skills/coplan/SKILL.md) (15 KB) | you type `/coplan` or `$coplan`, ask to plan something in Coplan or to set Coplan up, tell it to go ahead with a plan, or a confirmed design or a revision request arrives | investigate the code, publish the design, read your edits back and answer your comments (one by one, or all at once when you request revisions), propose changes that are yours to decide rather than make them, then break the confirmed design into a task list — and build when you say so, in chat or by submitting | call Coplan's tools; ask you in chat, only what it must; propose edits for you to accept or reject; sign the plan off for you when you tell it in chat to go ahead, quoting you; tell you to run `./setup.sh` in your clone when you ask it to set Coplan up or update it (or, in a checkout that was never built, run `pnpm install` there) |
+| [`coplan`](skills/coplan/SKILL.md) (16 KB) | you type `/coplan` or `$coplan`, ask to plan something in Coplan or to set Coplan up, tell it to go ahead with a plan, or a confirmed design or a revision request arrives | investigate the code, publish the design, read your edits back and answer your comments (one by one, or all at once when you request revisions), propose changes that are yours to decide rather than make them, then break the confirmed design into a task list — and build when you say so, in chat or by submitting | call Coplan's tools; ask you in chat, only what it must; propose edits for you to accept or reject; sign the plan off for you when you tell it in chat to go ahead, quoting you; tell you to run `./setup.sh` in your clone when you ask it to set Coplan up or update it (or, in a checkout that was never built, run `pnpm install` there) |
 | [`coplan-build`](skills/coplan-build/SKILL.md) (8 KB) | a submitted plan's build prompt arrives, or you ask it to build a Coplan plan | submit it for you first if you said to build one you have not submitted; start only tasks that are ready, build independent ones side by side where it can, land each on its branch, keep the board true, then run the final checks and write the report | use subagents and git worktrees when it has them and they help (up to `parallel` tasks at once in a Managed build); create branches; commit in the granularity the repository's history uses; rebase stacked branches; run the repository's checks; push the branches; open pull requests with `gh` or Graphite, as the repository's [`pullRequests`](docs/CONFIG.md#pullrequests) says — by default only once you say so — written from its pull request template if it has one |
-| [`iric`](skills/iric/SKILL.md) (6 KB) | building each task of a Managed build, or when you ask to run a task through iric | implement inside the task's scope, run the checks, have it reviewed the way you chose, refine until it passes or the round limit, and report each step | run the `implement` and `review` checks; start a reviewer subagent where it has them (review `subagent`), on the model [`review.model`](docs/CONFIG.md#review) names if one is set; ask you only where a Managed build keeps the decision for you (review `user`, past `maxRounds`, a check that fails) |
+| [`iric`](skills/iric/SKILL.md) (7 KB) | building each task of a Managed build, or when you ask to run a task through iric | implement inside the task's scope, run the checks, have it reviewed the way you chose, refine until it passes or the round limit, and report each step | run the `implement` and `review` checks; start a reviewer subagent where it has them (review `subagent`), on the model [`review.model`](docs/CONFIG.md#review) names if one is set; ask you only where a Managed build keeps the decision for you (review `user`, past `maxRounds`, a check that fails) |
 
 ### The MCP server: `harness`
 
@@ -458,7 +462,7 @@ The eleven tools:
 | `harness_plan_read` | No — marks your edits as read | The plan as text, leading with the net effect of your changes since the last read, with every id Claude needs. Diagrams read as an architecture: the system's shape, each part in flow order with its description, decisions and tasks, then every connection. `changes_only` skips the document and quotes edited text instead. |
 | `harness_plan_check` | No | What the plan leaves open: boxes no task builds, tasks that build no box, undescribed boxes, tasks with no detail, box ids two diagrams share, branch layouts a stack of pull requests cannot follow, and your comments nobody answered. The same list shows in the sign-off dialogs. |
 | `harness_plan_edit` | Yes | A batch of targeted edits — sections, diagrams, one box or arrow at a time, tasks, moves, comments (on the plan, an item, or one box or arrow) and replies, the build report — applied all or nothing. Once the design is confirmed, only tasks, task links and comments; once the plan is submitted, only task edits, comments and the report. |
-| `harness_plan_propose` | Not until you accept it | Suggest a change instead of making it: a batch of edits, with Claude's reason, that waits for you. You see it beside what it changes — and on the canvas, what it adds, changes and removes — and accept it (the edits apply, as yours) or reject it, saying why if you like. Claude hears your answer the next time it reads. A proposal you have moved past goes out of date and cannot be accepted. |
+| `harness_plan_propose` | Not until you accept it | Suggest a change instead of making it: a batch of edits, with Claude's reason, that waits for you. You see it beside what it changes — and on the canvas, what it adds, changes and removes — and accept it (the edits apply, as yours) or reject it, saying why if you like. Claude hears your answer the next time it reads. A proposal you have moved past goes out of date and cannot be accepted. Which checks a task runs (`set_checks`: skip one of the repository's, add one of its own) is yours alone, so Claude only ever proposes it. |
 | `harness_plan_advance` | Yes — signs it off | When you tell Claude in chat to go ahead: confirms the design (`to: "tasks"`) or submits the plan (`to: "build"`) as the page would, with the build settings you last chose in *Submit* or the repository's defaults, and locks it. Only with your words (`user_said`), which the page shows beside the sign-off; returns the prompt the page would have sent. |
 | `harness_tasks_publish` | Yes | Publish the task list for the confirmed design: replaces the task tree and nothing else, with dependencies, branches, review modes and the boxes each task builds. |
 | `harness_task_next` | No | What can be built now: ready tasks, how many to run at once, what is in progress and at which step, what the rest wait on, the branches — and, once every task is done, how to finish. |
@@ -661,9 +665,9 @@ counts against the model's tokens.
 
 | What | Size | When |
 | --- | --- | --- |
-| The eleven tool definitions | About 33 KB of JSON schema — on the order of 8,000–10,000 tokens | Whenever the agent loads the server's tools |
+| The eleven tool definitions | About 34 KB of JSON schema — on the order of 8,000–10,000 tokens | Whenever the agent loads the server's tools |
 | The three skill descriptions | About 1.4 KB | Always listed |
-| A skill's body | 15.5 KB (`coplan`), 8.2 KB (`coplan-build`), 6.4 KB (`iric`) | When the agent uses that skill |
+| A skill's body | 16.0 KB (`coplan`), 8.3 KB (`coplan-build`), 6.6 KB (`iric`) | When the agent uses that skill |
 | The plan, read back | About 9,000 characters for two diagrams and ten tasks; about 140,000 for 150 boxes and 150 tasks | Each `harness_plan_read` (`changes_only` is shorter), and each publish's reply |
 | A sign-off prompt | About 6,000 characters for a seven-task plan; a hook adds at most about 10,000, and a longer plan is handed over as its summary and task list | Once per sign-off |
 | "You changed the plan" | One line | Your next message after you edit |
