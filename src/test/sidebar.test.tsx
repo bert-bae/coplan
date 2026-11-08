@@ -64,6 +64,7 @@ function summary(sessionId: string, repo: string, createdAt: number, updatedAt: 
     openThreads: 0,
     unreadByClaude: 0,
     engaged: true,
+    hooked: true,
   };
 }
 

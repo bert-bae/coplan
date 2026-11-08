@@ -105,6 +105,24 @@ test('the cache reads a file again once it changes, and says each problem once',
   }
 });
 
+test('the cache says what is wrong now, for the page — and nothing once it is fixed (#52)', () => {
+  const dirs = homes('{ "autoOpen": "yes" }');
+  const cache = new ConfigCache(dirs.configDir);
+  try {
+    const errors = cache.errors(dirs.projectDir);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0]!, /config\.json: "autoOpen" must be true or false; "yes" is not, so false is used\./);
+    // Asked again, the same — unlike the log, which hears each once.
+    assert.deepEqual(cache.errors(dirs.projectDir), errors);
+    const file = path.join(dirs.configDir, 'config.json');
+    writeFileSync(file, '{ "autoOpen": true }');
+    utimesSync(file, new Date(), new Date(Date.now() + 2000));
+    assert.deepEqual(cache.errors(dirs.projectDir), []);
+  } finally {
+    removeHomes(dirs);
+  }
+});
+
 test('the documented defaults are the defaults', () => {
   const doc = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'docs', 'CONFIG.md'), 'utf8');
   for (const [key, value] of Object.entries(DEFAULT_CONFIG)) {

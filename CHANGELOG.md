@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Checks for what the change touched, Codex hooks that do not run, config errors in the page
+
+- **A file edited outside the plan no longer skips its check.** At `review`
+  and `final`, a hook limited to some files (`paths`) runs for the files a
+  task planned to touch *and* every file the change touched, as git says:
+  committed since the base branch, staged, unstaged or new.
+  `coplan check review --files a,b` adds them by itself (and says which
+  hooks they brought in); `--base <ref>` says what to measure from (default
+  `branches.base`), and `--no-diff` keeps to `--files`. A Managed task is
+  not done until it reported those checks too, and the refusal names the
+  file. `implement`, which runs before there is a diff, is as before, and so
+  is a task that lists no files: it already gets every hook.
+- **`coplan doctor` notices when Codex is not running Coplan's hooks.** Codex
+  runs a plugin's hooks only once you trust them in `/hooks`, and again
+  after every update changes them; until then a thread can use Coplan's
+  tools while no sign-off rides along with your messages and no question is
+  shown. The doctor now says so when the latest Codex thread that used
+  Coplan never had a hook reach it, and how to fix it. Where Codex keeps
+  that trust is not documented, so the doctor reads the symptom, not the
+  setting.
+- **What is wrong with the harness config is said in the page**: each
+  problem in `~/.claude/cc-harness/config.json` or a repository's
+  `.claude/harness.json` — a setting of the wrong type, one a repository
+  may not set, a file that is not JSON — shows once as a toast when you open
+  a session, not only in `daemon.log` and the doctor.
+
 ### Request revisions from the page: open comments as one ask
 
 - **Request revisions**, in the header, sends every comment waiting on the

@@ -1808,3 +1808,20 @@ test('with a link, queuing opens the session where "Answer in" does; in Cursor t
   assert.ok(posts.some((p) => p.route.endsWith('/plan/revisions')));
   assert.match(screen.getByTestId('revision-state').getAttribute('title') ?? '', /paste it into Cursor's chat/);
 });
+
+/* ------------------------------------------------------ Harness config errors (#52) */
+
+test('what is wrong with the harness config is said in the page, once per problem (#52)', async () => {
+  const problem = '/repo/.claude/harness.json: "autoOpen" must be true or false; "yes" is not, so false is used.';
+  const session = makeSession();
+  await boot(session, (route) => (route === '/api/session/s1' ? { session, configErrors: [problem] } : undefined));
+  const said = () => store.getState().toasts.filter((t) => t.text.includes('"autoOpen" must be true or false'));
+  await waitFor(() => assert.equal(said().length, 1));
+  assert.equal(said()[0]!.kind, 'error');
+  assert.match(said()[0]!.text, /^Coplan's config: .*Run coplan doctor to see every problem\.$/);
+  // Loaded again (the live stream reconnecting, the session picked again): not said twice.
+  await act(async () => {
+    await store.selectSession('s1');
+  });
+  assert.equal(said().length, 1);
+});

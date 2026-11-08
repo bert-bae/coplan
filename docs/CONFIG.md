@@ -109,7 +109,7 @@ A hook is a command, run from the repository root, or an object:
 | `run` | The shell command. Required. |
 | `name` | What it is called in reports and on the board, up to 60 characters. Defaults to the script name (`pnpm lint` or `npm run lint` → `lint`). |
 | `timeout` | Seconds before `coplan check` stops it: 1 to 3600. Default 600. |
-| `paths` | Globs (`src/**`, `*.py`, `docs/`, `src/**/*.{ts,tsx}`): the hook applies only to tasks that expect to touch a matching file. A task that lists no files gets every hook. `**` crosses directories, `*` and `?` do not, `{a,b}` is either; a glob without a slash matches a file name anywhere, and one ending in `/` everything under it. A `!glob` takes files back out: `["src/**", "!src/gen/**"]`. |
+| `paths` | Globs (`src/**`, `*.py`, `docs/`, `src/**/*.{ts,tsx}`): the hook applies only to tasks that touch a matching file — at `implement`, the files the task expects to touch; at `review` and `final`, those and every file the change touched, as git says (committed since the base branch, staged, unstaged or new), so a file edited outside the plan never skips its check. A task that lists no files gets every hook. `**` crosses directories, `*` and `?` do not, `{a,b}` is either; a glob without a slash matches a file name anywhere, and one ending in `/` everything under it. A `!glob` takes files back out: `["src/**", "!src/gen/**"]`. |
 | `cwd` | The folder it runs in, inside the repository: a package of a monorepo (`"packages/api"`). Default the repository root. While the folder does not exist the hook fails, saying so, rather than run somewhere it would check nothing. |
 | `env` | Variables set for it, up to 20: `{ "NODE_ENV": "test" }`. The prompts show the command with both, as one line the agent can run from the root. |
 | `optional` | `true`: a failure is reported but does not hold the task back. |
@@ -120,11 +120,16 @@ Coplan never runs these itself. They reach Claude in the build prompt and in
 each task's brief (`harness_task_brief`), and Claude runs them like any
 other command, under your permission settings. `coplan check <stage>` runs a
 whole stage at once and prints only the tail of what failed; `--files a,b`
-keeps to the hooks for those files, `--list` prints them without running,
-and `--json` prints results in the shape `harness_task_update` takes.
+keeps to the hooks for those files — at `review` and `final`, and for the
+files git says the change touched, measured from `branches.base` (or
+`--base <ref>`; `--no-diff` keeps to `--files` alone) — `--list` prints them
+without running, and `--json` prints results in the shape
+`harness_task_update` takes.
 
 Claude reports the checks it ran with each task. A task whose last reported
-checks include a failure (not `optional`) cannot be marked done.
+checks include a failure (not `optional`) cannot be marked done, and nor can
+one that never reported a required `review` check for its files — the files
+it planned to touch and the files the change touched.
 
 A file that cannot be read, a stage that does not exist, a hook without a
 command, a key Coplan does not read (often a typo of one it does), a value

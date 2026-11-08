@@ -125,8 +125,14 @@ By hand, the same is:
   daemon's version, and a whole round trip with real hook payloads.
 - **The build failed:** `setup.log` in the clone has all of its output. An
   old or missing Node.js is the usual cause.
-- **In Codex, Coplan's tools say no session is registered:** trust Coplan's
-  hooks in `/hooks`, then start a new thread.
+- **In Codex, Coplan's tools say no session is registered — or the plan
+  works, but a confirmed design or a submitted plan never arrives with your
+  next message, and a question Codex asks is not shown:** Codex is not
+  running Coplan's hooks. It runs a plugin's hooks only once you trust them
+  in `/hooks`, and again after every update changes them (`./setup.sh`
+  updates them). Trust them in `/hooks`, then start a new thread.
+  `coplan doctor` notices this: it says so when the latest Codex thread
+  used Coplan's tools but none of its hooks reached Coplan.
 - **"Coplan is not built":** a checkout you load directly (for example with
   `claude --plugin-dir`) has to be built once. Run `./setup.sh` in it, or
   `pnpm install` to only build it.

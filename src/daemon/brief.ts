@@ -426,6 +426,7 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
       hooksFor(project, 'review', files),
       review === 'subagent' ? reviewerWords(project) : '',
     );
+    b.push(...outsideChecks(project, files, 'cycle:review:outside'));
     // What a reviewer looks for here, whoever reviews.
     if (review !== 'skip') b.push(...instructionBlocks(project, 'review', '### What the review checks here'));
     b.gap().add('cycle:refine', TEMPLATE, '**Refine.** Fix what the review found, run the implement checks again, and go back to review.');
@@ -483,6 +484,23 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
 }
 
 /**
+ * The review checks this task's own files leave out, which still run if
+ * the change touches their files (#52): `coplan check review` adds them
+ * from git, and done waits on them. Nothing when none is left out.
+ */
+function outsideChecks(project: ProjectConfig, files: string[], id: string): Block[] {
+  if (!files.length) return [];
+  const own = hooksFor(project, 'review', files);
+  const left = project.hooks.review.filter((h) => !own.includes(h));
+  if (!left.length) return [];
+  return new BlockList().add(
+    id,
+    configSource(project, 'hooks.review'),
+    `If the change touches files outside this task's, their review checks run too — ${left.map((h) => `${h.name} (for ${(h.paths ?? []).join(', ')})`).join('; ')}: \`coplan check review\` adds them from git, and done waits on them.`,
+  ).blocks;
+}
+
+/**
  * A Tracked task's checks and how to report it: the repository's checks
  * for its files, and its status as it goes — no cycle, no review mode,
  * no round limit. How it is built and checked is the agent's call.
@@ -495,6 +513,7 @@ function trackedChecks(plan: Plan, task: Task, project: ProjectConfig, files: st
     for (const st of stages) {
       b.add(`checks:${st}`, configSource(project, `hooks.${st}`), `- ${st}: ${hooksFor(project, st, files).map((h) => `${h.name} \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`).join('; ')}`);
     }
+    b.push(...outsideChecks(project, files, 'checks:outside'));
     const filesArg = files.length ? ` --files ${[...new Set(files)].join(',')}` : '';
     if (bin) b.gap().add('checks:run', TEMPLATE, `Run a stage at once: \`"${bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report.`);
   } else if (!hasHooks(project)) {

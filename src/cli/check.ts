@@ -11,6 +11,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { HOOK_STAGES, DEFAULT_HOOK_TIMEOUT, PROJECT_CONFIG_PATH, hookCommand, hooksFor, loadProjectConfig, type CheckHook, type HookStage } from '../shared/project.ts';
 import type { CheckResult } from '../shared/types.ts';
+import { changedFiles, filesForStage } from '../shared/changes.ts';
 
 /** Lines of a failing hook's output shown. Enough to see the error. */
 const TAIL_LINES = 40;
@@ -30,6 +31,11 @@ interface Options {
   files: string[];
   list: boolean;
   json: boolean;
+  /** What the change is measured from at review and final; the
+   *  repository's base branch (`branches.base`) without. */
+  base?: string;
+  /** Match only `--files`, not what the change touched. */
+  noDiff: boolean;
 }
 
 function parseArgs(args: string[]): Options | string {
@@ -37,16 +43,21 @@ function parseArgs(args: string[]): Options | string {
   const files: string[] = [];
   let list = false;
   let json = false;
+  let base: string | undefined;
+  let noDiff = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === '--list') list = true;
     else if (a === '--json') json = true;
+    else if (a === '--no-diff') noDiff = true;
+    else if (a === '--base') base = args[++i] || undefined;
+    else if (a.startsWith('--base=')) base = a.slice(7) || undefined;
     else if (a === '--files') files.push(...(args[++i] ?? '').split(',').map((f) => f.trim()).filter(Boolean));
     else if (a.startsWith('--files=')) files.push(...a.slice(8).split(',').map((f) => f.trim()).filter(Boolean));
     else if ((HOOK_STAGES as readonly string[]).includes(a)) stage = a as HookStage;
     else return `unknown argument "${a}". Stages: ${HOOK_STAGES.join(', ')}.`;
   }
-  return { stage, files, list, json };
+  return { stage, files, list, json, noDiff, ...(base ? { base } : {}) };
 }
 
 export async function runCheck(args: string[], cwd = process.cwd()): Promise<number> {
@@ -73,7 +84,21 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
     } else console.log(say);
     return 0;
   }
-  const hooks = hooksFor(config, opts.stage, opts.files);
+  // At review and at the end there is a diff: a hook limited to some files
+  // runs for every file the change touched, not only the ones the task
+  // planned to (#52). A task that names no files gets every hook anyway.
+  const changed = opts.stage !== 'implement' && opts.files.length && !opts.noDiff ? await changedFiles(root, opts.base ?? config.branches.base) : null;
+  const files = filesForStage(opts.stage, opts.files, changed?.files);
+  const hooks = hooksFor(config, opts.stage, files);
+  const added = hooks.filter((h) => !hooksFor(config, opts.stage, opts.files).includes(h));
+  if (added.length && changed) {
+    const outside = changed.files.filter((f) => !opts.files.includes(f));
+    const say =
+      `coplan: also running ${added.map((h) => h.name).join(', ')} — the change touches files outside --files ` +
+      `(${outside.slice(0, 5).join(', ')}${outside.length > 5 ? ', …' : ''}${changed.base ? `, against ${changed.base}` : ''}).`;
+    if (opts.json) console.error(say);
+    else console.log(say);
+  }
   if (!hooks.length) {
     if (opts.json) console.log('[]');
     else console.log(`No ${opts.stage} hooks${opts.files.length ? ' apply to these files' : ''} in ${PROJECT_CONFIG_PATH}.`);

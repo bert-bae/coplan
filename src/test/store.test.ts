@@ -176,6 +176,21 @@ test('a plan missing lists from an older build still loads', async () => {
   assert.equal(plan!.seq, 3);
 });
 
+test('whether a session\'s hooks ran is kept; one saved before it was recorded is taken to have run them (#52)', async () => {
+  const dir = path.join(home, 'sessions', 'before-hooked');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ sessionId: 'before-hooked', cwd: '/x', title: 't', status: 'idle', createdAt: 5, updatedAt: Date.now(), plan: null }));
+  const store = await freshStore();
+  store.ensure('tools-only', process.cwd(), 'codex');
+  store.persistNow('tools-only');
+  const { summarize } = await import('../daemon/store.ts');
+  const reloaded = await freshStore();
+  assert.equal(reloaded.get('before-hooked')?.hookedAt, 5);
+  assert.equal(summarize(reloaded.get('before-hooked')!).hooked, true);
+  assert.equal(reloaded.get('tools-only')?.hookedAt, null, 'still none after a restart');
+  assert.equal(summarize(reloaded.get('tools-only')!).hooked, false);
+});
+
 test('a session saved by a newer Coplan is never read wrongly or saved over', async () => {
   const dir = path.join(home, 'sessions', 'from-the-future');
   mkdirSync(dir, { recursive: true });
