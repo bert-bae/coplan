@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### A task's own checks: skip one, or add one, set by you
+
+- **A task can skip one of the repository's checks, or add its own** — a
+  docs-only task skipping the test suite, a migration adding
+  `pnpm db:check`. Set them in the task's details (*Checks*: untick one to
+  skip it, add a command with its stage and whether it is optional), or on
+  its card during the build. Subtasks inherit them.
+- **Only you set them.** The agent cannot skip a check on the task it is
+  building: its edit is refused, and it proposes the change instead
+  (`set_checks` in `harness_plan_propose`), which you accept or reject —
+  mid-build too.
+- **A skip is never silent.** It shows as a chip on the task and its card,
+  in the task's brief (*Checks set for this task*), in the read-back and
+  what the agent hears changed, in the finish step (the report must say it)
+  and under the build report in the Overview.
+- **`done` follows them**: a skipped check is not waited on, and its failure
+  does not hold the task back; an added check is waited on like the
+  repository's, unless optional. `coplan check --skip a,b` leaves skipped
+  checks out.
+
 ### Checks for what the change touched, Codex hooks that do not run, config errors in the page
 
 - **A file edited outside the plan no longer skips its check.** At `review`

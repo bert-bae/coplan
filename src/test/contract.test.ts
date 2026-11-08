@@ -185,6 +185,16 @@ test('harness_plan_propose offers the edits a proposal may carry, and the daemon
   assert.deepEqual((tool.inputSchema['required'] as string[]).sort(), ['ops', 'reason', 'title']);
 });
 
+test("a task's checks are only ever proposed: set_checks is in harness_plan_propose, with its fields, and not in harness_plan_edit (#54)", () => {
+  const item = (name: string) => ((toolOf(name)!.inputSchema['properties'] as Record<string, { items: Record<string, unknown> }>)['ops']!.items['properties'] as Record<string, { enum?: string[] }>);
+  assert.ok(item('harness_plan_propose')['op']!.enum!.includes('set_checks'));
+  assert.ok(item('harness_plan_propose')['add'] && item('harness_plan_propose')['skip'], 'its fields are offered');
+  assert.deepEqual(OP_FIELDS.set_checks, ['id', 'add', 'skip']);
+  assert.ok(!item('harness_plan_edit')['op']!.enum!.includes('set_checks'), 'never offered as an edit the agent makes');
+  assert.ok(!('add' in item('harness_plan_edit')) && !('skip' in item('harness_plan_edit')));
+  assert.match(toolOf('harness_plan_propose')!.description, /set_checks \{id, add\?, skip\?\}/);
+});
+
 test('the harness_plan_edit description names every op it offers', () => {
   const description = toolOf('harness_plan_edit')!.description;
   for (const op of AGENT_OPS) assert.match(description, new RegExp(`\\b${op} \\{`), `${op} is not described`);

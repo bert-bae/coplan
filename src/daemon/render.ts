@@ -22,6 +22,7 @@ import {
   unreadAreas,
   unreadByClaude,
   proposalStaleness,
+  taskCheckWords,
   threadsForRevision,
 } from '../shared/plan.ts';
 import { KIND_NOUN, contentOf, diagramBlocks, diagramChanges, diagramToMarkdown, edgePhrase, hang, indent, nestHeadings } from '../shared/architecture.ts';
@@ -314,6 +315,9 @@ export function taskFacts(plan: Plan, task: Task, tracking: boolean): string {
     if (state === 'in_progress' && task.stage) facts.push(stageWords(task));
   }
   if (task.checks?.length && task.status !== 'todo') facts.push(`checks ${checkWords(task)}`);
+  // The checks the user set for it (#54): a skip is never silent.
+  const own = taskCheckWords(task);
+  if (own) facts.push(own);
   return facts.length ? ` · ${facts.join(' · ')}` : '';
 }
 
@@ -1303,6 +1307,10 @@ function taskChanges(base: PlanBaseline, plan: Plan, ids: Set<string>, withText:
       facts.push(`branch ${was.branch ? `\`${was.branch}\`` : 'inherited'} → ${now.branch ? `\`${now.branch}\`` : 'inherited'}`);
     }
     if ((was.review ?? '') !== (now.review ?? '')) facts.push(`review ${was.review ?? 'default'} → ${now.review ?? 'default'}`);
+    // Which checks gate it, as the user set them (#54).
+    if (JSON.stringify([was.addChecks ?? [], was.skipChecks ?? []]) !== JSON.stringify([now.addChecks ?? [], now.skipChecks ?? []])) {
+      facts.push(`its checks now: ${taskCheckWords(now) || "the repository's, nothing set"}`);
+    }
     if (!facts.length) continue;
     out.push(`Changed ${now.id} "${now.title}": ${facts.join('; ')}.`);
     if (withText && (was.detail ?? '').trim() !== (now.detail ?? '').trim() && now.detail?.trim()) out.push('  Detail now:', ...indent(now.detail, 4));

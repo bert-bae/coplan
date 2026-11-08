@@ -230,9 +230,32 @@ export interface Task {
   /** Each review's verdict, newest last: who gave it, in which round, under
    *  which review mode. Done needs a pass for the current round. */
   reviews?: ReviewRecord[];
+  /** Checks of its own, on top of the repository's (#54): required unless
+   *  `optional`. The user's to set (`set_checks`), or an accepted proposal's.
+   *  Subtasks inherit them. */
+  addChecks?: TaskCheck[];
+  /** Names of the repository's checks this task does not run: the user's to
+   *  set, never the agent's, and shown wherever the task's checks are. */
+  skipChecks?: string[];
   createdAt: number;
   updatedAt: number;
   createdBy: Author;
+}
+
+/** The stages a task's own check can run at: the final checks are the
+ *  whole build's, not one task's. */
+export const TASK_CHECK_STAGES = ['implement', 'review'] as const;
+export type TaskCheckStage = (typeof TASK_CHECK_STAGES)[number];
+
+/** A check one task adds to the repository's (#54). */
+export interface TaskCheck {
+  name: string;
+  /** A shell command, run from the repository root. */
+  run: string;
+  /** When it runs; `review` checks gate done. */
+  stage: TaskCheckStage;
+  /** A failure is reported but does not hold the task back. */
+  optional?: boolean;
 }
 
 /** What a comment is attached to. `plan` targets the plan as a whole; a
@@ -511,7 +534,7 @@ export interface PlanBaseline {
   summary: string;
   sections: Pick<Section, 'id' | 'title' | 'body'>[];
   diagrams: (Pick<Diagram, 'id' | 'title' | 'caption' | 'edges'> & { nodes: Omit<DiagramNode, 'x' | 'y'>[] })[];
-  tasks: Pick<Task, 'id' | 'parentId' | 'order' | 'title' | 'detail' | 'status' | 'files' | 'note' | 'dependsOn' | 'branch' | 'review'>[];
+  tasks: Pick<Task, 'id' | 'parentId' | 'order' | 'title' | 'detail' | 'status' | 'files' | 'note' | 'dependsOn' | 'branch' | 'review' | 'addChecks' | 'skipChecks'>[];
 }
 
 /* ------------------------------------------------------------------ *
@@ -642,6 +665,10 @@ export type PlanOp =
   /** A review's verdict on a task, for its current round: the user's from
    *  Coplan, or the agent's through harness_task_update. */
   | { op: 'review_task'; id: string; verdict: Verdict; summary?: string; userApproved?: boolean }
+  /** Which checks one task runs, besides the repository's (#54): `add`
+   *  replaces the checks it adds, `skip` the repository checks it leaves
+   *  out ([] clears either). The user's alone — the agent proposes it. */
+  | { op: 'set_checks'; id: string; add?: (Partial<TaskCheck> & { run: string })[]; skip?: string[] }
   | { op: 'comment'; target: Target; text: string }
   | { op: 'reply'; threadId: string; text: string }
   | { op: 'resolve'; threadId: string; resolved: boolean }

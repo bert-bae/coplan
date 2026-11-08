@@ -12,13 +12,14 @@
  * It is written so Claude can hand it to a subagent as it is: the subagent
  * learns how its piece fits the whole, and where its job ends.
  */
-import type { BuildSettings, ExecutionMode, Plan, Task, Thread } from '../shared/types.ts';
+import type { BuildSettings, ExecutionMode, Plan, Task, TaskCheck, Thread } from '../shared/types.ts';
 import { countTasks, describeTarget, findPart, outline, planPhase } from '../shared/plan.ts';
 import {
   DEFAULT_BUILD_SETTINGS,
   MODE_LABEL,
   REVIEW_WORDS,
   ancestorsOf,
+  effectiveChecks,
   branchPlan,
   SESSION_BRANCH,
   baseWords,
@@ -38,7 +39,7 @@ import {
   sharedFiles,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, configSource, emptyProjectConfig, hasHooks, hookCommand, hooksFor, type ProjectConfig } from '../shared/project.ts';
+import { HOOK_STAGES, configSource, emptyProjectConfig, hasHooks, hookCommand, hooksFor, taskHooks, type ProjectConfig } from '../shared/project.ts';
 import { hang, indent, nestHeadings } from '../shared/architecture.ts';
 import { agentInfo, type AgentKind } from '../shared/agents.ts';
 import {
@@ -110,7 +111,7 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
             .join(' → ')}. ${pullRequestWords(project)} Record each pull request with harness_branch_update {branch, pr_url, pr_number, pr_state}, so the board ` +
           'shows the stack.'
         : `2. Commit and push the work on the current branch. ${pullRequestWords(project)}`,
-      `3. Write the build report with harness_plan_edit {ops: [{op: "report", text, checks}]}: what each task did, the branches and pull requests, anything that differs from the plan, and follow-ups — with the final checks as they came out in \`checks\`. The plan is built once it is in.${finalWords(project)}`,
+      `3. Write the build report with harness_plan_edit {ops: [{op: "report", text, checks}]}: what each task did, the branches and pull requests, anything that differs from the plan, and follow-ups — with the final checks as they came out in \`checks\`. The plan is built once it is in.${finalWords(project)}${skippedWords(plan)}`,
       '4. Give the user the final summary in chat, with the links.',
     );
     out.push(...templateLines(project));
@@ -337,6 +338,9 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
   }
   const files = task.files?.length ? task.files : leavesUnder(plan, task.id).flatMap((t) => t.files ?? []);
   if (files.length) b.gap().add('files', task.files?.length ? me : derived("its subtasks' files"), `Files you expect to touch: ${[...new Set(files)].join(', ')}`);
+  // The checks the user set for it (#54): never silent, so said up front.
+  const own = effectiveChecks(plan, task);
+  b.push(...ownChecksBlocks(plan, task, own));
 
   // Where it fits.
   const fits = partBlocks(plan, task);
@@ -398,7 +402,7 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
     b.add('branch:where', derived("each task's branch"), 'No branch is named for it: work on the current branch.');
   }
 
-  if (!managedFor(plan, opts)) b.push(...trackedChecks(plan, task, project, files, opts.bin));
+  if (!managedFor(plan, opts)) b.push(...trackedChecks(plan, task, project, files, own, opts.bin));
   else {
     // The cycle.
     const review = effectiveReview(plan, task, settings.review);
@@ -411,8 +415,8 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
       b.gap().add(`cycle:${key}`, TEMPLATE, `**${name}.** ${what}`).inline(`cycle:${key}:model`, configSource(project, 'review.model'), model);
       if (hooks.length) b.add(`cycle:${key}:checks`, configSource(project, `hooks.${key}`), hooks.map((h) => `- ${h.name}: \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`));
     };
-    const filesArg = files.length ? ` --files ${[...new Set(files)].join(',')}` : '';
-    stage('implement', 'Implement', 'Make the change, then run the implement checks and fix what they find:', hooksFor(project, 'implement', files));
+    const filesArg = `${files.length ? ` --files ${[...new Set(files)].join(',')}` : ''}${skipArg(own)}`;
+    stage('implement', 'Implement', 'Make the change, then run the implement checks and fix what they find:', taskHooks(project, 'implement', files, own));
     stage(
       'review',
       'Review',
@@ -423,15 +427,15 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
           : review === 'self'
             ? 'Read your own diff against the objective and the acceptance criteria, as a reviewer would, and run the review checks:'
             : 'A fresh subagent that did not write the change reads the diff against this brief and runs the review checks.',
-      hooksFor(project, 'review', files),
+      taskHooks(project, 'review', files, own),
       review === 'subagent' ? reviewerWords(project) : '',
     );
-    b.push(...outsideChecks(project, files, 'cycle:review:outside'));
+    b.push(...outsideChecks(project, files, own, 'cycle:review:outside'));
     // What a reviewer looks for here, whoever reviews.
     if (review !== 'skip') b.push(...instructionBlocks(project, 'review', '### What the review checks here'));
     b.gap().add('cycle:refine', TEMPLATE, '**Refine.** Fix what the review found, run the implement checks again, and go back to review.');
-    if (opts.bin && HOOK_STAGES.some((s) => hooksFor(project, s, files).length)) {
-      b.gap().add('cycle:run', TEMPLATE, `Run a stage at once: \`"${opts.bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report.`);
+    if (opts.bin && HOOK_STAGES.some((s) => taskHooks(project, s, files, own).length)) {
+      b.gap().add('cycle:run', TEMPLATE, `Run a stage at once: \`"${opts.bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report.${ownRunWords(own)}`);
     } else if (!hasHooks(project)) {
       // What to do without checks, under the cycle rather than a heading of its own.
       for (const block of checksBlocks(project)) b.gap().add(block.id, block.source, block.text.split('\n').slice(1));
@@ -483,15 +487,59 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
   return b.blocks;
 }
 
+/** The checks the user skipped for tasks, for the report to say (#54). */
+function skippedWords(plan: Plan): string {
+  const skipped = leafTasks(plan).map((t) => ({ t, skip: effectiveChecks(plan, t).skip })).filter((x) => x.skip.length);
+  if (!skipped.length) return '';
+  return ` Say in it which checks were skipped, as the user set them: ${skipped.map(({ t, skip }) => `${t.id} skipped ${skip.join(', ')}`).join('; ')}.`;
+}
+
+/** `coplan check`'s flag for the checks the user skipped for a task. */
+function skipArg(own: { skip: readonly string[] }): string {
+  return own.skip.length ? ` --skip ${own.skip.join(',')}` : '';
+}
+
+/** The checks added for a task are not in the repository's config: said
+ *  where `coplan check` is, so they are not left to it. */
+function ownRunWords(own: { add: readonly TaskCheck[] }): string {
+  return own.add.length ? ` It does not know the checks added for this task (${own.add.map((c) => c.name).join(', ')}): run those as listed.` : '';
+}
+
+/**
+ * The checks the user set for this task (#54) — the repository checks it
+ * skips and the ones it adds, its parents' included — each traced to the
+ * task that set it. Nothing when none are set.
+ */
+function ownChecksBlocks(plan: Plan, task: Task, own: { add: TaskCheck[]; skip: string[] }): Block[] {
+  if (!own.add.length && !own.skip.length) return [];
+  const chain = [task, ...ancestorsOf(plan, task)];
+  const setter = (has: (t: Task) => boolean) => chain.find(has) ?? task;
+  const b = new BlockList();
+  b.gap().add('own-checks', TEMPLATE, ['## Checks set for this task', 'The user set these; they hold for this task over the repository\'s:']);
+  for (const name of own.skip) {
+    const by = setter((t) => Boolean(t.skipChecks?.includes(name)));
+    b.add(`own-checks:skip:${name}`, field('task', by.id), `- It skips ${name}: do not run it for this task — done does not wait on it${by.id === task.id ? '' : ` (set on "${by.title}")`}.`);
+  }
+  for (const c of own.add) {
+    const by = setter((t) => Boolean(t.addChecks?.some((x) => x.name === c.name)));
+    b.add(
+      `own-checks:add:${c.name}`,
+      field('task', by.id),
+      `- It adds ${c.name}: \`${c.run}\` at ${c.stage}${c.optional ? ' (optional)' : c.stage === 'review' ? ' — done waits on it, like the repository\'s' : ''}${by.id === task.id ? '' : ` (set on "${by.title}")`}.`,
+    );
+  }
+  return b.blocks;
+}
+
 /**
  * The review checks this task's own files leave out, which still run if
  * the change touches their files (#52): `coplan check review` adds them
  * from git, and done waits on them. Nothing when none is left out.
  */
-function outsideChecks(project: ProjectConfig, files: string[], id: string): Block[] {
+function outsideChecks(project: ProjectConfig, files: string[], set: { add: readonly TaskCheck[]; skip: readonly string[] }, id: string): Block[] {
   if (!files.length) return [];
   const own = hooksFor(project, 'review', files);
-  const left = project.hooks.review.filter((h) => !own.includes(h));
+  const left = project.hooks.review.filter((h) => !own.includes(h) && !set.skip.includes(h.name));
   if (!left.length) return [];
   return new BlockList().add(
     id,
@@ -505,17 +553,17 @@ function outsideChecks(project: ProjectConfig, files: string[], id: string): Blo
  * for its files, and its status as it goes — no cycle, no review mode,
  * no round limit. How it is built and checked is the agent's call.
  */
-function trackedChecks(plan: Plan, task: Task, project: ProjectConfig, files: string[], bin?: string): Block[] {
+function trackedChecks(plan: Plan, task: Task, project: ProjectConfig, files: string[], own: { add: TaskCheck[]; skip: string[] }, bin?: string): Block[] {
   const b = new BlockList();
-  const stages = (['implement', 'review'] as const).filter((st) => hooksFor(project, st, files).length);
+  const stages = (['implement', 'review'] as const).filter((st) => taskHooks(project, st, files, own).length);
   if (stages.length) {
     b.gap().add('checks', TEMPLATE, ["## Checks", "The repository's checks for this task's files:"]);
     for (const st of stages) {
-      b.add(`checks:${st}`, configSource(project, `hooks.${st}`), `- ${st}: ${hooksFor(project, st, files).map((h) => `${h.name} \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`).join('; ')}`);
+      b.add(`checks:${st}`, configSource(project, `hooks.${st}`), `- ${st}: ${taskHooks(project, st, files, own).map((h) => `${h.name} \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`).join('; ')}`);
     }
-    b.push(...outsideChecks(project, files, 'checks:outside'));
-    const filesArg = files.length ? ` --files ${[...new Set(files)].join(',')}` : '';
-    if (bin) b.gap().add('checks:run', TEMPLATE, `Run a stage at once: \`"${bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report.`);
+    b.push(...outsideChecks(project, files, own, 'checks:outside'));
+    const filesArg = `${files.length ? ` --files ${[...new Set(files)].join(',')}` : ''}${skipArg(own)}`;
+    if (bin) b.gap().add('checks:run', TEMPLATE, `Run a stage at once: \`"${bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report.${ownRunWords(own)}`);
   } else if (!hasHooks(project)) {
     b.gap().push(...checksBlocks(project));
   }

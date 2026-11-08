@@ -1702,3 +1702,59 @@ test('what is wrong with the harness config reaches the page with the session (#
   const { configErrors } = await call<{ configErrors: string[] }>(`/api/session/${id}`);
   assert.deepEqual(configErrors, [], 'fixed, nothing is said');
 });
+
+/* ------------------------------------------------------------------ *
+ * A task's own checks (#54)
+ * ------------------------------------------------------------------ */
+
+test('a task\'s own checks: the agent proposes, the user sets, and done follows them — skips not waited on, additions waited on (#54)', async () => {
+  const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-own-'));
+  const g = (...args: string[]) => execFileSync('git', args, { cwd: other, stdio: 'pipe' });
+  try {
+    g('init', '-q', '-b', 'main');
+    mkdirSync(path.join(other, '.coplan'), { recursive: true });
+    writeFileSync(path.join(other, '.coplan', 'config.json'), JSON.stringify({ hooks: { review: [{ name: 'tests', run: 'pnpm test' }] } }));
+    const id = 'own-checks';
+    const at = (route: string, body: Record<string, unknown>) =>
+      call<Record<string, unknown>>(route, { method: 'POST', headers: { 'x-harness-session': id }, body: JSON.stringify({ cwd: other, ...body }) });
+    await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: other, start_reason: 'startup' }) });
+    await at('/mcp/publish', { title: 'Docs and a migration', tasks: [{ id: 'docs', title: 'Document it' }, { id: 'migrate', title: 'Migrate' }] });
+    await at('/mcp/read', {});
+
+    // The agent cannot set them…
+    const direct = await at('/mcp/edit', { ops: [{ op: 'set_checks', id: 'docs', skip: ['tests'] }] });
+    assert.equal(direct['ok'], false);
+    assert.match(String(direct['text']), /Which checks a task runs is the user's to set/);
+    // …it proposes, and the user accepts in the page.
+    const proposed = await at('/mcp/propose', { title: 'Docs skip the tests', reason: 'Prose only.', ops: [{ op: 'set_checks', id: 'docs', skip: ['tests'] }] });
+    assert.equal(proposed['ok'], true, String(proposed['text']));
+    const accepted = await opsOn(id, [{ op: 'accept_proposal', id: 'p1' }]);
+    assert.ok(accepted.plan, accepted.error);
+    // The user adds one of their own to the migration, from the page.
+    const added = await opsOn(id, [{ op: 'set_checks', id: 'migrate', add: [{ name: 'db:check', run: 'pnpm db:check' }] }]);
+    assert.ok(added.plan, added.error);
+
+    const task = (body: Record<string, unknown>) => at('/mcp/task', body);
+    // docs: its skipped check is neither waited on, nor held against it when it fails.
+    await task({ task_id: 'docs', stage: 'review' });
+    await task({ task_id: 'docs', verdict: 'pass', checks: [{ name: 'tests', ok: false, note: 'unrelated flake' }] });
+    const docsDone = await task({ task_id: 'docs', status: 'done', note: 'documented' });
+    assert.equal(docsDone['ok'], true, String(docsDone['text']));
+
+    // migrate: done waits on the check the user added.
+    await task({ task_id: 'migrate', stage: 'review' });
+    await task({ task_id: 'migrate', verdict: 'pass', checks: [{ name: 'tests', ok: true }] });
+    const early = await task({ task_id: 'migrate', status: 'done', note: 'migrated' });
+    assert.equal(early['ok'], false);
+    assert.match(String(early['text']), /the review checks db:check were never reported/);
+    await task({ task_id: 'migrate', checks: [{ name: 'db:check', ok: true }] });
+    assert.equal((await task({ task_id: 'migrate', status: 'done', note: 'migrated' }))['ok'], true);
+
+    // The brief says it; the read-back shows it.
+    const brief = String((await at('/mcp/brief', { task_id: 'docs' }))['text']);
+    assert.match(brief, /- It skips tests: do not run it for this task/);
+    assert.match(String((await at("/mcp/read", {}))["text"]), /docs Document it · checks tests ✗ · skips tests/);
+  } finally {
+    rmSync(other, { recursive: true, force: true });
+  }
+});

@@ -33,6 +33,7 @@ import {
   MODE_LABEL,
   cleanSettings,
   dependents,
+  effectiveChecks,
   effectiveReview,
   hasSubtasks,
   isManaged,
@@ -45,7 +46,7 @@ import {
   validMode,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, hooksFor, loadProjectConfig, pathsMatch, type ProjectConfig } from '../shared/project.ts';
+import { HOOK_STAGES, loadProjectConfig, pathsMatch, taskHooks, type ProjectConfig } from '../shared/project.ts';
 import { changedFiles, filesForStage, type ChangedFiles } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
 import { ConfigCache, configStamp, type HarnessConfig } from '../shared/config.ts';
@@ -595,10 +596,13 @@ function buildRouter(deps: Deps): Router {
     // repository's .claude/harness.json and the global config.json), for
     // the page to say: otherwise only daemon.log and the doctor would (#52).
     if (session) {
+      const project = projectFor(session);
       json(ctx.res, 200, {
         session: forBrowser(session),
-        planCheck: projectFor(session).planCheck,
+        planCheck: project.planCheck,
         configErrors: config.errors(session.repoRoot ?? session.cwd),
+        // The repository's checks a task can skip, by stage (#54).
+        projectChecks: { implement: project.hooks.implement.map((h) => h.name), review: project.hooks.review.map((h) => h.name) },
       });
     }
   });
@@ -1270,13 +1274,20 @@ function buildRouter(deps: Deps): Router {
         );
       }
       // … and every check that gates it passed when it was last run.
-      const optional = new Set(HOOK_STAGES.flatMap((st) => project.hooks[st].filter((h) => h.optional).map((h) => h.name)));
+      // The checks the user set for it (#54): one they skipped neither holds
+      // it back nor is waited on; one they added does both, unless optional.
+      const set = effectiveChecks(before, task);
+      const optional = new Set([
+        ...HOOK_STAGES.flatMap((st) => project.hooks[st].filter((h) => h.optional).map((h) => h.name)),
+        ...set.add.filter((c) => c.optional).map((c) => c.name),
+        ...set.skip,
+      ]);
       const latest = mergeChecks(task.checks, checks ?? []);
       const failing = latest.filter((c) => !c.ok && !optional.has(c.name));
       // The files it planned to touch, and those the change touched (#52).
-      const own = new Set(hooksFor(project, 'review', task.files).map((h) => h.name));
+      const own = new Set(taskHooks(project, 'review', task.files, set).map((h) => h.name));
       const outside = changed ? changed.files.filter((f) => !task.files?.includes(f)) : [];
-      const missing = hooksFor(project, 'review', filesForStage('review', task.files, changed?.files))
+      const missing = taskHooks(project, 'review', filesForStage('review', task.files, changed?.files), set)
         .filter((h) => !h.optional && !latest.some((c) => c.name === h.name))
         .map((h) =>
           own.has(h.name)

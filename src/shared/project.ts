@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import type { BuildSettings, ExecutionMode } from './types.ts';
+import type { BuildSettings, ExecutionMode, TaskCheck } from './types.ts';
 import { DEFAULT_BUILD_SETTINGS, MAX_PARALLEL, MAX_ROUNDS, cleanSettings } from './build.ts';
 import { EXECUTION_MODES, REVIEW_MODES } from './types.ts';
 import { parseJsonc } from './jsonc.ts';
@@ -653,6 +653,22 @@ export function nameFor(run: string): string {
  */
 export function hooksFor(config: ProjectConfig, stage: HookStage, files?: readonly string[]): CheckHook[] {
   return config.hooks[stage].filter((h) => !h.paths?.length || !files?.length || files.some((f) => pathsMatch(h.paths!, f)));
+}
+
+/**
+ * One task's checks at a stage (#54): the repository's for its files,
+ * less the ones the user skipped for it, plus the ones they added for it.
+ * What its brief lists, what `done` waits on.
+ */
+export function taskHooks(
+  config: ProjectConfig,
+  stage: HookStage,
+  files: readonly string[] | undefined,
+  own: { add: readonly TaskCheck[]; skip: readonly string[] },
+): CheckHook[] {
+  const repo = hooksFor(config, stage, files).filter((h) => !own.skip.includes(h.name));
+  const added = own.add.filter((c) => c.stage === stage && !repo.some((h) => h.name === c.name));
+  return [...repo, ...added.map((c) => ({ name: c.name, run: c.run, ...(c.optional ? { optional: true } : {}) }))];
 }
 
 /** A file is in a hook's `paths` when a glob matches it and no `!glob`

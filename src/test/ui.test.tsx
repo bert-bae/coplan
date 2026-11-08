@@ -1825,3 +1825,68 @@ test('what is wrong with the harness config is said in the page, once per proble
   });
   assert.equal(said().length, 1);
 });
+
+/* ------------------------------------------------------ A task's own checks (#54) */
+
+const CHECKS = { implement: ['typecheck'], review: ['tests'] };
+
+test("a task's checks are set in its details: untick one to skip it, or add one of its own (#54)", async () => {
+  const plan = confirmedPlan();
+  const session = makeSession(plan);
+  await boot(session, (route) => (route === '/api/session/s1' ? { session, projectChecks: CHECKS } : undefined));
+  await openTab('Tasks');
+  const row = document.getElementById('task-t3')!;
+  await act(async () => {
+    fireEvent.click(within(row).getByRole('button', { name: 'Details of Wire into API' }));
+  });
+  const repo = screen.getByRole('list', { name: "The repository's checks for Wire into API" });
+  assert.deepEqual(within(repo).getAllByRole('checkbox').map((c) => (c as HTMLInputElement).checked), [true, true], 'every check runs until one is skipped');
+  await act(async () => {
+    fireEvent.click(within(repo).getByLabelText(/^tests/));
+  });
+  assert.deepEqual(opsSent().at(-1), { op: 'set_checks', id: 't3', skip: ['tests'] });
+
+  const form = screen.getByRole('group', { name: 'Add a check for this task' });
+  await act(async () => {
+    fireEvent.change(within(form).getByLabelText('Command of the check to add'), { target: { value: 'pnpm db:check' } });
+    fireEvent.change(within(form).getByLabelText('Name of the check to add'), { target: { value: 'db:check' } });
+  });
+  await act(async () => {
+    fireEvent.click(within(form).getByRole('button', { name: 'Add check' }));
+  });
+  assert.deepEqual(opsSent().at(-1), { op: 'set_checks', id: 't3', add: [{ name: 'db:check', run: 'pnpm db:check', stage: 'review' }] });
+  assert.match(screen.getByText(/Only you set these; Claude proposes changes to them/).textContent ?? '', /an added one gates/);
+});
+
+test('a skipped check shows on the task, on its card mid-build — where the user can still set it — and in the report (#54)', async () => {
+  let plan = applyOps(confirmedPlan(), [{ op: 'set_checks', id: 't3', skip: ['tests'], add: [{ name: 'db:check', run: 'pnpm db:check' }] }], 'user').plan;
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  const row = document.getElementById('task-t3')!;
+  assert.match(row.textContent ?? '', /skips tests/);
+  assert.match(row.textContent ?? '', /＋ db:check/);
+
+  cleanup();
+  plan = markDelivered(submitPlan(plan, { target: 'session', prompt: 'P' }));
+  const session = makeSession(plan);
+  await boot(session, (route) => (route === '/api/session/s1' ? { session, projectChecks: CHECKS } : undefined));
+  await openTab('Tasks');
+  const card = document.getElementById('task-t3')!;
+  assert.match(card.textContent ?? '', /skips tests/);
+  await act(async () => {
+    fireEvent.click(within(card).getByRole('button', { name: 'Wire into API' }));
+  });
+  await act(async () => {
+    fireEvent.click(within(card).getByLabelText(/^tests/));
+  });
+  assert.deepEqual(opsSent().at(-1), { op: 'set_checks', id: 't3', skip: [] }, 'the user takes the skip back mid-build');
+
+  cleanup();
+  for (const t of plan.tasks.filter((x) => !plan.tasks.some((c) => c.parentId === x.id))) {
+    plan = applyOps(plan, [{ op: 'upsert_task', id: t.id, status: 'done' }], 'claude', undefined, { tracking: true }).plan;
+  }
+  plan = applyOps(plan, [{ op: 'report', text: 'Built it.' }], 'claude').plan;
+  await boot(makeSession(plan));
+  await openTab('Overview');
+  assert.match(screen.getByTestId('skipped-checks').textContent ?? '', /Checks you skipped: t3 Wire into API \(tests\)\./);
+});

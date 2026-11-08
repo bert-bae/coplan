@@ -34,6 +34,8 @@ The build prompt says how the plan is built:
 
 It also lists the repository's **checks** from `.coplan/config.json`, per
 stage (`implement`, `review`, `final`). Run those — do not invent others.
+A task's brief says which of them the user skipped for it and which they
+added for it: follow the brief.
 If there are none, pick the repository's own commands (scripts, CI) once,
 use them for every task, and say which in your notes.
 

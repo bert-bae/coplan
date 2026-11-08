@@ -7,6 +7,7 @@ import { KIND_GLYPH } from '../components/FlowCanvas.tsx';
 import { ProgressBar, STATUS_GLYPH, STATUS_LABEL } from '../components/Progress.tsx';
 import { EmptyState } from '../components/primitives.tsx';
 import { Markdown } from '../components/Markdown.tsx';
+import { TaskCheckChips, TaskChecksField } from '../components/TaskChecks.tsx';
 import { classNames } from '../lib/format.ts';
 import { boxRows } from '../lib/tasks.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
@@ -653,6 +654,7 @@ function TaskRow(props: {
             </span>
           )}
           {task.review && <span className="chip" title="How this task is reviewed">review: {REVIEW_LABEL[task.review].toLowerCase()}</span>}
+          <TaskCheckChips plan={plan} task={task} />
           {props.tracking && !kids.length && <ReadinessChip plan={plan} task={task} />}
           {parts.map(({ d, n }) => (
             <button
@@ -779,6 +781,10 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
       <div className="field-row">
         <span className="field-label">Review</span>
         <ReviewPicker task={task} />
+      </div>
+      <div className="field-col">
+        <span className="field-label">Checks</span>
+        <TaskChecksField plan={plan} task={task} />
       </div>
       <div className="task-detail-foot">
         <span className="muted">
@@ -1122,7 +1128,8 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
     path.unshift(cursor.title);
     cursor = cursor.parentId ? plan.tasks.find((t) => t.id === cursor!.parentId) : undefined;
   }
-  const more = Boolean(task.detail?.trim() || task.files?.length);
+  // Its checks can still be set while it is not done, so there is always more.
+  const more = Boolean(task.detail?.trim() || task.files?.length) || (task.status !== 'done' && task.status !== 'dropped');
   return (
     <Focusable kind="task" id={task.id} as="article" className={classNames('board-card', 'is-tracked', `is-${task.status}`, arrived && 'is-arrived')}>
       {path.length > 0 && <p className="board-path">{path.join(' › ')}</p>}
@@ -1141,11 +1148,19 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
         <IricBadges task={task} />
         {task.status === 'todo' && <ReadinessChip plan={plan} task={task} />}
         {effectiveBranch(plan, task) && <span className="chip is-branch">⎇ {effectiveBranch(plan, task)}</span>}
+        <TaskCheckChips plan={plan} task={task} />
       </p>
       {open && (
         <div className="board-more">
           {task.detail?.trim() && <Markdown source={task.detail} />}
           {task.files?.length ? <p className="board-files mono">{task.files.join(', ')}</p> : null}
+          {/* The user's say over a task's checks holds on a locked plan too. */}
+          {task.status !== 'done' && task.status !== 'dropped' && (
+            <div className="board-checks">
+              <span className="field-label">Checks</span>
+              <TaskChecksField plan={plan} task={task} />
+            </div>
+          )}
         </div>
       )}
       <ReviewHistory task={task} />

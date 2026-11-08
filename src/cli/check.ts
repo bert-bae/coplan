@@ -36,6 +36,8 @@ interface Options {
   base?: string;
   /** Match only `--files`, not what the change touched. */
   noDiff: boolean;
+  /** Checks the user skipped for this task (#54): not run. */
+  skip: string[];
 }
 
 function parseArgs(args: string[]): Options | string {
@@ -45,11 +47,14 @@ function parseArgs(args: string[]): Options | string {
   let json = false;
   let base: string | undefined;
   let noDiff = false;
+  const skip: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === '--list') list = true;
     else if (a === '--json') json = true;
     else if (a === '--no-diff') noDiff = true;
+    else if (a === '--skip') skip.push(...(args[++i] ?? '').split(',').map((s) => s.trim()).filter(Boolean));
+    else if (a.startsWith('--skip=')) skip.push(...a.slice(7).split(',').map((s) => s.trim()).filter(Boolean));
     else if (a === '--base') base = args[++i] || undefined;
     else if (a.startsWith('--base=')) base = a.slice(7) || undefined;
     else if (a === '--files') files.push(...(args[++i] ?? '').split(',').map((f) => f.trim()).filter(Boolean));
@@ -57,7 +62,7 @@ function parseArgs(args: string[]): Options | string {
     else if ((HOOK_STAGES as readonly string[]).includes(a)) stage = a as HookStage;
     else return `unknown argument "${a}". Stages: ${HOOK_STAGES.join(', ')}.`;
   }
-  return { stage, files, list, json, noDiff, ...(base ? { base } : {}) };
+  return { stage, files, list, json, noDiff, skip, ...(base ? { base } : {}) };
 }
 
 export async function runCheck(args: string[], cwd = process.cwd()): Promise<number> {
@@ -89,8 +94,13 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   // planned to (#52). A task that names no files gets every hook anyway.
   const changed = opts.stage !== 'implement' && opts.files.length && !opts.noDiff ? await changedFiles(root, opts.base ?? config.branches.base) : null;
   const files = filesForStage(opts.stage, opts.files, changed?.files);
-  const hooks = hooksFor(config, opts.stage, files);
+  const hooks = hooksFor(config, opts.stage, files).filter((h) => !opts.skip.includes(h.name));
   const added = hooks.filter((h) => !hooksFor(config, opts.stage, opts.files).includes(h));
+  if (opts.skip.length) {
+    const say = `coplan: not running ${opts.skip.join(', ')} — skipped for this task.`;
+    if (opts.json) console.error(say);
+    else console.log(say);
+  }
   if (added.length && changed) {
     const outside = changed.files.filter((f) => !opts.files.includes(f));
     const say =

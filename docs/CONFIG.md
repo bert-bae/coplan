@@ -116,6 +116,14 @@ A hook is a command, run from the repository root, or an object:
 
 A stage holds at most 20 hooks.
 
+**One task's checks.** A task can skip some of these checks, or add checks of
+its own — a docs-only task skipping the test suite, a migration adding
+`pnpm db:check`. Only the user sets them, in the task's details in Coplan
+(the agent proposes them, `set_checks`); subtasks inherit them. A skipped
+check is not run and `done` does not wait on it; an added one runs at the
+stage it names and gates `done` like the repository's, unless `optional`.
+They show in the task's brief, on the board, and under the build report.
+
 Coplan never runs these itself. They reach Claude in the build prompt and in
 each task's brief (`harness_task_brief`), and Claude runs them like any
 other command, under your permission settings. `coplan check <stage>` runs a

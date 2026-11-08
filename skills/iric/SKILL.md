@@ -14,10 +14,13 @@ way to do it there too.)
 You need the task's brief (`harness_task_brief {task_id}`). It has the
 objective and acceptance criteria, the scope, the branch, the review mode,
 the round limit, and the exact checks for each stage from
-`.coplan/config.json`. Run those checks — they are what the repository
-says "good" means. `coplan check <stage> --files <the task's files>` runs a
-whole stage at once; add `--json` to get results in the shape
-`harness_task_update` takes.
+`.coplan/config.json` — less any the user skipped for this task, plus any
+they added for it (*Checks set for this task*). Run those checks — they are
+what the repository says "good" means. `coplan check <stage> --files <the
+task's files>` runs a whole stage at once (`--skip` for what the user
+skipped, as the brief writes it; the checks added for the task you run as
+listed); add `--json` to get results in the shape `harness_task_update`
+takes.
 
 Report every step with `harness_task_update` so the board shows where the
 task is. If you are a subagent without the Coplan tools, report back to the

@@ -2213,3 +2213,16 @@ span.board-title:hover { color: inherit; text-decoration: none; }
   .submit-prompt { max-height: 48vh; }
   .phase { gap: var(--sp-2); }
 }
+
+/* A task's own checks (#54): what it skips, what it adds. */
+.chip.check-skip { background: var(--attention-bg); color: var(--attention-fg); border-color: var(--attention-border); }
+.chip.check-add { gap: 6px; }
+.task-checks { display: flex; flex-direction: column; gap: var(--sp-2); }
+.task-checks-repo li { padding: 2px 0; }
+.task-checks-repo .is-skipped .task-check-name { text-decoration: line-through; text-decoration-color: var(--attention-solid); }
+.task-checks-own { display: flex; flex-wrap: wrap; gap: 4px; }
+.task-checks-add { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.task-checks-add .input { width: auto; min-width: 0; flex: 1 1 140px; }
+.task-checks-hint { margin: 0; font-size: var(--fs-sm); }
+.board-checks { display: flex; flex-direction: column; gap: 4px; margin-top: var(--sp-2); }
+.report-skipped { margin-top: var(--sp-3); font-size: var(--fs-sm); color: var(--attention-fg); }
