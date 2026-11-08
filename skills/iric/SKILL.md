@@ -16,11 +16,12 @@ objective and acceptance criteria, the scope, the branch, the review mode,
 the round limit, and the exact checks for each stage from
 `.coplan/config.json` — less any the user skipped for this task, plus any
 they added for it (*Checks set for this task*). Run those checks — they are
-what the repository says "good" means. `coplan check <stage> --files <the
-task's files>` runs a whole stage at once (`--skip` for what the user
-skipped, as the brief writes it; the checks added for the task you run as
-listed); add `--json` to get results in the shape `harness_task_update`
-takes.
+what the repository says "good" means. `coplan check <stage> --since
+<commit>` runs a stage at once, only the checks for what the task changed
+(the commit is the one `harness_task_update` gave when the task started;
+`--skip` for what the user skipped, as the brief writes it; the checks added
+for the task you run as listed); add `--json` to get results in the shape
+`harness_task_update` takes.
 
 Report every step with `harness_task_update` so the board shows where the
 task is. If you are a subagent without the Coplan tools, report back to the

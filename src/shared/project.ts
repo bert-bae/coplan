@@ -39,8 +39,8 @@ export interface CheckHook {
   run: string;
   /** Seconds before it is stopped. Default 600. */
   timeout?: number;
-  /** Only for tasks that touch matching files (globs, e.g. `src/**`, `*.py`).
-   *  A task that lists no files gets every hook. */
+  /** The hook's area (globs, e.g. `src/**`, `*.py`): it runs only when the
+   *  change touches a matching file. */
   paths?: string[];
   /** A failure is reported but does not hold the task back. */
   optional?: boolean;
@@ -602,7 +602,7 @@ function parseHooks(list: unknown, stage: string, errors: string[], root: string
         errors.push(`"${where}.cwd" must be a folder inside the repository, e.g. "packages/api".`);
       } else if (root && !folderThere(path.join(root, rel))) {
         // Kept: run anywhere else, it would pass without checking what it is for.
-        warnings.push(`"${where}.cwd" names ${rel}, which does not exist yet: the hook fails until it does.`);
+        warnings.push(`"${where}.cwd" names ${rel}, which does not exist yet: the hook checks changes under it, so it runs once there are some — and fails while the folder is missing.`);
         hook.cwd = rel;
       } else if (rel !== '.') hook.cwd = rel;
     }
@@ -647,12 +647,59 @@ export function nameFor(run: string): string {
 }
 
 /**
- * The hooks of one stage that apply to a task. A hook limited by `paths`
- * applies when the task expects to touch a matching file — and always when
- * the task lists no files, since then nobody can say it does not.
+ * The hooks of one stage a task is expected to need, from the files it
+ * plans to touch — what its brief lists before there is a change, and what
+ * holds where git cannot say. A task that lists no files gets every hook,
+ * since nobody can say it does not. Once there is a change, the hooks for
+ * it are `hooksForChange`'s.
  */
 export function hooksFor(config: ProjectConfig, stage: HookStage, files?: readonly string[]): CheckHook[] {
-  return config.hooks[stage].filter((h) => !h.paths?.length || !files?.length || files.some((f) => pathsMatch(h.paths!, f)));
+  return config.hooks[stage].filter((h) => {
+    const scope = hookScope(h);
+    return !scope || !files?.length || files.some((f) => pathsMatch(scope, f));
+  });
+}
+
+/**
+ * The area a hook checks: its `paths`, or — a hook run in a folder of its
+ * own (`cwd`, a package of a monorepo) — everything under that folder.
+ * Null for a hook that checks the whole repository.
+ */
+export function hookScope(h: Pick<CheckHook, 'paths' | 'cwd'>): string[] | null {
+  if (h.paths?.length) return h.paths;
+  if (h.cwd) return [`${h.cwd.replace(/\/+$/, '')}/`];
+  return null;
+}
+
+/** The changed files in a hook's area: every one, for a whole-repository hook. */
+export function filesInScope(h: Pick<CheckHook, 'paths' | 'cwd'>, files: readonly string[]): string[] {
+  const scope = hookScope(h);
+  return scope ? files.filter((f) => pathsMatch(scope, f)) : [...files];
+}
+
+/**
+ * The checks a change calls for at a stage: those whose area it touched.
+ * A check for an area the change never came near does not run, and when
+ * nothing changed, nothing does — every check is targeted.
+ */
+export function hooksForChange(config: ProjectConfig, stage: HookStage, changed: readonly string[]): CheckHook[] {
+  return config.hooks[stage].filter((h) => filesInScope(h, changed).length > 0);
+}
+
+/** Past this many files `{files}` stands for the whole repository (`.`),
+ *  rather than a command line too long for the shell. */
+export const MAX_FILES_ARG = 1_000;
+
+/**
+ * A hook's command with `{files}` filled in: the changed files in its area,
+ * each quoted for the shell — so `eslint {files}` lints only what changed.
+ * Where the change is not known, or is too large to list, `.`: the whole
+ * repository, as the command would check without it.
+ */
+export function withFiles(run: string, files: readonly string[] | null): string {
+  if (!run.includes('{files}')) return run;
+  const list = files && files.length && files.length <= MAX_FILES_ARG ? files.map((f) => `'${f.replace(/'/g, `'\\''`)}'`).join(' ') : '.';
+  return run.split('{files}').join(list);
 }
 
 /**
@@ -665,9 +712,12 @@ export function taskHooks(
   stage: HookStage,
   files: readonly string[] | undefined,
   own: { add: readonly TaskCheck[]; skip: readonly string[] },
+  /** `files` is what the change touched, so the checks are targeted to it:
+   *  none for an area it did not touch, none at all when it touched nothing. */
+  opts: { changed?: boolean } = {},
 ): CheckHook[] {
-  const repo = hooksFor(config, stage, files).filter((h) => !own.skip.includes(h.name));
-  const added = own.add.filter((c) => c.stage === stage && !repo.some((h) => h.name === c.name));
+  const repo = (opts.changed ? hooksForChange(config, stage, files ?? []) : hooksFor(config, stage, files)).filter((h) => !own.skip.includes(h.name));
+  const added = own.add.filter((c) => c.stage === stage && !repo.some((h) => h.name === c.name) && (!opts.changed || Boolean(files?.length)));
   return [...repo, ...added.map((c) => ({ name: c.name, run: c.run, ...(c.optional ? { optional: true } : {}) }))];
 }
 

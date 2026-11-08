@@ -28,12 +28,17 @@ instead of guessing.
    - `final` — once every task is done: the full suite, the build, anything
      slow or repository-wide (generated files up to date, audits).
 
-   Give slow hooks a `timeout` (seconds), limit language-specific ones with
-   `paths` (e.g. `["*.py"]`), and mark advisory ones `"optional": true`.
-   Set `branches.base` to the branch work merges into.
+   Make every check targeted: the build runs a check only when the change
+   touches its area, so give each one its area — `paths` (e.g. `["*.py"]`,
+   `["packages/api/"]`), or `cwd` for a package's own checks — and where
+   the tool takes files, pass only the changed ones with `{files}`
+   (`ruff check {files}`, `eslint {files}`). Leave a check whole only if
+   it really depends on anything in the repository. Give slow hooks a
+   `timeout` (seconds), and mark advisory ones `"optional": true`. Set
+   `branches.base` to the branch work merges into.
 
 3. If `.coplan/config.json` already exists, show the user how yours differs
    and ask before replacing it. Otherwise write it (it allows `//` comments),
-   then run `"${CLAUDE_PLUGIN_ROOT}/bin/coplan" check implement --list` to
-   confirm it reads back, and tell the user in a few lines what each stage
+   then run `"${CLAUDE_PLUGIN_ROOT}/bin/coplan" check implement --all --list`
+   to confirm it reads back, and tell the user in a few lines what each stage
    runs. Suggest committing it so everyone's builds run the same checks.

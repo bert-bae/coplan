@@ -1,17 +1,37 @@
 /**
- * `coplan check <stage>` — run a stage's hooks from `.coplan/config.json`.
+ * `coplan check <stage>` — run a stage's hooks from `.coplan/config.json`,
+ * targeted to what changed.
  *
  * One command for an agent to run, with output it can act on: a line per
  * hook, and for each failure only the tail of what it printed. `--json`
  * prints the results in the shape `harness_task_update` takes as `checks`.
+ *
+ * Only the checks for what the change touched run: since the commit the
+ * task began at (`--since`), or since the last commit; at `final`, since
+ * the base branch. A check for an area the change did not touch does not
+ * run, nothing runs when nothing changed, and `{files}` in a command is the
+ * changed files in its area. `--files` names the files instead of git;
+ * `--all` runs every check, as before.
  */
 import { spawn } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { HOOK_STAGES, DEFAULT_HOOK_TIMEOUT, PROJECT_CONFIG_PATH, hookCommand, hooksFor, loadProjectConfig, type CheckHook, type HookStage } from '../shared/project.ts';
+import {
+  HOOK_STAGES,
+  DEFAULT_HOOK_TIMEOUT,
+  PROJECT_CONFIG_PATH,
+  filesInScope,
+  hookCommand,
+  hookScope,
+  hooksForChange,
+  loadProjectConfig,
+  withFiles,
+  type CheckHook,
+  type HookStage,
+} from '../shared/project.ts';
 import type { CheckResult } from '../shared/types.ts';
-import { changedFiles, filesForStage } from '../shared/changes.ts';
+import { changedFiles, changedSince } from '../shared/changes.ts';
 
 /** Lines of a failing hook's output shown. Enough to see the error. */
 const TAIL_LINES = 40;
@@ -31,11 +51,14 @@ interface Options {
   files: string[];
   list: boolean;
   json: boolean;
-  /** What the change is measured from at review and final; the
-   *  repository's base branch (`branches.base`) without. */
+  /** What the build is measured from at `final`; the repository's base
+   *  branch (`branches.base`) without. */
   base?: string;
-  /** Match only `--files`, not what the change touched. */
-  noDiff: boolean;
+  /** The commit the task began at: its change is everything since. Without
+   *  it, the change is what is not committed yet. */
+  since?: string;
+  /** Every check, whatever changed: the escape from targeting. */
+  all: boolean;
   /** Checks the user skipped for this task (#54): not run. */
   skip: string[];
 }
@@ -46,13 +69,16 @@ function parseArgs(args: string[]): Options | string {
   let list = false;
   let json = false;
   let base: string | undefined;
-  let noDiff = false;
+  let since: string | undefined;
+  let all = false;
   const skip: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === '--list') list = true;
     else if (a === '--json') json = true;
-    else if (a === '--no-diff') noDiff = true;
+    else if (a === '--all') all = true;
+    else if (a === '--since') since = args[++i] || undefined;
+    else if (a.startsWith('--since=')) since = a.slice(8) || undefined;
     else if (a === '--skip') skip.push(...(args[++i] ?? '').split(',').map((s) => s.trim()).filter(Boolean));
     else if (a.startsWith('--skip=')) skip.push(...a.slice(7).split(',').map((s) => s.trim()).filter(Boolean));
     else if (a === '--base') base = args[++i] || undefined;
@@ -62,7 +88,7 @@ function parseArgs(args: string[]): Options | string {
     else if ((HOOK_STAGES as readonly string[]).includes(a)) stage = a as HookStage;
     else return `unknown argument "${a}". Stages: ${HOOK_STAGES.join(', ')}.`;
   }
-  return { stage, files, list, json, noDiff, skip, ...(base ? { base } : {}) };
+  return { stage, files, list, json, all, skip, ...(base ? { base } : {}), ...(since ? { since } : {}) };
 }
 
 export async function runCheck(args: string[], cwd = process.cwd()): Promise<number> {
@@ -89,40 +115,56 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
     } else console.log(say);
     return 0;
   }
-  // At review and at the end there is a diff: a hook limited to some files
-  // runs for every file the change touched, not only the ones the task
-  // planned to (#52). A task that names no files gets every hook anyway.
-  const changed = opts.stage !== 'implement' && opts.files.length && !opts.noDiff ? await changedFiles(root, opts.base ?? config.branches.base) : null;
-  const files = filesForStage(opts.stage, opts.files, changed?.files);
-  const hooks = hooksFor(config, opts.stage, files).filter((h) => !opts.skip.includes(h.name));
-  const added = hooks.filter((h) => !hooksFor(config, opts.stage, opts.files).includes(h));
-  if (opts.skip.length) {
-    const say = `coplan: not running ${opts.skip.join(', ')} — skipped for this task.`;
-    if (opts.json) console.error(say);
-    else console.log(say);
+  const say = (line: string) => (opts.json ? console.error(line) : console.log(line));
+  // What changed decides what runs. `--files` names it; else git does —
+  // since the task began, or since the last commit, or at the end since the
+  // base branch. Null where nobody can say: then every check runs.
+  let changed: string[] | null = null;
+  let since = '';
+  if (opts.all) since = '';
+  else if (opts.files.length) changed = opts.files;
+  else if (opts.stage === 'final') {
+    const build = await changedFiles(root, opts.base ?? config.branches.base);
+    if (build) [changed, since] = [build.files, build.base ? `since ${build.base}` : 'not committed yet'];
+  } else {
+    const task = await changedSince(root, opts.since);
+    if (task) [changed, since] = [task.files, opts.since ? `since ${opts.since.slice(0, 12)}` : 'since the last commit'];
+    else if (opts.since) {
+      console.error(`coplan: ${opts.since} is not a commit here: give the one the task began at, or --all.`);
+      return 2;
+    }
   }
-  if (added.length && changed) {
-    const outside = changed.files.filter((f) => !opts.files.includes(f));
-    const say =
-      `coplan: also running ${added.map((h) => h.name).join(', ')} — the change touches files outside --files ` +
-      `(${outside.slice(0, 5).join(', ')}${outside.length > 5 ? ', …' : ''}${changed.base ? `, against ${changed.base}` : ''}).`;
-    if (opts.json) console.error(say);
-    else console.log(say);
+  const stageHooks = config.hooks[opts.stage].filter((h) => !opts.skip.includes(h.name));
+  const hooks = changed === null ? stageHooks : hooksForChange(config, opts.stage, changed).filter((h) => !opts.skip.includes(h.name));
+  if (opts.skip.length) say(`coplan: not running ${opts.skip.join(', ')} — skipped for this task.`);
+  const untouched = stageHooks.filter((h) => !hooks.includes(h));
+  if (untouched.length && changed !== null) {
+    say(
+      changed.length
+        ? `coplan: not running ${untouched.map((h) => `${h.name} (${(hookScope(h) ?? []).join(', ')})`).join(', ')} — the change ${since ? `${since} ` : ''}does not touch ${untouched.length === 1 ? 'its area' : 'their areas'}.`
+        : `coplan: nothing changed ${since || 'in --files'}, so no check runs. Work already committed? Pass --since <the commit the task began at>, or --all.`,
+    );
   }
   if (!hooks.length) {
     if (opts.json) console.log('[]');
-    else console.log(`No ${opts.stage} hooks${opts.files.length ? ' apply to these files' : ''} in ${PROJECT_CONFIG_PATH}.`);
+    else if (!stageHooks.length) console.log(`No ${opts.stage} hooks${opts.skip.length ? ' left to run' : ''} in ${PROJECT_CONFIG_PATH}.`);
     return 0;
   }
+  // Each check's command, with `{files}` as the changed files in its area —
+  // from the folder it runs in.
+  const command = (h: CheckHook) => {
+    const files = changed === null ? null : filesInScope(h, changed).map((f) => (h.cwd ? path.posix.relative(h.cwd, f) : f));
+    return withFiles(h.run, files);
+  };
   if (opts.list) {
-    for (const h of hooks) console.log(`${h.name}: ${hookCommand(h)}${h.optional ? '  (optional)' : ''}`);
+    for (const h of hooks) console.log(`${h.name}: ${hookCommand({ ...h, run: command(h) })}${h.optional ? '  (optional)' : ''}`);
     return 0;
   }
 
   const results: CheckResult[] = [];
   let failed = 0;
   for (const hook of hooks) {
-    const outcome = await runHook(hook, root);
+    const outcome = await runHook({ ...hook, run: command(hook) }, root);
     const secs = `${(outcome.ms / 1000).toFixed(1)}s`;
     const ok = outcome.code === 0;
     const what = outcome.timedOut ? `timed out after ${hook.timeout ?? DEFAULT_HOOK_TIMEOUT}s` : `exit ${outcome.code}`;

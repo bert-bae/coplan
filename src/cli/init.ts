@@ -13,6 +13,18 @@ import { PROJECT_CONFIG_PATH, type CheckHook, type HookStage } from '../shared/p
 
 type Detected = Record<HookStage, CheckHook[]>;
 
+/**
+ * The areas the usual tools look at, so the checks written are targeted
+ * from the start: a typecheck or a linter runs only when the change
+ * touches its language. A test suite or a build is left whole — it may
+ * read anything — for the repository to scope if it knows better.
+ */
+const TS = ['*.ts', '*.tsx', '*.mts', '*.cts', 'tsconfig*.json', 'package.json'];
+const JS = ['*.ts', '*.tsx', '*.js', '*.jsx', '*.mjs', '*.cjs', '*.mts', '*.cts', 'package.json', 'eslint.config.*', '.eslintrc*'];
+const RUST = ['*.rs', 'Cargo.toml', 'Cargo.lock'];
+const GO = ['*.go', 'go.mod', 'go.sum'];
+const PY = ['*.py', 'pyproject.toml'];
+
 export function detectHooks(root: string): { hooks: Detected; found: string[] } {
   const hooks: Detected = { implement: [], review: [], final: [] };
   const found: string[] = [];
@@ -46,8 +58,8 @@ export function detectHooks(root: string): { hooks: Detected; found: string[] } 
       const test = pick(['test', 'test:unit', 'tests']);
       const build = pick(['build']);
       const check = pick(['check', 'verify', 'ci']);
-      if (typecheck) add('implement', 'typecheck', run(typecheck));
-      if (lint) add('implement', 'lint', run(lint));
+      if (typecheck) add('implement', 'typecheck', run(typecheck), { paths: TS });
+      if (lint) add('implement', 'lint', run(lint), { paths: JS });
       if (format) add('implement', 'format', run(format), { optional: true });
       if (test) add('review', 'tests', run(test), { timeout: 900 });
       if (check) add('final', check, run(check), { timeout: 1200 });
@@ -69,16 +81,16 @@ export function detectHooks(root: string): { hooks: Detected; found: string[] } 
   }
 
   if (read('Cargo.toml') !== null) {
-    add('implement', 'cargo check', 'cargo check --all-targets');
-    add('implement', 'clippy', 'cargo clippy --all-targets -- -D warnings', { optional: true });
-    add('review', 'cargo test', 'cargo test', { timeout: 900 });
+    add('implement', 'cargo check', 'cargo check --all-targets', { paths: RUST });
+    add('implement', 'clippy', 'cargo clippy --all-targets -- -D warnings', { paths: RUST, optional: true });
+    add('review', 'cargo test', 'cargo test', { timeout: 900, paths: RUST });
     add('final', 'cargo build', 'cargo build --release', { timeout: 1200 });
     found.push('Cargo.toml');
   }
 
   if (read('go.mod') !== null) {
-    add('implement', 'go vet', 'go vet ./...');
-    add('review', 'go test', 'go test ./...', { timeout: 900 });
+    add('implement', 'go vet', 'go vet ./...', { paths: GO });
+    add('review', 'go test', 'go test ./...', { timeout: 900, paths: GO });
     add('final', 'go build', 'go build ./...');
     found.push('go.mod');
   }
@@ -87,8 +99,9 @@ export function detectHooks(root: string): { hooks: Detected; found: string[] } 
   const python = pyproject ?? read('setup.cfg') ?? read('pytest.ini') ?? read('requirements-dev.txt');
   if (python !== null) {
     const text = [pyproject, read('setup.cfg'), read('requirements-dev.txt')].filter(Boolean).join('\n');
-    if (/\bruff\b/.test(text)) add('implement', 'ruff', 'ruff check .', { paths: ['*.py'] });
-    if (/\bmypy\b/.test(text)) add('implement', 'mypy', 'mypy .', { paths: ['*.py'] });
+    // ruff takes files: it lints only the ones the change touched.
+    if (/\bruff\b/.test(text)) add('implement', 'ruff', 'ruff check {files}', { paths: ['*.py'] });
+    if (/\bmypy\b/.test(text)) add('implement', 'mypy', 'mypy .', { paths: PY });
     add('review', 'pytest', 'pytest -q', { timeout: 900 });
     found.push('Python project');
   }
@@ -140,6 +153,9 @@ export function renderConfig(hooks: Detected, base: string | undefined, opts: { 
   //   final:     once every task is done, before the final report
   // A hook is a command (run from the repository root), or
   //   { "name", "run", "timeout" (seconds), "paths" (globs), "optional" }.
+  // Checks are targeted: each runs only when the change touches its area —
+  // its "paths", or the folder in "cwd" — and "{files}" in a command is the
+  // changed files in that area. One with neither runs on any change.
   // Run a stage yourself with:  coplan check review
   "hooks": {
     "implement": ${stage('implement')},

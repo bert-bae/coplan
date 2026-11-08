@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Targeted checks: only what the change touched
+
+- **Every check the build runs is targeted.** A check runs only when the
+  change touches its area — its `paths`, or, for a package's check, the
+  folder in its `cwd` — and when nothing changed, nothing runs. What a task
+  only planned to touch no longer calls for a check; what it edited outside
+  the plan still does.
+- **A task's change is measured from the commit it began at.** Coplan reads
+  it when the task starts — in the task's own worktree when its branch has
+  one — and `harness_task_update` gives the command:
+  `coplan check implement --since <commit>`. The done gate holds the task to
+  exactly those checks, and its refusal names the command. The final checks
+  run for the build's change since the base branch.
+- **`{files}` in a hook's command** is the changed files in its area, quoted
+  (`ruff check {files}`, `eslint {files}`), so the tool itself looks at
+  nothing else.
+- **`coplan check`** picks what to run from git: `--since <commit>`, else
+  what is not committed yet; at `final`, since the base branch. It says which
+  checks it left out and why. `--files` now names the files instead of git,
+  `--all` runs every check, and `--no-diff` is gone.
+- **`coplan init` writes targeted checks**: a typecheck or linter only for
+  its language, and `ruff check {files}`. Test suites and builds stay whole,
+  for the repository to scope. This repository's own typecheck now runs only
+  when TypeScript changes.
+
 ### A task's own checks: skip one, or add one, set by you
 
 - **A task can skip one of the repository's checks, or add its own** — a

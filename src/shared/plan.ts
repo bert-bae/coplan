@@ -854,6 +854,7 @@ function normalizeTask(task: Task): Task {
   const checks = cleanChecks(t.checks);
   if (checks?.length) t.checks = checks;
   else delete t.checks;
+  if (typeof t.startCommit !== 'string' || !/^[0-9a-f]{7,64}$/.test(t.startCommit)) delete t.startCommit;
   // What a task's own checks say, from disk: anything malformed is dropped,
   // never allowed to break a gate.
   const added = Array.isArray(t.addChecks) ? t.addChecks.map(validTaskCheck).filter((c): c is TaskCheck => Boolean(c)) : [];
@@ -906,6 +907,7 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
     'review',
     'stage',
     'checks',
+    'startCommit',
     'builds',
     'expect',
   ],
@@ -1116,7 +1118,7 @@ function expectAtStart(plan: Plan, op: PlanOp, author: Author): PlanOp {
 
 /** The fields of upsert_task that report progress rather than say what
  *  the task is. Claude reports them only through harness_task_update. */
-export const PROGRESS_FIELDS = ['status', 'stage', 'checks'] as const;
+export const PROGRESS_FIELDS = ['status', 'stage', 'checks', 'startCommit'] as const;
 
 /**
  * Claude's progress goes through harness_task_update, which refuses what
@@ -1788,6 +1790,9 @@ function editTask(
     task.updatedAt = now;
     out.push(log('status', ref('task', task.id), `"${task.title}": ${progress.join('; ')}`));
   }
+  // Where its change begins: read once, when it first starts, and kept —
+  // a task picked up again still owns what it did before.
+  if (typeof op.startCommit === 'string' && /^[0-9a-f]{7,64}$/.test(op.startCommit) && !task.startCommit) task.startCommit = op.startCommit;
 
   if (edited.length) {
     task.updatedAt = now;

@@ -39,7 +39,7 @@ import {
   sharedFiles,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, configSource, emptyProjectConfig, hasHooks, hookCommand, hooksFor, taskHooks, type ProjectConfig } from '../shared/project.ts';
+import { HOOK_STAGES, configSource, emptyProjectConfig, hasHooks, hookCommand, hookScope, hooksFor, taskHooks, type ProjectConfig } from '../shared/project.ts';
 import { hang, indent, nestHeadings } from '../shared/architecture.ts';
 import { agentInfo, type AgentKind } from '../shared/agents.ts';
 import {
@@ -100,7 +100,7 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
     const final = project.hooks.final;
     out.push(
       final.length
-        ? `1. Run the final checks: ${final.map((h) => `${h.name} \`${hookCommand(h)}\``).join('; ')}${opts.bin ? ` — or all of them with \`"${opts.bin}" check final\`` : ''}. Fix anything they find, as a task.`
+        ? `1. Run the final checks for what the build changed: ${final.map((h) => `${h.name} \`${hookCommand(h)}\`${hookScope(h) ? ` (for ${hookScope(h)!.join(', ')})` : ''}`).join('; ')}${opts.bin ? ` — \`"${opts.bin}" check final\` runs those whose area the build touched since the base branch, and no others` : ''}. Fix anything they find, as a task.`
         : '1. Run the repository\'s full checks (its test suite and build, as CI would) and fix anything they find, as a task.',
     );
     const { branches } = branchPlan(plan);
@@ -415,7 +415,7 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
       b.gap().add(`cycle:${key}`, TEMPLATE, `**${name}.** ${what}`).inline(`cycle:${key}:model`, configSource(project, 'review.model'), model);
       if (hooks.length) b.add(`cycle:${key}:checks`, configSource(project, `hooks.${key}`), hooks.map((h) => `- ${h.name}: \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`));
     };
-    const filesArg = `${files.length ? ` --files ${[...new Set(files)].join(',')}` : ''}${skipArg(own)}`;
+    const filesArg = `${sinceArg(task)}${skipArg(own)}`;
     stage('implement', 'Implement', 'Make the change, then run the implement checks and fix what they find:', taskHooks(project, 'implement', files, own));
     stage(
       'review',
@@ -435,7 +435,8 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
     if (review !== 'skip') b.push(...instructionBlocks(project, 'review', '### What the review checks here'));
     b.gap().add('cycle:refine', TEMPLATE, '**Refine.** Fix what the review found, run the implement checks again, and go back to review.');
     if (opts.bin && HOOK_STAGES.some((s) => taskHooks(project, s, files, own).length)) {
-      b.gap().add('cycle:run', TEMPLATE, `Run a stage at once: \`"${opts.bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report.${ownRunWords(own)}`);
+      const listed = HOOK_STAGES.flatMap((s) => taskHooks(project, s, files, own));
+      b.gap().add('cycle:run', TEMPLATE, `Run a stage at once: \`"${opts.bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report. ${TARGETED}${filesNote(listed)}${ownRunWords(own)}`);
     } else if (!hasHooks(project)) {
       // What to do without checks, under the cycle rather than a heading of its own.
       for (const block of checksBlocks(project)) b.gap().add(block.id, block.source, block.text.split('\n').slice(1));
@@ -492,6 +493,19 @@ function skippedWords(plan: Plan): string {
   const skipped = leafTasks(plan).map((t) => ({ t, skip: effectiveChecks(plan, t).skip })).filter((x) => x.skip.length);
   if (!skipped.length) return '';
   return ` Say in it which checks were skipped, as the user set them: ${skipped.map(({ t, skip }) => `${t.id} skipped ${skip.join(', ')}`).join('; ')}.`;
+}
+
+/** How `coplan check` picks what to run, said where it is offered. */
+const TARGETED = 'Only the checks for what the task changes run: since it began with `--since` (given when it starts), else since the last commit.';
+
+/** What `{files}` is, where a listed check's command has it. */
+function filesNote(hooks: readonly { run: string }[]): string {
+  return hooks.some((h) => h.run.includes('{files}')) ? ' `{files}` in a command is the changed files in that check\'s area: `coplan check` fills it in.' : '';
+}
+
+/** `coplan check`'s flag for where a task's change begins, once it has. */
+function sinceArg(task: Task): string {
+  return task.startCommit ? ` --since ${task.startCommit.slice(0, 12)}` : '';
 }
 
 /** `coplan check`'s flag for the checks the user skipped for a task. */
@@ -557,13 +571,14 @@ function trackedChecks(plan: Plan, task: Task, project: ProjectConfig, files: st
   const b = new BlockList();
   const stages = (['implement', 'review'] as const).filter((st) => taskHooks(project, st, files, own).length);
   if (stages.length) {
-    b.gap().add('checks', TEMPLATE, ["## Checks", "The repository's checks for this task's files:"]);
+    b.gap().add('checks', TEMPLATE, ['## Checks', "The repository's checks for the files this task expects to touch — they run only for what it really changes:"]);
     for (const st of stages) {
       b.add(`checks:${st}`, configSource(project, `hooks.${st}`), `- ${st}: ${taskHooks(project, st, files, own).map((h) => `${h.name} \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`).join('; ')}`);
     }
     b.push(...outsideChecks(project, files, own, 'checks:outside'));
-    const filesArg = `${files.length ? ` --files ${[...new Set(files)].join(',')}` : ''}${skipArg(own)}`;
-    if (bin) b.gap().add('checks:run', TEMPLATE, `Run a stage at once: \`"${bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report.${ownRunWords(own)}`);
+    const filesArg = `${sinceArg(task)}${skipArg(own)}`;
+    const listed = stages.flatMap((st) => taskHooks(project, st, files, own));
+    if (bin) b.gap().add('checks:run', TEMPLATE, `Run a stage at once: \`"${bin}" check implement${filesArg}\` (or \`review\`); add \`--json\` for the \`checks\` to report. ${TARGETED}${filesNote(listed)}${ownRunWords(own)}`);
   } else if (!hasHooks(project)) {
     b.gap().push(...checksBlocks(project));
   }

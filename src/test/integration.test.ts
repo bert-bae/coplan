@@ -1640,7 +1640,7 @@ test('in Cursor, the request is pasted or picked up by harness_plan_read — onc
  * Checks for what the change touched (#52)
  * ------------------------------------------------------------------ */
 
-test('done waits on the review checks for files the change touched outside the task\'s own (#52)', async () => {
+test("done waits on the checks for what the task changed since it began — not for files it only planned to touch (#52, targeted checks)", async () => {
   const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-diff-'));
   const g = (...args: string[]) => execFileSync('git', args, { cwd: other, stdio: 'pipe' });
   try {
@@ -1650,12 +1650,24 @@ test('done waits on the review checks for files the change touched outside the t
     mkdirSync(path.join(other, '.coplan'), { recursive: true });
     writeFileSync(
       path.join(other, '.coplan', 'config.json'),
-      JSON.stringify({ hooks: { review: [{ name: 'ts tests', run: 'true', paths: ['*.ts'] }, { name: 'py tests', run: 'true', paths: ['*.py'] }] } }),
+      JSON.stringify({
+        hooks: {
+          review: [
+            { name: 'ts tests', run: 'true', paths: ['*.ts'] },
+            { name: 'py tests', run: 'true', paths: ['*.py'] },
+            { name: 'md lint', run: 'true', paths: ['*.md'] },
+          ],
+        },
+      }),
     );
     writeFileSync(path.join(other, 'app.ts'), 'export {};\n');
+    writeFileSync(path.join(other, 'README.md'), '# hi\n');
     g('add', '-A');
     g('commit', '-qm', 'initial');
-    g('checkout', '-qb', 'feature');
+    // Work from before the task began is not the task's change.
+    writeFileSync(path.join(other, 'README.md'), '# changed before\n');
+    g('commit', '-qam', 'earlier work');
+    const began = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: other, encoding: 'utf8' }).trim();
 
     const id = 'diff-session';
     await call(`/hook/SessionStart`, { method: 'POST', body: JSON.stringify({ session_id: id, cwd: other, start_reason: 'startup' }) });
@@ -1664,18 +1676,25 @@ test('done waits on the review checks for files the change touched outside the t
     await call('/mcp/publish', {
       method: 'POST',
       headers: { 'x-harness-session': id },
-      body: JSON.stringify({ cwd: other, title: 'Wire the app', tasks: [{ id: 'app', title: 'Wire the app', files: ['app.ts'] }] }),
+      // It plans to touch README.md too — and never will.
+      body: JSON.stringify({ cwd: other, title: 'Wire the app', tasks: [{ id: 'app', title: 'Wire the app', files: ['app.ts', 'README.md'] }] }),
     });
+    // Starting, it records where its change begins, and says how to check it.
+    const started = await task({ status: 'in_progress', stage: 'implement' });
+    assert.match(String(started['text']), new RegExp(`Its checks run for what it changes, from this commit on: \`.*check implement --since ${began.slice(0, 12)}\``));
+    assert.equal((await sessionFor(id)).plan!.tasks.find((t) => t.id === 'app')?.startCommit, began);
+
+    // It edits its file, writes a Python helper, and commits the work.
+    writeFileSync(path.join(other, 'app.ts'), 'export const x = 1;\n');
+    writeFileSync(path.join(other, 'helper.py'), 'x = 1\n');
+    g('add', '-A');
+    g('commit', '-qm', 'the task');
     await task({ stage: 'review' });
     await task({ verdict: 'pass', checks: [{ name: 'ts tests', ok: true }] });
-
-    // Only its own file changed: its own check is all done waits on.
-    writeFileSync(path.join(other, 'app.ts'), 'export const x = 1;\n');
-    // …but it also wrote a Python helper, which has a check of its own.
-    writeFileSync(path.join(other, 'helper.py'), 'x = 1\n');
     const refused = await task({ status: 'done', note: 'wired' });
     assert.equal(refused['ok'], false);
-    assert.match(String(refused['text']), /the review checks py tests \(for helper\.py, which the change touches outside the task's files\) were never reported/);
+    assert.match(String(refused['text']), new RegExp(`the review checks py tests \\(for helper\\.py\\) were never reported — \`.*check review --since ${began.slice(0, 12)}\` runs exactly these`));
+    assert.doesNotMatch(String(refused['text']), /md lint/, 'README.md was planned, and touched only before the task began: no check for it');
 
     await task({ checks: [{ name: 'py tests', ok: true }] });
     const done = await task({ status: 'done', note: 'wired' });

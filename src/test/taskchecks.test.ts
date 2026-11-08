@@ -86,7 +86,7 @@ test('a skip is never silent: the brief, the read-back, the changes and the repo
   const brief = renderBrief(p, docs, { project, mode: 'managed', bin: '/coplan' });
   assert.match(brief, /## Checks set for this task\nThe user set these; they hold for this task over the repository's:\n- It skips tests: do not run it for this task — done does not wait on it\.\n- It adds links: `pnpm check-links` at review — done waits on it/);
   assert.match(brief, /\*\*Review\.\*\*[^\n]*\n- lint: `pnpm lint` \(optional\)\n- links: `pnpm check-links`/, 'the review list leaves tests out and has links');
-  assert.match(brief, /check implement --files README\.md --skip tests`.*It does not know the checks added for this task \(links\): run those as listed\./);
+  assert.match(brief, /check implement --skip tests`.*It does not know the checks added for this task \(links\): run those as listed\./);
   assert.match(renderBrief(p, docs, { project, mode: 'tracked' }), /- review: lint `pnpm lint` \(optional\); links `pnpm check-links`/);
   assert.match(renderPlan(p), /t?docs Document it · skips tests; adds links \(review\)/);
 

@@ -428,7 +428,7 @@ test('when every task is done, next says how to finish', () => {
   const plan = done(tasked(), 'client', 'config', 'invalidate', 'wire', 'docs');
   const next = renderNext(plan, { project: PROJECT, bin: '/x/coplan' });
   assert.match(next, /Every task in "Add a cache" is done \(5\)/);
-  assert.match(next, /final checks: check `npm run check` — or all of them with `"\/x\/coplan" check final`/);
+  assert.match(next, /final checks for what the build changed: check `npm run check` — `"\/x\/coplan" check final` runs those whose area the build touched since the base branch, and no others/);
   assert.match(next, /stack order: `cache\/storage` → `cache\/api` \(onto `cache\/storage`\)/);
   assert.match(next, /op: "report"/);
 });
@@ -447,7 +447,9 @@ test("a task's brief is self-contained: objective, where it fits, scope, branch 
   assert.match(brief, /- typecheck: `npm run typecheck`/);
   assert.doesNotMatch(brief, /ruff/, 'a hook for other files does not apply');
   assert.match(brief, /- tests: `npm test`/);
-  assert.match(brief, /"\/x\/coplan" check implement --files src\/cache\.ts/);
+  // Targeted by git, not by the files it planned: no --files, and how it picks.
+  assert.match(brief, /"\/x\/coplan" check implement` \(or `review`\); add `--json` for the `checks` to report\. Only the checks for what the task changes run: since it began with `--since`/);
+  assert.doesNotMatch(brief, /--files/);
 
   const wire = renderBrief(plan, plan.tasks.find((t) => t.id === 'wire')!, { project: PROJECT, mode: 'managed' });
   assert.match(wire, /\*\*API\*\* `api` in "Components" — service\n  Serves orders\.\n  Connections: API → Redis: get\/set; API → Postgres: SQL/);
@@ -658,7 +660,7 @@ test("in a Tracked build, what is next and a task's brief carry no cycle, no lim
   for (const banned of [/iric/, /review round/, /subagent/, /worktree/, /up to \d+ at once/]) assert.doesNotMatch(next, banned);
 
   const brief = renderBrief(plan, plan.tasks.find((t) => t.id === 'wire')!, { project: PROJECT });
-  assert.match(brief, /## Checks\nThe repository's checks for this task's files:\n- implement: typecheck `npm run typecheck`/);
+  assert.match(brief, /## Checks\nThe repository's checks for the files this task expects to touch — they run only for what it really changes:\n- implement: typecheck `npm run typecheck`/);
   assert.match(brief, /status: "in_progress" \| "done" \| "blocked"/);
   for (const banned of [/## The cycle/, /Review: /, /review round/, /subagent that did not write/, /each through its own cycle/]) assert.doesNotMatch(brief, banned);
 });

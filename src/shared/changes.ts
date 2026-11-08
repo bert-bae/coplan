@@ -1,11 +1,11 @@
 /**
- * The files a change touches, as git sees them (#52).
+ * What a change touched, as git says — the one thing every check is chosen
+ * by (#52, and targeted checks).
  *
- * A hook limited to some files (`paths`) runs for a task that touches them.
- * Before there is a diff — the implement stage — that can only be the files
- * the task planned to touch. At review and at the end there is a diff, and
- * a task that edited a file outside its plan must not skip the check for
- * it: so those stages match the files the change really touched as well.
+ * A check runs for the areas the change really touched, never for the
+ * files a task only planned to touch, nor for areas no commit or edit in
+ * it came near. One task's change is everything since the commit it began
+ * at; the build's, everything since the base branch.
  *
  * Node only (it runs git): for `coplan check` and the daemon, never the page.
  */
@@ -75,13 +75,48 @@ export async function changedFiles(root: string, base?: string | null): Promise<
 }
 
 /**
- * The files a stage's hooks are matched against: the files the task
- * planned to touch, and — at review and at the end, once there is a diff —
- * the files the change touched. A task that names no files gets every hook
- * whatever it changed, as before: the diff only ever adds checks.
+ * Every file changed since `since` — committed after it, staged, unstaged
+ * and new — or, with no `since`, since the last commit: the work not yet
+ * committed. That is one task's change, measured where it is built. Null
+ * outside a git repository, or when `since` is not a commit there.
  */
-export function filesForStage(stage: 'implement' | 'review' | 'final', planned: readonly string[] | undefined, changed: readonly string[] | undefined): string[] {
-  const own = [...(planned ?? [])];
-  if (stage === 'implement' || !own.length || !changed?.length) return own;
-  return [...new Set([...own, ...changed])];
+export async function changedSince(root: string, since?: string | null): Promise<ChangedFiles | null> {
+  if ((await git(root, ['rev-parse', '--git-dir'])) === null) return null;
+  const from = since ?? 'HEAD';
+  if ((await git(root, ['rev-parse', '--verify', '--quiet', `${from}^{commit}`])) === null) {
+    // A repository with no commit yet: everything in it is new.
+    if (since) return null;
+    return { files: paths(await git(root, ['ls-files', '--others', '--exclude-standard', '-z'])).sort(), base: null };
+  }
+  const lists = await Promise.all([
+    git(root, ['diff', '--name-only', '-z', from]),
+    git(root, ['ls-files', '--others', '--exclude-standard', '-z']),
+  ]);
+  return { files: [...new Set(lists.flatMap(paths))].sort().slice(0, MAX_FILES), base: since ?? null };
+}
+
+/** The commit checked out in `root` now, or null outside git. */
+export async function headCommit(root: string): Promise<string | null> {
+  return (await git(root, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']))?.trim() || null;
+}
+
+/** The working tree `branch` is checked out in — the repository's own or
+ *  one of its worktrees — or null when it is not checked out anywhere. */
+export async function worktreeOf(root: string, branch: string): Promise<string | null> {
+  const out = await git(root, ['worktree', 'list', '--porcelain']);
+  if (!out) return null;
+  let at: string | null = null;
+  for (const line of out.split('\n')) {
+    if (line.startsWith('worktree ')) at = line.slice(9);
+    else if (line === `branch refs/heads/${branch}` && at) return at;
+  }
+  return null;
+}
+
+/** Files committed on `branch` since `since` (from where they diverged), for
+ *  a branch no working tree has checked out any more; null when there is
+ *  no such branch. */
+export async function committedOn(root: string, since: string, branch: string): Promise<string[] | null> {
+  const out = await git(root, ['diff', '--name-only', '-z', `${since}...${branch}`]);
+  return out === null ? null : paths(out);
 }

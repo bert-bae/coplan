@@ -33,6 +33,7 @@ import {
   MODE_LABEL,
   cleanSettings,
   dependents,
+  effectiveBranch,
   effectiveChecks,
   effectiveReview,
   hasSubtasks,
@@ -46,14 +47,14 @@ import {
   validMode,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, loadProjectConfig, pathsMatch, taskHooks, type ProjectConfig } from '../shared/project.ts';
-import { changedFiles, filesForStage, type ChangedFiles } from '../shared/changes.ts';
+import { HOOK_STAGES, filesInScope, hookScope, loadProjectConfig, taskHooks, type ProjectConfig } from '../shared/project.ts';
+import { changedFiles, changedSince, committedOn, headCommit, worktreeOf, type ChangedFiles } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
 import { ConfigCache, configStamp, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
-import type { BuildChoice, BuildSettings, CleanupGroupId, DaemonLock, ExecutionMode, Plan, PlanInput, PlanOp, ServerEvent, SessionState, TaskListInput, TaskStatus } from '../shared/types.ts';
+import type { BuildChoice, BuildSettings, CleanupGroupId, DaemonLock, ExecutionMode, Plan, PlanInput, PlanOp, ServerEvent, SessionState, Task, TaskListInput, TaskStatus } from '../shared/types.ts';
 import { CLEANUP_GROUPS } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
@@ -1148,26 +1149,59 @@ function buildRouter(deps: Deps): Router {
    * those as a note in the reply instead (#62).
    */
   const updateTask = async (session: SessionState, body: Record<string, unknown>): Promise<string> => {
-    const changed = await reviewDiff(session, body);
-    return updateTaskNow(store.get(session.sessionId) ?? session, body, changed);
+    const git = await taskGit(session, body);
+    return updateTaskNow(store.get(session.sessionId) ?? session, body, git);
+  };
+
+  /** Where a task is built: the working tree its branch is checked out in
+   *  (a worktree of its own), else the session's. */
+  const builtIn = async (session: SessionState, plan: Plan, task: Task): Promise<string> => {
+    const root = session.repoRoot ?? session.cwd;
+    const branch = effectiveBranch(plan, task);
+    return (branch && (await worktreeOf(root, branch))) || root;
   };
 
   /**
-   * What the change touched, as git says, when it bears on marking a task
-   * done: a review hook limited to some files must run for a file the task
-   * edited outside its plan too (#52). Read only when it can matter — a
-   * task going done, on its own word, with files of its own, in a
-   * repository whose review hooks are limited by `paths`.
+   * What git says about a task, read before its update is weighed: the
+   * commit it begins at, when it is starting — its change is everything
+   * since — and, when it is going done, that change, which the done gate
+   * holds its checks to. Every check is targeted: to the areas the task
+   * really touched, not the ones it planned to, nor the rest of the build's.
    */
-  const reviewDiff = async (session: SessionState, body: Record<string, unknown>): Promise<ChangedFiles | null> => {
-    if (body['status'] !== 'done' || body['user_approved'] === true || !session.plan) return null;
-    const task = session.plan.tasks.find((t) => t.id === String(body['task_id'] ?? ''));
-    const project = projectFor(session);
-    if (!task?.files?.length || !project.hooks.review.some((h) => h.paths?.length)) return null;
-    return changedFiles(session.repoRoot ?? session.cwd, session.plan.submission?.base ?? project.branches.base);
+  const taskGit = async (session: SessionState, body: Record<string, unknown>): Promise<{ startCommit?: string; change?: ChangedFiles | null }> => {
+    const plan = session.plan;
+    const task = plan?.tasks.find((t) => t.id === String(body['task_id'] ?? ''));
+    if (!plan || !task) return {};
+    const out: { startCommit?: string; change?: ChangedFiles | null } = {};
+    const status = body['status'];
+    if (!task.startCommit && (status === 'in_progress' || (typeof body['stage'] === 'string' && status !== 'done' && status !== 'blocked'))) {
+      const head = await headCommit(await builtIn(session, plan, task));
+      if (head) out.startCommit = head;
+    }
+    if (status === 'done' && body['user_approved'] !== true) out.change = await taskChange(session, plan, task);
+    return out;
   };
 
-  const updateTaskNow = (session: SessionState, body: Record<string, unknown>, changed: ChangedFiles | null): string => {
+  /**
+   * One task's change: everything since the commit it began at, where it is
+   * built — or, on a branch no working tree has checked out any more, what
+   * was committed on it. A task started before that was recorded is held
+   * to the build's change since its base, as before. Null outside git.
+   */
+  const taskChange = async (session: SessionState, plan: Plan, task: Task): Promise<ChangedFiles | null> => {
+    const root = session.repoRoot ?? session.cwd;
+    if (!task.startCommit) return changedFiles(root, plan.submission?.base ?? projectFor(session).branches.base);
+    const branch = effectiveBranch(plan, task);
+    const tree = branch ? await worktreeOf(root, branch) : null;
+    if (branch && !tree) {
+      const committed = await committedOn(root, task.startCommit, branch);
+      if (committed) return { files: committed, base: task.startCommit };
+    }
+    return changedSince(tree ?? root, task.startCommit);
+  };
+
+  const updateTaskNow = (session: SessionState, body: Record<string, unknown>, git: { startCommit?: string; change?: ChangedFiles | null }): string => {
+    const changed = git.change ?? null;
     const before = session.plan;
     const taskId = String(body['task_id'] ?? '');
     if (!before) throw new PlanError(`No task "${taskId}": there is no plan yet. Publish one with harness_plan_publish.`);
@@ -1284,20 +1318,21 @@ function buildRouter(deps: Deps): Router {
       ]);
       const latest = mergeChecks(task.checks, checks ?? []);
       const failing = latest.filter((c) => !c.ok && !optional.has(c.name));
-      // The files it planned to touch, and those the change touched (#52).
-      const own = new Set(taskHooks(project, 'review', task.files, set).map((h) => h.name));
-      const outside = changed ? changed.files.filter((f) => !task.files?.includes(f)) : [];
-      const missing = taskHooks(project, 'review', filesForStage('review', task.files, changed?.files), set)
-        .filter((h) => !h.optional && !latest.some((c) => c.name === h.name))
-        .map((h) =>
-          own.has(h.name)
-            ? h.name
-            : `${h.name} (for ${outside.filter((f) => pathsMatch(h.paths ?? [], f)).slice(0, 3).join(', ')}, which the change touches outside the task's files)`,
-        );
+      // Targeted: the checks for what the task's change touched — none for
+      // an area it did not touch, however it was planned. Where git cannot
+      // say, the checks for the files it planned to touch, as before.
+      const missingHooks = (changed ? taskHooks(project, 'review', changed.files, set, { changed: true }) : taskHooks(project, 'review', task.files, set)).filter(
+        (h) => !h.optional && !latest.some((c) => c.name === h.name),
+      );
+      const missing = missingHooks.map((h) => {
+        const touched = changed && hookScope(h) ? filesInScope(h, changed.files) : [];
+        return touched.length ? `${h.name} (for ${touched.slice(0, 3).join(', ')}${touched.length > 3 ? ', …' : ''})` : h.name;
+      });
+      const rerun = missing.length && task.startCommit ? ` — \`${COPLAN_BIN ? `"${COPLAN_BIN}"` : 'coplan'} check review --since ${task.startCommit.slice(0, 12)}\` runs exactly these, where it is built` : '';
       if (failing.length || missing.length) {
         const why = [
           failing.length ? `its last checks failed (${failing.map((c) => `${c.name}${c.note ? `: ${c.note}` : ''}`).join('; ')})` : '',
-          missing.length ? `the review checks ${missing.join(', ')} were never reported` : '',
+          missing.length ? `the review checks ${missing.join(', ')} were never reported${rerun}` : '',
         ].filter(Boolean);
         gate(
           `"${task.title}" is not done: ` +
@@ -1340,6 +1375,7 @@ function buildRouter(deps: Deps): Router {
       ...(status ? { status } : {}),
       ...(stage ? { stage: stage as NonNullable<ReturnType<typeof validStage>> } : {}),
       ...(checks ? { checks } : {}),
+      ...(git.startCommit ? { startCommit: git.startCommit } : {}),
       ...(note !== undefined ? { note: approved ? `${note} (approved by the user)` : note } : {}),
     };
     const review: PlanOp[] = verdict
@@ -1355,6 +1391,13 @@ function buildRouter(deps: Deps): Router {
     const state = now.status === 'in_progress' && now.stage ? stageWords(now) : now.status.replace('_', ' ');
     out.push(`[cc-harness] "${now.title}" is ${state}.${changes.length ? '' : ' (It already was.)'}`);
     if (skipped.length) out.push(`Noted, not refused (this build is ${MODE_LABEL[planMode(plan, project.mode)]}): ${skipped.join('; ')}.`);
+    // Its checks are targeted to its change from here: say how to run them.
+    if (starting && now.startCommit) {
+      out.push(
+        `Its checks run for what it changes, from this commit on: \`${COPLAN_BIN ? `"${COPLAN_BIN}"` : 'coplan'} check implement --since ${now.startCommit.slice(0, 12)}\` ` +
+          '(then `review`), run where it is built.',
+      );
+    }
     if (starting && !plan.submission) {
       out.push(
         'The plan has not been submitted. If the user told you to build it, record that with harness_plan_advance ' +
