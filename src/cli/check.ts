@@ -31,7 +31,7 @@ import {
   type HookStage,
 } from '../shared/project.ts';
 import type { CheckResult } from '../shared/types.ts';
-import { changedFiles, changedSince } from '../shared/changes.ts';
+import { changedFiles, changedSince, unreadWords, type ChangedFiles } from '../shared/changes.ts';
 
 /** Lines of a failing hook's output shown. Enough to see the error. */
 const TAIL_LINES = 40;
@@ -121,15 +121,32 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   // base branch. Null where nobody can say: then every check runs.
   let changed: string[] | null = null;
   let since = '';
+  // A change git could not read, too large to list, or with no base to
+  // measure it from is not one that touched nothing: every check runs, as
+  // with --all, and it says why.
+  const unread = (c: ChangedFiles) => say(`coplan: what changed cannot be told — ${unreadWords(c)} — so every check runs.`);
   if (opts.all) since = '';
   else if (opts.files.length) changed = opts.files;
   else if (opts.stage === 'final') {
     const build = await changedFiles(root, opts.base ?? config.branches.base);
-    if (build) [changed, since] = [build.files, build.base ? `since ${build.base}` : 'not committed yet'];
+    // A base given here that is not there is a mistake to say, not a reason
+    // to run everything.
+    if (build?.unread === 'no-base' && opts.base) {
+      console.error(`coplan: "--base ${opts.base}" is not a branch or commit here.`);
+      return 2;
+    }
+    if (build) {
+      since = `since ${build.base}`;
+      if (build.unread) unread(build);
+      else changed = build.files;
+    }
   } else {
     const task = await changedSince(root, opts.since);
-    if (task) [changed, since] = [task.files, opts.since ? `since ${opts.since.slice(0, 12)}` : 'since the last commit'];
-    else if (opts.since) {
+    if (task) {
+      since = opts.since ? `since ${opts.since.slice(0, 12)}` : 'since the last commit';
+      if (task.unread) unread(task);
+      else changed = task.files;
+    } else if (opts.since) {
       console.error(`coplan: ${opts.since} is not a commit here: give the one the task began at, or --all.`);
       return 2;
     }

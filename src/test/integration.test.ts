@@ -1697,6 +1697,18 @@ test("done waits on the checks for what the task changed since it began — not 
     assert.doesNotMatch(String(refused['text']), /md lint/, 'README.md was planned, and touched only before the task began: no check for it');
 
     await task({ checks: [{ name: 'py tests', ok: true }] });
+    // Git cannot read the change (its index is broken): that is never
+    // "nothing changed", which would ask for no checks — every one applies.
+    const index = path.join(other, '.git', 'index');
+    const saved = readFileSync(index);
+    writeFileSync(index, 'not an index');
+    try {
+      const unread = await task({ status: 'done', note: 'wired' });
+      assert.equal(unread['ok'], false);
+      assert.match(String(unread['text']), /what it changed cannot be told — git could not read it \(it failed or took too long\) — so every review check applies, and md lint was never reported/);
+    } finally {
+      writeFileSync(index, saved);
+    }
     const done = await task({ status: 'done', note: 'wired' });
     assert.equal(done['ok'], true, String(done['text']));
   } finally {

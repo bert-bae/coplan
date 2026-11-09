@@ -48,7 +48,7 @@ import {
   waitingOn,
 } from '../shared/build.ts';
 import { HOOK_STAGES, filesInScope, hookScope, loadProjectConfig, taskHooks, type ProjectConfig } from '../shared/project.ts';
-import { changedFiles, changedSince, committedOn, headCommit, worktreeOf, type ChangedFiles } from '../shared/changes.ts';
+import { changedFiles, changedSince, committedOn, headCommit, unreadWords, worktreeOf, type ChangedFiles } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
 import { ConfigCache, configStamp, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
@@ -1195,7 +1195,7 @@ function buildRouter(deps: Deps): Router {
     const tree = branch ? await worktreeOf(root, branch) : null;
     if (branch && !tree) {
       const committed = await committedOn(root, task.startCommit, branch);
-      if (committed) return { files: committed, base: task.startCommit };
+      if (committed) return committed;
     }
     return changedSince(tree ?? root, task.startCommit);
   };
@@ -1319,11 +1319,18 @@ function buildRouter(deps: Deps): Router {
       const latest = mergeChecks(task.checks, checks ?? []);
       const failing = latest.filter((c) => !c.ok && !optional.has(c.name));
       // Targeted: the checks for what the task's change touched — none for
-      // an area it did not touch, however it was planned. Where git cannot
-      // say, the checks for the files it planned to touch, as before.
-      const missingHooks = (changed ? taskHooks(project, 'review', changed.files, set, { changed: true }) : taskHooks(project, 'review', task.files, set)).filter(
-        (h) => !h.optional && !latest.some((c) => c.name === h.name),
-      );
+      // an area it did not touch, however it was planned. Outside git, the
+      // checks for the files it planned to touch, as before. Where git
+      // could not read the change, or it is too large to list, every review
+      // check: an unread change is never taken for one that touched nothing.
+      const unread = changed?.unread;
+      const missingHooks = (
+        unread
+          ? taskHooks(project, 'review', undefined, set)
+          : changed
+            ? taskHooks(project, 'review', changed.files, set, { changed: true })
+            : taskHooks(project, 'review', task.files, set)
+      ).filter((h) => !h.optional && !latest.some((c) => c.name === h.name));
       const missing = missingHooks.map((h) => {
         const touched = changed && hookScope(h) ? filesInScope(h, changed.files) : [];
         return touched.length ? `${h.name} (for ${touched.slice(0, 3).join(', ')}${touched.length > 3 ? ', …' : ''})` : h.name;
@@ -1332,7 +1339,11 @@ function buildRouter(deps: Deps): Router {
       if (failing.length || missing.length) {
         const why = [
           failing.length ? `its last checks failed (${failing.map((c) => `${c.name}${c.note ? `: ${c.note}` : ''}`).join('; ')})` : '',
-          missing.length ? `the review checks ${missing.join(', ')} were never reported${rerun}` : '',
+          missing.length
+            ? unread && changed
+              ? `what it changed cannot be told — ${unreadWords(changed)} — so every review check applies, and ${missing.join(', ')} ${missing.length === 1 ? 'was' : 'were'} never reported`
+              : `the review checks ${missing.join(', ')} were never reported${rerun}`
+            : '',
         ].filter(Boolean);
         gate(
           `"${task.title}" is not done: ` +

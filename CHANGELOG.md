@@ -22,6 +22,13 @@
   what is not committed yet; at `final`, since the base branch. It says which
   checks it left out and why. `--files` now names the files instead of git,
   `--all` runs every check, and `--no-diff` is gone.
+- **A change that cannot be told runs every check.** Where git fails or
+  times out, the change is more than 5,000 files, or no base branch is
+  found to measure the build from, the done gate and `coplan check` apply
+  every check and say why, rather than take it for a change that touched
+  nothing. `coplan check final --base <ref>` with a ref that is not there is
+  an error. A repository with no commit yet counts its
+  staged files as well as its new ones.
 - **`coplan init` writes targeted checks**: a typecheck or linter only for
   its language, and `ruff check {files}`. Test suites and builds stay whole,
   for the repository to scope. This repository's own typecheck now runs only

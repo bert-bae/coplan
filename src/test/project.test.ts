@@ -276,6 +276,19 @@ test('coplan check runs only the checks for what changed: since the last commit,
     const final = run('final');
     assert.deepEqual(ran(final), ['build']);
     assert.match(final.stdout, /not running docs \(docs\/\) — the change since main does not touch its area/);
+    // Git cannot read the change: every check runs, {files} is the whole
+    // repository, and it says why — never "nothing changed".
+    writeFileSync(path.join(dir, '.git', 'index'), 'not an index');
+    const unread = run('review', '--since', began);
+    assert.deepEqual(ran(unread), ['ts tests', 'py tests', 'whole', 'api']);
+    assert.match(unread.stdout, /what changed cannot be told — git could not read it \(it failed or took too long\) — so every check runs/);
+    assert.match(run('implement', '--list').stdout, /py lint: echo linted \./);
+    rmSync(path.join(dir, '.git', 'index'));
+    g('reset', '-q');
+    // A --base that is not there is a mistake, not a build with nothing in it.
+    const typo = run('final', '--base', 'mian');
+    assert.equal(typo.status, 2);
+    assert.match(typo.stderr, /"--base mian" is not a branch or commit here/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
