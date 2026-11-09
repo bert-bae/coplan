@@ -33,7 +33,10 @@ The build prompt says how the plan is built:
     the user's to allow.
 
 It also lists the repository's **checks** from `.coplan/config.json`, per
-stage (`implement`, `review`, `final`). Run those — do not invent others.
+stage (`implement`, `review`, `final`). Run those — do not invent others —
+with `coplan check`, which runs only the ones for what changed: a task's
+checks since the commit it began at (`--since`, given when it starts), the
+final ones since the base branch.
 A task's brief says which of them the user skipped for it and which they
 added for it: follow the brief.
 If there are none, pick the repository's own commands (scripts, CI) once,

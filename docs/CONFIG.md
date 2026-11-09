@@ -106,11 +106,11 @@ A hook is a command, run from the repository root, or an object:
 
 | Key | Meaning |
 | --- | --- |
-| `run` | The shell command. Required. |
+| `run` | The shell command. Required. `{files}` in it is the changed files in the hook's area, each quoted (`ruff check {files}`, `eslint {files}`), so the tool looks at nothing else; from the hook's `cwd` when it has one. Where the change is not known, or runs past 1,000 files, it is `.`, the whole repository. |
 | `name` | What it is called in reports and on the board, up to 60 characters. Defaults to the script name (`pnpm lint` or `npm run lint` → `lint`). |
 | `timeout` | Seconds before `coplan check` stops it: 1 to 3600. Default 600. |
-| `paths` | Globs (`src/**`, `*.py`, `docs/`, `src/**/*.{ts,tsx}`): the hook applies only to tasks that touch a matching file — at `implement`, the files the task expects to touch; at `review` and `final`, those and every file the change touched, as git says (committed since the base branch, staged, unstaged or new), so a file edited outside the plan never skips its check. A task that lists no files gets every hook. `**` crosses directories, `*` and `?` do not, `{a,b}` is either; a glob without a slash matches a file name anywhere, and one ending in `/` everything under it. A `!glob` takes files back out: `["src/**", "!src/gen/**"]`. |
-| `cwd` | The folder it runs in, inside the repository: a package of a monorepo (`"packages/api"`). Default the repository root. While the folder does not exist the hook fails, saying so, rather than run somewhere it would check nothing. |
+| `paths` | Globs (`src/**`, `*.py`, `docs/`, `src/**/*.{ts,tsx}`): the hook's area. It runs only when the change touches a file in it (see [Targeted checks](#targeted-checks)). Without `paths`, a hook with a `cwd` checks that folder, and one with neither checks the whole repository: it runs on any change. `**` crosses directories, `*` and `?` do not, `{a,b}` is either; a glob without a slash matches a file name anywhere, and one ending in `/` everything under it. A `!glob` takes files back out: `["src/**", "!src/gen/**"]`. |
+| `cwd` | The folder it runs in, inside the repository: a package of a monorepo (`"packages/api"`). Default the repository root. Without `paths`, it is also the hook's area: the hook runs only when something under it changes. While the folder does not exist the hook fails, saying so, rather than run somewhere it would check nothing. |
 | `env` | Variables set for it, up to 20: `{ "NODE_ENV": "test" }`. The prompts show the command with both, as one line the agent can run from the root. |
 | `optional` | `true`: a failure is reported but does not hold the task back. |
 
@@ -127,17 +127,34 @@ They show in the task's brief, on the board, and under the build report.
 Coplan never runs these itself. They reach Claude in the build prompt and in
 each task's brief (`harness_task_brief`), and Claude runs them like any
 other command, under your permission settings. `coplan check <stage>` runs a
-whole stage at once and prints only the tail of what failed; `--files a,b`
-keeps to the hooks for those files — at `review` and `final`, and for the
-files git says the change touched, measured from `branches.base` (or
-`--base <ref>`; `--no-diff` keeps to `--files` alone) — `--list` prints them
-without running, and `--json` prints results in the shape
-`harness_task_update` takes.
+stage's checks for what changed and prints only the tail of what failed:
+`--since <commit>` measures the change from where a task began,
+`--files a,b` names the files instead of git, `--all` runs every check
+whatever changed, `--list` prints them without running, and `--json` prints
+results in the shape `harness_task_update` takes.
+
+### Targeted checks
+
+Every check the build runs is targeted to what changed, so a change pays
+only for the checks of the areas it touched:
+
+- **A task's change** is everything since the commit it began at — Coplan
+  reads it when the task starts, where the task is built (its own worktree,
+  if its branch has one) — committed since, staged, unstaged and new. Not
+  the files the task planned to touch: a planned file it never edited calls
+  for no check, and one it edited outside the plan gets its check.
+- **The build's change**, for `final`, is everything since the base branch.
+- **A check runs only when its area changed**: its `paths`, else the folder
+  in its `cwd`, else the whole repository (any change). When nothing changed,
+  nothing runs.
+- `{files}` in a command narrows the tool itself to the changed files.
 
 Claude reports the checks it ran with each task. A task whose last reported
 checks include a failure (not `optional`) cannot be marked done, and nor can
-one that never reported a required `review` check for its files — the files
-it planned to touch and the files the change touched.
+one that never reported a required `review` check for what it changed;
+`harness_task_update` names the command that runs exactly those
+(`coplan check review --since <commit>`). Where git cannot say what changed,
+the checks for the files the task planned to touch are held instead.
 
 A file that cannot be read, a stage that does not exist, a hook without a
 command, a key Coplan does not read (often a typo of one it does), a value

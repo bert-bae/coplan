@@ -21,7 +21,7 @@ _From .coplan/config.json, run from the repository root:_
 - implement: typecheck `pnpm typecheck`; lint `pnpm lint` (for src/**)
 - review: tests `env NODE_ENV=test sh -c 'pnpm test'`
 - final: check `pnpm check`; audit `pnpm audit` (optional)
-Run a whole stage with `"/opt/coplan/bin/coplan" check <stage>` — `--files a,b` for one task's files, `--json` for harness_task_update's `checks`.
+Run a stage with `"/opt/coplan/bin/coplan" check <stage>`: only the checks for what changed run (since a task began with `--since`, else since the last commit; at `final`, since the base branch). `--json` gives harness_task_update's `checks`.
 
 ## From the user
 > Start with the client.

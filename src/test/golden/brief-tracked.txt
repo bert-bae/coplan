@@ -49,11 +49,11 @@ Match the code style around you.
 Commit this task's work on `cache/client`. Cut it from `main` if it does not exist yet.
 
 ## Checks
-The repository's checks for this task's files:
+The repository's checks for the files this task expects to touch — they run only for what it really changes:
 - implement: typecheck `pnpm typecheck`; lint `pnpm lint`
 - review: tests `env NODE_ENV=test sh -c 'pnpm test'`
 
-Run a stage at once: `"/opt/coplan/bin/coplan" check implement --files src/cache.ts,src/events.ts` (or `review`); add `--json` for the `checks` to report.
+Run a stage at once: `"/opt/coplan/bin/coplan" check implement` (or `review`); add `--json` for the `checks` to report. Only the checks for what the task changes run: since it began with `--since` (given when it starts), else since the last commit.
 
 ### What a review checks here
 _From the user's and the repository's Coplan config; they hold for all of this._

@@ -1028,7 +1028,17 @@ export function checksBlocks(project: ProjectConfig, bin?: string, planning = fa
     const list = hooks.map((h) => `${h.name} \`${hookCommand(h)}\`${h.paths ? ` (for ${h.paths.join(', ')})` : ''}${h.optional ? ' (optional)' : ''}`);
     b.add(`checks:${stage}`, configSource(project, `hooks.${stage}`), `- ${stage}: ${list.join('; ')}`);
   }
-  if (bin) b.add('checks:run', TEMPLATE, `Run a whole stage with \`"${bin}" check <stage>\` — \`--files a,b\` for one task's files, \`--json\` for harness_task_update's \`checks\`.`);
+  if (bin) {
+    b.add(
+      'checks:run',
+      TEMPLATE,
+      `Run a stage with \`"${bin}" check <stage>\`: only the checks for what changed run (since a task began with \`--since\`, ` +
+        "else since the last commit; at `final`, since the base branch). `--json` gives harness_task_update's `checks`.",
+    );
+  }
+  if (HOOK_STAGES.some((stage) => project.hooks[stage].some((h) => h.run.includes('{files}')))) {
+    b.add('checks:files', TEMPLATE, '`{files}` in a command is the changed files in that check\'s area: `coplan check` fills it in.');
+  }
   return b.blocks;
 }
 

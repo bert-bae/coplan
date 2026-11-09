@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { changedFiles, filesForStage, resolveBase } from '../shared/changes.ts';
+import { changedFiles, changedSince, committedOn, headCommit, resolveBase, worktreeOf } from '../shared/changes.ts';
 
 /**
  * What a change touched, as git says (#52): what the review and final
@@ -56,12 +56,48 @@ test('outside a git repository there is no change to read', async () => {
   }
 });
 
-test('review and final match the change too; implement, and a task with no files, are as before', () => {
-  assert.deepEqual(filesForStage('implement', ['a.ts'], ['b.py']), ['a.ts'], 'no diff before the work is done');
-  assert.deepEqual(filesForStage('review', ['a.ts'], ['b.py', 'a.ts']), ['a.ts', 'b.py']);
-  assert.deepEqual(filesForStage('final', ['a.ts'], ['b.py']), ['a.ts', 'b.py']);
-  // No files of its own: every hook already applies, and the diff must not narrow that.
-  assert.deepEqual(filesForStage('review', [], ['b.py']), []);
-  assert.deepEqual(filesForStage('review', undefined, ['b.py']), []);
-  assert.deepEqual(filesForStage('review', ['a.ts'], undefined), ['a.ts']);
+test("one task's change: since the commit it began at, or else what is not committed yet (targeted checks)", async () => {
+  const { dir, git } = repo();
+  try {
+    const began = (await headCommit(dir))!;
+    assert.match(began, /^[0-9a-f]{40}$/);
+    assert.deepEqual((await changedSince(dir))?.files, [], 'nothing changed since the last commit');
+    writeFileSync(path.join(dir, 'app.ts'), 'export const x = 1;\n');
+    writeFileSync(path.join(dir, 'new.py'), 'y = 2\n');
+    assert.deepEqual((await changedSince(dir))?.files, ['app.ts', 'new.py']);
+    // The task commits its work: since the last commit, nothing; since it began, all of it.
+    git('add', '-A');
+    git('commit', '-qm', 'the task');
+    assert.deepEqual((await changedSince(dir))?.files, []);
+    assert.deepEqual((await changedSince(dir, began))?.files, ['app.ts', 'new.py']);
+    assert.equal(await changedSince(dir, 'not-a-commit'), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a task built in a worktree of its own is measured there; a branch checked out nowhere, by its commits", async () => {
+  const { dir, git } = repo();
+  const tree = mkdtempSync(path.join(tmpdir(), 'coplan-tree-'));
+  rmSync(tree, { recursive: true, force: true });
+  try {
+    const began = (await headCommit(dir))!;
+    git('worktree', 'add', '-q', '-b', 'coplan/api', tree);
+    // As git names them: on macOS a temporary folder is /private/var/…
+    assert.equal(realpathSync(String(await worktreeOf(dir, 'coplan/api'))), realpathSync(tree));
+    assert.equal(realpathSync(String(await worktreeOf(dir, 'main'))), realpathSync(dir));
+    assert.equal(await worktreeOf(dir, 'nowhere'), null);
+    writeFileSync(path.join(tree, 'api.ts'), 'export {};\n');
+    assert.deepEqual((await changedSince(tree, began))?.files, ['api.ts'], 'the worktree, not the checkout it came from');
+    assert.deepEqual((await changedSince(dir, began))?.files, []);
+    execFileSync('git', ['add', '-A'], { cwd: tree });
+    execFileSync('git', ['-c', 'user.email=t@e', '-c', 'user.name=t', 'commit', '-qm', 'api'], { cwd: tree });
+    git('worktree', 'remove', tree);
+    assert.equal(await worktreeOf(dir, 'coplan/api'), null);
+    assert.deepEqual(await committedOn(dir, began, 'coplan/api'), ['api.ts']);
+    assert.equal(await committedOn(dir, began, 'no-such-branch'), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(tree, { recursive: true, force: true });
+  }
 });

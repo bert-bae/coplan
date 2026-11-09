@@ -146,6 +146,10 @@ seeds into a throwaway daemon, the way real hooks and tool calls would.
   *Review* (what was built waits on you) or *Done*, in the same words in the
   header, the session list and the strip under the header — and the session
   list filters by them.
+- **Targeted checks.** A check runs only when the change touches its area —
+  its `paths`, or its package's folder — measured per task from the commit
+  it began at; `{files}` hands a linter just the changed files. Nothing
+  changed, nothing runs, so a build spends its time on what it touched.
 - **Checks per task, set by you.** A docs-only task can skip the test suite,
   a migration can add its own check. Only you set them — Claude proposes —
   and a skipped check shows on the task, in its brief and under the report,
@@ -293,8 +297,9 @@ and its build.
 3. **Keep the `implement` checks to seconds** — typecheck, lint, format. They
    run after every implementation and refinement pass of every task. Put the
    tests in `review` and slow, repository-wide checks in `final`, and give
-   language-specific checks `paths` so they only run for tasks that touch
-   those files. See [CONFIG.md](docs/CONFIG.md#the-repository-coplanconfigjson).
+   every check its area — `paths`, or a package's `cwd` — so it runs only
+   when a change touches it, and `{files}` where the tool takes files. See
+   [Targeted checks](docs/CONFIG.md#targeted-checks).
 4. **Say how pull requests are opened** in the same file
    ([`pullRequests`](docs/CONFIG.md#pullrequests)): with `gh`, Graphite or
    not at all, and whether as each branch is done, once you say (the
@@ -434,7 +439,7 @@ it uses the skill.
 | Skill | The agent uses it when | It tells the agent to | So the agent may |
 | --- | --- | --- | --- |
 | [`coplan`](skills/coplan/SKILL.md) (16 KB) | you type `/coplan` or `$coplan`, ask to plan something in Coplan or to set Coplan up, tell it to go ahead with a plan, or a confirmed design or a revision request arrives | investigate the code, publish the design, read your edits back and answer your comments (one by one, or all at once when you request revisions), propose changes that are yours to decide rather than make them, then break the confirmed design into a task list — and build when you say so, in chat or by submitting | call Coplan's tools; ask you in chat, only what it must; propose edits for you to accept or reject; sign the plan off for you when you tell it in chat to go ahead, quoting you; tell you to run `./setup.sh` in your clone when you ask it to set Coplan up or update it (or, in a checkout that was never built, run `pnpm install` there) |
-| [`coplan-build`](skills/coplan-build/SKILL.md) (8 KB) | a submitted plan's build prompt arrives, or you ask it to build a Coplan plan | submit it for you first if you said to build one you have not submitted; start only tasks that are ready, build independent ones side by side where it can, land each on its branch, keep the board true, then run the final checks and write the report | use subagents and git worktrees when it has them and they help (up to `parallel` tasks at once in a Managed build); create branches; commit in the granularity the repository's history uses; rebase stacked branches; run the repository's checks; push the branches; open pull requests with `gh` or Graphite, as the repository's [`pullRequests`](docs/CONFIG.md#pullrequests) says — by default only once you say so — written from its pull request template if it has one |
+| [`coplan-build`](skills/coplan-build/SKILL.md) (9 KB) | a submitted plan's build prompt arrives, or you ask it to build a Coplan plan | submit it for you first if you said to build one you have not submitted; start only tasks that are ready, build independent ones side by side where it can, land each on its branch, keep the board true, then run the final checks and write the report | use subagents and git worktrees when it has them and they help (up to `parallel` tasks at once in a Managed build); create branches; commit in the granularity the repository's history uses; rebase stacked branches; run the repository's checks; push the branches; open pull requests with `gh` or Graphite, as the repository's [`pullRequests`](docs/CONFIG.md#pullrequests) says — by default only once you say so — written from its pull request template if it has one |
 | [`iric`](skills/iric/SKILL.md) (7 KB) | building each task of a Managed build, or when you ask to run a task through iric | implement inside the task's scope, run the checks, have it reviewed the way you chose, refine until it passes or the round limit, and report each step | run the `implement` and `review` checks; start a reviewer subagent where it has them (review `subagent`), on the model [`review.model`](docs/CONFIG.md#review) names if one is set; ask you only where a Managed build keeps the decision for you (review `user`, past `maxRounds`, a check that fails) |
 
 ### The MCP server: `harness`
@@ -543,7 +548,7 @@ plugin's folder:
 | `open [id]`, `url [id]` | Open the page, or print its link with the access token |
 | `logs` | Follow the daemon's log |
 | `doctor` | Check the wiring end to end |
-| `check [implement\|review\|final]` | Run a stage of the repository's checks and print only what failed (`--files`, which at review and final adds the files git says changed; `--base`, `--no-diff`, `--list`, `--json`) |
+| `check [implement\|review\|final]` | Run a stage of the repository's checks — only those for what changed, as git says — and print only what failed (`--since`, `--files`, `--all`, `--base`, `--skip`, `--list`, `--json`) |
 | `init` | Write a starting `.coplan/config.json` from the repository's scripts (`--print` to only show it, `--force` to replace one) |
 | `setup` | Install in your agents, or take Coplan out again: what `./setup.sh` runs once it has built the clone (`--yes`, `--agents`, `--uninstall`) |
 | `clean` | Remove stale files (`--dry-run` to only list them) |
@@ -667,7 +672,7 @@ counts against the model's tokens.
 | --- | --- | --- |
 | The eleven tool definitions | About 34 KB of JSON schema — on the order of 8,000–10,000 tokens | Whenever the agent loads the server's tools |
 | The three skill descriptions | About 1.4 KB | Always listed |
-| A skill's body | 16.0 KB (`coplan`), 8.3 KB (`coplan-build`), 6.6 KB (`iric`) | When the agent uses that skill |
+| A skill's body | 16.0 KB (`coplan`), 8.5 KB (`coplan-build`), 6.7 KB (`iric`) | When the agent uses that skill |
 | The plan, read back | About 9,000 characters for two diagrams and ten tasks; about 140,000 for 150 boxes and 150 tasks | Each `harness_plan_read` (`changes_only` is shorter), and each publish's reply |
 | A sign-off prompt | About 6,000 characters for a seven-task plan; a hook adds at most about 10,000, and a longer plan is handed over as its summary and task list | Once per sign-off |
 | "You changed the plan" | One line | Your next message after you edit |

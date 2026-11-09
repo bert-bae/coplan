@@ -209,47 +209,73 @@ test('coplan check runs a stage, shows only what failed, and exits by the requir
 
     const scoped = run('implement', '--files', 'src/app.ts');
     assert.equal(scoped.status, 0);
-    assert.match(scoped.stdout, /No implement hooks apply to these files/);
-    assert.match(run('implement', '--list').stdout, /py only: exit 1/);
+    assert.match(scoped.stdout, /not running py only \(\*\.py\) — the change does not touch its area/);
+    assert.match(run('implement', '--all', '--list').stdout, /py only: exit 1/);
     assert.equal(run('lint').status, 2);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('at review, coplan check also runs the hooks for files the change touched outside --files (#52)', () => {
+test('coplan check runs only the checks for what changed: since the last commit, since the task began, or at the end since the base', () => {
   const dir = repo({
     '.coplan/config.json': JSON.stringify({
       hooks: {
-        implement: [{ name: 'py lint', run: 'echo linted', paths: ['*.py'] }],
+        implement: [{ name: 'py lint', run: 'echo linted {files}', paths: ['*.py'] }],
         review: [
           { name: 'ts tests', run: 'echo ts', paths: ['*.ts'] },
           { name: 'py tests', run: 'echo py', paths: ['*.py'] },
+          { name: 'whole', run: 'echo whole' },
+          { name: 'api', run: 'echo api {files}', cwd: 'packages/api' },
         ],
+        final: [{ name: 'docs', run: 'echo docs', paths: ['docs/'] }, { name: 'build', run: 'echo build' }],
       },
     }),
     'app.ts': 'export {};\n',
+    'packages/api/index.ts': 'export {};\n',
   });
+  const g = (...args: string[]) => execFileSync('git', ['-c', 'user.email=t@e', '-c', 'user.name=t', ...args], { cwd: dir, stdio: 'pipe' });
   try {
-    execFileSync('git', ['-c', 'user.email=t@e', '-c', 'user.name=t', 'commit', '--allow-empty', '-qm', 'base'], { cwd: dir });
-    // The task planned app.ts; it also wrote a Python helper.
-    writeFileSync(path.join(dir, 'helper.py'), 'x = 1\n');
+    g('checkout', '-qb', 'main');
+    g('add', '-A');
+    g('commit', '-qm', 'base');
+    const began = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    g('checkout', '-qb', 'feature');
     const run = (...args: string[]) => spawnSync(process.execPath, [CLI, 'check', ...args], { cwd: dir, encoding: 'utf8' });
-    const review = run('review', '--files', 'app.ts');
-    assert.equal(review.status, 0, review.stderr);
-    assert.match(review.stdout, /✓ ts tests/);
-    assert.match(review.stdout, /✓ py tests/, 'the check for the file it edited outside its plan runs');
-    assert.match(review.stdout, /also running py tests — the change touches files outside --files \(.*helper\.py/);
-    const json = run('review', '--files', 'app.ts', '--json');
-    assert.deepEqual((JSON.parse(json.stdout) as { name: string }[]).map((r) => r.name), ['ts tests', 'py tests']);
-    assert.match(json.stderr, /also running py tests/, 'said on stderr, so stdout stays parseable');
-    // A check the user skipped for the task is not run, and that is said (#54).
-    const skipped = run('review', '--files', 'app.ts', '--skip', 'py tests');
-    assert.doesNotMatch(skipped.stdout, /✓ py tests/);
-    assert.match(skipped.stdout, /not running py tests — skipped for this task/);
-    // --no-diff keeps to the files named; implement never reads a diff.
-    assert.doesNotMatch(run('review', '--files', 'app.ts', '--no-diff').stdout, /py tests/);
-    assert.match(run('implement', '--files', 'app.ts').stdout, /No implement hooks apply to these files/);
+    const ran = (out: { stdout: string }) => [...out.stdout.matchAll(/^[✓✗⚠] (.+?) {2}\(/gm)].map((m) => m[1]);
+
+    // Nothing changed: nothing runs, and it says how to reach committed work.
+    const idle = run('review');
+    assert.equal(idle.status, 0);
+    assert.deepEqual(ran(idle), []);
+    assert.match(idle.stdout, /nothing changed since the last commit, so no check runs\. Work already committed\? Pass --since/);
+
+    // A Python helper: its check and the whole-repository one; not the
+    // TypeScript one, nor the package's.
+    writeFileSync(path.join(dir, 'helper.py'), 'x = 1\n');
+    const review = run('review');
+    assert.deepEqual(ran(review), ['py tests', 'whole']);
+    assert.match(review.stdout, /not running ts tests \(\*\.ts\), api \(packages\/api\/\) — the change since the last commit does not touch their areas/);
+    // {files} is the changed files in the check's area, quoted.
+    assert.match(run('implement', '--list').stdout, /py lint: echo linted 'helper\.py'/);
+    // A package's check, run in its folder, gets its files from there.
+    writeFileSync(path.join(dir, 'packages', 'api', 'index.ts'), 'export const a = 1;\n');
+    assert.match(run('review', '--list').stdout, /api: \(cd packages\/api && echo api 'index\.ts'\)/);
+
+    // Committed: since the last commit, nothing; since the task began, all of it.
+    g('add', '-A');
+    g('commit', '-qm', 'task');
+    assert.deepEqual(ran(run('review')), []);
+    assert.deepEqual(ran(run('review', '--since', began)), ['ts tests', 'py tests', 'whole', 'api']);
+    assert.equal(run('review', '--since', 'nope').status, 2);
+    // --files names the files instead; --all runs everything, as before.
+    assert.deepEqual(ran(run('review', '--files', 'app.ts')), ['ts tests', 'whole']);
+    assert.deepEqual(ran(run('review', '--all')), ['ts tests', 'py tests', 'whole', 'api']);
+    assert.match(run('implement', '--all', '--list').stdout, /py lint: echo linted \./, 'not knowing the change, {files} is the whole repository');
+    // The end: the build since the base branch, so docs never came near.
+    const final = run('final');
+    assert.deepEqual(ran(final), ['build']);
+    assert.match(final.stdout, /not running docs \(docs\/\) — the change since main does not touch its area/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -302,7 +328,11 @@ test('coplan init writes a commented starting point from the scripts it finds, a
   });
   try {
     const { hooks, found } = detectHooks(dir);
-    assert.deepEqual(hooks.implement.map((h) => h.run), ['pnpm typecheck', 'pnpm lint', 'ruff check .']);
+    assert.deepEqual(hooks.implement.map((h) => h.run), ['pnpm typecheck', 'pnpm lint', 'ruff check {files}']);
+    // Targeted from the start: a language's tools only for that language;
+    // a test suite whole, since it may read anything.
+    assert.deepEqual(hooks.implement.map((h) => h.paths?.[0]), ['*.ts', '*.ts', '*.py']);
+    assert.equal(hooks.review[0]!.paths, undefined);
     assert.deepEqual(hooks.review.map((h) => h.run), ['pnpm test', 'pytest -q']);
     assert.deepEqual(hooks.final.map((h) => h.run), ['pnpm build']);
     assert.ok(found.some((f) => /pnpm/.test(f)));
@@ -441,7 +471,8 @@ test('only what breaks the checks stops coplan check; a hook whose folder is mis
     assert.ok(config.errors.length >= 2, 'the template and the model are errors');
     assert.equal(config.checksBroken, undefined, 'but not of the checks');
     assert.equal(config.hooks.review[1]!.cwd, 'packages/api', 'kept, so the hook cannot pass somewhere else');
-    const run = spawnSync(process.execPath, [CLI, 'check', 'review'], { cwd: dir, encoding: 'utf8' });
+    // Its folder is missing, so no change can be in it: --all runs it anyway.
+    const run = spawnSync(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, encoding: 'utf8' });
     assert.equal(run.status, 1, 'ran, and the api hook failed');
     assert.match(run.stdout, /✓ true/);
     assert.match(run.stdout, /✗ api[\s\S]*its folder packages\/api does not exist/);

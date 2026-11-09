@@ -1,10 +1,12 @@
 {
   // Coplan's own checks: what every task of a change planned with Coplan
   // runs in its implement → review → refine cycle. `coplan check <stage>`
-  // runs a stage; CI runs the same commands.
+  // runs a stage, targeted to what changed; CI runs the same commands.
+  // The tests read the skills, the docs and the golden prompts, so they run
+  // on any change; the typecheck only when TypeScript or its config does.
   "hooks": {
     "implement": [
-      { "name": "typecheck", "run": "pnpm typecheck" }
+      { "name": "typecheck", "run": "pnpm typecheck", "paths": ["*.ts", "*.tsx", "tsconfig.json", "package.json", "pnpm-lock.yaml"] }
     ],
     "review": [
       { "name": "build and test", "run": "pnpm build && pnpm test", "timeout": 900 }

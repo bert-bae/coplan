@@ -281,10 +281,10 @@ committed `.coplan/config.json` (`//` comments allowed):
 The hooks go to the agent in the build prompt and in each task's brief; it
 runs them like any other command, under your permission settings — Coplan
 never runs them itself. `coplan check <stage>` runs a whole stage and prints
-only what failed (`--files a,b` for one task's files — at review and final,
-with every file git says the change touched, so a file edited outside the
-plan still gets its checks — and `--json` for the results the agent
-reports). `coplan init`, or `/coplan-init` in Claude Code
+only what failed — and only the checks for what changed: since a task
+began (`--since`), at the end since the base branch, none for an area the
+change did not touch. `--json` gives the results the agent reports, and
+[Targeted checks](CONFIG.md#targeted-checks) has the rules. `coplan init`, or `/coplan-init` in Claude Code
 or Cursor, writes a starting point from the repository's scripts. See
 [CONFIG.md](CONFIG.md#the-repository-coplanconfigjson).
 

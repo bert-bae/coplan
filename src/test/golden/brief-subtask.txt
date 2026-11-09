@@ -65,7 +65,7 @@ Check error handling.
 
 **Refine.** Fix what the review found, run the implement checks again, and go back to review.
 
-Run a stage at once: `"/opt/coplan/bin/coplan" check implement --files src/cache.ts,src/events.ts` (or `review`); add `--json` for the `checks` to report.
+Run a stage at once: `"/opt/coplan/bin/coplan" check implement` (or `review`); add `--json` for the `checks` to report. Only the checks for what the task changes run: since it began with `--since` (given when it starts), else since the last commit.
 
 Report each step with harness_task_update {task_id: "inval", stage: "implement" | "review" | "refine", checks: [{name, ok, note}]}, and status "done" with a one-line note once the review passed. A subagent without the Coplan tools reports back to the agent that gave it this brief instead: what it changed, the checks and how they came out, and anything left.
 

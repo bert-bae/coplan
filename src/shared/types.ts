@@ -217,6 +217,9 @@ export interface Task {
   round?: number;
   /** The checks last run against it. */
   checks?: CheckResult[];
+  /** The commit checked out where it was built when it started: its change
+   *  — what its checks are targeted to — is everything since. */
+  startCommit?: string;
   /** What the task says — title, detail, note, files, dependencies, branch,
    *  review — has been edited this many times (1 when new). Progress
    *  (status, stage, checks) is not counted. */
@@ -623,6 +626,9 @@ export type PlanOp =
       review?: ReviewMode | '';
       stage?: IricStage;
       checks?: CheckResult[];
+      /** The commit the task's work began at, as the daemon read it when the
+       *  task started: progress, never set by hand. */
+      startCommit?: string;
       /** The boxes this task builds now: replaces its links; [] unlinks it. */
       builds?: string[];
       /** The task's `rev` the edit was made against. Refused if the other
