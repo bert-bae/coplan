@@ -39,7 +39,7 @@ import {
   sharedFiles,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, configSource, emptyProjectConfig, hasHooks, hookCommand, hookScope, hooksFor, taskHooks, type ProjectConfig } from '../shared/project.ts';
+import { HOOK_STAGES, configSource, emptyProjectConfig, hasHooks, hookCommand, hookScope, hooksFor, shellQuote, taskHooks, type ProjectConfig } from '../shared/project.ts';
 import { hang, indent, nestHeadings } from '../shared/architecture.ts';
 import { agentInfo, type AgentKind } from '../shared/agents.ts';
 import {
@@ -508,9 +508,11 @@ function sinceArg(task: Task): string {
   return task.startCommit ? ` --since ${task.startCommit.slice(0, 12)}` : '';
 }
 
-/** `coplan check`'s flag for the checks the user skipped for a task. */
-function skipArg(own: { skip: readonly string[] }): string {
-  return own.skip.length ? ` --skip ${own.skip.join(',')}` : '';
+/** `coplan check`'s flags for the checks the user skipped for a task: one
+ *  per check, quoted — a name may hold a space ("ts tests") or a comma, and
+ *  `--skip=<name>` keeps one that starts with dashes a value. */
+export function skipArg(own: { skip: readonly string[] }): string {
+  return own.skip.map((name) => ` ${shellQuote(`--skip=${name}`)}`).join('');
 }
 
 /** The checks added for a task are not in the repository's config: said

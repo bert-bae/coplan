@@ -1695,6 +1695,11 @@ test("done waits on the checks for what the task changed since it began — not 
     assert.equal(refused['ok'], false);
     assert.match(String(refused['text']), new RegExp(`the review checks py tests \\(for helper\\.py\\) were never reported — \`.*check review --since ${began.slice(0, 12)}\` runs exactly these`));
     assert.doesNotMatch(String(refused['text']), /md lint/, 'README.md was planned, and touched only before the task began: no check for it');
+    // The user skips a check for it: the command the gate gives skips it too,
+    // quoted, so it runs exactly what done waits on.
+    const skipped = await opsOn(id, [{ op: 'set_checks', id: 'app', skip: ['ts tests'] }]);
+    assert.ok(skipped.plan, skipped.error);
+    assert.match(String((await task({ status: 'done', note: 'wired' }))['text']), /check review --since [0-9a-f]{12} '--skip=ts tests'` runs exactly these/);
 
     await task({ checks: [{ name: 'py tests', ok: true }] });
     // Git cannot read the change (its index is broken): that is never

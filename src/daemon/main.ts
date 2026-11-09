@@ -27,7 +27,7 @@ import {
   stageWords,
   unreadNotice,
 } from './render.ts';
-import { briefBlocks, renderBrief, renderNext } from './brief.ts';
+import { briefBlocks, renderBrief, renderNext, skipArg } from './brief.ts';
 import { blocksText, joinBlocks } from '../shared/blocks.ts';
 import {
   MODE_LABEL,
@@ -1335,7 +1335,8 @@ function buildRouter(deps: Deps): Router {
         const touched = changed && hookScope(h) ? filesInScope(h, changed.files) : [];
         return touched.length ? `${h.name} (for ${touched.slice(0, 3).join(', ')}${touched.length > 3 ? ', …' : ''})` : h.name;
       });
-      const rerun = missing.length && task.startCommit ? ` — \`${COPLAN_BIN ? `"${COPLAN_BIN}"` : 'coplan'} check review --since ${task.startCommit.slice(0, 12)}\` runs exactly these, where it is built` : '';
+      // With the task's skips, so it runs exactly what the gate waits on.
+      const rerun = missing.length && task.startCommit ? ` — \`${COPLAN_BIN ? `"${COPLAN_BIN}"` : 'coplan'} check review --since ${task.startCommit.slice(0, 12)}${skipArg(set)}\` runs exactly these, where it is built` : '';
       if (failing.length || missing.length) {
         const why = [
           failing.length ? `its last checks failed (${failing.map((c) => `${c.name}${c.note ? `: ${c.note}` : ''}`).join('; ')})` : '',
@@ -1405,7 +1406,7 @@ function buildRouter(deps: Deps): Router {
     // Its checks are targeted to its change from here: say how to run them.
     if (starting && now.startCommit) {
       out.push(
-        `Its checks run for what it changes, from this commit on: \`${COPLAN_BIN ? `"${COPLAN_BIN}"` : 'coplan'} check implement --since ${now.startCommit.slice(0, 12)}\` ` +
+        `Its checks run for what it changes, from this commit on: \`${COPLAN_BIN ? `"${COPLAN_BIN}"` : 'coplan'} check implement --since ${now.startCommit.slice(0, 12)}${skipArg(effectiveChecks(plan, now))}\` ` +
           '(then `review`), run where it is built.',
       );
     }

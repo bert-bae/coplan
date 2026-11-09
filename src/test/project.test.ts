@@ -268,6 +268,20 @@ test('coplan check runs only the checks for what changed: since the last commit,
     assert.deepEqual(ran(run('review')), []);
     assert.deepEqual(ran(run('review', '--since', began)), ['ts tests', 'py tests', 'whole', 'api']);
     assert.equal(run('review', '--since', 'nope').status, 2);
+    // A skip names one check, whole: a space or a comma is part of it.
+    const skipped = run('review', '--since', began, '--skip=ts tests', '--skip', 'py tests');
+    assert.deepEqual(ran(skipped), ['whole', 'api']);
+    // A flag without its value is an error, never the next flag taken for it.
+    for (const [args, why] of [
+      [['review', '--since', '--list'], /"--since" needs the commit/],
+      [['review', '--skip'], /"--skip" needs the name of a check/],
+      [['final', '--base='], /"--base" needs a branch or commit/],
+      [['review', '--files', '--json'], /"--files" needs the files/],
+    ] as const) {
+      const bad = run(...args);
+      assert.equal(bad.status, 2, args.join(' '));
+      assert.match(bad.stderr, why);
+    }
     // --files names the files instead; --all runs everything, as before.
     assert.deepEqual(ran(run('review', '--files', 'app.ts')), ['ts tests', 'whole']);
     assert.deepEqual(ran(run('review', '--all')), ['ts tests', 'py tests', 'whole', 'api']);
@@ -289,6 +303,11 @@ test('coplan check runs only the checks for what changed: since the last commit,
     const typo = run('final', '--base', 'mian');
     assert.equal(typo.status, 2);
     assert.match(typo.stderr, /"--base mian" is not a branch or commit here/);
+    // A skip that names no check (or several, comma-joined) is said, not reported as skipped.
+    const joined = run('review', '--all', '--skip', 'ts tests,py tests', '--list');
+    assert.match(joined.stderr, /--skip "ts tests,py tests" names no check in \.coplan\/config\.json, so nothing is skipped for it/);
+    assert.doesNotMatch(joined.stdout + joined.stderr, /not running ts tests,py tests/);
+    assert.match(joined.stdout, /^ts tests:/m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
