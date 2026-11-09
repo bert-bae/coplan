@@ -84,8 +84,13 @@
 - **What is wrong with the harness config is said in the page**: each
   problem in `~/.claude/cc-harness/config.json` or a repository's
   `.claude/harness.json` — a setting of the wrong type, one a repository
-  may not set, a file that is not JSON — shows once as a toast when you open
-  a session, not only in `daemon.log` and the doctor.
+  may not set, a file that is not JSON — shows once as a toast, not only in
+  `daemon.log` and the doctor. It is not said again on a reload or a switch
+  to another session, and **⚠ settings** in the rail's footer lists every
+  current problem until the file is fixed. The page hears as soon as the
+  daemon next reads the file (within half a minute while it is open), so a
+  fix, or a new mistake, shows without a reload; one fixed and made again
+  is said again. Each page shows only the files its session reads.
 
 ### Request revisions from the page: open comments as one ask
 

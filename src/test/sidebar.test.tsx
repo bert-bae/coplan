@@ -162,6 +162,7 @@ beforeEach(() => {
     storage: null,
     storageBusy: false,
     restarting: false,
+    configErrors: [],
   });
 });
 
@@ -612,6 +613,50 @@ test('ticking history in adds it to the request', async () => {
 
   const call = posts.find((p) => p.route === '/api/storage/clean');
   assert.deepEqual(call!.body['groups'], ['sessions', 'partial-writes', 'log']);
+});
+
+test('a settings error is toasted once, listed in the footer while it lasts, and said again if it comes back', async () => {
+  await boot();
+  const GLOBAL = '~/.claude/cc-harness/config.json';
+  const A = ['~/.claude/cc-harness/config.json', '/repo-a/.claude/harness.json'];
+  const B = ['~/.claude/cc-harness/config.json', '/repo-b/.claude/harness.json'];
+  const bad = `${GLOBAL}: "autoOpen" must be true or false; "yes" is not, so false is used.`;
+  const inA = '/repo-a/.claude/harness.json: "promptNotice" must be true or false; 3 is not, so true is used.';
+  const toasts = (text: string) => store.getState().toasts.filter((t) => t.text.includes(text));
+  await act(async () => store.apply({ type: 'config-errors', errors: [bad, inA], files: A }));
+  assert.equal(toasts('"autoOpen"').length, 1);
+  assert.match(toasts('"autoOpen"')[0]!.text, /^Coplan's config: ~\/\.claude\/cc-harness\/config\.json: "autoOpen"/);
+
+  // The page reconnects, or is reloaded: the stream says it again, the page does not.
+  await act(async () => store.apply({ type: 'config-errors', errors: [bad, inA], files: A }));
+  assert.equal(toasts('"autoOpen"').length, 1, 'once per distinct error');
+
+  // A session in another repository: its file is fine, so A's error is not
+  // shown there — and is not forgotten either: back in A, no second toast.
+  await act(async () => store.apply({ type: 'config-errors', errors: [bad], files: B }));
+  await act(async () => store.apply({ type: 'config-errors', errors: [bad, inA], files: A }));
+  assert.equal(toasts('"promptNotice"').length, 1, 'switching sessions is not news');
+
+  // The footer keeps it findable after the toast is gone — a list the page
+  // holds, so opening it scans nothing.
+  store.set({ toasts: [] });
+  const before = store.getState().storageBusy;
+  fireEvent.click(screen.getByRole('button', { name: /⚠ settings/ }));
+  const list = await screen.findByRole('region', { name: 'Settings problems' });
+  assert.match(list.textContent ?? '', /"autoOpen" must be true or false/);
+  assert.equal(store.getState().storage, null, 'no storage scan');
+  assert.equal(store.getState().storageBusy, before);
+  assert.equal(document.querySelector('.global-groups'), null, 'and no cleanup groups mixed in');
+
+  // Fixed: the marker goes. Broken the same way again: said again.
+  await act(async () => store.apply({ type: 'config-errors', errors: [], files: A }));
+  assert.equal(screen.queryByRole('button', { name: /⚠ settings/ }), null);
+  assert.equal(screen.queryByRole('region', { name: 'Settings problems' }), null);
+  await act(async () => store.apply({ type: 'config-errors', errors: [bad], files: A }));
+  assert.equal(toasts('"autoOpen"').length, 1);
+  // The list was open when it was fixed: the next mistake does not open it.
+  assert.equal(screen.queryByRole('region', { name: 'Settings problems' }), null, 'closed by the fix, not reopened by itself');
+  assert.equal(screen.getByRole('button', { name: /⚠ settings/ }).getAttribute('aria-expanded'), 'false');
 });
 
 test('a restart is confirmed first', async () => {

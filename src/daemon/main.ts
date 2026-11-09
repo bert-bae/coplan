@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { unlinkSync, appendFileSync, existsSync, linkSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { SessionStore } from './store.ts';
@@ -50,7 +51,7 @@ import {
 import { HOOK_STAGES, filesInScope, hookScope, loadProjectConfig, taskHooks, type ProjectConfig } from '../shared/project.ts';
 import { changedFiles, changedSince, committedOn, headCommit, unreadWords, worktreeOf, type ChangedFiles } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
-import { ConfigCache, configStamp, type HarnessConfig } from '../shared/config.ts';
+import { ConfigCache, configStamp, globalConfigFile, projectHarnessFile, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
@@ -579,6 +580,33 @@ function buildRouter(deps: Deps): Router {
     return session ?? null;
   };
 
+  /** The settings folders open pages read, each read again on one timer
+   *  for the daemon — not once per page — so a fix reaches every page. */
+  const settingsWatch = (() => {
+    const dirs = new Map<string | null, number>();
+    let timer: NodeJS.Timeout | null = null;
+    return {
+      add(dir: string | null): () => void {
+        dirs.set(dir, (dirs.get(dir) ?? 0) + 1);
+        if (!timer) {
+          timer = setInterval(() => {
+            for (const d of dirs.keys()) config.get(d);
+          }, 25_000);
+          timer.unref?.();
+        }
+        return () => {
+          const n = (dirs.get(dir) ?? 1) - 1;
+          if (n > 0) dirs.set(dir, n);
+          else dirs.delete(dir);
+          if (!dirs.size && timer) {
+            clearInterval(timer);
+            timer = null;
+          }
+        };
+      },
+    };
+  })();
+
   /* --------------------------- UI bootstrap ------------------------ */
 
   /** A ticket for the live stream, which a browser opens without headers. */
@@ -593,15 +621,13 @@ function buildRouter(deps: Deps): Router {
    *  turns off. */
   router.get('/api/session/:id', (ctx) => {
     const session = sessionOr404(ctx);
-    // What is wrong with the harness config this session reads (its
-    // repository's .claude/harness.json and the global config.json), for
-    // the page to say: otherwise only daemon.log and the doctor would (#52).
+    // What is wrong with the harness config it reads comes over the live
+    // stream (`config-errors`), and again whenever that changes.
     if (session) {
       const project = projectFor(session);
       json(ctx.res, 200, {
         session: forBrowser(session),
         planCheck: project.planCheck,
-        configErrors: config.errors(session.repoRoot ?? session.cwd),
         // The repository's checks a task can skip, by stage (#54).
         projectChecks: { implement: project.hooks.implement.map((h) => h.name), review: project.hooks.review.map((h) => h.name) },
       });
@@ -1004,6 +1030,43 @@ function buildRouter(deps: Deps): Router {
     const focus = ctx.url.searchParams.get('session');
     const focused = focus ? store.get(focus) : undefined;
     if (focused) send({ type: 'snapshot', session: focused });
+    // The settings this page's session reads — the global file and its
+    // repository's — as they are now: read when it opens, then sent again
+    // whenever a read finds them changed. One timer for the daemon reads
+    // every open page's folder again (settingsWatch), so a fix is seen even
+    // while nothing else is going on. A page that asked for a session the
+    // daemon does not hold yet (just restarted, still loading it) watches
+    // the global file until the session arrives, then its repository's too.
+    let shownErrors: string | null = null;
+    let settingsDir: string | null | undefined;
+    let stopSettings = () => {};
+    const watchSettings = (dir: string | null) => {
+      if (dir === settingsDir) return;
+      stopSettings();
+      settingsDir = dir;
+      const files = [globalConfigFile(paths.configDir()), ...(dir ? [projectHarnessFile(dir)] : [])].map(homeRelative);
+      const sendSettings = (errors: string[]) => {
+        const shown = errors.map(homeRelative);
+        const key = `${files.join('\n')}\0${shown.join('\n')}`;
+        if (key === shownErrors) return;
+        shownErrors = key;
+        send({ type: 'config-errors', errors: shown, files });
+      };
+      sendSettings(config.errors(dir));
+      const unsubscribe = config.subscribe(dir, () => {
+        try {
+          sendSettings(config.held(dir));
+        } catch {
+          /* cleanup below fires */
+        }
+      });
+      const unwatchSettings = settingsWatch.add(dir);
+      stopSettings = () => {
+        unsubscribe();
+        unwatchSettings();
+      };
+    };
+    watchSettings(focused ? (focused.repoRoot ?? focused.cwd) : null);
 
     // Only the session this page shows. The page reconnects with a new
     // `session` when the user switches, so nothing it needs is filtered out,
@@ -1012,6 +1075,7 @@ function buildRouter(deps: Deps): Router {
     const listener = (event: ServerEvent) => {
       if (event.type === 'snapshot' && event.session.sessionId !== focus) return;
       try {
+        if (event.type === 'snapshot') watchSettings(event.session.repoRoot ?? event.session.cwd);
         send(event);
       } catch {
         /* cleanup below fires */
@@ -1034,6 +1098,7 @@ function buildRouter(deps: Deps): Router {
       clients.count = Math.max(0, clients.count - 1);
       clearInterval(heartbeat);
       store.off('event', listener);
+      stopSettings();
     };
     ctx.req.on('close', cleanup);
     ctx.req.on('error', cleanup);
@@ -1842,6 +1907,13 @@ main().catch((err: unknown) => {
   log(`failed to start: ${(err as Error)?.stack ?? String(err)}`);
   process.exit(1);
 });
+
+/** A path under the home folder as `~/…`: shorter in the page, and the
+ *  user's name stays out of it. */
+function homeRelative(text: string): string {
+  const home = os.homedir();
+  return home && home !== '/' ? text.split(home + path.sep).join(`~${path.sep}`) : text;
+}
 
 /**
  * What Claude last read is kept beside the plan so "since you last read" can
