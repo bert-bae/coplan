@@ -728,6 +728,22 @@ test('clicking a status dot moves the task along', async () => {
   assert.deepEqual(opsSent()[0], { op: 'upsert_task', id: 't2', status: 'in_progress' });
 });
 
+test("keys typed into a field are the field's: no task moves, no sidebar toggles", async () => {
+  await boot();
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getAllByRole('button', { name: /^Task title: Wire into API\. Edit$/ })[0]!);
+  });
+  const field = screen.getByRole('textbox', { name: 'Task title' });
+  const collapsed = store.getState().collapsedSidebar;
+  await act(async () => {
+    fireEvent.keyDown(field, { key: 'ArrowRight', altKey: true });
+    fireEvent.keyDown(field, { key: '[' });
+  });
+  assert.deepEqual(opsSent().filter((o) => o['op'] === 'move_task'), [], 'Alt+arrow moves the caret, not the task');
+  assert.equal(store.getState().collapsedSidebar, collapsed, '[ is a character');
+});
+
 test('Alt+arrows reorganize the tree from the keyboard', async () => {
   await boot();
   await openTab('Tasks');

@@ -9,7 +9,8 @@ import { EmptyState } from '../components/primitives.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { TaskCheckChips, TaskChecksField } from '../components/TaskChecks.tsx';
 import { classNames } from '../lib/format.ts';
-import { boxRows } from '../lib/tasks.ts';
+import { boxRows, shownStatus } from '../lib/tasks.ts';
+import { isTyping } from '../lib/keys.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
 import { boxUnbuilt } from '../../shared/check.ts';
 import { canTakeSubtasks, childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
@@ -241,7 +242,7 @@ function ByBox({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
 }
 
 function ByBoxRow({ plan, task, number, depth, readOnly }: { plan: Plan; task: Task; number: string; depth: number; readOnly: boolean }) {
-  const parent = hasChildren(plan, task.id);
+  const parent = hasSubtasks(plan, task.id);
   return (
     <li className={classNames('by-box-row', `is-${task.status}`)} style={{ ['--depth' as string]: depth }}>
       {parent || readOnly ? (
@@ -442,7 +443,7 @@ function Outline({ plan, hideDone }: { plan: Plan; hideDone: boolean }) {
   const rows = useMemo(() => {
     const hidden = new Set<string>();
     for (const id of collapsed) for (const d of descendants(plan, id)) hidden.add(d.id);
-    return outline(plan).filter(({ task }) => !hidden.has(task.id) && !(hideDone && task.status === 'done' && !hasChildren(plan, task.id)));
+    return outline(plan).filter(({ task }) => !hidden.has(task.id) && !(hideDone && task.status === 'done' && !hasSubtasks(plan, task.id)));
   }, [plan, collapsed, hideDone]);
 
   /** Where a drop on `target` in `zone` puts the dragged task. */
@@ -964,15 +965,8 @@ function MoveButton({ op, glyph, label }: { op: PlanOp | null; glyph: string; la
 /** Where a parent's subtasks stand: done when all are, blocked or in
  *  progress when any is. A parent has no status of its own to set — what
  *  is built, and what the agent reports, is its subtasks. */
-function derivedStatus(plan: Plan, task: Task): TaskStatus {
-  // The same roll-up harness_task_next and the briefs use, so the board and
-  // the agent never disagree about a parent.
-  const r = readinessOf(plan, task);
-  return r === 'ready' || r === 'waiting' ? 'todo' : r;
-}
-
 function DerivedStatus({ plan, task }: { plan: Plan; task: Task }) {
-  const status = derivedStatus(plan, task);
+  const status = shownStatus(plan, task);
   return (
     <span
       className={classNames('status-dot', 'is-static', `is-${status}`)}
@@ -1032,7 +1026,7 @@ function Board({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
   // Leaves only: a parent is a heading, and its progress is its subtasks'.
   const leaves = outline(plan)
     .map((r) => r.task)
-    .filter((t) => !hasChildren(plan, t.id));
+    .filter((t) => !hasSubtasks(plan, t.id));
 
   return (
     <div className={classNames('board', readOnly && 'is-readonly')}>
@@ -1104,7 +1098,7 @@ function useArrivals(plan: Plan): { arrived: Set<string>; announcement: string }
     const before = last.current;
     last.current = new Map(plan.tasks.map((t) => [t.id, t.status]));
     if (!before) return;
-    const moved = plan.tasks.filter((t) => before.has(t.id) && before.get(t.id) !== t.status && !hasChildren(plan, t.id));
+    const moved = plan.tasks.filter((t) => before.has(t.id) && before.get(t.id) !== t.status && !hasSubtasks(plan, t.id));
     if (!moved.length) return;
     const ids = moved.map((t) => t.id);
     setArrived((cur) => new Set([...cur, ...ids]));
@@ -1320,15 +1314,6 @@ function BoardCard({ plan, task }: { plan: Plan; task: Task }) {
 }
 
 /* ------------------------------------------------------------------ */
-
-function hasChildren(plan: Pick<Plan, 'tasks'>, id: string): boolean {
-  return hasSubtasks(plan, id);
-}
-
-function isTyping(target: EventTarget | null): boolean {
-  const el = target as HTMLElement | null;
-  return Boolean(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable));
-}
 
 /** A task's content revision; tasks written before it existed are at 1. */
 function revOf(task: Task): number {

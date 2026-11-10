@@ -17,6 +17,7 @@ import { OverviewView } from './views/OverviewView.tsx';
 import { DiagramsView } from './views/DiagramsView.tsx';
 import { TasksView } from './views/TasksView.tsx';
 import { classNames } from './lib/format.ts';
+import { isTyping } from './lib/keys.ts';
 import { countTasks, isLocked } from '../shared/plan.ts';
 import { agentInfo } from '../shared/agents.ts';
 import type { Plan, SessionState } from '../shared/types.ts';
@@ -369,9 +370,7 @@ function useDrawerDismiss(open: boolean): void {
 function useShortcuts(): void {
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable);
-      if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (isTyping(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
       // Not behind an open dialog: the page under it should hold still.
       if (document.querySelector('[aria-modal="true"]')) return;
       if (event.key === '[') {
