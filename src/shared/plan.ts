@@ -1204,19 +1204,49 @@ function arrowId(d: Diagram, op: { id?: string; from?: string; to?: string }): s
 }
 
 /**
- * A box or arrow op's `expect` is the diagram's rev as the caller read it —
- * before this batch. Each such op is its own diagram edit and moves the
- * rev, so it is checked here, against the plan the batch started from, and
- * not again as the batch goes on: several ops on one diagram, each with the
- * rev that was read, go through together.
+ * An edit's `expect` is the revision of what it edits as the author read
+ * it — before this batch. So it is checked here, against the plan the batch
+ * started from, and taken off, not checked again as the batch goes on:
+ * several edits to one item, each with the revision that was read, go
+ * through together. As `author`'s: Claude's, for the edits it proposes,
+ * which are tried as the user's.
  */
 function expectAtStart(plan: Plan, op: PlanOp, author: Author): PlanOp {
-  if (!op || typeof op !== 'object') return op;
-  if (op.op !== 'upsert_node' && op.op !== 'remove_node' && op.op !== 'upsert_edge' && op.op !== 'remove_edge') return op;
-  if (op.expect === undefined) return op;
-  const d = plan.diagrams.find((x) => x.id === op.diagramId);
-  if (d) checkGraphRev(d, op.expect, author);
-  const { expect: _checked, ...rest } = op;
+  if (!op || typeof op !== 'object' || (op as { expect?: unknown }).expect === undefined) return op;
+  switch (op.op) {
+    case 'upsert_node':
+    case 'remove_node':
+    case 'upsert_edge':
+    case 'remove_edge': {
+      const d = plan.diagrams.find((x) => x.id === op.diagramId);
+      if (d) checkGraphRev(d, op.expect, author);
+      break;
+    }
+    case 'upsert_diagram': {
+      const d = op.id ? plan.diagrams.find((x) => x.id === op.id) : undefined;
+      // A save of its graph alone conflicts with a graph changed since, not a title.
+      if (d && op.title === undefined && op.caption === undefined) checkGraphRev(d, op.expect, author);
+      else if (d) checkRev(d, op.expect, 'diagram', author);
+      break;
+    }
+    case 'upsert_section': {
+      const section = op.id ? plan.sections.find((x) => x.id === op.id) : undefined;
+      if (section) checkRev(section, op.expect, 'section', author);
+      break;
+    }
+    case 'upsert_task': {
+      const task = op.id ? findTask(plan, op.id) : undefined;
+      if (task) checkTaskRev(task, op.expect, author);
+      break;
+    }
+    default:
+      return op;
+  }
+  return withoutExpect(op);
+}
+
+function withoutExpect(op: PlanOp): PlanOp {
+  const { expect: _read, ...rest } = op as PlanOp & { expect?: unknown };
   return rest as PlanOp;
 }
 
@@ -1310,6 +1340,8 @@ export function applyOps(
   return { plan: next, changes };
 }
 
+/** One edit, in `plan` itself. Its `expect` was checked, and taken off,
+ *  before the batch began (expectAtStart): every caller goes through it. */
 function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[] {
   const log = (kind: ChangeKind, target: Target, summary: string) => record(plan, author, kind, target, summary, now);
 
@@ -1331,7 +1363,6 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
     case 'upsert_section': {
       const existing = op.id ? plan.sections.find((s) => s.id === op.id) : undefined;
       if (existing) {
-        checkRev(existing, op.expect, 'section', author);
         const title = clean(op.title, MAX_TITLE);
         const body = typeof op.body === 'string' ? clean(op.body, MAX_TEXT) ?? '' : undefined;
         const changed = (title && title !== existing.title) || (body !== undefined && body !== existing.body);
@@ -1367,8 +1398,6 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
     case 'upsert_diagram': {
       const existing = op.id ? plan.diagrams.find((d) => d.id === op.id) : undefined;
       if (existing) {
-        if (op.title === undefined && op.caption === undefined) checkGraphRev(existing, op.expect, author);
-        else checkRev(existing, op.expect, 'diagram', author);
         const before = structuredClone(existing);
         const title = clean(op.title, MAX_TITLE);
         if (title) existing.title = title;
@@ -1521,7 +1550,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       const d = plan.diagrams.find((x) => x.id === op.diagramId);
       if (!d) throw new PlanError(`No diagram "${op.diagramId}". The read lists each diagram's id.`);
       const { nodes, edges } = partEdit(d, op);
-      return applyOne(plan, { op: 'upsert_diagram', id: d.id, nodes, edges, ...(op.expect !== undefined ? { expect: op.expect } : {}) }, author, now);
+      return applyOne(plan, { op: 'upsert_diagram', id: d.id, nodes, edges }, author, now);
     }
 
     case 'remove':
@@ -1650,7 +1679,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         const trial = structuredClone(plan);
         delete trial.design;
         delete trial.submission;
-        applyAsUser(trial, op.ops, now);
+        applyAsUser(trial, op.ops, now, 'claude');
       } catch (err) {
         if (err instanceof PlanError) throw new PlanError(`The proposal would not apply to the plan as it is: ${err.message}`);
         throw err;
@@ -1672,10 +1701,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       // Kept without their `expect`: it checked them against what Claude read,
       // just now. From here `base` says whether the proposal still fits —
       // and a rev that moved with a dragged box must not refuse the accept.
-      const kept = op.ops.map((inner) => {
-        const { expect: _read, ...rest } = structuredClone(inner) as PlanOp & { expect?: unknown };
-        return rest as PlanOp;
-      });
+      const kept = op.ops.map((inner) => withoutExpect(structuredClone(inner)));
       proposals.push({ id, title, reason, ops: kept, threadId: thread.id, createdAt: now, base: proposalTouches(plan, op.ops), status: 'open' });
       // Settled ones go first when there are too many; open ones never.
       // An answer Claude has not heard yet is kept until it has: it is the
@@ -1788,7 +1814,6 @@ function editTask(
   now: number,
   log: (kind: ChangeKind, target: Target, summary: string) => Change,
 ): Change[] {
-  checkTaskRev(task, op.expect, author);
   // On a submitted plan, what a task the user signed off says is theirs:
   // Claude tracks the work (a note, the files it touched, a dependency it
   // found to be wrong) but does not re-scope it. Tasks it adds itself are
@@ -2171,16 +2196,17 @@ export function isLocked(plan: Pick<Plan, 'submission'> | null): boolean {
 
 /**
  * Apply a proposal's edits as the user's, in `plan` itself, the way a batch
- * is applied: each box or arrow edit's `expect` against the plan before the
- * batch, and what waits on what checked on the batch as a whole.
+ * is applied: each edit's `expect` against the plan before the batch, as
+ * `readBy`'s (Claude's, when it proposes them), and what waits on what
+ * checked on the batch as a whole.
  */
-function applyAsUser(plan: Plan, ops: PlanOp[], now: number): Change[] {
+function applyAsUser(plan: Plan, ops: PlanOp[], now: number, readBy: Author = 'user'): Change[] {
   const start = structuredClone(plan);
   const had = new Set(dependencyProblems(plan));
   const out: Change[] = [];
   ops.forEach((inner, i) => {
     try {
-      out.push(...applyOne(plan, expectAtStart(start, inner, 'user'), 'user', now));
+      out.push(...applyOne(plan, expectAtStart(start, inner, readBy), 'user', now));
     } catch (err) {
       if (err instanceof PlanError && ops.length > 1) throw new PlanError(`edit ${i + 1} (${inner.op}): ${err.message}`);
       throw err;

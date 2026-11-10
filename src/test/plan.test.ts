@@ -986,6 +986,42 @@ function proposing(op: PlanOp): Plan {
 const accept = (plan: Plan) => applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user').plan;
 const STALE = /Proposal p1 is out of date/;
 
+test("a proposal's edits are held to the revision Claude read as its own edits are", () => {
+  const opened = linkedPlan().tasks.find((t) => t.id === 't3')!.rev ?? 1;
+  // The user rewrote t3 after Claude's read; Claude reads again, but proposes on what it read first.
+  const plan = read(applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', detail: 'Must be accessible: a legal requirement' }], 'user').plan);
+  const stale: PlanOp = { op: 'upsert_task', id: 't3', detail: 'Claude text', expect: opened };
+  assert.throws(() => applyOps(plan, [stale], 'claude'), /Task "UI" was changed by the user while this edit was open/);
+  assert.throws(
+    () => applyOps(plan, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [stale] }], 'claude'),
+    /would not apply to the plan as it is: Task "UI" was changed by the user while this edit was open.*harness_plan_read/,
+    'proposed, as made directly',
+  );
+  // Claude's own edit since is no conflict, proposed or not.
+  const own = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', detail: 'Claude first' }], 'claude').plan;
+  const next: PlanOp = { op: 'upsert_task', id: 't3', detail: 'Claude second', expect: opened };
+  assert.doesNotThrow(() => applyOps(own, [next], 'claude'));
+  const proposed = applyOps(own, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [next] }], 'claude').plan;
+  assert.equal(accept(proposed).tasks.find((t) => t.id === 't3')?.detail, 'Claude second');
+  // Beside an edit only the user makes (a task's checks), which the proposal is for, either side of it;
+  // and several edits to one item, each on the revision that was read.
+  const checks: PlanOp = { op: 'set_checks', id: 't3', skip: ['tests'] };
+  for (const ops of [[next, checks], [checks, next], [next, { op: 'upsert_task', id: 't3', title: 'UI, again', expect: opened }]] as PlanOp[][]) {
+    const made = applyOps(own, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops }], 'claude').plan;
+    assert.equal(accept(made).tasks.find((t) => t.id === 't3')?.detail, 'Claude second', ops.map((o) => o.op).join());
+  }
+  const sectioned = applyOps(own, [{ op: 'upsert_section', title: 'Context', body: 'Why.' }], 'claude').plan;
+  const s = sectioned.sections[0]!;
+  const twice: PlanOp[] = [{ op: 'upsert_section', id: s.id, title: 'Background', expect: s.rev }, { op: 'upsert_section', id: s.id, body: 'Why, at length.', expect: s.rev }];
+  assert.equal(accept(applyOps(sectioned, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: twice }], 'claude').plan).sections[0]!.body, 'Why, at length.');
+  // A box edit made on a diagram the user has changed since is refused, proposed or not.
+  const graph = linkedPlan().diagrams[0]!.rev;
+  const boxed = read(applyOps(linkedPlan(), [{ op: 'upsert_node', diagramId: 'd1', id: 'c', label: 'C' }], 'user').plan);
+  const relabel: PlanOp = { op: 'upsert_node', diagramId: 'd1', id: 'a', label: 'Gateway', expect: graph };
+  assert.throws(() => applyOps(boxed, [relabel], 'claude'), /Diagram "Arch" was changed by the user while this edit was open/);
+  assert.throws(() => applyOps(boxed, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [relabel] }], 'claude'), /would not apply.*Diagram "Arch" was changed by the user/);
+});
+
 test("a proposed task removal is out of date once the user changed what it would take", () => {
   const removal: PlanOp = { op: 'remove', kind: 'task', id: 't1' };
   const cases: [string, PlanOp][] = [

@@ -52,9 +52,12 @@
   only the item each edit named was compared: accepting a proposed task
   removal took subtasks, dependencies and box links you had changed since
   with it, and a proposed `builds`, box edit, box removal or diagram
-  removal undid task links you had made. These now read as out of date and say what changed;
-  one made before this version reads as out of date too, as it cannot be
-  checked in full.
+  removal undid task links you had made. These now read as out of date
+  and say what changed; one made before this version reads as out of date
+  too, as it cannot be checked in full. And a proposal made on a task as
+  the agent read it before you changed it is refused when made, as the
+  agent's own edit is: it was let through, and accepting it put the
+  agent's old text back over yours.
 - **`coplan init` writes checks that run your scripts.** It wrote a
   script as `<package manager> <script>`, which for some names is the
   package manager's own command: `yarn check` (yarn's integrity check,
