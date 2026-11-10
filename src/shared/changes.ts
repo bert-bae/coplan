@@ -1,6 +1,7 @@
 /**
  * What a change touched, as git says — the one thing every check is chosen
- * by (#52, and targeted checks).
+ * by (#52, and targeted checks) — and which repository and branch a session
+ * is in, for the rail to group and label it. Nothing here writes.
  *
  * A check runs for the areas the change really touched, never for the
  * files a task only planned to touch, nor for areas no commit or edit in
@@ -28,6 +29,11 @@ async function git(root: string, args: string[]): Promise<string | null> {
   }
 }
 
+/** git's one-line answer, or null for none (or no git, or no folder). */
+async function gitLine(root: string, args: string[]): Promise<string | null> {
+  return (await git(root, args))?.trim() || null;
+}
+
 /** `-z` output: one path per NUL, so a name with spaces or quotes is whole. */
 function paths(out: string | null): string[] {
   return out ? out.split('\0').filter(Boolean) : [];
@@ -42,7 +48,7 @@ export async function resolveBase(root: string, base?: string | null): Promise<s
   const candidates: string[] = [];
   if (base) candidates.push(base, `origin/${base}`);
   else {
-    const head = (await git(root, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']))?.trim();
+    const head = await gitLine(root, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']);
     if (head) candidates.push(head);
     candidates.push('main', 'master', 'origin/main', 'origin/master');
   }
@@ -97,9 +103,20 @@ export async function changedSince(root: string, since?: string | null): Promise
   return { files: [...new Set(lists.flatMap(paths))].sort().slice(0, MAX_FILES), base: since ?? null };
 }
 
+/** The root of the repository a folder is in; null outside one. */
+export async function repoRoot(cwd: string): Promise<string | null> {
+  return gitLine(cwd, ['rev-parse', '--show-toplevel']);
+}
+
+/** The branch checked out in a folder; null on a detached HEAD. */
+export async function currentBranch(cwd: string): Promise<string | null> {
+  const name = await gitLine(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  return name === 'HEAD' ? null : name;
+}
+
 /** The commit checked out in `root` now, or null outside git. */
 export async function headCommit(root: string): Promise<string | null> {
-  return (await git(root, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']))?.trim() || null;
+  return gitLine(root, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);
 }
 
 /** The working tree `branch` is checked out in — the repository's own or

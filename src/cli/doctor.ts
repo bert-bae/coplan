@@ -19,7 +19,7 @@ import { randomUUID } from 'node:crypto';
 import { baseUrl, ensureDaemon, paths } from '../shared/paths.ts';
 import { loadConfigReport } from '../shared/config.ts';
 import { loadProjectConfig, PROJECT_CONFIG_PATH } from '../shared/project.ts';
-import { repoRootOf } from './check.ts';
+import { repoRoot } from '../shared/changes.ts';
 import type { DaemonLock, SessionState, SessionSummary } from '../shared/types.ts';
 import type { HookOutput } from '../shared/hooks.ts';
 
@@ -125,7 +125,7 @@ export async function runDoctor(): Promise<number> {
   /* ---------------- configuration ---------------- */
 
   const cwd = process.cwd();
-  const root = repoRootOf(cwd);
+  const root = (await repoRoot(cwd)) ?? cwd;
   const harness = loadConfigReport({ configDir: paths.configDir(), projectDir: root });
   record('the Coplan config reads cleanly', harness.errors.length === 0, harness.errors.length ? undefined : harness.files.filter(existsSync).join(', ') || 'defaults');
   for (const e of harness.errors) console.log(`    ${e}`);

@@ -15,7 +15,6 @@
  */
 import { spawn } from 'node:child_process';
 import { constants as osConstants } from 'node:os';
-import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import {
@@ -32,20 +31,12 @@ import {
   type HookStage,
 } from '../shared/project.ts';
 import type { CheckResult } from '../shared/types.ts';
-import { changedFiles, changedSince } from '../shared/changes.ts';
+import { changedFiles, changedSince, repoRoot } from '../shared/changes.ts';
 
 /** Lines of a failing hook's output shown. Enough to see the error. */
 const TAIL_LINES = 40;
 /** Output kept per hook while it runs; the tail is all that is shown. */
 const KEEP_BYTES = 256 * 1024;
-
-export function repoRootOf(cwd: string): string {
-  try {
-    return execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || cwd;
-  } catch {
-    return cwd;
-  }
-}
 
 interface Options {
   stage: HookStage;
@@ -98,7 +89,7 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
     console.error(opts);
     return 2;
   }
-  const root = repoRootOf(cwd);
+  const root = (await repoRoot(cwd)) ?? cwd;
   const config = loadProjectConfig(root);
   // A config that cannot be read must not pass for one with nothing to run.
   // Anything else that is wrong — a template that is missing, a reviewer

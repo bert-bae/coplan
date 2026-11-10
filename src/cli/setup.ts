@@ -25,7 +25,7 @@ import { REVIEW_MODES } from '../shared/types.ts';
 import { AGENTS, AGENT_KINDS, type AgentKind } from '../shared/agents.ts';
 import { paths, readVerifiedLock } from '../shared/paths.ts';
 import { baseBranch, detectHooks, renderConfig } from './init.ts';
-import { repoRootOf } from './check.ts';
+import { repoRoot } from '../shared/changes.ts';
 
 /** The clone this CLI was built in: `dist/cli/main.js` is two levels down. */
 const CLONE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -409,7 +409,7 @@ export async function askRepositories(io: SetupIo, home: string, coplanHome: str
       io.say(`  ${dir} is not a folder.`);
       continue;
     }
-    const root = repoRootOf(dir);
+    const root = (await repoRoot(dir)) ?? dir;
     const file = path.join(root, PROJECT_CONFIG_PATH);
     if (existsSync(file)) {
       io.say(`  ${file} is already there: left as it is.`);

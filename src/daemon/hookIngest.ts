@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { SessionStore } from './store.ts';
 import type { HarnessConfig } from '../shared/config.ts';
-import { currentBranch, repoRoot } from './git.ts';
+import { currentBranch, repoRoot } from '../shared/changes.ts';
 import { unreadNotice } from './render.ts';
 import { resolveLink, type SessionEnv } from '../shared/link.ts';
 import { DEFAULT_AGENT, agentInfo, type AgentKind } from '../shared/agents.ts';
@@ -113,8 +113,7 @@ async function onSessionStart(sessionId: string, input: SessionStartInput, ctx: 
   // daemon's own is some other session's repository.
   const cwd = input.cwd || ctx.store.get(sessionId)?.cwd || '';
   const session = ctx.store.ensure(sessionId, cwd);
-  const root = await repoRoot(cwd);
-  const branch = await currentBranch(root ?? cwd);
+  const [root, branch] = await Promise.all([repoRoot(cwd), currentBranch(cwd)]);
   ctx.store.update(sessionId, {
     cwd,
     repoRoot: root,

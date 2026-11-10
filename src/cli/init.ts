@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { parseJsonc } from '../shared/jsonc.ts';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { repoRootOf } from './check.ts';
+import { repoRoot } from '../shared/changes.ts';
 import { DEFAULT_BUILD_SETTINGS } from '../shared/build.ts';
 import { PROJECT_CONFIG_PATH, type CheckHook, type HookStage } from '../shared/project.ts';
 
@@ -173,7 +173,7 @@ ${opts.settings === false ? MANAGED : SETTINGS}  "branches": ${JSON.stringify({ 
 }
 
 export async function runInit(args: string[], cwd = process.cwd()): Promise<number> {
-  const root = repoRootOf(cwd);
+  const root = (await repoRoot(cwd)) ?? cwd;
   const file = path.join(root, PROJECT_CONFIG_PATH);
   const print = args.includes('--print');
   const { hooks, found } = detectHooks(root);

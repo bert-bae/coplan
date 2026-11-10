@@ -1,14 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { changedFiles, changedSince, committedOn, headCommit, resolveBase, worktreeOf } from '../shared/changes.ts';
+import { changedFiles, changedSince, committedOn, currentBranch, headCommit, repoRoot, resolveBase, worktreeOf } from '../shared/changes.ts';
 
 /**
  * What a change touched, as git says (#52): what the review and final
- * checks are matched against besides the files a task planned to touch.
+ * checks are matched against besides the files a task planned to touch;
+ * and which repository and branch a session is in.
  */
 
 function repo(): { dir: string; git: (...args: string[]) => void } {
@@ -102,9 +103,21 @@ test("a task built in a worktree of its own is measured there; a branch checked 
   }
 });
 
+test('a session\'s repository and branch: the root from any folder in it, and no branch on a detached HEAD', async () => {
+  const { dir, git } = repo();
+  try {
+    mkdirSync(path.join(dir, 'src', 'deep'), { recursive: true });
+    assert.equal(await repoRoot(path.join(dir, 'src', 'deep')), realpathSync(dir));
+    assert.equal(await currentBranch(dir), 'main');
+    git('checkout', '-q', '--detach');
+    assert.equal(await currentBranch(dir), null, 'detached: no branch to name');
+    assert.equal(await repoRoot(path.parse(dir).root), null, 'outside a repository');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('with no folder, git is not asked at all: an empty cwd would ask it about wherever the daemon runs', async () => {
-  const { headCommit, changedFiles, worktreeOf } = await import('../shared/changes.ts');
-  const { repoRoot, currentBranch } = await import('../daemon/git.ts');
   // This process runs inside a repository (the checkout under test), so any of these would answer if asked.
   assert.deepEqual(
     [await headCommit(''), await changedFiles(''), await worktreeOf('', 'main'), await repoRoot(''), await currentBranch('')],
