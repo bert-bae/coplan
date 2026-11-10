@@ -455,7 +455,7 @@ they are named `mcp__plugin_coplan_harness__<tool>`.
 
 | Agent | Declared in | Command | Environment | Timeouts |
 | --- | --- | --- | --- | --- |
-| Claude Code | [`.mcp.json`](.mcp.json) | `node ${CLAUDE_PLUGIN_ROOT}/dist/mcp/main.js` | `CC_HARNESS_PLUGIN_ROOT` | 60 s per call |
+| Claude Code | [`.mcp.json`](.mcp.json) | `node ${CLAUDE_PLUGIN_ROOT}/dist/mcp/main.js` | None set | 60 s per call |
 | Codex | [`mcp/codex.json`](mcp/codex.json) | `node ./dist/mcp/main.js`, from the plugin's folder | `COPLAN_AGENT=codex`; passes `CC_HARNESS_HOME` on | 20 s to start, 60 s per call |
 | Cursor | [`mcp/cursor.json`](mcp/cursor.json) | `node ${CURSOR_PLUGIN_ROOT}/dist/mcp/main.js` | `COPLAN_AGENT=cursor`, `COPLAN_WORKSPACE=${workspaceFolder}` | Cursor's defaults |
 
