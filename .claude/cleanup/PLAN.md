@@ -133,7 +133,7 @@ the audit's finding numbers.
 | F27 | The comment composer and the Files field lose their text when their view goes (clicking another box, a tab or session switch), and closing the page does not ask: their text is component state, outside the kept drafts (components/Threads.tsx:149, views/TasksView.tsx:895, store.ts beforeunload) [re-audit 6] | 2 should fix | done | b9e02fe |
 | F28 | Confirm design and Submit throw away a half-written draft without asking: the dialogs wait only for saves in flight, and once the plan locks `pruneDrafts` drops the kept draft (a summary started on Overview, a task detail), which was never in the prompt (components/Submit.tsx:379, 496; lib/drafts.ts:34-64) [re-audit 7] | 2 should fix | done | a15ed11 |
 | F29 | A parent whose subtasks were all dropped shows ✓ Done, while the briefs say it was dropped whole and progress counts 0 done: `shownStatus` rolls up through `readinessOf`, which settles dropped leaves as done. Rewriting it over `leavesUnder` (all dropped → dropped, all settled → done, then in progress, blocked, else to do) fixes this and makes it about 20x faster (78 ms → 3.6 ms per row on 400 tasks); `boxRows` also rebuilds `outline` once per box (ui/lib/tasks.ts:23, 41-45) [re-audit 8] | 2 should fix | done: dropped shows dropped; outline numbered once. The faster roll-up was dropped: 6 ms to 4 ms for 400 rows here, not worth a second copy of readinessOf's rule | 162366f |
-| F30 | Claude's `move_task` is not held against a move the user made that it has not read: the user moves t3 out of t1 to keep it, Claude (unread) moves it back under t1 and then removes t1, and t3 goes. Moves are left out of the unread-edit guard by design (`contentTargetsOf`: "none when it only … moves something"); refusing Claude's move of a task in `moved:` would close it, but it is a change to what the agent may do (found reviewing F22) | 2 should fix | open | |
+| F30 | Claude's `move_task` is not held against a move the user made that it has not read: the user moves t3 out of t1 to keep it, Claude (unread) moves it back under t1 and then removes t1, and t3 goes. Moves are left out of the unread-edit guard by design (`contentTargetsOf`: "none when it only … moves something"); refusing Claude's move of a task in `moved:` would close it, but it is a change to what the agent may do (found reviewing F22) | 2 should fix | needs-decision: D2 | |
 | R8 | One kept-draft hook: MarkdownField (Editable.tsx), FilesField (TasksView.tsx) and the comment composer (Threads.tsx) each keep their draft in `openDrafts` by hand, and the copies drift (F27's review found FilesField missing the delete after a save and the reset after a refusal). A `useKeptDraft(field, value, version)` in drafts.ts would hold the key, the kept entry and its lifecycle for all three (found reviewing F27) | 4 refactor | open | |
 | B35 | A lock that comes another way (the agent confirming or submitting from chat, another tab) still drops text left open in a field it locks, without a word: `pruneDrafts` lets the draft go once `fieldText` says the field is locked. Say what was dropped, with its text to copy, when a kept draft goes because its field locked rather than because it was saved (ui/lib/drafts.ts `pruneDrafts`, store.ts snapshot; found reviewing F28) | 5 smaller | open | |
 | B22 | B19's old-named folders are read only at boot, and `ensure`/`purge` know only the new name: a deleted `a:b` comes back on restart from `a_b`; one past the cap at boot gets a blank `a_b-<hash>` and its plan is never read again; a session whose id is `a_b` is served `a:b`'s saved state. Ignore saved state whose `sessionId` is not the id, read the old folder in `ensure` when it names this id, and remove it in `purge` (daemon/store.ts:153, 194, 276) [re-audit 10] | 5 smaller | open | |
@@ -185,6 +185,18 @@ Found while writing T1b (2026-11-10).
   warning)? Or also refuse on the server, which needs a revision on the summary
   and `expect` on `set_meta`, a change to the agent API? **Decided: warn only,
   for now** (2026-11-10).
+
+- **D2 (F30):** The agent's `move_task` is not checked against the user's
+  moves it has not read, by design ("none when it only … moves something").
+  So it can move a task the user moved out of a subtree back under it, then
+  remove the subtree, and the task goes: F22's guard, gone round in two
+  steps. Options:
+  - **Refuse the agent's move of a task the user moved since it last read
+    the plan** (one line in `contentTargetsOf`: `move_task` targets
+    `moved:<id>`, which F22 already records). The agent is told to read
+    first, as for any unread edit. Cost: an agent reorganising the outline
+    after the user dragged tasks about reads the plan first.
+  - **Leave moves unchecked** (as now): the two-step loss stays possible.
 
 ---
 
