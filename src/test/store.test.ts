@@ -241,6 +241,47 @@ test("a session whose id is another's old folder name is not served that one's p
   assert.equal(reloaded.get('odd_one')?.plan?.title, 'Mine');
 });
 
+/* A session whose old folder name is another session's own folder (`p:q`
+ * would have been kept in `p_q`, where session `p_q` keeps its plan):
+ * neither loses its plan to the other. */
+
+test("a session is neither served nor deleted with the plan of another whose folder has its old name", async () => {
+  const { paths } = await import('../shared/paths.ts');
+  const store = await freshStore();
+  store.ensure('p_q', process.cwd());
+  store.publishPlan('p_q', { title: 'Theirs', tasks: [{ title: 'one' }] });
+  store.persistNow('p_q');
+  assert.equal(store.ensure('p:q', process.cwd()).plan, null, 'its own, blank');
+  store.publishPlan('p:q', PLAN);
+  store.persistNow('p:q');
+  store.purge('p:q');
+  assert.equal(existsSync(paths.sessionDir('p:q')), false, 'deleted itself');
+  assert.ok(existsSync(paths.sessionState('p_q')), "but not the other's folder");
+  const reloaded = await freshStore();
+  assert.equal(reloaded.get('p:q'), undefined);
+  assert.equal(reloaded.get('p_q')?.plan?.title, 'Theirs', 'which keeps its plan');
+});
+
+test("a session's old copy, found in another's folder, does not go over its newer own", async () => {
+  const { paths } = await import('../shared/paths.ts');
+  // `c:d` kept the old way in `c_d`; moved to its own folder and changed since, the old copy left behind.
+  const seeded = await freshStore();
+  seeded.ensure('c:d', process.cwd());
+  seeded.publishPlan('c:d', { title: 'Old', tasks: [{ title: 'one' }] });
+  seeded.persistNow('c:d');
+  seeded.drop('c:d');
+  renameSync(paths.sessionDir('c:d'), path.join(home, 'sessions', 'c_d'));
+  const store = await freshStore();
+  store.ensure('c:d', process.cwd());
+  store.publishPlan('c:d', { title: 'Newer', tasks: [{ title: 'one' }] });
+  store.persistNow('c:d');
+  store.drop('c:d');
+  // Then session `c_d` starts, finding the old copy in what is its own folder.
+  store.ensure('c_d', process.cwd());
+  assert.equal(JSON.parse(readFileSync(paths.sessionState('c:d'), 'utf8')).plan.title, 'Newer');
+  assert.equal((await freshStore()).get('c:d')?.plan?.title, 'Newer', 'after a restart too');
+});
+
 test('sessions older than the retention window are not loaded', async () => {
   const dir = path.join(home, 'sessions', 'ancient');
   mkdirSync(dir, { recursive: true });
