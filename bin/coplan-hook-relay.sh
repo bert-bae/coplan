@@ -42,19 +42,13 @@ PAYLOAD=$(cat)
 # build log) is not worth shipping and parsing, so only the session goes.
 # The id is the payload's first one (agents put it first); the shortest
 # match up to it, then a plain string, so nothing in the output is taken.
-case "$EVENT" in
-  PostToolUse|postToolUse)
-    if [ "${#PAYLOAD}" -gt 262144 ]; then
-      ID_KEY=session_id
-      [ "$AGENT" = cursor ] && ID_KEY=conversation_id
-      REST=${PAYLOAD#*\"$ID_KEY\"}
-      [ "$REST" = "$PAYLOAD" ] && exit 0
-      ID=$(printf '%s' "$REST" | sed -n '1s/^[[:space:]]*:[[:space:]]*"\([A-Za-z0-9._:-]*\)".*/\1/p')
-      [ -n "$ID" ] || exit 0
-      PAYLOAD=$(printf '{"%s":"%s","hook_event_name":"%s"}' "$ID_KEY" "$ID" "$EVENT")
-    fi
-    ;;
-esac
+if [ "$EVENT" = PostToolUse ] && [ "${#PAYLOAD}" -gt 262144 ]; then
+  REST=${PAYLOAD#*\"session_id\"}
+  [ "$REST" = "$PAYLOAD" ] && exit 0
+  ID=$(printf '%s' "$REST" | sed -n '1s/^[[:space:]]*:[[:space:]]*"\([A-Za-z0-9._:-]*\)".*/\1/p')
+  [ -n "$ID" ] || exit 0
+  PAYLOAD=$(printf '{"session_id":"%s","hook_event_name":"%s"}' "$ID" "$EVENT")
+fi
 
 # An installed but unbuilt plugin (`dist/` is not in the repository) has no
 # daemon to start and no MCP server: everything would fail silently, and the

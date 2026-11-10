@@ -1047,10 +1047,6 @@ export function checksBlocks(project: ProjectConfig, bin?: string, planning = fa
   return b.blocks;
 }
 
-export function checksSection(project: ProjectConfig, bin?: string, planning = false): string[] {
-  return blockLines(checksBlocks(project, bin, planning));
-}
-
 /** How the build's pull requests are opened, as the repository says
  *  (`pullRequests` in .coplan/config.json). */
 export function pullRequestWords(project: ProjectConfig, opts: { pointer?: boolean } = {}): string {
@@ -1105,10 +1101,6 @@ export function instructionBlocks(project: ProjectConfig, point: InstructionPoin
     ],
     cut ? { cut: true } : {},
   ).blocks;
-}
-
-export function instructionLines(project: ProjectConfig, point: InstructionPoint, heading = '## Standing instructions', max = Infinity): string[] {
-  return blockLines(instructionBlocks(project, point, heading, max));
 }
 
 /**

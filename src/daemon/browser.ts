@@ -17,25 +17,22 @@ import { existsSync, readFileSync } from 'node:fs';
  */
 export function openInBrowser(url: string): void {
   if (!openable(url)) return;
-
-  for (const opener of candidates()) {
-    try {
-      // cmd.exe reads `&`, `|`, `<`, `>` and `^` as its own even inside an
-      // argument: escaped, so a link cannot run anything — or be cut short.
-      const arg = opener.cmd ? url.replace(/[&|<>^]/g, '^$&') : url;
-      const child = spawn(opener.command, [...opener.args, arg], {
-        stdio: 'ignore',
-        detached: true,
-        ...(opener.cwd ? { cwd: opener.cwd } : {}),
-      });
-      child.on('error', () => {
-        /* a failed open must never take the session with it */
-      });
-      child.unref();
-      return;
-    } catch {
-      /* try the next candidate */
-    }
+  const { command, args, cwd, cmd } = opener();
+  // cmd.exe reads `&`, `|`, `<`, `>` and `^` as its own even inside an
+  // argument: escaped, so a link cannot run anything — or be cut short.
+  const arg = cmd ? url.replace(/[&|<>^]/g, '^$&') : url;
+  // A failed open must never take the session with it: a missing opener
+  // says so with an `error` event, anything else by throwing.
+  try {
+    const child = spawn(command, [...args, arg], {
+      stdio: 'ignore',
+      detached: true,
+      ...(cwd ? { cwd } : {}),
+    });
+    child.on('error', () => {});
+    child.unref();
+  } catch {
+    /* not opened */
   }
 }
 
@@ -58,23 +55,20 @@ interface Opener {
   cmd?: boolean;
 }
 
-function candidates(): Opener[] {
-  if (process.platform === 'darwin') return [{ command: 'open', args: [] }];
-  if (process.platform === 'win32') return [{ command: 'cmd', args: ['/c', 'start', ''], cmd: true }];
-
-  const list: Opener[] = [];
+/** The one opener for this system. A spawn that fails says so only after
+ *  it has been chosen, so each is checked for, at the path it is run from. */
+function opener(): Opener {
+  if (process.platform === 'darwin') return { command: 'open', args: [] };
+  if (process.platform === 'win32') return { command: 'cmd', args: ['/c', 'start', ''], cmd: true };
   if (isWsl()) {
     // wslu's opener is purpose-built for this and gets it right.
-    if (existsSync('/usr/bin/wslview')) list.push({ command: 'wslview', args: [] });
-    if (existsSync('/mnt/c/Windows/System32/cmd.exe')) {
-      list.push({ command: '/mnt/c/Windows/System32/cmd.exe', args: ['/c', 'start', ''], cwd: '/mnt/c', cmd: true });
-    }
+    if (existsSync('/usr/bin/wslview')) return { command: '/usr/bin/wslview', args: [] };
+    if (existsSync('/mnt/c/Windows/System32/cmd.exe')) return { command: '/mnt/c/Windows/System32/cmd.exe', args: ['/c', 'start', ''], cwd: '/mnt/c', cmd: true };
   }
-  list.push({ command: 'xdg-open', args: [] });
-  return list;
+  return { command: 'xdg-open', args: [] };
 }
 
-function isWsl(): boolean {
+export function isWsl(): boolean {
   if (process.env['WSL_DISTRO_NAME']) return true;
   try {
     return existsSync('/proc/version') && /microsoft/i.test(readFileSync('/proc/version', 'utf8'));

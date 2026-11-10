@@ -3207,9 +3207,9 @@ function validStatus(value: unknown): TaskStatus | undefined {
 }
 
 /** Trim and bound a string; `undefined` for anything empty or not a string. */
-function clean(value: unknown, max: number, trim = true): string | undefined {
+function clean(value: unknown, max: number): string | undefined {
   if (typeof value !== 'string') return undefined;
-  const out = (trim ? value.trim() : value.replace(/\s+$/, '')).slice(0, max);
+  const out = value.trim().slice(0, max);
   return out.trim() ? out : undefined;
 }
 

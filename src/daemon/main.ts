@@ -85,7 +85,7 @@ async function main(): Promise<void> {
   // A lock whose daemon does not answer is left over from one that died;
   // its pid may belong to something else by now.
   const existing = await readVerifiedLock();
-  if (existing && !process.argv.includes('--force')) {
+  if (existing) {
     // Another daemon owns the lock; report it and exit, so "start" is
     // idempotent from hooks, the CLI and the MCP server.
     process.stdout.write(`${JSON.stringify({ alreadyRunning: true, ...existing })}\n`);

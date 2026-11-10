@@ -6,22 +6,6 @@
  * recorded payloads against the daemon to catch drift in this contract.
  */
 
-export const HOOK_EVENTS = [
-  'SessionStart',
-  'SessionEnd',
-  'UserPromptSubmit',
-  'PreToolUse',
-  'PostToolUse',
-  'PostToolUseFailure',
-  'Notification',
-  'Stop',
-  'SubagentStop',
-  'PreCompact',
-  'PostCompact',
-] as const;
-
-export type HookEvent = (typeof HOOK_EVENTS)[number];
-
 export interface HookInputBase {
   hook_event_name?: string;
   session_id?: string;

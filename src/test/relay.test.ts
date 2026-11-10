@@ -143,11 +143,8 @@ test('a huge PostToolUse sends only its session: the daemon needs to hear a tool
   assert.equal(result.code, 0);
   assert.equal(received.length, 1, 'still heard: it is what clears a permission prompt off the board');
   assert.deepEqual(JSON.parse(received[0]!.body), { session_id: 's-1', hook_event_name: 'PostToolUse' });
-  const cursor = JSON.stringify({ conversation_id: 'c-1', output: 'y'.repeat(300_000) });
-  await relay('postToolUse', cursor, {}, ['cursor']);
-  assert.deepEqual(JSON.parse(received[1]!.body), { conversation_id: 'c-1', hook_event_name: 'postToolUse' });
   await relay('PostToolUse', '{"session_id":"s1","tool_name":"Read"}');
-  assert.equal(received[2]!.body, '{"session_id":"s1","tool_name":"Read"}', 'an ordinary one goes as it is');
+  assert.equal(received[1]!.body, '{"session_id":"s1","tool_name":"Read"}', 'an ordinary one goes as it is');
 });
 
 test('says nothing when there is no daemon', async () => {

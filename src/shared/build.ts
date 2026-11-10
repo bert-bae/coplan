@@ -558,12 +558,6 @@ export const MODE_LABEL: Record<ExecutionMode, string> = {
   managed: 'Managed',
 };
 
-export const MODE_WORDS: Record<ExecutionMode, string> = {
-  export: 'Export: the plan is copied out as Markdown, to build anywhere',
-  tracked: 'Tracked: the agent builds it its own way and reports each task',
-  managed: 'Managed: each task goes implement → review → refine, held to its checks',
-};
-
 export const REVIEW_WORDS: Record<ReviewMode, string> = {
   subagent: 'an independent reviewer (a fresh subagent)',
   self: 'self-review',
