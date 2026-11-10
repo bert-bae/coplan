@@ -67,6 +67,7 @@ the audit's finding numbers.
 | Row | What | Phase | Status | Commit |
 |-----|------|-------|--------|--------|
 | T1 | Test: a prompt the agent never got is taken back and handed over again; an edit in between blocks the take-back [18] | 0 safety net | open | |
+| T1b | Test through the hook route: a UserPromptSubmit whose relay gives up before the answer leaves keeps the prompt to deliver again (daemon/main.ts:1066-1110: close listener, `writableFinished`) [18] | 0 safety net | open | |
 | T2 | Test: the live stream reconnects after an error (new ticket, new stream, session fetched again) and stops on 401 [18] | 0 safety net | open | |
 | T3 | Test: each daemon sign-off route answers a refusal with 409 and the right text (pins [19c] before it moves) | 0 safety net | open | |
 | T4 | Test: the browser store's six sign-off actions adopt the plan, toast, and return false on refusal (pins [19d]) | 0 safety net | open | |
@@ -76,7 +77,7 @@ the audit's finding numbers.
 | F4 | `upsert_task` with `builds` and removing a parent task slip past the unread-edit guard [5a] | 1 must fix | open | |
 | F5 | Delivering the build prompt marks the user's later changes as read [5b] | 1 must fix | open | |
 | F6 | An agent push wipes what the user is typing in the box panel [3] | 1 must fix | open | |
-| F7 | Saving the summary, box notes or a caption silently overwrites the agent's newer text [4]. Decision D1 | 1 must fix | needs-decision | |
+| F7 | Saving the summary, box notes or a caption silently overwrites the agent's newer text [4]. D1: warn only | 1 must fix | open | |
 | F8 | `coplan init` writes `yarn check` / `bun test` / `pnpm ci`: always use `<pm> run <script>` [7] | 2 should fix | open | |
 | F9 | A Codex session first seen through MCP gets the daemon's folder: another repo's checks and git [9] | 2 should fix | open | |
 | F10 | Plan sessions drop off the browser's list once 60 other sessions are newer [8] | 2 should fix | open | |
@@ -111,8 +112,8 @@ the audit's finding numbers.
 - **D1 (F7):** Warn in the browser only (about 3 lines: remember the value
   when editing starts, and show the existing "changed while you were editing"
   warning)? Or also refuse on the server, which needs a revision on the summary
-  and `expect` on `set_meta`, a change to the agent API? Suggested: warn only
-  now, server refusal as its own row later.
+  and `expect` on `set_meta`, a change to the agent API? **Decided: warn only,
+  for now** (2026-11-10).
 
 ---
 

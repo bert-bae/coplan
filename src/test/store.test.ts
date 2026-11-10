@@ -211,6 +211,51 @@ test('a session saved by a newer Coplan is never read wrongly or saved over', as
   assert.equal((JSON.parse(readFileSync(path.join(home, 'sessions', 'today', 'state.json'), 'utf8')) as { schemaVersion?: number }).schemaVersion, 1);
 });
 
+test('a prompt that never reached the agent is taken back and handed over again, unless the plan moved since', async () => {
+  const store = await freshStore();
+  store.ensure('handover', process.cwd());
+  store.publishPlan('handover', PLAN);
+  store.submit('handover', { target: 'session' });
+  const prior = store.get('handover')!.plan!;
+  const sent = store.deliver('handover');
+  assert.ok(sent, 'the build prompt is handed over');
+  assert.equal(store.pending('handover'), null, 'and recorded as sent');
+
+  // The hook's answer never reached the agent: taken back, so the next hook
+  // hands it over again — even after a daemon restart.
+  const delivered = store.get('handover')!.plan!.version;
+  assert.equal(store.undeliver('handover', prior, delivered), true);
+  assert.ok(store.get('handover')!.plan!.version > delivered, 'as a new version, so open tabs see it');
+  const reloaded = await freshStore();
+  assert.deepEqual(reloaded.pending('handover'), sent);
+  const beforeAgain = reloaded.get('handover')!.plan!;
+  assert.deepEqual(reloaded.deliver('handover'), sent, 'the same prompt, handed over again');
+  assert.equal(reloaded.deliver('handover'), null, 'and only once');
+  assert.equal((await freshStore()).pending('handover'), null, 'which a restart remembers');
+
+  // The user changed the plan after the hand-over: taking it back would undo
+  // their change, so it is refused and the plan is left alone.
+  const again = reloaded.get('handover')!.plan!;
+  reloaded.applyOps('handover', [{ op: 'set_checks', id: 't1', add: [{ name: 'lint', run: 'pnpm lint' }] }], 'user');
+  const edited = JSON.stringify(reloaded.get('handover')!.plan);
+  assert.equal(reloaded.undeliver('handover', beforeAgain, again.version), false);
+  assert.equal(JSON.stringify(reloaded.get('handover')!.plan), edited);
+  assert.equal(reloaded.pending('handover'), null);
+});
+
+test('the ask for a task list is taken back the same way', async () => {
+  const store = await freshStore();
+  store.ensure('design-handover', process.cwd());
+  store.publishPlan('design-handover', PLAN);
+  store.confirmDesign('design-handover', {});
+  const prior = store.get('design-handover')!.plan!;
+  const sent = store.deliver('design-handover');
+  assert.ok(sent, 'the design ask is handed over');
+  assert.equal(store.pending('design-handover'), null);
+  assert.equal(store.undeliver('design-handover', prior, store.get('design-handover')!.plan!.version), true);
+  assert.deepEqual(store.pending('design-handover'), sent);
+});
+
 test('a save that fails is said — once — instead of being dropped', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async () => {
   const store = await freshStore();
   store.ensure('readonly', process.cwd());
