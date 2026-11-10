@@ -876,6 +876,39 @@ test('Ctrl+C on `coplan check` stops the check even when nothing reads its error
   }
 });
 
+test('Ctrl+C on `coplan check` stops the check when its terminal has gone too (a write failing with EIO)', { skip: process.platform === 'win32' }, async () => {
+  // As when the terminal is closed: the message that it is stopping fails to be written.
+  const run = "(trap '' TERM; sleep 20) & echo $! > worker; echo $$ > group; touch started; wait";
+  const dir = repo({
+    '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'workers', run }] } }),
+    'eio.cjs': `const write = process.stderr.write.bind(process.stderr);
+process.stderr.write = (chunk, ...rest) => {
+  if (String(chunk).includes('interrupted')) {
+    process.nextTick(() => process.stderr.emit('error', Object.assign(new Error('write EIO'), { code: 'EIO' })));
+    return true;
+  }
+  return write(chunk, ...rest);
+};`,
+  });
+  const cli = spawn(process.execPath, ['-r', path.join(dir, 'eio.cjs'), CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(existsSync(path.join(dir, 'started')), 'the check started');
+    cli.kill('SIGINT');
+    assert.equal(await new Promise<number | null>((r) => cli.on('exit', (c) => r(c))), 130);
+    const state = spawnSync('ps', ['-o', 'stat=', '-p', readFileSync(path.join(dir, 'worker'), 'utf8').trim()], { encoding: 'utf8' }).stdout.trim();
+    assert.ok(state === '' || state.startsWith('Z'), `the worker is gone (${state})`);
+  } finally {
+    cli.kill('SIGKILL');
+    try {
+      process.kill(-Number(readFileSync(path.join(dir, 'group'), 'utf8')), 'SIGKILL');
+    } catch {
+      /* gone */
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('while an interrupted check winds down, the checks after it do not start', { skip: process.platform === 'win32' }, async () => {
   // A worker that takes a moment to stop: the check is over before it is.
   const slow = "(trap 'sleep 0.3; exit 0' TERM; while :; do sleep 0.1; done) & echo $$ > group; touch started; wait";

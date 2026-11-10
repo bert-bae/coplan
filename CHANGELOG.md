@@ -131,8 +131,8 @@
   interrupt is now passed on, and `coplan check` exits once all the check
   started is gone; what ignores the interrupt, a test runner's worker say,
   is killed three seconds on. That holds when nothing reads its errors any
-  more too (`2>&1 | head`, an agent that has closed the pipe), which made
-  it crash before the check was stopped.
+  more too (`2>&1 | head`, an agent that has closed the pipe, a terminal
+  closed), which made it crash before the check was stopped.
 - **A check whose folder is a file fails, and the rest still run.** Its
   `cwd` naming a file got past the check for a missing folder, and the
   shell could not start there: `coplan check` ended in a stack trace, and

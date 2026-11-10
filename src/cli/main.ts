@@ -415,11 +415,12 @@ usage: coplan <command>
 }
 
 // Nothing left reading what this says (`coplan check 2>&1 | head`, an agent
-// that closed the pipe) is no reason to stop part way, before a check is
-// stopped, say: what cannot be written is let go.
+// that closed the pipe: EPIPE; a terminal closed: EIO) is no reason to stop
+// part way, before a check is stopped, say: what cannot be written is let go.
+// Any other failure (a full disk under `--json > report.json`) still ends it.
 for (const out of [process.stdout, process.stderr]) {
   out.on('error', (err: NodeJS.ErrnoException) => {
-    if (err.code !== 'EPIPE') throw err;
+    if (err.code !== 'EPIPE' && err.code !== 'EIO') throw err;
   });
 }
 
