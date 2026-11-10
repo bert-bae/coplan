@@ -150,7 +150,8 @@ the audit's finding numbers.
 | B33 | The MCP server runs a request whose id is neither string nor number and answers under id null: JSON-RPC calls it an Invalid Request (-32600), not to be run (mcp/main.ts:231, 347-351) [re-audit, left out of the report's 20] | 5 smaller | done: null too, which MCP rules out | a46f633 |
 | B34 | A save against a revision the item has not reached (a buggy client, or a tab holding a plan since replaced) is refused as "was changed by Claude while this edit was open", though nobody changed it, so the cause stays hidden. Say the revision is newer than the item's (shared/plan.ts `checkRev`; found reviewing T5) | 5 smaller | done: tasks too, which let such an edit through; and a revision below 1 or not whole | 3b5c32e |
 | B36 | A check that times out has the rest of its group killed only by an unref'd timer, three seconds on, and its close is reported at once: a worker that ignores SIGTERM with its output redirected runs beside the next check, and on past `coplan check` if it ends first. Share the interrupt's wait for the group (cli/check.ts `stop`; found reviewing B31) | 5 smaller | done: one joined stop for both, and a check whose output is held open from outside now ends; the normal-exit path is row B37 | acd9060 |
-| B37 | A check that exits on its own is over only when its output closes: something it started out of its group holding that open (a dev server started detached) makes it run to its timeout and fail as timed out, though its exit code is known; and what it left running in its group (a stray test worker, its output redirected) runs on beside the next check. End it as a stopped one ends: on its exit, the rest of its group stopped, its output read or let go a moment on (cli/check.ts `runHook`; found reviewing B36) | 5 smaller | open | |
+| B37 | A check that exits on its own is over only when its output closes: something it started out of its group holding that open (a dev server started detached) makes it run to its timeout and fail as timed out, though its exit code is known; and what it left running in its group (a stray test worker, its output redirected) runs on beside the next check. End it as a stopped one ends: on its exit, the rest of its group stopped, its output read or let go a moment on (cli/check.ts `runHook`; found reviewing B36) | 5 smaller | done: the output half; stopping what is left in its group is B38 (D3) | 1958574 |
+| B38 | A check that exits on its own while something it started still runs in its group (a stray test worker, a server started with `&` and its output redirected) is over at once, and that runs on beside the next check and past `coplan check`. Stopping the rest of the group on exit would end it, but also a server a check starts for the checks after it (split from B37) | 5 smaller | needs-decision: D3 | |
 | A2 | Re-audit the areas the rows after A1 touched with `/ponytail-audit`, and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing | 6 re-audit | open | |
 
 ### F19: the take-back never fires
@@ -199,6 +200,16 @@ Found while writing T1b (2026-11-10).
     first, as for any unread edit. Cost: an agent reorganising the outline
     after the user dragged tasks about reads the plan first.
   - **Leave moves unchecked** (as now): the two-step loss stays possible.
+- **D3 (B38):** A check that exits on its own while something it started
+  is still running in its process group (a test runner's stray worker, a
+  server started with `&`, its output redirected) is over at once, and that
+  process runs on beside the next check, and past `coplan check`. Options:
+  - **Stop the rest of its group when it exits**, as a timeout does
+    (SIGTERM, then SIGKILL three seconds on): nothing a check starts
+    outlives it. Cost: a check that starts a server for the checks after it
+    (`npm run dev &`) has it stopped; it must start it in a group of its own
+    (`setsid`), or the checks be one.
+  - **Leave it running** (as now).
 
 ---
 
