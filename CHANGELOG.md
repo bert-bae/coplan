@@ -30,6 +30,12 @@
   after submitting, with your reason, or a task's checks you changed then,
   never showed in its read-back. Those now stay unread and it is told to
   read them, as when it is handed the confirmed design.
+- **What you type in a box's panel is no longer wiped by the agent.** A
+  change the agent published to the box you were typing in replaced your
+  text while you were still in the field, and nothing was saved. The
+  label, detail and description fields now keep what you type while you
+  are in them, and say when the box changed meanwhile: leaving keeps your
+  text, Esc takes the new one. Out of the field they follow the plan.
 
 ### Targeted checks: only what the change touched
 

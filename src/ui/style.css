@@ -1662,7 +1662,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .crash-title { margin: 0 0 var(--sp-1); font-weight: 700; color: var(--danger-fg); }
 .crash-detail { margin: 0 0 var(--sp-3); font-size: var(--fs-sm); color: var(--text-secondary); overflow-wrap: anywhere; }
 .md-conflict {
-  margin: var(--sp-2) 0 0; padding: var(--sp-2) var(--sp-3); border-radius: var(--r-md);
+  display: block; margin: var(--sp-2) 0 0; padding: var(--sp-2) var(--sp-3); border-radius: var(--r-md);
   background: var(--attention-bg); color: var(--attention-fg); border: 1px solid var(--attention-border);
   font-size: var(--fs-sm);
 }

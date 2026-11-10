@@ -24,6 +24,42 @@ import { KIND_GLYPH, KIND_HINT, KIND_LABEL, type EdgePatch, type FlowEdge, type 
  * Fields
  * ------------------------------------------------------------------ */
 
+/**
+ * A field's draft. While the user is in the field it is theirs: a change the
+ * agent publishes to the same box never replaces what they have not saved,
+ * and `changed` says one came in. Out of the field it follows the plan, so a
+ * save the plan refused or reshaped shows as the plan has it.
+ */
+function useFieldDraft(value: string) {
+  const [draft, setDraft] = useState(value);
+  const [editing, setEditing] = useState(false);
+  const startedAt = useRef(value);
+  useEffect(() => {
+    if (!editing) setDraft(value);
+  }, [value, editing]);
+  return {
+    draft,
+    setDraft,
+    changed: editing && value !== startedAt.current && draft.trim() !== value.trim(),
+    enter: () => {
+      startedAt.current = value;
+      setEditing(true);
+    },
+    leave: () => setEditing(false),
+    /** Escape: take the plan's text, the newer one if it changed. */
+    revert: () => setDraft(value),
+  };
+}
+
+/** Said in the field when the agent changed it while the user was typing. */
+function ChangedWhileTyping() {
+  return (
+    <span className="md-conflict" role="alert">
+      This changed while you were typing. Leaving the field keeps your text; Esc takes the new one.
+    </span>
+  );
+}
+
 /** One line. Saves on Enter or leaving the field; Escape puts it back. */
 export function CommitInput({
   value,
@@ -40,39 +76,45 @@ export function CommitInput({
   maxLength?: number;
   onCommit: (v: string) => void;
 }) {
-  const [draft, setDraft] = useState(value);
+  const { draft, setDraft, changed, enter, leave, revert } = useFieldDraft(value);
   const live = useRef({ draft, value, onCommit });
   live.current = { draft, value, onCommit };
-  useEffect(() => setDraft(value), [value]);
   // Switching to another box unmounts the field without a blur in some
   // browsers; whatever was typed is saved all the same.
   useEffect(
     () => () => {
       const { draft, value, onCommit } = live.current;
-      if (draft.trim() !== value) onCommit(draft.trim());
+      if (draft.trim() !== value.trim()) onCommit(draft.trim());
     },
     [],
   );
   const commit = () => {
-    if (draft.trim() !== value) onCommit(draft.trim());
+    if (draft.trim() !== value.trim()) onCommit(draft.trim());
   };
   return (
-    <input
-      className={classNames('input', className)}
-      value={draft}
-      aria-label={label}
-      placeholder={placeholder}
-      maxLength={maxLength}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') commit();
-        if (e.key === 'Escape') {
-          e.stopPropagation();
-          setDraft(value);
-        }
-      }}
-    />
+    <>
+      <input
+        className={classNames('input', className)}
+        value={draft}
+        aria-label={label}
+        placeholder={placeholder}
+        maxLength={maxLength}
+        onChange={(e) => setDraft(e.target.value)}
+        onFocus={enter}
+        onBlur={() => {
+          commit();
+          leave();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit();
+          if (e.key === 'Escape') {
+            e.stopPropagation();
+            revert();
+          }
+        }}
+      />
+      {changed && <ChangedWhileTyping />}
+    </>
   );
 }
 
@@ -95,11 +137,10 @@ export function CommitTextArea({
   maxLength?: number;
   onCommit: (v: string) => void;
 }) {
-  const [draft, setDraft] = useState(value);
+  const { draft, setDraft, changed, enter, leave, revert } = useFieldDraft(value);
   const area = useRef<HTMLTextAreaElement>(null);
   const live = useRef({ draft, value, onCommit });
   live.current = { draft, value, onCommit };
-  useEffect(() => setDraft(value), [value]);
   useEffect(
     () => () => {
       const { draft, value, onCommit } = live.current;
@@ -117,28 +158,35 @@ export function CommitTextArea({
     if (draft.trim() !== value.trim()) onCommit(draft.trim());
   };
   return (
-    <textarea
-      ref={area}
-      className="input text-area"
-      value={draft}
-      rows={minRows}
-      aria-label={label}
-      placeholder={placeholder}
-      maxLength={maxLength}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-          e.preventDefault();
+    <>
+      <textarea
+        ref={area}
+        className="input text-area"
+        value={draft}
+        rows={minRows}
+        aria-label={label}
+        placeholder={placeholder}
+        maxLength={maxLength}
+        onChange={(e) => setDraft(e.target.value)}
+        onFocus={enter}
+        onBlur={() => {
           commit();
-          area.current?.blur();
-        }
-        if (e.key === 'Escape') {
-          e.stopPropagation();
-          setDraft(value);
-        }
-      }}
-    />
+          leave();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            commit();
+            area.current?.blur();
+          }
+          if (e.key === 'Escape') {
+            e.stopPropagation();
+            revert();
+          }
+        }}
+      />
+      {changed && <ChangedWhileTyping />}
+    </>
   );
 }
 

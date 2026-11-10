@@ -661,3 +661,59 @@ test('once the design is confirmed, tasks are still added from a box; once submi
   assert.ok(!within(list).queryByRole('button', { name: /^Unlink/ }), 'or unlink');
   assert.ok(!within(list).queryByRole('button', { name: /^Title of task/ }), 'or rename');
 });
+
+/* The box panel's fields while the agent publishes: what the user is typing
+ * stays theirs; a field they have not touched follows the plan. */
+
+const { CommitInput, CommitTextArea } = await import('../ui/components/flow/Panels.tsx');
+
+for (const [name, Field, tag] of [['CommitTextArea', CommitTextArea, 'textarea'], ['CommitInput', CommitInput, 'input']] as const) {
+  /** The field as the panel shows it; `accept` is what the plan takes of a save. */
+  function mount(value: string, accept: (v: string) => boolean = () => true) {
+    const commits: string[] = [];
+    const field = (v: string) => <Field value={v} label="Box description" onCommit={(c: string) => accept(c) && commits.push(c)} />;
+    const view = render(field(value));
+    const box = view.container.querySelector(tag)! as HTMLInputElement | HTMLTextAreaElement;
+    return { commits, box, push: (v: string) => act(async () => view.rerender(field(v))), warned: () => view.container.querySelector('[role="alert"]') !== null };
+  }
+
+  test(`${name}: a push from the agent never replaces what the user is typing, and says it came`, async () => {
+    const { commits, box, push, warned } = mount('Old description');
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: 'Old description, and what the user is typing ' } });
+    await push('The agent rewrote it');
+    assert.equal(box.value, 'Old description, and what the user is typing ', 'the typing stays, to the last space');
+    assert.ok(warned(), 'and the user is told the box changed');
+    fireEvent.blur(box);
+    assert.deepEqual(commits, ['Old description, and what the user is typing'], 'leaving saves it');
+    cleanup();
+  });
+
+  test(`${name}: Escape takes the agent's newer text instead`, async () => {
+    const { commits, box, push, warned } = mount('Old');
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: 'Mine' } });
+    await push('The agent rewrote it');
+    fireEvent.keyDown(box, { key: 'Escape' });
+    assert.equal(box.value, 'The agent rewrote it');
+    assert.equal(warned(), false);
+    fireEvent.blur(box);
+    assert.deepEqual(commits, [], 'nothing to save');
+    cleanup();
+  });
+
+  test(`${name}: out of the field it follows the plan, also after a save the plan refused`, async () => {
+    const { commits, box, push } = mount('First', (v) => v !== '');
+    await push('Second, from the agent');
+    assert.equal(box.value, 'Second, from the agent', 'untouched, it follows');
+    // Cleared and left: the plan keeps its text, and so does the field.
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: '' } });
+    fireEvent.blur(box);
+    assert.deepEqual(commits, []);
+    assert.equal(box.value, 'Second, from the agent');
+    await push('Third, from the agent');
+    assert.equal(box.value, 'Third, from the agent', 'and it still follows');
+    cleanup();
+  });
+}
