@@ -153,6 +153,23 @@ the audit's finding numbers.
 | B37 | A check that exits on its own is over only when its output closes: something it started out of its group holding that open (a dev server started detached) makes it run to its timeout and fail as timed out, though its exit code is known; and what it left running in its group (a stray test worker, its output redirected) runs on beside the next check. End it as a stopped one ends: on its exit, the rest of its group stopped, its output read or let go a moment on (cli/check.ts `runHook`; found reviewing B36) | 5 smaller | done: the output half; stopping what is left in its group is B38 (D3) | 1958574 |
 | B38 | A check that exits on its own while something it started still runs in its group (a stray test worker, a server started with `&` and its output redirected) is over at once, and that runs on beside the next check and past `coplan check`. Stopping the rest of the group on exit would end it, but also a server a check starts for the checks after it (split from B37) | 5 smaller | needs-decision: D3 | |
 | A2 | Re-audit the areas the rows after A1 touched with `/ponytail-audit`, and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing | 6 re-audit | open | |
+| T6 | Three guards in the store's code for folders an earlier build named have no test that fails when they break (each removed alone, the store and integration tests still pass): `purge` deletes the old folder only when `ownerOf(old) === id`, else deleting `a:b` deletes the plan of session `a_b`; `readSaved` moves another session's state only when that session has none of its own, else an old copy goes over its newer one; and it serves an old folder only when it holds the id asked for, else `a:b` is served `a_b`'s plan. One store test each (daemon/store.ts:197, 303, 315) [re-audit A2 7] | 0 safety net | open | |
+| F31 | A proposal's inner `expect` is checked as the user's (its trial runs `applyAsUser`): a stale task `expect` the agent would be refused directly goes through, and accepting it overwrites the user's newer text; the agent's own successive edits are refused instead, and sections and diagrams name the wrong side. Check inner `expect`s as Claude's when the proposal is made (shared/plan.ts:1649-1653, 2183, 2987-2993) [re-audit A2 1] | 2 should fix | open | |
+| F32 | A proposal's ops are guarded, and printed for staleness, against the plan before it, not as its earlier ops leave it, as a batch is: `[move_task t3 under t1, remove t1]` passes though the user's unread edit of t3 would be refused in a batch, and stays acceptable after the user links a box or adds a dependency to t3, which accepting then drops (its preview is cached on the unchanged print). Guard each inner op on the trial copy, and print a `move_task` with the moved task's removal footprint (shared/plan.ts:1278-1280, 2222-2304) [re-audit A2 2] | 2 should fix | open | |
+| F33 | A progress note (`harness_task_update`, a note with a status) changes `task.note` without moving the task's revision, which the note editor relies on: the user's note editor, opened before the agent's "Blocked: DB creds missing", saves over it with no conflict. Move `rev`/`revBy` when the note changes (shared/plan.ts:1823-1828, 1906-1910) [re-audit A2 3] | 2 should fix | open | |
+| F34 | An unsent comment or reply is not held by the plan lock, though a submitted plan refuses the user's comments: Submit does not wait for it, a lock from chat drops it without B35's copy toast, its box goes, and the page asks before closing until reloaded. `fieldText` should take comment and reply drafts as locked once the plan is, with a name in `fieldName` (ui/lib/drafts.ts:87-90) [re-audit A2 4] | 2 should fix | open | |
+| F35 | A reply being typed vanishes when the agent resolves its thread: `fieldText` drops it and the thread moves to the hidden resolved list, with no toast, though a resolved thread still takes replies. Keep it while its thread exists (ui/lib/drafts.ts:89-90, components/Threads.tsx:66-75) [re-audit A2 5] | 2 should fix | open | |
+| F36 | Ctrl+C on `coplan check` whose stderr reader has gone (`2>&1 | head`, an agent that closed the pipe) crashes on the EPIPE from `process.stderr.write`, after the SIGTERM but before the wait and the SIGKILL: what ignores SIGTERM runs on. Use `console.error`, which ignores write errors (cli/check.ts:312) [re-audit A2 6] | 2 should fix | open | |
+| B39 | Every removal copies the whole plan, only to describe the comments it leaves without a home: 40 removals on a 5.4 MB plan hold the daemon about 0.9 s, paid again on a proposal's preview and accept. A shallow `{ ...plan }` does, as the removal reassigns its lists rather than changing them (shared/plan.ts:2000) [re-audit A2 8] | 5 smaller | open | |
+| B40 | A diagram whose links Claude changed (removing a task, a task list's builds) keeps the last design editor as `updatedBy`, so a conflict on it says "changed by another edit"; and `checkRev` tells Claude "It now shows the latest version" where a task's says to read the plan again. `bumpDiagram` takes the author (shared/plan.ts:760-764, 2938) [re-audit A2 9] | 5 smaller | open | |
+| B41 | A check's own timeout that falls in the 200 ms let-go after it ended on its own reports it as timed out: clear the timer once it has ended (cli/check.ts:290-299) [re-audit A2 10] | 5 smaller | open | |
+| B42 | A hook whose `cwd` is a file passes `existsSync`, and `spawn` then throws ENOTDIR inside the promise: `coplan check` prints a stack and the checks after it never run. Ask for a directory (cli/check.ts:191) [re-audit A2 11] | 5 smaller | open | |
+| B43 | Clicking Reply again on a reply being written empties it (`begin` starts it afresh): leave an open editor as it is (components/Threads.tsx:100, ui/lib/drafts.ts:172-176) [re-audit A2 12] | 5 smaller | open | |
+| B44 | A section's comment box sits inside the summary's fieldset, disabled once the design is confirmed, though comments are open until the plan is submitted: a comment written there is stuck, and the page asks before closing. Move the comment panels out of it (views/OverviewView.tsx:40) [re-audit A2 13] | 5 smaller | open | |
+| B45 | No test holds a toast with text to copy up past its 8 s: dropping `copy === undefined` would let the only copy of a dropped draft vanish (ui/store.ts:796) [re-audit A2 14] | 5 smaller | open | |
+| B46 | An earlier build run again after a session moved to its hashed folder serves the stale old folder, and its edits there are then ignored by the new build. Remove the old folder once moved, when it is the session's (`ownerOf`), or take the later `updatedAt` (daemon/store.ts:149-162, 276, 313-316) [re-audit A2 15] | 5 smaller | open | |
+| B47 | Ids with lone surrogates hash alike (`createHash().update(id)` encodes each as U+FFFD), so `"s\ud800"` and `"s\udbff"` share a folder. Hash the id as `utf16le`; the hashed names are not released yet (shared/paths.ts:41) [re-audit A2 16] | 5 smaller | open | |
+| A3 | Re-audit the areas the rows after A2 touched with `/ponytail-audit`, and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -209,7 +226,11 @@ Found while writing T1b (2026-11-10).
     outlives it. Cost: a check that starts a server for the checks after it
     (`npm run dev &`) has it stopped; it must start it in a group of its own
     (`setsid`), or the checks be one.
-  - **Leave it running** (as now).
+  - **Leave it running.** As now, though, one that writes to the check's
+    output (not redirected: `npm run serve & npm run e2e`) holds the check
+    until its timeout, which fails it as timed out. Leaving it running
+    means letting the check go on its shell's exit instead, not waiting
+    for its group (found in re-audit A2); stopping the group fixes that too.
 
 ---
 
@@ -497,3 +518,81 @@ outside their changed lines, the canvas lib (layout, geometry, history), several
 UI components (PlanEdge, ContextMenu, Shortcuts, Toasts, Handoff), the MCP tool
 definitions beyond their names, and real runs on macOS, Windows, Codex and
 Cursor.
+
+## Re-audit report (row A2, ponytail-audit, 2026-11-10)
+
+Scope: the changes since f6e0648 (row A1) in `src`, `bin` and `hooks`, and
+what they touch. Read by four auditors, one per area (check runner and MCP,
+daemon store, plan model, page); every finding below was reproduced, and
+the reproductions were run again before being kept.
+
+**What this repo does:** Coplan lets a developer and a coding agent plan a
+change together. A local daemon keeps each session's plan; the agent edits
+it through an MCP server, the user in a browser page, and a CLI runs the
+repository's checks. Load assumed: one developer on one machine, a few
+agent sessions, plans up to a few MB.
+
+### Should fix
+
+1. **A proposal checks its edits' revisions as if the user made them** (`shared/plan.ts:1649-1653, 2183, 2987-2993`)
+   - **What this is:** an edit can carry `expect`, the revision it was made on. A task edit is refused when the *other* side changed the task since.
+   - **Problem:** a proposal's edits are tried as the user's, so they are compared with the agent's changes, not the user's. The user edits t3; the agent, having read before that, proposes t3's old text with `expect: 1`. Sent directly it is refused; proposed, it is accepted, and accepting it overwrites the user's text.
+   - **Fix:** check each inner `expect` as Claude's when the proposal is made, then try the edits without it.
+   - **If we skip it:** a proposal can quietly carry the agent's stale text over the user's.
+2. **A proposal ignores its own earlier edits** (`shared/plan.ts:1278-1280, 2222-2304`)
+   - **What this is:** a batch of edits is checked as its earlier edits leave the plan; so is what makes a proposal out of date, for one edit.
+   - **Problem:** a proposal is checked edit by edit against the plan before it. `[move t3 under t1, remove t1]` passes though the user's unread change to t3 would be refused in a batch; and when the user then links a box or a dependency to t3, the proposal stays acceptable, and accepting it drops them.
+   - **Fix:** guard each inner edit on the trial copy, as a batch is; print a `move_task` with what removing the moved task would take.
+   - **If we skip it:** the guard the batch has can be gone round in a proposal.
+3. **The user's old status note saves over the agent's newer one** (`shared/plan.ts:1823-1828, 1906-1910`)
+   - **What this is:** the agent reports progress with a note and a status. The note editor saves with the task's revision.
+   - **Problem:** the progress note changes `task.note` without moving the revision. The user's note editor, opened before the agent wrote "Blocked: DB creds missing", saves over it with no conflict.
+   - **Fix:** move the revision when the note changes.
+   - **If we skip it:** the agent's blocker report can vanish.
+4. **An unsent comment outlives Submit and can never be sent** (`ui/lib/drafts.ts:87-90`)
+   - **What this is:** kept drafts that the plan's lock would hold still make Submit wait, and a lock from chat toasts them with a Copy button.
+   - **Problem:** comment and reply drafts are never taken as locked, though a submitted plan refuses the user's comments. Submit goes ahead, the comment box goes, no toast says so, and the page asks before closing until it is reloaded.
+   - **Fix:** take comment and reply drafts as locked once the plan is, and name them.
+   - **If we skip it:** a comment the user wrote is lost unsaid.
+5. **A reply being typed vanishes when its thread is resolved** (`ui/lib/drafts.ts:89-90`, `components/Threads.tsx:66-75`)
+   - **What this is:** a reply being written is kept while its thread is open.
+   - **Problem:** when the agent resolves the thread, the draft is dropped and the thread moves to the hidden resolved list, with no toast, though a resolved thread still takes replies.
+   - **Fix:** keep a reply while its thread exists.
+   - **If we skip it:** the user's half-written reply is gone.
+6. **Ctrl+C crashes `coplan check` when nothing reads its errors** (`cli/check.ts:312`)
+   - **What this is:** on Ctrl+C the command says it is stopping the check, then waits for it and kills what ignores the stop.
+   - **Problem:** it says so with `process.stderr.write`. Under `2>&1 | head`, or an agent that closed the pipe, that write fails (EPIPE) and crashes the command after the SIGTERM but before the wait and the kill: a worker that ignores SIGTERM runs on.
+   - **Fix:** `console.error`, which ignores write errors.
+   - **If we skip it:** row B31's fix is undone exactly when an agent ends the command.
+7. **Three guards against losing a session's plan have no test** (`daemon/store.ts:197, 303, 315`)
+   - **What this is:** the code that reads and removes folders an earlier build named.
+   - **Problem:** each guard can be deleted with every store and integration test still passing. Without them, deleting `a:b` deletes session `a_b`'s plan, an old copy goes over a session's newer one, or `a:b` is served `a_b`'s plan.
+   - **Fix:** one store test each.
+   - **If we skip it:** a later change can bring back B22's data loss unseen.
+
+### Nice to have
+
+8. **Every removal copies the whole plan** (`shared/plan.ts:2000`): only to describe the comments it orphans; 40 removals on a 5.4 MB plan hold the daemon about 0.9 s. A shallow copy does.
+9. **A diagram conflict blames "another edit"** (`shared/plan.ts:760-764, 2938`): a link change of the agent's keeps the last design editor as `updatedBy`; `bumpDiagram` should take the author.
+10. **A check that ended in time can be reported as timed out** (`cli/check.ts:290-299`): when its timeout falls in the 200 ms let-go. Clear the timer once it has ended.
+11. **A hook whose folder is a file crashes `coplan check`** (`cli/check.ts:191`): `spawn` throws ENOTDIR; ask for a directory.
+12. **Clicking Reply again empties the reply** (`components/Threads.tsx:100`): leave an open editor as it is.
+13. **A section comment is stuck once the design is confirmed** (`views/OverviewView.tsx:40`): its box is inside the summary's disabled fieldset; move it out.
+14. **The Copy toast's staying up is untested** (`ui/store.ts:796`).
+15. **An earlier build run again gets the stale old folder** (`daemon/store.ts:149-162, 276, 313-316`): remove the old folder once a session has moved, when it is the session's.
+16. **Ids with lone surrogates share a folder** (`shared/paths.ts:41`): hash the id as `utf16le`.
+
+Also found, and folded into decision D3 rather than a row: a check that
+leaves a process running in its group that writes to the check's output
+runs to its timeout and fails as timed out.
+
+Checked and not a finding: `coplan clean sessions` with no daemon running
+removes every session untouched for a day; that is the group's documented
+rule, as it is for sessions a long-running daemon has let go from memory.
+
+**Verdict:** no Must fix. Fix 6 first (it undoes B31 when an agent ends a
+check), then the proposal guards (1, 2) and the lost text (3, 4, 5).
+
+**Not checked:** a real browser (clipboard, focus order), two tabs at once,
+Windows, macOS's `/bin/sh` for the relay, case-insensitive filesystems
+(ids that differ only in case), and what agent harnesses do on a timeout.
