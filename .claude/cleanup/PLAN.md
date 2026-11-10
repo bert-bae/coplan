@@ -95,7 +95,7 @@ the audit's finding numbers.
 | C1 | Delete dead UI code: unused primitives, format helpers and their CSS, plus the `.panel-title` rule that leaks onto live titles [20] | 3 clean-up | done | ff8770c |
 | C2 | Delete dead daemon and shared code: `MODE_WORDS`, `checksSection`, `instructionLines`, `HOOK_EVENTS`, `clean`'s `trim`, Cursor tool-hook paths, the daemon's `--force`, `paths.sessionEvents`, `.diff.<pid>.tmp` sweep, the browser candidate loop [20] | 3 clean-up | done | 94cc1a8 |
 | C3 | Drop the `@tailwindcss/cli` dev dependency (and `@parcel/watcher` with it) and the unread `CC_HARNESS_PLUGIN_ROOT` [20] | 3 clean-up | done | a6f491b |
-| R1 | One `ensureDaemon()` for the CLI, the MCP server and the doctor, using the verified lock [19a]; fixes the doctor's stale-lock report | 4 refactor | open | |
+| R1 | One `ensureDaemon()` for the CLI, the MCP server and the doctor, using the verified lock [19a]; fixes the doctor's stale-lock report | 4 refactor | done | d8fa57b, 7316969 |
 | R2 | One "who spoke last" rule, exported from plan.ts, used in all four places [19b]; fixes the plan check and Revise button disagreeing | 4 refactor | open | |
 | R3 | Map `PlanError` to 409 once in the daemon's top-level catch; delete six try/catch blocks; one `planOr404` [19c] | 4 refactor | open | |
 | R4 | One `signOff` helper for the browser store's six sign-off actions; `commit` calls `adoptPlan` [19d] | 4 refactor | open | |
