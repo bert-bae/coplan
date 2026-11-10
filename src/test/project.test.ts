@@ -725,26 +725,79 @@ test('Ctrl+C on `coplan check` stops the check it is running, not only itself', 
   }
 });
 
-test('an interrupted check that left something running out of its group cannot hold `coplan check` open', { skip: process.platform === 'win32' }, async () => {
-  // A helper the check starts in a group of its own, holding the check's output open.
-  const helper = `node -e "const c = require('child_process').spawn('sleep', ['20'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }); require('fs').writeFileSync('helper', String(c.pid)); c.unref()"`;
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'serve', run: `${helper}; touch started; sleep 10` }] } }) });
+test('Ctrl+C on `coplan check` stops what the check started that ignores SIGTERM, not only the check', { skip: process.platform === 'win32' }, async () => {
+  // The shell goes at SIGTERM; a test runner's worker in its group ignores it.
+  const run = "(trap '' TERM; sleep 4; touch marker) & echo $$ > group; touch started; wait";
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'workers', run }] } }) });
   const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
   try {
     for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.ok(existsSync(path.join(dir, 'started')), 'the check started');
     const started = Date.now();
     cli.kill('SIGINT');
     const code = await new Promise<number | null>((r) => cli.on('exit', (c) => r(c)));
     assert.equal(code, 130);
-    assert.ok(Date.now() - started < 4000, `it ends without waiting for the helper (${Date.now() - started}ms)`);
+    assert.ok(Date.now() - started < 4500, `within the three seconds a check gets to stop (${Date.now() - started}ms)`);
+    // Past when the worker would have finished: it did not.
+    await new Promise((r) => setTimeout(r, 5000 - (Date.now() - started)));
+    assert.equal(existsSync(path.join(dir, 'marker')), false, 'the worker was stopped too');
   } finally {
     cli.kill('SIGKILL');
     try {
-      process.kill(Number(readFileSync(path.join(dir, 'helper'), 'utf8')), 'SIGKILL');
+      process.kill(-Number(readFileSync(path.join(dir, 'group'), 'utf8')), 'SIGKILL');
+    } catch {
+      /* gone, as it should be */
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('while an interrupted check winds down, the checks after it do not start', { skip: process.platform === 'win32' }, async () => {
+  // A worker that takes a moment to stop: the check is over before it is.
+  const slow = "(trap 'sleep 0.3; exit 0' TERM; while :; do sleep 0.1; done) & echo $$ > group; touch started; wait";
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'slow', run: slow }, { name: 'next', run: 'touch next' }] } }) });
+  const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 100));
+    cli.kill('SIGINT');
+    assert.equal(await new Promise<number | null>((r) => cli.on('exit', (c) => r(c))), 130);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(existsSync(path.join(dir, 'next')), false, 'the next check never ran');
+  } finally {
+    cli.kill('SIGKILL');
+    try {
+      process.kill(-Number(readFileSync(path.join(dir, 'group'), 'utf8')), 'SIGKILL');
     } catch {
       /* gone */
     }
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an interrupted check that left something running out of its group cannot hold `coplan check` open', { skip: process.platform === 'win32' }, async () => {
+  // A helper the check starts in a group of its own, holding the check's output open.
+  const helper = `node -e "const c = require('child_process').spawn('sleep', ['20'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }); require('fs').writeFileSync('helper', String(c.pid)); c.unref()"`;
+  // The check still running, or its shell gone already, waiting on the output alone.
+  for (const [then, within] of [['sleep 10', 4000], [':', 1500]] as const) {
+    const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'serve', run: `${helper}; touch started; ${then}` }] } }) });
+    const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
+    try {
+      for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 200));
+      const started = Date.now();
+      cli.kill('SIGINT');
+      const code = await new Promise<number | null>((r) => cli.on('exit', (c) => r(c)));
+      assert.equal(code, 130, then);
+      assert.ok(Date.now() - started < within, `${then}: it ends without waiting for the helper (${Date.now() - started}ms)`);
+    } finally {
+      cli.kill('SIGKILL');
+      try {
+        process.kill(Number(readFileSync(path.join(dir, 'helper'), 'utf8')), 'SIGKILL');
+      } catch {
+        /* gone */
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 

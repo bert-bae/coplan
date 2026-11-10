@@ -178,6 +178,9 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   return failed ? 1 : 0;
 }
 
+/** How long a check that is stopped gets to go, before it is killed. */
+const STOP_GRACE_MS = 3000;
+
 function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: string; ms: number; timedOut: boolean }> {
   const started = Date.now();
   // A hook whose folder is not there fails, saying so: run anywhere else it
@@ -211,7 +214,7 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
     child.stderr.on('data', keep);
     const stop = () => {
       kill('SIGTERM');
-      setTimeout(() => kill('SIGKILL'), 3000).unref();
+      setTimeout(() => kill('SIGKILL'), STOP_GRACE_MS).unref();
     };
     const timer = setTimeout(() => {
       timedOut = true;
@@ -219,22 +222,40 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
     }, (hook.timeout ?? DEFAULT_HOOK_TIMEOUT) * 1000);
     // Its own group also keeps Ctrl+C (and an agent ending this command)
     // from reaching it: passed on here, so nothing is left running, and this
-    // command ends as an interrupted one does once the check has gone. On
-    // its process exiting, not its output closing, which something it
-    // started out of its group could hold open; and a second interrupt, or
-    // five seconds, ends it whatever the check does.
+    // command ends as an interrupted one does once the check has gone — its
+    // process, then the rest of its group, which may ignore SIGTERM. Not its
+    // output closing, which something it started out of its group could
+    // hold open. Three seconds on, or at a second interrupt, what is left of
+    // the group is killed, which nothing can ignore, and it ends.
     const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
     let interrupts = 0;
+    const groupAlive = () => {
+      try {
+        process.kill(-child.pid!, 0);
+        return true;
+      } catch (err) {
+        // There, but not ours to signal (a member that changed user).
+        return (err as NodeJS.ErrnoException).code === 'EPERM';
+      }
+    };
     const interrupted = (signal: (typeof signals)[number]) => {
       const leave = () => process.exit(128 + osConstants.signals[signal]);
-      if (interrupts++) {
+      const end = () => {
         kill('SIGKILL');
         leave();
-      }
+      };
+      if (interrupts++) end();
       process.stderr.write(`coplan: interrupted; stopping "${hook.name}"\n`);
-      stop();
-      child.once('exit', leave);
-      setTimeout(leave, 5000).unref();
+      clearTimeout(timer);
+      kill('SIGTERM');
+      setTimeout(end, STOP_GRACE_MS);
+      // Gone, it may still show as there until its parent reaps it: past
+      // the SIGKILL, that is all the group can be.
+      const gone = () => (groupAlive() ? setTimeout(gone, 50) : leave());
+      // Its shell may have exited already, with something out of its group
+      // holding its output open.
+      if (child.exitCode !== null || child.signalCode !== null) gone();
+      else child.once('exit', gone);
     };
     for (const signal of signals) process.on(signal, interrupted);
     const done = () => {
@@ -246,6 +267,9 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
       resolve({ code: 127, output: String(err.message), ms: Date.now() - started, timedOut });
     });
     child.on('close', (code) => {
+      // Interrupted, it ends this command once its group has gone: the
+      // checks after it are not to start meanwhile.
+      if (interrupts) return;
       done();
       resolve({ code: timedOut ? 124 : (code ?? 1), output, ms: Date.now() - started, timedOut });
     });
