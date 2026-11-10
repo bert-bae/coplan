@@ -1021,9 +1021,9 @@ function buildRouter(deps: Deps): Router {
       agent = hookAgent(agent, body);
       const { event, input } = readAgentHook(agent, raw, body);
       const session = typeof input.session_id === 'string' ? store.get(input.session_id) : undefined;
-      const queued = (id: string) => Boolean(store.pending(id) || store.pendingRevision(id));
-      const prior = session?.plan && queued(session.sessionId) ? session.plan : null;
-      const waiting = prior ? [store.pending(session!.sessionId)?.prompt, store.pendingRevision(session!.sessionId)?.prompt] : [];
+      // What is queued for the agent, and the plan as it was, to restore.
+      const waiting = session ? [store.pending(session.sessionId)?.prompt, store.pendingRevision(session.sessionId)?.prompt].filter((p): p is string => Boolean(p)) : [];
+      const prior = session?.plan && waiting.length ? session.plan : null;
       if (event) {
         output = await ingestHook(event, input, {
           store,
@@ -1041,9 +1041,10 @@ function buildRouter(deps: Deps): Router {
       const after = session ? store.get(session.sessionId)?.plan : undefined;
       // Only when this answer is what carries the prompt. One the user pasted
       // into their message (in any agent; in Cursor, the only way) reached
-      // the agent whatever becomes of the answer.
+      // the agent whatever becomes of the answer. A request still queued
+      // behind it (one prompt to a message) is restored with it as it was.
       const carried = output.hookSpecificOutput?.additionalContext ?? '';
-      if (prior && after && !queued(session!.sessionId) && waiting.some((p) => p && carried.includes(p))) {
+      if (prior && after && waiting.some((p) => carried.includes(p))) {
         handed = { id: session!.sessionId, prior, version: after.version };
       }
     } catch (err) {

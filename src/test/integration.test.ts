@@ -1519,6 +1519,33 @@ test('one prompt to a message: a revision request queued with a sign-off waits f
   assert.ok(second.startsWith(preview.prompt), 'the request comes with the next one');
 });
 
+test('a sign-off queued with a revision request, on a message the relay gave up on, is kept for the next message', async () => {
+  const id = 'one-at-a-time-late';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  try {
+    await mcpFor(id, 'publish', PLAN);
+    await mcpFor(id, 'read');
+    await opsOn(id, [{ op: 'comment', target: { kind: 'node', id: 'd1/db' }, text: 'Use a read replica here.' }]);
+    await post(`/api/session/${id}/plan/design/confirm`);
+    const preview = await post<RevisionPreview>(`/api/session/${id}/plan/revisions/prompt`, {});
+    assert.ok((await post<{ plan?: unknown; error?: string }>(`/api/session/${id}/plan/revisions`, { expect: preview.version, hash: preview.hash })).plan);
+    // The relay's curl had already given up when the answer was ready.
+    const past = String(Math.floor(Date.now() / 1000) - 5);
+    const late = await hookFor(id, 'UserPromptSubmit', { prompt: 'go' }, { 'x-harness-deadline': past });
+    assert.equal(late.hookSpecificOutput?.additionalContext, undefined, 'the late answer does not carry it');
+    const s = await sessionFor(id);
+    assert.equal(s.plan!.design!.deliveredAt, null, 'the sign-off is not counted as delivered');
+    assert.equal(latest(s)!.deliveredAt, null, 'nor the request');
+    // Each in its turn, as if the late message had never been.
+    const next = String((await hookFor(id, 'UserPromptSubmit', { prompt: 'go on' })).hookSpecificOutput?.additionalContext ?? '');
+    assert.ok(next.startsWith('[cc-harness] The design is confirmed'), next.slice(0, 80));
+    const after = String((await hookFor(id, 'UserPromptSubmit', { prompt: 'and the comments?' })).hookSpecificOutput?.additionalContext ?? '');
+    assert.ok(after.startsWith(preview.prompt), 'the request comes with the one after');
+  } finally {
+    await call(`/api/session/${id}`, { method: 'DELETE' });
+  }
+});
+
 test('a revision request is queued in the page, carried by the next message once, and answered in its threads (#67)', async () => {
   const id = 'revise-session';
   await hookFor(id, 'SessionStart', { start_reason: 'startup' });

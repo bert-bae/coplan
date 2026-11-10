@@ -239,6 +239,11 @@
   agent removing that one, unaware, took yours with it. Now it is told to
   read the plan first. Moves inside what it removes, as it read it, still
   go through.
+- **A sign-off sent with a revision request waiting is kept when the
+  message does not get through.** A prompt whose message timed out is
+  kept for the next message, but not when a revision request was queued
+  behind it: the sign-off counted as delivered and the agent never got
+  it. Now both wait, each for its own message.
 - **No two sessions share a folder.** A session id is kept in a folder
   named after it, with anything a folder name cannot hold made safe, so
   ids that differed only there (`a/b`, `a_b`), or past 128 characters,
