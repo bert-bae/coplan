@@ -578,10 +578,11 @@ function buildRouter(deps: Deps): Router {
 
   const residentIds = (): string[] => store.all().map((s) => s.sessionId);
 
-  const sessionOr404 = (ctx: Ctx): SessionState | null => {
+  /** The session a route is about: there is nothing to answer for one the daemon does not know. */
+  const sessionOr404 = (ctx: Ctx): SessionState => {
     const session = store.get(ctx.params['id'] ?? '');
-    if (!session) json(ctx.res, 404, { error: 'unknown session' });
-    return session ?? null;
+    if (!session) throw new HttpError(404, 'unknown session');
+    return session;
   };
 
   /** A look at the plan: there is nothing to see until one is published. */
@@ -607,30 +608,22 @@ function buildRouter(deps: Deps): Router {
     // What is wrong with the harness config this session reads (its
     // repository's .claude/harness.json and the global config.json), for
     // the page to say: otherwise only daemon.log and the doctor would (#52).
-    if (session) {
-      const project = projectFor(session);
-      json(ctx.res, 200, {
-        session: forBrowser(session),
-        planCheck: project.planCheck,
-        configErrors: config.errors(session.repoRoot ?? session.cwd),
-        // The repository's checks a task can skip, by stage (#54).
-        projectChecks: { implement: project.hooks.implement.map((h) => h.name), review: project.hooks.review.map((h) => h.name) },
-      });
-    }
+    const project = projectFor(session);
+    json(ctx.res, 200, {
+      session: forBrowser(session),
+      planCheck: project.planCheck,
+      configErrors: config.errors(session.repoRoot ?? session.cwd),
+      // The repository's checks a task can skip, by stage (#54).
+      projectChecks: { implement: project.hooks.implement.map((h) => h.name), review: project.hooks.review.map((h) => h.name) },
+    });
   });
 
   router.delete('/api/session/:id', (ctx) => {
-    const id = ctx.params['id'] ?? '';
-    if (!store.get(id)) {
-      json(ctx.res, 404, { error: 'unknown session' });
-      return;
-    }
-    json(ctx.res, 200, { deleted: store.purge(id) });
+    json(ctx.res, 200, { deleted: store.purge(sessionOr404(ctx).sessionId) });
   });
 
   router.post('/api/session/:id/title', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ title?: string }>(ctx.req);
     const title = (body.title ?? '').trim().slice(0, MAX_TITLE_LENGTH);
     if (!title) {
@@ -649,7 +642,6 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/ops', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ ops?: PlanOp[] }>(ctx.req);
     const ops = Array.isArray(body.ops) ? body.ops : [];
     if (ops.length > MAX_OPS) throw new HttpError(400, `At most ${MAX_OPS} edits per request.`);
@@ -666,7 +658,6 @@ function buildRouter(deps: Deps): Router {
    *  debugging. Reading it here does not move Claude's read position. */
   router.get('/api/session/:id/plan/text', (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const plan = planOr404(session);
     text(ctx.res, 200, renderPlan(plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck }));
   });
@@ -675,7 +666,6 @@ function buildRouter(deps: Deps): Router {
    *  prompt viewer. A look, not a read: Claude's read position stays. */
   router.get('/api/session/:id/plan/readback', (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const plan = planOr404(session);
     const blocks = planBlocks(plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck });
     json(ctx.res, 200, { text: blocksText(blocks), blocks, version: plan.version });
@@ -688,7 +678,6 @@ function buildRouter(deps: Deps): Router {
    */
   router.get('/api/session/:id/task/:taskId/brief', (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const plan = planOr404(session);
     const task = plan.tasks.find((t) => t.id === ctx.params['taskId']);
     if (!task) throw new HttpError(404, `no task "${ctx.params['taskId'] ?? ''}"`);
@@ -702,7 +691,6 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/prompt', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ note?: unknown; target?: unknown; settings?: unknown; mode?: unknown }>(ctx.req);
     const plan = planOr404(session);
     const note = cleanNote(body.note);
@@ -744,7 +732,6 @@ function buildRouter(deps: Deps): Router {
    */
   router.get('/api/session/:id/plan/export', (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const plan = planOr404(session);
     const blocks = exportBlocks(plan, { project: projectFor(session) });
     json(ctx.res, 200, { text: blocksText(blocks), blocks, version: plan.version });
@@ -753,7 +740,6 @@ function buildRouter(deps: Deps): Router {
   /** The prompt the agent would be given if the design were confirmed now. */
   router.post('/api/session/:id/plan/design/prompt', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ note?: unknown }>(ctx.req);
     const plan = planOr404(session);
     const note = cleanNote(body.note);
@@ -778,7 +764,6 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/design/confirm', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ note?: unknown; expect?: unknown; hash?: unknown }>(ctx.req);
     const note = cleanNote(body.note);
     const plan = store.confirmDesign(session.sessionId, {
@@ -795,7 +780,6 @@ function buildRouter(deps: Deps): Router {
   /** Unlock a confirmed design. */
   router.post('/api/session/:id/plan/design/reopen', (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     json(ctx.res, 200, { plan: forBrowser(store.reopenDesign(session.sessionId)) });
   });
 
@@ -806,7 +790,6 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/revisions/prompt', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ note?: unknown }>(ctx.req);
     const plan = planOr404(session);
     const note = cleanNote(body.note);
@@ -821,7 +804,6 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/revisions', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ note?: unknown; expect?: unknown; hash?: unknown }>(ctx.req);
     const note = cleanNote(body.note);
     const plan = store.queueRevision(session.sessionId, {
@@ -836,7 +818,6 @@ function buildRouter(deps: Deps): Router {
   /** Take back a revision request not yet sent. */
   router.post('/api/session/:id/plan/revisions/withdraw', (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     json(ctx.res, 200, { plan: forBrowser(store.withdrawRevision(session.sessionId)) });
   });
 
@@ -847,7 +828,6 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/choice', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ mode?: unknown; settings?: unknown }>(ctx.req);
     const mode = validMode(body.mode);
     if (!mode) throw new HttpError(400, 'Say how it is built: mode "tracked", "managed" or "export".');
@@ -863,7 +843,6 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/submit', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ note?: unknown; target?: unknown; mode?: unknown; expect?: unknown; settings?: unknown; hash?: unknown }>(ctx.req);
     const asked = validTarget(body.target);
     const chosen = validMode(body.mode);
@@ -893,7 +872,6 @@ function buildRouter(deps: Deps): Router {
   /** Unlock a submitted plan, so it can be changed again. */
   router.post('/api/session/:id/plan/reopen', (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     json(ctx.res, 200, { plan: forBrowser(store.reopen(session.sessionId)) });
   });
 

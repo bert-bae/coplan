@@ -1796,6 +1796,23 @@ test('a task\'s own checks: the agent proposes, the user sets, and done follows 
   }
 });
 
+test('every route about a session answers a session the daemon does not know with a 404', async () => {
+  const routes: [string, string][] = [
+    ['GET', ''], ['POST', 'title'], ['POST', 'plan/ops'], ['GET', 'plan/text'], ['GET', 'plan/readback'], ['GET', 'task/t1/brief'],
+    ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/design/confirm'], ['POST', 'plan/design/reopen'],
+    ['POST', 'plan/revisions/prompt'], ['POST', 'plan/revisions'], ['POST', 'plan/revisions/withdraw'], ['POST', 'plan/choice'], ['POST', 'plan/submit'], ['POST', 'plan/reopen'],
+    ['DELETE', ''],
+  ];
+  // Every one the daemon serves: a route added later is in this list or fails here.
+  const main = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'daemon', 'main.ts'), 'utf8');
+  const served = [...main.matchAll(/router\.(get|post|delete)\('\/api\/session\/:id(?:\/([^']*))?'/g)].map((m) => `${m[1]!.toUpperCase()} ${(m[2] ?? '').replace(':taskId', 't1')}`);
+  assert.deepEqual(routes.map(([method, route]) => `${method} ${route}`).sort(), served.sort());
+  for (const [method, route] of routes) {
+    const res = await raw(`/api/session/no-such-session${route ? `/${route}` : ''}`, method === 'POST' ? { method, body: '{}' } : { method });
+    assert.deepEqual({ status: res.status, body: await res.json() }, { status: 404, body: { error: 'unknown session' } }, `${method} ${route}`);
+  }
+});
+
 test('a refused sign-off is a 409 with the reason, a look at no plan a 404, a refused edit a 400', async () => {
   const id = 'refusals';
   await hookFor(id, 'SessionStart', { start_reason: 'startup' });
