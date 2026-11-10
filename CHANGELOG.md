@@ -18,6 +18,13 @@
   "stopped", and `restart` waited on it for ever. `stop` now kills one
   that has not gone within three seconds, and says so; `restart` gives up
   asking it after five seconds and stops it.
+- **The agent cannot undo an edit of yours it has not read, by the side
+  door.** Its edits were checked only against the one item they named.
+  Setting a task's `builds` could drop a box link you had just made, and
+  removing a task took the subtasks, dependencies and links you had just
+  changed with it, after which the read-back said your edits "cancel
+  out". Both are now refused until it reads the plan, like any other
+  edit over yours.
 
 ### Targeted checks: only what the change touched
 

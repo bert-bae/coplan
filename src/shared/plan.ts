@@ -979,41 +979,76 @@ function unreadContent(plan: Plan): Set<string> {
   };
   return new Set(
     [...touched].filter((key) => {
-      const at = key.indexOf(':');
-      const [kind, id] = [key.slice(0, at), key.slice(at + 1)];
+      const [kind, id] = splitKey(key);
       return content(base, kind, id) !== content(now, kind, id);
     }),
   );
 }
 
-/** What an edit of Claude's would overwrite, as `kind:id` — or null when
- *  it only tracks progress, moves something, or talks in a thread. */
-function contentTargetOf(op: PlanOp): string | null {
+/** What an edit of Claude's would overwrite, as `kind:id` — none when it
+ *  only tracks progress, moves something, or talks in a thread. Every item
+ *  it changes, not only the one it names: a task's `builds` relinks boxes,
+ *  and a task goes with its subtasks, the dependencies on them and the
+ *  boxes' links to them. */
+function contentTargetsOf(plan: Plan, op: PlanOp): string[] {
   const has = (...keys: string[]) => keys.some((k) => (op as unknown as Record<string, unknown>)[k] !== undefined);
   switch (op.op) {
     case 'set_meta':
-      return 'plan:';
+      return ['plan:'];
     case 'upsert_section':
-      return op.id && has('title', 'body') ? `section:${op.id}` : null;
+      return op.id && has('title', 'body') ? [`section:${op.id}`] : [];
     case 'upsert_diagram':
-      return op.id && has('title', 'nodes', 'edges', 'direction', 'caption') ? `diagram:${op.id}` : null;
+      return op.id && has('title', 'nodes', 'edges', 'direction', 'caption') ? [`diagram:${op.id}`] : [];
     case 'upsert_node':
     case 'remove_node':
     case 'upsert_edge':
     case 'remove_edge':
-      return `diagram:${op.diagramId}`;
-    case 'upsert_task':
+      return [`diagram:${op.diagramId}`];
+    case 'upsert_task': {
       // A note with a status is a progress report (harness_task_update).
-      return op.id && (has('title', 'detail', 'files', 'dependsOn', 'branch', 'review') || (has('note') && !has('status', 'stage')))
-        ? `task:${op.id}`
-        : null;
-    case 'remove':
-      return `${op.kind}:${op.id}`;
+      const own = op.id && (has('title', 'detail', 'files', 'dependsOn', 'branch', 'review') || (has('note') && !has('status', 'stage')));
+      return [...(own ? [`task:${op.id}`] : []), ...(op.builds !== undefined ? relinked(plan, op.id, op.builds) : [])];
+    }
+    case 'remove': {
+      if (op.kind !== 'task') return [`${op.kind}:${op.id}`];
+      const { doomed, dependents, diagrams } = taskRemoval(plan, op.id);
+      return [...[...doomed].map((id) => `task:${id}`), ...dependents.map((t) => `task:${t.id}`), ...diagrams.map((d) => `diagram:${d.id}`)];
+    }
     case 'set_checks':
-      return `task:${op.id}`;
+      return [`task:${op.id}`];
     default:
-      return null;
+      return [];
   }
+}
+
+/** The diagrams whose box links a task's `builds` would change, worked out
+ *  on a copy: an added link can undo the user's unlink as surely as a
+ *  dropped one undoes their link. A ref that names no box changes nothing
+ *  here; the edit itself says what is wrong with it. */
+function relinked(plan: Plan, taskId: string | undefined, builds: string[]): string[] {
+  try {
+    const { linked, unlinked } = linkBuilds(structuredClone(plan), [{ id: taskId ?? '', refs: cleanList(builds) ?? [] }], 0);
+    return [...new Set([...linked, ...unlinked].map((p) => `diagram:${p.diagram.id}`))];
+  } catch {
+    return [];
+  }
+}
+
+/** What removing a task takes with it: its subtasks, the dependencies on
+ *  them, and the boxes' links to them. */
+function taskRemoval(plan: Plan, id: string): { doomed: Set<string>; dependents: Task[]; diagrams: Diagram[] } {
+  const doomed = new Set([id, ...descendants(plan, id).map((t) => t.id)]);
+  return {
+    doomed,
+    dependents: plan.tasks.filter((t) => !doomed.has(t.id) && t.dependsOn?.some((d) => doomed.has(d))),
+    diagrams: plan.diagrams.filter((d) => d.nodes.some((n) => n.taskIds?.some((t) => doomed.has(t)))),
+  };
+}
+
+/** `kind:id` apart, at the first colon: an id may hold one. */
+function splitKey(key: string): [string, string] {
+  const at = key.indexOf(':');
+  return [key.slice(0, at), key.slice(at + 1)];
 }
 
 /**
@@ -1023,12 +1058,19 @@ function contentTargetOf(op: PlanOp): string | null {
  * just added. Reading the plan clears it.
  */
 function refuseUnreadEdit(plan: Plan, op: PlanOp, unread: Set<string>): void {
-  const target = contentTargetOf(op);
-  if (!target || !unread.has(target)) return;
-  const [kind, id] = target.split(':') as [Target['kind'], string];
+  const target = contentTargetsOf(plan, op).find((key) => unread.has(key));
+  if (!target) return;
+  const [kind, id] = splitKey(target) as [Target['kind'], string];
+  // Reached through what the edit takes with it, not what it names: say how.
+  const how =
+    op.op === 'remove' && target !== `task:${op.id}`
+      ? " Removing a task takes its subtasks, the dependencies on them and its boxes' links with it."
+      : op.op === 'upsert_task' && kind === 'diagram'
+        ? " The task's `builds` would change which of that diagram's boxes link it."
+        : '';
   throw new PlanError(
     `The user changed ${describeTarget(plan, { kind, id })} since you last read the plan, so this edit was not applied — ` +
-      'it could undo theirs. Call harness_plan_read to see their version, then make the edit on top of it.',
+      `it could undo theirs.${how} Call harness_plan_read to see their version, then make the edit on top of it.`,
   );
 }
 
@@ -1165,11 +1207,13 @@ export function applyOps(
         // Its own reason first: whatever else is wrong, this is the user's.
         if (op.op === 'set_checks') throw new PlanError(AGENT_SET_CHECKS);
         if (!opts.tracking) refuseProgress(op);
-        refuseUnreadEdit(plan, op, unread!);
+        // Against the plan as the edits before it in this batch left it: a
+        // task moved under one being removed goes with it.
+        refuseUnreadEdit(next, op, unread!);
         // A proposal built on a version Claude never read could undo the
         // user's change as surely as an edit — only later, when accepted.
         if (op.op === 'propose' && Array.isArray(op.ops)) {
-          for (const inner of op.ops) if (inner && typeof inner === 'object') refuseUnreadEdit(plan, inner, unread!);
+          for (const inner of op.ops) if (inner && typeof inner === 'object') refuseUnreadEdit(next, inner, unread!);
         }
       }
       changes.push(...applyOne(next, expectAtStart(plan, op, author), author, now));
@@ -1907,27 +1951,25 @@ function removeItem(
     }
     case 'task': {
       const t = requireTask(plan, id);
-      const doomed = new Set([t.id, ...descendants(plan, t.id).map((d) => d.id)]);
+      // What the unread-edit guard checked, exactly (taskRemoval).
+      const { doomed, dependents, diagrams } = taskRemoval(plan, t.id);
       plan.tasks = plan.tasks.filter((x) => !doomed.has(x.id));
       normalizeSiblings(plan, t.parentId);
       // Nothing waits on work that is no longer in the plan.
-      for (const other of plan.tasks) {
-        if (!other.dependsOn?.some((id) => doomed.has(id))) continue;
-        const kept = other.dependsOn.filter((id) => !doomed.has(id));
+      for (const other of dependents) {
+        const kept = other.dependsOn!.filter((id) => !doomed.has(id));
         if (kept.length) other.dependsOn = kept;
         else delete other.dependsOn;
       }
-      for (const d of plan.diagrams) {
-        let touched = false;
+      for (const d of diagrams) {
         for (const n of d.nodes) {
           if (!n.taskIds?.some((id) => doomed.has(id))) continue;
           n.taskIds = n.taskIds.filter((id) => !doomed.has(id));
           if (n.taskIds.length === 0) delete n.taskIds;
-          touched = true;
         }
         // Its boxes' links changed: a canvas holding the old ones must
         // reload rather than save them back — which would be refused.
-        if (touched) bumpDiagram(d, Date.now());
+        bumpDiagram(d, Date.now());
       }
       const extra = doomed.size > 1 ? ` and its ${doomed.size - 1} subtask(s)` : '';
       summary = `removed task "${t.title}"${extra}`;
@@ -2168,7 +2210,7 @@ export function proposalStaleness(plan: Plan, p: Proposal): string[] {
   const out: string[] = [];
   for (const [key, was] of Object.entries(p.base)) {
     if (now[key] === was) continue;
-    const [kind, id] = key.split(/:(.*)/s) as [string, string];
+    const [kind, id] = splitKey(key);
     if (kind === 'plan') out.push("the plan's title or summary");
     else if (kind === 'section') out.push(`section "${plan.sections.find((s) => s.id === id)?.title ?? id}"`);
     else if (kind === 'diagram') out.push(`diagram "${plan.diagrams.find((d) => d.id === id)?.title ?? id}"`);
