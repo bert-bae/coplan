@@ -5,6 +5,7 @@
  * not a guess to trust; `/coplan-init` has Claude check it against CI.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { parseJsonc } from '../shared/jsonc.ts';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { repoRootOf } from './check.ts';
@@ -42,7 +43,8 @@ export function detectHooks(root: string): { hooks: Detected; found: string[] } 
   const pkg = read('package.json');
   if (pkg) {
     try {
-      const scripts = (JSON.parse(pkg) as { scripts?: Record<string, string> }).scripts ?? {};
+      // Through parseJsonc: a package.json with a byte order mark, which npm reads, is read too.
+      const scripts = (parseJsonc(pkg) as { scripts?: Record<string, string> }).scripts ?? {};
       const pm = existsSync(path.join(root, 'pnpm-lock.yaml'))
         ? 'pnpm'
         : existsSync(path.join(root, 'yarn.lock'))

@@ -5,7 +5,12 @@
  * `"curl http://x"` keeps its `//`.
  */
 export function parseJsonc(text: string): unknown {
-  return JSON.parse(stripJsonc(text));
+  // Saved as UTF-16 (PowerShell 5.1's `>` does) and read as UTF-8: its byte
+  // order mark comes out as replacement characters, and a NUL follows each
+  // character. Said plainly, as the error JSON.parse gives names neither.
+  if (/^\uFFFD\uFFFD|^[^\0]?\0/.test(text)) throw new SyntaxError('it is saved as UTF-16; save it as UTF-8');
+  // A byte order mark (some Windows editors save one) is not JSON: dropped.
+  return JSON.parse(stripJsonc(text.replace(/^\uFEFF/, '')));
 }
 
 export function stripJsonc(text: string): string {

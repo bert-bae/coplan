@@ -99,6 +99,13 @@
   against the new task list, so the whole publish was refused over a link
   the agent never wrote. A carried link to a task no longer in the plan
   now goes with the task, as when it is removed.
+- **A config file saved with a byte order mark is read.** Some Windows
+  editors (PowerShell 5.1's `Set-Content -Encoding UTF8`, say) start a
+  file with an invisible mark. `.coplan/config.json` saved that way was
+  "not valid JSON", so no check ran and the error named a character you
+  cannot see. `.coplan/config.json`, your own Coplan settings and the
+  `package.json` that `coplan init` reads now skip it, and one saved as
+  UTF-16 (PowerShell 5.1's `>`) says to save it as UTF-8.
 
 ### Targeted checks: only what the change touched
 

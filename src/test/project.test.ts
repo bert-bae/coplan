@@ -656,3 +656,24 @@ test('coplan init opts the repository in to Managed builds, with or without iric
     assert.equal(config.mode, 'managed', settings ? 'iric' : 'mode');
   }
 });
+
+test("coplan init reads a package.json saved with a byte order mark, as npm does", () => {
+  const dir = repo({ 'package.json': '\uFEFF' + JSON.stringify({ scripts: { test: 'vitest' } }), 'package-lock.json': '' });
+  try {
+    assert.deepEqual(detectHooks(dir).hooks.review.map((h) => h.run), ['npm run test']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a repository's checks saved with a byte order mark still run", () => {
+  const dir = repo({ '.coplan/config.json': '\uFEFF{\n  // saved by a Windows editor\n  "hooks": { "review": ["npm run test"] }\n}\n' });
+  try {
+    const config = loadProjectConfig(dir, { globalDir: null });
+    assert.deepEqual(config.errors, []);
+    assert.equal(config.checksBroken, undefined);
+    assert.deepEqual(config.hooks.review.map((h) => h.run), ['npm run test']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

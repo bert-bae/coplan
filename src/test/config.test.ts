@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ConfigCache, DEFAULT_CONFIG, loadConfigReport, mergeConfig } from '../shared/config.ts';
+import { parseJsonc } from '../shared/jsonc.ts';
 
 test('known keys override', () => {
   const cfg = mergeConfig(DEFAULT_CONFIG, { autoOpen: true, idleShutdownMinutes: 5 });
@@ -132,4 +133,28 @@ test('the documented defaults are the defaults', () => {
   const first = doc.slice(0, doc.indexOf('## Files'));
   const documented = [...first.matchAll(/^\| `(\w+)` \| `[^`]+` \| /gm)].map((m) => m[1]);
   assert.deepEqual(documented.sort(), Object.keys(DEFAULT_CONFIG).sort(), 'and nothing else is documented as one');
+});
+
+test('a config saved with a byte order mark (as some Windows editors save) is read like any other', () => {
+  assert.deepEqual(parseJsonc('\uFEFF{ "a": 1 }'), { a: 1 });
+  const dirs = homes('\uFEFF{ "autoOpen": true }', '\uFEFF{ "promptNotice": false }');
+  try {
+    const report = loadConfigReport(dirs);
+    assert.deepEqual(report.errors, []);
+    assert.equal(report.config.autoOpen, true);
+    assert.equal(report.config.promptNotice, false);
+  } finally {
+    removeHomes(dirs);
+  }
+});
+
+test('a config saved as UTF-16 says so, rather than naming characters no one can see', () => {
+  // What PowerShell 5.1's `>` writes, read as UTF-8: a BOM of FF FE, then a NUL after every character.
+  const dirs = homes(Buffer.from('\uFEFF{ "autoOpen": true }', 'utf16le').toString('utf8'));
+  try {
+    const report = loadConfigReport(dirs);
+    assert.match(report.errors[0] ?? '', /config\.json is not valid JSON, so none of it is used: it is saved as UTF-16; save it as UTF-8/);
+  } finally {
+    removeHomes(dirs);
+  }
 });
