@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react';
 import { store, useAgent } from '../../store.ts';
 import { MarkdownField } from '../Editable.tsx';
 import { Markdown } from '../Markdown.tsx';
@@ -60,13 +60,18 @@ function ChangedWhileTyping() {
   );
 }
 
-/** One line. Saves on Enter or leaving the field; Escape puts it back. */
-export function CommitInput({
+/**
+ * A field that saves when you leave it; Escape puts it back. One line also
+ * saves on Enter. A `multiline` one is a paragraph that grows with its
+ * text: Enter is a new line, and ⌘/Ctrl+Enter saves.
+ */
+export function CommitField({
   value,
   label,
   placeholder,
   className,
   maxLength,
+  multiline = false,
   onCommit,
 }: {
   value: string;
@@ -74,77 +79,15 @@ export function CommitInput({
   placeholder?: string;
   className?: string;
   maxLength?: number;
-  onCommit: (v: string) => void;
-}) {
-  const { draft, setDraft, changed, enter, leave, revert } = useFieldDraft(value);
-  const live = useRef({ draft, value, onCommit });
-  live.current = { draft, value, onCommit };
-  // Switching to another box unmounts the field without a blur in some
-  // browsers; whatever was typed is saved all the same.
-  useEffect(
-    () => () => {
-      const { draft, value, onCommit } = live.current;
-      if (draft.trim() !== value.trim()) onCommit(draft.trim());
-    },
-    [],
-  );
-  const commit = () => {
-    if (draft.trim() === value.trim()) return;
-    onCommit(draft.trim());
-    // Saved: an unmount in the same render (a session switch blurs, then
-    // removes the view) has nothing left to save.
-    live.current.value = draft.trim();
-  };
-  return (
-    <>
-      <input
-        className={classNames('input', className)}
-        value={draft}
-        aria-label={label}
-        placeholder={placeholder}
-        maxLength={maxLength}
-        onChange={(e) => setDraft(e.target.value)}
-        onFocus={enter}
-        onBlur={() => {
-          commit();
-          leave();
-        }}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') commit();
-          if (e.key === 'Escape') {
-            e.stopPropagation();
-            revert();
-          }
-        }}
-      />
-      {changed && <ChangedWhileTyping />}
-    </>
-  );
-}
-
-/**
- * A paragraph. Grows with its text, saves when you leave it or press
- * ⌘/Ctrl+Enter; Escape puts it back. Plain Enter is a new line.
- */
-export function CommitTextArea({
-  value,
-  label,
-  placeholder,
-  minRows = 3,
-  maxLength,
-  onCommit,
-}: {
-  value: string;
-  label: string;
-  placeholder?: string;
-  minRows?: number;
-  maxLength?: number;
+  multiline?: boolean;
   onCommit: (v: string) => void;
 }) {
   const { draft, setDraft, changed, enter, leave, revert } = useFieldDraft(value);
   const area = useRef<HTMLTextAreaElement>(null);
   const live = useRef({ draft, value, onCommit });
   live.current = { draft, value, onCommit };
+  // Switching to another box unmounts the field without a blur in some
+  // browsers; whatever was typed is saved all the same.
   useEffect(
     () => () => {
       const { draft, value, onCommit } = live.current;
@@ -159,38 +102,42 @@ export function CommitTextArea({
     if (el.scrollHeight) el.style.height = `${Math.min(el.scrollHeight + 2, 420)}px`;
   }, [draft]);
   const commit = () => {
-    if (draft.trim() === value.trim()) return;
+    // Against what was last saved, not this render's value: ⌘/Ctrl+Enter
+    // saves, then blurs, and the blur must not save it again.
+    if (draft.trim() === live.current.value.trim()) return;
     onCommit(draft.trim());
+    // Saved: an unmount in the same render (a session switch blurs, then
+    // removes the view) has nothing left to save either.
     live.current.value = draft.trim();
+  };
+  const field = {
+    className: classNames('input', multiline && 'text-area', className),
+    value: draft,
+    'aria-label': label,
+    placeholder,
+    maxLength,
+    onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setDraft(e.target.value),
+    onFocus: enter,
+    onBlur: () => {
+      commit();
+      leave();
+    },
+    onKeyDown: (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (e.key === 'Enter' && !multiline) commit();
+      if (e.key === 'Enter' && multiline && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        commit();
+        area.current?.blur();
+      }
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        revert();
+      }
+    },
   };
   return (
     <>
-      <textarea
-        ref={area}
-        className="input text-area"
-        value={draft}
-        rows={minRows}
-        aria-label={label}
-        placeholder={placeholder}
-        maxLength={maxLength}
-        onChange={(e) => setDraft(e.target.value)}
-        onFocus={enter}
-        onBlur={() => {
-          commit();
-          leave();
-        }}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-            e.preventDefault();
-            commit();
-            area.current?.blur();
-          }
-          if (e.key === 'Escape') {
-            e.stopPropagation();
-            revert();
-          }
-        }}
-      />
+      {multiline ? <textarea ref={area} rows={3} {...field} /> : <input {...field} />}
       {changed && <ChangedWhileTyping />}
     </>
   );
@@ -295,7 +242,7 @@ export function NodePanel({
         </button>
       </header>
 
-      <CommitInput
+      <CommitField
         className="panel-title-input"
         value={node.data.label}
         label="Box label"
@@ -312,14 +259,15 @@ export function NodePanel({
         <span className="field-label">
           On the box <span className="field-aside">a few words: technology or role</span>
         </span>
-        <CommitInput value={node.data.detail ?? ''} label="Box detail" placeholder="e.g. Redis, read-through" maxLength={80} onCommit={(detail) => onChange({ detail })} />
+        <CommitField value={node.data.detail ?? ''} label="Box detail" placeholder="e.g. Redis, read-through" maxLength={80} onCommit={(detail) => onChange({ detail })} />
       </label>
 
       <label className="field">
         <span className="field-label">
           Description <span className="field-aside">shown when hovering ⓘ</span>
         </span>
-        <CommitTextArea
+        <CommitField
+          multiline
           value={node.data.description ?? ''}
           label={`Description of ${node.data.label}`}
           placeholder="What this part does, what it owns, and how other parts talk to it."
@@ -512,7 +460,7 @@ export function EdgePanel({
 
       <label className="field">
         <span className="field-label">What flows along it</span>
-        <CommitInput value={edge.data?.label ?? ''} label="Arrow label" placeholder="e.g. REST, publishes events" maxLength={120} onCommit={(label) => onChange({ label })} />
+        <CommitField value={edge.data?.label ?? ''} label="Arrow label" placeholder="e.g. REST, publishes events" maxLength={120} onCommit={(label) => onChange({ label })} />
       </label>
 
       <div className="field">

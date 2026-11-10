@@ -148,6 +148,9 @@
   it unanswered. The page, the check, the ask and the agent's read now go by
   one rule: an open comment where you spoke last waits on the agent. The
   check quotes what you said last there, not what opened the thread.
+- **A box's field saved with Enter is saved once.** Enter in a label (or
+  ⌘/Ctrl+Enter in a description) saved it, and leaving the field then sent
+  the same save again.
 
 ### Targeted checks: only what the change touched
 

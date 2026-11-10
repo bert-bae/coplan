@@ -665,13 +665,13 @@ test('once the design is confirmed, tasks are still added from a box; once submi
 /* The box panel's fields while the agent publishes: what the user is typing
  * stays theirs; a field they have not touched follows the plan. */
 
-const { CommitInput, CommitTextArea } = await import('../ui/components/flow/Panels.tsx');
+const { CommitField } = await import('../ui/components/flow/Panels.tsx');
 
-for (const [name, Field, tag] of [['CommitTextArea', CommitTextArea, 'textarea'], ['CommitInput', CommitInput, 'input']] as const) {
+for (const [name, multiline, tag] of [['a paragraph', true, 'textarea'], ['a line', false, 'input']] as const) {
   /** The field as the panel shows it; `accept` is what the plan takes of a save. */
   function mount(value: string, accept: (v: string) => boolean = () => true) {
     const commits: string[] = [];
-    const field = (v: string) => <Field value={v} label="Box description" onCommit={(c: string) => accept(c) && commits.push(c)} />;
+    const field = (v: string) => <CommitField value={v} label="Box description" multiline={multiline} onCommit={(c: string) => accept(c) && commits.push(c)} />;
     const view = render(field(value));
     const box = view.container.querySelector(tag)! as HTMLInputElement | HTMLTextAreaElement;
     return { commits, box, push: (v: string) => act(async () => view.rerender(field(v))), warned: () => view.container.querySelector('[role="alert"]') !== null };
@@ -711,6 +711,23 @@ for (const [name, Field, tag] of [['CommitTextArea', CommitTextArea, 'textarea']
       cleanup();
     });
     assert.deepEqual(commits, ['New']);
+  });
+
+  test(`${name}: Enter saves a line; in a paragraph it is a new line, and ⌘/Ctrl+Enter saves`, async () => {
+    const { commits, box } = mount('Old');
+    act(() => box.focus());
+    fireEvent.change(box, { target: { value: 'New' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+    assert.deepEqual(commits, multiline ? [] : ['New'], multiline ? 'a paragraph goes on' : 'a line is done');
+    if (multiline) {
+      act(() => {
+        fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true });
+      });
+      assert.notEqual(document.activeElement, box, 'it is left');
+    }
+    act(() => box.blur());
+    assert.deepEqual(commits, ['New'], 'saved once, and leaving does not save it again');
+    cleanup();
   });
 
   test(`${name}: out of the field it follows the plan, also after a save the plan refused`, async () => {
