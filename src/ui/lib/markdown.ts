@@ -431,11 +431,30 @@ function matchTable(lines: string[], i: number): { html: string; endLine: number
  * Inline
  * ------------------------------------------------------------------ */
 
-/** Placeholder for a code span, so emphasis never fires inside one. */
+/** Placeholders, for what the passes after must not touch: a code span
+ *  (emphasis never fires inside one) and a link made (a url in its text is
+ *  not linked again, its href not emphasised). Neither can be in the text:
+ *  it is taken out first. */
 const CODE_MARK = '\u0000';
+const LINK_MARK = '\u0001';
+const MARKS = /[\u0000\u0001]/g;
+const CODE_AT = new RegExp(`${CODE_MARK}(\\d+)${CODE_MARK}`, 'g');
+const LINK_AT = new RegExp(`${LINK_MARK}(\\d+)${LINK_MARK}`, 'g');
+
+/** Put back what a placeholder stands for. */
+function restore(html: string, at: RegExp, held: string[]): string {
+  return html.replace(at, (_all, n: string) => held[Number(n)] ?? '');
+}
+
+function emphasis(html: string): string {
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/(^|[\s(])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>');
+  html = html.replace(/(^|[\s(])_([^_\s][^_]*)_(?=$|[\s).,;:!?])/g, '$1<em>$2</em>');
+  return html.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+}
 
 function inline(text: string): string {
-  let html = escapeHtml(text);
+  let html = escapeHtml(text.replace(MARKS, ''));
 
   // Lift code spans out first. `**` inside backticks is literal, and running
   // the emphasis passes over them would mangle real code.
@@ -444,20 +463,24 @@ function inline(text: string): string {
     spans.push(`<code>${body}</code>`);
     return `${CODE_MARK}${spans.length - 1}${CODE_MARK}`;
   });
+  // Then links: emphasis only in their text, never their href.
+  const links: string[] = [];
+  html = html.replace(/\[([^\]]+)\]\((https?:[^)\s\u0000]+)\)/g, (_all, label: string, href: string) => {
+    links.push(`<a href="${href}" target="_blank" rel="noreferrer">${emphasis(label)}</a>`);
+    return `${LINK_MARK}${links.length - 1}${LINK_MARK}`;
+  });
 
-  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/(^|[\s(])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>');
-  html = html.replace(/(^|[\s(])_([^_\s][^_]*)_(?=$|[\s).,;:!?])/g, '$1<em>$2</em>');
-  html = html.replace(/~~([^~]+)~~/g, '<del>$1</del>');
-  html = html.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  html = emphasis(html);
   // A bare url ends before the punctuation that ends its sentence, or the
-  // parenthesis around it (one of its own, balanced, it keeps).
-  html = html.replace(/(^|[\s(])(https?:\/\/[^\s<]+)/g, (_m, before: string, found: string) => {
+  // parenthesis around it (one of its own, balanced, it keeps), and before
+  // a code span or link that follows it.
+  html = html.replace(/(^|[\s(])(https?:\/\/[^\s<\u0000\u0001]+)/g, (_m, before: string, found: string) => {
     const [url, after] = trimUrl(found);
     return `${before}<a href="${url}" target="_blank" rel="noreferrer">${url}</a>${after}`;
   });
 
-  return html.replace(new RegExp(`${CODE_MARK}(\\d+)${CODE_MARK}`, 'g'), (_all, n: string) => spans[Number(n)] ?? '');
+  // Links back first: their text may hold a code span's mark.
+  return restore(restore(html, LINK_AT, links), CODE_AT, spans);
 }
 
 /** A bare url, from the punctuation after it. The text is escaped already:

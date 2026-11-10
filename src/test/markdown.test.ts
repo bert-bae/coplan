@@ -153,6 +153,24 @@ test('links open in a new tab, and bare urls are linked', () => {
   assert.ok(md.includes('<a href="https://example.com/b"'));
 });
 
+test("a bare url in a link's text is that link's text, not a link inside it", () => {
+  const html = renderMarkdown('[see (https://a.example/x)](https://b.example/y) and https://c.example/z');
+  assert.equal((html.match(/<a /g) ?? []).length, 2, html);
+  assert.ok(html.includes('<a href="https://b.example/y" target="_blank" rel="noreferrer">see (https://a.example/x)</a>'), html);
+  assert.ok(html.includes('<a href="https://c.example/z"'), 'a bare url outside it still is');
+  const code = renderMarkdown('[the `run` script](https://b.example/y)');
+  assert.ok(code.includes('<a href="https://b.example/y" target="_blank" rel="noreferrer">the <code>run</code> script</a>'), code);
+  // A url right before a link or a code span stops there.
+  const next = renderMarkdown('see https://a.example/x[docs](https://b.example/y) or https://a.example/z`code`');
+  assert.equal((next.match(/<a /g) ?? []).length, 3, next);
+  assert.ok(next.includes('<a href="https://a.example/x" target="_blank" rel="noreferrer">https://a.example/x</a><a href="https://b.example/y"'), next);
+  assert.ok(next.includes('https://a.example/z</a><code>code</code>'), next);
+  // Emphasis is the text's, never the href's; and a placeholder cannot be typed.
+  const starred = renderMarkdown('[**bold**](https://x.example/**b**/c)');
+  assert.ok(starred.includes('<a href="https://x.example/**b**/c" target="_blank" rel="noreferrer"><strong>bold</strong></a>'), starred);
+  assert.equal(renderMarkdown('raw \u00010\u0001 and [d](https://b.example/y)').match(/<a /g)?.length, 1);
+});
+
 test('a javascript: url is not turned into a link', () => {
   const html = renderMarkdown('[click](javascript:alert(1))');
   assert.ok(!html.includes('<a '), 'only http(s) targets are linkified');

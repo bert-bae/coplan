@@ -306,6 +306,11 @@
   the plan now on screen, where "t3" is another task. Like a sign-off's
   message, it now names its own plan; renaming or deleting a session from
   the list does too. A daemon that cannot be reached is said as it is.
+- **Links in the plan's text render as written.** A web address inside a
+  link's text was made a second link inside the first; one written right
+  before a link or a code span took it into its address; and `**` or a
+  backtick in a link's address turned into bold or code inside it. Each
+  now reads as written.
 - **No two sessions share a folder.** A session id is kept in a folder
   named after it, with anything a folder name cannot hold made safe, so
   ids that differed only there (`a/b`, `a_b`), or past 128 characters,
