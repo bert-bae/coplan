@@ -76,7 +76,7 @@ the audit's finding numbers.
 | F3 | `coplan stop` / `restart` cannot stop a hung daemon, and say they did [6] | 1 must fix | done | ea4fc79 |
 | F4 | `upsert_task` with `builds` and removing a parent task slip past the unread-edit guard [5a] | 1 must fix | done | 2afd5e8 |
 | F5 | Delivering the build prompt marks the user's later changes as read [5b] | 1 must fix | done | 9377052 |
-| F6 | An agent push wipes what the user is typing in the box panel [3] | 1 must fix | open | |
+| F6 | An agent push wipes what the user is typing in the box panel [3] | 1 must fix | done | 61e8112 |
 | F7 | Saving the summary, box notes or a caption silently overwrites the agent's newer text [4]. D1: warn only | 1 must fix | open | |
 | F19 | A sign-off is marked delivered when the relay gave up while the daemon was busy, so the agent never gets it (found by T1b). See *F19* below | 1 must fix | open | |
 | F20 | A proposal's staleness checks only the item each op names (and diagrams without their links), so accepting a proposed task removal or `builds` can take subtasks, dependencies or box links the user changed after it was proposed (`proposalTouches`, src/shared/plan.ts; found reviewing F4) | 2 should fix | open | |
