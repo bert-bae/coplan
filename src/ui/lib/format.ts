@@ -21,26 +21,6 @@ export function duration(ms: number): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
-export function clockTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-/** Split a path into its directory and file name for two-tone rendering. */
-export function splitPath(path: string): { dir: string; name: string } {
-  const index = path.lastIndexOf('/');
-  if (index < 0) return { dir: '', name: path };
-  return { dir: path.slice(0, index + 1), name: path.slice(index + 1) };
-}
-
-/** `src/app.ts:12-14` or `src/app.ts:12`. */
-export function lineRef(file: string, startLine: number, endLine: number): string {
-  return startLine === endLine ? `${file}:${startLine}` : `${file}:${startLine}-${endLine}`;
-}
-
-export function pluralize(count: number, singular: string, plural = `${singular}s`): string {
-  return `${count} ${count === 1 ? singular : plural}`;
-}
-
 export function classNames(...parts: (string | false | null | undefined)[]): string {
   return parts.filter(Boolean).join(' ');
 }

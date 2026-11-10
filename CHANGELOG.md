@@ -131,6 +131,11 @@
   that `.bak`, and your comments were gone. Its own line no longer counts,
   however an editor saved the file since, and a copy never goes over an
   earlier one: the next is `.bak.1`, then `.bak.2`.
+- **Titles in the diagram's side panel read as titles while you edit.** A
+  box's or a connection's title showed in grey capitals, and the
+  diagram's own title in grey, because a style left from unused code
+  matched them; only the read-only view undid it. That style and the
+  unused code are gone, so they look as they do once the plan is submitted.
 
 ### Targeted checks: only what the change touched
 
