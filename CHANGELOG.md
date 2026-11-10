@@ -142,6 +142,12 @@
   reported a dozen failures against a port nothing listens on. It now
   asks the daemon to answer, as `coplan` and the agents' tools already
   did, and starts one if none does.
+- ***Request revisions* carries your question in a proposal's thread.**
+  A reply you wrote under one of the agent's proposals was left out of the
+  ask, though the page said it would go with it and the plan check counted
+  it unanswered. The page, the check, the ask and the agent's read now go by
+  one rule: an open comment where you spoke last waits on the agent. The
+  check quotes what you said last there, not what opened the thread.
 
 ### Targeted checks: only what the change touched
 

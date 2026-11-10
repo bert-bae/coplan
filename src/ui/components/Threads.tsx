@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { store, useAgent, usePlan } from '../store.ts';
 import { Markdown } from './Markdown.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
+import { threadWaitsOn } from '../../shared/plan.ts';
 import type { Author, Target, Thread } from '../../shared/types.ts';
 
 /**
@@ -33,7 +34,7 @@ export function CommentToggle({
 }) {
   const threads = useThreads(target);
   const unresolved = threads.filter((t) => !t.resolved).length;
-  const waiting = threads.some((t) => !t.resolved && lastAuthor(t) === 'claude');
+  const waiting = threads.some((t) => threadWaitsOn(t) === 'user');
   return (
     <button
       type="button"
@@ -93,7 +94,7 @@ function ThreadView({ thread }: { thread: Thread }) {
         <button type="button" className="link" onClick={() => void store.op({ op: 'resolve', threadId: thread.id, resolved: !thread.resolved })}>
           {thread.resolved ? 'Reopen' : 'Resolve'}
         </button>
-        {!thread.resolved && lastAuthor(thread) === 'user' && <span className="muted">{agent.name} sees this when it next reads the plan, or with <em>Request revisions</em></span>}
+        {threadWaitsOn(thread) === 'claude' && <span className="muted">{agent.name} sees this when it next reads the plan, or with <em>Request revisions</em></span>}
       </div>
       {replying && (
         <Composer
@@ -190,6 +191,3 @@ function Composer({
   );
 }
 
-function lastAuthor(t: Thread): Author {
-  return t.replies.length ? t.replies[t.replies.length - 1]!.author : t.author;
-}

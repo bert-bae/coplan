@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, publishPlan, publishTasks } from '../shared/plan.ts';
+import { applyOps, confirmDesign, publishPlan, publishTasks, threadsForRevision } from '../shared/plan.ts';
 import { boxUnbuilt, planGaps, type GapRule } from '../shared/check.ts';
 import { renderGaps, renderPlan } from '../daemon/render.ts';
 import type { Plan, PlanInput } from '../shared/types.ts';
@@ -110,6 +110,20 @@ test('a comment from the user nobody answered, until it is answered', () => {
   const thread = plan.threads[0]!.id;
   plan = applyOps(plan, [{ op: 'reply', threadId: thread, text: 'Already in the stack.' }], 'claude').plan;
   assert.ok(!has(plan, 'comment-unanswered', 'd1/cache'));
+});
+
+test('the check and Request revisions agree on what waits on the agent, a question in a proposal too', () => {
+  let plan = publishPlan(null, DESIGN).plan;
+  plan = applyOps(plan, [{ op: 'propose', title: 'Add a box', reason: 'Asked for.', ops: [{ op: 'upsert_node', diagramId: 'd1', id: 'queue', label: 'Queue' }] }], 'claude').plan;
+  const proposal = plan.threads.at(-1)!;
+  const gaps = () => planGaps(plan).filter((g) => g.rule === 'comment-unanswered');
+  assert.deepEqual([threadsForRevision(plan), gaps()], [[], []], 'the proposal as made waits on the user');
+  // The user asks in the proposal's own thread, as the page lets them: now it waits on the agent.
+  plan = applyOps(plan, [{ op: 'reply', threadId: proposal.id, text: 'Which queue?' }], 'user').plan;
+  plan = applyOps(plan, [{ op: 'comment', target: { kind: 'node', id: 'd1/cache' }, text: 'Why Redis?' }], 'user').plan;
+  assert.deepEqual(threadsForRevision(plan).map((t) => t.target), [proposal.target, { kind: 'node', id: 'd1/cache' }]);
+  assert.deepEqual(gaps().map((g) => g.target), [proposal.target, { kind: 'node', id: 'd1/cache' }]);
+  assert.match(gaps()[0]!.message, /"Which queue\?"$/, "the user's question, not the proposal it answers");
 });
 
 test('the read and the check tool say it the same way', () => {

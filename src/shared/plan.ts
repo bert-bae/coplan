@@ -2523,20 +2523,22 @@ export function markDelivered(plan: Plan, now = Date.now()): Plan {
 /** Revision requests a plan keeps, newest last. */
 export const MAX_REVISIONS = 20;
 
-function lastWord(t: Thread): Author {
-  return t.replies.length ? t.replies[t.replies.length - 1]!.author : t.author;
+/** Who a thread waits on to answer: whoever did not speak last in it, or
+ *  no one once it is resolved. */
+export function threadWaitsOn(t: Thread): Author | null {
+  if (t.resolved) return null;
+  return (t.replies.at(-1)?.author ?? t.author) === 'user' ? 'claude' : 'user';
 }
 
 /**
- * The comments a revision request carries: every open thread whose last
- * word is the user's — what is waiting on the agent. Not a proposal's own
- * thread (that waits on the user), and not one the agent has already
- * answered: the user replies in it to put it back.
+ * What waits on the agent, and so what a revision request carries and the
+ * plan check counts unanswered: every open thread whose last word is the
+ * user's. Not one the agent has answered, nor its proposal as it made it
+ * (that waits on the user); the user replies in either to put it back.
  */
-export function threadsForRevision(plan: Pick<Plan, 'threads' | 'proposals'> | null): Thread[] {
+export function threadsForRevision(plan: Pick<Plan, 'threads'> | null): Thread[] {
   if (!plan) return [];
-  const proposed = new Set((plan.proposals ?? []).map((p) => p.threadId));
-  return plan.threads.filter((t) => !t.resolved && !proposed.has(t.id) && lastWord(t) === 'user');
+  return plan.threads.filter((t) => threadWaitsOn(t) === 'claude');
 }
 
 /** The request waiting to reach the agent, if one is. */

@@ -124,7 +124,7 @@ _Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_
 - ⛔ (holds Confirm and Submit) Box "Event bus" in "Invalidation" has no description: what it does, owns, and how others talk to it.
 - No task builds box "Postgres" in "Components": link the task that does, or say it already exists.
 - Task docs "Document the cache in the README" builds no box — link it to the parts it changes (builds).
-- Comment c1 from the user has no answer yet: "Which Redis version?"
+- Comment c1 from the user has no answer yet: "Redis 7."
 - Comment c3 from the user has no answer yet: "Keep the old path behind a flag.
 Remove it next release."
 - Comment c4 from the user has no answer yet: "Looks good overall."
