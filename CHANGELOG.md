@@ -338,6 +338,10 @@
   safe as they are and keep their folders; a session kept the old way is
   saved to its new folder the next time Coplan starts, or when it is next
   used, and deleting it deletes its old folder too.
+- **Removing many tasks no longer stalls Coplan.** Each removal copied
+  the whole plan to say what a comment left behind was on: on a big plan,
+  forty took close to a second, again for a proposal's preview and
+  accept. A tenth of that now.
 - **The agent setting many tasks' `builds` no longer stalls the page.**
   Checking each one against your unread edits copied the whole plan, so on
   a big plan a batch held Coplan for up to half a second. It now works out

@@ -2068,7 +2068,11 @@ function removeItem(
   id: string,
   log: (kind: ChangeKind, target: Target, summary: string) => Change,
 ): Change[] {
-  const before = structuredClone(plan);
+  // What a comment left without its item was on, named as it was. The
+  // removal replaces the lists, so these still hold what it removed; what
+  // it changes in the items left (a dependency, an order, a box's links)
+  // is no part of a name (describeTarget).
+  const before = { ...plan };
   let summary: string;
   switch (kind) {
     case 'section': {

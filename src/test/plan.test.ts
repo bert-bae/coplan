@@ -103,6 +103,30 @@ test('a republish keeps comments and statuses on surviving ids', () => {
   assert.equal(next.revision, 2);
 });
 
+/** How many times `run` copies a plan (structuredClone). */
+function countCopies(run: () => void): number {
+  const real = globalThis.structuredClone;
+  let n = 0;
+  globalThis.structuredClone = ((value: unknown, options?: StructuredSerializeOptions) => (n++, real(value, options))) as typeof real;
+  try {
+    run();
+  } finally {
+    globalThis.structuredClone = real;
+  }
+  return n;
+}
+
+test('removals do not copy the plan, each one, to say what a comment left behind was on', () => {
+  // On a big plan, a batch of them held the daemon close to a second.
+  let plan = publishPlan(null, { title: 'x', tasks: ['a', 'b', 'c', 'd', 'e'].map((id) => ({ id, title: id.toUpperCase() })) }, 1_000).plan;
+  plan = applyOps(plan, ['a', 'b', 'c', 'd'].map((id) => ({ op: 'comment', target: { kind: 'task', id }, text: `on ${id}` })), 'user').plan;
+  const removing = (ids: string[]) => () => applyOps(plan, ids.map((id) => ({ op: 'remove', kind: 'task', id })), 'user');
+  assert.equal(countCopies(removing(['a', 'b', 'c', 'd'])), countCopies(removing(['a'])));
+  // Each comment still says, by its title, what it was on.
+  const after = applyOps(plan, ['a', 'b', 'c', 'd'].map((id) => ({ op: 'remove', kind: 'task', id })), 'user').plan;
+  assert.deepEqual(after.threads.map((t) => t.text), ['A', 'B', 'C', 'D'].map((title) => `(on removed task "${title}") on ${title.toLowerCase()}`));
+});
+
 test('a comment on a removed item is kept, re-homed on the plan', () => {
   let plan = applyOps(fresh(), [{ op: 'comment', target: { kind: 'task', id: 't4' }, text: 'drop this?' }], 'user').plan;
   plan = applyOps(plan, [{ op: 'remove', kind: 'task', id: 't4' }], 'user').plan;
@@ -985,17 +1009,7 @@ test('the unread guard does not copy the plan for each builds edit', () => {
   // plan, a batch of them held the daemon for half a second. Counted as
   // copies: four make no more than one edit with no builds, with nothing
   // unread or with a change of the user's elsewhere.
-  const copies = (plan: Plan, ops: PlanOp[]) => {
-    const real = globalThis.structuredClone;
-    let n = 0;
-    globalThis.structuredClone = ((value: unknown, options?: StructuredSerializeOptions) => (n++, real(value, options))) as typeof real;
-    try {
-      applyOps(plan, ops, 'claude');
-    } finally {
-      globalThis.structuredClone = real;
-    }
-    return n;
-  };
+  const copies = (plan: Plan, ops: PlanOp[]) => countCopies(() => applyOps(plan, ops, 'claude'));
   const elsewhere = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't4', detail: 'the user wrote this' }], 'user').plan;
   const builds: PlanOp[] = ['t1', 't2', 't3', 't4'].map((id) => ({ op: 'upsert_task', id, builds: ['a'] }));
   for (const plan of [linkedPlan(), elsewhere]) assert.equal(copies(plan, builds), copies(plan, [{ op: 'upsert_task', id: 't1', title: 'API, again' }]));
