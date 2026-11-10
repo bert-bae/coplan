@@ -11,13 +11,12 @@
  * Every probe stands alone: one that throws is reported as failed and the
  * rest still run. The sessions the probes make are deleted at the end.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { setTimeout as sleep } from 'node:timers/promises';
-import { readLiveLock, baseUrl, paths } from '../shared/paths.ts';
+import { baseUrl, ensureDaemon, paths } from '../shared/paths.ts';
 import { loadConfigReport } from '../shared/config.ts';
 import { loadProjectConfig, PROJECT_CONFIG_PATH } from '../shared/project.ts';
 import { repoRootOf } from './check.ts';
@@ -29,7 +28,6 @@ const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : 
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(HERE, '..', '..');
-const DAEMON_ENTRY = path.resolve(HERE, '..', 'daemon', 'main.js');
 const RELAY = path.join(PLUGIN_ROOT, 'bin', 'coplan-hook-relay.sh');
 /** What the plugin needs (`engines` in package.json). */
 const MIN_NODE: [number, number] = [20, 11];
@@ -477,22 +475,6 @@ function summarize(checks: Check[]): number {
   }
   console.log(`${failed.length} of ${checks.length} checks failed (${fatal.length} fatal)`);
   return fatal.length > 0 ? 1 : 0;
-}
-
-async function ensureDaemon(): Promise<DaemonLock | null> {
-  const existing = readLiveLock();
-  if (existing) return existing;
-  const child = spawn(process.execPath, [DAEMON_ENTRY], { detached: true, stdio: 'ignore', env: process.env });
-  // An unhandled child `'error'` event would crash the doctor before it could
-  // report why the daemon failed to start.
-  child.on('error', () => {});
-  child.unref();
-  for (let i = 0; i < 60; i++) {
-    await sleep(100);
-    const lock = readLiveLock();
-    if (lock) return lock;
-  }
-  return null;
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {

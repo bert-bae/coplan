@@ -6,12 +6,10 @@
  * Everything here is also reachable from the plugin, but a plain CLI is what
  * makes the daemon debuggable when the hook wiring is the thing that broke.
  */
-import { spawn } from 'node:child_process';
 import { readFileSync, existsSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { readLock, readLiveLock, readVerifiedLock, probeLock, isPidAlive, baseUrl, paths, ensureHome } from '../shared/paths.ts';
+import { readLock, readLiveLock, readVerifiedLock, probeLock, isPidAlive, baseUrl, paths, ensureDaemon, DAEMON_ENTRY } from '../shared/paths.ts';
 import { runDoctor } from './doctor.ts';
 import { runCheck } from './check.ts';
 import { runInit } from './init.ts';
@@ -23,32 +21,6 @@ import { CLEANUP_GROUPS, type CleanupGroupId, type CleanupOutcome, type DaemonLo
 
 declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
-
-const DAEMON_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'daemon', 'main.js');
-
-async function ensureDaemon(): Promise<DaemonLock | null> {
-  const existing = (await readVerifiedLock());
-  if (existing) return existing;
-  ensureHome();
-  const child = spawn(process.execPath, [DAEMON_ENTRY], {
-    detached: true,
-    stdio: 'ignore',
-    env: process.env,
-  });
-  // `spawn` reports ENOENT asynchronously, on the child's `error` event. With
-  // no listener that is an unhandled `'error'`, which would take this process
-  // down mid-session — so attach one even though the failure is recoverable.
-  child.on('error', () => {
-    /* the lock-file poll below reports the failure */
-  });
-  child.unref();
-  for (let i = 0; i < 60; i++) {
-    await sleep(100);
-    const lock = (await readVerifiedLock());
-    if (lock) return lock;
-  }
-  return null;
-}
 
 async function api<T>(lock: DaemonLock, route: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${baseUrl(lock)}${route}`, {

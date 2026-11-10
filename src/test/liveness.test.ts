@@ -102,6 +102,20 @@ test('a daemon starts over a lock whose pid is some other live process', async (
   daemon.kill('SIGTERM');
 });
 
+test('`coplan doctor` starts a daemon over a stale lock instead of probing a dead port', async () => {
+  const other = bystander();
+  const port = await closedPort();
+  const dir = home({ pid: other.pid!, port });
+  const { out } = await cli(dir, 'doctor');
+  const reachable = out.split('\n').find((l) => l.includes('daemon reachable')) ?? '';
+  assert.match(reachable, /^✓ daemon reachable — http:\/\/127\.0\.0\.1:\d+$/, out);
+  assert.ok(!reachable.endsWith(`:${port}`), `the doctor probed the stale lock's port:\n${out}`);
+  const lock = JSON.parse(readFileSync(path.join(dir, 'daemon.json'), 'utf8')) as DaemonLock;
+  assert.notEqual(lock.pid, other.pid, 'a daemon of its own holds the lock');
+  assert.equal(await probeLock(lock), 'live');
+  assert.ok(isPidAlive(other.pid!), 'the process with the old pid was left alone');
+});
+
 test('`coplan stop` never signals a pid its daemon did not confirm', async () => {
   const other = bystander();
   const dir = home({ pid: other.pid!, port: await closedPort() });
@@ -149,7 +163,7 @@ server.listen(0, '127.0.0.1', () => {
 
 function cli(dir: string, ...args: string[]): Promise<{ code: number; out: string }> {
   return new Promise((resolve) => {
-    execFile(process.execPath, [CLI, ...args], { env: { ...process.env, CC_HARNESS_HOME: dir }, timeout: 30_000 }, (err, stdout, stderr) =>
+    execFile(process.execPath, [CLI, ...args], { cwd: dir, env: { ...process.env, CC_HARNESS_HOME: dir }, timeout: 30_000 }, (err, stdout, stderr) =>
       resolve({ code: err ? (typeof err.code === 'number' ? err.code : -1) : 0, out: `${stdout}${stderr}` }),
     );
   });

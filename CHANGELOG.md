@@ -136,6 +136,12 @@
   diagram's own title in grey, because a style left from unused code
   matched them; only the read-only view undid it. That style and the
   unused code are gone, so they look as they do once the plan is submitted.
+- **`coplan doctor` after a restart of the machine checks a real daemon.**
+  It took a lock whose process still existed for a running daemon, and
+  after a reboot that process can be another program's: the doctor then
+  reported a dozen failures against a port nothing listens on. It now
+  asks the daemon to answer, as `coplan` and the agents' tools already
+  did, and starts one if none does.
 
 ### Targeted checks: only what the change touched
 

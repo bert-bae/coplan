@@ -1,6 +1,9 @@
+import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { chmodSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { DaemonLock } from './types.ts';
 
 /** Root for all harness state. Overridable so tests can run hermetically.
@@ -109,4 +112,41 @@ export async function readVerifiedLock(timeoutMs?: number): Promise<DaemonLock |
   const lock = readLiveLock();
   if (!lock) return null;
   return (await probeLock(lock, timeoutMs)) === 'stale' ? null : lock;
+}
+
+/** The daemon's script. Each bundle (cli/, mcp/) and the tests sit one
+ *  folder under dist/, beside daemon/. */
+export const DAEMON_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'daemon', 'main.js');
+
+/**
+ * The running daemon's lock, starting one if none answers: for the CLI, the
+ * MCP server and the doctor alike. Started detached, so it outlives whatever
+ * started it. Null when it did not come up in six seconds; its log says why.
+ */
+export async function ensureDaemon(): Promise<DaemonLock | null> {
+  const existing = await readVerifiedLock();
+  if (existing) return existing;
+  ensureHome();
+  let pid: number | undefined;
+  try {
+    const child = spawn(process.execPath, [DAEMON_ENTRY], { detached: true, stdio: 'ignore', env: process.env });
+    // A missing binary is reported on `error`, which unheard would take this
+    // process down; the poll below reports the failure instead.
+    child.on('error', () => {});
+    child.unref();
+    pid = child.pid;
+  } catch {
+    return null;
+  }
+  const deadline = Date.now() + 6_000;
+  while (Date.now() < deadline) {
+    await sleep(100);
+    // Not the stale lock the new daemon is about to replace: one that
+    // answers, or the one just started, still too busy loading to.
+    const lock = readLiveLock();
+    if (!lock) continue;
+    const state = await probeLock(lock, Math.max(100, Math.min(500, deadline - Date.now())));
+    if (state === 'live' || (state === 'busy' && lock.pid === pid)) return lock;
+  }
+  return null;
 }

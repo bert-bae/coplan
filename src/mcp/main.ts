@@ -7,11 +7,8 @@
  * and it means one shared state machine across every concurrent session.
  */
 import { createInterface } from 'node:readline';
-import { spawn } from 'node:child_process';
-import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setTimeout as sleep } from 'node:timers/promises';
-import { readLiveLock, readVerifiedLock, probeLock, baseUrl, ensureHome } from '../shared/paths.ts';
+import { readLiveLock, baseUrl, ensureDaemon } from '../shared/paths.ts';
 import { TOOLS, DEFAULT_BUDGET_MS } from './tools.ts';
 import { agentInfo, parseAgent, sessionFromEnv, workspaceFromEnv } from '../shared/agents.ts';
 import type { DaemonLock } from '../shared/types.ts';
@@ -20,7 +17,6 @@ declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
 
 const PROTOCOL_VERSION = '2024-11-05';
-const DAEMON_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'daemon', 'main.js');
 
 interface JsonRpcRequest {
   jsonrpc: '2.0';
@@ -101,9 +97,7 @@ async function daemon(): Promise<DaemonLock | null> {
   if (cachedLock && readLiveLock()?.pid === cachedLock.pid) return cachedLock;
   // A lock is trusted once its daemon has answered: one left by a daemon
   // that died may name a pid some other process has now.
-  cachedLock = await readVerifiedLock();
-  if (cachedLock) return cachedLock;
-  cachedLock = await startDaemon();
+  cachedLock = await ensureDaemon();
   return cachedLock;
 }
 
@@ -124,34 +118,6 @@ function versionNotice(lock: DaemonLock): string {
     `\n\n[cc-harness] Coplan's daemon is v${lock.version} but this plugin is v${VERSION}, so some tools may not work as ` +
     'described. Tell the user to run /coplan-restart (or `coplan restart`) to bring the daemon up to date.'
   );
-}
-
-/** Start the daemon detached, so it outlives the session that spawned it. */
-async function startDaemon(): Promise<DaemonLock | null> {
-  ensureHome();
-  try {
-    const child = spawn(process.execPath, [DAEMON_ENTRY], {
-      detached: true,
-      stdio: 'ignore',
-      env: process.env,
-    });
-    // `spawn` reports ENOENT asynchronously, on the child's `error` event. With
-    // no listener that is an unhandled `'error'`, which would take this process
-    // down mid-session — so attach one even though the failure is recoverable.
-    child.on('error', () => {
-      /* the lock-file poll below reports the failure */
-    });
-    child.unref();
-  } catch {
-    return null;
-  }
-  for (let i = 0; i < 60; i++) {
-    await sleep(100);
-    // Not the stale lock the new daemon is about to replace: one that answers.
-    const lock = readLiveLock();
-    if (lock && (await probeLock(lock, 500)) === 'live') return lock;
-  }
-  return null;
 }
 
 interface CallResult {
