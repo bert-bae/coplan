@@ -84,7 +84,7 @@ the audit's finding numbers.
 | F8 | `coplan init` writes `yarn check` / `bun test` / `pnpm ci`: always use `<pm> run <script>` [7] | 2 should fix | done | a65c44f |
 | F9 | A Codex session first seen through MCP gets the daemon's folder: another repo's checks and git [9] | 2 should fix | done | f7fe757 |
 | F10 | Plan sessions drop off the browser's list once 60 other sessions are newer [8] | 2 should fix | done | bdd70ec |
-| F11 | A republish is refused for a box link to a task the agent dropped [10] | 2 should fix | open | |
+| F11 | A republish is refused for a box link to a task the agent dropped [10] | 2 should fix | done | b2db4bf |
 | F12 | `move_task` makes a finished task a parent, and its finished work disappears [11] | 2 should fix | done | 3bcbdac |
 | F13 | The brief says a dependency settled by dropping is "NOT DONE YET": use `isComplete` [12] | 2 should fix | done | 98d620a |
 | F14 | A `.coplan/config.json` that starts with a BOM stops every check [13] | 2 should fix | open | |
