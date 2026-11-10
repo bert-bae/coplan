@@ -51,8 +51,8 @@
   A proposal is out of date once you change what it would change, but
   only the item each edit named was compared: accepting a proposed task
   removal took subtasks, dependencies and box links you had changed since
-  with it, and a proposed `builds`, box edit or box removal undid task
-  links you had made. These now read as out of date and say what changed;
+  with it, and a proposed `builds`, box edit, box removal or diagram
+  removal undid task links you had made. These now read as out of date and say what changed;
   one made before this version reads as out of date too, as it cannot be
   checked in full.
 - **`coplan init` writes checks that run your scripts.** It wrote a

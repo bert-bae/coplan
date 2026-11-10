@@ -1000,6 +1000,15 @@ test('a proposal that would overwrite box links is out of date once the user lin
     const plan = applyOps(proposing(op), [edit], 'user').plan;
     assert.throws(() => accept(plan), /Proposal p1 is out of date: the tasks linked to box "[AB]" in diagram "Arch"/, what);
   }
+  // So would the whole diagram, removed with them.
+  const gone = applyOps(proposing({ op: 'remove', kind: 'diagram', id: 'd1' }), [{ op: 'upsert_node', diagramId: 'd1', id: 'b', taskIds: ['t4'] }], 'user').plan;
+  assert.throws(() => accept(gone), /Proposal p1 is out of date: the task links in diagram "Arch"/);
+  // A link made in another diagram leaves it as proposed.
+  let other = applyOps(linkedPlan(), [{ op: 'upsert_diagram', title: 'Data', nodes: [{ id: 'x', label: 'X' }], edges: [] }], 'claude').plan;
+  const data = other.diagrams[1]!.id;
+  other = applyOps(other, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [{ op: 'remove', kind: 'diagram', id: 'd1' }] }], 'claude').plan;
+  other = applyOps(other, [{ op: 'upsert_node', diagramId: data, id: 'x', taskIds: ['t4'] }], 'user').plan;
+  assert.deepEqual(accept(other).diagrams.map((d) => d.id), [data]);
   // A link somewhere else in the diagram does not hold up a proposal about box a.
   const elsewhere = applyOps(proposing({ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }), [{ op: 'upsert_node', diagramId: 'd1', id: 'b', taskIds: ['t4'] }], 'user').plan;
   assert.deepEqual(accept(elsewhere).diagrams[0]!.nodes.find((n) => n.id === 'a')?.taskIds, ['t3']);

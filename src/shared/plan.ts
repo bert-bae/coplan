@@ -2292,6 +2292,8 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
         break;
       case 'remove':
         if (op.kind === 'section' || op.kind === 'diagram' || op.kind === 'task') out[`${op.kind}:${op.id}`] = rev(op.kind, op.id);
+        // A diagram goes with its boxes' links, as a box does.
+        if (op.kind === 'diagram') out[`diagramlinks:${op.id}`] = linksIn(op.id);
         // A task goes with its subtasks, the dependencies on them and its
         // boxes' links (taskRemoval, as the unread-edit guard counts it).
         if (op.kind === 'task') out[`removal:${op.id}`] = removal(op.id);
