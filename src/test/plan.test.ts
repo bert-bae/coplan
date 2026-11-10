@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, submitPlan, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, confirmDesign, countTasks, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, publishTasks, submitPlan, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import { previewProposal } from '../shared/proposals.ts';
 import type { DiagramNodeInput, Plan, PlanInput, PlanOp } from '../shared/types.ts';
@@ -1023,4 +1023,65 @@ test("a save of a diagram's graph is refused for a graph changed since it was ba
   assert.throws(() => applyOps(plan, [{ op: 'upsert_diagram', id, nodes: d().nodes, edges: d().edges, expect: graphBase }], 'user'), PlanError);
   assert.throws(() => applyOps(plan, [{ op: 'upsert_diagram', id, title: 'Again', expect: graphBase }], 'user'), PlanError);
   assert.throws(() => applyOps(plan, [{ op: 'upsert_node', diagramId: id, id: 'api', label: 'API 2', expect: graphBase }], 'user'), PlanError, 'a box edit too');
+});
+
+/** INPUT with the ids its tasks were published under: a republish of it
+ *  changes only what a test changes. */
+const SAME_TASKS: PlanInput = {
+  ...INPUT,
+  tasks: [
+    { id: 't1', title: 'Storage layer', subtasks: [{ id: 't2', title: 'Cache client' }, { id: 't3', title: 'Invalidation', status: 'blocked' }] },
+    { id: 't4', title: 'Wire into API' },
+  ],
+};
+/** A canvas save of d1's boxes, made against revision `expect`. */
+const graphSave = (plan: Plan, nodes: DiagramNodeInput[], expect: number): PlanOp => ({ op: 'upsert_diagram', id: 'd1', nodes, edges: plan.diagrams[0]!.edges, expect });
+/** A save refused for a change made since its base. */
+const CHANGED = /was changed by Claude while this edit was open/;
+
+test("a canvas save is refused for a graph Claude republished since it was based, and not for a republish that left the graph alone", () => {
+  let plan = fresh();
+  const d = () => plan.diagrams[0]!;
+  const dragged = (keep = (_: string) => true) => d().nodes.filter((n) => keep(n.id)).map((n) => (n.id === 'api' ? { ...n, x: 10, y: 10 } : n));
+  // Republished with the same boxes and a new title: a drag based before it still lands.
+  let base = d().rev;
+  const graphRev = d().graphRev;
+  plan = publishPlan(plan, { ...SAME_TASKS, diagrams: [{ ...INPUT.diagrams![0]!, id: 'd1', title: 'Parts' }] }, 2_000).plan;
+  assert.ok(d().rev > base, 'the diagram moved on');
+  assert.equal(d().graphRev, graphRev, 'its graph did not');
+  plan = applyOps(plan, [graphSave(plan, dragged(), base)], 'user').plan;
+  assert.deepEqual([d().title, d().nodes.find((n) => n.id === 'api')?.x], ['Parts', 10], 'the drag landed, and the title stayed');
+  // Republished with a box added: a drag based before it would drop the box.
+  base = d().rev;
+  const withQueue = { ...INPUT.diagrams![0]!, id: 'd1', nodes: [...d().nodes, { id: 'queue', label: 'Queue', kind: 'queue' as const }] };
+  plan = publishPlan(plan, { ...SAME_TASKS, diagrams: [withQueue] }, 3_000).plan;
+  assert.throws(() => applyOps(plan, [graphSave(plan, dragged((id) => id !== 'queue'), base)], 'user'), CHANGED);
+});
+
+test("a canvas save is refused for links Claude's task list changed since it was based", () => {
+  let plan = fresh();
+  const base = plan.diagrams[0]!.rev;
+  const before = structuredClone(plan.diagrams[0]!.nodes);
+  // The task list says t4 builds the API: the API box's links change under the canvas.
+  plan = publishTasks(plan, { tasks: SAME_TASKS.tasks!.map((t) => (t.id === 't4' ? { ...t, builds: ['api'] } : t)) }, 2_000).plan;
+  assert.deepEqual(plan.diagrams[0]!.nodes.find((n) => n.id === 'api')?.taskIds, ['t4']);
+  assert.throws(() => applyOps(plan, [graphSave(plan, before, base)], 'user'), CHANGED, 'it would unlink t4');
+});
+
+test('a save against a revision the diagram has not reached is refused', () => {
+  const plan = fresh();
+  const d = plan.diagrams[0]!;
+  // Refused as stale today, in words that blame a change nobody made (row B34).
+  assert.throws(() => applyOps(plan, [graphSave(plan, d.nodes, d.rev + 5)], 'user'), PlanError);
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_node', diagramId: 'd1', id: 'api', label: 'API 2', expect: d.rev + 5 }], 'user'), PlanError);
+});
+
+test("a proposal that restates a diagram's boxes is out of date once the user links a task to one", () => {
+  let plan = fresh();
+  const d = plan.diagrams[0]!;
+  const restated = d.nodes.map((n) => (n.id === 'cache' ? { ...n, label: 'Redis' } : n));
+  plan = applyOps(plan, [{ op: 'propose', title: 'Name the cache', reason: 'It is Redis.', ops: [{ op: 'upsert_diagram', id: 'd1', nodes: restated, edges: d.edges }] }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_node', diagramId: 'd1', id: 'api', taskIds: ['t4'] }], 'user').plan;
+  // Accepting would put back the boxes as restated, without that link.
+  assert.throws(() => applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user'), /p1 is out of date: the task links in diagram "Components"/);
 });
