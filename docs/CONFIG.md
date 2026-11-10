@@ -60,9 +60,9 @@ in Claude) writes a starting point from the repository's scripts, and so does
 {
   "mode": "managed",
   "hooks": {
-    "implement": ["pnpm typecheck", { "name": "ruff", "run": "ruff check .", "paths": ["*.py"] }],
-    "review": [{ "name": "tests", "run": "pnpm test", "timeout": 900 }],
-    "final": ["pnpm check", { "name": "audit", "run": "pnpm audit", "optional": true }]
+    "implement": ["pnpm run typecheck", { "name": "ruff", "run": "ruff check .", "paths": ["*.py"] }],
+    "review": [{ "name": "tests", "run": "pnpm run test", "timeout": 900 }],
+    "final": ["pnpm run check", { "name": "audit", "run": "pnpm audit", "optional": true }]
   },
   "iric": { "review": "subagent", "parallel": 2, "maxRounds": 3 },
   "branches": { "base": "main", "prefix": "coplan/" }
@@ -107,7 +107,7 @@ A hook is a command, run from the repository root, or an object:
 | Key | Meaning |
 | --- | --- |
 | `run` | The shell command. Required. `{files}` in it is the changed files in the hook's area, each quoted (`ruff check {files}`, `eslint {files}`), so the tool looks at nothing else; from the hook's `cwd` when it has one. Where the change is not known, or runs past 1,000 files, it is `.`, the whole repository. |
-| `name` | What it is called in reports and on the board, up to 60 characters. Defaults to the script name (`pnpm lint` or `npm run lint` → `lint`). |
+| `name` | What it is called in reports and on the board, up to 60 characters. Defaults to the script name (`pnpm run lint` → `lint`). |
 | `timeout` | Seconds before `coplan check` stops it: 1 to 3600. Default 600. |
 | `paths` | Globs (`src/**`, `*.py`, `docs/`, `src/**/*.{ts,tsx}`): the hook's area. It runs only when the change touches a file in it (see [Targeted checks](#targeted-checks)). Without `paths`, a hook with a `cwd` checks that folder, and one with neither checks the whole repository: it runs on any change. `**` crosses directories, `*` and `?` do not, `{a,b}` is either; a glob without a slash matches a file name anywhere, and one ending in `/` everything under it. A `!glob` takes files back out: `["src/**", "!src/gen/**"]`. |
 | `cwd` | The folder it runs in, inside the repository: a package of a monorepo (`"packages/api"`). Default the repository root. Without `paths`, it is also the hook's area: the hook runs only when something under it changes. While the folder does not exist the hook fails, saying so, rather than run somewhere it would check nothing. |

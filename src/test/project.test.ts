@@ -320,6 +320,26 @@ test('a timed-out hook is stopped with everything it started', () => {
   }
 });
 
+test("coplan init runs the repository's own scripts, never a package manager's command of the same name", () => {
+  // yarn check is yarn's integrity check, bun test is Bun's test runner, pnpm ci is pnpm's own (unimplemented) command.
+  const cases: [string, string, Record<string, string>, { implement?: string; review?: string; final?: string }][] = [
+    ['yarn', 'yarn.lock', { typecheck: 'tsc', test: 'jest', check: 'tsc && jest' }, { implement: 'yarn run typecheck', review: 'yarn run test', final: 'yarn run check' }],
+    ['bun', 'bun.lock', { test: 'vitest', build: 'vite build' }, { review: 'bun run test', final: 'bun run build' }],
+    ['pnpm', 'pnpm-lock.yaml', { test: 'vitest', ci: 'pnpm lint && pnpm test' }, { review: 'pnpm run test', final: 'pnpm run ci' }],
+    ['npm', 'package-lock.json', { test: 'mocha', verify: 'npm test' }, { review: 'npm run test', final: 'npm run verify' }],
+  ];
+  for (const [pm, lock, scripts, want] of cases) {
+    const dir = repo({ 'package.json': JSON.stringify({ scripts }), [lock]: '' });
+    try {
+      const { hooks } = detectHooks(dir);
+      const got = { implement: hooks.implement[0]?.run, review: hooks.review[0]?.run, final: hooks.final[0]?.run };
+      assert.deepEqual(got, { implement: undefined, ...want }, pm);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('coplan init writes a commented starting point from the scripts it finds, and never over one', () => {
   const dir = repo({
     'package.json': JSON.stringify({ scripts: { typecheck: 'tsc', lint: 'eslint .', test: 'node --test', build: 'esbuild' } }),
@@ -328,13 +348,13 @@ test('coplan init writes a commented starting point from the scripts it finds, a
   });
   try {
     const { hooks, found } = detectHooks(dir);
-    assert.deepEqual(hooks.implement.map((h) => h.run), ['pnpm typecheck', 'pnpm lint', 'ruff check {files}']);
+    assert.deepEqual(hooks.implement.map((h) => h.run), ['pnpm run typecheck', 'pnpm run lint', 'ruff check {files}']);
     // Targeted from the start: a language's tools only for that language;
     // a test suite whole, since it may read anything.
     assert.deepEqual(hooks.implement.map((h) => h.paths?.[0]), ['*.ts', '*.ts', '*.py']);
     assert.equal(hooks.review[0]!.paths, undefined);
-    assert.deepEqual(hooks.review.map((h) => h.run), ['pnpm test', 'pytest -q']);
-    assert.deepEqual(hooks.final.map((h) => h.run), ['pnpm build']);
+    assert.deepEqual(hooks.review.map((h) => h.run), ['pnpm run test', 'pytest -q']);
+    assert.deepEqual(hooks.final.map((h) => h.run), ['pnpm run build']);
     assert.ok(found.some((f) => /pnpm/.test(f)));
 
     const first = spawnSync(process.execPath, [CLI, 'init'], { cwd: dir, encoding: 'utf8' });

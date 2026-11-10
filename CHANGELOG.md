@@ -55,6 +55,13 @@
   links you had made. These now read as out of date and say what changed;
   one made before this version reads as out of date too, as it cannot be
   checked in full.
+- **`coplan init` writes checks that run your scripts.** It wrote a
+  script as `<package manager> <script>`, which for some names is the
+  package manager's own command: `yarn check` (yarn's integrity check,
+  which passes without running anything), `bun test` (Bun's test runner)
+  and `pnpm ci` (which fails). It now writes `<package manager> run
+  <script>` throughout. A `.coplan/config.json` it wrote before keeps its
+  commands: look for those three and add `run`.
 
 ### Targeted checks: only what the change touched
 

@@ -50,7 +50,10 @@ export function detectHooks(root: string): { hooks: Detected; found: string[] } 
           : existsSync(path.join(root, 'bun.lockb')) || existsSync(path.join(root, 'bun.lock'))
             ? 'bun'
             : 'npm';
-      const run = (s: string) => (pm === 'npm' ? (s === 'test' ? 'npm test' : `npm run ${s}`) : `${pm} ${s === 'test' && pm !== 'yarn' ? 'test' : s}`);
+      // Always through `run`: a script named like a command of the package
+      // manager's own (yarn check, bun test, pnpm ci) runs that command
+      // instead, and passes or fails without running the script.
+      const run = (s: string) => `${pm} run ${s}`;
       const pick = (names: string[]) => names.find((n) => scripts[n]);
       const typecheck = pick(['typecheck', 'type-check', 'types', 'tsc', 'check:types']);
       const lint = pick(['lint', 'lint:check', 'eslint']);

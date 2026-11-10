@@ -397,7 +397,7 @@ test("a repository's checks are written from its scripts; a folder that is not t
   const config = loadProjectConfig(dir, { globalDir: null });
   assert.deepEqual(config.errors, []);
   assert.deepEqual(config.hooks.implement.map((h) => h.run), ['npm run lint']);
-  assert.deepEqual(config.hooks.review.map((h) => h.run), ['npm test']);
+  assert.deepEqual(config.hooks.review.map((h) => h.run), ['npm run test']);
   assert.ok('iric' in (parseJsonc(readFileSync(written[0]!, 'utf8')) as object), 'the built-in build settings, with no defaults of your own');
 });
 

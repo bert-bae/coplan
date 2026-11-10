@@ -267,11 +267,11 @@ committed `.coplan/config.json` (`//` comments allowed):
 {
   "hooks": {
     // quick checks after every implementation or refinement pass
-    "implement": ["pnpm typecheck", "pnpm lint"],
+    "implement": ["pnpm run typecheck", "pnpm run lint"],
     // the gate a task must pass before it is done
-    "review": [{ "name": "tests", "run": "pnpm test", "timeout": 900 }],
+    "review": [{ "name": "tests", "run": "pnpm run test", "timeout": 900 }],
     // once every task is done
-    "final": ["pnpm check"]
+    "final": ["pnpm run check"]
   },
   "iric": { "review": "subagent", "parallel": 2, "maxRounds": 3 },
   "branches": { "base": "main", "prefix": "coplan/" }
