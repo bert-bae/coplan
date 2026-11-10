@@ -947,6 +947,36 @@ test("removing a task cannot take a subtask, a dependency or a box link the user
   assert.deepEqual(applyOps(elsewhere, [{ op: 'remove', kind: 'task', id: 't1' }], 'claude').plan.tasks.map((t) => t.id), ['t3', 't4']);
 });
 
+test("an unread change of the user's is held to however many changes come after it, the log trimmed or not", () => {
+  const edited = () =>
+    applyOps(linkedPlan(), [
+      { op: 'upsert_task', id: 't3', detail: 'Must be accessible: a legal requirement', note: 'Creds are in the vault' },
+      { op: 'move_task', id: 't4', parentId: 't1', index: 1 },
+    ], 'user').plan;
+  const held = (plan: Plan, why: string) => {
+    assert.throws(() => applyOps(plan, [{ op: 'upsert_task', id: 't3', detail: 'Claude text' }], 'claude'), UNREAD, why);
+    assert.throws(() => applyOps(plan, [{ op: 'upsert_task', id: 't3', status: 'blocked', note: 'Blocked' }], 'claude', undefined, { tracking: true }), /changed the note of task "UI"/, why);
+    assert.throws(() => applyOps(plan, [{ op: 'remove', kind: 'task', id: 't1' }], 'claude'), /moved task "Docs"/, why);
+    assert.doesNotThrow(() => applyOps(plan, [{ op: 'upsert_task', id: 't2', detail: 'Its own' }], 'claude'), why);
+    assert.doesNotThrow(() => applyOps(read(plan), [{ op: 'upsert_task', id: 't3', detail: 'Claude text' }], 'claude'), `${why}: once read`);
+  };
+  // More than the log keeps after them: the user's own, or the agent's (its progress, its comments).
+  let byUser = edited();
+  for (let i = 0; i < 500; i++) byUser = applyOps(byUser, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: `note ${i}` }], 'user').plan;
+  held(byUser, "the user's");
+  let byAgent = edited();
+  for (let i = 0; i < 500; i++) byAgent = applyOps(byAgent, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: `note ${i}` }], 'claude').plan;
+  byAgent = applyOps(byAgent, [{ op: 'upsert_task', id: 't2', status: 'in_progress' }], 'claude', undefined, { tracking: true }).plan;
+  assert.ok(byAgent.changes.some((c) => c.author === 'user' && c.target.id === 't3'), 'its change is kept in the log');
+  held(byAgent, "the agent's");
+  // A log an earlier build trimmed: all that Claude read is compared.
+  const trimmed = edited();
+  trimmed.changes = [];
+  const gap = applyOps(trimmed, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'later' }], 'user').plan;
+  assert.ok(gap.changes[0]!.seq > gap.claudeReadSeq + 1);
+  held(gap, 'trimmed');
+});
+
 test("the agent's progress note cannot go over a note of the user's it has not read", () => {
   const report: PlanOp = { op: 'upsert_task', id: 't3', status: 'blocked', note: 'Blocked: DB creds missing' };
   const track = (plan: Plan) => applyOps(plan, [report], 'claude', undefined, { tracking: true }).plan;

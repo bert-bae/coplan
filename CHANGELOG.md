@@ -387,6 +387,14 @@
   your other open editors on that task are not held up by it. A one-line
   field refused that way shows what is there now and stays open: leaving
   it no longer saves yours over it after all, only Enter does.
+- **What you changed stays guarded however much happens after it.** The
+  plan's log keeps its last 500 changes, and the check that holds the
+  agent's edits to what it has read looked only at those: past that many
+  (comments, status clicks, the agent's own progress) before the agent
+  read the plan, it could edit, or remove, what you had changed, and was
+  not told of it. The log now keeps your changes the agent has not read,
+  and should it still not reach back far enough, everything the agent
+  read is compared.
 - **The agent's progress note cannot go over a note of yours it has
   not read.** A note sent with a status was left out of the check that
   holds the agent's edits to what it has read, so it replaced the note

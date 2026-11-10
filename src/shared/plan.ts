@@ -145,7 +145,15 @@ function record(plan: Plan, author: Author, kind: ChangeKind, target: Target, su
   plan.version += 1;
   const change: Change = { seq: plan.seq, ts: now, author, kind, target, summary };
   plan.changes.push(change);
-  if (plan.changes.length > MAX_CHANGES) plan.changes.splice(0, plan.changes.length - MAX_CHANGES);
+  if (plan.changes.length > MAX_CHANGES) {
+    // Oldest first, but not a change of the user's Claude has not read:
+    // what holds Claude's edits to what it read, and what it is told, go by
+    // those. Unless they alone pass four times the bound (unreadContent
+    // then compares all that Claude read).
+    let over = plan.changes.length - MAX_CHANGES;
+    plan.changes = plan.changes.filter((c) => over <= 0 || (c.author === 'user' && c.seq > plan.claudeReadSeq) || (over--, false));
+    if (plan.changes.length > MAX_CHANGES * 4) plan.changes.splice(0, plan.changes.length - MAX_CHANGES * 4);
+  }
   plan.updatedAt = now;
   return change;
 }
@@ -1007,10 +1015,24 @@ function unreadContent(plan: Plan): Set<string> {
       .map((c) => `${c.target.kind}:${c.target.id}`),
   );
   const base = plan.claudeBaseline;
+  // The log keeps its last MAX_CHANGES: one that has dropped changes since
+  // Claude's read cannot say what the user did, so everything Claude read,
+  // and everything there now, is compared, and every task's place.
+  const gap = !!base && plan.changes.length > 0 && plan.changes[0]!.seq > plan.claudeReadSeq + 1;
+  const now = base && (gap || touched.size) ? baselineOf(plan) : undefined;
+  if (gap && base && now) {
+    touched.add('plan:');
+    for (const b of [base, now]) {
+      for (const x of b.sections) touched.add(`section:${x.id}`);
+      for (const x of b.diagrams) touched.add(`diagram:${x.id}`);
+      for (const x of b.tasks) touched.add(`task:${x.id}`);
+    }
+    const parents = new Map(base.tasks.map((t) => [t.id, t.parentId ?? null]));
+    for (const t of now.tasks) if (parents.has(t.id) && parents.get(t.id) !== (t.parentId ?? null)) moved.push(`moved:${t.id}`);
+  }
   // With no record of what Claude read, every task touched may have had its note changed.
   const noteOf = (key: string) => `note:${splitKey(key)[1]}`;
-  if (!base || touched.size === 0) return new Set([...touched, ...[...touched].filter((key) => key.startsWith('task:')).map(noteOf), ...moved]);
-  const now = baselineOf(plan);
+  if (!base || !now || touched.size === 0) return new Set([...touched, ...[...touched].filter((key) => key.startsWith('task:')).map(noteOf), ...moved]);
   const content = (b: PlanBaseline, kind: string, id: string): string => {
     switch (kind) {
       case 'plan':
