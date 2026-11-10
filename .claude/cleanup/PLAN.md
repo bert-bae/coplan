@@ -98,7 +98,7 @@ the audit's finding numbers.
 | R1 | One `ensureDaemon()` for the CLI, the MCP server and the doctor, using the verified lock [19a]; fixes the doctor's stale-lock report | 4 refactor | done | d8fa57b, 7316969 |
 | R2 | One "who spoke last" rule, exported from plan.ts, used in all four places [19b]; fixes the plan check and Revise button disagreeing | 4 refactor | done | ec359da |
 | R3 | Map `PlanError` to 409 once in the daemon's top-level catch; delete six try/catch blocks; one `planOr404` [19c] | 4 refactor | done | 91cd7be |
-| R4 | One `signOff` helper for the browser store's six sign-off actions; `commit` calls `adoptPlan` [19d] | 4 refactor | open | |
+| R4 | One `signOff` helper for the browser store's six sign-off actions; `commit` calls `adoptPlan` [19d] | 4 refactor | done | 08b50d7 |
 | R5 | Merge `CommitInput` and `CommitTextArea` (after F6, so the fix lives in one place) [19e] | 4 refactor | open | |
 | R6 | Move `repoRoot` / `currentBranch` into `shared/changes.ts`; delete `daemon/git.ts` [19f] | 4 refactor | open | |
 | R7 | Bind every edit to the session it was made in: `store.op`/`ops` take the view's session, as the canvas's `commit` does, instead of reading the one on screen when called (39 call sites; selectSession's blur covers today's editors only because each saves synchronously; found reviewing F21) | 4 refactor | open | |
