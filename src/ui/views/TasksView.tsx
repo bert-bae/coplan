@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
-import { useKeptDraft } from '../lib/drafts.ts';
+import { filesText, useKeptDraft } from '../lib/drafts.ts';
 import { store, useCollapsedTasks, useEdit, useAgent, usePlan, useSessionId, useStillShown, useStore } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
 import { CommentToggle, ThreadPanel, useThreads } from '../components/Threads.tsx';
@@ -899,8 +899,7 @@ function FilesField({ task }: { task: Task }) {
   const edit = useEdit();
   // Kept, as a markdown field's draft is, while open: its view going (a tab
   // or session switch) reopens it with the text.
-  const kept = useKeptDraft(useSessionId(), `task:${task.id}:files`, (task.files ?? []).join('\n'), revOf(task));
-  const [saving, setSaving] = useState(false);
+  const kept = useKeptDraft(useSessionId(), `task:${task.id}:files`, filesText(task.files), revOf(task));
   if (!kept.editing) {
     return (
       <div className="files">
@@ -931,18 +930,14 @@ function FilesField({ task }: { task: Task }) {
         <button
           type="button"
           className="btn btn-sm btn-primary"
-          disabled={saving}
-          onClick={async () => {
+          disabled={kept.saving}
+          onClick={() => {
             const files = kept.draft.split('\n').map((f) => f.trim()).filter(Boolean);
-            setSaving(true);
-            const ok = await edit({ op: 'upsert_task', id: task.id, files, expect: kept.started.version });
-            setSaving(false);
-            // Refused when changed underneath: stay open, with the text.
-            if (ok) kept.saved();
-            else kept.refused();
+            // Refused when changed underneath: stays open, with the text.
+            void kept.save(() => edit({ op: 'upsert_task', id: task.id, files, ...expecting(kept.started.version) }));
           }}
         >
-          {saving ? 'Saving…' : 'Save'}
+          {kept.saving ? 'Saving…' : 'Save'}
         </button>
       </div>
     </div>

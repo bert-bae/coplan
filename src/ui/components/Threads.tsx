@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { useAgent, useEdit, usePlan, useSessionId } from '../store.ts';
-import { keptText, useKeptText } from '../lib/drafts.ts';
+import { useKeptDraft } from '../lib/drafts.ts';
 import { Markdown } from './Markdown.tsx';
 import { isComposing } from '../lib/keys.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
@@ -55,6 +55,8 @@ export function CommentToggle({
 export function ThreadPanel({ target, label }: { target: Target; label: string }) {
   const edit = useEdit();
   const threads = useThreads(target);
+  // Saved only once sent; kept (drafts.ts) while being written.
+  const comment = useKeptDraft(useSessionId(), `comment:${target.kind}:${target.id}`, '', undefined, true);
   const [showResolved, setShowResolved] = useState(false);
   const open = threads.filter((t) => !t.resolved);
   const resolved = threads.filter((t) => t.resolved);
@@ -71,7 +73,8 @@ export function ThreadPanel({ target, label }: { target: Target; label: string }
       )}
       {showResolved && resolved.map((t) => <ThreadView key={t.id} thread={t} />)}
       <Composer
-        field={`comment:${target.kind}:${target.id}`}
+        text={comment.draft}
+        setText={comment.setDraft}
         placeholder={open.length ? 'Add another comment…' : `Comment on ${label}…`}
         label={`New comment on ${label}`}
         onSend={(text) => edit({ op: 'comment', target, text })}
@@ -83,10 +86,8 @@ export function ThreadPanel({ target, label }: { target: Target; label: string }
 function ThreadView({ thread }: { thread: Thread }) {
   const edit = useEdit();
   const agent = useAgent();
-  const field = `reply:${thread.id}`;
-  const sessionId = useSessionId();
   // A reply left half written (its view went) opens again with it.
-  const [replying, setReplying] = useState(() => keptText(sessionId, field) !== undefined);
+  const reply = useKeptDraft(useSessionId(), `reply:${thread.id}`, '', undefined);
   return (
     <article className={classNames('thread', thread.resolved && 'is-resolved')}>
       <Entry author={thread.author} text={thread.text} ts={thread.ts} />
@@ -96,7 +97,7 @@ function ThreadView({ thread }: { thread: Thread }) {
       <div className="thread-actions">
         {!thread.resolved && (
           // Opens it: Cancel or Escape closes it, and drops what was written.
-          <button type="button" className="link" onClick={() => setReplying(true)}>
+          <button type="button" className="link" onClick={reply.begin}>
             Reply
           </button>
         )}
@@ -105,18 +106,15 @@ function ThreadView({ thread }: { thread: Thread }) {
         </button>
         {threadWaitsOn(thread) === 'claude' && <span className="muted">{agent.name} sees this when it next reads the plan, or with <em>Request revisions</em></span>}
       </div>
-      {replying && (
+      {reply.editing && (
         <Composer
-          field={field}
+          text={reply.draft}
+          setText={reply.setDraft}
           placeholder="Reply…"
           label="Reply"
           autoFocus
-          onSend={async (text) => {
-            const ok = await edit({ op: 'reply', threadId: thread.id, text });
-            if (ok) setReplying(false);
-            return ok;
-          }}
-          onCancel={() => setReplying(false)}
+          onSend={(text) => reply.save(() => edit({ op: 'reply', threadId: thread.id, text }))}
+          onCancel={reply.close}
         />
       )}
     </article>
@@ -141,22 +139,23 @@ export function AuthorBadge({ author }: { author: Author }) {
 }
 
 function Composer({
-  field,
+  text,
+  setText,
   placeholder,
   label,
   onSend,
   autoFocus,
   onCancel,
 }: {
-  /** Names it among the kept drafts (drafts.ts): `comment:…` or `reply:…`. */
-  field: string;
+  /** What is written, held (and kept) by the view that shows it. */
+  text: string;
+  setText: (next: string) => void;
   placeholder: string;
   label: string;
   onSend: (text: string) => Promise<boolean>;
   autoFocus?: boolean;
   onCancel?: () => void;
 }) {
-  const [text, setText] = useKeptText(useSessionId(), field);
   const latest = useRef(text);
   latest.current = text;
   const [busy, setBusy] = useState(false);

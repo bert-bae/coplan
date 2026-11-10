@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Markdown } from './Markdown.tsx';
 import { useKeptDraft } from '../lib/drafts.ts';
-import { store } from '../store.ts';
+import { useSessionId } from '../store.ts';
 import { classNames } from '../lib/format.ts';
 import { isComposing } from '../lib/keys.ts';
 
@@ -159,47 +159,27 @@ export function MarkdownField({
   version?: number;
 }) {
   // A draft left open here (a tab or session switch unmounted it) reopens.
-  const kept = useKeptDraft(store.getState().sessionId, draftKey ?? null, value, version, startEditing);
-  const { editing, draft, setDraft, started } = kept;
-  const [saving, setSaving] = useState(false);
-  // What editing started from (`started`): a field with a revision is watched
-  // by it; one with none (the summary, a box's notes, a caption) by its text,
-  // and its save is not refused (there is nothing to check it against): the
-  // warning below is all it gets.
+  const { editing, draft, setDraft, started, saving, begin, close, save: keep } = useKeptDraft(useSessionId(), draftKey ?? null, value, version, startEditing);
   const area = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    if (!editing) setDraft(value);
-  }, [value, editing]);
 
   useEffect(() => {
     if (editing) area.current?.focus();
   }, [editing]);
 
-  const begin = kept.begin;
-  // Showing the user's own text already (their save, landing) is nothing to
-  // lose, whatever moved.
+  // What editing started from: a field with a revision is watched by it; one
+  // with none (the summary, a box's notes, a caption) by its text, and its
+  // save is not refused (there is nothing to check it against): the warning
+  // below is all it gets. Showing the user's own text already (their save,
+  // landing) is nothing to lose, whatever moved.
   const changedUnderneath =
     editing && value !== draft && (started.version !== undefined ? version !== started.version : value !== started.value);
 
-  const save = async () => {
-    if (draft === value) {
-      kept.close();
-      return;
-    }
-    setSaving(true);
-    // With the "changed while you were editing" warning on screen, saving is
-    // a deliberate choice to replace the newer version, so it is made
-    // against that version. Otherwise it is made against the one edited.
-    const base = changedUnderneath ? version : started.version;
-    const result = await onSave(draft, base);
-    setSaving(false);
-    if (result === false) kept.refused();
-    else kept.saved();
-  };
+  // With the "changed while you were editing" warning on screen, saving is
+  // a deliberate choice to replace the newer version, so it is made against
+  // that version. Otherwise it is made against the one edited.
+  const save = () => keep(() => onSave(draft, changedUnderneath ? version : started.version));
   const cancel = () => {
-    kept.close();
-    setDraft(value);
+    close();
     onCancel?.();
   };
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {

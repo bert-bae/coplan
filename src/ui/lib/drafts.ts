@@ -12,9 +12,13 @@ import type { Plan, TargetKind } from '../../shared/types.ts';
  * any holds unsaved text. In memory only: a reload starts afresh, as the
  * page does.
  */
-export interface OpenDraft {
+export interface OpenDraft extends Started {
   draft: string;
-  /** What editing started from, for the "changed while you were editing" warning. */
+}
+
+/** What editing started from, for the "changed while you were editing"
+ *  warning: the field's revision, and its text. */
+interface Started {
   version: number | undefined;
   value: string;
 }
@@ -22,7 +26,7 @@ export interface OpenDraft {
 export const openDrafts = new Map<string, OpenDraft>();
 
 /** A kept draft's key: the session it was written in, and its field. */
-export function draftKey(sessionId: string | null, field: string): string {
+function draftKey(sessionId: string | null, field: string): string {
   return `${sessionId ?? ''}:${field}`;
 }
 
@@ -65,7 +69,7 @@ function fieldText(plan: Plan, field: string, locks: Locks = { design: isDesignL
   if (m) {
     const task = plan.tasks.find((t) => t.id === m![1]);
     if (!task || locks.plan) return undefined;
-    return m[2] === 'detail' ? (task.detail ?? '') : (task.files ?? []).join('\n');
+    return m[2] === 'detail' ? (task.detail ?? '') : filesText(task.files);
   }
   // A comment is saved only once sent: until then the field holds nothing.
   // It goes with what it is on; a reply, with its thread, or once resolved.
@@ -117,18 +121,19 @@ function fieldName(plan: Plan, field: string): string {
   return task ? `the ${task[2]} of task "${plan.tasks.find((t) => t.id === task[1])?.title ?? task[1]}"` : field;
 }
 
-/** Where an edit started: the field's revision, and its text. */
-export interface Started {
-  version: number | undefined;
-  value: string;
+/** A task's files as its field holds them: one path a line. */
+export function filesText(files: string[] | undefined): string {
+  return (files ?? []).join('\n');
 }
 
 /**
  * An editor's draft, kept among the open drafts while it is open: its view
- * going (a tab or session switch) reopens it with its text and where it
- * started, and closing the page asks first. `field` names it (null: not
- * kept), in the session on screen when it mounts; `value` and `version`
- * are the field as it is now.
+ * going (a tab or session switch, another box selected) reopens it with
+ * its text and where it started, and closing the page asks first. `field`
+ * names it (null: not kept), in `sessionId` (useSessionId); `value` and
+ * `version` are the field as it is now. A comment being written is one
+ * too, with nothing saved (`value` ''): `openAtFirst`, its box is always
+ * there.
  */
 export function useKeptDraft(sessionId: string | null, field: string | null, value: string, version: number | undefined, openAtFirst = false) {
   const [key] = useState(() => (field ? draftKey(sessionId, field) : null));
@@ -136,65 +141,54 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
   const [editing, setEditing] = useState(openAtFirst || Boolean(kept));
   const [draft, setDraft] = useState(kept?.draft ?? value);
   const [started, setStarted] = useState<Started>(() => (kept ? { version: kept.version, value: kept.value } : { version, value }));
-  // The field on screen now, and the editor as it last was: for a save's
-  // answer that lands later, maybe once the editor has closed or gone.
+  const [saving, setSaving] = useState(false);
+  // The field as it is on screen now, for a save's answer that lands later.
   const now = useRef<Started>({ version, value });
   now.current = { version, value };
-  const last = useRef({ draft, editing });
   useEffect(() => {
-    last.current = { draft, editing };
     if (!key) return;
     if (editing) openDrafts.set(key, { draft, ...started });
     else openDrafts.delete(key);
   }, [key, editing, draft, started]);
+  const close = () => setEditing(false);
   return {
     editing,
     draft,
     setDraft,
     started,
+    saving,
     /** Open it on the field as it is now. */
     begin: () => {
       setStarted(now.current);
       setDraft(now.current.value);
       setEditing(true);
     },
-    /** Closed, with nothing to keep. */
-    close: () => setEditing(false),
-    /** Saved: closed, and gone from the kept drafts even if the editor closed meanwhile. */
-    saved: () => {
-      if (key) openDrafts.delete(key);
-      setEditing(false);
-    },
-    /** Refused (most likely changed underneath): the text stays, as it is
-     *  now, and starts again from the field as it is now, so a deliberate
-     *  second save goes in. Not for an editor closed meanwhile. */
-    refused: () => {
+    close,
+    /**
+     * Save it with `send`, unless it is the field's text already; resolves
+     * whether it went in. Saved: closed, and gone from the kept drafts even
+     * if the editor closed meanwhile. Refused (`send` resolved false, most
+     * likely changed underneath): the text stays, and starts again from the
+     * field as it is now, so a deliberate second save goes in — unless it
+     * was closed meanwhile.
+     */
+    save: async (send: () => unknown): Promise<boolean> => {
+      if (draft === now.current.value) {
+        close();
+        return true;
+      }
+      setSaving(true);
+      const result = await send();
+      setSaving(false);
+      if (result !== false) {
+        if (key) openDrafts.delete(key);
+        close();
+        return true;
+      }
       setStarted(now.current);
-      if (key && last.current.editing) openDrafts.set(key, { draft: last.current.draft, ...now.current });
+      const open = key ? openDrafts.get(key) : undefined;
+      if (key && open) openDrafts.set(key, { ...open, ...now.current });
+      return false;
     },
   };
-}
-
-/**
- * Text being written that is saved only when sent (a comment, a reply):
- * kept among the open drafts while it holds any, so it outlives its view
- * and closing the page asks first. It is the session's on screen: another
- * session, another text.
- */
-export function useKeptText(sessionId: string | null, field: string): [string, (next: string) => void] {
-  const key = draftKey(sessionId, field);
-  const [held, setHeld] = useState(() => ({ key, text: keptText(sessionId, field) ?? '' }));
-  if (held.key !== key) setHeld({ key, text: keptText(sessionId, field) ?? '' });
-  const set = (next: string) => {
-    setHeld({ key, text: next });
-    if (next.trim()) openDrafts.set(key, { draft: next, version: undefined, value: '' });
-    else openDrafts.delete(key);
-  };
-  return [held.key === key ? held.text : (keptText(sessionId, field) ?? ''), set];
-}
-
-/** What a session holds written in a field, if anything: a reply left
- *  half written, say, to open its composer again with. */
-export function keptText(sessionId: string | null, field: string): string | undefined {
-  return openDrafts.get(draftKey(sessionId, field))?.draft;
 }
