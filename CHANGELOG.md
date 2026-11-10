@@ -87,6 +87,13 @@
   read as ready again, and its finished work dropped out of the counts.
   All three are now refused the same way, with what to do instead, and
   the task list no longer offers nesting or dropping a task into one.
+- **A dependency settled by dropping its work no longer reads as not
+  done.** The board counted dropped work as settled and showed the task
+  ready, but its brief (and the exported plan's) said the dependency was
+  "NOT DONE YET", so an implementer could wait for, or redo, work dropped
+  on purpose. Both now read it as the board does, and one dropped whole
+  is marked `[-]` with nothing of it to build on, as is a dropped subtask
+  in its parent's brief.
 
 ### Targeted checks: only what the change touched
 

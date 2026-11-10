@@ -39,8 +39,10 @@ import {
   dependents,
   effectiveBranch,
   hasDependencies,
+  droppedWhole,
   hasSubtasks,
   inheritedDeps,
+  isComplete,
   leafTasks,
   leavesUnder,
   modeFor,
@@ -960,8 +962,11 @@ function exportBriefBlocks(plan: Plan, task: Task, repoBase: string | undefined)
   if (before.length) {
     b.gap().add(`${key}:after`, TEMPLATE, 'It comes after:');
     for (const t of before) {
-      const done = leavesUnder(plan, t.id).every((l) => l.status === 'done');
-      b.add(`${key}:after:${t.id}`, field('task', t.id), `- ${done ? '[x]' : '[ ]'} ${t.id} ${t.title}`);
+      // Settled, as the board's readiness counts it: done, or dropped with a
+      // reason. All of it dropped leaves nothing to build on, and says so.
+      const dropped = droppedWhole(plan, t.id);
+      const mark = dropped ? '[-]' : isComplete(plan, t.id) ? '[x]' : '[ ]';
+      b.add(`${key}:after:${t.id}`, field('task', t.id), `- ${mark} ${t.id} ${t.title}${dropped ? ' (dropped: nothing of it to build on)' : ''}`);
     }
   }
   const after = dependents(plan, task);

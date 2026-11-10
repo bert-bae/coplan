@@ -20,9 +20,9 @@ import {
   waitingOn,
 } from '../shared/build.ts';
 import { renderBrief, renderNext } from '../daemon/brief.ts';
-import { buildPrompt, renderPlan } from '../daemon/render.ts';
+import { buildPrompt, exportText, renderPlan } from '../daemon/render.ts';
 import { parseProjectConfig } from '../shared/project.ts';
-import type { Plan, PlanInput, TaskInput } from '../shared/types.ts';
+import type { Plan, PlanInput, PlanOp, TaskInput } from '../shared/types.ts';
 
 /**
  * The build as a graph: what waits on what, what can start, what runs side
@@ -663,4 +663,35 @@ test("in a Tracked build, what is next and a task's brief carry no cycle, no lim
   assert.match(brief, /## Checks\nThe repository's checks for the files this task expects to touch — they run only for what it really changes:\n- implement: typecheck `npm run typecheck`/);
   assert.match(brief, /status: "in_progress" \| "done" \| "blocked"/);
   for (const banned of [/## The cycle/, /Review: /, /review round/, /subagent that did not write/, /each through its own cycle/]) assert.doesNotMatch(brief, banned);
+});
+
+test('a dependency whose work was dropped is settled in both briefs, as the board says', () => {
+  let plan = publishPlan(null, { title: 'x', tasks: [
+    { id: 't1', title: 'Cache layer', subtasks: [{ id: 't2', title: 'Redis client' }, { id: 't3', title: 'Memcached fallback' }] },
+    { id: 't4', title: 'API', dependsOn: ['t1'] },
+  ] }, 1_000).plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't2', status: 'done' }, { op: 'upsert_task', id: 't3', status: 'dropped', note: 'not needed' }], 'user').plan;
+  const api = plan.tasks.find((t) => t.id === 't4')!;
+  assert.equal(readinessOf(plan, api), 'ready');
+  const brief = renderBrief(plan, api, {});
+  assert.match(brief, /- \[x\] t1 Cache layer/);
+  assert.doesNotMatch(brief, /NOT DONE YET/);
+  assert.match(exportText(plan), /- \[x\] t1 Cache layer/, 'the exported brief agrees');
+  // In t1's own brief, the dropped subtask is marked as the plan marks it, not as work to do.
+  assert.match(renderBrief(plan, plan.tasks.find((t) => t.id === 't1')!, {}), /- \[-\] t3 Memcached fallback — dropped: not needed/);
+
+  // All of a dependency dropped (a leaf, or every subtask): settled, with nothing to build on.
+  for (const [what, ops] of [
+    ['a leaf', [{ op: 'upsert_task', id: 't1', status: 'dropped', note: 'replaced by a vendor library' }]],
+    ['every subtask', [{ op: 'upsert_task', id: 't2', status: 'dropped', note: 'x' }, { op: 'upsert_task', id: 't3', status: 'dropped', note: 'x' }]],
+  ] as [string, PlanOp[]][]) {
+    let p2 = publishPlan(null, { title: 'x', tasks: what === 'a leaf'
+      ? [{ id: 't1', title: 'Cache layer' }, { id: 't4', title: 'API', dependsOn: ['t1'] }]
+      : [{ id: 't1', title: 'Cache layer', subtasks: [{ id: 't2', title: 'Redis client' }, { id: 't3', title: 'Memcached fallback' }] }, { id: 't4', title: 'API', dependsOn: ['t1'] }] }, 1_000).plan;
+    p2 = applyOps(p2, ops, 'user').plan;
+    const t4 = p2.tasks.find((t) => t.id === 't4')!;
+    assert.equal(readinessOf(p2, t4), 'ready', what);
+    assert.match(renderBrief(p2, t4, {}), /- \[-\] t1 Cache layer — dropped: there is nothing of it to build on/, what);
+    assert.match(exportText(p2), /- \[-\] t1 Cache layer \(dropped: nothing of it to build on\)/, what);
+  }
 });

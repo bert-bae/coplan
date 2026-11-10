@@ -50,7 +50,7 @@ import type {
   Thread,
 } from './types.ts';
 import { BUILD_TARGETS, EDGE_ARROWS, EXECUTION_MODES, IRIC_STAGES, TASK_CHECK_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
-import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, planMode, roundVerdict, validReview } from './build.ts';
+import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, isSettled, planMode, roundVerdict, validReview } from './build.ts';
 import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from './proposal-ops.ts';
 
 /** How many review verdicts a task keeps. */
@@ -2062,7 +2062,7 @@ export function planPhase(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> &
   // is settled too: a build can end with nothing left to do.
   const tasks = plan?.tasks ?? [];
   const leaves = tasks.filter((t) => !tasks.some((c) => c.parentId === t.id));
-  if (!leaves.length || !leaves.every((t) => t.status === 'done' || t.status === 'dropped')) return 'building';
+  if (!leaves.length || !leaves.every(isSettled)) return 'building';
   // Every task done is not the build done: the final checks, the pull
   // requests and the report come after. The report closes it.
   return plan?.report ? 'built' : 'finalizing';

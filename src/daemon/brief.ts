@@ -27,11 +27,14 @@ import {
   stackStatus,
   buildSteps,
   dependents,
+  droppedWhole,
   effectiveBranch,
   effectiveReview,
   hasSubtasks,
   inheritedDeps,
+  isComplete,
   isManaged,
+  isSettled,
   leafTasks,
   leavesUnder,
   planMode,
@@ -217,7 +220,7 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
   // all done and that have none yet.
   const { open, tool } = project.pullRequests;
   if (open === 'auto' && tool !== 'none') {
-    const finished = (branch: string) => leaves.filter((t) => effectiveBranch(plan, t) === branch).every((t) => t.status === 'done' || t.status === 'dropped');
+    const finished = (branch: string) => leaves.filter((t) => effectiveBranch(plan, t) === branch).every(isSettled);
     // A stacked branch's pull request goes against the one below it, so that
     // one is opened first: until then, the branch above waits, done or not.
     // Every branch it needs, not only the one it is cut from: a branch built
@@ -334,7 +337,11 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
     const rank = new Map(buildSteps(plan).flatMap((step, i) => step.map((t) => [t.id, i] as const)));
     const leaves = leavesUnder(plan, task.id).map((t, i) => ({ t, i })).sort((a, b) => (rank.get(a.t.id) ?? 0) - (rank.get(b.t.id) ?? 0) || a.i - b.i);
     b.gap().add('subtasks', TEMPLATE, `Its subtasks — build them in this order${managedFor(plan, opts) ? ', each through its own cycle' : ''}:`);
-    for (const { t: leaf } of leaves) b.add(`subtask:${leaf.id}`, field('task', leaf.id), `- [${leaf.status === 'done' ? 'x' : ' '}] ${line(leaf)}`);
+    for (const { t: leaf } of leaves) {
+      // Dropped work is settled, and not to be built: marked as the plan marks it.
+      const mark = leaf.status === 'done' ? '[x]' : leaf.status === 'dropped' ? '[-]' : '[ ]';
+      b.add(`subtask:${leaf.id}`, field('task', leaf.id), `- ${mark} ${line(leaf)}${leaf.status === 'dropped' ? ` — dropped${leaf.note ? `: ${leaf.note}` : ''}` : ''}`);
+    }
   }
   const files = task.files?.length ? task.files : leavesUnder(plan, task.id).flatMap((t) => t.files ?? []);
   if (files.length) b.gap().add('files', task.files?.length ? me : derived("its subtasks' files"), `Files you expect to touch: ${[...new Set(files)].join(', ')}`);
@@ -352,9 +359,13 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
     if (before.length) {
       b.gap().add('comes-after', TEMPLATE, 'It comes after — build on what these did:');
       for (const t of before) {
-        const done = leavesUnder(plan, t.id).every((l) => l.status === 'done');
+        // Settled, as the board's readiness counts it: done, or dropped with
+        // a reason. All of it dropped leaves nothing to build on, and says so.
+        const dropped = droppedWhole(plan, t.id);
+        const mark = dropped ? '[-]' : isComplete(plan, t.id) ? '[x]' : '[ ] NOT DONE YET —';
+        const why = dropped ? ` — dropped: there is nothing of it to build on${t.note ? ` (${t.note})` : ''}` : t.note ? ` — ${t.note}` : '';
         const branch = effectiveBranch(plan, t);
-        b.add(`comes-after:${t.id}`, field('task', t.id), `- ${done ? '[x]' : '[ ] NOT DONE YET —'} ${line(t)}${t.note ? ` — ${t.note}` : ''}${branch ? ` · on \`${branch}\`` : ''}`);
+        b.add(`comes-after:${t.id}`, field('task', t.id), `- ${mark} ${line(t)}${why}${branch && !dropped ? ` · on \`${branch}\`` : ''}`);
       }
     }
     if (after.length) {

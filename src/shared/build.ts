@@ -97,6 +97,12 @@ export function isSettled(task: Task): boolean {
   return task.status === 'done' || task.status === 'dropped';
 }
 
+/** All of a task's work dropped: settled, with nothing of it built. */
+export function droppedWhole(plan: Tasks, id: string): boolean {
+  const leaves = leavesUnder(plan, id);
+  return leaves.length > 0 && leaves.every((t) => t.status === 'dropped');
+}
+
 /** Done means every leaf under it is settled — done, or dropped with a
  *  reason. A task that no longer exists holds nothing up. */
 export function isComplete(plan: Tasks, id: string): boolean {
