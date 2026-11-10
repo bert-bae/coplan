@@ -112,7 +112,7 @@ beforeEach(() => {
     taskMode: 'outline',
     planCheck: {},
     hideDone: false,
-    collapsedTasks: [],
+    collapsedTasks: new Map(),
     collapsedSidebar: false,
     toasts: [],
     focusTarget: null,
@@ -1640,6 +1640,26 @@ test('a submitted plan is followed by box too, beside the board, with nothing on
   assert.ok(document.querySelector('.board'));
 });
 
+test('jumping to a task unfolds the tasks over it, in its own plan, and only when one was folded', async () => {
+  await boot();
+  await act(async () => {
+    store.set({ taskMode: 'board', collapsedTasks: new Map([['s1', ['storage']], ['s2', ['storage']]]) });
+  });
+  const saved = () => window.localStorage.getItem('cc-harness:prefs');
+  const before = saved();
+  await act(async () => {
+    store.focus('task', 'storage');
+  });
+  assert.equal(store.getState().taskMode, 'outline');
+  assert.equal(saved(), before, 'nothing over it to unfold: nothing saved');
+  await act(async () => {
+    store.focus('task', 't2');
+  });
+  assert.ok(screen.getByRole('treeitem', { name: /Invalidation/ }), 'shown to scroll to');
+  assert.deepEqual([...store.getState().collapsedTasks], [['s2', ['storage']]], "another plan's fold stays");
+  assert.match(saved() ?? '', /"taskMode":"outline"/, 'saved with the outline it opened');
+});
+
 test("a box's task on a submitted plan opens its card on the board", async () => {
   await boot(makeSession(lockedPlan(true)));
   await act(async () => {
@@ -1824,6 +1844,36 @@ test('a proposal shown on the canvas marks what it adds and changes, and saves n
     fireEvent.click(screen.getAllByRole('button', { name: 'Close preview' })[0]!);
   });
   assert.equal(document.querySelector('.react-flow__node.diff-added'), null);
+});
+
+test('what is folded or previewed in one plan stays with it, though another plan uses the same ids', async () => {
+  const other = makeSession(proposed(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(proposed()), (route) => (route === '/api/session/s2' ? { session: other } : undefined));
+  // Booleans: a failed assertion on an element would print all of the DOM it hangs in.
+  const subtask = () => screen.queryByRole('treeitem', { name: /Cache client/ }) !== null;
+  // In s1: its proposal on the canvas, and its Storage layer folded.
+  await act(async () => {
+    fireEvent.click(within(screen.getByRole('article', { name: 'Put Redis in front of Postgres' })).getByRole('button', { name: 'Show on canvas' }));
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Hide subtasks of Storage layer' }));
+  });
+  assert.equal(subtask(), false);
+  // s2's plan has a Storage layer and a p1 of its own.
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  assert.ok(subtask(), 'its Storage layer is not folded');
+  await openTab('Architecture');
+  assert.equal(document.querySelector('.react-flow__node.diff-added') !== null, false, 'nor its p1 previewed');
+  assert.ok(!screen.queryAllByRole('status').some((x) => /Previewing p1/.test(x.textContent ?? '')));
+  // Back in s1, its fold is as the user left it.
+  await act(async () => {
+    await store.selectSession('s1');
+  });
+  await openTab('Tasks');
+  assert.equal(subtask(), false);
 });
 
 test('a proposal the plan has moved past cannot be accepted, and says what moved', async () => {

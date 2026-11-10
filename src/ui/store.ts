@@ -55,8 +55,9 @@ export interface UiState {
   taskMode: TaskMode;
   /** Hide finished tasks in the outline. */
   hideDone: boolean;
-  /** Tasks whose subtasks are folded away in the outline, by id. */
-  collapsedTasks: string[];
+  /** Tasks whose subtasks are folded away in the outline, by session, then
+   *  task id: task ids repeat across plans. The most recently folded last. */
+  collapsedTasks: Map<string, string[]>;
   collapsedSidebar: boolean;
   /** The narrow-width sidebar drawer. Never persisted. */
   drawerOpen: boolean;
@@ -97,7 +98,7 @@ const initial: UiState = {
   connection: 'connecting',
   taskMode: 'outline',
   hideDone: false,
-  collapsedTasks: [],
+  collapsedTasks: new Map(),
   collapsedSidebar: false,
   drawerOpen: false,
   pinned: [],
@@ -118,6 +119,8 @@ const initial: UiState = {
 };
 
 const PREFS_KEY = 'cc-harness:prefs';
+/** Sessions whose folded tasks are remembered, the most recently folded. */
+const FOLDS_KEPT = 100;
 
 /**
  * A tiny external store read through `useSyncExternalStore`.
@@ -193,7 +196,7 @@ class Store {
       if (typing instanceof HTMLInputElement || typing instanceof HTMLTextAreaElement) typing.blur();
     }
     if (updateHash) window.location.hash = `#/session/${id}`;
-    this.set({ sessionId: id, session: null, planCheck: {}, diagramId: null, error: null, exportOpen: false });
+    this.set({ sessionId: id, session: null, planCheck: {}, diagramId: null, proposalPreview: null, error: null, exportOpen: false });
     this.connect();
     try {
       const { session, planCheck, configErrors, projectChecks } = await api.session(id);
@@ -519,7 +522,10 @@ class Store {
         ancestors.add(cursor);
         cursor = tasks.find((t) => t.id === cursor)?.parentId ?? null;
       }
-      this.set({ collapsedTasks: this.state.collapsedTasks.filter((t) => !ancestors.has(t)), taskMode: 'outline' });
+      this.set({ taskMode: 'outline' });
+      const sessionId = this.state.session?.sessionId;
+      const folded = sessionId ? this.state.collapsedTasks.get(sessionId) : undefined;
+      if (sessionId && folded?.some((t) => ancestors.has(t))) this.setCollapsed(sessionId, folded.filter((t) => !ancestors.has(t)));
     }
     this.set({ tab, focusTarget: `${kind}:${id}` });
   }
@@ -566,7 +572,7 @@ class Store {
       statusFilter: this.state.statusFilter,
       taskMode: this.state.taskMode,
       hideDone: this.state.hideDone,
-      collapsedTasks: this.state.collapsedTasks,
+      collapsedTasks: [...this.state.collapsedTasks],
     });
   }
 
@@ -586,11 +592,21 @@ class Store {
     this.persistPrefs();
   }
 
-  toggleTaskCollapsed(id: string): void {
-    const collapsedTasks = this.state.collapsedTasks.includes(id)
-      ? this.state.collapsedTasks.filter((t) => t !== id)
-      : [...this.state.collapsedTasks, id];
-    this.set({ collapsedTasks });
+  /** Fold or unfold a task in the outline of the session the asking view
+   *  shows (useSessionId), whatever is on screen by then. */
+  toggleTaskCollapsed(sessionId: string | null, id: string): void {
+    if (!sessionId) return;
+    const now = this.state.collapsedTasks.get(sessionId) ?? [];
+    this.setCollapsed(sessionId, now.includes(id) ? now.filter((t) => t !== id) : [...now, id]);
+  }
+
+  /** Fold these in a session's outline. It becomes the most recently
+   *  folded, and only the FOLDS_KEPT most recent sessions' folds are kept. */
+  private setCollapsed(sessionId: string, tasks: string[]): void {
+    const folds = new Map(this.state.collapsedTasks);
+    folds.delete(sessionId);
+    if (tasks.length) folds.set(sessionId, tasks);
+    this.set({ collapsedTasks: new Map([...folds].slice(-FOLDS_KEPT)) });
     this.persistPrefs();
   }
 
@@ -642,10 +658,12 @@ class Store {
     }
     const sessions = this.state.sessions.filter((s) => s.sessionId !== sessionId);
     pruneDrafts(sessionId, null);
-    this.set({ sessions, pinned: this.state.pinned.filter((id) => id !== sessionId) });
+    const collapsedTasks = new Map(this.state.collapsedTasks);
+    collapsedTasks.delete(sessionId);
+    this.set({ sessions, pinned: this.state.pinned.filter((id) => id !== sessionId), collapsedTasks });
     this.persistPrefs();
     if (this.state.sessionId === sessionId) {
-      this.set({ sessionId: null, session: null });
+      this.set({ sessionId: null, session: null, proposalPreview: null });
       window.location.hash = '';
       const next = listedSessions(sessions, null)[0]?.sessionId;
       if (next) await this.selectSession(next);
@@ -798,7 +816,15 @@ function loadPrefs(): Partial<UiState> {
     if (typeof saved['collapsedSidebar'] === 'boolean') prefs.collapsedSidebar = saved['collapsedSidebar'];
     if (Array.isArray(saved['pinned'])) prefs.pinned = strings(saved['pinned']);
     if (Array.isArray(saved['collapsedProjects'])) prefs.collapsedProjects = strings(saved['collapsedProjects']);
-    if (Array.isArray(saved['collapsedTasks'])) prefs.collapsedTasks = strings(saved['collapsedTasks']);
+    // [session, task ids] pairs, the most recently folded last. A bare task
+    // id (kept before folds were by session) is no session's: dropped.
+    if (Array.isArray(saved['collapsedTasks'])) {
+      const folds = saved['collapsedTasks']
+        .filter((e): e is [string, unknown] => Array.isArray(e) && typeof e[0] === 'string')
+        .map(([id, tasks]): [string, string[]] => [id, strings(tasks)])
+        .filter(([, tasks]) => tasks.length > 0);
+      prefs.collapsedTasks = new Map(folds.slice(-FOLDS_KEPT));
+    }
     if (saved['taskMode'] === 'outline' || saved['taskMode'] === 'board' || saved['taskMode'] === 'boxes') prefs.taskMode = saved['taskMode'];
     if (typeof saved['hideDone'] === 'boolean') prefs.hideDone = saved['hideDone'];
     if ((PLAN_STATUSES as readonly unknown[]).includes(saved['statusFilter'])) prefs.statusFilter = saved['statusFilter'] as PlanStatus;
@@ -846,6 +872,14 @@ export function useSession(): SessionState | null {
 }
 
 const ShownSession = createContext<string | null>(null);
+
+const NO_FOLDS: readonly string[] = [];
+
+/** The tasks folded away in the outline of the plan the view shows. */
+export function useCollapsedTasks(): readonly string[] {
+  const sessionId = useSessionId();
+  return useStore((s) => (sessionId && s.collapsedTasks.get(sessionId)) || NO_FOLDS);
+}
 
 /** The session whose plan the view shows, as it rendered: what its edits
  *  and sign-offs go to, whatever is on screen by the time they are sent. */

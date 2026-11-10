@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
-import { store, useEdit, useAgent, usePlan, useStillShown, useStore } from '../store.ts';
+import { store, useCollapsedTasks, useEdit, useAgent, usePlan, useSessionId, useStillShown, useStore } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
 import { CommentToggle, ThreadPanel, useThreads } from '../components/Threads.tsx';
 import { Focusable } from '../components/Item.tsx';
@@ -422,7 +422,8 @@ function IricBadges({ task }: { task: Task }) {
 
 function Outline({ plan, hideDone }: { plan: Plan; hideDone: boolean }) {
   const edit = useEdit();
-  const collapsed = useStore((s) => s.collapsedTasks);
+  const sessionId = useSessionId();
+  const collapsed = useCollapsedTasks();
   const [dragging, setDragging] = useState<string | null>(null);
   const [hint, setHint] = useState<{ id: string; zone: DropZone } | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -480,7 +481,7 @@ function Outline({ plan, hideDone }: { plan: Plan; hideDone: boolean }) {
     if (!id || !zone) return;
     const op = dropOp(id, target, zone);
     if (!op) return;
-    if (zone === 'inside' && collapsed.includes(target.id)) store.toggleTaskCollapsed(target.id);
+    if (zone === 'inside' && collapsed.includes(target.id)) store.toggleTaskCollapsed(sessionId, target.id);
     void edit(op);
   };
 
@@ -556,7 +557,8 @@ function TaskRow(props: {
   const edit = useEdit();
   const stillShown = useStillShown();
   const { plan, task, depth, number, expanded } = props;
-  const collapsed = useStore((s) => s.collapsedTasks.includes(task.id));
+  const sessionId = useSessionId();
+  const collapsed = useCollapsedTasks().includes(task.id);
   const [comments, setComments] = useState(false);
   const kids = childrenOf(plan, task.id);
   // A parent is as far along as its subtasks: its row reads as its dot does.
@@ -626,7 +628,7 @@ function TaskRow(props: {
             type="button"
             className="twisty"
             aria-label={collapsed ? `Show subtasks of ${task.title}` : `Hide subtasks of ${task.title}`}
-            onClick={() => store.toggleTaskCollapsed(task.id)}
+            onClick={() => store.toggleTaskCollapsed(sessionId, task.id)}
           >
             {collapsed ? '▸' : '▾'}
           </button>
@@ -725,7 +727,7 @@ function TaskRow(props: {
             onCancel={props.onCloseAdd}
             onAdd={async (title) => {
               const ok = await edit({ op: 'upsert_task', parentId: task.id, title });
-              if (ok && collapsed && stillShown()) store.toggleTaskCollapsed(task.id);
+              if (ok && collapsed && stillShown()) store.toggleTaskCollapsed(sessionId, task.id);
               return ok;
             }}
           />

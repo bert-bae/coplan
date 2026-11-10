@@ -218,6 +218,13 @@
   and its note flagged by the parent's own stored status, so a parent
   whose subtasks were all done could still read as to do (or blocked), in
   the outline and in "By box".
+- **What is folded or previewed stays with its plan.** Folding a task in
+  one plan's outline folded the task of the same id in every other plan,
+  and a proposal shown on the canvas stayed shown in the next session
+  opened, on its proposal of the same id. Folds are now remembered per
+  session (for the 100 folded in most recently), and opening another
+  session closes a preview. Folds remembered from before are not carried
+  over.
 
 ### Targeted checks: only what the change touched
 

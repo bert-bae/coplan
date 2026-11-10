@@ -299,12 +299,12 @@ test('deleting the open session moves to another one', async () => {
   assert.equal(store.getState().sessionId, 's2');
 });
 
-test('deleting a session forgets the pin hanging off it', async () => {
+test('deleting a session forgets the pin and the folds hanging off it', async () => {
   await boot();
   // Flushed before the click: pinning re-parents the row into the Pinned
   // group, which remounts it and would drop the confirm mid-test.
   await act(async () => {
-    store.set({ pinned: ['s2'] });
+    store.set({ pinned: ['s2'], collapsedTasks: new Map([['s1', ['t1']], ['s2', ['t1']]]) });
   });
 
   await act(async () => {
@@ -316,6 +316,7 @@ test('deleting a session forgets the pin hanging off it', async () => {
 
   // Nothing else will ever clean it up: the session id is gone for good.
   assert.deepEqual(store.getState().pinned, []);
+  assert.deepEqual([...store.getState().collapsedTasks.keys()], ['s1'], "another session's stay");
 });
 
 test('collapsing the sidebar narrows the column it sits in', async () => {
