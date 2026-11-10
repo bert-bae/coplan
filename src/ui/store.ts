@@ -383,15 +383,40 @@ class Store {
   }
 
   /**
+   * A sign-off for the session on screen: the daemon's answer, that
+   * session's agent, and whether it is still on screen. What is done after
+   * the answer — moving the page, saying what happened — is for the
+   * session it was made on, which the user may have left by then.
+   */
+  private async signOff(
+    call: (sessionId: string) => Promise<{ plan: Plan }>,
+  ): Promise<{ plan: Plan; agent: AgentInfo; shown: () => boolean; say: (kind: Toast['kind'], text: string) => void } | null> {
+    const id = this.state.sessionId;
+    const agent = agentInfo(this.state.session?.agent);
+    const plan = await this.send(id, call);
+    if (!plan) return null;
+    const shown = () => this.isShown(id);
+    // Said over another session, it names the plan it is about.
+    const say = (kind: Toast['kind'], text: string) => this.toast(kind, shown() ? text : `"${plan.title}": ${text}`);
+    return { plan, agent, shown, say };
+  }
+
+  /** Whether a session is the one on screen: selected, loaded or still loading. */
+  isShown(sessionId: string | null): boolean {
+    return sessionId !== null && this.state.sessionId === sessionId;
+  }
+
+  /**
    * Sign the plan off. From here it is locked and the page follows the build
    * on the board. Resolves false when the daemon refused — most often
    * because the plan moved on since the preview was made.
    */
   async submitPlan(input: { target: BuildTarget; mode?: ExecutionMode; note: string; expect: number; hash?: string; settings?: BuildSettings }): Promise<boolean> {
-    if (!(await this.send(this.state.sessionId, (id) => api.submitPlan(id, input)))) return false;
-    this.set({ tab: 'tasks', taskMode: 'board' });
-    const agent = agentInfo(this.state.session?.agent);
-    this.toast(
+    const done = await this.signOff((id) => api.submitPlan(id, input));
+    if (!done) return false;
+    const { agent } = done;
+    if (done.shown()) this.set({ tab: 'tasks', taskMode: 'board' });
+    done.say(
       'success',
       input.target !== 'session'
         ? 'Plan submitted and locked. Paste the prompt where it will be built.'
@@ -404,14 +429,14 @@ class Store {
 
   /** Unlock a submitted plan for changes. The design stays confirmed. */
   async reopenPlan(): Promise<boolean> {
-    const plan = await this.send(this.state.sessionId, (id) => api.reopenPlan(id));
-    if (!plan) return false;
-    const name = agentInfo(this.state.session?.agent).name;
-    this.toast(
+    const done = await this.signOff((id) => api.reopenPlan(id));
+    if (!done) return false;
+    const { plan, agent } = done;
+    done.say(
       'info',
       plan.design
-        ? `The tasks are open for changes again; the design stays confirmed. Tell ${name} in chat once you have changed them.`
-        : `The plan is open for changes again. Tell ${name} in chat once you have changed it.`,
+        ? `The tasks are open for changes again; the design stays confirmed. Tell ${agent.name} in chat once you have changed them.`
+        : `The plan is open for changes again. Tell ${agent.name} in chat once you have changed it.`,
     );
     return true;
   }
@@ -421,9 +446,10 @@ class Store {
    * a task list with the user's next message.
    */
   async confirmDesign(input: { note: string; expect: number; hash?: string }): Promise<boolean> {
-    if (!(await this.send(this.state.sessionId, (id) => api.confirmDesign(id, input)))) return false;
-    const agent = agentInfo(this.state.session?.agent);
-    this.toast(
+    const done = await this.signOff((id) => api.confirmDesign(id, input));
+    if (!done) return false;
+    const { agent } = done;
+    done.say(
       'success',
       agent.promptContext
         ? `Design confirmed. Send any message in ${agent.name} to have it make the task list.`
@@ -438,10 +464,11 @@ class Store {
    * starts a turn.
    */
   async queueRevision(input: { note: string; expect: number; hash?: string }, opts: { quiet?: boolean } = {}): Promise<boolean> {
-    if (!(await this.send(this.state.sessionId, (id) => api.queueRevision(id, input)))) return false;
+    const done = await this.signOff((id) => api.queueRevision(id, input));
+    if (!done) return false;
     if (opts.quiet) return true;
-    const agent = agentInfo(this.state.session?.agent);
-    this.toast(
+    const { agent } = done;
+    done.say(
       'success',
       agent.promptContext
         ? `Request queued. Send any message in ${agent.name}'s chat — "go" will do — and it goes with it.`
@@ -452,15 +479,17 @@ class Store {
 
   /** Take back a revision request the agent has not been sent. */
   async withdrawRevision(): Promise<boolean> {
-    if (!(await this.send(this.state.sessionId, (id) => api.withdrawRevision(id)))) return false;
-    this.toast('info', 'Request withdrawn: it will not be sent.');
+    const done = await this.signOff((id) => api.withdrawRevision(id));
+    if (!done) return false;
+    done.say('info', 'Request withdrawn: it will not be sent.');
     return true;
   }
 
   /** Unlock a confirmed design so it can be reshaped. */
   async reopenDesign(): Promise<boolean> {
-    if (!(await this.send(this.state.sessionId, (id) => api.reopenDesign(id)))) return false;
-    this.toast('info', `The design is open for changes again. Tell ${agentInfo(this.state.session?.agent).name} in chat once you have changed it.`);
+    const done = await this.signOff((id) => api.reopenDesign(id));
+    if (!done) return false;
+    done.say('info', `The design is open for changes again. Tell ${done.agent.name} in chat once you have changed it.`);
     return true;
   }
 
@@ -835,6 +864,16 @@ export function SessionScope({ children }: { children: ReactNode }) {
 export function useCommit(): (ops: PlanOp[]) => Promise<Plan | null> {
   const sessionId = useContext(ShownSession);
   return useCallback((ops) => store.commit(ops, sessionId), [sessionId]);
+}
+
+/**
+ * Whether the session this view showed when it rendered is still on screen.
+ * What a view does once an answer comes (focus a row, expand a task, close
+ * a preview) is for that session only: ids like t3 repeat across plans.
+ */
+export function useStillShown(): () => boolean {
+  const sessionId = useContext(ShownSession);
+  return useCallback(() => store.isShown(sessionId), [sessionId]);
 }
 
 /** One edit, by `useCommit`, for callers that only need to know it was taken. */

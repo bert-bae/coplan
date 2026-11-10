@@ -113,18 +113,23 @@ test('an answer older than what the page already shows is not put in place', asy
 
 test('an answer for a session the user has since left never lands on the one on screen', async () => {
   await show('s6', 'claude');
-  await show('s7', 'claude');
+  // Another agent's session, so what is said can only be about one of them.
+  await show('s7', 'cursor');
   const onScreen = shownPlan();
   for (const s of SIGN_OFFS) {
     await show('s6', 'claude');
     let land: (value: unknown) => void = () => {};
     answer = () => new Promise((resolve) => (land = resolve));
     const pending = s.run();
-    await show('s7', 'claude');
+    await show('s7', 'cursor');
+    store.setTab('overview');
     land({ plan: { ...PLAN, version: 99, title: `s6 after ${s.name}` } });
     await pending;
     assert.equal(store.getState().sessionId, 's7');
     assert.deepEqual(shownPlan(), onScreen, `${s.name}'s answer for s6 leaves s7 alone`);
+    assert.equal(store.getState().tab, 'overview', `${s.name} does not move the page s7 is on`);
+    assert.match(lastToast()?.text ?? '', new RegExp(`^"s6 after ${s.name}": `), `${s.name} says which plan it is about`);
+    assert.doesNotMatch(lastToast()?.text ?? '', /Cursor/, `${s.name} speaks of s6's agent, not s7's`);
   }
 });
 

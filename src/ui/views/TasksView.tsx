@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
-import { store, useEdit, useAgent, usePlan, useStore } from '../store.ts';
+import { store, useEdit, useAgent, usePlan, useStillShown, useStore } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
 import { CommentToggle, ThreadPanel, useThreads } from '../components/Threads.tsx';
 import { Focusable } from '../components/Item.tsx';
@@ -553,6 +553,7 @@ function TaskRow(props: {
   tracking: boolean;
 }) {
   const edit = useEdit();
+  const stillShown = useStillShown();
   const { plan, task, depth, number, expanded } = props;
   const collapsed = useStore((s) => s.collapsedTasks.includes(task.id));
   const [comments, setComments] = useState(false);
@@ -589,8 +590,10 @@ function TaskRow(props: {
     if (!op) return;
     e.preventDefault();
     void edit(op).then(() => {
-      // Keep the keyboard on the row it moved.
-      window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`#task-${task.id} .task-line`)?.focus());
+      // Keep the keyboard on the row it moved — in its own plan, still on screen.
+      window.requestAnimationFrame(() => {
+        if (stillShown()) document.querySelector<HTMLElement>(`#task-${task.id} .task-line`)?.focus();
+      });
     });
   };
 
@@ -719,7 +722,7 @@ function TaskRow(props: {
             onCancel={props.onCloseAdd}
             onAdd={async (title) => {
               const ok = await edit({ op: 'upsert_task', parentId: task.id, title });
-              if (ok && collapsed) store.toggleTaskCollapsed(task.id);
+              if (ok && collapsed && stillShown()) store.toggleTaskCollapsed(task.id);
               return ok;
             }}
           />

@@ -13,7 +13,7 @@ setupDom();
 
 const { render, renderHook, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
-const { store, SessionScope, useEdit } = await import('../ui/store.ts');
+const { store, SessionScope, useEdit, useStillShown } = await import('../ui/store.ts');
 const { openDrafts } = await import('../ui/lib/drafts.ts');
 const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan, confirmDesign, queueRevision, markRevisionDelivered } = await import('../shared/plan.ts');
 
@@ -2052,6 +2052,19 @@ test('an edit made while one plan was on screen goes to that plan, however late 
     await result.current({ op: 'set_meta', title: 'Made on s2' });
   });
   assert.deepEqual(sentTo('s2').map((o) => o['title']), ['Made on s2'], 'and one made there now goes there');
+});
+
+test('what a view does after an answer is only for the plan it showed: never another on screen by then', async () => {
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => (route === '/api/session/s2' ? { session: other } : undefined));
+  const { result } = renderHook(() => useStillShown(), { wrapper: SessionScope });
+  const onS1 = result.current;
+  assert.equal(onS1(), true);
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  assert.equal(onS1(), false, 's1 is no longer on screen: its row is not focused, its task not expanded');
+  assert.equal(result.current(), true, 'and the view now on s2 is');
 });
 
 test('the task list offers no nesting under a task already started or finished', async () => {

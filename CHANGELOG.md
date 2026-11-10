@@ -202,6 +202,12 @@
   half-typed; the Escape that drops a choice threw the whole edit away, or
   closed the sign-off dialog. While the input method is composing, the
   fields and dialogs now leave its keys alone; the next Enter saves.
+- **A late answer leaves the session you moved to alone.** Submitting a
+  plan, then opening another session before the answer came, moved that
+  other session's page to its board and named its agent in the message;
+  moving or adding a task there could focus or expand a task of the same
+  id in it. What follows an answer is now done only for the session it
+  was made on, and a message about it, shown over another, names its plan.
 
 ### Targeted checks: only what the change touched
 

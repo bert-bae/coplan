@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { store, useCommit, useEdit, useAgent, usePlan, useStore } from '../store.ts';
+import { store, useCommit, useEdit, useAgent, usePlan, useStillShown, useStore } from '../store.ts';
 import { InlineText, MarkdownField } from '../components/Editable.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { ThreadPanel } from '../components/Threads.tsx';
@@ -211,13 +211,14 @@ function ProposalPreviewView({ plan, proposal, after, chosen }: { plan: Plan; pr
 
 function NewDiagram() {
   const commit = useCommit();
+  const stillShown = useStillShown();
   const [open, setOpen] = useState(false);
   const add = async (t: (typeof TEMPLATES)[number]) => {
     setOpen(false);
     const before = new Set(store.getState().session?.plan?.diagrams.map((d) => d.id));
     // Found in the daemon's answer: the plan on screen by then may be another.
     const made = (await commit([{ op: 'upsert_diagram', title: t.title, nodes: t.nodes, edges: t.edges }]))?.diagrams.find((d) => !before.has(d.id));
-    if (made) store.set({ diagramId: made.id });
+    if (made && stillShown()) store.set({ diagramId: made.id });
   };
   return (
     <div className="add-menu">
