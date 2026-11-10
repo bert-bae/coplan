@@ -831,5 +831,3 @@ function discardDir(dir: string): void {
     /* not worth failing over */
   }
 }
-
-export { sanitizeId };
