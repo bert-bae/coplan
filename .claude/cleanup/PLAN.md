@@ -67,7 +67,7 @@ the audit's finding numbers.
 | Row | What | Phase | Status | Commit |
 |-----|------|-------|--------|--------|
 | T1 | Test: a prompt the agent never got is taken back and handed over again; an edit in between blocks the take-back [18] | 0 safety net | done | acaa33a |
-| T1b | Test through the hook route: a UserPromptSubmit whose relay gives up before the answer leaves keeps the prompt to deliver again (daemon/main.ts:1066-1110: close listener, `writableFinished`) [18] | 0 safety net | blocked: the route's take-back never fires (0 of 30), so there is nothing working to pin; the test is F19's | |
+| T1b | Test through the hook route: a UserPromptSubmit whose relay gives up before the answer leaves keeps the prompt to deliver again (daemon/main.ts:1066-1110: close listener, `writableFinished`) [18] | 0 safety net | done in F19 (the take-back never fired, so the test came with the fix) | 5afa339 |
 | T2 | Test: the live stream reconnects after an error (new ticket, new stream, session fetched again) and stops on 401 [18] | 0 safety net | done | 36e9fe2 |
 | T3 | Test: each daemon sign-off route answers a refusal with 409 and the right text (pins [19c] before it moves) | 0 safety net | done | ee49ed6 |
 | T4 | Test: the browser store's six sign-off actions adopt the plan, toast, and return false on refusal (pins [19d]) | 0 safety net | done | 6b72ecc |
@@ -78,7 +78,7 @@ the audit's finding numbers.
 | F5 | Delivering the build prompt marks the user's later changes as read [5b] | 1 must fix | done | 9377052 |
 | F6 | An agent push wipes what the user is typing in the box panel [3] | 1 must fix | done | 61e8112 |
 | F7 | Saving the summary, box notes or a caption silently overwrites the agent's newer text [4]. D1: warn only | 1 must fix | done | 1e718e6 |
-| F19 | A sign-off is marked delivered when the relay gave up while the daemon was busy, so the agent never gets it (found by T1b). See *F19* below | 1 must fix | open | |
+| F19 | A sign-off is marked delivered when the relay gave up while the daemon was busy, so the agent never gets it (found by T1b). See *F19* below | 1 must fix | done | 5afa339 |
 | F20 | A proposal's staleness checks only the item each op names (and diagrams without their links), so accepting a proposed task removal or `builds` can take subtasks, dependencies or box links the user changed after it was proposed (`proposalTouches`, src/shared/plan.ts; found reviewing F4) | 2 should fix | open | |
 | F21 | An editor left open while switching session saves into the session now on screen: the views are keyed by tab only, and task ids repeat across plans, so the summary, a section or a task can get another plan's text (src/ui/App.tsx:96, src/ui/views/*; found reviewing F7) | 2 should fix | open | |
 | F8 | `coplan init` writes `yarn check` / `bun test` / `pnpm ci`: always use `<pm> run <script>` [7] | 2 should fix | open | |
