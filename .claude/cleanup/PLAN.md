@@ -82,7 +82,7 @@ the audit's finding numbers.
 | F20 | A proposal's staleness checks only the item each op names (and diagrams without their links), so accepting a proposed task removal or `builds` can take subtasks, dependencies or box links the user changed after it was proposed (`proposalTouches`, src/shared/plan.ts; found reviewing F4) | 2 should fix | done | 61b05ee |
 | F21 | An editor left open while switching session saves into the session now on screen: the views are keyed by tab only, and task ids repeat across plans, so the summary, a section or a task can get another plan's text (src/ui/App.tsx:96, src/ui/views/*; found reviewing F7). In fact the views unmount on a switch; the gap was a focused field's blur save | 2 should fix | done | 11f4110 |
 | F8 | `coplan init` writes `yarn check` / `bun test` / `pnpm ci`: always use `<pm> run <script>` [7] | 2 should fix | done | a65c44f |
-| F9 | A Codex session first seen through MCP gets the daemon's folder: another repo's checks and git [9] | 2 should fix | open | |
+| F9 | A Codex session first seen through MCP gets the daemon's folder: another repo's checks and git [9] | 2 should fix | done | f7fe757 |
 | F10 | Plan sessions drop off the browser's list once 60 other sessions are newer [8] | 2 should fix | open | |
 | F11 | A republish is refused for a box link to a task the agent dropped [10] | 2 should fix | open | |
 | F12 | `move_task` makes a finished task a parent, and its finished work disappears [11] | 2 should fix | open | |
