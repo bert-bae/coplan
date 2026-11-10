@@ -228,6 +228,31 @@ test('a session saved by a newer Coplan is never read wrongly or saved over', as
   assert.equal((JSON.parse(readFileSync(path.join(home, 'sessions', 'today', 'state.json'), 'utf8')) as { schemaVersion?: number }).schemaVersion, 1);
 });
 
+test('a newer Coplan\'s session is not saved over under an id its folder name changes', async () => {
+  // Session ids become folder names with anything unsafe made safe: `a/b` is kept in `a_b`.
+  const dir = path.join(home, 'sessions', 'from_the_future');
+  mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'state.json');
+  const future = JSON.stringify({ schemaVersion: 99, sessionId: 'from/the/future', title: 'x', plan: { shape: 'new' } });
+  writeFileSync(file, future);
+  const store = await freshStore();
+  store.ensure('from/the/future', process.cwd());
+  store.publishPlan('from/the/future', PLAN);
+  store.persistNow('from/the/future');
+  store.persistAll();
+  assert.equal(readFileSync(file, 'utf8'), future);
+
+  // And one that appears after the store started, found when its first hook arrives.
+  const later = path.join(home, 'sessions', 'also_from_the_future');
+  mkdirSync(later, { recursive: true });
+  const laterFile = path.join(later, 'state.json');
+  writeFileSync(laterFile, future);
+  store.ensure('also/from/the/future', process.cwd());
+  store.publishPlan('also/from/the/future', PLAN);
+  store.persistNow('also/from/the/future');
+  assert.equal(readFileSync(laterFile, 'utf8'), future);
+});
+
 test('a prompt that never reached the agent is taken back and handed over again, unless the plan moved since', async () => {
   const store = await freshStore();
   store.ensure('handover', process.cwd());

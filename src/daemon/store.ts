@@ -104,7 +104,8 @@ const NEWER = Symbol('newer');
 export class SessionStore extends EventEmitter {
   private sessions = new Map<string, SessionState>();
   private persistTimers = new Map<string, NodeJS.Timeout>();
-  /** Sessions on disk in a newer format than this build writes. */
+  /** Session folders (`sanitizeId` names) in a newer format than this
+   *  build writes: never written to, whichever id they are reached by. */
   private foreign = new Set<string>();
   /** The last write failure said for each session, so it is said once. */
   private persistFailed = new Map<string, string>();
@@ -221,7 +222,7 @@ export class SessionStore extends EventEmitter {
 
   persistNow(id: string): void {
     const state = this.sessions.get(id);
-    if (!state || this.foreign.has(id)) return;
+    if (!state || this.foreign.has(sanitizeId(id))) return;
     try {
       const dir = paths.sessionDir(id);
       mkdirSync(dir, { recursive: true });
@@ -268,7 +269,7 @@ export class SessionStore extends EventEmitter {
     if (!state) {
       const saved = readState(paths.sessionState(id));
       // A newer build's session is served blank from memory, never saved.
-      if (saved === NEWER) this.foreign.add(id);
+      if (saved === NEWER) this.foreign.add(sanitizeId(id));
       // No folder (a Codex tool call, whose hooks are not trusted yet) is
       // left unknown: the daemon's own is some other session's repository,
       // and its checks, base branch and git would be taken for this one's.
