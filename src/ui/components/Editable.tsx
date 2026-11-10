@@ -27,7 +27,7 @@ export function InlineText({
   value: string;
   /** Resolves false when the save was refused; the field then reopens with
    *  the text intact, so nothing typed is lost. */
-  onSave: (next: string, version: number | undefined) => void | Promise<unknown>;
+  onSave: (next: string, version: number | undefined, was: string) => void | Promise<unknown>;
   /** Accessible name for both the display and the input. */
   label: string;
   placeholder?: string;
@@ -36,7 +36,8 @@ export function InlineText({
   /** Shown, not editable: the plan is locked. */
   readOnly?: boolean;
   /** The item's revision, captured when editing starts and handed back on
-   *  save, so a save over someone else's newer change is refused. */
+   *  save, so a save over someone else's newer change is refused. The text
+   *  editing started from is handed back too (`was`). */
   version?: number;
 }) {
   const [editing, setEditing] = useState(false);
@@ -45,6 +46,9 @@ export function InlineText({
   const startedAt = useRef<number | undefined>(version);
   const latest = useRef<number | undefined>(version);
   latest.current = version;
+  const startedFrom = useRef(value);
+  const shown = useRef(value);
+  shown.current = value;
   const input = useRef<HTMLInputElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   /** Finished from the keyboard: the keyboard stays on the text. */
@@ -65,6 +69,7 @@ export function InlineText({
   const start = () => {
     done.current = false;
     startedAt.current = version;
+    startedFrom.current = value;
     setDraft(value);
     setEditing(true);
   };
@@ -74,12 +79,13 @@ export function InlineText({
     setEditing(false);
     const next = draft.trim();
     if (!next || next === value) return;
-    void Promise.resolve(onSave(next, startedAt.current)).then((result) => {
+    void Promise.resolve(onSave(next, startedAt.current, startedFrom.current)).then((result) => {
       if (result !== false) return;
       // Refused (most likely changed underneath): reopen with the text, on
       // the revision now on screen, so a deliberate second save goes in.
       done.current = false;
       startedAt.current = latest.current;
+      startedFrom.current = shown.current;
       setDraft(next);
       setEditing(true);
     });

@@ -749,7 +749,7 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
           placeholder="One line — what it's blocked on, or what was done"
           label="Status note"
           version={revOf(task)}
-          onSave={(note, rev) => edit({ op: 'upsert_task', id: task.id, note, ...expecting(rev) })}
+          onSave={(note, rev, was) => edit({ op: 'upsert_task', id: task.id, note, noteWas: was, ...expecting(rev) })}
         />
       </div>
       <div className="field-col">

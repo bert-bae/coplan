@@ -340,6 +340,12 @@
   Checking each one against your unread edits copied the whole plan, so on
   a big plan a batch held Coplan for up to half a second. It now works out
   which box links would change without the copy.
+- **Your old note no longer saves over the agent's newer one.** A note
+  the agent sends with a status ("Blocked: DB creds missing") changes the
+  task without moving its revision, so a note editor you had open from
+  before saved over it without a word. The note editor now saves with the
+  note it started from, and is refused if the note has changed since;
+  your other open editors on that task are not held up by it.
 - **A save made against a version the item never had says so.** A save
   carries the revision it was made on; one the item had never reached (a
   page still holding a plan since replaced, say) was refused as "changed

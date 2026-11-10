@@ -642,6 +642,9 @@ export type PlanOp =
       /** The task's `rev` the edit was made against. Refused if the other
        *  side has changed the task since. */
       expect?: number;
+      /** The page's note editor: the note it started from. Refused if the
+       *  note changed since — a progress note moves no revision. */
+      noteWas?: string;
     }
   | { op: 'move_task'; id: string; parentId: string | null; index: number }
   | { op: 'move_section'; id: string; index: number }

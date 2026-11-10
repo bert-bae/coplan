@@ -1212,7 +1212,9 @@ function arrowId(d: Diagram, op: { id?: string; from?: string; to?: string }): s
  * which are tried as the user's.
  */
 function expectAtStart(plan: Plan, op: PlanOp, author: Author): PlanOp {
-  if (!op || typeof op !== 'object' || (op as { expect?: unknown }).expect === undefined) return op;
+  if (!op || typeof op !== 'object') return op;
+  if (op.op === 'upsert_task' && op.noteWas !== undefined) op = noteAtStart(plan, op);
+  if ((op as { expect?: unknown }).expect === undefined) return op;
   switch (op.op) {
     case 'upsert_node':
     case 'remove_node':
@@ -1243,6 +1245,21 @@ function expectAtStart(plan: Plan, op: PlanOp, author: Author): PlanOp {
       return op;
   }
   return withoutExpect(op);
+}
+
+/**
+ * A note given with a status is progress, and moves no revision (an open
+ * editor of the task's other fields is not held up by it), so the page's
+ * note editor says which note it started from (`noteWas`): refused if the
+ * note has changed since, then taken off.
+ */
+function noteAtStart(plan: Plan, op: Extract<PlanOp, { op: 'upsert_task' }>): PlanOp {
+  const { noteWas, ...rest } = op;
+  const task = op.id ? findTask(plan, op.id) : undefined;
+  if (task && typeof op.note === 'string' && (task.note ?? '') !== noteWas) {
+    throw new PlanError(`The note of task "${task.title}" was changed while this edit was open, so it was not saved. It now shows the latest version.`);
+  }
+  return rest as PlanOp;
 }
 
 function withoutExpect(op: PlanOp): PlanOp {

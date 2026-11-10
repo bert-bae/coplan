@@ -491,6 +491,18 @@ test("the user's own quick successive saves never conflict with each other, and 
   assert.equal(plan.tasks.find((t) => t.id === 't4')!.rev, rev, 'a status report does not move the revision');
 });
 
+test("the agent's progress note is not saved over by the user's note editor from before it", () => {
+  const plan = fresh();
+  const opened = { rev: plan.tasks.find((t) => t.id === 't4')!.rev ?? 1, note: plan.tasks.find((t) => t.id === 't4')!.note ?? '' };
+  const reported = applyOps(plan, [{ op: 'upsert_task', id: 't4', status: 'blocked', note: 'Blocked: DB creds missing' }], 'claude', undefined, { tracking: true }).plan;
+  const mine: PlanOp = { op: 'upsert_task', id: 't4', note: 'my older note', noteWas: opened.note, expect: opened.rev };
+  assert.throws(() => applyOps(reported, [mine], 'user'), /The note of task "Wire into API" was changed while this edit was open/);
+  // Made on the note as it is now, it goes in; and the task's other editors are not held up by it.
+  const ok = applyOps(reported, [{ ...mine, noteWas: 'Blocked: DB creds missing' }], 'user').plan;
+  assert.equal(ok.tasks.find((t) => t.id === 't4')?.note, 'my older note');
+  assert.equal(applyOps(reported, [{ op: 'upsert_task', id: 't4', title: 'Wire it in', expect: opened.rev }], 'user').plan.tasks.find((t) => t.id === 't4')?.title, 'Wire it in');
+});
+
 test("Claude republishing a task with new content moves its revision; unchanged tasks keep theirs", () => {
   const plan = publishPlan(null, { ...INPUT, tasks: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }] }).plan;
   const next = publishPlan(plan, { ...INPUT, tasks: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B', detail: 'New.' }] }).plan;

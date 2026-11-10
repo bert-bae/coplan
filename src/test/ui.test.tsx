@@ -763,6 +763,26 @@ test('clicking a status dot moves the task along', async () => {
   assert.deepEqual(opsSent()[0], { op: 'upsert_task', id: 't2', status: 'in_progress' });
 });
 
+test('a status note is saved with the note it was written over', async () => {
+  await boot();
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^Status note: .*\. Edit$/ }));
+  });
+  const field = screen.getByRole('textbox', { name: 'Status note' });
+  const was = (field as HTMLInputElement).value;
+  fireEvent.change(field, { target: { value: 'Waiting on the cache client' } });
+  await act(async () => {
+    fireEvent.keyDown(field, { key: 'Enter' });
+  });
+  const op = opsSent().at(-1)!;
+  assert.equal(op['note'], 'Waiting on the cache client');
+  assert.equal(op['noteWas'], was, 'so a progress note made meanwhile is not saved over');
+});
+
 test("keys typed into a field are the field's: no task moves, no sidebar toggles", async () => {
   await boot();
   await openTab('Tasks');
