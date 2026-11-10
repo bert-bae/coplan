@@ -90,7 +90,7 @@ the audit's finding numbers.
 | F14 | A `.coplan/config.json` that starts with a BOM stops every check [13] | 2 should fix | done | fa3bd07 |
 | F15 | Markdown: numbered steps split by blank lines restart at 1, `3.` renders as 1, fences inside a step break [14] | 2 should fix | done | 2890b1d |
 | F16 | An open Markdown editor loses its text on a tab switch, a session switch or a tab close [15] | 2 should fix | done | b9085b9 |
-| F17 | Ctrl+C on `coplan check` leaves the check running [16] | 2 should fix | open | |
+| F17 | Ctrl+C on `coplan check` leaves the check running [16] | 2 should fix | done | 89e55b3 |
 | F18 | A second setup run overwrites the `.bak` that holds the user's comments [17] | 2 should fix | open | |
 | C1 | Delete dead UI code: unused primitives, format helpers and their CSS, plus the `.panel-title` rule that leaks onto live titles [20] | 3 clean-up | open | |
 | C2 | Delete dead daemon and shared code: `MODE_WORDS`, `checksSection`, `instructionLines`, `HOOK_EVENTS`, `clean`'s `trim`, Cursor tool-hook paths, the daemon's `--force`, `paths.sessionEvents`, `.diff.<pid>.tmp` sweep, the browser candidate loop [20] | 3 clean-up | open | |
