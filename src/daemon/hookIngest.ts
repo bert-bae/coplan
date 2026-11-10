@@ -109,7 +109,9 @@ function applyEnv(sessionId: string, ctx: IngestContext): void {
 }
 
 async function onSessionStart(sessionId: string, input: SessionStartInput, ctx: IngestContext): Promise<HookOutput> {
-  const cwd = input.cwd || process.cwd();
+  // A payload that names no folder leaves the one known, or none: the
+  // daemon's own is some other session's repository.
+  const cwd = input.cwd || ctx.store.get(sessionId)?.cwd || '';
   const session = ctx.store.ensure(sessionId, cwd);
   const root = await repoRoot(cwd);
   const branch = await currentBranch(root ?? cwd);

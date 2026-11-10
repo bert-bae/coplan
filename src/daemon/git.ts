@@ -9,6 +9,8 @@ import { promisify } from 'node:util';
 const exec = promisify(execFile);
 
 async function git(cwd: string, args: string[]): Promise<string | null> {
+  // No folder: an empty cwd would run git wherever this process is.
+  if (!cwd) return null;
   try {
     const { stdout } = await exec('git', args, { cwd, timeout: 5_000, maxBuffer: 1024 * 1024 });
     return stdout.trim() || null;

@@ -101,3 +101,13 @@ test("a task built in a worktree of its own is measured there; a branch checked 
     rmSync(tree, { recursive: true, force: true });
   }
 });
+
+test('with no folder, git is not asked at all: an empty cwd would ask it about wherever the daemon runs', async () => {
+  const { headCommit, changedFiles, worktreeOf } = await import('../shared/changes.ts');
+  const { repoRoot, currentBranch } = await import('../daemon/git.ts');
+  // This process runs inside a repository (the checkout under test), so any of these would answer if asked.
+  assert.deepEqual(
+    [await headCommit(''), await changedFiles(''), await worktreeOf('', 'main'), await repoRoot(''), await currentBranch('')],
+    [null, null, null, null, null],
+  );
+});

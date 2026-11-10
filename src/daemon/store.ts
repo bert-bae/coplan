@@ -250,12 +250,18 @@ export class SessionStore extends EventEmitter {
       const saved = readState(paths.sessionState(id));
       // A newer build's session is served blank from memory, never saved.
       if (saved === NEWER) this.foreign.add(id);
-      state = saved && saved !== NEWER ? saved : newSession(id, cwd || process.cwd(), agent);
+      // No folder (a Codex tool call, whose hooks are not trusted yet) is
+      // left unknown: the daemon's own is some other session's repository,
+      // and its checks, base branch and git would be taken for this one's.
+      state = saved && saved !== NEWER ? saved : newSession(id, cwd ?? '', agent);
       this.sessions.set(id, state);
       mkdirSync(paths.sessionDir(id), { recursive: true });
       this.emitEvent({ type: 'snapshot', session: state });
       this.broadcastSessionList();
     } else if (cwd && state.cwd !== cwd && !state.repoRoot) {
+      // A session first seen with no folder learns it here, and takes its
+      // name rather than its id's, as one seen first by its hooks does.
+      if (!state.cwd && !state.titleLocked && state.title === id.slice(0, 8)) state.title = path.basename(cwd) || state.title;
       state.cwd = cwd;
     }
     return state;

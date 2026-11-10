@@ -18,6 +18,8 @@ const exec = promisify(execFile);
 const MAX_FILES = 5_000;
 
 async function git(root: string, args: string[]): Promise<string | null> {
+  // No folder: an empty cwd would run git wherever this process is.
+  if (!root) return null;
   try {
     const { stdout } = await exec('git', args, { cwd: root, timeout: 10_000, maxBuffer: 8 * 1024 * 1024 });
     return stdout;

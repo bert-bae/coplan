@@ -68,6 +68,12 @@
   blurs a field as it goes, could save it into the session you switched
   to, where the same task id is another task. It is now saved where you
   typed it, before the switch.
+- **A Codex thread whose hooks are not trusted yet no longer takes another
+  repository's settings.** Seen first through a tool call, which names no
+  folder, its session was given the daemon's own: the repository of
+  whichever session started it, with that repository's checks, base branch
+  and git. It now has no folder until a hook says which, and no checks or
+  git are guessed meanwhile.
 
 ### Targeted checks: only what the change touched
 

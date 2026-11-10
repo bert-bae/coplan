@@ -1894,3 +1894,27 @@ test('a prompt the user pasted into a late message stays delivered: it reached t
     await call(`/api/session/${id}`, { method: 'DELETE' });
   }
 });
+
+test("a session first seen through a tool call with no folder (Codex, its hooks untrusted) guesses no repository: not the daemon's", async () => {
+  const id = 'codex-thread-no-folder';
+  // Codex's MCP server sends no cwd: the daemon's own folder is some other session's repository.
+  const res = await call<Record<string, unknown>>('/mcp/read', { method: 'POST', headers: { 'x-harness-session': id, 'x-harness-agent': 'codex' }, body: '{}' });
+  assert.ok(res['text'] !== undefined, JSON.stringify(res));
+  try {
+    const { session, projectChecks } = await call<{ session: SessionState; projectChecks: { implement: string[]; review: string[] } }>(`/api/session/${id}`);
+    assert.equal(session.cwd, '', 'no folder until a hook says which');
+    assert.equal(session.repoRoot, null);
+    assert.equal(session.title, id.slice(0, 8), 'named by its id, not after another repository');
+    assert.deepEqual(projectChecks, { implement: [], review: [] }, "and no repository's checks");
+    // A SessionStart that names no folder guesses none either.
+    await call(`/hook/SessionStart`, { method: 'POST', headers: { 'x-harness-agent': 'codex' }, body: JSON.stringify({ session_id: id, start_reason: 'startup' }) });
+    assert.equal((await sessionFor(id)).cwd, '');
+    // Its first hook that says where it is (trusted mid-thread: not a SessionStart) names it.
+    await hookFor(id, 'UserPromptSubmit', { prompt: 'go' }, { 'x-harness-agent': 'codex' });
+    const named = await sessionFor(id);
+    assert.equal(named.cwd, repo);
+    assert.equal(named.title, path.basename(repo));
+  } finally {
+    await call(`/api/session/${id}`, { method: 'DELETE' });
+  }
+});
