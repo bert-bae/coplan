@@ -25,7 +25,7 @@ const RELAY = path.resolve(
 let home: string;
 let server: http.Server;
 let port: number;
-let received: { url: string; auth: string | undefined; agent: string | undefined; body: string }[] = [];
+let received: { url: string; auth: string | undefined; agent: string | undefined; deadline: string | undefined; body: string }[] = [];
 /** Set to delay the response, to exercise the relay's timeout. */
 let holdMs = 0;
 let responseBody = '{"suppressOutput":true}';
@@ -44,7 +44,8 @@ before(async () => {
     req.on('data', (c) => (body += c));
     req.on('end', () => {
       const agent = req.headers['x-harness-agent'];
-      received.push({ url: req.url ?? '', auth: req.headers.authorization, agent: typeof agent === 'string' ? agent : undefined, body });
+      const deadline = req.headers['x-harness-deadline'];
+      received.push({ url: req.url ?? '', auth: req.headers.authorization, agent: typeof agent === 'string' ? agent : undefined, deadline: typeof deadline === 'string' ? deadline : undefined, body });
       const send = () => {
         if (res.destroyed || res.writableEnded) return;
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -234,6 +235,16 @@ test('an agent it does not know is sent as Claude Code, never passed through', a
   received = [];
   await relay('SessionEnd', '{"session_id":"s1"}', {}, ['x"; rm -rf /']);
   assert.equal(received[0]?.agent, 'claude');
+});
+
+test('says when its curl gives up, so a daemon that answers later knows no one is reading', async () => {
+  for (const [event, budget] of [['UserPromptSubmit', 4], ['SessionStart', 10]] as const) {
+    received = [];
+    const before = Math.floor(Date.now() / 1000);
+    await relay(event, '{"session_id":"s1"}');
+    const deadline = Number(received[0]?.deadline);
+    assert.ok(deadline >= before + budget && deadline <= Math.floor(Date.now() / 1000) + budget, `${event}: ${received[0]?.deadline}`);
+  }
 });
 
 test('a daemon that will not start is not waited on again by every message the user sends', async () => {

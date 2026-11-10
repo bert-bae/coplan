@@ -1068,11 +1068,13 @@ function buildRouter(deps: Deps): Router {
     let handed: { id: string; prior: Plan; version: number } | null = null;
     // Listened for from the start: the relay may give up while the hook is
     // still being handled, and a 'close' already past cannot be heard later.
-    const takeBack = () => {
-      if (!handed || ctx.res.writableFinished) return;
+    const takeBack = (): boolean => {
+      if (!handed || ctx.res.writableFinished) return false;
       const { id, prior, version } = handed;
       handed = null;
-      if (store.undeliver(id, prior, version)) log(`prompt for ${id} did not reach the agent; kept to deliver again`);
+      if (!store.undeliver(id, prior, version)) return false;
+      log(`prompt for ${id} did not reach the agent; kept to deliver again`);
+      return true;
     };
     ctx.res.once('close', takeBack);
     try {
@@ -1082,6 +1084,7 @@ function buildRouter(deps: Deps): Router {
       const session = typeof input.session_id === 'string' ? store.get(input.session_id) : undefined;
       const queued = (id: string) => Boolean(store.pending(id) || store.pendingRevision(id));
       const prior = session?.plan && queued(session.sessionId) ? session.plan : null;
+      const waiting = prior ? [store.pending(session!.sessionId)?.prompt, store.pendingRevision(session!.sessionId)?.prompt] : [];
       if (event) {
         output = await ingestHook(event, input, {
           store,
@@ -1097,7 +1100,13 @@ function buildRouter(deps: Deps): Router {
         });
       }
       const after = session ? store.get(session.sessionId)?.plan : undefined;
-      if (prior && after && !queued(session!.sessionId)) handed = { id: session!.sessionId, prior, version: after.version };
+      // Only when this answer is what carries the prompt. One the user pasted
+      // into their message (in any agent; in Cursor, the only way) reached
+      // the agent whatever becomes of the answer.
+      const carried = output.hookSpecificOutput?.additionalContext ?? '';
+      if (prior && after && !queued(session!.sessionId) && waiting.some((p) => p && carried.includes(p))) {
+        handed = { id: session!.sessionId, prior, version: after.version };
+      }
     } catch (err) {
       // A hook must never break the session it is attached to.
       log(`hook ${agent}/${raw} failed: ${(err as Error)?.message}`);
@@ -1105,8 +1114,16 @@ function buildRouter(deps: Deps): Router {
     }
     // The relay gave up (its curl timed out) or the connection dropped before
     // the answer was out: the agent never got the prompt. Taken back, so the
-    // next hook — or harness_plan_read — hands it over.
-    if (ctx.res.destroyed || ctx.req.socket.destroyed) takeBack();
+    // next hook — or harness_plan_read — hands it over, and the answer says
+    // nothing. A daemon too busy to answer in time cannot see the closed
+    // connection yet (the close is still queued behind this request), so the
+    // relay says when its curl gives up: in whole seconds of the same clock,
+    // rounded down, so the true moment is at or after it. Erring early only
+    // keeps a prompt for the next message; erring late would lose it.
+    const deadline = Number(header('x-harness-deadline'));
+    const gone = ctx.res.destroyed || ctx.req.socket.destroyed;
+    const late = deadline > 0 && Date.now() / 1000 > deadline - 0.25;
+    if ((gone || late) && takeBack()) output = HOOK_NOOP;
     if (!ctx.res.writableEnded) json(ctx.res, 200, writeAgentOutput(agent, raw, output));
   });
 

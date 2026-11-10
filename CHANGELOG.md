@@ -41,6 +41,12 @@
   text with yours without a word. You now see "This changed while you
   were editing" first, as tasks and sections already showed; saving still
   goes in, as the choice is yours.
+- **A sign-off is not lost when the daemon is slow to answer.** If the
+  daemon was too busy to answer your message's hook before the hook gave
+  up, it still marked the plan or design you signed off as delivered,
+  though the agent never got it, and nothing sent it again. The hook now
+  says when it gives up; a daemon that answers later keeps the prompt for
+  your next message.
 
 ### Targeted checks: only what the change touched
 

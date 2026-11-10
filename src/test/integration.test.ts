@@ -1834,3 +1834,63 @@ test('a refused sign-off is a 409 with the reason, a look at no plan a 404, a re
     await call(`/api/session/${id}`, { method: 'DELETE' });
   }
 });
+
+test('a prompt the relay gave up on while the daemon was busy is kept for the next message', { skip: process.platform === 'win32' }, async () => {
+  const id = 'late-relay';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  try {
+    const published = await mcpFor(id, 'publish', PLAN);
+    assert.equal(published['ok'], true, String(published['text']));
+    assert.equal((await raw(`/api/session/${id}/plan/submit`, { method: 'POST', body: JSON.stringify({ target: 'session' }) })).status, 200);
+    // The relay's curl gives up a second from now, and the daemon is busy
+    // (paused) past that: by the time it answers, no one is reading.
+    const deadline = Math.floor(Date.now() / 1000) + 1;
+    daemon.kill('SIGSTOP');
+    const late = hookFor(id, 'UserPromptSubmit', { prompt: 'go' }, { 'x-harness-deadline': String(deadline) });
+    await sleep(2_200);
+    daemon.kill('SIGCONT');
+    const answer = await late;
+    assert.equal(answer.hookSpecificOutput?.additionalContext, undefined, 'the late answer does not carry it');
+    assert.equal((await sessionFor(id)).plan!.submission!.deliveredAt, null, 'so it is not counted as delivered');
+    // The next message, answered in time (a second or two to spare), carries it.
+    const next = await hookFor(id, 'UserPromptSubmit', { prompt: 'go on' }, { 'x-harness-deadline': String(Math.floor(Date.now() / 1000) + 2) });
+    const s = await sessionFor(id);
+    assert.equal(next.hookSpecificOutput?.additionalContext, s.plan!.submission!.prompt);
+    assert.ok(s.plan!.submission!.deliveredAt);
+  } finally {
+    daemon.kill('SIGCONT');
+    await call(`/api/session/${id}`, { method: 'DELETE' });
+  }
+});
+
+test('in Cursor a pasted prompt stays delivered, however late the hook is: the paste reached the agent', async () => {
+  const id = 'late-relay-cursor';
+  const cursor = { 'x-harness-agent': 'cursor' };
+  await hookFor(id, 'sessionStart', { conversation_id: id, workspace_roots: [repo] }, cursor);
+  try {
+    assert.equal((await mcpFor(id, 'publish', PLAN))['ok'], true);
+    assert.equal((await raw(`/api/session/${id}/plan/submit`, { method: 'POST', body: JSON.stringify({ target: 'session' }) })).status, 200);
+    const prompt = (await sessionFor(id)).plan!.submission!.prompt;
+    const past = String(Math.floor(Date.now() / 1000) - 5);
+    await hookFor(id, 'beforeSubmitPrompt', { conversation_id: id, prompt }, { ...cursor, 'x-harness-deadline': past });
+    assert.ok((await sessionFor(id)).plan!.submission!.deliveredAt, 'not taken back, so not sent again');
+  } finally {
+    await call(`/api/session/${id}`, { method: 'DELETE' });
+  }
+});
+
+test('a prompt the user pasted into a late message stays delivered: it reached the agent with the message', async () => {
+  const id = 'late-relay-pasted';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  try {
+    assert.equal((await mcpFor(id, 'publish', PLAN))['ok'], true);
+    assert.equal((await raw(`/api/session/${id}/plan/submit`, { method: 'POST', body: JSON.stringify({ target: 'session' }) })).status, 200);
+    const prompt = (await sessionFor(id)).plan!.submission!.prompt;
+    await hookFor(id, 'UserPromptSubmit', { prompt }, { 'x-harness-deadline': String(Math.floor(Date.now() / 1000) - 5) });
+    assert.ok((await sessionFor(id)).plan!.submission!.deliveredAt, 'not taken back, so not sent again');
+    const next = await hookFor(id, 'UserPromptSubmit', { prompt: 'go on' });
+    assert.doesNotMatch(String(next.hookSpecificOutput?.additionalContext ?? ''), /Build the plan/);
+  } finally {
+    await call(`/api/session/${id}`, { method: 'DELETE' });
+  }
+});

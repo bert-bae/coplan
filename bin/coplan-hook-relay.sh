@@ -179,6 +179,9 @@ if [ "$AUTH_LINE" = "Authorization: Bearer $TOKEN" ]; then
 else
   AUTH_ARG="Authorization: Bearer $TOKEN"
 fi
+# When curl gives up, so a daemon too busy to answer in time knows no one
+# will read what it says: a prompt it would hand over is kept for the next.
+GIVE_UP_AT=$(( $(date +%s) + MAX_TIME ))
 RESPONSE=$(printf '%s' "$PAYLOAD" | curl -s -S \
   --max-time "$MAX_TIME" \
   --connect-timeout 2 \
@@ -186,6 +189,7 @@ RESPONSE=$(printf '%s' "$PAYLOAD" | curl -s -S \
   -H 'Content-Type: application/json' \
   -H "$AUTH_ARG" \
   -H "X-Harness-Agent: $AGENT" \
+  -H "X-Harness-Deadline: $GIVE_UP_AT" \
   -H "X-Harness-Remote-Session: ${CLAUDE_CODE_REMOTE_SESSION_ID:-}" \
   -H "X-Harness-Remote-Sdk: ${CLAUDE_CODE_REMOTE_SDK_URL:-}" \
   -H "X-Harness-Bridge-Session: ${CLAUDE_CODE_BRIDGE_SESSION_ID:-}" \
