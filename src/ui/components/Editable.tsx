@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Markdown } from './Markdown.tsx';
-import { draftKey as keyOf, openDrafts } from '../lib/drafts.ts';
+import { useKeptDraft } from '../lib/drafts.ts';
 import { store } from '../store.ts';
 import { classNames } from '../lib/format.ts';
 import { isComposing } from '../lib/keys.ts';
@@ -159,21 +159,13 @@ export function MarkdownField({
   version?: number;
 }) {
   // A draft left open here (a tab or session switch unmounted it) reopens.
-  const [key] = useState(() => (draftKey ? keyOf(store.getState().sessionId, draftKey) : null));
-  const [kept] = useState(() => (key ? openDrafts.get(key) : undefined));
-  const [editing, setEditing] = useState(startEditing || Boolean(kept));
-  const [draft, setDraft] = useState(kept?.draft ?? value);
+  const kept = useKeptDraft(store.getState().sessionId, draftKey ?? null, value, version, startEditing);
+  const { editing, draft, setDraft, started } = kept;
   const [saving, setSaving] = useState(false);
-  // What editing started from. A field with a revision is watched by it; one
-  // with none (the summary, a box's notes, a caption) by its text, and its
-  // save is not refused (there is nothing to check it against): the warning
-  // below is all it gets.
-  const started = useRef<{ version: number | undefined; value: string }>(kept ? { version: kept.version, value: kept.value } : { version, value });
-  useEffect(() => {
-    if (!key) return;
-    if (editing) openDrafts.set(key, { draft, ...started.current });
-    else openDrafts.delete(key);
-  }, [key, editing, draft]);
+  // What editing started from (`started`): a field with a revision is watched
+  // by it; one with none (the summary, a box's notes, a caption) by its text,
+  // and its save is not refused (there is nothing to check it against): the
+  // warning below is all it gets.
   const area = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -184,42 +176,29 @@ export function MarkdownField({
     if (editing) area.current?.focus();
   }, [editing]);
 
-  const begin = () => {
-    started.current = { version, value };
-    setEditing(true);
-  };
+  const begin = kept.begin;
   // Showing the user's own text already (their save, landing) is nothing to
   // lose, whatever moved.
   const changedUnderneath =
-    editing &&
-    value !== draft &&
-    (started.current.version !== undefined ? version !== started.current.version : value !== started.current.value);
+    editing && value !== draft && (started.version !== undefined ? version !== started.version : value !== started.value);
 
   const save = async () => {
     if (draft === value) {
-      setEditing(false);
+      kept.close();
       return;
     }
     setSaving(true);
     // With the "changed while you were editing" warning on screen, saving is
     // a deliberate choice to replace the newer version, so it is made
     // against that version. Otherwise it is made against the one edited.
-    const base = changedUnderneath ? version : started.current.version;
+    const base = changedUnderneath ? version : started.version;
     const result = await onSave(draft, base);
     setSaving(false);
-    if (result === false) {
-      // Refused — most likely changed underneath. Keep the text, and start
-      // from the revision now on screen so a deliberate second save goes in.
-      started.current = { version, value };
-      if (key) openDrafts.set(key, { draft, ...started.current });
-      return;
-    }
-    // Saved: gone from the kept drafts even if this editor closed meanwhile.
-    if (key) openDrafts.delete(key);
-    setEditing(false);
+    if (result === false) kept.refused();
+    else kept.saved();
   };
   const cancel = () => {
-    setEditing(false);
+    kept.close();
     setDraft(value);
     onCancel?.();
   };

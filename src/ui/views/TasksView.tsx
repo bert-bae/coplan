@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
-import { draftKey, openDrafts } from '../lib/drafts.ts';
+import { useKeptDraft } from '../lib/drafts.ts';
 import { store, useCollapsedTasks, useEdit, useAgent, usePlan, useSessionId, useStillShown, useStore } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
 import { CommentToggle, ThreadPanel, useThreads } from '../components/Threads.tsx';
@@ -897,25 +897,11 @@ function ReviewPicker({ task }: { task: Task }) {
 /** Expected files, one per line. */
 function FilesField({ task }: { task: Task }) {
   const edit = useEdit();
-  const sessionId = useSessionId();
-  const listed = (task.files ?? []).join('\n');
-  // Kept, as a markdown field's draft is, while open (drafts.ts): its view
-  // going (a tab or session switch) reopens it with the text.
-  const [key] = useState(() => draftKey(sessionId, `task:${task.id}:files`));
-  const [kept] = useState(() => openDrafts.get(key));
-  const [editing, setEditing] = useState(Boolean(kept));
-  const [draft, setDraft] = useState(kept?.draft ?? listed);
-  const [startedAt, setStartedAt] = useState(kept ? kept.version : revOf(task));
-  const startedFrom = useRef(kept?.value ?? listed);
-  const latest = useRef(revOf(task));
-  latest.current = revOf(task);
-  const latestFiles = useRef(task.files);
-  latestFiles.current = task.files;
-  useEffect(() => {
-    if (editing) openDrafts.set(key, { draft, version: startedAt, value: startedFrom.current });
-    else openDrafts.delete(key);
-  }, [key, editing, draft, startedAt]);
-  if (!editing) {
+  // Kept, as a markdown field's draft is, while open: its view going (a tab
+  // or session switch) reopens it with the text.
+  const kept = useKeptDraft(useSessionId(), `task:${task.id}:files`, (task.files ?? []).join('\n'), revOf(task));
+  const [saving, setSaving] = useState(false);
+  if (!kept.editing) {
     return (
       <div className="files">
         {task.files?.length ? (
@@ -927,16 +913,7 @@ function FilesField({ task }: { task: Task }) {
         ) : (
           <span className="muted">None listed.</span>
         )}{' '}
-        <button
-          type="button"
-          className="link"
-          onClick={() => {
-            setDraft(listed);
-            setStartedAt(revOf(task));
-            startedFrom.current = listed;
-            setEditing(true);
-          }}
-        >
+        <button type="button" className="link" onClick={kept.begin}>
           Edit
         </button>
       </div>
@@ -944,31 +921,28 @@ function FilesField({ task }: { task: Task }) {
   }
   return (
     <div className="md-field is-editing">
-      <textarea className="input mono" rows={4} value={draft} aria-label="Files, one per line" onChange={(e) => setDraft(e.target.value)} />
+      <textarea className="input mono" rows={4} value={kept.draft} aria-label="Files, one per line" onChange={(e) => kept.setDraft(e.target.value)} />
       <div className="md-field-foot">
         <span className="muted">One path per line</span>
         <span className="spacer" />
-        <button type="button" className="btn btn-sm btn-ghost" onClick={() => setEditing(false)}>
+        <button type="button" className="btn btn-sm btn-ghost" onClick={kept.close}>
           Cancel
         </button>
         <button
           type="button"
           className="btn btn-sm btn-primary"
+          disabled={saving}
           onClick={async () => {
-            const files = draft.split('\n').map((f) => f.trim()).filter(Boolean);
-            if (await edit({ op: 'upsert_task', id: task.id, files, expect: startedAt })) {
-              // Saved: gone from the kept drafts even if this field closed meanwhile.
-              openDrafts.delete(key);
-              setEditing(false);
-            } else {
-              // Refused when changed underneath: stay open, with the text, on
-              // the list as it is now, so a deliberate second save goes in.
-              startedFrom.current = (latestFiles.current ?? []).join('\n');
-              setStartedAt(latest.current);
-            }
+            const files = kept.draft.split('\n').map((f) => f.trim()).filter(Boolean);
+            setSaving(true);
+            const ok = await edit({ op: 'upsert_task', id: task.id, files, expect: kept.started.version });
+            setSaving(false);
+            // Refused when changed underneath: stay open, with the text.
+            if (ok) kept.saved();
+            else kept.refused();
           }}
         >
-          Save
+          {saving ? 'Saving…' : 'Save'}
         </button>
       </div>
     </div>

@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { useAgent, useEdit, usePlan, useSessionId } from '../store.ts';
-import { draftKey, openDrafts } from '../lib/drafts.ts';
+import { keptText, useKeptText } from '../lib/drafts.ts';
 import { Markdown } from './Markdown.tsx';
 import { isComposing } from '../lib/keys.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
@@ -84,9 +84,9 @@ function ThreadView({ thread }: { thread: Thread }) {
   const edit = useEdit();
   const agent = useAgent();
   const field = `reply:${thread.id}`;
-  const key = draftKey(useSessionId(), field);
+  const sessionId = useSessionId();
   // A reply left half written (its view went) opens again with it.
-  const [replying, setReplying] = useState(() => openDrafts.has(key));
+  const [replying, setReplying] = useState(() => keptText(sessionId, field) !== undefined);
   return (
     <article className={classNames('thread', thread.resolved && 'is-resolved')}>
       <Entry author={thread.author} text={thread.text} ts={thread.ts} />
@@ -156,7 +156,7 @@ function Composer({
   autoFocus?: boolean;
   onCancel?: () => void;
 }) {
-  const [text, setText] = useKeptText(field);
+  const [text, setText] = useKeptText(useSessionId(), field);
   const latest = useRef(text);
   latest.current = text;
   const [busy, setBusy] = useState(false);
@@ -210,21 +210,4 @@ function Composer({
       </div>
     </div>
   );
-}
-
-/**
- * Text being written that is saved only when sent, kept among the open
- * drafts while it holds any, so it outlives its view and closing the page
- * asks first. It is the session's on screen: another session, another text.
- */
-function useKeptText(field: string): [string, (next: string) => void] {
-  const key = draftKey(useSessionId(), field);
-  const [held, setHeld] = useState(() => ({ key, text: openDrafts.get(key)?.draft ?? '' }));
-  if (held.key !== key) setHeld({ key, text: openDrafts.get(key)?.draft ?? '' });
-  const set = (next: string) => {
-    setHeld({ key, text: next });
-    if (next.trim()) openDrafts.set(key, { draft: next, version: undefined, value: '' });
-    else openDrafts.delete(key);
-  };
-  return [held.key === key ? held.text : (openDrafts.get(key)?.draft ?? ''), set];
 }

@@ -893,6 +893,40 @@ test('a refused save keeps the editor open with the text intact', async () => {
   assert.ok(store.getState().toasts.some((t) => /changed by Claude/.test(t.text)), 'and the reason is shown');
 });
 
+test('a refused files save stays open with the text, and the next save goes against the list as it is now', async () => {
+  let refuse = true;
+  await boot(makeSession(), (route) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    if (refuse) return { __status: 409, error: 'Task "Invalidation" was changed by Claude while this edit was open, so it was not saved.' };
+    return { plan: store.getState().session?.plan, changes: [] };
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Files, one per line' }), { target: { value: 'src/cache.ts' } });
+  // Claude changes the task meanwhile (its change on screen first): the save is refused.
+  const s = store.getState().session!;
+  const moved = applyOps(s.plan!, [{ op: 'upsert_task', id: 't2', files: ['src/old.ts'] }], 'claude').plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: moved } }));
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  });
+  assert.equal((screen.getByRole('textbox', { name: 'Files, one per line' }) as HTMLTextAreaElement).value, 'src/cache.ts', 'nothing typed is lost');
+  // Saved again, deliberately: against the task as it is now.
+  refuse = false;
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  });
+  const [first, second] = opsSent().filter((o) => o['op'] === 'upsert_task' && 'files' in o);
+  assert.equal(first?.['expect'], s.plan!.tasks.find((t) => t.id === 't2')!.rev ?? 1);
+  assert.equal(second?.['expect'], moved.tasks.find((t) => t.id === 't2')!.rev, 'the revision now on screen');
+  assert.equal(screen.queryByRole('textbox', { name: 'Files, one per line' }), null, 'saved, and closed');
+});
+
 test('a view that throws takes only itself down', async () => {
   const broken = makePlan();
   // A shape only the canvas reads, and does not expect: arrows not a list.
