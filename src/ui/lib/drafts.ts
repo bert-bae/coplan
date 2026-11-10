@@ -41,15 +41,26 @@ export function unsavedDrafts(): boolean {
  * have nothing left to lose, go. That is a field that is gone, one that is
  * locked now, or one that holds the draft's text already (a save that
  * finished after its editor closed, say). With no plan (the session was
- * deleted), all of them go.
+ * deleted), all of them go. Returns those that held unsaved text a lock
+ * took the field from (a sign-off made in chat, say), named, for the user
+ * to be told, and to copy.
  */
-export function pruneDrafts(sessionId: string, plan: Plan | null): void {
+export function pruneDrafts(sessionId: string, plan: Plan | null): { name: string; text: string }[] {
   const prefix = `${sessionId}:`;
+  const locked: { name: string; text: string }[] = [];
+  const locks = plan ? { design: isDesignLocked(plan), plan: isLocked(plan) } : null;
   for (const [key, open] of openDrafts) {
     if (!key.startsWith(prefix)) continue;
-    const now = plan ? fieldText(plan, key.slice(prefix.length)) : undefined;
-    if (now === undefined || now === open.draft) openDrafts.delete(key);
+    const field = key.slice(prefix.length);
+    // The field as it is, and whether the plan's sign-offs hold it still.
+    const text = plan ? fieldText(plan, field, { design: false, plan: false }) : undefined;
+    const held = text !== undefined && fieldText(plan!, field, locks!) === undefined;
+    if (text !== undefined && !held && text !== open.draft) continue;
+    openDrafts.delete(key);
+    // Held, with text not saved (nor saved in the same plan as the lock).
+    if (held && open.draft !== open.value && open.draft !== text) locked.push({ name: fieldName(plan!, field), text: open.draft });
   }
+  return locked;
 }
 
 /** Which of the plan's sign-offs hold its fields still. */

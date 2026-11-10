@@ -821,6 +821,12 @@ input[type='checkbox'] { accent-color: var(--accent-solid); cursor: pointer; }
 .toast.is-success { border-left: 3px solid var(--success-solid); }
 .toast.is-error { border-left: 3px solid var(--danger-solid); background: var(--danger-bg); color: var(--danger-fg); }
 .toast.is-info { border-left: 3px solid var(--accent-solid); }
+/* Text the user may want to keep, below the message: selectable by hand. */
+.toast.has-copy { flex-wrap: wrap; }
+.toast-copy {
+  flex-basis: 100%; order: 2; margin: 0; max-height: 8em; overflow: auto;
+  white-space: pre-wrap; user-select: text; font-family: var(--font-mono, monospace); font-size: var(--fs-xs, 12px);
+}
 .toast-close {
   background: none; border: none; color: inherit; font-size: var(--fs-lg); line-height: 1;
   opacity: 0.6; transition: opacity var(--t-fast) linear;

@@ -280,6 +280,11 @@
 - **A parent task whose subtasks were all dropped shows as dropped.** It
   showed a ✓ Done, while the briefs said it was dropped whole and its
   progress counted nothing done.
+- **Text you left open is not dropped unsaid when the plan locks from
+  chat.** The design confirmed or the plan submitted in chat (or another
+  tab) dropped text left open in a field the lock froze, without a word.
+  The page now says which field, and shows the text, with a button to
+  copy it.
 - **No two sessions share a folder.** A session id is kept in a folder
   named after it, with anything a folder name cannot hold made safe, so
   ids that differed only there (`a/b`, `a_b`), or past 128 characters,

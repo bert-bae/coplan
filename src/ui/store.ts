@@ -35,6 +35,9 @@ export interface Toast {
   id: string;
   kind: 'info' | 'success' | 'error';
   text: string;
+  /** Text the user may want to keep: offered to copy, and the toast stays
+   *  until dismissed. */
+  copy?: string;
 }
 
 export interface UiState {
@@ -150,8 +153,13 @@ class Store {
   set(patch: Partial<UiState>): void {
     this.state = { ...this.state, ...patch };
     // A plan landing settles the drafts kept for it (see pruneDrafts).
-    if (patch.session?.plan) pruneDrafts(patch.session.sessionId, patch.session.plan);
+    const dropped = patch.session?.plan ? pruneDrafts(patch.session.sessionId, patch.session.plan) : [];
     for (const listener of this.listeners) listener();
+    const plan = patch.session?.plan;
+    for (const { name, text } of dropped) {
+      const how = plan?.submission ? 'was submitted' : 'had its design confirmed';
+      this.toast('error', `"${plan?.title}" ${how}, so the text you had open in ${name} could not be saved. Copy it to keep it:`, text);
+    }
   }
 
   /* ---------------------------------------------------------------- *
@@ -752,10 +760,10 @@ class Store {
     }
   }
 
-  toast(kind: Toast['kind'], text: string): void {
-    const toast: Toast = { id: `t${Date.now()}${Math.random().toString(36).slice(2, 6)}`, kind, text };
+  toast(kind: Toast['kind'], text: string, copy?: string): void {
+    const toast: Toast = { id: `t${Date.now()}${Math.random().toString(36).slice(2, 6)}`, kind, text, ...(copy !== undefined ? { copy } : {}) };
     this.set({ toasts: [...this.state.toasts, toast] });
-    window.setTimeout(() => this.dismissToast(toast.id), kind === 'error' ? 8000 : 4000);
+    if (copy === undefined) window.setTimeout(() => this.dismissToast(toast.id), kind === 'error' ? 8000 : 4000);
   }
 
   dismissToast(id: string): void {

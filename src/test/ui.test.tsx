@@ -2464,6 +2464,59 @@ test("an open editor's text waits in its own session while another is on screen"
   assert.equal((screen.getByRole('textbox', { name: 'the plan summary' }) as HTMLTextAreaElement).value, 'For s1 only');
 });
 
+test('a lock from elsewhere that drops text left open says so, with the text to copy', async () => {
+  await boot();
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'the plan summary' }), { target: { value: 'Half a summary' } });
+  await openTab('Tasks');
+  // The design confirmed in chat: the summary can no longer be saved.
+  const s = store.getState().session!;
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...s, plan: confirmDesign(s.plan!, { prompt: 'tasks' }) } });
+  });
+  const said = store.getState().toasts.find((t) => /the summary/.test(t.text));
+  assert.ok(said, 'said');
+  assert.match(said.text, /^"Add a cache" had its design confirmed, so the text you had open in the summary could not be saved/);
+  assert.equal(document.querySelector('.toast-copy')?.textContent, 'Half a summary', 'shown, to select where the clipboard is refused');
+  let copied = '';
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (t: string) => void (copied = t) }, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Copy text' }));
+    });
+  } finally {
+    if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+    else delete (navigator as { clipboard?: unknown }).clipboard;
+  }
+  assert.equal(copied, 'Half a summary');
+  assert.equal(document.querySelector('.toast-copy'), null, 'copied: the message goes');
+  // A draft already let go is not said again.
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(confirmDesign(s.plan!, { prompt: 'tasks' }), { target: 'session', prompt: 'build' }) } });
+  });
+  assert.equal(store.getState().toasts.filter((t) => /could not be saved/.test(t.text)).length, 0, 'not said again');
+});
+
+test('text saved in the same plan that locks its field is not said to be lost', async () => {
+  await boot();
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'the plan summary' }), { target: { value: 'Saved just in time' } });
+  await openTab('Tasks');
+  const s = store.getState().session!;
+  const saved = applyOps(s.plan!, [{ op: 'set_meta', summary: 'Saved just in time' }], 'user').plan;
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...s, plan: confirmDesign(saved, { prompt: 'tasks' }) } });
+  });
+  assert.ok(!store.getState().toasts.some((t) => /could not be saved/.test(t.text)));
+});
+
 test('a kept draft goes once it is saved, or its field is gone or locked: closing the page does not ask for nothing', async () => {
   await boot();
   const leaving = () => {
@@ -2495,6 +2548,7 @@ test('a kept draft goes once it is saved, or its field is gone or locked: closin
     store.apply({ type: 'snapshot', session: { ...s, plan: { ...structuredClone(s.plan!), sections: [], version: s.plan!.version + 1 } } });
   });
   assert.equal(leaving(), false, 'its section is gone');
+  assert.ok(!store.getState().toasts.some((t) => /could not be saved/.test(t.text)), 'gone, not locked: nothing to say');
 
   // The summary half written, then the design confirmed: it can no longer be saved.
   await openTab('Overview');
