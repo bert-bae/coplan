@@ -1777,3 +1777,60 @@ test('a task\'s own checks: the agent proposes, the user sets, and done follows 
     rmSync(other, { recursive: true, force: true });
   }
 });
+
+test('a refused sign-off is a 409 with the reason, a look at no plan a 404, a refused edit a 400', async () => {
+  const id = 'refusals';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  const send = async (method: string, route: string, body?: Record<string, unknown>) => {
+    const res = await raw(`/api/session/${id}/${route}`, body ? { method, body: JSON.stringify(body) } : { method });
+    const json = (res.headers.get('content-type') ?? '').includes('json');
+    return { status: res.status, body: (json ? await res.json() : { text: await res.text() }) as { error?: string } };
+  };
+  const post = (route: string, body: Record<string, unknown> = {}) => send('POST', `plan/${route}`, body);
+  try {
+    // No plan yet: every sign-off is refused, in the store's own words.
+    const signOffs: [string, Record<string, unknown>, string][] = [
+      ['design/confirm', {}, 'There is no plan to confirm yet.'],
+      ['design/reopen', {}, 'There is no plan.'],
+      ['revisions', {}, 'There is no plan to revise yet.'],
+      ['revisions/withdraw', {}, 'There is no plan.'],
+      ['submit', { target: 'session' }, 'There is no plan to submit yet.'],
+      ['reopen', {}, 'There is no plan.'],
+    ];
+    for (const [route, body, reason] of signOffs) {
+      assert.deepEqual(await post(route, body), { status: 409, body: { error: reason } }, route);
+    }
+
+    // And every look at a plan that is not there is a 404.
+    const looks: [string, string][] = [['GET', 'plan/text'], ['GET', 'plan/readback'], ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/revisions/prompt'], ['GET', 'task/t1/brief']];
+    for (const [method, route] of looks) {
+      assert.deepEqual(await send(method, route, method === 'POST' ? {} : undefined), { status: 404, body: { error: 'no plan yet' } }, route);
+    }
+
+    // With a plan: a sign-off over a version the user never saw is refused
+    // the same way, and the plan is left as it was.
+    const published = await mcpFor(id, 'publish', PLAN);
+    assert.equal(published['ok'], true, String(published['text']));
+    const before = (await sessionFor(id)).plan!;
+    const stale: [string, Record<string, unknown>, RegExp][] = [
+      ['submit', { target: 'session' }, /^The plan changed while you were reviewing it\. .* then submit again\.$/],
+      ['design/confirm', {}, /^The plan changed while you were reviewing it\. .* then confirm again\.$/],
+      ['revisions', {}, /^The plan changed while you were reading the request\./],
+    ];
+    for (const [route, body, reason] of stale) {
+      const res = await post(route, { ...body, expect: before.version - 1 });
+      assert.equal(res.status, 409, route);
+      assert.match(res.body.error ?? '', reason, route);
+    }
+
+    // An edit the plan refuses is the user's to fix: a 400, not a 409.
+    assert.deepEqual(await post('ops', { ops: [{ op: 'remove', kind: 'task', id: 'nope' }] }), { status: 400, body: { error: 'No task "nope".' } });
+    const after = (await sessionFor(id)).plan!;
+    assert.equal(after.version, before.version, 'nothing refused changed the plan');
+    assert.equal(after.submission ?? null, null);
+    assert.equal(after.design ?? null, null, 'no design was confirmed');
+    assert.deepEqual(after.revisions ?? [], [], 'no revision was queued');
+  } finally {
+    await call(`/api/session/${id}`, { method: 'DELETE' });
+  }
+});
