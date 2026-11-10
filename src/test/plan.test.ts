@@ -910,3 +910,68 @@ test('handing over the build prompt is not a read of what the user did after sub
   const design = applyOps(confirmDesign(proposed, { prompt: 'make tasks' }, 2_000), [{ op: 'reject_proposal', id: 'p1', note: 'No' }], 'user').plan;
   assert.equal(unreadByClaude(markDesignDelivered(design, 3_000)).length, 1);
 });
+
+/* A proposal is checked on accept against everything it would change, as
+ * an edit is: what the user changed since it was made makes it out of date. */
+
+function proposing(op: PlanOp): Plan {
+  return applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [op] }], 'claude').plan;
+}
+const accept = (plan: Plan) => applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user').plan;
+const STALE = /Proposal p1 is out of date/;
+
+test("a proposed task removal is out of date once the user changed what it would take", () => {
+  const removal: PlanOp = { op: 'remove', kind: 'task', id: 't1' };
+  const cases: [string, PlanOp][] = [
+    ['a subtask they wrote on', { op: 'upsert_task', id: 't2', detail: 'Must use REST — a legal requirement' }],
+    ['a subtask they added', { op: 'upsert_task', title: 'Auth', parentId: 't1' }],
+    ['a dependency they added', { op: 'upsert_task', id: 't4', dependsOn: ['t2'] }],
+    ['a box they linked', { op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t2'] }],
+  ];
+  for (const [what, edit] of cases) {
+    const plan = applyOps(proposing(removal), [edit], 'user').plan;
+    assert.throws(() => accept(plan), new RegExp(`${STALE.source}: what removing task t1 "API" takes`), what);
+  }
+  // A change elsewhere leaves it as it was proposed.
+  const elsewhere = applyOps(proposing(removal), [{ op: 'upsert_task', id: 't3', detail: 'unrelated' }], 'user').plan;
+  assert.deepEqual(accept(elsewhere).tasks.map((t) => t.id), ['t3', 't4']);
+});
+
+test("a proposed builds is out of date once the user relinked that task's boxes", () => {
+  const relink: PlanOp = { op: 'upsert_task', id: 't3', builds: ['a'] };
+  const plan = applyOps(proposing(relink), [{ op: 'upsert_node', diagramId: 'd1', id: 'b', taskIds: ['t3'] }], 'user').plan;
+  assert.throws(() => accept(plan), new RegExp(`${STALE.source}: the boxes task t3 "UI" builds`));
+  const elsewhere = applyOps(proposing(relink), [{ op: 'upsert_node', diagramId: 'd1', id: 'b', label: 'Renamed' }], 'user').plan;
+  assert.deepEqual(accept(elsewhere).diagrams[0]!.nodes.find((n) => n.id === 'a')?.taskIds, ['t3']);
+});
+
+test('a proposal that would overwrite box links is out of date once the user linked them since; an order alone is no change', () => {
+  // Box a's tasks set anew, and box b removed: both would undo a link the user made after.
+  for (const [what, op, edit] of [
+    ["box a's tasks", { op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }, { op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t1'] }],
+    ['box b, removed', { op: 'remove_node', diagramId: 'd1', id: 'b' }, { op: 'upsert_node', diagramId: 'd1', id: 'b', taskIds: ['t4'] }],
+  ] as [string, PlanOp, PlanOp][]) {
+    const plan = applyOps(proposing(op), [edit], 'user').plan;
+    assert.throws(() => accept(plan), /Proposal p1 is out of date: the tasks linked to box "[AB]" in diagram "Arch"/, what);
+  }
+  // A link somewhere else in the diagram does not hold up a proposal about box a.
+  const elsewhere = applyOps(proposing({ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }), [{ op: 'upsert_node', diagramId: 'd1', id: 'b', taskIds: ['t4'] }], 'user').plan;
+  assert.deepEqual(accept(elsewhere).diagrams[0]!.nodes.find((n) => n.id === 'a')?.taskIds, ['t3']);
+  // Diagrams reordered, with the task linked in both: its builds still fits.
+  let two = publishPlan(linkedPlan(), { title: 'x', tasks: [{ id: 't3', title: 'UI' }], diagrams: [
+    { id: 'd1', title: 'Arch', nodes: [{ id: 'a', label: 'A', taskIds: ['t3'] }], edges: [] },
+    { id: 'd2', title: 'Data', nodes: [{ id: 'x', label: 'X', taskIds: ['t3'] }], edges: [] },
+  ] }, 2_000).plan;
+  two = applyOps(two, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [{ op: 'upsert_task', id: 't3', builds: ['d2/x'] }] }], 'claude').plan;
+  two = applyOps(two, [{ op: 'move_diagram', id: 'd2', index: 0 }], 'user').plan;
+  assert.deepEqual(accept(two).diagrams.map((d) => [d.id, d.nodes[0]!.taskIds ?? []]), [['d2', ['t3']], ['d1', []]]);
+});
+
+test('a proposed removal over an edit of the task itself says so once; one made by an older Coplan is out of date', () => {
+  const plan = applyOps(proposing({ op: 'remove', kind: 'task', id: 't1' }), [{ op: 'upsert_task', id: 't1', detail: 'mine' }], 'user').plan;
+  assert.throws(() => accept(plan), /out of date: task t1 "API" changed since it was made/);
+  // Made before the footprint was recorded: it cannot be checked in full.
+  const old = proposing({ op: 'remove', kind: 'task', id: 't1' });
+  delete (old.proposals![0]!.base as Record<string, unknown>)['removal:t1'];
+  assert.throws(() => accept(old), /out of date: everything it would change \(it was made before Coplan recorded that\)/);
+});

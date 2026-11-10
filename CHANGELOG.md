@@ -47,6 +47,14 @@
   though the agent never got it, and nothing sent it again. The hook now
   says when it gives up; a daemon that answers later keeps the prompt for
   your next message.
+- **Accepting a proposal cannot undo what you changed after it was made.**
+  A proposal is out of date once you change what it would change, but
+  only the item each edit named was compared: accepting a proposed task
+  removal took subtasks, dependencies and box links you had changed since
+  with it, and a proposed `builds`, box edit or box removal undid task
+  links you had made. These now read as out of date and say what changed;
+  one made before this version reads as out of date too, as it cannot be
+  checked in full.
 
 ### Targeted checks: only what the change touched
 

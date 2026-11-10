@@ -2156,6 +2156,7 @@ function settleProposal(plan: Plan, p: Proposal, status: ProposalStatus, now: nu
  */
 export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, number | string> {
   const out: Record<string, number | string> = {};
+  const tasks = new Map(plan.tasks.map((t) => [t.id, t]));
   const rev = (kind: 'section' | 'diagram' | 'task', id: string): number | string => {
     if (kind === 'section') {
       const s = plan.sections.find((x) => x.id === id);
@@ -2165,11 +2166,32 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
       const d = plan.diagrams.find((x) => x.id === id);
       return d ? fingerprint(designWithoutLinks(d)) : 0;
     }
-    const t = plan.tasks.find((x) => x.id === id);
+    const t = tasks.get(id);
     // A task's own checks count once it has some — so a fingerprint taken
     // before they existed still matches a task that has none.
     const checks = t?.addChecks?.length || t?.skipChecks?.length ? [t.addChecks ?? [], t.skipChecks ?? []] : [];
     return t ? fingerprint(JSON.stringify([t.title, t.detail ?? '', t.parentId, t.dependsOn ?? [], t.branch ?? '', t.review ?? '', t.files ?? [], ...checks])) : 0;
+  };
+  // Links are left out of a diagram's own print (tasks are linked to boxes
+  // all through planning), so an op that overwrites them is printed by the
+  // links it would overwrite. Sorted throughout: an order is no change.
+  const boxLinks = (n: DiagramNode | undefined) => [...(n?.taskIds ?? [])].sort();
+  const links = (id: string) =>
+    fingerprint(JSON.stringify(plan.diagrams.flatMap((d) => d.nodes.filter((n) => n.taskIds?.includes(id)).map((n) => `${d.id}/${n.id}`)).sort()));
+  const linksOfBox = (diagramId: string, nodeId: string) =>
+    fingerprint(JSON.stringify(boxLinks(plan.diagrams.find((d) => d.id === diagramId)?.nodes.find((n) => n.id === nodeId))));
+  const linksIn = (diagramId: string) =>
+    fingerprint(JSON.stringify((plan.diagrams.find((d) => d.id === diagramId)?.nodes ?? []).filter((n) => n.taskIds?.length).map((n) => [n.id, boxLinks(n)]).sort()));
+  const removal = (id: string) => {
+    const { doomed, dependents, diagrams } = taskRemoval(plan, id);
+    return fingerprint(
+      JSON.stringify([
+        // The task itself is `task:<id>`'s to print.
+        [...doomed].filter((t) => t !== id).sort().map((t) => [t, rev('task', t)]),
+        dependents.map((t) => [t.id, t.dependsOn]).sort(),
+        diagrams.flatMap((d) => d.nodes.filter((n) => n.taskIds?.some((t) => doomed.has(t))).map((n) => [`${d.id}/${n.id}`, boxLinks(n)])).sort(),
+      ]),
+    );
   };
   for (const op of ops) {
     switch (op.op) {
@@ -2183,20 +2205,31 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
       case 'upsert_diagram':
       case 'move_diagram':
         if (op.id) out[`diagram:${op.id}`] = rev('diagram', op.id);
+        // A new list of boxes replaces the links on them.
+        if (op.op === 'upsert_diagram' && op.id && op.nodes !== undefined) out[`diagramlinks:${op.id}`] = linksIn(op.id);
         break;
       case 'upsert_node':
       case 'remove_node':
       case 'upsert_edge':
       case 'remove_edge':
         out[`diagram:${op.diagramId}`] = rev('diagram', op.diagramId);
+        // A box's tasks set anew, or the box gone with its links.
+        if ((op.op === 'upsert_node' && op.taskIds !== undefined) || (op.op === 'remove_node' && op.id)) {
+          out[`boxlinks:${op.diagramId}/${op.id}`] = linksOfBox(op.diagramId, op.id!);
+        }
         break;
       case 'upsert_task':
       case 'move_task':
       case 'set_checks':
         if (op.id) out[`task:${op.id}`] = rev('task', op.id);
+        // `builds` replaces which boxes link the task: a link made since is undone.
+        if (op.op === 'upsert_task' && op.id && op.builds !== undefined) out[`links:${op.id}`] = links(op.id);
         break;
       case 'remove':
         if (op.kind === 'section' || op.kind === 'diagram' || op.kind === 'task') out[`${op.kind}:${op.id}`] = rev(op.kind, op.id);
+        // A task goes with its subtasks, the dependencies on them and its
+        // boxes' links (taskRemoval, as the unread-edit guard counts it).
+        if (op.kind === 'task') out[`removal:${op.id}`] = removal(op.id);
         break;
     }
   }
@@ -2208,13 +2241,28 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
 export function proposalStaleness(plan: Plan, p: Proposal): string[] {
   const now = proposalTouches(plan, p.ops);
   const out: string[] = [];
+  // One made before Coplan printed all it would change cannot be checked in
+  // full: it is out of date for that reason alone.
+  if (Object.keys(now).some((key) => !(key in p.base))) out.push('everything it would change (it was made before Coplan recorded that)');
   for (const [key, was] of Object.entries(p.base)) {
     if (now[key] === was) continue;
     const [kind, id] = splitKey(key);
+    const task = () => {
+      const t = plan.tasks.find((x) => x.id === id);
+      return `task ${id}${t ? ` "${t.title}"` : ''}`;
+    };
+    const diagram = (did: string) => `diagram "${plan.diagrams.find((d) => d.id === did)?.title ?? did}"`;
     if (kind === 'plan') out.push("the plan's title or summary");
     else if (kind === 'section') out.push(`section "${plan.sections.find((s) => s.id === id)?.title ?? id}"`);
-    else if (kind === 'diagram') out.push(`diagram "${plan.diagrams.find((d) => d.id === id)?.title ?? id}"`);
-    else out.push(`task ${id}${plan.tasks.find((t) => t.id === id) ? ` "${plan.tasks.find((t) => t.id === id)!.title}"` : ''}`);
+    else if (kind === 'diagram') out.push(diagram(id));
+    else if (kind === 'diagramlinks') out.push(`the task links in ${diagram(id)}`);
+    else if (kind === 'boxlinks') {
+      const [did, nid] = [id.slice(0, id.indexOf('/')), id.slice(id.indexOf('/') + 1)];
+      const label = plan.diagrams.find((d) => d.id === did)?.nodes.find((n) => n.id === nid)?.label ?? nid;
+      out.push(`the tasks linked to box "${label}" in ${diagram(did)}`);
+    } else if (kind === 'removal') out.push(`what removing ${task()} takes (its subtasks, the dependencies on them, its boxes' links)`);
+    else if (kind === 'links') out.push(`the boxes ${task()} builds`);
+    else out.push(task());
   }
   return out;
 }
