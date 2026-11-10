@@ -121,6 +121,20 @@ const initial: UiState = {
   error: null,
 };
 
+/**
+ * What the page holds for the session on screen, let go when another opens
+ * (or it is deleted): its ids (a task's brief, an item to scroll to, a
+ * proposal, a diagram) may name others in the next.
+ */
+const SESSION_RESET: Partial<UiState> = {
+  planCheck: {},
+  diagramId: null,
+  proposalPreview: null,
+  viewer: null,
+  focusTarget: null,
+  exportOpen: false,
+};
+
 const PREFS_KEY = 'cc-harness:prefs';
 /** Sessions whose folded tasks are remembered, the most recently folded. */
 const FOLDS_KEPT = 100;
@@ -204,7 +218,8 @@ class Store {
       if (typing instanceof HTMLInputElement || typing instanceof HTMLTextAreaElement) typing.blur();
     }
     if (updateHash) window.location.hash = `#/session/${id}`;
-    this.set({ sessionId: id, session: null, planCheck: {}, diagramId: null, proposalPreview: null, error: null, exportOpen: false });
+    // Opened again, it reloads and keeps what was open on it.
+    this.set({ ...(id !== this.state.sessionId ? SESSION_RESET : {}), sessionId: id, session: null, error: null });
     this.connect();
     try {
       const { session, planCheck, configErrors, projectChecks } = await api.session(id);
@@ -671,7 +686,7 @@ class Store {
     this.set({ sessions, pinned: this.state.pinned.filter((id) => id !== sessionId), collapsedTasks });
     this.persistPrefs();
     if (this.state.sessionId === sessionId) {
-      this.set({ sessionId: null, session: null, proposalPreview: null });
+      this.set({ ...SESSION_RESET, sessionId: null, session: null });
       window.location.hash = '';
       const next = listedSessions(sessions, null)[0]?.sessionId;
       if (next) await this.selectSession(next);

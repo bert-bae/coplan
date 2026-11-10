@@ -2435,6 +2435,25 @@ test('a comment, a reply and a files list being written keep their text when the
   assert.equal(leaving(), false);
 });
 
+test("another session opened closes the prompt viewer and forgets a jump, both the old plan's", async () => {
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => (route === '/api/session/s2' ? { session: other } : undefined));
+  await act(async () => {
+    store.openViewer({ tab: 'brief', taskId: 't2' });
+    store.set({ focusTarget: 'task:t2' });
+  });
+  // Opened again (its row clicked), it is the same plan: they stay.
+  await act(async () => {
+    await store.selectSession('s1');
+  });
+  assert.deepEqual(store.getState().viewer, { tab: 'brief', taskId: 't2' });
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  assert.equal(store.getState().viewer, null, "s1's t2 is not s2's");
+  assert.equal(store.getState().focusTarget, null);
+});
+
 test('a kept comment goes with what it was on, and a kept reply once its thread is resolved', async () => {
   const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
   await boot(makeSession(plan));

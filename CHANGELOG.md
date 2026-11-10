@@ -295,6 +295,12 @@
   closed a new subtask's field (losing its title), a box's task list, and
   on a narrow window the session list's drawer. They now leave that
   Escape to the input method, as the other fields do.
+- **Opening another session closes what was open on the last.** The
+  prompt viewer stayed open, showing the new session's brief for the old
+  session's task id, and a jump made just before could flash the other
+  plan's item of the same id. Opening another session, or deleting the
+  one on screen, now closes the viewer and forgets the jump; opening the
+  same session again keeps them.
 - **No two sessions share a folder.** A session id is kept in a folder
   named after it, with anything a folder name cannot hold made safe, so
   ids that differed only there (`a/b`, `a_b`), or past 128 characters,
