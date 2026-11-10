@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { applyOps, confirmDesign, countTasks, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, submitPlan, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import { previewProposal } from '../shared/proposals.ts';
-import type { Plan, PlanInput, PlanOp } from '../shared/types.ts';
+import type { DiagramNodeInput, Plan, PlanInput, PlanOp } from '../shared/types.ts';
 
 /**
  * The plan document: publishing, editing from either side, and the change
@@ -993,4 +993,16 @@ test('no task is moved, or published, under a task already started or finished',
     () => publishPlan(read(base), { title: 'x', tasks: [{ id: 't1', title: 'Auth', subtasks: [{ title: 'Refresh' }] }, { id: 't2', title: 'Tokens' }, { id: 't3', title: 'UI' }] }, 2_000),
     /"Auth" is already done, so it cannot take subtasks: list the work beside t1 instead, giving any new task an id of its own, depending on t1 if it builds on it\./,
   );
+});
+
+test("a republish that drops a task the user linked to a box drops the link, not the publish", () => {
+  const input = (tasks: PlanInput['tasks'], nodes: DiagramNodeInput[] = [{ id: 'a', label: 'A' }]) => ({ title: 'x', tasks, diagrams: [{ id: 'd1', title: 'Arch', nodes, edges: [] }] });
+  let plan = publishPlan(null, input([{ id: 't1', title: 'one' }, { id: 't2', title: 'two' }]), 1_000).plan;
+  plan = read(applyOps(plan, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t1', 't2'] }], 'user').plan);
+  // The agent read it, and republishes without t2: the box keeps only what is still in the plan.
+  const after = publishPlan(plan, input([{ id: 't1', title: 'one' }]), 2_000).plan;
+  assert.deepEqual(after.diagrams[0]!.nodes[0]!.taskIds, ['t1']);
+  assert.ok(after.diagrams[0]!.rev > plan.diagrams[0]!.rev, 'a new revision, so an open canvas reloads rather than saving the old links back');
+  // A link it writes itself to a task that is not there is still a mistake to report.
+  assert.throws(() => publishPlan(plan, input([{ id: 't1', title: 'one' }], [{ id: 'a', label: 'A', taskIds: ['t9'] }]), 2_000), /node "a" links task "t9", which is not in the plan/);
 });

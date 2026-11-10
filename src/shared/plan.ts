@@ -2726,7 +2726,9 @@ function buildGraph(
     // diagram without restating what the user wrote on every box.
     const description = raw.description === undefined ? prev?.description : clean(raw.description, MAX_DESCRIPTION);
     const notes = raw.notes === undefined ? prev?.notes : clean(raw.notes, MAX_TEXT);
-    const links = raw.taskIds === undefined ? prev?.taskIds : cleanList(raw.taskIds);
+    // Links carried over keep only tasks still in the plan (a republish that
+    // drops one drops its links, as removing it does); written ones are checked.
+    const links = raw.taskIds === undefined ? prev?.taskIds?.filter((t) => taskIds.has(t)) : cleanList(raw.taskIds);
     for (const t of links ?? []) {
       if (!taskIds.has(t)) throw new PlanError(`Diagram "${title}": node "${id}" links task "${t}", which is not in the plan.`);
     }

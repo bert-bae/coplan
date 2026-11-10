@@ -94,6 +94,11 @@
   on purpose. Both now read it as the board does, and one dropped whole
   is marked `[-]` with nothing of it to build on, as is a dropped subtask
   in its parent's brief.
+- **A republish can drop a task you had linked to a box.** The links you
+  made carried over to the republished diagram and were then checked
+  against the new task list, so the whole publish was refused over a link
+  the agent never wrote. A carried link to a task no longer in the plan
+  now goes with the task, as when it is removed.
 
 ### Targeted checks: only what the change touched
 
