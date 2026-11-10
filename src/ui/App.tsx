@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { listedSessions, store, useEdit, useStore, useSession, TAB_IDS, type Tab } from './store.ts';
+import { listedSessions, store, SessionScope, useEdit, useStore, useSession, TAB_IDS, type Tab } from './store.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { Toasts } from './components/Toasts.tsx';
 import { ConnectionBar } from './components/ConnectionBar.tsx';
@@ -66,49 +66,51 @@ export function App() {
   );
 
   return (
-    <div className={classNames('app', sidebarCollapsed && 'is-sidebar-collapsed', drawerOpen && 'is-drawer-open')}>
-      <a className="skip-link" href={`#${panelId(tab)}`}>
-        Skip to content
-      </a>
-      <Sidebar />
-      {drawerOpen && <button type="button" className="scrim" aria-label="Close the session list" onClick={() => store.setDrawer(false)} />}
-      <main className="main" aria-label="Plan">
-        {!sessionId ? (
-          <NoSession error={error} />
-        ) : !session ? (
-          error ? <SessionUnavailable error={error} /> : <Loading />
-        ) : (
-          <>
-            <Header session={session} />
-            <ConnectionBar />
-            <WaitingBanner session={session} />
-            <PhaseStrip session={session} />
-            {plan && <ProposalsStrip plan={plan} />}
-            {!plan ? (
-              <NoPlan session={session} />
-            ) : (
-              <>
-                <nav className="tabs" role="tablist" aria-label="Plan views" ref={tabs} onKeyDown={onTabKeyDown}>
-                  {TAB_IDS.map((t) => (
-                    <TabButton key={t} id={t} active={tab === t} plan={plan} />
-                  ))}
-                </nav>
-                <div className="view" key={tab} id={panelId(tab)} role="tabpanel" aria-labelledby={tabId(tab)} tabIndex={-1}>
-                  <ErrorBoundary label={`${TAB_LABEL[tab]} view`} resetKey={`${sessionId}:${tab}`}>
-                    {tab === 'overview' && <OverviewView />}
-                    {tab === 'diagrams' && <DiagramsView />}
-                    {tab === 'tasks' && <TasksView />}
-                  </ErrorBoundary>
-                </div>
-              </>
-            )}
-          </>
-        )}
-      </main>
-      <PromptViewerHost />
-      <ExportHost />
-      <Toasts />
-    </div>
+    <SessionScope>
+      <div className={classNames('app', sidebarCollapsed && 'is-sidebar-collapsed', drawerOpen && 'is-drawer-open')}>
+        <a className="skip-link" href={`#${panelId(tab)}`}>
+          Skip to content
+        </a>
+        <Sidebar />
+        {drawerOpen && <button type="button" className="scrim" aria-label="Close the session list" onClick={() => store.setDrawer(false)} />}
+        <main className="main" aria-label="Plan">
+          {!sessionId ? (
+            <NoSession error={error} />
+          ) : !session ? (
+            error ? <SessionUnavailable error={error} /> : <Loading />
+          ) : (
+            <>
+              <Header session={session} />
+              <ConnectionBar />
+              <WaitingBanner session={session} />
+              <PhaseStrip session={session} />
+              {plan && <ProposalsStrip plan={plan} />}
+              {!plan ? (
+                <NoPlan session={session} />
+              ) : (
+                <>
+                  <nav className="tabs" role="tablist" aria-label="Plan views" ref={tabs} onKeyDown={onTabKeyDown}>
+                    {TAB_IDS.map((t) => (
+                      <TabButton key={t} id={t} active={tab === t} plan={plan} />
+                    ))}
+                  </nav>
+                  <div className="view" key={tab} id={panelId(tab)} role="tabpanel" aria-labelledby={tabId(tab)} tabIndex={-1}>
+                    <ErrorBoundary label={`${TAB_LABEL[tab]} view`} resetKey={`${sessionId}:${tab}`}>
+                      {tab === 'overview' && <OverviewView />}
+                      {tab === 'diagrams' && <DiagramsView />}
+                      {tab === 'tasks' && <TasksView />}
+                    </ErrorBoundary>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </main>
+        <PromptViewerHost />
+        <ExportHost />
+        <Toasts />
+      </div>
+    </SessionScope>
   );
 }
 

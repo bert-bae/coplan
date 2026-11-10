@@ -9,7 +9,7 @@ import { SubmitControl } from '../components/Submit.tsx';
 import { isDesignLocked, isLocked } from '../../shared/plan.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { diagramToMarkdown } from '../../shared/architecture.ts';
-import { NODE_KINDS, type Diagram, type DiagramEdgeInput, type DiagramNodeInput, type Plan, type PlanOp, type Proposal } from '../../shared/types.ts';
+import { NODE_KINDS, type Diagram, type DiagramEdgeInput, type DiagramNodeInput, type Plan, type Proposal } from '../../shared/types.ts';
 import { diagramDiff, previewDiagram, previewProposal } from '../../shared/proposals.ts';
 import { ProposalCard } from '../components/Proposals.tsx';
 
@@ -111,19 +111,19 @@ export function DiagramsView() {
           plan={plan}
           readOnly={locked}
           // Tasks are added to a box from it until the plan is submitted.
-          {...(!isLocked(plan) ? { onTaskOps: (ops: PlanOp[]) => commit(ops) } : {})}
+          {...(!isLocked(plan) ? { onTaskOps: commit } : {})}
           {...(tasking
             ? {
                 lockNote: 'The design is confirmed; reopen it to change the design. Task links can still change.',
                 onLinkTasks: (nodeId: string, taskIds: string[]) => {
                   const nodes = diagram.nodes.map((n) => (n.id === nodeId ? { ...n, taskIds } : n));
                   // Against the diagram on screen, so links the agent added since are not undone.
-                  void commit({ op: 'upsert_diagram', id: diagram.id, nodes, expect: diagram.rev });
+                  void commit([{ op: 'upsert_diagram', id: diagram.id, nodes, expect: diagram.rev }]);
                 },
               }
             : {})}
           onSave={async (patch: GraphPatch) => {
-            const plan = await commit({ op: 'upsert_diagram', id: diagram.id, ...patch });
+            const plan = await commit([{ op: 'upsert_diagram', id: diagram.id, ...patch }]);
             return plan?.diagrams.find((d) => d.id === diagram.id)?.rev ?? null;
           }}
           aside={<DiagramPanel plan={plan} diagram={diagram} locked={locked} />}
@@ -216,7 +216,7 @@ function NewDiagram() {
     setOpen(false);
     const before = new Set(store.getState().session?.plan?.diagrams.map((d) => d.id));
     // Found in the daemon's answer: the plan on screen by then may be another.
-    const made = (await commit({ op: 'upsert_diagram', title: t.title, nodes: t.nodes, edges: t.edges }))?.diagrams.find((d) => !before.has(d.id));
+    const made = (await commit([{ op: 'upsert_diagram', title: t.title, nodes: t.nodes, edges: t.edges }]))?.diagrams.find((d) => !before.has(d.id));
     if (made) store.set({ diagramId: made.id });
   };
   return (

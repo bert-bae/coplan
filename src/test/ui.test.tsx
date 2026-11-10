@@ -1,7 +1,7 @@
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, stubFetch } from './dom-env.ts';
-import type { Plan, PlanInput, PlanOp, SessionState } from '../shared/types.ts';
+import type { Plan, PlanInput, SessionState } from '../shared/types.ts';
 
 /**
  * The planning workspace in a browser: every edit becomes an op sent to the
@@ -11,9 +11,9 @@ import type { Plan, PlanInput, PlanOp, SessionState } from '../shared/types.ts';
 
 setupDom();
 
-const { render, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
+const { render, renderHook, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
-const { store, useEdit } = await import('../ui/store.ts');
+const { store, SessionScope, useEdit } = await import('../ui/store.ts');
 const { openDrafts } = await import('../ui/lib/drafts.ts');
 const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan, confirmDesign, queueRevision, markRevisionDelivered } = await import('../shared/plan.ts');
 
@@ -87,6 +87,8 @@ async function boot(session: SessionState = makeSession(), extra?: (route: strin
 const none = (found: Element | null, what = 'nothing expected') => assert.ok(found === null, `${what}: found ${found?.outerHTML.slice(0, 200)}`);
 
 const opsSent = () => posts.filter((p) => p.route.endsWith('/plan/ops')).flatMap((p) => p.body['ops'] as Record<string, unknown>[]);
+/** The edits sent to one session's plan. */
+const sentTo = (id: string) => posts.filter((p) => p.route === `/api/session/${id}/plan/ops`).flatMap((p) => p.body['ops'] as Record<string, unknown>[]);
 
 const openTab = async (name: string) => {
   await act(async () => {
@@ -1953,7 +1955,6 @@ test('switching session closes the editors of the one left: nothing typed for on
   // Another plan with the same task ids, as every plan has.
   const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
   await boot(makeSession(), (route) => (route === '/api/session/s2' ? { session: other } : undefined));
-  const sentTo = (id: string) => posts.filter((p) => p.route === `/api/session/${id}/plan/ops`).flatMap((p) => p.body['ops'] as Record<string, unknown>[]);
 
   // The summary open with a draft in it; the user goes Back to another session (no focus moves).
   await openTab('Overview');
@@ -1988,15 +1989,9 @@ test('switching session closes the editors of the one left: nothing typed for on
 test('an edit made while one plan was on screen goes to that plan, however late it is sent', async () => {
   const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
   await boot(makeSession(), (route) => (route === '/api/session/s2' ? { session: other } : undefined));
-  const sentTo = (id: string) => posts.filter((p) => p.route === `/api/session/${id}/plan/ops`).flatMap((p) => p.body['ops'] as Record<string, unknown>[]);
-  let edit: ((edit: PlanOp | PlanOp[]) => Promise<boolean>) | null = null;
-  function Editor() {
-    edit = useEdit();
-    return null;
-  }
-  render(<Editor />);
+  const { result } = renderHook(() => useEdit(), { wrapper: SessionScope });
   // What a view on s1 holds: an editor's save, a request still queued.
-  const madeOnS1 = edit!;
+  const madeOnS1 = result.current;
   await act(async () => {
     await store.selectSession('s2');
   });
@@ -2006,7 +2001,7 @@ test('an edit made while one plan was on screen goes to that plan, however late 
   assert.deepEqual(sentTo('s1').map((o) => o['title']), ['Renamed on s1']);
   assert.deepEqual(sentTo('s2'), [], 'never into the plan now on screen, whose t1 is another task');
   await act(async () => {
-    await edit!({ op: 'set_meta', title: 'Made on s2' });
+    await result.current({ op: 'set_meta', title: 'Made on s2' });
   });
   assert.deepEqual(sentTo('s2').map((o) => o['title']), ['Made on s2'], 'and one made there now goes there');
 });

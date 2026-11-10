@@ -1,4 +1,4 @@
-import { useCallback, useSyncExternalStore } from 'react';
+import { createContext, createElement, useCallback, useContext, useSyncExternalStore, type ReactNode } from 'react';
 import { api, eventsUrl, Unauthorized, type ProjectChecks } from './lib/api.ts';
 import { pruneDrafts, unsavedDrafts } from './lib/drafts.ts';
 
@@ -185,7 +185,7 @@ class Store {
     // A field being typed in saves when it loses focus: let it, before its
     // view goes. Left to the removal, it would be dropped where a browser
     // does not blur a removed field. Its save goes to its own session
-    // either way: each view's edits are bound to it (useEdit).
+    // either way: each view's edits are bound to it (useCommit).
     if (id !== this.state.sessionId) {
       const typing = document.activeElement;
       if (typing instanceof HTMLInputElement || typing instanceof HTMLTextAreaElement) typing.blur();
@@ -333,7 +333,7 @@ class Store {
    * reason is shown). Callers that build on the result (the canvas's
    * revision) need the daemon's answer, not whatever the store holds by the
    * time it arrives. The session is the caller's, never the one on screen
-   * when this runs: `useEdit` binds it when the view renders.
+   * when this runs: `useCommit` binds it when the view renders.
    */
   async commit(ops: PlanOp[], sessionId: string | null): Promise<Plan | null> {
     if (!sessionId || ops.length === 0) return null;
@@ -810,6 +810,15 @@ export function useSession(): SessionState | null {
   return useStore((s) => s.session);
 }
 
+const ShownSession = createContext<string | null>(null);
+
+/** Around everything that shows a session's plan: the session it shows,
+ *  read once here rather than by every component that edits it. */
+export function SessionScope({ children }: { children: ReactNode }) {
+  const sessionId = useStore((s) => s.session?.sessionId ?? null);
+  return createElement(ShownSession.Provider, { value: sessionId }, children);
+}
+
 /**
  * Edits to the plan the view shows, bound to its session when the view
  * renders, not when they are sent. A save that lands after the user
@@ -818,15 +827,15 @@ export function useSession(): SessionState | null {
  * these tasks. Resolves with that plan as the daemon left it, or null when
  * the edits were refused.
  */
-export function useCommit(): (edit: PlanOp | PlanOp[]) => Promise<Plan | null> {
-  const sessionId = useStore((s) => s.session?.sessionId ?? null);
-  return useCallback((edit) => store.commit(Array.isArray(edit) ? edit : [edit], sessionId), [sessionId]);
+export function useCommit(): (ops: PlanOp[]) => Promise<Plan | null> {
+  const sessionId = useContext(ShownSession);
+  return useCallback((ops) => store.commit(ops, sessionId), [sessionId]);
 }
 
-/** `useCommit`, for callers that only need to know the edits were taken. */
-export function useEdit(): (edit: PlanOp | PlanOp[]) => Promise<boolean> {
+/** One edit, by `useCommit`, for callers that only need to know it was taken. */
+export function useEdit(): (op: PlanOp) => Promise<boolean> {
   const commit = useCommit();
-  return useCallback(async (edit) => (await commit(edit)) !== null, [commit]);
+  return useCallback(async (op) => (await commit([op])) !== null, [commit]);
 }
 
 export function usePlan() {
