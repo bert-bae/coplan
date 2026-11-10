@@ -968,6 +968,46 @@ test('a refused files save stays open with the text, and the next save goes agai
   assert.equal(screen.queryByRole('textbox', { name: 'Files, one per line' }), null, 'saved, and closed');
 });
 
+test('a note refused as changed underneath is not saved over it by leaving the field: Enter does it, deliberately', async () => {
+  let refuse = true;
+  await boot(makeSession(), (route) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    if (refuse) return { __status: 409, error: 'The note of task "Invalidation" was changed while this edit was open, so it was not saved.' };
+    return { plan: store.getState().session?.plan, changes: [] };
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^Status note: .*\. Edit$/ }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Status note' }), { target: { value: 'Waiting on the cache client' } });
+  // The agent's progress note lands meanwhile: the save is refused.
+  const s = store.getState().session!;
+  const reported = applyOps(s.plan!, [{ op: 'upsert_task', id: 't2', status: 'blocked', note: 'Blocked: DB creds missing' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: reported } }));
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Status note' }), { key: 'Enter' });
+  });
+  const sent = () => opsSent().filter((o) => o['op'] === 'upsert_task' && 'note' in o).length;
+  assert.equal(sent(), 1);
+  refuse = false;
+  // Leaving the field is not a save over the agent's note.
+  await act(async () => {
+    fireEvent.blur(screen.getByRole('textbox', { name: 'Status note' }));
+  });
+  assert.equal(sent(), 1, 'nothing sent on leaving');
+  assert.ok(screen.getByText(/^Now: Blocked: DB creds missing\./), 'what is there now is shown');
+  // Enter is deliberate: saved over it, knowingly.
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Status note' }), { key: 'Enter' });
+  });
+  const last = opsSent().filter((o) => o['op'] === 'upsert_task' && 'note' in o).at(-1)!;
+  assert.equal(last['note'], 'Waiting on the cache client');
+  assert.equal(last['noteWas'], 'Blocked: DB creds missing');
+});
+
 test('a view that throws takes only itself down', async () => {
   const broken = makePlan();
   // A shape only the canvas reads, and does not expect: arrows not a list.

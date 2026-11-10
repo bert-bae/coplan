@@ -384,7 +384,9 @@
   task without moving its revision, so a note editor you had open from
   before saved over it without a word. The note editor now saves with the
   note it started from, and is refused if the note has changed since;
-  your other open editors on that task are not held up by it.
+  your other open editors on that task are not held up by it. A one-line
+  field refused that way shows what is there now and stays open: leaving
+  it no longer saves yours over it after all, only Enter does.
 - **The agent's progress note cannot go over a note of yours it has
   not read.** A note sent with a status was left out of the check that
   holds the agent's edits to what it has read, so it replaced the note

@@ -12,6 +12,8 @@ import { isComposing } from '../lib/keys.ts';
  *
  * Both fields share one contract: Enter (or ⌘/Ctrl+Enter for prose) saves,
  * Escape abandons, and losing focus saves — the same as renaming a file.
+ * Refused because the text changed underneath, it stays open showing what
+ * is there now, and only Enter saves over it.
  */
 
 export function InlineText({
@@ -42,6 +44,9 @@ export function InlineText({
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
+  // Refused as changed underneath: saved over that only by Enter, never by
+  // leaving the field (a click anywhere would undo what the refusal was about).
+  const [refused, setRefused] = useState(false);
   const done = useRef(false);
   const startedAt = useRef<number | undefined>(version);
   const latest = useRef<number | undefined>(version);
@@ -76,6 +81,7 @@ export function InlineText({
   const commit = () => {
     if (done.current) return;
     done.current = true;
+    setRefused(false);
     setEditing(false);
     const next = draft.trim();
     if (!next || next === value) return;
@@ -85,6 +91,9 @@ export function InlineText({
       // the revision now on screen, so a deliberate second save goes in.
       done.current = false;
       startedAt.current = latest.current;
+      // Changed underneath (not a failure of some other kind): what is there
+      // now is shown, and only Enter saves over it.
+      setRefused(shown.current !== startedFrom.current);
       startedFrom.current = shown.current;
       setDraft(next);
       setEditing(true);
@@ -92,6 +101,7 @@ export function InlineText({
   };
   const abandon = () => {
     done.current = true;
+    setRefused(false);
     setEditing(false);
     setDraft(value);
   };
@@ -99,14 +109,14 @@ export function InlineText({
   if (readOnly) return <Tag className={classNames('inline-text', 'is-readonly', !value && 'is-empty', className)}>{value || placeholder}</Tag>;
 
   if (editing) {
-    return (
+    const field = (
       <input
         ref={input}
         className={classNames('inline-input', className)}
         value={draft}
         aria-label={label}
         onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
+        onBlur={refused ? undefined : commit}
         onKeyDown={(e) => {
           if (isComposing(e)) return;
           if (e.key === 'Enter') {
@@ -121,6 +131,15 @@ export function InlineText({
           }
         }}
       />
+    );
+    if (!refused) return field;
+    return (
+      <>
+        {field}
+        <span className="inline-now muted" role="status">
+          Now: {value || '(empty)'}. Enter saves yours over it; Escape keeps it.
+        </span>
+      </>
     );
   }
 

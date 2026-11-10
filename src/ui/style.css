@@ -2088,6 +2088,7 @@ button.pv-chip { cursor: pointer; }
 
 /* A locked plan reads the same; its controls are simply off. */
 .lockable { margin: 0; padding: 0; border: 0; min-width: 0; }
+.inline-now { margin-left: 8px; font-size: var(--fs-micro); }
 .lockable:disabled .md-edit, .lockable:disabled .md-empty, .lockable:disabled .item-actions,
 .lockable:disabled .add-field, .lockable:disabled .thread-composer { display: none; }
 .lockable:disabled .inline-trigger { cursor: default; color: inherit; opacity: 1; }
