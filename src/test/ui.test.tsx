@@ -120,6 +120,8 @@ beforeEach(() => {
     viewer: null,
     exportOpen: false,
     showBookkeeping: false,
+    // A page refused its key in one test is not refused in the next.
+    connection: 'connecting',
   });
 });
 
@@ -134,6 +136,15 @@ test('three views, architecture first, and no way to answer Claude here', async 
   assert.equal(screen.getByRole('tab', { selected: true }).textContent?.startsWith('Architecture'), true);
   assert.equal(screen.queryByText(/questions/i), null);
   assert.equal(screen.queryByText(/activity/i), null);
+});
+
+test('the page opens its live stream once on load, with one ticket', async () => {
+  // The session answers before the ticket does, as it can on a busy daemon.
+  await boot(makeSession(), (route) => (route === '/api/events/ticket' ? new Promise((resolve) => setTimeout(() => resolve({ ticket: 't' }), 20)) : undefined));
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 50));
+  });
+  assert.equal(posts.filter((p) => p.route === '/api/events/ticket').length, 1);
 });
 
 test('with no plan yet, the page says how to get one', async () => {

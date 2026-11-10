@@ -134,6 +134,8 @@ class Store {
   private reconnectTimer: number | undefined;
   private retries = 0;
   private connectAttempt = 0;
+  /** A stream is being opened: its ticket is not back yet. */
+  private opening = false;
 
   getState = (): UiState => this.state;
 
@@ -164,9 +166,9 @@ class Store {
       this.set({ error: describeError(err) });
     }
 
-    // Selecting a session opens the stream; with none to select, open it for
-    // the session list alone.
-    if (!this.source) this.connect();
+    // Selecting a session opens the stream (its ticket maybe not back yet);
+    // with none to select, open it for the session list alone.
+    if (!this.source && !this.opening) this.connect();
     // Closing or reloading with an edit still on its way, or one open and
     // not saved, would lose it without a word: the browser asks first.
     window.addEventListener('beforeunload', (e) => {
@@ -218,9 +220,11 @@ class Store {
     this.source = null;
     window.clearTimeout(this.reconnectTimer);
     const attempt = ++this.connectAttempt;
+    this.opening = true;
     void eventsUrl(this.state.sessionId)
       .then((url) => {
         if (attempt !== this.connectAttempt) return;
+        this.opening = false;
         const source = new EventSource(url);
         this.source = source;
         source.onopen = () => {
@@ -242,6 +246,7 @@ class Store {
       })
       .catch((err: unknown) => {
         if (attempt !== this.connectAttempt) return;
+        this.opening = false;
         if (err instanceof Unauthorized) {
           this.set({ connection: 'unauthorized' });
           return;
