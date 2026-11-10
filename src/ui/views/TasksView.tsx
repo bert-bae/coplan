@@ -4,7 +4,7 @@ import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx'
 import { CommentToggle, ThreadPanel, useThreads } from '../components/Threads.tsx';
 import { Focusable } from '../components/Item.tsx';
 import { KIND_GLYPH } from '../components/FlowCanvas.tsx';
-import { ProgressBar, STATUS_GLYPH, STATUS_LABEL } from '../components/Progress.tsx';
+import { ProgressBar, STATUS_GLYPH, STATUS_LABEL, TaskStatusDot } from '../components/Progress.tsx';
 import { EmptyState } from '../components/primitives.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { TaskCheckChips, TaskChecksField } from '../components/TaskChecks.tsx';
@@ -246,17 +246,7 @@ function ByBoxRow({ plan, task, status, number, depth, readOnly }: { plan: Plan;
   const parent = hasSubtasks(plan, task.id);
   return (
     <li className={classNames('by-box-row', `is-${status}`)} style={{ ['--depth' as string]: depth }}>
-      {parent || readOnly ? (
-        parent ? (
-          <DerivedStatus task={task} status={status} />
-        ) : (
-          <span className={classNames('status-dot is-static', `is-${task.status}`)} role="img" aria-label={`${task.title}: ${STATUS_LABEL[task.status]}`}>
-            <span aria-hidden="true">{STATUS_GLYPH[task.status]}</span>
-          </span>
-        )
-      ) : (
-        <StatusDot task={task} />
-      )}
+      {parent || readOnly ? <TaskStatusDot plan={plan} task={task} status={status} named /> : <StatusDot task={task} />}
       <span className="task-num">{number}</span>
       <button type="button" className="link by-box-title" title={readOnly ? 'Show its card on the board' : 'Show it in the outline'} onClick={() => store.focus('task', task.id)}>
         {task.title}
@@ -635,7 +625,7 @@ function TaskRow(props: {
         ) : (
           <span className="twisty is-leaf" aria-hidden="true" />
         )}
-        {kids.length ? <DerivedStatus task={task} status={status} /> : <StatusDot task={task} />}
+        {kids.length ? <TaskStatusDot plan={plan} task={task} status={status} named /> : <StatusDot task={task} />}
         <span className="task-num">{number}</span>
         <InlineText
           className="task-title"
@@ -967,23 +957,6 @@ function MoveButton({ op, glyph, label }: { op: PlanOp | null; glyph: string; la
     <button type="button" className="icon-btn is-tiny" disabled={!op} title={label} aria-label={label} onClick={() => op && void edit(op)}>
       <span aria-hidden="true">{glyph}</span>
     </button>
-  );
-}
-
-/** Where a parent's subtasks stand: done when all are, blocked or in
- *  progress when any is. A parent has no status of its own to set — what
- *  is built, and what the agent reports, is its subtasks. */
-/** A parent's dot: `status` is rolled up from its subtasks (shownStatus). */
-function DerivedStatus({ task, status }: { task: Task; status: TaskStatus }) {
-  return (
-    <span
-      className={classNames('status-dot', 'is-static', `is-${status}`)}
-      role="img"
-      title={`${STATUS_LABEL[status]}, from its subtasks`}
-      aria-label={`${task.title}: ${STATUS_LABEL[status]}, from its subtasks`}
-    >
-      <span aria-hidden="true">{STATUS_GLYPH[status]}</span>
-    </span>
   );
 }
 

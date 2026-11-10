@@ -1,10 +1,9 @@
 import { forwardRef, useEffect, useRef, type FocusEvent, type KeyboardEvent, type RefObject } from 'react';
 import { store, useEdit, usePlan, useStore } from '../../store.ts';
 import { AddField, InlineText } from '../Editable.tsx';
-import { ProgressBar, STATUS_GLYPH, STATUS_LABEL } from '../Progress.tsx';
+import { ProgressBar, TaskStatusDot } from '../Progress.tsx';
 import { classNames } from '../../lib/format.ts';
 import { boxRows } from '../../lib/tasks.ts';
-import { hasSubtasks } from '../../../shared/build.ts';
 import { boxUnbuilt } from '../../../shared/check.ts';
 import type { Task } from '../../../shared/types.ts';
 import { useCanvas, type FlowData } from './shared.ts';
@@ -181,14 +180,7 @@ export function BoxTasks({ id, data, chip }: { id: string; data: FlowData; chip:
         <ul className="flow-tasks-list" aria-label={`Tasks that build ${data.label}`}>
           {rows.map(({ task, number, depth, direct, status }) => (
             <li key={task.id} className={classNames('flow-tasks-row', `is-${status}`)} style={{ ['--depth' as string]: depth }}>
-              <span
-                className={classNames('status-dot is-static', `is-${status}`)}
-                role="img"
-                aria-label={STATUS_LABEL[status]}
-                title={`${STATUS_LABEL[status]}${hasSubtasks(plan!, task.id) ? ', from its subtasks' : ''}`}
-              >
-                <span aria-hidden="true">{STATUS_GLYPH[status]}</span>
-              </span>
+              <TaskStatusDot plan={plan!} task={task} status={status} />
               <button
                 type="button"
                 className="link task-num"

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ChangeE
 import { store, useAgent } from '../../store.ts';
 import { MarkdownField } from '../Editable.tsx';
 import { Markdown } from '../Markdown.tsx';
-import { STATUS_GLYPH, STATUS_LABEL } from '../Progress.tsx';
+import { TaskStatusDot } from '../Progress.tsx';
 import { classNames } from '../../lib/format.ts';
 import { isComposing } from '../../lib/keys.ts';
 import { isLocked, outline } from '../../../shared/plan.ts';
@@ -297,9 +297,7 @@ export function NodePanel({
               if (!task) return null;
               return (
                 <li key={id}>
-                  <span className={classNames('status-dot is-static', `is-${task.status}`)} title={STATUS_LABEL[task.status]} aria-label={STATUS_LABEL[task.status]}>
-                    {STATUS_GLYPH[task.status]}
-                  </span>
+                  <TaskStatusDot plan={plan} task={task} />
                   <button type="button" className="link panel-task" onClick={() => store.focus('task', id)}>
                     {task.title}
                   </button>
@@ -662,9 +660,7 @@ export function ReadOnlyPanel({
             <ul className="panel-tasks">
               {tasks.map((task) => (
                 <li key={task.id}>
-                  <span className={classNames('status-dot is-static', `is-${task.status}`)} title={STATUS_LABEL[task.status]} aria-label={STATUS_LABEL[task.status]}>
-                    {STATUS_GLYPH[task.status]}
-                  </span>
+                  <TaskStatusDot plan={plan} task={task} />
                   <button
                     type="button"
                     className="link panel-task"

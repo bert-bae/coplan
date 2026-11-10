@@ -1201,6 +1201,43 @@ test('a prompt cut to fit says what it leaves out, and that the agent reads it w
   assert.match(list.querySelector('[data-key="instructions.build"]')?.textContent ?? '', /none$/);
 });
 
+/** The status a list on the canvas gives Storage layer, the parent of t1 and t2. */
+const storageDot = (root: Element) =>
+  [...root.querySelectorAll('li')].find((li) => li.textContent?.includes('Storage layer'))?.querySelector('.status-dot')?.getAttribute('aria-label');
+const subtasksDone = (plan: Plan) => applyOps(plan, [{ op: 'upsert_task', id: 't2', status: 'done' }], 'user').plan;
+
+test('the canvas shows a parent task as far along as its subtasks, as the Tasks tab does', async () => {
+  await boot(makeSession(subtasksDone(makePlan())));
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  const info = await waitFor(() => {
+    const el = document.querySelector<HTMLButtonElement>('button[aria-label="About Postgres"]');
+    assert.ok(el);
+    return el;
+  });
+  await act(async () => {
+    fireEvent.mouseEnter(info);
+  });
+  await waitFor(() => assert.ok(document.querySelector('.flow-summary')));
+  assert.equal(storageDot(document.querySelector('.flow-summary')!), 'Done, from its subtasks', 'in the box summary');
+  assert.equal(document.querySelector('.flow-summary .status-dot')?.hasAttribute('title'), false, 'with no tooltip over the summary');
+  await act(async () => {
+    fireEvent.keyDown(info, { key: 'Escape' });
+  });
+  await selectBox('Postgres');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  await waitFor(() => assert.match(panel.textContent ?? '', /Built by/));
+  assert.equal(storageDot(panel), 'Done, from its subtasks', 'and in its panel');
+});
+
+test('and so does the panel of a confirmed design', async () => {
+  await boot(makeSession(subtasksDone(confirmedPlan())));
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('Postgres');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  await waitFor(() => assert.match(panel.textContent ?? '', /Built by/));
+  assert.equal(storageDot(panel), 'Done, from its subtasks');
+});
+
 test('with the design confirmed, boxes still link to tasks but nothing else on them changes', async () => {
   await boot(makeSession(confirmedPlan()));
   await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));

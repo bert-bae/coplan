@@ -217,7 +217,8 @@
   rolled up from its subtasks, but the row was struck through, labelled
   and its note flagged by the parent's own stored status, so a parent
   whose subtasks were all done could still read as to do (or blocked), in
-  the outline and in "By box".
+  the outline and in "By box". The canvas reads the same way: a box's
+  panel and its summary list a parent as far along as its subtasks.
 - **What is folded or previewed stays with its plan.** Folding a task in
   one plan's outline folded the task of the same id in every other plan,
   and a proposal shown on the canvas stayed shown in the next session
