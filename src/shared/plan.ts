@@ -2356,6 +2356,9 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
     const checks = t?.addChecks?.length || t?.skipChecks?.length ? [t.addChecks ?? [], t.skipChecks ?? []] : [];
     return t ? fingerprint(JSON.stringify([t.title, t.detail ?? '', t.parentId, t.dependsOn ?? [], t.branch ?? '', t.review ?? '', t.files ?? [], ...checks])) : 0;
   };
+  // A note is apart from its task's print (progress writes it): printed
+  // where the proposal would write it, or delete it.
+  const note = (id: string) => fingerprint(tasks.get(id)?.note ?? '');
   // Links are left out of a diagram's own print (tasks are linked to boxes
   // all through planning), so an op that overwrites them is printed by the
   // links it would overwrite. Sorted throughout: an order is no change.
@@ -2381,8 +2384,8 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
     const { doomed, dependents, diagrams } = taskRemoval(outline, id);
     return fingerprint(
       JSON.stringify([
-        // The task itself is `task:<id>`'s to print.
-        [...doomed].filter((t) => t !== id && tasks.has(t)).sort().map((t) => [t, rev('task', t)]),
+        // The task itself is `task:<id>`'s (and `note:<id>`'s) to print.
+        [...doomed].filter((t) => t !== id && tasks.has(t)).sort().map((t) => [t, rev('task', t), note(t)]),
         dependents.map((t) => [t.id, t.dependsOn]).sort(),
         diagrams.flatMap((d) => d.nodes.filter((n) => n.taskIds?.some((t) => doomed.has(t))).map((n) => [`${d.id}/${n.id}`, boxLinks(n)])).sort(),
       ]),
@@ -2421,9 +2424,7 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
         if (op.op === 'upsert_task' && op.id && !tasks.has(op.id) && op.parentId) movedTo.set(op.id, op.parentId);
         // `builds` replaces which boxes link the task: a link made since is undone.
         if (op.op === 'upsert_task' && op.id && op.builds !== undefined) out[`links:${op.id}`] = links(op.id);
-        // A note is apart from the task's print (progress writes it): one
-        // the proposal sets is printed on its own.
-        if (op.op === 'upsert_task' && op.id && typeof op.note === 'string') out[`note:${op.id}`] = fingerprint(tasks.get(op.id)?.note ?? '');
+        if (op.op === 'upsert_task' && op.id && typeof op.note === 'string') out[`note:${op.id}`] = note(op.id);
         break;
       case 'remove':
         if (op.kind === 'section' || op.kind === 'diagram' || op.kind === 'task') out[`${op.kind}:${op.id}`] = rev(op.kind, op.id);
@@ -2431,7 +2432,10 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
         if (op.kind === 'diagram') out[`diagramlinks:${op.id}`] = linksIn(op.id);
         // A task goes with its subtasks, the dependencies on them and its
         // boxes' links (taskRemoval, as the unread-edit guard counts it).
-        if (op.kind === 'task') out[`removal:${op.id}`] = removal(op.id);
+        if (op.kind === 'task') {
+          out[`removal:${op.id}`] = removal(op.id);
+          out[`note:${op.id}`] = note(op.id);
+        }
         break;
     }
   }
@@ -2462,7 +2466,7 @@ export function proposalStaleness(plan: Plan, p: Proposal): string[] {
       const [did, nid] = [id.slice(0, id.indexOf('/')), id.slice(id.indexOf('/') + 1)];
       const label = plan.diagrams.find((d) => d.id === did)?.nodes.find((n) => n.id === nid)?.label ?? nid;
       out.push(`the tasks linked to box "${label}" in ${diagram(did)}`);
-    } else if (kind === 'removal') out.push(`what removing ${task()} takes (its subtasks, the dependencies on them, its boxes' links)`);
+    } else if (kind === 'removal') out.push(`what removing ${task()} takes (its subtasks and their notes, the dependencies on them, its boxes' links)`);
     else if (kind === 'links') out.push(`the boxes ${task()} builds`);
     // Named once: a task changed (or gone) says its note has too.
     else if (kind === 'note') {

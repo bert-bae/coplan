@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **Accepting a proposed task removal no longer deletes notes you rewrote after it was made.** A note on the
+  task or on a subtask it takes puts the proposal out of date instead.
 - **`coplan check` names a hook folder it cannot enter.** It used to fail as `spawn sh EACCES`, exit 127,
   as if the shell were missing; it now says the folder cannot be entered.
 - **Text a lock dropped no longer comes back when the plan is reopened.** A comment, reply or field being

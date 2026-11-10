@@ -1146,11 +1146,15 @@ test("a proposed task removal is out of date once the user changed what it would
     ['a subtask they added', { op: 'upsert_task', title: 'Auth', parentId: 't1' }],
     ['a dependency they added', { op: 'upsert_task', id: 't4', dependsOn: ['t2'] }],
     ['a box they linked', { op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t2'] }],
+    ['a note on a subtask', { op: 'upsert_task', id: 't2', note: 'Half done: keep the router' }],
   ];
   for (const [what, edit] of cases) {
     const plan = applyOps(proposing(removal), [edit], 'user').plan;
     assert.throws(() => accept(plan), new RegExp(`${STALE.source}: what removing task t1 "API" takes`), what);
   }
+  // The note on the task itself, likewise: removing it would delete the note.
+  const noted = applyOps(proposing(removal), [{ op: 'upsert_task', id: 't1', note: 'Keep: the mobile app calls it' }], 'user').plan;
+  assert.throws(() => accept(noted), new RegExp(`${STALE.source}: the note on task t1 "API"`));
   // A change elsewhere leaves it as it was proposed.
   const elsewhere = applyOps(proposing(removal), [{ op: 'upsert_task', id: 't3', detail: 'unrelated' }], 'user').plan;
   assert.deepEqual(accept(elsewhere).tasks.map((t) => t.id), ['t3', 't4']);
