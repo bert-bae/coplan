@@ -244,6 +244,13 @@
   kept for the next message, but not when a revision request was queued
   behind it: the sign-off counted as delivered and the agent never got
   it. Now both wait, each for its own message.
+- **Clicking into a box's field no longer saves over the agent's text.**
+  A field in the box panel you had only clicked into kept its old text
+  when the agent changed the box, and saved it when you left: an empty
+  description you clicked into deleted the one the agent then wrote. It
+  now shows the agent's text and saves only what you type. The "changed
+  while you were typing" warning also goes once you save or take the new
+  text, and no longer comes back for a change you have already seen.
 - **No two sessions share a folder.** A session id is kept in a folder
   named after it, with anything a folder name cannot hold made safe, so
   ids that differed only there (`a/b`, `a_b`), or past 128 characters,

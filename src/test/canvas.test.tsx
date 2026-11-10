@@ -730,6 +730,35 @@ for (const [name, multiline, tag] of [['a paragraph', true, 'textarea'], ['a lin
     cleanup();
   });
 
+  test(`${name}: a field only clicked into follows the agent's push, and leaving it saves nothing`, async () => {
+    for (const before of ['', 'Old description']) {
+      try {
+        const { commits, box, push, warned } = mount(before);
+        fireEvent.focus(box);
+        await push('What the agent wrote');
+        assert.equal(box.value, 'What the agent wrote', 'it shows the newer text');
+        assert.equal(warned(), false, 'with nothing of the user\'s to warn about');
+        fireEvent.blur(box);
+        assert.deepEqual(commits, [], `nothing saved over it (was ${JSON.stringify(before)})`);
+      } finally {
+        cleanup();
+      }
+    }
+  });
+
+  test(`${name}: once Escape takes the agent's text, typing on in it does not warn again`, async () => {
+    const { commits, box, push, warned } = mount('Old');
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: 'Mine' } });
+    await push('The agent rewrote it');
+    fireEvent.keyDown(box, { key: 'Escape' });
+    fireEvent.change(box, { target: { value: 'The agent rewrote it, and more' } });
+    assert.equal(warned(), false);
+    fireEvent.blur(box);
+    assert.deepEqual(commits, ['The agent rewrote it, and more']);
+    cleanup();
+  });
+
   test(`${name}: Escape takes the agent's newer text instead`, async () => {
     const { commits, box, push, warned } = mount('Old');
     fireEvent.focus(box);
@@ -766,6 +795,36 @@ for (const [name, multiline, tag] of [['a paragraph', true, 'textarea'], ['a lin
       assert.equal(box.value, 'にほん', 'Escape drops a choice, not the edit');
       fireEvent.keyDown(box, { key: 'Enter' });
       assert.deepEqual(commits, ['にほん'], 'the next Enter is the line done');
+      cleanup();
+    });
+
+    test(`${name}: Enter saves over a push and the warning goes; typing on warns only of a newer push`, async () => {
+      const { commits, box, push, warned } = mount('Old');
+      act(() => box.focus());
+      fireEvent.change(box, { target: { value: 'Mine' } });
+      await push('Agent name');
+      assert.ok(warned());
+      fireEvent.keyDown(box, { key: 'Enter' });
+      assert.deepEqual(commits, ['Mine']);
+      assert.equal(warned(), false, 'saved: nothing left to warn of');
+      fireEvent.change(box, { target: { value: 'Mine, longer' } });
+      assert.equal(warned(), false, 'the plan has not answered yet, and that is no news');
+      await push('Mine');
+      assert.equal(warned(), false, 'its answer is the save itself');
+      await push('Agent again');
+      assert.ok(warned(), 'a push after it is');
+      cleanup();
+    });
+
+    test(`${name}: saved with Enter, then renamed by the agent: leaving does not save it again over the rename`, async () => {
+      const { commits, box, push } = mount('Old');
+      act(() => box.focus());
+      fireEvent.change(box, { target: { value: 'Mine' } });
+      fireEvent.keyDown(box, { key: 'Enter' });
+      await push('Mine');
+      await push('Agent name');
+      act(() => box.blur());
+      assert.deepEqual(commits, ['Mine']);
       cleanup();
     });
 

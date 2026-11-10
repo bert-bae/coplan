@@ -26,10 +26,11 @@ import { KIND_GLYPH, KIND_HINT, KIND_LABEL, type EdgePatch, type FlowEdge, type 
  * ------------------------------------------------------------------ */
 
 /**
- * A field's draft. While the user is in the field it is theirs: a change the
- * agent publishes to the same box never replaces what they have not saved,
- * and `changed` says one came in. Out of the field it follows the plan, so a
- * save the plan refused or reshaped shows as the plan has it.
+ * A field's draft. Once the user types in the field it is theirs: a change
+ * the agent publishes to the same box never replaces what they have not
+ * saved, and `changed` says one came in. Otherwise — out of the field, or in
+ * it without typing — it follows the plan, so a save the plan refused or
+ * reshaped shows as the plan has it, and leaving saves nothing over a push.
  *
  * `commit` saves the draft unless it is what the field last saved, or the
  * plan's text since: Enter then leaving, or leaving then the field going
@@ -38,16 +39,39 @@ import { KIND_GLYPH, KIND_HINT, KIND_LABEL, type EdgePatch, type FlowEdge, type 
 function useFieldDraft(value: string, onCommit: (v: string) => void) {
   const [draft, setDraft] = useState(value);
   const [editing, setEditing] = useState(false);
-  const startedAt = useRef(value);
+  // Typed in since entering the field, or since that was saved or dropped:
+  // until then the field is the plan's, follows its pushes, and has nothing
+  // to save. Kept in a ref for the handlers, and in state for the warning.
+  const typed = useRef(false);
+  const [typedShown, setTypedShown] = useState(false);
+  const setTyped = (next: boolean) => {
+    typed.current = next;
+    setTypedShown(next);
+  };
+  // The plan's text as the user last saw it (on entering, taking it with
+  // Esc, or saving over it), and what they last saved here, which the plan
+  // will answer with: a push of anything else is what `changed` warns of.
+  const knew = useRef(value);
+  const mine = useRef<string | null>(null);
   const saved = useRef(value);
-  const live = useRef({ draft, onCommit });
-  live.current = { draft, onCommit };
+  const live = useRef({ draft, value, onCommit });
+  live.current = { draft, value, onCommit };
   useEffect(() => {
     saved.current = value;
-    if (!editing) setDraft(value);
+    if (!editing || !typed.current) {
+      setDraft(value);
+      knew.current = value;
+    }
   }, [value, editing]);
   const commit = useCallback(() => {
+    // Untyped, the draft is the plan's text, or about to be once this push
+    // renders: nothing to save over it.
+    if (!typed.current) return;
+    typed.current = false;
+    setTypedShown(false);
     const text = live.current.draft.trim();
+    knew.current = live.current.value;
+    mine.current = text;
     if (text === saved.current.trim()) return;
     live.current.onCommit(text);
     saved.current = text;
@@ -57,16 +81,20 @@ function useFieldDraft(value: string, onCommit: (v: string) => void) {
   useEffect(() => commit, [commit]);
   return {
     draft,
-    setDraft,
-    changed: editing && value !== startedAt.current && draft.trim() !== value.trim(),
-    commit,
-    enter: () => {
-      startedAt.current = value;
-      setEditing(true);
+    type: (next: string) => {
+      setTyped(true);
+      setDraft(next);
     },
+    changed: editing && typedShown && value !== knew.current && value !== mine.current && draft.trim() !== value.trim(),
+    commit,
+    enter: () => setEditing(true),
     leave: () => setEditing(false),
     /** Escape: take the plan's text, the newer one if it changed. */
-    revert: () => setDraft(value),
+    revert: () => {
+      setTyped(false);
+      knew.current = value;
+      setDraft(value);
+    },
   };
 }
 
@@ -101,7 +129,7 @@ export function CommitField({
   multiline?: boolean;
   onCommit: (v: string) => void;
 }) {
-  const { draft, setDraft, changed, commit, enter, leave, revert } = useFieldDraft(value, onCommit);
+  const { draft, type, changed, commit, enter, leave, revert } = useFieldDraft(value, onCommit);
   const area = useRef<HTMLTextAreaElement>(null);
   useLayoutEffect(() => {
     const el = area.current;
@@ -115,7 +143,7 @@ export function CommitField({
     'aria-label': label,
     placeholder,
     maxLength,
-    onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setDraft(e.target.value),
+    onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => type(e.target.value),
     onFocus: enter,
     onBlur: () => {
       commit();
