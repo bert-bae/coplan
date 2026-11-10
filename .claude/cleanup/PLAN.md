@@ -68,7 +68,7 @@ the audit's finding numbers.
 |-----|------|-------|--------|--------|
 | T1 | Test: a prompt the agent never got is taken back and handed over again; an edit in between blocks the take-back [18] | 0 safety net | done | acaa33a |
 | T1b | Test through the hook route: a UserPromptSubmit whose relay gives up before the answer leaves keeps the prompt to deliver again (daemon/main.ts:1066-1110: close listener, `writableFinished`) [18] | 0 safety net | blocked: the route's take-back never fires (0 of 30), so there is nothing working to pin; the test is F19's | |
-| T2 | Test: the live stream reconnects after an error (new ticket, new stream, session fetched again) and stops on 401 [18] | 0 safety net | open | |
+| T2 | Test: the live stream reconnects after an error (new ticket, new stream, session fetched again) and stops on 401 [18] | 0 safety net | done | 36e9fe2 |
 | T3 | Test: each daemon sign-off route answers a refusal with 409 and the right text (pins [19c] before it moves) | 0 safety net | open | |
 | T4 | Test: the browser store's six sign-off actions adopt the plan, toast, and return false on refusal (pins [19d]) | 0 safety net | open | |
 | F1 | macOS: the hook relay never starts the daemon. Test: SessionStart with no `setsid` on PATH writes `daemon.json` [1] | 1 must fix | open | |
