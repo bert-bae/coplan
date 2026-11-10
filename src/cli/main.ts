@@ -11,7 +11,7 @@ import { readFileSync, existsSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { readLiveLock, readVerifiedLock, probeLock, baseUrl, paths, ensureHome } from '../shared/paths.ts';
+import { readLock, readLiveLock, readVerifiedLock, probeLock, isPidAlive, baseUrl, paths, ensureHome } from '../shared/paths.ts';
 import { runDoctor } from './doctor.ts';
 import { runCheck } from './check.ts';
 import { runInit } from './init.ts';
@@ -113,18 +113,39 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
     // to stop.
     const state = await probeLock(lock);
     if (state === 'stale') {
-      rmSync(paths.lockFile(), { force: true });
+      releaseLock(lock.pid);
       console.log('not running (removed a lock left by a daemon that is gone)');
       return 0;
     }
     if (state === 'busy') console.log(`the daemon (pid ${lock.pid}) is not answering; stopping it anyway`);
     try {
       process.kill(lock.pid, 'SIGTERM');
-      console.log(`stopped pid ${lock.pid}`);
     } catch (err) {
       console.error(`could not stop pid ${lock.pid}: ${(err as Error).message}`);
       return 1;
     }
+    // One that answered is saving its sessions on the way out: it has time.
+    // One that did not may be stuck too hard to run its SIGTERM handler at
+    // all (it is JavaScript), and nothing but SIGKILL stops that.
+    if (await exits(lock.pid, state === 'live' ? 15_000 : 3_000)) {
+      releaseLock(lock.pid);
+      console.log(`stopped pid ${lock.pid}`);
+      return 0;
+    }
+    try {
+      process.kill(lock.pid, 'SIGKILL');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+        console.error(`could not stop pid ${lock.pid}: ${(err as Error).message}`);
+        return 1;
+      }
+    }
+    if (!(await exits(lock.pid, 2_000))) {
+      console.error(`could not stop pid ${lock.pid}: it is still running`);
+      return 1;
+    }
+    releaseLock(lock.pid);
+    console.log(`stopped pid ${lock.pid} (it did not answer SIGTERM, so it was killed)`);
     return 0;
   },
 
@@ -141,10 +162,12 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
 
     try {
       // From this plugin's build: the daemon may be another install's, older.
+      // A hung daemon takes the connection and never answers: give up on
+      // asking it, and stop it instead.
       const result = await api<{ restarting?: boolean }>(
         lock,
         '/api/daemon/restart',
-        { method: 'POST', body: JSON.stringify({ entry: DAEMON_ENTRY }) },
+        { method: 'POST', body: JSON.stringify({ entry: DAEMON_ENTRY }), signal: AbortSignal.timeout(5_000) },
       );
       if (result.restarting) {
         const next = await waitForNewDaemon(lock.pid);
@@ -159,7 +182,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
       // Fall through: an unreachable daemon is still one we can stop.
     }
 
-    await commands['stop']!(args);
+    if ((await commands['stop']!(args)) !== 0) return 1;
     await sleep(400);
     return commands['start']!(args);
   },
@@ -324,6 +347,33 @@ async function heldSessionBytes(lock: DaemonLock | null): Promise<number> {
   } catch {
     return 0;
   }
+}
+
+/** Whether the process is gone within `ms`. */
+async function exits(pid: number, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (gone(pid)) return true;
+    await sleep(100);
+  }
+  return gone(pid);
+}
+
+/** Exited, if not yet reaped: a zombie answers signals, but it has stopped
+ *  for good. Where init is slow to reap (or never does, in some containers),
+ *  only Linux's process table tells. */
+function gone(pid: number): boolean {
+  if (!isPidAlive(pid)) return true;
+  try {
+    return readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ').at(-1)!.startsWith('Z');
+  } catch {
+    return false;
+  }
+}
+
+/** Remove the lock, if it is still this daemon's: never a successor's. */
+function releaseLock(pid: number): void {
+  if (readLock()?.pid === pid) rmSync(paths.lockFile(), { force: true });
 }
 
 /** Wait for the lock to be claimed by a process other than the one that had it. */

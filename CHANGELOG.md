@@ -13,6 +13,11 @@
   error, a request too large or malformed JSON reached the agent as a
   successful result, carrying raw JSON, so it carried on as though, say, a
   publish had been stored. It now gets an error, in the daemon's words.
+- **`coplan stop` and `coplan restart` stop a hung daemon.** A daemon
+  stuck too hard to run its shutdown kept running while `stop` said
+  "stopped", and `restart` waited on it for ever. `stop` now kills one
+  that has not gone within three seconds, and says so; `restart` gives up
+  asking it after five seconds and stops it.
 
 ### Targeted checks: only what the change touched
 

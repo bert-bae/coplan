@@ -113,3 +113,67 @@ test('`coplan stop` never signals a pid its daemon did not confirm', async () =>
   assert.ok(isPidAlive(other.pid!), 'the bystander is still running');
   assert.equal(existsSync(path.join(dir, 'daemon.json')), false);
 });
+
+/**
+ * A daemon whose event loop is stuck: it holds its port (connections are
+ * accepted, nothing answers) and has a SIGTERM handler that can never run.
+ */
+async function hungDaemon(): Promise<{ dir: string; pid: number }> {
+  const dir = home({ pid: 0, port: 0 });
+  const child = spawn(
+    process.execPath,
+    [
+      '-e',
+      `const http = require('node:http'), fs = require('node:fs');
+process.on('SIGTERM', () => process.exit(0));
+const server = http.createServer(() => {});
+server.listen(0, '127.0.0.1', () => {
+  fs.writeFileSync(${JSON.stringify(path.join(dir, 'daemon.json'))}, JSON.stringify({ pid: process.pid, port: server.address().port, token: 't', host: '127.0.0.1', version: '0.0.0', startedAt: 1 }));
+  for (;;) {}
+});`,
+    ],
+    { stdio: 'ignore' },
+  );
+  children.push(child);
+  for (let i = 0; i < 50; i++) {
+    await sleep(100);
+    try {
+      const lock = JSON.parse(readFileSync(path.join(dir, 'daemon.json'), 'utf8')) as DaemonLock;
+      if (lock.pid === child.pid) return { dir, pid: child.pid };
+    } catch {
+      /* caught mid-write */
+    }
+  }
+  throw new Error('the hung daemon did not start');
+}
+
+function cli(dir: string, ...args: string[]): Promise<{ code: number; out: string }> {
+  return new Promise((resolve) => {
+    execFile(process.execPath, [CLI, ...args], { env: { ...process.env, CC_HARNESS_HOME: dir }, timeout: 30_000 }, (err, stdout, stderr) =>
+      resolve({ code: err ? (typeof err.code === 'number' ? err.code : -1) : 0, out: `${stdout}${stderr}` }),
+    );
+  });
+}
+
+test('`coplan stop` stops a daemon that is hung, and says how', async () => {
+  const { dir, pid } = await hungDaemon();
+  const { code, out } = await cli(dir, 'stop');
+  assert.equal(code, 0, out);
+  await sleep(200);
+  assert.equal(isPidAlive(pid), false, `the hung daemon is gone:\n${out}`);
+  assert.match(out, /did not answer SIGTERM, so it was killed/);
+  assert.equal(existsSync(path.join(dir, 'daemon.json')), false, 'and its lock with it');
+});
+
+test('`coplan restart` replaces a daemon that is hung, instead of hanging with it', async () => {
+  const { dir, pid } = await hungDaemon();
+  const started = Date.now();
+  const { code, out } = await cli(dir, 'restart');
+  assert.equal(code, 0, out);
+  assert.ok(Date.now() - started < 20_000, `took ${Date.now() - started}ms`);
+  await sleep(200);
+  assert.equal(isPidAlive(pid), false, `the hung daemon is gone:\n${out}`);
+  const next = JSON.parse(readFileSync(path.join(dir, 'daemon.json'), 'utf8')) as DaemonLock;
+  assert.notEqual(next.pid, pid);
+  assert.equal(await probeLock(next), 'live', 'and a new one answers');
+});
