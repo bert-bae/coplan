@@ -140,7 +140,9 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
   // it) is left as it is.
   //
   // A revision request the user queued from the page (#67) rides along the
-  // same way, after any sign-off: one explicit ask, sent once.
+  // same way: one explicit ask, sent once. One prompt to a message, as each
+  // is the most a hook may add (PROMPT_BUDGET): queued with a sign-off, the
+  // request waits for the message after.
   if (!agentInfo(ctx.agent).promptContext) {
     // An agent whose hooks cannot be relied on to add to a prompt (Cursor)
     // gets the prompt by the user pasting it, or from its next
@@ -152,7 +154,7 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
     if (revision && holdsPrompt(typed, revision.prompt)) ctx.store.deliverRevision(sessionId);
   } else {
     const handed = ctx.store.deliver(sessionId);
-    const revision = ctx.store.deliverRevision(sessionId);
+    const revision = handed ? null : ctx.store.deliverRevision(sessionId);
     if (handed || revision) {
       // The user can still act after signing off (edit tasks after the
       // design, comment, reject a proposal after submitting); that is not in

@@ -172,6 +172,13 @@
   made the save look stale: it was refused, and undo was cleared. A change
   that leaves the boxes and arrows as they were no longer counts against a
   move; one that changes them still does.
+- **A prompt Coplan hands over arrives whole, one to a message.** A
+  sign-off's prompt and a revision request queued with it went in the same
+  message, which could pass what an agent takes from a hook (about 10,000
+  characters in Claude Code): the rest went to a file the model sees only
+  a preview of. A request queued with a sign-off now comes with the message
+  after. And Codex's prompt hook, which Coplan had capped at 4,000 tokens,
+  now takes 8,000: a whole prompt even for a plan in Chinese or Japanese.
 
 ### Targeted checks: only what the change touched
 

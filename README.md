@@ -495,7 +495,7 @@ Claude Code's hooks ([`hooks/hooks.json`](hooks/hooks.json)):
 | Event | Matches | Timeout | What Coplan does with it |
 | --- | --- | --- | --- |
 | `SessionStart` | — | 20 s | Registers the session and labels it with its repository and branch (`git rev-parse`, read-only). If the plugin isn't built, says so once. |
-| `UserPromptSubmit` | — | 10 s | Clears a pending question, and lists the session on the page once your message starts with `/coplan`. Adds to your message the design or build prompt you signed off, and the request to revise the plan you queued with *Request revisions*, each once — not again if you pasted it; or, if you changed the plan since Claude last read it, one line saying so ([`promptNotice`](docs/CONFIG.md)). |
+| `UserPromptSubmit` | — | 10 s | Clears a pending question, and lists the session on the page once your message starts with `/coplan`. Adds to your message the design or build prompt you signed off, or the request to revise the plan you queued with *Request revisions* (one to a message, the request after the sign-off), each once — not again if you pasted it; or, if you changed the plan since Claude last read it, one line saying so ([`promptNotice`](docs/CONFIG.md)). |
 | `PreToolUse` | `AskUserQuestion` | 5 s | Shows the question on the page and moves the session to *Waiting on you*. |
 | `PostToolUse` | every tool | 5 s | Clears a question or permission prompt once a tool finishes, and lists the session once the agent loads a Coplan skill. A payload over 256 KB is cut to the session id before it is sent. |
 | `Notification` | — | 5 s | Notices permission and idle prompts. |
@@ -504,7 +504,10 @@ Claude Code's hooks ([`hooks/hooks.json`](hooks/hooks.json)):
 
 Codex's ([`hooks/codex.json`](hooks/codex.json)) are the same events, except
 that `PreToolUse` matches `request_user_input` and `request_user_input_async`,
-and `PermissionRequest` takes the place of `Notification`. Cursor's five
+and `PermissionRequest` takes the place of `Notification`. Its
+`UserPromptSubmit` takes up to 8,000 tokens of added context
+(`additionalContextLimit`), a whole prompt in any script; past it Codex puts
+the rest in a file the model sees only a preview of. Cursor's five
 ([`hooks/cursor.json`](hooks/cursor.json)) are its own: `sessionStart`,
 `beforeSubmitPrompt`, `afterAgentResponse`, `stop` and `sessionEnd` — its
 hooks see neither its question tool nor permission prompts, so a question

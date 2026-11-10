@@ -1501,6 +1501,24 @@ test('"make the task list" in chat confirms the design; with no choice made, a b
 type RevisionPreview = Preview & { hash: string; threadIds: string[] };
 const latest = (s: SessionState) => s.plan!.revisions?.at(-1);
 
+test('one prompt to a message: a revision request queued with a sign-off waits for the message after', async () => {
+  const id = 'one-at-a-time';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await mcpFor(id, 'read');
+  await opsOn(id, [{ op: 'comment', target: { kind: 'node', id: 'd1/db' }, text: 'Use a read replica here.' }]);
+  await post(`/api/session/${id}/plan/design/confirm`);
+  const preview = await post<RevisionPreview>(`/api/session/${id}/plan/revisions/prompt`, {});
+  assert.ok((await post<{ plan?: unknown; error?: string }>(`/api/session/${id}/plan/revisions`, { expect: preview.version, hash: preview.hash })).plan);
+  // Each prompt is the most a hook may add at once: together they would be
+  // cut to a file the agent sees only the start of.
+  const first = String((await hookFor(id, 'UserPromptSubmit', { prompt: 'go' })).hookSpecificOutput?.additionalContext ?? '');
+  assert.ok(first.startsWith('[cc-harness] The design is confirmed'), first.slice(0, 80));
+  assert.doesNotMatch(first, /Revise the plan/);
+  const second = String((await hookFor(id, 'UserPromptSubmit', { prompt: 'and the comments?' })).hookSpecificOutput?.additionalContext ?? '');
+  assert.ok(second.startsWith(preview.prompt), 'the request comes with the next one');
+});
+
 test('a revision request is queued in the page, carried by the next message once, and answered in its threads (#67)', async () => {
   const id = 'revise-session';
   await hookFor(id, 'SessionStart', { start_reason: 'startup' });

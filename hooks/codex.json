@@ -30,7 +30,7 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/coplan-hook-relay.sh\" UserPromptSubmit codex",
             "timeout": 10,
-            "additionalContextLimit": 4000
+            "additionalContextLimit": 8000
           }
         ]
       }

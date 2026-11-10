@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readLiveLock, baseUrl } from '../shared/paths.ts';
-import { BUILD_MARKER } from '../daemon/render.ts';
+import { BUILD_MARKER, PROMPT_BUDGET } from '../daemon/render.ts';
 import { readAgentHook, writeAgentOutput } from '../daemon/agentHooks.ts';
 import { agentInfo, parseAgent, sessionFromEnv, workspaceFromEnv } from '../shared/agents.ts';
 import { codexHooks, relayCalls } from '../cli/doctor.ts';
@@ -507,4 +507,15 @@ test("each agent's MCP config and hooks name that agent", () => {
   const codexServer = (readJson('mcp/codex.json')['mcpServers'] as Record<string, { args: string[]; cwd?: string }>)['harness']!;
   assert.equal(codexServer.cwd, '.', 'Codex resolves a plugin server only through a relative cwd');
   assert.ok(!codexServer.args.some((a) => a.includes('${')), 'Codex expands nothing in a plugin server');
+});
+
+test('Codex takes the most a message can carry whole: one prompt and the unread notice, in any script', () => {
+  const hooks = JSON.parse(readFileSync(path.join(ROOT, 'hooks', 'codex.json'), 'utf8')) as { hooks: Record<string, { hooks: { additionalContextLimit?: number }[] }[]> };
+  const limit = hooks.hooks['UserPromptSubmit']![0]!.hooks[0]!.additionalContextLimit;
+  // Codex counts approximate tokens, about four bytes each, and past the limit
+  // saves the text to a file the model sees only a preview of. A message
+  // carries one prompt, up to the budget in characters, and the unread notice
+  // (a line); a plan in Chinese or Japanese takes three bytes a character.
+  const most = Math.ceil(((PROMPT_BUDGET + 1_000) * 3) / 4);
+  assert.ok(typeof limit === 'number' && limit >= most, `additionalContextLimit ${limit} is under ${most}`);
 });
