@@ -161,3 +161,52 @@ test('a javascript: url is not turned into a link', () => {
 test('empty input produces empty output', () => {
   assert.equal(renderMarkdown(''), '');
 });
+
+test('numbered steps with blank lines between them are one list, counting on', () => {
+  const html = renderMarkdown('1. First step\n\n2. Second step\n\n3. Third step');
+  assert.equal((html.match(/<ol>/g) ?? []).length, 1, 'one list, not three that each start at 1');
+  assert.equal((html.match(/<li>/g) ?? []).length, 3);
+  // A paragraph after a blank line still ends it.
+  assert.match(renderMarkdown('1. a\n\nAfter'), /<\/ol>\n<p>After<\/p>/);
+});
+
+test('a list that starts at 3 starts at 3', () => {
+  assert.match(renderMarkdown('3. third\n4. fourth'), /^<ol start="3">/);
+  assert.match(renderMarkdown('1. first'), /^<ol>/, 'and one that starts at 1 says nothing');
+});
+
+test('a code block indented under a step stays in that step, as code', () => {
+  const html = renderMarkdown('1. Install it:\n\n   ```bash\n   npm i\n   ```\n\n2. Run the tests');
+  assert.equal((html.match(/<ol>/g) ?? []).length, 1);
+  assert.match(html, /<li>Install it:\n<pre class="md-code" data-lang="bash"><code>npm i<\/code><\/pre>\n<\/li>\n<li>Run the tests/);
+});
+
+test("a bare url does not take the sentence's full stop with it", () => {
+  const html = renderMarkdown('See https://example.com/a. Or (https://example.com/b), then stop.');
+  assert.ok(html.includes('<a href="https://example.com/a" target="_blank" rel="noreferrer">https://example.com/a</a>.'));
+  assert.ok(html.includes('<a href="https://example.com/b" target="_blank" rel="noreferrer">https://example.com/b</a>),'));
+});
+
+test('a code block quoting a step with its own fence stays one block', () => {
+  const html = renderMarkdown('```md\n1. step\n\n   ```bash\n   npm i\n   ```\n```');
+  assert.equal((html.match(/<pre/g) ?? []).length, 1);
+  assert.match(html, /<code>1\. step\n\n   ```bash\n   npm i\n   ```<\/code>/);
+});
+
+test('code under a step: tabs come off, an unclosed block keeps its language, an outer item gets what is indented to it', () => {
+  assert.match(renderMarkdown('1. a\n\n\t```\n\tcode\n\t```'), /<code>code<\/code>/);
+  assert.match(renderMarkdown('1. a\n\n   ```bash\n   npm i'), /<pre class="md-code" data-lang="bash"><code>npm i<\/code><\/pre>/);
+  assert.match(renderMarkdown('- a\n  - b\n\n  ```\n  x\n  ```'), /<li>b\n<\/li>\n<\/ul>\n<pre class="md-code"><code>x<\/code><\/pre>/, "indented to a's text: a's");
+  assert.match(renderMarkdown('- a\n  - b\n\n  more'), /<li>b\n<\/li>\n<\/ul>\n<p>more<\/p>/);
+});
+
+test('what is not under a step is not taken into it', () => {
+  assert.match(renderMarkdown('1. a\n\n second para'), /<\/ol>\n<p>second para<\/p>/, 'one space short of its text');
+  assert.doesNotMatch(renderMarkdown('    ```\n    not a fence\n    ```'), /<pre/, 'a fence indented four spaces is text');
+});
+
+test('a bare url keeps a parenthesis of its own and an & it ends with', () => {
+  assert.ok(renderMarkdown('See https://en.wikipedia.org/wiki/Foo_(bar) now').includes('href="https://en.wikipedia.org/wiki/Foo_(bar)"'));
+  assert.ok(renderMarkdown('Link: https://x.com/a?q=1&').includes('href="https://x.com/a?q=1&amp;"'));
+  assert.ok(renderMarkdown('see https://x.com/q", he said').includes('href="https://x.com/q" target="_blank" rel="noreferrer">https://x.com/q</a>&quot;,'), 'a quote after it is not');
+});

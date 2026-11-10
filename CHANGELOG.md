@@ -106,6 +106,12 @@
   cannot see. `.coplan/config.json`, your own Coplan settings and the
   `package.json` that `coplan init` reads now skip it, and one saved as
   UTF-16 (PowerShell 5.1's `>`) says to save it as UTF-8.
+- **Numbered steps read as written.** In task details, notes and
+  comments, steps with blank lines between them each started again at 1,
+  a list beginning at 3 began at 1, and a code block indented under a step
+  came out as garbled text that broke the list in two. They now count on,
+  keep their number and keep the code in its step, and a bare link no
+  longer takes the sentence's full stop with it.
 
 ### Targeted checks: only what the change touched
 
