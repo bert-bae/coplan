@@ -72,7 +72,7 @@ the audit's finding numbers.
 | T3 | Test: each daemon sign-off route answers a refusal with 409 and the right text (pins [19c] before it moves) | 0 safety net | done | ee49ed6 |
 | T4 | Test: the browser store's six sign-off actions adopt the plan, toast, and return false on refusal (pins [19d]) | 0 safety net | done | 6b72ecc |
 | F1 | macOS: the hook relay never starts the daemon. Test: SessionStart with no `setsid` on PATH writes `daemon.json` [1] | 1 must fix | done | 74beb1d |
-| F2 | The MCP server reports daemon 500, 413 and 400 answers as success [2] | 1 must fix | open | |
+| F2 | The MCP server reports daemon 500, 413 and 400 answers as success [2] | 1 must fix | done | 01e68cf |
 | F3 | `coplan stop` / `restart` cannot stop a hung daemon, and say they did [6] | 1 must fix | open | |
 | F4 | `upsert_task` with `builds` and removing a parent task slip past the unread-edit guard [5a] | 1 must fix | open | |
 | F5 | Delivering the build prompt marks the user's later changes as read [5b] | 1 must fix | open | |
