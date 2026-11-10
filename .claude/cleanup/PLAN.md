@@ -124,6 +124,28 @@ the audit's finding numbers.
 | B20 | The canvas lists the tasks that build a box by each one's own stored status, so a parent whose subtasks are all done still shows a to-do dot there while the Tasks tab shows it done (src/ui/components/flow/Panels.tsx:300, 665, PlanNode.tsx:212; `shownStatus` in src/ui/lib/tasks.ts; found reviewing B16) | 5 smaller | done | a345cef |
 | B21 | The session list shows a session a newer Coplan saved as an ordinary empty one: `summarize` leaves out `savedByNewer`, so it says so only once opened, and deleting it from the list deletes the newer build's plan with no warning (src/daemon/store.ts `summarize`, src/ui/components/Sidebar.tsx delete confirm; found reviewing B18) | 5 smaller | done | 31826a0 |
 | A1 | Re-audit the touched areas with `/ponytail-audit`, and add any new findings as rows | 6 re-audit | open | |
+| T5 | Test the conflict guards for the diagram's graph and links: a canvas save based before `publishPlan` changed the graph, or before `publishTasks` relinked a box, is refused; a proposal restating a diagram's links goes stale once the user links a box. Each of plan.ts:462 (`graphRev` on publish), :754 (`bumpDiagram` sets it), :766 (`expect <= d.rev`) and :2247 (`diagramlinks:` key) can be deleted with every test passing [re-audit 9] | 0 safety net | open | |
+| F22 | An agent `remove` of a task deletes a task the user moved under it since the agent last read: `unreadContent` counts only created/edited/deleted/published changes, so the move is not unread content. Removing the new parent takes the moved task and its detail; the same removal as a proposal is caught as stale (plan.ts:990-995, 1047-1050) [re-audit 1] | 1 must fix | open | |
+| F23 | A sign-off queued with a revision request is lost when the relay gives up: since one prompt goes per message (B6), the revision stays queued after the sign-off is handed, so `!queued(...)` keeps `handed` unset and neither take-back fires (daemon/main.ts:1046; no test sends a deadline with both queued) [re-audit 2] | 2 should fix | open | |
+| F24 | Leaving a box field you never typed in saves over the agent's newer text: `useFieldDraft`'s `saved` follows each push but the draft does not while focused, so focus, agent push, blur commits the stale draft (an empty Description deletes the agent's); a one-line field saved with Enter saves again on leave over a newer rename (flow/Panels.tsx:38-70) [re-audit 3] | 2 should fix | open | |
+| F25 | CLI commands wait forever on a daemon that does not answer, and the doctor calls it reachable: `readVerifiedLock` keeps a `busy` lock and `api()` has no timeout nor `res.ok` check. `coplan status`, `clean`, `url`/`open` (no session in env) and `doctor` hang on a paused daemon (cli/main.ts:25-37, shared/paths.ts:119-125, cli/doctor.ts:142-147) [re-audit 4] | 2 should fix | open | |
+| F26 | A daemon started with nothing active exits at its first idle check, within about a minute: the check counts recent sessions and clients, not the daemon's own uptime, so the link `coplan start` or `coplan url` prints stops working unless a browser opens it at once; the log says "idle for 120m" (daemon/main.ts:1746-1756) [re-audit 5] | 2 should fix | open | |
+| F27 | The comment composer and the Files field lose their text when their view goes (clicking another box, a tab or session switch), and closing the page does not ask: their text is component state, outside the kept drafts (components/Threads.tsx:149, views/TasksView.tsx:895, store.ts beforeunload) [re-audit 6] | 2 should fix | open | |
+| F28 | Confirm design and Submit throw away a half-written draft without asking: the dialogs wait only for saves in flight, and once the plan locks `pruneDrafts` drops the kept draft (a summary started on Overview, a task detail), which was never in the prompt (components/Submit.tsx:379, 496; lib/drafts.ts:34-64) [re-audit 7] | 2 should fix | open | |
+| F29 | A parent whose subtasks were all dropped shows ✓ Done, while the briefs say it was dropped whole and progress counts 0 done: `shownStatus` rolls up through `readinessOf`, which settles dropped leaves as done. Rewriting it over `leavesUnder` (all dropped → dropped, all settled → done, then in progress, blocked, else to do) fixes this and makes it about 20x faster (78 ms → 3.6 ms per row on 400 tasks); `boxRows` also rebuilds `outline` once per box (ui/lib/tasks.ts:23, 41-45) [re-audit 8] | 2 should fix | open | |
+| B22 | B19's old-named folders are read only at boot, and `ensure`/`purge` know only the new name: a deleted `a:b` comes back on restart from `a_b`; one past the cap at boot gets a blank `a_b-<hash>` and its plan is never read again; a session whose id is `a_b` is served `a:b`'s saved state. Ignore saved state whose `sessionId` is not the id, read the old folder in `ensure` when it names this id, and remove it in `purge` (daemon/store.ts:153, 194, 276) [re-audit 10] | 5 smaller | open | |
+| B23 | After starting the daemon, the relay waits up to 10 s from then, past the 10 s hook timeout of UserPromptSubmit/beforeSubmitPrompt: a slow cold start can mark a sign-off delivered after the agent killed the hook. Raise MAX_TIME only for SessionStart, or cap it to the time left (bin/coplan-hook-relay.sh:171, 201; comment at :101) [re-audit 11] | 5 smaller | open | |
+| B24 | Two Escape handlers lack B12's `isComposing` guard: Escape that cancels an input-method candidate closes "add subtask" (`AddField`) or a box's task list, losing the typed title (components/Editable.tsx:327, flow/BoxTasks.tsx:133) [re-audit 12] | 5 smaller | open | |
+| B25 | A session switch keeps the prompt viewer and the focus target: Back to another session shows its brief for the old task id, or the old sent prompt as its own; a jump made just before a switch flashes the other plan's item of that id (store.ts:199 `selectSession`) [re-audit 13] | 5 smaller | open | |
+| B26 | An edit refused after a switch is toasted over the other plan without naming its own ("t3" means another task there), unlike the sign-offs since B13 (store.ts:361-371 `send` → `fail`) [re-audit 14] | 5 smaller | open | |
+| B27 | A bare url inside a markdown link's text renders a link inside a link (`[see (https://a.com)](https://b.com)`), invalid HTML (ui/lib/markdown.ts:455) [re-audit 15] | 5 smaller | open | |
+| B28 | The unread-edit guard clones the whole plan for every `upsert_task` with `builds`, even with nothing unread: 100 such ops on a 1.6 MB plan take 272 ms as the agent, up to about 0.5 s at MAX_OPS with the daemon blocked. Return early when nothing is unread (shared/plan.ts:1063-1066, 1096) [re-audit 16] | 5 smaller | open | |
+| B29 | A proposed diagram removal does not go stale when the user links a task to one of its boxes, while a proposed box removal does: add `diagramlinks:<id>` for `remove` of kind diagram (shared/plan.ts:2266-2270) [re-audit 17] | 5 smaller | open | |
+| B30 | A box linking both a parent and its subtask lists the subtask "via parent", with no Unlink, or above its parent: `direct` is set by walk order, not by `taskIds` (ui/lib/tasks.ts:26-34, flow/BoxTasks.tsx:207) [re-audit 18] | 5 smaller | open | |
+| B31 | Ctrl+C on `coplan check` exits once the group leader does, before the SIGKILL that would stop a member ignoring SIGTERM: such a test runner or server stays running (cli/check.ts:241-252) [re-audit 19] | 5 smaller | open | |
+| B32 | Dead re-export `export { sanitizeId }` in the store: everything imports it from shared/paths.ts (daemon/store.ts:778) [re-audit 20] | 5 smaller | open | |
+| B33 | The MCP server runs a request whose id is neither string nor number and answers under id null: JSON-RPC calls it an Invalid Request (-32600), not to be run (mcp/main.ts:231, 347-351) [re-audit, left out of the report's 20] | 5 smaller | open | |
+| A2 | Re-audit the areas the rows after A1 touched with `/ponytail-audit`, and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -343,3 +365,106 @@ Not checked:
 - Windows.
 - Skimmed only: `render.ts` lines 681-1140, `brief.ts` outside lines 86-400, `architecture.ts`, `blocks.ts`, `agents.ts`, `types.ts`; the internals of `ui/lib/layout.ts`, `geometry.ts` and `graph.ts`; the components `PlanEdge`, `ContextMenu`, `Shortcuts`, `Export`, `GlobalActions`, `Handoff`, `Proposals`, `TaskChecks` and the Revisions dialog body; most of `style.css`.
 - The restart handover race between a relay-started daemon and a respawned one.
+
+---
+
+## Re-audit report (row A1, ponytail-audit, 2026-11-10)
+
+What this repo does: Coplan keeps a coding agent's plan in a small daemon on
+the user's machine. The user shapes it in a browser page; the agent reads and
+edits it through an MCP server and hooks. Load assumed: as in the first audit,
+one machine, several agent sessions at once, one or a few tabs, plans of tens
+to a few hundred tasks and boxes, the agent and the user sometimes editing the
+same item at once.
+
+How it was run: four reviewers, one layer each (daemon and hooks, the shared
+plan model, CLI and MCP, browser UI), over what changed since 0cb836d and what
+it touches. Nothing already in the ledger was reported again. Each finding was
+reproduced with a script against the built code, or checked by reading the
+lines named; the ledger rows above say which.
+
+### Must fix
+
+1. **An agent removal deletes a task the user moved under it** (`src/shared/plan.ts:990-995`, `:1047-1050`)
+   - **What this is:** The unread-edit guard refuses an agent edit to anything the user changed since the agent last read the plan.
+   - **Problem:** It counts only created, edited, deleted and published changes, not moves. The user drags t5 under t1; the agent, not having read since, removes t1, and t5 goes with it. The same removal sent as a proposal is caught as stale.
+   - **Fix:** Count a task the user moved (its parent now differs from the agent's baseline) as unread content, and include it among what a removal takes. About 4 lines.
+   - **If we skip it:** A subtree the user placed can be deleted blind, the loss the guard exists to stop.
+
+### Should fix
+
+2. **A sign-off queued with a revision request is lost when the relay gives up** (`src/daemon/main.ts:1046`)
+   - **What this is:** The hook route takes a prompt back when the relay gave up before the answer reached the agent (F19).
+   - **Problem:** Since one prompt goes per message (B6), the revision stays queued after the sign-off is handed, and the take-back requires nothing queued. The user revises, then submits; a late hook hands the build prompt to a closed socket and it stays marked delivered.
+   - **Fix:** Drop `!queued(...)` from the condition; the check that the answer carried a queued prompt is enough, and the take-back restores both.
+   - **If we skip it:** F19's loss returns for anyone who queues a revision and then signs off.
+
+3. **Leaving a box field you never typed in saves over the agent's newer text** (`src/ui/components/flow/Panels.tsx:38-70`)
+   - **What this is:** The box panel's fields save when you leave them.
+   - **Problem:** The saved value follows each agent push while the draft does not, so a field you only clicked into looks changed. Click into an empty Description, the agent writes one, click away: it is deleted. The warning shown says leaving keeps your text.
+   - **Fix:** Remember whether the user typed since entering the field; save on leave only then.
+   - **If we skip it:** Clicking into a field is enough to undo the agent's work.
+
+4. **CLI commands wait forever on a daemon that does not answer** (`src/cli/main.ts:25-37`, `src/shared/paths.ts:119-125`, `src/cli/doctor.ts:142-147`)
+   - **What this is:** `coplan status`, `clean`, `url`, `open` and `doctor` talk to the daemon over HTTP.
+   - **Problem:** A daemon that does not answer counts as running, and the requests have no timeout. On a paused daemon each of them hangs; the doctor first says "daemon reachable".
+   - **Fix:** A default timeout and a status check in `api()`; the doctor says "not answering: run coplan restart" for a busy daemon.
+   - **If we skip it:** The commands people are told to run to diagnose hang exactly when the daemon is the problem.
+
+5. **A daemon started with nothing active exits within a minute** (`src/daemon/main.ts:1746-1756`)
+   - **What this is:** The daemon exits once no browser is open and no session was active within the idle time.
+   - **Problem:** It never counts its own start. `coplan start` or `coplan url` with no active session prints a link that is dead a minute later unless a browser opens it at once. The log says "idle for 120m".
+   - **Fix:** Count idle time from the later of the daemon's start and the last activity.
+   - **If we skip it:** The link the CLI prints often does not work.
+
+6. **Comments and the Files field lose their text when their view goes** (`src/ui/components/Threads.tsx:149`, `src/ui/views/TasksView.tsx:895`)
+   - **What this is:** F16 kept open drafts across unmounts, for markdown fields only.
+   - **Problem:** A comment typed on a box is gone when the user clicks another box; the same on a tab or session switch, and for an open Files edit. Closing the page does not ask about them.
+   - **Fix:** Keep their text in a map by session and target, as Submit's drafts do, and count it before unload.
+   - **If we skip it:** Ordinary clicking loses typed comments.
+
+7. **Confirm design and Submit throw away a half-written draft without asking** (`src/ui/components/Submit.tsx:379`, `:496`; `src/ui/lib/drafts.ts:34-64`)
+   - **What this is:** A draft left open in a field is kept until saved or until its field is locked.
+   - **Problem:** The dialogs wait only for saves in flight. A summary half-written on Overview, then Confirm design on Architecture: the plan locks and the draft is dropped, never in the prompt.
+   - **Fix:** Count open drafts for the session among what the dialogs wait for, with a title saying which field to save or cancel.
+   - **If we skip it:** The page asks before closing the tab but not before a sign-off that loses the same text.
+
+8. **A parent whose subtasks were all dropped shows as Done, and working out a parent's status is slow** (`src/ui/lib/tasks.ts:23`, `:41-45`)
+   - **What this is:** A parent's shown status is rolled up from its subtasks (B16, B20).
+   - **Problem:** The roll-up goes through build readiness, which counts dropped as settled, so all-dropped shows ✓ Done while the briefs say dropped and progress counts 0 done. It also works out ready versus waiting for every leaf only to show both as to do: 78 ms per row on 400 tasks; `boxRows` rebuilds the outline per box.
+   - **Fix:** Roll up over the leaves directly (all dropped → dropped, all settled → done, then in progress, blocked, else to do), about 20 times faster; build the outline once per render.
+   - **If we skip it:** The page says dropped work is done, and the Tasks view stutters on large plans.
+
+9. **The guards against stale canvas saves and proposals have no test that fails** (`src/shared/plan.ts:462`, `:754`, `:766`, `:2247`)
+   - **What this is:** The diagram's graph revision (B4) and the link staleness keys (F20).
+   - **Problem:** Each of these lines can be deleted with every test passing; together, a canvas save from before the agent republished drops the agent's new box, and accepting a stale proposal wipes a link the user made.
+   - **Fix:** Three plan tests: a graph save after `publishPlan`, one after `publishTasks` relinks a box, and a proposal restating links after the user links a box.
+   - **If we skip it:** A refactor can remove them silently.
+
+### Nice to have
+
+10. **B19's old-named folders are read only at boot** (`src/daemon/store.ts:153`, `:194`, `:276`) — a deleted `a:b` returns on restart; one past the cap at boot loses its plan; a session whose id is `a_b` is served `a:b`'s state. Ignore saved state for another id; read and remove the old folder in `ensure` and `purge` too.
+11. **After a cold start the relay waits past the hook's own timeout** (`bin/coplan-hook-relay.sh:171`, `:201`) — a slow start can mark a sign-off delivered after the agent killed the hook. Raise the wait only for SessionStart.
+12. **Two Escape handlers lack the input-method guard** (`src/ui/components/Editable.tsx:327`, `src/ui/components/flow/BoxTasks.tsx:133`) — cancelling a candidate closes the field and loses the title.
+13. **A session switch keeps the prompt viewer and the focus target** (`src/ui/store.ts:199`) — the viewer shows the other plan's brief for the old task id; a jump flashes the other plan's item.
+14. **An edit refused after a switch does not name its plan** (`src/ui/store.ts:361-371`) — "t3" in the toast means another task on screen.
+15. **A bare url inside a link's text renders a link in a link** (`src/ui/lib/markdown.ts:455`).
+16. **The unread-edit guard clones the plan for every `builds` edit** (`src/shared/plan.ts:1063-1066`) — up to about 0.5 s per call on a big plan; return early when nothing is unread.
+17. **A proposed diagram removal ignores links made since; a box removal does not** (`src/shared/plan.ts:2266-2270`).
+18. **A box linking a parent and its subtask lists the subtask as reached through its parent** (`src/ui/lib/tasks.ts:26-34`) — no Unlink for it there.
+19. **Ctrl+C on `coplan check` can leave a member that ignores SIGTERM running** (`src/cli/check.ts:241-252`).
+20. **A dead re-export in the store** (`src/daemon/store.ts:778`).
+
+One smaller finding was left out of this list (the MCP server runs a request
+whose id is not a string or number); it is row B33.
+
+Verdict: one data-loss bug (1) to fix first, then the lost sign-off (2) and the
+box field that saves over the agent (3).
+
+Lean: -1 line possible (20).
+
+Not checked: main.ts routes the cleanup did not change, render.ts and brief.ts
+outside their changed lines, the canvas lib (layout, geometry, history), several
+UI components (PlanEdge, ContextMenu, Shortcuts, Toasts, Handoff), the MCP tool
+definitions beyond their names, and real runs on macOS, Windows, Codex and
+Cursor.
