@@ -2669,6 +2669,25 @@ test('a comment being written is held by the submit lock, as a field is: Submit 
   assert.equal(screen.queryByRole('button', { name: 'Reply' }) === null, true, 'no Reply');
 });
 
+test('a toast holding text to copy is not timed out; others go on their own', async () => {
+  await boot();
+  // Time passes: every timer the toasts set comes due.
+  const due: (() => void)[] = [];
+  await act(async () => {
+    const real = window.setTimeout;
+    window.setTimeout = ((fn: () => void) => (due.push(fn), 0)) as unknown as typeof window.setTimeout;
+    try {
+      store.toast('error', 'The text you had open could not be saved. Copy it to keep it:', 'Half a summary');
+      store.toast('error', 'Something else went wrong.');
+    } finally {
+      window.setTimeout = real;
+    }
+  });
+  await act(async () => due.forEach((fn) => fn()));
+  assert.equal(document.querySelector('.toast-copy')?.textContent, 'Half a summary', 'the only copy of it is still on screen');
+  assert.equal(screen.queryByText('Something else went wrong.') === null, true, 'the other has gone');
+});
+
 test('a lock from elsewhere that drops text left open says so, with the text to copy', async () => {
   await boot();
   await openTab('Overview');
