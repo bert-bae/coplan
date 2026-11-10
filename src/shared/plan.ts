@@ -1303,13 +1303,12 @@ export function applyOps(
         // Against the plan as the edits before it in this batch left it: a
         // task moved under one being removed goes with it.
         refuseUnreadEdit(next, op, unread!);
-        // A proposal built on a version Claude never read could undo the
-        // user's change as surely as an edit — only later, when accepted.
-        if (op.op === 'propose' && Array.isArray(op.ops)) {
-          for (const inner of op.ops) if (inner && typeof inner === 'object') refuseUnreadEdit(next, inner, unread!);
-        }
       }
-      changes.push(...applyOne(next, expectAtStart(plan, op, author), author, now));
+      // A proposal built on a version Claude never read could undo the
+      // user's change as surely as an edit — only later, when accepted: its
+      // edits are guarded too, in its trial (applyOne's `guard`).
+      const guard = unread ? (at: Plan, inner: PlanOp) => refuseUnreadEdit(at, inner, unread) : undefined;
+      changes.push(...applyOne(next, expectAtStart(plan, op, author), author, now, guard));
     } catch (err) {
       if (err instanceof PlanError && ops.length > 1) {
         throw new PlanError(`Edit ${i + 1} (${(op as { op?: string })?.op ?? '?'}): ${err.message}`);
@@ -1341,8 +1340,9 @@ export function applyOps(
 }
 
 /** One edit, in `plan` itself. Its `expect` was checked, and taken off,
- *  before the batch began (expectAtStart): every caller goes through it. */
-function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[] {
+ *  before the batch began (expectAtStart): every caller goes through it.
+ *  `guard`: Claude's unread-edit guard, for the edits a proposal carries. */
+function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (plan: Plan, op: PlanOp) => void): Change[] {
   const log = (kind: ChangeKind, target: Target, summary: string) => record(plan, author, kind, target, summary, now);
 
   switch (op?.op) {
@@ -1674,13 +1674,27 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       // As it would be taken: a proposal that cannot apply is refused now,
       // not when the user presses Accept. The lock is left out of the trial:
       // a design change proposed after sign-off is fair to suggest, and
-      // accepting it is where the lock holds.
+      // accepting it is where the lock holds. Each edit is guarded as those
+      // before it leave the plan, as a batch's are: a task moved under one
+      // it removes goes with it.
+      let refused: PlanError | undefined;
+      const guarded =
+        guard &&
+        ((at: Plan, inner: PlanOp, i: number) => {
+          try {
+            guard(at, inner);
+          } catch (err) {
+            if (!(err instanceof PlanError)) throw err;
+            throw (refused = new PlanError(`Proposed edit ${i + 1} (${inner.op}): ${err.message}`));
+          }
+        });
       try {
         const trial = structuredClone(plan);
         delete trial.design;
         delete trial.submission;
-        applyAsUser(trial, op.ops, now, 'claude');
+        applyAsUser(trial, op.ops, now, 'claude', guarded);
       } catch (err) {
+        if (err === refused) throw err;
         if (err instanceof PlanError) throw new PlanError(`The proposal would not apply to the plan as it is: ${err.message}`);
         throw err;
       }
@@ -2200,11 +2214,18 @@ export function isLocked(plan: Pick<Plan, 'submission'> | null): boolean {
  * `readBy`'s (Claude's, when it proposes them), and what waits on what
  * checked on the batch as a whole.
  */
-function applyAsUser(plan: Plan, ops: PlanOp[], now: number, readBy: Author = 'user'): Change[] {
+function applyAsUser(
+  plan: Plan,
+  ops: PlanOp[],
+  now: number,
+  readBy: Author = 'user',
+  before?: (plan: Plan, op: PlanOp, i: number) => void,
+): Change[] {
   const start = structuredClone(plan);
   const had = new Set(dependencyProblems(plan));
   const out: Change[] = [];
   ops.forEach((inner, i) => {
+    before?.(plan, inner, i);
     try {
       out.push(...applyOne(plan, expectAtStart(start, inner, readBy), 'user', now));
     } catch (err) {
@@ -2273,8 +2294,14 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
     fingerprint(JSON.stringify(boxLinks(plan.diagrams.find((d) => d.id === diagramId)?.nodes.find((n) => n.id === nodeId))));
   const linksIn = (diagramId: string) =>
     fingerprint(JSON.stringify((plan.diagrams.find((d) => d.id === diagramId)?.nodes ?? []).filter((n) => n.taskIds?.length).map((n) => [n.id, boxLinks(n)]).sort()));
+  // Where the proposal's moves put its tasks, before a removal that takes
+  // them: a move is the one edit that brings what is the user's (a task's
+  // dependencies, its box links) under a removal; the proposal's other
+  // edits only add its own.
+  const movedTo = new Map<string, string | null>();
   const removal = (id: string) => {
-    const { doomed, dependents, diagrams } = taskRemoval(plan, id);
+    const outline = movedTo.size ? { ...plan, tasks: plan.tasks.map((t) => (movedTo.has(t.id) ? { ...t, parentId: movedTo.get(t.id)! } : t)) } : plan;
+    const { doomed, dependents, diagrams } = taskRemoval(outline, id);
     return fingerprint(
       JSON.stringify([
         // The task itself is `task:<id>`'s to print.
@@ -2313,6 +2340,7 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
       case 'move_task':
       case 'set_checks':
         if (op.id) out[`task:${op.id}`] = rev('task', op.id);
+        if (op.op === 'move_task' && op.id) movedTo.set(op.id, op.parentId ?? null);
         // `builds` replaces which boxes link the task: a link made since is undone.
         if (op.op === 'upsert_task' && op.id && op.builds !== undefined) out[`links:${op.id}`] = links(op.id);
         break;

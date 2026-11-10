@@ -57,7 +57,10 @@
   too, as it cannot be checked in full. And a proposal made on a task as
   the agent read it before you changed it is refused when made, as the
   agent's own edit is: it was let through, and accepting it put the
-  agent's old text back over yours.
+  agent's old text back over yours. A proposal's edits are also checked
+  as those before them leave the plan, as a batch's are: one that moves a
+  task under another and removes that one counts what it takes of the
+  task moved.
 - **`coplan init` writes checks that run your scripts.** It wrote a
   script as `<package manager> <script>`, which for some names is the
   package manager's own command: `yarn check` (yarn's integrity check,

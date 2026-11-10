@@ -916,6 +916,16 @@ test('the guard follows the batch: a task moved under one being removed goes wit
   );
 });
 
+test('a proposal is guarded as a batch is: a task its edits move under one it removes goes with it, so it counts', () => {
+  const plan = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', detail: 'the user wrote this' }], 'user').plan;
+  const ops: PlanOp[] = [{ op: 'move_task', id: 't3', parentId: 't1', index: 0 }, { op: 'remove', kind: 'task', id: 't1' }];
+  assert.throws(() => applyOps(plan, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops }], 'claude'), /Proposed edit 2 \(remove\): The user changed task "UI" since you last read the plan/);
+  assert.equal(applyOps(read(plan), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops }], 'claude').plan.proposals?.length, 1, 'read first, then propose');
+  // What a proposal cannot carry is said first, as for any proposal.
+  const progress: PlanOp = { op: 'upsert_task', id: 't3', detail: 'x', status: 'done' };
+  assert.throws(() => applyOps(plan, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [progress] }], 'claude'), /Proposed edit 1 \(upsert_task\): .*harness_task_update/);
+});
+
 test("builds is held to the links it would really change: an unlink undone counts, a restated link does not", () => {
   // The user unlinks t3 from b; builds naming b again (however it is spelt) would undo that.
   let plan = applyOps(linkedPlan(), [{ op: 'upsert_node', diagramId: 'd1', id: 'b', taskIds: ['t3'] }], 'user').plan;
@@ -1037,6 +1047,21 @@ test("a proposed task removal is out of date once the user changed what it would
   // A change elsewhere leaves it as it was proposed.
   const elsewhere = applyOps(proposing(removal), [{ op: 'upsert_task', id: 't3', detail: 'unrelated' }], 'user').plan;
   assert.deepEqual(accept(elsewhere).tasks.map((t) => t.id), ['t3', 't4']);
+});
+
+test('a proposed removal is out of date once the user changed what it would take of a task the proposal moves under it', () => {
+  const ops: PlanOp[] = [{ op: 'move_task', id: 't3', parentId: 't1', index: 0 }, { op: 'remove', kind: 'task', id: 't1' }];
+  const proposed = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops }], 'claude').plan;
+  for (const [what, edit] of [
+    ['a dependency on it the user added', { op: 'upsert_task', id: 't4', dependsOn: ['t3'] }],
+    ['a box the user linked to it', { op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }],
+  ] as [string, PlanOp][]) {
+    assert.throws(() => accept(applyOps(proposed, [edit], 'user').plan), new RegExp(`${STALE.source}: what removing task t1 "API" takes`), what);
+  }
+  // A move alone leaves the moved task's links and dependencies as they are: no reason to refuse it.
+  const moved = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [ops[0]!] }], 'claude').plan;
+  const linked = applyOps(moved, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan;
+  assert.equal(accept(linked).tasks.find((t) => t.id === 't3')?.parentId, 't1');
 });
 
 test("a proposed builds is out of date once the user relinked that task's boxes", () => {
