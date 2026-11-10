@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { store, useAgent, usePlan, useSession, useStore } from '../store.ts';
+import { store, useAgent, usePlan, useSession, useSessionId, useStore } from '../store.ts';
 import { api, type PromptPreview, type ProjectSummary } from '../lib/api.ts';
 import { OpenInClaude } from './Handoff.tsx';
 import { ProgressBar } from './Progress.tsx';
@@ -369,7 +369,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
   const session = useSession();
   const plan = usePlan();
   const agent = useAgent();
-  const sessionId = useStore((s) => s.sessionId);
+  const sessionId = useSessionId();
   const [note, setNote, clearDraft] = useDraft(`${sessionId}:design`);
   const settled = useSettled(note);
   const [shown, setShown] = useState<{ preview: PromptPreview; note: string } | null>(null);
@@ -410,7 +410,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
     setBusy(true);
     // Where no hook can hand the prompt over (Cursor), the user pastes it.
     if (!agent.promptContext) await copyText(preview.prompt, `Copied — paste it into ${agent.name}'s chat.`);
-    const ok = await store.confirmDesign({ note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}) });
+    const ok = await store.confirmDesign({ sessionId, agent }, { note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}) });
     setBusy(false);
     if (ok) {
       clearDraft();
@@ -483,7 +483,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
   const session = useSession();
   const plan = usePlan();
   const agent = useAgent();
-  const sessionId = useStore((s) => s.sessionId);
+  const sessionId = useSessionId();
   // Both null until the first preview says what the repository's defaults are.
   const [mode, setMode] = useState<ExecutionMode | null>(null);
   const [note, setNote, clearDraft] = useDraft(`${sessionId}:submit`);
@@ -549,7 +549,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
     if (target === 'elsewhere' || !agent.promptContext) {
       await copyText(preview.prompt, target === 'session' ? `Copied — paste it into ${agent.name}'s chat.` : 'Copied the plan as Markdown.');
     }
-    const ok = await store.submitPlan({
+    const ok = await store.submitPlan({ sessionId, agent }, {
       target,
       mode,
       note,
@@ -983,7 +983,7 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
               className="link is-danger"
               onClick={() => {
                 setConfirming(false);
-                void store.reopenDesign();
+                void store.reopenDesign({ sessionId: session.sessionId, agent });
               }}
             >
               Reopen design
@@ -1150,7 +1150,7 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
               className="link is-danger"
               onClick={() => {
                 setConfirming(false);
-                void store.reopenPlan();
+                void store.reopenPlan({ sessionId: session.sessionId, agent });
               }}
             >
               {submission.deliveredAt ? 'Reopen' : 'Withdraw'}

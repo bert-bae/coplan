@@ -1049,6 +1049,46 @@ test('the design is confirmed from the architecture view, after reading what Cla
   assert.match(screen.getByTestId('plan-status').textContent ?? '', /^✎ Planning · design confirmed$/);
 });
 
+test('a sign-off goes to the session its dialog was opened on, though the user moved on while it was copied', async () => {
+  // Cursor: the prompt is copied for the user to paste before the design is confirmed.
+  const session = makeSession(makePlan(), { agent: 'cursor' });
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  let release: () => void = () => {};
+  // A clipboard that holds the copy until released; the one before it comes back after.
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText: () => new Promise<void>((resolve) => (release = resolve)) }, configurable: true });
+  try {
+    await boot(session, (route) => {
+      if (route === '/api/session/s2') return { session: other };
+      if (route.endsWith('/plan/design/prompt')) return { prompt: 'DESIGN PROMPT', trimmed: false, version: session.plan!.version, budget: 9000, maxNote: 4000 };
+      if (route.endsWith('/plan/design/confirm')) return { plan: confirmedPlan() };
+      return undefined;
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Confirm design' }));
+    });
+    const dialog = screen.getByRole('dialog', { name: 'Confirm the design' });
+    const confirm = within(dialog).getByRole('button', { name: 'Copy and confirm design' }) as HTMLButtonElement;
+    await waitFor(() => assert.equal(confirm.disabled, false));
+    await act(async () => {
+      fireEvent.click(confirm);
+    });
+    // The copy waits on the clipboard; meanwhile the user opens another session.
+    await act(async () => {
+      await store.selectSession('s2');
+    });
+    await act(async () => {
+      release();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+  } finally {
+    if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+    else delete (navigator as { clipboard?: unknown }).clipboard;
+  }
+  const sent = posts.filter((p) => p.route.endsWith('/plan/design/confirm')).map((p) => p.route);
+  assert.deepEqual(sent, ['/api/session/s1/plan/design/confirm']);
+});
+
 test('the sign-off dialogs list each setting from config, read-only, with the file and key that set it', async () => {
   const { designPrompt, configRows, promptHash } = await import('../daemon/render.ts');
   const { parseProjectConfig } = await import('../shared/project.ts');

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { store, useAgent, usePlan, useSession, useStore } from '../store.ts';
+import { store, useAgent, usePlan, useSession, useSessionId } from '../store.ts';
 import { api, type PromptPreview } from '../lib/api.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { isComposing } from '../lib/keys.ts';
@@ -20,6 +20,7 @@ import { copyText } from '../lib/copy.ts';
  * Cursor, whose hooks cannot add to a message, it is copied to paste.
  */
 export function RevisionControl() {
+  const sessionId = useSessionId();
   const session = useSession();
   const plan = usePlan();
   const agent = useAgent();
@@ -47,7 +48,7 @@ export function RevisionControl() {
           >
             Copy request
           </button>
-          <button type="button" className="link" onClick={() => void store.withdrawRevision()}>
+          <button type="button" className="link" onClick={() => void store.withdrawRevision({ sessionId, agent })}>
             Withdraw
           </button>
         </>
@@ -94,7 +95,7 @@ function RevisionState({ plan, req, agent }: { plan: Plan; req: RevisionRequest;
 
 function RevisionDialog({ session, plan, onClose }: { session: SessionState; plan: Plan; onClose: () => void }) {
   const agent = useAgent();
-  const sessionId = useStore((s) => s.sessionId);
+  const sessionId = useSessionId();
   const [note, setNote] = useState('');
   const [shown, setShown] = useState<{ preview: PromptPreview & { threadIds: string[] }; note: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -146,7 +147,7 @@ function RevisionDialog({ session, plan, onClose }: { session: SessionState; pla
     if (!preview || !current) return false;
     setBusy(true);
     if (!agent.promptContext) await copyText(preview.prompt, `Copied — paste it into ${agent.name}'s chat.`);
-    const ok = await store.queueRevision({ note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}) }, { quiet: !agent.promptContext });
+    const ok = await store.queueRevision({ sessionId, agent }, { note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}) }, { quiet: !agent.promptContext });
     setBusy(false);
     if (ok) onClose();
     else setRefresh((n) => n + 1);

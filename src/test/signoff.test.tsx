@@ -2,7 +2,7 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, stubFetch } from './dom-env.ts';
 import type { Plan, SessionState } from '../shared/types.ts';
-import type { AgentKind } from '../shared/agents.ts';
+import { agentInfo, type AgentKind } from '../shared/agents.ts';
 
 /**
  * The page's six sign-off actions: submit, reopen, confirm the design,
@@ -48,6 +48,8 @@ async function show(id: string, agent: AgentKind): Promise<void> {
 }
 
 const lastToast = () => store.getState().toasts.at(-1);
+/** The session on screen, as a dialog opened now would sign it off. */
+const shown = () => ({ sessionId: store.getState().sessionId, agent: agentInfo(store.getState().session?.agent) });
 const shownPlan = () => store.getState().session?.plan;
 
 interface SignOff {
@@ -59,12 +61,12 @@ interface SignOff {
   said: RegExp;
 }
 const SIGN_OFFS: SignOff[] = [
-  { name: 'submitPlan', route: 'plan/submit', run: () => store.submitPlan({ target: 'session', note: 'go', expect: 1 }), body: { target: 'session', note: 'go', expect: 1 }, kind: 'success', said: /^Plan submitted and locked\. Send any message in Claude to hand it the prompt\.$/ },
-  { name: 'reopenPlan', route: 'plan/reopen', run: () => store.reopenPlan(), body: {}, kind: 'info', said: /^The plan is open for changes again\. Tell Claude in chat once you have changed it\.$/ },
-  { name: 'confirmDesign', route: 'plan/design/confirm', run: () => store.confirmDesign({ note: '', expect: 1 }), body: { note: '', expect: 1 }, kind: 'success', said: /^Design confirmed\. Send any message in Claude to have it make the task list\.$/ },
-  { name: 'reopenDesign', route: 'plan/design/reopen', run: () => store.reopenDesign(), body: {}, kind: 'info', said: /^The design is open for changes again\. Tell Claude in chat once you have changed it\.$/ },
-  { name: 'queueRevision', route: 'plan/revisions', run: () => store.queueRevision({ note: 'tighten it', expect: 1 }), body: { note: 'tighten it', expect: 1 }, kind: 'success', said: /^Request queued\. Send any message in Claude's chat — "go" will do — and it goes with it\.$/ },
-  { name: 'withdrawRevision', route: 'plan/revisions/withdraw', run: () => store.withdrawRevision(), body: {}, kind: 'info', said: /^Request withdrawn: it will not be sent\.$/ },
+  { name: 'submitPlan', route: 'plan/submit', run: () => store.submitPlan(shown(), { target: 'session', note: 'go', expect: 1 }), body: { target: 'session', note: 'go', expect: 1 }, kind: 'success', said: /^Plan submitted and locked\. Send any message in Claude to hand it the prompt\.$/ },
+  { name: 'reopenPlan', route: 'plan/reopen', run: () => store.reopenPlan(shown()), body: {}, kind: 'info', said: /^The plan is open for changes again\. Tell Claude in chat once you have changed it\.$/ },
+  { name: 'confirmDesign', route: 'plan/design/confirm', run: () => store.confirmDesign(shown(), { note: '', expect: 1 }), body: { note: '', expect: 1 }, kind: 'success', said: /^Design confirmed\. Send any message in Claude to have it make the task list\.$/ },
+  { name: 'reopenDesign', route: 'plan/design/reopen', run: () => store.reopenDesign(shown()), body: {}, kind: 'info', said: /^The design is open for changes again\. Tell Claude in chat once you have changed it\.$/ },
+  { name: 'queueRevision', route: 'plan/revisions', run: () => store.queueRevision(shown(), { note: 'tighten it', expect: 1 }), body: { note: 'tighten it', expect: 1 }, kind: 'success', said: /^Request queued\. Send any message in Claude's chat — "go" will do — and it goes with it\.$/ },
+  { name: 'withdrawRevision', route: 'plan/revisions/withdraw', run: () => store.withdrawRevision(shown()), body: {}, kind: 'info', said: /^Request withdrawn: it will not be sent\.$/ },
 ];
 
 // First, while the (one, shared) store has no session on screen yet.
@@ -170,7 +172,7 @@ test('a submit moves the page to the task board', async () => {
   await show('s4', 'claude');
   store.setTab('overview');
   answer = () => ({ plan: { ...shownPlan()!, version: shownPlan()!.version + 1 } });
-  assert.equal(await store.submitPlan({ target: 'session', note: '', expect: 1 }), true);
+  assert.equal(await store.submitPlan(shown(), { target: 'session', note: '', expect: 1 }), true);
   assert.deepEqual({ tab: store.getState().tab, taskMode: store.getState().taskMode }, { tab: 'tasks', taskMode: 'board' });
 });
 
@@ -178,23 +180,23 @@ test('what a sign-off says fits the agent and where the plan is built', async ()
   await show('s5', 'cursor');
   const next = () => ({ plan: { ...shownPlan()!, version: shownPlan()!.version + 1 } });
   answer = next;
-  await store.submitPlan({ target: 'session', note: '', expect: 1 });
+  await store.submitPlan(shown(), { target: 'session', note: '', expect: 1 });
   assert.equal(lastToast()?.text, "Plan submitted and locked. Paste the prompt into Cursor's chat.");
-  await store.submitPlan({ target: 'elsewhere', note: '', expect: 1 });
+  await store.submitPlan(shown(), { target: 'elsewhere', note: '', expect: 1 });
   assert.equal(lastToast()?.text, 'Plan submitted and locked. Paste the prompt where it will be built.');
-  await store.confirmDesign({ note: '', expect: 1 });
+  await store.confirmDesign(shown(), { note: '', expect: 1 });
   assert.equal(lastToast()?.text, "Design confirmed. Paste the prompt into Cursor's chat to have it make the task list.");
-  await store.queueRevision({ note: '', expect: 1 });
+  await store.queueRevision(shown(), { note: '', expect: 1 });
   assert.equal(lastToast()?.text, "Request queued. Paste it into Cursor's chat, or ask Cursor to read the plan.");
 
   // Reopening a plan whose design was confirmed keeps the design.
   answer = () => ({ plan: { ...shownPlan()!, version: shownPlan()!.version + 1, design: { at: 1, prompt: 'p' } } });
-  await store.reopenPlan();
+  await store.reopenPlan(shown());
   assert.equal(lastToast()?.text, 'The tasks are open for changes again; the design stays confirmed. Tell Cursor in chat once you have changed them.');
 
   // A quiet revision request says nothing.
   answer = next;
   const toasts = store.getState().toasts.length;
-  assert.equal(await store.queueRevision({ note: '', expect: 1 }, { quiet: true }), true);
+  assert.equal(await store.queueRevision(shown(), { note: '', expect: 1 }, { quiet: true }), true);
   assert.equal(store.getState().toasts.length, toasts);
 });

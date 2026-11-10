@@ -208,6 +208,11 @@
   moving or adding a task there could focus or expand a task of the same
   id in it. What follows an answer is now done only for the session it
   was made on, and a message about it, shown over another, names its plan.
+- **A sign-off goes to the plan its dialog showed.** Confirming a design,
+  submitting or queuing a revision in Cursor copies the prompt first; a
+  session opened while that copy waited was the one signed off (refused,
+  at best, as another plan's version). Each sign-off now carries the
+  session it was made in.
 
 ### Targeted checks: only what the change touched
 

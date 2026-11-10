@@ -383,16 +383,17 @@ class Store {
   }
 
   /**
-   * A sign-off for the session on screen: the daemon's answer, that
+   * A sign-off for one session — the one its dialog showed, given by the
+   * caller, never the one on screen when it runs: the daemon's answer, that
    * session's agent, and whether it is still on screen. What is done after
    * the answer — moving the page, saying what happened — is for the
    * session it was made on, which the user may have left by then.
    */
   private async signOff(
+    to: SignOffFor,
     call: (sessionId: string) => Promise<{ plan: Plan }>,
   ): Promise<{ plan: Plan; agent: AgentInfo; shown: () => boolean; say: (kind: Toast['kind'], text: string) => void } | null> {
-    const id = this.state.sessionId;
-    const agent = agentInfo(this.state.session?.agent);
+    const { sessionId: id, agent } = to;
     const plan = await this.send(id, call);
     if (!plan) return null;
     const shown = () => this.isShown(id);
@@ -411,8 +412,8 @@ class Store {
    * on the board. Resolves false when the daemon refused — most often
    * because the plan moved on since the preview was made.
    */
-  async submitPlan(input: { target: BuildTarget; mode?: ExecutionMode; note: string; expect: number; hash?: string; settings?: BuildSettings }): Promise<boolean> {
-    const done = await this.signOff((id) => api.submitPlan(id, input));
+  async submitPlan(to: SignOffFor, input: { target: BuildTarget; mode?: ExecutionMode; note: string; expect: number; hash?: string; settings?: BuildSettings }): Promise<boolean> {
+    const done = await this.signOff(to, (id) => api.submitPlan(id, input));
     if (!done) return false;
     const { agent } = done;
     if (done.shown()) this.set({ tab: 'tasks', taskMode: 'board' });
@@ -428,8 +429,8 @@ class Store {
   }
 
   /** Unlock a submitted plan for changes. The design stays confirmed. */
-  async reopenPlan(): Promise<boolean> {
-    const done = await this.signOff((id) => api.reopenPlan(id));
+  async reopenPlan(to: SignOffFor): Promise<boolean> {
+    const done = await this.signOff(to, (id) => api.reopenPlan(id));
     if (!done) return false;
     const { plan, agent } = done;
     done.say(
@@ -445,8 +446,8 @@ class Store {
    * Sign the design off. From here it is locked, and Claude gets the ask for
    * a task list with the user's next message.
    */
-  async confirmDesign(input: { note: string; expect: number; hash?: string }): Promise<boolean> {
-    const done = await this.signOff((id) => api.confirmDesign(id, input));
+  async confirmDesign(to: SignOffFor, input: { note: string; expect: number; hash?: string }): Promise<boolean> {
+    const done = await this.signOff(to, (id) => api.confirmDesign(id, input));
     if (!done) return false;
     const { agent } = done;
     done.say(
@@ -463,8 +464,8 @@ class Store {
    * waits for the user's next message in the agent's chat: the page never
    * starts a turn.
    */
-  async queueRevision(input: { note: string; expect: number; hash?: string }, opts: { quiet?: boolean } = {}): Promise<boolean> {
-    const done = await this.signOff((id) => api.queueRevision(id, input));
+  async queueRevision(to: SignOffFor, input: { note: string; expect: number; hash?: string }, opts: { quiet?: boolean } = {}): Promise<boolean> {
+    const done = await this.signOff(to, (id) => api.queueRevision(id, input));
     if (!done) return false;
     if (opts.quiet) return true;
     const { agent } = done;
@@ -478,16 +479,16 @@ class Store {
   }
 
   /** Take back a revision request the agent has not been sent. */
-  async withdrawRevision(): Promise<boolean> {
-    const done = await this.signOff((id) => api.withdrawRevision(id));
+  async withdrawRevision(to: SignOffFor): Promise<boolean> {
+    const done = await this.signOff(to, (id) => api.withdrawRevision(id));
     if (!done) return false;
     done.say('info', 'Request withdrawn: it will not be sent.');
     return true;
   }
 
   /** Unlock a confirmed design so it can be reshaped. */
-  async reopenDesign(): Promise<boolean> {
-    const done = await this.signOff((id) => api.reopenDesign(id));
+  async reopenDesign(to: SignOffFor): Promise<boolean> {
+    const done = await this.signOff(to, (id) => api.reopenDesign(id));
     if (!done) return false;
     done.say('info', `The design is open for changes again. Tell ${done.agent.name} in chat once you have changed it.`);
     return true;
@@ -846,6 +847,19 @@ export function useSession(): SessionState | null {
 
 const ShownSession = createContext<string | null>(null);
 
+/** The session whose plan the view shows, as it rendered: what its edits
+ *  and sign-offs go to, whatever is on screen by the time they are sent. */
+export function useSessionId(): string | null {
+  return useContext(ShownSession);
+}
+
+/** Who a sign-off is for, as the view that makes it rendered: the session,
+ *  and its agent, whose chat the toast says to go to. */
+export interface SignOffFor {
+  sessionId: string | null;
+  agent: AgentInfo;
+}
+
 /** Around everything that shows a session's plan: the session it shows,
  *  read once here rather than by every component that edits it. */
 export function SessionScope({ children }: { children: ReactNode }) {
@@ -862,7 +876,7 @@ export function SessionScope({ children }: { children: ReactNode }) {
  * the edits were refused.
  */
 export function useCommit(): (ops: PlanOp[]) => Promise<Plan | null> {
-  const sessionId = useContext(ShownSession);
+  const sessionId = useSessionId();
   return useCallback((ops) => store.commit(ops, sessionId), [sessionId]);
 }
 
@@ -872,7 +886,7 @@ export function useCommit(): (ops: PlanOp[]) => Promise<Plan | null> {
  * a preview) is for that session only: ids like t3 repeat across plans.
  */
 export function useStillShown(): () => boolean {
-  const sessionId = useContext(ShownSession);
+  const sessionId = useSessionId();
   return useCallback(() => store.isShown(sessionId), [sessionId]);
 }
 
