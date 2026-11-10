@@ -2547,6 +2547,33 @@ test('a kept comment goes with what it was on; a kept reply stays, its thread re
   assert.equal(leaving(), true, 'resolved, it still takes a reply');
 });
 
+test('a section can be commented on once the design is confirmed, as until the plan is submitted', async () => {
+  await boot(makeSession(confirmedPlan()));
+  await openTab('Overview');
+  const toggle = screen.getByRole('button', { name: 'Comment on Context' }) as HTMLButtonElement;
+  assert.equal(toggle.matches(':disabled'), false, 'its comments open');
+  await act(async () => {
+    fireEvent.click(toggle);
+  });
+  const box = screen.getByRole('textbox', { name: 'New comment on Context' }) as HTMLTextAreaElement;
+  assert.equal(box.matches(':disabled'), false, 'and can be written in');
+  fireEvent.change(box, { target: { value: 'Is "slow" measured?' } });
+  await act(async () => {
+    fireEvent.click(within(screen.getByLabelText('Comments on Context')).getByRole('button', { name: 'Comment' }));
+  });
+  assert.deepEqual(opsSent().at(-1), { op: 'comment', target: { kind: 'section', id: 's1' }, text: 'Is "slow" measured?' });
+  // What the section says stays locked with the design: its body, its title, its place.
+  assert.equal(screen.getByRole('button', { name: 'Edit section "Context"' }).matches(':disabled'), true, 'body');
+  assert.equal(screen.queryByRole('button', { name: /^Section title: / }) === null, true, 'title');
+  assert.equal(screen.queryByRole('button', { name: 'Move Context up' }) === null, true, 'place');
+  // Submitted, its comments are there to read, not to answer or resolve.
+  const commented = applyOps(confirmedPlan(), [{ op: 'comment', target: { kind: 'section', id: 's1' }, text: 'Measured?' }], 'user').plan;
+  const s = store.getState().session!;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(commented, { target: 'session', prompt: 'build' }) } }));
+  assert.ok(within(screen.getByLabelText('Comments on Context')).getByText('Measured?'));
+  assert.equal(within(screen.getByLabelText('Comments on Context')).queryByRole('button', { name: 'Resolve' }) === null, true, 'no Resolve');
+});
+
 test('Reply goes while the reply is being written, so nothing empties it', async () => {
   const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
   await boot(makeSession(plan));

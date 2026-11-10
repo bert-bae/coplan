@@ -21,6 +21,7 @@ export function OverviewView() {
   const edit = useEdit();
   const plan = usePlan();
   if (!plan) return null;
+  const designLocked = isDesignLocked(plan);
   return (
     <div className="view-pad doc">
       <Glance plan={plan} />
@@ -36,8 +37,9 @@ export function OverviewView() {
       )}
 
       {/* A confirmed or submitted design reads the same, but every control
-          in it is off. Comments stay open until the plan is submitted. */}
-      <fieldset className="lockable" disabled={isDesignLocked(plan)}>
+          in it is off. Comments stay open until the plan is submitted: a
+          section locks what it says, not its comments (SectionCard). */}
+      <fieldset className="lockable" disabled={designLocked}>
       <Focusable kind="plan" id="summary" className="doc-block" labelledBy="summary-head">
         <h2 id="summary-head" className="doc-label">
           Summary
@@ -51,12 +53,13 @@ export function OverviewView() {
           onSave={(summary) => edit({ op: 'set_meta', summary })}
         />
       </Focusable>
+      </fieldset>
 
       {plan.sections.map((section, i) => (
-        <SectionCard key={section.id} section={section} index={i} count={plan.sections.length} />
+        <SectionCard key={section.id} section={section} index={i} count={plan.sections.length} locked={designLocked} />
       ))}
 
-      {!isDesignLocked(plan) && (
+      {!designLocked && (
         <div className="doc-add">
           <AddField
             placeholder="New section title — e.g. Data model, Risks, Out of scope"
@@ -65,8 +68,6 @@ export function OverviewView() {
           />
         </div>
       )}
-
-      </fieldset>
 
       {(!isLocked(plan) || plan.threads.some((t) => t.target.kind === 'plan')) && (
         <fieldset className="lockable" disabled={isLocked(plan)}>
@@ -135,7 +136,7 @@ function Glance({ plan }: { plan: Plan }) {
   );
 }
 
-function SectionCard({ section, index, count }: { section: Section; index: number; count: number }) {
+function SectionCard({ section, index, count, locked }: { section: Section; index: number; count: number; locked: boolean }) {
   const edit = useEdit();
   const [comments, setComments] = useState(false);
   const target = { kind: 'section' as const, id: section.id };
@@ -147,27 +148,32 @@ function SectionCard({ section, index, count }: { section: Section; index: numbe
           className="section-title"
           value={section.title}
           label="Section title"
+          readOnly={locked}
           onSave={(title) => edit({ op: 'upsert_section', id: section.id, title })}
         />
         <span className="item-id">{section.id}</span>
         <span className="spacer" />
         <CommentToggle target={target} label={section.title} open={comments} onToggle={() => setComments((v) => !v)} />
-        <ItemActions
-          label={section.title}
-          index={index}
-          count={count}
-          onMove={(to) => edit({ op: 'move_section', id: section.id, index: to })}
-          onRemove={() => edit({ op: 'remove', kind: 'section', id: section.id })}
-        />
+        {!locked && (
+          <ItemActions
+            label={section.title}
+            index={index}
+            count={count}
+            onMove={(to) => edit({ op: 'move_section', id: section.id, index: to })}
+            onRemove={() => edit({ op: 'remove', kind: 'section', id: section.id })}
+          />
+        )}
       </header>
-      <MarkdownField
-        value={section.body}
-        label={`section "${section.title}"`}
-        rows={8}
-        version={section.rev}
-        draftKey={`section:${section.id}`}
-        onSave={(body, rev) => edit({ op: 'upsert_section', id: section.id, body, ...(rev !== undefined ? { expect: rev } : {}) })}
-      />
+      <fieldset className="lockable" disabled={locked}>
+        <MarkdownField
+          value={section.body}
+          label={`section "${section.title}"`}
+          rows={8}
+          version={section.rev}
+          draftKey={`section:${section.id}`}
+          onSave={(body, rev) => edit({ op: 'upsert_section', id: section.id, body, ...(rev !== undefined ? { expect: rev } : {}) })}
+        />
+      </fieldset>
       {comments && <ThreadPanel target={target} label={section.title} />}
     </Focusable>
   );

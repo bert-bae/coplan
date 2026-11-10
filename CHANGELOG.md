@@ -365,6 +365,12 @@
   again: a reply to a resolved thread never reached the agent. *Reply*
   goes while one is being written, as an editor's *Edit* does: clicking it
   again emptied it.
+- **A section can be commented on once the design is confirmed.**
+  Comments are open until the plan is submitted, but a section's comment
+  button went dead with its text when the design was confirmed, and a
+  comment already being written there was hidden, never to be sent. Only
+  what the section says is locked now. Once the plan is submitted, no
+  thread offers *Resolve*, which a submitted plan refuses.
 - **A comment you are writing is held by Submit, as a field is.** A
   submitted plan takes no comments, but a comment or reply left unsent
   did not hold up *Submit plan*, and a submit from chat let it go without

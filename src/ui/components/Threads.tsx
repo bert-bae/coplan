@@ -113,9 +113,11 @@ function ThreadView({ thread }: { thread: Thread }) {
             Reply
           </button>
         )}
-        <button type="button" className="link" onClick={() => void edit({ op: 'resolve', threadId: thread.id, resolved: !thread.resolved })}>
-          {thread.resolved ? 'Reopen' : 'Resolve'}
-        </button>
+        {!locked && (
+          <button type="button" className="link" onClick={() => void edit({ op: 'resolve', threadId: thread.id, resolved: !thread.resolved })}>
+            {thread.resolved ? 'Reopen' : 'Resolve'}
+          </button>
+        )}
         {threadWaitsOn(thread) === 'claude' && <span className="muted">{agent.name} sees this when it next reads the plan, or with <em>Request revisions</em></span>}
       </div>
       {reply.editing && !locked && (
