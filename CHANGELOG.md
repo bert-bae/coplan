@@ -9,6 +9,10 @@
   run. So a new session waited five seconds for nothing, and after the
   daemon's idle shutdown, a plan you signed off could miss your next
   message. The relay now has node start it, detached, everywhere.
+- **A tool call the daemon fails is an error to the agent.** A daemon
+  error, a request too large or malformed JSON reached the agent as a
+  successful result, carrying raw JSON, so it carried on as though, say, a
+  publish had been stored. It now gets an error, in the daemon's words.
 
 ### Targeted checks: only what the change touched
 

@@ -21,6 +21,8 @@ let server: http.Server;
 let port: number;
 /** How long the stub daemon sits on a request before answering. */
 let holdMs = 0;
+/** An answer the stub daemon gives instead of its usual one. */
+let answer: { status: number; body: string } | null = null;
 let received: string[] = [];
 
 before(async () => {
@@ -39,8 +41,8 @@ before(async () => {
     req.on('end', () => {
       const send = () => {
         if (res.writableEnded) return;
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: !req.url?.includes('refuse'), text: '[cc-harness] done' }));
+        res.writeHead(answer?.status ?? 200, { 'content-type': 'application/json' });
+        res.end(answer?.body ?? JSON.stringify({ ok: !req.url?.includes('refuse'), text: '[cc-harness] done' }));
       };
       if (holdMs) setTimeout(send, holdMs).unref();
       else send();
@@ -63,6 +65,7 @@ after(() => {
 
 beforeEach(() => {
   holdMs = 0;
+  answer = null;
   received = [];
 });
 
@@ -122,6 +125,28 @@ test('a tool call reaches the daemon and returns its prose verbatim', async () =
   assert.equal(result.isError, false);
   assert.equal(result.content[0]?.text, '[cc-harness] done');
   assert.deepEqual(received, ['/mcp/read']);
+});
+
+test('a daemon that fails a call is an error to the agent, in the daemon\'s words, never a success', async () => {
+  // What the daemon answers when a handler throws, a body is too large, or it is not JSON.
+  for (const [status, error] of [[500, 'internal error'], [413, 'body too large'], [400, 'malformed JSON']] as const) {
+    answer = { status, body: JSON.stringify({ error }) };
+    const result = await callTool('harness_plan_publish', { title: 'x' });
+    assert.equal(result.isError, true, `a ${status} is an error`);
+    assert.match(result.content[0]?.text ?? '', new RegExp(`${status}: ${error}`), `and says what the daemon said (${status})`);
+    // A daemon that failed partway may have stored part of it: the agent looks before it tries again.
+    assert.equal(/read the plan \(harness_plan_read\) before trying it again/.test(result.content[0]?.text ?? ''), status === 500, `${status}`);
+  }
+  // A tool this daemon does not know (an older daemon): its own words, passed on as they are.
+  answer = { status: 404, body: JSON.stringify({ ok: false, text: '[cc-harness] Unknown tool "publish".' }) };
+  const unknown = await callTool('harness_plan_publish', { title: 'x' });
+  assert.equal(unknown.isError, true);
+  assert.equal(unknown.content[0]?.text, '[cc-harness] Unknown tool "publish".');
+  // An answer that is JSON but not an object is no answer at all.
+  answer = { status: 200, body: 'null' };
+  const nothing = await callTool('harness_plan_read');
+  assert.equal(nothing.isError, true);
+  assert.equal(nothing.content[0]?.text, '[cc-harness] The daemon answered 200: null');
 });
 
 test('each tool forwards to its own endpoint', async () => {

@@ -107,6 +107,13 @@ async function daemon(): Promise<DaemonLock | null> {
   return cachedLock;
 }
 
+/** What the daemon answers a tool call: prose for the agent, or an error. */
+interface DaemonReply {
+  text?: string;
+  ok?: boolean;
+  error?: string;
+}
+
 /** Said once per server: the daemon runs another version of Coplan than
  *  this plugin — another install's, or one from before an update. */
 let versionNoted = false;
@@ -190,13 +197,25 @@ async function callDaemon(
       }),
       signal: controller.signal,
     });
-    // Refusals (401, 403) come back as plain text, not JSON.
     const raw = await res.text();
-    let body: { text?: string; ok?: boolean };
+    let body: DaemonReply | null = null;
     try {
-      body = JSON.parse(raw) as { text?: string; ok?: boolean };
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') body = parsed as DaemonReply;
     } catch {
-      return { ok: false, text: `[cc-harness] The daemon answered ${res.status}: ${raw.trim().slice(0, 200)}` };
+      /* refusals (401, 403) come back as plain text */
+    }
+    // A failed call is never a success, whatever its body says. Most answer
+    // `{ error }` (a handler that threw, a body too large); a tool the daemon
+    // does not know answers prose for the agent, passed on as it is.
+    if (!body || !res.ok) {
+      const said =
+        typeof body?.text === 'string'
+          ? body.text
+          : `[cc-harness] The daemon answered ${res.status}: ${typeof body?.error === 'string' ? body.error : raw.trim().slice(0, 200)}`;
+      // One that failed partway may have saved what came before the failure.
+      const check = res.status >= 500 ? ' It may have saved part of this call before failing: read the plan (harness_plan_read) before trying it again.' : '';
+      return { ok: false, text: said + check + versionNotice(lock) };
     }
     return { ok: body.ok !== false, text: (body.text ?? JSON.stringify(body)) + versionNotice(lock) };
   } catch (err) {
