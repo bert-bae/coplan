@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync, readdirSync, existsSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { paths, ensureHome, sanitizeId } from '../shared/paths.ts';
+import { paths, ensureHome, legacyName, sanitizeId } from '../shared/paths.ts';
 import {
   PlanError,
   applyOps,
@@ -190,8 +190,11 @@ export class SessionStore extends EventEmitter {
     const removed = this.sessions.delete(id);
     this.persistFailed.delete(id);
     // A session's folder, and only one: never sessions/ or what holds it.
+    // One an earlier build kept it in goes too, or the next start reads it.
     const dir = paths.sessionDir(id);
     if (path.dirname(dir) === paths.sessionsDir()) discardDir(dir);
+    const old = legacyFile(id);
+    if (old && ownerOf(old) === id) discardDir(path.dirname(old));
     if (removed) this.broadcastSessionList();
     return removed;
   }
@@ -230,21 +233,7 @@ export class SessionStore extends EventEmitter {
     const state = this.sessions.get(id);
     if (!state || state.savedByNewer) return;
     try {
-      const dir = paths.sessionDir(id);
-      mkdirSync(dir, { recursive: true });
-      const tmp = path.join(dir, `.state.${process.pid}.tmp`);
-      // On disk before it replaces the old file: a power cut between the two
-      // must leave the old state, not an empty new one.
-      const fd = openSync(tmp, 'w', 0o600);
-      try {
-        // writeFileSync on a descriptor loops until every byte is written;
-        // a single writeSync may stop short.
-        writeFileSync(fd, JSON.stringify({ schemaVersion: STATE_SCHEMA, ...state }, null, 2));
-        fsyncSync(fd);
-      } finally {
-        closeSync(fd);
-      }
-      renameSync(tmp, path.join(dir, 'state.json'));
+      writeState(paths.sessionDir(id), state);
       this.persistFailed.delete(id);
     } catch (err) {
       // The live session goes on — but nobody may be told their edits are
@@ -273,7 +262,7 @@ export class SessionStore extends EventEmitter {
   ensure(id: string, cwd?: string, agent?: AgentKind): SessionState {
     let state = this.sessions.get(id);
     if (!state) {
-      const saved = readState(paths.sessionState(id));
+      const saved = this.readSaved(id);
       // No folder (a Codex tool call, whose hooks are not trusted yet) is
       // left unknown: the daemon's own is some other session's repository,
       // and its checks, base branch and git would be taken for this one's.
@@ -283,6 +272,8 @@ export class SessionStore extends EventEmitter {
       if (saved === NEWER) state.savedByNewer = true;
       this.sessions.set(id, state);
       mkdirSync(paths.sessionDir(id), { recursive: true });
+      // Read from the folder an earlier build kept it in: saved to its own.
+      if (saved && saved !== NEWER && !existsSync(paths.sessionState(id))) this.persistNow(id);
       this.emitEvent({ type: 'snapshot', session: state });
       this.broadcastSessionList();
     } else if (cwd && state.cwd !== cwd && !state.repoRoot) {
@@ -292,6 +283,37 @@ export class SessionStore extends EventEmitter {
       state.cwd = cwd;
     }
     return state;
+  }
+
+  /**
+   * A session's saved state: from its own folder or, while that holds no
+   * state file, from the folder an earlier build kept it in (see
+   * loadFromDisk), if the state there is this session's and not past
+   * keeping. A state in its own folder that is another session's (an earlier
+   * build's, whose id this one is spelled like that session's folder name)
+   * is no state of this one's: it is first copied to that session's own
+   * folder, unless that session is here to save itself, so this one's saves
+   * take nothing from it.
+   */
+  private readSaved(id: string): SessionState | typeof NEWER | undefined {
+    const file = paths.sessionState(id);
+    if (existsSync(file)) {
+      const own = readState(file);
+      if (!own || own === NEWER || own.sessionId === id) return own;
+      if (!this.sessions.has(own.sessionId) && !existsSync(paths.sessionState(own.sessionId))) {
+        try {
+          writeState(paths.sessionDir(own.sessionId), own);
+        } catch (err) {
+          // Said as any failed save is (and logged): this one's saves wait on nothing.
+          this.emitEvent({ type: 'persist-error', sessionId: own.sessionId, message: (err as NodeJS.ErrnoException)?.code ?? String(err) });
+        }
+      }
+      return undefined;
+    }
+    const old = legacyFile(id);
+    const legacy = old ? readState(old) : undefined;
+    if (!legacy || legacy === NEWER || legacy.sessionId !== id) return undefined;
+    return (legacy.updatedAt ?? 0) < Date.now() - SESSION_TTL_MS ? undefined : legacy;
   }
 
   all(): SessionState[] {
@@ -646,6 +668,41 @@ export function summarize(s: SessionState): SessionSummary {
     hooked: s.hookedAt !== null,
     ...(s.savedByNewer ? { savedByNewer: true } : {}),
   };
+}
+
+/** Write a session's state into its folder, made if need be: on disk
+ *  before it replaces the old file, so a power cut between the two leaves
+ *  the old state, not an empty new one. */
+function writeState(dir: string, state: SessionState): void {
+  mkdirSync(dir, { recursive: true });
+  const tmp = path.join(dir, `.state.${process.pid}.tmp`);
+  const fd = openSync(tmp, 'w', 0o600);
+  try {
+    // writeFileSync on a descriptor loops until every byte is written;
+    // a single writeSync may stop short.
+    writeFileSync(fd, JSON.stringify({ schemaVersion: STATE_SCHEMA, ...state }, null, 2));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, path.join(dir, 'state.json'));
+}
+
+/** The state file an earlier build kept a session in, where that is not its own. */
+function legacyFile(id: string): string | null {
+  const old = legacyName(id);
+  return old === sanitizeId(id) ? null : path.join(paths.sessionsDir(), old, 'state.json');
+}
+
+/** Whose session a state file holds, if it can be read: looked at only,
+ *  never moved aside, whosever folder it is in. */
+function ownerOf(file: string): string | undefined {
+  try {
+    const id = (JSON.parse(readFileSync(file, 'utf8')) as { sessionId?: unknown } | null)?.sessionId;
+    return typeof id === 'string' ? id : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

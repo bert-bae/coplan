@@ -291,7 +291,8 @@
   shared one: each read the other's plan and saved over it. Such an id's
   folder now also carries a short hash of the id. Every agent's ids are
   safe as they are and keep their folders; a session kept the old way is
-  saved to its new folder the next time Coplan starts.
+  saved to its new folder the next time Coplan starts, or when it is next
+  used, and deleting it deletes its old folder too.
 
 ### Targeted checks: only what the change touched
 

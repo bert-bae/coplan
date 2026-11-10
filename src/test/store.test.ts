@@ -205,6 +205,42 @@ test('a session kept in a folder named the old way is saved to its own', async (
   assert.ok(existsSync(old), 'the other left for housekeeping');
 });
 
+test('a session kept the old way is found by ensure as at load, and deleted for good, folder and all', async () => {
+  const { paths } = await import('../shared/paths.ts');
+  const old = path.join(home, 'sessions', 'later_x');
+  // Kept the old way, and not loaded at start (past the cap, or written after it).
+  const store = await freshStore();
+  const seeded = await freshStore();
+  seeded.ensure('later:x', process.cwd());
+  seeded.publishPlan('later:x', PLAN);
+  seeded.drop('later:x');
+  renameSync(paths.sessionDir('later:x'), old);
+  assert.equal(store.ensure('later:x', process.cwd()).plan?.title, PLAN.title, 'its plan, not a blank one');
+  assert.ok(existsSync(paths.sessionState('later:x')), 'and saved to its own folder');
+  // Deleted: neither folder brings it back.
+  store.purge('later:x');
+  assert.equal(existsSync(old), false);
+  assert.equal((await freshStore()).get('later:x'), undefined, 'gone after a restart too');
+});
+
+test("a session whose id is another's old folder name is not served that one's plan, nor saves over it", async () => {
+  const { paths } = await import('../shared/paths.ts');
+  // `odd:one`, kept the old way in `odd_one`, not loaded at start; then a session whose id is `odd_one`.
+  const store = await freshStore();
+  const seeded = await freshStore();
+  seeded.ensure('odd:one', process.cwd());
+  seeded.publishPlan('odd:one', PLAN);
+  seeded.drop('odd:one');
+  renameSync(paths.sessionDir('odd:one'), path.join(home, 'sessions', 'odd_one'));
+  assert.equal(store.ensure('odd_one', process.cwd()).plan, null, 'its own, blank');
+  assert.ok(existsSync(paths.sessionState('odd:one')), "the other's copied to its own folder first");
+  store.publishPlan('odd_one', { title: 'Mine', tasks: [{ title: 'one' }] });
+  store.persistNow('odd_one');
+  const reloaded = await freshStore();
+  assert.equal(reloaded.get('odd:one')?.plan?.title, PLAN.title, 'the other kept its plan');
+  assert.equal(reloaded.get('odd_one')?.plan?.title, 'Mine');
+});
+
 test('sessions older than the retention window are not loaded', async () => {
   const dir = path.join(home, 'sessions', 'ancient');
   mkdirSync(dir, { recursive: true });

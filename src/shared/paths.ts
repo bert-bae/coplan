@@ -36,10 +36,17 @@ export const paths = {
  *  a folder (one typed as another's hashed name would). A name made here
  *  is its own name again. */
 export function sanitizeId(id: string): string {
-  const safe = id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128) || 'unknown';
-  const name = /^\.+$/.test(safe) ? safe.replace(/\./g, '_') : safe;
+  const name = legacyName(id);
   if (name === id) return name;
   return `${name.slice(0, 119)}-${createHash('sha256').update(id).digest('hex').slice(0, 8)}`;
+}
+
+/** The folder name an earlier build gave a session: its id made safe, with
+ *  no hash, so two ids changed alike shared it. sanitizeId's, for an id
+ *  already safe. */
+export function legacyName(id: string): string {
+  const safe = id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128) || 'unknown';
+  return /^\.+$/.test(safe) ? safe.replace(/\./g, '_') : safe;
 }
 
 /**
