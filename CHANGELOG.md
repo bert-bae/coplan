@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixes
+
+- **On macOS, hooks start the daemon again.** The hook relay started it
+  with `setsid`, which macOS does not have, and its fallback could never
+  run. So a new session waited five seconds for nothing, and after the
+  daemon's idle shutdown, a plan you signed off could miss your next
+  message. The relay now has node start it, detached, everywhere.
+
 ### Targeted checks: only what the change touched
 
 - **Every check the build runs is targeted.** A check runs only when the

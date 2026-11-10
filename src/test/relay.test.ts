@@ -1,8 +1,8 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import http from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -254,6 +254,65 @@ test('a daemon that will not start is not waited on again by every message the u
   } finally {
     rmSync(plugin, { recursive: true, force: true });
     rmSync(empty, { recursive: true, force: true });
+  }
+});
+
+test('the daemon starts where there is no setsid, as on macOS', async () => {
+  const plugin = mkdtempSync(path.join(tmpdir(), 'cc-harness-nosetsid-plugin-'));
+  const empty = mkdtempSync(path.join(tmpdir(), 'cc-harness-nosetsid-home-'));
+  const bin = mkdtempSync(path.join(tmpdir(), 'cc-harness-nosetsid-bin-'));
+  try {
+    // A daemon that does what the real one does on start: listens, answers
+    // /health with its pid, writes its lock, and takes the hook.
+    mkdirSync(path.join(plugin, 'dist', 'daemon'), { recursive: true });
+    writeFileSync(
+      path.join(plugin, 'dist', 'daemon', 'main.js'),
+      `const http = require('node:http'), fs = require('node:fs'), path = require('node:path');
+const home = process.env.CC_HARNESS_HOME;
+const server = http.createServer((req, res) => {
+  if (req.url === '/health') return res.end(JSON.stringify({ ok: true, pid: process.pid }));
+  fs.writeFileSync(path.join(home, 'hook-received'), req.url);
+  res.setHeader('content-type', 'application/json');
+  res.end('{}');
+});
+server.listen(0, '127.0.0.1', () => {
+  fs.writeFileSync(path.join(home, 'daemon.json'), JSON.stringify({ pid: process.pid, port: server.address().port, token: 't' }));
+});
+setTimeout(() => process.exit(0), 15000).unref();
+`,
+    );
+    // Every command on PATH but setsid, the first of each name as PATH finds it.
+    const linked = new Set<string>();
+    for (const dir of (process.env['PATH'] ?? '').split(path.delimiter)) {
+      if (!path.isAbsolute(dir)) continue;
+      let names: string[] = [];
+      try {
+        names = readdirSync(dir);
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        if (name === 'setsid' || linked.has(name)) continue;
+        linked.add(name);
+        symlinkSync(path.join(dir, name), path.join(bin, name));
+      }
+    }
+    const out = await relay('SessionStart', '{"session_id":"s1"}', { CLAUDE_PLUGIN_ROOT: plugin, CC_HARNESS_HOME: empty, PATH: bin });
+    assert.equal(out.code, 0);
+    assert.ok(existsSync(path.join(empty, 'daemon.json')), 'the daemon started');
+    assert.equal(existsSync(path.join(empty, 'start-failed')), false, 'without waiting out the start timeout');
+    assert.equal(readFileSync(path.join(empty, 'hook-received'), 'utf8'), '/hook/SessionStart', 'and got the hook');
+    // Detached: a process group of its own, so the agent ending the hook's group leaves it running.
+    const { pid } = JSON.parse(readFileSync(path.join(empty, 'daemon.json'), 'utf8')) as { pid: number };
+    assert.equal(execFileSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' }).trim(), String(pid));
+  } finally {
+    try {
+      const { pid } = JSON.parse(readFileSync(path.join(empty, 'daemon.json'), 'utf8')) as { pid: number };
+      process.kill(pid);
+    } catch {
+      /* it never started */
+    }
+    for (const dir of [plugin, empty, bin]) rmSync(dir, { recursive: true, force: true });
   }
 });
 

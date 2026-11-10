@@ -140,7 +140,10 @@ start_daemon() {
     UserPromptSubmit|beforeSubmitPrompt)
       [ -n "$(find "$FAILED" -mmin -5 2>/dev/null)" ] && return 1 ;;
   esac
-  (setsid node "$ENTRY" >/dev/null 2>&1 &) 2>/dev/null || (node "$ENTRY" >/dev/null 2>&1 &)
+  # Detached into a session of its own, so it outlives the agent that started
+  # it. Node does that itself: macOS has no setsid command, and a fallback
+  # after `( … &) ||` never runs, since a backgrounded command always succeeds.
+  node --input-type=commonjs -e 'require("child_process").spawn(process.execPath, [process.argv[1]], { detached: true, stdio: "ignore" }).unref()' "$ENTRY" >/dev/null 2>&1
   # Waited on by the clock, not by count: where sleep takes no fractions,
   # fifty tries would be fifty seconds.
   DEADLINE=$(( $(date +%s) + 5 ))
