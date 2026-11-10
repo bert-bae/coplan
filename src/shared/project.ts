@@ -631,7 +631,8 @@ export function hookCommand(hook: CheckHook): string {
   return hook.cwd ? `(cd ${shellQuote(hook.cwd)} && ${run})` : run;
 }
 
-function shellQuote(text: string): string {
+/** `text` as one word for `sh`: as it is when it is plain, else quoted. */
+export function shellQuote(text: string): string {
   return /^[\w@%+=:,./-]+$/.test(text) ? text : `'${text.replace(/'/g, `'\\''`)}'`;
 }
 

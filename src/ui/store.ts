@@ -81,6 +81,8 @@ export interface UiState {
   exportOpen: boolean;
   /** Show the agent's bookkeeping in the viewer. Off until asked for. */
   showBookkeeping: boolean;
+  /** What is wrong with Coplan's settings files now, each naming its file. */
+  configErrors: string[];
   toasts: Toast[];
   error: string | null;
 }
@@ -112,11 +114,32 @@ const initial: UiState = {
   viewer: null,
   exportOpen: false,
   showBookkeeping: false,
+  configErrors: [],
   toasts: [],
   error: null,
 };
 
 const PREFS_KEY = 'cc-harness:prefs';
+/** The settings errors this browser has already been told about. */
+const SEEN_CONFIG_ERRORS_KEY = 'cc-harness:config-errors-seen';
+
+/** A list kept in this browser; empty where storage is unavailable. */
+function readList(key: string): string[] {
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(key) ?? '[]') as unknown;
+    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeList(key: string, list: string[]): void {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(list.slice(0, 50)));
+  } catch {
+    /* a private window: told again next time, which is the safe side */
+  }
+}
 
 /**
  * A tiny external store read through `useSyncExternalStore`.
@@ -183,10 +206,9 @@ class Store {
     this.set({ sessionId: id, session: null, planCheck: {}, diagramId: null, error: null, exportOpen: false });
     this.connect();
     try {
-      const { session, planCheck, configErrors, projectChecks } = await api.session(id);
+      const { session, planCheck, projectChecks } = await api.session(id);
       // Clicking through the rail quickly: only the last choice may land.
       if (this.state.sessionId === id) this.set({ session: this.newest(session), planCheck: planCheck ?? {}, projectChecks: projectChecks ?? NO_CHECKS });
-      this.sayConfigErrors(configErrors);
     } catch (err) {
       if (this.state.sessionId === id) this.set({ error: describeError(err) });
     }
@@ -255,9 +277,8 @@ class Store {
   private async resync(): Promise<void> {
     if (!this.state.sessionId) return;
     try {
-      const { session, planCheck, configErrors, projectChecks } = await api.session(this.state.sessionId);
+      const { session, planCheck, projectChecks } = await api.session(this.state.sessionId);
       if (session.sessionId === this.state.sessionId) this.set({ session: this.newest(session), planCheck: planCheck ?? {}, projectChecks: projectChecks ?? NO_CHECKS });
-      this.sayConfigErrors(configErrors);
     } catch {
       /* the next connect says what is wrong */
     }
@@ -287,6 +308,9 @@ class Store {
         return;
       }
       case 'ping':
+        return;
+      case 'config-errors':
+        this.configErrors(event.errors, event.files ?? []);
         return;
       case 'persist-error':
         if (event.sessionId === this.state.sessionId) {
@@ -725,17 +749,23 @@ class Store {
    * Notices
    * ---------------------------------------------------------------- */
 
-  /** Harness config errors already said on this page: each is said once. */
-  private saidConfigErrors = new Set<string>();
-
-  /** Say what is wrong with the harness config, once per distinct error
-   *  (#52): a setting that is quietly ignored is worse than a toast. */
-  private sayConfigErrors(errors: string[] | undefined): void {
-    for (const e of errors ?? []) {
-      if (this.saidConfigErrors.has(e)) continue;
-      this.saidConfigErrors.add(e);
-      this.toast('error', `Coplan's config: ${e} Run coplan doctor to see every problem.`);
+  /**
+   * A settings file Coplan could not use (#52): a setting quietly ignored is
+   * worse than a toast. Said once per distinct error — not again on a
+   * reload, a reconnect or a switch to another session — and listed in the
+   * rail's footer for as long as it is wrong. Once fixed it is forgotten, so
+   * the same mistake made again is said again. "Fixed" is only known for the
+   * files this page's session reads (`files`): an error in another
+   * repository's file is kept as seen.
+   */
+  private configErrors(errors: string[], files: string[]): void {
+    this.set({ configErrors: errors });
+    const seen = readList(SEEN_CONFIG_ERRORS_KEY);
+    for (const e of errors) {
+      if (!seen.includes(e)) this.toast('error', `Coplan's config: ${e} Run coplan doctor to see every problem.`);
     }
+    const fixed = (e: string) => !errors.includes(e) && files.some((f) => e.startsWith(f));
+    writeList(SEEN_CONFIG_ERRORS_KEY, [...errors, ...seen.filter((e) => !errors.includes(e) && !fixed(e))]);
   }
 
   toast(kind: Toast['kind'], text: string): void {

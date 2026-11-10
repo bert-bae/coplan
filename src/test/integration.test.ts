@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -1695,8 +1695,25 @@ test("done waits on the checks for what the task changed since it began — not 
     assert.equal(refused['ok'], false);
     assert.match(String(refused['text']), new RegExp(`the review checks py tests \\(for helper\\.py\\) were never reported — \`.*check review --since ${began.slice(0, 12)}\` runs exactly these`));
     assert.doesNotMatch(String(refused['text']), /md lint/, 'README.md was planned, and touched only before the task began: no check for it');
+    // The user skips a check for it: the command the gate gives skips it too,
+    // quoted, so it runs exactly what done waits on.
+    const skipped = await opsOn(id, [{ op: 'set_checks', id: 'app', skip: ['ts tests'] }]);
+    assert.ok(skipped.plan, skipped.error);
+    assert.match(String((await task({ status: 'done', note: 'wired' }))['text']), /check review --since [0-9a-f]{12} '--skip=ts tests'` runs exactly these/);
 
     await task({ checks: [{ name: 'py tests', ok: true }] });
+    // Git cannot read the change (its index is broken): that is never
+    // "nothing changed", which would ask for no checks — every one applies.
+    const index = path.join(other, '.git', 'index');
+    const saved = readFileSync(index);
+    writeFileSync(index, 'not an index');
+    try {
+      const unread = await task({ status: 'done', note: 'wired' });
+      assert.equal(unread['ok'], false);
+      assert.match(String(unread['text']), /what it changed cannot be told — git could not read it \(it failed or took too long\) — so every review check applies, and md lint was never reported/);
+    } finally {
+      writeFileSync(index, saved);
+    }
     const done = await task({ status: 'done', note: 'wired' });
     assert.equal(done['ok'], true, String(done['text']));
   } finally {
@@ -1704,22 +1721,91 @@ test("done waits on the checks for what the task changed since it began — not 
   }
 });
 
-test('what is wrong with the harness config reaches the page with the session (#52)', async () => {
+/** The `config-errors` events a page's live stream for `session` receives,
+ *  as they come; `close` ends the stream. */
+async function settingsStream(session: string): Promise<{ events: string[][]; files: string[][]; close: () => void }> {
+  const events: string[][] = [];
+  const files: string[][] = [];
+  const { ticket } = await call<{ ticket: string }>('/api/events/ticket', { method: 'POST', body: '{}' });
+  let req: http.ClientRequest | undefined;
+  await new Promise<void>((resolve, reject) => {
+    req = http.get(`${baseUrl(lock)}/api/events?ticket=${ticket}&session=${session}`, (res) => {
+      let buf = '';
+      res.on('data', (chunk: Buffer) => {
+        buf += chunk.toString('utf8');
+        let cut: number;
+        while ((cut = buf.indexOf('\n\n')) >= 0) {
+          const frame = buf.slice(0, cut);
+          buf = buf.slice(cut + 2);
+          if (!frame.startsWith('data: ')) continue;
+          const event = JSON.parse(frame.slice(6)) as { type: string; errors?: string[]; files?: string[] };
+          if (event.type === 'config-errors') {
+            events.push(event.errors!);
+            files.push(event.files!);
+          }
+        }
+      });
+      resolve();
+    });
+    req.on('error', reject);
+  });
+  return { events, files, close: () => req?.destroy() };
+}
+
+test("a mistake in the harness config reaches the page: when it opens, and as soon as it is made or fixed (#52)", async () => {
   const id = 'config-errors';
   await hookFor(id, 'SessionStart', { start_reason: 'startup' });
   const file = path.join(repo, '.claude', 'harness.json');
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify({ promptNotice: 'sometimes', idleShutdownMinutes: 5 }));
+  const page = await settingsStream(id);
+  const until = async (ok: () => boolean) => {
+    for (let i = 0; i < 50 && !ok(); i++) await sleep(50);
+    assert.ok(ok(), JSON.stringify(page.events));
+  };
   try {
-    const { configErrors } = await call<{ configErrors: string[] }>(`/api/session/${id}`);
-    assert.equal(configErrors.length, 2);
-    assert.match(configErrors.join('\n'), /harness\.json: "promptNotice" must be true or false/);
-    assert.match(configErrors.join('\n'), /harness\.json: "idleShutdownMinutes" can only be set in the global config/);
+    // Opening the page: its repository's file is read, and each mistake said.
+    await until(() => page.events.length > 0);
+    const first = page.events[0]!;
+    assert.equal(first.length, 2);
+    assert.match(first.join('\n'), /harness\.json: "promptNotice" must be true or false/);
+    assert.match(first.join('\n'), /harness\.json: "idleShutdownMinutes" can only be set in the global config/);
+    assert.ok(page.files[0]!.some((f) => f.endsWith(path.join('.claude', 'harness.json'))), 'it says which files it speaks for');
+
+    // A page that asked for a session the daemon did not hold yet watches
+    // its repository once the session arrives.
+    const early = await settingsStream('config-late');
+    try {
+      for (let i = 0; i < 50 && !early.events.length; i++) await sleep(50);
+      assert.deepEqual(early.events[0], [], 'only the global file, until it knows the session');
+      await hookFor('config-late', 'SessionStart', { start_reason: 'startup' });
+      for (let i = 0; i < 50 && early.events.length < 2; i++) await sleep(50);
+      assert.match((early.events[1] ?? []).join('\n'), /harness\.json: "promptNotice" must be true or false/);
+    } finally {
+      early.close();
+    }
+
+    // A page for a session in another repository is not told of it.
+    const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-other-repo-'));
+    try {
+      await hookFor('config-elsewhere', 'SessionStart', { start_reason: 'startup', cwd: other });
+      const there = await settingsStream('config-elsewhere');
+      for (let i = 0; i < 50 && !there.events.length; i++) await sleep(50);
+      there.close();
+      assert.deepEqual(there.events[0], []);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+
+    // Fixed: the next time the daemon reads it, the open page hears.
+    writeFileSync(file, JSON.stringify({ promptNotice: false }));
+    utimesSync(file, new Date(), new Date(Date.now() + 2000));
+    await hookFor(id, 'UserPromptSubmit', { prompt: 'hello' });
+    await until(() => page.events.at(-1)?.length === 0);
   } finally {
-    rmSync(file);
+    page.close();
+    rmSync(file, { force: true });
   }
-  const { configErrors } = await call<{ configErrors: string[] }>(`/api/session/${id}`);
-  assert.deepEqual(configErrors, [], 'fixed, nothing is said');
 });
 
 /* ------------------------------------------------------------------ *

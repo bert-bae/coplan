@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { changedFiles, changedSince, committedOn, headCommit, resolveBase, worktreeOf } from '../shared/changes.ts';
+import { MAX_FILES, changedFiles, changedSince, committedOn, headCommit, resolveBase, worktreeOf } from '../shared/changes.ts';
 
 /**
  * What a change touched, as git says (#52): what the review and final
@@ -39,9 +39,9 @@ test('a change is what it committed since the base, what it has not, and its new
     const out = await changedFiles(dir);
     assert.equal(out?.base, 'main', 'main, without being told');
     assert.deepEqual(out?.files, ['README.md', 'committed.py', 'new file.py']);
-    // Asked for a base that is not there: only what is not committed.
+    // Asked for a base that is not there: the build cannot be measured.
     assert.equal(await resolveBase(dir, 'nope'), null);
-    assert.deepEqual((await changedFiles(dir, 'nope'))?.files, ['README.md', 'new file.py']);
+    assert.equal((await changedFiles(dir, 'nope'))?.unread, 'no-base', 'a base that is not there leaves the build unmeasured, not empty');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -94,10 +94,93 @@ test("a task built in a worktree of its own is measured there; a branch checked 
     execFileSync('git', ['-c', 'user.email=t@e', '-c', 'user.name=t', 'commit', '-qm', 'api'], { cwd: tree });
     git('worktree', 'remove', tree);
     assert.equal(await worktreeOf(dir, 'coplan/api'), null);
-    assert.deepEqual(await committedOn(dir, began, 'coplan/api'), ['api.ts']);
+    assert.deepEqual(await committedOn(dir, began, 'coplan/api'), { files: ['api.ts'], base: began });
     assert.equal(await committedOn(dir, began, 'no-such-branch'), null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(tree, { recursive: true, force: true });
+  }
+});
+
+test('a change git cannot read, or too long to list, is unread — never an empty one', async () => {
+  const { dir, git } = repo();
+  try {
+    const began = (await headCommit(dir))!;
+    git('checkout', '-qb', 'feature');
+    writeFileSync(path.join(dir, 'app.ts'), 'export const x = 1;\n');
+    // A broken index: git still knows the repository and the commit, but
+    // cannot say what changed.
+    writeFileSync(path.join(dir, '.git', 'index'), 'not an index');
+    for (const out of [await changedSince(dir, began), await changedSince(dir), await changedFiles(dir)]) {
+      assert.equal(out?.unread, 'git-failed');
+      assert.deepEqual(out?.files, []);
+    }
+    rmSync(path.join(dir, '.git', 'index'));
+    git('reset', '-q');
+
+    // More files than can be told apart: unread too, not cut short quietly.
+    mkdirSync(path.join(dir, 'many'));
+    for (let i = 0; i <= MAX_FILES; i++) writeFileSync(path.join(dir, 'many', `f${i}.txt`), '');
+    const many = await changedSince(dir, began);
+    assert.equal(many?.unread, 'too-many');
+    assert.equal(many?.files.length, MAX_FILES);
+    rmSync(path.join(dir, 'many'), { recursive: true, force: true });
+    const fine = await changedSince(dir, began);
+    assert.equal(fine?.unread, undefined);
+    assert.deepEqual(fine?.files, ['app.ts']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a repository with no commit yet is all new — staged or not — and that is not a failure', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'coplan-changes-'));
+  const git = (...args: string[]) => void execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+  try {
+    git('init', '-q', '-b', 'main');
+    writeFileSync(path.join(dir, 'staged.ts'), 'export {};\n');
+    writeFileSync(path.join(dir, 'loose.py'), 'x = 1\n');
+    git('add', 'staged.ts');
+    for (const out of [await changedFiles(dir), await changedSince(dir)]) {
+      assert.equal(out?.unread, undefined);
+      assert.deepEqual(out?.files, ['loose.py', 'staged.ts']);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('git failing to say whether a commit is there is a failure to read, never "not there"', async () => {
+  const { dir, git } = repo();
+  // A git that fails every `rev-parse --verify` (as a timeout would), and is
+  // the real one for everything else.
+  const bin = mkdtempSync(path.join(tmpdir(), 'coplan-fakegit-'));
+  const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  writeFileSync(path.join(bin, 'git'), `#!/bin/sh\ncase "$*" in *--verify*) echo boom >&2; exit 128;; esac\nexec "${real}" "$@"\n`);
+  chmodSync(path.join(bin, 'git'), 0o755);
+  const began = (await headCommit(dir))!;
+  git('branch', 'side');
+  const was = process.env['PATH'];
+  process.env['PATH'] = `${bin}${path.delimiter}${was ?? ''}`;
+  try {
+    assert.equal((await changedSince(dir, began))?.unread, 'git-failed', 'not null: the task is not taken for one outside git');
+    assert.equal((await changedSince(dir))?.unread, 'git-failed', 'not a repository with no commit yet');
+    assert.equal((await changedFiles(dir))?.unread, 'git-failed');
+    assert.equal((await committedOn(dir, began, 'side'))?.unread, 'git-failed', 'not "no such branch"');
+  } finally {
+    process.env['PATH'] = was;
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('with no base branch anywhere, the build is unmeasured — not just what is uncommitted', async () => {
+  const { dir, git } = repo();
+  try {
+    git('branch', '-m', 'trunk');
+    assert.equal((await changedFiles(dir))?.unread, 'no-base');
+    assert.equal((await changedFiles(dir, 'trunk'))?.unread, undefined, 'named, it is found');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

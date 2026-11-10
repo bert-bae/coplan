@@ -268,6 +268,20 @@ test('coplan check runs only the checks for what changed: since the last commit,
     assert.deepEqual(ran(run('review')), []);
     assert.deepEqual(ran(run('review', '--since', began)), ['ts tests', 'py tests', 'whole', 'api']);
     assert.equal(run('review', '--since', 'nope').status, 2);
+    // A skip names one check, whole: a space or a comma is part of it.
+    const skipped = run('review', '--since', began, '--skip=ts tests', '--skip', 'py tests');
+    assert.deepEqual(ran(skipped), ['whole', 'api']);
+    // A flag without its value is an error, never the next flag taken for it.
+    for (const [args, why] of [
+      [['review', '--since', '--list'], /"--since" needs the commit/],
+      [['review', '--skip'], /"--skip" needs the name of a check/],
+      [['final', '--base='], /"--base" needs a branch or commit/],
+      [['review', '--files', '--json'], /"--files" needs the files/],
+    ] as const) {
+      const bad = run(...args);
+      assert.equal(bad.status, 2, args.join(' '));
+      assert.match(bad.stderr, why);
+    }
     // --files names the files instead; --all runs everything, as before.
     assert.deepEqual(ran(run('review', '--files', 'app.ts')), ['ts tests', 'whole']);
     assert.deepEqual(ran(run('review', '--all')), ['ts tests', 'py tests', 'whole', 'api']);
@@ -276,6 +290,24 @@ test('coplan check runs only the checks for what changed: since the last commit,
     const final = run('final');
     assert.deepEqual(ran(final), ['build']);
     assert.match(final.stdout, /not running docs \(docs\/\) — the change since main does not touch its area/);
+    // Git cannot read the change: every check runs, {files} is the whole
+    // repository, and it says why — never "nothing changed".
+    writeFileSync(path.join(dir, '.git', 'index'), 'not an index');
+    const unread = run('review', '--since', began);
+    assert.deepEqual(ran(unread), ['ts tests', 'py tests', 'whole', 'api']);
+    assert.match(unread.stdout, /what changed cannot be told — git could not read it \(it failed or took too long\) — so every check runs/);
+    assert.match(run('implement', '--list').stdout, /py lint: echo linted \./);
+    rmSync(path.join(dir, '.git', 'index'));
+    g('reset', '-q');
+    // A --base that is not there is a mistake, not a build with nothing in it.
+    const typo = run('final', '--base', 'mian');
+    assert.equal(typo.status, 2);
+    assert.match(typo.stderr, /"--base mian" is not a branch or commit here/);
+    // A skip that names no check (or several, comma-joined) is said, not reported as skipped.
+    const joined = run('review', '--all', '--skip', 'ts tests,py tests', '--list');
+    assert.match(joined.stderr, /--skip "ts tests,py tests" names no check in \.coplan\/config\.json, so nothing is skipped for it/);
+    assert.doesNotMatch(joined.stdout + joined.stderr, /not running ts tests,py tests/);
+    assert.match(joined.stdout, /^ts tests:/m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
