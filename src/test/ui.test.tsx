@@ -2727,6 +2727,24 @@ test('a comment being written is held by the submit lock, as a field is: Submit 
   assert.ok(screen.getByText('Is a day of staleness fine?'), 'the comments there are still to read');
   assert.equal(screen.queryByRole('textbox', { name: /^New comment on/ }) === null, true, 'no comment box');
   assert.equal(screen.queryByRole('button', { name: 'Reply' }) === null, true, 'no Reply');
+  // Reopened, its box starts afresh: what the lock dropped was offered to copy, and does not come back untracked.
+  const relock = async (lock: (plan: Plan) => Plan) => {
+    await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: lock(store.getState().session!.plan!) } }));
+  };
+  const submit = (plan: Plan) => submitPlan(plan, { target: 'session', prompt: 'build' });
+  await relock(reopenPlan);
+  assert.equal((screen.getByRole('textbox', { name: /^New comment on the plan/ }) as HTMLTextAreaElement).value, '', 'comment box empty');
+  // A reply, likewise.
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Reply' }), { target: { value: 'A day is fine' } });
+  await relock(submit);
+  assert.ok(store.getState().toasts.some((t) => t.copy === 'A day is fine'), 'the reply offered to copy');
+  assert.equal([...openDrafts.keys()].some((k) => k.includes(':reply:')), false, 'and no longer kept');
+  await relock(reopenPlan);
+  assert.equal(screen.queryByRole('textbox', { name: 'Reply' }) === null, true, 'reply box closed');
+  assert.ok(screen.getByRole('button', { name: 'Reply' }), 'Reply offered again');
 });
 
 test('a toast holding text to copy is not timed out; others go on their own', async () => {

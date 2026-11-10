@@ -25,6 +25,10 @@ interface Started {
 
 export const openDrafts = new Map<string, OpenDraft>();
 
+/** The editors open now, by draft key: told when a lock takes their field,
+ *  so what was written does not stay on screen untracked. */
+const holders = new Map<string, () => void>();
+
 /** A kept draft's key: the session it was written in, and its field. */
 function draftKey(sessionId: string | null, field: string): string {
   return `${sessionId ?? ''}:${field}`;
@@ -62,6 +66,7 @@ export function pruneDrafts(sessionId: string, plan: Plan | null): { name: strin
     const held = text !== undefined && fieldText(plan!, field, locks!) === undefined;
     if (text !== undefined && !held && text !== open.draft) continue;
     openDrafts.delete(key);
+    if (held) holders.get(key)?.();
     // Held, with text not saved (nor saved in the same plan as the lock).
     if (held && open.draft !== open.value && open.draft !== text) locked.push({ name: fieldName(plan!, field), text: open.draft });
   }
@@ -176,6 +181,19 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
     if (editing) openDrafts.set(key, { draft, ...started });
     else openDrafts.delete(key);
   }, [key, editing, draft, started]);
+  // A lock that takes the field takes what was written (pruneDrafts offers
+  // it to copy): the field opens afresh once it is free again.
+  useEffect(() => {
+    if (!key) return;
+    const drop = () => {
+      setDraft(now.current.value);
+      setEditing(openAtFirst);
+    };
+    holders.set(key, drop);
+    return () => {
+      if (holders.get(key) === drop) holders.delete(key);
+    };
+  }, [key, openAtFirst]);
   const close = () => setEditing(false);
   return {
     editing,

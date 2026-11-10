@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **Text a lock dropped no longer comes back when the plan is reopened.** A comment, reply or field being
+  written when the plan was signed off elsewhere is offered to copy, as before, and its box now starts empty.
 - **A submitted plan no longer offers to comment where it takes no comments.** A section or task with no
   comments shows no comment button, and one with only resolved comments reads "Comments on …".
 - **Accepting a proposal no longer writes over a task note you rewrote after it was made.** The proposal
