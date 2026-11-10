@@ -153,7 +153,11 @@ export function MarkdownField({
   const [editing, setEditing] = useState(startEditing);
   const [draft, setDraft] = useState(value);
   const [saving, setSaving] = useState(false);
-  const startedAt = useRef<number | undefined>(version);
+  // What editing started from. A field with a revision is watched by it; one
+  // with none (the summary, a box's notes, a caption) by its text, and its
+  // save is not refused (there is nothing to check it against): the warning
+  // below is all it gets.
+  const started = useRef<{ version: number | undefined; value: string }>({ version, value });
   const area = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -165,10 +169,15 @@ export function MarkdownField({
   }, [editing]);
 
   const begin = () => {
-    startedAt.current = version;
+    started.current = { version, value };
     setEditing(true);
   };
-  const changedUnderneath = editing && version !== undefined && startedAt.current !== undefined && version !== startedAt.current;
+  // Showing the user's own text already (their save, landing) is nothing to
+  // lose, whatever moved.
+  const changedUnderneath =
+    editing &&
+    value !== draft &&
+    (started.current.version !== undefined ? version !== started.current.version : value !== started.current.value);
 
   const save = async () => {
     if (draft === value) {
@@ -179,13 +188,13 @@ export function MarkdownField({
     // With the "changed while you were editing" warning on screen, saving is
     // a deliberate choice to replace the newer version, so it is made
     // against that version. Otherwise it is made against the one edited.
-    const base = changedUnderneath ? version : startedAt.current;
+    const base = changedUnderneath ? version : started.current.version;
     const result = await onSave(draft, base);
     setSaving(false);
     if (result === false) {
       // Refused — most likely changed underneath. Keep the text, and start
       // from the revision now on screen so a deliberate second save goes in.
-      startedAt.current = version;
+      started.current = { version, value };
       return;
     }
     setEditing(false);

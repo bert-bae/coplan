@@ -36,6 +36,11 @@
   label, detail and description fields now keep what you type while you
   are in them, and say when the box changed meanwhile: leaving keeps your
   text, Esc takes the new one. Out of the field they follow the plan.
+- **The summary, a box's notes and a diagram caption warn you too.** If
+  the agent changed one while you were editing it, saving replaced its
+  text with yours without a word. You now see "This changed while you
+  were editing" first, as tasks and sections already showed; saving still
+  goes in, as the choice is yours.
 
 ### Targeted checks: only what the change touched
 

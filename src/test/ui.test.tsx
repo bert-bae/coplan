@@ -1890,3 +1890,52 @@ test('a skipped check shows on the task, on its card mid-build — where the use
   await openTab('Overview');
   assert.match(screen.getByTestId('skipped-checks').textContent ?? '', /Checks you skipped: t3 Wire into API \(tests\)\./);
 });
+
+test("the summary says when the agent changed it while the user was editing; saving still goes in (warn, don't refuse)", async () => {
+  await boot();
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  const area = screen.getByRole('textbox', { name: 'the plan summary' }) as HTMLTextAreaElement;
+  fireEvent.change(area, { target: { value: 'Put a cache in front of the database. Typo fixed.' } });
+  assert.equal(screen.queryByRole('alert'), null, 'nothing has changed underneath yet');
+  // The agent rewrites the summary meanwhile.
+  const s = store.getState().session!;
+  const plan = { ...structuredClone(s.plan!), summary: 'A read-through cache, written by the agent.', version: s.plan!.version + 1 };
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...s, plan } });
+  });
+  assert.match(screen.getByRole('alert').textContent ?? '', /This changed while you were editing/);
+  assert.equal(area.value, 'Put a cache in front of the database. Typo fixed.', 'the typing stays');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  });
+  assert.deepEqual(opsSent().at(-1), { op: 'set_meta', summary: 'Put a cache in front of the database. Typo fixed.' });
+});
+
+test('a field with no revision (box notes, a caption) warns the same way, and only when it did change', async () => {
+  const { MarkdownField } = await import('../ui/components/Editable.tsx');
+  const saved: string[] = [];
+  const field = (value: string) => <MarkdownField value={value} label="notes on API" onSave={(v) => void saved.push(v)} />;
+  const view = render(field('Primary store.'));
+  await act(async () => {
+    fireEvent.click(view.getByRole('button', { name: 'Edit notes on API' }));
+  });
+  fireEvent.change(view.getByRole('textbox', { name: 'notes on API' }), { target: { value: 'Primary store. Mine.' } });
+  await act(async () => view.rerender(field('Primary store.')));
+  assert.equal(view.queryByRole('alert'), null, 'the same text again is no change');
+  await act(async () => view.rerender(field('Rewritten by the agent.')));
+  assert.ok(view.getByRole('alert'));
+  fireEvent.keyDown(view.getByRole('textbox', { name: 'notes on API' }), { key: 'Escape' });
+  await act(async () => {
+    fireEvent.click(view.getByRole('button', { name: 'Edit notes on API' }));
+  });
+  assert.equal(view.queryByRole('alert'), null, 'editing again starts from the newer text');
+  assert.deepEqual(saved, []);
+  // The user's own save landing before it resolves is not a change underneath.
+  fireEvent.change(view.getByRole('textbox', { name: 'notes on API' }), { target: { value: 'My notes.' } });
+  await act(async () => view.rerender(field('My notes.')));
+  assert.equal(view.queryByRole('alert'), null, 'their own text, landing');
+  view.unmount();
+});
