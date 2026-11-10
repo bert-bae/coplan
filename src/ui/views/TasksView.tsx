@@ -209,7 +209,7 @@ function ByBox({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
                   {items.length ? (
                     <ul className="by-box-list" aria-label={`Tasks that build ${n.label}`}>
                       {items.map((r) => (
-                        <ByBoxRow key={r.task.id} plan={plan} task={r.task} number={r.number} depth={r.depth} readOnly={readOnly} />
+                        <ByBoxRow key={r.task.id} plan={plan} task={r.task} status={r.status} number={r.number} depth={r.depth} readOnly={readOnly} />
                       ))}
                     </ul>
                   ) : (
@@ -230,7 +230,7 @@ function ByBox({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
         {off.length ? (
           <ul className="by-box-list" aria-label="Tasks that build no box">
             {off.map((r) => (
-              <ByBoxRow key={r.task.id} plan={plan} task={r.task} number={r.number} depth={r.depth} readOnly={readOnly} />
+              <ByBoxRow key={r.task.id} plan={plan} task={r.task} status={shownStatus(plan, r.task)} number={r.number} depth={r.depth} readOnly={readOnly} />
             ))}
           </ul>
         ) : (
@@ -241,13 +241,14 @@ function ByBox({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
   );
 }
 
-function ByBoxRow({ plan, task, number, depth, readOnly }: { plan: Plan; task: Task; number: string; depth: number; readOnly: boolean }) {
+/** A task under a box; `status` is as the page shows it (see shownStatus). */
+function ByBoxRow({ plan, task, status, number, depth, readOnly }: { plan: Plan; task: Task; status: TaskStatus; number: string; depth: number; readOnly: boolean }) {
   const parent = hasSubtasks(plan, task.id);
   return (
-    <li className={classNames('by-box-row', `is-${task.status}`)} style={{ ['--depth' as string]: depth }}>
+    <li className={classNames('by-box-row', `is-${status}`)} style={{ ['--depth' as string]: depth }}>
       {parent || readOnly ? (
         parent ? (
-          <DerivedStatus plan={plan} task={task} />
+          <DerivedStatus task={task} status={status} />
         ) : (
           <span className={classNames('status-dot is-static', `is-${task.status}`)} role="img" aria-label={`${task.title}: ${STATUS_LABEL[task.status]}`}>
             <span aria-hidden="true">{STATUS_GLYPH[task.status]}</span>
@@ -261,7 +262,7 @@ function ByBoxRow({ plan, task, number, depth, readOnly }: { plan: Plan; task: T
         {task.title}
       </button>
       {task.note && (
-        <span className={classNames('chip is-note', task.status === 'blocked' && 'is-warning')} title={task.note}>
+        <span className={classNames('chip is-note', status === 'blocked' && 'is-warning')} title={task.note}>
           {task.note}
         </span>
       )}
@@ -558,6 +559,8 @@ function TaskRow(props: {
   const collapsed = useStore((s) => s.collapsedTasks.includes(task.id));
   const [comments, setComments] = useState(false);
   const kids = childrenOf(plan, task.id);
+  // A parent is as far along as its subtasks: its row reads as its dot does.
+  const status = shownStatus(plan, task);
   const sub = kids.length ? countTasks({ tasks: [task, ...descendants(plan, task.id)] }) : null;
   const threads = useThreads({ kind: 'task', id: task.id });
   const target = { kind: 'task' as const, id: task.id };
@@ -598,14 +601,14 @@ function TaskRow(props: {
   };
 
   return (
-    <Focusable kind="task" id={task.id} as="div" className={classNames('task', `is-${task.status}`, props.dragging && 'is-dragging')}>
+    <Focusable kind="task" id={task.id} as="div" className={classNames('task', `is-${status}`, props.dragging && 'is-dragging')}>
       <div
         className={classNames('task-line', props.dropZone && `drop-${props.dropZone}`)}
         style={{ ['--depth' as string]: depth }}
         role="treeitem"
         aria-level={depth + 1}
         aria-expanded={kids.length ? !collapsed : undefined}
-        aria-label={`${number} ${task.title}, ${STATUS_LABEL[task.status]}`}
+        aria-label={`${number} ${task.title}, ${STATUS_LABEL[status]}`}
         tabIndex={0}
         draggable
         onDragStart={props.onDragStart}
@@ -630,7 +633,7 @@ function TaskRow(props: {
         ) : (
           <span className="twisty is-leaf" aria-hidden="true" />
         )}
-        {kids.length ? <DerivedStatus plan={plan} task={task} /> : <StatusDot task={task} />}
+        {kids.length ? <DerivedStatus task={task} status={status} /> : <StatusDot task={task} />}
         <span className="task-num">{number}</span>
         <InlineText
           className="task-title"
@@ -646,7 +649,7 @@ function TaskRow(props: {
             </span>
           )}
           {task.note && (
-            <span className={classNames('chip is-note', task.status === 'blocked' && 'is-warning')} title={task.note}>
+            <span className={classNames('chip is-note', status === 'blocked' && 'is-warning')} title={task.note}>
               {task.note}
             </span>
           )}
@@ -968,8 +971,8 @@ function MoveButton({ op, glyph, label }: { op: PlanOp | null; glyph: string; la
 /** Where a parent's subtasks stand: done when all are, blocked or in
  *  progress when any is. A parent has no status of its own to set — what
  *  is built, and what the agent reports, is its subtasks. */
-function DerivedStatus({ plan, task }: { plan: Plan; task: Task }) {
-  const status = shownStatus(plan, task);
+/** A parent's dot: `status` is rolled up from its subtasks (shownStatus). */
+function DerivedStatus({ task, status }: { task: Task; status: TaskStatus }) {
   return (
     <span
       className={classNames('status-dot', 'is-static', `is-${status}`)}

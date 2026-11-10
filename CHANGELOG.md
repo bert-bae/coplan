@@ -213,6 +213,11 @@
   session opened while that copy waited was the one signed off (refused,
   at best, as another plan's version). Each sign-off now carries the
   session it was made in.
+- **A parent task's row reads as its dot does.** Its dot showed the status
+  rolled up from its subtasks, but the row was struck through, labelled
+  and its note flagged by the parent's own stored status, so a parent
+  whose subtasks were all done could still read as to do (or blocked), in
+  the outline and in "By box".
 
 ### Targeted checks: only what the change touched
 

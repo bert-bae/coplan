@@ -718,6 +718,30 @@ test('"By box" lists every task under each box it builds, and the tasks that bui
   assert.equal(store.getState().focusTarget === null || store.getState().focusTarget === 'node:d1:db', true);
 });
 
+test('a parent task is shown as its subtasks have it, in the outline and "By box"', async () => {
+  const plan = applyOps(
+    makePlan(),
+    [
+      { op: 'upsert_task', id: 'storage', status: 'blocked', note: 'waits on the ops team' },
+      { op: 'upsert_task', id: 't2', status: 'done' },
+    ],
+    'user',
+  ).plan;
+  assert.equal(plan.tasks.find((t) => t.id === 'storage')?.status, 'blocked', 'its own status, as stored');
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  const line = document.getElementById('task-storage')!;
+  assert.ok(line.classList.contains('is-done'), 'struck through, as its dot says');
+  assert.ok(screen.getByRole('treeitem', { name: '1 Storage layer, Done' }), 'and said so');
+  assert.equal(line.querySelector('.chip.is-note')?.classList.contains('is-warning'), false, 'its note not flagged as a blocker');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'By box' }));
+  });
+  const row = [...screen.getByRole('region', { name: 'Postgres' }).querySelectorAll('.by-box-row')].find((r) => r.querySelector('.by-box-title')?.textContent === 'Storage layer');
+  assert.ok(row?.classList.contains('is-done'), 'by box too');
+  assert.equal(row?.querySelector('.chip.is-note')?.classList.contains('is-warning'), false);
+});
+
 test('"By box" marks a box no task builds, as the plan check would', async () => {
   await boot();
   await openTab('Tasks');
