@@ -179,6 +179,13 @@
   a preview of. A request queued with a sign-off now comes with the message
   after. And Codex's prompt hook, which Coplan had capped at 4,000 tokens,
   now takes 8,000: a whole prompt even for a plan in Chinese or Japanese.
+- **A Claude Code tool call never lands in a Codex thread.** A call that
+  named no session (a Claude Code without `CLAUDE_CODE_SESSION_ID`, or
+  before its hooks registered it) fell back to whatever session was in its
+  folder, a Codex thread included, and left its process on it: when
+  Claude exited, the thread was marked ended. A call that says it is
+  Claude Code now only reaches a Claude session or, for Cursor running
+  Claude Code's config, a Cursor chat, by its process or its folder.
 
 ### Targeted checks: only what the change touched
 

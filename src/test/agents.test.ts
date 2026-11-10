@@ -320,6 +320,39 @@ function serverCall(
   });
 }
 
+test("a Claude tool call naming no session never takes over another agent's in its folder", async () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'coplan-shared-folder-'));
+  const other = mkdtempSync(path.join(tmpdir(), 'coplan-cursor-folder-'));
+  const elsewhere = mkdtempSync(path.join(tmpdir(), 'coplan-elsewhere-'));
+  try {
+    const thread = '019a0000-0000-7000-8000-00000000b7b7';
+    await hook('codex', 'SessionStart', { session_id: thread, cwd: folder, hook_event_name: 'SessionStart', source: 'startup' });
+    assert.equal((await mcp('codex', 'publish', { ...PLAN, title: "Codex's plan", cwd: folder }, thread)).ok, true);
+    // A Claude Code that names no session (no CLAUDE_CODE_SESSION_ID) and has none of its own here.
+    const read = await mcp('claude', 'read', { cwd: folder, pid: 424242 });
+    assert.doesNotMatch(read.text, /Codex's plan/, "it is not handed the Codex thread's plan");
+    // Nor does its process come to stand for the thread: the reaper would end the thread when Claude exits.
+    assert.doesNotMatch((await mcp('claude', 'read', { cwd: elsewhere, pid: 424242 })).text, /Codex's plan/);
+    // And a pid the Codex app gave its thread is the Codex app's: a Claude call with the same one is not the thread's.
+    await mcp('codex', 'read', { cwd: folder, pid: 515151 }, thread);
+    assert.doesNotMatch((await mcp('claude', 'read', { cwd: elsewhere, pid: 515151 })).text, /Codex's plan/);
+
+    // What the fallback is for: Cursor running Claude Code's config names itself Claude, and still finds its chat.
+    const chat = 'cursor-chat-b7';
+    await hook('cursor', 'sessionStart', { ...cursorBase, conversation_id: chat, workspace_roots: [other], hook_event_name: 'sessionStart', session_id: chat });
+    const published = await mcp('claude', 'publish', { ...PLAN, title: "Cursor's plan", cwd: other, pid: 434343 });
+    assert.equal(published.ok, true, published.text);
+    assert.equal((await session(chat)).plan?.title, "Cursor's plan");
+    // Its process stands for the chat from then on: a Claude session started in that folder later does not take its calls.
+    await hook('claude', 'SessionStart', { session_id: 'claude-later-b7', cwd: other, source: 'startup' });
+    assert.equal((await mcp('claude', 'publish', { ...PLAN, title: "Cursor's plan, again", cwd: other, pid: 434343 })).ok, true);
+    assert.equal((await session(chat)).plan?.title, "Cursor's plan, again");
+    assert.equal((await session('claude-later-b7')).plan, null);
+  } finally {
+    for (const dir of [folder, other, elsewhere]) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the Codex MCP server takes its thread from each call, not from its folder or environment', async () => {
   const other = '0199a213-81c0-7800-8aa1-000000000002';
   await hook('codex', 'SessionStart', { session_id: other, cwd: repo, hook_event_name: 'SessionStart', source: 'startup' });

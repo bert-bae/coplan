@@ -1095,24 +1095,29 @@ function buildRouter(deps: Deps): Router {
     const id = body.sessionId ?? (typeof headerId === 'string' && headerId ? headerId : undefined);
     const agentHeader = ctx.req.headers['x-harness-agent'];
     const agent = parseAgent(typeof agentHeader === 'string' ? agentHeader : undefined);
+    // Who a server may really be. One that says Claude may be Cursor running
+    // the Claude Code plugin's config; it is never Codex, and its calls never
+    // reach a Codex thread.
+    const mayBe: AgentKind[] = agent === 'claude' ? ['claude', 'cursor'] : [agent];
+    const byPid = (pid: number) => mayBe.map((a) => store.findByPid(pid, a)).find(Boolean) ?? null;
     let session: SessionState | null = null;
     if (id) session = store.ensure(id, body.cwd, agent);
     else if (agent === 'claude') {
-      // One `claude` process is one session, so its pid names it.
-      if (body.pid) session = store.findByPid(body.pid) ?? null;
-      if (!session && body.cwd) session = store.findByCwd(body.cwd, agent) ?? null;
+      // One `claude` process is one session, so its pid names it; else its
+      // folder, a Claude session first, then a Cursor chat.
+      if (body.pid) session = byPid(body.pid);
+      for (const a of mayBe) if (!session && body.cwd) session = store.findByCwd(body.cwd, a) ?? null;
     } else {
       // One Cursor process serves every chat in every window, and one Codex
       // app every thread: the folder says more than the pid. In that folder,
       // the chat that was active last is the one calling.
       if (body.cwd) session = store.findByCwd(body.cwd, agent) ?? null;
-      if (!session && body.pid) session = store.findByPid(body.pid, agent) ?? null;
+      if (!session && body.pid) session = byPid(body.pid);
     }
-    // A server that names the wrong agent — Cursor running the Claude Code
-    // plugin's config — still finds the chat in its folder.
-    if (!session && body.cwd) session = store.findByCwd(body.cwd) ?? null;
     if (!session) return null;
-    if (body.pid && session.claudePid !== body.pid) store.update(session.sessionId, { claudePid: body.pid });
+    // The process stands for the session only where it may be that session's:
+    // otherwise its exit would end a session it never was.
+    if (body.pid && mayBe.includes(session.agent) && session.claudePid !== body.pid) store.update(session.sessionId, { claudePid: body.pid });
     return session;
   };
 
