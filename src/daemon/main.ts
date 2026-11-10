@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { SessionStore } from './store.ts';
+import { isIdle } from './idle.ts';
 import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from './http.ts';
 import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
@@ -1740,19 +1741,18 @@ function refuseUnfinishedFinal(checks: unknown, project: ProjectConfig): void {
 }
 
 /**
- * Exit once nothing is using the daemon: no browser open and no session
- * active recently. The next hook starts a fresh one. The setting is read
- * each minute, so changing `idleShutdownMinutes` needs no restart.
+ * Exit once nothing is using the daemon: no browser open, and neither it
+ * nor a session started or active recently (isIdle). The next hook starts
+ * a fresh one. The setting is read each minute, so changing
+ * `idleShutdownMinutes` needs no restart.
  */
 function startIdleWatch(store: SessionStore, config: ConfigCache, clients: { count: number }, stop: () => void): void {
+  const startedAt = Date.now();
   const timer = setInterval(() => {
     const minutes = config.get().idleShutdownMinutes;
     if (!minutes || minutes <= 0) return;
-    const idleMs = minutes * 60_000;
-    if (clients.count > 0) return;
-    const busy = store.all().some((s) => s.status !== 'ended' && Date.now() - s.updatedAt < idleMs);
-    if (busy) return;
-    log(`idle for ${minutes}m with no clients; exiting`);
+    if (!isIdle(Date.now(), { startedAt, clients: clients.count, sessions: () => store.all() }, minutes * 60_000)) return;
+    log(`nothing has used it for ${minutes}m (no page open, no session active); exiting`);
     stop();
   }, 60_000);
   timer.unref?.();

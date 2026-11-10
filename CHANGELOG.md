@@ -260,6 +260,11 @@
   (15 s for a clean). An error the daemon answers with is said in its
   words, not as a crash, and the CLI's own messages come without a stack
   trace.
+- **A daemon started for its link stays up long enough to open it.** The
+  daemon exits once nothing has used it for `idleShutdownMinutes`, but
+  its own start did not count: started by `coplan start` or `coplan url`
+  with no session active, it exited within a minute, and the link it
+  printed stopped working. It now waits that long from its start too.
 - **No two sessions share a folder.** A session id is kept in a folder
   named after it, with anything a folder name cannot hold made safe, so
   ids that differed only there (`a/b`, `a_b`), or past 128 characters,
