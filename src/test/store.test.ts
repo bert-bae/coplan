@@ -256,6 +256,73 @@ test('the ask for a task list is taken back the same way', async () => {
   assert.deepEqual(store.pending('design-handover'), sent);
 });
 
+test('sessions planned in and plain ones are kept apart: neither many plain sessions nor many old plans push the other out', async () => {
+  // A home of its own: what earlier tests left on disk does not count here.
+  const own = mkdtempSync(path.join(tmpdir(), 'cc-harness-cap-'));
+  process.env['CC_HARNESS_HOME'] = own;
+  try {
+    const store = await freshStore();
+    const daysAgo = (n: number) => Date.now() - n * 24 * 60 * 60 * 1000;
+    const at = (id: string, updatedAt: number) => {
+      store.get(id)!.updatedAt = updatedAt;
+      store.persistNow(id);
+    };
+    // A plan untouched for two days, and a session that used Coplan with no plan yet.
+    store.ensure('planned', process.cwd());
+    store.publishPlan('planned', PLAN);
+    at('planned', daysAgo(2));
+    store.ensure('engaged', process.cwd());
+    store.engage('engaged');
+    at('engaged', daysAgo(2));
+    // Sixty newer sessions that never used Coplan (every `claude -p`, every plain chat), and one more.
+    for (let i = 0; i < 61; i++) {
+      store.ensure(`plain-${i}`, process.cwd());
+      at(`plain-${i}`, daysAgo(1) + i);
+    }
+    // Sixty more plans, newer still: a pile of them must not push out a session running now.
+    for (let i = 0; i < 60; i++) {
+      store.ensure(`plan-${i}`, process.cwd());
+      store.publishPlan(`plan-${i}`, PLAN);
+      at(`plan-${i}`, daysAgo(1) + 100 + i);
+    }
+    store.ensure('running-now', process.cwd());
+    store.persistNow('running-now');
+    store.sweep({ endedTtlMs: 60 * 60 * 1000 });
+    const kept = new Set(store.all().map((s) => s.sessionId));
+    assert.ok(kept.has('running-now'), 'a plain session running now stays');
+    assert.equal(kept.has('plain-0') || kept.has('plain-1'), false, 'the two oldest plain ones go (62 in a pool of 60)');
+    assert.equal(kept.has('planned') || kept.has('engaged'), false, 'and the two oldest plans, past their own cap');
+    assert.ok(kept.has('plan-0') && kept.has('plain-2'));
+    assert.equal(kept.size, 120);
+    // The daemon's next start keeps the same ones.
+    const reloaded = await freshStore();
+    assert.deepEqual(new Set(reloaded.all().map((s) => s.sessionId)), kept);
+  } finally {
+    process.env['CC_HARNESS_HOME'] = home;
+    rmSync(own, { recursive: true, force: true });
+  }
+});
+
+test('a plan is not pushed out of memory by any number of newer plain sessions', async () => {
+  const own = mkdtempSync(path.join(tmpdir(), 'cc-harness-cap-'));
+  process.env['CC_HARNESS_HOME'] = own;
+  try {
+    const store = await freshStore();
+    store.ensure('planned', process.cwd());
+    store.publishPlan('planned', PLAN);
+    store.get('planned')!.updatedAt = Date.now() - 2 * 24 * 60 * 60 * 1000;
+    store.persistNow('planned');
+    for (let i = 0; i < 100; i++) store.ensure(`plain-${i}`, process.cwd());
+    store.sweep({ endedTtlMs: 60 * 60 * 1000 });
+    assert.ok(store.get('planned'));
+    for (let i = 0; i < 100; i++) store.persistNow(`plain-${i}`);
+    assert.ok((await freshStore()).all().some((s) => s.sessionId === 'planned'), 'nor on the next start');
+  } finally {
+    process.env['CC_HARNESS_HOME'] = home;
+    rmSync(own, { recursive: true, force: true });
+  }
+});
+
 test('a save that fails is said — once — instead of being dropped', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async () => {
   const store = await freshStore();
   store.ensure('readonly', process.cwd());

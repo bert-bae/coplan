@@ -74,6 +74,13 @@
   whichever session started it, with that repository's checks, base branch
   and git. It now has no folder until a hook says which, and no checks or
   git are guessed meanwhile.
+- **A session with a plan stays in the list.** The daemon keeps 60
+  sessions in memory, chosen by the last activity alone, and every agent
+  session counts, plain ones included. Sixty newer sessions that never
+  used Coplan pushed an open plan out of the browser's list and out of
+  `coplan open` until its agent was used again. Sessions you planned in
+  and the rest are now kept apart, the newest 60 of each, so neither can
+  push out the other.
 
 ### Targeted checks: only what the change touched
 

@@ -45,7 +45,23 @@ const PERSIST_DEBOUNCE_MS = 400;
 /** Sessions untouched for longer than this are dropped from memory and disk on boot. */
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** Hard cap on sessions held in memory, newest first. */
+/** Sessions kept in memory per pool (see `kept`). */
 const MAX_SESSIONS = 60;
+
+/**
+ * Which sessions stay in memory, and so in the browser's list and for
+ * `coplan open` and finding a session by its pid or folder, when there are
+ * more than fit: the newest of those the user planned in (a plan, or Coplan
+ * used), and the newest of the rest, each up to the cap. Two pools, so the
+ * many sessions that never touch Coplan cannot push out a plan, nor a pile
+ * of old plans a session running now. Past them a session stays on disk.
+ */
+function kept(states: SessionState[]): SessionState[] {
+  const newest = [...states].sort((a, b) => b.updatedAt - a.updatedAt);
+  const planned = newest.filter((s) => s.plan || s.engagedAt);
+  const plain = newest.filter((s) => !(s.plan || s.engagedAt));
+  return [...planned.slice(0, MAX_SESSIONS), ...plain.slice(0, MAX_SESSIONS)];
+}
 
 export function newSession(sessionId: string, cwd: string, agent: AgentKind = DEFAULT_AGENT): SessionState {
   const now = Date.now();
@@ -136,8 +152,7 @@ export class SessionStore extends EventEmitter {
     }
 
     // Anything past the cap stays on disk — cold, not stale.
-    loaded.sort((a, b) => b.updatedAt - a.updatedAt);
-    for (const state of loaded.slice(0, MAX_SESSIONS)) this.sessions.set(state.sessionId, state);
+    for (const state of kept(loaded)) this.sessions.set(state.sessionId, state);
     for (const sessionDir of expired) discardDir(sessionDir);
   }
 
@@ -182,8 +197,10 @@ export class SessionStore extends EventEmitter {
         dropped++;
       }
     }
-    for (const state of this.all().slice(MAX_SESSIONS)) {
-      this.drop(state.sessionId);
+    const keep = new Set(kept([...this.sessions.values()]).map((s) => s.sessionId));
+    for (const id of [...this.sessions.keys()]) {
+      if (keep.has(id)) continue;
+      this.drop(id);
       dropped++;
     }
     return dropped;
