@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { useAgent, useEdit, usePlan, useSessionId } from '../store.ts';
-import { useKeptDraft } from '../lib/drafts.ts';
+import { keptDraft, useKeptDraft } from '../lib/drafts.ts';
 import { Markdown } from './Markdown.tsx';
 import { isComposing } from '../lib/keys.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
@@ -56,13 +56,17 @@ export function ThreadPanel({ target, label }: { target: Target; label: string }
   const edit = useEdit();
   const threads = useThreads(target);
   // Saved only once sent; kept (drafts.ts) while being written.
-  const comment = useKeptDraft(useSessionId(), `comment:${target.kind}:${target.id}`, '', undefined, true);
+  const sessionId = useSessionId();
+  const comment = useKeptDraft(sessionId, `comment:${target.kind}:${target.id}`, '', undefined, true);
   const [showResolved, setShowResolved] = useState(false);
   // A submitted plan takes no comments: its threads are there to read.
   const plan = usePlan();
   const locked = plan ? isLocked(plan) : false;
-  const open = threads.filter((t) => !t.resolved);
-  const resolved = threads.filter((t) => t.resolved);
+  // A resolved thread with a reply being written to it stays in sight, the
+  // reply with it: sent, it opens the thread again.
+  const writing = (t: Thread) => keptDraft(sessionId, `reply:${t.id}`) !== undefined;
+  const open = threads.filter((t) => !t.resolved || writing(t));
+  const resolved = threads.filter((t) => t.resolved && !open.includes(t));
 
   return (
     <div className="threads" aria-label={`Comments on ${label}`}>

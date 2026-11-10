@@ -340,6 +340,11 @@
   Checking each one against your unread edits copied the whole plan, so on
   a big plan a batch held Coplan for up to half a second. It now works out
   which box links would change without the copy.
+- **A reply you are writing stays when the agent resolves its thread.**
+  It vanished with no word, the thread folded away among the resolved,
+  though a resolved thread still takes a reply. It now stays, its thread
+  in sight while it is being written, and sending it opens the thread
+  again: a reply to a resolved thread never reached the agent.
 - **A comment you are writing is held by Submit, as a field is.** A
   submitted plan takes no comments, but a comment or reply left unsent
   did not hold up *Submit plan*, and a submit from chat let it go without

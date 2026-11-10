@@ -30,6 +30,11 @@ function draftKey(sessionId: string | null, field: string): string {
   return `${sessionId ?? ''}:${field}`;
 }
 
+/** The draft kept for `field` in `sessionId`, if one is. */
+export function keptDraft(sessionId: string | null, field: string): OpenDraft | undefined {
+  return openDrafts.get(draftKey(sessionId, field));
+}
+
 /** Whether any open editor holds text not saved yet. */
 export function unsavedDrafts(): boolean {
   for (const d of openDrafts.values()) if (d.draft !== d.value) return true;
@@ -83,12 +88,13 @@ function fieldText(plan: Plan, field: string, locks: Locks = { design: isDesignL
     return m[2] === 'detail' ? (task.detail ?? '') : filesText(task.files);
   }
   // A comment is saved only once sent: until then the field holds nothing.
-  // It goes with what it is on; a reply, with its thread, or once resolved.
+  // It goes with what it is on; a reply, with its thread (a resolved one
+  // still takes replies).
   // Comments are open until the plan is submitted: a submitted plan takes none.
   m = /^comment:([^:]+):(.*)$/.exec(field);
   if (m) return !locks.plan && targetExists(plan, { kind: m[1] as TargetKind, id: m[2]! }) ? '' : undefined;
   m = /^reply:(.+)$/.exec(field);
-  if (m) return !locks.plan && plan.threads.some((t) => t.id === m![1] && !t.resolved) ? '' : undefined;
+  if (m) return !locks.plan && plan.threads.some((t) => t.id === m![1]) ? '' : undefined;
   m = /^caption:(.+)$/.exec(field);
   if (m) {
     const diagram = plan.diagrams.find((d) => d.id === m![1]);

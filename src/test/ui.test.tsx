@@ -2517,7 +2517,7 @@ test("another session opened closes the prompt viewer and forgets a jump, both t
   assert.equal(store.getState().focusTarget, null);
 });
 
-test('a kept comment goes with what it was on, and a kept reply once its thread is resolved', async () => {
+test('a kept comment goes with what it was on; a kept reply stays, its thread resolved or not', async () => {
   const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
   await boot(makeSession(plan));
   const leaving = () => {
@@ -2544,7 +2544,30 @@ test('a kept comment goes with what it was on, and a kept reply once its thread 
   assert.equal(leaving(), true);
   const resolved = applyOps(without, [{ op: 'resolve', threadId: without.threads[0]!.id, resolved: true }], 'claude').plan;
   await act(async () => store.apply({ type: 'snapshot', session: makeSession(resolved) }));
-  assert.equal(leaving(), false, 'resolved: there is nothing left to reply to');
+  assert.equal(leaving(), true, 'resolved, it still takes a reply');
+});
+
+test('a reply being written stays on screen, with its text, when the agent resolves its thread', async () => {
+  const plan = applyOps(makePlan(), [
+    { op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' },
+    { op: 'comment', target: { kind: 'task', id: 't2' }, text: 'And which TTL?' },
+  ], 'user').plan;
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '2 open comment(s) on Invalidation' }));
+  });
+  const [first, second] = screen.getAllByRole('button', { name: 'Reply' });
+  await act(async () => {
+    fireEvent.click(first!);
+    fireEvent.click(second!);
+  });
+  // One reply written, the other opened and left empty.
+  fireEvent.change(screen.getAllByRole('textbox', { name: 'Reply' })[0]!, { target: { value: 'The Redis one' } });
+  const resolved = applyOps(plan, plan.threads.map((t) => ({ op: 'resolve' as const, threadId: t.id, resolved: true })), 'claude').plan;
+  await act(async () => store.apply({ type: 'snapshot', session: makeSession(resolved) }));
+  const fields = screen.queryAllByRole('textbox', { name: 'Reply' }) as HTMLTextAreaElement[];
+  assert.deepEqual(fields.map((f) => f.value), ['The Redis one'], 'the written one stays; the empty one folds away with its thread');
 });
 
 test("an open editor's text waits in its own session while another is on screen", async () => {

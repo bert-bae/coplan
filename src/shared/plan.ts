@@ -1599,6 +1599,8 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
       if (!text) throw new PlanError('A reply needs text.');
       if (thread.replies.length >= MAX_REPLIES) throw new PlanError('This thread is full; start a new comment.');
       thread.replies.push({ id: `${thread.id}.${thread.replies.length + 1}`, author, text, ts: now });
+      // The user taking up a resolved thread again: it is open, for the agent to hear.
+      if (thread.resolved && author === 'user') thread.resolved = false;
       return [log('replied', thread.target, `replied on ${describeTarget(plan, thread.target)}: ${short(text, 80)}`)];
     }
 

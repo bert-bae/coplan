@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, publishTasks, submitPlan, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, confirmDesign, countTasks, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import { previewProposal } from '../shared/proposals.ts';
 import type { DiagramNodeInput, Plan, PlanInput, PlanOp } from '../shared/types.ts';
@@ -145,6 +145,16 @@ test('a batch is all or nothing', () => {
     /Edit 2 \(remove\): No task "t99"/,
   );
   assert.equal(before.tasks.length, 4, 'the plan passed in is untouched');
+});
+
+test("the user's reply to a resolved thread opens it again, for the agent to hear", () => {
+  let plan = applyOps(fresh(), [{ op: 'comment', target: { kind: 'task', id: 't4' }, text: 'Which client?' }], 'user').plan;
+  const id = plan.threads[0]!.id;
+  plan = applyOps(plan, [{ op: 'resolve', threadId: id, resolved: true }], 'claude').plan;
+  assert.equal(applyOps(plan, [{ op: 'reply', threadId: id, text: 'Done, thanks' }], 'claude').plan.threads[0]!.resolved, true, "the agent's leaves it as it is");
+  plan = applyOps(plan, [{ op: 'reply', threadId: id, text: 'Not quite: the pooled one' }], 'user').plan;
+  assert.equal(plan.threads[0]!.resolved, false);
+  assert.equal(threadWaitsOn(plan.threads[0]!), 'claude');
 });
 
 test('ids are never reused, even after a delete', () => {
