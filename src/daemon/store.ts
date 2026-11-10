@@ -161,18 +161,18 @@ export class SessionStore extends EventEmitter {
     // copy's: a tie, a fresh stamp from that build's hook, a clock running
     // ahead would each put it over work done since. Left as it is, for
     // housekeeping, and for that earlier build.
-    const newest = new Map<string, { state: SessionState; old: boolean }>();
+    const chosen = new Map<string, { state: SessionState; old: boolean }>();
     for (const copy of found) {
       const own = sanitizeId(copy.state.sessionId);
       if (copy.old && (newer.has(own) || holds.has(own))) continue;
-      newest.set(copy.state.sessionId, copy);
+      chosen.set(copy.state.sessionId, copy);
     }
     // Anything past the cap stays on disk — cold, not stale.
-    for (const state of kept([...newest.values()].map((c) => c.state))) this.sessions.set(state.sessionId, state);
-    // Expired first: a session's own folder past keeping is where its newer
-    // copy from an old folder goes.
+    for (const state of kept([...chosen.values()].map((c) => c.state))) this.sessions.set(state.sessionId, state);
+    // Expired first: a session's own folder past keeping is where a copy
+    // from its old folder goes.
     for (const sessionDir of expired) discardDir(sessionDir);
-    for (const { state, old } of newest.values()) if (old && this.sessions.has(state.sessionId)) this.persistNow(state.sessionId);
+    for (const { state, old } of chosen.values()) if (old && this.sessions.has(state.sessionId)) this.persistNow(state.sessionId);
   }
 
   /** Forget a session in memory; its state stays on disk. */

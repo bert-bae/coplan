@@ -230,6 +230,7 @@ test("a session's own folder wins over its old one once it holds a copy, however
     const title = how === 'load' ? next.get(id)?.plan?.title : next.ensure(id, process.cwd()).plan?.title;
     assert.equal(title, wins, id);
     assert.equal(ownTitle(id), wins, `${id}: its own folder holds it`);
+    assert.equal(JSON.parse(readFileSync(path.join(home, 'sessions', old, 'state.json'), 'utf8')).plan.title, 'From the earlier build', `${id}: the old one left as it was`);
   }
   // Taken from its old folder, a change since that moves no time (its folder learnt) survives the next start.
   const kept = await freshStore();
