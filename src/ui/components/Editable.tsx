@@ -283,6 +283,8 @@ export function AddField({
         autoFocus={autoFocus}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => {
+          // Escape that drops an input method's choice is its own (lib/keys.ts).
+          if (isComposing(e)) return;
           if (e.key === 'Escape' && onCancel) {
             e.stopPropagation();
             onCancel();

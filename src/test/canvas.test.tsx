@@ -512,6 +512,22 @@ test('with no tasks in the plan yet, or the rule turned off in planCheck, no box
   assert.ok(!document.querySelector('.flow-node-gap'), 'the repository turned it off');
 });
 
+test("an input method's Escape in a box's task list drops its choice, not the list", async () => {
+  await boot(makeSession(taskedPlan()), { live: true });
+  const list = await openTasks('Gateway');
+  const field = within(list).getByRole('textbox', { name: 'New task for Gateway' });
+  fireEvent.change(field, { target: { value: 'にほん' } });
+  await act(async () => {
+    fireEvent.keyDown(field, { key: 'Escape', isComposing: true });
+  });
+  assert.ok(taskList(), 'still open');
+  assert.equal((within(taskList()!).getByRole('textbox', { name: 'New task for Gateway' }) as HTMLInputElement).value, 'にほん');
+  await act(async () => {
+    fireEvent.keyDown(field, { key: 'Escape' });
+  });
+  assert.equal(taskList(), null, 'the next Escape closes it');
+});
+
 test("a box's chip opens its tasks, ready to add one; a task added there builds the box", async () => {
   await boot(makeSession(taskedPlan()), { live: true });
   const list = await openTasks('Gateway');

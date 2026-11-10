@@ -290,6 +290,11 @@
   given 10 s more, past the 10 s the agent gives a message's hook: on a
   slow start the agent cut it off, and the sign-off it carried counted as
   delivered. The start and the call now share what the hook is given.
+- **Escape that drops an input method's choice keeps three more things
+  open.** Cancelling a Japanese, Chinese or Korean candidate with Escape
+  closed a new subtask's field (losing its title), a box's task list, and
+  on a narrow window the session list's drawer. They now leave that
+  Escape to the input method, as the other fields do.
 - **No two sessions share a folder.** A session id is kept in a folder
   named after it, with anything a folder name cannot hold made safe, so
   ids that differed only there (`a/b`, `a_b`), or past 128 characters,

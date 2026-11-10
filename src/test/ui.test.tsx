@@ -832,6 +832,27 @@ test('a subtask is added under its parent', async () => {
   assert.deepEqual(opsSent()[0], { op: 'upsert_task', parentId: 't3', title: 'Feature flag' });
 });
 
+test("an input method's Escape in a new subtask's field drops its choice, not the field", async () => {
+  await boot();
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Add a subtask to Wire into API'));
+  });
+  const input = screen.getByLabelText('New subtask of Wire into API') as HTMLInputElement;
+  fireEvent.change(input, { target: { value: 'にほん' } });
+  // On a narrow window, with the session list open as a drawer.
+  await act(async () => store.setDrawer(true));
+  await act(async () => {
+    fireEvent.keyDown(input, { key: 'Escape', isComposing: true });
+  });
+  assert.equal((screen.getByLabelText('New subtask of Wire into API') as HTMLInputElement).value, 'にほん', 'still open, with the title');
+  assert.equal(store.getState().drawerOpen, true, 'and the drawer with it');
+  await act(async () => {
+    fireEvent.keyDown(input, { key: 'Escape' });
+  });
+  assert.equal(screen.queryByLabelText('New subtask of Wire into API'), null, 'the next Escape closes it');
+});
+
 test('the board puts each leaf task in its status column', async () => {
   await boot();
   await openTab('Tasks');

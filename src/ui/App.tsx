@@ -17,7 +17,7 @@ import { OverviewView } from './views/OverviewView.tsx';
 import { DiagramsView } from './views/DiagramsView.tsx';
 import { TasksView } from './views/TasksView.tsx';
 import { classNames } from './lib/format.ts';
-import { isTyping } from './lib/keys.ts';
+import { isComposing, isTyping } from './lib/keys.ts';
 import { countTasks, isLocked } from '../shared/plan.ts';
 import { agentInfo } from '../shared/agents.ts';
 import type { Plan, SessionState } from '../shared/types.ts';
@@ -353,7 +353,8 @@ function useDrawerDismiss(open: boolean): void {
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') store.setDrawer(false);
+      // Not one that drops an input method's choice, in a field on the page.
+      if (event.key === 'Escape' && !isComposing(event)) store.setDrawer(false);
     };
     const onResize = () => {
       if (window.innerWidth > 900) store.setDrawer(false);

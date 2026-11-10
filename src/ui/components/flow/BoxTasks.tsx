@@ -3,6 +3,7 @@ import { store, useEdit, usePlan, useStore } from '../../store.ts';
 import { AddField, InlineText } from '../Editable.tsx';
 import { ProgressBar, TaskStatusDot } from '../Progress.tsx';
 import { classNames } from '../../lib/format.ts';
+import { isComposing } from '../../lib/keys.ts';
 import { boxRows } from '../../lib/tasks.ts';
 import { boxUnbuilt } from '../../../shared/check.ts';
 import type { Task } from '../../../shared/types.ts';
@@ -130,7 +131,8 @@ export function BoxTasks({ id, data, chip }: { id: string; data: FlowData; chip:
   }, []);
 
   const onKeyDown = (e: KeyboardEvent) => {
-    if (e.key !== 'Escape') return;
+    // Escape that drops an input method's choice is its own (lib/keys.ts).
+    if (isComposing(e) || e.key !== 'Escape') return;
     e.preventDefault();
     e.stopPropagation();
     close(true);
