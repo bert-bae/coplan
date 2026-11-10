@@ -62,6 +62,12 @@
   and `pnpm ci` (which fails). It now writes `<package manager> run
   <script>` throughout. A `.coplan/config.json` it wrote before keeps its
   commands: look for those three and add `run`.
+- **A field you are typing in is saved to its own plan when you switch
+  sessions.** Going to another session (Back, say) while typing a task's
+  title, note or branch dropped what you typed, or, in a browser that
+  blurs a field as it goes, could save it into the session you switched
+  to, where the same task id is another task. It is now saved where you
+  typed it, before the switch.
 
 ### Targeted checks: only what the change touched
 

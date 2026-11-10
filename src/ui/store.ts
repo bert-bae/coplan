@@ -179,6 +179,14 @@ class Store {
   }
 
   async selectSession(id: string, updateHash = true): Promise<void> {
+    // A field being typed in saves when it loses focus: let it, while its
+    // own session is still the one on screen. Left to the view's removal,
+    // it would be dropped, or (where a browser blurs a removed field) saved
+    // into the session switched to, where task ids like t3 mean other tasks.
+    if (id !== this.state.sessionId) {
+      const typing = document.activeElement;
+      if (typing instanceof HTMLInputElement || typing instanceof HTMLTextAreaElement) typing.blur();
+    }
     if (updateHash) window.location.hash = `#/session/${id}`;
     this.set({ sessionId: id, session: null, planCheck: {}, diagramId: null, error: null, exportOpen: false });
     this.connect();

@@ -89,7 +89,7 @@ the audit's finding numbers.
 | F13 | The brief says a dependency settled by dropping is "NOT DONE YET": use `isComplete` [12] | 2 should fix | open | |
 | F14 | A `.coplan/config.json` that starts with a BOM stops every check [13] | 2 should fix | open | |
 | F15 | Markdown: numbered steps split by blank lines restart at 1, `3.` renders as 1, fences inside a step break [14] | 2 should fix | open | |
-| F16 | An open Markdown editor loses its text on a tab switch or a tab close [15] | 2 should fix | open | |
+| F16 | An open Markdown editor loses its text on a tab switch, a session switch or a tab close [15] | 2 should fix | open | |
 | F17 | Ctrl+C on `coplan check` leaves the check running [16] | 2 should fix | open | |
 | F18 | A second setup run overwrites the `.bak` that holds the user's comments [17] | 2 should fix | open | |
 | C1 | Delete dead UI code: unused primitives, format helpers and their CSS, plus the `.panel-title` rule that leaks onto live titles [20] | 3 clean-up | open | |
@@ -101,6 +101,7 @@ the audit's finding numbers.
 | R4 | One `signOff` helper for the browser store's six sign-off actions; `commit` calls `adoptPlan` [19d] | 4 refactor | open | |
 | R5 | Merge `CommitInput` and `CommitTextArea` (after F6, so the fix lives in one place) [19e] | 4 refactor | open | |
 | R6 | Move `repoRoot` / `currentBranch` into `shared/changes.ts`; delete `daemon/git.ts` [19f] | 4 refactor | open | |
+| R7 | Bind every edit to the session it was made in: `store.op`/`ops` take the view's session, as the canvas's `commit` does, instead of reading the one on screen when called (39 call sites; selectSession's blur covers today's editors only because each saves synchronously; found reviewing F21) | 4 refactor | open | |
 | B1 | The relay exits 2 when `HOME` is unset, which blocks the prompt: `${HOME:-}` (bin/coplan-hook-relay.sh:78) | 5 smaller | open | |
 | B2 | `sanitizeId` lets `.` and `..` through, and `purge` would delete the harness home (src/shared/paths.ts:29-31) | 5 smaller | open | |
 | B3 | The MCP server exits on a `null` line; parse errors get no -32700 answer (src/mcp/main.ts:328-342) | 5 smaller | open | |

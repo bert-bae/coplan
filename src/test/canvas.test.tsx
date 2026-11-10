@@ -702,6 +702,17 @@ for (const [name, Field, tag] of [['CommitTextArea', CommitTextArea, 'textarea']
     cleanup();
   });
 
+  test(`${name}: left and removed at once (a session switch), it is saved once`, async () => {
+    const { commits, box } = mount('Old');
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: 'New' } });
+    await act(async () => {
+      fireEvent.blur(box);
+      cleanup();
+    });
+    assert.deepEqual(commits, ['New']);
+  });
+
   test(`${name}: out of the field it follows the plan, also after a save the plan refused`, async () => {
     const { commits, box, push } = mount('First', (v) => v !== '');
     await push('Second, from the agent');

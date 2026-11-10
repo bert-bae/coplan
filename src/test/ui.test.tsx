@@ -1939,3 +1939,39 @@ test('a field with no revision (box notes, a caption) warns the same way, and on
   assert.equal(view.queryByRole('alert'), null, 'their own text, landing');
   view.unmount();
 });
+
+test('switching session closes the editors of the one left: nothing typed for one plan is saved into another', async () => {
+  // Another plan with the same task ids, as every plan has.
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => (route === '/api/session/s2' ? { session: other } : undefined));
+  const sentTo = (id: string) => posts.filter((p) => p.route === `/api/session/${id}/plan/ops`).flatMap((p) => p.body['ops'] as Record<string, unknown>[]);
+
+  // The summary open with a draft in it; the user goes Back to another session (no focus moves).
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'the plan summary' }), { target: { value: 'A summary written for s1' } });
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  assert.equal(screen.queryByRole('textbox', { name: 'the plan summary' }), null, "s1's editor is gone");
+  assert.deepEqual(sentTo('s2'), [], 'and its draft went nowhere near s2');
+
+  // A task title being typed in when the session changes: saved in s1, where it was typed.
+  await act(async () => {
+    await store.selectSession('s1');
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getAllByRole('button', { name: /^Task title: Storage layer\. Edit$/ })[0]!);
+  });
+  const title = screen.getByRole('textbox', { name: 'Task title' }) as HTMLInputElement;
+  title.focus();
+  fireEvent.change(title, { target: { value: 'Storage, renamed in s1' } });
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  assert.equal(sentTo('s2').length, 0, 'nothing reached s2');
+  assert.deepEqual(sentTo('s1').map((o) => [o['op'], o['title']]), [['upsert_task', 'Storage, renamed in s1']]);
+});

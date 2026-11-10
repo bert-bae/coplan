@@ -89,7 +89,11 @@ export function CommitInput({
     [],
   );
   const commit = () => {
-    if (draft.trim() !== value.trim()) onCommit(draft.trim());
+    if (draft.trim() === value.trim()) return;
+    onCommit(draft.trim());
+    // Saved: an unmount in the same render (a session switch blurs, then
+    // removes the view) has nothing left to save.
+    live.current.value = draft.trim();
   };
   return (
     <>
@@ -155,7 +159,9 @@ export function CommitTextArea({
     if (el.scrollHeight) el.style.height = `${Math.min(el.scrollHeight + 2, 420)}px`;
   }, [draft]);
   const commit = () => {
-    if (draft.trim() !== value.trim()) onCommit(draft.trim());
+    if (draft.trim() === value.trim()) return;
+    onCommit(draft.trim());
+    live.current.value = draft.trim();
   };
   return (
     <>
