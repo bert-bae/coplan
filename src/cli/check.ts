@@ -309,7 +309,7 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
         kill('SIGKILL');
         leave();
       }
-      process.stderr.write(`coplan: interrupted; stopping "${hook.name}"\n`);
+      console.error(`coplan: interrupted; stopping "${hook.name}"`);
       clearTimeout(timer);
       void stop().then(leave);
     };

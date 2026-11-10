@@ -414,6 +414,15 @@ usage: coplan <command>
 `);
 }
 
+// Nothing left reading what this says (`coplan check 2>&1 | head`, an agent
+// that closed the pipe) is no reason to stop part way, before a check is
+// stopped, say: what cannot be written is let go.
+for (const out of [process.stdout, process.stderr]) {
+  out.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code !== 'EPIPE') throw err;
+  });
+}
+
 const [, , command = 'status', ...rest] = process.argv;
 const handler = commands[command];
 if (!handler) {

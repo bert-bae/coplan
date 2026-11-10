@@ -130,7 +130,9 @@
   `coplan` quit and the test suite ran on, and a second run raced it. The
   interrupt is now passed on, and `coplan check` exits once all the check
   started is gone; what ignores the interrupt, a test runner's worker say,
-  is killed three seconds on.
+  is killed three seconds on. That holds when nothing reads its errors any
+  more too (`2>&1 | head`, an agent that has closed the pipe), which made
+  it crash before the check was stopped.
 - **A check that times out is stopped with all it started.** What it
   started that ignored the stop could run on beside the next check, or
   past `coplan check` itself; and a check whose output something outside

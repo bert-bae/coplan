@@ -815,6 +815,33 @@ test('Ctrl+C on `coplan check` stops what the check started that ignores SIGTERM
   }
 });
 
+test('Ctrl+C on `coplan check` stops the check even when nothing reads its errors any more', { skip: process.platform === 'win32' }, async () => {
+  // `2>&1 | head`, or an agent that closed the pipe: saying it is stopping must not end it before it has.
+  const run = "(trap '' TERM; sleep 20) & echo $! > worker; echo $$ > group; touch started; wait";
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'workers', run }] } }) });
+  const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: ['ignore', 'ignore', 'pipe'] });
+  try {
+    for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(existsSync(path.join(dir, 'started')), 'the check started');
+    cli.stderr!.destroy();
+    await new Promise((r) => setTimeout(r, 100));
+    cli.kill('SIGINT');
+    const code = await new Promise<number | null>((r) => cli.on('exit', (c) => r(c)));
+    assert.equal(code, 130, 'it ends as an interrupted command does');
+    // Having stopped the check: its worker that ignores SIGTERM too (a zombie has gone).
+    const state = spawnSync('ps', ['-o', 'stat=', '-p', readFileSync(path.join(dir, 'worker'), 'utf8').trim()], { encoding: 'utf8' }).stdout.trim();
+    assert.ok(state === '' || state.startsWith('Z'), `the worker is gone (${state})`);
+  } finally {
+    cli.kill('SIGKILL');
+    try {
+      process.kill(-Number(readFileSync(path.join(dir, 'group'), 'utf8')), 'SIGKILL');
+    } catch {
+      /* gone */
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('while an interrupted check winds down, the checks after it do not start', { skip: process.platform === 'win32' }, async () => {
   // A worker that takes a moment to stop: the check is over before it is.
   const slow = "(trap 'sleep 0.3; exit 0' TERM; while :; do sleep 0.1; done) & echo $$ > group; touch started; wait";
