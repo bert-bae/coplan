@@ -230,7 +230,9 @@
   nothing done in it was saved, with nothing on the page to say why. It now
   says so as it opens, and that deleting it deletes it for the newer
   version too. Deleting it also frees its id: a session started later
-  under it is saved as usual.
+  under it is saved as usual. The session list shows it, marked "saved by
+  a newer Coplan" rather than "no plan yet", and asks before deleting it
+  there whether to delete it for the newer Coplan too.
 - **No two sessions share a folder.** A session id is kept in a folder
   named after it, with anything a folder name cannot hold made safe, so
   ids that differed only there (`a/b`, `a_b`), or past 128 characters,

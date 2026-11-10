@@ -319,6 +319,21 @@ test('deleting a session forgets the pin and the folds hanging off it', async ()
   assert.deepEqual([...store.getState().collapsedTasks.keys()], ['s1'], "another session's stay");
 });
 
+test('a session a newer Coplan saved says so in the list, and deleting it asks knowing that', async () => {
+  await boot(() => {
+    const now = Date.now();
+    return [summary('s1', 'repo', now), { ...summary('s2', 'other', now - 1000), savedByNewer: true }];
+  });
+  const row = rowFor('s2 title');
+  assert.match(row.textContent ?? '', /saved by a newer Coplan/);
+  assert.doesNotMatch(row.textContent ?? '', /no plan yet/, 'not an empty session');
+  await act(async () => {
+    fireEvent.click(within(row).getByTitle('Delete session'));
+  });
+  assert.match(rowFor('s2 title').textContent ?? '', /Delete permanently, for the newer Coplan too\?/);
+  assert.match(rowFor('s1 title').textContent ?? '', /no plan yet/, 'others as they were');
+});
+
 test('collapsing the sidebar narrows the column it sits in', async () => {
   await boot();
   assert.ok(!document.querySelector('.app')?.classList.contains('is-sidebar-collapsed'));

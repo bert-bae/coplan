@@ -320,6 +320,9 @@ test("a newer Coplan's session is marked for the page to say so, and deleting it
   writeFuture();
   const store = await freshStore();
   assert.equal(store.ensure(id, process.cwd()).savedByNewer, true);
+  const { summarize } = await import('../daemon/store.ts');
+  assert.equal(summarize(store.get(id)!).savedByNewer, true, 'and the session list says so too');
+  assert.equal(summarize(store.get(id)!).engaged, true, 'listing it, blank as it is here');
   store.publishPlan(id, PLAN);
   assert.equal(store.get(id)?.savedByNewer, true, 'through edits');
   store.persistNow(id);
@@ -329,6 +332,7 @@ test("a newer Coplan's session is marked for the page to say so, and deleting it
   assert.equal(store.purge(id), true);
   assert.equal(existsSync(dir), false);
   assert.equal(store.ensure(id, process.cwd()).savedByNewer, undefined);
+  assert.equal(summarize(store.get(id)!).savedByNewer, undefined);
   store.publishPlan(id, PLAN);
   store.persistNow(id);
   assert.equal((JSON.parse(readFileSync(file, 'utf8')) as { schemaVersion?: number }).schemaVersion, 1);
@@ -453,6 +457,25 @@ test('a plan is not pushed out of memory by any number of newer plain sessions',
     assert.ok(store.get('planned'));
     for (let i = 0; i < 100; i++) store.persistNow(`plain-${i}`);
     assert.ok((await freshStore()).all().some((s) => s.sessionId === 'planned'), 'nor on the next start');
+  } finally {
+    process.env['CC_HARNESS_HOME'] = home;
+    rmSync(own, { recursive: true, force: true });
+  }
+});
+
+test("a newer Coplan's session is not pushed out of memory by newer plain sessions", async () => {
+  const own = mkdtempSync(path.join(tmpdir(), 'cc-harness-cap-'));
+  process.env['CC_HARNESS_HOME'] = own;
+  try {
+    const { paths } = await import('../shared/paths.ts');
+    mkdirSync(paths.sessionDir('from-newer'), { recursive: true });
+    writeFileSync(paths.sessionState('from-newer'), JSON.stringify({ schemaVersion: 99, sessionId: 'from-newer' }));
+    const store = await freshStore();
+    store.ensure('from-newer', process.cwd());
+    store.get('from-newer')!.updatedAt = Date.now() - 2 * 24 * 60 * 60 * 1000;
+    for (let i = 0; i < 100; i++) store.ensure(`plain-${i}`, process.cwd());
+    store.sweep({ endedTtlMs: 60 * 60 * 1000 });
+    assert.equal(store.get('from-newer')?.savedByNewer, true, 'still listed, and still saying why it is blank');
   } finally {
     process.env['CC_HARNESS_HOME'] = home;
     rmSync(own, { recursive: true, force: true });

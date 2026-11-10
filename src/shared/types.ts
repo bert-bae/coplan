@@ -877,6 +877,8 @@ export interface SessionSummary {
   engaged: boolean;
   /** At least one of its hooks has reached Coplan (see `hookedAt`). */
   hooked: boolean;
+  /** Saved by a newer Coplan (see `SessionState.savedByNewer`). */
+  savedByNewer?: boolean;
 }
 
 /* ------------------------------------------------------------------ *

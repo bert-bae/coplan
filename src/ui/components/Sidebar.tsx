@@ -309,7 +309,13 @@ function SessionRow({
         )}
         <span className="session-sub">
           {stage && <span className="session-stage">{stage}</span>}
-          {!session.planTitle && <span className="session-stage">no plan yet</span>}
+          {session.savedByNewer ? (
+            <span className="session-stage" title="This Coplan cannot read it, nor save anything done in it">
+              saved by a newer Coplan
+            </span>
+          ) : (
+            !session.planTitle && <span className="session-stage">no plan yet</span>
+          )}
           {mixed && <span className={classNames('session-agent', `is-${agent.kind}`)}>{agent.name}</span>}
           <span className={classNames('session-state', `is-${session.status}`)}>
             {SESSION_STATE_LABEL[session.status] ?? session.status}
@@ -378,7 +384,7 @@ function SessionRow({
 
       {confirming && (
         <div className="session-confirm">
-          <span>Delete permanently?</span>
+          <span>{session.savedByNewer ? 'Delete permanently, for the newer Coplan too?' : 'Delete permanently?'}</span>
           <div className="row-actions">
             <button
               type="button"

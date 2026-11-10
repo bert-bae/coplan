@@ -58,8 +58,10 @@ const MAX_SESSIONS = 60;
  */
 function kept(states: SessionState[]): SessionState[] {
   const newest = [...states].sort((a, b) => b.updatedAt - a.updatedAt);
-  const planned = newest.filter((s) => s.plan || s.engagedAt);
-  const plain = newest.filter((s) => !(s.plan || s.engagedAt));
+  // A newer build's session is blank here, but a used one on disk.
+  const used = (s: SessionState) => Boolean(s.plan || s.engagedAt || s.savedByNewer);
+  const planned = newest.filter(used);
+  const plain = newest.filter((s) => !used(s));
   return [...planned.slice(0, MAX_SESSIONS), ...plain.slice(0, MAX_SESSIONS)];
 }
 
@@ -638,9 +640,11 @@ export function summarize(s: SessionState): SessionSummary {
     link: s.link,
     openThreads: plan?.threads.filter((t) => !t.resolved).length ?? 0,
     unreadByClaude: unreadItems(plan),
-    // A plan saved before sessions were stamped still counts.
-    engaged: Boolean(s.engagedAt) || plan !== null,
+    // A plan saved before sessions were stamped still counts, and so does
+    // a newer build's session: blank here, but one it kept.
+    engaged: Boolean(s.engagedAt) || plan !== null || Boolean(s.savedByNewer),
     hooked: s.hookedAt !== null,
+    ...(s.savedByNewer ? { savedByNewer: true } : {}),
   };
 }
 
