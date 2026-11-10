@@ -136,6 +136,43 @@ test('a daemon that hangs cannot hold a turn open', async () => {
   assert.ok(Date.now() - started < 8_000, `took ${Date.now() - started}ms`);
 });
 
+test('it finds the daemon where the daemon keeps it, with or without HOME, and never blocks a prompt', async () => {
+  // Node leaves out what is undefined: these run with the variable unset.
+  const unset = undefined as unknown as string;
+  // A home whose ~/.claude/cc-harness is this test's daemon home.
+  const user = mkdtempSync(path.join(tmpdir(), 'cc-harness-user-'));
+  mkdirSync(path.join(user, '.claude'));
+  symlinkSync(home, path.join(user, '.claude', 'cc-harness'));
+  // What Node answers for the user's home when HOME is unset, or nothing.
+  const bins: string[] = [];
+  const bin = (answer: string) => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'cc-harness-bin-'));
+    bins.push(dir);
+    writeFileSync(path.join(dir, 'node'), `#!/bin/sh\nprintf '%s' '${answer}'\n`);
+    chmodSync(path.join(dir, 'node'), 0o755);
+    return `${dir}:${process.env['PATH'] ?? ''}`;
+  };
+  const heard = async (env: Record<string, string>) => {
+    received = [];
+    const result = await relay('Stop', '{"session_id":"s1"}', env);
+    assert.equal(result.code, 0);
+    return received.length === 1;
+  };
+  try {
+    assert.ok(await heard({ HOME: unset }), 'CC_HARNESS_HOME alone is enough');
+    assert.ok(await heard({ HOME: unset, CC_HARNESS_HOME: unset, PATH: bin(user) }), "with HOME unset, Node's answer");
+    assert.ok(await heard({ HOME: user, CC_HARNESS_HOME: '${env:CC_HARNESS_HOME}' }), 'one passed on unexpanded is no directory');
+    // No home at all: nothing to find, and nothing blocked.
+    for (const event of ['UserPromptSubmit', 'SessionStart', 'Stop']) {
+      received = [];
+      const result = await relay(event, '{"session_id":"s1"}', { HOME: unset, CC_HARNESS_HOME: unset, PATH: bin('') });
+      assert.deepEqual([result, received.length], [{ stdout: '', code: 0 }, 0], event);
+    }
+  } finally {
+    for (const dir of [user, ...bins]) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a huge PostToolUse sends only its session: the daemon needs to hear a tool finished, not what it said', async () => {
   received = [];
   const huge = JSON.stringify({ session_id: 's-1', tool_input: { session_id: 'not-this' }, tool_response: `"session_id":"nor-this" ${'x'.repeat(300_000)}` });

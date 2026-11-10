@@ -151,6 +151,12 @@
 - **A box's description saved with ⌘/Ctrl+Enter is saved once.** The
   keys saved it, and leaving the field, which they also do, sent the same
   save again.
+- **Hooks run without `HOME` reach Coplan, and never block your prompt.**
+  The hook relay stopped with an error where `HOME` was unset (some
+  sandboxed agents), and an agent takes a failing prompt hook as a refusal.
+  It now finds the daemon's home as the daemon does — from the user
+  database when `HOME` is unset — and, like it, ignores a
+  `CC_HARNESS_HOME` an agent passed on unexpanded.
 
 ### Targeted checks: only what the change touched
 

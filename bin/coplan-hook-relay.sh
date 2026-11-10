@@ -69,6 +69,16 @@ if [ -n "$PLUGIN_ROOT_DIR" ] && [ ! -f "$PLUGIN_ROOT_DIR/dist/daemon/main.js" ];
   exit 0
 fi
 
+# Where the daemon keeps its lock, found as it finds it (paths.ts): the
+# CC_HARNESS_HOME an agent passed on, unless it passed it unexpanded, else
+# ~/.claude/cc-harness. With HOME unset that home is Node's answer, from the
+# user database, which costs a Node start only here; a bare $HOME would end
+# the hook with status 2 under `set -u`, and that blocks the prompt.
+case "${CC_HARNESS_HOME:-}" in *'${'*) CC_HARNESS_HOME= ;; esac
+if [ -z "${CC_HARNESS_HOME:-}" ] && [ -z "${HOME:-}" ]; then
+  HOME=$(node -e 'process.stdout.write(require("os").homedir())' 2>/dev/null) || HOME=
+  [ -n "$HOME" ] || exit 0
+fi
 HOME_DIR="${CC_HARNESS_HOME:-$HOME/.claude/cc-harness}"
 LOCK="$HOME_DIR/daemon.json"
 
