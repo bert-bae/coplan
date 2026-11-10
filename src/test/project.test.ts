@@ -320,6 +320,46 @@ test('a timed-out hook is stopped with everything it started', () => {
   }
 });
 
+test('a timed-out hook is over only once what it started has gone, even what ignores SIGTERM', { skip: process.platform === 'win32' }, () => {
+  // A worker that ignores SIGTERM, its output elsewhere: the hook's output closes without it.
+  const hangs = "(trap '' TERM; sleep 20) >/dev/null 2>&1 & echo $! > worker; echo $$ > group; wait";
+  // The next check says whether the worker is still running (a zombie has gone).
+  const next = 'state=$(ps -o stat= -p "$(cat worker)"); case "$state" in ""|Z*) echo gone ;; *) echo running ;; esac > next';
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'hangs', run: hangs, timeout: 1 }, { name: 'next', run: next }] } }) });
+  try {
+    const out = spawnSync(process.execPath, [CLI, 'check', 'review'], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
+    assert.match(out.stdout, /✗ hangs {2}\(timed out after 1s/);
+    assert.equal(readFileSync(path.join(dir, 'next'), 'utf8').trim(), 'gone', 'the next check started once the worker had gone, killed');
+  } finally {
+    try {
+      process.kill(-Number(readFileSync(path.join(dir, 'group'), 'utf8')), 'SIGKILL');
+    } catch {
+      /* gone */
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a timed-out hook whose output is held open from outside its group still ends', { skip: process.platform === 'win32' }, () => {
+  // A helper in a group of its own, holding the hook's output open.
+  const helper = `node -e "const c = require('child_process').spawn('sleep', ['20'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }); require('fs').writeFileSync('helper', String(c.pid)); c.unref()"`;
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'serve', run: `${helper}; echo last words; sleep 20`, timeout: 1 }] } }) });
+  try {
+    const started = Date.now();
+    const out = spawnSync(process.execPath, [CLI, 'check', 'review'], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
+    assert.ok(Date.now() - started < 5_000, `took ${Date.now() - started}ms`);
+    assert.match(out.stdout, /✗ serve {2}\(timed out after 1s/);
+    assert.match(out.stdout + out.stderr, /last words/, 'with what it said');
+  } finally {
+    try {
+      process.kill(Number(readFileSync(path.join(dir, 'helper'), 'utf8')), 'SIGKILL');
+    } catch {
+      /* gone */
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("coplan init runs the repository's own scripts, never a package manager's command of the same name", () => {
   // yarn check is yarn's integrity check, bun test is Bun's test runner, pnpm ci is pnpm's own (unimplemented) command.
   const cases: [string, string, Record<string, string>, { implement?: string; review?: string; final?: string }][] = [
@@ -798,6 +838,29 @@ test('an interrupted check that left something running out of its group cannot h
       }
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+test('Ctrl+C while a timed-out check is being stopped ends with that stop, not three seconds after', { skip: process.platform === 'win32' }, async () => {
+  const run = "(trap '' TERM; sleep 20) & echo $$ > group; touch started; wait";
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'stubborn', run, timeout: 1 }] } }) });
+  const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 50));
+    const started = Date.now();
+    // Timed out at one second, killed at four: interrupted between, it ends then.
+    await new Promise((r) => setTimeout(r, 2_500));
+    cli.kill('SIGINT');
+    assert.equal(await new Promise<number | null>((r) => cli.on('exit', (c) => r(c))), 130);
+    assert.ok(Date.now() - started < 4_900, `with the stop under way (${Date.now() - started}ms)`);
+  } finally {
+    cli.kill('SIGKILL');
+    try {
+      process.kill(-Number(readFileSync(path.join(dir, 'group'), 'utf8')), 'SIGKILL');
+    } catch {
+      /* gone */
+    }
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

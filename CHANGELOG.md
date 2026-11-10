@@ -125,6 +125,11 @@
   interrupt is now passed on, and `coplan check` exits once all the check
   started is gone; what ignores the interrupt, a test runner's worker say,
   is killed three seconds on.
+- **A check that times out is stopped with all it started.** What it
+  started that ignored the stop could run on beside the next check, or
+  past `coplan check` itself; and a check whose output something outside
+  it held open never ended. It is now over once all it started is gone,
+  killed three seconds on if need be.
 - **Your settings' comments survive a second `./setup.sh`.** When setup
   rewrote a settings file that had comments, it kept the original as
   `.bak`; but the line it writes at the top counted as a comment the next
