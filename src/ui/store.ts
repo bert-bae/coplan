@@ -344,24 +344,10 @@ class Store {
   async commit(ops: PlanOp[], sessionId: string | null = this.state.sessionId): Promise<Plan | null> {
     // A caller bound to one session's plan (the canvas) names it, so a save
     // still queued when the user switches sessions lands where it was made.
-    const id = sessionId;
-    if (!id || ops.length === 0) return null;
+    if (!sessionId || ops.length === 0) return null;
     this.set({ saving: this.state.saving + 1 });
     try {
-      const { plan } = await api.ops(id, ops);
-      const session = this.state.session;
-      // The live stream may already have delivered something newer — a change
-      // Claude made right after this one, or another tab's drag. Never roll
-      // the page back to it. `version` counts layout saves too; `seq` does not.
-      // A daemon started before `version` existed sends none; fall back to seq.
-      const order = (p: Plan) => p.version ?? p.seq;
-      if (session && session.sessionId === id && (!session.plan || order(plan) >= order(session.plan))) {
-        this.set({ session: { ...session, plan } });
-      }
-      return plan;
-    } catch (err) {
-      this.fail(err);
-      return null;
+      return await this.send(sessionId, (id) => api.ops(id, ops));
     } finally {
       this.set({ saving: Math.max(0, this.state.saving - 1) });
     }
@@ -371,7 +357,30 @@ class Store {
     return this.ops([op]);
   }
 
-  /** Put the daemon's answer in place, unless something newer has landed. */
+  /**
+   * Ask the daemon for a change to a session's plan — edits, or a sign-off
+   * — and put its answer in place. Null when there is no session, or when
+   * the daemon refused: its reason is shown and the plan is left as it was.
+   */
+  private async send(sessionId: string | null, call: (sessionId: string) => Promise<{ plan: Plan }>): Promise<Plan | null> {
+    if (!sessionId) return null;
+    try {
+      const { plan } = await call(sessionId);
+      this.adoptPlan(sessionId, plan);
+      return plan;
+    } catch (err) {
+      this.fail(err);
+      return null;
+    }
+  }
+
+  /**
+   * Put the daemon's answer in place, unless something newer has landed:
+   * the live stream may already have delivered a change Claude made right
+   * after this one, or another tab's drag. Never roll the page back to it.
+   * `version` counts layout saves too; `seq` does not. A daemon started
+   * before `version` existed sends none; fall back to seq.
+   */
   private adoptPlan(sessionId: string, plan: Plan): void {
     const session = this.state.session;
     const order = (p: Plan) => p.version ?? p.seq;
@@ -386,47 +395,32 @@ class Store {
    * because the plan moved on since the preview was made.
    */
   async submitPlan(input: { target: BuildTarget; mode?: ExecutionMode; note: string; expect: number; hash?: string; settings?: BuildSettings }): Promise<boolean> {
-    const id = this.state.sessionId;
-    if (!id) return false;
-    try {
-      const { plan } = await api.submitPlan(id, input);
-      this.adoptPlan(id, plan);
-      this.set({ tab: 'tasks', taskMode: 'board' });
-      const agent = agentInfo(this.state.session?.agent);
-      this.toast(
-        'success',
-        input.target !== 'session'
-          ? 'Plan submitted and locked. Paste the prompt where it will be built.'
-          : agent.promptContext
-            ? `Plan submitted and locked. Send any message in ${agent.name} to hand it the prompt.`
-            : `Plan submitted and locked. Paste the prompt into ${agent.name}'s chat.`,
-      );
-      return true;
-    } catch (err) {
-      this.fail(err);
-      return false;
-    }
+    if (!(await this.send(this.state.sessionId, (id) => api.submitPlan(id, input)))) return false;
+    this.set({ tab: 'tasks', taskMode: 'board' });
+    const agent = agentInfo(this.state.session?.agent);
+    this.toast(
+      'success',
+      input.target !== 'session'
+        ? 'Plan submitted and locked. Paste the prompt where it will be built.'
+        : agent.promptContext
+          ? `Plan submitted and locked. Send any message in ${agent.name} to hand it the prompt.`
+          : `Plan submitted and locked. Paste the prompt into ${agent.name}'s chat.`,
+    );
+    return true;
   }
 
   /** Unlock a submitted plan for changes. The design stays confirmed. */
   async reopenPlan(): Promise<boolean> {
-    const id = this.state.sessionId;
-    if (!id) return false;
-    try {
-      const { plan } = await api.reopenPlan(id);
-      this.adoptPlan(id, plan);
-      const name = agentInfo(this.state.session?.agent).name;
-      this.toast(
-        'info',
-        plan.design
-          ? `The tasks are open for changes again; the design stays confirmed. Tell ${name} in chat once you have changed them.`
-          : `The plan is open for changes again. Tell ${name} in chat once you have changed it.`,
-      );
-      return true;
-    } catch (err) {
-      this.fail(err);
-      return false;
-    }
+    const plan = await this.send(this.state.sessionId, (id) => api.reopenPlan(id));
+    if (!plan) return false;
+    const name = agentInfo(this.state.session?.agent).name;
+    this.toast(
+      'info',
+      plan.design
+        ? `The tasks are open for changes again; the design stays confirmed. Tell ${name} in chat once you have changed them.`
+        : `The plan is open for changes again. Tell ${name} in chat once you have changed it.`,
+    );
+    return true;
   }
 
   /**
@@ -434,23 +428,15 @@ class Store {
    * a task list with the user's next message.
    */
   async confirmDesign(input: { note: string; expect: number; hash?: string }): Promise<boolean> {
-    const id = this.state.sessionId;
-    if (!id) return false;
-    try {
-      const { plan } = await api.confirmDesign(id, input);
-      this.adoptPlan(id, plan);
-      const agent = agentInfo(this.state.session?.agent);
-      this.toast(
-        'success',
-        agent.promptContext
-          ? `Design confirmed. Send any message in ${agent.name} to have it make the task list.`
-          : `Design confirmed. Paste the prompt into ${agent.name}'s chat to have it make the task list.`,
-      );
-      return true;
-    } catch (err) {
-      this.fail(err);
-      return false;
-    }
+    if (!(await this.send(this.state.sessionId, (id) => api.confirmDesign(id, input)))) return false;
+    const agent = agentInfo(this.state.session?.agent);
+    this.toast(
+      'success',
+      agent.promptContext
+        ? `Design confirmed. Send any message in ${agent.name} to have it make the task list.`
+        : `Design confirmed. Paste the prompt into ${agent.name}'s chat to have it make the task list.`,
+    );
+    return true;
   }
 
   /**
@@ -459,55 +445,30 @@ class Store {
    * starts a turn.
    */
   async queueRevision(input: { note: string; expect: number; hash?: string }, opts: { quiet?: boolean } = {}): Promise<boolean> {
-    const id = this.state.sessionId;
-    if (!id) return false;
-    try {
-      const { plan } = await api.queueRevision(id, input);
-      this.adoptPlan(id, plan);
-      const agent = agentInfo(this.state.session?.agent);
-      if (!opts.quiet) {
-        this.toast(
-          'success',
-          agent.promptContext
-            ? `Request queued. Send any message in ${agent.name}'s chat — "go" will do — and it goes with it.`
-            : `Request queued. Paste it into ${agent.name}'s chat, or ask ${agent.name} to read the plan.`,
-        );
-      }
-      return true;
-    } catch (err) {
-      this.fail(err);
-      return false;
-    }
+    if (!(await this.send(this.state.sessionId, (id) => api.queueRevision(id, input)))) return false;
+    if (opts.quiet) return true;
+    const agent = agentInfo(this.state.session?.agent);
+    this.toast(
+      'success',
+      agent.promptContext
+        ? `Request queued. Send any message in ${agent.name}'s chat — "go" will do — and it goes with it.`
+        : `Request queued. Paste it into ${agent.name}'s chat, or ask ${agent.name} to read the plan.`,
+    );
+    return true;
   }
 
   /** Take back a revision request the agent has not been sent. */
   async withdrawRevision(): Promise<boolean> {
-    const id = this.state.sessionId;
-    if (!id) return false;
-    try {
-      const { plan } = await api.withdrawRevision(id);
-      this.adoptPlan(id, plan);
-      this.toast('info', 'Request withdrawn: it will not be sent.');
-      return true;
-    } catch (err) {
-      this.fail(err);
-      return false;
-    }
+    if (!(await this.send(this.state.sessionId, (id) => api.withdrawRevision(id)))) return false;
+    this.toast('info', 'Request withdrawn: it will not be sent.');
+    return true;
   }
 
   /** Unlock a confirmed design so it can be reshaped. */
   async reopenDesign(): Promise<boolean> {
-    const id = this.state.sessionId;
-    if (!id) return false;
-    try {
-      const { plan } = await api.reopenDesign(id);
-      this.adoptPlan(id, plan);
-      this.toast('info', `The design is open for changes again. Tell ${agentInfo(this.state.session?.agent).name} in chat once you have changed it.`);
-      return true;
-    } catch (err) {
-      this.fail(err);
-      return false;
-    }
+    if (!(await this.send(this.state.sessionId, (id) => api.reopenDesign(id)))) return false;
+    this.toast('info', `The design is open for changes again. Tell ${agentInfo(this.state.session?.agent).name} in chat once you have changed it.`);
+    return true;
   }
 
   /** Jump to an item from anywhere: a board card, the overview's "now". */
