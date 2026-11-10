@@ -122,8 +122,9 @@
   process group of its own, so a timeout can stop all it started, but
   that also kept Ctrl+C (or an agent ending the command) from reaching it:
   `coplan` quit and the test suite ran on, and a second run raced it. The
-  interrupt is now passed on, and `coplan check` exits once the check is
-  gone.
+  interrupt is now passed on, and `coplan check` exits once all the check
+  started is gone; what ignores the interrupt, a test runner's worker say,
+  is killed three seconds on.
 - **Your settings' comments survive a second `./setup.sh`.** When setup
   rewrote a settings file that had comments, it kept the original as
   `.bak`; but the line it writes at the top counted as a comment the next
