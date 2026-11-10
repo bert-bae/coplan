@@ -133,6 +133,12 @@
   is killed three seconds on. That holds when nothing reads its errors any
   more too (`2>&1 | head`, an agent that has closed the pipe), which made
   it crash before the check was stopped.
+- **A check whose folder is a file fails, and the rest still run.** Its
+  `cwd` naming a file got past the check for a missing folder, and the
+  shell could not start there: `coplan check` ended in a stack trace, and
+  the checks after it never ran. It now fails that check, saying its
+  folder is not a folder, as any check that cannot start does, and the
+  config's own reading warns of it.
 - **A check that times out is stopped with all it started.** What it
   started that ignored the stop could run on beside the next check, or
   past `coplan check` itself; and a check whose output something outside

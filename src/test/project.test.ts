@@ -307,6 +307,23 @@ test('a config coplan check cannot read fails, rather than passing with nothing 
   }
 });
 
+test("a hook whose folder is a file, or that cannot start, fails, saying so, and the checks after it still run", () => {
+  // And one the shell cannot be started for at all (a NUL in its command).
+  const hooks = [{ name: 'api', run: 'true', cwd: 'notes.md' }, { name: 'nul', run: 'true\u0000' }, { name: 'after', run: 'true' }];
+  const dir = repo({ 'notes.md': '# not a folder\n', '.coplan/config.json': JSON.stringify({ hooks: { review: hooks } }) });
+  try {
+    assert.match(loadProjectConfig(dir, { globalDir: null }).warnings.join('\n'), /"hooks\.review\[0\]\.cwd" names notes\.md, which is a file, not a folder/);
+    const run = spawnSync(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
+    assert.match(run.stdout, /✗ api[\s\S]*its folder notes\.md is not a folder/, run.stdout + run.stderr);
+    assert.match(run.stdout, /✗ nul/);
+    assert.match(run.stdout, /✓ after/);
+    assert.equal(run.status, 1);
+    assert.doesNotMatch(run.stderr, /\n\s+at /, 'no stack');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a timed-out hook is stopped with everything it started', () => {
   const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'hangs', run: 'sleep 20; echo done', timeout: 1 }] } }) });
   try {

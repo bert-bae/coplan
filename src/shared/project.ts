@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import type { BuildSettings, ExecutionMode, TaskCheck } from './types.ts';
@@ -231,11 +231,16 @@ export function loadProjectConfig(root: string | null | undefined, opts: { globa
  *  synchronous, so one at a time. */
 let reading: string[] | null = null;
 
-/** Whether a hook's folder exists — watched like a file the config read, so
- *  the folder appearing reads the config again (and drops the warning). */
-function folderThere(dir: string): boolean {
+/** What a hook's folder is — watched like a file the config read, so the
+ *  folder appearing reads the config again (and drops the warning). */
+function folderAt(dir: string): 'folder' | 'file' | 'missing' {
   reading?.push(dir);
-  return existsSync(dir);
+  try {
+    const stat = statSync(dir, { throwIfNoEntry: false });
+    return !stat ? 'missing' : stat.isDirectory() ? 'folder' : 'file';
+  } catch {
+    return 'missing';
+  }
 }
 
 /** The repository's config from what its file holds. */
@@ -596,13 +601,18 @@ function parseHooks(list: unknown, stage: string, errors: string[], root: string
     else if (rec['optional'] !== undefined && rec['optional'] !== false) errors.push(`"${where}.optional" must be true or false.`);
     const cwd = rec['cwd'];
     if (cwd !== undefined) {
+      let at: ReturnType<typeof folderAt> | undefined;
       const rel = typeof cwd === 'string' ? cwd.trim().replace(/\\/g, '/').replace(/\/+$/, '') : '';
       // Inside the repository: a check runs where its code is, nowhere else.
       if (!rel || rel.startsWith('/') || /^[A-Za-z]:/.test(rel) || rel.split('/').includes('..')) {
         errors.push(`"${where}.cwd" must be a folder inside the repository, e.g. "packages/api".`);
-      } else if (root && !folderThere(path.join(root, rel))) {
+      } else if (root && (at = folderAt(path.join(root, rel))) !== 'folder') {
         // Kept: run anywhere else, it would pass without checking what it is for.
-        warnings.push(`"${where}.cwd" names ${rel}, which does not exist yet: the hook checks changes under it, so it runs once there are some — and fails while the folder is missing.`);
+        warnings.push(
+          at === 'file'
+            ? `"${where}.cwd" names ${rel}, which is a file, not a folder: the hook fails until it is one.`
+            : `"${where}.cwd" names ${rel}, which does not exist yet: the hook checks changes under it, so it runs once there are some — and fails while the folder is missing.`,
+        );
         hook.cwd = rel;
       } else if (rel !== '.') hook.cwd = rel;
     }

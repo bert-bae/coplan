@@ -15,7 +15,7 @@
  */
 import { spawn } from 'node:child_process';
 import { constants as osConstants } from 'node:os';
-import { existsSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import path from 'node:path';
 import {
   HOOK_STAGES,
@@ -188,20 +188,36 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
   const started = Date.now();
   // A hook whose folder is not there fails, saying so: run anywhere else it
   // could pass without checking what it is for.
-  if (hook.cwd && !existsSync(path.join(cwd, hook.cwd))) {
-    return Promise.resolve({ code: 1, output: `its folder ${hook.cwd} does not exist`, ms: 0, timedOut: false });
+  if (hook.cwd) {
+    let problem: string | undefined;
+    try {
+      const stat = statSync(path.join(cwd, hook.cwd), { throwIfNoEntry: false });
+      if (!stat) problem = 'does not exist';
+      else if (!stat.isDirectory()) problem = 'is not a folder';
+    } catch (err) {
+      problem = `cannot be read (${(err as NodeJS.ErrnoException).code ?? err})`;
+    }
+    if (problem) return Promise.resolve({ code: 1, output: `its folder ${hook.cwd} ${problem}`, ms: 0, timedOut: false });
   }
-  return new Promise((resolve) => {
-    let output = '';
-    let timedOut = false;
-    // Its own process group, so a timeout stops everything it started — a
-    // test runner's workers too — not just the shell.
-    const child = spawn('sh', ['-c', hook.run], {
+  // Its own process group, so a timeout stops everything it started — a
+  // test runner's workers too — not just the shell. One that cannot start
+  // at all fails, as one that cannot be found does, and the checks go on.
+  const start = () =>
+    spawn('sh', ['-c', hook.run], {
       cwd: hook.cwd ? path.join(cwd, hook.cwd) : cwd,
       env: { ...process.env, CI: process.env['CI'] ?? '1', ...hook.env },
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     });
+  let child: ReturnType<typeof start>;
+  try {
+    child = start();
+  } catch (err) {
+    return Promise.resolve({ code: 1, output: String((err as Error)?.message ?? err), ms: Date.now() - started, timedOut: false });
+  }
+  return new Promise((resolve) => {
+    let output = '';
+    let timedOut = false;
     const kill = (signal: NodeJS.Signals) => {
       try {
         if (child.pid) process.kill(-child.pid, signal);
