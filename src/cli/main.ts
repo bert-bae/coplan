@@ -9,7 +9,7 @@
 import { readFileSync, existsSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { readLock, readLiveLock, readVerifiedLock, probeLock, isPidAlive, baseUrl, paths, ensureDaemon, DAEMON_ENTRY } from '../shared/paths.ts';
+import { readLock, readLiveLock, readLockState, readVerifiedLock, probeLock, isPidAlive, baseUrl, paths, ensureDaemon, DAEMON_ENTRY } from '../shared/paths.ts';
 import { runDoctor } from './doctor.ts';
 import { runCheck } from './check.ts';
 import { runInit } from './init.ts';
@@ -22,18 +22,44 @@ import { CLEANUP_GROUPS, type CleanupGroupId, type CleanupOutcome, type DaemonLo
 declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
 
-async function api<T>(lock: DaemonLock, route: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${baseUrl(lock)}${route}`, {
-    ...init,
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}`, ...(init?.headers ?? {}) },
-  });
-  // Refusals (401, 403) come back as plain text: say what they said.
-  const text = await res.text();
+/** What a command says, not a crash: printed without a stack. */
+class Said extends Error {}
+
+/** A daemon that holds its port but does not answer: busy, or hung. */
+function notAnswering(lock: DaemonLock, within?: number): Said {
+  return new Said(
+    `the daemon (pid ${lock.pid}) ${within ? `did not answer within ${within / 1000} s` : 'is not answering'}: ` +
+      'it may be busy; if it stays that way, run `coplan restart`',
+  );
+}
+
+async function api<T>(lock: DaemonLock, route: string, init?: RequestInit, timeoutMs = 5_000): Promise<T> {
+  let res: Response;
+  let text: string;
   try {
-    return JSON.parse(text) as T;
-  } catch {
-    throw new Error(`the daemon answered ${res.status}: ${text.trim().slice(0, 200)}`);
+    res = await fetch(`${baseUrl(lock)}${route}`, {
+      ...init,
+      // A hung daemon takes the connection and never answers.
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}`, ...(init?.headers ?? {}) },
+    });
+    text = await res.text();
+  } catch (err) {
+    if ((err as Error)?.name === 'TimeoutError') throw notAnswering(lock, timeoutMs);
+    throw err;
   }
+  // Refusals (401, 403) come back as plain text: say what they said.
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new Said(`the daemon answered ${res.status}: ${text.trim().slice(0, 200)}`);
+  }
+  if (!res.ok) {
+    const error = (body as { error?: unknown } | null)?.error;
+    throw new Said(`the daemon answered ${res.status}: ${typeof error === 'string' ? error : text.trim().slice(0, 200)}`);
+  }
+  return body as T;
 }
 
 /**
@@ -134,13 +160,8 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
 
     try {
       // From this plugin's build: the daemon may be another install's, older.
-      // A hung daemon takes the connection and never answers: give up on
-      // asking it, and stop it instead.
-      const result = await api<{ restarting?: boolean }>(
-        lock,
-        '/api/daemon/restart',
-        { method: 'POST', body: JSON.stringify({ entry: DAEMON_ENTRY }), signal: AbortSignal.timeout(5_000) },
-      );
+      // A hung daemon never answers: api() gives up, and it is stopped instead.
+      const result = await api<{ restarting?: boolean }>(lock, '/api/daemon/restart', { method: 'POST', body: JSON.stringify({ entry: DAEMON_ENTRY }) });
       if (result.restarting) {
         const next = await waitForNewDaemon(lock.pid);
         if (next) {
@@ -188,14 +209,19 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
       : args.includes('--all')
         ? [...CLEANUP_GROUPS]
         : CLEANUP_GROUPS.filter((id) => id !== 'sessions');
-    const lock = (await readVerifiedLock());
+    const found = await readLockState();
+    if (found?.state === 'busy') throw notAnswering(found.lock);
+    const lock = found?.lock ?? null;
     if (!lock) console.log('(no daemon running: live sessions are identified by age alone)');
 
     const outcome = lock
-      ? await api<{ result: CleanupOutcome }>(lock, '/api/storage/clean', {
-          method: 'POST',
-          body: JSON.stringify({ groups, dryRun }),
-        }).then((r) => r.result)
+      ? await api<{ result: CleanupOutcome }>(
+          lock,
+          '/api/storage/clean',
+          { method: 'POST', body: JSON.stringify({ groups, dryRun }) },
+          // Removing many files can take a while.
+          15_000,
+        ).then((r) => r.result)
       : cleanStorage({ groups, dryRun });
 
     for (const group of outcome.groups) {
@@ -220,12 +246,14 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
 
   /** The daemon, and every session with where its plan stands. */
   async status() {
-    const lock = (await readVerifiedLock());
-    if (!lock) {
+    const found = await readLockState();
+    if (!found) {
       console.log('not running');
       return 0;
     }
+    const { lock } = found;
     console.log(`coplan v${lock.version} on ${baseUrl(lock)} (pid ${lock.pid})`);
+    if (found.state === 'busy') throw notAnswering(lock);
     if (lock.version !== VERSION) console.log(`  this plugin is v${VERSION}: run \`coplan restart\` so the daemon runs it`);
     const { sessions } = await api<{ sessions: SessionSummary[] }>(lock, '/api/sessions');
     if (!sessions.length) {
@@ -395,6 +423,6 @@ if (!handler) {
 handler(rest)
   .then((code) => process.exit(code))
   .catch((err: unknown) => {
-    console.error((err as Error)?.stack ?? String(err));
+    console.error(err instanceof Said ? `coplan: ${err.message}` : ((err as Error)?.stack ?? String(err)));
     process.exit(1);
   });

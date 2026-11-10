@@ -251,6 +251,15 @@
   now shows the agent's text and saves only what you type. The "changed
   while you were typing" warning also goes once you save or take the new
   text, and no longer comes back for a change you have already seen.
+- **`coplan status`, `clean`, `url`, `open` and `doctor` no longer hang on a
+  daemon that does not answer.** A daemon holding its port without
+  answering counted as running, and the commands waited on it forever;
+  the doctor said it was reachable. `status`, `clean` and the doctor now
+  say at once that it is not answering, may be busy, and to run `coplan
+  restart` if it stays that way; any other request gives up after 5 s
+  (15 s for a clean). An error the daemon answers with is said in its
+  words, not as a crash, and the CLI's own messages come without a stack
+  trace.
 - **No two sessions share a folder.** A session id is kept in a folder
   named after it, with anything a folder name cannot hold made safe, so
   ids that differed only there (`a/b`, `a_b`), or past 128 characters,

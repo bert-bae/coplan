@@ -116,12 +116,19 @@ export async function probeLock(lock: DaemonLock, timeoutMs = 1_500): Promise<'l
   }
 }
 
-/** The lock of a daemon that is running and answering — not merely one
- *  whose pid exists. */
-export async function readVerifiedLock(timeoutMs?: number): Promise<DaemonLock | null> {
+/** The lock of a daemon that is running — not merely one whose pid exists —
+ *  and whether it answered in time or is too busy to (`busy`): a daemon
+ *  not to start another over, nor to wait on. */
+export async function readLockState(timeoutMs?: number): Promise<{ lock: DaemonLock; state: 'live' | 'busy' } | null> {
   const lock = readLiveLock();
   if (!lock) return null;
-  return (await probeLock(lock, timeoutMs)) === 'stale' ? null : lock;
+  const state = await probeLock(lock, timeoutMs);
+  return state === 'stale' ? null : { lock, state };
+}
+
+/** The lock of a daemon that is running, answering or not (readLockState). */
+export async function readVerifiedLock(timeoutMs?: number): Promise<DaemonLock | null> {
+  return (await readLockState(timeoutMs))?.lock ?? null;
 }
 
 /** The daemon's script. Each bundle (cli/, mcp/) and the tests sit one

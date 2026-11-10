@@ -16,7 +16,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { baseUrl, ensureDaemon, paths } from '../shared/paths.ts';
+import { baseUrl, ensureDaemon, paths, readLockState } from '../shared/paths.ts';
 import { loadConfigReport } from '../shared/config.ts';
 import { loadProjectConfig, PROJECT_CONFIG_PATH } from '../shared/project.ts';
 import { repoRoot } from '../shared/changes.ts';
@@ -139,7 +139,13 @@ export async function runDoctor(): Promise<number> {
 
   /* ---------------- live daemon ---------------- */
 
-  const lock = await ensureDaemon();
+  // Running, but too busy to answer: every probe after this would wait on it.
+  const found = await readLockState();
+  if (found?.state === 'busy') {
+    record('daemon reachable', false, `not answering (pid ${found.lock.pid}): it may be busy; if it stays that way, run \`coplan restart\``, true);
+    return summarize(checks);
+  }
+  const lock = found?.lock ?? (await ensureDaemon());
   if (!lock) {
     record('daemon reachable', false, `see ${paths.logFile()}`, true);
     return summarize(checks);
