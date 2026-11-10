@@ -38,7 +38,9 @@ export const paths = {
 export function sanitizeId(id: string): string {
   const name = legacyName(id);
   if (name === id) return name;
-  return `${name.slice(0, 119)}-${createHash('sha256').update(id).digest('hex').slice(0, 8)}`;
+  // Hashed as UTF-16, as the id is held: as UTF-8, every lone surrogate
+  // would be the same U+FFFD, and ids differing only there one folder.
+  return `${name.slice(0, 119)}-${createHash('sha256').update(id, 'utf16le').digest('hex').slice(0, 8)}`;
 }
 
 /** The folder name an earlier build gave a session: its id made safe, with

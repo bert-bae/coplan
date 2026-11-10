@@ -154,7 +154,8 @@ test("a session id is always a folder in sessions/: '.' and '..' never name sess
 test('no two session ids share a folder, however their names are made safe', async () => {
   const { sanitizeId } = await import('../shared/paths.ts');
   const long = 'x'.repeat(128);
-  const ids = ['a/b', 'a_b', 'a:b', `${long}1`, `${long}2`, '..', '__', '', 'unknown'];
+  // Lone surrogates too, which UTF-8 would turn into one and the same character.
+  const ids = ['a/b', 'a_b', 'a:b', `${long}1`, `${long}2`, '..', '__', '', 'unknown', 's\ud800', 's\udbff'];
   const names = ids.map(sanitizeId);
   assert.equal(new Set(names).size, ids.length, JSON.stringify(names));
   for (const name of names) {
