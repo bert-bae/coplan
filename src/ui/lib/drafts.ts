@@ -47,16 +47,23 @@ export function pruneDrafts(sessionId: string, plan: Plan | null): void {
   }
 }
 
-/** A field's text now: undefined when it is gone, or locked. */
-function fieldText(plan: Plan, field: string): string | undefined {
-  const design = isDesignLocked(plan);
+/** Which of the plan's sign-offs hold its fields still. */
+interface Locks {
+  design: boolean;
+  plan: boolean;
+}
+
+/** A field's text now: undefined when it is gone, or locked (as the plan
+ *  is, or as it would be with `locks`). */
+function fieldText(plan: Plan, field: string, locks: Locks = { design: isDesignLocked(plan), plan: isLocked(plan) }): string | undefined {
+  const design = locks.design;
   if (field === 'summary') return design ? undefined : plan.summary;
   let m = /^section:(.+)$/.exec(field);
   if (m) return design ? undefined : plan.sections.find((s) => s.id === m![1])?.body;
   m = /^task:(.+):(detail|files)$/.exec(field);
   if (m) {
     const task = plan.tasks.find((t) => t.id === m![1]);
-    if (!task || isLocked(plan)) return undefined;
+    if (!task || locks.plan) return undefined;
     return m[2] === 'detail' ? (task.detail ?? '') : (task.files ?? []).join('\n');
   }
   // A comment is saved only once sent: until then the field holds nothing.
@@ -76,4 +83,35 @@ function fieldText(plan: Plan, field: string): string | undefined {
     return node && !design ? (node.notes ?? '') : undefined;
   }
   return undefined;
+}
+
+/**
+ * What a sign-off would drop: the session's fields holding text not saved
+ * that its lock would hold still, named for the user. Once the plan is
+ * locked, pruneDrafts lets them go, and their text was never in the prompt.
+ */
+export function draftsLockedBy(sessionId: string | null, plan: Plan, signOff: 'design' | 'plan'): string[] {
+  const prefix = draftKey(sessionId, '');
+  const locks = { design: true, plan: signOff === 'plan' };
+  const out: string[] = [];
+  for (const [key, open] of openDrafts) {
+    if (!key.startsWith(prefix) || open.draft === open.value) continue;
+    const field = key.slice(prefix.length);
+    if (fieldText(plan, field) !== undefined && fieldText(plan, field, locks) === undefined) out.push(fieldName(plan, field));
+  }
+  return out;
+}
+
+/** A kept field, as the user would look for it. */
+function fieldName(plan: Plan, field: string): string {
+  if (field === 'summary') return 'the summary';
+  const [kind, id] = [field.slice(0, field.indexOf(':')), field.slice(field.indexOf(':') + 1)];
+  if (kind === 'section') return `section "${plan.sections.find((s) => s.id === id)?.title ?? id}"`;
+  if (kind === 'caption') return `the caption of "${plan.diagrams.find((d) => d.id === id)?.title ?? id}"`;
+  if (kind === 'notes') {
+    const [did, nid] = [id.slice(0, id.indexOf('/')), id.slice(id.indexOf('/') + 1)];
+    return `the notes on box "${plan.diagrams.find((d) => d.id === did)?.nodes.find((n) => n.id === nid)?.label ?? nid}"`;
+  }
+  const task = /^(.+):(detail|files)$/.exec(id);
+  return task ? `the ${task[2]} of task "${plan.tasks.find((t) => t.id === task[1])?.title ?? task[1]}"` : field;
 }

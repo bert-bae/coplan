@@ -13,6 +13,7 @@ import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
 import { droppedParts, type ConfigRow } from '../../shared/blocks.ts';
 import { PLAN_STATUS, statusDetail, statusFacts, statusTitle } from '../lib/status.ts';
 import { copyText } from '../lib/copy.ts';
+import { draftsLockedBy } from '../lib/drafts.ts';
 import { CONFIG_DOCS, PromptView, configDocs } from './PromptView.tsx';
 import type { Target } from '../../shared/types.ts';
 
@@ -240,6 +241,13 @@ function useDraft(key: string): [string, (note: string) => void, () => void] {
   return [note, set, () => drafts.delete(key)];
 }
 
+/** Why a sign-off button waits, if it does: what disables it, and says so. */
+function waitTitle(unsaved: boolean, open: string[], held: boolean): string | undefined {
+  if (unsaved) return 'Saving your last edit first…';
+  if (open.length) return `Save or cancel the text open in ${open.join(', ')} first`;
+  return held ? 'Fix the gaps this repository counts as errors first' : undefined;
+}
+
 /** Show a field a prompt quotes, from a sign-off dialog. */
 function followField(onClose: () => void): (target: Target) => void {
   return (target) => {
@@ -375,8 +383,10 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
   const [shown, setShown] = useState<{ preview: PromptPreview; note: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // An edit still on its way (the canvas, a field) is not in the prompt yet.
+  // An edit still on its way (the canvas, a field) is not in the prompt yet,
+  // nor is text left open in a field the lock would drop.
   const unsaved = useStore((s) => s.saving > 0 || s.canvasSaving);
+  const open = plan ? draftsLockedBy(sessionId, plan, 'design') : [];
   const version = plan?.version ?? 0;
   // The prompt also moves when the agent reads the plan (its "since you
   // last read" part), which is not a new version — and after a refused
@@ -458,7 +468,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>
               Cancel
             </button>
-            <button type="button" className="btn btn-primary" disabled={!current || busy || unsaved || held} title={unsaved ? 'Saving your last edit first…' : held ? 'Fix the gaps this repository counts as errors first' : undefined} onClick={() => void confirm()}>
+            <button type="button" className="btn btn-primary" disabled={!current || busy || Boolean(waitTitle(unsaved, open, held))} title={waitTitle(unsaved, open, held)} onClick={() => void confirm()}>
               {busy ? 'Confirming…' : agent.promptContext ? 'Confirm design' : 'Copy and confirm design'}
             </button>
           </div>
@@ -492,8 +502,9 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
   const [shown, setShown] = useState<Shown | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  // An edit still on its way (the canvas, a field) is not in the prompt yet.
+  // As for the design: an edit on its way, or text left open the lock would drop.
   const unsaved = useStore((s) => s.saving > 0 || s.canvasSaving);
+  const open = plan ? draftsLockedBy(sessionId, plan, 'plan') : [];
   const version = plan?.version ?? 0;
   // As for the design: the agent reading the plan moves the prompt without
   // a new version, and a refused submit fetches it again.
@@ -637,7 +648,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={submitting}>
               Cancel
             </button>
-            <button type="button" className="btn btn-primary" disabled={!current || submitting || unsaved || held} title={unsaved ? 'Saving your last edit first…' : held ? 'Fix the gaps this repository counts as errors first' : undefined} onClick={() => void submit()}>
+            <button type="button" className="btn btn-primary" disabled={!current || submitting || Boolean(waitTitle(unsaved, open, held))} title={waitTitle(unsaved, open, held)} onClick={() => void submit()}>
               {submitting ? 'Submitting…' : mode === 'export' ? 'Copy and lock' : target === 'session' && agent.promptContext ? 'Submit and lock' : 'Copy, submit and lock'}
             </button>
           </div>

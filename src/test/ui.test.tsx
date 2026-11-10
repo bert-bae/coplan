@@ -1316,6 +1316,66 @@ test('a gap the repository counts as an error holds Submit, and is shown first',
   assert.match(dialog.querySelector('.submit-gap-error')?.textContent ?? '', /^Error: /);
 });
 
+test('confirming the design waits for text left open in it, which the lock would drop', async () => {
+  const session = makeSession();
+  await boot(session, (route) =>
+    route.endsWith('/plan/design/prompt') ? { prompt: 'DESIGN PROMPT', trimmed: false, version: session.plan!.version, budget: 9000, maxNote: 4000 } : undefined,
+  );
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'the plan summary' }), { target: { value: 'Half a summary' } });
+  await openTab('Architecture');
+  const confirmButton = async () => {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Confirm design' }));
+    });
+    const dialog = screen.getByRole('dialog', { name: 'Confirm the design' });
+    await waitFor(() => assert.equal(within(dialog).getByTestId('prompt-preview').textContent, 'DESIGN PROMPT'));
+    return { dialog, button: within(dialog).getByRole('button', { name: 'Confirm design' }) as HTMLButtonElement };
+  };
+  let { dialog, button } = await confirmButton();
+  assert.equal(button.disabled, true);
+  assert.equal(button.title, 'Save or cancel the text open in the summary first');
+  await act(async () => {
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+  });
+  // Saved, or here cancelled, and nothing holds it up.
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  });
+  await openTab('Architecture');
+  ({ button } = await confirmButton());
+  assert.equal(button.disabled, false);
+});
+
+test("submitting waits for a task's detail left open, which the lock would drop", async () => {
+  const session = makeSession(confirmedPlan());
+  await boot(session, (route) =>
+    route.endsWith('/plan/prompt')
+      ? { prompt: 'PROMPT', trimmed: false, version: session.plan!.version, budget: 9000, maxNote: 4000, mode: 'managed', settings: DEFAULTS, project: { file: null, mode: 'managed', defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [] } }
+      : undefined,
+  );
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Add approach or acceptance criteria: detail of "Invalidation"' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'detail of "Invalidation"' }), { target: { value: 'Half the criteria' } });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Review & submit plan' }));
+  });
+  const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
+  await waitFor(() => assert.equal(within(dialog).getByTestId('prompt-preview').textContent, 'PROMPT'));
+  const submit = within(dialog).getByRole('button', { name: 'Submit and lock' }) as HTMLButtonElement;
+  assert.equal(submit.disabled, true);
+  assert.equal(submit.title, 'Save or cancel the text open in the detail of task "Invalidation" first');
+});
+
 test('the plan is submitted after reading the prompt it sends, with how the build runs', async () => {
   const session = makeSession(confirmedPlan());
   const version = session.plan!.version;

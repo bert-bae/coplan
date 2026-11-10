@@ -272,6 +272,11 @@
   now kept like the other editors: back where they were with their text,
   asked about before the page closes, and let go once sent, cancelled, or
   what they were on is gone.
+- **Confirm design and Submit wait for text you left open.** A summary,
+  section, caption, box note or (for Submit) task detail or files list
+  half written in an editor elsewhere on the page was dropped once the
+  sign-off locked it, and was never in the prompt. The button now waits,
+  saying which field to save or cancel first.
 - **No two sessions share a folder.** A session id is kept in a folder
   named after it, with anything a folder name cannot hold made safe, so
   ids that differed only there (`a/b`, `a_b`), or past 128 characters,
