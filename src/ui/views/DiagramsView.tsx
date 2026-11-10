@@ -271,6 +271,7 @@ function DiagramPanel({ plan, diagram, locked }: { plan: Plan; diagram: Diagram;
         placeholder="What this diagram shows."
         emptyAction="Describe it"
         rows={3}
+        draftKey={`caption:${diagram.id}`}
         // No revision check: the diagram's revision moves with every drag on
         // the canvas, so it would flag the user's own layout edits as a
         // conflict. A caption is short and only ever edited here.

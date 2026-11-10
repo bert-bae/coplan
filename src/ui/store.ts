@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { api, eventsUrl, Unauthorized, type ProjectChecks } from './lib/api.ts';
+import { pruneDrafts, unsavedDrafts } from './lib/drafts.ts';
 
 const NO_CHECKS: ProjectChecks = { implement: [], review: [] };
 import { isLocked } from '../shared/plan.ts';
@@ -143,6 +144,8 @@ class Store {
 
   set(patch: Partial<UiState>): void {
     this.state = { ...this.state, ...patch };
+    // A plan landing settles the drafts kept for it (see pruneDrafts).
+    if (patch.session?.plan) pruneDrafts(patch.session.sessionId, patch.session.plan);
     for (const listener of this.listeners) listener();
   }
 
@@ -164,10 +167,10 @@ class Store {
     // Selecting a session opens the stream; with none to select, open it for
     // the session list alone.
     if (!this.source) this.connect();
-    // Closing or reloading with an edit still on its way would lose it
-    // without a word: the browser asks first.
+    // Closing or reloading with an edit still on its way, or one open and
+    // not saved, would lose it without a word: the browser asks first.
     window.addEventListener('beforeunload', (e) => {
-      if (this.state.saving > 0 || this.state.canvasSaving) {
+      if (this.state.saving > 0 || this.state.canvasSaving || unsavedDrafts()) {
         e.preventDefault();
         e.returnValue = '';
       }
@@ -654,6 +657,7 @@ class Store {
       return;
     }
     const sessions = this.state.sessions.filter((s) => s.sessionId !== sessionId);
+    pruneDrafts(sessionId, null);
     this.set({ sessions, pinned: this.state.pinned.filter((id) => id !== sessionId) });
     this.persistPrefs();
     if (this.state.sessionId === sessionId) {

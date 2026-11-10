@@ -250,11 +250,14 @@ export function NodePanel({
   onRemove,
   onClose,
   commentTarget,
+  diagramId,
 }: {
   node: FlowNode;
   nodes: FlowNode[];
   edges: FlowEdge[];
   plan: Plan;
+  /** The diagram the box is in: names its notes' kept draft. */
+  diagramId: string;
   /** Where comments on this box live, once it is saved. */
   commentTarget?: Target;
   onChange: (patch: NodePatch) => void;
@@ -333,6 +336,7 @@ export function NodePanel({
           placeholder="What was decided about this part, and why."
           emptyAction="Add a decision"
           rows={6}
+          draftKey={`notes:${diagramId}/${node.id}`}
           onSave={(notes) => onChange({ notes })}
         />
       </div>

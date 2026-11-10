@@ -754,6 +754,7 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
           placeholder="No detail yet."
           emptyAction="Add approach or acceptance criteria"
           version={revOf(task)}
+          draftKey={`task:${task.id}:detail`}
           onSave={(detail, rev) => store.op({ op: 'upsert_task', id: task.id, detail, ...expecting(rev) })}
         />
       </div>

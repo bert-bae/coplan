@@ -46,6 +46,7 @@ export function OverviewView() {
           label="the plan summary"
           placeholder="No summary yet."
           emptyAction="Write one"
+          draftKey="summary"
           onSave={(summary) => store.op({ op: 'set_meta', summary })}
         />
       </Focusable>
@@ -162,6 +163,7 @@ function SectionCard({ section, index, count }: { section: Section; index: numbe
         label={`section "${section.title}"`}
         rows={8}
         version={section.rev}
+        draftKey={`section:${section.id}`}
         onSave={(body, rev) => store.op({ op: 'upsert_section', id: section.id, body, ...(rev !== undefined ? { expect: rev } : {}) })}
       />
       {comments && <ThreadPanel target={target} label={section.title} />}

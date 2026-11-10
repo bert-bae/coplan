@@ -1384,6 +1384,7 @@ function Editor({
     panel = (
       <NodePanel
         key={node.id}
+        diagramId={diagram.id}
         node={node}
         nodes={nodes}
         edges={edges}

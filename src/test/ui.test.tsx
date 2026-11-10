@@ -14,6 +14,7 @@ setupDom();
 const { render, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
 const { store } = await import('../ui/store.ts');
+const { openDrafts } = await import('../ui/lib/drafts.ts');
 const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan, confirmDesign, queueRevision, markRevisionDelivered } = await import('../shared/plan.ts');
 
 const INPUT: PlanInput = {
@@ -81,6 +82,10 @@ async function boot(session: SessionState = makeSession(), extra?: (route: strin
   });
 }
 
+/** Nothing found. On failure it shows what was, briefly: a jsdom element
+ *  handed to assert whole makes the test runner print the entire DOM graph. */
+const none = (found: Element | null, what = 'nothing expected') => assert.ok(found === null, `${what}: found ${found?.outerHTML.slice(0, 200)}`);
+
 const opsSent = () => posts.filter((p) => p.route.endsWith('/plan/ops')).flatMap((p) => p.body['ops'] as Record<string, unknown>[]);
 
 const openTab = async (name: string) => {
@@ -92,6 +97,10 @@ const openTab = async (name: string) => {
 beforeEach(() => {
   cleanup();
   window.localStorage.clear();
+  openDrafts.clear();
+  // Each test starts on s1, whatever session the one before it went to
+  // (replaceState: no hashchange for an earlier boot's listener to act on).
+  window.history.replaceState(null, '', '#/session/s1');
   store.set({
     sessions: [],
     sessionId: null,
@@ -1899,7 +1908,7 @@ test("the summary says when the agent changed it while the user was editing; sav
   });
   const area = screen.getByRole('textbox', { name: 'the plan summary' }) as HTMLTextAreaElement;
   fireEvent.change(area, { target: { value: 'Put a cache in front of the database. Typo fixed.' } });
-  assert.equal(screen.queryByRole('alert'), null, 'nothing has changed underneath yet');
+  none(screen.queryByRole('alert'), 'nothing has changed underneath yet');
   // The agent rewrites the summary meanwhile.
   const s = store.getState().session!;
   const plan = { ...structuredClone(s.plan!), summary: 'A read-through cache, written by the agent.', version: s.plan!.version + 1 };
@@ -1924,19 +1933,19 @@ test('a field with no revision (box notes, a caption) warns the same way, and on
   });
   fireEvent.change(view.getByRole('textbox', { name: 'notes on API' }), { target: { value: 'Primary store. Mine.' } });
   await act(async () => view.rerender(field('Primary store.')));
-  assert.equal(view.queryByRole('alert'), null, 'the same text again is no change');
+  none(view.queryByRole('alert'), 'the same text again is no change');
   await act(async () => view.rerender(field('Rewritten by the agent.')));
   assert.ok(view.getByRole('alert'));
   fireEvent.keyDown(view.getByRole('textbox', { name: 'notes on API' }), { key: 'Escape' });
   await act(async () => {
     fireEvent.click(view.getByRole('button', { name: 'Edit notes on API' }));
   });
-  assert.equal(view.queryByRole('alert'), null, 'editing again starts from the newer text');
+  none(view.queryByRole('alert'), 'editing again starts from the newer text');
   assert.deepEqual(saved, []);
   // The user's own save landing before it resolves is not a change underneath.
   fireEvent.change(view.getByRole('textbox', { name: 'notes on API' }), { target: { value: 'My notes.' } });
   await act(async () => view.rerender(field('My notes.')));
-  assert.equal(view.queryByRole('alert'), null, 'their own text, landing');
+  none(view.queryByRole('alert'), 'their own text, landing');
   view.unmount();
 });
 
@@ -1955,7 +1964,7 @@ test('switching session closes the editors of the one left: nothing typed for on
   await act(async () => {
     await store.selectSession('s2');
   });
-  assert.equal(screen.queryByRole('textbox', { name: 'the plan summary' }), null, "s1's editor is gone");
+  none(screen.queryByRole('textbox', { name: 'the plan summary' }), "s1's editor is gone");
   assert.deepEqual(sentTo('s2'), [], 'and its draft went nowhere near s2');
 
   // A task title being typed in when the session changes: saved in s1, where it was typed.
@@ -1983,4 +1992,94 @@ test('the task list offers no nesting under a task already started or finished',
   assert.equal((screen.getByRole('button', { name: 'Nest Invalidation under the task above' }) as HTMLButtonElement).disabled, true);
   // Wire into API sits below Storage layer, which is a parent already: that is fine.
   assert.equal((screen.getByRole('button', { name: 'Nest Wire into API under the task above' }) as HTMLButtonElement).disabled, false);
+});
+
+test('an open editor keeps its text across a tab switch, and closing the page asks first', async () => {
+  await boot();
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'the plan summary' }), { target: { value: 'Three paragraphs, half written' } });
+  const leaving = () => {
+    const e = new window.Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  };
+  assert.equal(leaving(), true, 'closing the page with it open asks first');
+  await openTab('Tasks');
+  await openTab('Overview');
+  assert.equal((screen.getByRole('textbox', { name: 'the plan summary' }) as HTMLTextAreaElement).value, 'Three paragraphs, half written', 'back where it was');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  });
+  assert.equal(leaving(), false, 'cancelled, there is nothing to lose');
+  await openTab('Tasks');
+  await openTab('Overview');
+  none(screen.queryByRole('textbox', { name: 'the plan summary' }), 'and it does not come back');
+});
+
+test("an open editor's text waits in its own session while another is on screen", async () => {
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => (route === '/api/session/s2' ? { session: other } : undefined));
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'the plan summary' }), { target: { value: 'For s1 only' } });
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  await openTab('Overview');
+  none(screen.queryByRole('textbox', { name: 'the plan summary' }), 'not in s2');
+  await act(async () => {
+    await store.selectSession('s1');
+  });
+  await openTab('Overview');
+  assert.equal((screen.getByRole('textbox', { name: 'the plan summary' }) as HTMLTextAreaElement).value, 'For s1 only');
+});
+
+test('a kept draft goes once it is saved, or its field is gone or locked: closing the page does not ask for nothing', async () => {
+  await boot();
+  const leaving = () => {
+    const e = new window.Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  };
+  const writeIn = async (button: string, box: string, text: string) => {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: button }));
+    });
+    fireEvent.change(screen.getByRole('textbox', { name: box }), { target: { value: text } });
+  };
+  await openTab('Overview');
+
+  // Saved: nothing kept, whatever happens to the editor after.
+  await writeIn('Edit the plan summary', 'the plan summary', 'A summary, saved');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  });
+  assert.equal(leaving(), false, 'saved');
+
+  // A section half written, then removed (by the agent, say): nothing left to save it into.
+  await writeIn('Edit section "Context"', 'section "Context"', 'Half a thought');
+  await openTab('Tasks');
+  assert.equal(leaving(), true);
+  const s = store.getState().session!;
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...s, plan: { ...structuredClone(s.plan!), sections: [], version: s.plan!.version + 1 } } });
+  });
+  assert.equal(leaving(), false, 'its section is gone');
+
+  // The summary half written, then the design confirmed: it can no longer be saved.
+  await openTab('Overview');
+  await writeIn('Edit the plan summary', 'the plan summary', 'Another summary');
+  await openTab('Tasks');
+  const t = store.getState().session!;
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...t, plan: confirmDesign(t.plan!, { prompt: 'tasks' }) } });
+  });
+  assert.equal(leaving(), false, 'locked');
+  await openTab('Overview');
+  none(screen.queryByRole('textbox', { name: 'the plan summary' }), 'no editor reopens that cannot be closed');
 });

@@ -112,6 +112,12 @@
   came out as garbled text that broke the list in two. They now count on,
   keep their number and keep the code in its step, and a bare link no
   longer takes the sentence's full stop with it.
+- **An open editor keeps what you wrote.** A task's detail, the summary,
+  a section, a box's notes or a diagram's caption, open and half written,
+  was gone when you clicked another tab (or a chip that opens one), went
+  to another session and back, or closed the page without being asked.
+  It now reopens as you left it, in its own session, and the browser asks
+  before you close the page with one unsaved.
 
 ### Targeted checks: only what the change touched
 
