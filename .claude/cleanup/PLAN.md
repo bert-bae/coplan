@@ -97,7 +97,7 @@ the audit's finding numbers.
 | C3 | Drop the `@tailwindcss/cli` dev dependency (and `@parcel/watcher` with it) and the unread `CC_HARNESS_PLUGIN_ROOT` [20] | 3 clean-up | done | a6f491b |
 | R1 | One `ensureDaemon()` for the CLI, the MCP server and the doctor, using the verified lock [19a]; fixes the doctor's stale-lock report | 4 refactor | done | d8fa57b, 7316969 |
 | R2 | One "who spoke last" rule, exported from plan.ts, used in all four places [19b]; fixes the plan check and Revise button disagreeing | 4 refactor | done | ec359da |
-| R3 | Map `PlanError` to 409 once in the daemon's top-level catch; delete six try/catch blocks; one `planOr404` [19c] | 4 refactor | open | |
+| R3 | Map `PlanError` to 409 once in the daemon's top-level catch; delete six try/catch blocks; one `planOr404` [19c] | 4 refactor | done | 91cd7be |
 | R4 | One `signOff` helper for the browser store's six sign-off actions; `commit` calls `adoptPlan` [19d] | 4 refactor | open | |
 | R5 | Merge `CommitInput` and `CommitTextArea` (after F6, so the fix lives in one place) [19e] | 4 refactor | open | |
 | R6 | Move `repoRoot` / `currentBranch` into `shared/changes.ts`; delete `daemon/git.ts` [19f] | 4 refactor | open | |
@@ -112,6 +112,7 @@ the audit's finding numbers.
 | B8 | `init` opens the stream twice when the session fetch answers before the ticket: `this.source` is set only once the ticket lands, so `if (!this.source) this.connect()` asks for a second ticket (the attempt guard drops the first stream). Harmless, but a wasted ticket per page load (src/ui/store.ts:164; found reviewing T2) | 5 smaller | open | |
 | B9 | `coplan init` picks the package manager from lockfiles only, ignoring package.json's `packageManager` field: a repo with no lockfile yet (or a stray one) gets the wrong tool's `run` (src/cli/init.ts:46; found reviewing F8) | 5 smaller | open | |
 | B10 | Check, then fix if real: when Cursor runs Claude Code's `hooks.json`, a huge `PostToolUse` names its session `conversation_id`, so the relay finds no `session_id` and drops it; and the slimmed payload loses `cursor_version`, which `hookAgent` reads (bin/coplan-hook-relay.sh:45, agentHooks.ts hookAgent; found reviewing C2) | 5 smaller | open | |
+| B11 | `sessionOr404` throws `HttpError(404)` as `planOr404` does, so the daemon's ~20 routes drop their `if (!session) return;` and none can forget it (src/daemon/main.ts; found reviewing R3) | 5 smaller | open | |
 | A1 | Re-audit the touched areas with `/ponytail-audit`, and add any new findings as rows | 6 re-audit | open | |
 
 ### F19: the take-back never fires
