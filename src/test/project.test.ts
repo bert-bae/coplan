@@ -340,6 +340,23 @@ test('a timed-out hook is over only once what it started has gone, even what ign
   }
 });
 
+test('a hook that ends in time is not taken as timed out while its output is let go', { skip: process.platform !== 'linux' }, () => {
+  // Ended 200 ms before its timeout, its output held open from outside its group: the let-go runs past the timeout.
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'quick', run: 'setsid sleep 5 & echo $! > holder; sleep 0.8; echo done', timeout: 1 }] } }) });
+  try {
+    const out = spawnSync(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
+    assert.match(out.stdout, /✓ quick/, out.stdout);
+    assert.equal(out.status, 0);
+  } finally {
+    try {
+      process.kill(Number(readFileSync(path.join(dir, 'holder'), 'utf8')), 'SIGKILL');
+    } catch {
+      /* gone */
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a timed-out hook whose output is held open from outside its group still ends', { skip: process.platform === 'win32' }, () => {
   // A helper in a group of its own, holding the hook's output open.
   const helper = `node -e "const c = require('child_process').spawn('sleep', ['20'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }); require('fs').writeFileSync('helper', String(c.pid)); c.unref()"`;

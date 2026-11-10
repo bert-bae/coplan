@@ -142,7 +142,7 @@
   check that started something detached (a dev server, say) that kept its
   output open ran on until its timeout, and failed as timed out, though it
   had ended, and passed. It is now over as it ended, and the server runs
-  on.
+  on, even when its timeout falls in the moment it is given to finish.
 - **Your settings' comments survive a second `./setup.sh`.** When setup
   rewrote a settings file that had comments, it kept the original as
   `.bak`; but the line it writes at the top counted as a comment the next

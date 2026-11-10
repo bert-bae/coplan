@@ -294,6 +294,8 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
       () => settled || stopping !== undefined,
     );
     const timer = setTimeout(() => {
+      // Ended in time, all of it, and its output being let go: not a timeout.
+      if (ended !== undefined && !groupAlive()) return;
       timedOut = true;
       void stop().then(letGo);
     }, (hook.timeout ?? DEFAULT_HOOK_TIMEOUT) * 1000);
