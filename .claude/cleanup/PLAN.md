@@ -106,6 +106,7 @@ the audit's finding numbers.
 | B5 | Tasks view copies: `derivedStatus`, `hasChildren`, three `isTyping` checks (TasksView.tsx:957-962, 1308-1316; lib/tasks.ts:41-45) | 5 smaller | open | |
 | B6 | Check, then fix if real: Codex `additionalContextLimit: 4000` (hooks/codex.json:33) vs the 9000-character prompt budget (render.ts:431) | 5 smaller | open | |
 | B7 | Check, then fix if real: the `findByCwd` fallback (daemon/main.ts:1135) can attach a Claude MCP call to a Codex or Cursor session in the same folder | 5 smaller | open | |
+| B8 | `init` opens the stream twice when the session fetch answers before the ticket: `this.source` is set only once the ticket lands, so `if (!this.source) this.connect()` asks for a second ticket (the attempt guard drops the first stream). Harmless, but a wasted ticket per page load (src/ui/store.ts:164; found reviewing T2) | 5 smaller | open | |
 | A1 | Re-audit the touched areas with `/ponytail-audit`, and add any new findings as rows | 6 re-audit | open | |
 
 ### F19: the take-back never fires
