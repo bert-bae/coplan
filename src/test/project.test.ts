@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -303,6 +303,21 @@ test('a config coplan check cannot read fails, rather than passing with nothing 
     assert.equal(out.stdout, '');
     assert.match(out.stderr, /could not be read[\s\S]*nothing was run/);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Root enters any folder: the case is one only another user meets.
+test("a hook whose folder cannot be entered fails, saying so, not as a shell that is missing", { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {
+  const hooks = [{ name: 'api', run: 'true', cwd: 'shut' }];
+  const dir = repo({ 'shut/README.md': 'x\n', '.coplan/config.json': JSON.stringify({ hooks: { review: hooks } }) });
+  chmodSync(path.join(dir, 'shut'), 0o600);
+  try {
+    const run = spawnSync(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
+    assert.match(run.stdout, /✗ api[\s\S]*its folder shut cannot be entered \(EACCES\)/, run.stdout + run.stderr);
+    assert.equal(run.status, 1);
+  } finally {
+    chmodSync(path.join(dir, 'shut'), 0o700);
     rmSync(dir, { recursive: true, force: true });
   }
 });

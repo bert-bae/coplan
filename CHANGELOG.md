@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **`coplan check` names a hook folder it cannot enter.** It used to fail as `spawn sh EACCES`, exit 127,
+  as if the shell were missing; it now says the folder cannot be entered.
 - **Text a lock dropped no longer comes back when the plan is reopened.** A comment, reply or field being
   written when the plan was signed off elsewhere is offered to copy, as before, and its box now starts empty.
 - **A submitted plan no longer offers to comment where it takes no comments.** A section or task with no
