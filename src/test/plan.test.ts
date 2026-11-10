@@ -1161,6 +1161,11 @@ test('a proposed removal is out of date once the user changed what it would take
   ] as [string, PlanOp][]) {
     assert.throws(() => accept(applyOps(proposed, [edit], 'user').plan), new RegExp(`${STALE.source}: what removing task t1 "API" takes`), what);
   }
+  // Moved under a task the proposal adds under the one it removes, likewise.
+  const viaNew: PlanOp[] = [{ op: 'upsert_task', id: 't9', title: 'Frontend', parentId: 't1' }, { op: 'move_task', id: 't3', parentId: 't9', index: 0 }, { op: 'remove', kind: 'task', id: 't1' }];
+  const proposedVia = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: viaNew }], 'claude').plan;
+  assert.throws(() => accept(applyOps(proposedVia, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan), STALE);
+  assert.deepEqual(accept(proposedVia).tasks.map((t) => t.id), ['t4'], 'nothing changed since: accepted');
   // A move alone leaves the moved task's links and dependencies as they are: no reason to refuse it.
   const moved = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [ops[0]!] }], 'claude').plan;
   const linked = applyOps(moved, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan;

@@ -2361,12 +2361,17 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
   // edits only add its own.
   const movedTo = new Map<string, string | null>();
   const removal = (id: string) => {
-    const outline = movedTo.size ? { ...plan, tasks: plan.tasks.map((t) => (movedTo.has(t.id) ? { ...t, parentId: movedTo.get(t.id)! } : t)) } : plan;
+    // Tasks the proposal adds stand in by their place alone, for what is
+    // moved under them; printed are only those already in the plan.
+    const added = [...movedTo].filter(([t]) => !tasks.has(t)).map(([t, parentId]) => ({ id: t, title: t, parentId, order: 0, status: 'todo' }) as Task);
+    const outline = movedTo.size
+      ? { ...plan, tasks: [...plan.tasks.map((t) => (movedTo.has(t.id) ? { ...t, parentId: movedTo.get(t.id)! } : t)), ...added] }
+      : plan;
     const { doomed, dependents, diagrams } = taskRemoval(outline, id);
     return fingerprint(
       JSON.stringify([
         // The task itself is `task:<id>`'s to print.
-        [...doomed].filter((t) => t !== id).sort().map((t) => [t, rev('task', t)]),
+        [...doomed].filter((t) => t !== id && tasks.has(t)).sort().map((t) => [t, rev('task', t)]),
         dependents.map((t) => [t.id, t.dependsOn]).sort(),
         diagrams.flatMap((d) => d.nodes.filter((n) => n.taskIds?.some((t) => doomed.has(t))).map((n) => [`${d.id}/${n.id}`, boxLinks(n)])).sort(),
       ]),
@@ -2402,6 +2407,7 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
       case 'set_checks':
         if (op.id) out[`task:${op.id}`] = rev('task', op.id);
         if (op.op === 'move_task' && op.id) movedTo.set(op.id, op.parentId ?? null);
+        if (op.op === 'upsert_task' && op.id && !tasks.has(op.id) && op.parentId) movedTo.set(op.id, op.parentId);
         // `builds` replaces which boxes link the task: a link made since is undone.
         if (op.op === 'upsert_task' && op.id && op.builds !== undefined) out[`links:${op.id}`] = links(op.id);
         break;
