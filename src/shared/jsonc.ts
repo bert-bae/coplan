@@ -14,7 +14,17 @@ export function parseJsonc(text: string): unknown {
 }
 
 export function stripJsonc(text: string): string {
+  return dropTrailingCommas(scan(text).out);
+}
+
+/** The comments in a JSONC text, each without its `//` or `/* *\/`, trimmed. */
+export function jsoncComments(text: string): string[] {
+  return scan(text).comments;
+}
+
+function scan(text: string): { out: string; comments: string[] } {
   let out = '';
+  const comments: string[] = [];
   let i = 0;
   while (i < text.length) {
     const c = text[i]!;
@@ -23,12 +33,15 @@ export function stripJsonc(text: string): string {
       while (i < text.length && text[i] !== '"') i += text[i] === '\\' ? 2 : 1;
       out += text.slice(start, ++i);
     } else if (c === '/' && text[i + 1] === '/') {
+      const start = i;
       while (i < text.length && text[i] !== '\n') i++;
+      comments.push(text.slice(start + 2, i).trim());
     } else if (c === '/' && text[i + 1] === '*') {
       const end = text.indexOf('*/', i + 2);
       // Kept as whitespace so a line number in a parse error still points
       // at the right line.
       const comment = end < 0 ? text.slice(i) : text.slice(i, end + 2);
+      comments.push(comment.slice(2, end < 0 ? undefined : -2).trim());
       out += comment.replace(/[^\n]/g, ' ');
       i += comment.length;
     } else {
@@ -36,7 +49,7 @@ export function stripJsonc(text: string): string {
       i++;
     }
   }
-  return dropTrailingCommas(out);
+  return { out, comments };
 }
 
 /** A comma before `}` or `]` — the edit people make most — outside strings. */

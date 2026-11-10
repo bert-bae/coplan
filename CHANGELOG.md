@@ -124,6 +124,13 @@
   `coplan` quit and the test suite ran on, and a second run raced it. The
   interrupt is now passed on, and `coplan check` exits once the check is
   gone.
+- **Your settings' comments survive a second `./setup.sh`.** When setup
+  rewrote a settings file that had comments, it kept the original as
+  `.bak`; but the line it writes at the top counted as a comment the next
+  time, so a second run that changed a setting copied its own output over
+  that `.bak`, and your comments were gone. Its own line no longer counts,
+  however an editor saved the file since, and a copy never goes over an
+  earlier one: the next is `.bak.1`, then `.bak.2`.
 
 ### Targeted checks: only what the change touched
 

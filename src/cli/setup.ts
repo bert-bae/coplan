@@ -18,7 +18,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_CONFIG, globalConfigFile, mergeConfig } from '../shared/config.ts';
-import { parseJsonc, stripJsonc } from '../shared/jsonc.ts';
+import { jsoncComments, parseJsonc } from '../shared/jsonc.ts';
 import { DEFAULT_BUILD_SETTINGS, MAX_PARALLEL } from '../shared/build.ts';
 import { GLOBAL_PROJECT_FILE, HOOK_STAGES, PROJECT_CONFIG_PATH, PR_OPEN, PR_TOOLS, loadProjectConfig } from '../shared/project.ts';
 import { REVIEW_MODES } from '../shared/types.ts';
@@ -289,15 +289,24 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/** A config file as it stands: its object, and whether it had comments a
- *  rewrite would drop. Null when it cannot be read: then it is left alone. */
+/** What each settings file says at its top, as `save` writes it. */
+const DEFAULTS_HEADER = "Your defaults for every repository's build. A repository's .coplan/config.json overrides them; docs/CONFIG.md has the rest.";
+const MACHINE_HEADER = "Coplan's settings on this machine. docs/CONFIG.md says what each one does.";
+
+/** A comment `save` wrote, not the user: known by how its headers begin,
+ *  so a header reworded later is still known. */
+const ownComment = (comment: string) => ["Your defaults for every repository's build.", "Coplan's settings on this machine."].some((start) => comment.startsWith(start));
+
+/** A config file as it stands: its object, and whether it has comments of
+ *  the user's that a rewrite would drop (setup's own header is not one).
+ *  Null when it cannot be read: then it is left alone. */
 function readJsonc(file: string, io: SetupIo): { raw: Record<string, unknown>; comments: boolean } | null {
   if (!existsSync(file)) return { raw: {}, comments: false };
   try {
     const text = readFileSync(file, 'utf8');
     const raw = parseJsonc(text);
     if (!isRecord(raw)) throw new Error('it does not hold an object');
-    return { raw, comments: stripJsonc(text) !== text };
+    return { raw, comments: jsoncComments(text).some((c) => !ownComment(c)) };
   } catch (err) {
     io.say(`  ${file} cannot be read (${(err as Error).message}), so it is left as it is. Fix it by hand; docs/CONFIG.md says what goes in it.`);
     return null;
@@ -325,8 +334,11 @@ function save(file: string, header: string, before: { raw: Record<string, unknow
   if (JSON.stringify(raw) === JSON.stringify(before.raw)) return false;
   mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   if (before.comments) {
-    copyFileSync(file, `${file}.bak`);
-    io.say(`  (${file} had comments, which this rewrite drops: the file as it was is ${file}.bak)`);
+    // Never over an earlier copy: that may hold comments this one does not.
+    let backup = `${file}.bak`;
+    for (let n = 1; existsSync(backup); n++) backup = `${file}.bak.${n}`;
+    copyFileSync(file, backup);
+    io.say(`  (${file} had comments, which this rewrite drops: the file as it was is ${backup})`);
   }
   const body = JSON.stringify(raw, null, 2).split('\n');
   const lines = body.length === 1 ? ['{', `  // ${header}`, '}'] : ['{', `  // ${header}`, ...body.slice(1)];
@@ -360,7 +372,7 @@ export async function askSettings(io: SetupIo, coplanHome: string): Promise<stri
       put(o, 'tool', tool, 'gh');
       put(o, 'open', open, 'ask');
     });
-    if (save(defaultsFile, "Your defaults for every repository's build. A repository's .coplan/config.json overrides them; docs/CONFIG.md has the rest.", defaults, raw, io)) {
+    if (save(defaultsFile, DEFAULTS_HEADER, defaults, raw, io)) {
       saved.push(defaultsFile);
       for (const w of loadProjectConfig(null, { globalDir: coplanHome }).warnings) io.say(`  ! ${w}`);
     }
@@ -373,7 +385,7 @@ export async function askSettings(io: SetupIo, coplanHome: string): Promise<stri
     const autoOpen = await yesNo(io, '  Open the plan in your browser by itself when the agent publishes one?', now.autoOpen);
     const raw = { ...machine.raw };
     put(raw, 'autoOpen', autoOpen, DEFAULT_CONFIG.autoOpen);
-    if (save(machineFile, "Coplan's settings on this machine. docs/CONFIG.md says what each one does.", machine, raw, io)) saved.push(machineFile);
+    if (save(machineFile, MACHINE_HEADER, machine, raw, io)) saved.push(machineFile);
   }
 
   io.say(saved.length ? `  Saved to ${saved.join(' and ')}.` : '  Nothing changed.');
