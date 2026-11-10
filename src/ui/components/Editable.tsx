@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Markdown } from './Markdown.tsx';
-import { openDrafts } from '../lib/drafts.ts';
+import { draftKey as keyOf, openDrafts } from '../lib/drafts.ts';
 import { store } from '../store.ts';
 import { classNames } from '../lib/format.ts';
 import { isComposing } from '../lib/keys.ts';
@@ -159,7 +159,7 @@ export function MarkdownField({
   version?: number;
 }) {
   // A draft left open here (a tab or session switch unmounted it) reopens.
-  const [key] = useState(() => (draftKey ? `${store.getState().sessionId ?? ''}:${draftKey}` : null));
+  const [key] = useState(() => (draftKey ? keyOf(store.getState().sessionId, draftKey) : null));
   const [kept] = useState(() => (key ? openDrafts.get(key) : undefined));
   const [editing, setEditing] = useState(startEditing || Boolean(kept));
   const [draft, setDraft] = useState(kept?.draft ?? value);

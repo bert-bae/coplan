@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
+import { draftKey, openDrafts } from '../lib/drafts.ts';
 import { store, useCollapsedTasks, useEdit, useAgent, usePlan, useSessionId, useStillShown, useStore } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
 import { CommentToggle, ThreadPanel, useThreads } from '../components/Threads.tsx';
@@ -894,11 +895,24 @@ function ReviewPicker({ task }: { task: Task }) {
 /** Expected files, one per line. */
 function FilesField({ task }: { task: Task }) {
   const edit = useEdit();
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState((task.files ?? []).join('\n'));
-  const [startedAt, setStartedAt] = useState(revOf(task));
+  const sessionId = useSessionId();
+  const listed = (task.files ?? []).join('\n');
+  // Kept, as a markdown field's draft is, while open (drafts.ts): its view
+  // going (a tab or session switch) reopens it with the text.
+  const [key] = useState(() => draftKey(sessionId, `task:${task.id}:files`));
+  const [kept] = useState(() => openDrafts.get(key));
+  const [editing, setEditing] = useState(Boolean(kept));
+  const [draft, setDraft] = useState(kept?.draft ?? listed);
+  const [startedAt, setStartedAt] = useState(kept ? kept.version : revOf(task));
+  const startedFrom = useRef(kept?.value ?? listed);
   const latest = useRef(revOf(task));
   latest.current = revOf(task);
+  const latestFiles = useRef(task.files);
+  latestFiles.current = task.files;
+  useEffect(() => {
+    if (editing) openDrafts.set(key, { draft, version: startedAt, value: startedFrom.current });
+    else openDrafts.delete(key);
+  }, [key, editing, draft, startedAt]);
   if (!editing) {
     return (
       <div className="files">
@@ -915,8 +929,9 @@ function FilesField({ task }: { task: Task }) {
           type="button"
           className="link"
           onClick={() => {
-            setDraft((task.files ?? []).join('\n'));
+            setDraft(listed);
             setStartedAt(revOf(task));
+            startedFrom.current = listed;
             setEditing(true);
           }}
         >
@@ -939,9 +954,16 @@ function FilesField({ task }: { task: Task }) {
           className="btn btn-sm btn-primary"
           onClick={async () => {
             const files = draft.split('\n').map((f) => f.trim()).filter(Boolean);
-            // Refused when changed underneath: stay open, with the text.
-            if (await edit({ op: 'upsert_task', id: task.id, files, expect: startedAt })) setEditing(false);
-            else setStartedAt(latest.current);
+            if (await edit({ op: 'upsert_task', id: task.id, files, expect: startedAt })) {
+              // Saved: gone from the kept drafts even if this field closed meanwhile.
+              openDrafts.delete(key);
+              setEditing(false);
+            } else {
+              // Refused when changed underneath: stay open, with the text, on
+              // the list as it is now, so a deliberate second save goes in.
+              startedFrom.current = (latestFiles.current ?? []).join('\n');
+              setStartedAt(latest.current);
+            }
           }}
         >
           Save

@@ -265,6 +265,13 @@
   its own start did not count: started by `coplan start` or `coplan url`
   with no session active, it exited within a minute, and the link it
   printed stopped working. It now waits that long from its start too.
+- **A comment, a reply or a files list being written keeps its text.**
+  Clicking another box, or switching tab or session, threw away a comment
+  being typed (on a box, a task or the plan), a reply, or an open edit of
+  a task's files, and closing the page did not ask about them. They are
+  now kept like the other editors: back where they were with their text,
+  asked about before the page closes, and let go once sent, cancelled, or
+  what they were on is gone.
 - **No two sessions share a folder.** A session id is kept in a folder
   named after it, with anything a folder name cannot hold made safe, so
   ids that differed only there (`a/b`, `a_b`), or past 128 characters,

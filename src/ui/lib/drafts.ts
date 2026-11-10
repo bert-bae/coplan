@@ -1,10 +1,12 @@
 /**
- * Markdown editors open with text, by session and field (`<session>:summary`,
- * `:section:<id>`, `:task:<id>:detail`, `:caption:<diagram>`,
- * `:notes:<diagram>/<box>`). An editor that
- * unmounts (a tab or a session switch) reopens with its draft and what it
- * started from, and closing the page asks first while any holds unsaved
- * text. In memory only: a reload starts afresh, as the page does.
+ * Editors open with text, by session and field (`<session>:summary`,
+ * `:section:<id>`, `:task:<id>:detail`, `:task:<id>:files`,
+ * `:caption:<diagram>`, `:notes:<diagram>/<box>`), and comments being
+ * written (`:comment:<kind>:<id>`, `:reply:<thread>`). An editor that
+ * unmounts (a tab or a session switch, another box selected) reopens with
+ * its draft and what it started from, and closing the page asks first while
+ * any holds unsaved text. In memory only: a reload starts afresh, as the
+ * page does.
  */
 export interface OpenDraft {
   draft: string;
@@ -13,10 +15,15 @@ export interface OpenDraft {
   value: string;
 }
 
-import { isDesignLocked, isLocked } from '../../shared/plan.ts';
-import type { Plan } from '../../shared/types.ts';
+import { isDesignLocked, isLocked, targetExists } from '../../shared/plan.ts';
+import type { Plan, TargetKind } from '../../shared/types.ts';
 
 export const openDrafts = new Map<string, OpenDraft>();
+
+/** A kept draft's key: the session it was written in, and its field. */
+export function draftKey(sessionId: string | null, field: string): string {
+  return `${sessionId ?? ''}:${field}`;
+}
 
 /** Whether any open editor holds text not saved yet. */
 export function unsavedDrafts(): boolean {
@@ -46,11 +53,18 @@ function fieldText(plan: Plan, field: string): string | undefined {
   if (field === 'summary') return design ? undefined : plan.summary;
   let m = /^section:(.+)$/.exec(field);
   if (m) return design ? undefined : plan.sections.find((s) => s.id === m![1])?.body;
-  m = /^task:(.+):detail$/.exec(field);
+  m = /^task:(.+):(detail|files)$/.exec(field);
   if (m) {
     const task = plan.tasks.find((t) => t.id === m![1]);
-    return task && !isLocked(plan) ? (task.detail ?? '') : undefined;
+    if (!task || isLocked(plan)) return undefined;
+    return m[2] === 'detail' ? (task.detail ?? '') : (task.files ?? []).join('\n');
   }
+  // A comment is saved only once sent: until then the field holds nothing.
+  // It goes with what it is on; a reply, with its thread, or once resolved.
+  m = /^comment:([^:]+):(.*)$/.exec(field);
+  if (m) return targetExists(plan, { kind: m[1] as TargetKind, id: m[2]! }) ? '' : undefined;
+  m = /^reply:(.+)$/.exec(field);
+  if (m) return plan.threads.some((t) => t.id === m![1] && !t.resolved) ? '' : undefined;
   m = /^caption:(.+)$/.exec(field);
   if (m) {
     const diagram = plan.diagrams.find((d) => d.id === m![1]);

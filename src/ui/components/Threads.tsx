@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { useAgent, useEdit, usePlan } from '../store.ts';
+import { useRef, useState } from 'react';
+import { useAgent, useEdit, usePlan, useSessionId } from '../store.ts';
+import { draftKey, openDrafts } from '../lib/drafts.ts';
 import { Markdown } from './Markdown.tsx';
 import { isComposing } from '../lib/keys.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
@@ -70,6 +71,7 @@ export function ThreadPanel({ target, label }: { target: Target; label: string }
       )}
       {showResolved && resolved.map((t) => <ThreadView key={t.id} thread={t} />)}
       <Composer
+        field={`comment:${target.kind}:${target.id}`}
         placeholder={open.length ? 'Add another comment…' : `Comment on ${label}…`}
         label={`New comment on ${label}`}
         onSend={(text) => edit({ op: 'comment', target, text })}
@@ -81,7 +83,10 @@ export function ThreadPanel({ target, label }: { target: Target; label: string }
 function ThreadView({ thread }: { thread: Thread }) {
   const edit = useEdit();
   const agent = useAgent();
-  const [replying, setReplying] = useState(false);
+  const field = `reply:${thread.id}`;
+  const key = draftKey(useSessionId(), field);
+  // A reply left half written (its view went) opens again with it.
+  const [replying, setReplying] = useState(() => openDrafts.has(key));
   return (
     <article className={classNames('thread', thread.resolved && 'is-resolved')}>
       <Entry author={thread.author} text={thread.text} ts={thread.ts} />
@@ -90,7 +95,8 @@ function ThreadView({ thread }: { thread: Thread }) {
       ))}
       <div className="thread-actions">
         {!thread.resolved && (
-          <button type="button" className="link" onClick={() => setReplying((v) => !v)}>
+          // Opens it: Cancel or Escape closes it, and drops what was written.
+          <button type="button" className="link" onClick={() => setReplying(true)}>
             Reply
           </button>
         )}
@@ -101,6 +107,7 @@ function ThreadView({ thread }: { thread: Thread }) {
       </div>
       {replying && (
         <Composer
+          field={field}
           placeholder="Reply…"
           label="Reply"
           autoFocus
@@ -134,19 +141,24 @@ export function AuthorBadge({ author }: { author: Author }) {
 }
 
 function Composer({
+  field,
   placeholder,
   label,
   onSend,
   autoFocus,
   onCancel,
 }: {
+  /** Names it among the kept drafts (drafts.ts): `comment:…` or `reply:…`. */
+  field: string;
   placeholder: string;
   label: string;
   onSend: (text: string) => Promise<boolean>;
   autoFocus?: boolean;
   onCancel?: () => void;
 }) {
-  const [text, setText] = useState('');
+  const [text, setText] = useKeptText(field);
+  const latest = useRef(text);
+  latest.current = text;
   const [busy, setBusy] = useState(false);
   const send = async () => {
     const value = text.trim();
@@ -154,8 +166,13 @@ function Composer({
     setBusy(true);
     const ok = await onSend(value);
     setBusy(false);
-    if (ok) setText('');
+    // Sent: cleared, unless more was typed while it went.
+    if (ok && latest.current.trim() === value) setText('');
   };
+  const cancel = onCancel && (() => {
+    setText('');
+    onCancel();
+  });
   return (
     <div className="thread-composer">
       <textarea
@@ -173,17 +190,17 @@ function Composer({
             e.preventDefault();
             void send();
           }
-          if (e.key === 'Escape' && onCancel) {
+          if (e.key === 'Escape' && cancel) {
             e.stopPropagation();
-            onCancel();
+            cancel();
           }
         }}
       />
       <div className="thread-composer-foot">
         <span className="muted">⌘/Ctrl+Enter</span>
         <span className="spacer" />
-        {onCancel && (
-          <button type="button" className="btn btn-sm btn-ghost" onClick={onCancel}>
+        {cancel && (
+          <button type="button" className="btn btn-sm btn-ghost" onClick={cancel}>
             Cancel
           </button>
         )}
@@ -195,3 +212,19 @@ function Composer({
   );
 }
 
+/**
+ * Text being written that is saved only when sent, kept among the open
+ * drafts while it holds any, so it outlives its view and closing the page
+ * asks first. It is the session's on screen: another session, another text.
+ */
+function useKeptText(field: string): [string, (next: string) => void] {
+  const key = draftKey(useSessionId(), field);
+  const [held, setHeld] = useState(() => ({ key, text: openDrafts.get(key)?.draft ?? '' }));
+  if (held.key !== key) setHeld({ key, text: openDrafts.get(key)?.draft ?? '' });
+  const set = (next: string) => {
+    setHeld({ key, text: next });
+    if (next.trim()) openDrafts.set(key, { draft: next, version: undefined, value: '' });
+    else openDrafts.delete(key);
+  };
+  return [held.key === key ? held.text : (openDrafts.get(key)?.draft ?? ''), set];
+}

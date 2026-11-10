@@ -2264,6 +2264,92 @@ test('an open editor keeps its text across a tab switch, and closing the page as
   none(screen.queryByRole('textbox', { name: 'the plan summary' }), 'and it does not come back');
 });
 
+test('a comment, a reply and a files list being written keep their text when their view goes, and closing the page asks first', async () => {
+  const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  await boot(makeSession(plan));
+  const leaving = () => {
+    const e = new window.Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  };
+  // A comment on a box: another box selected, and back.
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('Postgres');
+  const panel = () => screen.getByRole('complementary', { name: 'Details' });
+  fireEvent.change(within(panel()).getByRole('textbox', { name: /^New comment on/ }), { target: { value: 'Half a comment' } });
+  assert.equal(leaving(), true, 'closing the page asks first');
+  await selectBox('API');
+  // The plan pushed meanwhile (the agent at work) keeps what is not saved.
+  await act(async () => store.apply({ type: 'snapshot', session: makeSession(plan) }));
+  await selectBox('Postgres');
+  assert.equal((within(panel()).getByRole('textbox', { name: /^New comment on/ }) as HTMLTextAreaElement).value, 'Half a comment');
+  // A reply, and a files list, on a task: another tab, and back.
+  const openTask = async () => {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '1 open comment(s) on Invalidation' }));
+    });
+  };
+  await openTab('Tasks');
+  await openTask();
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Reply' }), { target: { value: 'The Redis one' } });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Files, one per line' }), { target: { value: 'src/cache.ts' } });
+  await openTab('Overview');
+  await act(async () => store.apply({ type: 'snapshot', session: makeSession(plan) }));
+  await openTab('Tasks');
+  await openTask();
+  assert.equal((screen.getByRole('textbox', { name: 'Reply' }) as HTMLTextAreaElement).value, 'The Redis one');
+  assert.equal((screen.getByRole('textbox', { name: 'Files, one per line' }) as HTMLTextAreaElement).value, 'src/cache.ts');
+  // Each goes when cancelled; with all gone, there is nothing to ask about.
+  for (const name of ['Cancel', 'Cancel']) {
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole('button', { name })[0]!);
+    });
+  }
+  await openTab('Architecture');
+  await selectBox('Postgres');
+  fireEvent.change(within(panel()).getByRole('textbox', { name: /^New comment on/ }), { target: { value: '' } });
+  assert.equal(leaving(), false);
+});
+
+test('a kept comment goes with what it was on, and a kept reply once its thread is resolved', async () => {
+  const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  await boot(makeSession(plan));
+  const leaving = () => {
+    const e = new window.Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  };
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('Postgres');
+  fireEvent.change(within(screen.getByRole('complementary', { name: 'Details' })).getByRole('textbox', { name: /^New comment on/ }), { target: { value: 'Half a comment' } });
+  await selectBox('API');
+  const without = applyOps(plan, [{ op: 'remove_node', diagramId: 'd1', id: 'db' }], 'claude').plan;
+  await act(async () => store.apply({ type: 'snapshot', session: makeSession(without) }));
+  assert.equal(leaving(), false, 'the box is gone, and the comment with it');
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '1 open comment(s) on Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Reply' }), { target: { value: 'The Redis one' } });
+  await openTab('Overview');
+  assert.equal(leaving(), true);
+  const resolved = applyOps(without, [{ op: 'resolve', threadId: without.threads[0]!.id, resolved: true }], 'claude').plan;
+  await act(async () => store.apply({ type: 'snapshot', session: makeSession(resolved) }));
+  assert.equal(leaving(), false, 'resolved: there is nothing left to reply to');
+});
+
 test("an open editor's text waits in its own session while another is on screen", async () => {
   const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
   await boot(makeSession(), (route) => (route === '/api/session/s2' ? { session: other } : undefined));
