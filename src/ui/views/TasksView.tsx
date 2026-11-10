@@ -10,7 +10,7 @@ import { EmptyState } from '../components/primitives.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { TaskCheckChips, TaskChecksField } from '../components/TaskChecks.tsx';
 import { classNames } from '../lib/format.ts';
-import { boxRows, shownStatus } from '../lib/tasks.ts';
+import { boxRows, numbered, shownStatus } from '../lib/tasks.ts';
 import { isTyping } from '../lib/keys.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
 import { boxUnbuilt } from '../../shared/check.ts';
@@ -167,6 +167,8 @@ function ModeSwitch({ mode, modes }: { mode: TaskMode; modes: TaskMode[] }) {
 function ByBox({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
   const severity = useStore((s) => s.planCheck['box-unbuilt']);
   const rows = outline(plan);
+  // Numbered once for every box listed, not once per box.
+  const byId = numbered(rows);
   const linked = new Set(plan.diagrams.flatMap((d) => d.nodes.flatMap((n) => n.taskIds ?? [])));
   const builds = (t: Task) => linked.has(t.id) || ancestorsOf(plan, t).some((a) => linked.has(a.id)) || descendants(plan, t.id).some((x) => linked.has(x.id));
   const off = rows.filter((r) => !builds(r.task));
@@ -180,7 +182,7 @@ function ByBox({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
           <section key={d.id} className="by-box-diagram" aria-label={several ? d.title : undefined}>
             {several && <h2 className="field-label by-box-diagram-title">{d.title}</h2>}
             {boxes.map((n) => {
-              const items = boxRows(plan, n.taskIds);
+              const items = boxRows(plan, n.taskIds, byId);
               const counts = countTasks({ tasks: items.map((r) => r.task) });
               const gap = severity !== 'off' && boxUnbuilt(plan, n);
               return (

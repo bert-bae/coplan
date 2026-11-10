@@ -277,6 +277,9 @@
   half written in an editor elsewhere on the page was dropped once the
   sign-off locked it, and was never in the prompt. The button now waits,
   saying which field to save or cancel first.
+- **A parent task whose subtasks were all dropped shows as dropped.** It
+  showed a ✓ Done, while the briefs said it was dropped whole and its
+  progress counted nothing done.
 - **No two sessions share a folder.** A session id is kept in a folder
   named after it, with anything a folder name cannot hold made safe, so
   ids that differed only there (`a/b`, `a_b`), or past 128 characters,
