@@ -340,6 +340,24 @@ test("coplan init runs the repository's own scripts, never a package manager's c
   }
 });
 
+test("coplan init takes the package manager package.json names, before any lockfile", () => {
+  const cases: [string, Record<string, string>, string][] = [
+    ['named, no lockfile yet', { 'package.json': JSON.stringify({ packageManager: 'pnpm@10.28.0', scripts: { test: 'vitest' } }) }, 'pnpm run test'],
+    ['named, a stray lockfile', { 'package.json': JSON.stringify({ packageManager: 'yarn@4.1.0+sha512.abc', scripts: { test: 'jest' } }), 'pnpm-lock.yaml': '' }, 'yarn run test'],
+    ['bun', { 'package.json': JSON.stringify({ packageManager: 'bun@1.1.0', scripts: { test: 'bun test' } }) }, 'bun run test'],
+    ['one it does not know: the lockfile', { 'package.json': JSON.stringify({ packageManager: 'deno@2', scripts: { test: 'x' } }), 'pnpm-lock.yaml': '' }, 'pnpm run test'],
+    ['not a string: the lockfile', { 'package.json': JSON.stringify({ packageManager: 7, scripts: { test: 'x' } }), 'yarn.lock': '' }, 'yarn run test'],
+  ];
+  for (const [what, files, want] of cases) {
+    const dir = repo(files);
+    try {
+      assert.deepEqual(detectHooks(dir).hooks.review.map((h) => h.run), [want], what);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('coplan init writes a commented starting point from the scripts it finds, and never over one', () => {
   const dir = repo({
     'package.json': JSON.stringify({ scripts: { typecheck: 'tsc', lint: 'eslint .', test: 'node --test', build: 'esbuild' } }),

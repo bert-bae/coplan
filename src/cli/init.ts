@@ -26,6 +26,15 @@ const RUST = ['*.rs', 'Cargo.toml', 'Cargo.lock'];
 const GO = ['*.go', 'go.mod', 'go.sum'];
 const PY = ['*.py', 'pyproject.toml'];
 
+/** Each lockfile and the package manager that writes it, in the order they are believed. */
+const LOCKFILES: [string, string][] = [
+  ['pnpm-lock.yaml', 'pnpm'],
+  ['yarn.lock', 'yarn'],
+  ['bun.lock', 'bun'],
+  ['bun.lockb', 'bun'],
+  ['package-lock.json', 'npm'],
+];
+
 export function detectHooks(root: string): { hooks: Detected; found: string[] } {
   const hooks: Detected = { implement: [], review: [], final: [] };
   const found: string[] = [];
@@ -44,14 +53,15 @@ export function detectHooks(root: string): { hooks: Detected; found: string[] } 
   if (pkg) {
     try {
       // Through parseJsonc: a package.json with a byte order mark, which npm reads, is read too.
-      const scripts = (parseJsonc(pkg) as { scripts?: Record<string, string> }).scripts ?? {};
-      const pm = existsSync(path.join(root, 'pnpm-lock.yaml'))
-        ? 'pnpm'
-        : existsSync(path.join(root, 'yarn.lock'))
-          ? 'yarn'
-          : existsSync(path.join(root, 'bun.lockb')) || existsSync(path.join(root, 'bun.lock'))
-            ? 'bun'
-            : 'npm';
+      const manifest = parseJsonc(pkg) as { scripts?: Record<string, string>; packageManager?: unknown };
+      const scripts = manifest.scripts ?? {};
+      // The one package.json names in `packageManager` (`pnpm@10.28.0`, the
+      // field Corepack uses), whatever lockfile is there or not yet; else
+      // the lockfile's; else npm.
+      const named = typeof manifest.packageManager === 'string' ? /^(npm|pnpm|yarn|bun)@/.exec(manifest.packageManager)?.[1] : undefined;
+      const locked = LOCKFILES.find(([file]) => existsSync(path.join(root, file)));
+      const pm = named ?? locked?.[1] ?? 'npm';
+      const why = named ? 'packageManager' : (locked?.[0] ?? 'no lockfile');
       // Always through `run`: a script named like a command of the package
       // manager's own (yarn check, bun test, pnpm ci) runs that command
       // instead, and passes or fails without running the script.
@@ -69,7 +79,7 @@ export function detectHooks(root: string): { hooks: Detected; found: string[] } 
       if (test) add('review', 'tests', run(test), { timeout: 900 });
       if (check) add('final', check, run(check), { timeout: 1200 });
       else if (build) add('final', 'build', run(build));
-      found.push(`package.json scripts (${pm})`);
+      found.push(`package.json scripts (${pm}, from ${why})`);
     } catch {
       found.push('package.json (unreadable — skipped)');
     }

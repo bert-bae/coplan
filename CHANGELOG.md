@@ -186,6 +186,11 @@
   Claude exited, the thread was marked ended. A call that says it is
   Claude Code now only reaches a Claude session or, for Cursor running
   Claude Code's config, a Cursor chat, by its process or its folder.
+- **`coplan init` runs scripts with the package manager `package.json`
+  names.** It went by lockfiles alone, so a repository with no lockfile
+  yet, or a stray one, got another tool's `run`. The `packageManager`
+  field (`pnpm@10.28.0`, the one Corepack uses) now comes first, and
+  `init` says which it went by.
 
 ### Targeted checks: only what the change touched
 
