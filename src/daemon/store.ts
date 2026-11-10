@@ -123,6 +123,7 @@ export class SessionStore extends EventEmitter {
     if (!existsSync(dir)) return;
 
     const loaded: SessionState[] = [];
+    const elsewhere: string[] = [];
     const expired: string[] = [];
     const cutoff = Date.now() - SESSION_TTL_MS;
 
@@ -143,11 +144,20 @@ export class SessionStore extends EventEmitter {
         expired.push(sessionDir);
         continue;
       }
+      // A folder named by an earlier build, which made an id safe without
+      // its hash (see sanitizeId): read only while the session's own folder
+      // holds no state, and saved there once loaded. Left as it is, for
+      // housekeeping, and for an earlier build run again.
+      if (entry.name !== sanitizeId(state.sessionId)) {
+        if (existsSync(paths.sessionState(state.sessionId))) continue;
+        elsewhere.push(state.sessionId);
+      }
       loaded.push(state);
     }
 
     // Anything past the cap stays on disk — cold, not stale.
     for (const state of kept(loaded)) this.sessions.set(state.sessionId, state);
+    for (const id of elsewhere) if (this.sessions.has(id)) this.persistNow(id);
     for (const sessionDir of expired) discardDir(sessionDir);
   }
 

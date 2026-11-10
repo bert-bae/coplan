@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync, chmodSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync, chmodSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -151,6 +151,60 @@ test("a session id is always a folder in sessions/: '.' and '..' never name sess
   assert.ok(existsSync(path.join(home, 'sessions', 'kept')), 'and so are the other sessions');
 });
 
+test('no two session ids share a folder, however their names are made safe', async () => {
+  const { sanitizeId } = await import('../shared/paths.ts');
+  const long = 'x'.repeat(128);
+  const ids = ['a/b', 'a_b', 'a:b', `${long}1`, `${long}2`, '..', '__', '', 'unknown'];
+  const names = ids.map(sanitizeId);
+  assert.equal(new Set(names).size, ids.length, JSON.stringify(names));
+  for (const name of names) {
+    assert.match(name, /^[A-Za-z0-9._-]{1,128}$/);
+    assert.ok(!/^\.+$/.test(name), name);
+    assert.equal(sanitizeId(name), name, 'a folder name names itself');
+  }
+  const uuid = '0f8fad5b-d9cb-469f-a165-70867728950e';
+  assert.equal(sanitizeId(uuid), uuid, 'an id already safe is its own folder name, as it always was');
+});
+
+test('sessions whose ids are made safe alike keep their own plans', async () => {
+  const store = await freshStore();
+  store.ensure('team/x', process.cwd());
+  store.publishPlan('team/x', { title: 'Slash', tasks: [{ title: 'one' }] });
+  store.persistNow('team/x');
+  assert.equal(store.ensure('team_x', process.cwd()).plan, null, "not the other one's plan");
+  store.publishPlan('team_x', { title: 'Underscore', tasks: [{ title: 'one' }] });
+  store.persistNow('team_x');
+  const reloaded = await freshStore();
+  assert.equal(reloaded.get('team/x')?.plan?.title, 'Slash');
+  assert.equal(reloaded.get('team_x')?.plan?.title, 'Underscore');
+});
+
+test('a session kept in a folder named the old way is saved to its own', async () => {
+  const { paths } = await import('../shared/paths.ts');
+  const store = await freshStore();
+  store.ensure('old:style', process.cwd());
+  store.publishPlan('old:style', PLAN);
+  store.persistNow('old:style');
+  store.drop('old:style');
+  // As an earlier build kept it: the id made safe, and nothing more.
+  const old = path.join(home, 'sessions', 'old_style');
+  if (paths.sessionDir('old:style') !== old) renameSync(paths.sessionDir('old:style'), old);
+  // Its own folder there already, with nothing saved in it: still read from the old one.
+  mkdirSync(paths.sessionDir('old:style'));
+  const reloaded = await freshStore();
+  assert.equal(reloaded.get('old:style')?.plan?.title, PLAN.title);
+  assert.ok(existsSync(paths.sessionState('old:style')), 'saved to its own');
+  assert.ok(existsSync(path.join(old, 'state.json')), 'the old one left as it was');
+
+  // Once both are there, the one in the session's own folder is the one saved since.
+  const stale = JSON.parse(readFileSync(paths.sessionState('old:style'), 'utf8')) as { plan: { title: string }; updatedAt: number };
+  stale.plan.title = 'Stale';
+  stale.updatedAt -= 1000;
+  writeFileSync(path.join(old, 'state.json'), JSON.stringify(stale));
+  for (let i = 0; i < 3; i++) assert.equal((await freshStore()).get('old:style')?.plan?.title, PLAN.title);
+  assert.ok(existsSync(old), 'the other left for housekeeping');
+});
+
 test('sessions older than the retention window are not loaded', async () => {
   const dir = path.join(home, 'sessions', 'ancient');
   mkdirSync(dir, { recursive: true });
@@ -229,8 +283,9 @@ test('a session saved by a newer Coplan is never read wrongly or saved over', as
 });
 
 test('a newer Coplan\'s session is not saved over under an id its folder name changes', async () => {
-  // Session ids become folder names with anything unsafe made safe: `a/b` is kept in `a_b`.
-  const dir = path.join(home, 'sessions', 'from_the_future');
+  // Session ids become folder names with anything unsafe made safe: `a/b` is kept in `a_b-<hash>`.
+  const { paths } = await import('../shared/paths.ts');
+  const dir = paths.sessionDir('from/the/future');
   mkdirSync(dir, { recursive: true });
   const file = path.join(dir, 'state.json');
   const future = JSON.stringify({ schemaVersion: 99, sessionId: 'from/the/future', title: 'x', plan: { shape: 'new' } });
@@ -243,7 +298,7 @@ test('a newer Coplan\'s session is not saved over under an id its folder name ch
   assert.equal(readFileSync(file, 'utf8'), future);
 
   // And one that appears after the store started, found when its first hook arrives.
-  const later = path.join(home, 'sessions', 'also_from_the_future');
+  const later = paths.sessionDir('also/from/the/future');
   mkdirSync(later, { recursive: true });
   const laterFile = path.join(later, 'state.json');
   writeFileSync(laterFile, future);

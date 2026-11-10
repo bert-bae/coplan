@@ -230,6 +230,13 @@
   says so as it opens, and that deleting it deletes it for the newer
   version too. Deleting it also frees its id: a session started later
   under it is saved as usual.
+- **No two sessions share a folder.** A session id is kept in a folder
+  named after it, with anything a folder name cannot hold made safe, so
+  ids that differed only there (`a/b`, `a_b`), or past 128 characters,
+  shared one: each read the other's plan and saved over it. Such an id's
+  folder now also carries a short hash of the id. Every agent's ids are
+  safe as they are and keep their folders; a session kept the old way is
+  saved to its new folder the next time Coplan starts.
 
 ### Targeted checks: only what the change touched
 

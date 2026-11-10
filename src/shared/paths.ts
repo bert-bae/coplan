@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { chmodSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
@@ -29,11 +30,16 @@ export const paths = {
 
 /** Session ids come from the CLI, but they end up in filesystem paths.
  *  An id of dots alone is never one: `.` would be sessions/ itself and
- *  `..` the home, which purging the session would delete. */
+ *  `..` the home, which purging the session would delete. An id that is a
+ *  safe name already is its own (every agent's is); one changed to make it
+ *  safe also carries a hash of itself, so two ids changed alike never share
+ *  a folder (one typed as another's hashed name would). A name made here
+ *  is its own name again. */
 export function sanitizeId(id: string): string {
-  const safe = id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128);
-  if (!safe) return 'unknown';
-  return /^\.+$/.test(safe) ? safe.replace(/\./g, '_') : safe;
+  const safe = id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128) || 'unknown';
+  const name = /^\.+$/.test(safe) ? safe.replace(/\./g, '_') : safe;
+  if (name === id) return name;
+  return `${name.slice(0, 119)}-${createHash('sha256').update(id).digest('hex').slice(0, 8)}`;
 }
 
 /**
