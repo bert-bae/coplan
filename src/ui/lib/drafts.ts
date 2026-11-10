@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { isDesignLocked, isLocked, targetExists } from '../../shared/plan.ts';
+import { describeTarget, isDesignLocked, isLocked, targetExists } from '../../shared/plan.ts';
 import type { Plan, TargetKind } from '../../shared/types.ts';
 
 /**
@@ -84,10 +84,11 @@ function fieldText(plan: Plan, field: string, locks: Locks = { design: isDesignL
   }
   // A comment is saved only once sent: until then the field holds nothing.
   // It goes with what it is on; a reply, with its thread, or once resolved.
+  // Comments are open until the plan is submitted: a submitted plan takes none.
   m = /^comment:([^:]+):(.*)$/.exec(field);
-  if (m) return targetExists(plan, { kind: m[1] as TargetKind, id: m[2]! }) ? '' : undefined;
+  if (m) return !locks.plan && targetExists(plan, { kind: m[1] as TargetKind, id: m[2]! }) ? '' : undefined;
   m = /^reply:(.+)$/.exec(field);
-  if (m) return plan.threads.some((t) => t.id === m![1] && !t.resolved) ? '' : undefined;
+  if (m) return !locks.plan && plan.threads.some((t) => t.id === m![1] && !t.resolved) ? '' : undefined;
   m = /^caption:(.+)$/.exec(field);
   if (m) {
     const diagram = plan.diagrams.find((d) => d.id === m![1]);
@@ -127,6 +128,14 @@ function fieldName(plan: Plan, field: string): string {
   if (kind === 'notes') {
     const [did, nid] = [id.slice(0, id.indexOf('/')), id.slice(id.indexOf('/') + 1)];
     return `the notes on box "${plan.diagrams.find((d) => d.id === did)?.nodes.find((n) => n.id === nid)?.label ?? nid}"`;
+  }
+  if (kind === 'comment') {
+    const [on, at] = [id.slice(0, id.indexOf(':')), id.slice(id.indexOf(':') + 1)];
+    return `the comment on ${describeTarget(plan, { kind: on as TargetKind, id: at })}`;
+  }
+  if (kind === 'reply') {
+    const thread = plan.threads.find((t) => t.id === id);
+    return thread ? `the reply on ${describeTarget(plan, thread.target)}` : 'a reply';
   }
   const task = /^(.+):(detail|files)$/.exec(id);
   return task ? `the ${task[2]} of task "${plan.tasks.find((t) => t.id === task[1])?.title ?? task[1]}"` : field;

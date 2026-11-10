@@ -14,7 +14,7 @@ setupDom();
 const { render, renderHook, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
 const { store, SessionScope, useEdit, useStillShown } = await import('../ui/store.ts');
-const { openDrafts } = await import('../ui/lib/drafts.ts');
+const { openDrafts, draftsLockedBy } = await import('../ui/lib/drafts.ts');
 const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan, confirmDesign, queueRevision, markRevisionDelivered } = await import('../shared/plan.ts');
 
 const INPUT: PlanInput = {
@@ -2565,6 +2565,38 @@ test("an open editor's text waits in its own session while another is on screen"
   });
   await openTab('Overview');
   assert.equal((screen.getByRole('textbox', { name: 'the plan summary' }) as HTMLTextAreaElement).value, 'For s1 only');
+});
+
+test('a comment being written is held by the submit lock, as a field is: Submit waits for it, and a lock from elsewhere says so', async () => {
+  // Comments are open until the plan is submitted, and then refused. One already there stays to read.
+  const confirmed = confirmDesign(applyOps(makePlan(), [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'Is a day of staleness fine?' }], 'user').plan, { prompt: 'tasks' });
+  await boot(makeSession(confirmed));
+  await openTab('Overview');
+  assert.ok(screen.getByRole('button', { name: 'Reply' }), 'replies open before');
+  fireEvent.change(screen.getByRole('textbox', { name: /^New comment on the plan/ }), { target: { value: 'Also handle a cache stampede' } });
+  const s = store.getState().session!;
+  assert.deepEqual(draftsLockedBy(s.sessionId, s.plan!, 'plan'), ['the comment on the plan'], 'Submit waits for it');
+  assert.deepEqual(draftsLockedBy(s.sessionId, s.plan!, 'design'), [], 'the design is confirmed already');
+  // A reply being written, likewise.
+  const threaded = applyOps(confirmed, [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  const reply = `elsewhere:reply:${threaded.threads.find((t) => t.target.kind === 'task')!.id}`;
+  openDrafts.set(reply, { draft: 'The pooled one', value: '', version: undefined });
+  try {
+    assert.deepEqual(draftsLockedBy('elsewhere', threaded, 'plan'), ['the reply on task "Invalidation"']);
+  } finally {
+    openDrafts.delete(reply);
+  }
+  // Submitted in chat: the comment can no longer be sent.
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(s.plan!, { target: 'session', prompt: 'build' }) } });
+  });
+  const said = store.getState().toasts.find((t) => /comment on the plan/.test(t.text));
+  assert.ok(said, 'said');
+  assert.equal(said.copy, 'Also handle a cache stampede', 'with the text to copy');
+  // Its box goes, as the plan takes no comments now: nothing typed there to be dropped again.
+  assert.ok(screen.getByText('Is a day of staleness fine?'), 'the comments there are still to read');
+  assert.equal(screen.queryByRole('textbox', { name: /^New comment on/ }) === null, true, 'no comment box');
+  assert.equal(screen.queryByRole('button', { name: 'Reply' }) === null, true, 'no Reply');
 });
 
 test('a lock from elsewhere that drops text left open says so, with the text to copy', async () => {

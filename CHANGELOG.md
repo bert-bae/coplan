@@ -340,6 +340,12 @@
   Checking each one against your unread edits copied the whole plan, so on
   a big plan a batch held Coplan for up to half a second. It now works out
   which box links would change without the copy.
+- **A comment you are writing is held by Submit, as a field is.** A
+  submitted plan takes no comments, but a comment or reply left unsent
+  did not hold up *Submit plan*, and a submit from chat let it go without
+  a word, its box gone. Submit now waits for it, and a lock from
+  elsewhere tells you, with the text to copy. Once the plan is submitted,
+  its comments are there to read, with no box to write in or Reply.
 - **Your old note no longer saves over the agent's newer one.** A note
   the agent sends with a status ("Blocked: DB creds missing") changes the
   task without moving its revision, so a note editor you had open from

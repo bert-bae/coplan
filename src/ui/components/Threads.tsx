@@ -4,7 +4,7 @@ import { useKeptDraft } from '../lib/drafts.ts';
 import { Markdown } from './Markdown.tsx';
 import { isComposing } from '../lib/keys.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
-import { threadWaitsOn } from '../../shared/plan.ts';
+import { isLocked, threadWaitsOn } from '../../shared/plan.ts';
 import type { Author, Target, Thread } from '../../shared/types.ts';
 
 /**
@@ -58,6 +58,9 @@ export function ThreadPanel({ target, label }: { target: Target; label: string }
   // Saved only once sent; kept (drafts.ts) while being written.
   const comment = useKeptDraft(useSessionId(), `comment:${target.kind}:${target.id}`, '', undefined, true);
   const [showResolved, setShowResolved] = useState(false);
+  // A submitted plan takes no comments: its threads are there to read.
+  const plan = usePlan();
+  const locked = plan ? isLocked(plan) : false;
   const open = threads.filter((t) => !t.resolved);
   const resolved = threads.filter((t) => t.resolved);
 
@@ -72,13 +75,15 @@ export function ThreadPanel({ target, label }: { target: Target; label: string }
         </button>
       )}
       {showResolved && resolved.map((t) => <ThreadView key={t.id} thread={t} />)}
-      <Composer
-        text={comment.draft}
-        setText={comment.setDraft}
-        placeholder={open.length ? 'Add another comment…' : `Comment on ${label}…`}
-        label={`New comment on ${label}`}
-        onSend={(text) => edit({ op: 'comment', target, text })}
-      />
+      {!locked && (
+        <Composer
+          text={comment.draft}
+          setText={comment.setDraft}
+          placeholder={open.length ? 'Add another comment…' : `Comment on ${label}…`}
+          label={`New comment on ${label}`}
+          onSend={(text) => edit({ op: 'comment', target, text })}
+        />
+      )}
     </div>
   );
 }
@@ -88,6 +93,8 @@ function ThreadView({ thread }: { thread: Thread }) {
   const agent = useAgent();
   // A reply left half written (its view went) opens again with it.
   const reply = useKeptDraft(useSessionId(), `reply:${thread.id}`, '', undefined);
+  const plan = usePlan();
+  const locked = plan ? isLocked(plan) : false;
   return (
     <article className={classNames('thread', thread.resolved && 'is-resolved')}>
       <Entry author={thread.author} text={thread.text} ts={thread.ts} />
@@ -95,7 +102,7 @@ function ThreadView({ thread }: { thread: Thread }) {
         <Entry key={r.id} author={r.author} text={r.text} ts={r.ts} reply />
       ))}
       <div className="thread-actions">
-        {!thread.resolved && (
+        {!thread.resolved && !locked && (
           // Opens it: Cancel or Escape closes it, and drops what was written.
           <button type="button" className="link" onClick={reply.begin}>
             Reply
@@ -106,7 +113,7 @@ function ThreadView({ thread }: { thread: Thread }) {
         </button>
         {threadWaitsOn(thread) === 'claude' && <span className="muted">{agent.name} sees this when it next reads the plan, or with <em>Request revisions</em></span>}
       </div>
-      {reply.editing && (
+      {reply.editing && !locked && (
         <Composer
           text={reply.draft}
           setText={reply.setDraft}
