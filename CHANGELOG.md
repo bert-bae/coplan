@@ -343,7 +343,9 @@
   folder now also carries a short hash of the id. Every agent's ids are
   safe as they are and keep their folders; a session kept the old way is
   saved to its new folder the next time Coplan starts, or when it is next
-  used, and deleting it deletes its old folder too.
+  used, and deleting it deletes its old folder too. If an earlier build,
+  run again, saved more in the old folder since, that newer copy is the
+  one taken.
 - **A diagram the agent relinked says so.** Removing a task, or a task
   list's `builds`, changed a diagram's box links but left it marked as
   last edited by whoever edited it before: a save refused over it said

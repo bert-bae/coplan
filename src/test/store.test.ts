@@ -205,6 +205,86 @@ test('a session kept in a folder named the old way is saved to its own', async (
   assert.ok(existsSync(old), 'the other left for housekeeping');
 });
 
+test('a newer copy an earlier build saved in the old folder is the one taken, at load and by ensure, and saved to its own', async () => {
+  const { paths } = await import('../shared/paths.ts');
+  const ownTitle = (id: string) => JSON.parse(readFileSync(paths.sessionState(id), 'utf8')).plan.title;
+  // Its own folder's copy older by a minute, or so old it is past keeping.
+  for (const [id, old, how, age] of [
+    ['run:again', 'run_again', 'load', 60_000],
+    ['later:again', 'later_again', 'ensure', 60_000],
+    ['long:gone', 'long_gone', 'load', 120 * 24 * 60 * 60 * 1000],
+  ] as const) {
+    const store = await freshStore();
+    store.ensure(id, process.cwd());
+    store.publishPlan(id, { title: 'In its own folder', tasks: [{ title: 'one' }] });
+    store.persistNow(id);
+    store.drop(id);
+    // By ensure: a daemon already up, the session not in memory, when the files change.
+    const up = how === 'ensure' ? await freshStore() : undefined;
+    up?.drop(id);
+    // An earlier build, run again, saves what the user did since in the folder it knows.
+    const own = JSON.parse(readFileSync(paths.sessionState(id), 'utf8')) as { plan: { title: string }; updatedAt: number };
+    const since = { ...own, plan: { ...own.plan, title: 'Edited in the earlier build' }, updatedAt: Date.now() };
+    writeFileSync(paths.sessionState(id), JSON.stringify({ ...own, updatedAt: Date.now() - age }));
+    mkdirSync(path.join(home, 'sessions', old), { recursive: true });
+    writeFileSync(path.join(home, 'sessions', old, 'state.json'), JSON.stringify(since));
+    const next = up ?? (await freshStore());
+    const title = how === 'load' ? next.get(id)?.plan?.title : next.ensure(id, process.cwd()).plan?.title;
+    assert.equal(title, 'Edited in the earlier build', id);
+    assert.equal(ownTitle(id), 'Edited in the earlier build', `${id}: saved to its own folder`);
+  }
+});
+
+test("an old folder's copy is not taken over another session's, nor when it has no time of its own; an unreadable own copy gives way to it", async () => {
+  const { paths, sanitizeId, legacyName } = await import('../shared/paths.ts');
+  const template = async (id: string, title: string) => {
+    const store = await freshStore();
+    store.ensure(id, process.cwd());
+    store.publishPlan(id, { title, tasks: [{ title: 'one' }] });
+    store.persistNow(id);
+    store.drop(id);
+    return JSON.parse(readFileSync(paths.sessionState(id), 'utf8')) as Record<string, unknown> & { updatedAt: number };
+  };
+  const put = (folder: string, state: object) => {
+    mkdirSync(path.join(home, 'sessions', folder), { recursive: true });
+    writeFileSync(path.join(home, 'sessions', folder, 'state.json'), JSON.stringify(state));
+  };
+  const titleIn = (folder: string) => JSON.parse(readFileSync(path.join(home, 'sessions', folder, 'state.json'), 'utf8')).plan?.title;
+
+  // x:y's own folder holds y's copy, kept the old way there: x:y's newer old copy does not go over it.
+  const x = 'x:y';
+  const y = sanitizeId(x).replace('_', ':');
+  assert.equal(legacyName(y), sanitizeId(x));
+  const xs = await template(x, 'Plan of x');
+  rmSync(paths.sessionDir(x), { recursive: true, force: true });
+  put(sanitizeId(x), { ...(await template(y, 'Plan of y')), updatedAt: Date.now() - 1_000 });
+  rmSync(paths.sessionDir(y), { recursive: true, force: true });
+  put(legacyName(x), { ...xs, updatedAt: Date.now() });
+  const booted = await freshStore();
+  assert.equal(booted.get(y)?.plan?.title, 'Plan of y', 'y kept its plan');
+  assert.equal(JSON.parse(readFileSync(path.join(home, 'sessions', sanitizeId(x), 'state.json'), 'utf8')).sessionId, y, "x's copy did not go over it");
+
+  // An old copy with no time of its own loses to the session's own, at load and by ensure.
+  for (const how of ['load', 'ensure'] as const) {
+    const id = `no:time-${how}`;
+    const up = how === 'ensure' ? await freshStore() : undefined;
+    const own = await template(id, 'Its own');
+    const { updatedAt: _none, ...undated } = { ...own, plan: { ...(own['plan'] as object), title: 'Undated old copy' } };
+    put(legacyName(id), undated);
+    const next = up ?? (await freshStore());
+    next.drop(id);
+    assert.equal(next.ensure(id, process.cwd()).plan?.title, 'Its own', how);
+    assert.equal(titleIn(sanitizeId(id)), 'Its own', `${how}: not saved over`);
+  }
+
+  // Its own copy unreadable (moved aside), the old one is taken by ensure, as at load.
+  const up = await freshStore();
+  const kept = await template('torn:up', 'Kept the old way');
+  put(legacyName('torn:up'), { ...kept, updatedAt: Date.now() });
+  writeFileSync(paths.sessionState('torn:up'), '{"sessionId":"torn:up","plan":{"tit');
+  assert.equal(up.ensure('torn:up', process.cwd()).plan?.title, 'Kept the old way');
+});
+
 test('a session kept the old way is found by ensure as at load, and deleted for good, folder and all', async () => {
   const { paths } = await import('../shared/paths.ts');
   const old = path.join(home, 'sessions', 'later_x');
