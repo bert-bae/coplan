@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 import { api, eventsUrl, Unauthorized, type ProjectChecks } from './lib/api.ts';
 import { pruneDrafts, unsavedDrafts } from './lib/drafts.ts';
 
@@ -182,10 +182,10 @@ class Store {
   }
 
   async selectSession(id: string, updateHash = true): Promise<void> {
-    // A field being typed in saves when it loses focus: let it, while its
-    // own session is still the one on screen. Left to the view's removal,
-    // it would be dropped, or (where a browser blurs a removed field) saved
-    // into the session switched to, where task ids like t3 mean other tasks.
+    // A field being typed in saves when it loses focus: let it, before its
+    // view goes. Left to the removal, it would be dropped where a browser
+    // does not blur a removed field. Its save goes to its own session
+    // either way: each view's edits are bound to it (useEdit).
     if (id !== this.state.sessionId) {
       const typing = document.activeElement;
       if (typing instanceof HTMLInputElement || typing instanceof HTMLTextAreaElement) typing.blur();
@@ -328,22 +328,14 @@ class Store {
    * ---------------------------------------------------------------- */
 
   /**
-   * Send edits to the daemon. Resolves true when they were accepted; on a
-   * refusal the daemon's reason is shown and the plan is left as it was.
+   * Send edits to one session's plan, and resolve with the plan exactly as
+   * the daemon left it after them — or null when they were refused (the
+   * reason is shown). Callers that build on the result (the canvas's
+   * revision) need the daemon's answer, not whatever the store holds by the
+   * time it arrives. The session is the caller's, never the one on screen
+   * when this runs: `useEdit` binds it when the view renders.
    */
-  async ops(ops: PlanOp[]): Promise<boolean> {
-    return (await this.commit(ops)) !== null;
-  }
-
-  /**
-   * Send edits, and resolve with the plan exactly as the daemon left it after
-   * them — or null when they were refused. Callers that build on the result
-   * (the canvas's revision) need the daemon's answer, not whatever the store
-   * holds by the time it arrives.
-   */
-  async commit(ops: PlanOp[], sessionId: string | null = this.state.sessionId): Promise<Plan | null> {
-    // A caller bound to one session's plan (the canvas) names it, so a save
-    // still queued when the user switches sessions lands where it was made.
+  async commit(ops: PlanOp[], sessionId: string | null): Promise<Plan | null> {
     if (!sessionId || ops.length === 0) return null;
     this.set({ saving: this.state.saving + 1 });
     try {
@@ -351,10 +343,6 @@ class Store {
     } finally {
       this.set({ saving: Math.max(0, this.state.saving - 1) });
     }
-  }
-
-  op(op: PlanOp): Promise<boolean> {
-    return this.ops([op]);
   }
 
   /**
@@ -820,6 +808,25 @@ export function useStore<T>(select: (state: UiState) => T): T {
 
 export function useSession(): SessionState | null {
   return useStore((s) => s.session);
+}
+
+/**
+ * Edits to the plan the view shows, bound to its session when the view
+ * renders, not when they are sent. A save that lands after the user
+ * switched sessions — an editor saving on its way out, a request still
+ * queued — goes to the plan it was made on, where task ids like t3 mean
+ * these tasks. Resolves with that plan as the daemon left it, or null when
+ * the edits were refused.
+ */
+export function useCommit(): (edit: PlanOp | PlanOp[]) => Promise<Plan | null> {
+  const sessionId = useStore((s) => s.session?.sessionId ?? null);
+  return useCallback((edit) => store.commit(Array.isArray(edit) ? edit : [edit], sessionId), [sessionId]);
+}
+
+/** `useCommit`, for callers that only need to know the edits were taken. */
+export function useEdit(): (edit: PlanOp | PlanOp[]) => Promise<boolean> {
+  const commit = useCommit();
+  return useCallback(async (edit) => (await commit(edit)) !== null, [commit]);
 }
 
 export function usePlan() {

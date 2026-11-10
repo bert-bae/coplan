@@ -132,19 +132,19 @@ test("an edit's answer is put in place the same way: newer or equal lands, older
   await show('s8', 'claude');
   const at = shownPlan()!.version;
   answer = () => ({ plan: { ...shownPlan()!, version: at + 1, title: 'edited' }, changes: [] });
-  assert.equal((await store.commit([{ op: 'set_meta', title: 'edited' }]))?.title, 'edited');
+  assert.equal((await store.commit([{ op: 'set_meta', title: 'edited' }], 's8'))?.title, 'edited');
   assert.equal(shownPlan()?.title, 'edited');
   answer = () => ({ plan: { ...shownPlan()!, version: at + 1, title: 'edited, same version' }, changes: [] });
-  await store.commit([{ op: 'set_meta', title: 'x' }]);
+  await store.commit([{ op: 'set_meta', title: 'x' }], 's8');
   assert.equal(shownPlan()?.title, 'edited, same version');
   answer = () => ({ plan: { ...shownPlan()!, version: at, title: 'stale edit' }, changes: [] });
-  assert.equal((await store.commit([{ op: 'set_meta', title: 'x' }]))?.title, 'stale edit', 'the answer is returned');
+  assert.equal((await store.commit([{ op: 'set_meta', title: 'x' }], 's8'))?.title, 'stale edit', 'the answer is returned');
   assert.equal(shownPlan()?.title, 'edited, same version', 'but not put in place');
   answer = () => ({ plan: { ...shownPlan()!, version: at + 5, title: 'for s1' }, changes: [] });
   await store.commit([{ op: 'set_meta', title: 'x' }], 's1');
   assert.equal(shownPlan()?.title, 'edited, same version', "another session's answer never lands here");
   answer = () => ({ __status: 400, error: 'No task "nope".' });
-  assert.equal(await store.commit([{ op: 'remove', kind: 'task', id: 'nope' }]), null);
+  assert.equal(await store.commit([{ op: 'remove', kind: 'task', id: 'nope' }], 's8'), null);
   assert.equal(lastToast()?.text, 'No task "nope".');
 });
 

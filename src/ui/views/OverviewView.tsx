@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { store, useAgent, usePlan } from '../store.ts';
+import { store, useEdit, useAgent, usePlan } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
 import { CommentToggle, ThreadPanel } from '../components/Threads.tsx';
 import { Focusable, ItemActions } from '../components/Item.tsx';
@@ -18,6 +18,7 @@ import type { Plan, Section } from '../../shared/types.ts';
  * and each one is a way into the tab that holds the detail.
  */
 export function OverviewView() {
+  const edit = useEdit();
   const plan = usePlan();
   if (!plan) return null;
   return (
@@ -47,7 +48,7 @@ export function OverviewView() {
           placeholder="No summary yet."
           emptyAction="Write one"
           draftKey="summary"
-          onSave={(summary) => store.op({ op: 'set_meta', summary })}
+          onSave={(summary) => edit({ op: 'set_meta', summary })}
         />
       </Focusable>
 
@@ -60,7 +61,7 @@ export function OverviewView() {
           <AddField
             placeholder="New section title — e.g. Data model, Risks, Out of scope"
             label="New section title"
-            onAdd={(title) => store.op({ op: 'upsert_section', title, body: '' })}
+            onAdd={(title) => edit({ op: 'upsert_section', title, body: '' })}
           />
         </div>
       )}
@@ -135,6 +136,7 @@ function Glance({ plan }: { plan: Plan }) {
 }
 
 function SectionCard({ section, index, count }: { section: Section; index: number; count: number }) {
+  const edit = useEdit();
   const [comments, setComments] = useState(false);
   const target = { kind: 'section' as const, id: section.id };
   return (
@@ -145,7 +147,7 @@ function SectionCard({ section, index, count }: { section: Section; index: numbe
           className="section-title"
           value={section.title}
           label="Section title"
-          onSave={(title) => store.op({ op: 'upsert_section', id: section.id, title })}
+          onSave={(title) => edit({ op: 'upsert_section', id: section.id, title })}
         />
         <span className="item-id">{section.id}</span>
         <span className="spacer" />
@@ -154,8 +156,8 @@ function SectionCard({ section, index, count }: { section: Section; index: numbe
           label={section.title}
           index={index}
           count={count}
-          onMove={(to) => store.op({ op: 'move_section', id: section.id, index: to })}
-          onRemove={() => store.op({ op: 'remove', kind: 'section', id: section.id })}
+          onMove={(to) => edit({ op: 'move_section', id: section.id, index: to })}
+          onRemove={() => edit({ op: 'remove', kind: 'section', id: section.id })}
         />
       </header>
       <MarkdownField
@@ -164,7 +166,7 @@ function SectionCard({ section, index, count }: { section: Section; index: numbe
         rows={8}
         version={section.rev}
         draftKey={`section:${section.id}`}
-        onSave={(body, rev) => store.op({ op: 'upsert_section', id: section.id, body, ...(rev !== undefined ? { expect: rev } : {}) })}
+        onSave={(body, rev) => edit({ op: 'upsert_section', id: section.id, body, ...(rev !== undefined ? { expect: rev } : {}) })}
       />
       {comments && <ThreadPanel target={target} label={section.title} />}
     </Focusable>

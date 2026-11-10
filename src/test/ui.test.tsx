@@ -1,7 +1,7 @@
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, stubFetch } from './dom-env.ts';
-import type { Plan, PlanInput, SessionState } from '../shared/types.ts';
+import type { Plan, PlanInput, PlanOp, SessionState } from '../shared/types.ts';
 
 /**
  * The planning workspace in a browser: every edit becomes an op sent to the
@@ -13,7 +13,7 @@ setupDom();
 
 const { render, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
-const { store } = await import('../ui/store.ts');
+const { store, useEdit } = await import('../ui/store.ts');
 const { openDrafts } = await import('../ui/lib/drafts.ts');
 const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan, confirmDesign, queueRevision, markRevisionDelivered } = await import('../shared/plan.ts');
 
@@ -562,7 +562,7 @@ test('a late answer never rolls the page back past a newer version', async () =>
   store.set({ session: { ...s, plan: { ...s.plan!, title: 'Newer', version: s.plan!.version + 2 } } });
   stubFetch((route) => (route.endsWith('/plan/ops') ? { plan: older, changes: [] } : { ok: true }));
   await act(async () => {
-    await store.commit([{ op: 'set_meta', title: 'Older' }]);
+    await store.commit([{ op: 'set_meta', title: 'Older' }], 's1');
   });
   assert.equal(store.getState().session?.plan?.title, 'Newer');
 });
@@ -628,7 +628,7 @@ test('an answer from a daemon that predates version is still applied', async () 
   store.set({ session: { ...s, plan: { ...s.plan!, version: undefined as unknown as number } } });
   stubFetch((route) => (route.endsWith('/plan/ops') ? { plan: legacy, changes: [] } : { ok: true }));
   await act(async () => {
-    await store.commit([{ op: 'set_meta', title: 'From the old daemon' }]);
+    await store.commit([{ op: 'set_meta', title: 'From the old daemon' }], 's1');
   });
   assert.equal(store.getState().session?.plan?.title, 'From the old daemon');
 });
@@ -1983,6 +1983,32 @@ test('switching session closes the editors of the one left: nothing typed for on
   });
   assert.equal(sentTo('s2').length, 0, 'nothing reached s2');
   assert.deepEqual(sentTo('s1').map((o) => [o['op'], o['title']]), [['upsert_task', 'Storage, renamed in s1']]);
+});
+
+test('an edit made while one plan was on screen goes to that plan, however late it is sent', async () => {
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => (route === '/api/session/s2' ? { session: other } : undefined));
+  const sentTo = (id: string) => posts.filter((p) => p.route === `/api/session/${id}/plan/ops`).flatMap((p) => p.body['ops'] as Record<string, unknown>[]);
+  let edit: ((edit: PlanOp | PlanOp[]) => Promise<boolean>) | null = null;
+  function Editor() {
+    edit = useEdit();
+    return null;
+  }
+  render(<Editor />);
+  // What a view on s1 holds: an editor's save, a request still queued.
+  const madeOnS1 = edit!;
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  await act(async () => {
+    await madeOnS1({ op: 'upsert_task', id: 't1', title: 'Renamed on s1' });
+  });
+  assert.deepEqual(sentTo('s1').map((o) => o['title']), ['Renamed on s1']);
+  assert.deepEqual(sentTo('s2'), [], 'never into the plan now on screen, whose t1 is another task');
+  await act(async () => {
+    await edit!({ op: 'set_meta', title: 'Made on s2' });
+  });
+  assert.deepEqual(sentTo('s2').map((o) => o['title']), ['Made on s2'], 'and one made there now goes there');
 });
 
 test('the task list offers no nesting under a task already started or finished', async () => {

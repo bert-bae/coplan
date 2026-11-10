@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { store, useAgent, usePlan } from '../store.ts';
+import { useAgent, useEdit, usePlan } from '../store.ts';
 import { Markdown } from './Markdown.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { threadWaitsOn } from '../../shared/plan.ts';
@@ -51,6 +51,7 @@ export function CommentToggle({
 }
 
 export function ThreadPanel({ target, label }: { target: Target; label: string }) {
+  const edit = useEdit();
   const threads = useThreads(target);
   const [showResolved, setShowResolved] = useState(false);
   const open = threads.filter((t) => !t.resolved);
@@ -70,13 +71,14 @@ export function ThreadPanel({ target, label }: { target: Target; label: string }
       <Composer
         placeholder={open.length ? 'Add another comment…' : `Comment on ${label}…`}
         label={`New comment on ${label}`}
-        onSend={(text) => store.op({ op: 'comment', target, text })}
+        onSend={(text) => edit({ op: 'comment', target, text })}
       />
     </div>
   );
 }
 
 function ThreadView({ thread }: { thread: Thread }) {
+  const edit = useEdit();
   const agent = useAgent();
   const [replying, setReplying] = useState(false);
   return (
@@ -91,7 +93,7 @@ function ThreadView({ thread }: { thread: Thread }) {
             Reply
           </button>
         )}
-        <button type="button" className="link" onClick={() => void store.op({ op: 'resolve', threadId: thread.id, resolved: !thread.resolved })}>
+        <button type="button" className="link" onClick={() => void edit({ op: 'resolve', threadId: thread.id, resolved: !thread.resolved })}>
           {thread.resolved ? 'Reopen' : 'Resolve'}
         </button>
         {threadWaitsOn(thread) === 'claude' && <span className="muted">{agent.name} sees this when it next reads the plan, or with <em>Request revisions</em></span>}
@@ -102,7 +104,7 @@ function ThreadView({ thread }: { thread: Thread }) {
           label="Reply"
           autoFocus
           onSend={async (text) => {
-            const ok = await store.op({ op: 'reply', threadId: thread.id, text });
+            const ok = await edit({ op: 'reply', threadId: thread.id, text });
             if (ok) setReplying(false);
             return ok;
           }}

@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useRef, type FocusEvent, type KeyboardEvent, type RefObject } from 'react';
-import { store, usePlan, useStore } from '../../store.ts';
+import { store, useEdit, usePlan, useStore } from '../../store.ts';
 import { AddField, InlineText } from '../Editable.tsx';
 import { ProgressBar, STATUS_GLYPH, STATUS_LABEL } from '../Progress.tsx';
 import { classNames } from '../../lib/format.ts';
@@ -101,6 +101,7 @@ export const BoxFoot = forwardRef<HTMLButtonElement, { id: string; data: FlowDat
  * the keyboard leaves it.
  */
 export function BoxTasks({ id, data, chip }: { id: string; data: FlowData; chip: RefObject<HTMLButtonElement | null> }) {
+  const edit = useEdit();
   const api = useCanvas();
   const plan = usePlan();
   const panel = useRef<HTMLDivElement>(null);
@@ -206,7 +207,7 @@ export function BoxTasks({ id, data, chip }: { id: string; data: FlowData; chip:
                 label={`Title of task ${number}`}
                 readOnly={!editable}
                 version={task.rev ?? 1}
-                onSave={(title, rev) => store.op({ op: 'upsert_task', id: task.id, title, ...(rev === undefined ? {} : { expect: rev }) })}
+                onSave={(title, rev) => edit({ op: 'upsert_task', id: task.id, title, ...(rev === undefined ? {} : { expect: rev }) })}
               />
               <button type="button" className="link task-brief" aria-label={`Brief for ${task.title}`} title="What the agent building it is given" onClick={() => brief(task)}>
                 Brief

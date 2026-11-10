@@ -114,6 +114,7 @@ the audit's finding numbers.
 | B10 | Check, then fix if real: when Cursor runs Claude Code's `hooks.json`, a huge `PostToolUse` names its session `conversation_id`, so the relay finds no `session_id` and drops it; and the slimmed payload loses `cursor_version`, which `hookAgent` reads (bin/coplan-hook-relay.sh:45, agentHooks.ts hookAgent; found reviewing C2) | 5 smaller | open | |
 | B11 | `sessionOr404` throws `HttpError(404)` as `planOr404` does, so the daemon's ~20 routes drop their `if (!session) return;` and none can forget it (src/daemon/main.ts; found reviewing R3) | 5 smaller | open | |
 | B12 | Enter in the panel's one-line fields (box label, detail, arrow label) saves while an IME is composing: check `e.nativeEvent.isComposing` (src/ui/components/flow/Panels.tsx CommitField; found reviewing R5) | 5 smaller | open | |
+| B13 | What the page does after a late answer applies to the session now on screen: a sign-off's tab switch and toast, a moved task's refocus (`#task-<id>`), a new subtask's expand, a settled proposal's preview close, all keyed by ids that repeat across plans. Check the answer's session is still on screen first (src/ui/store.ts sign-offs, TasksView.tsx:590, 721, Proposals.tsx:39; found reviewing R7) | 5 smaller | open | |
 | A1 | Re-audit the touched areas with `/ponytail-audit`, and add any new findings as rows | 6 re-audit | open | |
 
 ### F19: the take-back never fires

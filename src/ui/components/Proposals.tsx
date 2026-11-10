@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { store, useAgent, useStore } from '../store.ts';
+import { store, useEdit, useAgent, useStore } from '../store.ts';
 import { Markdown } from './Markdown.tsx';
 import { previewProposal, type ProposalPreview } from '../../shared/proposals.ts';
 import type { Plan, Proposal } from '../../shared/types.ts';
@@ -22,6 +22,7 @@ export function ProposalsStrip({ plan }: { plan: Plan }) {
 }
 
 export function ProposalCard({ plan, proposal: p, compact = false }: { plan: Plan; proposal: Proposal; compact?: boolean }) {
+  const edit = useEdit();
   const agent = useAgent();
   const previewing = useStore((s) => s.proposalPreview);
   // Shared with the canvas preview: one run per proposal per plan.
@@ -33,7 +34,7 @@ export function ProposalCard({ plan, proposal: p, compact = false }: { plan: Pla
 
   const answer = async (op: { op: 'accept_proposal'; id: string } | { op: 'reject_proposal'; id: string; note?: string }) => {
     setBusy(true);
-    const ok = await store.op(op);
+    const ok = await edit(op);
     setBusy(false);
     if (ok && store.getState().proposalPreview === p.id) store.set({ proposalPreview: null });
     if (ok) store.toast('success', op.op === 'accept_proposal' ? `Accepted "${p.title}".` : `Rejected "${p.title}". ${agent.name} hears why the next time it reads the plan.`);

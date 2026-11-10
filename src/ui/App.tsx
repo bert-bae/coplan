@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { listedSessions, store, useStore, useSession, TAB_IDS, type Tab } from './store.ts';
+import { listedSessions, store, useEdit, useStore, useSession, TAB_IDS, type Tab } from './store.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { Toasts } from './components/Toasts.tsx';
 import { ConnectionBar } from './components/ConnectionBar.tsx';
@@ -153,6 +153,7 @@ function tabBadge(id: Tab, plan: Plan): { text: string; tone: 'neutral' | 'accen
 }
 
 function Header({ session }: { session: SessionState }) {
+  const edit = useEdit();
   const saving = useStore((s) => s.saving);
   const plan = session.plan;
   const counts = countTasks(plan);
@@ -169,7 +170,7 @@ function Header({ session }: { session: SessionState }) {
             value={plan.title}
             label="Plan title"
             readOnly={isLocked(plan)}
-            onSave={(title) => store.op({ op: 'set_meta', title })}
+            onSave={(title) => edit({ op: 'set_meta', title })}
           />
         ) : (
           <h1 className="head-title">{session.title}</h1>
@@ -240,6 +241,7 @@ const START_PLAN: Record<SessionState['agent'], string> = {
 };
 
 function NoPlan({ session }: { session: SessionState }) {
+  const edit = useEdit();
   const agent = agentInfo(session.agent);
   return (
     <div className="view">
@@ -253,7 +255,7 @@ function NoPlan({ session }: { session: SessionState }) {
           </>
         }
         action={
-          <button type="button" className="btn" onClick={() => void store.op({ op: 'set_meta', title: session.title || 'Untitled plan' })}>
+          <button type="button" className="btn" onClick={() => void edit({ op: 'set_meta', title: session.title || 'Untitled plan' })}>
             Start a plan by hand
           </button>
         }
