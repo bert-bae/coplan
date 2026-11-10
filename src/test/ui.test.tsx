@@ -1,7 +1,7 @@
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, stubFetch } from './dom-env.ts';
-import type { Plan, PlanInput, SessionState } from '../shared/types.ts';
+import type { Plan, PlanInput, SessionState, SessionSummary } from '../shared/types.ts';
 
 /**
  * The planning workspace in a browser: every edit becomes an op sent to the
@@ -2433,6 +2433,49 @@ test('a comment, a reply and a files list being written keep their text when the
   await selectBox('Postgres');
   fireEvent.change(within(panel()).getByRole('textbox', { name: /^New comment on/ }), { target: { value: '' } });
   assert.equal(leaving(), false);
+});
+
+test('an edit refused after another session opened names its own plan', async () => {
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => {
+    if (route === '/api/session/s2') return { session: other };
+    if (route === '/api/session/s1/plan/ops') return { __status: 409, error: 'Task "Invalidation" was changed by Claude while this edit was open, so it was not saved.' };
+    return undefined;
+  });
+  await act(async () => {
+    store.set({ sessions: [{ sessionId: 's1', title: 'repo', planTitle: 'Add a cache' } as SessionSummary] });
+    await store.selectSession('s2');
+  });
+  // A save made on s1 (an editor saving as it closed) is answered with s2 on screen.
+  await act(async () => {
+    await store.commit([{ op: 'upsert_task', id: 't2', title: 'Renamed' }], 's1');
+  });
+  const said = () => store.getState().toasts.at(-1)?.text ?? '';
+  assert.equal(store.getState().toasts.at(-1)?.kind, 'error');
+  assert.match(said(), /^"Add a cache": Task "Invalidation" was changed by Claude/, 'over s2, whose t2 is another task');
+  // Not in the session list (deleted meanwhile, say): another plan, all the same.
+  await act(async () => {
+    store.set({ sessions: [] });
+    await store.commit([{ op: 'upsert_task', id: 't2', title: 'Again' }], 's1');
+  });
+  assert.match(said(), /^Another plan: Task "Invalidation"/);
+});
+
+test("a daemon that cannot be reached is said as it is, no one plan's doing", async () => {
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => {
+    if (route === '/api/session/s2') return { session: other };
+    if (route === '/api/session/s1/plan/ops') throw new TypeError('Failed to fetch');
+    return undefined;
+  });
+  await act(async () => {
+    store.set({ sessions: [{ sessionId: 's1', title: 'repo', planTitle: 'Add a cache' } as SessionSummary] });
+    await store.selectSession('s2');
+  });
+  await act(async () => {
+    await store.commit([{ op: 'upsert_task', id: 't2', title: 'Renamed' }], 's1');
+  });
+  assert.match(store.getState().toasts.at(-1)?.text ?? '', /^Coplan's daemon is not reachable/);
 });
 
 test("another session opened closes the prompt viewer and forgets a jump, both the old plan's", async () => {

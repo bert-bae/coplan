@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { listedSessions, store, SessionScope, useEdit, useStore, useSession, TAB_IDS, type Tab } from './store.ts';
+import { listedSessions, sessionName, store, SessionScope, useEdit, useStore, useSession, TAB_IDS, type Tab } from './store.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { Toasts } from './components/Toasts.tsx';
 import { ConnectionBar, SavedByNewerBar } from './components/ConnectionBar.tsx';
@@ -302,7 +302,7 @@ function SessionUnavailable({ error }: { error: string }) {
         action={
           !unauthorized && other ? (
             <button type="button" className="btn" onClick={() => void store.selectSession(other.sessionId)}>
-              Open {other.planTitle ?? other.title}
+              Open {sessionName(other)}
             </button>
           ) : undefined
         }

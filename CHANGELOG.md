@@ -301,6 +301,11 @@
   plan's item of the same id. Opening another session, or deleting the
   one on screen, now closes the viewer and forgets the jump; opening the
   same session again keeps them.
+- **An edit refused off screen says which plan it was.** An editor that
+  saved as you moved to another session, and was refused, said so over
+  the plan now on screen, where "t3" is another task. Like a sign-off's
+  message, it now names its own plan; renaming or deleting a session from
+  the list does too. A daemon that cannot be reached is said as it is.
 - **No two sessions share a folder.** A session id is kept in a folder
   named after it, with anything a folder name cannot hold made safe, so
   ids that differed only there (`a/b`, `a_b`), or past 128 characters,

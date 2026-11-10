@@ -388,9 +388,25 @@ class Store {
       this.adoptPlan(sessionId, plan);
       return plan;
     } catch (err) {
-      this.fail(err);
+      this.failFor(sessionId, err);
       return null;
     }
+  }
+
+  /** Said of a session's plan: over another, it names the one it is about
+   *  ("t3" there is another task) — `title` if the answer gave one. */
+  private sayOf(sessionId: string | null, kind: Toast['kind'], text: string, title?: string): void {
+    if (this.isShown(sessionId)) return this.toast(kind, text);
+    const listed = this.state.sessions.find((s) => s.sessionId === sessionId);
+    const name = title ?? (listed ? sessionName(listed) : null);
+    this.toast(kind, name ? `"${name}": ${text}` : `Another plan: ${text}`);
+  }
+
+  /** A request about a session failed: said of it (sayOf), unless the
+   *  daemon was not reached at all, which is no one plan's doing. */
+  private failFor(sessionId: string | null, err: unknown): void {
+    if (unreachable(err)) this.fail(err);
+    else this.sayOf(sessionId, 'error', describeError(err));
   }
 
   /**
@@ -423,8 +439,7 @@ class Store {
     const plan = await this.send(id, call);
     if (!plan) return null;
     const shown = () => this.isShown(id);
-    // Said over another session, it names the plan it is about.
-    const say = (kind: Toast['kind'], text: string) => this.toast(kind, shown() ? text : `"${plan.title}": ${text}`);
+    const say = (kind: Toast['kind'], text: string) => this.sayOf(id, kind, text, plan.title);
     return { plan, agent, shown, say };
   }
 
@@ -668,7 +683,7 @@ class Store {
     try {
       await api.renameSession(sessionId, next);
     } catch (err) {
-      this.fail(err);
+      this.failFor(sessionId, err);
     }
   }
 
@@ -676,7 +691,7 @@ class Store {
     try {
       await api.deleteSession(sessionId);
     } catch (err) {
-      this.fail(err);
+      this.failFor(sessionId, err);
       return;
     }
     const sessions = this.state.sessions.filter((s) => s.sessionId !== sessionId);
@@ -794,10 +809,20 @@ class Store {
  * Helpers
  * ------------------------------------------------------------------ */
 
+/** A session's name as the page shows it: its plan's title, else its own. */
+export function sessionName(s: Pick<SessionSummary, 'planTitle' | 'title'>): string {
+  return s.planTitle ?? s.title;
+}
+
+/** fetch's own failure: the daemon was not reached. */
+function unreachable(err: unknown): boolean {
+  return err instanceof TypeError && /fetch|network|load failed/i.test(err.message);
+}
+
 export function describeError(err: unknown): string {
   // fetch's own wording ("Failed to fetch", "NetworkError…") says nothing to
   // a reader: the daemon could not be reached, and the edit was not saved.
-  if (err instanceof TypeError && /fetch|network|load failed/i.test(err.message)) {
+  if (unreachable(err)) {
     return "Coplan's daemon is not reachable, so this was not saved. Run `coplan status` in a terminal to see why.";
   }
   if (err instanceof Error) return err.message;
