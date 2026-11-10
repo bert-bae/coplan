@@ -40,14 +40,27 @@ PAYLOAD=$(cat)
 # to hear which session's tool finished — that is what clears a question or
 # a permission prompt off the board. A huge one (a big file read, a long
 # build log) is not worth shipping and parsing, so only the session goes.
-# The id is the payload's first one (agents put it first); the shortest
-# match up to it, then a plain string, so nothing in the output is taken.
+# What names the session is kept: Claude Code's session_id, or, where Cursor
+# runs Claude Code's hooks, its chat's conversation_id with the
+# cursor_version that tells the daemon whose it is. Each is its first match
+# as a plain "key": "value" pair (agents put theirs first): one in the
+# output is escaped, \"key\", and is never taken. grep, not the shell's own
+# prefix match, which on a payload this size takes minutes where a key is
+# missing.
+field() {
+  printf '%s' "$PAYLOAD" | grep -o "\"$1\"[[:space:]]*:[[:space:]]*\"[A-Za-z0-9._:-]*\"" | head -n 1 | sed 's/.*:[[:space:]]*"\(.*\)"$/\1/'
+}
 if [ "$EVENT" = PostToolUse ] && [ "${#PAYLOAD}" -gt 262144 ]; then
-  REST=${PAYLOAD#*\"session_id\"}
-  [ "$REST" = "$PAYLOAD" ] && exit 0
-  ID=$(printf '%s' "$REST" | sed -n '1s/^[[:space:]]*:[[:space:]]*"\([A-Za-z0-9._:-]*\)".*/\1/p')
-  [ -n "$ID" ] || exit 0
-  PAYLOAD=$(printf '{"session_id":"%s","hook_event_name":"%s"}' "$ID" "$EVENT")
+  SLIM=
+  for KEY in session_id conversation_id cursor_version; do
+    VALUE=$(field "$KEY")
+    [ -n "$VALUE" ] && SLIM="$SLIM\"$KEY\":\"$VALUE\","
+  done
+  case "$SLIM" in
+    *'"session_id"'* | *'"conversation_id"'*) ;;
+    *) exit 0 ;;
+  esac
+  PAYLOAD=$(printf '{%s"hook_event_name":"%s"}' "$SLIM" "$EVENT")
 fi
 
 # An installed but unbuilt plugin (`dist/` is not in the repository) has no

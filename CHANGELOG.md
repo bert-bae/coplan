@@ -191,6 +191,11 @@
   yet, or a stray one, got another tool's `run`. The `packageManager`
   field (`pnpm@10.28.0`, the one Corepack uses) now comes first, and
   `init` says which it went by.
+- **In Cursor running Claude Code's hooks, a tool with a huge output still
+  clears what waited on it.** The relay cuts such an event down to its
+  session, which it looked for only as Claude Code names it: Cursor's
+  chat id was not found and the event was dropped, leaving a question or
+  permission prompt on the board.
 
 ### Targeted checks: only what the change touched
 

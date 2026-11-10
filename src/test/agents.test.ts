@@ -9,7 +9,7 @@ import { createInterface } from 'node:readline';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readLiveLock, baseUrl } from '../shared/paths.ts';
 import { BUILD_MARKER, PROMPT_BUDGET } from '../daemon/render.ts';
-import { readAgentHook, writeAgentOutput } from '../daemon/agentHooks.ts';
+import { hookAgent, readAgentHook, writeAgentOutput } from '../daemon/agentHooks.ts';
 import { agentInfo, parseAgent, sessionFromEnv, workspaceFromEnv } from '../shared/agents.ts';
 import { codexHooks, relayCalls } from '../cli/doctor.ts';
 import type { DaemonLock, SessionState, SessionSummary } from '../shared/types.ts';
@@ -551,4 +551,14 @@ test('Codex takes the most a message can carry whole: one prompt and the unread 
   // (a line); a plan in Chinese or Japanese takes three bytes a character.
   const most = Math.ceil(((PROMPT_BUDGET + 1_000) * 3) / 4);
   assert.ok(typeof limit === 'number' && limit >= most, `additionalContextLimit ${limit} is under ${most}`);
+});
+
+test("a huge tool event from Cursor running Claude Code's hooks, cut down by the relay, is still read as its chat's", () => {
+  // What the relay keeps of it: see relay.test.ts.
+  const slim = { conversation_id: 'c-9', cursor_version: '2.0.0', hook_event_name: 'PostToolUse' };
+  const agent = hookAgent('claude', slim);
+  assert.equal(agent, 'cursor');
+  const { event, input } = readAgentHook(agent, 'PostToolUse', slim);
+  assert.equal(event, 'PostToolUse');
+  assert.equal(input.session_id, 'c-9');
 });

@@ -180,6 +180,16 @@ test('a huge PostToolUse sends only its session: the daemon needs to hear a tool
   assert.equal(result.code, 0);
   assert.equal(received.length, 1, 'still heard: it is what clears a permission prompt off the board');
   assert.deepEqual(JSON.parse(received[0]!.body), { session_id: 's-1', hook_event_name: 'PostToolUse' });
+  // Cursor running Claude Code's hooks: its chat is conversation_id, and
+  // cursor_version is how the daemon tells it is Cursor's.
+  // No session_id in it: finding that it is missing must not take the hook's time.
+  const cursor = JSON.stringify({ conversation_id: 'c-9', cursor_version: '2.0.0', tool_output: `"conversation_id":"nor-this" ${'y'.repeat(300_000)}` });
+  const started = Date.now();
+  await relay('PostToolUse', cursor);
+  assert.ok(Date.now() - started < 3_000, `took ${Date.now() - started}ms of a 5s hook`);
+  assert.equal(received.length, 2);
+  assert.deepEqual(JSON.parse(received[1]!.body), { conversation_id: 'c-9', cursor_version: '2.0.0', hook_event_name: 'PostToolUse' });
+  received = received.slice(0, 1);
   await relay('PostToolUse', '{"session_id":"s1","tool_name":"Read"}');
   assert.equal(received[1]!.body, '{"session_id":"s1","tool_name":"Read"}', 'an ordinary one goes as it is');
 });
