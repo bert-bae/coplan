@@ -162,6 +162,11 @@
   deleting that session would have deleted every plan, or the home. Such
   an id now gets a folder inside the sessions folder, and deleting a
   session removes only a folder there.
+- **Coplan's tools stay up through a line that is not a request.** A
+  `null` (or any JSON that is not an object) sent to the tool server ended
+  it, taking the agent's Coplan tools with it until the session restarted;
+  bad JSON, or a request with no method, got no answer. Each now gets the
+  JSON-RPC error for it.
 
 ### Targeted checks: only what the change touched
 

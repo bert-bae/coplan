@@ -220,13 +220,20 @@ function send(message: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
+/** A notification (no id) is never answered; a request is, under its id,
+ *  and a line whose id could not be read under null, as JSON-RPC says. */
 function respond(id: number | string | null | undefined, result: unknown): void {
-  if (id === undefined || id === null) return;
+  if (id === undefined) return;
   send({ jsonrpc: '2.0', id, result });
 }
 
+/** An id as JSON-RPC allows one, to answer under: else null. */
+function replyId(id: unknown): number | string | null {
+  return typeof id === 'number' || typeof id === 'string' ? id : null;
+}
+
 function respondError(id: number | string | null | undefined, code: number, message: string): void {
-  if (id === undefined || id === null) return;
+  if (id === undefined) return;
   send({ jsonrpc: '2.0', id, error: { code, message } });
 }
 
@@ -291,9 +298,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
 
     default:
       // Unknown methods are ignored for notifications and rejected for calls.
-      if (req.id !== undefined && req.id !== null) {
-        respondError(req.id, -32601, `Method not found: ${req.method}`);
-      }
+      respondError(req.id, -32601, `Method not found: ${req.method}`);
   }
 }
 
@@ -308,20 +313,42 @@ function maybeExit(): void {
 
 const rl = createInterface({ input: process.stdin });
 rl.on('line', (line) => {
+  // Nothing a client sends may end the server, and with it the agent's
+  // tools: what is not a request it takes gets the JSON-RPC error for it.
+  try {
+    onLine(line);
+  } catch (err) {
+    respondError(null, -32603, `Internal error: ${(err as Error)?.message}`);
+  }
+});
+
+function onLine(line: string): void {
   const trimmed = line.trim();
   if (!trimmed) return;
-  let req: JsonRpcRequest;
+  let parsed: unknown;
   try {
-    req = JSON.parse(trimmed) as JsonRpcRequest;
+    parsed = JSON.parse(trimmed);
   } catch {
+    respondError(null, -32700, 'Parse error');
     return;
   }
+  // `null`, a number, a batch (MCP sends none): not a request this takes.
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    respondError(null, -32600, 'Invalid Request');
+    return;
+  }
+  const message = parsed as Record<string, unknown>;
   // The client answering a request of ours (`roots/list`), not asking one.
-  if (typeof req.method !== 'string') {
-    const id = String(req.id ?? '');
-    if (pendingRoots.delete(id)) onRoots((req as unknown as { result?: unknown }).result);
+  if (message['method'] === undefined && ('result' in message || 'error' in message)) {
+    const id = replyId(message['id']);
+    if (id !== null && pendingRoots.delete(String(id))) onRoots(message['result']);
     return;
   }
+  if (typeof message['method'] !== 'string') {
+    respondError(replyId(message['id']), -32600, 'Invalid Request');
+    return;
+  }
+  const req = { ...message, id: message['id'] === undefined ? undefined : replyId(message['id']) } as JsonRpcRequest;
   inFlight++;
   void handleRequest(req)
     .catch((err: unknown) => {
@@ -331,7 +358,7 @@ rl.on('line', (line) => {
       inFlight--;
       maybeExit();
     });
-});
+}
 
 rl.on('close', () => {
   stdinClosed = true;

@@ -194,3 +194,31 @@ test('an unknown tool is an error, not a silent no-op', async () => {
   child.kill();
   assert.match(reply, /Unknown tool/);
 });
+
+test('a line that is not a request gets the JSON-RPC error for it, and the server carries on', async () => {
+  const child = spawn(process.execPath, [MCP], {
+    env: { ...process.env, CC_HARNESS_HOME: home },
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  const replies: Record<string, unknown>[] = [];
+  let buffered = '';
+  const answered = new Promise<void>((resolve) => {
+    child.on('exit', () => resolve());
+    child.stdout!.on('data', (c: Buffer) => {
+      buffered += c.toString();
+      const lines = buffered.split('\n');
+      buffered = lines.pop()!;
+      for (const line of lines) if (line.trim()) replies.push(JSON.parse(line) as Record<string, unknown>);
+      if (replies.some((r) => r['id'] === 1)) resolve();
+    });
+  });
+  const lines = ['null', '42', '"text"', '[]', '{not json', '{"id":{"toString":0}}', '{"id":5}', '{"jsonrpc":"2.0","id":3,"method":42}'];
+  for (const line of [...lines, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })]) child.stdin!.write(`${line}\n`);
+  await Promise.race([answered, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+  assert.equal(child.exitCode, null, 'the server is still running');
+  child.kill();
+  const errors = replies.filter((r) => r['error']).map((r) => [r['id'], (r['error'] as { code: number }).code]);
+  const invalid = (id: number | null) => [id, -32600];
+  assert.deepEqual(errors, [invalid(null), invalid(null), invalid(null), invalid(null), [null, -32700], invalid(null), invalid(5), invalid(3)], 'one error each, under its id where it has one');
+  assert.ok(replies.some((r) => r['id'] === 1 && r['result']), 'and the next request is answered');
+});
