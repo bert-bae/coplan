@@ -285,6 +285,11 @@
   tab) dropped text left open in a field the lock froze, without a word.
   The page now says which field, and shows the text, with a button to
   copy it.
+- **A message that has to start Coplan first stays within its hook's
+  time.** Starting the daemon took up to 5 s, and the call after it was
+  given 10 s more, past the 10 s the agent gives a message's hook: on a
+  slow start the agent cut it off, and the sign-off it carried counted as
+  delivered. The start and the call now share what the hook is given.
 - **No two sessions share a folder.** A session id is kept in a folder
   named after it, with anything a folder name cannot hold made safe, so
   ids that differed only there (`a/b`, `a_b`), or past 128 characters,
