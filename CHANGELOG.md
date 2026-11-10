@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **A submitted plan no longer offers to comment where it takes no comments.** A section or task with no
+  comments shows no comment button, and one with only resolved comments reads "Comments on …".
 - **Accepting a proposal no longer writes over a task note you rewrote after it was made.** The proposal
   shows as out of date instead.
 - **A proposal made in the same batch as Claude's own edit to an item is no longer refused.** Its edits'

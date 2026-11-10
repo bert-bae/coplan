@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { store, useEdit, useAgent, usePlan } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
-import { CommentToggle, ThreadPanel } from '../components/Threads.tsx';
+import { CommentToggle, ThreadPanel, useCommentsShown } from '../components/Threads.tsx';
 import { Focusable, ItemActions } from '../components/Item.tsx';
 import { ProgressBar } from '../components/Progress.tsx';
 import { scrollBehavior } from '../lib/motion.ts';
@@ -20,6 +20,7 @@ import type { Plan, Section } from '../../shared/types.ts';
 export function OverviewView() {
   const edit = useEdit();
   const plan = usePlan();
+  const generalShown = useCommentsShown({ kind: 'plan', id: '' });
   if (!plan) return null;
   const designLocked = isDesignLocked(plan);
   return (
@@ -69,7 +70,7 @@ export function OverviewView() {
         </div>
       )}
 
-      {(!isLocked(plan) || plan.threads.some((t) => t.target.kind === 'plan')) && (
+      {generalShown && (
         <fieldset className="lockable" disabled={isLocked(plan)}>
           <section className="doc-block" aria-labelledby="general-head">
             <h2 id="general-head" className="doc-label">

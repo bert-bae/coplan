@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEven
 import { filesText, useKeptDraft } from '../lib/drafts.ts';
 import { store, useCollapsedTasks, useEdit, useAgent, usePlan, useSessionId, useStillShown, useStore } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
-import { CommentToggle, ThreadPanel, useThreads } from '../components/Threads.tsx';
+import { CommentToggle, ThreadPanel, useCommentsShown, useThreads } from '../components/Threads.tsx';
 import { Focusable } from '../components/Item.tsx';
 import { KIND_GLYPH } from '../components/FlowCanvas.tsx';
 import { ProgressBar, STATUS_GLYPH, STATUS_LABEL, TaskStatusDot } from '../components/Progress.tsx';
@@ -559,6 +559,8 @@ function TaskRow(props: {
   const sub = kids.length ? countTasks({ tasks: [task, ...descendants(plan, task.id)] }) : null;
   const threads = useThreads({ kind: 'task', id: task.id });
   const target = { kind: 'task' as const, id: task.id };
+  // Open, unless the plan was locked with none to read.
+  const commenting = useCommentsShown(target) && comments;
   const parts = props.parts;
 
   const siblings = childrenOf(plan, task.parentId);
@@ -704,10 +706,10 @@ function TaskRow(props: {
         </button>
       </div>
 
-      {(expanded || comments) && (
+      {(expanded || commenting) && (
         <div className="task-detail" style={{ ['--depth' as string]: depth }}>
           {expanded && <TaskDetail plan={plan} task={task} />}
-          {comments && <ThreadPanel target={target} label={task.title} />}
+          {commenting && <ThreadPanel target={target} label={task.title} />}
         </div>
       )}
 

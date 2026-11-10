@@ -22,6 +22,13 @@ export function useThreads(target: Target): Thread[] {
   return (plan?.threads ?? []).filter((t) => t.target.kind === target.kind && t.target.id === target.id);
 }
 
+/** Locked, comments are read, not written: shown only where there are some. */
+export function useCommentsShown(target: Target): boolean {
+  const plan = usePlan();
+  const threads = useThreads(target);
+  return !plan || !isLocked(plan) || threads.length > 0;
+}
+
 /** The speech-bubble toggle that sits in an item's header. */
 export function CommentToggle({
   target,
@@ -35,15 +42,20 @@ export function CommentToggle({
   label: string;
 }) {
   const threads = useThreads(target);
+  const plan = usePlan();
+  const shown = useCommentsShown(target);
+  if (!shown) return null;
   const unresolved = threads.filter((t) => !t.resolved).length;
   const waiting = threads.some((t) => threadWaitsOn(t) === 'user');
+  // Locked, its comments are there to read, not to add to.
+  const verb = plan && isLocked(plan) ? 'Comments' : 'Comment';
   return (
     <button
       type="button"
       className={classNames('comment-toggle', open && 'is-active', unresolved > 0 && 'has-comments', waiting && 'has-reply')}
       aria-expanded={open}
-      title={unresolved ? `${unresolved} open comment(s)` : 'Comment'}
-      aria-label={unresolved ? `${unresolved} open comment(s) on ${label}` : `Comment on ${label}`}
+      title={unresolved ? `${unresolved} open comment(s)` : verb}
+      aria-label={unresolved ? `${unresolved} open comment(s) on ${label}` : `${verb} on ${label}`}
       onClick={onToggle}
     >
       <span aria-hidden="true">💬</span>
@@ -59,6 +71,7 @@ export function ThreadPanel({ target, label }: { target: Target; label: string }
   const sessionId = useSessionId();
   const comment = useKeptDraft(sessionId, `comment:${target.kind}:${target.id}`, '', undefined, true);
   const [showResolved, setShowResolved] = useState(false);
+  const shown = useCommentsShown(target);
   // A submitted plan takes no comments: its threads are there to read.
   const plan = usePlan();
   const locked = plan ? isLocked(plan) : false;
@@ -67,6 +80,7 @@ export function ThreadPanel({ target, label }: { target: Target; label: string }
   const writing = (t: Thread) => keptDraft(sessionId, `reply:${t.id}`) !== undefined;
   const open = threads.filter((t) => !t.resolved || writing(t));
   const resolved = threads.filter((t) => t.resolved && !open.includes(t));
+  if (!shown) return null;
 
   return (
     <div className="threads" aria-label={`Comments on ${label}`}>

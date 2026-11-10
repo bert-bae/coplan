@@ -2614,6 +2614,26 @@ test('a section can be commented on once the design is confirmed, as until the p
   assert.equal(within(screen.getByLabelText('Comments on Context')).queryByRole('button', { name: 'Resolve' }) === null, true, 'no Resolve');
 });
 
+test("a submitted plan offers comments only where there are some to read, as a diagram's", async () => {
+  await boot(makeSession(lockedPlan()));
+  await openTab('Overview');
+  assert.ok(screen.getByRole('heading', { name: 'Context' }), 'the section is there');
+  assert.equal(screen.queryByRole('button', { name: /on Context$/ }) === null, true, 'no section toggle onto an empty panel');
+  await openTab('Tasks');
+  assert.ok(screen.getAllByText('Invalidation').length, 'the task is there');
+  assert.equal(screen.queryByRole('button', { name: /on Invalidation$/ }) === null, true, 'nor a task one');
+  // One with a comment keeps it, to read.
+  const commented = applyOps(confirmedPlan(), [{ op: 'comment', target: { kind: 'section', id: 's1' }, text: 'Measured?' }], 'user').plan;
+  const s = store.getState().session!;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(commented, { target: 'session', prompt: 'build' }) } }));
+  await openTab('Overview');
+  assert.ok(screen.getByRole('button', { name: '1 open comment(s) on Context' }));
+  // Resolved, it is still there to read, and not offered as one to write.
+  const resolved = applyOps(commented, [{ op: 'resolve', threadId: commented.threads[0]!.id, resolved: true }], 'user').plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(resolved, { target: 'session', prompt: 'build' }) } }));
+  assert.ok(screen.getByRole('button', { name: 'Comments on Context' }));
+});
+
 test('Reply goes while the reply is being written, so nothing empties it', async () => {
   const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
   await boot(makeSession(plan));

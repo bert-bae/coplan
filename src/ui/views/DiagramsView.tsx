@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { store, useCommit, useEdit, useAgent, usePlan, useStillShown, useStore } from '../store.ts';
 import { InlineText, MarkdownField } from '../components/Editable.tsx';
 import { Markdown } from '../components/Markdown.tsx';
-import { ThreadPanel } from '../components/Threads.tsx';
+import { ThreadPanel, useCommentsShown } from '../components/Threads.tsx';
 import { DiagramEditor, KIND_GLYPH, KIND_LABEL, type GraphPatch } from '../components/FlowCanvas.tsx';
 import { EmptyState } from '../components/primitives.tsx';
 import { SubmitControl } from '../components/Submit.tsx';
@@ -243,6 +243,7 @@ function DiagramPanel({ plan, diagram, locked }: { plan: Plan; diagram: Diagram;
   const edit = useEdit();
   const agent = useAgent();
   const [confirming, setConfirming] = useState(false);
+  const commentsShown = useCommentsShown({ kind: 'diagram', id: diagram.id });
   const index = plan.diagrams.findIndex((d) => d.id === diagram.id);
   const linked = diagram.nodes.filter((n) => n.taskIds?.length).length;
   return (
@@ -315,8 +316,7 @@ function DiagramPanel({ plan, diagram, locked }: { plan: Plan; diagram: Diagram;
           </li>
         ))}
       </ul>
-      {/* Locked, comments are read, not written: show them only if there are any. */}
-      {(!isLocked(plan) || plan.threads.some((t) => t.target.kind === 'diagram' && t.target.id === diagram.id)) && (
+      {commentsShown && (
         <fieldset className="lockable" disabled={isLocked(plan)}>
           <div className="field">
             <span className="field-label">Comments</span>

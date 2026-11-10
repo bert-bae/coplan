@@ -5,9 +5,9 @@ import { Markdown } from '../Markdown.tsx';
 import { TaskStatusDot } from '../Progress.tsx';
 import { classNames } from '../../lib/format.ts';
 import { isComposing } from '../../lib/keys.ts';
-import { isLocked, outline } from '../../../shared/plan.ts';
+import { outline } from '../../../shared/plan.ts';
 import { NODE_KINDS, type NodeKind, type Plan, type Target } from '../../../shared/types.ts';
-import { ThreadPanel } from '../Threads.tsx';
+import { ThreadPanel, useCommentsShown } from '../Threads.tsx';
 import { KIND_GLYPH, KIND_HINT, KIND_LABEL, type EdgePatch, type FlowEdge, type FlowNode, type NodePatch } from './shared.ts';
 
 /**
@@ -546,8 +546,8 @@ export function EdgePanel({
  * on, and afterwards wherever there are comments to read.
  */
 function PartComments({ plan, target, label }: { plan: Plan | undefined; target: Target; label: string }) {
-  const any = plan?.threads.some((t) => t.target.kind === target.kind && t.target.id === target.id);
-  if (!plan || (isLocked(plan) && !any)) return null;
+  const shown = useCommentsShown(target);
+  if (!plan || !shown) return null;
   return (
     <div className="field">
       <span className="field-label">Comments</span>
