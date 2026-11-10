@@ -14,6 +14,7 @@
  * `--all` runs every check, as before.
  */
 import { spawn } from 'node:child_process';
+import { constants as osConstants } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -217,17 +218,44 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
     };
     child.stdout.on('data', keep);
     child.stderr.on('data', keep);
-    const timer = setTimeout(() => {
-      timedOut = true;
+    const stop = () => {
       kill('SIGTERM');
       setTimeout(() => kill('SIGKILL'), 3000).unref();
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      stop();
     }, (hook.timeout ?? DEFAULT_HOOK_TIMEOUT) * 1000);
-    child.on('error', (err) => {
+    // Its own group also keeps Ctrl+C (and an agent ending this command)
+    // from reaching it: passed on here, so nothing is left running, and this
+    // command ends as an interrupted one does once the check has gone. On
+    // its process exiting, not its output closing, which something it
+    // started out of its group could hold open; and a second interrupt, or
+    // five seconds, ends it whatever the check does.
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+    let interrupts = 0;
+    const interrupted = (signal: (typeof signals)[number]) => {
+      const leave = () => process.exit(128 + osConstants.signals[signal]);
+      if (interrupts++) {
+        kill('SIGKILL');
+        leave();
+      }
+      process.stderr.write(`coplan: interrupted; stopping "${hook.name}"\n`);
+      stop();
+      child.once('exit', leave);
+      setTimeout(leave, 5000).unref();
+    };
+    for (const signal of signals) process.on(signal, interrupted);
+    const done = () => {
       clearTimeout(timer);
+      for (const signal of signals) process.off(signal, interrupted);
+    };
+    child.on('error', (err) => {
+      done();
       resolve({ code: 127, output: String(err.message), ms: Date.now() - started, timedOut });
     });
     child.on('close', (code) => {
-      clearTimeout(timer);
+      done();
       resolve({ code: timedOut ? 124 : (code ?? 1), output, ms: Date.now() - started, timedOut });
     });
   });

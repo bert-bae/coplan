@@ -118,6 +118,12 @@
   to another session and back, or closed the page without being asked.
   It now reopens as you left it, in its own session, and the browser asks
   before you close the page with one unsaved.
+- **Ctrl+C on `coplan check` stops the check too.** Each check runs in a
+  process group of its own, so a timeout can stop all it started, but
+  that also kept Ctrl+C (or an agent ending the command) from reaching it:
+  `coplan` quit and the test suite ran on, and a second run raced it. The
+  interrupt is now passed on, and `coplan check` exits once the check is
+  gone.
 
 ### Targeted checks: only what the change touched
 

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync, execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -674,6 +674,81 @@ test("a repository's checks saved with a byte order mark still run", () => {
     assert.equal(config.checksBroken, undefined);
     assert.deepEqual(config.hooks.review.map((h) => h.run), ['npm run test']);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Ctrl+C on `coplan check` stops the check it is running, not only itself', { skip: process.platform === 'win32' }, async () => {
+  // The check says when it has started, and which process group it is.
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'slow', run: 'echo $$ > group; touch started; sleep 4; touch marker' }] } }) });
+  const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: ['ignore', 'ignore', 'pipe'] });
+  let said = '';
+  cli.stderr!.on('data', (c: Buffer) => (said += c.toString()));
+  try {
+    for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.ok(existsSync(path.join(dir, 'started')), 'the check started');
+    const started = Date.now();
+    cli.kill('SIGINT');
+    const code = await new Promise<number | null>((r) => cli.on('exit', (c) => r(c)));
+    assert.equal(code, 130, 'it exits as an interrupted command does');
+    assert.ok(Date.now() - started < 3500, 'promptly');
+    assert.match(said, /interrupted; stopping "slow"/);
+    // Past when the check would have finished: it did not.
+    await new Promise((r) => setTimeout(r, 4000));
+    assert.equal(existsSync(path.join(dir, 'marker')), false, 'the check was stopped with it');
+  } finally {
+    cli.kill('SIGKILL');
+    try {
+      process.kill(-Number(readFileSync(path.join(dir, 'group'), 'utf8')), 'SIGKILL');
+    } catch {
+      /* gone, as it should be */
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an interrupted check that left something running out of its group cannot hold `coplan check` open', { skip: process.platform === 'win32' }, async () => {
+  // A helper the check starts in a group of its own, holding the check's output open.
+  const helper = `node -e "const c = require('child_process').spawn('sleep', ['20'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }); require('fs').writeFileSync('helper', String(c.pid)); c.unref()"`;
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'serve', run: `${helper}; touch started; sleep 10` }] } }) });
+  const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 100));
+    const started = Date.now();
+    cli.kill('SIGINT');
+    const code = await new Promise<number | null>((r) => cli.on('exit', (c) => r(c)));
+    assert.equal(code, 130);
+    assert.ok(Date.now() - started < 4000, `it ends without waiting for the helper (${Date.now() - started}ms)`);
+  } finally {
+    cli.kill('SIGKILL');
+    try {
+      process.kill(Number(readFileSync(path.join(dir, 'helper'), 'utf8')), 'SIGKILL');
+    } catch {
+      /* gone */
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a second Ctrl+C ends `coplan check` at once, even with a check that ignores the first', { skip: process.platform === 'win32' }, async () => {
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'stubborn', run: "trap '' TERM; echo $$ > group; touch started; sleep 10" }] } }) });
+  const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 100));
+    const started = Date.now();
+    cli.kill('SIGINT');
+    await new Promise((r) => setTimeout(r, 300));
+    cli.kill('SIGINT');
+    const code = await new Promise<number | null>((r) => cli.on('exit', (c) => r(c)));
+    assert.equal(code, 130);
+    assert.ok(Date.now() - started < 1500, `not the three seconds a check gets to stop (${Date.now() - started}ms)`);
+  } finally {
+    cli.kill('SIGKILL');
+    try {
+      process.kill(-Number(readFileSync(path.join(dir, 'group'), 'utf8')), 'SIGKILL');
+    } catch {
+      /* gone */
+    }
     rmSync(dir, { recursive: true, force: true });
   }
 });
