@@ -106,8 +106,9 @@ function ThreadView({ thread }: { thread: Thread }) {
         <Entry key={r.id} author={r.author} text={r.text} ts={r.ts} reply />
       ))}
       <div className="thread-actions">
-        {!thread.resolved && !locked && (
+        {!thread.resolved && !locked && !reply.editing && (
           // Opens it: Cancel or Escape closes it, and drops what was written.
+          // Gone while it is open, as an editor's Edit is.
           <button type="button" className="link" onClick={reply.begin}>
             Reply
           </button>

@@ -362,7 +362,9 @@
   It vanished with no word, the thread folded away among the resolved,
   though a resolved thread still takes a reply. It now stays, its thread
   in sight while it is being written, and sending it opens the thread
-  again: a reply to a resolved thread never reached the agent.
+  again: a reply to a resolved thread never reached the agent. *Reply*
+  goes while one is being written, as an editor's *Edit* does: clicking it
+  again emptied it.
 - **A comment you are writing is held by Submit, as a field is.** A
   submitted plan takes no comments, but a comment or reply left unsent
   did not hold up *Submit plan*, and a submit from chat let it go without

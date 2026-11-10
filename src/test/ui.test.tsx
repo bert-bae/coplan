@@ -2547,6 +2547,26 @@ test('a kept comment goes with what it was on; a kept reply stays, its thread re
   assert.equal(leaving(), true, 'resolved, it still takes a reply');
 });
 
+test('Reply goes while the reply is being written, so nothing empties it', async () => {
+  const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '1 open comment(s) on Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Reply' }), { target: { value: 'Half a reply' } });
+  assert.equal(screen.queryByRole('button', { name: 'Reply' }) === null, true, 'no Reply to click again');
+  assert.equal((screen.getByRole('textbox', { name: 'Reply' }) as HTMLTextAreaElement).value, 'Half a reply');
+  // Cancelled, it is back.
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  });
+  assert.ok(screen.getByRole('button', { name: 'Reply' }));
+});
+
 test('a reply being written stays on screen, with its text, when the agent resolves its thread', async () => {
   const plan = applyOps(makePlan(), [
     { op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' },
