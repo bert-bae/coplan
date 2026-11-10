@@ -324,6 +324,12 @@
   Checking each one against your unread edits copied the whole plan, so on
   a big plan a batch held Coplan for up to half a second. It now works out
   which box links would change without the copy.
+- **A save made against a version the item never had says so.** A save
+  carries the revision it was made on; one the item had never reached (a
+  page still holding a plan since replaced, say) was refused as "changed
+  by Claude while this edit was open", though nobody had changed it, and
+  a task saved that way went in over what was there. Both are now refused
+  as made against a version it never had.
 - **A box linking a task and its subtask lists both as linked.** The
   subtask showed as building the box only through its parent, with no
   Unlink, or, when linked first, sat above its parent. It now sits under

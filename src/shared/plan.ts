@@ -2934,6 +2934,7 @@ function layoutChanged(before: Diagram, after: Diagram): boolean {
  */
 function checkRev(item: { rev: number; title: string; updatedBy: Author }, expect: unknown, kind: string, author: Author): void {
   if (typeof expect !== 'number' || expect === item.rev) return;
+  if (!reached(item.rev, expect)) refuseUnreached(kind, item.title, item.rev, expect, author);
   const who = item.updatedBy === author ? 'another edit' : item.updatedBy === 'claude' ? 'Claude' : 'the user';
   throw new PlanError(
     `${kind[0]!.toUpperCase()}${kind.slice(1)} "${item.title}" was changed by ${who} while this edit was open, so it was not saved. ` +
@@ -2941,13 +2942,24 @@ function checkRev(item: { rev: number; title: string; updatedBy: Author }, expec
   );
 }
 
+/** Whether `expect` names a revision an item at `rev` has had: a whole
+ *  number from 1 to where it is now. */
+function reached(rev: number, expect: number): boolean {
+  return Number.isInteger(expect) && expect >= 1 && expect <= rev;
+}
+
 /**
- * A task edit made against revision `expect` is refused when the *other*
- * side changed what the task says since — the user saving over Claude's
- * newer text, or the other way round. One side's own quick successive
- * saves (ticking dependencies one after another) never trip it, and
- * progress (status, stage, checks) is not part of the revision.
+ * An edit made against a revision the item never had: nobody changed it,
+ * but the edit was made on a version it never was (a tab holding a plan
+ * since replaced, or a client's mistake), so it is refused, saying so.
  */
+function refuseUnreached(kind: string, title: string, rev: number, expect: number, author: Author): never {
+  throw new PlanError(
+    `${kind[0]!.toUpperCase()}${kind.slice(1)} "${title}" is at revision ${rev}, not ${expect}: this edit was made against a version it never had, so it was not saved. ` +
+      (author === 'claude' ? 'Read the plan again (harness_plan_read), then redo the edit.' : 'It now shows the latest version.'),
+  );
+}
+
 /** The latest result of each check: a new report replaces the one of the
  *  same name and leaves the others as they were. */
 export function mergeChecks(before: readonly CheckResult[] | undefined, reported: readonly CheckResult[]): CheckResult[] {
@@ -2965,8 +2977,17 @@ function taskContent(t: Task): string {
   return JSON.stringify([t.title, t.detail ?? '', t.note ?? '', t.files ?? [], t.dependsOn ?? [], t.branch ?? '', t.review ?? '']);
 }
 
+/**
+ * A task edit made against revision `expect` is refused when the *other*
+ * side changed what the task says since — the user saving over Claude's
+ * newer text, or the other way round. One side's own quick successive
+ * saves (ticking dependencies one after another) never trip it, and
+ * progress (status, stage, checks) is not part of the revision.
+ */
 function checkTaskRev(task: Task, expect: unknown, author: Author): void {
   if (typeof expect !== 'number') return;
+  const rev = task.rev ?? 1;
+  if (!reached(rev, expect)) refuseUnreached('task', task.title, rev, expect, author);
   const other: Author = author === 'user' ? 'claude' : 'user';
   const theirs = task.revBy?.[other];
   if (theirs === undefined || theirs <= expect) return;

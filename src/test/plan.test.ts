@@ -306,6 +306,26 @@ test('a save made against an old revision is refused, naming who changed it', ()
   assert.equal(ok.sections[0]!.body, 'my edit');
 });
 
+test('a save made against a revision the item never reached says so, and is not saved', () => {
+  // A tab holding a plan since replaced, or a client's mistake: nobody changed anything.
+  const plan = applyOps(fresh(), [{ op: 'upsert_task', id: 't4', detail: 'Claude wrote this.' }], 'claude').plan;
+  const ahead = (rev: number | undefined) => (rev ?? 1) + 5;
+  const edits: [string, PlanOp, RegExp][] = [
+    ['section', { op: 'upsert_section', id: 's1', body: 'stale', expect: ahead(plan.sections[0]!.rev) }, /^Section "[^"]+" is at revision \d+, not \d+: this edit was made against a version it never had/],
+    ['diagram', { op: 'upsert_node', diagramId: plan.diagrams[0]!.id, id: 'db', label: 'stale', expect: ahead(plan.diagrams[0]!.rev) }, /^Diagram "[^"]+" is at revision \d+, not \d+/],
+    ['diagram caption', { op: 'upsert_diagram', id: plan.diagrams[0]!.id, caption: 'stale', expect: ahead(plan.diagrams[0]!.rev) }, /^Diagram "[^"]+" is at revision \d+, not \d+/],
+    ['task', { op: 'upsert_task', id: 't4', detail: 'stale', expect: ahead(plan.tasks.find((t) => t.id === 't4')!.rev) }, /^Task "Wire into API" is at revision 2, not 7/],
+    // Nor one below any it can have.
+    ['section at 0', { op: 'upsert_section', id: 's1', body: 'stale', expect: 0 }, /^Section "[^"]+" is at revision \d+, not 0/],
+    ['task at 1.5', { op: 'upsert_task', id: 't4', detail: 'stale', expect: 1.5 }, /^Task "Wire into API" is at revision 2, not 1\.5/],
+  ];
+  for (const [what, op, said] of edits) {
+    assert.throws(() => applyOps(plan, [op], 'user'), (err: Error) => said.test(err.message) && /latest version/.test(err.message) && !/changed by/.test(err.message), what);
+  }
+  // The agent is told to read the plan again.
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_task', id: 't4', detail: 'stale', expect: 9 }], 'claude'), /is at revision 2, not 9: .*harness_plan_read/);
+});
+
 test('every change to a diagram moves its revision; a no-op does not', () => {
   const plan = fresh();
   const d = plan.diagrams[0]!;
