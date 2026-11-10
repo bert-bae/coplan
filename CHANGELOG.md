@@ -319,6 +319,10 @@
   safe as they are and keep their folders; a session kept the old way is
   saved to its new folder the next time Coplan starts, or when it is next
   used, and deleting it deletes its old folder too.
+- **The agent setting many tasks' `builds` no longer stalls the page.**
+  Checking each one against your unread edits copied the whole plan, so on
+  a big plan a batch held Coplan for up to half a second. It now works out
+  which box links would change without the copy.
 
 ### Targeted checks: only what the change touched
 

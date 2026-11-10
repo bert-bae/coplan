@@ -679,31 +679,39 @@ function linkBuilds(
   const linked: Part[] = [];
   const unlinked: Part[] = [];
   for (const { id, refs } of builds) {
-    const title = plan.tasks.find((t) => t.id === id)?.title ?? id;
-    const want = new Set(refs.map((ref) => {
-      const { diagram, node } = findBox(plan, ref, title);
-      return `${diagram.id}/${node.id}`;
-    }));
-    for (const diagram of plan.diagrams) {
-      let touched = false;
-      for (const node of diagram.nodes) {
-        const has = node.taskIds?.includes(id) ?? false;
-        const wanted = want.has(`${diagram.id}/${node.id}`);
-        if (wanted && !has) {
-          node.taskIds = [...(node.taskIds ?? []), id];
-          linked.push({ diagram, node });
-          touched = true;
-        } else if (!wanted && has && replace) {
-          const kept = node.taskIds!.filter((x) => x !== id);
-          if (kept.length) node.taskIds = kept;
-          else delete node.taskIds;
-          unlinked.push({ diagram, node });
-          touched = true;
-        }
-      }
-      // A canvas holding the old links must reload rather than save over
-      // them — but only when a link actually changed.
-      if (touched) bumpDiagram(diagram, now);
+    const change = buildsChange(plan, id, refs, replace);
+    const changed = new Set([...change.linked, ...change.unlinked].map((p) => p.diagram));
+    for (const { node } of change.linked) node.taskIds = [...(node.taskIds ?? []), id];
+    for (const { node } of change.unlinked) {
+      const kept = node.taskIds!.filter((x) => x !== id);
+      if (kept.length) node.taskIds = kept;
+      else delete node.taskIds;
+    }
+    // A canvas holding the old links must reload rather than save over
+    // them — but only when a link actually changed.
+    for (const diagram of changed) bumpDiagram(diagram, now);
+    linked.push(...change.linked);
+    unlinked.push(...change.unlinked);
+  }
+  return { linked, unlinked };
+}
+
+/** The boxes whose link to task `id` its `builds` (`refs`) would change:
+ *  those to link, and with `replace` those to unlink. Changes nothing. */
+function buildsChange(plan: Plan, id: string, refs: string[], replace: boolean): { linked: Part[]; unlinked: Part[] } {
+  const title = plan.tasks.find((t) => t.id === id)?.title ?? id;
+  const want = new Set(refs.map((ref) => {
+    const { diagram, node } = findBox(plan, ref, title);
+    return `${diagram.id}/${node.id}`;
+  }));
+  const linked: Part[] = [];
+  const unlinked: Part[] = [];
+  for (const diagram of plan.diagrams) {
+    for (const node of diagram.nodes) {
+      const has = node.taskIds?.includes(id) ?? false;
+      const wanted = want.has(`${diagram.id}/${node.id}`);
+      if (wanted && !has) linked.push({ diagram, node });
+      else if (!wanted && has && replace) unlinked.push({ diagram, node });
     }
   }
   return { linked, unlinked };
@@ -1074,13 +1082,13 @@ function contentTargetsOf(plan: Plan, op: PlanOp): string[] {
   }
 }
 
-/** The diagrams whose box links a task's `builds` would change, worked out
- *  on a copy: an added link can undo the user's unlink as surely as a
- *  dropped one undoes their link. A ref that names no box changes nothing
- *  here; the edit itself says what is wrong with it. */
+/** The diagrams whose box links a task's `builds` would change: an added
+ *  link can undo the user's unlink as surely as a dropped one undoes their
+ *  link. A ref that names no box changes nothing here; the edit itself says
+ *  what is wrong with it. */
 function relinked(plan: Plan, taskId: string | undefined, builds: string[]): string[] {
   try {
-    const { linked, unlinked } = linkBuilds(structuredClone(plan), [{ id: taskId ?? '', refs: cleanList(builds) ?? [] }], 0);
+    const { linked, unlinked } = buildsChange(plan, taskId ?? '', cleanList(builds) ?? [], true);
     return [...new Set([...linked, ...unlinked].map((p) => `diagram:${p.diagram.id}`))];
   } catch {
     return [];

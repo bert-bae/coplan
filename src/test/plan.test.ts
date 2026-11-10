@@ -909,6 +909,27 @@ test("builds is held to the links it would really change: an unlink undone count
   assert.equal(after.tasks.find((t) => t.id === 't3')?.title, 'UI, again');
 });
 
+test('the unread guard does not copy the plan for each builds edit', () => {
+  // Working out which links a builds would change copied the plan: on a big
+  // plan, a batch of them held the daemon for half a second. Counted as
+  // copies: four make no more than one edit with no builds, with nothing
+  // unread or with a change of the user's elsewhere.
+  const copies = (plan: Plan, ops: PlanOp[]) => {
+    const real = globalThis.structuredClone;
+    let n = 0;
+    globalThis.structuredClone = ((value: unknown, options?: StructuredSerializeOptions) => (n++, real(value, options))) as typeof real;
+    try {
+      applyOps(plan, ops, 'claude');
+    } finally {
+      globalThis.structuredClone = real;
+    }
+    return n;
+  };
+  const elsewhere = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't4', detail: 'the user wrote this' }], 'user').plan;
+  const builds: PlanOp[] = ['t1', 't2', 't3', 't4'].map((id) => ({ op: 'upsert_task', id, builds: ['a'] }));
+  for (const plan of [linkedPlan(), elsewhere]) assert.equal(copies(plan, builds), copies(plan, [{ op: 'upsert_task', id: 't1', title: 'API, again' }]));
+});
+
 test('handing over the build prompt is not a read of what the user did after submitting', () => {
   const proposed = applyOps(publishPlan(null, { title: 'x', tasks: [{ id: 't1', title: 'Build API' }] }, 1_000).plan, [
     { op: 'propose', title: 'Add cache', reason: 'faster', ops: [{ op: 'upsert_task', title: 'Cache' }] },
