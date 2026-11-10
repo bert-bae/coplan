@@ -101,7 +101,7 @@ the audit's finding numbers.
 | R4 | One `signOff` helper for the browser store's six sign-off actions; `commit` calls `adoptPlan` [19d] | 4 refactor | done | 08b50d7 |
 | R5 | Merge `CommitInput` and `CommitTextArea` (after F6, so the fix lives in one place) [19e] | 4 refactor | done | 177744e, 267bcdb |
 | R6 | Move `repoRoot` / `currentBranch` into `shared/changes.ts`; delete `daemon/git.ts` [19f] | 4 refactor | done | 101ab73 |
-| R7 | Bind every edit to the session it was made in: `store.op`/`ops` take the view's session, as the canvas's `commit` does, instead of reading the one on screen when called (39 call sites; selectSession's blur covers today's editors only because each saves synchronously; found reviewing F21) | 4 refactor | open | |
+| R7 | Bind every edit to the session it was made in: `store.op`/`ops` take the view's session, as the canvas's `commit` does, instead of reading the one on screen when called (39 call sites; selectSession's blur covers today's editors only because each saves synchronously; found reviewing F21) | 4 refactor | done | 8f17a7d, 46005bb |
 | B1 | The relay exits 2 when `HOME` is unset, which blocks the prompt: `${HOME:-}` (bin/coplan-hook-relay.sh:78) | 5 smaller | open | |
 | B2 | `sanitizeId` lets `.` and `..` through, and `purge` would delete the harness home (src/shared/paths.ts:29-31) | 5 smaller | open | |
 | B3 | The MCP server exits on a `null` line; parse errors get no -32700 answer (src/mcp/main.ts:328-342) | 5 smaller | open | |
@@ -115,6 +115,7 @@ the audit's finding numbers.
 | B11 | `sessionOr404` throws `HttpError(404)` as `planOr404` does, so the daemon's ~20 routes drop their `if (!session) return;` and none can forget it (src/daemon/main.ts; found reviewing R3) | 5 smaller | open | |
 | B12 | Enter in the panel's one-line fields (box label, detail, arrow label) saves while an IME is composing: check `e.nativeEvent.isComposing` (src/ui/components/flow/Panels.tsx CommitField; found reviewing R5) | 5 smaller | open | |
 | B13 | What the page does after a late answer applies to the session now on screen: a sign-off's tab switch and toast, a moved task's refocus (`#task-<id>`), a new subtask's expand, a settled proposal's preview close, all keyed by ids that repeat across plans. Check the answer's session is still on screen first (src/ui/store.ts sign-offs, TasksView.tsx:590, 721, Proposals.tsx:39; found reviewing R7) | 5 smaller | open | |
+| B14 | The six sign-offs still send to the session on screen when they run, not the one the dialog was opened on: give them its session as `commit` has, from `useSessionId`-style context (the dialogs already hold it for their previews). Guarded today by the daemon's `expect`/`hash` (src/ui/store.ts sign-offs, Submit.tsx, Revisions.tsx; found reviewing R7) | 5 smaller | open | |
 | A1 | Re-audit the touched areas with `/ponytail-audit`, and add any new findings as rows | 6 re-audit | open | |
 
 ### F19: the take-back never fires
