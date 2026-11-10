@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { isPidAlive, probeLock } from '../shared/paths.ts';
+import { baseUrl, isPidAlive, probeLock } from '../shared/paths.ts';
 import type { DaemonLock } from '../shared/types.ts';
 
 /**
@@ -107,11 +107,9 @@ test('`coplan doctor` starts a daemon over a stale lock instead of probing a dea
   const port = await closedPort();
   const dir = home({ pid: other.pid!, port });
   const { out } = await cli(dir, 'doctor');
-  const reachable = out.split('\n').find((l) => l.includes('daemon reachable')) ?? '';
-  assert.match(reachable, /^✓ daemon reachable — http:\/\/127\.0\.0\.1:\d+$/, out);
-  assert.ok(!reachable.endsWith(`:${port}`), `the doctor probed the stale lock's port:\n${out}`);
   const lock = JSON.parse(readFileSync(path.join(dir, 'daemon.json'), 'utf8')) as DaemonLock;
   assert.notEqual(lock.pid, other.pid, 'a daemon of its own holds the lock');
+  assert.equal(out.split('\n').find((l) => l.includes('daemon reachable')), `✓ daemon reachable — ${baseUrl(lock)}`, out);
   assert.equal(await probeLock(lock), 'live');
   assert.ok(isPidAlive(other.pid!), 'the process with the old pid was left alone');
 });

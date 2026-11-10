@@ -127,26 +127,21 @@ export async function ensureDaemon(): Promise<DaemonLock | null> {
   const existing = await readVerifiedLock();
   if (existing) return existing;
   ensureHome();
-  let pid: number | undefined;
   try {
     const child = spawn(process.execPath, [DAEMON_ENTRY], { detached: true, stdio: 'ignore', env: process.env });
     // A missing binary is reported on `error`, which unheard would take this
     // process down; the poll below reports the failure instead.
     child.on('error', () => {});
     child.unref();
-    pid = child.pid;
   } catch {
     return null;
   }
+  // The same test as above: the stale lock the new daemon replaces fails it.
   const deadline = Date.now() + 6_000;
   while (Date.now() < deadline) {
     await sleep(100);
-    // Not the stale lock the new daemon is about to replace: one that
-    // answers, or the one just started, still too busy loading to.
-    const lock = readLiveLock();
-    if (!lock) continue;
-    const state = await probeLock(lock, Math.max(100, Math.min(500, deadline - Date.now())));
-    if (state === 'live' || (state === 'busy' && lock.pid === pid)) return lock;
+    const lock = await readVerifiedLock(500);
+    if (lock) return lock;
   }
   return null;
 }

@@ -95,10 +95,7 @@ let cachedLock: DaemonLock | null = null;
 
 async function daemon(): Promise<DaemonLock | null> {
   if (cachedLock && readLiveLock()?.pid === cachedLock.pid) return cachedLock;
-  // A lock is trusted once its daemon has answered: one left by a daemon
-  // that died may name a pid some other process has now.
-  cachedLock = await ensureDaemon();
-  return cachedLock;
+  return (cachedLock = await ensureDaemon());
 }
 
 /** What the daemon answers a tool call: prose for the agent, or an error. */
