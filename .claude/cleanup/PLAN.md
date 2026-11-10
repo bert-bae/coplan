@@ -75,7 +75,7 @@ the audit's finding numbers.
 | F2 | The MCP server reports daemon 500, 413 and 400 answers as success [2] | 1 must fix | done | 01e68cf |
 | F3 | `coplan stop` / `restart` cannot stop a hung daemon, and say they did [6] | 1 must fix | done | ea4fc79 |
 | F4 | `upsert_task` with `builds` and removing a parent task slip past the unread-edit guard [5a] | 1 must fix | done | 2afd5e8 |
-| F5 | Delivering the build prompt marks the user's later changes as read [5b] | 1 must fix | open | |
+| F5 | Delivering the build prompt marks the user's later changes as read [5b] | 1 must fix | done | 9377052 |
 | F6 | An agent push wipes what the user is typing in the box panel [3] | 1 must fix | open | |
 | F7 | Saving the summary, box notes or a caption silently overwrites the agent's newer text [4]. D1: warn only | 1 must fix | open | |
 | F19 | A sign-off is marked delivered when the relay gave up while the daemon was busy, so the agent never gets it (found by T1b). See *F19* below | 1 must fix | open | |
