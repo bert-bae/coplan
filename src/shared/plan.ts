@@ -545,6 +545,23 @@ function refuseUnread(prev: Plan | null, then: string): void {
 }
 
 /**
+ * Whether a task can take subtasks. One already started or finished cannot:
+ * a subtask would make it a parent and take its progress (stage, rounds,
+ * checks) away, and its finished work out of the counts. One that is a
+ * parent already can. The page offers no move this refuses.
+ */
+export function canTakeSubtasks(plan: Pick<Plan, 'tasks'>, task: Task): boolean {
+  return task.status === 'todo' || plan.tasks.some((t) => t.parentId === task.id);
+}
+
+function refuseNewParent(plan: Plan, parent: Task, instead: string, { depends = true } = {}): void {
+  if (canTakeSubtasks(plan, parent)) return;
+  // Depending on dropped work means nothing.
+  const after = depends && parent.status !== 'dropped' ? `, depending on ${parent.id} if it builds on it` : '';
+  throw new PlanError(`"${parent.title}" is already ${STATUS_WORDS[parent.status]}, so it cannot take subtasks: ${instead}${after}.`);
+}
+
+/**
  * Build a task tree from what Claude wrote. Ids that survive keep their
  * status, detail, note, files and links; dependencies, branch and review
  * mode left out are kept too (the user may have set them), and `[]` or `""`
@@ -609,6 +626,13 @@ function buildTaskTree(
     });
   };
   walk(input, null, 0);
+  // A task that survives keeps its status, so one already started or
+  // finished that this publish nests work under would lose its progress.
+  // (Reusing a finished task's id for new work carries its status over too.)
+  const parents = new Set(tasks.map((t) => t.parentId));
+  for (const old of base.tasks) {
+    if (parents.has(old.id)) refuseNewParent(base, old, `list the work beside ${old.id} instead, giving any new task an id of its own`);
+  }
 
   // Dependencies are resolved once every task has its id, so a task can
   // name one written after it.
@@ -1368,16 +1392,9 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       const title = clean(op.title, MAX_TITLE);
       if (!title) throw new PlanError(op.id ? `No task "${op.id}".` : 'A new task needs a title.');
       if (plan.tasks.length >= MAX_TASKS) throw new PlanError(`A plan holds at most ${MAX_TASKS} tasks.`);
-      const parentId = op.parentId ? requireTask(plan, op.parentId).id : null;
-      // Under a task already started or finished, a subtask would make it a
-      // parent and take its progress — stage, rounds, checks — away.
-      const parent = parentId ? requireTask(plan, parentId) : null;
-      if (parent && parent.status !== 'todo' && !plan.tasks.some((t) => t.parentId === parent.id)) {
-        throw new PlanError(
-          `"${parent.title}" is already ${STATUS_WORDS[parent.status]}, so it cannot take subtasks: add the new work as its own ` +
-            `task beside it${parent.parentId ? ` (parentId "${parent.parentId}")` : ''}, depending on ${parent.id} if it builds on it.`,
-        );
-      }
+      const parent = op.parentId ? requireTask(plan, op.parentId) : null;
+      const parentId = parent?.id ?? null;
+      if (parent) refuseNewParent(plan, parent, `add the new work as its own task beside it${parent.parentId ? ` (parentId "${parent.parentId}")` : ''}`);
       const detail = clean(op.detail, MAX_TEXT);
       const note = clean(op.note, MAX_TITLE * 2);
       const files = cleanList(op.files);
@@ -1417,9 +1434,13 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
 
     case 'move_task': {
       const task = requireTask(plan, op.id);
-      const parentId = op.parentId ? requireTask(plan, op.parentId).id : null;
+      const parent = op.parentId ? requireTask(plan, op.parentId) : null;
+      const parentId = parent?.id ?? null;
       if (parentId && (parentId === task.id || isDescendant(plan, parentId, task.id))) {
         throw new PlanError(`Cannot move "${task.title}" inside itself.`);
+      }
+      if (parent && parentId !== task.parentId) {
+        refuseNewParent(plan, parent, `move "${task.title}" beside it instead${parent.parentId ? ` (parentId "${parent.parentId}")` : ''}`, { depends: false });
       }
       const from = task.parentId;
       task.parentId = parentId;

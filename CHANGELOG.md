@@ -81,6 +81,12 @@
   `coplan open` until its agent was used again. Sessions you planned in
   and the rest are now kept apart, the newest 60 of each, so neither can
   push out the other.
+- **Finished work stays finished when tasks move.** Adding a subtask to a
+  task already started or done was refused, but moving one under it, or a
+  republish nesting new work under it, was not: the task became a parent,
+  read as ready again, and its finished work dropped out of the counts.
+  All three are now refused the same way, with what to do instead, and
+  the task list no longer offers nesting or dropping a task into one.
 
 ### Targeted checks: only what the change touched
 

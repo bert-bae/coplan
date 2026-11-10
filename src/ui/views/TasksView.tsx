@@ -12,7 +12,7 @@ import { classNames } from '../lib/format.ts';
 import { boxRows } from '../lib/tasks.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
 import { boxUnbuilt } from '../../shared/check.ts';
-import { childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
+import { canTakeSubtasks, childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
 import { DEFAULT_BUILD_SETTINGS, SESSION_BRANCH, roundVerdict, stackStatus, type StackEntry, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
 import { REVIEW_MODES, TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type ReviewMode, type Task, type TaskStatus } from '../../shared/types.ts';
 import type { TaskMode } from '../store.ts';
@@ -446,7 +446,8 @@ function Outline({ plan, hideDone }: { plan: Plan; hideDone: boolean }) {
   /** Where a drop on `target` in `zone` puts the dragged task. */
   const dropOp = (draggedId: string, target: Task, zone: DropZone): PlanOp | null => {
     if (draggedId === target.id || descendants(plan, draggedId).some((d) => d.id === target.id)) return null;
-    if (zone === 'inside') return { op: 'move_task', id: draggedId, parentId: target.id, index: Number.MAX_SAFE_INTEGER };
+    // Not into a task already started or finished: it cannot take subtasks.
+    if (zone === 'inside') return canTakeSubtasks(plan, target) ? { op: 'move_task', id: draggedId, parentId: target.id, index: Number.MAX_SAFE_INTEGER } : null;
     const siblings = childrenOf(plan, target.parentId).filter((t) => t.id !== draggedId);
     const at = siblings.findIndex((t) => t.id === target.id);
     return { op: 'move_task', id: draggedId, parentId: target.parentId, index: zone === 'before' ? at : at + 1 };
@@ -565,7 +566,7 @@ function TaskRow(props: {
     up: index > 0 ? ({ op: 'move_task', id: task.id, parentId: task.parentId, index: index - 1 } as PlanOp) : null,
     down: index < siblings.length - 1 ? ({ op: 'move_task', id: task.id, parentId: task.parentId, index: index + 1 } as PlanOp) : null,
     // Nest under the sibling above, at the end of its subtasks.
-    indent: index > 0 ? ({ op: 'move_task', id: task.id, parentId: siblings[index - 1]!.id, index: Number.MAX_SAFE_INTEGER } as PlanOp) : null,
+    indent: index > 0 && canTakeSubtasks(plan, siblings[index - 1]!) ? ({ op: 'move_task', id: task.id, parentId: siblings[index - 1]!.id, index: Number.MAX_SAFE_INTEGER } as PlanOp) : null,
     // Out one level, right after the old parent.
     outdent: parent
       ? ({

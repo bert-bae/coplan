@@ -975,3 +975,22 @@ test('a proposed removal over an edit of the task itself says so once; one made 
   delete (old.proposals![0]!.base as Record<string, unknown>)['removal:t1'];
   assert.throws(() => accept(old), /out of date: everything it would change \(it was made before Coplan recorded that\)/);
 });
+
+/* A task already started or finished cannot become a parent, however the
+ * subtask would get under it: its progress (stage, rounds, checks) would go. */
+
+test('no task is moved, or published, under a task already started or finished', () => {
+  const base = applyOps(publishPlan(null, { title: 'x', tasks: [{ id: 't1', title: 'Auth' }, { id: 't2', title: 'Tokens' }, { id: 't3', title: 'UI' }] }, 1_000).plan, [{ op: 'upsert_task', id: 't1', status: 'done' }], 'user').plan;
+  assert.throws(() => applyOps(base, [{ op: 'move_task', id: 't2', parentId: 't1', index: 0 }], 'user'), /"Auth" is already done, so it cannot take subtasks: move "Tokens" beside it/);
+  assert.equal(countTasks(base).done, 1, 'the finished work still counts');
+  // Dropped work is not worth depending on: no such advice for it.
+  const dropped = applyOps(base, [{ op: 'upsert_task', id: 't3', status: 'dropped', note: 'not needed' }], 'user').plan;
+  assert.throws(() => applyOps(dropped, [{ op: 'upsert_task', parentId: 't3', title: 'More' }], 'user'), (err: Error) => /already dropped/.test(err.message) && !/depending on/.test(err.message));
+  // Under a task not started yet, a move is fine.
+  assert.equal(applyOps(base, [{ op: 'move_task', id: 't2', parentId: 't3', index: 0 }], 'user').plan.tasks.find((t) => t.id === 't2')?.parentId, 't3');
+  // A republish that nests new work under it is refused the same way.
+  assert.throws(
+    () => publishPlan(read(base), { title: 'x', tasks: [{ id: 't1', title: 'Auth', subtasks: [{ title: 'Refresh' }] }, { id: 't2', title: 'Tokens' }, { id: 't3', title: 'UI' }] }, 2_000),
+    /"Auth" is already done, so it cannot take subtasks: list the work beside t1 instead, giving any new task an id of its own, depending on t1 if it builds on it\./,
+  );
+});

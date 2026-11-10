@@ -1975,3 +1975,12 @@ test('switching session closes the editors of the one left: nothing typed for on
   assert.equal(sentTo('s2').length, 0, 'nothing reached s2');
   assert.deepEqual(sentTo('s1').map((o) => [o['op'], o['title']]), [['upsert_task', 'Storage, renamed in s1']]);
 });
+
+test('the task list offers no nesting under a task already started or finished', async () => {
+  await boot();
+  await openTab('Tasks');
+  // Invalidation sits below Cache client, which is done: nesting under it is not offered.
+  assert.equal((screen.getByRole('button', { name: 'Nest Invalidation under the task above' }) as HTMLButtonElement).disabled, true);
+  // Wire into API sits below Storage layer, which is a parent already: that is fine.
+  assert.equal((screen.getByRole('button', { name: 'Nest Wire into API under the task above' }) as HTMLButtonElement).disabled, false);
+});

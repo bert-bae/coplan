@@ -162,12 +162,14 @@ test('connections are reported by what they join: added, removed, reversed, rest
 
 test('task edits are reported as where the task ended up', () => {
   let plan = fresh();
+  // Under a task not started yet: one in progress cannot take subtasks.
+  plan = applyOps(plan, [{ op: 'upsert_task', title: 'Rollout' }], 'user').plan;
   plan = applyOps(plan, [{ op: 'upsert_task', title: 'Load test' }], 'user').plan;
-  plan = applyOps(plan, [{ op: 'upsert_task', id: 't1', title: 'Load tst' }], 'user').plan;
-  plan = applyOps(plan, [{ op: 'upsert_task', id: 't1', title: 'Load test the cache' }], 'user').plan;
-  plan = applyOps(plan, [{ op: 'move_task', id: 't1', parentId: 'cache-client', index: 0 }], 'user').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't2', title: 'Load tst' }], 'user').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't2', title: 'Load test the cache' }], 'user').plan;
+  plan = applyOps(plan, [{ op: 'move_task', id: 't2', parentId: 't1', index: 0 }], 'user').plan;
   const text = renderPlan(plan, { changesOnly: true });
-  assert.match(text, /\*\*Tasks\*\*\n- Added t1 "Load test the cache" under "Cache client"\./);
+  assert.match(text, /\*\*Tasks\*\*\n(- .*\n)*- Added t2 "Load test the cache" under "Rollout"\./);
   assert.doesNotMatch(text, /Load tst/);
 });
 
