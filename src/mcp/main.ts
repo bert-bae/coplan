@@ -20,7 +20,7 @@ const PROTOCOL_VERSION = '2024-11-05';
 
 interface JsonRpcRequest {
   jsonrpc: '2.0';
-  id?: number | string | null;
+  id?: number | string;
   method: string;
   params?: Record<string, unknown>;
 }
@@ -344,11 +344,14 @@ function onLine(line: string): void {
     if (id !== null && pendingRoots.delete(String(id))) onRoots(message['result']);
     return;
   }
-  if (typeof message['method'] !== 'string') {
-    respondError(replyId(message['id']), -32600, 'Invalid Request');
+  // A request's id is a string or a number (MCP: never null): one that is
+  // neither makes it no request to run, answered under null.
+  const id = replyId(message['id']);
+  if (typeof message['method'] !== 'string' || (message['id'] !== undefined && id === null)) {
+    respondError(id, -32600, 'Invalid Request');
     return;
   }
-  const req = { ...message, id: message['id'] === undefined ? undefined : replyId(message['id']) } as JsonRpcRequest;
+  const req = message as unknown as JsonRpcRequest;
   inFlight++;
   void handleRequest(req)
     .catch((err: unknown) => {

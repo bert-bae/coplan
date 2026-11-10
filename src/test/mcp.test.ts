@@ -212,13 +212,18 @@ test('a line that is not a request gets the JSON-RPC error for it, and the serve
       if (replies.some((r) => r['id'] === 1)) resolve();
     });
   });
-  const lines = ['null', '42', '"text"', '[]', '{not json', '{"id":{"toString":0}}', '{"id":5}', '{"jsonrpc":"2.0","id":3,"method":42}'];
+  // The last three are requests but for their id, which is a string or a number (MCP: never null).
+  const badIds = ['{"x":1}', 'true', 'null'].map((id) => `{"jsonrpc":"2.0","id":${id},"method":"tools/list"}`);
+  const lines = ['null', '42', '"text"', '[]', '{not json', '{"id":{"toString":0}}', '{"id":5}', '{"jsonrpc":"2.0","id":3,"method":42}', ...badIds];
   for (const line of [...lines, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })]) child.stdin!.write(`${line}\n`);
   await Promise.race([answered, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+  // A moment more, for any answer to a line before it that should get none.
+  await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(child.exitCode, null, 'the server is still running');
   child.kill();
   const errors = replies.filter((r) => r['error']).map((r) => [r['id'], (r['error'] as { code: number }).code]);
   const invalid = (id: number | null) => [id, -32600];
-  assert.deepEqual(errors, [invalid(null), invalid(null), invalid(null), invalid(null), [null, -32700], invalid(null), invalid(5), invalid(3)], 'one error each, under its id where it has one');
+  assert.deepEqual(errors, [invalid(null), invalid(null), invalid(null), invalid(null), [null, -32700], invalid(null), invalid(5), invalid(3), invalid(null), invalid(null), invalid(null)], 'one error each, under its id where it has one');
+  assert.ok(!replies.some((r) => r['result'] && r['id'] !== 1), 'a request with a bad id is not run');
   assert.ok(replies.some((r) => r['id'] === 1 && r['result']), 'and the next request is answered');
 });
