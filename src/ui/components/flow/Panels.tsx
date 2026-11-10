@@ -4,6 +4,7 @@ import { MarkdownField } from '../Editable.tsx';
 import { Markdown } from '../Markdown.tsx';
 import { STATUS_GLYPH, STATUS_LABEL } from '../Progress.tsx';
 import { classNames } from '../../lib/format.ts';
+import { isComposing } from '../../lib/keys.ts';
 import { isLocked, outline } from '../../../shared/plan.ts';
 import { NODE_KINDS, type NodeKind, type Plan, type Target } from '../../../shared/types.ts';
 import { ThreadPanel } from '../Threads.tsx';
@@ -121,6 +122,7 @@ export function CommitField({
       leave();
     },
     onKeyDown: (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (isComposing(e)) return;
       if (e.key === 'Enter' && !multiline) commit();
       if (e.key === 'Enter' && multiline && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();

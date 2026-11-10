@@ -196,6 +196,12 @@
   session, which it looked for only as Claude Code names it: Cursor's
   chat id was not found and the event was dropped, leaving a question or
   permission prompt on the board.
+- **Typing in Japanese, Chinese or Korean, the input method's keys are its
+  own.** The Enter that picks characters saved a title, a box's label, an
+  arrow's label, a session's name, a check's command or a comment
+  half-typed; the Escape that drops a choice threw the whole edit away, or
+  closed the sign-off dialog. While the input method is composing, the
+  fields and dialogs now leave its keys alone; the next Enter saves.
 
 ### Targeted checks: only what the change touched
 

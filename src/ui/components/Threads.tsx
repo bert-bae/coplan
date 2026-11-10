@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useAgent, useEdit, usePlan } from '../store.ts';
 import { Markdown } from './Markdown.tsx';
+import { isComposing } from '../lib/keys.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { threadWaitsOn } from '../../shared/plan.ts';
 import type { Author, Target, Thread } from '../../shared/types.ts';
@@ -167,6 +168,7 @@ function Composer({
         autoFocus={autoFocus}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
+          if (isComposing(e)) return;
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
             e.preventDefault();
             void send();

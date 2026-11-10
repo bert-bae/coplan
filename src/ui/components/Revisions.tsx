@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { store, useAgent, usePlan, useSession, useStore } from '../store.ts';
 import { api, type PromptPreview } from '../lib/api.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
+import { isComposing } from '../lib/keys.ts';
 import { MAX_NOTE, describeTarget, latestRevision, pendingRevision, revisionProgress, revisionStatus, threadsForRevision } from '../../shared/plan.ts';
 import type { AgentInfo } from '../../shared/agents.ts';
 import type { Plan, RevisionRequest, SessionState, Target } from '../../shared/types.ts';
@@ -107,7 +108,7 @@ function RevisionDialog({ session, plan, onClose }: { session: SessionState; pla
   }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !busy) {
+      if (e.key === 'Escape' && !busy && !isComposing(e)) {
         e.stopPropagation();
         onClose();
       }

@@ -4,6 +4,7 @@ import { usePlan } from '../../store.ts';
 import { Markdown } from '../Markdown.tsx';
 import { ProgressBar, STATUS_GLYPH, STATUS_LABEL } from '../Progress.tsx';
 import { classNames } from '../../lib/format.ts';
+import { isComposing } from '../../lib/keys.ts';
 import { BoxFoot, BoxTasks } from './BoxTasks.tsx';
 import { KIND_GLYPH, KIND_LABEL, useCanvas, type FlowData, type FlowEdge, type FlowNode } from './shared.ts';
 
@@ -297,6 +298,7 @@ export function LabelInput({
       onBlur={() => finish(draft)}
       onKeyDown={(e) => {
         e.stopPropagation();
+        if (isComposing(e)) return;
         if (e.key === 'Enter') finish(draft);
         if (e.key === 'Escape') finish(null);
         // Tab finishes the name and stays on the canvas, ready for the next

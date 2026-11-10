@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { store, useAgent, usePlan, useSession, useStore, type ViewerState, type ViewerTab } from '../store.ts';
 import { api } from '../lib/api.ts';
 import { classNames } from '../lib/format.ts';
+import { isComposing } from '../lib/keys.ts';
 import { droppedParts, type Block, type BlockSource, type SettingKey } from '../../shared/blocks.ts';
 import { findPart, outline, planPhase } from '../../shared/plan.ts';
 import type { Plan, Target } from '../../shared/types.ts';
@@ -291,7 +292,7 @@ function PromptViewer({ viewer }: { viewer: ViewerState }) {
   }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !isComposing(e)) {
         e.stopPropagation();
         store.closeViewer();
       }

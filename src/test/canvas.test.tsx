@@ -755,6 +755,20 @@ for (const [name, multiline, tag] of [['a paragraph', true, 'textarea'], ['a lin
   });
 
   if (!multiline) {
+    test(`${name}: the keys of an input method still composing (Japanese, Chinese, Korean) are its own`, async () => {
+      const { commits, box } = mount('Old');
+      act(() => box.focus());
+      fireEvent.change(box, { target: { value: 'にほん' } });
+      fireEvent.keyDown(box, { key: 'Enter', isComposing: true });
+      fireEvent.keyDown(box, { key: 'Enter', keyCode: 229 });
+      assert.deepEqual(commits, [], 'Enter picks the characters');
+      fireEvent.keyDown(box, { key: 'Escape', isComposing: true });
+      assert.equal(box.value, 'にほん', 'Escape drops a choice, not the edit');
+      fireEvent.keyDown(box, { key: 'Enter' });
+      assert.deepEqual(commits, ['にほん'], 'the next Enter is the line done');
+      cleanup();
+    });
+
     test(`${name}: Enter saves it, and leaving after does not save it again, though the plan has not answered yet`, async () => {
       const { commits, box, push } = mount('Old');
       act(() => box.focus());

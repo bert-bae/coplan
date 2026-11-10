@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { listedSessions, store, useStore } from '../store.ts';
 import { GlobalActions } from './GlobalActions.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
+import { isComposing } from '../lib/keys.ts';
 import { agentInfo } from '../../shared/agents.ts';
 import { PLAN_STATUSES, type PlanStatus, type SessionSummary } from '../../shared/types.ts';
 import { PLAN_STATUS, statusTitle, summaryFacts } from '../lib/status.ts';
@@ -436,6 +437,7 @@ function RenameField({ session, onDone }: { session: SessionSummary; onDone: () 
       onChange={(e) => setValue(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => {
+        if (isComposing(e)) return;
         if (e.key === 'Enter') commit();
         if (e.key === 'Escape') abandon();
       }}

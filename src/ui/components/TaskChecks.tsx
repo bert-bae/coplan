@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useAgent, useEdit, useStore } from '../store.ts';
 import { classNames } from '../lib/format.ts';
+import { isComposing } from '../lib/keys.ts';
 import { ancestorsOf, effectiveChecks, leafTasks } from '../../shared/build.ts';
 import { TASK_CHECK_STAGES, type Plan, type Task, type TaskCheck, type TaskCheckStage } from '../../shared/types.ts';
 
@@ -121,7 +122,7 @@ function AddCheck({ onAdd, taken }: { onAdd: (c: TaskCheck) => void; taken: stri
   };
   return (
     <div className="task-checks-add" role="group" aria-label="Add a check for this task">
-      <input className="input mono" value={run} placeholder="Command, e.g. pnpm db:check" aria-label="Command of the check to add" onChange={(e) => setRun(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} />
+      <input className="input mono" value={run} placeholder="Command, e.g. pnpm db:check" aria-label="Command of the check to add" onChange={(e) => setRun(e.target.value)} onKeyDown={(e) => !isComposing(e) && e.key === 'Enter' && add()} />
       <input className="input" value={name} placeholder="Name (optional)" aria-label="Name of the check to add" onChange={(e) => setName(e.target.value)} />
       <select className="input" value={stage} aria-label="When it runs" onChange={(e) => setStage(e.target.value as TaskCheckStage)}>
         <option value="review">at review</option>

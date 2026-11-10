@@ -4,6 +4,7 @@ import { api, type PromptPreview, type ProjectSummary } from '../lib/api.ts';
 import { OpenInClaude } from './Handoff.tsx';
 import { ProgressBar } from './Progress.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
+import { isComposing } from '../lib/keys.ts';
 import { MAX_NOTE, awaitingUserReview, countTasks, currentTask, planPhase, unreadAreas } from '../../shared/plan.ts';
 import { MAX_PARALLEL, MAX_ROUNDS, MODE_LABEL, branchPlan, buildSteps, hasDependencies, planMode, readyTasks, targetOf } from '../../shared/build.ts';
 import { blockingGaps, planGaps, type GapSeverities } from '../../shared/check.ts';
@@ -212,7 +213,7 @@ export function StatusChip({ plan, agent, note }: { plan: Plan; agent: AgentInfo
 function useEscape(onClose: () => void, busy = false): void {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !busy) {
+      if (e.key === 'Escape' && !busy && !isComposing(e)) {
         e.stopPropagation();
         onClose();
       }

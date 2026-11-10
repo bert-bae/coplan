@@ -755,6 +755,27 @@ test("keys typed into a field are the field's: no task moves, no sidebar toggles
   assert.equal(store.getState().collapsedSidebar, collapsed, '[ is a character');
 });
 
+test("a title's Enter that picks an input method's characters saves nothing; the next one does", async () => {
+  await boot();
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getAllByRole('button', { name: /^Task title: Wire into API\. Edit$/ })[0]!);
+  });
+  const field = screen.getByRole('textbox', { name: 'Task title' });
+  fireEvent.change(field, { target: { value: 'API に配線' } });
+  await act(async () => {
+    fireEvent.keyDown(field, { key: 'Enter', isComposing: true });
+    fireEvent.keyDown(field, { key: 'Enter', keyCode: 229 });
+    fireEvent.keyDown(field, { key: 'Escape', isComposing: true });
+  });
+  assert.deepEqual(opsSent(), [], 'still composing');
+  assert.ok(screen.getByRole('textbox', { name: 'Task title' }), 'and the edit is still open');
+  await act(async () => {
+    fireEvent.keyDown(field, { key: 'Enter' });
+  });
+  assert.deepEqual(opsSent().map((o) => o['title']), ['API に配線']);
+});
+
 test('Alt+arrows reorganize the tree from the keyboard', async () => {
   await boot();
   await openTab('Tasks');

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { store, usePlan, useStore } from '../store.ts';
 import { api } from '../lib/api.ts';
 import { classNames } from '../lib/format.ts';
+import { isComposing } from '../lib/keys.ts';
 import { PromptView } from './PromptView.tsx';
 import type { Block } from '../../shared/blocks.ts';
 import type { Target } from '../../shared/types.ts';
@@ -46,7 +47,7 @@ function ExportDialog({ sessionId }: { sessionId: string }) {
   }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !isComposing(e)) {
         e.stopPropagation();
         store.closeExport();
       }

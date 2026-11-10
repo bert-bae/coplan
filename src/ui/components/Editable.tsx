@@ -3,6 +3,7 @@ import { Markdown } from './Markdown.tsx';
 import { openDrafts } from '../lib/drafts.ts';
 import { store } from '../store.ts';
 import { classNames } from '../lib/format.ts';
+import { isComposing } from '../lib/keys.ts';
 
 /**
  * Edit-in-place. Everything in the plan is editable where it is shown,
@@ -101,6 +102,7 @@ export function InlineText({
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}
         onKeyDown={(e) => {
+          if (isComposing(e)) return;
           if (e.key === 'Enter') {
             e.preventDefault();
             refocus.current = true;
@@ -222,6 +224,7 @@ export function MarkdownField({
     onCancel?.();
   };
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (isComposing(e)) return;
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       void save();
