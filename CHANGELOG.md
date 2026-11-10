@@ -233,6 +233,12 @@
   under it is saved as usual. The session list shows it, marked "saved by
   a newer Coplan" rather than "no plan yet", and asks before deleting it
   there whether to delete it for the newer Coplan too.
+- **The agent cannot delete a task you just moved under one it removes.**
+  It was refused an edit to anything you changed since it last read the
+  plan, but a move was not counted: drag a task under another, and the
+  agent removing that one, unaware, took yours with it. Now it is told to
+  read the plan first. Moves inside what it removes, as it read it, still
+  go through.
 - **No two sessions share a folder.** A session id is kept in a folder
   named after it, with anything a folder name cannot hold made safe, so
   ids that differed only there (`a/b`, `a_b`), or past 128 characters,

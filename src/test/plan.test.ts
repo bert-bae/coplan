@@ -863,6 +863,31 @@ test("removing a task cannot take a subtask, a dependency or a box link the user
   assert.deepEqual(applyOps(elsewhere, [{ op: 'remove', kind: 'task', id: 't1' }], 'claude').plan.tasks.map((t) => t.id), ['t3', 't4']);
 });
 
+test('removing a task cannot take one the user just moved under it, unread', () => {
+  const ids = (plan: Plan) => plan.tasks.map((t) => t.id);
+  const remove: PlanOp = { op: 'remove', kind: 'task', id: 't1' };
+  // The user moves UI under Routes, inside API: removing API would take it.
+  const plan = applyOps(linkedPlan(), [{ op: 'move_task', id: 't3', parentId: 't2', index: 0 }], 'user').plan;
+  assert.throws(() => applyOps(plan, [remove], 'claude'), /The user moved task "UI" since you last read the plan, so this edit was not applied.* Removing a task takes its subtasks/);
+  assert.deepEqual(ids(applyOps(read(plan), [remove], 'claude').plan), ['t4'], 'read first, and it goes with it knowingly');
+  const andMore = applyOps(plan, [{ op: 'upsert_task', id: 't4', detail: 'unrelated' }], 'user').plan;
+  assert.throws(() => applyOps(andMore, [remove], 'claude'), /moved task "UI"/, 'whatever else the user changed meanwhile');
+  // A move is not an edit of what moved: Claude may still edit it.
+  assert.equal(applyOps(plan, [{ op: 'upsert_task', id: 't3', title: 'UI, again' }], 'claude').plan.tasks.find((t) => t.id === 't3')?.title, 'UI, again');
+  // Moved back out, nothing of the user's is taken.
+  const back = applyOps(plan, [{ op: 'move_task', id: 't3', parentId: null, index: 1 }], 'user').plan;
+  assert.deepEqual(ids(applyOps(back, [remove], 'claude').plan), ['t3', 't4']);
+  // Nor when a subtask moved out and back, or about inside what is removed: it was there when Claude read it.
+  const outAndBack = applyOps(linkedPlan(), [
+    { op: 'move_task', id: 't2', parentId: null, index: 0 },
+    { op: 'move_task', id: 't2', parentId: 't1', index: 0 },
+  ], 'user').plan;
+  assert.deepEqual(ids(applyOps(outAndBack, [remove], 'claude').plan), ['t3', 't4']);
+  const deeper = read(applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't5', title: 'Auth', parentId: 't1' }], 'user').plan);
+  const within = applyOps(deeper, [{ op: 'move_task', id: 't2', parentId: 't5', index: 0 }], 'user').plan;
+  assert.deepEqual(ids(applyOps(within, [remove], 'claude').plan), ['t3', 't4']);
+});
+
 test('the guard follows the batch: a task moved under one being removed goes with it, so it counts', () => {
   const plan = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', detail: 'the user wrote this' }], 'user').plan;
   assert.throws(

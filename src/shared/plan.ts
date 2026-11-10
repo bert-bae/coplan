@@ -986,15 +986,19 @@ function checkOpFields(op: unknown): void {
  * plan, as `kind:id` — by the net effect, so edits that cancel out do not
  * count. Comments, task progress and positions are not content: Claude
  * acting on a comment it has not read yet loses nothing of the user's.
+ * Nor is where a task sits, but each task the user moved is `moved:id`,
+ * which only a removal looks at (contentTargetsOf).
  */
 function unreadContent(plan: Plan): Set<string> {
+  const unread = unreadByClaude(plan);
+  const moved = unread.filter((c) => c.kind === 'moved' && c.target.kind === 'task').map((c) => `moved:${c.target.id}`);
   const touched = new Set(
-    unreadByClaude(plan)
+    unread
       .filter((c) => c.kind === 'created' || c.kind === 'edited' || c.kind === 'deleted' || c.kind === 'published')
       .map((c) => `${c.target.kind}:${c.target.id}`),
   );
   const base = plan.claudeBaseline;
-  if (!base || touched.size === 0) return touched;
+  if (!base || touched.size === 0) return new Set([...touched, ...moved]);
   const now = baselineOf(plan);
   const content = (b: PlanBaseline, kind: string, id: string): string => {
     switch (kind) {
@@ -1012,12 +1016,18 @@ function unreadContent(plan: Plan): Set<string> {
         return '';
     }
   };
-  return new Set(
-    [...touched].filter((key) => {
-      const [kind, id] = splitKey(key);
-      return content(base, kind, id) !== content(now, kind, id);
-    }),
-  );
+  const changed = [...touched].filter((key) => {
+    const [kind, id] = splitKey(key);
+    return content(base, kind, id) !== content(now, kind, id);
+  });
+  return new Set([...changed, ...moved]);
+}
+
+/** The task and those under it in the plan as Claude last read it: only
+ *  the task when there is no such record. */
+function readUnder(plan: Plan, id: string): Set<string> {
+  const tasks = plan.claudeBaseline?.tasks as Task[] | undefined;
+  return new Set([id, ...(tasks ? descendants({ tasks }, id).map((t) => t.id) : [])]);
 }
 
 /** What an edit of Claude's would overwrite, as `kind:id` — none when it
@@ -1047,7 +1057,15 @@ function contentTargetsOf(plan: Plan, op: PlanOp): string[] {
     case 'remove': {
       if (op.kind !== 'task') return [`${op.kind}:${op.id}`];
       const { doomed, dependents, diagrams } = taskRemoval(plan, op.id);
-      return [...[...doomed].map((id) => `task:${id}`), ...dependents.map((t) => `task:${t.id}`), ...diagrams.map((d) => `diagram:${d.id}`)];
+      // What it takes that was not under it when Claude last read the plan:
+      // there only if moved there since, by the user if `moved:id` is unread.
+      const was = readUnder(plan, op.id);
+      return [
+        ...[...doomed].map((id) => `task:${id}`),
+        ...[...doomed].filter((id) => !was.has(id)).map((id) => `moved:${id}`),
+        ...dependents.map((t) => `task:${t.id}`),
+        ...diagrams.map((d) => `diagram:${d.id}`),
+      ];
     }
     case 'set_checks':
       return [`task:${op.id}`];
@@ -1095,7 +1113,8 @@ function splitKey(key: string): [string, string] {
 function refuseUnreadEdit(plan: Plan, op: PlanOp, unread: Set<string>): void {
   const target = contentTargetsOf(plan, op).find((key) => unread.has(key));
   if (!target) return;
-  const [kind, id] = splitKey(target) as [Target['kind'], string];
+  const [kind, id] = splitKey(target) as [Target['kind'] | 'moved', string];
+  const what = kind === 'moved' ? `moved ${describeTarget(plan, { kind: 'task', id })}` : `changed ${describeTarget(plan, { kind, id })}`;
   // Reached through what the edit takes with it, not what it names: say how.
   const how =
     op.op === 'remove' && target !== `task:${op.id}`
@@ -1104,7 +1123,7 @@ function refuseUnreadEdit(plan: Plan, op: PlanOp, unread: Set<string>): void {
         ? " The task's `builds` would change which of that diagram's boxes link it."
         : '';
   throw new PlanError(
-    `The user changed ${describeTarget(plan, { kind, id })} since you last read the plan, so this edit was not applied — ` +
+    `The user ${what} since you last read the plan, so this edit was not applied — ` +
       `it could undo theirs.${how} Call harness_plan_read to see their version, then make the edit on top of it.`,
   );
 }
