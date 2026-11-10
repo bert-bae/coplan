@@ -1249,6 +1249,22 @@ function arrowId(d: Diagram, op: { id?: string; from?: string; to?: string }): s
  */
 function expectAtStart(plan: Plan, op: PlanOp, author: Author): PlanOp {
   if (!op || typeof op !== 'object') return op;
+  // A proposal's edits were read on the same plan as the batch's own.
+  if (op.op === 'propose' && Array.isArray(op.ops)) {
+    const ops = op.ops;
+    return {
+      ...op,
+      ops: ops.map((inner, i) => {
+        try {
+          return expectAtStart(plan, inner, author);
+        } catch (err) {
+          if (!(err instanceof PlanError)) throw err;
+          const which = ops.length > 1 ? `edit ${i + 1} (${(inner as { op?: string })?.op ?? '?'}): ` : '';
+          throw new PlanError(`The proposal would not apply to the plan as it is: ${which}${err.message}`);
+        }
+      }),
+    };
+  }
   if (op.op === 'upsert_task' && op.noteWas !== undefined) op = noteAtStart(plan, op);
   if ((op as { expect?: unknown }).expect === undefined) return op;
   switch (op.op) {
@@ -1747,7 +1763,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
         const trial = structuredClone(plan);
         delete trial.design;
         delete trial.submission;
-        applyAsUser(trial, op.ops, now, 'claude', guarded);
+        applyAsUser(trial, op.ops, now, guarded);
       } catch (err) {
         if (err === refused) throw err;
         if (err instanceof PlanError) throw new PlanError(`The proposal would not apply to the plan as it is: ${err.message}`);
@@ -1767,10 +1783,11 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
         replies: [],
       };
       plan.threads.push(thread);
-      // Kept without their `expect`: it checked them against what Claude read,
-      // just now. From here `base` says whether the proposal still fits —
-      // and a rev that moved with a dragged box must not refuse the accept.
-      const kept = op.ops.map((inner) => withoutExpect(structuredClone(inner)));
+      // Kept without their `expect` (expectAtStart took it off): it checked
+      // them against what Claude read. From here `base` says whether the
+      // proposal still fits — and a rev that moved with a dragged box must
+      // not refuse the accept.
+      const kept = structuredClone(op.ops);
       proposals.push({ id, title, reason, ops: kept, threadId: thread.id, createdAt: now, base: proposalTouches(plan, op.ops), status: 'open' });
       // Settled ones go first when there are too many; open ones never.
       // An answer Claude has not heard yet is kept until it has: it is the
@@ -2271,24 +2288,18 @@ export function isLocked(plan: Pick<Plan, 'submission'> | null): boolean {
 
 /**
  * Apply a proposal's edits as the user's, in `plan` itself, the way a batch
- * is applied: each edit's `expect` against the plan before the batch, as
- * `readBy`'s (Claude's, when it proposes them), and what waits on what
- * checked on the batch as a whole.
+ * is applied, with what waits on what checked on the batch as a whole. Their
+ * `expect`s were checked when Claude proposed them (expectAtStart), and kept
+ * without.
  */
-function applyAsUser(
-  plan: Plan,
-  ops: PlanOp[],
-  now: number,
-  readBy: Author = 'user',
-  before?: (plan: Plan, op: PlanOp, i: number) => void,
-): Change[] {
+function applyAsUser(plan: Plan, ops: PlanOp[], now: number, before?: (plan: Plan, op: PlanOp, i: number) => void): Change[] {
   const start = structuredClone(plan);
   const had = new Set(dependencyProblems(plan));
   const out: Change[] = [];
   ops.forEach((inner, i) => {
     before?.(plan, inner, i);
     try {
-      out.push(...applyOne(plan, expectAtStart(start, inner, readBy), 'user', now));
+      out.push(...applyOne(plan, inner, 'user', now));
     } catch (err) {
       if (err instanceof PlanError && ops.length > 1) throw new PlanError(`edit ${i + 1} (${inner.op}): ${err.message}`);
       throw err;

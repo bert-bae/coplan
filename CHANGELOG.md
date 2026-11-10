@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **A proposal made in the same batch as Claude's own edit to an item is no longer refused.** Its edits'
+  revisions are checked against the plan as the batch began, as the batch's own edits are.
 - **On macOS, hooks start the daemon again.** The hook relay started it
   with `setsid`, which macOS does not have, and its fallback could never
   run. So a new session waited five seconds for nothing, and after the

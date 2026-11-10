@@ -1127,6 +1127,10 @@ test("a proposal's edits are held to the revision Claude read as its own edits a
   const s = sectioned.sections[0]!;
   const twice: PlanOp[] = [{ op: 'upsert_section', id: s.id, title: 'Background', expect: s.rev }, { op: 'upsert_section', id: s.id, body: 'Why, at length.', expect: s.rev }];
   assert.equal(accept(applyOps(sectioned, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: twice }], 'claude').plan).sections[0]!.body, 'Why, at length.');
+  // Its edits are checked against the plan as the batch found it, not as the batch's own edits before it left it.
+  const mixed = applyOps(sectioned, [{ op: 'upsert_section', id: s.id, body: 'Why, in short.', expect: s.rev }, { op: 'propose', title: 'Tidy', reason: 'simpler', ops: [{ op: 'upsert_section', id: s.id, title: 'Background', expect: s.rev }] }], 'claude').plan;
+  const took = accept(mixed).sections[0]!;
+  assert.deepEqual([took.title, took.body], ['Background', 'Why, in short.']);
   // A box edit made on a diagram the user has changed since is refused, proposed or not.
   const graph = linkedPlan().diagrams[0]!.rev;
   const boxed = read(applyOps(linkedPlan(), [{ op: 'upsert_node', diagramId: 'd1', id: 'c', label: 'C' }], 'user').plan);
