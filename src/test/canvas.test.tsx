@@ -713,22 +713,31 @@ for (const [name, multiline, tag] of [['a paragraph', true, 'textarea'], ['a lin
     assert.deepEqual(commits, ['New']);
   });
 
-  test(`${name}: Enter saves a line; in a paragraph it is a new line, and ⌘/Ctrl+Enter saves`, async () => {
-    const { commits, box } = mount('Old');
-    act(() => box.focus());
-    fireEvent.change(box, { target: { value: 'New' } });
-    fireEvent.keyDown(box, { key: 'Enter' });
-    assert.deepEqual(commits, multiline ? [] : ['New'], multiline ? 'a paragraph goes on' : 'a line is done');
-    if (multiline) {
-      act(() => {
-        fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true });
-      });
+  if (!multiline) {
+    test(`${name}: Enter saves it, and leaving after does not save it again, though the plan has not answered yet`, async () => {
+      const { commits, box, push } = mount('Old');
+      act(() => box.focus());
+      fireEvent.change(box, { target: { value: 'New' } });
+      fireEvent.keyDown(box, { key: 'Enter' });
+      assert.deepEqual(commits, ['New']);
+      await push('Old');
+      act(() => box.blur());
+      assert.deepEqual(commits, ['New']);
+      cleanup();
+    });
+  } else {
+    test(`${name}: Enter is a new line; ⌘/Ctrl+Enter leaves it, and saves it once`, async () => {
+      const { commits, box } = mount('Old');
+      act(() => box.focus());
+      fireEvent.change(box, { target: { value: 'New' } });
+      fireEvent.keyDown(box, { key: 'Enter' });
+      assert.deepEqual(commits, [], 'a paragraph goes on');
+      fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true });
       assert.notEqual(document.activeElement, box, 'it is left');
-    }
-    act(() => box.blur());
-    assert.deepEqual(commits, ['New'], 'saved once, and leaving does not save it again');
-    cleanup();
-  });
+      assert.deepEqual(commits, ['New']);
+      cleanup();
+    });
+  }
 
   test(`${name}: out of the field it follows the plan, also after a save the plan refused`, async () => {
     const { commits, box, push } = mount('First', (v) => v !== '');

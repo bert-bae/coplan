@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react';
 import { store, useAgent } from '../../store.ts';
 import { MarkdownField } from '../Editable.tsx';
 import { Markdown } from '../Markdown.tsx';
@@ -29,18 +29,36 @@ import { KIND_GLYPH, KIND_HINT, KIND_LABEL, type EdgePatch, type FlowEdge, type 
  * agent publishes to the same box never replaces what they have not saved,
  * and `changed` says one came in. Out of the field it follows the plan, so a
  * save the plan refused or reshaped shows as the plan has it.
+ *
+ * `commit` saves the draft unless it is what the field last saved, or the
+ * plan's text since: Enter then leaving, or leaving then the field going
+ * (a session switch), saves once, however soon the plan answers.
  */
-function useFieldDraft(value: string) {
+function useFieldDraft(value: string, onCommit: (v: string) => void) {
   const [draft, setDraft] = useState(value);
   const [editing, setEditing] = useState(false);
   const startedAt = useRef(value);
+  const saved = useRef(value);
+  const live = useRef({ draft, onCommit });
+  live.current = { draft, onCommit };
   useEffect(() => {
+    saved.current = value;
     if (!editing) setDraft(value);
   }, [value, editing]);
+  const commit = useCallback(() => {
+    const text = live.current.draft.trim();
+    if (text === saved.current.trim()) return;
+    live.current.onCommit(text);
+    saved.current = text;
+  }, []);
+  // Switching to another box unmounts the field without a blur in some
+  // browsers; whatever was typed is saved all the same.
+  useEffect(() => commit, [commit]);
   return {
     draft,
     setDraft,
     changed: editing && value !== startedAt.current && draft.trim() !== value.trim(),
+    commit,
     enter: () => {
       startedAt.current = value;
       setEditing(true);
@@ -63,7 +81,7 @@ function ChangedWhileTyping() {
 /**
  * A field that saves when you leave it; Escape puts it back. One line also
  * saves on Enter. A `multiline` one is a paragraph that grows with its
- * text: Enter is a new line, and ⌘/Ctrl+Enter saves.
+ * text: Enter is a new line, and ⌘/Ctrl+Enter leaves it, which saves.
  */
 export function CommitField({
   value,
@@ -82,34 +100,14 @@ export function CommitField({
   multiline?: boolean;
   onCommit: (v: string) => void;
 }) {
-  const { draft, setDraft, changed, enter, leave, revert } = useFieldDraft(value);
+  const { draft, setDraft, changed, commit, enter, leave, revert } = useFieldDraft(value, onCommit);
   const area = useRef<HTMLTextAreaElement>(null);
-  const live = useRef({ draft, value, onCommit });
-  live.current = { draft, value, onCommit };
-  // Switching to another box unmounts the field without a blur in some
-  // browsers; whatever was typed is saved all the same.
-  useEffect(
-    () => () => {
-      const { draft, value, onCommit } = live.current;
-      if (draft.trim() !== value.trim()) onCommit(draft.trim());
-    },
-    [],
-  );
   useLayoutEffect(() => {
     const el = area.current;
     if (!el) return;
     el.style.height = 'auto';
     if (el.scrollHeight) el.style.height = `${Math.min(el.scrollHeight + 2, 420)}px`;
   }, [draft]);
-  const commit = () => {
-    // Against what was last saved, not this render's value: ⌘/Ctrl+Enter
-    // saves, then blurs, and the blur must not save it again.
-    if (draft.trim() === live.current.value.trim()) return;
-    onCommit(draft.trim());
-    // Saved: an unmount in the same render (a session switch blurs, then
-    // removes the view) has nothing left to save either.
-    live.current.value = draft.trim();
-  };
   const field = {
     className: classNames('input', multiline && 'text-area', className),
     value: draft,
@@ -126,8 +124,7 @@ export function CommitField({
       if (e.key === 'Enter' && !multiline) commit();
       if (e.key === 'Enter' && multiline && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
-        commit();
-        area.current?.blur();
+        e.currentTarget.blur();
       }
       if (e.key === 'Escape') {
         e.stopPropagation();
