@@ -182,7 +182,19 @@ the audit's finding numbers.
 | B52 | A comment or reply a lock dropped (toasted with Copy) comes back in its box when the plan is reopened, but untracked: no close prompt, and a tab switch empties it. Clear the composer when the lock drops it (components/Threads.tsx:60, 82, 123; found re-auditing F34) [re-audit A3 9] | 5 smaller | done | e2cde86 |
 | B53 | A hook folder that cannot be entered (no search permission) passes the stat and fails as `spawn sh EACCES`, exit 127, as if the shell were missing: check access in the same try (cli/check.ts:194-198; found re-auditing B42) [re-audit A3 10] | 5 smaller | done | 65b63ff |
 | B54 | A proposed task removal ignores the notes it deletes: the user rewriting t3's (or a subtask's) note after the agent proposed removing t3 does not put the proposal out of date, and accepting it deletes the note. Print the doomed tasks' notes in `removal:<id>` (shared/plan.ts proposalTouches) [review of B50] | 5 smaller | done | c6f0216 |
-| A4 | Re-audit the areas the rows after A3 touched with `/ponytail-audit`, and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing | 6 re-audit | open | |
+| A4 | Re-audit the areas the rows after A3 touched with `/ponytail-audit`, and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing | 6 re-audit | done: no must fix, 4 should fix, 7 nice to have, now rows F42-F44, T7, B55-B61 and A5 | PENDING |
+| F42 | Ctrl+C with stderr on a full disk crashes `coplan check` before its check is stopped: the interrupt message fails with ENOSPC, which the F39 guard rethrows, so the SIGKILL three seconds later never comes and a worker that ignores SIGTERM runs on. Reproduced with `2>/dev/full`. Let stderr ignore every write error; keep the rethrow on stdout, where the report goes (cli/main.ts:421-425) [re-audit A4 1] | 2 should fix | open | |
+| F43 | After a save refused as changed underneath (F40), leaving by unmounting the field (a tab switch, closing a task's Details, a session switch) drops the user's text without a word: no toast with Copy, no close prompt. Before F40 the blur saved it. Offer it to copy when the field goes while refused (components/Editable.tsx:119, 135-143) [re-audit A4 2] | 2 should fix | open | |
+| F44 | A submitted plan's task comments, and the agent's replies to them, cannot be read anywhere: the locked Tasks tab is the board, whose cards show no comments. B51's guard in TaskRow never runs (TaskRow is not drawn on a locked plan), so its test's task assertion is vacuous. Show the task's comments on the board card, read only; drop the dead guard; make the test read them there (views/TasksView.tsx:59, 562, 1105) [re-audit A4 3] | 2 should fix | open | |
+| T7 | Test: a copy in a session's old folder is not loaded over its own folder's file from a newer build (`newer.has(own)` in load). Removing that guard passes every store test, and would write the old copy over the newer build's plan on a downgrade (daemon/store.ts:167; store.test.ts:432) [re-audit A4 4] | 0 safety net | open | |
+| B55 | Load's last loop checks `this.sessions.has` before persistNow, which returns for a session not in memory already: drop it (daemon/store.ts:175) [re-audit A4 5] | 5 smaller | open | |
+| B56 | `holds` is a Map whose values are no longer read, beside `newer` for the same check: one Set of folders taken (daemon/store.ts:128-131, 147, 153, 167) [re-audit A4 6] | 5 smaller | open | |
+| B57 | A store test case pins B46's undated rule, which F38 removed: delete the loop and "nor when it has no time of its own" from its title (store.test.ts:248, 277-289) [re-audit A4 7] | 5 smaller | open | |
+| B58 | An editor opened but not typed in is let go by pruneDrafts at the next snapshot (nothing to lose), so a later lock never tells it (B52): it stays open, disabled, and reopens on stale text with the warning. Call the holders of held fields not kept any more too (ui/lib/drafts.ts:66-69) [re-audit A4 8] | 5 smaller | open | |
+| B59 | A proposal that upserts its new task twice takes the second `parentId` as its place, which applying ignores, so a removal's print misses what is moved under it, and a link the user makes after is lost on accept. Take a new task's place from its first edit (shared/plan.ts:2424) [re-audit A4 9] | 5 smaller | open | |
+| B60 | Since B49 a proposed edit may carry `noteWas`, which a direct agent edit refuses: expectAtStart strips it before checkOpFields sees it. Take it off only for the user's edits (shared/plan.ts:1268) [re-audit A4 10] | 5 smaller | open | |
+| B61 | Untested new plan code: the 4x bound on the trimmed log, the gap fallback for plan, sections and diagrams, and B50's "note named once" condition each break with every test passing. Add a held section edit to the trimmed test, a note on t3 before the gone case, and a bound assert (shared/plan.ts:155, 1024-1028, 2473) [re-audit A4 11] | 5 smaller | open | |
+| A5 | Re-audit the areas the rows after A4 touched with `/ponytail-audit`, and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -639,3 +651,40 @@ a few agent sessions, plans up to a few MB.
 **Not checked:** a real browser's focus after a refusal, two tabs, Windows and
 macOS, case-insensitive filesystems, an agent harness that SIGKILLs the
 whole group.
+
+## Re-audit report (row A4, ponytail-audit, 2026-11-10)
+
+Scope: the changes since 30f7435 (row A3), by four auditors as before
+(plan model, check runner, store, page); each Should fix was run again.
+
+**What this repo does:** as in the A2 report. Load assumed: one developer,
+a few agent sessions, plans up to a few MB.
+
+### Should fix
+
+1. **Ctrl+C with stderr on a full disk crashes `coplan check` before the stop** (`cli/main.ts:421-425`). The interrupt message fails with ENOSPC, which F39's EPIPE/EIO guard rethrows; the worker that ignores SIGTERM runs on. Reproduced with `2>/dev/full`: the CLI gone, `sleep 30` still running. Let stderr ignore every write error.
+2. **Refused text is lost when its field goes** (`components/Editable.tsx:119, 135-143`). After F40, a field holding a refused save is left by unmounting it (a tab or session switch, Details closed) with nothing kept and nothing said. Offer it to copy.
+3. **A submitted plan's task comments cannot be read** (`views/TasksView.tsx:59, 562, 1105`). The locked Tasks tab is the board, whose cards show none, nor the agent's replies. B51's TaskRow guard never runs there, and its test's task assertion is vacuous.
+4. **No test holds the newer-build guard in load** (`daemon/store.ts:167`). Removing `newer.has(own)` passes all 31 store tests (run again); it would write an old copy over a newer build's plan on a downgrade.
+
+### Nice to have
+
+5. Load's `sessions.has` before persistNow does nothing (`store.ts:175`).
+6. `holds` is a Map whose values go unread, beside `newer` (`store.ts:128`).
+7. A store test case pins B46's removed undated rule (`store.test.ts:248`).
+8. An editor opened but not typed in can miss B52's lock reset (`drafts.ts:66`).
+9. A proposal upserting its new task twice is placed by the ignored second `parentId` (`plan.ts:2424`).
+10. A proposed edit may carry `noteWas`, which a direct agent edit refuses (`plan.ts:1268`).
+11. Untested: the log's 4x bound, the gap fallback beyond tasks, B50's note condition (`plan.ts:155, 1024, 2473`).
+
+Checked and fine: F38's own-folder rule and its guards (mutants), F39 under a
+real pty, B53 as `nobody` (CI is not root, so its test runs there), F41's
+trimming and gap fallback, B48-B50 and B54's prints, B52's holders across
+sessions and in-flight saves.
+
+**Verdict:** no Must fix; fix 3 first (the agent's answers are hidden through
+the build), then 2, 1 and 4.
+
+**Not checked:** a real browser's blur and focus, macOS and Windows, network
+filesystems' ENOSPC/EDQUOT, readdir orders other than sorted, render.ts's
+summary past 2000 unread changes.
