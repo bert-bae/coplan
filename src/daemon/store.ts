@@ -182,7 +182,9 @@ export class SessionStore extends EventEmitter {
     }
     const removed = this.sessions.delete(id);
     this.persistFailed.delete(id);
-    discardDir(paths.sessionDir(id));
+    // A session's folder, and only one: never sessions/ or what holds it.
+    const dir = paths.sessionDir(id);
+    if (path.dirname(dir) === paths.sessionsDir()) discardDir(dir);
     if (removed) this.broadcastSessionList();
     return removed;
   }

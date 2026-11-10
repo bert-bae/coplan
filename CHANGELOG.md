@@ -157,6 +157,11 @@
   It now finds the daemon's home as the daemon does — from the user
   database when `HOME` is unset — and, like it, ignores a
   `CC_HARNESS_HOME` an agent passed on unexpanded.
+- **A session named `.` or `..` can no longer reach Coplan's other
+  files.** Its folder was the sessions folder itself, or Coplan's home, so
+  deleting that session would have deleted every plan, or the home. Such
+  an id now gets a folder inside the sessions folder, and deleting a
+  session removes only a folder there.
 
 ### Targeted checks: only what the change touched
 

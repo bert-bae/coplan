@@ -27,9 +27,13 @@ export const paths = {
   authHeader: () => path.join(harnessHome(), 'auth.header'),
 };
 
-/** Session ids come from the CLI, but they end up in filesystem paths. */
+/** Session ids come from the CLI, but they end up in filesystem paths.
+ *  An id of dots alone is never one: `.` would be sessions/ itself and
+ *  `..` the home, which purging the session would delete. */
 export function sanitizeId(id: string): string {
-  return id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128) || 'unknown';
+  const safe = id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128);
+  if (!safe) return 'unknown';
+  return /^\.+$/.test(safe) ? safe.replace(/\./g, '_') : safe;
 }
 
 /**

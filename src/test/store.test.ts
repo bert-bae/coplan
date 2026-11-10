@@ -134,6 +134,23 @@ test('purge removes a session from memory and from disk, for good', async () => 
   assert.equal(store.purge('never-existed'), false);
 });
 
+test("a session id is always a folder in sessions/: '.' and '..' never name sessions/ or the home", async () => {
+  const { paths } = await import('../shared/paths.ts');
+  for (const id of ['.', '..', '...', '', '../x', '/', 'a/../..']) {
+    const dir = paths.sessionDir(id);
+    assert.equal(path.dirname(dir), paths.sessionsDir(), JSON.stringify(id));
+    assert.ok(!['.', '..'].includes(path.basename(dir)), JSON.stringify(id));
+  }
+  // And so purging one deletes nothing else.
+  const store = await freshStore();
+  store.ensure('kept', process.cwd());
+  store.persistNow('kept');
+  writeFileSync(path.join(home, 'canary'), 'x');
+  for (const id of ['..', '.']) store.purge(id);
+  assert.ok(existsSync(path.join(home, 'canary')), 'the home is still there');
+  assert.ok(existsSync(path.join(home, 'sessions', 'kept')), 'and so are the other sessions');
+});
+
 test('sessions older than the retention window are not loaded', async () => {
   const dir = path.join(home, 'sessions', 'ancient');
   mkdirSync(dir, { recursive: true });
