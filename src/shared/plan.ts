@@ -471,7 +471,7 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
   next.sections = sections;
   next.diagrams = diagrams;
   next.tasks = tasks;
-  linkBuilds(next, builds, now, false);
+  linkBuilds(next, builds, now, 'claude', false);
   checkDependencies(next);
   next.threads = base.threads.map((thread) => detachIfOrphaned(next, base, thread));
   next.revision = base.revision + 1;
@@ -520,9 +520,9 @@ export function publishTasks(prev: Plan | null, input: TaskListInput, now = Date
       if (kept.length) n.taskIds = kept;
       else delete n.taskIds;
     }
-    if (touched) bumpDiagram(d, now);
+    if (touched) bumpDiagram(d, now, 'claude');
   }
-  linkBuilds(next, builds, now);
+  linkBuilds(next, builds, now, 'claude');
   checkDependencies(next);
   next.threads = base.threads.map((thread) => detachIfOrphaned(next, base, thread));
 
@@ -671,6 +671,7 @@ function linkBuilds(
   plan: Plan,
   builds: { id: string; refs: string[] }[],
   now: number,
+  author: Author,
   /** `builds` says which boxes the task builds now, so a box it no longer
    *  names loses the link. Off when the diagrams themselves declare links
    *  too (a whole publish), so the two add up. */
@@ -689,7 +690,7 @@ function linkBuilds(
     }
     // A canvas holding the old links must reload rather than save over
     // them — but only when a link actually changed.
-    for (const diagram of changed) bumpDiagram(diagram, now);
+    for (const diagram of changed) bumpDiagram(diagram, now, author);
     linked.push(...change.linked);
     unlinked.push(...change.unlinked);
   }
@@ -734,7 +735,6 @@ function logLinks(
       names(linked).length ? `linked "${task.title}" to ${names(linked).join(', ')}` : '',
       names(unlinked).length ? `unlinked it from ${names(unlinked).join(', ')}` : '',
     ].filter(Boolean);
-    diagram.updatedBy = author;
     out.push(log('edited', ref('diagram', diagram.id), `${facts.join(' and ')} in diagram "${diagram.title}"`.replace(/^unlinked it/, `unlinked "${task.title}"`)));
   }
   return out;
@@ -757,10 +757,11 @@ function findBox(plan: Plan, ref: string, title: string): { diagram: Diagram; no
 }
 
 /** A diagram's links changed under it: a canvas editing it must reload. */
-function bumpDiagram(d: Diagram, now: number): void {
+function bumpDiagram(d: Diagram, now: number, author: Author): void {
   d.rev += 1;
   d.graphRev = d.rev;
   d.updatedAt = now;
+  d.updatedBy = author;
 }
 
 /** What a canvas draws: a change to it moves `graphRev`. */
@@ -1531,7 +1532,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
       placeAmongSiblings(plan, task, op.index);
       const where = parentId ? ` under "${requireTask(plan, parentId).title}"` : '';
       const created = log('created', ref('task', task.id), `added task "${title}"${where}`);
-      const linked = op.builds?.length ? linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now) : { linked: [], unlinked: [] };
+      const linked = op.builds?.length ? linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now, author) : { linked: [], unlinked: [] };
       return [created, ...logLinks(linked, task, author, log)];
     }
 
@@ -1584,7 +1585,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
     }
 
     case 'remove':
-      return removeItem(plan, op.kind, op.id, log);
+      return removeItem(plan, op.kind, op.id, author, now, log);
 
     case 'comment': {
       const target = normalizeTarget(op.target);
@@ -1981,7 +1982,7 @@ function editTask(
     out.push(log('edited', ref('task', task.id), `edited the ${edited.join(', ')} of "${task.title}"`));
   }
   // Given, builds says which boxes the task builds now ([] unlinks it).
-  if (op.builds !== undefined) out.push(...logLinks(linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now), task, author, log));
+  if (op.builds !== undefined) out.push(...logLinks(linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now, author), task, author, log));
   if (typeof op.index === 'number') placeAmongSiblings(plan, task, op.index);
   return out;
 }
@@ -2066,6 +2067,8 @@ function removeItem(
   plan: Plan,
   kind: string,
   id: string,
+  author: Author,
+  now: number,
   log: (kind: ChangeKind, target: Target, summary: string) => Change,
 ): Change[] {
   // What a comment left without its item was on, named as it was. The
@@ -2109,7 +2112,7 @@ function removeItem(
         }
         // Its boxes' links changed: a canvas holding the old ones must
         // reload rather than save them back — which would be refused.
-        bumpDiagram(d, Date.now());
+        bumpDiagram(d, now, author);
       }
       const extra = doomed.size > 1 ? ` and its ${doomed.size - 1} subtask(s)` : '';
       summary = `removed task "${t.title}"${extra}`;
@@ -3022,13 +3025,19 @@ function layoutChanged(before: Diagram, after: Diagram): boolean {
  * throw away the other side's change — the one failure a shared plan must
  * not have. The caller reloads and tries again with the latest in front of it.
  */
+/** What a refused save is told to do next: the agent reads the plan again;
+ *  the page has the latest version on screen already. */
+function staleHint(author: Author): string {
+  return author === 'claude' ? 'Read the plan again (harness_plan_read), then redo the edit.' : 'It now shows the latest version.';
+}
+
 function checkRev(item: { rev: number; title: string; updatedBy: Author }, expect: unknown, kind: string, author: Author): void {
   if (typeof expect !== 'number' || expect === item.rev) return;
   if (!reached(item.rev, expect)) refuseUnreached(kind, item.title, item.rev, expect, author);
   const who = item.updatedBy === author ? 'another edit' : item.updatedBy === 'claude' ? 'Claude' : 'the user';
   throw new PlanError(
     `${kind[0]!.toUpperCase()}${kind.slice(1)} "${item.title}" was changed by ${who} while this edit was open, so it was not saved. ` +
-      'It now shows the latest version.',
+      staleHint(author),
   );
 }
 
@@ -3046,7 +3055,7 @@ function reached(rev: number, expect: number): boolean {
 function refuseUnreached(kind: string, title: string, rev: number, expect: number, author: Author): never {
   throw new PlanError(
     `${kind[0]!.toUpperCase()}${kind.slice(1)} "${title}" is at revision ${rev}, not ${expect}: this edit was made against a version it never had, so it was not saved. ` +
-      (author === 'claude' ? 'Read the plan again (harness_plan_read), then redo the edit.' : 'It now shows the latest version.'),
+      staleHint(author),
   );
 }
 
@@ -3083,7 +3092,7 @@ function checkTaskRev(task: Task, expect: unknown, author: Author): void {
   if (theirs === undefined || theirs <= expect) return;
   throw new PlanError(
     `Task "${task.title}" was changed by ${other === 'claude' ? 'Claude' : 'the user'} while this edit was open, so it was not saved. ` +
-      (author === 'claude' ? 'Read the plan again (harness_plan_read), then redo the edit.' : 'It now shows the latest version.'),
+      staleHint(author),
   );
 }
 

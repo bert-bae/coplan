@@ -338,6 +338,12 @@
   safe as they are and keep their folders; a session kept the old way is
   saved to its new folder the next time Coplan starts, or when it is next
   used, and deleting it deletes its old folder too.
+- **A diagram the agent relinked says so.** Removing a task, or a task
+  list's `builds`, changed a diagram's box links but left it marked as
+  last edited by whoever edited it before: a save refused over it said
+  "changed by another edit", and the diagram's line said *edited by you*.
+  It now names the agent, and the agent refused over a diagram or section
+  is told to read the plan again.
 - **Removing many tasks no longer stalls Coplan.** Each removal copied
   the whole plan to say what a comment left behind was on: on a big plan,
   forty took close to a second, again for a proposal's preview and

@@ -360,6 +360,24 @@ test('a save made against a revision the item never reached says so, and is not 
   assert.throws(() => applyOps(plan, [{ op: 'upsert_task', id: 't4', detail: 'stale', expect: 9 }], 'claude'), /is at revision 2, not 9: .*harness_plan_read/);
 });
 
+test("a diagram conflict names who changed it, its links included, and tells the agent to read again", () => {
+  // The user links a box; Claude, having read it, removes the task: the box's links change under the canvas.
+  let plan = read(applyOps(linkedPlan(), [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t2'] }], 'user').plan);
+  const canvas = { rev: plan.diagrams[0]!.rev, nodes: structuredClone(plan.diagrams[0]!.nodes) };
+  plan = applyOps(plan, [{ op: 'remove', kind: 'task', id: 't1' }], 'claude').plan;
+  assert.throws(
+    () => applyOps(plan, [{ op: 'upsert_diagram', id: 'd1', nodes: canvas.nodes, edges: [], expect: canvas.rev }], 'user'),
+    /Diagram "Arch" was changed by Claude while this edit was open, so it was not saved\. It now shows the latest version/,
+  );
+  // The user adds a box; Claude's box edit, on the revision it read, is told who, and what to do.
+  const read1 = linkedPlan();
+  const boxed = read(applyOps(read1, [{ op: 'upsert_node', diagramId: 'd1', id: 'c', label: 'C' }], 'user').plan);
+  assert.throws(
+    () => applyOps(boxed, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', label: 'Gateway', expect: read1.diagrams[0]!.rev }], 'claude'),
+    /Diagram "Arch" was changed by the user while this edit was open, so it was not saved\. Read the plan again \(harness_plan_read\)/,
+  );
+});
+
 test('every change to a diagram moves its revision; a no-op does not', () => {
   const plan = fresh();
   const d = plan.diagrams[0]!;
