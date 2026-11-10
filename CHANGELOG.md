@@ -130,6 +130,11 @@
   past `coplan check` itself; and a check whose output something outside
   it held open never ended. It is now over once all it started is gone,
   killed three seconds on if need be.
+- **A check that starts a server outside it is over when it ends.** A
+  check that started something detached (a dev server, say) that kept its
+  output open ran on until its timeout, and failed as timed out, though it
+  had ended, and passed. It is now over as it ended, and the server runs
+  on.
 - **Your settings' comments survive a second `./setup.sh`.** When setup
   rewrote a settings file that had comments, it kept the original as
   `.bak`; but the line it writes at the top counted as a comment the next

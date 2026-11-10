@@ -180,6 +180,9 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
 
 /** How long a check that is stopped gets to go, before it is killed. */
 const STOP_GRACE_MS = 3000;
+/** How long a check that has gone gets for its output to close: it may be
+ *  held open from outside its group. */
+const LET_GO_MS = 200;
 
 function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: string; ms: number; timedOut: boolean }> {
   const started = Date.now();
@@ -221,6 +224,18 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
         return (err as NodeJS.ErrnoException).code === 'EPERM';
       }
     };
+    /** `then` once the check's process and the rest of its group have gone,
+     *  unless `over()` first. Its shell may have exited already, with
+     *  something out of its group holding its output open. */
+    const afterGroup = (then: () => void, over: () => boolean) => {
+      const poll = () => {
+        if (over()) return;
+        if (groupAlive()) setTimeout(poll, 50);
+        else then();
+      };
+      if (child.exitCode !== null || child.signalCode !== null) poll();
+      else child.once('exit', poll);
+    };
     /**
      * Stop the check: SIGTERM to its group, settled once its process and the
      * rest of its group have gone. What ignores SIGTERM, a test runner's
@@ -246,21 +261,15 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
         }, STOP_GRACE_MS);
         // Gone, a process may still show as there until its parent reaps it:
         // past the SIGKILL, that is all the group can be.
-        const gone = () => {
-          if (over) return;
-          if (groupAlive()) setTimeout(gone, 50);
-          else finish();
-        };
-        // Its shell may have exited already, with something out of its group
-        // holding its output open.
-        if (child.exitCode !== null || child.signalCode !== null) gone();
-        else child.once('exit', gone);
+        afterGroup(finish, () => over);
       }));
-    // Over once its output has closed, or, stopped, once it has gone: its
-    // output read to the end, or let go a moment on, as it may be held open
-    // from outside its group. Interrupted, this command ends instead.
+    // Over once its output has closed, or once it has gone (stopped, or
+    // ended on its own): its output read to the end, or let go a moment on,
+    // as it may be held open from outside its group. Interrupted, this
+    // command ends instead.
     let closed = false;
-    let code: number | null = null;
+    let ended: number | undefined;
+    child.once('exit', () => (ended = Date.now()));
     let interrupts = 0;
     let settled = false;
     const settle = () => {
@@ -268,14 +277,25 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
       settled = true;
       done();
       if (!closed) {
-        child.stdout.destroy();
-        child.stderr.destroy();
+        // Held open from outside its group (a server started for the
+        // checks after it, say): read on, unheard, and not kept open for.
+        for (const out of [child.stdout, child.stderr]) {
+          out.removeListener('data', keep);
+          out.resume();
+          (out as unknown as { unref?: () => void }).unref?.();
+        }
       }
-      resolve({ code: timedOut ? 124 : (code ?? 1), output, ms: Date.now() - started, timedOut });
+      resolve({ code: timedOut ? 124 : (child.exitCode ?? 1), output, ms: (ended ?? Date.now()) - started, timedOut });
     };
+    const letGo = () => (closed ? settle() : setTimeout(settle, LET_GO_MS));
+    // Ended on its own, it is over as it ended, whatever holds its output.
+    afterGroup(
+      () => !stopping && letGo(),
+      () => settled || stopping !== undefined,
+    );
     const timer = setTimeout(() => {
       timedOut = true;
-      void stop().then(() => (closed ? settle() : setTimeout(settle, 200)));
+      void stop().then(letGo);
     }, (hook.timeout ?? DEFAULT_HOOK_TIMEOUT) * 1000);
     // Its own group also keeps Ctrl+C (and an agent ending this command)
     // from reaching it: passed on here, so nothing is left running, and this
@@ -302,9 +322,8 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
       done();
       resolve({ code: 127, output: String(err.message), ms: Date.now() - started, timedOut });
     });
-    child.on('close', (exitCode) => {
+    child.on('close', () => {
       closed = true;
-      code = exitCode;
       // Being stopped, it is over once stopped.
       if (!stopping) settle();
     });

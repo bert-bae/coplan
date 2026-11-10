@@ -360,6 +360,29 @@ test('a timed-out hook whose output is held open from outside its group still en
   }
 });
 
+test('a hook that ends with its output held open from outside its group is over when it ends, as it ended', { skip: process.platform === 'win32' }, () => {
+  // A dev server started detached, still writing to the hook's output.
+  const helper = `node -e "const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => console.log(1), 50)'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }); require('fs').writeFileSync('helper', String(c.pid)); c.unref()"`;
+  // The check after it finds the server still up: its output is not cut off under it.
+  const after = 'sleep 0.5; case "$(ps -o stat= -p "$(cat helper)")" in ""|Z*) ;; *) echo up > alive ;; esac';
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'serve', run: `${helper}; echo served`, timeout: 8 }, { name: 'after', run: after }] } }) });
+  try {
+    const started = Date.now();
+    const out = spawnSync(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
+    assert.equal(out.status, 0, out.stdout + out.stderr);
+    assert.match(out.stdout, /✓ serve/);
+    assert.ok(Date.now() - started < 5_000, `not its timeout (${Date.now() - started}ms)`);
+    assert.equal(existsSync(path.join(dir, 'alive')), true, 'the server it started was still up');
+  } finally {
+    try {
+      process.kill(Number(readFileSync(path.join(dir, 'helper'), 'utf8')), 'SIGKILL');
+    } catch {
+      /* gone */
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("coplan init runs the repository's own scripts, never a package manager's command of the same name", () => {
   // yarn check is yarn's integrity check, bun test is Bun's test runner, pnpm ci is pnpm's own (unimplemented) command.
   const cases: [string, string, Record<string, string>, { implement?: string; review?: string; final?: string }][] = [
@@ -817,27 +840,23 @@ test('while an interrupted check winds down, the checks after it do not start', 
 test('an interrupted check that left something running out of its group cannot hold `coplan check` open', { skip: process.platform === 'win32' }, async () => {
   // A helper the check starts in a group of its own, holding the check's output open.
   const helper = `node -e "const c = require('child_process').spawn('sleep', ['20'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }); require('fs').writeFileSync('helper', String(c.pid)); c.unref()"`;
-  // The check still running, or its shell gone already, waiting on the output alone.
-  for (const [then, within] of [['sleep 10', 4000], [':', 1500]] as const) {
-    const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'serve', run: `${helper}; touch started; ${then}` }] } }) });
-    const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'serve', run: `${helper}; touch started; sleep 10` }] } }) });
+  const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 100));
+    const started = Date.now();
+    cli.kill('SIGINT');
+    const code = await new Promise<number | null>((r) => cli.on('exit', (c) => r(c)));
+    assert.equal(code, 130);
+    assert.ok(Date.now() - started < 4000, `it ends without waiting for the helper (${Date.now() - started}ms)`);
+  } finally {
+    cli.kill('SIGKILL');
     try {
-      for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 100));
-      await new Promise((r) => setTimeout(r, 200));
-      const started = Date.now();
-      cli.kill('SIGINT');
-      const code = await new Promise<number | null>((r) => cli.on('exit', (c) => r(c)));
-      assert.equal(code, 130, then);
-      assert.ok(Date.now() - started < within, `${then}: it ends without waiting for the helper (${Date.now() - started}ms)`);
-    } finally {
-      cli.kill('SIGKILL');
-      try {
-        process.kill(Number(readFileSync(path.join(dir, 'helper'), 'utf8')), 'SIGKILL');
-      } catch {
-        /* gone */
-      }
-      rmSync(dir, { recursive: true, force: true });
+      process.kill(Number(readFileSync(path.join(dir, 'helper'), 'utf8')), 'SIGKILL');
+    } catch {
+      /* gone */
     }
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
