@@ -171,6 +171,17 @@ the audit's finding numbers.
 | B46 | An earlier build run again after a session moved to its hashed folder serves the stale old folder, and its edits there are then ignored by the new build. Remove the old folder once moved, when it is the session's (`ownerOf`), or take the later `updatedAt` (daemon/store.ts:149-162, 276, 313-316) [re-audit A2 15] | 5 smaller | done: the newest taken, never over a newer build's or another session's, an undated one never winning | 693db5f |
 | B47 | Ids with lone surrogates hash alike (`createHash().update(id)` encodes each as U+FFFD), so `"s\ud800"` and `"s\udbff"` share a folder. Hash the id as `utf16le`; the hashed names are not released yet (shared/paths.ts:41) [re-audit A2 16] | 5 smaller | done | 7722531 |
 | A3 | Re-audit the areas the rows after A2 touched with `/ponytail-audit`, and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing | 6 re-audit | open | |
+| F38 | B46's newest-copy rule loses work: (a) once a session's old-folder copy is taken and saved with the same time, a change that moves no time (ensure learning its folder) ties at the next start and readdir order picks the old copy, saved back over the own; (b) an earlier build's hook stamping its stale old copy newer overwrites an hour of work in the own folder, with no trace on disk; (c) an old copy dated ahead of the clock reverts the session at every start; (d) another session's first save destroys a newer old copy of a session past the memory cap. Go back to the own folder winning whenever it holds a readable copy, keeping B46's other fixes (newer build's and other sessions' folders left alone, expired cleared first, ensure saving what it took, unreadable own giving way) (daemon/store.ts:168-176, 320-330; found re-auditing B46) [re-audit A3 1] | 2 should fix | open | |
+| F39 | Closing the terminal during `coplan check` crashes it before the check is stopped: SIGHUP, then the interrupt message's write fails with EIO, which F36's guard (EPIPE only) rethrows; a worker ignoring SIGTERM runs on (reproduced under a pty: exit 1 after 0.01 s). Let any write error on stdout or stderr go (cli/main.ts:422) [re-audit A3 2] | 2 should fix | open | |
+| F40 | A save refused as changed underneath (the note editor's `noteWas`, a title's revision) reopens with the user's text on the new base, and the next blur, a click anywhere, saves it over the newer text the refusal was about: the agent's "Blocked: DB creds missing" is gone after all. After a refusal, leave the field only by Enter (save) or Escape (drop), showing what is there now (components/Editable.tsx:83-91, 109) [re-audit A3 3] | 2 should fix | open | |
+| F41 | Trimming the change log (500 entries) hides unread user edits from the unread-edit guard, which compares only items still in the log: the user edits t3's detail and note, 500 other changes follow (comments, status clicks) before the agent reads, and its edit of t3 and its progress note both go over the user's. Compare every item in the baseline when the log has a gap since Claude's read, or never trim what Claude has not read (shared/plan.ts:148, 1001-1006) [re-audit A3 4] | 2 should fix | open | |
+| B48 | A proposed removal's print misses a task the proposal moves under a task it adds itself (`[add t9 under t1, move t3 under t9, remove t1]`): the user's link or dependency on t3 made after it is dropped on accept, not refused as out of date. Give `movedTo` the added tasks' parents (shared/plan.ts:2341-2342, 2379-2382; found re-auditing F32) [re-audit A3 5] | 5 smaller | open | |
+| B49 | A proposal's `expect` is checked against the plan as the batch's earlier direct edits left it: `[upsert_section s1 body expect 1, propose [upsert_section s1 title expect 1]]` is refused, and on any revision again. Check it against the batch's start (shared/plan.ts:1728, 2263; found re-auditing F31) [re-audit A3 6] | 5 smaller | open | |
+| B50 | A proposal's staleness print leaves a task's note out: the user rewriting t3's note after the agent proposed a note for it does not put the proposal out of date, and accepting it writes over theirs. Print a proposed note as `note:<id>` (shared/plan.ts:2324) [re-audit A3 7] | 5 smaller | open | |
+| B51 | A submitted plan still offers a section's "Comment on …" button, which opens an empty panel: show it only while the plan takes comments or the section has some, as the diagrams do (views/OverviewView.tsx:156; found re-auditing B44) [re-audit A3 8] | 5 smaller | open | |
+| B52 | A comment or reply a lock dropped (toasted with Copy) comes back in its box when the plan is reopened, but untracked: no close prompt, and a tab switch empties it. Clear the composer when the lock drops it (components/Threads.tsx:60, 82, 123; found re-auditing F34) [re-audit A3 9] | 5 smaller | open | |
+| B53 | A hook folder that cannot be entered (no search permission) passes the stat and fails as `spawn sh EACCES`, exit 127, as if the shell were missing: check access in the same try (cli/check.ts:194-198; found re-auditing B42) [re-audit A3 10] | 5 smaller | open | |
+| A4 | Re-audit the areas the rows after A3 touched with `/ponytail-audit`, and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -597,3 +608,33 @@ check), then the proposal guards (1, 2) and the lost text (3, 4, 5).
 **Not checked:** a real browser (clipboard, focus order), two tabs at once,
 Windows, macOS's `/bin/sh` for the relay, case-insensitive filesystems
 (ids that differ only in case), and what agent harnesses do on a timeout.
+
+## Re-audit report (row A3, ponytail-audit, 2026-11-10)
+
+Scope: the changes since fb5c76d (row A2), by four auditors as before
+(plan model, check runner, store, page); each finding kept was run again.
+
+**What this repo does:** as in the A2 report. Load assumed: one developer,
+a few agent sessions, plans up to a few MB.
+
+### Should fix
+
+1. **B46's newest-copy rule loses work** (`daemon/store.ts:168-176, 320-330`). Taking whichever folder's copy of a session is newest by its time lets a tie (decided by readdir order), a hook's fresh stamp on an earlier build's stale copy, or a clock running ahead put an old copy over the session's own, and the own copy is not kept anywhere. Reproduced: a session's folder reverting at the second start; an hour of work gone from disk. Go back to the own folder winning once it holds a readable copy.
+2. **Closing the terminal crashes `coplan check` before its check is stopped** (`cli/main.ts:422`). SIGHUP, then EIO on the interrupt message, which F36's EPIPE-only guard rethrows. Let every write error on stdout and stderr go.
+3. **A save refused as changed underneath is saved on the next blur** (`components/Editable.tsx:83-91, 109`). The refusal reopens the field on the new base, so a click anywhere saves the user's text over what the refusal was about. Leave it by Enter or Escape only.
+4. **A trimmed change log hides unread edits from the guard** (`shared/plan.ts:148, 1001-1006`). Older than this loop: after 500 other changes, the agent's edit and progress note go over the user's unread ones. Compare the whole baseline when the log has a gap.
+
+### Nice to have
+
+5. A proposed removal's print misses a task moved under one the proposal adds (`plan.ts:2341`).
+6. A proposal's `expect` is checked mid-batch, after the batch's own direct edits (`plan.ts:1728`).
+7. A proposal's staleness ignores a task's note (`plan.ts:2324`).
+8. A submitted plan offers a section's comment button onto an empty panel (`OverviewView.tsx:156`).
+9. A comment a lock dropped comes back untracked on reopen (`Threads.tsx:60`).
+10. A hook folder without search permission is reported as `spawn sh EACCES` (`check.ts:194`).
+
+**Verdict:** no Must fix; fix 1 first (it can lose a plan), then 2 and 3.
+
+**Not checked:** a real browser's focus after a refusal, two tabs, Windows and
+macOS, case-insensitive filesystems, an agent harness that SIGKILLs the
+whole group.
