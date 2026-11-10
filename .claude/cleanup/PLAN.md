@@ -83,7 +83,7 @@ the audit's finding numbers.
 | F21 | An editor left open while switching session saves into the session now on screen: the views are keyed by tab only, and task ids repeat across plans, so the summary, a section or a task can get another plan's text (src/ui/App.tsx:96, src/ui/views/*; found reviewing F7). In fact the views unmount on a switch; the gap was a focused field's blur save | 2 should fix | done | 11f4110 |
 | F8 | `coplan init` writes `yarn check` / `bun test` / `pnpm ci`: always use `<pm> run <script>` [7] | 2 should fix | done | a65c44f |
 | F9 | A Codex session first seen through MCP gets the daemon's folder: another repo's checks and git [9] | 2 should fix | done | f7fe757 |
-| F10 | Plan sessions drop off the browser's list once 60 other sessions are newer [8] | 2 should fix | open | |
+| F10 | Plan sessions drop off the browser's list once 60 other sessions are newer [8] | 2 should fix | done | bdd70ec |
 | F11 | A republish is refused for a box link to a task the agent dropped [10] | 2 should fix | open | |
 | F12 | `move_task` makes a finished task a parent, and its finished work disappears [11] | 2 should fix | open | |
 | F13 | The brief says a dependency settled by dropping is "NOT DONE YET": use `isComplete` [12] | 2 should fix | open | |
