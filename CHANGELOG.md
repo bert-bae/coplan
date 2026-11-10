@@ -225,6 +225,11 @@
   session (for the 100 folded in most recently), and opening another
   session closes a preview. Folds remembered from before are not carried
   over.
+- **A session saved by a newer Coplan says so.** It opened blank, and
+  nothing done in it was saved, with nothing on the page to say why. It now
+  says so as it opens, and that deleting it deletes it for the newer
+  version too. Deleting it also frees its id: a session started later
+  under it is saved as usual.
 
 ### Targeted checks: only what the change touched
 

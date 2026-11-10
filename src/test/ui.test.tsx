@@ -1846,6 +1846,18 @@ test('a proposal shown on the canvas marks what it adds and changes, and saves n
   assert.equal(document.querySelector('.react-flow__node.diff-added'), null);
 });
 
+test('a session a newer Coplan saved says, as it opens, that nothing done in it here is kept', async () => {
+  await boot(makeSession(null, { savedByNewer: true }));
+  const said = screen.getAllByRole('alert').find((a) => /newer version of Coplan/.test(a.textContent ?? ''));
+  assert.match(said?.textContent ?? '', /nothing done in it here is saved/);
+  assert.match(said?.textContent ?? '', /Deleting it here deletes it for the newer version too/);
+});
+
+test('a session this Coplan saved says nothing of the kind', async () => {
+  await boot();
+  assert.ok(!screen.queryAllByRole('alert').some((a) => /newer version of Coplan/.test(a.textContent ?? '')));
+});
+
 test('what is folded or previewed in one plan stays with it, though another plan uses the same ids', async () => {
   const other = makeSession(proposed(), { sessionId: 's2', title: 'other repo' });
   await boot(makeSession(proposed()), (route) => (route === '/api/session/s2' ? { session: other } : undefined));

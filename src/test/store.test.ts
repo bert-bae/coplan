@@ -253,6 +253,45 @@ test('a newer Coplan\'s session is not saved over under an id its folder name ch
   assert.equal(readFileSync(laterFile, 'utf8'), future);
 });
 
+test("a newer Coplan's session is marked for the page to say so, and deleting it frees its id", async () => {
+  const id = 'newer-then-deleted';
+  const dir = path.join(home, 'sessions', id);
+  const file = path.join(dir, 'state.json');
+  const future = JSON.stringify({ schemaVersion: 99, sessionId: id, plan: { shape: 'new' } });
+  const writeFuture = () => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, future);
+  };
+  writeFuture();
+  const store = await freshStore();
+  assert.equal(store.ensure(id, process.cwd()).savedByNewer, true);
+  store.publishPlan(id, PLAN);
+  assert.equal(store.get(id)?.savedByNewer, true, 'through edits');
+  store.persistNow(id);
+  assert.equal(readFileSync(file, 'utf8'), future, 'and never saved over');
+
+  // Deleted on purpose: gone, and the id is this build's again.
+  assert.equal(store.purge(id), true);
+  assert.equal(existsSync(dir), false);
+  assert.equal(store.ensure(id, process.cwd()).savedByNewer, undefined);
+  store.publishPlan(id, PLAN);
+  store.persistNow(id);
+  assert.equal((JSON.parse(readFileSync(file, 'utf8')) as { schemaVersion?: number }).schemaVersion, 1);
+
+  // A mark found on disk is not this build's to keep: it would stop the saves.
+  const kept = store.get(id);
+  store.drop(id);
+  writeFileSync(file, JSON.stringify({ ...kept, schemaVersion: 1, savedByNewer: true }));
+  assert.equal(store.ensure(id, process.cwd()).savedByNewer, undefined);
+
+  // A folder the delete could not remove is the newer build's still, on disk.
+  store.purge(id);
+  writeFuture();
+  assert.equal(store.ensure(id, process.cwd()).savedByNewer, true);
+  store.persistNow(id);
+  assert.equal(readFileSync(file, 'utf8'), future);
+});
+
 test('a prompt that never reached the agent is taken back and handed over again, unless the plan moved since', async () => {
   const store = await freshStore();
   store.ensure('handover', process.cwd());

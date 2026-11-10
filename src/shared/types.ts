@@ -807,6 +807,9 @@ export interface SessionState {
   title: string;
   /** Set once the user renames the session, so nothing overwrites it. */
   titleLocked?: boolean;
+  /** Saved by a newer Coplan, in a format this build cannot read: served
+   *  blank, and never saved over (so never on disk with this set). */
+  savedByNewer?: boolean;
   status: SessionStatus;
   /** Set while Claude is waiting on the user; cleared when they reply. */
   waiting: WaitingState | null;

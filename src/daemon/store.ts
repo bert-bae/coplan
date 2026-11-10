@@ -104,9 +104,6 @@ const NEWER = Symbol('newer');
 export class SessionStore extends EventEmitter {
   private sessions = new Map<string, SessionState>();
   private persistTimers = new Map<string, NodeJS.Timeout>();
-  /** Session folders (`sanitizeId` names) in a newer format than this
-   *  build writes: never written to, whichever id they are reached by. */
-  private foreign = new Set<string>();
   /** The last write failure said for each session, so it is said once. */
   private persistFailed = new Map<string, string>();
 
@@ -138,13 +135,10 @@ export class SessionStore extends EventEmitter {
         continue;
       }
       const state = readState(file);
-      if (state === NEWER) {
-        // Written by a newer Coplan than this daemon: left exactly as it is,
-        // and never saved over (see persistNow), until that build runs.
-        this.foreign.add(entry.name);
-        continue;
-      }
-      if (!state) continue;
+      // One written by a newer Coplan than this daemon is left exactly as it
+      // is until that build runs: not loaded, and never saved over
+      // (`savedByNewer`, set by ensure and checked by persistNow).
+      if (!state || state === NEWER) continue;
       if ((state.updatedAt ?? 0) < cutoff) {
         expired.push(sessionDir);
         continue;
@@ -222,7 +216,7 @@ export class SessionStore extends EventEmitter {
 
   persistNow(id: string): void {
     const state = this.sessions.get(id);
-    if (!state || this.foreign.has(sanitizeId(id))) return;
+    if (!state || state.savedByNewer) return;
     try {
       const dir = paths.sessionDir(id);
       mkdirSync(dir, { recursive: true });
@@ -268,12 +262,13 @@ export class SessionStore extends EventEmitter {
     let state = this.sessions.get(id);
     if (!state) {
       const saved = readState(paths.sessionState(id));
-      // A newer build's session is served blank from memory, never saved.
-      if (saved === NEWER) this.foreign.add(sanitizeId(id));
       // No folder (a Codex tool call, whose hooks are not trusted yet) is
       // left unknown: the daemon's own is some other session's repository,
       // and its checks, base branch and git would be taken for this one's.
       state = saved && saved !== NEWER ? saved : newSession(id, cwd ?? '', agent);
+      // A newer build's session is served blank from memory, marked so the
+      // page says why, and never saved (persistNow).
+      if (saved === NEWER) state.savedByNewer = true;
       this.sessions.set(id, state);
       mkdirSync(paths.sessionDir(id), { recursive: true });
       this.emitEvent({ type: 'snapshot', session: state });
@@ -655,6 +650,8 @@ function readState(file: string): SessionState | typeof NEWER | undefined {
     // submission it would read as invalid, and so as unlocked. Hands off.
     if (typeof state.schemaVersion === 'number' && state.schemaVersion > STATE_SCHEMA) return NEWER;
     delete state.schemaVersion;
+    // Only ever set in memory: on disk it would stop this one being saved.
+    delete state.savedByNewer;
     migrate(state);
     return state;
   } catch {

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import { listedSessions, store, SessionScope, useEdit, useStore, useSession, TAB_IDS, type Tab } from './store.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { Toasts } from './components/Toasts.tsx';
-import { ConnectionBar } from './components/ConnectionBar.tsx';
+import { ConnectionBar, SavedByNewerBar } from './components/ConnectionBar.tsx';
 import { ThemeToggle } from './components/ThemeToggle.tsx';
 import { Handoff, WaitingBanner } from './components/Handoff.tsx';
 import { PromptViewerHost } from './components/PromptView.tsx';
@@ -83,6 +83,7 @@ export function App() {
             <>
               <Header session={session} />
               <ConnectionBar />
+              {session.savedByNewer && <SavedByNewerBar />}
               <WaitingBanner session={session} />
               <PhaseStrip session={session} />
               {plan && <ProposalsStrip plan={plan} />}
