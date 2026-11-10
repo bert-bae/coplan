@@ -25,6 +25,11 @@
   changed with it, after which the read-back said your edits "cancel
   out". Both are now refused until it reads the plan, like any other
   edit over yours.
+- **What you do after submitting reaches the agent.** Handing it the build
+  prompt counted as its read of the whole plan, so a proposal you rejected
+  after submitting, with your reason, or a task's checks you changed then,
+  never showed in its read-back. Those now stay unread and it is told to
+  read them, as when it is handed the confirmed design.
 
 ### Targeted checks: only what the change touched
 

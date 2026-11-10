@@ -370,6 +370,9 @@ export interface BuildSettings {
  */
 export interface Submission {
   at: number;
+  /** The change log's position when it was submitted: what the prompt
+   *  knows about. Absent on plans submitted before it was recorded. */
+  seq?: number;
   target: BuildTarget;
   /** Anything the user added for Claude when submitting. */
   note?: string;

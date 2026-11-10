@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, submitPlan, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, confirmDesign, countTasks, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, submitPlan, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import { previewProposal } from '../shared/proposals.ts';
 import type { Plan, PlanInput, PlanOp } from '../shared/types.ts';
@@ -882,4 +882,31 @@ test("builds is held to the links it would really change: an unlink undone count
   other = applyOps(other, [{ op: 'upsert_node', diagramId: 'd1', id: 'b', label: 'Renamed' }], 'user').plan;
   const after = applyOps(other, [{ op: 'upsert_task', id: 't3', title: 'UI, again', builds: ['a'] }], 'claude').plan;
   assert.equal(after.tasks.find((t) => t.id === 't3')?.title, 'UI, again');
+});
+
+test('handing over the build prompt is not a read of what the user did after submitting', () => {
+  const proposed = applyOps(publishPlan(null, { title: 'x', tasks: [{ id: 't1', title: 'Build API' }] }, 1_000).plan, [
+    { op: 'propose', title: 'Add cache', reason: 'faster', ops: [{ op: 'upsert_task', title: 'Cache' }] },
+  ], 'claude').plan;
+  for (const reload of [false, true]) {
+    let plan = submitPlan(proposed, { target: 'session', prompt: 'build it' }, 2_000);
+    // The daemon may restart between the sign-off and its delivery.
+    if (reload) plan = normalizePlan(JSON.parse(JSON.stringify(plan)) as Parameters<typeof normalizePlan>[0], 'x');
+    plan = applyOps(plan, [{ op: 'reject_proposal', id: 'p1', note: 'No cache: we must stay stateless' }], 'user').plan;
+    plan = markDelivered(plan, 3_000);
+    assert.ok(plan.submission!.deliveredAt, 'delivered');
+    assert.deepEqual(unreadByClaude(plan).map((c) => c.summary), ['rejected proposal p1 "Add cache": No cache: we must stay stateless'], `reload: ${reload}`);
+    assert.match(renderPlan(plan, { changesOnly: true }), /No cache: we must stay stateless/, 'the agent is shown the reason when it reads');
+  }
+  // A plan submitted before the sign-off's log position was recorded: by the clock.
+  const legacy = submitPlan(proposed, { target: 'session', prompt: 'build it' }, 2_000);
+  delete legacy.submission!.seq;
+  const rejected = applyOps(legacy, [{ op: 'reject_proposal', id: 'p1', note: 'No' }], 'user', 2_500).plan;
+  assert.equal(unreadByClaude(markDelivered(rejected, 3_000)).length, 1, 'a legacy submission too');
+  // With nothing after the sign-off, the prompt it carried is the agent's read, as before.
+  const quiet = markDelivered(submitPlan(proposed, { target: 'session', prompt: 'build it' }, 2_000), 3_000);
+  assert.deepEqual(unreadByClaude(quiet), []);
+  // The design's hand-over works the same way.
+  const design = applyOps(confirmDesign(proposed, { prompt: 'make tasks' }, 2_000), [{ op: 'reject_proposal', id: 'p1', note: 'No' }], 'user').plan;
+  assert.equal(unreadByClaude(markDesignDelivered(design, 3_000)).length, 1);
 });

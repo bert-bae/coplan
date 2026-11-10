@@ -1585,8 +1585,9 @@ function buildRouter(deps: Deps): Router {
           // build prompt once the plan is submitted. That is how Cursor gets
           // it (no hook can add it to the user's message), and how any agent
           // gets one whose hook did not get through. Delivering it counts as
-          // the read — except for edits made after the design was confirmed,
-          // which are not in its prompt and stay unread.
+          // the read — unless the user changed something after signing off,
+          // which is not in its prompt: then all of it stays unread, and the
+          // notice says to read it.
           //
           // A revision request the user queued (#67) comes with it too: ahead
           // of the plan itself, which this read then returns as usual.

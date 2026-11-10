@@ -153,8 +153,9 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
     const handed = ctx.store.deliver(sessionId);
     const revision = ctx.store.deliverRevision(sessionId);
     if (handed || revision) {
-      // The user can still edit tasks and comment after confirming the design;
-      // those edits are not in the prompt, and the agent is told to read them.
+      // The user can still act after signing off (edit tasks after the
+      // design, comment, reject a proposal after submitting); that is not in
+      // the prompt, so it stays unread and the agent is told to read it.
       const later = ctx.store.get(sessionId)?.plan;
       const notice = later && ctx.config.promptNotice ? unreadNotice(later) : null;
       const text = [

@@ -2338,6 +2338,7 @@ export function submitPlan(
   const said = cleanUserSaid(input.userSaid);
   next.submission = {
     at: now,
+    seq: plan.seq,
     target: input.target,
     ...(input.mode ? { mode: input.mode } : {}),
     ...(note ? { note } : {}),
@@ -2401,17 +2402,26 @@ export function reopenDesign(plan: Plan, now = Date.now()): Plan {
   return next;
 }
 
+/**
+ * Whether a sign-off's prompt reaching Claude is Claude's read of the plan.
+ * The prompt was written at the sign-off: anything the user did since (a
+ * task changed, a proposal rejected with its reason) is not in it, so it all
+ * stays unread and Claude is told to read it. A trimmed prompt points Claude
+ * at harness_plan_read for what it could not quote, so it is never the read.
+ */
+function promptIsTheRead(plan: Plan, signoff: { at: number; seq?: number; trimmed?: boolean }): boolean {
+  // One signed off before its log position was recorded: by the clock.
+  const since = (c: Change) => (signoff.seq !== undefined ? c.seq > signoff.seq : c.ts > signoff.at);
+  return !signoff.trimmed && !unreadByClaude(plan).some(since);
+}
+
 /** The ask for a task list reached Claude, carrying the design: that is
  *  Claude reading the plan. */
 export function markDesignDelivered(plan: Plan, now = Date.now()): Plan {
   if (!plan.design || plan.design.deliveredAt || plan.submission) return plan;
   const next = structuredClone(plan);
   next.design!.deliveredAt = now;
-  // The prompt was written when the design was confirmed. Anything the
-  // user changed since — tasks, comments — is not in it, so it stays unread
-  // and Claude is told to read it.
-  const confirmedAt = plan.design.seq ?? plan.seq;
-  if (!plan.design.trimmed && !unreadByClaude(plan).some((c) => c.seq > confirmedAt)) markReadByClaude(next, now);
+  if (promptIsTheRead(plan, plan.design)) markReadByClaude(next, now);
   next.version += 1;
   next.updatedAt = now;
   return next;
@@ -2419,8 +2429,9 @@ export function markDesignDelivered(plan: Plan, now = Date.now()): Plan {
 
 /**
  * The prompt has reached Claude. It carries the whole plan as submitted —
- * or, when that was too long, tells Claude to read it — so this is Claude's
- * read of the plan too.
+ * or, when that was too long, tells Claude to read it — so it is Claude's
+ * read of the plan too, unless the user changed something after submitting
+ * (promptIsTheRead).
  */
 export function markDelivered(plan: Plan, now = Date.now()): Plan {
   // Only this session is ever handed the prompt.
@@ -2430,10 +2441,7 @@ export function markDelivered(plan: Plan, now = Date.now()): Plan {
   // The build prompt carries the design too: a task-list ask not yet sent
   // has nothing left to say.
   if (next.design && !next.design.deliveredAt) next.design.deliveredAt = now;
-  // A trimmed prompt points Claude at harness_plan_read for what it could
-  // not quote — the user's changes among them — so it is not Claude's read:
-  // that read is, and it still has them to show.
-  if (!plan.submission.trimmed) markReadByClaude(next, now);
+  if (promptIsTheRead(plan, plan.submission)) markReadByClaude(next, now);
   next.version += 1;
   next.updatedAt = now;
   return next;
@@ -2581,6 +2589,7 @@ function validSubmission(raw: unknown): Submission | undefined {
   const mode = (EXECUTION_MODES as readonly string[]).includes(s.mode as string) ? s.mode : undefined;
   const said = s.via === 'chat' ? cleanUserSaid(s.userSaid) : undefined;
   return {
+    ...(Number.isInteger(s.seq) && s.seq! >= 0 ? { seq: s.seq } : {}),
     at: s.at,
     target,
     // Kept across a restart: without it a Tracked build would read back as
@@ -2602,7 +2611,7 @@ function validDesign(raw: unknown): DesignSignoff | undefined {
   const said = d.via === 'chat' ? cleanUserSaid(d.userSaid) : undefined;
   return {
     at: d.at,
-    ...(typeof d.seq === 'number' ? { seq: d.seq } : {}),
+    ...(Number.isInteger(d.seq) && d.seq! >= 0 ? { seq: d.seq } : {}),
     ...(typeof d.note === 'string' && d.note ? { note: d.note } : {}),
     prompt: d.prompt,
     ...(d.trimmed === true ? { trimmed: true } : {}),
