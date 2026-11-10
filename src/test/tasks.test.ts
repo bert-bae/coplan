@@ -47,3 +47,16 @@ test("a box's rows are the same whether the outline is numbered for it or once f
   }
   assert.deepEqual(boxRows(plan, ['t2']).map((r) => [r.number, r.depth]), [['1.1', 0], ['1.1.1', 1]], 'numbered as the outline, indented from the linked task');
 });
+
+test("a box linking a task and its subtask lists the subtask under it, linked in its own right", () => {
+  const plan = publishPlan(null, {
+    title: 'x',
+    tasks: [{ id: 't1', title: 'API', subtasks: [{ id: 't2', title: 'Routes', subtasks: [{ id: 't3', title: 'Auth' }] }] }, { id: 't4', title: 'Docs' }],
+  }).plan;
+  // Each row: the task, its indent, and whether the box links it itself (it can be unlinked).
+  const shape = (ids: string[]) => boxRows(plan, ids).map((r) => [r.task.id, r.depth, r.direct]);
+  const both = [['t1', 0, true], ['t2', 1, true], ['t3', 2, false]];
+  assert.deepEqual(shape(['t1', 't2']), both);
+  assert.deepEqual(shape(['t2', 't1']), both, 'whichever was linked first: never above its parent');
+  assert.deepEqual(shape(['t3', 't4', 't1']), [['t4', 0, true], ['t1', 0, true], ['t2', 1, false], ['t3', 2, true]], 'a subtask further down');
+});

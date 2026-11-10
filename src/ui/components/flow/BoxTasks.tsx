@@ -217,7 +217,7 @@ export function BoxTasks({ id, data, chip }: { id: string; data: FlowData; chip:
                   ×
                 </button>
               ) : (
-                editable && <span className="flow-tasks-via" title="Builds this box through the task above it" aria-hidden="true" />
+                editable && <span className="flow-tasks-via" title="Builds this box through the linked task it is under" aria-hidden="true" />
               )}
             </li>
           ))}

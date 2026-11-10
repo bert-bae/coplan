@@ -323,6 +323,10 @@
   Checking each one against your unread edits copied the whole plan, so on
   a big plan a batch held Coplan for up to half a second. It now works out
   which box links would change without the copy.
+- **A box linking a task and its subtask lists both as linked.** The
+  subtask showed as building the box only through its parent, with no
+  Unlink, or, when linked first, sat above its parent. It now sits under
+  its parent with its own Unlink.
 
 ### Targeted checks: only what the change touched
 

@@ -1,5 +1,5 @@
 import { descendants, outline } from '../../shared/plan.ts';
-import { droppedWhole, hasSubtasks, readinessOf } from '../../shared/build.ts';
+import { ancestorsOf, droppedWhole, hasSubtasks, readinessOf } from '../../shared/build.ts';
 import type { Plan, Task, TaskStatus } from '../../shared/types.ts';
 
 /**
@@ -28,17 +28,19 @@ export function numbered(rows: ReturnType<typeof outline>): Numbered {
 export function boxRows(plan: Plan | null, taskIds: string[] | undefined, rows: Numbered | null = null): BoxRow[] {
   if (!plan || !taskIds?.length) return [];
   rows ??= numbered(outline(plan));
+  const linked = new Set(taskIds);
   const seen = new Set<string>();
   const out: BoxRow[] = [];
   for (const id of taskIds) {
     const task = plan.tasks.find((t) => t.id === id);
-    if (!task || seen.has(id)) continue;
+    // A task linked with one above it is listed under that one, where it sits.
+    if (!task || seen.has(id) || ancestorsOf(plan, task).some((a) => linked.has(a.id))) continue;
     const base = rows.get(id)?.depth ?? 0;
     for (const t of [task, ...descendants(plan, task.id)]) {
       if (seen.has(t.id)) continue;
       seen.add(t.id);
       const at = rows.get(t.id);
-      out.push({ task: t, number: at?.number ?? t.id, depth: (at?.depth ?? base) - base, direct: t.id === id, status: shownStatus(plan, t) });
+      out.push({ task: t, number: at?.number ?? t.id, depth: (at?.depth ?? base) - base, direct: linked.has(t.id), status: shownStatus(plan, t) });
     }
   }
   return out;
