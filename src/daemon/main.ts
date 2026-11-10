@@ -111,13 +111,18 @@ async function main(): Promise<void> {
   const router = buildRouter({ store, config, token, clients, lifecycle });
 
   server.on('request', (req, res) => {
-    void handle(req, res, router, token).catch((err: unknown) => {
+    void handle(req, res, router, token).catch((thrown: unknown) => {
+      const where = `${req.method} ${req.url?.split('?')[0]}`;
+      // What the plan refuses (a sign-off over a version the user never saw,
+      // one with no plan to sign) is a conflict, in the plan's own words.
+      if (thrown instanceof PlanError) log(`refused ${where}: ${thrown.message}`);
+      const err = thrown instanceof PlanError ? new HttpError(409, thrown.message) : thrown;
       if (err instanceof HttpError) {
         if (!res.headersSent) json(res, err.status, { error: err.message });
         else res.end();
         return;
       }
-      log(`request error on ${req.method} ${req.url?.split('?')[0]}: ${(err as Error)?.stack ?? err}`);
+      log(`request error on ${where}: ${(err as Error)?.stack ?? err}`);
       if (!res.headersSent) json(res, 500, { error: 'internal error' });
       else res.end();
     });
@@ -579,6 +584,12 @@ function buildRouter(deps: Deps): Router {
     return session ?? null;
   };
 
+  /** A look at the plan: there is nothing to see until one is published. */
+  const planOr404 = (session: SessionState): Plan => {
+    if (!session.plan) throw new HttpError(404, 'no plan yet');
+    return session.plan;
+  };
+
   /* --------------------------- UI bootstrap ------------------------ */
 
   /** A ticket for the live stream, which a browser opens without headers. */
@@ -656,11 +667,8 @@ function buildRouter(deps: Deps): Router {
   router.get('/api/session/:id/plan/text', (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
-    if (!session.plan) {
-      json(ctx.res, 404, { error: 'no plan yet' });
-      return;
-    }
-    text(ctx.res, 200, renderPlan(session.plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck }));
+    const plan = planOr404(session);
+    text(ctx.res, 200, renderPlan(plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck }));
   });
 
   /** The read-back as blocks, each naming its source, for the page's
@@ -668,12 +676,9 @@ function buildRouter(deps: Deps): Router {
   router.get('/api/session/:id/plan/readback', (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
-    if (!session.plan) {
-      json(ctx.res, 404, { error: 'no plan yet' });
-      return;
-    }
-    const blocks = planBlocks(session.plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck });
-    json(ctx.res, 200, { text: blocksText(blocks), blocks, version: session.plan.version });
+    const plan = planOr404(session);
+    const blocks = planBlocks(plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck });
+    json(ctx.res, 200, { text: blocksText(blocks), blocks, version: plan.version });
   });
 
   /**
@@ -684,13 +689,11 @@ function buildRouter(deps: Deps): Router {
   router.get('/api/session/:id/task/:taskId/brief', (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
-    const task = session.plan?.tasks.find((t) => t.id === ctx.params['taskId']);
-    if (!session.plan || !task) {
-      json(ctx.res, 404, { error: session.plan ? `no task "${ctx.params['taskId'] ?? ''}"` : 'no plan yet' });
-      return;
-    }
-    const blocks = briefBlocks(session.plan, task, briefOptions(session));
-    json(ctx.res, 200, { text: joinBlocks(blocks), blocks, task: { id: task.id, title: task.title }, version: session.plan.version });
+    const plan = planOr404(session);
+    const task = plan.tasks.find((t) => t.id === ctx.params['taskId']);
+    if (!task) throw new HttpError(404, `no task "${ctx.params['taskId'] ?? ''}"`);
+    const blocks = briefBlocks(plan, task, briefOptions(session));
+    json(ctx.res, 200, { text: joinBlocks(blocks), blocks, task: { id: task.id, title: task.title }, version: plan.version });
   });
 
   /**
@@ -701,10 +704,7 @@ function buildRouter(deps: Deps): Router {
     const session = sessionOr404(ctx);
     if (!session) return;
     const body = await readJson<{ note?: unknown; target?: unknown; settings?: unknown; mode?: unknown }>(ctx.req);
-    if (!session.plan) {
-      json(ctx.res, 404, { error: 'no plan yet' });
-      return;
-    }
+    const plan = planOr404(session);
     const note = cleanNote(body.note);
     const project = projectFor(session);
     // The mode asked for; else the target's; else the one the user last
@@ -714,7 +714,7 @@ function buildRouter(deps: Deps): Router {
     const chosen = validMode(body.mode) ?? last?.mode;
     const mode = modeFor(asked, chosen, project.mode);
     const settings = body.settings ? settingsFrom(body.settings, project) : (last?.settings ?? project.settings);
-    const { prompt, trimmed, blocks } = buildPrompt(session.plan, {
+    const { prompt, trimmed, blocks } = buildPrompt(plan, {
       target: targetOf(mode),
       agent: session.agent,
       settings,
@@ -728,7 +728,7 @@ function buildRouter(deps: Deps): Router {
       hash: promptHash(prompt),
       trimmed,
       blocks,
-      version: session.plan.version,
+      version: plan.version,
       budget: PROMPT_BUDGET,
       maxNote: MAX_NOTE,
       mode,
@@ -745,12 +745,9 @@ function buildRouter(deps: Deps): Router {
   router.get('/api/session/:id/plan/export', (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
-    if (!session.plan) {
-      json(ctx.res, 404, { error: 'no plan yet' });
-      return;
-    }
-    const blocks = exportBlocks(session.plan, { project: projectFor(session) });
-    json(ctx.res, 200, { text: blocksText(blocks), blocks, version: session.plan.version });
+    const plan = planOr404(session);
+    const blocks = exportBlocks(plan, { project: projectFor(session) });
+    json(ctx.res, 200, { text: blocksText(blocks), blocks, version: plan.version });
   });
 
   /** The prompt the agent would be given if the design were confirmed now. */
@@ -758,19 +755,16 @@ function buildRouter(deps: Deps): Router {
     const session = sessionOr404(ctx);
     if (!session) return;
     const body = await readJson<{ note?: unknown }>(ctx.req);
-    if (!session.plan) {
-      json(ctx.res, 404, { error: 'no plan yet' });
-      return;
-    }
+    const plan = planOr404(session);
     const note = cleanNote(body.note);
     const project = projectFor(session);
-    const { prompt, trimmed, blocks } = designPrompt(session.plan, { agent: session.agent, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
+    const { prompt, trimmed, blocks } = designPrompt(plan, { agent: session.agent, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
     json(ctx.res, 200, {
       prompt,
       hash: promptHash(prompt),
       trimmed,
       blocks,
-      version: session.plan.version,
+      version: plan.version,
       budget: PROMPT_BUDGET,
       maxNote: MAX_NOTE,
       project: projectSummary(project, 'design'),
@@ -787,32 +781,22 @@ function buildRouter(deps: Deps): Router {
     if (!session) return;
     const body = await readJson<{ note?: unknown; expect?: unknown; hash?: unknown }>(ctx.req);
     const note = cleanNote(body.note);
-    try {
-      const plan = store.confirmDesign(session.sessionId, {
-        project: projectFor(session),
-        ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
-        ...(note ? { note } : {}),
-        ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
-        ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
-      });
-      log(`design confirmed for ${session.sessionId}`);
-      json(ctx.res, 200, { plan: forBrowser(plan) });
-    } catch (err) {
-      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
-      else throw err;
-    }
+    const plan = store.confirmDesign(session.sessionId, {
+      project: projectFor(session),
+      ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
+      ...(note ? { note } : {}),
+      ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
+      ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
+    });
+    log(`design confirmed for ${session.sessionId}`);
+    json(ctx.res, 200, { plan: forBrowser(plan) });
   });
 
   /** Unlock a confirmed design. */
   router.post('/api/session/:id/plan/design/reopen', (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
-    try {
-      json(ctx.res, 200, { plan: forBrowser(store.reopenDesign(session.sessionId)) });
-    } catch (err) {
-      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
-      else throw err;
-    }
+    json(ctx.res, 200, { plan: forBrowser(store.reopenDesign(session.sessionId)) });
   });
 
   /**
@@ -824,13 +808,10 @@ function buildRouter(deps: Deps): Router {
     const session = sessionOr404(ctx);
     if (!session) return;
     const body = await readJson<{ note?: unknown }>(ctx.req);
-    if (!session.plan) {
-      json(ctx.res, 404, { error: 'no plan yet' });
-      return;
-    }
+    const plan = planOr404(session);
     const note = cleanNote(body.note);
-    const { prompt, trimmed, blocks, threadIds } = revisionPrompt(session.plan, note ? { note } : {});
-    json(ctx.res, 200, { prompt, hash: promptHash(prompt), trimmed, blocks, threadIds, version: session.plan.version, budget: PROMPT_BUDGET, maxNote: MAX_NOTE });
+    const { prompt, trimmed, blocks, threadIds } = revisionPrompt(plan, note ? { note } : {});
+    json(ctx.res, 200, { prompt, hash: promptHash(prompt), trimmed, blocks, threadIds, version: plan.version, budget: PROMPT_BUDGET, maxNote: MAX_NOTE });
   });
 
   /**
@@ -843,30 +824,20 @@ function buildRouter(deps: Deps): Router {
     if (!session) return;
     const body = await readJson<{ note?: unknown; expect?: unknown; hash?: unknown }>(ctx.req);
     const note = cleanNote(body.note);
-    try {
-      const plan = store.queueRevision(session.sessionId, {
-        ...(note ? { note } : {}),
-        ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
-        ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
-      });
-      log(`revision request queued for ${session.sessionId}`);
-      json(ctx.res, 200, { plan: forBrowser(plan) });
-    } catch (err) {
-      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
-      else throw err;
-    }
+    const plan = store.queueRevision(session.sessionId, {
+      ...(note ? { note } : {}),
+      ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
+      ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
+    });
+    log(`revision request queued for ${session.sessionId}`);
+    json(ctx.res, 200, { plan: forBrowser(plan) });
   });
 
   /** Take back a revision request not yet sent. */
   router.post('/api/session/:id/plan/revisions/withdraw', (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
-    try {
-      json(ctx.res, 200, { plan: forBrowser(store.withdrawRevision(session.sessionId)) });
-    } catch (err) {
-      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
-      else throw err;
-    }
+    json(ctx.res, 200, { plan: forBrowser(store.withdrawRevision(session.sessionId)) });
   });
 
   /**
@@ -904,36 +875,26 @@ function buildRouter(deps: Deps): Router {
     const mode = modeFor(asked, chosen, project.mode);
     const target = targetOf(mode);
     const settings = settingsFrom(body.settings, project);
-    try {
-      const plan = store.submit(session.sessionId, {
-        target,
-        project,
-        settings,
-        ...(chosen ? { mode } : {}),
-        ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
-        ...(note ? { note } : {}),
-        ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
-        ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
-      });
-      log(`plan submitted for ${session.sessionId} (${mode})`);
-      if (chosen) rememberChoice(session, mode, mode === 'managed' ? settings : undefined);
-      json(ctx.res, 200, { plan: forBrowser(plan) });
-    } catch (err) {
-      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
-      else throw err;
-    }
+    const plan = store.submit(session.sessionId, {
+      target,
+      project,
+      settings,
+      ...(chosen ? { mode } : {}),
+      ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
+      ...(note ? { note } : {}),
+      ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
+      ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
+    });
+    log(`plan submitted for ${session.sessionId} (${mode})`);
+    if (chosen) rememberChoice(session, mode, mode === 'managed' ? settings : undefined);
+    json(ctx.res, 200, { plan: forBrowser(plan) });
   });
 
   /** Unlock a submitted plan, so it can be changed again. */
   router.post('/api/session/:id/plan/reopen', (ctx) => {
     const session = sessionOr404(ctx);
     if (!session) return;
-    try {
-      json(ctx.res, 200, { plan: forBrowser(store.reopen(session.sessionId)) });
-    } catch (err) {
-      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
-      else throw err;
-    }
+    json(ctx.res, 200, { plan: forBrowser(store.reopen(session.sessionId)) });
   });
 
   /* --------------------------- Maintenance ------------------------- */
