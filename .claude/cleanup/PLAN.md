@@ -92,7 +92,7 @@ the audit's finding numbers.
 | F16 | An open Markdown editor loses its text on a tab switch, a session switch or a tab close [15] | 2 should fix | done | b9085b9 |
 | F17 | Ctrl+C on `coplan check` leaves the check running [16] | 2 should fix | done | 89e55b3 |
 | F18 | A second setup run overwrites the `.bak` that holds the user's comments [17] | 2 should fix | done | d4746d8 |
-| C1 | Delete dead UI code: unused primitives, format helpers and their CSS, plus the `.panel-title` rule that leaks onto live titles [20] | 3 clean-up | open | |
+| C1 | Delete dead UI code: unused primitives, format helpers and their CSS, plus the `.panel-title` rule that leaks onto live titles [20] | 3 clean-up | done | ff8770c |
 | C2 | Delete dead daemon and shared code: `MODE_WORDS`, `checksSection`, `instructionLines`, `HOOK_EVENTS`, `clean`'s `trim`, Cursor tool-hook paths, the daemon's `--force`, `paths.sessionEvents`, `.diff.<pid>.tmp` sweep, the browser candidate loop [20] | 3 clean-up | open | |
 | C3 | Drop the `@tailwindcss/cli` dev dependency (and `@parcel/watcher` with it) and the unread `CC_HARNESS_PLUGIN_ROOT` [20] | 3 clean-up | open | |
 | R1 | One `ensureDaemon()` for the CLI, the MCP server and the doctor, using the verified lock [19a]; fixes the doctor's stale-lock report | 4 refactor | open | |
