@@ -154,18 +154,18 @@ export class SessionStore extends EventEmitter {
       found.push({ state, old: entry.name !== sanitizeId(state.sessionId) });
     }
 
-    // One copy a session, the newest. A folder named by an earlier build,
-    // which made an id safe without its hash (see sanitizeId), is read
-    // while the session's own holds no state, or an older one (that build
-    // run again, and the user at work in it) — never over a newer build's
-    // or another session's — and saved there once loaded. Left as it is,
-    // for housekeeping, and for that earlier build.
+    // One copy a session. A folder named by an earlier build, which made an
+    // id safe without its hash (see sanitizeId), is read only while the
+    // session's own folder holds no readable state (nor a newer build's),
+    // and saved there once loaded. Its time is not weighed against the own
+    // copy's: a tie, a fresh stamp from that build's hook, a clock running
+    // ahead would each put it over work done since. Left as it is, for
+    // housekeeping, and for that earlier build.
     const newest = new Map<string, { state: SessionState; old: boolean }>();
     for (const copy of found) {
       const own = sanitizeId(copy.state.sessionId);
-      if (copy.old && (newer.has(own) || (holds.get(own) ?? copy.state.sessionId) !== copy.state.sessionId)) continue;
-      const other = newest.get(copy.state.sessionId);
-      if (!other || age(copy) > age(other)) newest.set(copy.state.sessionId, copy);
+      if (copy.old && (newer.has(own) || holds.has(own))) continue;
+      newest.set(copy.state.sessionId, copy);
     }
     // Anything past the cap stays on disk — cold, not stale.
     for (const state of kept([...newest.values()].map((c) => c.state))) this.sessions.set(state.sessionId, state);
@@ -322,11 +322,7 @@ export class SessionStore extends EventEmitter {
         const saved = legacy();
         return { saved, old: saved !== undefined };
       }
-      if (own.sessionId === id) {
-        // An earlier build, run again, may have saved a newer one since.
-        const newer = legacy();
-        return newer && age({ state: newer, old: true }) > age({ state: own, old: false }) ? { saved: newer, old: true } : { saved: own, old: false };
-      }
+      if (own.sessionId === id) return { saved: own, old: false };
       if (!this.sessions.has(own.sessionId) && !existsSync(paths.sessionState(own.sessionId))) {
         try {
           writeState(paths.sessionDir(own.sessionId), own);
@@ -771,19 +767,8 @@ function quarantine(file: string): void {
  * review-loop state. The steps become top-level tasks and the prose becomes a
  * section; the rest has no meaning any more and is dropped.
  */
-/** States read with no time of their own, given the time they were read. */
-const undated = new WeakSet<SessionState>();
-
-/** How recent a copy of a session is, to take the newest: one found in a
- *  folder an earlier build named, with no time of its own, never wins over
- *  another (it would, read after it, every time). */
-function age({ state, old }: { state: SessionState; old: boolean }): number {
-  return old && undated.has(state) ? -1 : (state.updatedAt ?? 0);
-}
-
 function migrate(state: SessionState): void {
   const raw = state as unknown as Record<string, unknown>;
-  if (typeof state.updatedAt !== 'number') undated.add(state);
   state.updatedAt = typeof state.updatedAt === 'number' ? state.updatedAt : Date.now();
   state.createdAt ??= state.updatedAt;
   state.title = typeof state.title === 'string' && state.title ? state.title : state.sessionId.slice(0, 8);

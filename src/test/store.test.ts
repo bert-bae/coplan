@@ -206,34 +206,42 @@ test('a session kept in a folder named the old way is saved to its own', async (
   assert.ok(existsSync(old), 'the other left for housekeeping');
 });
 
-test('a newer copy an earlier build saved in the old folder is the one taken, at load and by ensure, and saved to its own', async () => {
+test("a session's own folder wins over its old one once it holds a copy, however the old one is dated; past keeping, it gives way", async () => {
   const { paths } = await import('../shared/paths.ts');
   const ownTitle = (id: string) => JSON.parse(readFileSync(paths.sessionState(id), 'utf8')).plan.title;
-  // Its own folder's copy older by a minute, or so old it is past keeping.
-  for (const [id, old, how, age] of [
-    ['run:again', 'run_again', 'load', 60_000],
-    ['later:again', 'later_again', 'ensure', 60_000],
-    ['long:gone', 'long_gone', 'load', 120 * 24 * 60 * 60 * 1000],
+  // An earlier build, run again, stamps its stale copy newer (a hook): the work in the own folder stays.
+  for (const [id, old, how, age, wins] of [
+    ['run:again', 'run_again', 'load', 60_000, 'In its own folder'],
+    ['later:again', 'later_again', 'ensure', 60_000, 'In its own folder'],
+    ['long:gone', 'long_gone', 'load', 120 * 24 * 60 * 60 * 1000, 'From the earlier build'],
   ] as const) {
     const store = await freshStore();
     store.ensure(id, process.cwd());
     store.publishPlan(id, { title: 'In its own folder', tasks: [{ title: 'one' }] });
     store.persistNow(id);
     store.drop(id);
-    // By ensure: a daemon already up, the session not in memory, when the files change.
     const up = how === 'ensure' ? await freshStore() : undefined;
     up?.drop(id);
-    // An earlier build, run again, saves what the user did since in the folder it knows.
     const own = JSON.parse(readFileSync(paths.sessionState(id), 'utf8')) as { plan: { title: string }; updatedAt: number };
-    const since = { ...own, plan: { ...own.plan, title: 'Edited in the earlier build' }, updatedAt: Date.now() };
     writeFileSync(paths.sessionState(id), JSON.stringify({ ...own, updatedAt: Date.now() - age }));
     mkdirSync(path.join(home, 'sessions', old), { recursive: true });
-    writeFileSync(path.join(home, 'sessions', old, 'state.json'), JSON.stringify(since));
+    writeFileSync(path.join(home, 'sessions', old, 'state.json'), JSON.stringify({ ...own, plan: { ...own.plan, title: 'From the earlier build' }, updatedAt: Date.now() + 600_000 }));
     const next = up ?? (await freshStore());
     const title = how === 'load' ? next.get(id)?.plan?.title : next.ensure(id, process.cwd()).plan?.title;
-    assert.equal(title, 'Edited in the earlier build', id);
-    assert.equal(ownTitle(id), 'Edited in the earlier build', `${id}: saved to its own folder`);
+    assert.equal(title, wins, id);
+    assert.equal(ownTitle(id), wins, `${id}: its own folder holds it`);
   }
+  // Taken from its old folder, a change since that moves no time (its folder learnt) survives the next start.
+  const kept = await freshStore();
+  kept.ensure('tie:break', '');
+  kept.publishPlan('tie:break', PLAN);
+  kept.persistNow('tie:break');
+  kept.drop('tie:break');
+  renameSync(paths.sessionDir('tie:break'), path.join(home, 'sessions', 'tie_break'));
+  const first = await freshStore();
+  first.ensure('tie:break', '/home/me/proj');
+  first.persistAll();
+  assert.equal((await freshStore()).get('tie:break')?.cwd, '/home/me/proj');
 });
 
 test("an old folder's copy is not taken over another session's, nor when it has no time of its own; an unreadable own copy gives way to it", async () => {
