@@ -67,7 +67,7 @@ the audit's finding numbers.
 | Row | What | Phase | Status | Commit |
 |-----|------|-------|--------|--------|
 | T1 | Test: a prompt the agent never got is taken back and handed over again; an edit in between blocks the take-back [18] | 0 safety net | done | acaa33a |
-| T1b | Test through the hook route: a UserPromptSubmit whose relay gives up before the answer leaves keeps the prompt to deliver again (daemon/main.ts:1066-1110: close listener, `writableFinished`) [18] | 0 safety net | open | |
+| T1b | Test through the hook route: a UserPromptSubmit whose relay gives up before the answer leaves keeps the prompt to deliver again (daemon/main.ts:1066-1110: close listener, `writableFinished`) [18] | 0 safety net | blocked: the route's take-back never fires (0 of 30), so there is nothing working to pin; the test is F19's | |
 | T2 | Test: the live stream reconnects after an error (new ticket, new stream, session fetched again) and stops on 401 [18] | 0 safety net | open | |
 | T3 | Test: each daemon sign-off route answers a refusal with 409 and the right text (pins [19c] before it moves) | 0 safety net | open | |
 | T4 | Test: the browser store's six sign-off actions adopt the plan, toast, and return false on refusal (pins [19d]) | 0 safety net | open | |
@@ -78,6 +78,7 @@ the audit's finding numbers.
 | F5 | Delivering the build prompt marks the user's later changes as read [5b] | 1 must fix | open | |
 | F6 | An agent push wipes what the user is typing in the box panel [3] | 1 must fix | open | |
 | F7 | Saving the summary, box notes or a caption silently overwrites the agent's newer text [4]. D1: warn only | 1 must fix | open | |
+| F19 | A sign-off is marked delivered when the relay gave up while the daemon was busy, so the agent never gets it (found by T1b). See *F19* below | 1 must fix | open | |
 | F8 | `coplan init` writes `yarn check` / `bun test` / `pnpm ci`: always use `<pm> run <script>` [7] | 2 should fix | open | |
 | F9 | A Codex session first seen through MCP gets the daemon's folder: another repo's checks and git [9] | 2 should fix | open | |
 | F10 | Plan sessions drop off the browser's list once 60 other sessions are newer [8] | 2 should fix | open | |
@@ -106,6 +107,33 @@ the audit's finding numbers.
 | B6 | Check, then fix if real: Codex `additionalContextLimit: 4000` (hooks/codex.json:33) vs the 9000-character prompt budget (render.ts:431) | 5 smaller | open | |
 | B7 | Check, then fix if real: the `findByCwd` fallback (daemon/main.ts:1135) can attach a Claude MCP call to a Codex or Cursor session in the same folder | 5 smaller | open | |
 | A1 | Re-audit the touched areas with `/ponytail-audit`, and add any new findings as rows | 6 re-audit | open | |
+
+### F19: the take-back never fires
+
+Found while writing T1b (2026-11-10).
+
+- **Case:** The daemon is busy (paused with SIGSTOP in the reproduction). The
+  relay sends a UserPromptSubmit for a session with a submitted plan, then gives
+  up: curl's `--max-time 4` (bin/coplan-hook-relay.sh:87) closes the socket.
+  When the daemon resumes, it delivers the prompt, writes its answer into the
+  closed socket, and keeps the plan marked delivered. The agent never got the
+  prompt, and no later hook hands it over.
+- **Measured:** with a normal close, 0 of 15 trials were taken back. With a
+  reset, also 0 of 15.
+- **Why:** onUserPromptSubmit runs without a single await once the body is
+  read, so the answer is written before the daemon processes the close that is
+  already waiting. `takeBack` then sees `writableFinished` and does nothing.
+- **Tried:** waiting one `setImmediate` before the destroyed-check catches
+  resets (15 of 15) but not a normal close (0 of 15), which is how curl gives
+  up. Socket state is not a reliable signal here.
+- **Fix:** the relay sends `x-harness-deadline: $(( $(date +%s) + MAX_TIME ))`.
+  The hook route does not deliver, or takes back, a prompt it handles within
+  about 1 s of that deadline. The prompt then goes out with the next message.
+  It is late, but it is not lost. Keep the close-based take-back for resets.
+- **Test (the pin):** an integration test that pauses the daemon with SIGSTOP,
+  sends the hook through a raw socket with the deadline header, closes, sends
+  SIGCONT, and asserts that the prompt is still pending and the next
+  UserPromptSubmit hands it over. Skip it on win32.
 
 ## Decisions for the user
 
