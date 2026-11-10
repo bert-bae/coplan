@@ -2421,6 +2421,9 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
         if (op.op === 'upsert_task' && op.id && !tasks.has(op.id) && op.parentId) movedTo.set(op.id, op.parentId);
         // `builds` replaces which boxes link the task: a link made since is undone.
         if (op.op === 'upsert_task' && op.id && op.builds !== undefined) out[`links:${op.id}`] = links(op.id);
+        // A note is apart from the task's print (progress writes it): one
+        // the proposal sets is printed on its own.
+        if (op.op === 'upsert_task' && op.id && typeof op.note === 'string') out[`note:${op.id}`] = fingerprint(tasks.get(op.id)?.note ?? '');
         break;
       case 'remove':
         if (op.kind === 'section' || op.kind === 'diagram' || op.kind === 'task') out[`${op.kind}:${op.id}`] = rev(op.kind, op.id);
@@ -2461,6 +2464,10 @@ export function proposalStaleness(plan: Plan, p: Proposal): string[] {
       out.push(`the tasks linked to box "${label}" in ${diagram(did)}`);
     } else if (kind === 'removal') out.push(`what removing ${task()} takes (its subtasks, the dependencies on them, its boxes' links)`);
     else if (kind === 'links') out.push(`the boxes ${task()} builds`);
+    // Named once: a task changed (or gone) says its note has too.
+    else if (kind === 'note') {
+      if (now[`task:${id}`] === p.base[`task:${id}`]) out.push(`the note on ${task()}`);
+    }
     else out.push(task());
   }
   return out;

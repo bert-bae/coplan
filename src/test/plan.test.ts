@@ -1184,6 +1184,18 @@ test("a proposed builds is out of date once the user relinked that task's boxes"
   assert.deepEqual(accept(elsewhere).diagrams[0]!.nodes.find((n) => n.id === 'a')?.taskIds, ['t3']);
 });
 
+test("a proposed note is out of date once the user rewrote that task's note", () => {
+  const noted: PlanOp = { op: 'upsert_task', id: 't3', note: 'Claude note' };
+  const plan = applyOps(proposing(noted), [{ op: 'upsert_task', id: 't3', note: 'User note' }], 'user').plan;
+  assert.throws(() => accept(plan), new RegExp(`${STALE.source}: the note on task t3 "UI"`));
+  // A task gone is named once, not again for its note.
+  const gone = applyOps(proposing(noted), [{ op: 'remove', kind: 'task', id: 't3' }], 'user').plan;
+  assert.throws(() => accept(gone), new RegExp(`${STALE.source}: task t3 changed since`));
+  // A proposal that leaves the note alone is not held up by it.
+  const titled = applyOps(proposing({ op: 'upsert_task', id: 't3', title: 'Screens' }), [{ op: 'upsert_task', id: 't3', note: 'User note' }], 'user').plan;
+  assert.equal(accept(titled).tasks.find((t) => t.id === 't3')?.note, 'User note');
+});
+
 test('a proposal that would overwrite box links is out of date once the user linked them since; an order alone is no change', () => {
   // Box a's tasks set anew, and box b removed: both would undo a link the user made after.
   for (const [what, op, edit] of [

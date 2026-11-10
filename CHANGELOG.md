@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **Accepting a proposal no longer writes over a task note you rewrote after it was made.** The proposal
+  shows as out of date instead.
 - **A proposal made in the same batch as Claude's own edit to an item is no longer refused.** Its edits'
   revisions are checked against the plan as the batch began, as the batch's own edits are.
 - **On macOS, hooks start the daemon again.** The hook relay started it
