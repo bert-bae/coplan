@@ -106,7 +106,7 @@ the audit's finding numbers.
 | B2 | `sanitizeId` lets `.` and `..` through, and `purge` would delete the harness home (src/shared/paths.ts:29-31) | 5 smaller | done | 234a27a |
 | B3 | The MCP server exits on a `null` line; parse errors get no -32700 answer (src/mcp/main.ts:328-342) | 5 smaller | done | 76762e7 |
 | B4 | A canvas save is refused, and undo cleared, when only the diagram's title changed mid-drag (FlowCanvas.tsx:269-372, plan.ts checkRev) | 5 smaller | done | 8564c6d |
-| B5 | Tasks view copies: `derivedStatus`, `hasChildren`, three `isTyping` checks (TasksView.tsx:957-962, 1308-1316; lib/tasks.ts:41-45) | 5 smaller | open | |
+| B5 | Tasks view copies: `derivedStatus`, `hasChildren`, three `isTyping` checks (TasksView.tsx:957-962, 1308-1316; lib/tasks.ts:41-45) | 5 smaller | done | d6c0118 |
 | B6 | Check, then fix if real: Codex `additionalContextLimit: 4000` (hooks/codex.json:33) vs the 9000-character prompt budget (render.ts:431) | 5 smaller | open | |
 | B7 | Check, then fix if real: the `findByCwd` fallback (daemon/main.ts:1135) can attach a Claude MCP call to a Codex or Cursor session in the same folder | 5 smaller | open | |
 | B8 | `init` opens the stream twice when the session fetch answers before the ticket: `this.source` is set only once the ticket lands, so `if (!this.source) this.connect()` asks for a second ticket (the attempt guard drops the first stream). Harmless, but a wasted ticket per page load (src/ui/store.ts:164; found reviewing T2) | 5 smaller | open | |
@@ -117,6 +117,7 @@ the audit's finding numbers.
 | B13 | What the page does after a late answer applies to the session now on screen: a sign-off's tab switch and toast, a moved task's refocus (`#task-<id>`), a new subtask's expand, a settled proposal's preview close, all keyed by ids that repeat across plans. Check the answer's session is still on screen first (src/ui/store.ts sign-offs, TasksView.tsx:590, 721, Proposals.tsx:39; found reviewing R7) | 5 smaller | open | |
 | B14 | The six sign-offs still send to the session on screen when they run, not the one the dialog was opened on: give them its session as `commit` has, from `useSessionId`-style context (the dialogs already hold it for their previews). Guarded today by the daemon's `expect`/`hash` (src/ui/store.ts sign-offs, Submit.tsx, Revisions.tsx; found reviewing R7) | 5 smaller | open | |
 | B15 | The store's guard against overwriting a newer build's state records the folder name (sanitized) at load but checks the raw session id in `ensure`/`persistNow`, so an id `sanitizeId` changes (`a/b` → `a_b`) gets past it (src/daemon/store.ts `foreign`; found reviewing B2) | 5 smaller | open | |
+| B16 | A parent task's row is styled by its own stored status (`is-${task.status}`) while its dot shows the status rolled up from its subtasks, so a parent whose subtasks are all done can still look to-do, in the outline and in "By box" (src/ui/views/TasksView.tsx outline row and ByBoxRow; found reviewing B5) | 5 smaller | open | |
 | A1 | Re-audit the touched areas with `/ponytail-audit`, and add any new findings as rows | 6 re-audit | open | |
 
 ### F19: the take-back never fires
