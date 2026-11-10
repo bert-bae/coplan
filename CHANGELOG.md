@@ -167,6 +167,11 @@
   it, taking the agent's Coplan tools with it until the session restarted;
   bad JSON, or a request with no method, got no answer. Each now gets the
   JSON-RPC error for it.
+- **Moving a box while the diagram is renamed keeps the move.** A title or
+  caption changed while a drag or a keyboard move was still to be saved
+  made the save look stale: it was refused, and undo was cleared. A change
+  that leaves the boxes and arrows as they were no longer counts against a
+  move; one that changes them still does.
 
 ### Targeted checks: only what the change touched
 

@@ -1006,3 +1006,21 @@ test("a republish that drops a task the user linked to a box drops the link, not
   // A link it writes itself to a task that is not there is still a mistake to report.
   assert.throws(() => publishPlan(plan, input([{ id: 't1', title: 'one' }], [{ id: 'a', label: 'A', taskIds: ['t9'] }]), 2_000), /node "a" links task "t9", which is not in the plan/);
 });
+
+test("a save of a diagram's graph is refused for a graph changed since it was based, not for a title or caption", () => {
+  let plan = fresh();
+  const d = () => plan.diagrams[0]!;
+  const id = d().id;
+  const base = d().rev;
+  const moved = (x: number): PlanOp => ({ op: 'upsert_diagram', id, nodes: d().nodes.map((n) => (n.id === 'api' ? { ...n, x, y: 40 } : n)), edges: d().edges, expect: base });
+  // The user renames the diagram while a box is being dragged: the drag's save still lands.
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id, title: 'Renamed', caption: 'Meanwhile' }], 'claude').plan;
+  plan = applyOps(plan, [moved(120)], 'user').plan;
+  assert.deepEqual([d().title, d().caption, d().nodes.find((n) => n.id === 'api')?.x], ['Renamed', 'Meanwhile', 120]);
+  // Boxes Claude moved since are a conflict, as is a title edited against a stale revision.
+  const graphBase = d().rev;
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id, nodes: d().nodes.map((n) => (n.id === 'db' ? { ...n, x: 300, y: 80 } : n)), edges: d().edges }], 'claude').plan;
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_diagram', id, nodes: d().nodes, edges: d().edges, expect: graphBase }], 'user'), PlanError);
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_diagram', id, title: 'Again', expect: graphBase }], 'user'), PlanError);
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_node', diagramId: id, id: 'api', label: 'API 2', expect: graphBase }], 'user'), PlanError, 'a box edit too');
+});

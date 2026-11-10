@@ -95,6 +95,11 @@ export interface Diagram {
   title: string;
   /** Bumped on every change; see `Section.rev`. */
   rev: number;
+  /** The revision at which its boxes, arrows or direction last changed. A
+   *  save of the graph made against any revision since is not refused for a
+   *  title or caption edited meanwhile. Absent where a diagram was saved
+   *  before it was kept: then `rev` stands for it. */
+  graphRev?: number;
   nodes: DiagramNode[];
   edges: DiagramEdge[];
   /** Which way automatic layout flows. When Claude leaves it out, the

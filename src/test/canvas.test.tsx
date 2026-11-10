@@ -365,6 +365,47 @@ test('a refused save — even an undo — leaves no history that no longer match
   assert.equal(redo.disabled, true, 'and no refused graph to redo');
 });
 
+test('a title edited beside the canvas while a move waits to save neither refuses the move nor costs its undo', async () => {
+  await boot(makeSession(), { live: true });
+  const id = live!.diagrams[0]!.id;
+  await selectBox('API');
+  const moved = () => live!.diagrams[0]!.nodes.find((n) => n.label === 'API')!;
+  const x = moved().x;
+  await act(async () => {
+    fireEvent.keyDown(nodeEl('API'), { key: 'ArrowRight' });
+  });
+  // While the move waits, the title changes: Claude, or the panel beside the canvas.
+  live = applyOps(live!, [{ op: 'upsert_diagram', id, title: 'Renamed mid-move' }], 'claude').plan;
+  const s = store.getState().session!;
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...s, plan: live! } });
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 400));
+  });
+  await settle();
+  assert.notEqual(moved().x, x, 'the move was saved');
+  assert.equal(live!.diagrams[0]!.title, 'Renamed mid-move', 'over the new title, not instead of it');
+  assert.equal((screen.getByRole('button', { name: 'Undo' }) as HTMLButtonElement).disabled, false, 'and it can be undone');
+  assert.doesNotMatch(store.getState().toasts.at(-1)?.text ?? '', /was changed by/);
+
+  // A box added meanwhile is a change to the graph: that move is refused, not saved over it.
+  await act(async () => {
+    fireEvent.keyDown(nodeEl('API'), { key: 'ArrowRight' });
+  });
+  const graph = live!.diagrams[0]!;
+  live = applyOps(live!, [{ op: 'upsert_diagram', id, nodes: [...graph.nodes, { id: 'queue', label: 'Queue', kind: 'queue' }], edges: graph.edges }], 'claude').plan;
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...store.getState().session!, plan: live! } });
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 400));
+  });
+  await settle();
+  assert.ok(live!.diagrams[0]!.nodes.some((n) => n.id === 'queue'), "Claude's box stays");
+  assert.match(store.getState().toasts.at(-1)?.text ?? '', /was changed by Claude/);
+});
+
 test('undo will not revert a change made elsewhere, and says so', async () => {
   await boot();
   await selectBox('API');

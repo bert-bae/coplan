@@ -452,16 +452,14 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
     const caption = clean(raw.caption, MAX_TEXT);
     const graph = buildGraph(raw.nodes ?? [], raw.edges ?? [], old, dTitle, new Set(tasks.map((t) => t.id)));
     const direction = validDirection(raw.direction) ?? old?.direction ?? suggestDirection(graph.nodes, graph.edges);
-    const same =
-      old &&
-      old.title === dTitle &&
-      old.caption === caption &&
-      old.direction === direction &&
-      JSON.stringify([old.nodes, old.edges]) === JSON.stringify([graph.nodes, graph.edges]);
+    const sameGraph = old && old.direction === direction && JSON.stringify([old.nodes, old.edges]) === JSON.stringify([graph.nodes, graph.edges]);
+    const same = sameGraph && old.title === dTitle && old.caption === caption;
+    const rev = same ? old.rev : (old?.rev ?? 0) + 1;
     diagrams.push({
       id,
       title: dTitle,
-      rev: same ? old.rev : (old?.rev ?? 0) + 1,
+      rev,
+      graphRev: sameGraph ? (old.graphRev ?? old.rev) : rev,
       ...graph,
       direction,
       ...(caption ? { caption } : {}),
@@ -753,7 +751,20 @@ function findBox(plan: Plan, ref: string, title: string): { diagram: Diagram; no
 /** A diagram's links changed under it: a canvas editing it must reload. */
 function bumpDiagram(d: Diagram, now: number): void {
   d.rev += 1;
+  d.graphRev = d.rev;
   d.updatedAt = now;
+}
+
+/** What a canvas draws: a change to it moves `graphRev`. */
+function graphOf(d: Diagram): string {
+  return JSON.stringify([d.nodes, d.edges, d.direction]);
+}
+
+/** A save of a diagram's graph alone, made against revision `expect`: it
+ *  conflicts with a graph changed since, not with a title or caption edit. */
+function checkGraphRev(d: Diagram, expect: unknown, author: Author): void {
+  if (typeof expect === 'number' && expect >= (d.graphRev ?? d.rev) && expect <= d.rev) return;
+  checkRev(d, expect, 'diagram', author);
 }
 
 function checkDependencies(plan: Plan): void {
@@ -1177,7 +1188,7 @@ function expectAtStart(plan: Plan, op: PlanOp, author: Author): PlanOp {
   if (op.op !== 'upsert_node' && op.op !== 'remove_node' && op.op !== 'upsert_edge' && op.op !== 'remove_edge') return op;
   if (op.expect === undefined) return op;
   const d = plan.diagrams.find((x) => x.id === op.diagramId);
-  if (d) checkRev(d, op.expect, 'diagram', author);
+  if (d) checkGraphRev(d, op.expect, author);
   const { expect: _checked, ...rest } = op;
   return rest as PlanOp;
 }
@@ -1224,6 +1235,7 @@ export function applyOps(
   const next = structuredClone(plan);
   const changes: Change[] = [];
   const unread = author === 'claude' ? unreadContent(plan) : null;
+  const graphs = new Map(plan.diagrams.map((d) => [d.id, graphOf(d)]));
   ops.forEach((op, i) => {
     try {
       if (author === 'claude') {
@@ -1248,6 +1260,9 @@ export function applyOps(
       throw err;
     }
   });
+  // Whatever moved a diagram's boxes, arrows or direction (a canvas save, a
+  // box edit, a link) moved its graph revision with it.
+  for (const d of next.diagrams) if (graphs.get(d.id) !== graphOf(d)) d.graphRev = d.rev;
   // Dependencies are checked on the batch as a whole, so a task and the one
   // it waits on can be added together in either order. A problem the plan
   // already had (written by an older build) does not block unrelated edits.
@@ -1325,7 +1340,8 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
     case 'upsert_diagram': {
       const existing = op.id ? plan.diagrams.find((d) => d.id === op.id) : undefined;
       if (existing) {
-        checkRev(existing, op.expect, 'diagram', author);
+        if (op.title === undefined && op.caption === undefined) checkGraphRev(existing, op.expect, author);
+        else checkRev(existing, op.expect, 'diagram', author);
         const before = structuredClone(existing);
         const title = clean(op.title, MAX_TITLE);
         if (title) existing.title = title;
@@ -1375,6 +1391,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         id: claimId(plan, 'diagram', undefined),
         title,
         rev: 1,
+        graphRev: 1,
         ...graph,
         direction: validDirection(op.direction) ?? suggestDirection(graph.nodes, graph.edges),
         ...(caption ? { caption } : {}),
