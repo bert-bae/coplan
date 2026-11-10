@@ -1006,7 +1006,9 @@ function unreadContent(plan: Plan): Set<string> {
       .map((c) => `${c.target.kind}:${c.target.id}`),
   );
   const base = plan.claudeBaseline;
-  if (!base || touched.size === 0) return new Set([...touched, ...moved]);
+  // With no record of what Claude read, every task touched may have had its note changed.
+  const noteOf = (key: string) => `note:${splitKey(key)[1]}`;
+  if (!base || touched.size === 0) return new Set([...touched, ...[...touched].filter((key) => key.startsWith('task:')).map(noteOf), ...moved]);
   const now = baselineOf(plan);
   const content = (b: PlanBaseline, kind: string, id: string): string => {
     switch (kind) {
@@ -1028,7 +1030,10 @@ function unreadContent(plan: Plan): Set<string> {
     const [kind, id] = splitKey(key);
     return content(base, kind, id) !== content(now, kind, id);
   });
-  return new Set([...changed, ...moved]);
+  // A task's note apart, as `note:id`: a progress note goes over it alone.
+  const noteIn = (b: PlanBaseline, key: string) => b.tasks.find((t) => t.id === splitKey(key)[1])?.note ?? '';
+  const notes = changed.filter((key) => key.startsWith('task:') && noteIn(base, key) !== noteIn(now, key)).map(noteOf);
+  return new Set([...changed, ...notes, ...moved]);
 }
 
 /** The task and those under it in the plan as Claude last read it: only
@@ -1058,9 +1063,12 @@ function contentTargetsOf(plan: Plan, op: PlanOp): string[] {
     case 'remove_edge':
       return [`diagram:${op.diagramId}`];
     case 'upsert_task': {
-      // A note with a status is a progress report (harness_task_update).
+      // A note with a status is a progress report (harness_task_update):
+      // held only to a change of the note itself.
       const own = op.id && (has('title', 'detail', 'files', 'dependsOn', 'branch', 'review') || (has('note') && !has('status', 'stage')));
-      return [...(own ? [`task:${op.id}`] : []), ...(op.builds !== undefined ? relinked(plan, op.id, op.builds) : [])];
+      const progressNote =
+        op.id && has('note') && has('status', 'stage') && clean(op.note, MAX_TITLE * 2) !== findTask(plan, op.id)?.note;
+      return [...(own ? [`task:${op.id}`] : []), ...(progressNote ? [`note:${op.id}`] : []), ...(op.builds !== undefined ? relinked(plan, op.id, op.builds) : [])];
     }
     case 'remove': {
       if (op.kind !== 'task') return [`${op.kind}:${op.id}`];
@@ -1121,8 +1129,13 @@ function splitKey(key: string): [string, string] {
 function refuseUnreadEdit(plan: Plan, op: PlanOp, unread: Set<string>): void {
   const target = contentTargetsOf(plan, op).find((key) => unread.has(key));
   if (!target) return;
-  const [kind, id] = splitKey(target) as [Target['kind'] | 'moved', string];
-  const what = kind === 'moved' ? `moved ${describeTarget(plan, { kind: 'task', id })}` : `changed ${describeTarget(plan, { kind, id })}`;
+  const [kind, id] = splitKey(target) as [Target['kind'] | 'moved' | 'note', string];
+  const what =
+    kind === 'moved'
+      ? `moved ${describeTarget(plan, { kind: 'task', id })}`
+      : kind === 'note'
+        ? `changed the note of ${describeTarget(plan, { kind: 'task', id })}`
+        : `changed ${describeTarget(plan, { kind, id })}`;
   // Reached through what the edit takes with it, not what it names: say how.
   const how =
     op.op === 'remove' && target !== `task:${op.id}`

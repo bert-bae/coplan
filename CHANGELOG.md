@@ -359,6 +359,11 @@
   before saved over it without a word. The note editor now saves with the
   note it started from, and is refused if the note has changed since;
   your other open editors on that task are not held up by it.
+- **The agent's progress note cannot go over a note of yours it has
+  not read.** A note sent with a status was left out of the check that
+  holds the agent's edits to what it has read, so it replaced the note
+  you had just written. It is now refused until the agent reads the plan,
+  when what you changed is the note; a status alone still goes through.
 - **A save made against a version the item never had says so.** A save
   carries the revision it was made on; one the item had never reached (a
   page still holding a plan since replaced, say) was refused as "changed

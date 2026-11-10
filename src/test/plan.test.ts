@@ -905,6 +905,25 @@ test("removing a task cannot take a subtask, a dependency or a box link the user
   assert.deepEqual(applyOps(elsewhere, [{ op: 'remove', kind: 'task', id: 't1' }], 'claude').plan.tasks.map((t) => t.id), ['t3', 't4']);
 });
 
+test("the agent's progress note cannot go over a note of the user's it has not read", () => {
+  const report: PlanOp = { op: 'upsert_task', id: 't3', status: 'blocked', note: 'Blocked: DB creds missing' };
+  const track = (plan: Plan) => applyOps(plan, [report], 'claude', undefined, { tracking: true }).plan;
+  const noted = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', note: 'Creds are in the vault' }], 'user').plan;
+  assert.throws(() => track(noted), /The user changed the note of task "UI" since you last read the plan/);
+  assert.equal(track(read(noted)).tasks.find((t) => t.id === 't3')?.note, 'Blocked: DB creds missing', 'read first, then report');
+  // Its progress alone goes through, and so does a note when what the user changed is not the note.
+  assert.equal(applyOps(noted, [{ op: 'upsert_task', id: 't3', status: 'blocked' }], 'claude', undefined, { tracking: true }).plan.tasks.find((t) => t.id === 't3')?.status, 'blocked');
+  const titled = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', title: 'UI, again' }], 'user').plan;
+  assert.equal(track(titled).tasks.find((t) => t.id === 't3')?.note, 'Blocked: DB creds missing');
+  // Nor when it says what the user wrote: nothing of theirs goes.
+  const same: PlanOp = { op: 'upsert_task', id: 't3', status: 'blocked', note: 'Creds are in the vault' };
+  assert.equal(applyOps(noted, [same], 'claude', undefined, { tracking: true }).plan.tasks.find((t) => t.id === 't3')?.status, 'blocked');
+  // With no record of what Claude read, a note the user touched counts as changed.
+  const unrecorded = structuredClone(linkedPlan());
+  delete unrecorded.claudeBaseline;
+  assert.throws(() => track(applyOps(unrecorded, [{ op: 'upsert_task', id: 't3', note: 'Creds are in the vault' }], 'user').plan), /changed the note of task "UI"/);
+});
+
 test('removing a task cannot take one the user just moved under it, unread', () => {
   const ids = (plan: Plan) => plan.tasks.map((t) => t.id);
   const remove: PlanOp = { op: 'remove', kind: 'task', id: 't1' };
