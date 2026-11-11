@@ -673,25 +673,51 @@ export class SessionStore extends EventEmitter {
   emitEvent(event: ServerEvent): void {
     // Raised before anyone listens (a save that failed as the store loaded,
     // in its constructor): held for the first listener, the daemon's log.
-    if (this.listenerCount('event') === 0) {
+    // While some are held, a later one waits behind them, in order.
+    if (this.listenerCount('event') === 0 || (this.unheard.length && event.type === 'persist-error')) {
       if (event.type !== 'persist-error') return;
-      if (!this.unheard.length) {
-        const onListener = (name: string | symbol) => {
-          if (name !== 'event') return;
-          this.off('newListener', onListener);
-          // Told once it is on (newListener comes just before); held again
-          // if it went before then.
-          process.nextTick(() => {
-            const held = this.unheard.splice(0);
-            for (const event of held) this.emitEvent(event);
-          });
-        };
-        this.on('newListener', onListener);
-      }
       this.unheard.push(event);
+      if (this.listenerCount('event') > 0) this.flushSoon();
+      else if (!this.listeners('newListener').includes(this.onListener)) this.on('newListener', this.onListener);
       return;
     }
     this.emit('event', event);
+  }
+
+  /** The first 'event' listener: told what was held, once it is on
+   *  (newListener comes just before). */
+  private readonly onListener = (name: string | symbol): void => {
+    if (name !== 'event') return;
+    this.off('newListener', this.onListener);
+    this.flushSoon();
+  };
+
+  private flushPending = false;
+
+  /** What was held, told on the next tick, one at a time and in order: one
+   *  raised meanwhile waits behind them, and a listener that throws leaves
+   *  the rest held. Held again if no listener is left by then. */
+  private flushSoon(): void {
+    if (this.flushPending) return;
+    this.flushPending = true;
+    process.nextTick(() => {
+      this.flushPending = false;
+      if (!this.listenerCount('event')) {
+        if (this.unheard.length) this.on('newListener', this.onListener);
+        return;
+      }
+      while (this.unheard.length && this.listenerCount('event')) this.emit('event', this.unheard.shift()!);
+    });
+  }
+
+  /** Every listener off, the one waiting for the first too: it waits again
+   *  while anything is held. */
+  override removeAllListeners(name?: string | symbol): this {
+    // No name is every name: passed on as none, not as undefined.
+    if (name === undefined) super.removeAllListeners();
+    else super.removeAllListeners(name);
+    if (this.unheard.length && !this.listeners('newListener').includes(this.onListener)) this.on('newListener', this.onListener);
+    return this;
   }
 
   /**

@@ -89,14 +89,19 @@ export interface SetupResult {
 
 const TRIES = 3;
 
+/** Whether what is said cannot be seen (stdout failed). A failed write
+ *  (what was said just before) is told a tick after it, so that is waited
+ *  for. */
+async function outputFailed(io: SetupIo): Promise<boolean> {
+  if (!io.unwritable) return false;
+  await new Promise((r) => setImmediate(r));
+  return io.unwritable();
+}
+
 async function answer(io: SetupIo, question: string): Promise<string | null> {
   if (!io.ask) return null;
-  // A question no one can see is not asked, nor answered blind. A failed
-  // write (what was said just before) is told a tick after it.
-  if (io.unwritable) {
-    await new Promise((r) => setImmediate(r));
-    if (io.unwritable()) throw new Stopped();
-  }
+  // A question no one can see is not asked, nor answered blind.
+  if (await outputFailed(io)) throw new Stopped();
   return (await io.ask(question)).trim();
 }
 
@@ -444,10 +449,17 @@ export async function setup(opts: SetupOptions, io: SetupIo): Promise<SetupResul
   stagePlugin(opts.root, opts.stage);
   const kinds = opts.agents ?? (await chooseAgents(io, findAgents(io, opts.home)));
   const result = install(io, kinds, opts);
-  if (io.ask && (await yesNo(io, 'Adjust settings now? The defaults are fine to start.', false))) {
-    await askSettings(io, opts.coplanHome);
-    await askRepositories(io, opts.home, opts.coplanHome);
-    io.say('  More settings: docs/CONFIG.md');
+  // Installed: with its output failing, before the settings or part way
+  // through them, nothing more is asked and the walk ends as --yes does, so
+  // the daemon is restarted on this build after it.
+  try {
+    if (io.ask && (await yesNo(io, 'Adjust settings now? The defaults are fine to start.', false))) {
+      await askSettings(io, opts.coplanHome);
+      await askRepositories(io, opts.home, opts.coplanHome);
+      io.say('  More settings: docs/CONFIG.md');
+    }
+  } catch (err) {
+    if (!(err instanceof Stopped && io.unwritable?.())) throw err;
   }
   return result;
 }

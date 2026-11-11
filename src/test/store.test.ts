@@ -789,6 +789,30 @@ test("a newer Coplan's session is not pushed out of memory by newer plain sessio
   }
 });
 
+test('save failures held for the first listener come in order, and are not stranded by removeAllListeners', async () => {
+  const store = await freshStore();
+  const fail = (id: string) => store.emitEvent({ type: 'persist-error', sessionId: id, message: 'EIO' });
+  fail('a');
+  fail('b');
+  // Every listener removed (and with them the one waiting for the first): still held.
+  store.removeAllListeners();
+  const told: string[] = [];
+  store.on('event', (e: { type: string; sessionId?: string }) => {
+    if (e.type === 'persist-error') told.push(e.sessionId!);
+  });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(told, ['a', 'b'], 'told once a listener is on');
+  // Held again (no listener), then one raised live before they are told comes after them.
+  store.removeAllListeners();
+  fail('c');
+  store.on('event', (e: { type: string; sessionId?: string }) => {
+    if (e.type === 'persist-error') told.push(e.sessionId!);
+  });
+  fail('live');
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(told, ['a', 'b', 'c', 'live']);
+});
+
 test("a failed copy of another session's state, found in a folder it was named into, is said once, as any failed save", async () => {
   const { paths } = await import('../shared/paths.ts');
   const store = await freshStore();
