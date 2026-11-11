@@ -238,7 +238,12 @@ the audit's finding numbers.
 | F68 | F65 gap: a review box redrawn while its request is out, holding more than was sent: the request goes through, save drops the parked draft, 'sent' restarts the box and re-keeps its draft, but the round is decided so the box is gone: text on no screen, unoffered, closing the page asks; offered later (if ever) as "could not be sent". Offer the extra on 'sent' when the draft was parked (ui/lib/drafts.ts) (bert-bae/coplan#136) [re-audit A10 3] | 2 should fix | done: save offers what a parked draft holds beyond what went ('added'); its boxes close | c533d46 |
 | F69 | Older: text typed into an editor while its own save is out is lost when the save goes through (close() regardless); an editor redrawn meanwhile keeps it since F65. Close only if it holds what was sent (ui/lib/drafts.ts save) (bert-bae/coplan#137) [re-audit A10 4] | 2 should fix | done: kept open on what was typed (a reply: only what came after), started from the field; not from the returned revision (an agent edit in that instant is not warned of) | 1489143 |
 | B74 | A dropped dependent is told it "no longer" waits; the board's drop then done of a done task loses its round's verdict unnoticed (F66 may cover it); onListener may be registered twice (harmless) (daemon/main.ts, daemon/store.ts) (bert-bae/coplan#138) [re-audit A10 5-7] | 5 smaller | done: dependents() leaves dropped tasks out (reply, brief, page); the other two items by F66 and F67 | 7bd83dc |
-| A11 | Re-audit the areas the rows after A10 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#139) | 6 re-audit | open | |
+| A11 | Re-audit the areas the rows after A10 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#139) | 6 re-audit | done: no must fix, 3 should fix, 8 nice to have, now rows F70-F72, B75 and A12 | {A11} |
+| F70 | F66's undone half: the done gate's messages loop for a task not in review whose round has no pass (a finished task taken up again; refine; blocked): "verdict pass is fine" (refused: not in review), go to review (round limit: "what still fails"); a user-reviewed one is told "they have not passed it", which the board cannot fix. Point to stage review for a new round, allow it when the pass was cleared, and say the pass was cleared (daemon/main.ts done gate, verdict check) (bert-bae/coplan#140) [re-audit A11 1] | 2 should fix | open | |
+| F71 | Older (F69 claimed it): an editor off screen when its save goes in keeps the revision from before it (now.current is not updated unmounted): a section reopens with a false "changed while you were editing"; the files' next save is refused for the user's own save. Take the starting point from the plan as it lands, or restart a kept draft from the field on remount (ui/lib/drafts.ts) (bert-bae/coplan#141) [re-audit A11 2] | 2 should fix | open | |
+| F72 | F69 gap: a new comment goes through edit, not the kept draft's save: typed on while posted, it keeps the posted text and posting again repeats it. Post it through comment.save, or drop the sent text from the front (ui/components/Threads.tsx) (bert-bae/coplan#142) [re-audit A11 3] | 2 should fix | open | |
+| B75 | Tests: wasDone across a republish, B74's done dependent, a comment keeping what came after, a throwing listener; reopening from a drop-while-done gives no "went ahead" warning; a reply edited mid-post is kept whole; the 'added' offer on deleted text; CHANGELOG: comments, B73/B74 (optional) (shared/plan.ts, daemon/main.ts, daemon/store.ts, ui/lib/drafts.ts, CHANGELOG.md) (bert-bae/coplan#143) [re-audit A11 4-11] | 5 smaller | open | |
+| A12 | Re-audit the areas the rows after A11 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#144) | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -930,3 +935,36 @@ revision (no false warning); trimming; comments unaffected.
 
 **Verdict:** no Must fix; fix 1 and 3 first (they refuse or hide the
 user's work), then 4, 2.
+
+## Re-audit report (row A11, four auditors, 2026-11-11)
+
+Scope: the changes since a13d287 (rows F66-F69, B74), at f6de757, by four
+auditors (plan model, whole branch and checks, store events, page), each
+in its own worktree at that commit; each finding kept was reproduced,
+except where marked.
+
+### Should fix
+
+1. **The done gate's messages loop for a task not in review whose round has no pass** (`daemon/main.ts`). F66's undone half.
+2. **An editor off screen when its save goes in keeps a stale starting point** (`ui/lib/drafts.ts`). Older; F69 claimed it.
+3. **A new comment typed on while posted repeats its first part when posted again** (`ui/components/Threads.tsx`). F69 gap.
+
+### Nice to have
+
+4-7. Tests for wasDone across a republish, B74's done dependent, a comment's kept rest, a throwing listener.
+8. Reopening from a drop-while-done gives no "went ahead" warning.
+9. A reply edited mid-post is kept whole.
+10. The 'added' offer on deleted text (not reproduced).
+11. CHANGELOG: comments; B73/B74 (optional).
+
+Checked and fine: check implement, review (twice) and final pass; the
+runtime suite on Node 20.11.0 (688 pass); ui.test six times at once, no
+flake; every fix since #128 pinned by a test that fails when it is
+reverted; the CHANGELOG entries match the code; a drop undone keeps its
+pass (user-reviewed too); taking work up again clears it; wasDone on
+reload, republish and the user's own edits; dependents() callers (no
+readiness change); held events with once(), listeners added or removed
+mid-flush, re-entrant failures, flushPending; restart points on screen;
+the 'added' offer once, not on blanks.
+
+**Verdict:** no Must fix; fix 1 first (it can stall a build), then 3, 2.
