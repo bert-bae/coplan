@@ -550,6 +550,12 @@ function refuseUnread(prev: Plan | null, then: string): void {
   );
 }
 
+/** Whether a task with this status is in the build's cycle, and so keeps
+ *  its stage: in progress, or blocked part way. */
+function keepsStage(status: TaskStatus): boolean {
+  return status === 'in_progress' || status === 'blocked';
+}
+
 /**
  * Whether a task can take subtasks. One already started or finished cannot:
  * a subtask would make it a parent and take its progress (stage, rounds,
@@ -615,9 +621,11 @@ function buildTaskTree(
         ...(note ? { note } : {}),
         ...(branch ? { branch } : {}),
         ...(review ? { review } : {}),
-        ...(old?.stage && status === 'in_progress' ? { stage: old.stage } : {}),
+        ...(old?.stage && keepsStage(status) ? { stage: old.stage } : {}),
+        // Its rounds' record goes with its round, as its status does.
         ...(old?.round ? { round: old.round } : {}),
         ...(old?.checks?.length ? { checks: old.checks } : {}),
+        ...(old?.reviews?.length ? { reviews: old.reviews } : {}),
         createdAt: old?.createdAt ?? now,
         updatedAt: now,
         createdBy: old?.createdBy ?? 'claude',
@@ -903,11 +911,11 @@ function normalizeTask(task: Task): Task {
   if (!validReview(t.review)) delete t.review;
   if (!validStage(t.stage)) delete t.stage;
   if (typeof t.round !== 'number' || !(t.round > 0)) delete t.round;
-  // Only a task in the cycle (in progress, or blocked in it) has a stage, as
-  // an edit leaves it. Its round stays, whatever its status: only the user
-  // putting a task back starts it over (an edit by the agent keeps it), and
-  // a round lost here would meet an old round's verdict next review.
-  if (t.status !== 'in_progress' && t.status !== 'blocked') delete t.stage;
+  // Only a task in the cycle has a stage, as an edit leaves it. Its round
+  // stays, whatever its status: only the user putting a task back starts it
+  // over (an edit by the agent keeps it), and a round lost here would meet
+  // an old round's verdict next review.
+  if (!keepsStage(t.status)) delete t.stage;
   // In review with no round (an older or hand-edited plan): its first, so a
   // verdict can be given and a review box keyed.
   if (t.stage === 'review' && t.round === undefined) t.round = 1;
@@ -1992,7 +2000,7 @@ function editTask(
       out.push(log('status', ref('task', task.id), `marked "${task.title}" ${STATUS_WORDS[status]}${note}`));
     }
     // Finished, or back in the pile: no longer anywhere in the cycle.
-    if (status === 'done' || status === 'todo' || status === 'dropped') delete task.stage;
+    if (!keepsStage(status)) delete task.stage;
     // Put back in the pile by the user, it starts its cycle over: the rounds
     // and checks of the work it had are not this work's. Claude cannot do
     // that to itself — it would be a way round the round limit.
@@ -2005,7 +2013,7 @@ function editTask(
   const progress: string[] = [];
   // Going into review is a round. Reporting review again while in it —
   // with the review checks, say — is the same round.
-  if (stage && task.status !== 'done' && task.status !== 'todo' && task.status !== 'dropped' && stage !== task.stage) {
+  if (stage && keepsStage(task.status) && stage !== task.stage) {
     task.stage = stage;
     if (stage === 'review') task.round = (task.round ?? 0) + 1;
     progress.push(stage === 'review' ? `in review (round ${task.round})` : STAGE_WORDS[stage]);

@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **A finished task carried into the next plan keeps its review history.** Publishing the next plan kept its
+  review round but dropped the reviews themselves from the page.
 - **A task left in review by a hand-edited plan, though no longer in progress, is not put in a review round.**
   A stage is dropped from a task not started, done or dropped, as an edit drops it; its round is kept.
 - **A session that could not be saved as Coplan started is said in its log.** Such a failure was told to no one,

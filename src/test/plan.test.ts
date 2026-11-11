@@ -1472,6 +1472,17 @@ test("a canvas save is refused for a graph Claude republished since it was based
   assert.throws(() => applyOps(plan, [graphSave(plan, dragged((id) => id !== 'queue'), base)], 'user'), CHANGED);
 });
 
+test('a republish keeps a kept task\'s review history with its round, and a blocked task\'s stage', () => {
+  const plan = fresh();
+  const t4 = plan.tasks.find((t) => t.id === 't4')!;
+  Object.assign(t4, { status: 'blocked', stage: 'review', round: 2, reviews: [{ round: 1, by: 'user', verdict: 'changes', summary: 'Add a timeout', at: 1_000 }] });
+  const next = publishTasks(plan, { tasks: SAME_TASKS.tasks! }, 2_000).plan;
+  const kept = next.tasks.find((t) => t.id === 't4')!;
+  assert.deepEqual(kept.reviews, t4.reviews, 'its review history');
+  assert.equal(kept.round, 2);
+  assert.equal(kept.stage, 'review', 'its stage, blocked in it');
+});
+
 test("a canvas save is refused for links Claude's task list changed since it was based", () => {
   let plan = fresh();
   const base = plan.diagrams[0]!.rev;
