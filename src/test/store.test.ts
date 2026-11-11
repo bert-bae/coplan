@@ -449,6 +449,37 @@ test('a session saved by a newer Coplan is never read wrongly or saved over', as
   assert.equal((JSON.parse(readFileSync(path.join(home, 'sessions', 'today', 'state.json'), 'utf8')) as { schemaVersion?: number }).schemaVersion, 1);
 });
 
+test("a copy in a session's old folder is not loaded over its own folder's file from a newer build", async () => {
+  const { paths, legacyName } = await import('../shared/paths.ts');
+  const id = 'down:grade';
+  // As this build saved it once, then moved to the folder an earlier build named.
+  const store = await freshStore();
+  store.ensure(id, process.cwd());
+  store.publishPlan(id, { title: 'From the earlier build', tasks: [{ title: 'one' }] });
+  store.persistNow(id);
+  store.drop(id);
+  const old = path.join(home, 'sessions', legacyName(id));
+  mkdirSync(old, { recursive: true });
+  // As an earlier build kept it: no format of its own named.
+  const { schemaVersion: _none, ...earlier } = JSON.parse(readFileSync(paths.sessionState(id), 'utf8')) as Record<string, unknown>;
+  const oldCopy = JSON.stringify({ ...earlier, updatedAt: Date.now() });
+  writeFileSync(path.join(old, 'state.json'), oldCopy);
+  // Since then, a newer Coplan has saved the session in its own folder.
+  const future = JSON.stringify({ schemaVersion: 99, sessionId: id, title: 'x', plan: { shape: 'new' } });
+  writeFileSync(paths.sessionState(id), future);
+  // Downgraded: the old copy is not loaded, nor saved over the newer one.
+  const booted = await freshStore();
+  assert.equal(booted.get(id)?.plan?.title, undefined, 'not loaded from the old folder');
+  // Nor when its hook arrives: started afresh in memory, never saved there.
+  const hooked = booted.ensure(id, process.cwd());
+  assert.equal(hooked.plan?.title, undefined, 'not taken from the old folder by ensure');
+  assert.equal(hooked.savedByNewer, true);
+  booted.persistNow(id);
+  booted.persistAll();
+  assert.equal(readFileSync(paths.sessionState(id), 'utf8'), future, "the newer build's file is left as it is");
+  assert.equal(readFileSync(path.join(old, 'state.json'), 'utf8'), oldCopy, 'and the old copy, for the earlier build');
+});
+
 test('a newer Coplan\'s session is not saved over under an id its folder name changes', async () => {
   // Session ids become folder names with anything unsafe made safe: `a/b` is kept in `a_b-<hash>`.
   const { paths } = await import('../shared/paths.ts');
