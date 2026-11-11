@@ -1279,11 +1279,30 @@ test("a proposed move the user's moves since put inside itself makes the proposa
     const moved = applyOps(proposed, [{ op: 'move_task', id: 't1', parentId: 't3', index: 0 }], 'user').plan;
     assert.doesNotThrow(() => renderPlan(moved), what);
     assert.doesNotThrow(() => previewProposal(moved, moved.proposals![0]!), what);
-    assert.throws(() => accept(moved), new RegExp(`${STALE.source}: where task t3 "UI" moves`), what);
+    assert.throws(() => accept(moved), new RegExp(`${STALE.source}: where task t3 "UI" goes \\(the task it goes under is now inside it\\)`), what);
   }
   // A circle of parents, which no path should build, ends the walk under a task rather than the stack.
   const circle = { tasks: [{ id: 'a', parentId: 'b' }, { id: 'b', parentId: 'a' }] as Task[] };
   assert.deepEqual(descendants(circle, 'a').map((t) => t.id), ['b']);
+});
+
+test("a proposed move to a task the user since removed or closed is out of date, not a raw error on accept", () => {
+  const proposed = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [{ op: 'move_task', id: 't3', parentId: 't2', index: 0 }] }], 'claude').plan;
+  for (const [what, edit, why] of [
+    ['removed', { op: 'remove', kind: 'task', id: 't2' }, 'is gone'],
+    ['done', { op: 'upsert_task', id: 't2', status: 'done' }, 'takes no subtasks now'],
+  ] as [string, PlanOp, string][]) {
+    const edited = applyOps(proposed, [edit], 'user').plan;
+    assert.throws(() => accept(edited), new RegExp(`${STALE.source}: where task t3 "UI" goes \\(the task it goes under ${why}\\)`), what);
+    // A new task the proposal adds under it, likewise.
+    const adding = applyOps(linkedPlan(), [{ op: 'propose', title: 'More', reason: 'needed', ops: [{ op: 'upsert_task', id: 'n1', title: 'Paging', parentId: 't2' }] }], 'claude').plan;
+    assert.throws(() => accept(applyOps(adding, [edit], 'user').plan), new RegExp(`${STALE.source}: where task n1 goes \\(the task it goes under ${why}\\)`), `adding, ${what}`);
+  }
+  assert.equal(accept(proposed).tasks.find((t) => t.id === 't3')?.parentId, 't2', 'unchanged, it applies');
+  // Closed, with subtasks the proposal moves out first: it takes none by the time the move applies.
+  const closed = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 'c1', title: 'Spare', parentId: 't1' }, { op: 'upsert_task', id: 't1', status: 'done' }], 'user').plan;
+  const outFirst = applyOps(closed, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [{ op: 'move_task', id: 't2', parentId: null, index: 0 }, { op: 'move_task', id: 't3', parentId: 't1', index: 0 }] }], 'claude').plan;
+  assert.throws(() => accept(applyOps(outFirst, [{ op: 'remove', kind: 'task', id: 'c1' }], 'user').plan), new RegExp(`${STALE.source}: where task t3 "UI" goes \\(the task it goes under takes no subtasks now\\)`), 'by the outline');
 });
 
 test("a proposed builds is out of date once the user relinked that task's boxes", () => {

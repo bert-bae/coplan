@@ -2386,15 +2386,29 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
   const placed = new Set<string>();
   // The plan's tasks the proposal has removed, and not added again.
   const gone = new Set<string>();
-  // Tasks a move would put inside themselves: out of date, whatever else
-  // the proposal does to them.
-  const inside = new Set<string>();
+  // Tasks the proposal can no longer put where it says (see `place`), and
+  // why: out of date, whatever else the proposal does to them.
+  const unfit = new Map<string, string>();
   // A task and those it is under, in the outline (walked up, so a circle
   // ends the walk rather than the stack).
   const ancestry = (id: string): Set<string> => {
     const seen = new Set<string>();
     for (let at: string | null | undefined = id; at && !seen.has(at); at = movedTo.has(at) ? movedTo.get(at) : tasks.get(at)?.parentId) seen.add(at);
     return seen;
+  };
+  // Put a task under `to` in the outline (`added`: by the edit that adds
+  // it), unless the user's edits since mean applying cannot: `to` is now
+  // inside it (and the outline would go round in a circle), gone, or one
+  // of the plan's that takes no subtasks now.
+  const place = (id: string, to: string | null, added: boolean) => {
+    const theirs = to && !placed.has(to) ? tasks.get(to) : undefined;
+    const from = added ? undefined : movedTo.has(id) ? movedTo.get(id) : tasks.get(id)?.parentId;
+    let why: string | undefined;
+    if (to && ancestry(to).has(id)) why = MOVE_UNFIT.inside;
+    else if (to && !placed.has(to) && (!theirs || gone.has(to))) why = MOVE_UNFIT.gone;
+    else if (theirs && to !== from && !canTakeSubtasks(outline(), theirs)) why = MOVE_UNFIT.closed;
+    if (why) unfit.set(id, why);
+    else movedTo.set(id, to);
   };
   // The plan as the proposal's edits have it so far: its removals gone, its
   // moves made. Tasks the proposal adds stand in by their place alone, for
@@ -2445,19 +2459,14 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
       case 'move_task':
       case 'set_checks':
         if (op.id) out[`task:${op.id}`] = rev('task', op.id);
-        if (op.op === 'move_task' && op.id) {
-          // The user's moves since can put where it goes inside it: applying
-          // it would fail, and the outline would go round in a circle.
-          if (op.parentId && ancestry(op.parentId).has(op.id)) inside.add(op.id);
-          else movedTo.set(op.id, op.parentId ?? null);
-        }
+        if (op.op === 'move_task' && op.id) place(op.id, op.parentId ?? null, false);
         // A task the proposal adds is placed by its first edit, as applying
         // it is: a later upsert's parentId moves nothing. One of the plan's
         // it removed first is added afresh, where this edit puts it.
         if (op.op === 'upsert_task' && op.id && (!tasks.has(op.id) || gone.has(op.id)) && !placed.has(op.id)) {
           placed.add(op.id);
           gone.delete(op.id);
-          if (op.parentId || tasks.has(op.id)) movedTo.set(op.id, op.parentId ?? null);
+          if (op.parentId || tasks.has(op.id)) place(op.id, op.parentId ?? null, true);
         }
         // `builds` replaces which boxes link the task: a link made since is undone.
         if (op.op === 'upsert_task' && op.id && op.builds !== undefined) out[`links:${op.id}`] = links(op.id);
@@ -2488,13 +2497,18 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
         break;
     }
   }
-  for (const id of inside) out[`task:${id}`] = INSIDE_ITSELF;
+  for (const [id, why] of unfit) out[`task:${id}`] = why;
   return out;
 }
 
-/** A move's print once the plan puts where it goes inside the task: never
- *  what the proposal was made on. */
-const INSIDE_ITSELF = 'inside itself';
+/** A move's print once the plan cannot take it where it says, by why:
+ *  never what the proposal was made on (it applied then). */
+const MOVE_UNFIT: Record<'inside' | 'gone' | 'closed', string> = {
+  inside: 'the task it goes under is now inside it',
+  gone: 'the task it goes under is gone',
+  closed: 'the task it goes under takes no subtasks now',
+};
+const UNFIT_WORDS = new Set(Object.values(MOVE_UNFIT));
 
 /** What changed since a proposal was made, in words; empty while it still
  *  fits the plan. */
@@ -2526,7 +2540,7 @@ export function proposalStaleness(plan: Plan, p: Proposal): string[] {
     else if (kind === 'note') {
       if (now[`task:${id}`] === p.base[`task:${id}`]) out.push(`the note on ${task()}`);
     }
-    else if (now[key] === INSIDE_ITSELF) out.push(`where ${task()} moves (now inside it)`);
+    else if (typeof now[key] === 'string' && UNFIT_WORDS.has(now[key])) out.push(`where ${task()} goes (${now[key]})`);
     else out.push(task());
   }
   return out;

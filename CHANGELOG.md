@@ -10,7 +10,8 @@
   keeps it too. Sessions untouched for 30 days are still cleared at start, as before.
 - **A proposal no longer stops the plan from showing after you move a task under one it moves.** If your move
   put where the proposal moves a task inside that task, reading the plan, previewing the proposal and accepting
-  it all failed; the proposal now reads as out of date, naming the move.
+  it all failed; the proposal now reads as out of date, naming the move. So does one that puts a task under a
+  task you have since removed or marked done, which used to look current and then fail on accept.
 - **`coplan check | less` shows the whole report.** A long report piped to a reader that was slow to read it was
   cut off after five seconds, without a word; the CLI now waits for it, as any command writing to a pipe does.
 - **A change request you are typing on a card is kept when the agent moves the card.** It was lost without a word
