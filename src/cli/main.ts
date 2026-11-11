@@ -421,21 +421,41 @@ usage: coplan <command>
 // part way, before a check is stopped, say: what cannot be written is let go.
 // On stderr, whatever the failure (a full disk too): it says what is going
 // on, never the result. On stdout, where the report goes, any other failure
-// (a full disk under `--json > report.json`) still ends it.
+// (a full disk under `--json > report.json`) ends it, as a failure: see exit.
 process.stderr.on('error', () => {});
+let unwritten: NodeJS.ErrnoException | undefined;
 process.stdout.on('error', (err: NodeJS.ErrnoException) => {
-  if (err.code !== 'EPIPE' && err.code !== 'EIO') throw err;
+  if (err.code === 'EPIPE' || err.code === 'EIO' || unwritten) return;
+  unwritten = err;
+  exit(1);
 });
+
+/** Exits once what was said on stdout is written: a report that could not
+ *  be is a failure, not an exit 0 with nothing there. A write's failure is
+ *  told after its callback, so the tick after that is waited for too. A
+ *  reader that stopped reading is not waited for long. */
+function exit(code: number): void {
+  const leave = () => {
+    if (unwritten) {
+      console.error(`coplan: the output could not be written (${unwritten.code ?? unwritten.message}).`);
+      process.exit(code === 0 ? 1 : code);
+    }
+    process.exit(code);
+  };
+  setTimeout(leave, 5000);
+  process.stdout.write('', () => setImmediate(leave));
+}
 
 const [, , command = 'status', ...rest] = process.argv;
 const handler = commands[command];
 if (!handler) {
   usage();
-  process.exit(command === 'help' || command === '--help' ? 0 : 2);
+  exit(command === 'help' || command === '--help' ? 0 : 2);
+} else {
+  handler(rest)
+    .then(exit)
+    .catch((err: unknown) => {
+      console.error(err instanceof Said ? `coplan: ${err.message}` : ((err as Error)?.stack ?? String(err)));
+      exit(1);
+    });
 }
-handler(rest)
-  .then((code) => process.exit(code))
-  .catch((err: unknown) => {
-    console.error(err instanceof Said ? `coplan: ${err.message}` : ((err as Error)?.stack ?? String(err)));
-    process.exit(1);
-  });

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdtempSync, mkdirSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -963,6 +963,22 @@ process.stderr.write = (chunk, ...rest) => {
     assert.ok(worker === '' || worker.startsWith('Z'), `the worker is gone (${worker})`);
   });
 }
+
+test('`coplan check --json` with its report to a full disk fails, not passes with nothing written', { skip: !existsSync('/dev/full') }, () => {
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'ok', run: 'true' }] } }) });
+  try {
+    const full = openSync('/dev/full', 'w');
+    try {
+      const run = spawnSync(process.execPath, [CLI, 'check', 'review', '--all', '--json'], { cwd: dir, stdio: ['ignore', full, 'pipe'], encoding: 'utf8', timeout: 20_000 });
+      assert.equal(run.status, 1, `the report was not written: ${run.stderr}`);
+      assert.match(run.stderr, /the output could not be written \(ENOSPC\)/);
+    } finally {
+      closeSync(full);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('`coplan check` ending any other way mid-check (a crash) takes the check with it', { skip: process.platform === 'win32' }, async () => {
   const crash = `const { existsSync } = require('node:fs');
