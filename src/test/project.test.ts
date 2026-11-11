@@ -891,28 +891,19 @@ test('Ctrl+C on `coplan check` stops the check even when nothing reads its error
   }
 });
 
-test('Ctrl+C on `coplan check` stops the check when its terminal has gone too (a write failing with EIO)', { skip: process.platform === 'win32' }, async () => {
-  // As when the terminal is closed: the message that it is stopping fails to be written.
+/** A check whose worker ignores SIGTERM, run by `coplan check` with `preload` (a file's text) loaded first. */
+async function checkWithWorker(preload: string, during: (cli: ReturnType<typeof spawn>) => void): Promise<{ code: number | null; worker: string }> {
   const run = "(trap '' TERM; sleep 20) & echo $! > worker; echo $$ > group; touch started; wait";
-  const dir = repo({
-    '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'workers', run }] } }),
-    'eio.cjs': `const write = process.stderr.write.bind(process.stderr);
-process.stderr.write = (chunk, ...rest) => {
-  if (String(chunk).includes('interrupted')) {
-    process.nextTick(() => process.stderr.emit('error', Object.assign(new Error('write EIO'), { code: 'EIO' })));
-    return true;
-  }
-  return write(chunk, ...rest);
-};`,
-  });
-  const cli = spawn(process.execPath, ['-r', path.join(dir, 'eio.cjs'), CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'workers', run }] } }), 'preload.cjs': preload });
+  const cli = spawn(process.execPath, ['-r', path.join(dir, 'preload.cjs'), CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
   try {
     for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 50));
     assert.ok(existsSync(path.join(dir, 'started')), 'the check started');
-    cli.kill('SIGINT');
-    assert.equal(await new Promise<number | null>((r) => cli.on('exit', (c) => r(c))), 130);
-    const state = spawnSync('ps', ['-o', 'stat=', '-p', readFileSync(path.join(dir, 'worker'), 'utf8').trim()], { encoding: 'utf8' }).stdout.trim();
-    assert.ok(state === '' || state.startsWith('Z'), `the worker is gone (${state})`);
+    const exited = new Promise<number | null>((r) => cli.on('exit', (c) => r(c)));
+    during(cli);
+    const code = await exited;
+    const worker = spawnSync('ps', ['-o', 'stat=', '-p', readFileSync(path.join(dir, 'worker'), 'utf8').trim()], { encoding: 'utf8' }).stdout.trim();
+    return { code, worker };
   } finally {
     cli.kill('SIGKILL');
     try {
@@ -922,6 +913,32 @@ process.stderr.write = (chunk, ...rest) => {
     }
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+for (const code of ['EIO', 'ENOSPC']) {
+  test(`Ctrl+C on \`coplan check\` stops the check when saying so fails with ${code} (a terminal gone; a full disk)`, { skip: process.platform === 'win32' }, async () => {
+    // The message that it is stopping fails to be written: stopping goes on.
+    const fail = `const write = process.stderr.write.bind(process.stderr);
+process.stderr.write = (chunk, ...rest) => {
+  if (String(chunk).includes('interrupted')) {
+    process.nextTick(() => process.stderr.emit('error', Object.assign(new Error('write ${code}'), { code: '${code}' })));
+    return true;
+  }
+  return write(chunk, ...rest);
+};`;
+    const { code: exit, worker } = await checkWithWorker(fail, (cli) => cli.kill('SIGINT'));
+    assert.equal(exit, 130);
+    assert.ok(worker === '' || worker.startsWith('Z'), `the worker is gone (${worker})`);
+  });
+}
+
+test('`coplan check` ending any other way mid-check (a crash) takes the check with it', { skip: process.platform === 'win32' }, async () => {
+  const crash = `const { existsSync } = require('node:fs');
+const t = setInterval(() => { if (existsSync('started')) { clearInterval(t); setTimeout(() => { throw new Error('boom'); }, 100); } }, 20);
+t.unref();`;
+  const { code, worker } = await checkWithWorker(crash, () => {});
+  assert.equal(code, 1);
+  assert.ok(worker === '' || worker.startsWith('Z'), `the worker is gone (${worker})`);
 });
 
 test('while an interrupted check winds down, the checks after it do not start', { skip: process.platform === 'win32' }, async () => {

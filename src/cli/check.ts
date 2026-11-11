@@ -342,9 +342,14 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
       void stop().then(leave);
     };
     for (const signal of signals) process.on(signal, interrupted);
+    // Whatever else ends this command meanwhile (a crash, a write that
+    // fails): the check's group goes with it, not left running unwatched.
+    const orphaned = () => kill('SIGKILL');
+    process.on('exit', orphaned);
     const done = () => {
       clearTimeout(timer);
       for (const signal of signals) process.off(signal, interrupted);
+      process.off('exit', orphaned);
     };
     child.on('error', (err) => {
       done();

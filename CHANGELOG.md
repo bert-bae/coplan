@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **`coplan check` no longer leaves a check running when it ends unexpectedly.** Ctrl+C with errors going
+  to a full disk stops the check as usual, and a crash mid-check takes the check's processes with it.
 - **Accepting a proposed task removal no longer deletes notes you rewrote after it was made.** A note on the
   task or on a subtask it takes puts the proposal out of date instead.
 - **`coplan check` names a hook folder it cannot enter.** It used to fail as `spawn sh EACCES`, exit 127,
