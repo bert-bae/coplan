@@ -463,6 +463,29 @@ test('an undated session loaded is saved with the date its file gave it, so a la
   assert.ok(Math.abs((onDisk.updatedAt ?? 0) - days20) < 60_000, `dated on disk by its file: ${onDisk.updatedAt}`);
 });
 
+test('an undated session past the cap on sessions held in memory is saved with its date too', async () => {
+  const { paths } = await import('../shared/paths.ts');
+  const days25 = Date.now() - 25 * 24 * 60 * 60 * 1000;
+  // More sessions with a plan than are held, all newer: the undated one stays cold, on disk.
+  const plan = { title: 'p', summary: '', sections: [], diagrams: [], tasks: [], threads: [] };
+  for (let i = 0; i < 61; i++) {
+    mkdirSync(paths.sessionDir(`held-${i}`), { recursive: true });
+    writeFileSync(paths.sessionState(`held-${i}`), JSON.stringify({ sessionId: `held-${i}`, cwd: process.cwd(), title: 'x', status: 'idle', plan, updatedAt: Date.now() - i * 1000 }));
+  }
+  mkdirSync(paths.sessionDir('cold-undated'), { recursive: true });
+  writeFileSync(paths.sessionState('cold-undated'), JSON.stringify({ sessionId: 'cold-undated', cwd: process.cwd(), title: 'early build', status: 'idle', plan }));
+  utimesSync(paths.sessionState('cold-undated'), days25 / 1000, days25 / 1000);
+  try {
+    const store = await freshStore();
+    assert.equal(store.get('cold-undated'), undefined, 'past the cap, not in memory');
+    const onDisk = JSON.parse(readFileSync(paths.sessionState('cold-undated'), 'utf8')) as { updatedAt?: number };
+    assert.ok(Math.abs((onDisk.updatedAt ?? 0) - days25) < 60_000, `dated on disk by its file: ${onDisk.updatedAt}`);
+  } finally {
+    for (let i = 0; i < 61; i++) rmSync(paths.sessionDir(`held-${i}`), { recursive: true, force: true });
+    rmSync(paths.sessionDir('cold-undated'), { recursive: true, force: true });
+  }
+});
+
 test('a save that fails while the store starts, before anyone listens, is told to the first listener', async () => {
   const { paths } = await import('../shared/paths.ts');
   mkdirSync(paths.sessionDir('unsaved-at-start'), { recursive: true });

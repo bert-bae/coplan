@@ -102,8 +102,9 @@ export function pruneDrafts(sessionId: string, plan: Plan | null): DroppedDraft[
     // is offered only if the send is refused (save).
     const review = /^review:(.+):(\d+)$/.exec(field);
     if (review && plan && text === undefined && open.draft.trim()) {
-      const title = plan.tasks.find((t) => t.id === review[1])?.title ?? review[1];
-      const dropped: DroppedDraft = { name: `your change request on task "${title}" (round ${review[2]})`, text: open.draft, why: 'review' };
+      const title = plan.tasks.find((t) => t.id === review[1])?.title;
+      const on = title === undefined ? 'a task since removed' : `task "${title}"`;
+      const dropped: DroppedDraft = { name: `your change request on ${on} (round ${review[2]})`, text: open.draft, why: 'review' };
       if (sending.has(key)) letGoWhileSending.set(key, dropped);
       else locked.push(dropped);
     }

@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **A task left in review by a hand-edited plan, though no longer in progress, is not put in a review round.**
+  A stage is dropped from a task not started, done or dropped, as an edit drops it.
 - **A session that could not be saved as Coplan started is said in its log.** Such a failure was told to no one,
   and then never again while it went on failing.
 - **A page opened on a plan that cannot be saved says so.** A save failure was said once, to whoever was
@@ -35,7 +37,9 @@
 - **Accepting a proposal no longer drops a link you made to a task it removes by way of a new one.** A proposal
   that names a new task twice, or removes a task (new or not) and adds it again, with its subtasks, is placed as
   it will be applied, so your change shows it as out of date. One that removes the same task twice counts what
-  each removal takes, so a subtask you add under it, or a task you move under it, is not lost on accept.
+  each removal takes, so a subtask you add under it, or a task you move under it, is not lost on accept. A proposal of
+  that kind left open from an earlier version reads as out of date: reject it, and the agent can propose it
+  again.
 - **An editor you opened but didn't type in closes when the plan is signed off elsewhere.** It stayed open and
   disabled, and came back on stale text with a warning.
 - **A submitted plan's comments on parent tasks, and in By box, can be read.** Parent tasks with comments are

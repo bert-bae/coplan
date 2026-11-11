@@ -920,6 +920,14 @@ test('a task in review with no round (an older or hand-edited plan) is in its fi
   const plan = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'in_progress', order: 0, parentId: null, stage: 'review' }, { id: 't2', title: 'UI', status: 'todo', order: 1, parentId: null }] } as unknown as Plan & Record<string, unknown>, 'x');
   assert.equal(plan.tasks.find((t) => t.id === 't1')?.round, 1);
   assert.equal(plan.tasks.find((t) => t.id === 't2')?.round, undefined, 'not one that is not in review');
+  // A stage on a task not in progress (hand-edited) is dropped, as an edit drops it: no round either.
+  const stale = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'todo', order: 0, parentId: null, stage: 'review', round: 3 }, { id: 't2', title: 'UI', order: 1, parentId: null, stage: 'review' }] } as unknown as Plan & Record<string, unknown>, 'x');
+  assert.equal(stale.tasks[0]!.stage, undefined);
+  assert.equal(stale.tasks[0]!.round, undefined, 'back in the pile, it starts over');
+  assert.equal(stale.tasks[1]!.stage, undefined, 'nor one with no status of its own');
+  assert.equal(stale.tasks[1]!.round, undefined);
+  const blocked = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'blocked', order: 0, parentId: null, stage: 'implement' }] } as unknown as Plan & Record<string, unknown>, 'x');
+  assert.equal(blocked.tasks[0]!.stage, 'implement', 'a blocked one keeps its stage');
 });
 
 function linkedPlan(): Plan {

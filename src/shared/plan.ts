@@ -903,6 +903,11 @@ function normalizeTask(task: Task): Task {
   if (!validReview(t.review)) delete t.review;
   if (!validStage(t.stage)) delete t.stage;
   if (typeof t.round !== 'number' || !(t.round > 0)) delete t.round;
+  // Only a task in the cycle (in progress, or blocked in it) has a stage, as
+  // an edit leaves it; one in the pile has no round either, as one the user
+  // puts back starts over.
+  if (t.status !== 'in_progress' && t.status !== 'blocked') delete t.stage;
+  if (t.status === 'todo') delete t.round;
   // In review with no round (an older or hand-edited plan): its first, so a
   // verdict can be given and a review box keyed.
   if (t.stage === 'review' && t.round === undefined) t.round = 1;

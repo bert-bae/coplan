@@ -178,6 +178,17 @@ export class SessionStore extends EventEmitter {
     // from its old folder goes.
     for (const sessionDir of expired) discardDir(sessionDir);
     for (const state of loaded) if (chosen.get(state.sessionId)?.old || datedByFile.has(state)) this.persistNow(state.sessionId);
+    // One past the cap, cold in its own folder, keeps the date its file gave
+    // it too: written back as it is, with no one to tell if that fails (it
+    // is tried again when it is read).
+    for (const { state, old } of chosen.values()) {
+      if (this.sessions.get(state.sessionId) === state || old || !datedByFile.has(state)) continue;
+      try {
+        writeState(paths.sessionDir(state.sessionId), state);
+      } catch {
+        /* see above */
+      }
+    }
   }
 
   /** Forget a session in memory; its state stays on disk. */

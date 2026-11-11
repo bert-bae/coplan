@@ -432,7 +432,8 @@ watchStdout(() => {
 });
 
 /** Exits once what was said on stdout is written: a report that could not
- *  be is a failure, not an exit 0 with nothing there. A write's failure is
+ *  be is a failure, not an exit 0 with nothing there (stdout closed, `>&-`,
+ *  cannot be told: Node opens /dev/null in its place). A write's failure is
  *  told after its callback, so the tick after that is waited for too. A
  *  slow reader (a pager on its first page) is waited for, as any command
  *  writing to a pipe waits; one that goes away closes it (EPIPE), which
@@ -449,7 +450,8 @@ function exit(code: number): void {
     process.exit(code);
   };
   // Nothing pending: no write to wait on (a zero-length one need not call
-  // back where stdout to a pipe is asynchronous, as on Windows).
+  // back where stdout to a pipe is asynchronous: on Windows, and on Linux
+  // once the pipe is full).
   if (process.stdout.writableLength === 0) setImmediate(leave);
   else process.stdout.write('', () => setImmediate(leave));
 }

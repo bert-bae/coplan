@@ -14,7 +14,7 @@ setupDom();
 const { render, renderHook, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
 const { store, SessionScope, useEdit, useStillShown } = await import('../ui/store.ts');
-const { openDrafts, draftsLockedBy, unsavedDrafts } = await import('../ui/lib/drafts.ts');
+const { openDrafts, draftsLockedBy, pruneDrafts, unsavedDrafts } = await import('../ui/lib/drafts.ts');
 const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan, confirmDesign, queueRevision, markRevisionDelivered } = await import('../shared/plan.ts');
 
 const INPUT: PlanInput = {
@@ -2053,6 +2053,12 @@ test('a change request being typed is offered to copy when the task no longer wa
   });
   assert.ok(opsSent().some((op) => op['op'] === 'review_task' && op['summary'] === 'Retry twice'), 'sent');
   assert.equal(offered().length, 2, 'its own request is not offered');
+});
+
+test('a change request on a task since removed is offered, named as such rather than by its id', () => {
+  openDrafts.set('s-gone:review:t-gone:2', { draft: 'Add a timeout', value: '', version: undefined });
+  const dropped = pruneDrafts('s-gone', lockedPlan(true));
+  assert.deepEqual(dropped.map((d) => [d.name, d.text]), [['your change request on a task since removed (round 2)', 'Add a timeout']]);
 });
 
 test('a change request refused because its round stopped waiting while it was sent is offered to copy at once', async () => {
