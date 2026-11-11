@@ -125,10 +125,9 @@ export class SessionStore extends EventEmitter {
     if (!existsSync(dir)) return;
 
     const found: { state: SessionState; old: boolean }[] = [];
-    // The folders a newer Coplan's sessions are in, and the session each
-    // folder of its own holds.
-    const newer = new Set<string>();
-    const holds = new Map<string, string>();
+    // The folders that hold a session's state: a readable one not past
+    // keeping, or a newer Coplan's.
+    const taken = new Set<string>();
     const expired: string[] = [];
     const cutoff = Date.now() - SESSION_TTL_MS;
 
@@ -144,13 +143,13 @@ export class SessionStore extends EventEmitter {
       // One written by a newer Coplan than this daemon is left exactly as it
       // is until that build runs: not loaded, and never saved over
       // (`savedByNewer`, set by ensure and checked by persistNow).
-      if (state === NEWER) newer.add(entry.name);
+      if (state === NEWER) taken.add(entry.name);
       if (!state || state === NEWER) continue;
       if ((state.updatedAt ?? 0) < cutoff) {
         expired.push(sessionDir);
         continue;
       }
-      holds.set(entry.name, state.sessionId);
+      taken.add(entry.name);
       found.push({ state, old: entry.name !== sanitizeId(state.sessionId) });
     }
 
@@ -164,7 +163,7 @@ export class SessionStore extends EventEmitter {
     const chosen = new Map<string, { state: SessionState; old: boolean }>();
     for (const copy of found) {
       const own = sanitizeId(copy.state.sessionId);
-      if (copy.old && (newer.has(own) || holds.has(own))) continue;
+      if (copy.old && taken.has(own)) continue;
       chosen.set(copy.state.sessionId, copy);
     }
     // Anything past the cap stays on disk — cold, not stale.
