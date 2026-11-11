@@ -911,6 +911,89 @@ test('a section is edited in place and saved as an op', async () => {
   assert.deepEqual(opsSent()[0], { op: 'upsert_section', id: 's1', body: 'Reads take 400ms.', expect: 1 }, 'made against the revision edited');
 });
 
+test('text typed while a save is on its way is kept when the save goes through', async () => {
+  // The daemon applies the edits it is sent.
+  await boot(undefined, (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+    return { plan: next, changes: [] };
+  });
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+  });
+  const area = () => screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
+  await act(async () => {
+    fireEvent.change(area(), { target: { value: 'First.' } });
+  });
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+    });
+    fireEvent.change(area(), { target: { value: 'First. Second.' } });
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await act(async () => {
+    await held;
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  assert.equal(area().value, 'First. Second.', 'still open, with what was typed meanwhile');
+  assert.equal(unsavedDrafts(), true, 'and closing the page asks');
+  // Saved again: made against the revision the first save made, so it goes in.
+  await act(async () => {
+    fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+  });
+  const sections = opsSent().filter((op) => op['op'] === 'upsert_section');
+  assert.deepEqual(sections.map((op) => [op['body'], op['expect']]), [['First.', 1], ['First. Second.', 2]]);
+});
+
+test('a reply typed on while it is posted keeps only what came after, so nothing posts twice', async () => {
+  const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  await boot(makeSession(plan), (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+    return { plan: next, changes: [] };
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '1 open comment(s) on Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+  });
+  const box = () => screen.getByRole('textbox', { name: 'Reply' }) as HTMLTextAreaElement;
+  fireEvent.change(box(), { target: { value: 'The Redis one.' } });
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.keyDown(box(), { key: 'Enter', ctrlKey: true });
+    });
+    fireEvent.change(box(), { target: { value: 'The Redis one. With a pool.' } });
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await act(async () => {
+    await held;
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  assert.equal(box().value, 'With a pool.', 'what came after, not what was posted');
+});
+
 test('a refused save keeps the editor open with the text intact', async () => {
   await boot();
   await openTab('Overview');

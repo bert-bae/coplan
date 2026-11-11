@@ -322,7 +322,8 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
     /**
      * Save it with `send`, unless it is the field's text already; resolves
      * whether it went in. Saved: closed, and gone from the kept drafts even
-     * if the editor closed meanwhile. Refused (`send` resolved false, most
+     * if the editor closed meanwhile; unless more was typed while it went,
+     * which stays open (a reply or comment: only what came after). Refused (`send` resolved false, most
      * likely changed underneath): the text stays, and starts again from the
      * field as it is now, so a deliberate second save goes in — unless it
      * was closed meanwhile.
@@ -366,6 +367,20 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
         return false;
       }
       if (result !== false) {
+        // More typed here while it went: kept open on it, starting again
+        // from the field as it is now (the save in). A reply or a comment
+        // adds rather than replaces, so it keeps only what came after what
+        // was sent; a field keeps all of it, which the next save replaces.
+        if (draftNow.current.trim() !== sent.trim() && !letGo) {
+          const adds = field !== null && /^(reply|comment):/.test(field);
+          const rest = adds && draftNow.current.startsWith(sent) ? draftNow.current.slice(sent.length).replace(/^\s+/, '') : draftNow.current;
+          if (rest !== draftNow.current) setDraft(rest);
+          setStarted(now.current);
+          // Kept so too, for an editor off screen meanwhile.
+          const open = key ? openDrafts.get(key) : undefined;
+          if (key && open) openDrafts.set(key, { ...open, draft: rest, ...now.current });
+          return true;
+        }
         // Gone from the kept drafts, unless an editor drawn anew meanwhile
         // (since let go) holds more than was sent.
         if (key && openDrafts.get(key)?.draft === sent) openDrafts.delete(key);
