@@ -1478,7 +1478,8 @@ function buildRouter(deps: Deps): Router {
           (now.status === 'dropped' ? 'check they still hold without it, and tell the user.' : 'check they still hold once it changes.'),
       );
     }
-    const unbuilt = waiting.filter((t) => !built.includes(t));
+    // Those still to build on it (one done already is not waiting).
+    const unbuilt = waiting.filter((t) => !built.includes(t) && t.status !== 'done');
     if (status === 'dropped' && changes.length && unbuilt.length) {
       out.push(
         `${unbuilt.map((t) => `${t.id} "${t.title}"`).join(', ')} waited on it and no longer do${unbuilt.length === 1 ? 'es' : ''}: ` +

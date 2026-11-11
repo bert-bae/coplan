@@ -104,6 +104,9 @@ test('dependents are what comes after a task, through its parent too', () => {
   const plan = tasked();
   const client = plan.tasks.find((t) => t.id === 'client')!;
   assert.deepEqual(ids(dependents(plan, client)), ['invalidate', 'wire']);
+  // One dropped waits on nothing: not among them (the brief's and the page's "Waiting on it", the drop's reply).
+  plan.tasks.find((t) => t.id === 'wire')!.status = 'dropped';
+  assert.deepEqual(ids(dependents(plan, client)), ['invalidate']);
 });
 
 test('dependencies that could never be built are refused, and say why', () => {

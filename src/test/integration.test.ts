@@ -1254,6 +1254,18 @@ test('dropping a task needs a reason; dropping or reopening one says what it mea
   assert.match(byStage, /t4 "Wire up" \(in progress\) already went ahead on this task's work: check they still hold once it changes/);
 });
 
+test('dropping a task does not tell a dependent that is itself dropped that it no longer waits', async () => {
+  const id = 'scope-session-dropped-dependent';
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't4', dependsOn: ['t3'] }] });
+  assert.equal((await task({ task_id: 't4', status: 'dropped', note: 'not needed' }))['ok'], true);
+  const reply = await task({ task_id: 't3', status: 'dropped', note: 'not needed either' });
+  assert.equal(reply['ok'], true, String(reply['text']));
+  assert.doesNotMatch(String(reply['text']), /t4 "Wire up"/);
+});
+
 test("done needs the round's passing verdict — the user's own, when the user reviews it", async () => {
   const id = 'review-session';
   const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
