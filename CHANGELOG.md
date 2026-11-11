@@ -4,6 +4,9 @@
 
 ### Fixes
 
+- **Text in a field whose save was refused is no longer lost when the field goes.** Switching tabs or
+  closing a task's Details, with the field still open on a refused save or that save still on its way, offers
+  your text to copy.
 - **`coplan check` no longer leaves a check running when it ends unexpectedly.** Ctrl+C with errors going
   to a full disk stops the check as usual, and a crash mid-check takes the check's processes with it.
 - **Accepting a proposed task removal no longer deletes notes you rewrote after it was made.** A note on the

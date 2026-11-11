@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Markdown } from './Markdown.tsx';
 import { useKeptDraft } from '../lib/drafts.ts';
-import { useSessionId } from '../store.ts';
+import { store, useSessionId } from '../store.ts';
 import { classNames } from '../lib/format.ts';
 import { isComposing } from '../lib/keys.ts';
 
@@ -63,6 +63,23 @@ export function InlineText({
     if (!editing) setDraft(value);
   }, [value, editing]);
 
+  // Refused text is not saved by the field going (a tab switch, Details
+  // closed) any more than by a blur: offered to copy, not dropped. So is
+  // text whose save is refused after the field went (left by a blur).
+  const held = useRef({ refused, draft, label });
+  held.current = { refused, draft, label };
+  const mounted = useRef(true);
+  const offer = (text: string) =>
+    store.toast('error', `Your text for ${held.current.label} was not saved. Copy it to keep it:`, text);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      const { refused: still, draft: text } = held.current;
+      if (still && text.trim() && text.trim() !== shown.current) offer(text);
+    };
+  }, []);
+
   useEffect(() => {
     if (editing) input.current?.select();
     else if (refocus.current) {
@@ -87,6 +104,7 @@ export function InlineText({
     if (!next || next === value) return;
     void Promise.resolve(onSave(next, startedAt.current, startedFrom.current)).then((result) => {
       if (result !== false) return;
+      if (!mounted.current) return offer(next);
       // Refused (most likely changed underneath): reopen with the text, on
       // the revision now on screen, so a deliberate second save goes in.
       done.current = false;

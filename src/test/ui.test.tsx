@@ -1008,6 +1008,72 @@ test('a note refused as changed underneath is not saved over it by leaving the f
   assert.equal(last['noteWas'], 'Blocked: DB creds missing');
 });
 
+test('a note refused as changed underneath is offered to copy when its field goes', async () => {
+  await boot(makeSession(), (route) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    return { __status: 409, error: 'The note of task "Invalidation" was changed while this edit was open, so it was not saved.' };
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^Status note: .*\. Edit$/ }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Status note' }), { target: { value: 'Waiting on the cache client' } });
+  const s = store.getState().session!;
+  const reported = applyOps(s.plan!, [{ op: 'upsert_task', id: 't2', status: 'blocked', note: 'Blocked: DB creds missing' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: reported } }));
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Status note' }), { key: 'Enter' });
+  });
+  assert.ok(screen.getByText(/^Now: Blocked: DB creds missing\./), 'refused, and held open');
+  assert.equal(store.getState().toasts.some((t) => t.copy !== undefined), false);
+  // A tab switch takes the field away: the text is offered, not dropped.
+  await openTab('Overview');
+  const kept = store.getState().toasts.find((t) => t.copy !== undefined);
+  assert.equal(kept?.copy, 'Waiting on the cache client');
+  assert.match(kept?.text ?? '', /Status note/);
+});
+
+test('a note whose save is refused after its field went is offered to copy', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  await boot(makeSession(), (route) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    return { __status: 409, error: 'The note of task "Invalidation" was changed while this edit was open, so it was not saved.' };
+  });
+  const original = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', {
+    value: async (input: unknown, init?: RequestInit) => {
+      if (String(input).endsWith('/plan/ops')) await gate;
+      return original(input as string, init);
+    },
+    configurable: true,
+    writable: true,
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^Status note: .*\. Edit$/ }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Status note' }), { target: { value: 'Waiting on the cache client' } });
+  // Left by a blur (the save goes), then the tab switch takes the field away.
+  await act(async () => {
+    fireEvent.blur(screen.getByRole('textbox', { name: 'Status note' }));
+  });
+  await openTab('Overview');
+  // The save comes back refused, with nothing on screen to reopen.
+  await act(async () => {
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  const kept = store.getState().toasts.find((t) => t.copy !== undefined);
+  assert.equal(kept?.copy, 'Waiting on the cache client');
+});
+
 test('a view that throws takes only itself down', async () => {
   const broken = makePlan();
   // A shape only the canvas reads, and does not expect: arrows not a list.
