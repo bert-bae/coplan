@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, confirmDesign, countTasks, MAX_CHANGES, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import { previewProposal } from '../shared/proposals.ts';
 import type { DiagramNodeInput, Plan, PlanInput, PlanOp } from '../shared/types.ts';
@@ -969,10 +969,10 @@ test("an unread change of the user's is held to however many changes come after 
   };
   // More than the log keeps after them: the user's own, or the agent's (its progress, its comments).
   let byUser = edited();
-  for (let i = 0; i < 500; i++) byUser = applyOps(byUser, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: `note ${i}` }], 'user').plan;
+  for (let i = 0; i < MAX_CHANGES; i++) byUser = applyOps(byUser, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: `note ${i}` }], 'user').plan;
   held(byUser, "the user's");
   let byAgent = edited();
-  for (let i = 0; i < 500; i++) byAgent = applyOps(byAgent, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: `note ${i}` }], 'claude').plan;
+  for (let i = 0; i < MAX_CHANGES; i++) byAgent = applyOps(byAgent, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: `note ${i}` }], 'claude').plan;
   byAgent = applyOps(byAgent, [{ op: 'upsert_task', id: 't2', status: 'in_progress' }], 'claude', undefined, { tracking: true }).plan;
   assert.ok(byAgent.changes.some((c) => c.author === 'user' && c.target.id === 't3'), 'its change is kept in the log');
   held(byAgent, "the agent's");
@@ -982,6 +982,36 @@ test("an unread change of the user's is held to however many changes come after 
   const gap = applyOps(trimmed, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'later' }], 'user').plan;
   assert.ok(gap.changes[0]!.seq > gap.claudeReadSeq + 1);
   held(gap, 'trimmed');
+  // So is the rest of what Claude read: the plan's title, a section, a diagram.
+  const sectioned = read(applyOps(linkedPlan(), [{ op: 'upsert_section', title: 'Context', body: 'Why' }], 'claude').plan);
+  const sid = sectioned.sections[0]!.id;
+  const others = applyOps(sectioned, [
+    { op: 'set_meta', title: 'Theirs' },
+    { op: 'upsert_section', id: sid, body: 'Why, as the user has it' },
+    { op: 'upsert_node', diagramId: 'd1', id: 'a', label: 'Gateway' },
+  ], 'user').plan;
+  others.changes = [];
+  const otherGap = applyOps(others, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'later' }], 'user').plan;
+  assert.ok(otherGap.changes[0]!.seq > otherGap.claudeReadSeq + 1, 'a gap');
+  for (const [what, op] of [
+    ['the title', { op: 'set_meta', title: 'Mine' }],
+    ['a section', { op: 'upsert_section', id: sid, body: 'Claude text' }],
+    ['a diagram', { op: 'upsert_node', diagramId: 'd1', id: 'a', label: 'API' }],
+  ] as [string, PlanOp][]) {
+    assert.throws(() => applyOps(otherGap, [op], 'claude'), UNREAD, `trimmed: ${what}`);
+    assert.doesNotThrow(() => applyOps(read(otherGap), [op], 'claude'), `trimmed: ${what}, once read`);
+  }
+  assert.doesNotThrow(() => applyOps(otherGap, [{ op: 'upsert_task', id: 't3', detail: 'Its own' }], 'claude'), 'trimmed: what the user left alone');
+});
+
+test("the change log is bounded: the user's unread changes past four times its size go too", () => {
+  const edits: PlanOp[] = Array.from({ length: MAX_CHANGES * 4 + 20 }, (_, i) => ({ op: 'upsert_task', id: 't4', detail: `take ${i}` }));
+  const plan = applyOps(linkedPlan(), edits, 'user').plan;
+  assert.equal(plan.changes.length, MAX_CHANGES * 4);
+  assert.equal(plan.changes.at(-1)!.seq, plan.seq, 'the newest kept');
+  assert.equal(plan.changes[0]!.seq, plan.seq - MAX_CHANGES * 4 + 1, 'the oldest gone');
+  // What went is still held against the agent: all it read is compared.
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_task', id: 't4', detail: 'Claude text' }], 'claude'), UNREAD);
 });
 
 test("the agent's progress note cannot go over a note of the user's it has not read", () => {
@@ -1209,9 +1239,14 @@ test("a proposed note is out of date once the user rewrote that task's note", ()
   const noted: PlanOp = { op: 'upsert_task', id: 't3', note: 'Claude note' };
   const plan = applyOps(proposing(noted), [{ op: 'upsert_task', id: 't3', note: 'User note' }], 'user').plan;
   assert.throws(() => accept(plan), new RegExp(`${STALE.source}: the note on task t3 "UI"`));
-  // A task gone is named once, not again for its note.
-  const gone = applyOps(proposing(noted), [{ op: 'remove', kind: 'task', id: 't3' }], 'user').plan;
-  assert.throws(() => accept(gone), new RegExp(`${STALE.source}: task t3 changed since`));
+  // A task gone is named once, not again for its note: with none,
+  const gone0 = applyOps(proposing(noted), [{ op: 'remove', kind: 'task', id: 't3' }], 'user').plan;
+  assert.throws(() => accept(gone0), new RegExp(`${STALE.source}: task t3 changed since`));
+  // and with one (its print changed too).
+  const withNote = read(applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', note: 'User note' }], 'user').plan);
+  const proposedOnNote = applyOps(withNote, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [noted] }], 'claude').plan;
+  const gone = applyOps(proposedOnNote, [{ op: 'remove', kind: 'task', id: 't3' }], 'user').plan;
+  assert.throws(() => accept(gone), (err: Error) => new RegExp(`${STALE.source}: task t3 changed since`).test(err.message) && !/the note on/.test(err.message));
   // A proposal that leaves the note alone is not held up by it.
   const titled = applyOps(proposing({ op: 'upsert_task', id: 't3', title: 'Screens' }), [{ op: 'upsert_task', id: 't3', note: 'User note' }], 'user').plan;
   assert.equal(accept(titled).tasks.find((t) => t.id === 't3')?.note, 'User note');
