@@ -2787,6 +2787,29 @@ test("a submitted plan's task comments, and the agent's replies, are read on its
   assert.equal(within(panel).queryByRole('button', { name: 'Resolve' }) === null, true, 'nor to resolve');
 });
 
+test("a board card's open comments and details stay open when the agent moves it", async () => {
+  const commented = applyOps(confirmedPlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  const submitted = submitPlan(commented, { target: 'session', prompt: 'build' });
+  await boot(makeSession(submitted));
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '1 open comment(s) on Invalidation' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Invalidation' }));
+  });
+  assert.ok(screen.getByLabelText('Comments on Invalidation'));
+  // The agent starts it: the card moves to In progress.
+  const s = store.getState().session!;
+  const started = applyOps(s.plan!, [{ op: 'upsert_task', id: 't2', status: 'in_progress' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: started } }));
+  const card = within(screen.getByRole('region', { name: 'In progress' })).getByRole('button', { name: 'Invalidation' });
+  assert.equal(card.getAttribute('aria-expanded'), 'true', 'its details still open');
+  assert.ok(screen.getByLabelText('Comments on Invalidation'), 'its comments still open');
+  // Done, with nothing more to show: no details left open with no way to close them.
+  const done = applyOps(started, [{ op: 'upsert_task', id: 't2', status: 'done' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: done } }));
+  assert.equal(document.querySelector('.board-more') === null, true);
+});
+
 test("a submitted plan's comments on a parent task are read on its board", async () => {
   const plan = confirmedPlan();
   const parent = plan.tasks.find((t) => t.title === 'Storage layer')!.id;

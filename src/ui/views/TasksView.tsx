@@ -1007,6 +1007,15 @@ function Board({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
   const edit = useEdit();
   const [over, setOver] = useState<TaskStatus | null>(null);
   const { arrived, announcement } = useArrivals(plan);
+  // What is open on a tracked card (`details:t3`, `comments:t3`), kept here:
+  // a card the agent moves to another column is drawn anew there.
+  const [opened, setOpened] = useState<ReadonlySet<string>>(() => new Set());
+  const toggle = (key: string) =>
+    setOpened((cur) => {
+      const next = new Set(cur);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
   // Leaves only: a parent is a heading, and its progress is its subtasks'.
   const leaves = outline(plan)
     .map((r) => r.task)
@@ -1046,7 +1055,7 @@ function Board({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
             <div className="board-cards">
               {cards.map((task) =>
                 readOnly ? (
-                  <TrackedCard key={task.id} plan={plan} task={task} arrived={arrived.has(task.id)} />
+                  <TrackedCard key={task.id} plan={plan} task={task} arrived={arrived.has(task.id)} opened={opened} toggle={toggle} />
                 ) : (
                   <BoardCard key={task.id} plan={plan} task={task} />
                 ),
@@ -1142,11 +1151,13 @@ function useArrivals(plan: Plan): { arrived: Set<string>; announcement: string }
 
 /** A card on a submitted plan's board: read, never moved by hand. Opens to
  *  show what the task involves. */
-function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived: boolean }) {
+function TrackedCard({ plan, task, arrived, opened, toggle }: { plan: Plan; task: Task; arrived: boolean; opened: ReadonlySet<string>; toggle: (key: string) => void }) {
   const agent = useAgent();
-  const [open, setOpen] = useState(false);
+
+  const toggleDetails = () => toggle(`details:${task.id}`);
   // Its comments, and the agent's replies, to read: the outline is gone.
-  const [comments, setComments] = useState(false);
+  const comments = opened.has(`comments:${task.id}`);
+  const toggleComments = () => toggle(`comments:${task.id}`);
   const target = { kind: 'task' as const, id: task.id };
   const path: string[] = [];
   let cursor = task.parentId ? plan.tasks.find((t) => t.id === task.parentId) : undefined;
@@ -1156,13 +1167,15 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
   }
   // Its checks can still be set while it is not done, so there is always more.
   const more = Boolean(task.detail?.trim() || task.files?.length) || (task.status !== 'done' && task.status !== 'dropped');
+  // Open while there is more to show: a card moved to Done may have none left.
+  const open = more && opened.has(`details:${task.id}`);
   return (
     <Focusable kind="task" id={task.id} as="article" className={classNames('board-card', 'is-tracked', `is-${task.status}`, arrived && 'is-arrived')}>
       {path.length > 0 && <p className="board-path">{path.join(' › ')}</p>}
       <p className="board-title-row">
         {task.status === 'in_progress' && <span className="working-dot" title={`${agent.name} is on it`} aria-label={`${agent.name} is on it`} />}
         {more ? (
-          <button type="button" className="board-title" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+          <button type="button" className="board-title" aria-expanded={open} onClick={toggleDetails}>
             {task.title}
           </button>
         ) : (
@@ -1195,7 +1208,7 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
         <span className="item-id">{task.id}</span>
         {arrived && <span className="pill is-moved">just moved</span>}
         <span className="spacer" />
-        <CommentToggle target={target} label={task.title} open={comments} onToggle={() => setComments((v) => !v)} />
+        <CommentToggle target={target} label={task.title} open={comments} onToggle={toggleComments} />
         <BriefButton task={task} />
         <span className={classNames('board-state', `is-${task.status}`)}>{STATUS_LABEL[task.status]}</span>
       </footer>

@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **A board card you opened stays open when the agent moves it.** Its details and comments no longer close as
+  it changes column.
 - **Text in a field whose save was refused is kept safe from a sign-off and a closed tab.** The plan signed
   off elsewhere offers it to copy, and closing the page asks first. Offered after a session switch, it names its
   own plan.
