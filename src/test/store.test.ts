@@ -641,6 +641,32 @@ test('sessions planned in and plain ones are kept apart: neither many plain sess
   }
 });
 
+test('a session kept the old way and past the cap stays cold at load: not copied to its own folder', async () => {
+  const own = mkdtempSync(path.join(tmpdir(), 'cc-harness-cap-'));
+  process.env['CC_HARNESS_HOME'] = own;
+  try {
+    const { paths, legacyName } = await import('../shared/paths.ts');
+    const store = await freshStore();
+    // Sixty-one plain sessions, each kept in the folder an earlier build named.
+    for (let i = 0; i < 61; i++) {
+      const id = `cold:${i}`;
+      store.ensure(id, process.cwd());
+      store.get(id)!.updatedAt = Date.now() - 60_000 + i;
+      store.persistNow(id);
+      store.drop(id);
+      renameSync(paths.sessionDir(id), path.join(own, 'sessions', legacyName(id)));
+    }
+    const booted = await freshStore();
+    assert.equal(booted.get('cold:0')?.sessionId, undefined, 'the oldest is past the cap');
+    assert.equal(existsSync(paths.sessionState('cold:0')), false, 'and is not saved to its own folder');
+    assert.ok(existsSync(path.join(own, 'sessions', legacyName('cold:0'), 'state.json')), 'its old copy is where it was');
+    assert.ok(existsSync(paths.sessionState('cold:1')), 'one within it is');
+  } finally {
+    process.env['CC_HARNESS_HOME'] = home;
+    rmSync(own, { recursive: true, force: true });
+  }
+});
+
 test('a plan is not pushed out of memory by any number of newer plain sessions', async () => {
   const own = mkdtempSync(path.join(tmpdir(), 'cc-harness-cap-'));
   process.env['CC_HARNESS_HOME'] = own;

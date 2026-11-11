@@ -168,11 +168,12 @@ export class SessionStore extends EventEmitter {
       chosen.set(copy.state.sessionId, copy);
     }
     // Anything past the cap stays on disk — cold, not stale.
-    for (const state of kept([...chosen.values()].map((c) => c.state))) this.sessions.set(state.sessionId, state);
+    const loaded = kept([...chosen.values()].map((c) => c.state));
+    for (const state of loaded) this.sessions.set(state.sessionId, state);
     // Expired first: a session's own folder past keeping is where a copy
     // from its old folder goes.
     for (const sessionDir of expired) discardDir(sessionDir);
-    for (const { state, old } of chosen.values()) if (old && this.sessions.has(state.sessionId)) this.persistNow(state.sessionId);
+    for (const state of loaded) if (chosen.get(state.sessionId)?.old) this.persistNow(state.sessionId);
   }
 
   /** Forget a session in memory; its state stays on disk. */
