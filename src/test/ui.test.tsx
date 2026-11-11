@@ -1,7 +1,7 @@
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, stubFetch } from './dom-env.ts';
-import type { Plan, PlanInput, SessionState, SessionSummary } from '../shared/types.ts';
+import type { Plan, PlanInput, PlanOp, SessionState, SessionSummary } from '../shared/types.ts';
 
 /**
  * The planning workspace in a browser: every edit becomes an op sent to the
@@ -1990,6 +1990,69 @@ test('a change request typed on a card that went into review while on screen is 
   assert.equal(round2.tasks.find((t) => t.id === 't3')!.round, 2);
   assert.ok(within(review()).getByRole('button', { name: 'Request changes' }), 'a fresh box');
   assert.equal(unsavedDrafts(), false, "round 1's request no longer kept");
+  const offered = store.getState().toasts.find((t) => t.copy !== undefined);
+  assert.equal(offered?.copy, 'Add a timeout', 'but offered to copy');
+});
+
+test('a change request being typed is offered to copy when the task no longer waits on the user', async () => {
+  const plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  // The user's own request lands over the stream before its answer does.
+  let landFirst: Plan | null = null;
+  await boot(makeSession(plan), (route) => {
+    if (!route.endsWith('/plan/ops') || !landFirst) return undefined;
+    const s = store.getState().session!;
+    store.apply({ type: 'snapshot', session: { ...s, plan: landFirst } });
+    return { plan: landFirst, changes: [] };
+  });
+  await openTab('Tasks');
+  const s = store.getState().session!;
+  const review = () => within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  const offered = () => store.getState().toasts.filter((t) => t.copy !== undefined);
+  const land = async (next: Plan) => act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: next } }));
+  const type = async (text: string) => {
+    await act(async () => {
+      fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+    });
+    fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: text } });
+  };
+  const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
+  const inReview = claude(s.plan!, { op: 'upsert_task', id: 't3', stage: 'review' });
+  await land(inReview);
+  await type('Add a timeout');
+  // The agent takes it back to building before the user sends it.
+  const back = claude(inReview, { op: 'upsert_task', id: 't3', stage: 'implement' });
+  await land(back);
+  assert.equal(offered().length, 1, 'offered once');
+  assert.equal(offered()[0]!.copy, 'Add a timeout');
+  assert.match(offered()[0]!.text, /change request on task "Wire into API" \(round 1\)/);
+  assert.match(offered()[0]!.text, /no longer waits on your review/);
+  await land({ ...back });
+  assert.equal(offered().length, 1, 'not offered again');
+  // A box opened and left empty: nothing to offer.
+  const round2 = claude(back, { op: 'upsert_task', id: 't3', stage: 'review' });
+  await land(round2);
+  await type('  ');
+  const round2Back = claude(round2, { op: 'upsert_task', id: 't3', stage: 'implement' });
+  await land(round2Back);
+  assert.equal(offered().length, 1, 'an empty box is not offered');
+  // A verdict the user gave in chat, which the agent records as theirs: what the box held is offered.
+  const round3 = claude(round2Back, { op: 'upsert_task', id: 't3', stage: 'review' });
+  await land(round3);
+  await type('Log the retries');
+  await land(claude(round3, { op: 'review_task', id: 't3', verdict: 'pass', userApproved: true }));
+  assert.equal(offered().length, 2, 'a verdict from chat offers it');
+  assert.equal(offered()[1]!.copy, 'Log the retries');
+  // The box's own request, landing before its answer: nothing to offer.
+  const round4 = claude(claude(round3, { op: 'upsert_task', id: 't3', stage: 'implement' }), { op: 'upsert_task', id: 't3', stage: 'review' });
+  await land(round4);
+  await type('Retry twice');
+  landFirst = applyOps(round4, [{ op: 'review_task', id: 't3', verdict: 'changes', summary: 'Retry twice' }], 'user').plan;
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Send' }));
+  });
+  assert.ok(opsSent().some((op) => op['op'] === 'review_task' && op['summary'] === 'Retry twice'), 'sent');
+  assert.equal(offered().length, 2, 'its own request is not offered');
 });
 
 test('a submitted plan is followed by box too, beside the board, with nothing on it to edit', async () => {

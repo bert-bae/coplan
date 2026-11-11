@@ -15,6 +15,8 @@
   cut off after five seconds, without a word; the CLI now waits for it, as any command writing to a pipe does.
 - **A change request you are typing on a card is kept when the agent moves the card.** It was lost without a word
   as the card changed column; closing the page now asks first too.
+- **A change request you were typing is offered to copy when the task stops waiting on your review.** If the
+  agent took the task back to building, or you gave your verdict in chat, the text went without a word.
 - **Submitting or confirming the design waits for a field whose save was refused.** Its warning names the field,
   as it does for text left open in an editor, instead of dropping it and offering it to copy afterwards.
 - **A board card you opened stays open when the agent moves it.** Its details and comments no longer close as

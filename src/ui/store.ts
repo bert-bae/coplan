@@ -194,7 +194,11 @@ class Store {
     const dropped = patch.session?.plan ? pruneDrafts(patch.session.sessionId, patch.session.plan) : [];
     for (const listener of this.listeners) listener();
     const plan = patch.session?.plan;
-    for (const { name, text } of dropped) {
+    for (const { name, text, why } of dropped) {
+      if (why === 'review') {
+        this.toast('error', `In "${plan?.title}", that task no longer waits on your review, so ${name} could not be sent. Copy it to keep it:`, text);
+        continue;
+      }
       const how = plan?.submission ? 'was submitted' : 'had its design confirmed';
       this.toast('error', `"${plan?.title}" ${how}, so the text you had open in ${name} could not be saved. Copy it to keep it:`, text);
     }

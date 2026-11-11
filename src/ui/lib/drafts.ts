@@ -31,6 +31,10 @@ export const openDrafts = new Map<string, OpenDraft>();
  *  so what was written does not stay on screen untracked. */
 const holders = new Map<string, () => void>();
 
+/** Kept drafts being saved now: a plan that lands meanwhile may be their
+ *  own save's, so what they hold is not lost. */
+const sending = new Set<string>();
+
 /** A kept draft's key: the session it was written in, and its field. */
 function draftKey(sessionId: string | null, field: string): string {
   return `${sessionId ?? ''}:${field}`;
@@ -61,11 +65,12 @@ export function unsavedDrafts(): boolean {
  * An editor still open whose field a lock takes is told, kept or not.
  * With no plan (the session was deleted), all of them go. Returns those
  * that held unsaved text a lock took the field from (a sign-off made in
- * chat, say), named, for the user to be told, and to copy.
+ * chat, say), or a change request whose round no longer waits on the user,
+ * named, for the user to be told, and to copy.
  */
-export function pruneDrafts(sessionId: string, plan: Plan | null): { name: string; text: string }[] {
+export function pruneDrafts(sessionId: string, plan: Plan | null): DroppedDraft[] {
   const prefix = `${sessionId}:`;
-  const locked: { name: string; text: string }[] = [];
+  const locked: DroppedDraft[] = [];
   const locks = plan ? { design: isDesignLocked(plan), plan: isLocked(plan) } : null;
   const told = new Set<string>();
   for (const [key, open] of openDrafts) {
@@ -81,7 +86,15 @@ export function pruneDrafts(sessionId: string, plan: Plan | null): { name: strin
       told.add(key);
     }
     // Held, with text not saved (nor saved in the same plan as the lock).
-    if (held && open.draft !== open.value && open.draft !== text) locked.push({ name: fieldName(plan!, field), text: open.draft });
+    if (held && open.draft !== open.value && open.draft !== text) locked.push({ name: fieldName(plan!, field), text: open.draft, why: 'locked' });
+    // A change request whose round no longer waits on the user (the agent
+    // took the task back, or a verdict came in chat): its box is gone. Not
+    // one being sent, whose own verdict lands before its answer.
+    const review = /^review:(.+):(\d+)$/.exec(field);
+    if (review && plan && text === undefined && open.draft.trim() && !sending.has(key)) {
+      const title = plan.tasks.find((t) => t.id === review[1])?.title ?? review[1];
+      locked.push({ name: `your change request on task "${title}" (round ${review[2]})`, text: open.draft, why: 'review' });
+    }
   }
   // One open with nothing typed was let go at an earlier plan (above), so
   // is not kept: the lock that takes its field tells it too.
@@ -93,6 +106,14 @@ export function pruneDrafts(sessionId: string, plan: Plan | null): { name: strin
     }
   }
   return locked;
+}
+
+/** Unsaved text a plan landing took the field of: a sign-off's lock, or a
+ *  review round that no longer waits on the user. */
+export interface DroppedDraft {
+  name: string;
+  text: string;
+  why: 'locked' | 'review';
 }
 
 /** Which of the plan's sign-offs hold its fields still. */
@@ -256,8 +277,14 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
         return true;
       }
       setSaving(true);
-      const result = await send();
-      setSaving(false);
+      if (key) sending.add(key);
+      let result: unknown;
+      try {
+        result = await send();
+      } finally {
+        if (key) sending.delete(key);
+        setSaving(false);
+      }
       if (result !== false) {
         if (key) openDrafts.delete(key);
         close();
