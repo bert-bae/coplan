@@ -435,7 +435,9 @@ process.stdout.on('error', (err: NodeJS.ErrnoException) => {
  *  told after its callback, so the tick after that is waited for too. A
  *  slow reader (a pager on its first page) is waited for, as any command
  *  writing to a pipe waits; one that goes away closes it (EPIPE), which
- *  ends the wait. */
+ *  ends the wait. One that keeps the pipe open and never reads it (any
+ *  process holding its read end, a grandchild too) holds the CLI until it
+ *  reads or goes. */
 function exit(code: number): void {
   const leave = () => {
     if (unwritten) {

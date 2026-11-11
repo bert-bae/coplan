@@ -48,7 +48,6 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
  *  within SESSION_TTL_MS. A start deletes what is past it; ensure dates
  *  anew one it reads back past it. */
 const fresh = (time: number, now: number) => time >= now - SESSION_TTL_MS;
-/** Hard cap on sessions held in memory, newest first. */
 /** Sessions kept in memory per pool (see `kept`). */
 const MAX_SESSIONS = 60;
 
@@ -176,7 +175,7 @@ export class SessionStore extends EventEmitter {
     // Expired first: a session's own folder past keeping is where a copy
     // from its old folder goes.
     for (const sessionDir of expired) discardDir(sessionDir);
-    for (const state of loaded) if (chosen.get(state.sessionId)?.old) this.persistNow(state.sessionId);
+    for (const state of loaded) if (chosen.get(state.sessionId)?.old || datedByFile.has(state)) this.persistNow(state.sessionId);
   }
 
   /** Forget a session in memory; its state stays on disk. */
@@ -293,7 +292,7 @@ export class SessionStore extends EventEmitter {
       this.sessions.set(id, state);
       mkdirSync(paths.sessionDir(id), { recursive: true });
       // Read from the folder an earlier build kept it in: saved to its own.
-      if (old || revived) this.persistNow(id);
+      if (old || revived || datedByFile.has(state)) this.persistNow(id);
       this.emitEvent({ type: 'snapshot', session: state });
       this.broadcastSessionList();
     } else if (cwd && state.cwd !== cwd && !state.repoRoot) {
@@ -734,6 +733,10 @@ function ownerOf(file: string): string | undefined {
   }
 }
 
+/** States read with no time of their own, dated by their file's: to be
+ *  saved with that date. */
+const datedByFile = new WeakSet<SessionState>();
+
 /**
  * Read one session's state, or undefined if there is none.
  *
@@ -752,7 +755,9 @@ function readState(file: string): SessionState | typeof NEWER | undefined {
     delete state.schemaVersion;
     // Only ever set in memory: on disk it would stop this one being saved.
     delete state.savedByNewer;
-    // One with no time of its own was last saved when its file was.
+    // One with no time of its own was last saved when its file was: saved
+    // with it once loaded (datedByFile), so a copy of the file keeps it.
+    if (typeof state.updatedAt !== 'number') datedByFile.add(state);
     migrate(state, () => mtimeOf(file));
     return state;
   } catch {

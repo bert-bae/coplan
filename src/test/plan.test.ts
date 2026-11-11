@@ -916,6 +916,12 @@ test('proposals survive a reload; one that lost its edits does not', () => {
 /* An edit of Claude's is refused when it would overwrite a change of the
  * user's it has not read: every item it changes counts, not only the one it names. */
 
+test('a task in review with no round (an older or hand-edited plan) is in its first, so it can be reviewed', () => {
+  const plan = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'in_progress', order: 0, parentId: null, stage: 'review' }, { id: 't2', title: 'UI', status: 'todo', order: 1, parentId: null }] } as unknown as Plan & Record<string, unknown>, 'x');
+  assert.equal(plan.tasks.find((t) => t.id === 't1')?.round, 1);
+  assert.equal(plan.tasks.find((t) => t.id === 't2')?.round, undefined, 'not one that is not in review');
+});
+
 function linkedPlan(): Plan {
   return publishPlan(null, {
     title: 'x',

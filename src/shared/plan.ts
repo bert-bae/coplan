@@ -903,6 +903,9 @@ function normalizeTask(task: Task): Task {
   if (!validReview(t.review)) delete t.review;
   if (!validStage(t.stage)) delete t.stage;
   if (typeof t.round !== 'number' || !(t.round > 0)) delete t.round;
+  // In review with no round (an older or hand-edited plan): its first, so a
+  // verdict can be given and a review box keyed.
+  if (t.stage === 'review' && t.round === undefined) t.round = 1;
   const checks = cleanChecks(t.checks);
   if (checks?.length) t.checks = checks;
   else delete t.checks;

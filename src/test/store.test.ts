@@ -452,6 +452,17 @@ test('a saved session with no time of its own is dated by its file: one untouche
   assert.ok(Math.abs((store.get('undated-recent')?.updatedAt ?? 0) - Date.now()) < 60_000, 'a recent one is kept');
 });
 
+test('an undated session loaded is saved with the date its file gave it, so a later copy of the file keeps its age', async () => {
+  const { paths } = await import('../shared/paths.ts');
+  const days20 = Date.now() - 20 * 24 * 60 * 60 * 1000;
+  mkdirSync(paths.sessionDir('undated-saved'), { recursive: true });
+  writeFileSync(paths.sessionState('undated-saved'), JSON.stringify({ sessionId: 'undated-saved', cwd: process.cwd(), title: 'early build', status: 'idle', plan: null }));
+  utimesSync(paths.sessionState('undated-saved'), days20 / 1000, days20 / 1000);
+  await freshStore();
+  const onDisk = JSON.parse(readFileSync(paths.sessionState('undated-saved'), 'utf8')) as { updatedAt?: number };
+  assert.ok(Math.abs((onDisk.updatedAt ?? 0) - days20) < 60_000, `dated on disk by its file: ${onDisk.updatedAt}`);
+});
+
 test('a session saved by a newer Coplan is never read wrongly or saved over', async () => {
   const dir = path.join(home, 'sessions', 'from-the-future');
   mkdirSync(dir, { recursive: true });

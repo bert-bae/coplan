@@ -15,6 +15,8 @@
   cut off after five seconds, without a word; the CLI now waits for it, as any command writing to a pipe does.
 - **A change request you are typing on a card is kept when the agent moves the card.** It was lost without a word
   as the card changed column; closing the page now asks first too.
+- **A task left in review by an older or hand-edited plan can be reviewed.** With no review round recorded, its
+  box said "round undefined" and lost what you typed, and no verdict could be given; it is now in its first round.
 - **A change request you were typing is offered to copy when the task stops waiting on your review.** If the
   agent took the task back to building, or you gave your verdict in chat, the text went without a word.
 - **Submitting or confirming the design waits for a field whose save was refused.** Its warning names the field,
