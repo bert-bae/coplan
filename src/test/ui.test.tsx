@@ -1944,6 +1944,26 @@ test("a task the user reviews waits for their verdict on its card", async () => 
   assert.deepEqual(opsSent().at(-1), { op: 'review_task', id: 't3', verdict: 'changes', summary: 'Add a timeout' });
 });
 
+test('a change request being typed on a card is kept when the agent moves the card', async () => {
+  let plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't3', stage: 'review' }], 'claude', undefined, { tracking: true }).plan;
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  const review = () => within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+  });
+  fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout' } });
+  assert.equal(unsavedDrafts(), true, 'closing the page asks first');
+  // The agent reports it blocked meanwhile: the card moves column.
+  const s = store.getState().session!;
+  const blocked = applyOps(s.plan!, [{ op: 'upsert_task', id: 't3', status: 'blocked', note: 'Waiting on review' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: blocked } }));
+  assert.ok(within(screen.getByRole('region', { name: 'Blocked' })).getByRole('group', { name: 'Your review of Wire into API' }), 'moved');
+  assert.equal((within(review()).getByLabelText('What to change') as HTMLInputElement).value, 'Add a timeout', 'what was typed is still there');
+});
+
 test('a submitted plan is followed by box too, beside the board, with nothing on it to edit', async () => {
   await boot(makeSession(lockedPlan(true)));
   await openTab('Tasks');

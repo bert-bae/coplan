@@ -1255,16 +1255,14 @@ function ReviewHistory({ task }: { task: Task }) {
 function UserReview({ plan, task }: { plan: Plan; task: Task }) {
   const edit = useEdit();
   const agent = useAgent();
-  const [asking, setAsking] = useState(false);
-  const [why, setWhy] = useState('');
+  // Kept (drafts.ts) while typed: the agent moving the card draws it anew
+  // in another column, and closing the page asks first.
+  const { editing: asking, draft: why, setDraft: setWhy, begin, close, save } = useKeptDraft(useSessionId(), `review:${task.id}:${task.round}`, '', undefined);
   const mode = effectiveReview(plan, task, plan.submission?.settings?.review ?? DEFAULT_BUILD_SETTINGS.review);
   if (mode !== 'user' || task.stage !== 'review') return null;
   const decided = roundVerdict(task, 'user');
   if (decided) return null;
-  const send = async (verdict: 'pass' | 'changes', summary?: string) => {
-    const ok = await edit({ op: 'review_task', id: task.id, verdict, ...(summary ? { summary } : {}) });
-    if (ok) setAsking(false);
-  };
+  const verdict = (op: { verdict: 'pass' } | { verdict: 'changes'; summary: string }) => edit({ op: 'review_task', id: task.id, ...op });
   return (
     <div className="board-review" role="group" aria-label={`Your review of ${task.title}`}>
       <span className="field-label">Your review — round {task.round}</span>
@@ -1272,20 +1270,20 @@ function UserReview({ plan, task }: { plan: Plan; task: Task }) {
         <>
           <input className="input" value={why} placeholder={`What should ${agent.name} change?`} aria-label="What to change" onChange={(e) => setWhy(e.target.value)} />
           <span className="board-review-actions">
-            <button type="button" className="btn btn-sm" disabled={!why.trim()} onClick={() => void send('changes', why.trim())}>
+            <button type="button" className="btn btn-sm" disabled={!why.trim()} onClick={() => void save(() => verdict({ verdict: 'changes', summary: why.trim() }))}>
               Send
             </button>
-            <button type="button" className="btn btn-sm btn-ghost" onClick={() => setAsking(false)}>
+            <button type="button" className="btn btn-sm btn-ghost" onClick={close}>
               Cancel
             </button>
           </span>
         </>
       ) : (
         <span className="board-review-actions">
-          <button type="button" className="btn btn-sm btn-primary" onClick={() => void send('pass')}>
+          <button type="button" className="btn btn-sm btn-primary" onClick={() => void verdict({ verdict: 'pass' })}>
             Approve
           </button>
-          <button type="button" className="btn btn-sm" onClick={() => setAsking(true)}>
+          <button type="button" className="btn btn-sm" onClick={begin}>
             Request changes
           </button>
         </span>

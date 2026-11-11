@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { describeTarget, isDesignLocked, isLocked, targetExists } from '../../shared/plan.ts';
+import { DEFAULT_BUILD_SETTINGS, effectiveReview, roundVerdict } from '../../shared/build.ts';
 import type { Plan, TargetKind } from '../../shared/types.ts';
 
 /**
  * Editors open with text, by session and field (`<session>:summary`,
  * `:section:<id>`, `:task:<id>:detail`, `:task:<id>:files`,
  * `:caption:<diagram>`, `:notes:<diagram>/<box>`), and comments being
- * written (`:comment:<kind>:<id>`, `:reply:<thread>`). An editor that
+ * written (`:comment:<kind>:<id>`, `:reply:<thread>`), and a change request
+ * on a task in the user's review (`:review:<task>:<round>`). An editor that
  * unmounts (a tab or a session switch, another box selected) reopens with
  * its draft and what it started from, and closing the page asks first while
  * any holds unsaved text. In memory only: a reload starts afresh, as the
@@ -120,6 +122,14 @@ function fieldText(plan: Plan, field: string, locks: Locks = { design: isDesignL
   if (m) return !locks.plan && targetExists(plan, { kind: m[1] as TargetKind, id: m[2]! }) ? '' : undefined;
   m = /^reply:(.+)$/.exec(field);
   if (m) return !locks.plan && plan.threads.some((t) => t.id === m![1]) ? '' : undefined;
+  // A change request to a task in the user's review: open while that round
+  // waits on their verdict, whatever the locks (the plan is submitted by then).
+  m = /^review:(.+):(\d+)$/.exec(field);
+  if (m) {
+    const task = plan.tasks.find((t) => t.id === m![1]);
+    const mode = task && effectiveReview(plan, task, plan.submission?.settings?.review ?? DEFAULT_BUILD_SETTINGS.review);
+    return task?.stage === 'review' && String(task.round) === m[2] && mode === 'user' && !roundVerdict(task, 'user') ? '' : undefined;
+  }
   m = /^caption:(.+)$/.exec(field);
   if (m) {
     const diagram = plan.diagrams.find((d) => d.id === m![1]);
