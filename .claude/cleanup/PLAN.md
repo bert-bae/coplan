@@ -215,7 +215,12 @@ the audit's finding numbers.
 | F55 | F50 gap: a change request being typed is dropped without a word when the agent takes the task out of review (to implement, then round 2): pruneDrafts drops it, nothing offers it, closing the page does not ask; before F50 the stale box came back with it. Offer a dropped `review:` draft with text as a locked one is (ui/lib/drafts.ts pruneDrafts, TasksView.tsx UserReview) (bert-bae/coplan#112) [re-audit A6 4] | 2 should fix | done: offered to copy, named by task and round; not while its own send is in flight | d116f46 |
 | B68 | An undated state loaded from its own folder is never saved with its date (an mtime bump makes it new again); a task in review with no round keys its draft `review:t3:undefined`, dropped every snapshot; a stray doc comment at store.ts:47; optionally say in exit()'s comment that a reader holding the pipe unread holds the CLI (daemon/store.ts load, TasksView.tsx UserReview, cli/main.ts) (bert-bae/coplan#113) [re-audit A6 5-8] | 5 smaller | done: saved with its file's date at load and ensure; a review with no round is round 1 (normalizeTask); comment gone; exit()'s comment says it | 13d9d49 |
 | B69 | A proposed move to a parent the user since removed, or set done or dropped, reads as current (`task:<id>` prints the moved task only) and accept fails with the raw apply error, not "out of date". Print a move's destination, or call an apply error at accept out of date (shared/plan.ts proposalTouches `move_task`) (bert-bae/coplan#115) [review of F53] | 5 smaller | done: moves and new tasks placed by `place`, against the outline; out of date with the reason | c4ba8e3 |
-| A7 | Re-audit the areas the rows after A6 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#114) | 6 re-audit | open | |
+| A7 | Re-audit the areas the rows after A6 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#114) | 6 re-audit | done: no must fix, 3 should fix, 5 nice to have, now rows F56-F58, B70 and A8 | {A7} |
+| F56 | B68 widened: load saves every undated session (and copies from an old folder) in the constructor, before main.ts listens: a failed save's persist-error goes to no one, and persistFailed then swallows the same failure later, so the user edits a session that never saves, untold. Save after the listeners are on, or record no failure no one heard (daemon/store.ts loadFromDisk, persistNow) (bert-bae/coplan#116) [re-audit A7 1] | 2 should fix | open | |
+| F57 | F55 gap: a change request sent as its round stops waiting on the user is refused (409 "not in review"), but pruneDrafts let its draft go unoffered while it was in `sending`: lost (card redrawn) or offered only at a later snapshot, its box hidden. Offer it when save is refused for a key let go while sending; disable Send while saving (ui/lib/drafts.ts pruneDrafts, save; TasksView.tsx UserReview) (bert-bae/coplan#117) [re-audit A7 2] | 2 should fix | open | |
+| F58 | `coplan check` starts the next check after stdout failed (a sync write's error comes a tick later), then exit(1) SIGKILLs it: `check --all >/dev/full` ran check two's side effect. Wait a tick and stop on a failed stdout before each check (cli/check.ts hook loop, cli/main.ts `unwritten`) (bert-bae/coplan#118) [re-audit A7 3] | 2 should fix | open | |
+| B70 | normalizeTask keeps a stage on a task not in progress (and B68 gives it round 1); an undated session past the cap is not saved with its date at load; the review toast names a removed task by id; exit()'s comment ("as on Windows", ">&-" exits 0 with nothing written); a release note for F52's old double-removal proposals (shared/plan.ts, daemon/store.ts, ui/lib/drafts.ts, cli/main.ts) (bert-bae/coplan#119) [re-audit A7 4-8] | 5 smaller | open | |
+| A8 | Re-audit the areas the rows after A7 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#120) | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -773,3 +778,37 @@ move and beforeunload still asks.
 
 **Verdict:** 2 Must fix. Fix 1 first (it loses a user's edit silently),
 then 2, 4, 3.
+
+## Re-audit report (row A7, four auditors, 2026-11-11)
+
+Scope: the changes since 28e7a26 (rows F52-F55, B68, B69), at e81dc2d, by
+four auditors (plan model, check runner, store, page), each in its own
+worktree checked out at that commit; each finding kept was reproduced,
+except where marked.
+
+### Should fix
+
+1. **A save failing at daemon start is told to no one** (`daemon/store.ts` loadFromDisk): it runs before main.ts listens, and persistFailed then swallows the same failure later. Wider since B68.
+2. **A change request sent as its round stops waiting is lost** (`ui/lib/drafts.ts`): refused by the daemon, and let go unoffered while it was being sent. F55 gap.
+3. **`coplan check` starts the next check after its output failed, then kills it** (`cli/check.ts`). Older.
+
+### Nice to have
+
+4. normalizeTask keeps a stage on a task not in progress (and B68 gives it round 1).
+5. An undated session past the cap is not saved with its date at load.
+6. The review toast names a removed task by id (not reproduced).
+7. exit()'s comment: "as on Windows"; `>&-` exits 0 with nothing written.
+8. F52 reads an old proposal that removes a task twice as out of date (not run): a release note.
+
+Checked and fine: a fuzz of ~25,000 proposals with 1-5 user edits each (no
+crash, no false out-of-date, none judged current that then failed, no user
+edit lost); `place`'s closed check against applyOps' (reorders, earlier
+moves, re-added tasks); sentinels against fingerprints; B68's round against
+the pile and later reviews; ensure's revival kept at the next start, the
+copy branch, WeakSet identity through migrate, the rail's order; F55's
+offer once, session switches, boot, two tabs, the own send landing first,
+save()'s try/finally; exit() on pipes, slow and early-closing readers,
+/dev/full, a TTY, and signals.
+
+**Verdict:** no Must fix; fix 2 first (it loses what the user typed), then
+1, 3.
