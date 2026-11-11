@@ -39,8 +39,13 @@ export function keptDraft(sessionId: string | null, field: string): OpenDraft | 
   return openDrafts.get(draftKey(sessionId, field));
 }
 
+/** Inline fields holding text refused as changed underneath (Editable's
+ *  InlineText): not kept drafts, but text not saved all the same. */
+export const refusedFields = new Set<object>();
+
 /** Whether any open editor holds text not saved yet. */
 export function unsavedDrafts(): boolean {
+  if (refusedFields.size) return true;
   for (const d of openDrafts.values()) if (d.draft !== d.value) return true;
   return false;
 }

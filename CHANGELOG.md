@@ -4,6 +4,9 @@
 
 ### Fixes
 
+- **Text in a field whose save was refused is kept safe from a sign-off and a closed tab.** The plan signed
+  off elsewhere offers it to copy, and closing the page asks first. Offered after a session switch, it names its
+  own plan.
 - **Accepting a proposal no longer drops a link you made to a task it removes by way of a new one.** A proposal
   that names a new task twice is placed as it will be applied, so your change shows it as out of date.
 - **An editor you opened but didn't type in closes when the plan is signed off elsewhere.** It stayed open and

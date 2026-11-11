@@ -14,7 +14,7 @@ setupDom();
 const { render, renderHook, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
 const { store, SessionScope, useEdit, useStillShown } = await import('../ui/store.ts');
-const { openDrafts, draftsLockedBy } = await import('../ui/lib/drafts.ts');
+const { openDrafts, draftsLockedBy, unsavedDrafts } = await import('../ui/lib/drafts.ts');
 const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan, confirmDesign, queueRevision, markRevisionDelivered } = await import('../shared/plan.ts');
 
 const INPUT: PlanInput = {
@@ -1034,6 +1034,41 @@ test('a note refused as changed underneath is offered to copy when its field goe
   const kept = store.getState().toasts.find((t) => t.copy !== undefined);
   assert.equal(kept?.copy, 'Waiting on the cache client');
   assert.match(kept?.text ?? '', /Status note/);
+});
+
+/** A plan title refused as changed underneath, and held open with the user's text. */
+async function refusedTitle(): Promise<void> {
+  await boot(makeSession(), (route) => (route.endsWith('/plan/ops') ? { __status: 409, error: 'The plan title was changed while this edit was open, so it was not saved.' } : undefined));
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^Plan title: .*\. Edit$/ }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Plan title' }), { target: { value: 'Mine' } });
+  const s = store.getState().session!;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: { ...s.plan!, title: 'Theirs' } } }));
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Plan title' }), { key: 'Enter' });
+  });
+  assert.ok(screen.getByText(/^Now: Theirs\./), 'refused, and held open');
+}
+
+test('refused text held open is offered to copy when a lock takes its field, and the field closes', async () => {
+  await refusedTitle();
+  // Submitted in chat: the title can no longer be saved.
+  const s = store.getState().session!;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(confirmDesign(s.plan!, { prompt: 'tasks' }), { target: 'session', prompt: 'build' }) } }));
+  const kept = store.getState().toasts.find((t) => t.copy !== undefined);
+  assert.equal(kept?.copy, 'Mine');
+  assert.equal(screen.queryByRole('textbox', { name: 'Plan title' }) === null, true);
+  assert.equal(screen.queryByText(/^Now: /) === null, true, 'nothing left of it');
+});
+
+test('refused text held open makes closing the page ask first', async () => {
+  await refusedTitle();
+  assert.equal(unsavedDrafts(), true, 'held');
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Plan title' }), { key: 'Escape' });
+  });
+  assert.equal(unsavedDrafts(), false, 'let go');
 });
 
 test('a note whose save is refused after its field went is offered to copy', async () => {
@@ -2617,6 +2652,7 @@ test('a plan title refused as changed underneath does not follow a session switc
   }
   assert.equal(left === null, true, 'closed');
   assert.equal(sentTo('s2').length, 0, 'nothing saved over the other plan');
+  assert.match(store.getState().toasts.find((t) => t.copy !== undefined)?.text ?? '', /^(Another plan|"[^"]+"): Your text for Plan title/, 'said of its own plan, not the one on screen');
   assert.equal(sentTo('s1').length, 1, 'nor saved again over the agent\'s title on the way out');
   assert.equal(store.getState().toasts.find((t) => t.copy !== undefined)?.copy, 'Mine', 'offered to copy');
 });

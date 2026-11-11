@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Markdown } from './Markdown.tsx';
-import { useKeptDraft } from '../lib/drafts.ts';
+import { refusedFields, useKeptDraft } from '../lib/drafts.ts';
 import { store, useSessionId } from '../store.ts';
 import { classNames } from '../lib/format.ts';
 import { isComposing } from '../lib/keys.ts';
@@ -69,8 +69,10 @@ export function InlineText({
   const held = useRef({ refused, draft, label });
   held.current = { refused, draft, label };
   const mounted = useRef(true);
+  // Said of its own plan: the field may go with a switch to another.
+  const sessionId = useSessionId();
   const offer = (text: string) =>
-    store.toast('error', `Your text for ${held.current.label} was not saved. Copy it to keep it:`, text);
+    store.sayOf(sessionId, 'error', `Your text for ${held.current.label} was not saved. Copy it to keep it:`, undefined, text);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -123,6 +125,26 @@ export function InlineText({
     setEditing(false);
     setDraft(value);
   };
+
+  // Held while refused: closing the page asks first. A lock that takes the
+  // field (the plan signed off elsewhere) offers the text to copy and closes it.
+  useEffect(() => {
+    if (!refused) return;
+    if (readOnly) {
+      const text = held.current.draft;
+      if (text.trim() && text.trim() !== shown.current) offer(text);
+      // Offered once: an unmount before the close lands does not offer it again.
+      held.current.refused = false;
+      abandon();
+      return;
+    }
+    const token = {};
+    refusedFields.add(token);
+    return () => {
+      refusedFields.delete(token);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- on refused and readOnly alone
+  }, [refused, readOnly]);
 
   if (readOnly) return <Tag className={classNames('inline-text', 'is-readonly', !value && 'is-empty', className)}>{value || placeholder}</Tag>;
 

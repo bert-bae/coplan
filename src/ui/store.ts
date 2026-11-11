@@ -419,12 +419,13 @@ class Store {
   }
 
   /** Said of a session's plan: over another, it names the one it is about
-   *  ("t3" there is another task) — `title` if the answer gave one. */
-  private sayOf(sessionId: string | null, kind: Toast['kind'], text: string, title?: string): void {
-    if (this.isShown(sessionId)) return this.toast(kind, text);
+   *  ("t3" there is another task) — `title` if the answer gave one. With
+   *  `copy`, the text is offered to copy (see toast). */
+  sayOf(sessionId: string | null, kind: Toast['kind'], text: string, title?: string, copy?: string): void {
+    if (this.isShown(sessionId)) return this.toast(kind, text, copy);
     const listed = this.state.sessions.find((s) => s.sessionId === sessionId);
     const name = title ?? (listed ? sessionName(listed) : null);
-    this.toast(kind, name ? `"${name}": ${text}` : `Another plan: ${text}`);
+    this.toast(kind, name ? `"${name}": ${text}` : `Another plan: ${text}`, copy);
   }
 
   /** A request about a session failed: said of it (sayOf), unless the
