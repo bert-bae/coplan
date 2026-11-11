@@ -2374,6 +2374,8 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
   // dependencies, its box links) under a removal; the proposal's other
   // edits only add its own.
   const movedTo = new Map<string, string | null>();
+  // The new tasks seen so far: placed by their first edit.
+  const seenNew = new Set<string>();
   const removal = (id: string) => {
     // Tasks the proposal adds stand in by their place alone, for what is
     // moved under them; printed are only those already in the plan.
@@ -2421,7 +2423,12 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
       case 'set_checks':
         if (op.id) out[`task:${op.id}`] = rev('task', op.id);
         if (op.op === 'move_task' && op.id) movedTo.set(op.id, op.parentId ?? null);
-        if (op.op === 'upsert_task' && op.id && !tasks.has(op.id) && op.parentId) movedTo.set(op.id, op.parentId);
+        // A new task is placed by its first edit, as applying it is: a later
+        // upsert's parentId moves nothing.
+        if (op.op === 'upsert_task' && op.id && !tasks.has(op.id) && !seenNew.has(op.id)) {
+          seenNew.add(op.id);
+          if (op.parentId) movedTo.set(op.id, op.parentId);
+        }
         // `builds` replaces which boxes link the task: a link made since is undone.
         if (op.op === 'upsert_task' && op.id && op.builds !== undefined) out[`links:${op.id}`] = links(op.id);
         if (op.op === 'upsert_task' && op.id && typeof op.note === 'string') out[`note:${op.id}`] = note(op.id);
@@ -2435,6 +2442,8 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
         if (op.kind === 'task') {
           out[`removal:${op.id}`] = removal(op.id);
           out[`note:${op.id}`] = note(op.id);
+          // A new task removed is placed afresh if the proposal adds it again.
+          if (seenNew.delete(op.id)) movedTo.delete(op.id);
         }
         break;
     }

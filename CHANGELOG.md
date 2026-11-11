@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **Accepting a proposal no longer drops a link you made to a task it removes by way of a new one.** A proposal
+  that names a new task twice is placed as it will be applied, so your change shows it as out of date.
 - **An editor you opened but didn't type in closes when the plan is signed off elsewhere.** It stayed open and
   disabled, and came back on stale text with a warning.
 - **A submitted plan's comments on parent tasks, and in By box, can be read.** Parent tasks with comments are
