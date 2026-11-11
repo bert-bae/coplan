@@ -764,6 +764,36 @@ test("a newer Coplan's session is not pushed out of memory by newer plain sessio
   }
 });
 
+test("a failed copy of another session's state, found in a folder it was named into, is said once, as any failed save", async () => {
+  const { paths } = await import('../shared/paths.ts');
+  const store = await freshStore();
+  // Then `q_r`'s own folder is found holding `q:r`'s state (an earlier build named it so); copying it to
+  // `q:r`'s folder fails.
+  mkdirSync(paths.sessionDir('q_r'), { recursive: true });
+  writeFileSync(paths.sessionState('q_r'), JSON.stringify({ sessionId: 'q:r', cwd: process.cwd(), title: 'theirs', status: 'idle', plan: null, updatedAt: Date.now() }));
+  const blocker = path.join(paths.sessionDir('q:r'), `.state.${process.pid}.tmp`);
+  mkdirSync(blocker, { recursive: true });
+  try {
+    const told: string[] = [];
+    store.on('event', (e: { type: string; sessionId?: string; message?: string }) => {
+      if (e.type === 'persist-error') told.push(`${e.sessionId}:${e.message}`);
+    });
+    store.ensure('q_r', process.cwd());
+    store.drop('q_r');
+    store.ensure('q_r', process.cwd());
+    assert.deepEqual(told, ['q:r:EISDIR'], 'once, not on every read');
+    assert.equal(store.saveFailure('q:r'), 'EISDIR', 'and a page opening on it is told');
+    // Copied once it can be: no longer said to be failing.
+    rmSync(blocker, { recursive: true, force: true });
+    store.drop('q_r');
+    store.ensure('q_r', process.cwd());
+    assert.equal(existsSync(paths.sessionState('q:r')), true);
+    assert.equal(store.saveFailure('q:r'), undefined);
+  } finally {
+    rmSync(blocker, { recursive: true, force: true });
+  }
+});
+
 test('a save that fails is said — once — instead of being dropped', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async () => {
   const store = await freshStore();
   store.ensure('readonly', process.cwd());

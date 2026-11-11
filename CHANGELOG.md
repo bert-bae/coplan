@@ -6,6 +6,8 @@
 
 - **A session that could not be saved as Coplan started is said in its log.** Such a failure was told to no one,
   and then never again while it went on failing.
+- **A page opened on a plan that cannot be saved says so.** A save failure was said once, to whoever was
+  listening then (the daemon's log, with no page open), and never again while it went on failing.
 - **A session you come back to after a month keeps its plan while Coplan runs.** One not touched for 30 days
   and since let go from memory came back with its plan from one folder and blank from the other, and a blank one
   was then saved over it. A hook for it now reads it back from either folder and dates it anew, so the next start

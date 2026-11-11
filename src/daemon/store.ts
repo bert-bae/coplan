@@ -255,11 +255,21 @@ export class SessionStore extends EventEmitter {
     } catch (err) {
       // The live session goes on — but nobody may be told their edits are
       // saved when they are not. Said once per kind of failure, not per edit.
-      const message = (err as NodeJS.ErrnoException)?.code ?? (err as Error)?.message ?? String(err);
-      if (this.persistFailed.get(id) === message) return;
-      this.persistFailed.set(id, message);
-      this.emitEvent({ type: 'persist-error', sessionId: id, message });
+      this.saveFailed(id, err);
     }
+  }
+
+  private saveFailed(id: string, err: unknown): void {
+    const message = (err as NodeJS.ErrnoException)?.code ?? (err as Error)?.message ?? String(err);
+    if (this.persistFailed.get(id) === message) return;
+    this.persistFailed.set(id, message);
+    this.emitEvent({ type: 'persist-error', sessionId: id, message });
+  }
+
+  /** Why the session's state cannot be saved now (said once when it
+   *  started failing), for a page that opens on it later. */
+  saveFailure(id: string): string | undefined {
+    return this.persistFailed.get(id);
   }
 
   persistAll(): void {
@@ -335,9 +345,11 @@ export class SessionStore extends EventEmitter {
       if (!this.sessions.has(own.sessionId) && !existsSync(paths.sessionState(own.sessionId))) {
         try {
           writeState(paths.sessionDir(own.sessionId), own);
+          this.persistFailed.delete(own.sessionId);
         } catch (err) {
-          // Said as any failed save is (and logged): this one's saves wait on nothing.
-          this.emitEvent({ type: 'persist-error', sessionId: own.sessionId, message: (err as NodeJS.ErrnoException)?.code ?? String(err) });
+          // Said as any failed save is, once per kind (and logged): this
+          // one's saves wait on nothing.
+          this.saveFailed(own.sessionId, err);
         }
       }
       return { saved: undefined, old: false };
