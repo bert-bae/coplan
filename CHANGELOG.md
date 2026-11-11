@@ -28,7 +28,8 @@
   box said "round undefined" and lost what you typed, and no verdict could be given; it is now in its first round.
 - **A change request you were typing is offered to copy when the task stops waiting on your review.** If the
   agent took the task back to building, or you gave your verdict in chat, the text went without a word. So is
-  one you sent just as that happened, which is refused; and Send cannot be pressed twice while it is on its way.
+  one you sent just as that happened, which is refused; and Send cannot be pressed twice while it is on its way,
+  even after the card moves meanwhile.
 - **Submitting or confirming the design waits for a field whose save was refused.** Its warning names the field,
   as it does for text left open in an editor, instead of dropping it and offering it to copy afterwards.
 - **A board card you opened stays open when the agent moves it.** Its details and comments no longer close as

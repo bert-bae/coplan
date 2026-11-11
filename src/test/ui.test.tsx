@@ -2107,6 +2107,81 @@ test('a change request refused because its round stopped waiting while it was se
   }
 });
 
+test('a review box drawn anew while its request is on its way cannot send it again', async () => {
+  const plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  const s = store.getState().session!;
+  const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
+  const inReview = claude(s.plan!, { op: 'upsert_task', id: 't3', stage: 'review' });
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: inReview } }));
+  const review = () => within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+  });
+  fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout' } });
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.click(within(review()).getByRole('button', { name: 'Send' }));
+    });
+    // Meanwhile the agent marks it blocked, still in review: the card is drawn anew in another column.
+    await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: claude(inReview, { op: 'upsert_task', id: 't3', status: 'blocked', note: 'Waiting' }) } }));
+    const send = within(review()).getByRole('button', { name: 'Send' }) as HTMLButtonElement;
+    assert.equal(send.disabled, true, 'the new box knows its request is on its way');
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await act(async () => {
+    await held;
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  assert.equal(opsSent().filter((op) => op['op'] === 'review_task').length, 1, 'sent once');
+  // Sent: the box drawn anew closes too, rather than hold what went.
+  assert.equal(within(review()).queryByLabelText('What to change') === null, true, 'closed');
+  assert.equal(unsavedDrafts(), false);
+});
+
+test('a review box drawn anew while its request is on its way and then refused keeps the text, and can send again', async () => {
+  const plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  await boot(makeSession(plan), (route) => (route.endsWith('/plan/ops') ? { __status: 409, error: 'Busy, try again.' } : undefined));
+  await openTab('Tasks');
+  const s = store.getState().session!;
+  const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
+  const inReview = claude(s.plan!, { op: 'upsert_task', id: 't3', stage: 'review' });
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: inReview } }));
+  const review = () => within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+  });
+  fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout' } });
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.click(within(review()).getByRole('button', { name: 'Send' }));
+    });
+    await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: claude(inReview, { op: 'upsert_task', id: 't3', status: 'blocked', note: 'Waiting' }) } }));
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await act(async () => {
+    await held;
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  assert.equal((within(review()).getByLabelText('What to change') as HTMLInputElement).value, 'Add a timeout', 'kept');
+  assert.equal((within(review()).getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled, false, 'and can be sent again');
+});
+
 test('Send on a change request cannot be pressed twice while the first is on its way', async () => {
   const plan = lockedPlan(true);
   plan.tasks.find((t) => t.id === 't3')!.review = 'user';

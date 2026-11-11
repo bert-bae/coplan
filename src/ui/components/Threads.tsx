@@ -143,6 +143,7 @@ function ThreadView({ thread }: { thread: Thread }) {
           autoFocus
           onSend={(text) => reply.save(() => edit({ op: 'reply', threadId: thread.id, text }))}
           onCancel={reply.close}
+          sending={reply.saving}
         />
       )}
     </article>
@@ -174,6 +175,7 @@ function Composer({
   onSend,
   autoFocus,
   onCancel,
+  sending,
 }: {
   /** What is written, held (and kept) by the view that shows it. */
   text: string;
@@ -183,13 +185,15 @@ function Composer({
   onSend: (text: string) => Promise<boolean>;
   autoFocus?: boolean;
   onCancel?: () => void;
+  /** On its way from an editor drawn before this one (its thread moved). */
+  sending?: boolean;
 }) {
   const latest = useRef(text);
   latest.current = text;
   const [busy, setBusy] = useState(false);
   const send = async () => {
     const value = text.trim();
-    if (!value || busy) return;
+    if (!value || busy || sending) return;
     setBusy(true);
     const ok = await onSend(value);
     setBusy(false);
@@ -231,7 +235,7 @@ function Composer({
             Cancel
           </button>
         )}
-        <button type="button" className="btn btn-sm" disabled={!text.trim() || busy} onClick={() => void send()}>
+        <button type="button" className="btn btn-sm" disabled={!text.trim() || busy || sending} onClick={() => void send()}>
           Comment
         </button>
       </div>

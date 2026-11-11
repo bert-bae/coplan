@@ -34,6 +34,16 @@ const holders = new Map<string, () => void>();
 /** Kept drafts being saved now: a plan that lands meanwhile may be their
  *  own save's, so what they hold is not lost. */
 const sending = new Set<string>();
+/** How a send went, told to the editors of its draft that did not make it
+ *  (drawn anew while it was out: its card moved): they wait on it, then
+ *  close on its text sent, or start again from the field if refused. */
+type SendNews = 'sending' | 'sent' | 'refused';
+const sendWatchers = new Map<string, Set<(news: SendNews) => void>>();
+function tellSend(key: string, news: SendNews, from: (news: SendNews) => void): void {
+  if (news === 'sending') sending.add(key);
+  else sending.delete(key);
+  for (const watch of sendWatchers.get(key) ?? []) if (watch !== from) watch(news);
+}
 /** Of those, change requests a plan landing let go (their round no longer
  *  waits on the user) while being sent: offered if the send is refused. */
 const letGoWhileSending = new Map<string, DroppedDraft>();
@@ -243,6 +253,29 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
   const [draft, setDraft] = useState(kept?.draft ?? value);
   const [started, setStarted] = useState<Started>(() => (kept ? { version: kept.version, value: kept.value } : { version, value }));
   const [saving, setSaving] = useState(false);
+  // Its draft being sent from an editor drawn before this one, and how that
+  // went (tellSend).
+  const [sentElsewhere, setSentElsewhere] = useState(() => (key ? sending.has(key) : false));
+  const watchRef = useRef<(news: SendNews) => void>(() => {});
+  watchRef.current = (news) => {
+    setSentElsewhere(news === 'sending');
+    if (news === 'sent') {
+      setDraft(now.current.value);
+      setEditing(openAtFirst);
+    } else if (news === 'refused') setStarted(now.current);
+  };
+  const watch = useRef((news: SendNews) => watchRef.current(news)).current;
+  useEffect(() => {
+    if (!key) return;
+    const watchers = sendWatchers.get(key) ?? new Set();
+    sendWatchers.set(key, watchers);
+    watchers.add(watch);
+    setSentElsewhere(sending.has(key));
+    return () => {
+      watchers.delete(watch);
+      if (!watchers.size) sendWatchers.delete(key);
+    };
+  }, [key, watch]);
   // The field as it is on screen now, for a save's answer that lands later.
   const now = useRef<Started>({ version, value });
   now.current = { version, value };
@@ -270,7 +303,7 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
     draft,
     setDraft,
     started,
-    saving,
+    saving: saving || sentElsewhere,
     /** Open it on the field as it is now. */
     begin: () => {
       setStarted(now.current);
@@ -291,15 +324,17 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
         close();
         return true;
       }
+      // On its way already, from this editor or one drawn before it.
+      if (key && sending.has(key)) return false;
       setSaving(true);
-      if (key) sending.add(key);
+      if (key) tellSend(key, 'sending', watch);
       let result: unknown = false;
       let letGo: DroppedDraft | undefined;
       try {
         result = await send();
       } finally {
         if (key) {
-          sending.delete(key);
+          tellSend(key, result === false ? 'refused' : 'sent', watch);
           letGo = letGoWhileSending.get(key);
           letGoWhileSending.delete(key);
         }
