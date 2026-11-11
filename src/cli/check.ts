@@ -32,6 +32,7 @@ import {
 } from '../shared/project.ts';
 import type { CheckResult } from '../shared/types.ts';
 import { changedFiles, changedSince, repoRoot, unreadWords, type ChangedFiles } from '../shared/changes.ts';
+import { stdoutFailure } from './output.ts';
 
 /** Lines of a failing hook's output shown. Enough to see the error. */
 const TAIL_LINES = 40;
@@ -201,6 +202,11 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   const results: CheckResult[] = [];
   let failed = 0;
   for (const hook of hooks) {
+    // Output that could not be written (a full disk) ends the run before
+    // the next check, rather than leave it half done. Its error is told a
+    // tick after the write.
+    await new Promise((r) => setImmediate(r));
+    if (stdoutFailure()) return 1;
     const outcome = await runHook({ ...hook, run: command(hook) }, root);
     const secs = `${(outcome.ms / 1000).toFixed(1)}s`;
     const ok = outcome.code === 0;

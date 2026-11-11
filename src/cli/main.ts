@@ -18,6 +18,7 @@ import { AGENT_KINDS, agentInfo, sessionFromEnv } from '../shared/agents.ts';
 import { openInBrowser } from '../daemon/browser.ts';
 import { cleanStorage, scanStorage } from '../daemon/housekeeping.ts';
 import { CLEANUP_GROUPS, type CleanupGroupId, type CleanupOutcome, type DaemonLock, type SessionSummary, type StorageReport } from '../shared/types.ts';
+import { stdoutFailure, watchStdout } from './output.ts';
 
 declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
@@ -421,13 +422,13 @@ usage: coplan <command>
 // part way, before a check is stopped, say: what cannot be written is let go.
 // On stderr, whatever the failure (a full disk too): it says what is going
 // on, never the result. On stdout, where the report goes, any other failure
-// (a full disk under `--json > report.json`) ends it, as a failure: see exit.
+// (a full disk under `--json > report.json`) ends it, as a failure (see
+// output.ts and exit): at once with no command running; a running one ends
+// itself, so nothing it started is killed part way.
 process.stderr.on('error', () => {});
-let unwritten: NodeJS.ErrnoException | undefined;
-process.stdout.on('error', (err: NodeJS.ErrnoException) => {
-  if (err.code === 'EPIPE' || err.code === 'EIO' || unwritten) return;
-  unwritten = err;
-  exit(1);
+let running = false;
+watchStdout(() => {
+  if (!running) exit(1);
 });
 
 /** Exits once what was said on stdout is written: a report that could not
@@ -440,6 +441,7 @@ process.stdout.on('error', (err: NodeJS.ErrnoException) => {
  *  reads or goes. */
 function exit(code: number): void {
   const leave = () => {
+    const unwritten = stdoutFailure();
     if (unwritten) {
       console.error(`coplan: the output could not be written (${unwritten.code ?? unwritten.message}).`);
       process.exit(code === 0 ? 1 : code);
@@ -458,7 +460,11 @@ if (!handler) {
   usage();
   exit(command === 'help' || command === '--help' ? 0 : 2);
 } else {
+  running = true;
   handler(rest)
+    .finally(() => {
+      running = false;
+    })
     .then(exit)
     .catch((err: unknown) => {
       console.error(err instanceof Said ? `coplan: ${err.message}` : ((err as Error)?.stack ?? String(err)));

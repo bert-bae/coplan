@@ -999,6 +999,26 @@ test('`coplan check` waits for a slow reader: a report past a pipe\'s buffer rea
   }
 });
 
+test('`coplan check` whose output fails stops before the next check, rather than start it and kill it', { skip: !existsSync('/dev/full') }, () => {
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'skipped', run: 'true' }, { name: 'one', run: 'true' }, { name: 'two', run: 'echo started > two.log; sleep 2' }] } }) });
+  try {
+    const full = openSync('/dev/full', 'w');
+    try {
+      // After a check's line; and before the first, after the line saying what is skipped.
+      for (const [args, gone] of [[[], 'two.log'], [['--skip', 'one', '--skip', 'skipped'], 'two.log']] as [string[], string][]) {
+        const run = spawnSync(process.execPath, [CLI, 'check', 'review', '--all', ...args], { cwd: dir, stdio: ['ignore', full, 'pipe'], encoding: 'utf8', timeout: 20_000 });
+        assert.equal(run.status, 1, run.stderr);
+        assert.match(run.stderr, /the output could not be written \(ENOSPC\)/);
+        assert.equal(existsSync(path.join(dir, gone)), false, `check two never started (${args.join(' ') || 'after a check'})`);
+      }
+    } finally {
+      closeSync(full);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('`coplan check --json` with its report to a full disk fails, not passes with nothing written', { skip: !existsSync('/dev/full') }, () => {
   const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'ok', run: 'true' }] } }) });
   try {
