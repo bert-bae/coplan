@@ -232,7 +232,13 @@ the audit's finding numbers.
 | F65 | F62 gap: text typed into an editor drawn anew while its draft is out (its field still takes input while it shows Saving…) is lost when the send goes through: the 'sent' news closes it whatever it holds. Close only if it holds the text sent; else start again from the field (ui/lib/drafts.ts useKeptDraft) (bert-bae/coplan#130) [re-audit A9 2] | 2 should fix | done: 'sent' closes only an editor holding the text sent; the kept draft deleted only if it holds it (on screen or not) | 772ab40 |
 | B72 | An interactive setup whose output fails skips the daemon restart (stops at the settings question, after installing; not a regression); a live persist-error just after the first listener can come before held ones; removeAllListeners() strands held events (nothing calls it) (cli/setup.ts setup; daemon/store.ts emitEvent) (bert-bae/coplan#131) [re-audit A9 3-5] | 5 smaller | done: setup ends as --yes once output fails after installing (settings too); held events told in order, kept through removeAllListeners | c7253cc |
 | B73 | Reopening a finished task by way of dropped skips the warning that its dependents went ahead on its work (main.ts ~1476 checks done → not done/dropped only) (daemon/main.ts) (bert-bae/coplan#133) [review of F64] | 5 smaller | done: warned when a finished task is no longer done (by its new status, dropped included, by stage alone too); one line per dependent | bf11bd0 |
-| A10 | Re-audit the areas the rows after A9 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#132) | 6 re-audit | open | |
+| A10 | Re-audit the areas the rows after A9 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#132) | 6 re-audit | done: no must fix, 4 should fix, 3 nice to have, now rows F66-F69, B74 and A11 | {A10} |
+| F66 | F64: undoing a mistaken drop of a finished task (done -> dropped -> done, nothing changed) is refused, and the gate's messages loop: give the pass (not in review), go to review (round limit: "what still fails"); a user-reviewed one is told the user has not passed it, not that the pass was cleared. Clear the pass when it leaves dropped for todo, in progress or blocked, not at the drop; say so where a pass was cleared (shared/plan.ts editTask; daemon/main.ts done gate) (bert-bae/coplan#134) [re-audit A10 1] | 2 should fix | open | |
+| F67 | B72 regressed B71: the only listener going part way through a flush (once(), or a page's cleanup) leaves the rest held with no wait for the next listener: stranded until another failure. Put the wait back after the loop when some are still held and no listener is left; a listener that throws runs delivery one behind (daemon/store.ts flushSoon) (bert-bae/coplan#135) [re-audit A10 2] | 2 should fix | open | |
+| F68 | F65 gap: a review box redrawn while its request is out, holding more than was sent: the request goes through, save drops the parked draft, 'sent' restarts the box and re-keeps its draft, but the round is decided so the box is gone: text on no screen, unoffered, closing the page asks; offered later (if ever) as "could not be sent". Offer the extra on 'sent' when the draft was parked (ui/lib/drafts.ts) (bert-bae/coplan#136) [re-audit A10 3] | 2 should fix | open | |
+| F69 | Older: text typed into an editor while its own save is out is lost when the save goes through (close() regardless); an editor redrawn meanwhile keeps it since F65. Close only if it holds what was sent (ui/lib/drafts.ts save) (bert-bae/coplan#137) [re-audit A10 4] | 2 should fix | open | |
+| B74 | A dropped dependent is told it "no longer" waits; the board's drop then done of a done task loses its round's verdict unnoticed (F66 may cover it); onListener may be registered twice (harmless) (daemon/main.ts, daemon/store.ts) (bert-bae/coplan#138) [re-audit A10 5-7] | 5 smaller | open | |
+| A11 | Re-audit the areas the rows after A10 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#139) | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -892,3 +898,35 @@ unmounted, refused, sent), no two editors of one key open at once,
 F57's offer still once.
 
 **Verdict:** no Must fix; fix 1 first (it passes the review gate), then 2.
+
+## Re-audit report (row A10, four auditors, 2026-11-11)
+
+Scope: the changes since 323294e (rows F64, F65, B72, B73), at 90f01e5,
+by four auditors (plan model and task route, setup/CLI, store events,
+page), each in its own worktree at that commit; each finding kept was
+reproduced, except where marked.
+
+### Should fix
+
+1. **Undoing a mistaken drop of a finished task is refused, its messages looping** (`shared/plan.ts` editTask, `daemon/main.ts` done gate). From F64.
+2. **Held save failures stranded if the only listener goes part way through** (`daemon/store.ts` flushSoon). B72 regressed B71; not reached by the daemon today.
+3. **A review box redrawn mid-send, holding more than was sent, hides it once the request goes through** (`ui/lib/drafts.ts`). F65 gap.
+4. **Text typed into an editor during its own save is lost** (`ui/lib/drafts.ts` save). Older (not reproduced for replies and the review box).
+
+### Nice to have
+
+5. A dropped dependent told it "no longer" waits.
+6. The board's drop then done of a done task loses its round's verdict.
+7. onListener can be registered twice (harmless).
+
+Checked and fine: setup on a pty (healthy walk, Ctrl+C/D 130, stdout
+failing at chosen points on a small tmpfs: settings files whole or not
+written, the daemon restarted, rc 1), --uninstall; a listener raising a
+failure while told one; removeAllListeners with a removeListener
+listener; snapshots unaffected by held failures; done set again on a
+done task changes nothing; mixed dependents named once; a stage-only
+reopen warns; a versioned section redrawn mid-save takes the new
+revision (no false warning); trimming; comments unaffected.
+
+**Verdict:** no Must fix; fix 1 and 3 first (they refuse or hide the
+user's work), then 4, 2.
