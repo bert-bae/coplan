@@ -1467,20 +1467,23 @@ function buildRouter(deps: Deps): Router {
     // The tasks that wait on this one: what dropping or reopening it means
     // for them is worth saying out loud.
     const waiting = dependents(plan, now);
-    if (status === 'dropped' && changes.length && waiting.length) {
+    // Those that went ahead on its finished work, when it is finished no
+    // more: taken up again (by stage alone too), or dropped. Said now, as one
+    // taken up from dropped later cannot tell it was finished (F64).
+    const reopened = task.status === 'done' && now.status !== 'done' && changes.length > 0;
+    const built = reopened ? waiting.filter((t) => t.status === 'in_progress' || t.status === 'blocked' || t.status === 'done') : [];
+    if (built.length) {
       out.push(
-        `${waiting.map((t) => `${t.id} "${t.title}"`).join(', ')} waited on it and no longer do${waiting.length === 1 ? 'es' : ''}: ` +
-          'check they do not need its work, and tell the user.',
+        `${built.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ')} already went ahead on this task's work: ` +
+          (now.status === 'dropped' ? 'check they still hold without it, and tell the user.' : 'check they still hold once it changes.'),
       );
     }
-    if (task.status === 'done' && status && status !== 'done' && status !== 'dropped') {
-      const built = waiting.filter((t) => t.status !== 'todo');
-      if (built.length) {
-        out.push(
-          `${built.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ')} already went ahead on this task's work: ` +
-            'check they still hold once it changes.',
-        );
-      }
+    const unbuilt = waiting.filter((t) => !built.includes(t));
+    if (status === 'dropped' && changes.length && unbuilt.length) {
+      out.push(
+        `${unbuilt.map((t) => `${t.id} "${t.title}"`).join(', ')} waited on it and no longer do${unbuilt.length === 1 ? 'es' : ''}: ` +
+          'check they do not need its work, and tell the user.',
+      );
     }
     if ((status === 'done' || status === 'dropped') && changes.length) {
       if (planPhase(plan) === 'finalizing' || planPhase(plan) === 'built') {

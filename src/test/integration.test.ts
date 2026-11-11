@@ -1232,6 +1232,26 @@ test('dropping a task needs a reason; dropping or reopening one says what it mea
   await task({ task_id: 't4', stage: 'implement' });
   const reopened = String((await task({ task_id: 't3', status: 'in_progress', stage: 'refine' }))['text']);
   assert.match(reopened, /t4 "Wire up" \(in progress\) already went ahead on this task's work/);
+
+  // Finished again, then dropped: said then, as reopening it from dropped later has no way to know.
+  await task({ task_id: 't3', stage: 'review' });
+  assert.equal((await task({ task_id: 't3', status: 'done', verdict: 'pass', note: 'done again' }))['ok'], true);
+  const droppedDone = String((await task({ task_id: 't3', status: 'dropped', note: 'superseded' }))['text']);
+  assert.match(droppedDone, /t4 "Wire up" \(in progress\) already went ahead on this task's work: check they still hold without it/);
+  assert.doesNotMatch(droppedDone, /no longer do/, 'said once, not as waiting too');
+
+  // Taken up again by stage alone: said as well.
+  const other = 'scope-session-stage';
+  const otherTask = (body: Record<string, unknown>) => mcpFor(other, 'task', body);
+  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(other, 'publish', PLAN);
+  await mcpFor(other, 'edit', { ops: [{ op: 'upsert_task', id: 't4', dependsOn: ['t1'] }] });
+  await otherTask({ task_id: 't2', status: 'dropped', note: 'the client already exists' });
+  await otherTask({ task_id: 't3', stage: 'review' });
+  assert.equal((await otherTask({ task_id: 't3', status: 'done', verdict: 'pass', note: 'done' }))['ok'], true);
+  await otherTask({ task_id: 't4', stage: 'implement' });
+  const byStage = String((await otherTask({ task_id: 't3', stage: 'refine' }))['text']);
+  assert.match(byStage, /t4 "Wire up" \(in progress\) already went ahead on this task's work: check they still hold once it changes/);
 });
 
 test("done needs the round's passing verdict — the user's own, when the user reviews it", async () => {
