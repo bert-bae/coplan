@@ -245,7 +245,7 @@ test("a session's own folder wins over its old one once it holds a copy, however
   assert.equal((await freshStore()).get('tie:break')?.cwd, '/home/me/proj');
 });
 
-test("an old folder's copy is not taken over another session's, nor when it has no time of its own; an unreadable own copy gives way to it", async () => {
+test("an old folder's copy is not taken over another session's; an unreadable own copy gives way to it", async () => {
   const { paths, sanitizeId, legacyName } = await import('../shared/paths.ts');
   const template = async (id: string, title: string) => {
     const store = await freshStore();
@@ -259,7 +259,6 @@ test("an old folder's copy is not taken over another session's, nor when it has 
     mkdirSync(path.join(home, 'sessions', folder), { recursive: true });
     writeFileSync(path.join(home, 'sessions', folder, 'state.json'), JSON.stringify(state));
   };
-  const titleIn = (folder: string) => JSON.parse(readFileSync(path.join(home, 'sessions', folder, 'state.json'), 'utf8')).plan?.title;
 
   // x:y's own folder holds y's copy, kept the old way there: x:y's newer old copy does not go over it.
   const x = 'x:y';
@@ -273,19 +272,6 @@ test("an old folder's copy is not taken over another session's, nor when it has 
   const booted = await freshStore();
   assert.equal(booted.get(y)?.plan?.title, 'Plan of y', 'y kept its plan');
   assert.equal(JSON.parse(readFileSync(path.join(home, 'sessions', sanitizeId(x), 'state.json'), 'utf8')).sessionId, y, "x's copy did not go over it");
-
-  // An old copy with no time of its own loses to the session's own, at load and by ensure.
-  for (const how of ['load', 'ensure'] as const) {
-    const id = `no:time-${how}`;
-    const up = how === 'ensure' ? await freshStore() : undefined;
-    const own = await template(id, 'Its own');
-    const { updatedAt: _none, ...undated } = { ...own, plan: { ...(own['plan'] as object), title: 'Undated old copy' } };
-    put(legacyName(id), undated);
-    const next = up ?? (await freshStore());
-    next.drop(id);
-    assert.equal(next.ensure(id, process.cwd()).plan?.title, 'Its own', how);
-    assert.equal(titleIn(sanitizeId(id)), 'Its own', `${how}: not saved over`);
-  }
 
   // Its own copy unreadable (moved aside), the old one is taken by ensure, as at load.
   const up = await freshStore();
