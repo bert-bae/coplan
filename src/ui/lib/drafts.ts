@@ -197,7 +197,8 @@ export function filesText(files: string[] | undefined): string {
  * names it (null: not kept), in `sessionId` (useSessionId); `value` and
  * `version` are the field as it is now. A comment being written is one
  * too, with nothing saved (`value` ''): `openAtFirst`, its box is always
- * there.
+ * there. `field` is read once, at mount: a caller whose field changes while
+ * it is on screen draws it anew (a React key), as UserReview does by round.
  */
 export function useKeptDraft(sessionId: string | null, field: string | null, value: string, version: number | undefined, openAtFirst = false) {
   const [key] = useState(() => (field ? draftKey(sessionId, field) : null));

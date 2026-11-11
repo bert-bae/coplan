@@ -1964,6 +1964,34 @@ test('a change request being typed on a card is kept when the agent moves the ca
   assert.equal((within(review()).getByLabelText('What to change') as HTMLInputElement).value, 'Add a timeout', 'what was typed is still there');
 });
 
+test('a change request typed on a card that went into review while on screen is kept too', async () => {
+  const plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  // The agent finishes building it: into review, the card where it was.
+  const s = store.getState().session!;
+  const inReview = applyOps(s.plan!, [{ op: 'upsert_task', id: 't3', stage: 'review' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: inReview } }));
+  const review = () => within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+  });
+  fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout' } });
+  // Anything else lands meanwhile, then the agent moves the card.
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: { ...inReview } } }));
+  assert.equal(unsavedDrafts(), true, 'still kept: closing the page asks first');
+  const blocked = applyOps(inReview, [{ op: 'upsert_task', id: 't3', status: 'blocked', note: 'Waiting on review' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: blocked } }));
+  assert.equal((within(review()).getByLabelText('What to change') as HTMLInputElement).value, 'Add a timeout', 'kept across the move');
+  // Round 2 (the verdict given in chat, the changes made): a fresh box, round 1's request let go.
+  const round2 = applyOps(blocked, [{ op: 'upsert_task', id: 't3', stage: 'refine' }, { op: 'upsert_task', id: 't3', stage: 'review' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: round2 } }));
+  assert.equal(round2.tasks.find((t) => t.id === 't3')!.round, 2);
+  assert.ok(within(review()).getByRole('button', { name: 'Request changes' }), 'a fresh box');
+  assert.equal(unsavedDrafts(), false, "round 1's request no longer kept");
+});
+
 test('a submitted plan is followed by box too, beside the board, with nothing on it to edit', async () => {
   await boot(makeSession(lockedPlan(true)));
   await openTab('Tasks');

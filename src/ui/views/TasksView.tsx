@@ -1203,7 +1203,8 @@ function TrackedCard({ plan, task, arrived, opened, toggle }: { plan: Plan; task
         </div>
       )}
       <ReviewHistory task={task} />
-      <UserReview plan={plan} task={task} />
+      {/* Drawn anew each round: its kept draft is that round's (useKeptDraft keys at mount). */}
+      <UserReview key={`${task.id}:${task.round}`} plan={plan} task={task} />
       <footer className="board-foot">
         <span className="item-id">{task.id}</span>
         {arrived && <span className="pill is-moved">just moved</span>}
