@@ -208,7 +208,13 @@ the audit's finding numbers.
 | F50 | B66 gap: useKeptDraft fixes its key at mount, so a card on screen when its task enters review (or a new round) keeps `review:t3:undefined` (or the old round): pruneDrafts drops the draft at the next snapshot, closing the page stops asking, and a move loses the text. Key UserReview by task and round (TasksView.tsx TrackedCard) (bert-bae/coplan#104) [re-audit A5 3] | 2 should fix | done: UserReview keyed by task and round | d456d06 |
 | F51 | F45's 5 s cap cuts a live but slow reader (`coplan check \| less`) without a word and keeps the exit code (0 with an optional failure): 64926 of 200108 bytes reached `(sleep 7; wc -c)`. Fail with a message when output is still pending at the cap, or wait for EPIPE (cli/main.ts:445) (bert-bae/coplan#105) [re-audit A5 4] | 2 should fix | done: no cap; waits as any pipe writer does (a reader that keeps the pipe without reading now holds it) | ab6f03d |
 | B67 | Tests: ~~a report over a pipe's buffer reaches a reader in full~~ (done by F51); B64's ensure assertion is vacuous (write the old copy after load); skip `write('')` when nothing is pending, for Windows (project.test.ts, store.test.ts:436, cli/main.ts:446) (bert-bae/coplan#106) [re-audit A5 5, 6] | 5 smaller | done: ensure judges a copy written after load; no empty write with nothing pending | fdf2edb |
-| A6 | Re-audit the areas the rows after A5 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#108) | 6 re-audit | open | |
+| A6 | Re-audit the areas the rows after A5 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#108) | 6 re-audit | done: 2 must fix, 2 should fix, 4 nice to have, now rows F52-F55, B68 and A7 | {A6} |
+| F52 | F49 regression: a proposal that removes the same id twice (`remove t3, upsert t3, remove t3, upsert t3`) keys both removals' prints `removal:t3`, and the second, worked out from an outline the first already emptied, overwrites the first: a subtask the user adds under t3, a task moved under it, or a link on that task is lost on accept, where 766a32f refused it. Combine the prints under one key (shared/plan.ts proposalTouches `remove`) (bert-bae/coplan#109) [re-audit A6 1] | 1 must fix | open | |
+| F53 | A cycle in a proposal's working outline crashes: proposal `[move t3 under t2, remove t1]`, then the user moves t1 under t3 (legal in the plan) gives t1→t3→t2→t1, and `descendants` recurses until RangeError in accept_proposal, renderPlan and previewProposal. Skip a move into its own subtree in the outline, and call the proposal out of date (shared/plan.ts proposalTouches `outline`, `descendants`) (bert-bae/coplan#110) [re-audit A6 2] | 1 must fix | open | |
+| F54 | `ensure` takes an expired session from its own folder (40-day undated file), though `legacy()` refuses the same from an earlier build's folder; and ensure(x) copying y's expired state to y's own folder lets ensure(y) take it. State the keeping rule once for load, legacy() and the own-folder path (daemon/store.ts readSaved) (bert-bae/coplan#111) [re-audit A6 3] | 2 should fix | open | |
+| F55 | F50 gap: a change request being typed is dropped without a word when the agent takes the task out of review (to implement, then round 2): pruneDrafts drops it, nothing offers it, closing the page does not ask; before F50 the stale box came back with it. Offer a dropped `review:` draft with text as a locked one is (ui/lib/drafts.ts pruneDrafts, TasksView.tsx UserReview) (bert-bae/coplan#112) [re-audit A6 4] | 2 should fix | open | |
+| B68 | An undated state loaded from its own folder is never saved with its date (an mtime bump makes it new again); a task in review with no round keys its draft `review:t3:undefined`, dropped every snapshot; a stray doc comment at store.ts:47; optionally say in exit()'s comment that a reader holding the pipe unread holds the CLI (daemon/store.ts load, TasksView.tsx UserReview, cli/main.ts) (bert-bae/coplan#113) [re-audit A6 5-8] | 5 smaller | open | |
+| A7 | Re-audit the areas the rows after A6 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#114) | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -731,3 +737,38 @@ signals and long-running commands.
 
 **Verdict:** no Must fix; fix 1 first (it can lose a user's link), then 3, 4, 2.
 
+## Re-audit report (row A6, four auditors, 2026-11-11)
+
+Scope: the changes since 766a32f (rows F48-F51 and B67), by four auditors
+(plan model, check runner, store, page), each in its own worktree; each
+finding kept was reproduced with a scratch test or command.
+
+### Must fix
+
+1. **A second removal of the same id overwrites the first's print** (`shared/plan.ts` proposalTouches `remove`). `[remove t3, upsert t3, remove t3, upsert t3]`, then the user adds a subtask under t3, moves t4 under it, or links t4 and moves it: accept goes through and the user's edit is lost. 766a32f refused all three. F49 regression.
+2. **A cyclic working outline crashes** (`plan.ts` `descendants`). `[move t3 under t2, remove t1]`, then the user moves t1 under t3: RangeError in accept_proposal, renderPlan and previewProposal. Predates F48/F49.
+
+### Should fix
+
+3. **`ensure` takes an expired session from its own folder** (`daemon/store.ts` readSaved), though not from an earlier build's folder. Predates B64.
+4. **A change request being typed is dropped when the task leaves review** (`TasksView.tsx` UserReview, `drafts.ts` pruneDrafts): not offered, not asked about on close. Follows from F50.
+
+### Nice to have
+
+5. An undated own-folder state is never saved with its date.
+6. A task in review with no round: draft key `review:t3:undefined`, dropped each snapshot.
+7. A stray doc comment at `store.ts:47`.
+8. `exit()`'s comment could say a reader holding the pipe unread holds the CLI (F51's accepted trade-off; no internal caller pipes the CLI without reading).
+
+Checked and fine: a fuzz of ~4,700 proposals against ~70 user edits each
+(nothing else lost or wrongly refused); F48's and F49's named sequences
+against applyOps; exit() with a slow reader (200056 of 200056 bytes, exit
+1), an early-closing reader, stdout closed, /dev/full (ENOSPC, exit 1), a
+TTY, SIGTERM/SIGINT/SIGHUP while blocked, and the order of the error event
+and leave; B67's empty-write skip (same results); dating by file on every
+read path; the copy-to-own-folder write keeps the old date; failed saves
+keep the old mtime; UserReview's remount keeps the draft across a column
+move and beforeunload still asks.
+
+**Verdict:** 2 Must fix. Fix 1 first (it loses a user's edit silently),
+then 2, 4, 3.
