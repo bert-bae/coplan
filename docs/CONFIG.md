@@ -18,8 +18,11 @@ to either file counts at once, with no restart.
 Both files are JSON with comments: `//` to the end of a line and `/* … */`
 anywhere outside a string, and a trailing comma is allowed. Nothing is
 skipped silently: a file that is not valid JSON, a key Coplan does not read,
-or a value of the wrong type or out of range is written to `daemon.log` and
-reported by `coplan doctor`, and the value from the layer before is used.
+or a value of the wrong type or out of range is written to `daemon.log`,
+reported by `coplan doctor`, and shown in the Coplan page of every session
+that reads the file (a toast once per distinct error, and **⚠ settings** in
+the rail's footer until it is fixed); the value from the layer before is
+used.
 The keys the old review loop used (`gateHoldSeconds`, `stages`, `ship`) are
 still ignored without a word, so an old config file does no harm.
 
@@ -153,8 +156,13 @@ Claude reports the checks it ran with each task. A task whose last reported
 checks include a failure (not `optional`) cannot be marked done, and nor can
 one that never reported a required `review` check for what it changed;
 `harness_task_update` names the command that runs exactly those
-(`coplan check review --since <commit>`). Where git cannot say what changed,
-the checks for the files the task planned to touch are held instead.
+(`coplan check review --since <commit>`). Outside a git repository, the
+checks for the files the task planned to touch are held instead. Where git
+is there but cannot read the change (it fails or times out), the change is
+more than 5,000 files, or no base branch is found to measure the build
+from, every check applies, in the done gate and in `coplan check`, and both
+say why: a change nobody could read is never taken for one that touched
+nothing.
 
 A file that cannot be read, a stage that does not exist, a hook without a
 command, a key Coplan does not read (often a typo of one it does), a value

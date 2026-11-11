@@ -893,7 +893,12 @@ export type ServerEvent =
   | { type: 'sessions'; sessions: SessionSummary[] }
   | { type: 'ping'; ts: number }
   /** A session's state could not be written to disk: edits are not saved. */
-  | { type: 'persist-error'; sessionId: string; message: string };
+  | { type: 'persist-error'; sessionId: string; message: string }
+  /** What is wrong with the settings files this page's session reads
+   *  (config.json, its repository's .claude/harness.json) now: every error,
+   *  each naming its file. Empty once they are fixed. `files` are the files
+   *  it speaks for. */
+  | { type: 'config-errors'; errors: string[]; files: string[] };
 
 /* ------------------------------------------------------------------ *
  * Daemon lock file

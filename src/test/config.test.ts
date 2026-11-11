@@ -124,6 +124,90 @@ test('the cache says what is wrong now, for the page — and nothing once it is 
   }
 });
 
+test("the cache says what is wrong with one repository's files, and tells its watchers when that changes", async () => {
+  const dirs = homes('{ "autoOpen": "yes" }');
+  let told = 0;
+  const cache = new ConfigCache(dirs.configDir, () => {}, 64);
+  cache.subscribe(dirs.projectDir, () => told++);
+  cache.subscribe(null, () => told++);
+  const tick = () => new Promise<void>((resolve) => queueMicrotask(resolve));
+  try {
+    assert.match(cache.errors().join('\n'), /"autoOpen" must be true or false/);
+    assert.equal(told, 0, 'never from inside the read');
+    await tick();
+    assert.equal(told, 1);
+    cache.get();
+    await tick();
+    assert.equal(told, 1, 'read again unchanged: nothing new to say');
+
+    // A repository's own file adds its error, for that repository alone.
+    mkdirSync(path.join(dirs.projectDir, '.claude'), { recursive: true });
+    writeFileSync(path.join(dirs.projectDir, '.claude', 'harness.json'), '{ "promptNotice": 3 }');
+    const here = cache.errors(dirs.projectDir);
+    assert.equal(here.length, 2);
+    assert.match(here.join('\n'), /harness\.json: "promptNotice" must be true or false/);
+    await tick();
+    assert.equal(told, 2);
+    assert.equal(cache.errors(path.join(dirs.projectDir, 'elsewhere')).length, 1, "another repository's page: the global error only");
+    assert.equal(cache.errors().length, 1);
+
+    // Fixed: read again, with nothing to say.
+    const file = path.join(dirs.configDir, 'config.json');
+    writeFileSync(file, '{}');
+    utimesSync(file, new Date(), new Date(Date.now() + 2000));
+    const project = path.join(dirs.projectDir, '.claude', 'harness.json');
+    writeFileSync(project, '{}');
+    utimesSync(project, new Date(), new Date(Date.now() + 2000));
+    const before = told;
+    assert.deepEqual(cache.errors(dirs.projectDir), []);
+    await tick();
+    assert.ok(told > before, 'the fix is news');
+  } finally {
+    removeHomes(dirs);
+  }
+});
+
+test('watchers that read every folder again settle, even past the cache limit', async () => {
+  const dirs = homes('{ "autoOpen": "yes" }');
+  const cache = new ConfigCache(dirs.configDir, () => {}, 2);
+  const folders = ['a', 'b', 'c', 'd'].map((f) => path.join(dirs.projectDir, f));
+  let told = 0;
+  // A page per folder, each reading its own folder when told: past the
+  // limit each read clears the cache, which must not be news again.
+  for (const f of folders) cache.subscribe(f, () => (told++, cache.errors(f)));
+  try {
+    for (const f of folders) cache.errors(f);
+    for (let i = 0; i < 20; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
+    assert.ok(told <= folders.length * 4, `settled after ${told} calls`);
+  } finally {
+    removeHomes(dirs);
+  }
+});
+
+test("a page is told of its own folder's changes, and keeps them past the cache's limit", async () => {
+  const dirs = homes('{}');
+  const cache = new ConfigCache(dirs.configDir, () => {}, 1);
+  const a = path.join(dirs.projectDir, 'a');
+  const b = path.join(dirs.projectDir, 'b');
+  mkdirSync(path.join(a, '.claude'), { recursive: true });
+  writeFileSync(path.join(a, '.claude', 'harness.json'), '{ "promptNotice": 3 }');
+  let toldA = 0;
+  let toldB = 0;
+  cache.subscribe(a, () => toldA++);
+  cache.subscribe(b, () => toldB++);
+  try {
+    cache.errors(a);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    assert.equal(toldA, 1);
+    assert.equal(toldB, 0, "another folder's page is not woken");
+    // Reading b clears a cache of one; a's errors are still what its page holds.
+    cache.errors(b);
+    assert.equal(cache.held(a).length, 1);
+  } finally {
+    removeHomes(dirs);
+  }
+});
+
 test('the documented defaults are the defaults', () => {
   const doc = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'docs', 'CONFIG.md'), 'utf8');
   for (const [key, value] of Object.entries(DEFAULT_CONFIG)) {

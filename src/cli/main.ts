@@ -402,9 +402,11 @@ usage: coplan <command>
   url  [id]  print the UI url (with auth token)
   logs       tail the daemon log
   doctor     verify the plugin wiring end to end
-  check [implement|review|final] [--files a,b] [--base ref] [--no-diff] [--skip a,b] [--list] [--json]
-             run that stage's hooks from .coplan/config.json (default: review);
-             at review and final, --files also takes the files git says changed
+  check [implement|review|final] [--since commit] [--files a,b] [--base ref] [--all] [--skip name]... [--list] [--json]
+             run that stage's hooks from .coplan/config.json (default: review),
+             only those for what changed: since --since, else since the last
+             commit; at final, since --base. --files names the files instead,
+             --all runs every hook, --skip leaves one out (once per check)
   init [--print] [--force]
              write a starting .coplan/config.json from the repository's scripts
   setup [--yes] [--agents claude,codex,cursor|none]

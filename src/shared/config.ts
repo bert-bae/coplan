@@ -144,6 +144,13 @@ export function loadConfigReport(opts: { configDir: string; projectDir?: string 
 export class ConfigCache {
   private entries = new Map<string, { stamp: string; config: HarnessConfig; errors: string[] }>();
   private said = new Set<string>();
+  /** Watchers, by the folder they watch ('' for the global file alone). */
+  private watchers = new Map<string, Set<() => void>>();
+  /** What each folder's files were last found to hold wrong, kept apart
+   *  from the cache: a cache cleared at its limit is not news, and does
+   *  not lose what another folder's page shows. */
+  private known = new Map<string, string[]>();
+  private pending = new Set<string>();
 
   constructor(
     private readonly configDir: string,
@@ -166,14 +173,54 @@ export class ConfigCache {
     }
     if (this.entries.size >= this.max) this.entries.clear();
     this.entries.set(key, { stamp, config: report.config, errors: report.errors });
+    if ((this.known.get(key) ?? []).join('\n') !== report.errors.join('\n')) {
+      if (this.known.size > 1000) this.known.clear();
+      this.known.set(key, report.errors);
+      this.notify(key);
+    }
     return report.config;
   }
 
   /** What is wrong with the config for `projectDir` now — its own file and
-   *  the global one — each naming its file: for the page to say (#52). */
+   *  the global one — each naming its file: for the page to say (#52). Read
+   *  again if either file changed. */
   errors(projectDir?: string | null): string[] {
     this.get(projectDir);
-    return [...(this.entries.get(projectDir ?? '')?.errors ?? [])];
+    return this.held(projectDir);
+  }
+
+  /** The same, as last read, without looking at the files again: for a
+   *  watcher told of a change, which a read just found. */
+  held(projectDir?: string | null): string[] {
+    const key = projectDir ?? '';
+    return [...(this.known.get(key) ?? this.entries.get(key)?.errors ?? [])];
+  }
+
+  /** `fn` is called — once, after the read that found it, never inside it
+   *  — whenever what is wrong with `projectDir`'s files changes. */
+  subscribe(projectDir: string | null, fn: () => void): () => void {
+    const key = projectDir ?? '';
+    let set = this.watchers.get(key);
+    if (!set) this.watchers.set(key, (set = new Set()));
+    set.add(fn);
+    return () => {
+      set.delete(fn);
+      if (!set.size) this.watchers.delete(key);
+    };
+  }
+
+  /** A folder's watchers hear of its change once the read is done, and once
+   *  however many reads changed it: one watcher reading again does not set
+   *  off the next. */
+  private notify(key: string): void {
+    const first = this.pending.size === 0;
+    this.pending.add(key);
+    if (!first) return;
+    queueMicrotask(() => {
+      const keys = [...this.pending];
+      this.pending.clear();
+      for (const k of keys) for (const fn of this.watchers.get(k) ?? []) fn();
+    });
   }
 }
 

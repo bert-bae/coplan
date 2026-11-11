@@ -31,7 +31,7 @@ import {
   type HookStage,
 } from '../shared/project.ts';
 import type { CheckResult } from '../shared/types.ts';
-import { changedFiles, changedSince, repoRoot } from '../shared/changes.ts';
+import { changedFiles, changedSince, repoRoot, unreadWords, type ChangedFiles } from '../shared/changes.ts';
 
 /** Lines of a failing hook's output shown. Enough to see the error. */
 const TAIL_LINES = 40;
@@ -66,18 +66,38 @@ function parseArgs(args: string[]): Options | string {
   const skip: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
+    // `--flag value` or `--flag=value`. A flag with nothing after it — at
+    // the end, or followed by another flag, which is left to be read as one
+    // — has an empty value, which each flag refuses: a value quietly taken
+    // from the next flag, or dropped, would change what runs.
+    const value = (flag: string): string | null => {
+      if (a.startsWith(`${flag}=`)) return a.slice(flag.length + 1);
+      if (a !== flag) return null;
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith('--')) return '';
+      i++;
+      return next;
+    };
+    let v: string | null;
     if (a === '--list') list = true;
     else if (a === '--json') json = true;
     else if (a === '--all') all = true;
-    else if (a === '--since') since = args[++i] || undefined;
-    else if (a.startsWith('--since=')) since = a.slice(8) || undefined;
-    else if (a === '--skip') skip.push(...(args[++i] ?? '').split(',').map((s) => s.trim()).filter(Boolean));
-    else if (a.startsWith('--skip=')) skip.push(...a.slice(7).split(',').map((s) => s.trim()).filter(Boolean));
-    else if (a === '--base') base = args[++i] || undefined;
-    else if (a.startsWith('--base=')) base = a.slice(7) || undefined;
-    else if (a === '--files') files.push(...(args[++i] ?? '').split(',').map((f) => f.trim()).filter(Boolean));
-    else if (a.startsWith('--files=')) files.push(...a.slice(8).split(',').map((f) => f.trim()).filter(Boolean));
-    else if ((HOOK_STAGES as readonly string[]).includes(a)) stage = a as HookStage;
+    else if ((v = value('--since')) !== null) {
+      if (!v.trim()) return '"--since" needs the commit the task began at.';
+      since = v.trim();
+    } else if ((v = value('--skip')) !== null) {
+      // One check per --skip, named whole: a name may hold a space or a
+      // comma ("ts tests"), so nothing splits it.
+      if (!v.trim()) return '"--skip" needs the name of a check.';
+      skip.push(v.trim());
+    } else if ((v = value('--base')) !== null) {
+      if (!v.trim()) return '"--base" needs a branch or commit.';
+      base = v.trim();
+    } else if ((v = value('--files')) !== null) {
+      const named = v.split(',').map((f) => f.trim()).filter(Boolean);
+      if (!named.length) return '"--files" needs the files, comma-separated: --files src/a.ts,src/b.ts.';
+      files.push(...named);
+    } else if ((HOOK_STAGES as readonly string[]).includes(a)) stage = a as HookStage;
     else return `unknown argument "${a}". Stages: ${HOOK_STAGES.join(', ')}.`;
   }
   return { stage, files, list, json, all, skip, ...(base ? { base } : {}), ...(since ? { since } : {}) };
@@ -113,22 +133,47 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   // base branch. Null where nobody can say: then every check runs.
   let changed: string[] | null = null;
   let since = '';
+  // A change git could not read, too large to list, or with no base to
+  // measure it from is not one that touched nothing: every check runs, as
+  // with --all, and it says why.
+  const unread = (c: ChangedFiles) => say(`coplan: what changed cannot be told — ${unreadWords(c)} — so every check runs.`);
   if (opts.all) since = '';
   else if (opts.files.length) changed = opts.files;
   else if (opts.stage === 'final') {
     const build = await changedFiles(root, opts.base ?? config.branches.base);
-    if (build) [changed, since] = [build.files, build.base ? `since ${build.base}` : 'not committed yet'];
+    // A base given here that is not there is a mistake to say, not a reason
+    // to run everything.
+    if (build?.unread === 'no-base' && opts.base) {
+      console.error(`coplan: "--base ${opts.base}" is not a branch or commit here.`);
+      return 2;
+    }
+    if (build) {
+      since = `since ${build.base}`;
+      if (build.unread) unread(build);
+      else changed = build.files;
+    }
   } else {
     const task = await changedSince(root, opts.since);
-    if (task) [changed, since] = [task.files, opts.since ? `since ${opts.since.slice(0, 12)}` : 'since the last commit'];
-    else if (opts.since) {
+    if (task) {
+      since = opts.since ? `since ${opts.since.slice(0, 12)}` : 'since the last commit';
+      if (task.unread) unread(task);
+      else changed = task.files;
+    } else if (opts.since) {
       console.error(`coplan: ${opts.since} is not a commit here: give the one the task began at, or --all.`);
       return 2;
     }
   }
   const stageHooks = config.hooks[opts.stage].filter((h) => !opts.skip.includes(h.name));
   const hooks = changed === null ? stageHooks : hooksForChange(config, opts.stage, changed).filter((h) => !opts.skip.includes(h.name));
-  if (opts.skip.length) say(`coplan: not running ${opts.skip.join(', ')} — skipped for this task.`);
+  // A skip names one of the repository's checks, whole. One that names none
+  // (a typo, or `--skip a,b` from before each check took its own flag)
+  // skips nothing, and is said so rather than reported as skipped.
+  const known = new Set(HOOK_STAGES.flatMap((st) => config.hooks[st].map((h) => h.name)));
+  for (const name of opts.skip.filter((n) => !known.has(n))) {
+    console.error(`coplan: --skip "${name}" names no check in ${PROJECT_CONFIG_PATH}, so nothing is skipped for it (one --skip per check).`);
+  }
+  const skippedHere = config.hooks[opts.stage].filter((h) => opts.skip.includes(h.name)).map((h) => h.name);
+  if (skippedHere.length) say(`coplan: not running ${skippedHere.join(', ')} — skipped for this task.`);
   const untouched = stageHooks.filter((h) => !hooks.includes(h));
   if (untouched.length && changed !== null) {
     say(

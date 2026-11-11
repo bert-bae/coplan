@@ -445,6 +445,20 @@
   what is not committed yet; at `final`, since the base branch. It says which
   checks it left out and why. `--files` now names the files instead of git,
   `--all` runs every check, and `--no-diff` is gone.
+- **`--skip` takes one check, whole.** A brief now writes one quoted
+  `--skip=<name>` per skipped check, so a name with a space or a comma
+  (`ts tests`) runs as written; `coplan check` no longer splits a skip on
+  commas, and says so for a skip that names no check. The done gate's
+  rerun command and the task-start hint carry the task's skips too. A flag
+  left without its value (`--since`, `--base`, `--files`, `--skip`) is an
+  error, never the next flag taken for it.
+- **A change that cannot be told runs every check.** Where git fails or
+  times out, the change is more than 5,000 files, or no base branch is
+  found to measure the build from, the done gate and `coplan check` apply
+  every check and say why, rather than take it for a change that touched
+  nothing. `coplan check final --base <ref>` with a ref that is not there is
+  an error. A repository with no commit yet counts its
+  staged files as well as its new ones.
 - **`coplan init` writes targeted checks**: a typecheck or linter only for
   its language, and `ruff check {files}`. Test suites and builds stay whole,
   for the repository to scope. This repository's own typecheck now runs only
@@ -493,8 +507,13 @@
 - **What is wrong with the harness config is said in the page**: each
   problem in `~/.claude/cc-harness/config.json` or a repository's
   `.claude/harness.json` — a setting of the wrong type, one a repository
-  may not set, a file that is not JSON — shows once as a toast when you open
-  a session, not only in `daemon.log` and the doctor.
+  may not set, a file that is not JSON — shows once as a toast, not only in
+  `daemon.log` and the doctor. It is not said again on a reload or a switch
+  to another session, and **⚠ settings** in the rail's footer lists every
+  current problem until the file is fixed. The page hears as soon as the
+  daemon next reads the file (within half a minute while it is open), so a
+  fix, or a new mistake, shows without a reload; one fixed and made again
+  is said again. Each page shows only the files its session reads.
 
 ### Request revisions from the page: open comments as one ask
 

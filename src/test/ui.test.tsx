@@ -2210,16 +2210,15 @@ test('with a link, queuing opens the session where "Answer in" does; in Cursor t
 
 test('what is wrong with the harness config is said in the page, once per problem (#52)', async () => {
   const problem = '/repo/.claude/harness.json: "autoOpen" must be true or false; "yes" is not, so false is used.';
-  const session = makeSession();
-  await boot(session, (route) => (route === '/api/session/s1' ? { session, configErrors: [problem] } : undefined));
+  const files = ['~/.claude/cc-harness/config.json', '/repo/.claude/harness.json'];
+  await boot(makeSession());
   const said = () => store.getState().toasts.filter((t) => t.text.includes('"autoOpen" must be true or false'));
-  await waitFor(() => assert.equal(said().length, 1));
+  await act(async () => store.apply({ type: 'config-errors', errors: [problem], files }));
+  assert.equal(said().length, 1);
   assert.equal(said()[0]!.kind, 'error');
   assert.match(said()[0]!.text, /^Coplan's config: .*Run coplan doctor to see every problem\.$/);
-  // Loaded again (the live stream reconnecting, the session picked again): not said twice.
-  await act(async () => {
-    await store.selectSession('s1');
-  });
+  // Said again by the stream (it reconnected, the session was picked again): not toasted twice.
+  await act(async () => store.apply({ type: 'config-errors', errors: [problem], files }));
   assert.equal(said().length, 1);
 });
 

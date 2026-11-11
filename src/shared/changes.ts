@@ -15,14 +15,16 @@ import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
 
-/** More than any one change needs to be told apart; past it, the list is cut. */
-const MAX_FILES = 5_000;
+/** More than any one change needs to be told apart; past it, the change is
+ *  not listed (`unread: 'too-many'`) and every check applies. */
+export const MAX_FILES = 5_000;
+const OPTS = { timeout: 10_000, maxBuffer: 8 * 1024 * 1024 } as const;
 
 async function git(root: string, args: string[]): Promise<string | null> {
   // No folder: an empty cwd would run git wherever this process is.
   if (!root) return null;
   try {
-    const { stdout } = await exec('git', args, { cwd: root, timeout: 10_000, maxBuffer: 8 * 1024 * 1024 });
+    const { stdout } = await exec('git', args, { cwd: root, ...OPTS });
     return stdout;
   } catch {
     return null;
@@ -34,17 +36,48 @@ async function gitLine(root: string, args: string[]): Promise<string | null> {
   return (await git(root, args))?.trim() || null;
 }
 
+/**
+ * Whether `ref` names a commit: true; false when git says there is none
+ * (`rev-parse --verify --quiet` exits 1, silently, for a ref that is not
+ * there, or a repository with no commit yet); null when git could not say
+ * (it failed or timed out, or there is no folder). A failure is never taken
+ * for "not there".
+ */
+async function hasCommit(root: string, ref: string): Promise<boolean | null> {
+  if (!root) return null;
+  try {
+    await exec('git', ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd: root, ...OPTS });
+    return true;
+  } catch (err) {
+    return (err as { code?: unknown }).code === 1 ? false : null;
+  }
+}
+
 /** `-z` output: one path per NUL, so a name with spaces or quotes is whole. */
 function paths(out: string | null): string[] {
   return out ? out.split('\0').filter(Boolean) : [];
 }
 
 /**
+ * One change from the lists git gave for it. A list git could not give
+ * (it failed, timed out, or said more than fits) is not an empty one: the
+ * change is then `unread`, and so is one too long to hold. Every check is
+ * targeted to the change, so an unread one must never pass for "nothing
+ * changed" — that would ask for no checks at all.
+ */
+function listed(lists: (string | null)[], base: string | null): ChangedFiles {
+  if (lists.some((l) => l === null)) return { files: [], base, unread: 'git-failed' };
+  const files = [...new Set(lists.flatMap(paths))].sort();
+  return files.length > MAX_FILES ? { files: files.slice(0, MAX_FILES), base, unread: 'too-many' } : { files, base };
+}
+
+/**
  * The ref a change is measured from: the one asked for (or its
  * `origin/` twin), else where `origin/HEAD` points, else `main` or
- * `master`. Null when none is there: then only uncommitted changes count.
+ * `master`. `ref` is null when none is there; `failed` when git could not
+ * say for one tried before it, which might have been the one.
  */
-export async function resolveBase(root: string, base?: string | null): Promise<string | null> {
+async function findBase(root: string, base?: string | null): Promise<{ ref: string | null; failed: boolean }> {
   const candidates: string[] = [];
   if (base) candidates.push(base, `origin/${base}`);
   else {
@@ -53,9 +86,17 @@ export async function resolveBase(root: string, base?: string | null): Promise<s
     candidates.push('main', 'master', 'origin/main', 'origin/master');
   }
   for (const ref of candidates) {
-    if ((await git(root, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])) !== null) return ref;
+    const has = await hasCommit(root, ref);
+    if (has === null) return { ref: null, failed: true };
+    if (has) return { ref, failed: false };
   }
-  return null;
+  return { ref: null, failed: false };
+}
+
+/** The ref a change is measured from (see findBase), or null when none is
+ *  there or git could not say. */
+export async function resolveBase(root: string, base?: string | null): Promise<string | null> {
+  return (await findBase(root, base)).ref;
 }
 
 export interface ChangedFiles {
@@ -63,23 +104,44 @@ export interface ChangedFiles {
   files: string[];
   /** The ref the committed part was measured from; null when none was found. */
   base: string | null;
+  /** Set when `files` is not the whole change: git could not read it
+   *  (`git-failed`), it is more than MAX_FILES (`too-many`), or there is no
+   *  base branch to measure it from (`no-base`). Then every check applies,
+   *  as for a change nobody can see. */
+  unread?: 'git-failed' | 'too-many' | 'no-base';
+}
+
+/** Why a change could not be told, as a clause: "what it changed cannot be
+ *  told: <this>". One wording for the done gate and `coplan check`. */
+export function unreadWords(c: ChangedFiles): string {
+  return c.unread === 'too-many'
+    ? `it is more than ${MAX_FILES.toLocaleString('en')} files`
+    : c.unread === 'no-base'
+      ? 'no base branch was found to measure it from (set branches.base in .coplan/config.json)'
+      : 'git could not read it (it failed or took too long)';
 }
 
 /**
  * Every file the change touches: committed since it left the base
  * (`git diff <base>...HEAD`), staged or not (`git diff HEAD`), and new
- * files git does not ignore. Null outside a git repository.
+ * files git does not ignore. Null outside a git repository. With no base
+ * branch to measure from, the change is `unread` ('no-base'): what is not
+ * committed alone would leave out the whole build.
  */
 export async function changedFiles(root: string, base?: string | null): Promise<ChangedFiles | null> {
   if ((await git(root, ['rev-parse', '--git-dir'])) === null) return null;
-  const from = await resolveBase(root, base);
+  const head = await hasCommit(root, 'HEAD');
+  if (head === null) return { files: [], base: null, unread: 'git-failed' };
+  if (!head) return unborn(root);
+  const from = await findBase(root, base);
+  if (from.failed) return { files: [], base: null, unread: 'git-failed' };
+  if (!from.ref) return { files: [], base: null, unread: 'no-base' };
   const lists = await Promise.all([
-    from ? git(root, ['diff', '--name-only', '-z', `${from}...HEAD`]) : Promise.resolve(null),
+    git(root, ['diff', '--name-only', '-z', `${from.ref}...HEAD`]),
     git(root, ['diff', '--name-only', '-z', 'HEAD']),
     git(root, ['ls-files', '--others', '--exclude-standard', '-z']),
   ]);
-  const files = [...new Set(lists.flatMap(paths))].sort().slice(0, MAX_FILES);
-  return { files, base: from };
+  return listed(lists, from.ref);
 }
 
 /**
@@ -91,16 +153,21 @@ export async function changedFiles(root: string, base?: string | null): Promise<
 export async function changedSince(root: string, since?: string | null): Promise<ChangedFiles | null> {
   if ((await git(root, ['rev-parse', '--git-dir'])) === null) return null;
   const from = since ?? 'HEAD';
-  if ((await git(root, ['rev-parse', '--verify', '--quiet', `${from}^{commit}`])) === null) {
-    // A repository with no commit yet: everything in it is new.
-    if (since) return null;
-    return { files: paths(await git(root, ['ls-files', '--others', '--exclude-standard', '-z'])).sort(), base: null };
-  }
+  const has = await hasCommit(root, from);
+  if (has === null) return { files: [], base: since ?? null, unread: 'git-failed' };
+  if (!has) return since ? null : unborn(root);
   const lists = await Promise.all([
     git(root, ['diff', '--name-only', '-z', from]),
     git(root, ['ls-files', '--others', '--exclude-standard', '-z']),
   ]);
-  return { files: [...new Set(lists.flatMap(paths))].sort().slice(0, MAX_FILES), base: since ?? null };
+  return listed(lists, since ?? null);
+}
+
+/** A repository with no commit yet: everything in it is new — staged, or
+ *  not yet added. (There is no HEAD to diff against, which is not a
+ *  failure to read.) */
+async function unborn(root: string): Promise<ChangedFiles> {
+  return listed(await Promise.all([git(root, ['ls-files', '-z']), git(root, ['ls-files', '--others', '--exclude-standard', '-z'])]), null);
 }
 
 /** The root of the repository a folder is in; null outside one. */
@@ -134,8 +201,11 @@ export async function worktreeOf(root: string, branch: string): Promise<string |
 
 /** Files committed on `branch` since `since` (from where they diverged), for
  *  a branch no working tree has checked out any more; null when there is
- *  no such branch. */
-export async function committedOn(root: string, since: string, branch: string): Promise<string[] | null> {
-  const out = await git(root, ['diff', '--name-only', '-z', `${since}...${branch}`]);
-  return out === null ? null : paths(out);
+ *  no such branch. A branch that is there but whose diff git could not
+ *  read is `unread`, not empty. */
+export async function committedOn(root: string, since: string, branch: string): Promise<ChangedFiles | null> {
+  const has = await hasCommit(root, branch);
+  if (has === false) return null;
+  if (has === null) return { files: [], base: since, unread: 'git-failed' };
+  return listed([await git(root, ['diff', '--name-only', '-z', `${since}...${branch}`])], since);
 }
