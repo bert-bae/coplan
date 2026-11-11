@@ -2208,6 +2208,84 @@ test('text typed into a box drawn anew while its request is on its way is kept w
   assert.equal((within(review()).getByLabelText('What to change') as HTMLInputElement).value, 'Add a timeout, and log retries, and alert');
 });
 
+test('text added to a box drawn anew while its request is on its way is offered, once the request decides the round', async () => {
+  const plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  // The daemon applies the verdict: its plan lands over the stream before the answer.
+  await boot(makeSession(plan), (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const ops = (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops;
+    const next = applyOps(s.plan!, ops, 'user').plan;
+    store.apply({ type: 'snapshot', session: { ...s, plan: next } });
+    return { plan: next, changes: [] };
+  });
+  await openTab('Tasks');
+  const s = store.getState().session!;
+  const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
+  const inReview = claude(s.plan!, { op: 'upsert_task', id: 't3', stage: 'review' });
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: inReview } }));
+  const review = () => within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+  });
+  fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout' } });
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.click(within(review()).getByRole('button', { name: 'Send' }));
+    });
+    await openTab('Overview');
+    await openTab('Tasks');
+    fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout, and log retries' } });
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await act(async () => {
+    await held;
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  const offered = store.getState().toasts.filter((t) => t.copy !== undefined);
+  assert.equal(offered.length, 1, 'offered once');
+  assert.equal(offered[0]!.copy, 'Add a timeout, and log retries');
+  assert.match(offered[0]!.text, /went in/);
+  assert.equal(unsavedDrafts(), false, 'and not kept, on no screen');
+
+  // In the same box, not drawn anew, and with that box off screen when it goes through: offered as well.
+  const round2 = claude(claude(store.getState().session!.plan!, { op: 'upsert_task', id: 't3', stage: 'implement' }), { op: 'upsert_task', id: 't3', stage: 'review' });
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: round2 } }));
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+  });
+  fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Retry twice' } });
+  let again: (() => void) | null = null;
+  const heldAgain = new Promise<void>((r) => (again = r));
+  const realFetch2 = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await heldAgain, realFetch2(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.click(within(review()).getByRole('button', { name: 'Send' }));
+    });
+    fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Retry twice, with backoff' } });
+    await openTab('Overview');
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch2, writable: true, configurable: true });
+    again!();
+  }
+  await act(async () => {
+    await heldAgain;
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  const offeredAgain = store.getState().toasts.filter((t) => t.copy !== undefined);
+  assert.equal(offeredAgain.length, 2);
+  assert.equal(offeredAgain[1]!.copy, 'Retry twice, with backoff');
+  assert.equal(unsavedDrafts(), false);
+});
+
 test('a review box drawn anew while its request is on its way and then refused keeps the text, and can send again', async () => {
   const plan = lockedPlan(true);
   plan.tasks.find((t) => t.id === 't3')!.review = 'user';

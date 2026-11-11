@@ -47,11 +47,12 @@ function tellSend(key: string, news: SendNews, from: SendWatcher, text: string):
   for (const watch of sendWatchers.get(key) ?? []) if (watch !== from) watch(news, text);
 }
 /** Of those, change requests a plan landing let go (their round no longer
- *  waits on the user) while being sent: offered if the send is refused. */
+ *  waits on the user) while being sent: offered if the send is refused, or,
+ *  sent, if they hold more than went. */
 const letGoWhileSending = new Map<string, DroppedDraft>();
 let offerDropped: ((sessionId: string | null, dropped: DroppedDraft) => void) | null = null;
-/** Where a draft let go while being sent, then refused, is offered (the
- *  store's copy toast). */
+/** Where a draft let go while being sent is offered (the store's copy
+ *  toast): refused, or sent holding more than went. */
 export function onDroppedAfterSend(offer: (sessionId: string | null, dropped: DroppedDraft) => void): void {
   offerDropped = offer;
 }
@@ -138,7 +139,7 @@ export function pruneDrafts(sessionId: string, plan: Plan | null): DroppedDraft[
 export interface DroppedDraft {
   name: string;
   text: string;
-  why: 'locked' | 'review';
+  why: 'locked' | 'review' | 'added';
 }
 
 /** Which of the plan's sign-offs hold its fields still. */
@@ -263,7 +264,10 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
   draftNow.current = draft;
   watchRef.current = (news, text) => {
     setSentElsewhere(news === 'sending');
-    if (news === 'sent' && draftNow.current === text) {
+    // Sent, and its box gone with its round (parked): closed, whatever it
+    // holds; what was added while it went is offered by the sender (save).
+    const parked = news === 'sent' && key !== null && letGoWhileSending.has(key);
+    if (news === 'sent' && (draftNow.current === text || parked)) {
       setDraft(now.current.value);
       setEditing(openAtFirst);
     } else if (news !== 'sending') setStarted(now.current);
@@ -346,6 +350,13 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
         setSaving(false);
         // Thrown, once its field had gone: offered all the same.
         if (result === false && letGo) offerDropped?.(keySession, letGo);
+      }
+      // Sent, its field gone with it (a change request that decided its
+      // round): what was added while it went (in this box or one drawn anew,
+      // on screen or not) is offered, not left on no screen.
+      if (result !== false && letGo) {
+        if (letGo.text.trim() && letGo.text.trim() !== sent.trim()) offerDropped?.(keySession, { ...letGo, why: 'added' });
+        openDrafts.delete(key!);
       }
       // Refused once its field had gone (a change request whose round
       // stopped waiting as it was sent): offered now, and closed.

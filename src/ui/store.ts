@@ -199,14 +199,18 @@ class Store {
 
   /** A change request whose round stopped waiting, offered of its own
    *  session's plan (named if that is not the one shown). */
-  offerDroppedNow(sessionId: string | null, { name, text }: DroppedDraft, title?: string): void {
-    this.sayOf(sessionId, 'error', `That task no longer waits on your review, so ${name} could not be sent. Copy it to keep it:`, title, text);
+  offerDroppedNow(sessionId: string | null, { name, text, why }: DroppedDraft, title?: string): void {
+    const say =
+      why === 'added'
+        ? `${name[0]!.toUpperCase()}${name.slice(1)} went in; what you added while it was on its way was not sent. Copy it to keep it:`
+        : `That task no longer waits on your review, so ${name} could not be sent. Copy it to keep it:`;
+    this.sayOf(sessionId, 'error', say, title, text);
   }
 
   /** Text a plan landing took the field of, offered to copy. */
   private offerDropped(dropped: DroppedDraft, plan: Plan | null | undefined, sessionId: string): void {
     const { name, text, why } = dropped;
-    if (why === 'review') return this.offerDroppedNow(sessionId, dropped, plan?.title);
+    if (why === 'review' || why === 'added') return this.offerDroppedNow(sessionId, dropped, plan?.title);
     const how = plan?.submission ? 'was submitted' : 'had its design confirmed';
     this.toast('error', `"${plan?.title}" ${how}, so the text you had open in ${name} could not be saved. Copy it to keep it:`, text);
   }
