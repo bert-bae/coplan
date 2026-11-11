@@ -2586,6 +2586,41 @@ test('an edit refused after another session opened names its own plan', async ()
   assert.match(said(), /^Another plan: Task "Invalidation"/);
 });
 
+test('a plan title refused as changed underneath does not follow a session switch onto the other plan', async () => {
+  const other = makeSession({ ...makePlan(), title: 'Other plan' }, { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => {
+    if (route === '/api/session/s2') return { session: other };
+    if (route === '/api/session/s1/plan/ops') return { __status: 409, error: 'The plan title was changed while this edit was open, so it was not saved.' };
+    return undefined;
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^Plan title: .*\. Edit$/ }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Plan title' }), { target: { value: 'Mine' } });
+  // The agent renames the plan meanwhile: the save is refused, and held open.
+  const s = store.getState().session!;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: { ...s.plan!, title: 'Theirs' } } }));
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Plan title' }), { key: 'Enter' });
+  });
+  assert.ok(screen.getByText(/^Now: Theirs\./), 'refused, and held open');
+  assert.equal(store.getState().toasts.some((t) => t.copy !== undefined), false);
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  // Not open on the other plan, where Enter would save it over that one's title.
+  const left = screen.queryByRole('textbox', { name: 'Plan title' });
+  if (left) {
+    await act(async () => {
+      fireEvent.keyDown(left, { key: 'Enter' });
+    });
+  }
+  assert.equal(left === null, true, 'closed');
+  assert.equal(sentTo('s2').length, 0, 'nothing saved over the other plan');
+  assert.equal(sentTo('s1').length, 1, 'nor saved again over the agent\'s title on the way out');
+  assert.equal(store.getState().toasts.find((t) => t.copy !== undefined)?.copy, 'Mine', 'offered to copy');
+});
+
 test("a daemon that cannot be reached is said as it is, no one plan's doing", async () => {
   const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
   await boot(makeSession(), (route) => {

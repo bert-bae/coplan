@@ -169,6 +169,8 @@ function Header({ session }: { session: SessionState }) {
         <SessionsToggle />
         {plan ? (
           <InlineText
+            // A field left open (refused) goes with its plan, never onto the next.
+            key={session.sessionId}
             as="h1"
             className="head-title"
             value={plan.title}
