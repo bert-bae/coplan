@@ -4,6 +4,10 @@
 
 ### Fixes
 
+- **A session you come back to after a month keeps its plan while Coplan runs.** One not touched for 30 days
+  and since let go from memory came back with its plan from one folder and blank from the other, and a blank one
+  was then saved over it. A hook for it now reads it back from either folder and dates it anew, so the next start
+  keeps it too. Sessions untouched for 30 days are still cleared at start, as before.
 - **A proposal no longer stops the plan from showing after you move a task under one it moves.** If your move
   put where the proposal moves a task inside that task, reading the plan, previewing the proposal and accepting
   it all failed; the proposal now reads as out of date, naming the move.

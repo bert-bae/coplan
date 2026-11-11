@@ -415,7 +415,7 @@ test('whether a session\'s hooks ran is kept; one saved before it was recorded i
   assert.equal(summarize(reloaded.get('tools-only')!).hooked, false);
 });
 
-test('a saved session with no time of its own is dated by its file: one untouched for months expires', async () => {
+test('a saved session with no time of its own is dated by its file: one untouched for months expires at a start', async () => {
   const { paths, legacyName } = await import('../shared/paths.ts');
   const months = (Date.now() - 120 * 24 * 60 * 60 * 1000) / 1000;
   const undated = (id: string) => ({ sessionId: id, cwd: process.cwd(), title: 'early build', status: 'idle', plan: null });
@@ -434,12 +434,21 @@ test('a saved session with no time of its own is dated by its file: one untouche
   assert.equal(store.get('undated-own')?.sessionId, undefined, 'past keeping, not loaded');
   assert.equal(store.get('undated:old')?.sessionId, undefined, 'nor its old-folder copy');
   assert.notEqual(store.ensure('undated:old', process.cwd()).title, 'early build', 'nor brought back by ensure');
-  // One an earlier build left after this store loaded is judged by ensure.
+  // While the store runs, a session a hook asks for is live: one past keeping is read back, from an earlier
+  // build's folder or its own (dropped from memory, say), not saved over with a blank one.
   const late = path.join(home, 'sessions', legacyName('undated:late'));
   mkdirSync(late, { recursive: true });
   writeFileSync(path.join(late, 'state.json'), JSON.stringify(undated('undated:late')));
   utimesSync(path.join(late, 'state.json'), months, months);
-  assert.notEqual(store.ensure('undated:late', process.cwd()).title, 'early build', 'nor taken by ensure');
+  assert.equal(store.ensure('undated:late', process.cwd()).title, 'early build', 'read back from its old folder');
+  mkdirSync(paths.sessionDir('undated-late-own'), { recursive: true });
+  writeFileSync(paths.sessionState('undated-late-own'), JSON.stringify(undated('undated-late-own')));
+  utimesSync(paths.sessionState('undated-late-own'), months, months);
+  assert.equal(store.ensure('undated-late-own', process.cwd()).title, 'early build', 'read back from its own folder');
+  // Dated now and saved, so the next start keeps it.
+  const next = await freshStore();
+  assert.equal(next.get('undated:late')?.title, 'early build', 'kept at the next start (old folder)');
+  assert.equal(next.get('undated-late-own')?.title, 'early build', 'kept at the next start (own folder)');
   assert.ok(Math.abs((store.get('undated-recent')?.updatedAt ?? 0) - Date.now()) < 60_000, 'a recent one is kept');
 });
 

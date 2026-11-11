@@ -44,6 +44,10 @@ const PERSIST_DEBOUNCE_MS = 400;
  */
 /** Sessions untouched for longer than this are dropped from memory and disk on boot. */
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/** Not past keeping: saved (or, for a folder with no state, touched)
+ *  within SESSION_TTL_MS. A start deletes what is past it; ensure dates
+ *  anew one it reads back past it. */
+const fresh = (time: number, now: number) => time >= now - SESSION_TTL_MS;
 /** Hard cap on sessions held in memory, newest first. */
 /** Sessions kept in memory per pool (see `kept`). */
 const MAX_SESSIONS = 60;
@@ -129,14 +133,14 @@ export class SessionStore extends EventEmitter {
     // keeping, or a newer Coplan's.
     const taken = new Set<string>();
     const expired: string[] = [];
-    const cutoff = Date.now() - SESSION_TTL_MS;
+    const now = Date.now();
 
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
       const sessionDir = path.join(dir, entry.name);
       const file = path.join(sessionDir, 'state.json');
       if (!existsSync(file)) {
-        if (mtimeOf(sessionDir) < cutoff) expired.push(sessionDir);
+        if (!fresh(mtimeOf(sessionDir), now)) expired.push(sessionDir);
         continue;
       }
       const state = readState(file);
@@ -145,7 +149,7 @@ export class SessionStore extends EventEmitter {
       // (`savedByNewer`, set by ensure and checked by persistNow).
       if (state === NEWER) taken.add(entry.name);
       if (!state || state === NEWER) continue;
-      if ((state.updatedAt ?? 0) < cutoff) {
+      if (!fresh(state.updatedAt ?? 0, now)) {
         expired.push(sessionDir);
         continue;
       }
@@ -282,10 +286,14 @@ export class SessionStore extends EventEmitter {
       // A newer build's session is served blank from memory, marked so the
       // page says why, and never saved (persistNow).
       if (saved === NEWER) state.savedByNewer = true;
+      // Read back past keeping: a hook asks for it, so it is live, and dated
+      // now, or the next start would delete it.
+      const revived = saved && saved !== NEWER && !fresh(saved.updatedAt ?? 0, Date.now());
+      if (revived) state.updatedAt = Date.now();
       this.sessions.set(id, state);
       mkdirSync(paths.sessionDir(id), { recursive: true });
       // Read from the folder an earlier build kept it in: saved to its own.
-      if (old) this.persistNow(id);
+      if (old || revived) this.persistNow(id);
       this.emitEvent({ type: 'snapshot', session: state });
       this.broadcastSessionList();
     } else if (cwd && state.cwd !== cwd && !state.repoRoot) {
@@ -300,8 +308,8 @@ export class SessionStore extends EventEmitter {
   /**
    * A session's saved state: from its own folder or, while that holds no
    * state file, from the folder an earlier build kept it in (see
-   * loadFromDisk), if the state there is this session's and not past
-   * keeping. A state in its own folder that is another session's (an earlier
+   * loadFromDisk), if the state there is this session's. Whatever its age:
+   * a hook asks for it, so it is live (and ensure dates it now). A state in its own folder that is another session's (an earlier
    * build's, whose id this one is spelled like that session's folder name)
    * is no state of this one's: it is first copied to that session's own
    * folder, unless that session is here to save itself, so this one's saves
@@ -312,7 +320,7 @@ export class SessionStore extends EventEmitter {
     const legacy = () => {
       const old = legacyFile(id);
       const state = old ? readState(old) : undefined;
-      return state && state !== NEWER && state.sessionId === id && (state.updatedAt ?? 0) >= Date.now() - SESSION_TTL_MS ? state : undefined;
+      return state && state !== NEWER && state.sessionId === id ? state : undefined;
     };
     if (existsSync(file)) {
       const own = readState(file);
