@@ -433,7 +433,9 @@ process.stdout.on('error', (err: NodeJS.ErrnoException) => {
 /** Exits once what was said on stdout is written: a report that could not
  *  be is a failure, not an exit 0 with nothing there. A write's failure is
  *  told after its callback, so the tick after that is waited for too. A
- *  reader that stopped reading is not waited for long. */
+ *  slow reader (a pager on its first page) is waited for, as any command
+ *  writing to a pipe waits; one that goes away closes it (EPIPE), which
+ *  ends the wait. */
 function exit(code: number): void {
   const leave = () => {
     if (unwritten) {
@@ -442,7 +444,6 @@ function exit(code: number): void {
     }
     process.exit(code);
   };
-  setTimeout(leave, 5000);
   process.stdout.write('', () => setImmediate(leave));
 }
 

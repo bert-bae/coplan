@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **`coplan check | less` shows the whole report.** A long report piped to a reader that was slow to read it was
+  cut off after five seconds, without a word; the CLI now waits for it, as any command writing to a pipe does.
 - **A change request you are typing on a card is kept when the agent moves the card.** It was lost without a word
   as the card changed column; closing the page now asks first too.
 - **Submitting or confirming the design waits for a field whose save was refused.** Its warning names the field,

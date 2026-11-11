@@ -964,6 +964,41 @@ process.stderr.write = (chunk, ...rest) => {
   });
 }
 
+test('`coplan check` waits for a slow reader: a report past a pipe\'s buffer reaches it whole, the summary last', { skip: process.platform === 'win32', timeout: 30_000 }, async () => {
+  // A failing check whose output is far more than a pipe holds.
+  const big = "head -c 400000 /dev/zero | tr '\\0' x; echo; exit 1";
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'big', run: big }] } }) });
+  try {
+    const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] });
+    // Once its output is read through, and its stdout closed.
+    const closed = new Promise<number | null>((r) => cli.on('close', (c) => r(c)));
+    try {
+      // Not read for a while (longer than the 5 s an earlier build waited): a pager left on its first page.
+      await new Promise((r) => setTimeout(r, 6_000));
+      let out = '';
+      cli.stdout!.setEncoding('utf8').on('data', (d: string) => (out += d));
+      assert.equal(await closed, 1);
+      assert.match(out.trimEnd().split('\n').at(-1) ?? '', /^review: /, 'the summary arrived, last');
+    } finally {
+      cli.kill('SIGKILL');
+    }
+    // A reader that goes away instead (`| head -c1`) ends the wait at once.
+    const early = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] });
+    try {
+      const gone = new Promise<number | null>((r) => early.on('exit', (c) => r(c)));
+      await new Promise((r) => early.stdout!.once('readable', r));
+      const started = Date.now();
+      early.stdout!.destroy();
+      assert.equal(await gone, 1);
+      assert.ok(Date.now() - started < 3_000, `it ends without waiting (${Date.now() - started}ms)`);
+    } finally {
+      early.kill('SIGKILL');
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('`coplan check --json` with its report to a full disk fails, not passes with nothing written', { skip: !existsSync('/dev/full') }, () => {
   const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'ok', run: 'true' }] } }) });
   try {
