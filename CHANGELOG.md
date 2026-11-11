@@ -17,7 +17,8 @@
   own plan.
 - **Accepting a proposal no longer drops a link you made to a task it removes by way of a new one.** A proposal
   that names a new task twice, or removes a task (new or not) and adds it again, with its subtasks, is placed as
-  it will be applied, so your change shows it as out of date.
+  it will be applied, so your change shows it as out of date. One that removes the same task twice counts what
+  each removal takes, so a subtask you add under it, or a task you move under it, is not lost on accept.
 - **An editor you opened but didn't type in closes when the plan is signed off elsewhere.** It stayed open and
   disabled, and came back on stale text with a warning.
 - **A submitted plan's comments on parent tasks, and in By box, can be read.** Parent tasks with comments are

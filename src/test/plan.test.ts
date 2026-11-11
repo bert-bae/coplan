@@ -1246,6 +1246,17 @@ test('a proposed removal is out of date once the user changed what it would take
   assert.equal(accept(proposedTop).tasks.find((t) => t.id === 't2')?.parentId, null, 'as applied: t2 stays, at the top');
   const movedOut = applyOps(linkedPlan(), [{ op: 'move_task', id: 't2', parentId: null, index: 0 }], 'user').plan;
   assert.equal(proposalTouches(linkedPlan(), toTop)['removal:t1'], proposalTouches(movedOut, [{ op: 'remove', kind: 'task', id: 't1' }])['removal:t1']);
+  // Removed twice: what the first removal takes counts as much as the second's, which sees it gone already.
+  const removedTwice: PlanOp[] = [{ op: 'remove', kind: 'task', id: 't3' }, { op: 'upsert_task', id: 't3', title: 'UI' }, { op: 'remove', kind: 'task', id: 't3' }, { op: 'upsert_task', id: 't3', title: 'UI' }];
+  const proposedRemovedTwice = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: removedTwice }], 'claude').plan;
+  for (const [what, edits] of [
+    ['a subtask added under it', [{ op: 'upsert_task', id: 'u9', title: 'Mine', parentId: 't3' }]],
+    ['a task moved under it', [{ op: 'move_task', id: 't4', parentId: 't3', index: 0 }]],
+  ] as [string, PlanOp[]][]) {
+    const edited = applyOps(proposedRemovedTwice, edits, 'user').plan;
+    assert.throws(() => accept(edited), STALE, `removed twice, ${what}`);
+  }
+  assert.equal(accept(proposedRemovedTwice).tasks.find((t) => t.id === 't3')?.title, 'UI', 'with nothing changed, it applies');
   // A move alone leaves the moved task's links and dependencies as they are: no reason to refuse it.
   const moved = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [ops[0]!] }], 'claude').plan;
   const linked = applyOps(moved, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan;

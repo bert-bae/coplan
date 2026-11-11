@@ -2453,7 +2453,11 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
         // boxes' links (taskRemoval, as the unread-edit guard counts it).
         if (op.kind === 'task') {
           const taken = taskRemoval(outline(), op.id);
-          out[`removal:${op.id}`] = removal(op.id, taken);
+          // Removed again (added back in between): what each removal takes
+          // counts, the later one seeing the earlier one's taken already.
+          const key = `removal:${op.id}`;
+          const print = removal(op.id, taken);
+          out[key] = key in out ? fingerprint(JSON.stringify([out[key], print])) : print;
           out[`note:${op.id}`] = note(op.id);
           // What it takes is gone from the outline, and placed afresh if the
           // proposal adds it again.
