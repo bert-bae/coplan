@@ -2699,6 +2699,23 @@ test("a submitted plan offers comments only where there are some to read, as a d
   assert.ok(screen.getByRole('button', { name: 'Comments on Context' }));
 });
 
+test("a submitted plan's task comments, and the agent's replies, are read on its board", async () => {
+  const commented = applyOps(confirmedPlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  const submitted = submitPlan(commented, { target: 'session', prompt: 'build' });
+  const replied = applyOps(submitted, [{ op: 'reply', threadId: submitted.threads[0]!.id, text: 'The shared Redis client.' }], 'claude').plan;
+  await boot(makeSession(replied));
+  await openTab('Tasks');
+  assert.equal(document.querySelector('.board-card') === null, false, 'the board');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '1 open comment(s) on Invalidation' }));
+  });
+  const panel = screen.getByLabelText('Comments on Invalidation');
+  assert.ok(within(panel).getByText('Which client?'));
+  assert.ok(within(panel).getByText('The shared Redis client.'));
+  assert.equal(within(panel).queryByRole('button', { name: 'Reply' }) === null, true, 'to read, not to answer');
+  assert.equal(within(panel).queryByRole('button', { name: 'Resolve' }) === null, true, 'nor to resolve');
+});
+
 test('Reply goes while the reply is being written, so nothing empties it', async () => {
   const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
   await boot(makeSession(plan));

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEven
 import { filesText, useKeptDraft } from '../lib/drafts.ts';
 import { store, useCollapsedTasks, useEdit, useAgent, usePlan, useSessionId, useStillShown, useStore } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
-import { CommentToggle, ThreadPanel, useCommentsShown, useThreads } from '../components/Threads.tsx';
+import { CommentToggle, ThreadPanel, useThreads } from '../components/Threads.tsx';
 import { Focusable } from '../components/Item.tsx';
 import { KIND_GLYPH } from '../components/FlowCanvas.tsx';
 import { ProgressBar, STATUS_GLYPH, STATUS_LABEL, TaskStatusDot } from '../components/Progress.tsx';
@@ -559,8 +559,6 @@ function TaskRow(props: {
   const sub = kids.length ? countTasks({ tasks: [task, ...descendants(plan, task.id)] }) : null;
   const threads = useThreads({ kind: 'task', id: task.id });
   const target = { kind: 'task' as const, id: task.id };
-  // Open, unless the plan was locked with none to read.
-  const commenting = useCommentsShown(target) && comments;
   const parts = props.parts;
 
   const siblings = childrenOf(plan, task.parentId);
@@ -706,10 +704,10 @@ function TaskRow(props: {
         </button>
       </div>
 
-      {(expanded || commenting) && (
+      {(expanded || comments) && (
         <div className="task-detail" style={{ ['--depth' as string]: depth }}>
           {expanded && <TaskDetail plan={plan} task={task} />}
-          {commenting && <ThreadPanel target={target} label={task.title} />}
+          {comments && <ThreadPanel target={target} label={task.title} />}
         </div>
       )}
 
@@ -1105,6 +1103,9 @@ function useArrivals(plan: Plan): { arrived: Set<string>; announcement: string }
 function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived: boolean }) {
   const agent = useAgent();
   const [open, setOpen] = useState(false);
+  // Its comments, and the agent's replies, to read: the outline is gone.
+  const [comments, setComments] = useState(false);
+  const target = { kind: 'task' as const, id: task.id };
   const path: string[] = [];
   let cursor = task.parentId ? plan.tasks.find((t) => t.id === task.parentId) : undefined;
   while (cursor) {
@@ -1152,9 +1153,11 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
         <span className="item-id">{task.id}</span>
         {arrived && <span className="pill is-moved">just moved</span>}
         <span className="spacer" />
+        <CommentToggle target={target} label={task.title} open={comments} onToggle={() => setComments((v) => !v)} />
         <BriefButton task={task} />
         <span className={classNames('board-state', `is-${task.status}`)}>{STATUS_LABEL[task.status]}</span>
       </footer>
+      {comments && <ThreadPanel target={target} label={task.title} />}
     </Focusable>
   );
 }

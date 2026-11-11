@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **A submitted plan's task comments can be read on its board.** A card with comments has a toggle that shows
+  them, and the agent's replies, to read. Before, they were on no tab once the plan was submitted.
 - **Text in a field whose save was refused is no longer lost when the field goes.** Switching tabs or
   closing a task's Details, with the field still open on a refused save or that save still on its way, offers
   your text to copy.
