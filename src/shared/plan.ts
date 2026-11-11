@@ -1265,7 +1265,11 @@ function expectAtStart(plan: Plan, op: PlanOp, author: Author): PlanOp {
       }),
     };
   }
-  if (op.op === 'upsert_task' && op.noteWas !== undefined) op = noteAtStart(plan, op);
+  // `noteWas` comes from the page's note editor only. The agent may not send
+  // it: checkOpFields refuses it, but for a proposal's edits only later, in
+  // applyOne, after this has run. So it is checked and taken off for the
+  // user's edits alone, and an agent's proposed one keeps it to be refused.
+  if (op.op === 'upsert_task' && op.noteWas !== undefined && author === 'user') op = noteAtStart(plan, op);
   if ((op as { expect?: unknown }).expect === undefined) return op;
   switch (op.op) {
     case 'upsert_node':

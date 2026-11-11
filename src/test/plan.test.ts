@@ -555,6 +555,13 @@ test("the agent's progress note is not saved over by the user's note editor from
   assert.equal(applyOps(reported, [{ op: 'upsert_task', id: 't4', title: 'Wire it in', expect: opened.rev }], 'user').plan.tasks.find((t) => t.id === 't4')?.title, 'Wire it in');
 });
 
+test('`noteWas` is the note editor\'s: the agent may not send it, in an edit or in a proposal', () => {
+  const plan = fresh();
+  const withWas: PlanOp = { op: 'upsert_task', id: 't4', detail: 'More', noteWas: '' };
+  assert.throws(() => applyOps(plan, [withWas], 'claude'), /upsert_task does not take "noteWas"/);
+  assert.throws(() => applyOps(plan, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [withWas] }], 'claude'), /upsert_task does not take "noteWas"/);
+});
+
 test("Claude republishing a task with new content moves its revision; unchanged tasks keep theirs", () => {
   const plan = publishPlan(null, { ...INPUT, tasks: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }] }).plan;
   const next = publishPlan(plan, { ...INPUT, tasks: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B', detail: 'New.' }] }).plan;
