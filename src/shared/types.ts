@@ -238,6 +238,10 @@ export interface Task {
   /** Each review's verdict, newest last: who gave it, in which round, under
    *  which review mode. Done needs a pass for the current round. */
   reviews?: ReviewRecord[];
+  /** Dropped while it was done: taken up again for work, its round's
+   *  verdicts go, as they do when it leaves done; set done again (the drop
+   *  undone), they stay. */
+  wasDone?: boolean;
   /** Checks of its own, on top of the repository's (#54): required unless
    *  `optional`. The user's to set (`set_checks`), or an accepted proposal's.
    *  Subtasks inherit them. */

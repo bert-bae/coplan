@@ -923,6 +923,9 @@ test('a finished task taken up again, by way of dropped too, has no verdict for 
   // Done in a build, at round 1, with a pass (carried into the next plan by a republish).
   Object.assign(plan.tasks.find((t) => t.id === 't2')!, { status: 'done', round: 1, reviews: [{ round: 1, by: 'claude', verdict: 'pass', summary: 'ok', at: 1 }] });
   plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'dropped' });
+  // A drop undone, nothing changed: still done on its pass.
+  const undone = claude(plan, { op: 'upsert_task', id: 't2', status: 'done' });
+  assert.equal(roundVerdict(undone.tasks.find((t) => t.id === 't2')!, 'self')?.verdict, 'pass', 'a drop undone keeps the pass');
   plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'in_progress' });
   assert.equal(roundVerdict(plan.tasks.find((t) => t.id === 't2')!, 'self'), undefined, 'no pass for the work taken up again');
   // One dropped mid-review, before it was done, keeps its verdict: the changes asked for still stand.
@@ -931,6 +934,24 @@ test('a finished task taken up again, by way of dropped too, has no verdict for 
   midway = claude(midway, { op: 'upsert_task', id: 't2', status: 'dropped' });
   midway = claude(midway, { op: 'upsert_task', id: 't2', status: 'in_progress' });
   assert.equal(roundVerdict(midway.tasks.find((t) => t.id === 't2')!, 'self')?.verdict, 'changes');
+  // A pass given mid-review, then dropped before done and taken up again: kept, as it was never done.
+  let passed = fresh();
+  Object.assign(passed.tasks.find((t) => t.id === 't2')!, { status: 'in_progress', stage: 'review', round: 2, reviews: [{ round: 2, by: 'claude', verdict: 'pass', summary: 'ok', at: 1 }] });
+  passed = claude(passed, { op: 'upsert_task', id: 't2', status: 'dropped' });
+  passed = claude(passed, { op: 'upsert_task', id: 't2', status: 'in_progress' });
+  assert.equal(roundVerdict(passed.tasks.find((t) => t.id === 't2')!, 'self')?.verdict, 'pass');
+  // Done after a "changes" then a pass, dropped and taken up again: no stale "changes" left either.
+  let mixed = fresh();
+  Object.assign(mixed.tasks.find((t) => t.id === 't2')!, { status: 'done', round: 1, reviews: [{ round: 1, by: 'claude', verdict: 'changes', summary: 'Add a timeout', at: 1 }, { round: 1, by: 'claude', verdict: 'pass', summary: 'ok', at: 2 }] });
+  mixed = claude(mixed, { op: 'upsert_task', id: 't2', status: 'dropped' });
+  mixed = claude(mixed, { op: 'upsert_task', id: 't2', status: 'in_progress' });
+  assert.equal(roundVerdict(mixed.tasks.find((t) => t.id === 't2')!, 'self'), undefined);
+  // Known across a restart.
+  let reload = fresh();
+  Object.assign(reload.tasks.find((t) => t.id === 't2')!, { status: 'done', round: 1, reviews: [{ round: 1, by: 'claude', verdict: 'pass', summary: 'ok', at: 1 }] });
+  reload = normalizePlan(JSON.parse(JSON.stringify(claude(reload, { op: 'upsert_task', id: 't2', status: 'dropped' }))) as Plan & Record<string, unknown>, 'x');
+  reload = claude(reload, { op: 'upsert_task', id: 't2', status: 'in_progress' });
+  assert.equal(roundVerdict(reload.tasks.find((t) => t.id === 't2')!, 'self'), undefined);
 });
 
 test('a task the agent puts back to todo keeps its round across a restart, as the edit kept it', () => {

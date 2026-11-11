@@ -556,6 +556,12 @@ function keepsStage(status: TaskStatus): boolean {
   return status === 'in_progress' || status === 'blocked';
 }
 
+/** Whether a task with this status is work still to do (not done, not
+ *  dropped). */
+function isWorking(status: TaskStatus): boolean {
+  return status === 'todo' || keepsStage(status);
+}
+
 /**
  * Whether a task can take subtasks. One already started or finished cannot:
  * a subtask would make it a parent and take its progress (stage, rounds,
@@ -626,6 +632,7 @@ function buildTaskTree(
         ...(old?.round ? { round: old.round } : {}),
         ...(old?.checks?.length ? { checks: old.checks } : {}),
         ...(old?.reviews?.length ? { reviews: old.reviews } : {}),
+        ...(old?.wasDone && status === 'dropped' ? { wasDone: true } : {}),
         createdAt: old?.createdAt ?? now,
         updatedAt: now,
         createdBy: old?.createdBy ?? 'claude',
@@ -925,6 +932,7 @@ function normalizeTask(task: Task): Task {
   if (checks?.length) t.checks = checks;
   else delete t.checks;
   if (typeof t.startCommit !== 'string' || !/^[0-9a-f]{7,64}$/.test(t.startCommit)) delete t.startCommit;
+  if (t.wasDone !== true || t.status !== 'dropped') delete t.wasDone;
   // What a task's own checks say, from disk: anything malformed is dropped,
   // never allowed to break a gate.
   const added = Array.isArray(t.addChecks) ? t.addChecks.map(validTaskCheck).filter((c): c is TaskCheck => Boolean(c)) : [];
@@ -1990,14 +1998,18 @@ function editTask(
     const status = validStatus(wanted);
     if (!status) throw new PlanError(`"${wanted}" is not a task status (${TASK_STATUSES.join(', ')}).`);
     if (status !== task.status) {
-      // A finished task that is no longer done changes: the pass that closed
-      // its round passed the work as it was, not as it will be. Dropped too,
-      // or done → dropped → in progress would keep it. (One dropped before it
-      // was done keeps its verdicts: a "changes" still asks for them.)
-      if (task.status === 'done' && task.reviews) {
+      // A finished task taken up again changes: the pass that closed its
+      // round passed the work as it was, not as it will be. Its round's
+      // verdicts go when it leaves done for work, straight or by way of
+      // dropped (wasDone). Dropped, or a drop undone (back to done), it keeps
+      // them; one dropped before it was done keeps its own.
+      const finished = task.status === 'done' || (task.status === 'dropped' && task.wasDone);
+      if (isWorking(status) && finished && task.reviews) {
         task.reviews = task.reviews.filter((r) => r.round !== task.round);
         if (!task.reviews.length) delete task.reviews;
       }
+      if (task.status === 'done' && status === 'dropped') task.wasDone = true;
+      else delete task.wasDone;
       task.status = status;
       task.updatedAt = now;
       const note = task.note && typeof op.note === 'string' ? ` — ${short(task.note, 80)}` : '';
