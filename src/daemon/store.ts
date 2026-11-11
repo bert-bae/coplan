@@ -677,8 +677,7 @@ export class SessionStore extends EventEmitter {
     if (this.listenerCount('event') === 0 || (this.unheard.length && event.type === 'persist-error')) {
       if (event.type !== 'persist-error') return;
       this.unheard.push(event);
-      if (this.listenerCount('event') > 0) this.flushSoon();
-      else if (!this.listeners('newListener').includes(this.onListener)) this.on('newListener', this.onListener);
+      this.passOnHeld();
       return;
     }
     this.emit('event', event);
@@ -695,19 +694,28 @@ export class SessionStore extends EventEmitter {
   private flushPending = false;
 
   /** What was held, told on the next tick, one at a time and in order: one
-   *  raised meanwhile waits behind them, and a listener that throws leaves
-   *  the rest held. Held again if no listener is left by then. */
+   *  raised meanwhile waits behind them (and is told in the same pass).
+   *  What is still held after it (the listener gone part way, or one that
+   *  threw: its event is gone, as a live one would be) goes on. */
   private flushSoon(): void {
     if (this.flushPending) return;
     this.flushPending = true;
     process.nextTick(() => {
-      this.flushPending = false;
-      if (!this.listenerCount('event')) {
-        if (this.unheard.length) this.on('newListener', this.onListener);
-        return;
+      try {
+        while (this.unheard.length && this.listenerCount('event')) this.emit('event', this.unheard.shift()!);
+      } finally {
+        this.flushPending = false;
+        this.passOnHeld();
       }
-      while (this.unheard.length && this.listenerCount('event')) this.emit('event', this.unheard.shift()!);
     });
+  }
+
+  /** What is held, on its way: told soon while someone listens, else
+   *  waiting for the first listener (once). */
+  private passOnHeld(): void {
+    if (!this.unheard.length) return;
+    if (this.listenerCount('event') > 0) this.flushSoon();
+    else if (!this.listeners('newListener').includes(this.onListener)) this.on('newListener', this.onListener);
   }
 
   /** Every listener off, the one waiting for the first too: it waits again
@@ -716,7 +724,7 @@ export class SessionStore extends EventEmitter {
     // No name is every name: passed on as none, not as undefined.
     if (name === undefined) super.removeAllListeners();
     else super.removeAllListeners(name);
-    if (this.unheard.length && !this.listeners('newListener').includes(this.onListener)) this.on('newListener', this.onListener);
+    this.passOnHeld();
     return this;
   }
 

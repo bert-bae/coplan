@@ -813,6 +813,24 @@ test('save failures held for the first listener come in order, and are not stran
   assert.deepEqual(told, ['a', 'b', 'c', 'live']);
 });
 
+test('save failures still held when the only listener goes part way through are told to the next one', async () => {
+  const store = await freshStore();
+  const fail = (id: string) => store.emitEvent({ type: 'persist-error', sessionId: id, message: 'EIO' });
+  fail('a');
+  fail('b');
+  fail('c');
+  const first: string[] = [];
+  store.once('event', (e: { sessionId?: string }) => first.push(e.sessionId!));
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(first, ['a'], 'a once() listener takes one');
+  const next: string[] = [];
+  store.on('event', (e: { type: string; sessionId?: string }) => {
+    if (e.type === 'persist-error') next.push(e.sessionId!);
+  });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(next, ['b', 'c'], 'the rest go to the next listener');
+});
+
 test("a failed copy of another session's state, found in a folder it was named into, is said once, as any failed save", async () => {
   const { paths } = await import('../shared/paths.ts');
   const store = await freshStore();
