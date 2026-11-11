@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdtempSync, mkdirSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -963,6 +963,57 @@ process.stderr.write = (chunk, ...rest) => {
     assert.ok(worker === '' || worker.startsWith('Z'), `the worker is gone (${worker})`);
   });
 }
+
+test('`coplan check` waits for a slow reader: a report past a pipe\'s buffer reaches it whole, the summary last', { skip: process.platform === 'win32', timeout: 30_000 }, async () => {
+  // A failing check whose output is far more than a pipe holds.
+  const big = "head -c 400000 /dev/zero | tr '\\0' x; echo; exit 1";
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'big', run: big }] } }) });
+  try {
+    const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] });
+    // Once its output is read through, and its stdout closed.
+    const closed = new Promise<number | null>((r) => cli.on('close', (c) => r(c)));
+    try {
+      // Not read for a while (longer than the 5 s an earlier build waited): a pager left on its first page.
+      await new Promise((r) => setTimeout(r, 6_000));
+      let out = '';
+      cli.stdout!.setEncoding('utf8').on('data', (d: string) => (out += d));
+      assert.equal(await closed, 1);
+      assert.match(out.trimEnd().split('\n').at(-1) ?? '', /^review: /, 'the summary arrived, last');
+    } finally {
+      cli.kill('SIGKILL');
+    }
+    // A reader that goes away instead (`| head -c1`) ends the wait at once.
+    const early = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] });
+    try {
+      const gone = new Promise<number | null>((r) => early.on('exit', (c) => r(c)));
+      await new Promise((r) => early.stdout!.once('readable', r));
+      const started = Date.now();
+      early.stdout!.destroy();
+      assert.equal(await gone, 1);
+      assert.ok(Date.now() - started < 3_000, `it ends without waiting (${Date.now() - started}ms)`);
+    } finally {
+      early.kill('SIGKILL');
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('`coplan check --json` with its report to a full disk fails, not passes with nothing written', { skip: !existsSync('/dev/full') }, () => {
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'ok', run: 'true' }] } }) });
+  try {
+    const full = openSync('/dev/full', 'w');
+    try {
+      const run = spawnSync(process.execPath, [CLI, 'check', 'review', '--all', '--json'], { cwd: dir, stdio: ['ignore', full, 'pipe'], encoding: 'utf8', timeout: 20_000 });
+      assert.equal(run.status, 1, `the report was not written: ${run.stderr}`);
+      assert.match(run.stderr, /the output could not be written \(ENOSPC\)/);
+    } finally {
+      closeSync(full);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('`coplan check` ending any other way mid-check (a crash) takes the check with it', { skip: process.platform === 'win32' }, async () => {
   const crash = `const { existsSync } = require('node:fs');

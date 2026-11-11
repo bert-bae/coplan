@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync, chmodSync, renameSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync, chmodSync, renameSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -245,7 +245,7 @@ test("a session's own folder wins over its old one once it holds a copy, however
   assert.equal((await freshStore()).get('tie:break')?.cwd, '/home/me/proj');
 });
 
-test("an old folder's copy is not taken over another session's, nor when it has no time of its own; an unreadable own copy gives way to it", async () => {
+test("an old folder's copy is not taken over another session's; an unreadable own copy gives way to it", async () => {
   const { paths, sanitizeId, legacyName } = await import('../shared/paths.ts');
   const template = async (id: string, title: string) => {
     const store = await freshStore();
@@ -259,7 +259,6 @@ test("an old folder's copy is not taken over another session's, nor when it has 
     mkdirSync(path.join(home, 'sessions', folder), { recursive: true });
     writeFileSync(path.join(home, 'sessions', folder, 'state.json'), JSON.stringify(state));
   };
-  const titleIn = (folder: string) => JSON.parse(readFileSync(path.join(home, 'sessions', folder, 'state.json'), 'utf8')).plan?.title;
 
   // x:y's own folder holds y's copy, kept the old way there: x:y's newer old copy does not go over it.
   const x = 'x:y';
@@ -273,19 +272,6 @@ test("an old folder's copy is not taken over another session's, nor when it has 
   const booted = await freshStore();
   assert.equal(booted.get(y)?.plan?.title, 'Plan of y', 'y kept its plan');
   assert.equal(JSON.parse(readFileSync(path.join(home, 'sessions', sanitizeId(x), 'state.json'), 'utf8')).sessionId, y, "x's copy did not go over it");
-
-  // An old copy with no time of its own loses to the session's own, at load and by ensure.
-  for (const how of ['load', 'ensure'] as const) {
-    const id = `no:time-${how}`;
-    const up = how === 'ensure' ? await freshStore() : undefined;
-    const own = await template(id, 'Its own');
-    const { updatedAt: _none, ...undated } = { ...own, plan: { ...(own['plan'] as object), title: 'Undated old copy' } };
-    put(legacyName(id), undated);
-    const next = up ?? (await freshStore());
-    next.drop(id);
-    assert.equal(next.ensure(id, process.cwd()).plan?.title, 'Its own', how);
-    assert.equal(titleIn(sanitizeId(id)), 'Its own', `${how}: not saved over`);
-  }
 
   // Its own copy unreadable (moved aside), the old one is taken by ensure, as at load.
   const up = await freshStore();
@@ -429,6 +415,28 @@ test('whether a session\'s hooks ran is kept; one saved before it was recorded i
   assert.equal(summarize(reloaded.get('tools-only')!).hooked, false);
 });
 
+test('a saved session with no time of its own is dated by its file: one untouched for months expires', async () => {
+  const { paths, legacyName } = await import('../shared/paths.ts');
+  const months = (Date.now() - 120 * 24 * 60 * 60 * 1000) / 1000;
+  const undated = (id: string) => ({ sessionId: id, cwd: process.cwd(), title: 'early build', status: 'idle', plan: null });
+  // In its own folder, and in a folder an earlier build named.
+  mkdirSync(paths.sessionDir('undated-own'), { recursive: true });
+  writeFileSync(paths.sessionState('undated-own'), JSON.stringify(undated('undated-own')));
+  utimesSync(paths.sessionState('undated-own'), months, months);
+  const old = path.join(home, 'sessions', legacyName('undated:old'));
+  mkdirSync(old, { recursive: true });
+  writeFileSync(path.join(old, 'state.json'), JSON.stringify(undated('undated:old')));
+  utimesSync(path.join(old, 'state.json'), months, months);
+  // One saved recently is kept, dated by its file too.
+  mkdirSync(paths.sessionDir('undated-recent'), { recursive: true });
+  writeFileSync(paths.sessionState('undated-recent'), JSON.stringify(undated('undated-recent')));
+  const store = await freshStore();
+  assert.equal(store.get('undated-own')?.sessionId, undefined, 'past keeping, not loaded');
+  assert.equal(store.get('undated:old')?.sessionId, undefined, 'nor its old-folder copy');
+  assert.notEqual(store.ensure('undated:old', process.cwd()).title, 'early build', 'nor taken by ensure');
+  assert.ok(Math.abs((store.get('undated-recent')?.updatedAt ?? 0) - Date.now()) < 60_000, 'a recent one is kept');
+});
+
 test('a session saved by a newer Coplan is never read wrongly or saved over', async () => {
   const dir = path.join(home, 'sessions', 'from-the-future');
   mkdirSync(dir, { recursive: true });
@@ -447,6 +455,37 @@ test('a session saved by a newer Coplan is never read wrongly or saved over', as
   store.ensure('today', process.cwd());
   store.persistNow('today');
   assert.equal((JSON.parse(readFileSync(path.join(home, 'sessions', 'today', 'state.json'), 'utf8')) as { schemaVersion?: number }).schemaVersion, 1);
+});
+
+test("a copy in a session's old folder is not loaded over its own folder's file from a newer build", async () => {
+  const { paths, legacyName } = await import('../shared/paths.ts');
+  const id = 'down:grade';
+  // As this build saved it once, then moved to the folder an earlier build named.
+  const store = await freshStore();
+  store.ensure(id, process.cwd());
+  store.publishPlan(id, { title: 'From the earlier build', tasks: [{ title: 'one' }] });
+  store.persistNow(id);
+  store.drop(id);
+  const old = path.join(home, 'sessions', legacyName(id));
+  mkdirSync(old, { recursive: true });
+  // As an earlier build kept it: no format of its own named.
+  const { schemaVersion: _none, ...earlier } = JSON.parse(readFileSync(paths.sessionState(id), 'utf8')) as Record<string, unknown>;
+  const oldCopy = JSON.stringify({ ...earlier, updatedAt: Date.now() });
+  writeFileSync(path.join(old, 'state.json'), oldCopy);
+  // Since then, a newer Coplan has saved the session in its own folder.
+  const future = JSON.stringify({ schemaVersion: 99, sessionId: id, title: 'x', plan: { shape: 'new' } });
+  writeFileSync(paths.sessionState(id), future);
+  // Downgraded: the old copy is not loaded, nor saved over the newer one.
+  const booted = await freshStore();
+  assert.equal(booted.get(id)?.plan?.title, undefined, 'not loaded from the old folder');
+  // Nor when its hook arrives: started afresh in memory, never saved there.
+  const hooked = booted.ensure(id, process.cwd());
+  assert.equal(hooked.plan?.title, undefined, 'not taken from the old folder by ensure');
+  assert.equal(hooked.savedByNewer, true);
+  booted.persistNow(id);
+  booted.persistAll();
+  assert.equal(readFileSync(paths.sessionState(id), 'utf8'), future, "the newer build's file is left as it is");
+  assert.equal(readFileSync(path.join(old, 'state.json'), 'utf8'), oldCopy, 'and the old copy, for the earlier build');
 });
 
 test('a newer Coplan\'s session is not saved over under an id its folder name changes', async () => {
@@ -604,6 +643,32 @@ test('sessions planned in and plain ones are kept apart: neither many plain sess
     // The daemon's next start keeps the same ones.
     const reloaded = await freshStore();
     assert.deepEqual(new Set(reloaded.all().map((s) => s.sessionId)), kept);
+  } finally {
+    process.env['CC_HARNESS_HOME'] = home;
+    rmSync(own, { recursive: true, force: true });
+  }
+});
+
+test('a session kept the old way and past the cap stays cold at load: not copied to its own folder', async () => {
+  const own = mkdtempSync(path.join(tmpdir(), 'cc-harness-cap-'));
+  process.env['CC_HARNESS_HOME'] = own;
+  try {
+    const { paths, legacyName } = await import('../shared/paths.ts');
+    const store = await freshStore();
+    // Sixty-one plain sessions, each kept in the folder an earlier build named.
+    for (let i = 0; i < 61; i++) {
+      const id = `cold:${i}`;
+      store.ensure(id, process.cwd());
+      store.get(id)!.updatedAt = Date.now() - 60_000 + i;
+      store.persistNow(id);
+      store.drop(id);
+      renameSync(paths.sessionDir(id), path.join(own, 'sessions', legacyName(id)));
+    }
+    const booted = await freshStore();
+    assert.equal(booted.get('cold:0')?.sessionId, undefined, 'the oldest is past the cap');
+    assert.equal(existsSync(paths.sessionState('cold:0')), false, 'and is not saved to its own folder');
+    assert.ok(existsSync(path.join(own, 'sessions', legacyName('cold:0'), 'state.json')), 'its old copy is where it was');
+    assert.ok(existsSync(paths.sessionState('cold:1')), 'one within it is');
   } finally {
     process.env['CC_HARNESS_HOME'] = home;
     rmSync(own, { recursive: true, force: true });

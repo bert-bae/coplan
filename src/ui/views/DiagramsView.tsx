@@ -261,6 +261,7 @@ function DiagramPanel({ plan, diagram, locked }: { plan: Plan; diagram: Diagram;
         className="panel-title"
         value={diagram.title}
         label="Diagram title"
+        lockedBy="design"
         readOnly={locked}
         onSave={(title) => edit({ op: 'upsert_diagram', id: diagram.id, title })}
       />

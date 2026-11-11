@@ -1265,7 +1265,11 @@ function expectAtStart(plan: Plan, op: PlanOp, author: Author): PlanOp {
       }),
     };
   }
-  if (op.op === 'upsert_task' && op.noteWas !== undefined) op = noteAtStart(plan, op);
+  // `noteWas` comes from the page's note editor only. The agent may not send
+  // it: checkOpFields refuses it, but for a proposal's edits only later, in
+  // applyOne, after this has run. So it is checked and taken off for the
+  // user's edits alone, and an agent's proposed one keeps it to be refused.
+  if (op.op === 'upsert_task' && op.noteWas !== undefined && author === 'user') op = noteAtStart(plan, op);
   if ((op as { expect?: unknown }).expect === undefined) return op;
   switch (op.op) {
     case 'upsert_node':
@@ -2374,14 +2378,22 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
   // dependencies, its box links) under a removal; the proposal's other
   // edits only add its own.
   const movedTo = new Map<string, string | null>();
-  const removal = (id: string) => {
-    // Tasks the proposal adds stand in by their place alone, for what is
-    // moved under them; printed are only those already in the plan.
+  // The tasks the proposal adds (new, or of the plan's, removed first) seen
+  // so far: placed by their first edit.
+  const placed = new Set<string>();
+  // The plan's tasks the proposal has removed, and not added again.
+  const gone = new Set<string>();
+  // The plan as the proposal's edits have it so far: its removals gone, its
+  // moves made. Tasks the proposal adds stand in by their place alone, for
+  // what is moved under them.
+  const outline = (): Plan => {
+    if (!movedTo.size && !gone.size) return plan;
     const added = [...movedTo].filter(([t]) => !tasks.has(t)).map(([t, parentId]) => ({ id: t, title: t, parentId, order: 0, status: 'todo' }) as Task);
-    const outline = movedTo.size
-      ? { ...plan, tasks: [...plan.tasks.map((t) => (movedTo.has(t.id) ? { ...t, parentId: movedTo.get(t.id)! } : t)), ...added] }
-      : plan;
-    const { doomed, dependents, diagrams } = taskRemoval(outline, id);
+    const kept = plan.tasks.filter((t) => !gone.has(t.id)).map((t) => (movedTo.has(t.id) ? { ...t, parentId: movedTo.get(t.id)! } : t));
+    return { ...plan, tasks: [...kept, ...added] };
+  };
+  const removal = (id: string, { doomed, dependents, diagrams }: ReturnType<typeof taskRemoval>) => {
+    // Printed are only the tasks already in the plan.
     return fingerprint(
       JSON.stringify([
         // The task itself is `task:<id>`'s (and `note:<id>`'s) to print.
@@ -2421,7 +2433,14 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
       case 'set_checks':
         if (op.id) out[`task:${op.id}`] = rev('task', op.id);
         if (op.op === 'move_task' && op.id) movedTo.set(op.id, op.parentId ?? null);
-        if (op.op === 'upsert_task' && op.id && !tasks.has(op.id) && op.parentId) movedTo.set(op.id, op.parentId);
+        // A task the proposal adds is placed by its first edit, as applying
+        // it is: a later upsert's parentId moves nothing. One of the plan's
+        // it removed first is added afresh, where this edit puts it.
+        if (op.op === 'upsert_task' && op.id && (!tasks.has(op.id) || gone.has(op.id)) && !placed.has(op.id)) {
+          placed.add(op.id);
+          gone.delete(op.id);
+          if (op.parentId || tasks.has(op.id)) movedTo.set(op.id, op.parentId ?? null);
+        }
         // `builds` replaces which boxes link the task: a link made since is undone.
         if (op.op === 'upsert_task' && op.id && op.builds !== undefined) out[`links:${op.id}`] = links(op.id);
         if (op.op === 'upsert_task' && op.id && typeof op.note === 'string') out[`note:${op.id}`] = note(op.id);
@@ -2433,8 +2452,16 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
         // A task goes with its subtasks, the dependencies on them and its
         // boxes' links (taskRemoval, as the unread-edit guard counts it).
         if (op.kind === 'task') {
-          out[`removal:${op.id}`] = removal(op.id);
+          const taken = taskRemoval(outline(), op.id);
+          out[`removal:${op.id}`] = removal(op.id, taken);
           out[`note:${op.id}`] = note(op.id);
+          // What it takes is gone from the outline, and placed afresh if the
+          // proposal adds it again.
+          for (const t of taken.doomed) {
+            placed.delete(t);
+            movedTo.delete(t);
+            if (tasks.has(t)) gone.add(t);
+          }
         }
         break;
     }

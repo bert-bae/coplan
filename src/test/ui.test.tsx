@@ -14,7 +14,7 @@ setupDom();
 const { render, renderHook, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
 const { store, SessionScope, useEdit, useStillShown } = await import('../ui/store.ts');
-const { openDrafts, draftsLockedBy } = await import('../ui/lib/drafts.ts');
+const { openDrafts, draftsLockedBy, unsavedDrafts } = await import('../ui/lib/drafts.ts');
 const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan, confirmDesign, queueRevision, markRevisionDelivered } = await import('../shared/plan.ts');
 
 const INPUT: PlanInput = {
@@ -1008,6 +1008,115 @@ test('a note refused as changed underneath is not saved over it by leaving the f
   assert.equal(last['noteWas'], 'Blocked: DB creds missing');
 });
 
+test('a note refused as changed underneath is offered to copy when its field goes', async () => {
+  await boot(makeSession(), (route) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    return { __status: 409, error: 'The note of task "Invalidation" was changed while this edit was open, so it was not saved.' };
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^Status note: .*\. Edit$/ }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Status note' }), { target: { value: 'Waiting on the cache client' } });
+  const s = store.getState().session!;
+  const reported = applyOps(s.plan!, [{ op: 'upsert_task', id: 't2', status: 'blocked', note: 'Blocked: DB creds missing' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: reported } }));
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Status note' }), { key: 'Enter' });
+  });
+  assert.ok(screen.getByText(/^Now: Blocked: DB creds missing\./), 'refused, and held open');
+  assert.equal(store.getState().toasts.some((t) => t.copy !== undefined), false);
+  // A tab switch takes the field away: the text is offered, not dropped.
+  await openTab('Overview');
+  const kept = store.getState().toasts.find((t) => t.copy !== undefined);
+  assert.equal(kept?.copy, 'Waiting on the cache client');
+  assert.match(kept?.text ?? '', /Status note/);
+});
+
+/** A plan title refused as changed underneath, and held open with the user's text. */
+async function refusedTitle(): Promise<void> {
+  await boot(makeSession(), (route) => (route.endsWith('/plan/ops') ? { __status: 409, error: 'The plan title was changed while this edit was open, so it was not saved.' } : undefined));
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^Plan title: .*\. Edit$/ }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Plan title' }), { target: { value: 'Mine' } });
+  const s = store.getState().session!;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: { ...s.plan!, title: 'Theirs' } } }));
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Plan title' }), { key: 'Enter' });
+  });
+  assert.ok(screen.getByText(/^Now: Theirs\./), 'refused, and held open');
+}
+
+test('refused text held open is offered to copy when a lock takes its field, and the field closes', async () => {
+  await refusedTitle();
+  // Submitted in chat: the title can no longer be saved.
+  const s = store.getState().session!;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(confirmDesign(s.plan!, { prompt: 'tasks' }), { target: 'session', prompt: 'build' }) } }));
+  const kept = store.getState().toasts.find((t) => t.copy !== undefined);
+  assert.equal(kept?.copy, 'Mine');
+  assert.equal(screen.queryByRole('textbox', { name: 'Plan title' }) === null, true);
+  assert.equal(screen.queryByText(/^Now: /) === null, true, 'nothing left of it');
+});
+
+test("a sign-off's warning names refused text it would drop, by the sign-off that locks its field", async () => {
+  await refusedTitle();
+  const plan = store.getState().session!.plan!;
+  assert.deepEqual(draftsLockedBy('s1', plan, 'plan'), ['the plan title "Theirs"'], 'submitting locks the title');
+  assert.deepEqual(draftsLockedBy('s1', plan, 'design'), [], 'confirming the design does not');
+  assert.deepEqual(draftsLockedBy('s2', plan, 'plan'), [], "nor another session's sign-off");
+});
+
+test('refused text held open makes closing the page ask first', async () => {
+  await refusedTitle();
+  assert.equal(unsavedDrafts(), true, 'held');
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Plan title' }), { key: 'Escape' });
+  });
+  assert.equal(unsavedDrafts(), false, 'let go');
+});
+
+test('a note whose save is refused after its field went is offered to copy', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  await boot(makeSession(), (route) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    return { __status: 409, error: 'The note of task "Invalidation" was changed while this edit was open, so it was not saved.' };
+  });
+  const original = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', {
+    value: async (input: unknown, init?: RequestInit) => {
+      if (String(input).endsWith('/plan/ops')) await gate;
+      return original(input as string, init);
+    },
+    configurable: true,
+    writable: true,
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^Status note: .*\. Edit$/ }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Status note' }), { target: { value: 'Waiting on the cache client' } });
+  // Left by a blur (the save goes), then the tab switch takes the field away.
+  await act(async () => {
+    fireEvent.blur(screen.getByRole('textbox', { name: 'Status note' }));
+  });
+  await openTab('Overview');
+  // The save comes back refused, with nothing on screen to reopen.
+  await act(async () => {
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  const kept = store.getState().toasts.find((t) => t.copy !== undefined);
+  assert.equal(kept?.copy, 'Waiting on the cache client');
+});
+
 test('a view that throws takes only itself down', async () => {
   const broken = makePlan();
   // A shape only the canvas reads, and does not expect: arrows not a list.
@@ -1835,6 +1944,54 @@ test("a task the user reviews waits for their verdict on its card", async () => 
   assert.deepEqual(opsSent().at(-1), { op: 'review_task', id: 't3', verdict: 'changes', summary: 'Add a timeout' });
 });
 
+test('a change request being typed on a card is kept when the agent moves the card', async () => {
+  let plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 't3', stage: 'review' }], 'claude', undefined, { tracking: true }).plan;
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  const review = () => within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+  });
+  fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout' } });
+  assert.equal(unsavedDrafts(), true, 'closing the page asks first');
+  // The agent reports it blocked meanwhile: the card moves column.
+  const s = store.getState().session!;
+  const blocked = applyOps(s.plan!, [{ op: 'upsert_task', id: 't3', status: 'blocked', note: 'Waiting on review' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: blocked } }));
+  assert.ok(within(screen.getByRole('region', { name: 'Blocked' })).getByRole('group', { name: 'Your review of Wire into API' }), 'moved');
+  assert.equal((within(review()).getByLabelText('What to change') as HTMLInputElement).value, 'Add a timeout', 'what was typed is still there');
+});
+
+test('a change request typed on a card that went into review while on screen is kept too', async () => {
+  const plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  // The agent finishes building it: into review, the card where it was.
+  const s = store.getState().session!;
+  const inReview = applyOps(s.plan!, [{ op: 'upsert_task', id: 't3', stage: 'review' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: inReview } }));
+  const review = () => within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+  });
+  fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout' } });
+  // Anything else lands meanwhile, then the agent moves the card.
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: { ...inReview } } }));
+  assert.equal(unsavedDrafts(), true, 'still kept: closing the page asks first');
+  const blocked = applyOps(inReview, [{ op: 'upsert_task', id: 't3', status: 'blocked', note: 'Waiting on review' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: blocked } }));
+  assert.equal((within(review()).getByLabelText('What to change') as HTMLInputElement).value, 'Add a timeout', 'kept across the move');
+  // Round 2 (the verdict given in chat, the changes made): a fresh box, round 1's request let go.
+  const round2 = applyOps(blocked, [{ op: 'upsert_task', id: 't3', stage: 'refine' }, { op: 'upsert_task', id: 't3', stage: 'review' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: round2 } }));
+  assert.equal(round2.tasks.find((t) => t.id === 't3')!.round, 2);
+  assert.ok(within(review()).getByRole('button', { name: 'Request changes' }), 'a fresh box');
+  assert.equal(unsavedDrafts(), false, "round 1's request no longer kept");
+});
+
 test('a submitted plan is followed by box too, beside the board, with nothing on it to edit', async () => {
   await boot(makeSession(lockedPlan(true)));
   await openTab('Tasks');
@@ -2520,6 +2677,42 @@ test('an edit refused after another session opened names its own plan', async ()
   assert.match(said(), /^Another plan: Task "Invalidation"/);
 });
 
+test('a plan title refused as changed underneath does not follow a session switch onto the other plan', async () => {
+  const other = makeSession({ ...makePlan(), title: 'Other plan' }, { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => {
+    if (route === '/api/session/s2') return { session: other };
+    if (route === '/api/session/s1/plan/ops') return { __status: 409, error: 'The plan title was changed while this edit was open, so it was not saved.' };
+    return undefined;
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^Plan title: .*\. Edit$/ }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Plan title' }), { target: { value: 'Mine' } });
+  // The agent renames the plan meanwhile: the save is refused, and held open.
+  const s = store.getState().session!;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: { ...s.plan!, title: 'Theirs' } } }));
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Plan title' }), { key: 'Enter' });
+  });
+  assert.ok(screen.getByText(/^Now: Theirs\./), 'refused, and held open');
+  assert.equal(store.getState().toasts.some((t) => t.copy !== undefined), false);
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  // Not open on the other plan, where Enter would save it over that one's title.
+  const left = screen.queryByRole('textbox', { name: 'Plan title' });
+  if (left) {
+    await act(async () => {
+      fireEvent.keyDown(left, { key: 'Enter' });
+    });
+  }
+  assert.equal(left === null, true, 'closed');
+  assert.equal(sentTo('s2').length, 0, 'nothing saved over the other plan');
+  assert.match(store.getState().toasts.find((t) => t.copy !== undefined)?.text ?? '', /^(Another plan|"[^"]+"): Your text for Plan title/, 'said of its own plan, not the one on screen');
+  assert.equal(sentTo('s1').length, 1, 'nor saved again over the agent\'s title on the way out');
+  assert.equal(store.getState().toasts.find((t) => t.copy !== undefined)?.copy, 'Mine', 'offered to copy');
+});
+
 test("a daemon that cannot be reached is said as it is, no one plan's doing", async () => {
   const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
   await boot(makeSession(), (route) => {
@@ -2631,6 +2824,82 @@ test("a submitted plan offers comments only where there are some to read, as a d
   const resolved = applyOps(commented, [{ op: 'resolve', threadId: commented.threads[0]!.id, resolved: true }], 'user').plan;
   await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(resolved, { target: 'session', prompt: 'build' }) } }));
   assert.ok(screen.getByRole('button', { name: 'Comments on Context' }));
+});
+
+test("a submitted plan's task comments, and the agent's replies, are read on its board", async () => {
+  const commented = applyOps(confirmedPlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  const submitted = submitPlan(commented, { target: 'session', prompt: 'build' });
+  const replied = applyOps(submitted, [{ op: 'reply', threadId: submitted.threads[0]!.id, text: 'The shared Redis client.' }], 'claude').plan;
+  await boot(makeSession(replied));
+  await openTab('Tasks');
+  assert.equal(document.querySelector('.board-card') === null, false, 'the board');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '1 open comment(s) on Invalidation' }));
+  });
+  const panel = screen.getByLabelText('Comments on Invalidation');
+  assert.ok(within(panel).getByText('Which client?'));
+  assert.ok(within(panel).getByText('The shared Redis client.'));
+  assert.equal(within(panel).queryByRole('button', { name: 'Reply' }) === null, true, 'to read, not to answer');
+  assert.equal(within(panel).queryByRole('button', { name: 'Resolve' }) === null, true, 'nor to resolve');
+});
+
+test("a board card's open comments and details stay open when the agent moves it", async () => {
+  const commented = applyOps(confirmedPlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  const submitted = submitPlan(commented, { target: 'session', prompt: 'build' });
+  await boot(makeSession(submitted));
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '1 open comment(s) on Invalidation' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Invalidation' }));
+  });
+  assert.ok(screen.getByLabelText('Comments on Invalidation'));
+  // The agent starts it: the card moves to In progress.
+  const s = store.getState().session!;
+  const started = applyOps(s.plan!, [{ op: 'upsert_task', id: 't2', status: 'in_progress' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: started } }));
+  const card = within(screen.getByRole('region', { name: 'In progress' })).getByRole('button', { name: 'Invalidation' });
+  assert.equal(card.getAttribute('aria-expanded'), 'true', 'its details still open');
+  assert.ok(screen.getByLabelText('Comments on Invalidation'), 'its comments still open');
+  // Done, with nothing more to show: no details left open with no way to close them.
+  const done = applyOps(started, [{ op: 'upsert_task', id: 't2', status: 'done' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: done } }));
+  assert.equal(document.querySelector('.board-more') === null, true);
+});
+
+test("a submitted plan's comments on a parent task are read on its board", async () => {
+  const plan = confirmedPlan();
+  const parent = plan.tasks.find((t) => t.title === 'Storage layer')!.id;
+  const commented = applyOps(plan, [{ op: 'comment', target: { kind: 'task', id: parent }, text: 'Which store?' }], 'user').plan;
+  const submitted = submitPlan(commented, { target: 'session', prompt: 'build' });
+  const replied = applyOps(submitted, [{ op: 'reply', threadId: submitted.threads[0]!.id, text: 'Redis, as the diagram says.' }], 'claude').plan;
+  await boot(makeSession(replied));
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '1 open comment(s) on Storage layer' }));
+  });
+  const panel = screen.getByLabelText('Comments on Storage layer');
+  assert.ok(within(panel).getByText('Which store?'));
+  assert.ok(within(panel).getByText('Redis, as the diagram says.'));
+  // A parent with none has nothing to show.
+  assert.equal(screen.queryByRole('button', { name: /on Wire into API$/ }) === null, true);
+});
+
+test("a submitted plan's task comments are read in By box too", async () => {
+  const commented = applyOps(confirmedPlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  const submitted = submitPlan(commented, { target: 'session', prompt: 'build' });
+  const replied = applyOps(submitted, [{ op: 'reply', threadId: submitted.threads[0]!.id, text: 'The shared Redis client.' }], 'claude').plan;
+  await boot(makeSession(replied));
+  await openTab('Tasks');
+  await act(async () => store.set({ taskMode: 'boxes' }));
+  assert.equal(document.querySelector('.by-box') === null, false, 'by box');
+  const toggles = screen.getAllByRole('button', { name: '1 open comment(s) on Invalidation' });
+  await act(async () => {
+    fireEvent.click(toggles[0]!);
+  });
+  const panel = screen.getAllByLabelText('Comments on Invalidation')[0]!;
+  assert.ok(within(panel).getByText('Which client?'));
+  assert.ok(within(panel).getByText('The shared Redis client.'));
+  assert.equal(within(panel).queryByRole('button', { name: 'Reply' }) === null, true, 'to read');
 });
 
 test('Reply goes while the reply is being written, so nothing empties it', async () => {
@@ -2800,6 +3069,23 @@ test('a lock from elsewhere that drops text left open says so, with the text to 
     store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(confirmDesign(s.plan!, { prompt: 'tasks' }), { target: 'session', prompt: 'build' }) } });
   });
   assert.equal(store.getState().toasts.filter((t) => /could not be saved/.test(t.text)).length, 0, 'not said again');
+});
+
+test('an editor opened but not typed in is closed by a lock that comes after a snapshot', async () => {
+  await boot();
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  assert.ok(screen.getByRole('textbox', { name: 'the plan summary' }));
+  // A snapshot lands with nothing to lose in it: its kept draft is let go.
+  const s = store.getState().session!;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: { ...s.plan! } } }));
+  assert.ok(screen.getByRole('textbox', { name: 'the plan summary' }), 'still open');
+  // Then the design is confirmed in chat: the editor is told, and closes.
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: confirmDesign(s.plan!, { prompt: 'tasks' }) } }));
+  assert.equal(screen.queryByRole('textbox', { name: 'the plan summary' }) === null, true, 'closed by the lock');
+  assert.equal(store.getState().toasts.filter((t) => /could not be saved/.test(t.text)).length, 0, 'nothing to say: nothing was typed');
 });
 
 test('text saved in the same plan that locks its field is not said to be lost', async () => {

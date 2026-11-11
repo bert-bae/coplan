@@ -149,6 +149,7 @@ function SectionCard({ section, index, count, locked }: { section: Section; inde
           className="section-title"
           value={section.title}
           label="Section title"
+          lockedBy="design"
           readOnly={locked}
           onSave={(title) => edit({ op: 'upsert_section', id: section.id, title })}
         />

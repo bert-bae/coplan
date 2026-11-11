@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { describeTarget, isDesignLocked, isLocked, targetExists } from '../../shared/plan.ts';
+import { DEFAULT_BUILD_SETTINGS, effectiveReview, roundVerdict } from '../../shared/build.ts';
 import type { Plan, TargetKind } from '../../shared/types.ts';
 
 /**
  * Editors open with text, by session and field (`<session>:summary`,
  * `:section:<id>`, `:task:<id>:detail`, `:task:<id>:files`,
  * `:caption:<diagram>`, `:notes:<diagram>/<box>`), and comments being
- * written (`:comment:<kind>:<id>`, `:reply:<thread>`). An editor that
+ * written (`:comment:<kind>:<id>`, `:reply:<thread>`), and a change request
+ * on a task in the user's review (`:review:<task>:<round>`). An editor that
  * unmounts (a tab or a session switch, another box selected) reopens with
  * its draft and what it started from, and closing the page asks first while
  * any holds unsaved text. In memory only: a reload starts afresh, as the
@@ -39,8 +41,14 @@ export function keptDraft(sessionId: string | null, field: string): OpenDraft | 
   return openDrafts.get(draftKey(sessionId, field));
 }
 
+/** Inline fields holding text refused as changed underneath (Editable's
+ *  InlineText): not kept drafts, but text not saved all the same. Each with
+ *  its session, its name, and the sign-off that locks it. */
+export const refusedFields = new Map<object, { sessionId: string | null; name: string; lockedBy: 'design' | 'plan' }>();
+
 /** Whether any open editor holds text not saved yet. */
 export function unsavedDrafts(): boolean {
+  if (refusedFields.size) return true;
   for (const d of openDrafts.values()) if (d.draft !== d.value) return true;
   return false;
 }
@@ -49,15 +57,17 @@ export function unsavedDrafts(): boolean {
  * A session's plan, as it lands: its drafts that can no longer be saved, or
  * have nothing left to lose, go. That is a field that is gone, one that is
  * locked now, or one that holds the draft's text already (a save that
- * finished after its editor closed, say). With no plan (the session was
- * deleted), all of them go. Returns those that held unsaved text a lock
- * took the field from (a sign-off made in chat, say), named, for the user
- * to be told, and to copy.
+ * finished after its editor closed, an editor opened and not typed in).
+ * An editor still open whose field a lock takes is told, kept or not.
+ * With no plan (the session was deleted), all of them go. Returns those
+ * that held unsaved text a lock took the field from (a sign-off made in
+ * chat, say), named, for the user to be told, and to copy.
  */
 export function pruneDrafts(sessionId: string, plan: Plan | null): { name: string; text: string }[] {
   const prefix = `${sessionId}:`;
   const locked: { name: string; text: string }[] = [];
   const locks = plan ? { design: isDesignLocked(plan), plan: isLocked(plan) } : null;
+  const told = new Set<string>();
   for (const [key, open] of openDrafts) {
     if (!key.startsWith(prefix)) continue;
     const field = key.slice(prefix.length);
@@ -66,9 +76,21 @@ export function pruneDrafts(sessionId: string, plan: Plan | null): { name: strin
     const held = text !== undefined && fieldText(plan!, field, locks!) === undefined;
     if (text !== undefined && !held && text !== open.draft) continue;
     openDrafts.delete(key);
-    if (held) holders.get(key)?.();
+    if (held) {
+      holders.get(key)?.();
+      told.add(key);
+    }
     // Held, with text not saved (nor saved in the same plan as the lock).
     if (held && open.draft !== open.value && open.draft !== text) locked.push({ name: fieldName(plan!, field), text: open.draft });
+  }
+  // One open with nothing typed was let go at an earlier plan (above), so
+  // is not kept: the lock that takes its field tells it too.
+  if (plan) {
+    for (const [key, drop] of holders) {
+      if (!key.startsWith(prefix) || told.has(key) || openDrafts.has(key)) continue;
+      const field = key.slice(prefix.length);
+      if (fieldText(plan, field, { design: false, plan: false }) !== undefined && fieldText(plan, field, locks!) === undefined) drop();
+    }
   }
   return locked;
 }
@@ -100,6 +122,14 @@ function fieldText(plan: Plan, field: string, locks: Locks = { design: isDesignL
   if (m) return !locks.plan && targetExists(plan, { kind: m[1] as TargetKind, id: m[2]! }) ? '' : undefined;
   m = /^reply:(.+)$/.exec(field);
   if (m) return !locks.plan && plan.threads.some((t) => t.id === m![1]) ? '' : undefined;
+  // A change request to a task in the user's review: open while that round
+  // waits on their verdict, whatever the locks (the plan is submitted by then).
+  m = /^review:(.+):(\d+)$/.exec(field);
+  if (m) {
+    const task = plan.tasks.find((t) => t.id === m![1]);
+    const mode = task && effectiveReview(plan, task, plan.submission?.settings?.review ?? DEFAULT_BUILD_SETTINGS.review);
+    return task?.stage === 'review' && String(task.round) === m[2] && mode === 'user' && !roundVerdict(task, 'user') ? '' : undefined;
+  }
   m = /^caption:(.+)$/.exec(field);
   if (m) {
     const diagram = plan.diagrams.find((d) => d.id === m![1]);
@@ -126,6 +156,9 @@ export function draftsLockedBy(sessionId: string | null, plan: Plan, signOff: 'd
     if (!key.startsWith(prefix) || open.draft === open.value) continue;
     const field = key.slice(prefix.length);
     if (fieldText(plan, field) !== undefined && fieldText(plan, field, locks) === undefined) out.push(fieldName(plan, field));
+  }
+  for (const held of refusedFields.values()) {
+    if (held.sessionId === sessionId && (signOff === 'plan' || held.lockedBy === 'design')) out.push(held.name);
   }
   return out;
 }
@@ -164,7 +197,8 @@ export function filesText(files: string[] | undefined): string {
  * names it (null: not kept), in `sessionId` (useSessionId); `value` and
  * `version` are the field as it is now. A comment being written is one
  * too, with nothing saved (`value` ''): `openAtFirst`, its box is always
- * there.
+ * there. `field` is read once, at mount: a caller whose field changes while
+ * it is on screen draws it anew (a React key), as UserReview does by round.
  */
 export function useKeptDraft(sessionId: string | null, field: string | null, value: string, version: number | undefined, openAtFirst = false) {
   const [key] = useState(() => (field ? draftKey(sessionId, field) : null));
@@ -184,7 +218,7 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
   // A lock that takes the field takes what was written (pruneDrafts offers
   // it to copy): the field opens afresh once it is free again.
   useEffect(() => {
-    if (!key) return;
+    if (!key || !editing) return;
     const drop = () => {
       setDraft(now.current.value);
       setEditing(openAtFirst);
@@ -193,7 +227,7 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
     return () => {
       if (holders.get(key) === drop) holders.delete(key);
     };
-  }, [key, openAtFirst]);
+  }, [key, openAtFirst, editing]);
   const close = () => setEditing(false);
   return {
     editing,

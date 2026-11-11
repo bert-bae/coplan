@@ -4,6 +4,31 @@
 
 ### Fixes
 
+- **`coplan check | less` shows the whole report.** A long report piped to a reader that was slow to read it was
+  cut off after five seconds, without a word; the CLI now waits for it, as any command writing to a pipe does.
+- **A change request you are typing on a card is kept when the agent moves the card.** It was lost without a word
+  as the card changed column; closing the page now asks first too.
+- **Submitting or confirming the design waits for a field whose save was refused.** Its warning names the field,
+  as it does for text left open in an editor, instead of dropping it and offering it to copy afterwards.
+- **A board card you opened stays open when the agent moves it.** Its details and comments no longer close as
+  it changes column.
+- **Text in a field whose save was refused is kept safe from a sign-off and a closed tab.** The plan signed
+  off elsewhere offers it to copy, and closing the page asks first. Offered after a session switch, it names its
+  own plan.
+- **Accepting a proposal no longer drops a link you made to a task it removes by way of a new one.** A proposal
+  that names a new task twice, or removes a task (new or not) and adds it again, with its subtasks, is placed as
+  it will be applied, so your change shows it as out of date.
+- **An editor you opened but didn't type in closes when the plan is signed off elsewhere.** It stayed open and
+  disabled, and came back on stale text with a warning.
+- **A submitted plan's comments on parent tasks, and in By box, can be read.** Parent tasks with comments are
+  listed above the board, and each task in By box has the same read-only toggle as a card.
+- **`coplan check --json > report.json` on a full disk now fails.** It exited 0 with nothing written; it now
+  says the output could not be written and exits 1.
+- **A submitted plan's task comments can be read on its board.** A card with comments has a toggle that shows
+  them, and the agent's replies, to read. Before, they were on no tab once the plan was submitted.
+- **Text in a field whose save was refused is no longer lost when the field goes.** Switching tabs or
+  closing a task's Details, with the field still open on a refused save or that save still on its way, offers
+  your text to copy.
 - **`coplan check` no longer leaves a check running when it ends unexpectedly.** Ctrl+C with errors going
   to a full disk stops the check as usual, and a crash mid-check takes the check's processes with it.
 - **Accepting a proposed task removal no longer deletes notes you rewrote after it was made.** A note on the

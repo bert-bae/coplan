@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, confirmDesign, countTasks, MAX_CHANGES, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, proposalTouches, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import { previewProposal } from '../shared/proposals.ts';
 import type { DiagramNodeInput, Plan, PlanInput, PlanOp } from '../shared/types.ts';
@@ -555,6 +555,13 @@ test("the agent's progress note is not saved over by the user's note editor from
   assert.equal(applyOps(reported, [{ op: 'upsert_task', id: 't4', title: 'Wire it in', expect: opened.rev }], 'user').plan.tasks.find((t) => t.id === 't4')?.title, 'Wire it in');
 });
 
+test('`noteWas` is the note editor\'s: the agent may not send it, in an edit or in a proposal', () => {
+  const plan = fresh();
+  const withWas: PlanOp = { op: 'upsert_task', id: 't4', detail: 'More', noteWas: '' };
+  assert.throws(() => applyOps(plan, [withWas], 'claude'), /upsert_task does not take "noteWas"/);
+  assert.throws(() => applyOps(plan, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [withWas] }], 'claude'), /upsert_task does not take "noteWas"/);
+});
+
 test("Claude republishing a task with new content moves its revision; unchanged tasks keep theirs", () => {
   const plan = publishPlan(null, { ...INPUT, tasks: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }] }).plan;
   const next = publishPlan(plan, { ...INPUT, tasks: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B', detail: 'New.' }] }).plan;
@@ -962,10 +969,10 @@ test("an unread change of the user's is held to however many changes come after 
   };
   // More than the log keeps after them: the user's own, or the agent's (its progress, its comments).
   let byUser = edited();
-  for (let i = 0; i < 500; i++) byUser = applyOps(byUser, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: `note ${i}` }], 'user').plan;
+  for (let i = 0; i < MAX_CHANGES; i++) byUser = applyOps(byUser, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: `note ${i}` }], 'user').plan;
   held(byUser, "the user's");
   let byAgent = edited();
-  for (let i = 0; i < 500; i++) byAgent = applyOps(byAgent, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: `note ${i}` }], 'claude').plan;
+  for (let i = 0; i < MAX_CHANGES; i++) byAgent = applyOps(byAgent, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: `note ${i}` }], 'claude').plan;
   byAgent = applyOps(byAgent, [{ op: 'upsert_task', id: 't2', status: 'in_progress' }], 'claude', undefined, { tracking: true }).plan;
   assert.ok(byAgent.changes.some((c) => c.author === 'user' && c.target.id === 't3'), 'its change is kept in the log');
   held(byAgent, "the agent's");
@@ -975,6 +982,36 @@ test("an unread change of the user's is held to however many changes come after 
   const gap = applyOps(trimmed, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'later' }], 'user').plan;
   assert.ok(gap.changes[0]!.seq > gap.claudeReadSeq + 1);
   held(gap, 'trimmed');
+  // So is the rest of what Claude read: the plan's title, a section, a diagram.
+  const sectioned = read(applyOps(linkedPlan(), [{ op: 'upsert_section', title: 'Context', body: 'Why' }], 'claude').plan);
+  const sid = sectioned.sections[0]!.id;
+  const others = applyOps(sectioned, [
+    { op: 'set_meta', title: 'Theirs' },
+    { op: 'upsert_section', id: sid, body: 'Why, as the user has it' },
+    { op: 'upsert_node', diagramId: 'd1', id: 'a', label: 'Gateway' },
+  ], 'user').plan;
+  others.changes = [];
+  const otherGap = applyOps(others, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'later' }], 'user').plan;
+  assert.ok(otherGap.changes[0]!.seq > otherGap.claudeReadSeq + 1, 'a gap');
+  for (const [what, op] of [
+    ['the title', { op: 'set_meta', title: 'Mine' }],
+    ['a section', { op: 'upsert_section', id: sid, body: 'Claude text' }],
+    ['a diagram', { op: 'upsert_node', diagramId: 'd1', id: 'a', label: 'API' }],
+  ] as [string, PlanOp][]) {
+    assert.throws(() => applyOps(otherGap, [op], 'claude'), UNREAD, `trimmed: ${what}`);
+    assert.doesNotThrow(() => applyOps(read(otherGap), [op], 'claude'), `trimmed: ${what}, once read`);
+  }
+  assert.doesNotThrow(() => applyOps(otherGap, [{ op: 'upsert_task', id: 't3', detail: 'Its own' }], 'claude'), 'trimmed: what the user left alone');
+});
+
+test("the change log is bounded: the user's unread changes past four times its size go too", () => {
+  const edits: PlanOp[] = Array.from({ length: MAX_CHANGES * 4 + 20 }, (_, i) => ({ op: 'upsert_task', id: 't4', detail: `take ${i}` }));
+  const plan = applyOps(linkedPlan(), edits, 'user').plan;
+  assert.equal(plan.changes.length, MAX_CHANGES * 4);
+  assert.equal(plan.changes.at(-1)!.seq, plan.seq, 'the newest kept');
+  assert.equal(plan.changes[0]!.seq, plan.seq - MAX_CHANGES * 4 + 1, 'the oldest gone');
+  // What went is still held against the agent: all it read is compared.
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_task', id: 't4', detail: 'Claude text' }], 'claude'), UNREAD);
 });
 
 test("the agent's progress note cannot go over a note of the user's it has not read", () => {
@@ -1174,6 +1211,41 @@ test('a proposed removal is out of date once the user changed what it would take
   const proposedVia = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: viaNew }], 'claude').plan;
   assert.throws(() => accept(applyOps(proposedVia, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan), STALE);
   assert.deepEqual(accept(proposedVia).tasks.map((t) => t.id), ['t4'], 'nothing changed since: accepted');
+  // Upserted twice, the new task is placed by its first edit, as applying it is: a later parentId moves nothing.
+  const twice: PlanOp[] = [viaNew[0]!, { op: 'upsert_task', id: 't9', detail: 'The screens', parentId: 't4' }, ...viaNew.slice(1)];
+  const proposedTwice = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: twice }], 'claude').plan;
+  assert.equal(accept(proposedTwice).tasks.some((t) => t.id === 't3'), false, 'as applied: t9, and t3 under it, go with t1');
+  assert.throws(() => accept(applyOps(proposedTwice, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan), STALE);
+  // Removed and added again, it is placed by the edit that adds it again.
+  const again: PlanOp[] = [viaNew[0]!, { op: 'remove', kind: 'task', id: 't9' }, { op: 'upsert_task', id: 't9', title: 'Frontend', parentId: 't4' }, { op: 'move_task', id: 't3', parentId: 't9', index: 0 }, { op: 'remove', kind: 'task', id: 't4' }];
+  const proposedAgain = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: again }], 'claude').plan;
+  assert.equal(accept(proposedAgain).tasks.some((t) => t.id === 't3'), false, 'as applied: t3 goes with t4');
+  assert.throws(() => accept(applyOps(proposedAgain, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan), STALE);
+  // Its new subtasks go with it, so the proposal adding one again elsewhere places it there too: whether the
+  // new task it goes with is removed itself, or goes with a task of the plan's.
+  for (const [what, viaGone] of [
+    ['under a new task removed', [viaNew[0]!, { op: 'upsert_task', id: 't10', title: 'Screens', parentId: 't9' }, { op: 'remove', kind: 'task', id: 't9' }, { op: 'upsert_task', id: 't10', title: 'Screens', parentId: 't4' }, { op: 'move_task', id: 't3', parentId: 't10', index: 0 }, { op: 'remove', kind: 'task', id: 't4' }]],
+    ['under a task of the plan removed', [{ op: 'upsert_task', id: 't9', title: 'Frontend', parentId: 't2' }, { op: 'remove', kind: 'task', id: 't1' }, { op: 'upsert_task', id: 't9', title: 'Frontend', parentId: 't4' }, { op: 'move_task', id: 't3', parentId: 't9', index: 0 }, { op: 'remove', kind: 'task', id: 't4' }]],
+  ] as [string, PlanOp[]][]) {
+    const proposedGone = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: viaGone }], 'claude').plan;
+    assert.equal(accept(proposedGone).tasks.some((t) => t.id === 't3'), false, `${what}: as applied, t3 goes with t4`);
+    assert.throws(() => accept(applyOps(proposedGone, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan), STALE, what);
+  }
+  // A task of the plan's removed and added again is placed where the proposal adds it, as applying it is.
+  for (const [what, again, moved] of [
+    ['a subtask', [{ op: 'remove', kind: 'task', id: 't1' }, { op: 'upsert_task', id: 't2', title: 'Routes', parentId: 't4' }, { op: 'move_task', id: 't3', parentId: 't2', index: 0 }, { op: 'remove', kind: 'task', id: 't4' }], 't3'],
+    ['a top task', [{ op: 'remove', kind: 'task', id: 't3' }, { op: 'upsert_task', id: 't3', title: 'UI', parentId: 't4' }, { op: 'move_task', id: 't2', parentId: 't3', index: 0 }, { op: 'remove', kind: 'task', id: 't4' }], 't2'],
+  ] as [string, PlanOp[], string][]) {
+    const proposedAgain = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: again }], 'claude').plan;
+    assert.equal(accept(proposedAgain).tasks.some((t) => t.id === moved), false, `${what}: as applied, ${moved} goes with t4`);
+    assert.throws(() => accept(applyOps(proposedAgain, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: [moved] }], 'user').plan), STALE, what);
+  }
+  // Added again at the top, it is not taken by its old parent's removal: removing t1 takes t1 alone, as with t2 moved out first.
+  const toTop: PlanOp[] = [{ op: 'remove', kind: 'task', id: 't2' }, { op: 'upsert_task', id: 't2', title: 'Routes' }, { op: 'remove', kind: 'task', id: 't1' }];
+  const proposedTop = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: toTop }], 'claude').plan;
+  assert.equal(accept(proposedTop).tasks.find((t) => t.id === 't2')?.parentId, null, 'as applied: t2 stays, at the top');
+  const movedOut = applyOps(linkedPlan(), [{ op: 'move_task', id: 't2', parentId: null, index: 0 }], 'user').plan;
+  assert.equal(proposalTouches(linkedPlan(), toTop)['removal:t1'], proposalTouches(movedOut, [{ op: 'remove', kind: 'task', id: 't1' }])['removal:t1']);
   // A move alone leaves the moved task's links and dependencies as they are: no reason to refuse it.
   const moved = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [ops[0]!] }], 'claude').plan;
   const linked = applyOps(moved, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan;
@@ -1192,9 +1264,14 @@ test("a proposed note is out of date once the user rewrote that task's note", ()
   const noted: PlanOp = { op: 'upsert_task', id: 't3', note: 'Claude note' };
   const plan = applyOps(proposing(noted), [{ op: 'upsert_task', id: 't3', note: 'User note' }], 'user').plan;
   assert.throws(() => accept(plan), new RegExp(`${STALE.source}: the note on task t3 "UI"`));
-  // A task gone is named once, not again for its note.
-  const gone = applyOps(proposing(noted), [{ op: 'remove', kind: 'task', id: 't3' }], 'user').plan;
-  assert.throws(() => accept(gone), new RegExp(`${STALE.source}: task t3 changed since`));
+  // A task gone is named once, not again for its note: with none,
+  const gone0 = applyOps(proposing(noted), [{ op: 'remove', kind: 'task', id: 't3' }], 'user').plan;
+  assert.throws(() => accept(gone0), new RegExp(`${STALE.source}: task t3 changed since`));
+  // and with one (its print changed too).
+  const withNote = read(applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', note: 'User note' }], 'user').plan);
+  const proposedOnNote = applyOps(withNote, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [noted] }], 'claude').plan;
+  const gone = applyOps(proposedOnNote, [{ op: 'remove', kind: 'task', id: 't3' }], 'user').plan;
+  assert.throws(() => accept(gone), (err: Error) => new RegExp(`${STALE.source}: task t3 changed since`).test(err.message) && !/the note on/.test(err.message));
   // A proposal that leaves the note alone is not held up by it.
   const titled = applyOps(proposing({ op: 'upsert_task', id: 't3', title: 'Screens' }), [{ op: 'upsert_task', id: 't3', note: 'User note' }], 'user').plan;
   assert.equal(accept(titled).tasks.find((t) => t.id === 't3')?.note, 'User note');

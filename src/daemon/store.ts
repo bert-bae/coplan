@@ -125,10 +125,9 @@ export class SessionStore extends EventEmitter {
     if (!existsSync(dir)) return;
 
     const found: { state: SessionState; old: boolean }[] = [];
-    // The folders a newer Coplan's sessions are in, and the session each
-    // folder of its own holds.
-    const newer = new Set<string>();
-    const holds = new Map<string, string>();
+    // The folders that hold a session's state: a readable one not past
+    // keeping, or a newer Coplan's.
+    const taken = new Set<string>();
     const expired: string[] = [];
     const cutoff = Date.now() - SESSION_TTL_MS;
 
@@ -144,13 +143,13 @@ export class SessionStore extends EventEmitter {
       // One written by a newer Coplan than this daemon is left exactly as it
       // is until that build runs: not loaded, and never saved over
       // (`savedByNewer`, set by ensure and checked by persistNow).
-      if (state === NEWER) newer.add(entry.name);
+      if (state === NEWER) taken.add(entry.name);
       if (!state || state === NEWER) continue;
       if ((state.updatedAt ?? 0) < cutoff) {
         expired.push(sessionDir);
         continue;
       }
-      holds.set(entry.name, state.sessionId);
+      taken.add(entry.name);
       found.push({ state, old: entry.name !== sanitizeId(state.sessionId) });
     }
 
@@ -164,15 +163,16 @@ export class SessionStore extends EventEmitter {
     const chosen = new Map<string, { state: SessionState; old: boolean }>();
     for (const copy of found) {
       const own = sanitizeId(copy.state.sessionId);
-      if (copy.old && (newer.has(own) || holds.has(own))) continue;
+      if (copy.old && taken.has(own)) continue;
       chosen.set(copy.state.sessionId, copy);
     }
     // Anything past the cap stays on disk — cold, not stale.
-    for (const state of kept([...chosen.values()].map((c) => c.state))) this.sessions.set(state.sessionId, state);
+    const loaded = kept([...chosen.values()].map((c) => c.state));
+    for (const state of loaded) this.sessions.set(state.sessionId, state);
     // Expired first: a session's own folder past keeping is where a copy
     // from its old folder goes.
     for (const sessionDir of expired) discardDir(sessionDir);
-    for (const { state, old } of chosen.values()) if (old && this.sessions.has(state.sessionId)) this.persistNow(state.sessionId);
+    for (const state of loaded) if (chosen.get(state.sessionId)?.old) this.persistNow(state.sessionId);
   }
 
   /** Forget a session in memory; its state stays on disk. */
@@ -744,7 +744,8 @@ function readState(file: string): SessionState | typeof NEWER | undefined {
     delete state.schemaVersion;
     // Only ever set in memory: on disk it would stop this one being saved.
     delete state.savedByNewer;
-    migrate(state);
+    // One with no time of its own was last saved when its file was.
+    migrate(state, () => mtimeOf(file));
     return state;
   } catch {
     quarantine(file);
@@ -767,9 +768,9 @@ function quarantine(file: string): void {
  * review-loop state. The steps become top-level tasks and the prose becomes a
  * section; the rest has no meaning any more and is dropped.
  */
-function migrate(state: SessionState): void {
+function migrate(state: SessionState, savedAt: () => number): void {
   const raw = state as unknown as Record<string, unknown>;
-  state.updatedAt = typeof state.updatedAt === 'number' ? state.updatedAt : Date.now();
+  state.updatedAt = typeof state.updatedAt === 'number' ? state.updatedAt : savedAt();
   state.createdAt ??= state.updatedAt;
   state.title = typeof state.title === 'string' && state.title ? state.title : state.sessionId.slice(0, 8);
   state.cwd = typeof state.cwd === 'string' ? state.cwd : '';
@@ -780,11 +781,12 @@ function migrate(state: SessionState): void {
     const plan = emptyPlan(String(oldPlan['title'] ?? state.title));
     plan.summary = typeof oldPlan['summary'] === 'string' ? oldPlan['summary'] : '';
     if (typeof oldPlan['markdown'] === 'string' && oldPlan['markdown'].trim()) {
-      plan.sections.push({ id: 's1', title: 'Notes', body: oldPlan['markdown'], rev: 1, updatedAt: Date.now(), updatedBy: 'claude' });
+      plan.sections.push({ id: 's1', title: 'Notes', body: oldPlan['markdown'], rev: 1, updatedAt: state.updatedAt, updatedBy: 'claude' });
     }
     const steps = Array.isArray(oldPlan['steps']) ? (oldPlan['steps'] as Record<string, unknown>[]) : [];
+    // Dated as the session is: they were saved with it.
     steps.forEach((step, i) => {
-      const now = Date.now();
+      const now = state.updatedAt;
       plan.tasks.push({
         id: `t${i + 1}`,
         parentId: null,

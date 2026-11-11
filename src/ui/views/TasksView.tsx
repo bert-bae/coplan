@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEven
 import { filesText, useKeptDraft } from '../lib/drafts.ts';
 import { store, useCollapsedTasks, useEdit, useAgent, usePlan, useSessionId, useStillShown, useStore } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
-import { CommentToggle, ThreadPanel, useCommentsShown, useThreads } from '../components/Threads.tsx';
+import { CommentToggle, ThreadPanel, useThreads } from '../components/Threads.tsx';
 import { Focusable } from '../components/Item.tsx';
 import { KIND_GLYPH } from '../components/FlowCanvas.tsx';
 import { ProgressBar, STATUS_GLYPH, STATUS_LABEL, TaskStatusDot } from '../components/Progress.tsx';
@@ -81,9 +81,10 @@ export function TasksView() {
         {plan.tasks.length === 0 ? (
           <EmptyState title="No tasks" hint="This plan was submitted without a task breakdown." />
         ) : mode === 'boxes' ? (
-          <ByBox plan={plan} readOnly />
+          <ByBox key={sessionId} plan={plan} readOnly />
         ) : (
           <>
+            <ParentThreads key={sessionId} plan={plan} />
             <Board key={sessionId} plan={plan} readOnly />
             <BuildOrder plan={plan} collapsible />
           </>
@@ -247,6 +248,9 @@ function ByBox({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
 /** A task under a box; `status` is as the page shows it (see shownStatus). */
 function ByBoxRow({ plan, task, status, number, depth, readOnly }: { plan: Plan; task: Task; status: TaskStatus; number: string; depth: number; readOnly: boolean }) {
   const parent = hasSubtasks(plan, task.id);
+  // Locked, the outline is gone: its comments, and the agent's replies, are read here.
+  const [comments, setComments] = useState(false);
+  const target = { kind: 'task' as const, id: task.id };
   return (
     <li className={classNames('by-box-row', `is-${status}`)} style={{ ['--depth' as string]: depth }}>
       {parent || readOnly ? <TaskStatusDot plan={plan} task={task} status={status} named /> : <StatusDot task={task} />}
@@ -260,7 +264,13 @@ function ByBoxRow({ plan, task, status, number, depth, readOnly }: { plan: Plan;
         </span>
       )}
       <span className="spacer" />
+      {readOnly && <CommentToggle target={target} label={task.title} open={comments} onToggle={() => setComments((v) => !v)} />}
       <BriefButton task={task} />
+      {readOnly && comments && (
+        <div className="by-box-threads">
+          <ThreadPanel target={target} label={task.title} />
+        </div>
+      )}
     </li>
   );
 }
@@ -559,8 +569,6 @@ function TaskRow(props: {
   const sub = kids.length ? countTasks({ tasks: [task, ...descendants(plan, task.id)] }) : null;
   const threads = useThreads({ kind: 'task', id: task.id });
   const target = { kind: 'task' as const, id: task.id };
-  // Open, unless the plan was locked with none to read.
-  const commenting = useCommentsShown(target) && comments;
   const parts = props.parts;
 
   const siblings = childrenOf(plan, task.parentId);
@@ -706,10 +714,10 @@ function TaskRow(props: {
         </button>
       </div>
 
-      {(expanded || commenting) && (
+      {(expanded || comments) && (
         <div className="task-detail" style={{ ['--depth' as string]: depth }}>
           {expanded && <TaskDetail plan={plan} task={task} />}
-          {commenting && <ThreadPanel target={target} label={task.title} />}
+          {comments && <ThreadPanel target={target} label={task.title} />}
         </div>
       )}
 
@@ -999,6 +1007,15 @@ function Board({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
   const edit = useEdit();
   const [over, setOver] = useState<TaskStatus | null>(null);
   const { arrived, announcement } = useArrivals(plan);
+  // What is open on a tracked card (`details:t3`, `comments:t3`), kept here:
+  // a card the agent moves to another column is drawn anew there.
+  const [opened, setOpened] = useState<ReadonlySet<string>>(() => new Set());
+  const toggle = (key: string) =>
+    setOpened((cur) => {
+      const next = new Set(cur);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
   // Leaves only: a parent is a heading, and its progress is its subtasks'.
   const leaves = outline(plan)
     .map((r) => r.task)
@@ -1038,7 +1055,7 @@ function Board({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
             <div className="board-cards">
               {cards.map((task) =>
                 readOnly ? (
-                  <TrackedCard key={task.id} plan={plan} task={task} arrived={arrived.has(task.id)} />
+                  <TrackedCard key={task.id} plan={plan} task={task} arrived={arrived.has(task.id)} opened={opened} toggle={toggle} />
                 ) : (
                   <BoardCard key={task.id} plan={plan} task={task} />
                 ),
@@ -1052,6 +1069,38 @@ function Board({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
         {announcement}
       </p>
     </div>
+  );
+}
+
+/** A submitted plan's comments on parent tasks, which have no card: above
+ *  the board, to read, with the agent's replies. */
+function ParentThreads({ plan }: { plan: Plan }) {
+  const commented = new Set(plan.threads.filter((th) => th.target.kind === 'task').map((th) => th.target.id));
+  const parentIds = new Set(plan.tasks.map((t) => t.parentId));
+  const parents = outline(plan)
+    .map((r) => r.task)
+    .filter((t) => commented.has(t.id) && parentIds.has(t.id));
+  if (!parents.length) return null;
+  return (
+    <ul className="parent-threads" aria-label="Comments on parent tasks">
+      {parents.map((t) => (
+        <ParentThread key={t.id} task={t} />
+      ))}
+    </ul>
+  );
+}
+
+function ParentThread({ task }: { task: Task }) {
+  const [open, setOpen] = useState(false);
+  const target = { kind: 'task' as const, id: task.id };
+  return (
+    <li className="parent-thread">
+      <p className="parent-thread-head">
+        <span className="parent-thread-title">{task.title}</span>
+        <CommentToggle target={target} label={task.title} open={open} onToggle={() => setOpen((v) => !v)} />
+      </p>
+      {open && <ThreadPanel target={target} label={task.title} />}
+    </li>
   );
 }
 
@@ -1102,9 +1151,14 @@ function useArrivals(plan: Plan): { arrived: Set<string>; announcement: string }
 
 /** A card on a submitted plan's board: read, never moved by hand. Opens to
  *  show what the task involves. */
-function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived: boolean }) {
+function TrackedCard({ plan, task, arrived, opened, toggle }: { plan: Plan; task: Task; arrived: boolean; opened: ReadonlySet<string>; toggle: (key: string) => void }) {
   const agent = useAgent();
-  const [open, setOpen] = useState(false);
+
+  const toggleDetails = () => toggle(`details:${task.id}`);
+  // Its comments, and the agent's replies, to read: the outline is gone.
+  const comments = opened.has(`comments:${task.id}`);
+  const toggleComments = () => toggle(`comments:${task.id}`);
+  const target = { kind: 'task' as const, id: task.id };
   const path: string[] = [];
   let cursor = task.parentId ? plan.tasks.find((t) => t.id === task.parentId) : undefined;
   while (cursor) {
@@ -1113,13 +1167,15 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
   }
   // Its checks can still be set while it is not done, so there is always more.
   const more = Boolean(task.detail?.trim() || task.files?.length) || (task.status !== 'done' && task.status !== 'dropped');
+  // Open while there is more to show: a card moved to Done may have none left.
+  const open = more && opened.has(`details:${task.id}`);
   return (
     <Focusable kind="task" id={task.id} as="article" className={classNames('board-card', 'is-tracked', `is-${task.status}`, arrived && 'is-arrived')}>
       {path.length > 0 && <p className="board-path">{path.join(' › ')}</p>}
       <p className="board-title-row">
         {task.status === 'in_progress' && <span className="working-dot" title={`${agent.name} is on it`} aria-label={`${agent.name} is on it`} />}
         {more ? (
-          <button type="button" className="board-title" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+          <button type="button" className="board-title" aria-expanded={open} onClick={toggleDetails}>
             {task.title}
           </button>
         ) : (
@@ -1147,14 +1203,17 @@ function TrackedCard({ plan, task, arrived }: { plan: Plan; task: Task; arrived:
         </div>
       )}
       <ReviewHistory task={task} />
-      <UserReview plan={plan} task={task} />
+      {/* Drawn anew each round: its kept draft is that round's (useKeptDraft keys at mount). */}
+      <UserReview key={`${task.id}:${task.round}`} plan={plan} task={task} />
       <footer className="board-foot">
         <span className="item-id">{task.id}</span>
         {arrived && <span className="pill is-moved">just moved</span>}
         <span className="spacer" />
+        <CommentToggle target={target} label={task.title} open={comments} onToggle={toggleComments} />
         <BriefButton task={task} />
         <span className={classNames('board-state', `is-${task.status}`)}>{STATUS_LABEL[task.status]}</span>
       </footer>
+      {comments && <ThreadPanel target={target} label={task.title} />}
     </Focusable>
   );
 }
@@ -1197,16 +1256,14 @@ function ReviewHistory({ task }: { task: Task }) {
 function UserReview({ plan, task }: { plan: Plan; task: Task }) {
   const edit = useEdit();
   const agent = useAgent();
-  const [asking, setAsking] = useState(false);
-  const [why, setWhy] = useState('');
+  // Kept (drafts.ts) while typed: the agent moving the card draws it anew
+  // in another column, and closing the page asks first.
+  const { editing: asking, draft: why, setDraft: setWhy, begin, close, save } = useKeptDraft(useSessionId(), `review:${task.id}:${task.round}`, '', undefined);
   const mode = effectiveReview(plan, task, plan.submission?.settings?.review ?? DEFAULT_BUILD_SETTINGS.review);
   if (mode !== 'user' || task.stage !== 'review') return null;
   const decided = roundVerdict(task, 'user');
   if (decided) return null;
-  const send = async (verdict: 'pass' | 'changes', summary?: string) => {
-    const ok = await edit({ op: 'review_task', id: task.id, verdict, ...(summary ? { summary } : {}) });
-    if (ok) setAsking(false);
-  };
+  const verdict = (op: { verdict: 'pass' } | { verdict: 'changes'; summary: string }) => edit({ op: 'review_task', id: task.id, ...op });
   return (
     <div className="board-review" role="group" aria-label={`Your review of ${task.title}`}>
       <span className="field-label">Your review — round {task.round}</span>
@@ -1214,20 +1271,20 @@ function UserReview({ plan, task }: { plan: Plan; task: Task }) {
         <>
           <input className="input" value={why} placeholder={`What should ${agent.name} change?`} aria-label="What to change" onChange={(e) => setWhy(e.target.value)} />
           <span className="board-review-actions">
-            <button type="button" className="btn btn-sm" disabled={!why.trim()} onClick={() => void send('changes', why.trim())}>
+            <button type="button" className="btn btn-sm" disabled={!why.trim()} onClick={() => void save(() => verdict({ verdict: 'changes', summary: why.trim() }))}>
               Send
             </button>
-            <button type="button" className="btn btn-sm btn-ghost" onClick={() => setAsking(false)}>
+            <button type="button" className="btn btn-sm btn-ghost" onClick={close}>
               Cancel
             </button>
           </span>
         </>
       ) : (
         <span className="board-review-actions">
-          <button type="button" className="btn btn-sm btn-primary" onClick={() => void send('pass')}>
+          <button type="button" className="btn btn-sm btn-primary" onClick={() => void verdict({ verdict: 'pass' })}>
             Approve
           </button>
-          <button type="button" className="btn btn-sm" onClick={() => setAsking(true)}>
+          <button type="button" className="btn btn-sm" onClick={begin}>
             Request changes
           </button>
         </span>

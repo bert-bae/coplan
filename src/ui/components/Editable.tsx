@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Markdown } from './Markdown.tsx';
-import { useKeptDraft } from '../lib/drafts.ts';
-import { useSessionId } from '../store.ts';
+import { refusedFields, useKeptDraft } from '../lib/drafts.ts';
+import { store, useSessionId } from '../store.ts';
 import { classNames } from '../lib/format.ts';
 import { isComposing } from '../lib/keys.ts';
 
@@ -25,6 +25,7 @@ export function InlineText({
   as: Tag = 'span',
   readOnly = false,
   version,
+  lockedBy = 'plan',
 }: {
   value: string;
   /** Resolves false when the save was refused; the field then reopens with
@@ -41,6 +42,9 @@ export function InlineText({
    *  save, so a save over someone else's newer change is refused. The text
    *  editing started from is handed back too (`was`). */
   version?: number;
+  /** The sign-off that makes it read only: confirming the design, or
+   *  submitting the plan. Its warning names refused text held here. */
+  lockedBy?: 'design' | 'plan';
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
@@ -62,6 +66,25 @@ export function InlineText({
   useEffect(() => {
     if (!editing) setDraft(value);
   }, [value, editing]);
+
+  // Refused text is not saved by the field going (a tab switch, Details
+  // closed) any more than by a blur: offered to copy, not dropped. So is
+  // text whose save is refused after the field went (left by a blur).
+  const held = useRef({ refused, draft, label });
+  held.current = { refused, draft, label };
+  const mounted = useRef(true);
+  // Said of its own plan: the field may go with a switch to another.
+  const sessionId = useSessionId();
+  const offer = (text: string) =>
+    store.sayOf(sessionId, 'error', `Your text for ${held.current.label} was not saved. Copy it to keep it:`, undefined, text);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      const { refused: still, draft: text } = held.current;
+      if (still && text.trim() && text.trim() !== shown.current) offer(text);
+    };
+  }, []);
 
   useEffect(() => {
     if (editing) input.current?.select();
@@ -87,6 +110,7 @@ export function InlineText({
     if (!next || next === value) return;
     void Promise.resolve(onSave(next, startedAt.current, startedFrom.current)).then((result) => {
       if (result !== false) return;
+      if (!mounted.current) return offer(next);
       // Refused (most likely changed underneath): reopen with the text, on
       // the revision now on screen, so a deliberate second save goes in.
       done.current = false;
@@ -105,6 +129,27 @@ export function InlineText({
     setEditing(false);
     setDraft(value);
   };
+
+  // Held while refused: closing the page asks first. A lock that takes the
+  // field (the plan signed off elsewhere) offers the text to copy and closes it.
+  useEffect(() => {
+    if (!refused) return;
+    if (readOnly) {
+      const text = held.current.draft;
+      if (text.trim() && text.trim() !== shown.current) offer(text);
+      // Offered once: an unmount before the close lands does not offer it again.
+      held.current.refused = false;
+      abandon();
+      return;
+    }
+    const token = {};
+    // Named by what it holds now, to tell two of a kind apart.
+    refusedFields.set(token, { sessionId, name: `the ${held.current.label.toLowerCase()} "${shown.current}"`, lockedBy });
+    return () => {
+      refusedFields.delete(token);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- on refused and readOnly alone
+  }, [refused, readOnly]);
 
   if (readOnly) return <Tag className={classNames('inline-text', 'is-readonly', !value && 'is-empty', className)}>{value || placeholder}</Tag>;
 
