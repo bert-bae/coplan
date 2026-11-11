@@ -911,6 +911,8 @@ function normalizeTask(task: Task): Task {
   if (!validReview(t.review)) delete t.review;
   if (!validStage(t.stage)) delete t.stage;
   if (typeof t.round !== 'number' || !(t.round > 0)) delete t.round;
+  // A status it does not know is taken as not started.
+  t.status = validStatus(t.status) ?? 'todo';
   // Only a task in the cycle has a stage, as an edit leaves it. Its round
   // stays, whatever its status: only the user putting a task back starts it
   // over (an edit by the agent keeps it), and a round lost here would meet

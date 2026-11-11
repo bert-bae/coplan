@@ -940,6 +940,10 @@ test('a task in review with no round (an older or hand-edited plan) is in its fi
   assert.equal(stale.tasks[1]!.round, undefined);
   const blocked = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'blocked', order: 0, parentId: null, stage: 'implement' }] } as unknown as Plan & Record<string, unknown>, 'x');
   assert.equal(blocked.tasks[0]!.stage, 'implement', 'a blocked one keeps its stage');
+  // A status it does not know is taken as not started.
+  const odd = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'bogus', order: 0, parentId: null, stage: 'review', round: 2 }] } as unknown as Plan & Record<string, unknown>, 'x');
+  assert.equal(odd.tasks[0]!.status, 'todo');
+  assert.equal(odd.tasks[0]!.stage, undefined);
 });
 
 function linkedPlan(): Plan {

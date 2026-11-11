@@ -676,13 +676,17 @@ export class SessionStore extends EventEmitter {
     if (this.listenerCount('event') === 0) {
       if (event.type !== 'persist-error') return;
       if (!this.unheard.length) {
-        this.once('newListener', (name) => {
+        const onListener = (name: string | symbol) => {
           if (name !== 'event') return;
-          // Told once it is on (newListener comes just before).
+          this.off('newListener', onListener);
+          // Told once it is on (newListener comes just before); held again
+          // if it went before then.
           process.nextTick(() => {
-            for (const held of this.unheard.splice(0)) this.emit('event', held);
+            const held = this.unheard.splice(0);
+            for (const event of held) this.emitEvent(event);
           });
-        });
+        };
+        this.on('newListener', onListener);
       }
       this.unheard.push(event);
       return;

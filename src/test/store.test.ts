@@ -496,6 +496,8 @@ test('a save that fails while the store starts, before anyone listens, is told t
   try {
     const store = await freshStore();
     const told: string[] = [];
+    // A listener of another name first: the held one waits for an 'event' listener.
+    store.on('other', () => {});
     store.on('event', (e: { type: string; sessionId?: string; message?: string }) => {
       if (e.type === 'persist-error') told.push(`${e.sessionId}:${e.message}`);
     });
