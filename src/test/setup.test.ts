@@ -15,6 +15,7 @@ import {
   installCursor,
   setup,
   stagePlugin,
+  Stopped,
   uninstall,
   type RunResult,
   type SetupIo,
@@ -132,6 +133,26 @@ test('staging again replaces the old copy whole', () => {
   assert.equal(existsSync(path.join(stage, 'left-over')), false);
   assert.equal(existsSync(`${stage}.tmp`), false);
   assert.equal(existsSync(`${stage}.old`), false);
+});
+
+test('with its output failing (a full disk), setup asks nothing it cannot be seen asking: the walk stops', async () => {
+  const asked: string[] = [];
+  const io: SetupIo = {
+    ask: async (q) => {
+      asked.push(q);
+      return '';
+    },
+    say: () => {},
+    run: (): RunResult => ({ ok: true, stdout: '', out: '' }),
+    unwritable: () => true,
+  };
+  await assert.rejects(chooseAgents(io, ['claude', 'codex']), Stopped);
+  assert.deepEqual(asked, [], 'nothing asked, nothing answered blind');
+  // The failure told a tick after the line said just before the question, as a failed write is.
+  let failed = false;
+  const late: SetupIo = { ...io, say: () => void setImmediate(() => (failed = true)), unwritable: () => failed };
+  await assert.rejects(chooseAgents(late, ['claude', 'codex']), Stopped);
+  assert.deepEqual(asked, [], 'nor when it is told a tick late');
 });
 
 test('setup refuses to run from the staged copy, naming the clone', () => {

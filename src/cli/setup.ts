@@ -26,6 +26,7 @@ import { AGENTS, AGENT_KINDS, type AgentKind } from '../shared/agents.ts';
 import { paths, readVerifiedLock } from '../shared/paths.ts';
 import { baseBranch, detectHooks, renderConfig } from './init.ts';
 import { repoRoot } from '../shared/changes.ts';
+import { stdoutFailure } from './output.ts';
 
 /** The clone this CLI was built in: `dist/cli/main.js` is two levels down. */
 const CLONE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -58,6 +59,9 @@ export interface SetupIo {
   say: (line: string) => void;
   /** Run a command, never throwing. */
   run: (command: string, args: string[]) => RunResult;
+  /** Whether what is said cannot be seen (stdout failed: a full disk): no
+   *  question is asked then, and the walk stops (Stopped). */
+  unwritable?: () => boolean;
 }
 
 export interface SetupOptions {
@@ -87,6 +91,12 @@ const TRIES = 3;
 
 async function answer(io: SetupIo, question: string): Promise<string | null> {
   if (!io.ask) return null;
+  // A question no one can see is not asked, nor answered blind. A failed
+  // write (what was said just before) is told a tick after it.
+  if (io.unwritable) {
+    await new Promise((r) => setImmediate(r));
+    if (io.unwritable()) throw new Stopped();
+  }
   return (await io.ask(question)).trim();
 }
 
@@ -550,6 +560,11 @@ function askTerminal(question: string): Promise<string> {
       rl.close();
       resolve(a);
     });
+    // The question itself could not be written (its error comes a tick
+    // after): no one is reading it to answer.
+    setImmediate(() => {
+      if (stdoutFailure() && !answered) rl.close();
+    });
   });
 }
 
@@ -595,6 +610,7 @@ export async function runSetup(args: string[]): Promise<number> {
     say: (line) => console.log(line),
     run: runCommand,
     ...(interactive ? { ask: askTerminal } : {}),
+    unwritable: () => stdoutFailure() !== undefined,
   };
   const opts: SetupOptions = {
     root: CLONE,
@@ -605,6 +621,8 @@ export async function runSetup(args: string[]): Promise<number> {
   };
   const stop = (err: unknown) => {
     if (!(err instanceof Stopped)) throw err;
+    // Its output failed: a failure (main says so), not the user stopping it.
+    if (stdoutFailure()) return 1;
     console.log('\n\nStopped. What was done so far stays; run ./setup.sh again to finish.');
     return 130;
   };

@@ -50,7 +50,8 @@
 - **`coplan check --json > report.json` on a full disk now fails.** It exited 0 with nothing written; it now
   says the output could not be written and exits 1.
 - **`coplan check` stops before the next check when its output cannot be written.** On a full disk it started
-  the next check and killed it part way; a command running when its output fails now ends itself.
+  the next check and killed it part way; a command running when its output fails now ends itself. `setup` asks
+  nothing once its output fails, rather than wait on a question no one can see.
 - **A submitted plan's task comments can be read on its board.** A card with comments has a toggle that shows
   them, and the agent's replies, to read. Before, they were on no tab once the plan was submitted.
 - **Text in a field whose save was refused is no longer lost when the field goes.** Switching tabs or
