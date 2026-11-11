@@ -1565,6 +1565,12 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .by-box-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
 .by-box-row { display: flex; align-items: center; gap: var(--sp-2); min-height: 28px; padding: 1px 4px 1px calc(4px + var(--depth, 0) * 22px); border-radius: var(--r-sm); }
 .by-box-row:hover { background: var(--surface-hover); }
+.by-box-row:has(.by-box-threads) { flex-wrap: wrap; }
+.by-box-threads { flex-basis: 100%; }
+.parent-threads { list-style: none; margin: 0 0 var(--sp-3); padding: 0; display: grid; gap: var(--sp-2); }
+.parent-thread { padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border-subtle, var(--border-default)); border-radius: var(--r-md); background: var(--surface-raised); }
+.parent-thread-head { display: flex; align-items: center; gap: var(--sp-2); margin: 0; }
+.parent-thread-title { font-weight: 600; }
 .by-box-title { min-width: 0; font-size: var(--fs-md); font-weight: 500; color: var(--text-primary); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .by-box-row.is-done .by-box-title, .by-box-row.is-dropped .by-box-title { color: var(--text-tertiary); text-decoration: line-through; }
 .by-box-empty { margin: 4px 0 0; font-size: var(--fs-sm); font-style: italic; }

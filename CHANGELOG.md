@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **A submitted plan's comments on parent tasks, and in By box, can be read.** Parent tasks with comments are
+  listed above the board, and each task in By box has the same read-only toggle as a card.
 - **`coplan check --json > report.json` on a full disk now fails.** It exited 0 with nothing written; it now
   says the output could not be written and exits 1.
 - **A submitted plan's task comments can be read on its board.** A card with comments has a toggle that shows

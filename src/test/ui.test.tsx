@@ -2751,6 +2751,42 @@ test("a submitted plan's task comments, and the agent's replies, are read on its
   assert.equal(within(panel).queryByRole('button', { name: 'Resolve' }) === null, true, 'nor to resolve');
 });
 
+test("a submitted plan's comments on a parent task are read on its board", async () => {
+  const plan = confirmedPlan();
+  const parent = plan.tasks.find((t) => t.title === 'Storage layer')!.id;
+  const commented = applyOps(plan, [{ op: 'comment', target: { kind: 'task', id: parent }, text: 'Which store?' }], 'user').plan;
+  const submitted = submitPlan(commented, { target: 'session', prompt: 'build' });
+  const replied = applyOps(submitted, [{ op: 'reply', threadId: submitted.threads[0]!.id, text: 'Redis, as the diagram says.' }], 'claude').plan;
+  await boot(makeSession(replied));
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '1 open comment(s) on Storage layer' }));
+  });
+  const panel = screen.getByLabelText('Comments on Storage layer');
+  assert.ok(within(panel).getByText('Which store?'));
+  assert.ok(within(panel).getByText('Redis, as the diagram says.'));
+  // A parent with none has nothing to show.
+  assert.equal(screen.queryByRole('button', { name: /on Wire into API$/ }) === null, true);
+});
+
+test("a submitted plan's task comments are read in By box too", async () => {
+  const commented = applyOps(confirmedPlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  const submitted = submitPlan(commented, { target: 'session', prompt: 'build' });
+  const replied = applyOps(submitted, [{ op: 'reply', threadId: submitted.threads[0]!.id, text: 'The shared Redis client.' }], 'claude').plan;
+  await boot(makeSession(replied));
+  await openTab('Tasks');
+  await act(async () => store.set({ taskMode: 'boxes' }));
+  assert.equal(document.querySelector('.by-box') === null, false, 'by box');
+  const toggles = screen.getAllByRole('button', { name: '1 open comment(s) on Invalidation' });
+  await act(async () => {
+    fireEvent.click(toggles[0]!);
+  });
+  const panel = screen.getAllByLabelText('Comments on Invalidation')[0]!;
+  assert.ok(within(panel).getByText('Which client?'));
+  assert.ok(within(panel).getByText('The shared Redis client.'));
+  assert.equal(within(panel).queryByRole('button', { name: 'Reply' }) === null, true, 'to read');
+});
+
 test('Reply goes while the reply is being written, so nothing empties it', async () => {
   const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
   await boot(makeSession(plan));

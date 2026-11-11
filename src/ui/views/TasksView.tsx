@@ -81,9 +81,10 @@ export function TasksView() {
         {plan.tasks.length === 0 ? (
           <EmptyState title="No tasks" hint="This plan was submitted without a task breakdown." />
         ) : mode === 'boxes' ? (
-          <ByBox plan={plan} readOnly />
+          <ByBox key={sessionId} plan={plan} readOnly />
         ) : (
           <>
+            <ParentThreads key={sessionId} plan={plan} />
             <Board key={sessionId} plan={plan} readOnly />
             <BuildOrder plan={plan} collapsible />
           </>
@@ -247,6 +248,9 @@ function ByBox({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
 /** A task under a box; `status` is as the page shows it (see shownStatus). */
 function ByBoxRow({ plan, task, status, number, depth, readOnly }: { plan: Plan; task: Task; status: TaskStatus; number: string; depth: number; readOnly: boolean }) {
   const parent = hasSubtasks(plan, task.id);
+  // Locked, the outline is gone: its comments, and the agent's replies, are read here.
+  const [comments, setComments] = useState(false);
+  const target = { kind: 'task' as const, id: task.id };
   return (
     <li className={classNames('by-box-row', `is-${status}`)} style={{ ['--depth' as string]: depth }}>
       {parent || readOnly ? <TaskStatusDot plan={plan} task={task} status={status} named /> : <StatusDot task={task} />}
@@ -260,7 +264,13 @@ function ByBoxRow({ plan, task, status, number, depth, readOnly }: { plan: Plan;
         </span>
       )}
       <span className="spacer" />
+      {readOnly && <CommentToggle target={target} label={task.title} open={comments} onToggle={() => setComments((v) => !v)} />}
       <BriefButton task={task} />
+      {readOnly && comments && (
+        <div className="by-box-threads">
+          <ThreadPanel target={target} label={task.title} />
+        </div>
+      )}
     </li>
   );
 }
@@ -1050,6 +1060,38 @@ function Board({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
         {announcement}
       </p>
     </div>
+  );
+}
+
+/** A submitted plan's comments on parent tasks, which have no card: above
+ *  the board, to read, with the agent's replies. */
+function ParentThreads({ plan }: { plan: Plan }) {
+  const commented = new Set(plan.threads.filter((th) => th.target.kind === 'task').map((th) => th.target.id));
+  const parentIds = new Set(plan.tasks.map((t) => t.parentId));
+  const parents = outline(plan)
+    .map((r) => r.task)
+    .filter((t) => commented.has(t.id) && parentIds.has(t.id));
+  if (!parents.length) return null;
+  return (
+    <ul className="parent-threads" aria-label="Comments on parent tasks">
+      {parents.map((t) => (
+        <ParentThread key={t.id} task={t} />
+      ))}
+    </ul>
+  );
+}
+
+function ParentThread({ task }: { task: Task }) {
+  const [open, setOpen] = useState(false);
+  const target = { kind: 'task' as const, id: task.id };
+  return (
+    <li className="parent-thread">
+      <p className="parent-thread-head">
+        <span className="parent-thread-title">{task.title}</span>
+        <CommentToggle target={target} label={task.title} open={open} onToggle={() => setOpen((v) => !v)} />
+      </p>
+      {open && <ThreadPanel target={target} label={task.title} />}
+    </li>
   );
 }
 
