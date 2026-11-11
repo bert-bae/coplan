@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync, chmodSync, renameSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync, chmodSync, renameSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -413,6 +413,28 @@ test('whether a session\'s hooks ran is kept; one saved before it was recorded i
   assert.equal(summarize(reloaded.get('before-hooked')!).hooked, true);
   assert.equal(reloaded.get('tools-only')?.hookedAt, null, 'still none after a restart');
   assert.equal(summarize(reloaded.get('tools-only')!).hooked, false);
+});
+
+test('a saved session with no time of its own is dated by its file: one untouched for months expires', async () => {
+  const { paths, legacyName } = await import('../shared/paths.ts');
+  const months = (Date.now() - 120 * 24 * 60 * 60 * 1000) / 1000;
+  const undated = (id: string) => ({ sessionId: id, cwd: process.cwd(), title: 'early build', status: 'idle', plan: null });
+  // In its own folder, and in a folder an earlier build named.
+  mkdirSync(paths.sessionDir('undated-own'), { recursive: true });
+  writeFileSync(paths.sessionState('undated-own'), JSON.stringify(undated('undated-own')));
+  utimesSync(paths.sessionState('undated-own'), months, months);
+  const old = path.join(home, 'sessions', legacyName('undated:old'));
+  mkdirSync(old, { recursive: true });
+  writeFileSync(path.join(old, 'state.json'), JSON.stringify(undated('undated:old')));
+  utimesSync(path.join(old, 'state.json'), months, months);
+  // One saved recently is kept, dated by its file too.
+  mkdirSync(paths.sessionDir('undated-recent'), { recursive: true });
+  writeFileSync(paths.sessionState('undated-recent'), JSON.stringify(undated('undated-recent')));
+  const store = await freshStore();
+  assert.equal(store.get('undated-own')?.sessionId, undefined, 'past keeping, not loaded');
+  assert.equal(store.get('undated:old')?.sessionId, undefined, 'nor its old-folder copy');
+  assert.notEqual(store.ensure('undated:old', process.cwd()).title, 'early build', 'nor taken by ensure');
+  assert.ok(Math.abs((store.get('undated-recent')?.updatedAt ?? 0) - Date.now()) < 60_000, 'a recent one is kept');
 });
 
 test('a session saved by a newer Coplan is never read wrongly or saved over', async () => {

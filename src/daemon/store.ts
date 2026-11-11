@@ -744,7 +744,8 @@ function readState(file: string): SessionState | typeof NEWER | undefined {
     delete state.schemaVersion;
     // Only ever set in memory: on disk it would stop this one being saved.
     delete state.savedByNewer;
-    migrate(state);
+    // One with no time of its own was last saved when its file was.
+    migrate(state, () => mtimeOf(file));
     return state;
   } catch {
     quarantine(file);
@@ -767,9 +768,9 @@ function quarantine(file: string): void {
  * review-loop state. The steps become top-level tasks and the prose becomes a
  * section; the rest has no meaning any more and is dropped.
  */
-function migrate(state: SessionState): void {
+function migrate(state: SessionState, savedAt: () => number): void {
   const raw = state as unknown as Record<string, unknown>;
-  state.updatedAt = typeof state.updatedAt === 'number' ? state.updatedAt : Date.now();
+  state.updatedAt = typeof state.updatedAt === 'number' ? state.updatedAt : savedAt();
   state.createdAt ??= state.updatedAt;
   state.title = typeof state.title === 'string' && state.title ? state.title : state.sessionId.slice(0, 8);
   state.cwd = typeof state.cwd === 'string' ? state.cwd : '';
@@ -780,11 +781,12 @@ function migrate(state: SessionState): void {
     const plan = emptyPlan(String(oldPlan['title'] ?? state.title));
     plan.summary = typeof oldPlan['summary'] === 'string' ? oldPlan['summary'] : '';
     if (typeof oldPlan['markdown'] === 'string' && oldPlan['markdown'].trim()) {
-      plan.sections.push({ id: 's1', title: 'Notes', body: oldPlan['markdown'], rev: 1, updatedAt: Date.now(), updatedBy: 'claude' });
+      plan.sections.push({ id: 's1', title: 'Notes', body: oldPlan['markdown'], rev: 1, updatedAt: state.updatedAt, updatedBy: 'claude' });
     }
     const steps = Array.isArray(oldPlan['steps']) ? (oldPlan['steps'] as Record<string, unknown>[]) : [];
+    // Dated as the session is: they were saved with it.
     steps.forEach((step, i) => {
-      const now = Date.now();
+      const now = state.updatedAt;
       plan.tasks.push({
         id: `t${i + 1}`,
         parentId: null,
