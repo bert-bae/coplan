@@ -1990,9 +1990,11 @@ function editTask(
     const status = validStatus(wanted);
     if (!status) throw new PlanError(`"${wanted}" is not a task status (${TASK_STATUSES.join(', ')}).`);
     if (status !== task.status) {
-      // A finished task taken up again changes: the pass that closed its
-      // round passed the work as it was, not as it will be.
-      if (task.status === 'done' && status !== 'dropped' && task.reviews) {
+      // A finished task that is no longer done changes: the pass that closed
+      // its round passed the work as it was, not as it will be. Dropped too,
+      // or done → dropped → in progress would keep it. (One dropped before it
+      // was done keeps its verdicts: a "changes" still asks for them.)
+      if (task.status === 'done' && task.reviews) {
         task.reviews = task.reviews.filter((r) => r.round !== task.round);
         if (!task.reviews.length) delete task.reviews;
       }

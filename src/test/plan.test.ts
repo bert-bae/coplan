@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyOps, confirmDesign, countTasks, descendants, MAX_CHANGES, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, proposalTouches, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
+import { roundVerdict } from '../shared/build.ts';
 import { previewProposal } from '../shared/proposals.ts';
 import type { DiagramNodeInput, Plan, PlanInput, PlanOp, Task } from '../shared/types.ts';
 
@@ -915,6 +916,22 @@ test('proposals survive a reload; one that lost its edits does not', () => {
 
 /* An edit of Claude's is refused when it would overwrite a change of the
  * user's it has not read: every item it changes counts, not only the one it names. */
+
+test('a finished task taken up again, by way of dropped too, has no verdict for its round; one dropped before it was done keeps its own', () => {
+  const claude = (plan: Plan, op: PlanOp) => applyOps(plan, [op], 'claude', undefined, { tracking: true }).plan;
+  let plan = fresh();
+  // Done in a build, at round 1, with a pass (carried into the next plan by a republish).
+  Object.assign(plan.tasks.find((t) => t.id === 't2')!, { status: 'done', round: 1, reviews: [{ round: 1, by: 'claude', verdict: 'pass', summary: 'ok', at: 1 }] });
+  plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'dropped' });
+  plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'in_progress' });
+  assert.equal(roundVerdict(plan.tasks.find((t) => t.id === 't2')!, 'self'), undefined, 'no pass for the work taken up again');
+  // One dropped mid-review, before it was done, keeps its verdict: the changes asked for still stand.
+  let midway = fresh();
+  Object.assign(midway.tasks.find((t) => t.id === 't2')!, { status: 'in_progress', stage: 'review', round: 2, reviews: [{ round: 2, by: 'claude', verdict: 'changes', summary: 'Add a timeout', at: 1 }] });
+  midway = claude(midway, { op: 'upsert_task', id: 't2', status: 'dropped' });
+  midway = claude(midway, { op: 'upsert_task', id: 't2', status: 'in_progress' });
+  assert.equal(roundVerdict(midway.tasks.find((t) => t.id === 't2')!, 'self')?.verdict, 'changes');
+});
 
 test('a task the agent puts back to todo keeps its round across a restart, as the edit kept it', () => {
   const claude = (plan: Plan, op: PlanOp) => applyOps(plan, [op], 'claude', undefined, { tracking: true }).plan;

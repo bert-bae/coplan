@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **A finished task taken up again needs a new review, even by way of dropped.** Dropped and then restarted,
+  it kept the pass that closed its round, so it could be marked done again on that.
 - **A finished task carried into the next plan keeps its review history.** Publishing the next plan kept its
   review round but dropped the reviews themselves from the page.
 - **A task left in review by a hand-edited plan, though no longer in progress, is not put in a review round.**
