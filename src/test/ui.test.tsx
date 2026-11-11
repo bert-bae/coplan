@@ -2956,6 +2956,23 @@ test('a lock from elsewhere that drops text left open says so, with the text to 
   assert.equal(store.getState().toasts.filter((t) => /could not be saved/.test(t.text)).length, 0, 'not said again');
 });
 
+test('an editor opened but not typed in is closed by a lock that comes after a snapshot', async () => {
+  await boot();
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  assert.ok(screen.getByRole('textbox', { name: 'the plan summary' }));
+  // A snapshot lands with nothing to lose in it: its kept draft is let go.
+  const s = store.getState().session!;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: { ...s.plan! } } }));
+  assert.ok(screen.getByRole('textbox', { name: 'the plan summary' }), 'still open');
+  // Then the design is confirmed in chat: the editor is told, and closes.
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: confirmDesign(s.plan!, { prompt: 'tasks' }) } }));
+  assert.equal(screen.queryByRole('textbox', { name: 'the plan summary' }) === null, true, 'closed by the lock');
+  assert.equal(store.getState().toasts.filter((t) => /could not be saved/.test(t.text)).length, 0, 'nothing to say: nothing was typed');
+});
+
 test('text saved in the same plan that locks its field is not said to be lost', async () => {
   await boot();
   await openTab('Overview');

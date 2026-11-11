@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **An editor you opened but didn't type in closes when the plan is signed off elsewhere.** It stayed open and
+  disabled, and came back on stale text with a warning.
 - **A submitted plan's comments on parent tasks, and in By box, can be read.** Parent tasks with comments are
   listed above the board, and each task in By box has the same read-only toggle as a card.
 - **`coplan check --json > report.json` on a full disk now fails.** It exited 0 with nothing written; it now

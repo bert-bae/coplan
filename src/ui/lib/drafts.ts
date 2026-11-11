@@ -49,15 +49,17 @@ export function unsavedDrafts(): boolean {
  * A session's plan, as it lands: its drafts that can no longer be saved, or
  * have nothing left to lose, go. That is a field that is gone, one that is
  * locked now, or one that holds the draft's text already (a save that
- * finished after its editor closed, say). With no plan (the session was
- * deleted), all of them go. Returns those that held unsaved text a lock
- * took the field from (a sign-off made in chat, say), named, for the user
- * to be told, and to copy.
+ * finished after its editor closed, an editor opened and not typed in).
+ * An editor still open whose field a lock takes is told, kept or not.
+ * With no plan (the session was deleted), all of them go. Returns those
+ * that held unsaved text a lock took the field from (a sign-off made in
+ * chat, say), named, for the user to be told, and to copy.
  */
 export function pruneDrafts(sessionId: string, plan: Plan | null): { name: string; text: string }[] {
   const prefix = `${sessionId}:`;
   const locked: { name: string; text: string }[] = [];
   const locks = plan ? { design: isDesignLocked(plan), plan: isLocked(plan) } : null;
+  const told = new Set<string>();
   for (const [key, open] of openDrafts) {
     if (!key.startsWith(prefix)) continue;
     const field = key.slice(prefix.length);
@@ -66,9 +68,21 @@ export function pruneDrafts(sessionId: string, plan: Plan | null): { name: strin
     const held = text !== undefined && fieldText(plan!, field, locks!) === undefined;
     if (text !== undefined && !held && text !== open.draft) continue;
     openDrafts.delete(key);
-    if (held) holders.get(key)?.();
+    if (held) {
+      holders.get(key)?.();
+      told.add(key);
+    }
     // Held, with text not saved (nor saved in the same plan as the lock).
     if (held && open.draft !== open.value && open.draft !== text) locked.push({ name: fieldName(plan!, field), text: open.draft });
+  }
+  // One open with nothing typed was let go at an earlier plan (above), so
+  // is not kept: the lock that takes its field tells it too.
+  if (plan) {
+    for (const [key, drop] of holders) {
+      if (!key.startsWith(prefix) || told.has(key) || openDrafts.has(key)) continue;
+      const field = key.slice(prefix.length);
+      if (fieldText(plan, field, { design: false, plan: false }) !== undefined && fieldText(plan, field, locks!) === undefined) drop();
+    }
   }
   return locked;
 }
@@ -184,7 +198,7 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
   // A lock that takes the field takes what was written (pruneDrafts offers
   // it to copy): the field opens afresh once it is free again.
   useEffect(() => {
-    if (!key) return;
+    if (!key || !editing) return;
     const drop = () => {
       setDraft(now.current.value);
       setEditing(openAtFirst);
@@ -193,7 +207,7 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
     return () => {
       if (holders.get(key) === drop) holders.delete(key);
     };
-  }, [key, openAtFirst]);
+  }, [key, openAtFirst, editing]);
   const close = () => setEditing(false);
   return {
     editing,
