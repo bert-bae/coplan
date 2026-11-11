@@ -916,14 +916,26 @@ test('proposals survive a reload; one that lost its edits does not', () => {
 /* An edit of Claude's is refused when it would overwrite a change of the
  * user's it has not read: every item it changes counts, not only the one it names. */
 
+test('a task the agent puts back to todo keeps its round across a restart, as the edit kept it', () => {
+  const claude = (plan: Plan, op: PlanOp) => applyOps(plan, [op], 'claude', undefined, { tracking: true }).plan;
+  let plan = claude(fresh(), { op: 'upsert_task', id: 't2', status: 'in_progress' });
+  for (const stage of ['review', 'implement', 'review'] as const) plan = claude(plan, { op: 'upsert_task', id: 't2', stage });
+  plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'todo' });
+  assert.equal(plan.tasks.find((t) => t.id === 't2')?.round, 2, 'the edit keeps it');
+  const reloaded = normalizePlan(JSON.parse(JSON.stringify(plan)) as Plan & Record<string, unknown>, 'x');
+  assert.equal(reloaded.tasks.find((t) => t.id === 't2')?.round, 2, 'so does a restart: its next review is round 3');
+});
+
 test('a task in review with no round (an older or hand-edited plan) is in its first, so it can be reviewed', () => {
   const plan = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'in_progress', order: 0, parentId: null, stage: 'review' }, { id: 't2', title: 'UI', status: 'todo', order: 1, parentId: null }] } as unknown as Plan & Record<string, unknown>, 'x');
   assert.equal(plan.tasks.find((t) => t.id === 't1')?.round, 1);
   assert.equal(plan.tasks.find((t) => t.id === 't2')?.round, undefined, 'not one that is not in review');
-  // A stage on a task not in progress (hand-edited) is dropped, as an edit drops it: no round either.
+  // A stage on a task not in progress (hand-edited) is dropped, as an edit drops it.
   const stale = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'todo', order: 0, parentId: null, stage: 'review', round: 3 }, { id: 't2', title: 'UI', order: 1, parentId: null, stage: 'review' }] } as unknown as Plan & Record<string, unknown>, 'x');
   assert.equal(stale.tasks[0]!.stage, undefined);
-  assert.equal(stale.tasks[0]!.round, undefined, 'back in the pile, it starts over');
+  // Its round stays: only the user putting it back starts it over (an edit by the agent keeps it, so a
+  // restart may not), or its next review would meet an old round's verdict.
+  assert.equal(stale.tasks[0]!.round, 3, 'its round kept');
   assert.equal(stale.tasks[1]!.stage, undefined, 'nor one with no status of its own');
   assert.equal(stale.tasks[1]!.round, undefined);
   const blocked = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'blocked', order: 0, parentId: null, stage: 'implement' }] } as unknown as Plan & Record<string, unknown>, 'x');
