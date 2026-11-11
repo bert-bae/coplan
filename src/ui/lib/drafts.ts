@@ -40,8 +40,9 @@ export function keptDraft(sessionId: string | null, field: string): OpenDraft | 
 }
 
 /** Inline fields holding text refused as changed underneath (Editable's
- *  InlineText): not kept drafts, but text not saved all the same. */
-export const refusedFields = new Set<object>();
+ *  InlineText): not kept drafts, but text not saved all the same. Each with
+ *  its session, its name, and the sign-off that locks it. */
+export const refusedFields = new Map<object, { sessionId: string | null; name: string; lockedBy: 'design' | 'plan' }>();
 
 /** Whether any open editor holds text not saved yet. */
 export function unsavedDrafts(): boolean {
@@ -145,6 +146,9 @@ export function draftsLockedBy(sessionId: string | null, plan: Plan, signOff: 'd
     if (!key.startsWith(prefix) || open.draft === open.value) continue;
     const field = key.slice(prefix.length);
     if (fieldText(plan, field) !== undefined && fieldText(plan, field, locks) === undefined) out.push(fieldName(plan, field));
+  }
+  for (const held of refusedFields.values()) {
+    if (held.sessionId === sessionId && (signOff === 'plan' || held.lockedBy === 'design')) out.push(held.name);
   }
   return out;
 }

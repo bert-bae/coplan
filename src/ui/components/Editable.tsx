@@ -25,6 +25,7 @@ export function InlineText({
   as: Tag = 'span',
   readOnly = false,
   version,
+  lockedBy = 'plan',
 }: {
   value: string;
   /** Resolves false when the save was refused; the field then reopens with
@@ -41,6 +42,9 @@ export function InlineText({
    *  save, so a save over someone else's newer change is refused. The text
    *  editing started from is handed back too (`was`). */
   version?: number;
+  /** The sign-off that makes it read only: confirming the design, or
+   *  submitting the plan. Its warning names refused text held here. */
+  lockedBy?: 'design' | 'plan';
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
@@ -139,7 +143,8 @@ export function InlineText({
       return;
     }
     const token = {};
-    refusedFields.add(token);
+    // Named by what it holds now, to tell two of a kind apart.
+    refusedFields.set(token, { sessionId, name: `the ${held.current.label.toLowerCase()} "${shown.current}"`, lockedBy });
     return () => {
       refusedFields.delete(token);
     };

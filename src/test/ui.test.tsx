@@ -1062,6 +1062,14 @@ test('refused text held open is offered to copy when a lock takes its field, and
   assert.equal(screen.queryByText(/^Now: /) === null, true, 'nothing left of it');
 });
 
+test("a sign-off's warning names refused text it would drop, by the sign-off that locks its field", async () => {
+  await refusedTitle();
+  const plan = store.getState().session!.plan!;
+  assert.deepEqual(draftsLockedBy('s1', plan, 'plan'), ['the plan title "Theirs"'], 'submitting locks the title');
+  assert.deepEqual(draftsLockedBy('s1', plan, 'design'), [], 'confirming the design does not');
+  assert.deepEqual(draftsLockedBy('s2', plan, 'plan'), [], "nor another session's sign-off");
+});
+
 test('refused text held open makes closing the page ask first', async () => {
   await refusedTitle();
   assert.equal(unsavedDrafts(), true, 'held');

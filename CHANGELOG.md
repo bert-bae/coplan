@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- **Submitting or confirming the design waits for a field whose save was refused.** Its warning names the field,
+  as it does for text left open in an editor, instead of dropping it and offering it to copy afterwards.
 - **A board card you opened stays open when the agent moves it.** Its details and comments no longer close as
   it changes column.
 - **Text in a field whose save was refused is kept safe from a sign-off and a closed tab.** The plan signed
