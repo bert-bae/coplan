@@ -433,7 +433,13 @@ test('a saved session with no time of its own is dated by its file: one untouche
   const store = await freshStore();
   assert.equal(store.get('undated-own')?.sessionId, undefined, 'past keeping, not loaded');
   assert.equal(store.get('undated:old')?.sessionId, undefined, 'nor its old-folder copy');
-  assert.notEqual(store.ensure('undated:old', process.cwd()).title, 'early build', 'nor taken by ensure');
+  assert.notEqual(store.ensure('undated:old', process.cwd()).title, 'early build', 'nor brought back by ensure');
+  // One an earlier build left after this store loaded is judged by ensure.
+  const late = path.join(home, 'sessions', legacyName('undated:late'));
+  mkdirSync(late, { recursive: true });
+  writeFileSync(path.join(late, 'state.json'), JSON.stringify(undated('undated:late')));
+  utimesSync(path.join(late, 'state.json'), months, months);
+  assert.notEqual(store.ensure('undated:late', process.cwd()).title, 'early build', 'nor taken by ensure');
   assert.ok(Math.abs((store.get('undated-recent')?.updatedAt ?? 0) - Date.now()) < 60_000, 'a recent one is kept');
 });
 

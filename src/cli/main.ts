@@ -444,7 +444,10 @@ function exit(code: number): void {
     }
     process.exit(code);
   };
-  process.stdout.write('', () => setImmediate(leave));
+  // Nothing pending: no write to wait on (a zero-length one need not call
+  // back where stdout to a pipe is asynchronous, as on Windows).
+  if (process.stdout.writableLength === 0) setImmediate(leave);
+  else process.stdout.write('', () => setImmediate(leave));
 }
 
 const [, , command = 'status', ...rest] = process.argv;
