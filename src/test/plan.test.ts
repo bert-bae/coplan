@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, MAX_CHANGES, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, confirmDesign, countTasks, MAX_CHANGES, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, proposalTouches, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import { previewProposal } from '../shared/proposals.ts';
 import type { DiagramNodeInput, Plan, PlanInput, PlanOp } from '../shared/types.ts';
@@ -1231,6 +1231,21 @@ test('a proposed removal is out of date once the user changed what it would take
     assert.equal(accept(proposedGone).tasks.some((t) => t.id === 't3'), false, `${what}: as applied, t3 goes with t4`);
     assert.throws(() => accept(applyOps(proposedGone, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan), STALE, what);
   }
+  // A task of the plan's removed and added again is placed where the proposal adds it, as applying it is.
+  for (const [what, again, moved] of [
+    ['a subtask', [{ op: 'remove', kind: 'task', id: 't1' }, { op: 'upsert_task', id: 't2', title: 'Routes', parentId: 't4' }, { op: 'move_task', id: 't3', parentId: 't2', index: 0 }, { op: 'remove', kind: 'task', id: 't4' }], 't3'],
+    ['a top task', [{ op: 'remove', kind: 'task', id: 't3' }, { op: 'upsert_task', id: 't3', title: 'UI', parentId: 't4' }, { op: 'move_task', id: 't2', parentId: 't3', index: 0 }, { op: 'remove', kind: 'task', id: 't4' }], 't2'],
+  ] as [string, PlanOp[], string][]) {
+    const proposedAgain = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: again }], 'claude').plan;
+    assert.equal(accept(proposedAgain).tasks.some((t) => t.id === moved), false, `${what}: as applied, ${moved} goes with t4`);
+    assert.throws(() => accept(applyOps(proposedAgain, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: [moved] }], 'user').plan), STALE, what);
+  }
+  // Added again at the top, it is not taken by its old parent's removal: removing t1 takes t1 alone, as with t2 moved out first.
+  const toTop: PlanOp[] = [{ op: 'remove', kind: 'task', id: 't2' }, { op: 'upsert_task', id: 't2', title: 'Routes' }, { op: 'remove', kind: 'task', id: 't1' }];
+  const proposedTop = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: toTop }], 'claude').plan;
+  assert.equal(accept(proposedTop).tasks.find((t) => t.id === 't2')?.parentId, null, 'as applied: t2 stays, at the top');
+  const movedOut = applyOps(linkedPlan(), [{ op: 'move_task', id: 't2', parentId: null, index: 0 }], 'user').plan;
+  assert.equal(proposalTouches(linkedPlan(), toTop)['removal:t1'], proposalTouches(movedOut, [{ op: 'remove', kind: 'task', id: 't1' }])['removal:t1']);
   // A move alone leaves the moved task's links and dependencies as they are: no reason to refuse it.
   const moved = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [ops[0]!] }], 'claude').plan;
   const linked = applyOps(moved, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan;

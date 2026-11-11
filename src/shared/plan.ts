@@ -2378,14 +2378,19 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
   // dependencies, its box links) under a removal; the proposal's other
   // edits only add its own.
   const movedTo = new Map<string, string | null>();
-  // The new tasks seen so far: placed by their first edit.
-  const seenNew = new Set<string>();
-  // The plan as the proposal's moves have it so far. Tasks the proposal
-  // adds stand in by their place alone, for what is moved under them.
+  // The tasks the proposal adds (new, or of the plan's, removed first) seen
+  // so far: placed by their first edit.
+  const placed = new Set<string>();
+  // The plan's tasks the proposal has removed, and not added again.
+  const gone = new Set<string>();
+  // The plan as the proposal's edits have it so far: its removals gone, its
+  // moves made. Tasks the proposal adds stand in by their place alone, for
+  // what is moved under them.
   const outline = (): Plan => {
-    if (!movedTo.size) return plan;
+    if (!movedTo.size && !gone.size) return plan;
     const added = [...movedTo].filter(([t]) => !tasks.has(t)).map(([t, parentId]) => ({ id: t, title: t, parentId, order: 0, status: 'todo' }) as Task);
-    return { ...plan, tasks: [...plan.tasks.map((t) => (movedTo.has(t.id) ? { ...t, parentId: movedTo.get(t.id)! } : t)), ...added] };
+    const kept = plan.tasks.filter((t) => !gone.has(t.id)).map((t) => (movedTo.has(t.id) ? { ...t, parentId: movedTo.get(t.id)! } : t));
+    return { ...plan, tasks: [...kept, ...added] };
   };
   const removal = (id: string, { doomed, dependents, diagrams }: ReturnType<typeof taskRemoval>) => {
     // Printed are only the tasks already in the plan.
@@ -2428,11 +2433,13 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
       case 'set_checks':
         if (op.id) out[`task:${op.id}`] = rev('task', op.id);
         if (op.op === 'move_task' && op.id) movedTo.set(op.id, op.parentId ?? null);
-        // A new task is placed by its first edit, as applying it is: a later
-        // upsert's parentId moves nothing.
-        if (op.op === 'upsert_task' && op.id && !tasks.has(op.id) && !seenNew.has(op.id)) {
-          seenNew.add(op.id);
-          if (op.parentId) movedTo.set(op.id, op.parentId);
+        // A task the proposal adds is placed by its first edit, as applying
+        // it is: a later upsert's parentId moves nothing. One of the plan's
+        // it removed first is added afresh, where this edit puts it.
+        if (op.op === 'upsert_task' && op.id && (!tasks.has(op.id) || gone.has(op.id)) && !placed.has(op.id)) {
+          placed.add(op.id);
+          gone.delete(op.id);
+          if (op.parentId || tasks.has(op.id)) movedTo.set(op.id, op.parentId ?? null);
         }
         // `builds` replaces which boxes link the task: a link made since is undone.
         if (op.op === 'upsert_task' && op.id && op.builds !== undefined) out[`links:${op.id}`] = links(op.id);
@@ -2448,9 +2455,13 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
           const taken = taskRemoval(outline(), op.id);
           out[`removal:${op.id}`] = removal(op.id, taken);
           out[`note:${op.id}`] = note(op.id);
-          // A new task removed, or taken with it, is placed afresh if the
+          // What it takes is gone from the outline, and placed afresh if the
           // proposal adds it again.
-          for (const t of taken.doomed) if (seenNew.delete(t)) movedTo.delete(t);
+          for (const t of taken.doomed) {
+            placed.delete(t);
+            movedTo.delete(t);
+            if (tasks.has(t)) gone.add(t);
+          }
         }
         break;
     }
