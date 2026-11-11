@@ -2383,6 +2383,16 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
   const placed = new Set<string>();
   // The plan's tasks the proposal has removed, and not added again.
   const gone = new Set<string>();
+  // Tasks a move would put inside themselves: out of date, whatever else
+  // the proposal does to them.
+  const inside = new Set<string>();
+  // A task and those it is under, in the outline (walked up, so a circle
+  // ends the walk rather than the stack).
+  const ancestry = (id: string): Set<string> => {
+    const seen = new Set<string>();
+    for (let at: string | null | undefined = id; at && !seen.has(at); at = movedTo.has(at) ? movedTo.get(at) : tasks.get(at)?.parentId) seen.add(at);
+    return seen;
+  };
   // The plan as the proposal's edits have it so far: its removals gone, its
   // moves made. Tasks the proposal adds stand in by their place alone, for
   // what is moved under them.
@@ -2432,7 +2442,12 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
       case 'move_task':
       case 'set_checks':
         if (op.id) out[`task:${op.id}`] = rev('task', op.id);
-        if (op.op === 'move_task' && op.id) movedTo.set(op.id, op.parentId ?? null);
+        if (op.op === 'move_task' && op.id) {
+          // The user's moves since can put where it goes inside it: applying
+          // it would fail, and the outline would go round in a circle.
+          if (op.parentId && ancestry(op.parentId).has(op.id)) inside.add(op.id);
+          else movedTo.set(op.id, op.parentId ?? null);
+        }
         // A task the proposal adds is placed by its first edit, as applying
         // it is: a later upsert's parentId moves nothing. One of the plan's
         // it removed first is added afresh, where this edit puts it.
@@ -2470,8 +2485,13 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
         break;
     }
   }
+  for (const id of inside) out[`task:${id}`] = INSIDE_ITSELF;
   return out;
 }
+
+/** A move's print once the plan puts where it goes inside the task: never
+ *  what the proposal was made on. */
+const INSIDE_ITSELF = 'inside itself';
 
 /** What changed since a proposal was made, in words; empty while it still
  *  fits the plan. */
@@ -2503,6 +2523,7 @@ export function proposalStaleness(plan: Plan, p: Proposal): string[] {
     else if (kind === 'note') {
       if (now[`task:${id}`] === p.base[`task:${id}`]) out.push(`the note on ${task()}`);
     }
+    else if (now[key] === INSIDE_ITSELF) out.push(`where ${task()} moves (now inside it)`);
     else out.push(task());
   }
   return out;
@@ -3294,8 +3315,12 @@ export function childrenOf(plan: Pick<Plan, 'tasks'>, parentId: string | null): 
 
 export function descendants(plan: Pick<Plan, 'tasks'>, id: string): Task[] {
   const out: Task[] = [];
+  // A circle of parents (a plan never has one) ends the walk, not the stack.
+  const seen = new Set([id]);
   const visit = (pid: string) => {
     for (const child of childrenOf(plan, pid)) {
+      if (seen.has(child.id)) continue;
+      seen.add(child.id);
       out.push(child);
       visit(child.id);
     }

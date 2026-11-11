@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, MAX_CHANGES, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, proposalTouches, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, confirmDesign, countTasks, descendants, MAX_CHANGES, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, proposalTouches, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import { previewProposal } from '../shared/proposals.ts';
-import type { DiagramNodeInput, Plan, PlanInput, PlanOp } from '../shared/types.ts';
+import type { DiagramNodeInput, Plan, PlanInput, PlanOp, Task } from '../shared/types.ts';
 
 /**
  * The plan document: publishing, editing from either side, and the change
@@ -1261,6 +1261,23 @@ test('a proposed removal is out of date once the user changed what it would take
   const moved = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [ops[0]!] }], 'claude').plan;
   const linked = applyOps(moved, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan;
   assert.equal(accept(linked).tasks.find((t) => t.id === 't3')?.parentId, 't1');
+});
+
+test("a proposed move the user's moves since put inside itself makes the proposal out of date, not a crash", () => {
+  // t3 under t2 fit when proposed; the user then moved t1 under t3, so t2 is inside t3.
+  for (const [what, ops] of [
+    ['a move and a removal', [{ op: 'move_task', id: 't3', parentId: 't2', index: 0 }, { op: 'remove', kind: 'task', id: 't1' }]],
+    ['a move, a later edit to it, and a removal', [{ op: 'move_task', id: 't3', parentId: 't2', index: 0 }, { op: 'upsert_task', id: 't3', detail: 'Screens' }, { op: 'remove', kind: 'task', id: 't1' }]],
+  ] as [string, PlanOp[]][]) {
+    const proposed = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops }], 'claude').plan;
+    const moved = applyOps(proposed, [{ op: 'move_task', id: 't1', parentId: 't3', index: 0 }], 'user').plan;
+    assert.doesNotThrow(() => renderPlan(moved), what);
+    assert.doesNotThrow(() => previewProposal(moved, moved.proposals![0]!), what);
+    assert.throws(() => accept(moved), new RegExp(`${STALE.source}: where task t3 "UI" moves`), what);
+  }
+  // A circle of parents, which no path should build, ends the walk under a task rather than the stack.
+  const circle = { tasks: [{ id: 'a', parentId: 'b' }, { id: 'b', parentId: 'a' }] as Task[] };
+  assert.deepEqual(descendants(circle, 'a').map((t) => t.id), ['b']);
 });
 
 test("a proposed builds is out of date once the user relinked that task's boxes", () => {
