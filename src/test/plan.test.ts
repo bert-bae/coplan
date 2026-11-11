@@ -1221,6 +1221,16 @@ test('a proposed removal is out of date once the user changed what it would take
   const proposedAgain = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: again }], 'claude').plan;
   assert.equal(accept(proposedAgain).tasks.some((t) => t.id === 't3'), false, 'as applied: t3 goes with t4');
   assert.throws(() => accept(applyOps(proposedAgain, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan), STALE);
+  // Its new subtasks go with it, so the proposal adding one again elsewhere places it there too: whether the
+  // new task it goes with is removed itself, or goes with a task of the plan's.
+  for (const [what, viaGone] of [
+    ['under a new task removed', [viaNew[0]!, { op: 'upsert_task', id: 't10', title: 'Screens', parentId: 't9' }, { op: 'remove', kind: 'task', id: 't9' }, { op: 'upsert_task', id: 't10', title: 'Screens', parentId: 't4' }, { op: 'move_task', id: 't3', parentId: 't10', index: 0 }, { op: 'remove', kind: 'task', id: 't4' }]],
+    ['under a task of the plan removed', [{ op: 'upsert_task', id: 't9', title: 'Frontend', parentId: 't2' }, { op: 'remove', kind: 'task', id: 't1' }, { op: 'upsert_task', id: 't9', title: 'Frontend', parentId: 't4' }, { op: 'move_task', id: 't3', parentId: 't9', index: 0 }, { op: 'remove', kind: 'task', id: 't4' }]],
+  ] as [string, PlanOp[]][]) {
+    const proposedGone = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: viaGone }], 'claude').plan;
+    assert.equal(accept(proposedGone).tasks.some((t) => t.id === 't3'), false, `${what}: as applied, t3 goes with t4`);
+    assert.throws(() => accept(applyOps(proposedGone, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan), STALE, what);
+  }
   // A move alone leaves the moved task's links and dependencies as they are: no reason to refuse it.
   const moved = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [ops[0]!] }], 'claude').plan;
   const linked = applyOps(moved, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan;

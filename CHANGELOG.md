@@ -14,7 +14,8 @@
   off elsewhere offers it to copy, and closing the page asks first. Offered after a session switch, it names its
   own plan.
 - **Accepting a proposal no longer drops a link you made to a task it removes by way of a new one.** A proposal
-  that names a new task twice is placed as it will be applied, so your change shows it as out of date.
+  that names a new task twice, or removes one and adds it again, with its subtasks, is placed as it will be
+  applied, so your change shows it as out of date.
 - **An editor you opened but didn't type in closes when the plan is signed off elsewhere.** It stayed open and
   disabled, and came back on stale text with a warning.
 - **A submitted plan's comments on parent tasks, and in By box, can be read.** Parent tasks with comments are

@@ -2380,14 +2380,15 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
   const movedTo = new Map<string, string | null>();
   // The new tasks seen so far: placed by their first edit.
   const seenNew = new Set<string>();
-  const removal = (id: string) => {
-    // Tasks the proposal adds stand in by their place alone, for what is
-    // moved under them; printed are only those already in the plan.
+  // The plan as the proposal's moves have it so far. Tasks the proposal
+  // adds stand in by their place alone, for what is moved under them.
+  const outline = (): Plan => {
+    if (!movedTo.size) return plan;
     const added = [...movedTo].filter(([t]) => !tasks.has(t)).map(([t, parentId]) => ({ id: t, title: t, parentId, order: 0, status: 'todo' }) as Task);
-    const outline = movedTo.size
-      ? { ...plan, tasks: [...plan.tasks.map((t) => (movedTo.has(t.id) ? { ...t, parentId: movedTo.get(t.id)! } : t)), ...added] }
-      : plan;
-    const { doomed, dependents, diagrams } = taskRemoval(outline, id);
+    return { ...plan, tasks: [...plan.tasks.map((t) => (movedTo.has(t.id) ? { ...t, parentId: movedTo.get(t.id)! } : t)), ...added] };
+  };
+  const removal = (id: string, { doomed, dependents, diagrams }: ReturnType<typeof taskRemoval>) => {
+    // Printed are only the tasks already in the plan.
     return fingerprint(
       JSON.stringify([
         // The task itself is `task:<id>`'s (and `note:<id>`'s) to print.
@@ -2444,10 +2445,12 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
         // A task goes with its subtasks, the dependencies on them and its
         // boxes' links (taskRemoval, as the unread-edit guard counts it).
         if (op.kind === 'task') {
-          out[`removal:${op.id}`] = removal(op.id);
+          const taken = taskRemoval(outline(), op.id);
+          out[`removal:${op.id}`] = removal(op.id, taken);
           out[`note:${op.id}`] = note(op.id);
-          // A new task removed is placed afresh if the proposal adds it again.
-          if (seenNew.delete(op.id)) movedTo.delete(op.id);
+          // A new task removed, or taken with it, is placed afresh if the
+          // proposal adds it again.
+          for (const t of taken.doomed) if (seenNew.delete(t)) movedTo.delete(t);
         }
         break;
     }
