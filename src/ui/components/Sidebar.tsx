@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { listedSessions, store, useStore } from '../store.ts';
+import { listedSessions, sessionName, store, useStore } from '../store.ts';
 import { GlobalActions } from './GlobalActions.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
+import { isComposing } from '../lib/keys.ts';
 import { agentInfo } from '../../shared/agents.ts';
 import { PLAN_STATUSES, type PlanStatus, type SessionSummary } from '../../shared/types.ts';
 import { PLAN_STATUS, statusTitle, summaryFacts } from '../lib/status.ts';
@@ -299,7 +300,7 @@ function SessionRow({
               <span className="working-dot" title={`${agent.name} is working`} aria-label={`${agent.name} is working`} />
             )
           )}
-          <span className="session-title">{session.planTitle ?? session.title}</span>
+          <span className="session-title">{sessionName(session)}</span>
         </span>
         {session.waiting ? (
           <span className="session-waiting">{session.waiting.text}</span>
@@ -308,7 +309,13 @@ function SessionRow({
         )}
         <span className="session-sub">
           {stage && <span className="session-stage">{stage}</span>}
-          {!session.planTitle && <span className="session-stage">no plan yet</span>}
+          {session.savedByNewer ? (
+            <span className="session-stage" title="This Coplan cannot read it, nor save anything done in it">
+              saved by a newer Coplan
+            </span>
+          ) : (
+            !session.planTitle && <span className="session-stage">no plan yet</span>
+          )}
           {mixed && <span className={classNames('session-agent', `is-${agent.kind}`)}>{agent.name}</span>}
           <span className={classNames('session-state', `is-${session.status}`)}>
             {SESSION_STATE_LABEL[session.status] ?? session.status}
@@ -377,7 +384,7 @@ function SessionRow({
 
       {confirming && (
         <div className="session-confirm">
-          <span>Delete permanently?</span>
+          <span>{session.savedByNewer ? 'Delete permanently, for the newer Coplan too?' : 'Delete permanently?'}</span>
           <div className="row-actions">
             <button
               type="button"
@@ -436,6 +443,7 @@ function RenameField({ session, onDone }: { session: SessionSummary; onDone: () 
       onChange={(e) => setValue(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => {
+        if (isComposing(e)) return;
         if (e.key === 'Enter') commit();
         if (e.key === 'Escape') abandon();
       }}
@@ -453,7 +461,7 @@ function CollapsedRail({ sessions, current }: { sessions: SessionSummary[]; curr
   return (
     <nav className="session-rail" aria-label="Sessions">
       {ordered.map((s) => {
-        const name = s.planTitle ?? s.title;
+        const name = sessionName(s);
         return (
           <button
             key={s.sessionId}

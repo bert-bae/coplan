@@ -365,6 +365,47 @@ test('a refused save — even an undo — leaves no history that no longer match
   assert.equal(redo.disabled, true, 'and no refused graph to redo');
 });
 
+test('a title edited beside the canvas while a move waits to save neither refuses the move nor costs its undo', async () => {
+  await boot(makeSession(), { live: true });
+  const id = live!.diagrams[0]!.id;
+  await selectBox('API');
+  const moved = () => live!.diagrams[0]!.nodes.find((n) => n.label === 'API')!;
+  const x = moved().x;
+  await act(async () => {
+    fireEvent.keyDown(nodeEl('API'), { key: 'ArrowRight' });
+  });
+  // While the move waits, the title changes: Claude, or the panel beside the canvas.
+  live = applyOps(live!, [{ op: 'upsert_diagram', id, title: 'Renamed mid-move' }], 'claude').plan;
+  const s = store.getState().session!;
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...s, plan: live! } });
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 400));
+  });
+  await settle();
+  assert.notEqual(moved().x, x, 'the move was saved');
+  assert.equal(live!.diagrams[0]!.title, 'Renamed mid-move', 'over the new title, not instead of it');
+  assert.equal((screen.getByRole('button', { name: 'Undo' }) as HTMLButtonElement).disabled, false, 'and it can be undone');
+  assert.doesNotMatch(store.getState().toasts.at(-1)?.text ?? '', /was changed by/);
+
+  // A box added meanwhile is a change to the graph: that move is refused, not saved over it.
+  await act(async () => {
+    fireEvent.keyDown(nodeEl('API'), { key: 'ArrowRight' });
+  });
+  const graph = live!.diagrams[0]!;
+  live = applyOps(live!, [{ op: 'upsert_diagram', id, nodes: [...graph.nodes, { id: 'queue', label: 'Queue', kind: 'queue' }], edges: graph.edges }], 'claude').plan;
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...store.getState().session!, plan: live! } });
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 400));
+  });
+  await settle();
+  assert.ok(live!.diagrams[0]!.nodes.some((n) => n.id === 'queue'), "Claude's box stays");
+  assert.match(store.getState().toasts.at(-1)?.text ?? '', /was changed by Claude/);
+});
+
 test('undo will not revert a change made elsewhere, and says so', async () => {
   await boot();
   await selectBox('API');
@@ -469,6 +510,22 @@ test('with no tasks in the plan yet, or the rule turned off in planCheck, no box
   await boot(makeSession(taskedPlan()), { planCheck: { 'box-unbuilt': 'off' } });
   await waitFor(() => assert.equal(store.getState().planCheck['box-unbuilt'], 'off'));
   assert.ok(!document.querySelector('.flow-node-gap'), 'the repository turned it off');
+});
+
+test("an input method's Escape in a box's task list drops its choice, not the list", async () => {
+  await boot(makeSession(taskedPlan()), { live: true });
+  const list = await openTasks('Gateway');
+  const field = within(list).getByRole('textbox', { name: 'New task for Gateway' });
+  fireEvent.change(field, { target: { value: 'にほん' } });
+  await act(async () => {
+    fireEvent.keyDown(field, { key: 'Escape', isComposing: true });
+  });
+  assert.ok(taskList(), 'still open');
+  assert.equal((within(taskList()!).getByRole('textbox', { name: 'New task for Gateway' }) as HTMLInputElement).value, 'にほん');
+  await act(async () => {
+    fireEvent.keyDown(field, { key: 'Escape' });
+  });
+  assert.equal(taskList(), null, 'the next Escape closes it');
 });
 
 test("a box's chip opens its tasks, ready to add one; a task added there builds the box", async () => {
@@ -661,3 +718,169 @@ test('once the design is confirmed, tasks are still added from a box; once submi
   assert.ok(!within(list).queryByRole('button', { name: /^Unlink/ }), 'or unlink');
   assert.ok(!within(list).queryByRole('button', { name: /^Title of task/ }), 'or rename');
 });
+
+/* The box panel's fields while the agent publishes: what the user is typing
+ * stays theirs; a field they have not touched follows the plan. */
+
+const { CommitField } = await import('../ui/components/flow/Panels.tsx');
+
+for (const [name, multiline, tag] of [['a paragraph', true, 'textarea'], ['a line', false, 'input']] as const) {
+  /** The field as the panel shows it; `accept` is what the plan takes of a save. */
+  function mount(value: string, accept: (v: string) => boolean = () => true) {
+    const commits: string[] = [];
+    const field = (v: string) => <CommitField value={v} label="Box description" multiline={multiline} onCommit={(c: string) => accept(c) && commits.push(c)} />;
+    const view = render(field(value));
+    const box = view.container.querySelector(tag)! as HTMLInputElement | HTMLTextAreaElement;
+    return { commits, box, push: (v: string) => act(async () => view.rerender(field(v))), warned: () => view.container.querySelector('[role="alert"]') !== null };
+  }
+
+  test(`${name}: a push from the agent never replaces what the user is typing, and says it came`, async () => {
+    const { commits, box, push, warned } = mount('Old description');
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: 'Old description, and what the user is typing ' } });
+    await push('The agent rewrote it');
+    assert.equal(box.value, 'Old description, and what the user is typing ', 'the typing stays, to the last space');
+    assert.ok(warned(), 'and the user is told the box changed');
+    fireEvent.blur(box);
+    assert.deepEqual(commits, ['Old description, and what the user is typing'], 'leaving saves it');
+    cleanup();
+  });
+
+  test(`${name}: a field only clicked into follows the agent's push, and leaving it saves nothing`, async () => {
+    for (const before of ['', 'Old description']) {
+      try {
+        const { commits, box, push, warned } = mount(before);
+        fireEvent.focus(box);
+        await push('What the agent wrote');
+        assert.equal(box.value, 'What the agent wrote', 'it shows the newer text');
+        assert.equal(warned(), false, 'with nothing of the user\'s to warn about');
+        fireEvent.blur(box);
+        assert.deepEqual(commits, [], `nothing saved over it (was ${JSON.stringify(before)})`);
+      } finally {
+        cleanup();
+      }
+    }
+  });
+
+  test(`${name}: once Escape takes the agent's text, typing on in it does not warn again`, async () => {
+    const { commits, box, push, warned } = mount('Old');
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: 'Mine' } });
+    await push('The agent rewrote it');
+    fireEvent.keyDown(box, { key: 'Escape' });
+    fireEvent.change(box, { target: { value: 'The agent rewrote it, and more' } });
+    assert.equal(warned(), false);
+    fireEvent.blur(box);
+    assert.deepEqual(commits, ['The agent rewrote it, and more']);
+    cleanup();
+  });
+
+  test(`${name}: Escape takes the agent's newer text instead`, async () => {
+    const { commits, box, push, warned } = mount('Old');
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: 'Mine' } });
+    await push('The agent rewrote it');
+    fireEvent.keyDown(box, { key: 'Escape' });
+    assert.equal(box.value, 'The agent rewrote it');
+    assert.equal(warned(), false);
+    fireEvent.blur(box);
+    assert.deepEqual(commits, [], 'nothing to save');
+    cleanup();
+  });
+
+  test(`${name}: left and removed at once (a session switch), it is saved once`, async () => {
+    const { commits, box } = mount('Old');
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: 'New' } });
+    await act(async () => {
+      fireEvent.blur(box);
+      cleanup();
+    });
+    assert.deepEqual(commits, ['New']);
+  });
+
+  if (!multiline) {
+    test(`${name}: the keys of an input method still composing (Japanese, Chinese, Korean) are its own`, async () => {
+      const { commits, box } = mount('Old');
+      act(() => box.focus());
+      fireEvent.change(box, { target: { value: 'にほん' } });
+      fireEvent.keyDown(box, { key: 'Enter', isComposing: true });
+      fireEvent.keyDown(box, { key: 'Enter', keyCode: 229 });
+      assert.deepEqual(commits, [], 'Enter picks the characters');
+      fireEvent.keyDown(box, { key: 'Escape', isComposing: true });
+      assert.equal(box.value, 'にほん', 'Escape drops a choice, not the edit');
+      fireEvent.keyDown(box, { key: 'Enter' });
+      assert.deepEqual(commits, ['にほん'], 'the next Enter is the line done');
+      cleanup();
+    });
+
+    test(`${name}: Enter saves over a push and the warning goes; typing on warns only of a newer push`, async () => {
+      const { commits, box, push, warned } = mount('Old');
+      act(() => box.focus());
+      fireEvent.change(box, { target: { value: 'Mine' } });
+      await push('Agent name');
+      assert.ok(warned());
+      fireEvent.keyDown(box, { key: 'Enter' });
+      assert.deepEqual(commits, ['Mine']);
+      assert.equal(warned(), false, 'saved: nothing left to warn of');
+      fireEvent.change(box, { target: { value: 'Mine, longer' } });
+      assert.equal(warned(), false, 'the plan has not answered yet, and that is no news');
+      await push('Mine');
+      assert.equal(warned(), false, 'its answer is the save itself');
+      await push('Agent again');
+      assert.ok(warned(), 'a push after it is');
+      cleanup();
+    });
+
+    test(`${name}: saved with Enter, then renamed by the agent: leaving does not save it again over the rename`, async () => {
+      const { commits, box, push } = mount('Old');
+      act(() => box.focus());
+      fireEvent.change(box, { target: { value: 'Mine' } });
+      fireEvent.keyDown(box, { key: 'Enter' });
+      await push('Mine');
+      await push('Agent name');
+      act(() => box.blur());
+      assert.deepEqual(commits, ['Mine']);
+      cleanup();
+    });
+
+    test(`${name}: Enter saves it, and leaving after does not save it again, though the plan has not answered yet`, async () => {
+      const { commits, box, push } = mount('Old');
+      act(() => box.focus());
+      fireEvent.change(box, { target: { value: 'New' } });
+      fireEvent.keyDown(box, { key: 'Enter' });
+      assert.deepEqual(commits, ['New']);
+      await push('Old');
+      act(() => box.blur());
+      assert.deepEqual(commits, ['New']);
+      cleanup();
+    });
+  } else {
+    test(`${name}: Enter is a new line; ⌘/Ctrl+Enter leaves it, and saves it once`, async () => {
+      const { commits, box } = mount('Old');
+      act(() => box.focus());
+      fireEvent.change(box, { target: { value: 'New' } });
+      fireEvent.keyDown(box, { key: 'Enter' });
+      assert.deepEqual(commits, [], 'a paragraph goes on');
+      fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true });
+      assert.notEqual(document.activeElement, box, 'it is left');
+      assert.deepEqual(commits, ['New']);
+      cleanup();
+    });
+  }
+
+  test(`${name}: out of the field it follows the plan, also after a save the plan refused`, async () => {
+    const { commits, box, push } = mount('First', (v) => v !== '');
+    await push('Second, from the agent');
+    assert.equal(box.value, 'Second, from the agent', 'untouched, it follows');
+    // Cleared and left: the plan keeps its text, and so does the field.
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: '' } });
+    fireEvent.blur(box);
+    assert.deepEqual(commits, []);
+    assert.equal(box.value, 'Second, from the agent');
+    await push('Third, from the agent');
+    assert.equal(box.value, 'Third, from the agent', 'and it still follows');
+    cleanup();
+  });
+}

@@ -23,6 +23,7 @@ import { History } from '../lib/history.ts';
 import { clipOrigin, parseClip, pasteClip, serializeClip, toClip, type Clip } from '../lib/clipboard.ts';
 import { useResolvedTheme } from '../lib/theme.ts';
 import { classNames } from '../lib/format.ts';
+import { isTyping } from '../lib/keys.ts';
 import { NODE_KINDS, type Diagram, type DiagramDirection, type DiagramEdgeInput, type DiagramNodeInput, type NodeKind, type Plan, type PlanOp } from '../../shared/types.ts';
 import type { DiffMark } from '../../shared/proposals.ts';
 import { PlanNode } from './flow/PlanNode.tsx';
@@ -1092,11 +1093,6 @@ function Editor({
   overlays.current = { menu: Boolean(menu), shortcuts, reconnect: Boolean(reconnect) };
 
   useEffect(() => {
-    const busy = (target: EventTarget | null) => {
-      const el = target as HTMLElement | null;
-      if (!el || !(el instanceof HTMLElement)) return false;
-      return el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName);
-    };
     /** A box's task list keeps every key: Tab, Enter, Escape and typing are
      *  how it is used, and it closes itself. */
     const inTasks = (target: EventTarget | null) => target instanceof HTMLElement && Boolean(target.closest('.flow-tasks'));
@@ -1112,7 +1108,7 @@ function Editor({
     /** The canvas speaks for the clipboard when the keyboard is on it, and no
      *  text is selected that the user means to copy. */
     const ours = (e: Event) => {
-      if (busy(e.target) || busy(document.activeElement) || inTasks(document.activeElement)) return false;
+      if (isTyping(e.target) || isTyping(document.activeElement) || inTasks(document.activeElement)) return false;
       const text = window.getSelection?.()?.toString() ?? '';
       return onCanvas() && !text;
     };
@@ -1168,7 +1164,7 @@ function Editor({
         if (toggleRegion()) e.preventDefault();
         return;
       }
-      if (busy(e.target) || inTasks(e.target) || !onCanvas()) return;
+      if (isTyping(e.target) || inTasks(e.target) || !onCanvas()) return;
       const o = overlays.current;
       if (o.menu || o.shortcuts || o.reconnect) return;
       const k = keys.current;
@@ -1384,6 +1380,7 @@ function Editor({
     panel = (
       <NodePanel
         key={node.id}
+        diagramId={diagram.id}
         node={node}
         nodes={nodes}
         edges={edges}

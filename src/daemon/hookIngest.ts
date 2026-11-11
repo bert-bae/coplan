@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { SessionStore } from './store.ts';
 import type { HarnessConfig } from '../shared/config.ts';
-import { currentBranch, repoRoot } from './git.ts';
+import { currentBranch, repoRoot } from '../shared/changes.ts';
 import { unreadNotice } from './render.ts';
 import { resolveLink, type SessionEnv } from '../shared/link.ts';
 import { DEFAULT_AGENT, agentInfo, type AgentKind } from '../shared/agents.ts';
@@ -109,10 +109,11 @@ function applyEnv(sessionId: string, ctx: IngestContext): void {
 }
 
 async function onSessionStart(sessionId: string, input: SessionStartInput, ctx: IngestContext): Promise<HookOutput> {
-  const cwd = input.cwd || process.cwd();
+  // A payload that names no folder leaves the one known, or none: the
+  // daemon's own is some other session's repository.
+  const cwd = input.cwd || ctx.store.get(sessionId)?.cwd || '';
   const session = ctx.store.ensure(sessionId, cwd);
-  const root = await repoRoot(cwd);
-  const branch = await currentBranch(root ?? cwd);
+  const [root, branch] = await Promise.all([repoRoot(cwd), currentBranch(cwd)]);
   ctx.store.update(sessionId, {
     cwd,
     repoRoot: root,
@@ -139,7 +140,9 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
   // it) is left as it is.
   //
   // A revision request the user queued from the page (#67) rides along the
-  // same way, after any sign-off: one explicit ask, sent once.
+  // same way: one explicit ask, sent once. One prompt to a message, as each
+  // is the most a hook may add (PROMPT_BUDGET): queued with a sign-off, the
+  // request waits for the message after.
   if (!agentInfo(ctx.agent).promptContext) {
     // An agent whose hooks cannot be relied on to add to a prompt (Cursor)
     // gets the prompt by the user pasting it, or from its next
@@ -151,10 +154,11 @@ async function onUserPromptSubmit(sessionId: string, input: UserPromptSubmitInpu
     if (revision && holdsPrompt(typed, revision.prompt)) ctx.store.deliverRevision(sessionId);
   } else {
     const handed = ctx.store.deliver(sessionId);
-    const revision = ctx.store.deliverRevision(sessionId);
+    const revision = handed ? null : ctx.store.deliverRevision(sessionId);
     if (handed || revision) {
-      // The user can still edit tasks and comment after confirming the design;
-      // those edits are not in the prompt, and the agent is told to read them.
+      // The user can still act after signing off (edit tasks after the
+      // design, comment, reject a proposal after submitting); that is not in
+      // the prompt, so it stays unread and the agent is told to read it.
       const later = ctx.store.get(sessionId)?.plan;
       const notice = later && ctx.config.promptNotice ? unreadNotice(later) : null;
       const text = [

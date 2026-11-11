@@ -14,8 +14,8 @@
  * `--all` runs every check, as before.
  */
 import { spawn } from 'node:child_process';
-import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { constants as osConstants } from 'node:os';
+import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import path from 'node:path';
 import {
   HOOK_STAGES,
@@ -31,20 +31,12 @@ import {
   type HookStage,
 } from '../shared/project.ts';
 import type { CheckResult } from '../shared/types.ts';
-import { changedFiles, changedSince, unreadWords, type ChangedFiles } from '../shared/changes.ts';
+import { changedFiles, changedSince, repoRoot, unreadWords, type ChangedFiles } from '../shared/changes.ts';
 
 /** Lines of a failing hook's output shown. Enough to see the error. */
 const TAIL_LINES = 40;
 /** Output kept per hook while it runs; the tail is all that is shown. */
 const KEEP_BYTES = 256 * 1024;
-
-export function repoRootOf(cwd: string): string {
-  try {
-    return execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || cwd;
-  } catch {
-    return cwd;
-  }
-}
 
 interface Options {
   stage: HookStage;
@@ -117,7 +109,7 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
     console.error(opts);
     return 2;
   }
-  const root = repoRootOf(cwd);
+  const root = (await repoRoot(cwd)) ?? cwd;
   const config = loadProjectConfig(root);
   // A config that cannot be read must not pass for one with nothing to run.
   // Anything else that is wrong — a template that is missing, a reviewer
@@ -231,24 +223,56 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   return failed ? 1 : 0;
 }
 
+/** How long a check that is stopped gets to go, before it is killed. */
+const STOP_GRACE_MS = 3000;
+/** How long a check that has gone gets for its output to close: it may be
+ *  held open from outside its group. */
+const LET_GO_MS = 200;
+
 function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: string; ms: number; timedOut: boolean }> {
   const started = Date.now();
   // A hook whose folder is not there fails, saying so: run anywhere else it
   // could pass without checking what it is for.
-  if (hook.cwd && !existsSync(path.join(cwd, hook.cwd))) {
-    return Promise.resolve({ code: 1, output: `its folder ${hook.cwd} does not exist`, ms: 0, timedOut: false });
+  const dir = hook.cwd ? path.join(cwd, hook.cwd) : cwd;
+  if (hook.cwd) {
+    let problem: string | undefined;
+    const code = (err: unknown) => (err as NodeJS.ErrnoException).code ?? String(err);
+    try {
+      const stat = statSync(dir, { throwIfNoEntry: false });
+      if (!stat) problem = 'does not exist';
+      else if (!stat.isDirectory()) problem = 'is not a folder';
+    } catch (err) {
+      problem = `cannot be read (${code(err)})`;
+    }
+    // Run in: one that cannot be entered would fail as a missing shell.
+    if (!problem) {
+      try {
+        accessSync(dir, fsConstants.X_OK);
+      } catch (err) {
+        problem = `cannot be entered (${code(err)})`;
+      }
+    }
+    if (problem) return Promise.resolve({ code: 1, output: `its folder ${hook.cwd} ${problem}`, ms: 0, timedOut: false });
   }
-  return new Promise((resolve) => {
-    let output = '';
-    let timedOut = false;
-    // Its own process group, so a timeout stops everything it started — a
-    // test runner's workers too — not just the shell.
-    const child = spawn('sh', ['-c', hook.run], {
-      cwd: hook.cwd ? path.join(cwd, hook.cwd) : cwd,
+  // Its own process group, so a timeout stops everything it started — a
+  // test runner's workers too — not just the shell. One that cannot start
+  // at all fails, as one that cannot be found does, and the checks go on.
+  const start = () =>
+    spawn('sh', ['-c', hook.run], {
+      cwd: dir,
       env: { ...process.env, CI: process.env['CI'] ?? '1', ...hook.env },
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     });
+  let child: ReturnType<typeof start>;
+  try {
+    child = start();
+  } catch (err) {
+    return Promise.resolve({ code: 1, output: String((err as Error)?.message ?? err), ms: Date.now() - started, timedOut: false });
+  }
+  return new Promise((resolve) => {
+    let output = '';
+    let timedOut = false;
     const kill = (signal: NodeJS.Signals) => {
       try {
         if (child.pid) process.kill(-child.pid, signal);
@@ -262,18 +286,124 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
     };
     child.stdout.on('data', keep);
     child.stderr.on('data', keep);
+    const groupAlive = () => {
+      try {
+        process.kill(-child.pid!, 0);
+        return true;
+      } catch (err) {
+        // There, but not ours to signal (a member that changed user).
+        return (err as NodeJS.ErrnoException).code === 'EPERM';
+      }
+    };
+    /** `then` once the check's process and the rest of its group have gone,
+     *  unless `over()` first. Its shell may have exited already, with
+     *  something out of its group holding its output open. */
+    const afterGroup = (then: () => void, over: () => boolean) => {
+      const poll = () => {
+        if (over()) return;
+        if (groupAlive()) setTimeout(poll, 50);
+        else then();
+      };
+      if (child.exitCode !== null || child.signalCode !== null) poll();
+      else child.once('exit', poll);
+    };
+    /**
+     * Stop the check: SIGTERM to its group, settled once its process and the
+     * rest of its group have gone. What ignores SIGTERM, a test runner's
+     * worker say, is killed three seconds on, which nothing can ignore, and
+     * that settles it. Not its output closing, which something it started
+     * out of its group could hold open. A stop under way is joined.
+     */
+    let stopping: Promise<void> | undefined;
+    const stop = () =>
+      (stopping ??= new Promise<void>((stopped) => {
+        kill('SIGTERM');
+        let over = false;
+        const finish = () => {
+          if (over) return;
+          over = true;
+          clearTimeout(deadline);
+          stopped();
+        };
+        // A moment for what was killed to have exited.
+        const deadline = setTimeout(() => {
+          kill('SIGKILL');
+          setTimeout(finish, 100);
+        }, STOP_GRACE_MS);
+        // Gone, a process may still show as there until its parent reaps it:
+        // past the SIGKILL, that is all the group can be.
+        afterGroup(finish, () => over);
+      }));
+    // Over once its output has closed, or once it has gone (stopped, or
+    // ended on its own): its output read to the end, or let go a moment on,
+    // as it may be held open from outside its group. Interrupted, this
+    // command ends instead.
+    let closed = false;
+    let ended: number | undefined;
+    child.once('exit', () => (ended = Date.now()));
+    let interrupts = 0;
+    let settled = false;
+    const settle = () => {
+      if (settled || interrupts) return;
+      settled = true;
+      done();
+      if (!closed) {
+        // Held open from outside its group (a server started for the
+        // checks after it, say): read on, unheard, and not kept open for.
+        for (const out of [child.stdout, child.stderr]) {
+          out.removeListener('data', keep);
+          out.resume();
+          (out as unknown as { unref?: () => void }).unref?.();
+        }
+      }
+      resolve({ code: timedOut ? 124 : (child.exitCode ?? 1), output, ms: (ended ?? Date.now()) - started, timedOut });
+    };
+    const letGo = () => (closed ? settle() : setTimeout(settle, LET_GO_MS));
+    // Ended on its own, it is over as it ended, whatever holds its output.
+    afterGroup(
+      () => !stopping && letGo(),
+      () => settled || stopping !== undefined,
+    );
     const timer = setTimeout(() => {
+      // Ended in time, all of it, and its output being let go: not a timeout.
+      if (ended !== undefined && !groupAlive()) return;
       timedOut = true;
-      kill('SIGTERM');
-      setTimeout(() => kill('SIGKILL'), 3000).unref();
+      void stop().then(letGo);
     }, (hook.timeout ?? DEFAULT_HOOK_TIMEOUT) * 1000);
-    child.on('error', (err) => {
+    // Its own group also keeps Ctrl+C (and an agent ending this command)
+    // from reaching it: passed on here, so nothing is left running, and this
+    // command ends as an interrupted one does once the check has gone (stop),
+    // or at a second interrupt, killing what is left of it. Meanwhile the
+    // checks after it are not to start.
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+    const interrupted = (signal: (typeof signals)[number]) => {
+      const leave = () => process.exit(128 + osConstants.signals[signal]);
+      if (interrupts++) {
+        kill('SIGKILL');
+        leave();
+      }
+      console.error(`coplan: interrupted; stopping "${hook.name}"`);
       clearTimeout(timer);
+      void stop().then(leave);
+    };
+    for (const signal of signals) process.on(signal, interrupted);
+    // Whatever else ends this command meanwhile (a crash, a write that
+    // fails): the check's group goes with it, not left running unwatched.
+    const orphaned = () => kill('SIGKILL');
+    process.on('exit', orphaned);
+    const done = () => {
+      clearTimeout(timer);
+      for (const signal of signals) process.off(signal, interrupted);
+      process.off('exit', orphaned);
+    };
+    child.on('error', (err) => {
+      done();
       resolve({ code: 127, output: String(err.message), ms: Date.now() - started, timedOut });
     });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ code: timedOut ? 124 : (code ?? 1), output, ms: Date.now() - started, timedOut });
+    child.on('close', () => {
+      closed = true;
+      // Being stopped, it is over once stopped.
+      if (!stopping) settle();
     });
   });
 }

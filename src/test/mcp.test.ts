@@ -21,6 +21,8 @@ let server: http.Server;
 let port: number;
 /** How long the stub daemon sits on a request before answering. */
 let holdMs = 0;
+/** An answer the stub daemon gives instead of its usual one. */
+let answer: { status: number; body: string } | null = null;
 let received: string[] = [];
 
 before(async () => {
@@ -39,8 +41,8 @@ before(async () => {
     req.on('end', () => {
       const send = () => {
         if (res.writableEnded) return;
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: !req.url?.includes('refuse'), text: '[cc-harness] done' }));
+        res.writeHead(answer?.status ?? 200, { 'content-type': 'application/json' });
+        res.end(answer?.body ?? JSON.stringify({ ok: !req.url?.includes('refuse'), text: '[cc-harness] done' }));
       };
       if (holdMs) setTimeout(send, holdMs).unref();
       else send();
@@ -63,6 +65,7 @@ after(() => {
 
 beforeEach(() => {
   holdMs = 0;
+  answer = null;
   received = [];
 });
 
@@ -124,6 +127,28 @@ test('a tool call reaches the daemon and returns its prose verbatim', async () =
   assert.deepEqual(received, ['/mcp/read']);
 });
 
+test('a daemon that fails a call is an error to the agent, in the daemon\'s words, never a success', async () => {
+  // What the daemon answers when a handler throws, a body is too large, or it is not JSON.
+  for (const [status, error] of [[500, 'internal error'], [413, 'body too large'], [400, 'malformed JSON']] as const) {
+    answer = { status, body: JSON.stringify({ error }) };
+    const result = await callTool('harness_plan_publish', { title: 'x' });
+    assert.equal(result.isError, true, `a ${status} is an error`);
+    assert.match(result.content[0]?.text ?? '', new RegExp(`${status}: ${error}`), `and says what the daemon said (${status})`);
+    // A daemon that failed partway may have stored part of it: the agent looks before it tries again.
+    assert.equal(/read the plan \(harness_plan_read\) before trying it again/.test(result.content[0]?.text ?? ''), status === 500, `${status}`);
+  }
+  // A tool this daemon does not know (an older daemon): its own words, passed on as they are.
+  answer = { status: 404, body: JSON.stringify({ ok: false, text: '[cc-harness] Unknown tool "publish".' }) };
+  const unknown = await callTool('harness_plan_publish', { title: 'x' });
+  assert.equal(unknown.isError, true);
+  assert.equal(unknown.content[0]?.text, '[cc-harness] Unknown tool "publish".');
+  // An answer that is JSON but not an object is no answer at all.
+  answer = { status: 200, body: 'null' };
+  const nothing = await callTool('harness_plan_read');
+  assert.equal(nothing.isError, true);
+  assert.equal(nothing.content[0]?.text, '[cc-harness] The daemon answered 200: null');
+});
+
 test('each tool forwards to its own endpoint', async () => {
   for (const [name, endpoint] of [
     ['harness_plan_publish', '/mcp/publish'],
@@ -168,4 +193,37 @@ test('an unknown tool is an error, not a silent no-op', async () => {
   });
   child.kill();
   assert.match(reply, /Unknown tool/);
+});
+
+test('a line that is not a request gets the JSON-RPC error for it, and the server carries on', async () => {
+  const child = spawn(process.execPath, [MCP], {
+    env: { ...process.env, CC_HARNESS_HOME: home },
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  const replies: Record<string, unknown>[] = [];
+  let buffered = '';
+  const answered = new Promise<void>((resolve) => {
+    child.on('exit', () => resolve());
+    child.stdout!.on('data', (c: Buffer) => {
+      buffered += c.toString();
+      const lines = buffered.split('\n');
+      buffered = lines.pop()!;
+      for (const line of lines) if (line.trim()) replies.push(JSON.parse(line) as Record<string, unknown>);
+      if (replies.some((r) => r['id'] === 1)) resolve();
+    });
+  });
+  // The last three are requests but for their id, which is a string or a number (MCP: never null).
+  const badIds = ['{"x":1}', 'true', 'null'].map((id) => `{"jsonrpc":"2.0","id":${id},"method":"tools/list"}`);
+  const lines = ['null', '42', '"text"', '[]', '{not json', '{"id":{"toString":0}}', '{"id":5}', '{"jsonrpc":"2.0","id":3,"method":42}', ...badIds];
+  for (const line of [...lines, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })]) child.stdin!.write(`${line}\n`);
+  await Promise.race([answered, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+  // A moment more, for any answer to a line before it that should get none.
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(child.exitCode, null, 'the server is still running');
+  child.kill();
+  const errors = replies.filter((r) => r['error']).map((r) => [r['id'], (r['error'] as { code: number }).code]);
+  const invalid = (id: number | null) => [id, -32600];
+  assert.deepEqual(errors, [invalid(null), invalid(null), invalid(null), invalid(null), [null, -32700], invalid(null), invalid(5), invalid(3), invalid(null), invalid(null), invalid(null)], 'one error each, under its id where it has one');
+  assert.ok(!replies.some((r) => r['result'] && r['id'] !== 1), 'a request with a bad id is not run');
+  assert.ok(replies.some((r) => r['id'] === 1 && r['result']), 'and the next request is answered');
 });

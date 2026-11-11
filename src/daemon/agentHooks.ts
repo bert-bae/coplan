@@ -27,9 +27,6 @@ const CURSOR_EVENTS: Record<string, string> = {
   sessionStart: 'SessionStart',
   sessionEnd: 'SessionEnd',
   beforeSubmitPrompt: 'UserPromptSubmit',
-  preToolUse: 'PreToolUse',
-  postToolUse: 'PostToolUse',
-  postToolUseFailure: 'PostToolUse',
   afterAgentResponse: 'AfterAgentResponse',
   stop: 'Stop',
 };

@@ -246,7 +246,8 @@ them into one explicit ask, with nothing more to type:
   already answered stays out until you reply in it; so do Claude's own
   proposals, which wait on you.
 - **Coplan never starts a turn.** The request is queued, and your next
-  message in Claude's chat carries it — "go" will do — once. Where the
+  message in Claude's chat carries it — "go" will do — once; the one after,
+  if a sign-off is waiting to go too, as one message carries one prompt. Where the
   session has a link, queuing opens it there, as *Answer in Claude* does.
   Pasted by hand, it is not sent a second time.
 - In Cursor, whose hooks cannot add to a message, queuing copies the
@@ -267,11 +268,11 @@ committed `.coplan/config.json` (`//` comments allowed):
 {
   "hooks": {
     // quick checks after every implementation or refinement pass
-    "implement": ["pnpm typecheck", "pnpm lint"],
+    "implement": ["pnpm run typecheck", "pnpm run lint"],
     // the gate a task must pass before it is done
-    "review": [{ "name": "tests", "run": "pnpm test", "timeout": 900 }],
+    "review": [{ "name": "tests", "run": "pnpm run test", "timeout": 900 }],
     // once every task is done
-    "final": ["pnpm check"]
+    "final": ["pnpm run check"]
   },
   "iric": { "review": "subagent", "parallel": 2, "maxRounds": 3 },
   "branches": { "base": "main", "prefix": "coplan/" }

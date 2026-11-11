@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { listedSessions, store, useStore, useSession, TAB_IDS, type Tab } from './store.ts';
+import { listedSessions, sessionName, store, SessionScope, useEdit, useStore, useSession, TAB_IDS, type Tab } from './store.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { Toasts } from './components/Toasts.tsx';
-import { ConnectionBar } from './components/ConnectionBar.tsx';
+import { ConnectionBar, SavedByNewerBar } from './components/ConnectionBar.tsx';
 import { ThemeToggle } from './components/ThemeToggle.tsx';
 import { Handoff, WaitingBanner } from './components/Handoff.tsx';
 import { PromptViewerHost } from './components/PromptView.tsx';
@@ -17,6 +17,7 @@ import { OverviewView } from './views/OverviewView.tsx';
 import { DiagramsView } from './views/DiagramsView.tsx';
 import { TasksView } from './views/TasksView.tsx';
 import { classNames } from './lib/format.ts';
+import { isComposing, isTyping } from './lib/keys.ts';
 import { countTasks, isLocked } from '../shared/plan.ts';
 import { agentInfo } from '../shared/agents.ts';
 import type { Plan, SessionState } from '../shared/types.ts';
@@ -66,49 +67,52 @@ export function App() {
   );
 
   return (
-    <div className={classNames('app', sidebarCollapsed && 'is-sidebar-collapsed', drawerOpen && 'is-drawer-open')}>
-      <a className="skip-link" href={`#${panelId(tab)}`}>
-        Skip to content
-      </a>
-      <Sidebar />
-      {drawerOpen && <button type="button" className="scrim" aria-label="Close the session list" onClick={() => store.setDrawer(false)} />}
-      <main className="main" aria-label="Plan">
-        {!sessionId ? (
-          <NoSession error={error} />
-        ) : !session ? (
-          error ? <SessionUnavailable error={error} /> : <Loading />
-        ) : (
-          <>
-            <Header session={session} />
-            <ConnectionBar />
-            <WaitingBanner session={session} />
-            <PhaseStrip session={session} />
-            {plan && <ProposalsStrip plan={plan} />}
-            {!plan ? (
-              <NoPlan session={session} />
-            ) : (
-              <>
-                <nav className="tabs" role="tablist" aria-label="Plan views" ref={tabs} onKeyDown={onTabKeyDown}>
-                  {TAB_IDS.map((t) => (
-                    <TabButton key={t} id={t} active={tab === t} plan={plan} />
-                  ))}
-                </nav>
-                <div className="view" key={tab} id={panelId(tab)} role="tabpanel" aria-labelledby={tabId(tab)} tabIndex={-1}>
-                  <ErrorBoundary label={`${TAB_LABEL[tab]} view`} resetKey={`${sessionId}:${tab}`}>
-                    {tab === 'overview' && <OverviewView />}
-                    {tab === 'diagrams' && <DiagramsView />}
-                    {tab === 'tasks' && <TasksView />}
-                  </ErrorBoundary>
-                </div>
-              </>
-            )}
-          </>
-        )}
-      </main>
-      <PromptViewerHost />
-      <ExportHost />
-      <Toasts />
-    </div>
+    <SessionScope>
+      <div className={classNames('app', sidebarCollapsed && 'is-sidebar-collapsed', drawerOpen && 'is-drawer-open')}>
+        <a className="skip-link" href={`#${panelId(tab)}`}>
+          Skip to content
+        </a>
+        <Sidebar />
+        {drawerOpen && <button type="button" className="scrim" aria-label="Close the session list" onClick={() => store.setDrawer(false)} />}
+        <main className="main" aria-label="Plan">
+          {!sessionId ? (
+            <NoSession error={error} />
+          ) : !session ? (
+            error ? <SessionUnavailable error={error} /> : <Loading />
+          ) : (
+            <>
+              <Header session={session} />
+              <ConnectionBar />
+              {session.savedByNewer && <SavedByNewerBar />}
+              <WaitingBanner session={session} />
+              <PhaseStrip session={session} />
+              {plan && <ProposalsStrip plan={plan} />}
+              {!plan ? (
+                <NoPlan session={session} />
+              ) : (
+                <>
+                  <nav className="tabs" role="tablist" aria-label="Plan views" ref={tabs} onKeyDown={onTabKeyDown}>
+                    {TAB_IDS.map((t) => (
+                      <TabButton key={t} id={t} active={tab === t} plan={plan} />
+                    ))}
+                  </nav>
+                  <div className="view" key={tab} id={panelId(tab)} role="tabpanel" aria-labelledby={tabId(tab)} tabIndex={-1}>
+                    <ErrorBoundary label={`${TAB_LABEL[tab]} view`} resetKey={`${sessionId}:${tab}`}>
+                      {tab === 'overview' && <OverviewView />}
+                      {tab === 'diagrams' && <DiagramsView />}
+                      {tab === 'tasks' && <TasksView />}
+                    </ErrorBoundary>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </main>
+        <PromptViewerHost />
+        <ExportHost />
+        <Toasts />
+      </div>
+    </SessionScope>
   );
 }
 
@@ -153,6 +157,7 @@ function tabBadge(id: Tab, plan: Plan): { text: string; tone: 'neutral' | 'accen
 }
 
 function Header({ session }: { session: SessionState }) {
+  const edit = useEdit();
   const saving = useStore((s) => s.saving);
   const plan = session.plan;
   const counts = countTasks(plan);
@@ -169,7 +174,7 @@ function Header({ session }: { session: SessionState }) {
             value={plan.title}
             label="Plan title"
             readOnly={isLocked(plan)}
-            onSave={(title) => store.op({ op: 'set_meta', title })}
+            onSave={(title) => edit({ op: 'set_meta', title })}
           />
         ) : (
           <h1 className="head-title">{session.title}</h1>
@@ -240,6 +245,7 @@ const START_PLAN: Record<SessionState['agent'], string> = {
 };
 
 function NoPlan({ session }: { session: SessionState }) {
+  const edit = useEdit();
   const agent = agentInfo(session.agent);
   return (
     <div className="view">
@@ -253,7 +259,7 @@ function NoPlan({ session }: { session: SessionState }) {
           </>
         }
         action={
-          <button type="button" className="btn" onClick={() => void store.op({ op: 'set_meta', title: session.title || 'Untitled plan' })}>
+          <button type="button" className="btn" onClick={() => void edit({ op: 'set_meta', title: session.title || 'Untitled plan' })}>
             Start a plan by hand
           </button>
         }
@@ -296,7 +302,7 @@ function SessionUnavailable({ error }: { error: string }) {
         action={
           !unauthorized && other ? (
             <button type="button" className="btn" onClick={() => void store.selectSession(other.sessionId)}>
-              Open {other.planTitle ?? other.title}
+              Open {sessionName(other)}
             </button>
           ) : undefined
         }
@@ -347,7 +353,8 @@ function useDrawerDismiss(open: boolean): void {
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') store.setDrawer(false);
+      // Not one that drops an input method's choice, in a field on the page.
+      if (event.key === 'Escape' && !isComposing(event)) store.setDrawer(false);
     };
     const onResize = () => {
       if (window.innerWidth > 900) store.setDrawer(false);
@@ -365,9 +372,7 @@ function useDrawerDismiss(open: boolean): void {
 function useShortcuts(): void {
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable);
-      if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (isTyping(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
       // Not behind an open dialog: the page under it should hold still.
       if (document.querySelector('[aria-modal="true"]')) return;
       if (event.key === '[') {

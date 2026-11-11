@@ -11,16 +11,15 @@
  * Every probe stands alone: one that throws is reported as failed and the
  * rest still run. The sessions the probes make are deleted at the end.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { setTimeout as sleep } from 'node:timers/promises';
-import { readLiveLock, baseUrl, paths } from '../shared/paths.ts';
+import { baseUrl, ensureDaemon, paths, readLockState } from '../shared/paths.ts';
 import { loadConfigReport } from '../shared/config.ts';
 import { loadProjectConfig, PROJECT_CONFIG_PATH } from '../shared/project.ts';
-import { repoRootOf } from './check.ts';
+import { repoRoot } from '../shared/changes.ts';
 import type { DaemonLock, SessionState, SessionSummary } from '../shared/types.ts';
 import type { HookOutput } from '../shared/hooks.ts';
 
@@ -29,7 +28,6 @@ const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : 
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(HERE, '..', '..');
-const DAEMON_ENTRY = path.resolve(HERE, '..', 'daemon', 'main.js');
 const RELAY = path.join(PLUGIN_ROOT, 'bin', 'coplan-hook-relay.sh');
 /** What the plugin needs (`engines` in package.json). */
 const MIN_NODE: [number, number] = [20, 11];
@@ -127,7 +125,7 @@ export async function runDoctor(): Promise<number> {
   /* ---------------- configuration ---------------- */
 
   const cwd = process.cwd();
-  const root = repoRootOf(cwd);
+  const root = (await repoRoot(cwd)) ?? cwd;
   const harness = loadConfigReport({ configDir: paths.configDir(), projectDir: root });
   record('the Coplan config reads cleanly', harness.errors.length === 0, harness.errors.length ? undefined : harness.files.filter(existsSync).join(', ') || 'defaults');
   for (const e of harness.errors) console.log(`    ${e}`);
@@ -141,7 +139,13 @@ export async function runDoctor(): Promise<number> {
 
   /* ---------------- live daemon ---------------- */
 
-  const lock = await ensureDaemon();
+  // Running, but too busy to answer: every probe after this would wait on it.
+  const found = await readLockState();
+  if (found?.state === 'busy') {
+    record('daemon reachable', false, `not answering (pid ${found.lock.pid}): it may be busy; if it stays that way, run \`coplan restart\``, true);
+    return summarize(checks);
+  }
+  const lock = found?.lock ?? (await ensureDaemon());
   if (!lock) {
     record('daemon reachable', false, `see ${paths.logFile()}`, true);
     return summarize(checks);
@@ -477,22 +481,6 @@ function summarize(checks: Check[]): number {
   }
   console.log(`${failed.length} of ${checks.length} checks failed (${fatal.length} fatal)`);
   return fatal.length > 0 ? 1 : 0;
-}
-
-async function ensureDaemon(): Promise<DaemonLock | null> {
-  const existing = readLiveLock();
-  if (existing) return existing;
-  const child = spawn(process.execPath, [DAEMON_ENTRY], { detached: true, stdio: 'ignore', env: process.env });
-  // An unhandled child `'error'` event would crash the doctor before it could
-  // report why the daemon failed to start.
-  child.on('error', () => {});
-  child.unref();
-  for (let i = 0; i < 60; i++) {
-    await sleep(100);
-    const lock = readLiveLock();
-    if (lock) return lock;
-  }
-  return null;
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {

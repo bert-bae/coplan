@@ -7,6 +7,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { SessionStore } from './store.ts';
+import { isIdle } from './idle.ts';
 import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from './http.ts';
 import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
@@ -86,7 +87,7 @@ async function main(): Promise<void> {
   // A lock whose daemon does not answer is left over from one that died;
   // its pid may belong to something else by now.
   const existing = await readVerifiedLock();
-  if (existing && !process.argv.includes('--force')) {
+  if (existing) {
     // Another daemon owns the lock; report it and exit, so "start" is
     // idempotent from hooks, the CLI and the MCP server.
     process.stdout.write(`${JSON.stringify({ alreadyRunning: true, ...existing })}\n`);
@@ -112,13 +113,18 @@ async function main(): Promise<void> {
   const router = buildRouter({ store, config, token, clients, lifecycle });
 
   server.on('request', (req, res) => {
-    void handle(req, res, router, token).catch((err: unknown) => {
+    void handle(req, res, router, token).catch((thrown: unknown) => {
+      const where = `${req.method} ${req.url?.split('?')[0]}`;
+      // What the plan refuses (a sign-off over a version the user never saw,
+      // one with no plan to sign) is a conflict, in the plan's own words.
+      if (thrown instanceof PlanError) log(`refused ${where}: ${thrown.message}`);
+      const err = thrown instanceof PlanError ? new HttpError(409, thrown.message) : thrown;
       if (err instanceof HttpError) {
         if (!res.headersSent) json(res, err.status, { error: err.message });
         else res.end();
         return;
       }
-      log(`request error on ${req.method} ${req.url?.split('?')[0]}: ${(err as Error)?.stack ?? err}`);
+      log(`request error on ${where}: ${(err as Error)?.stack ?? err}`);
       if (!res.headersSent) json(res, 500, { error: 'internal error' });
       else res.end();
     });
@@ -574,10 +580,17 @@ function buildRouter(deps: Deps): Router {
 
   const residentIds = (): string[] => store.all().map((s) => s.sessionId);
 
-  const sessionOr404 = (ctx: Ctx): SessionState | null => {
+  /** The session a route is about: there is nothing to answer for one the daemon does not know. */
+  const sessionOr404 = (ctx: Ctx): SessionState => {
     const session = store.get(ctx.params['id'] ?? '');
-    if (!session) json(ctx.res, 404, { error: 'unknown session' });
-    return session ?? null;
+    if (!session) throw new HttpError(404, 'unknown session');
+    return session;
+  };
+
+  /** A look at the plan: there is nothing to see until one is published. */
+  const planOr404 = (session: SessionState): Plan => {
+    if (!session.plan) throw new HttpError(404, 'no plan yet');
+    return session.plan;
   };
 
   /** The settings folders open pages read, each read again on one timer
@@ -623,29 +636,21 @@ function buildRouter(deps: Deps): Router {
     const session = sessionOr404(ctx);
     // What is wrong with the harness config it reads comes over the live
     // stream (`config-errors`), and again whenever that changes.
-    if (session) {
-      const project = projectFor(session);
-      json(ctx.res, 200, {
-        session: forBrowser(session),
-        planCheck: project.planCheck,
-        // The repository's checks a task can skip, by stage (#54).
-        projectChecks: { implement: project.hooks.implement.map((h) => h.name), review: project.hooks.review.map((h) => h.name) },
-      });
-    }
+    const project = projectFor(session);
+    json(ctx.res, 200, {
+      session: forBrowser(session),
+      planCheck: project.planCheck,
+      // The repository's checks a task can skip, by stage (#54).
+      projectChecks: { implement: project.hooks.implement.map((h) => h.name), review: project.hooks.review.map((h) => h.name) },
+    });
   });
 
   router.delete('/api/session/:id', (ctx) => {
-    const id = ctx.params['id'] ?? '';
-    if (!store.get(id)) {
-      json(ctx.res, 404, { error: 'unknown session' });
-      return;
-    }
-    json(ctx.res, 200, { deleted: store.purge(id) });
+    json(ctx.res, 200, { deleted: store.purge(sessionOr404(ctx).sessionId) });
   });
 
   router.post('/api/session/:id/title', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ title?: string }>(ctx.req);
     const title = (body.title ?? '').trim().slice(0, MAX_TITLE_LENGTH);
     if (!title) {
@@ -664,7 +669,6 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/ops', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ ops?: PlanOp[] }>(ctx.req);
     const ops = Array.isArray(body.ops) ? body.ops : [];
     if (ops.length > MAX_OPS) throw new HttpError(400, `At most ${MAX_OPS} edits per request.`);
@@ -681,25 +685,17 @@ function buildRouter(deps: Deps): Router {
    *  debugging. Reading it here does not move Claude's read position. */
   router.get('/api/session/:id/plan/text', (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
-    if (!session.plan) {
-      json(ctx.res, 404, { error: 'no plan yet' });
-      return;
-    }
-    text(ctx.res, 200, renderPlan(session.plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck }));
+    const plan = planOr404(session);
+    text(ctx.res, 200, renderPlan(plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck }));
   });
 
   /** The read-back as blocks, each naming its source, for the page's
    *  prompt viewer. A look, not a read: Claude's read position stays. */
   router.get('/api/session/:id/plan/readback', (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
-    if (!session.plan) {
-      json(ctx.res, 404, { error: 'no plan yet' });
-      return;
-    }
-    const blocks = planBlocks(session.plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck });
-    json(ctx.res, 200, { text: blocksText(blocks), blocks, version: session.plan.version });
+    const plan = planOr404(session);
+    const blocks = planBlocks(plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck });
+    json(ctx.res, 200, { text: blocksText(blocks), blocks, version: plan.version });
   });
 
   /**
@@ -709,14 +705,11 @@ function buildRouter(deps: Deps): Router {
    */
   router.get('/api/session/:id/task/:taskId/brief', (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
-    const task = session.plan?.tasks.find((t) => t.id === ctx.params['taskId']);
-    if (!session.plan || !task) {
-      json(ctx.res, 404, { error: session.plan ? `no task "${ctx.params['taskId'] ?? ''}"` : 'no plan yet' });
-      return;
-    }
-    const blocks = briefBlocks(session.plan, task, briefOptions(session));
-    json(ctx.res, 200, { text: joinBlocks(blocks), blocks, task: { id: task.id, title: task.title }, version: session.plan.version });
+    const plan = planOr404(session);
+    const task = plan.tasks.find((t) => t.id === ctx.params['taskId']);
+    if (!task) throw new HttpError(404, `no task "${ctx.params['taskId'] ?? ''}"`);
+    const blocks = briefBlocks(plan, task, briefOptions(session));
+    json(ctx.res, 200, { text: joinBlocks(blocks), blocks, task: { id: task.id, title: task.title }, version: plan.version });
   });
 
   /**
@@ -725,12 +718,8 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/prompt', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ note?: unknown; target?: unknown; settings?: unknown; mode?: unknown }>(ctx.req);
-    if (!session.plan) {
-      json(ctx.res, 404, { error: 'no plan yet' });
-      return;
-    }
+    const plan = planOr404(session);
     const note = cleanNote(body.note);
     const project = projectFor(session);
     // The mode asked for; else the target's; else the one the user last
@@ -740,7 +729,7 @@ function buildRouter(deps: Deps): Router {
     const chosen = validMode(body.mode) ?? last?.mode;
     const mode = modeFor(asked, chosen, project.mode);
     const settings = body.settings ? settingsFrom(body.settings, project) : (last?.settings ?? project.settings);
-    const { prompt, trimmed, blocks } = buildPrompt(session.plan, {
+    const { prompt, trimmed, blocks } = buildPrompt(plan, {
       target: targetOf(mode),
       agent: session.agent,
       settings,
@@ -754,7 +743,7 @@ function buildRouter(deps: Deps): Router {
       hash: promptHash(prompt),
       trimmed,
       blocks,
-      version: session.plan.version,
+      version: plan.version,
       budget: PROMPT_BUDGET,
       maxNote: MAX_NOTE,
       mode,
@@ -770,33 +759,25 @@ function buildRouter(deps: Deps): Router {
    */
   router.get('/api/session/:id/plan/export', (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
-    if (!session.plan) {
-      json(ctx.res, 404, { error: 'no plan yet' });
-      return;
-    }
-    const blocks = exportBlocks(session.plan, { project: projectFor(session) });
-    json(ctx.res, 200, { text: blocksText(blocks), blocks, version: session.plan.version });
+    const plan = planOr404(session);
+    const blocks = exportBlocks(plan, { project: projectFor(session) });
+    json(ctx.res, 200, { text: blocksText(blocks), blocks, version: plan.version });
   });
 
   /** The prompt the agent would be given if the design were confirmed now. */
   router.post('/api/session/:id/plan/design/prompt', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ note?: unknown }>(ctx.req);
-    if (!session.plan) {
-      json(ctx.res, 404, { error: 'no plan yet' });
-      return;
-    }
+    const plan = planOr404(session);
     const note = cleanNote(body.note);
     const project = projectFor(session);
-    const { prompt, trimmed, blocks } = designPrompt(session.plan, { agent: session.agent, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
+    const { prompt, trimmed, blocks } = designPrompt(plan, { agent: session.agent, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
     json(ctx.res, 200, {
       prompt,
       hash: promptHash(prompt),
       trimmed,
       blocks,
-      version: session.plan.version,
+      version: plan.version,
       budget: PROMPT_BUDGET,
       maxNote: MAX_NOTE,
       project: projectSummary(project, 'design'),
@@ -810,35 +791,23 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/design/confirm', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ note?: unknown; expect?: unknown; hash?: unknown }>(ctx.req);
     const note = cleanNote(body.note);
-    try {
-      const plan = store.confirmDesign(session.sessionId, {
-        project: projectFor(session),
-        ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
-        ...(note ? { note } : {}),
-        ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
-        ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
-      });
-      log(`design confirmed for ${session.sessionId}`);
-      json(ctx.res, 200, { plan: forBrowser(plan) });
-    } catch (err) {
-      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
-      else throw err;
-    }
+    const plan = store.confirmDesign(session.sessionId, {
+      project: projectFor(session),
+      ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
+      ...(note ? { note } : {}),
+      ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
+      ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
+    });
+    log(`design confirmed for ${session.sessionId}`);
+    json(ctx.res, 200, { plan: forBrowser(plan) });
   });
 
   /** Unlock a confirmed design. */
   router.post('/api/session/:id/plan/design/reopen', (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
-    try {
-      json(ctx.res, 200, { plan: forBrowser(store.reopenDesign(session.sessionId)) });
-    } catch (err) {
-      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
-      else throw err;
-    }
+    json(ctx.res, 200, { plan: forBrowser(store.reopenDesign(session.sessionId)) });
   });
 
   /**
@@ -848,15 +817,11 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/revisions/prompt', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ note?: unknown }>(ctx.req);
-    if (!session.plan) {
-      json(ctx.res, 404, { error: 'no plan yet' });
-      return;
-    }
+    const plan = planOr404(session);
     const note = cleanNote(body.note);
-    const { prompt, trimmed, blocks, threadIds } = revisionPrompt(session.plan, note ? { note } : {});
-    json(ctx.res, 200, { prompt, hash: promptHash(prompt), trimmed, blocks, threadIds, version: session.plan.version, budget: PROMPT_BUDGET, maxNote: MAX_NOTE });
+    const { prompt, trimmed, blocks, threadIds } = revisionPrompt(plan, note ? { note } : {});
+    json(ctx.res, 200, { prompt, hash: promptHash(prompt), trimmed, blocks, threadIds, version: plan.version, budget: PROMPT_BUDGET, maxNote: MAX_NOTE });
   });
 
   /**
@@ -866,33 +831,21 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/revisions', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ note?: unknown; expect?: unknown; hash?: unknown }>(ctx.req);
     const note = cleanNote(body.note);
-    try {
-      const plan = store.queueRevision(session.sessionId, {
-        ...(note ? { note } : {}),
-        ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
-        ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
-      });
-      log(`revision request queued for ${session.sessionId}`);
-      json(ctx.res, 200, { plan: forBrowser(plan) });
-    } catch (err) {
-      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
-      else throw err;
-    }
+    const plan = store.queueRevision(session.sessionId, {
+      ...(note ? { note } : {}),
+      ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
+      ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
+    });
+    log(`revision request queued for ${session.sessionId}`);
+    json(ctx.res, 200, { plan: forBrowser(plan) });
   });
 
   /** Take back a revision request not yet sent. */
   router.post('/api/session/:id/plan/revisions/withdraw', (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
-    try {
-      json(ctx.res, 200, { plan: forBrowser(store.withdrawRevision(session.sessionId)) });
-    } catch (err) {
-      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
-      else throw err;
-    }
+    json(ctx.res, 200, { plan: forBrowser(store.withdrawRevision(session.sessionId)) });
   });
 
   /**
@@ -902,7 +855,6 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/choice', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ mode?: unknown; settings?: unknown }>(ctx.req);
     const mode = validMode(body.mode);
     if (!mode) throw new HttpError(400, 'Say how it is built: mode "tracked", "managed" or "export".');
@@ -918,7 +870,6 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/submit', async (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
     const body = await readJson<{ note?: unknown; target?: unknown; mode?: unknown; expect?: unknown; settings?: unknown; hash?: unknown }>(ctx.req);
     const asked = validTarget(body.target);
     const chosen = validMode(body.mode);
@@ -930,36 +881,25 @@ function buildRouter(deps: Deps): Router {
     const mode = modeFor(asked, chosen, project.mode);
     const target = targetOf(mode);
     const settings = settingsFrom(body.settings, project);
-    try {
-      const plan = store.submit(session.sessionId, {
-        target,
-        project,
-        settings,
-        ...(chosen ? { mode } : {}),
-        ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
-        ...(note ? { note } : {}),
-        ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
-        ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
-      });
-      log(`plan submitted for ${session.sessionId} (${mode})`);
-      if (chosen) rememberChoice(session, mode, mode === 'managed' ? settings : undefined);
-      json(ctx.res, 200, { plan: forBrowser(plan) });
-    } catch (err) {
-      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
-      else throw err;
-    }
+    const plan = store.submit(session.sessionId, {
+      target,
+      project,
+      settings,
+      ...(chosen ? { mode } : {}),
+      ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
+      ...(note ? { note } : {}),
+      ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
+      ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
+    });
+    log(`plan submitted for ${session.sessionId} (${mode})`);
+    if (chosen) rememberChoice(session, mode, mode === 'managed' ? settings : undefined);
+    json(ctx.res, 200, { plan: forBrowser(plan) });
   });
 
   /** Unlock a submitted plan, so it can be changed again. */
   router.post('/api/session/:id/plan/reopen', (ctx) => {
     const session = sessionOr404(ctx);
-    if (!session) return;
-    try {
-      json(ctx.res, 200, { plan: forBrowser(store.reopen(session.sessionId)) });
-    } catch (err) {
-      if (err instanceof PlanError) json(ctx.res, 409, { error: err.message });
-      else throw err;
-    }
+    json(ctx.res, 200, { plan: forBrowser(store.reopen(session.sessionId)) });
   });
 
   /* --------------------------- Maintenance ------------------------- */
@@ -1133,11 +1073,13 @@ function buildRouter(deps: Deps): Router {
     let handed: { id: string; prior: Plan; version: number } | null = null;
     // Listened for from the start: the relay may give up while the hook is
     // still being handled, and a 'close' already past cannot be heard later.
-    const takeBack = () => {
-      if (!handed || ctx.res.writableFinished) return;
+    const takeBack = (): boolean => {
+      if (!handed || ctx.res.writableFinished) return false;
       const { id, prior, version } = handed;
       handed = null;
-      if (store.undeliver(id, prior, version)) log(`prompt for ${id} did not reach the agent; kept to deliver again`);
+      if (!store.undeliver(id, prior, version)) return false;
+      log(`prompt for ${id} did not reach the agent; kept to deliver again`);
+      return true;
     };
     ctx.res.once('close', takeBack);
     try {
@@ -1145,8 +1087,9 @@ function buildRouter(deps: Deps): Router {
       agent = hookAgent(agent, body);
       const { event, input } = readAgentHook(agent, raw, body);
       const session = typeof input.session_id === 'string' ? store.get(input.session_id) : undefined;
-      const queued = (id: string) => Boolean(store.pending(id) || store.pendingRevision(id));
-      const prior = session?.plan && queued(session.sessionId) ? session.plan : null;
+      // What is queued for the agent, and the plan as it was, to restore.
+      const waiting = session ? [store.pending(session.sessionId)?.prompt, store.pendingRevision(session.sessionId)?.prompt].filter((p): p is string => Boolean(p)) : [];
+      const prior = session?.plan && waiting.length ? session.plan : null;
       if (event) {
         output = await ingestHook(event, input, {
           store,
@@ -1162,7 +1105,14 @@ function buildRouter(deps: Deps): Router {
         });
       }
       const after = session ? store.get(session.sessionId)?.plan : undefined;
-      if (prior && after && !queued(session!.sessionId)) handed = { id: session!.sessionId, prior, version: after.version };
+      // Only when this answer is what carries the prompt. One the user pasted
+      // into their message (in any agent; in Cursor, the only way) reached
+      // the agent whatever becomes of the answer. A request still queued
+      // behind it (one prompt to a message) is restored with it as it was.
+      const carried = output.hookSpecificOutput?.additionalContext ?? '';
+      if (prior && after && waiting.some((p) => carried.includes(p))) {
+        handed = { id: session!.sessionId, prior, version: after.version };
+      }
     } catch (err) {
       // A hook must never break the session it is attached to.
       log(`hook ${agent}/${raw} failed: ${(err as Error)?.message}`);
@@ -1170,8 +1120,16 @@ function buildRouter(deps: Deps): Router {
     }
     // The relay gave up (its curl timed out) or the connection dropped before
     // the answer was out: the agent never got the prompt. Taken back, so the
-    // next hook — or harness_plan_read — hands it over.
-    if (ctx.res.destroyed || ctx.req.socket.destroyed) takeBack();
+    // next hook — or harness_plan_read — hands it over, and the answer says
+    // nothing. A daemon too busy to answer in time cannot see the closed
+    // connection yet (the close is still queued behind this request), so the
+    // relay says when its curl gives up: in whole seconds of the same clock,
+    // rounded down, so the true moment is at or after it. Erring early only
+    // keeps a prompt for the next message; erring late would lose it.
+    const deadline = Number(header('x-harness-deadline'));
+    const gone = ctx.res.destroyed || ctx.req.socket.destroyed;
+    const late = deadline > 0 && Date.now() / 1000 > deadline - 0.25;
+    if ((gone || late) && takeBack()) output = HOOK_NOOP;
     if (!ctx.res.writableEnded) json(ctx.res, 200, writeAgentOutput(agent, raw, output));
   });
 
@@ -1182,24 +1140,29 @@ function buildRouter(deps: Deps): Router {
     const id = body.sessionId ?? (typeof headerId === 'string' && headerId ? headerId : undefined);
     const agentHeader = ctx.req.headers['x-harness-agent'];
     const agent = parseAgent(typeof agentHeader === 'string' ? agentHeader : undefined);
+    // Who a server may really be. One that says Claude may be Cursor running
+    // the Claude Code plugin's config; it is never Codex, and its calls never
+    // reach a Codex thread.
+    const mayBe: AgentKind[] = agent === 'claude' ? ['claude', 'cursor'] : [agent];
+    const byPid = (pid: number) => mayBe.map((a) => store.findByPid(pid, a)).find(Boolean) ?? null;
     let session: SessionState | null = null;
     if (id) session = store.ensure(id, body.cwd, agent);
     else if (agent === 'claude') {
-      // One `claude` process is one session, so its pid names it.
-      if (body.pid) session = store.findByPid(body.pid) ?? null;
-      if (!session && body.cwd) session = store.findByCwd(body.cwd, agent) ?? null;
+      // One `claude` process is one session, so its pid names it; else its
+      // folder, a Claude session first, then a Cursor chat.
+      if (body.pid) session = byPid(body.pid);
+      for (const a of mayBe) if (!session && body.cwd) session = store.findByCwd(body.cwd, a) ?? null;
     } else {
       // One Cursor process serves every chat in every window, and one Codex
       // app every thread: the folder says more than the pid. In that folder,
       // the chat that was active last is the one calling.
       if (body.cwd) session = store.findByCwd(body.cwd, agent) ?? null;
-      if (!session && body.pid) session = store.findByPid(body.pid, agent) ?? null;
+      if (!session && body.pid) session = byPid(body.pid);
     }
-    // A server that names the wrong agent — Cursor running the Claude Code
-    // plugin's config — still finds the chat in its folder.
-    if (!session && body.cwd) session = store.findByCwd(body.cwd) ?? null;
     if (!session) return null;
-    if (body.pid && session.claudePid !== body.pid) store.update(session.sessionId, { claudePid: body.pid });
+    // The process stands for the session only where it may be that session's:
+    // otherwise its exit would end a session it never was.
+    if (body.pid && mayBe.includes(session.agent) && session.claudePid !== body.pid) store.update(session.sessionId, { claudePid: body.pid });
     return session;
   };
 
@@ -1662,8 +1625,9 @@ function buildRouter(deps: Deps): Router {
           // build prompt once the plan is submitted. That is how Cursor gets
           // it (no hook can add it to the user's message), and how any agent
           // gets one whose hook did not get through. Delivering it counts as
-          // the read — except for edits made after the design was confirmed,
-          // which are not in its prompt and stay unread.
+          // the read — unless the user changed something after signing off,
+          // which is not in its prompt: then all of it stays unread, and the
+          // notice says to read it.
           //
           // A revision request the user queued (#67) comes with it too: ahead
           // of the plan itself, which this read then returns as usual.
@@ -1854,19 +1818,18 @@ function refuseUnfinishedFinal(checks: unknown, project: ProjectConfig): void {
 }
 
 /**
- * Exit once nothing is using the daemon: no browser open and no session
- * active recently. The next hook starts a fresh one. The setting is read
- * each minute, so changing `idleShutdownMinutes` needs no restart.
+ * Exit once nothing is using the daemon: no browser open, and neither it
+ * nor a session started or active recently (isIdle). The next hook starts
+ * a fresh one. The setting is read each minute, so changing
+ * `idleShutdownMinutes` needs no restart.
  */
 function startIdleWatch(store: SessionStore, config: ConfigCache, clients: { count: number }, stop: () => void): void {
+  const startedAt = Date.now();
   const timer = setInterval(() => {
     const minutes = config.get().idleShutdownMinutes;
     if (!minutes || minutes <= 0) return;
-    const idleMs = minutes * 60_000;
-    if (clients.count > 0) return;
-    const busy = store.all().some((s) => s.status !== 'ended' && Date.now() - s.updatedAt < idleMs);
-    if (busy) return;
-    log(`idle for ${minutes}m with no clients; exiting`);
+    if (!isIdle(Date.now(), { startedAt, clients: clients.count, sessions: () => store.all() }, minutes * 60_000)) return;
+    log(`nothing has used it for ${minutes}m (no page open, no session active); exiting`);
     stop();
   }, 60_000);
   timer.unref?.();

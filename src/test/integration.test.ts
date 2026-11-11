@@ -1501,6 +1501,51 @@ test('"make the task list" in chat confirms the design; with no choice made, a b
 type RevisionPreview = Preview & { hash: string; threadIds: string[] };
 const latest = (s: SessionState) => s.plan!.revisions?.at(-1);
 
+test('one prompt to a message: a revision request queued with a sign-off waits for the message after', async () => {
+  const id = 'one-at-a-time';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await mcpFor(id, 'read');
+  await opsOn(id, [{ op: 'comment', target: { kind: 'node', id: 'd1/db' }, text: 'Use a read replica here.' }]);
+  await post(`/api/session/${id}/plan/design/confirm`);
+  const preview = await post<RevisionPreview>(`/api/session/${id}/plan/revisions/prompt`, {});
+  assert.ok((await post<{ plan?: unknown; error?: string }>(`/api/session/${id}/plan/revisions`, { expect: preview.version, hash: preview.hash })).plan);
+  // Each prompt is the most a hook may add at once: together they would be
+  // cut to a file the agent sees only the start of.
+  const first = String((await hookFor(id, 'UserPromptSubmit', { prompt: 'go' })).hookSpecificOutput?.additionalContext ?? '');
+  assert.ok(first.startsWith('[cc-harness] The design is confirmed'), first.slice(0, 80));
+  assert.doesNotMatch(first, /Revise the plan/);
+  const second = String((await hookFor(id, 'UserPromptSubmit', { prompt: 'and the comments?' })).hookSpecificOutput?.additionalContext ?? '');
+  assert.ok(second.startsWith(preview.prompt), 'the request comes with the next one');
+});
+
+test('a sign-off queued with a revision request, on a message the relay gave up on, is kept for the next message', async () => {
+  const id = 'one-at-a-time-late';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  try {
+    await mcpFor(id, 'publish', PLAN);
+    await mcpFor(id, 'read');
+    await opsOn(id, [{ op: 'comment', target: { kind: 'node', id: 'd1/db' }, text: 'Use a read replica here.' }]);
+    await post(`/api/session/${id}/plan/design/confirm`);
+    const preview = await post<RevisionPreview>(`/api/session/${id}/plan/revisions/prompt`, {});
+    assert.ok((await post<{ plan?: unknown; error?: string }>(`/api/session/${id}/plan/revisions`, { expect: preview.version, hash: preview.hash })).plan);
+    // The relay's curl had already given up when the answer was ready.
+    const past = String(Math.floor(Date.now() / 1000) - 5);
+    const late = await hookFor(id, 'UserPromptSubmit', { prompt: 'go' }, { 'x-harness-deadline': past });
+    assert.equal(late.hookSpecificOutput?.additionalContext, undefined, 'the late answer does not carry it');
+    const s = await sessionFor(id);
+    assert.equal(s.plan!.design!.deliveredAt, null, 'the sign-off is not counted as delivered');
+    assert.equal(latest(s)!.deliveredAt, null, 'nor the request');
+    // Each in its turn, as if the late message had never been.
+    const next = String((await hookFor(id, 'UserPromptSubmit', { prompt: 'go on' })).hookSpecificOutput?.additionalContext ?? '');
+    assert.ok(next.startsWith('[cc-harness] The design is confirmed'), next.slice(0, 80));
+    const after = String((await hookFor(id, 'UserPromptSubmit', { prompt: 'and the comments?' })).hookSpecificOutput?.additionalContext ?? '');
+    assert.ok(after.startsWith(preview.prompt), 'the request comes with the one after');
+  } finally {
+    await call(`/api/session/${id}`, { method: 'DELETE' });
+  }
+});
+
 test('a revision request is queued in the page, carried by the next message once, and answered in its threads (#67)', async () => {
   const id = 'revise-session';
   await hookFor(id, 'SessionStart', { start_reason: 'startup' });
@@ -1861,5 +1906,163 @@ test('a task\'s own checks: the agent proposes, the user sets, and done follows 
     assert.match(String((await at("/mcp/read", {}))["text"]), /docs Document it · checks tests ✗ · skips tests/);
   } finally {
     rmSync(other, { recursive: true, force: true });
+  }
+});
+
+test('every route about a session answers a session the daemon does not know with a 404', async () => {
+  const routes: [string, string][] = [
+    ['GET', ''], ['POST', 'title'], ['POST', 'plan/ops'], ['GET', 'plan/text'], ['GET', 'plan/readback'], ['GET', 'task/t1/brief'],
+    ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/design/confirm'], ['POST', 'plan/design/reopen'],
+    ['POST', 'plan/revisions/prompt'], ['POST', 'plan/revisions'], ['POST', 'plan/revisions/withdraw'], ['POST', 'plan/choice'], ['POST', 'plan/submit'], ['POST', 'plan/reopen'],
+    ['DELETE', ''],
+  ];
+  // Every one the daemon serves: a route added later is in this list or fails here.
+  const main = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'daemon', 'main.ts'), 'utf8');
+  const served = [...main.matchAll(/router\.(get|post|delete)\('\/api\/session\/:id(?:\/([^']*))?'/g)].map((m) => `${m[1]!.toUpperCase()} ${(m[2] ?? '').replace(':taskId', 't1')}`);
+  assert.deepEqual(routes.map(([method, route]) => `${method} ${route}`).sort(), served.sort());
+  for (const [method, route] of routes) {
+    const res = await raw(`/api/session/no-such-session${route ? `/${route}` : ''}`, method === 'POST' ? { method, body: '{}' } : { method });
+    assert.deepEqual({ status: res.status, body: await res.json() }, { status: 404, body: { error: 'unknown session' } }, `${method} ${route}`);
+  }
+});
+
+test('a refused sign-off is a 409 with the reason, a look at no plan a 404, a refused edit a 400', async () => {
+  const id = 'refusals';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  const send = async (method: string, route: string, body?: Record<string, unknown>) => {
+    const res = await raw(`/api/session/${id}/${route}`, body ? { method, body: JSON.stringify(body) } : { method });
+    const json = (res.headers.get('content-type') ?? '').includes('json');
+    return { status: res.status, body: (json ? await res.json() : { text: await res.text() }) as { error?: string } };
+  };
+  const post = (route: string, body: Record<string, unknown> = {}) => send('POST', `plan/${route}`, body);
+  try {
+    // No plan yet: every sign-off is refused, in the store's own words.
+    const signOffs: [string, Record<string, unknown>, string][] = [
+      ['design/confirm', {}, 'There is no plan to confirm yet.'],
+      ['design/reopen', {}, 'There is no plan.'],
+      ['revisions', {}, 'There is no plan to revise yet.'],
+      ['revisions/withdraw', {}, 'There is no plan.'],
+      ['submit', { target: 'session' }, 'There is no plan to submit yet.'],
+      ['reopen', {}, 'There is no plan.'],
+    ];
+    for (const [route, body, reason] of signOffs) {
+      assert.deepEqual(await post(route, body), { status: 409, body: { error: reason } }, route);
+    }
+
+    // And every look at a plan that is not there is a 404.
+    const looks: [string, string][] = [['GET', 'plan/text'], ['GET', 'plan/readback'], ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/revisions/prompt'], ['GET', 'task/t1/brief']];
+    for (const [method, route] of looks) {
+      assert.deepEqual(await send(method, route, method === 'POST' ? {} : undefined), { status: 404, body: { error: 'no plan yet' } }, route);
+    }
+
+    // With a plan: a sign-off over a version the user never saw is refused
+    // the same way, and the plan is left as it was.
+    const published = await mcpFor(id, 'publish', PLAN);
+    assert.equal(published['ok'], true, String(published['text']));
+    const before = (await sessionFor(id)).plan!;
+    const stale: [string, Record<string, unknown>, RegExp][] = [
+      ['submit', { target: 'session' }, /^The plan changed while you were reviewing it\. .* then submit again\.$/],
+      ['design/confirm', {}, /^The plan changed while you were reviewing it\. .* then confirm again\.$/],
+      ['revisions', {}, /^The plan changed while you were reading the request\./],
+    ];
+    for (const [route, body, reason] of stale) {
+      const res = await post(route, { ...body, expect: before.version - 1 });
+      assert.equal(res.status, 409, route);
+      assert.match(res.body.error ?? '', reason, route);
+    }
+
+    // An edit the plan refuses is the user's to fix: a 400, not a 409.
+    assert.deepEqual(await post('ops', { ops: [{ op: 'remove', kind: 'task', id: 'nope' }] }), { status: 400, body: { error: 'No task "nope".' } });
+    const after = (await sessionFor(id)).plan!;
+    assert.equal(after.version, before.version, 'nothing refused changed the plan');
+    assert.equal(after.submission ?? null, null);
+    assert.equal(after.design ?? null, null, 'no design was confirmed');
+    assert.deepEqual(after.revisions ?? [], [], 'no revision was queued');
+  } finally {
+    await call(`/api/session/${id}`, { method: 'DELETE' });
+  }
+});
+
+test('a prompt the relay gave up on while the daemon was busy is kept for the next message', { skip: process.platform === 'win32' }, async () => {
+  const id = 'late-relay';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  try {
+    const published = await mcpFor(id, 'publish', PLAN);
+    assert.equal(published['ok'], true, String(published['text']));
+    assert.equal((await raw(`/api/session/${id}/plan/submit`, { method: 'POST', body: JSON.stringify({ target: 'session' }) })).status, 200);
+    // The relay's curl gives up a second from now, and the daemon is busy
+    // (paused) past that: by the time it answers, no one is reading.
+    const deadline = Math.floor(Date.now() / 1000) + 1;
+    daemon.kill('SIGSTOP');
+    const late = hookFor(id, 'UserPromptSubmit', { prompt: 'go' }, { 'x-harness-deadline': String(deadline) });
+    await sleep(2_200);
+    daemon.kill('SIGCONT');
+    const answer = await late;
+    assert.equal(answer.hookSpecificOutput?.additionalContext, undefined, 'the late answer does not carry it');
+    assert.equal((await sessionFor(id)).plan!.submission!.deliveredAt, null, 'so it is not counted as delivered');
+    // The next message, answered in time (a second or two to spare), carries it.
+    const next = await hookFor(id, 'UserPromptSubmit', { prompt: 'go on' }, { 'x-harness-deadline': String(Math.floor(Date.now() / 1000) + 2) });
+    const s = await sessionFor(id);
+    assert.equal(next.hookSpecificOutput?.additionalContext, s.plan!.submission!.prompt);
+    assert.ok(s.plan!.submission!.deliveredAt);
+  } finally {
+    daemon.kill('SIGCONT');
+    await call(`/api/session/${id}`, { method: 'DELETE' });
+  }
+});
+
+test('in Cursor a pasted prompt stays delivered, however late the hook is: the paste reached the agent', async () => {
+  const id = 'late-relay-cursor';
+  const cursor = { 'x-harness-agent': 'cursor' };
+  await hookFor(id, 'sessionStart', { conversation_id: id, workspace_roots: [repo] }, cursor);
+  try {
+    assert.equal((await mcpFor(id, 'publish', PLAN))['ok'], true);
+    assert.equal((await raw(`/api/session/${id}/plan/submit`, { method: 'POST', body: JSON.stringify({ target: 'session' }) })).status, 200);
+    const prompt = (await sessionFor(id)).plan!.submission!.prompt;
+    const past = String(Math.floor(Date.now() / 1000) - 5);
+    await hookFor(id, 'beforeSubmitPrompt', { conversation_id: id, prompt }, { ...cursor, 'x-harness-deadline': past });
+    assert.ok((await sessionFor(id)).plan!.submission!.deliveredAt, 'not taken back, so not sent again');
+  } finally {
+    await call(`/api/session/${id}`, { method: 'DELETE' });
+  }
+});
+
+test('a prompt the user pasted into a late message stays delivered: it reached the agent with the message', async () => {
+  const id = 'late-relay-pasted';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  try {
+    assert.equal((await mcpFor(id, 'publish', PLAN))['ok'], true);
+    assert.equal((await raw(`/api/session/${id}/plan/submit`, { method: 'POST', body: JSON.stringify({ target: 'session' }) })).status, 200);
+    const prompt = (await sessionFor(id)).plan!.submission!.prompt;
+    await hookFor(id, 'UserPromptSubmit', { prompt }, { 'x-harness-deadline': String(Math.floor(Date.now() / 1000) - 5) });
+    assert.ok((await sessionFor(id)).plan!.submission!.deliveredAt, 'not taken back, so not sent again');
+    const next = await hookFor(id, 'UserPromptSubmit', { prompt: 'go on' });
+    assert.doesNotMatch(String(next.hookSpecificOutput?.additionalContext ?? ''), /Build the plan/);
+  } finally {
+    await call(`/api/session/${id}`, { method: 'DELETE' });
+  }
+});
+
+test("a session first seen through a tool call with no folder (Codex, its hooks untrusted) guesses no repository: not the daemon's", async () => {
+  const id = 'codex-thread-no-folder';
+  // Codex's MCP server sends no cwd: the daemon's own folder is some other session's repository.
+  const res = await call<Record<string, unknown>>('/mcp/read', { method: 'POST', headers: { 'x-harness-session': id, 'x-harness-agent': 'codex' }, body: '{}' });
+  assert.ok(res['text'] !== undefined, JSON.stringify(res));
+  try {
+    const { session, projectChecks } = await call<{ session: SessionState; projectChecks: { implement: string[]; review: string[] } }>(`/api/session/${id}`);
+    assert.equal(session.cwd, '', 'no folder until a hook says which');
+    assert.equal(session.repoRoot, null);
+    assert.equal(session.title, id.slice(0, 8), 'named by its id, not after another repository');
+    assert.deepEqual(projectChecks, { implement: [], review: [] }, "and no repository's checks");
+    // A SessionStart that names no folder guesses none either.
+    await call(`/hook/SessionStart`, { method: 'POST', headers: { 'x-harness-agent': 'codex' }, body: JSON.stringify({ session_id: id, start_reason: 'startup' }) });
+    assert.equal((await sessionFor(id)).cwd, '');
+    // Its first hook that says where it is (trusted mid-thread: not a SessionStart) names it.
+    await hookFor(id, 'UserPromptSubmit', { prompt: 'go' }, { 'x-harness-agent': 'codex' });
+    const named = await sessionFor(id);
+    assert.equal(named.cwd, repo);
+    assert.equal(named.title, path.basename(repo));
+  } finally {
+    await call(`/api/session/${id}`, { method: 'DELETE' });
   }
 });

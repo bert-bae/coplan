@@ -95,6 +95,11 @@ export interface Diagram {
   title: string;
   /** Bumped on every change; see `Section.rev`. */
   rev: number;
+  /** The revision at which its boxes, arrows or direction last changed. A
+   *  save of the graph made against any revision since is not refused for a
+   *  title or caption edited meanwhile. Absent where a diagram was saved
+   *  before it was kept: then `rev` stands for it. */
+  graphRev?: number;
   nodes: DiagramNode[];
   edges: DiagramEdge[];
   /** Which way automatic layout flows. When Claude leaves it out, the
@@ -370,6 +375,9 @@ export interface BuildSettings {
  */
 export interface Submission {
   at: number;
+  /** The change log's position when it was submitted: what the prompt
+   *  knows about. Absent on plans submitted before it was recorded. */
+  seq?: number;
   target: BuildTarget;
   /** Anything the user added for Claude when submitting. */
   note?: string;
@@ -634,6 +642,9 @@ export type PlanOp =
       /** The task's `rev` the edit was made against. Refused if the other
        *  side has changed the task since. */
       expect?: number;
+      /** The page's note editor: the note it started from. Refused if the
+       *  note changed since — a progress note moves no revision. */
+      noteWas?: string;
     }
   | { op: 'move_task'; id: string; parentId: string | null; index: number }
   | { op: 'move_section'; id: string; index: number }
@@ -799,6 +810,9 @@ export interface SessionState {
   title: string;
   /** Set once the user renames the session, so nothing overwrites it. */
   titleLocked?: boolean;
+  /** Saved by a newer Coplan, in a format this build cannot read: served
+   *  blank, and never saved over (so never on disk with this set). */
+  savedByNewer?: boolean;
   status: SessionStatus;
   /** Set while Claude is waiting on the user; cleared when they reply. */
   waiting: WaitingState | null;
@@ -866,6 +880,8 @@ export interface SessionSummary {
   engaged: boolean;
   /** At least one of its hooks has reached Coplan (see `hookedAt`). */
   hooked: boolean;
+  /** Saved by a newer Coplan (see `SessionState.savedByNewer`). */
+  savedByNewer?: boolean;
 }
 
 /* ------------------------------------------------------------------ *

@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { store, useAgent, usePlan, useSession, useStore } from '../store.ts';
+import { store, useAgent, usePlan, useSession, useSessionId, useStore } from '../store.ts';
 import { api, type PromptPreview, type ProjectSummary } from '../lib/api.ts';
 import { OpenInClaude } from './Handoff.tsx';
 import { ProgressBar } from './Progress.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
+import { isComposing } from '../lib/keys.ts';
 import { MAX_NOTE, awaitingUserReview, countTasks, currentTask, planPhase, unreadAreas } from '../../shared/plan.ts';
 import { MAX_PARALLEL, MAX_ROUNDS, MODE_LABEL, branchPlan, buildSteps, hasDependencies, planMode, readyTasks, targetOf } from '../../shared/build.ts';
 import { blockingGaps, planGaps, type GapSeverities } from '../../shared/check.ts';
@@ -12,6 +13,7 @@ import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
 import { droppedParts, type ConfigRow } from '../../shared/blocks.ts';
 import { PLAN_STATUS, statusDetail, statusFacts, statusTitle } from '../lib/status.ts';
 import { copyText } from '../lib/copy.ts';
+import { draftsLockedBy } from '../lib/drafts.ts';
 import { CONFIG_DOCS, PromptView, configDocs } from './PromptView.tsx';
 import type { Target } from '../../shared/types.ts';
 
@@ -212,7 +214,7 @@ export function StatusChip({ plan, agent, note }: { plan: Plan; agent: AgentInfo
 function useEscape(onClose: () => void, busy = false): void {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !busy) {
+      if (e.key === 'Escape' && !busy && !isComposing(e)) {
         e.stopPropagation();
         onClose();
       }
@@ -237,6 +239,13 @@ function useDraft(key: string): [string, (note: string) => void, () => void] {
     else drafts.delete(key);
   };
   return [note, set, () => drafts.delete(key)];
+}
+
+/** Why a sign-off button waits, if it does: what disables it, and says so. */
+function waitTitle(unsaved: boolean, open: string[], held: boolean): string | undefined {
+  if (unsaved) return 'Saving your last edit first…';
+  if (open.length) return `Save or cancel the text open in ${open.join(', ')} first`;
+  return held ? 'Fix the gaps this repository counts as errors first' : undefined;
 }
 
 /** Show a field a prompt quotes, from a sign-off dialog. */
@@ -368,14 +377,16 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
   const session = useSession();
   const plan = usePlan();
   const agent = useAgent();
-  const sessionId = useStore((s) => s.sessionId);
+  const sessionId = useSessionId();
   const [note, setNote, clearDraft] = useDraft(`${sessionId}:design`);
   const settled = useSettled(note);
   const [shown, setShown] = useState<{ preview: PromptPreview; note: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // An edit still on its way (the canvas, a field) is not in the prompt yet.
+  // An edit still on its way (the canvas, a field) is not in the prompt yet,
+  // nor is text left open in a field the lock would drop.
   const unsaved = useStore((s) => s.saving > 0 || s.canvasSaving);
+  const open = plan ? draftsLockedBy(sessionId, plan, 'design') : [];
   const version = plan?.version ?? 0;
   // The prompt also moves when the agent reads the plan (its "since you
   // last read" part), which is not a new version — and after a refused
@@ -409,7 +420,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
     setBusy(true);
     // Where no hook can hand the prompt over (Cursor), the user pastes it.
     if (!agent.promptContext) await copyText(preview.prompt, `Copied — paste it into ${agent.name}'s chat.`);
-    const ok = await store.confirmDesign({ note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}) });
+    const ok = await store.confirmDesign({ sessionId, agent }, { note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}) });
     setBusy(false);
     if (ok) {
       clearDraft();
@@ -457,7 +468,7 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>
               Cancel
             </button>
-            <button type="button" className="btn btn-primary" disabled={!current || busy || unsaved || held} title={unsaved ? 'Saving your last edit first…' : held ? 'Fix the gaps this repository counts as errors first' : undefined} onClick={() => void confirm()}>
+            <button type="button" className="btn btn-primary" disabled={!current || busy || Boolean(waitTitle(unsaved, open, held))} title={waitTitle(unsaved, open, held)} onClick={() => void confirm()}>
               {busy ? 'Confirming…' : agent.promptContext ? 'Confirm design' : 'Copy and confirm design'}
             </button>
           </div>
@@ -482,7 +493,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
   const session = useSession();
   const plan = usePlan();
   const agent = useAgent();
-  const sessionId = useStore((s) => s.sessionId);
+  const sessionId = useSessionId();
   // Both null until the first preview says what the repository's defaults are.
   const [mode, setMode] = useState<ExecutionMode | null>(null);
   const [note, setNote, clearDraft] = useDraft(`${sessionId}:submit`);
@@ -491,8 +502,9 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
   const [shown, setShown] = useState<Shown | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  // An edit still on its way (the canvas, a field) is not in the prompt yet.
+  // As for the design: an edit on its way, or text left open the lock would drop.
   const unsaved = useStore((s) => s.saving > 0 || s.canvasSaving);
+  const open = plan ? draftsLockedBy(sessionId, plan, 'plan') : [];
   const version = plan?.version ?? 0;
   // As for the design: the agent reading the plan moves the prompt without
   // a new version, and a refused submit fetches it again.
@@ -548,7 +560,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
     if (target === 'elsewhere' || !agent.promptContext) {
       await copyText(preview.prompt, target === 'session' ? `Copied — paste it into ${agent.name}'s chat.` : 'Copied the plan as Markdown.');
     }
-    const ok = await store.submitPlan({
+    const ok = await store.submitPlan({ sessionId, agent }, {
       target,
       mode,
       note,
@@ -636,7 +648,7 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={submitting}>
               Cancel
             </button>
-            <button type="button" className="btn btn-primary" disabled={!current || submitting || unsaved || held} title={unsaved ? 'Saving your last edit first…' : held ? 'Fix the gaps this repository counts as errors first' : undefined} onClick={() => void submit()}>
+            <button type="button" className="btn btn-primary" disabled={!current || submitting || Boolean(waitTitle(unsaved, open, held))} title={waitTitle(unsaved, open, held)} onClick={() => void submit()}>
               {submitting ? 'Submitting…' : mode === 'export' ? 'Copy and lock' : target === 'session' && agent.promptContext ? 'Submit and lock' : 'Copy, submit and lock'}
             </button>
           </div>
@@ -982,7 +994,7 @@ function TaskingStrip({ session, plan }: { session: SessionState; plan: Plan }) 
               className="link is-danger"
               onClick={() => {
                 setConfirming(false);
-                void store.reopenDesign();
+                void store.reopenDesign({ sessionId: session.sessionId, agent });
               }}
             >
               Reopen design
@@ -1149,7 +1161,7 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
               className="link is-danger"
               onClick={() => {
                 setConfirming(false);
-                void store.reopenPlan();
+                void store.reopenPlan({ sessionId: session.sessionId, agent });
               }}
             >
               {submission.deliveredAt ? 'Reopen' : 'Withdraw'}

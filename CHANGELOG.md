@@ -2,6 +2,429 @@
 
 ## Unreleased
 
+### Fixes
+
+- **`coplan check` no longer leaves a check running when it ends unexpectedly.** Ctrl+C with errors going
+  to a full disk stops the check as usual, and a crash mid-check takes the check's processes with it.
+- **Accepting a proposed task removal no longer deletes notes you rewrote after it was made.** A note on the
+  task or on a subtask it takes puts the proposal out of date instead.
+- **`coplan check` names a hook folder it cannot enter.** It used to fail as `spawn sh EACCES`, exit 127,
+  as if the shell were missing; it now says the folder cannot be entered.
+- **Text a lock dropped no longer comes back when the plan is reopened.** A comment, reply or field being
+  written when the plan was signed off elsewhere is offered to copy, as before, and its box now starts empty.
+- **A submitted plan no longer offers to comment where it takes no comments.** A section or task with no
+  comments shows no comment button, and one with only resolved comments reads "Comments on …".
+- **Accepting a proposal no longer writes over a task note you rewrote after it was made.** The proposal
+  shows as out of date instead.
+- **A proposal made in the same batch as Claude's own edit to an item is no longer refused.** Its edits'
+  revisions are checked against the plan as the batch began, as the batch's own edits are.
+- **On macOS, hooks start the daemon again.** The hook relay started it
+  with `setsid`, which macOS does not have, and its fallback could never
+  run. So a new session waited five seconds for nothing, and after the
+  daemon's idle shutdown, a plan you signed off could miss your next
+  message. The relay now has node start it, detached, everywhere.
+- **A tool call the daemon fails is an error to the agent.** A daemon
+  error, a request too large or malformed JSON reached the agent as a
+  successful result, carrying raw JSON, so it carried on as though, say, a
+  publish had been stored. It now gets an error, in the daemon's words.
+- **`coplan stop` and `coplan restart` stop a hung daemon.** A daemon
+  stuck too hard to run its shutdown kept running while `stop` said
+  "stopped", and `restart` waited on it for ever. `stop` now kills one
+  that has not gone within three seconds, and says so; `restart` gives up
+  asking it after five seconds and stops it.
+- **The agent cannot undo an edit of yours it has not read, by the side
+  door.** Its edits were checked only against the one item they named.
+  Setting a task's `builds` could drop a box link you had just made, and
+  removing a task took the subtasks, dependencies and links you had just
+  changed with it, after which the read-back said your edits "cancel
+  out". Both are now refused until it reads the plan, like any other
+  edit over yours.
+- **What you do after submitting reaches the agent.** Handing it the build
+  prompt counted as its read of the whole plan, so a proposal you rejected
+  after submitting, with your reason, or a task's checks you changed then,
+  never showed in its read-back. Those now stay unread and it is told to
+  read them, as when it is handed the confirmed design.
+- **What you type in a box's panel is no longer wiped by the agent.** A
+  change the agent published to the box you were typing in replaced your
+  text while you were still in the field, and nothing was saved. The
+  label, detail and description fields now keep what you type while you
+  are in them, and say when the box changed meanwhile: leaving keeps your
+  text, Esc takes the new one. Out of the field they follow the plan.
+- **The summary, a box's notes and a diagram caption warn you too.** If
+  the agent changed one while you were editing it, saving replaced its
+  text with yours without a word. You now see "This changed while you
+  were editing" first, as tasks and sections already showed; saving still
+  goes in, as the choice is yours.
+- **A sign-off is not lost when the daemon is slow to answer.** If the
+  daemon was too busy to answer your message's hook before the hook gave
+  up, it still marked the plan or design you signed off as delivered,
+  though the agent never got it, and nothing sent it again. The hook now
+  says when it gives up; a daemon that answers later keeps the prompt for
+  your next message.
+- **Accepting a proposal cannot undo what you changed after it was made.**
+  A proposal is out of date once you change what it would change, but
+  only the item each edit named was compared: accepting a proposed task
+  removal took subtasks, dependencies and box links you had changed since
+  with it, and a proposed `builds`, box edit, box removal or diagram
+  removal undid task links you had made. These now read as out of date
+  and say what changed; one made before this version reads as out of date
+  too, as it cannot be checked in full. And a proposal made on a task as
+  the agent read it before you changed it is refused when made, as the
+  agent's own edit is: it was let through, and accepting it put the
+  agent's old text back over yours. A proposal's edits are also checked
+  as those before them leave the plan, as a batch's are: one that moves a
+  task under another and removes that one counts what it takes of the
+  task moved.
+- **`coplan init` writes checks that run your scripts.** It wrote a
+  script as `<package manager> <script>`, which for some names is the
+  package manager's own command: `yarn check` (yarn's integrity check,
+  which passes without running anything), `bun test` (Bun's test runner)
+  and `pnpm ci` (which fails). It now writes `<package manager> run
+  <script>` throughout. A `.coplan/config.json` it wrote before keeps its
+  commands: look for those three and add `run`.
+- **A field you are typing in is saved to its own plan when you switch
+  sessions.** Going to another session (Back, say) while typing a task's
+  title, note or branch dropped what you typed, or, in a browser that
+  blurs a field as it goes, could save it into the session you switched
+  to, where the same task id is another task. It is now saved where you
+  typed it, before the switch.
+- **A Codex thread whose hooks are not trusted yet no longer takes another
+  repository's settings.** Seen first through a tool call, which names no
+  folder, its session was given the daemon's own: the repository of
+  whichever session started it, with that repository's checks, base branch
+  and git. It now has no folder until a hook says which, and no checks or
+  git are guessed meanwhile.
+- **A session with a plan stays in the list.** The daemon keeps 60
+  sessions in memory, chosen by the last activity alone, and every agent
+  session counts, plain ones included. Sixty newer sessions that never
+  used Coplan pushed an open plan out of the browser's list and out of
+  `coplan open` until its agent was used again. Sessions you planned in
+  and the rest are now kept apart, the newest 60 of each, so neither can
+  push out the other.
+- **Finished work stays finished when tasks move.** Adding a subtask to a
+  task already started or done was refused, but moving one under it, or a
+  republish nesting new work under it, was not: the task became a parent,
+  read as ready again, and its finished work dropped out of the counts.
+  All three are now refused the same way, with what to do instead, and
+  the task list no longer offers nesting or dropping a task into one.
+- **A dependency settled by dropping its work no longer reads as not
+  done.** The board counted dropped work as settled and showed the task
+  ready, but its brief (and the exported plan's) said the dependency was
+  "NOT DONE YET", so an implementer could wait for, or redo, work dropped
+  on purpose. Both now read it as the board does, and one dropped whole
+  is marked `[-]` with nothing of it to build on, as is a dropped subtask
+  in its parent's brief.
+- **A republish can drop a task you had linked to a box.** The links you
+  made carried over to the republished diagram and were then checked
+  against the new task list, so the whole publish was refused over a link
+  the agent never wrote. A carried link to a task no longer in the plan
+  now goes with the task, as when it is removed.
+- **A config file saved with a byte order mark is read.** Some Windows
+  editors (PowerShell 5.1's `Set-Content -Encoding UTF8`, say) start a
+  file with an invisible mark. `.coplan/config.json` saved that way was
+  "not valid JSON", so no check ran and the error named a character you
+  cannot see. `.coplan/config.json`, your own Coplan settings and the
+  `package.json` that `coplan init` reads now skip it, and one saved as
+  UTF-16 (PowerShell 5.1's `>`) says to save it as UTF-8.
+- **Numbered steps read as written.** In task details, notes and
+  comments, steps with blank lines between them each started again at 1,
+  a list beginning at 3 began at 1, and a code block indented under a step
+  came out as garbled text that broke the list in two. They now count on,
+  keep their number and keep the code in its step, and a bare link no
+  longer takes the sentence's full stop with it.
+- **An open editor keeps what you wrote.** A task's detail, the summary,
+  a section, a box's notes or a diagram's caption, open and half written,
+  was gone when you clicked another tab (or a chip that opens one), went
+  to another session and back, or closed the page without being asked.
+  It now reopens as you left it, in its own session, and the browser asks
+  before you close the page with one unsaved.
+- **Ctrl+C on `coplan check` stops the check too.** Each check runs in a
+  process group of its own, so a timeout can stop all it started, but
+  that also kept Ctrl+C (or an agent ending the command) from reaching it:
+  `coplan` quit and the test suite ran on, and a second run raced it. The
+  interrupt is now passed on, and `coplan check` exits once all the check
+  started is gone; what ignores the interrupt, a test runner's worker say,
+  is killed three seconds on. That holds when nothing reads its errors any
+  more too (`2>&1 | head`, an agent that has closed the pipe, a terminal
+  closed), which made it crash before the check was stopped.
+- **A check whose folder is a file fails, and the rest still run.** Its
+  `cwd` naming a file got past the check for a missing folder, and the
+  shell could not start there: `coplan check` ended in a stack trace, and
+  the checks after it never ran. It now fails that check, saying its
+  folder is not a folder, as any check that cannot start does, and the
+  config's own reading warns of it.
+- **A check that times out is stopped with all it started.** What it
+  started that ignored the stop could run on beside the next check, or
+  past `coplan check` itself; and a check whose output something outside
+  it held open never ended. It is now over once all it started is gone,
+  killed three seconds on if need be.
+- **A check that starts a server outside it is over when it ends.** A
+  check that started something detached (a dev server, say) that kept its
+  output open ran on until its timeout, and failed as timed out, though it
+  had ended, and passed. It is now over as it ended, and the server runs
+  on, even when its timeout falls in the moment it is given to finish.
+- **Your settings' comments survive a second `./setup.sh`.** When setup
+  rewrote a settings file that had comments, it kept the original as
+  `.bak`; but the line it writes at the top counted as a comment the next
+  time, so a second run that changed a setting copied its own output over
+  that `.bak`, and your comments were gone. Its own line no longer counts,
+  however an editor saved the file since, and a copy never goes over an
+  earlier one: the next is `.bak.1`, then `.bak.2`.
+- **Titles in the diagram's side panel read as titles while you edit.** A
+  box's or a connection's title showed in grey capitals, and the
+  diagram's own title in grey, because a style left from unused code
+  matched them; only the read-only view undid it. That style and the
+  unused code are gone, so they look as they do once the plan is submitted.
+- **`coplan doctor` after a restart of the machine checks a real daemon.**
+  It took a lock whose process still existed for a running daemon, and
+  after a reboot that process can be another program's: the doctor then
+  reported a dozen failures against a port nothing listens on. It now
+  asks the daemon to answer, as `coplan` and the agents' tools already
+  did, and starts one if none does.
+- ***Request revisions* carries your question in a proposal's thread.**
+  A reply you wrote under one of the agent's proposals was left out of the
+  ask, though the page said it would go with it and the plan check counted
+  it unanswered. The page, the check, the ask and the agent's read now go by
+  one rule: an open comment where you spoke last waits on the agent. The
+  check quotes what you said last there, not what opened the thread.
+- **A box's description saved with ⌘/Ctrl+Enter is saved once.** The
+  keys saved it, and leaving the field, which they also do, sent the same
+  save again.
+- **Hooks run without `HOME` reach Coplan, and never block your prompt.**
+  The hook relay stopped with an error where `HOME` was unset (some
+  sandboxed agents), and an agent takes a failing prompt hook as a refusal.
+  It now finds the daemon's home as the daemon does — from the user
+  database when `HOME` is unset — and, like it, ignores a
+  `CC_HARNESS_HOME` an agent passed on unexpanded.
+- **A session named `.` or `..` can no longer reach Coplan's other
+  files.** Its folder was the sessions folder itself, or Coplan's home, so
+  deleting that session would have deleted every plan, or the home. Such
+  an id now gets a folder inside the sessions folder, and deleting a
+  session removes only a folder there.
+- **Coplan's tools stay up through a line that is not a request.** A
+  `null` (or any JSON that is not an object) sent to the tool server ended
+  it, taking the agent's Coplan tools with it until the session restarted;
+  bad JSON, or a request with no method, got no answer. Each now gets the
+  JSON-RPC error for it.
+- **Moving a box while the diagram is renamed keeps the move.** A title or
+  caption changed while a drag or a keyboard move was still to be saved
+  made the save look stale: it was refused, and undo was cleared. A change
+  that leaves the boxes and arrows as they were no longer counts against a
+  move; one that changes them still does.
+- **A prompt Coplan hands over arrives whole, one to a message.** A
+  sign-off's prompt and a revision request queued with it went in the same
+  message, which could pass what an agent takes from a hook (about 10,000
+  characters in Claude Code): the rest went to a file the model sees only
+  a preview of. A request queued with a sign-off now comes with the message
+  after. And Codex's prompt hook, which Coplan had capped at 4,000 tokens,
+  now takes 8,000: a whole prompt even for a plan in Chinese or Japanese.
+- **A Claude Code tool call never lands in a Codex thread.** A call that
+  named no session (a Claude Code without `CLAUDE_CODE_SESSION_ID`, or
+  before its hooks registered it) fell back to whatever session was in its
+  folder, a Codex thread included, and left its process on it: when
+  Claude exited, the thread was marked ended. A call that says it is
+  Claude Code now only reaches a Claude session or, for Cursor running
+  Claude Code's config, a Cursor chat, by its process or its folder.
+- **`coplan init` runs scripts with the package manager `package.json`
+  names.** It went by lockfiles alone, so a repository with no lockfile
+  yet, or a stray one, got another tool's `run`. The `packageManager`
+  field (`pnpm@10.28.0`, the one Corepack uses) now comes first, and
+  `init` says which it went by.
+- **In Cursor running Claude Code's hooks, a tool with a huge output still
+  clears what waited on it.** The relay cuts such an event down to its
+  session, which it looked for only as Claude Code names it: Cursor's
+  chat id was not found and the event was dropped, leaving a question or
+  permission prompt on the board.
+- **Typing in Japanese, Chinese or Korean, the input method's keys are its
+  own.** The Enter that picks characters saved a title, a box's label, an
+  arrow's label, a session's name, a check's command or a comment
+  half-typed; the Escape that drops a choice threw the whole edit away, or
+  closed the sign-off dialog. While the input method is composing, the
+  fields and dialogs now leave its keys alone; the next Enter saves.
+- **A late answer leaves the session you moved to alone.** Submitting a
+  plan, then opening another session before the answer came, moved that
+  other session's page to its board and named its agent in the message;
+  moving or adding a task there could focus or expand a task of the same
+  id in it. What follows an answer is now done only for the session it
+  was made on, and a message about it, shown over another, names its plan.
+- **A sign-off goes to the plan its dialog showed.** Confirming a design,
+  submitting or queuing a revision in Cursor copies the prompt first; a
+  session opened while that copy waited was the one signed off (refused,
+  at best, as another plan's version). Each sign-off now carries the
+  session it was made in.
+- **A parent task's row reads as its dot does.** Its dot showed the status
+  rolled up from its subtasks, but the row was struck through, labelled
+  and its note flagged by the parent's own stored status, so a parent
+  whose subtasks were all done could still read as to do (or blocked), in
+  the outline and in "By box". The canvas reads the same way: a box's
+  panel and its summary list a parent as far along as its subtasks.
+- **What is folded or previewed stays with its plan.** Folding a task in
+  one plan's outline folded the task of the same id in every other plan,
+  and a proposal shown on the canvas stayed shown in the next session
+  opened, on its proposal of the same id. Folds are now remembered per
+  session (for the 100 folded in most recently), and opening another
+  session closes a preview. Folds remembered from before are not carried
+  over.
+- **A session saved by a newer Coplan says so.** It opened blank, and
+  nothing done in it was saved, with nothing on the page to say why. It now
+  says so as it opens, and that deleting it deletes it for the newer
+  version too. Deleting it also frees its id: a session started later
+  under it is saved as usual. The session list shows it, marked "saved by
+  a newer Coplan" rather than "no plan yet", and asks before deleting it
+  there whether to delete it for the newer Coplan too.
+- **The agent cannot delete a task you just moved under one it removes.**
+  It was refused an edit to anything you changed since it last read the
+  plan, but a move was not counted: drag a task under another, and the
+  agent removing that one, unaware, took yours with it. Now it is told to
+  read the plan first. Moves inside what it removes, as it read it, still
+  go through.
+- **A sign-off sent with a revision request waiting is kept when the
+  message does not get through.** A prompt whose message timed out is
+  kept for the next message, but not when a revision request was queued
+  behind it: the sign-off counted as delivered and the agent never got
+  it. Now both wait, each for its own message.
+- **Clicking into a box's field no longer saves over the agent's text.**
+  A field in the box panel you had only clicked into kept its old text
+  when the agent changed the box, and saved it when you left: an empty
+  description you clicked into deleted the one the agent then wrote. It
+  now shows the agent's text and saves only what you type. The "changed
+  while you were typing" warning also goes once you save or take the new
+  text, and no longer comes back for a change you have already seen.
+- **`coplan status`, `clean`, `url`, `open` and `doctor` no longer hang on a
+  daemon that does not answer.** A daemon holding its port without
+  answering counted as running, and the commands waited on it forever;
+  the doctor said it was reachable. `status`, `clean` and the doctor now
+  say at once that it is not answering, may be busy, and to run `coplan
+  restart` if it stays that way; any other request gives up after 5 s
+  (15 s for a clean). An error the daemon answers with is said in its
+  words, not as a crash, and the CLI's own messages come without a stack
+  trace.
+- **A daemon started for its link stays up long enough to open it.** The
+  daemon exits once nothing has used it for `idleShutdownMinutes`, but
+  its own start did not count: started by `coplan start` or `coplan url`
+  with no session active, it exited within a minute, and the link it
+  printed stopped working. It now waits that long from its start too.
+- **A comment, a reply or a files list being written keeps its text.**
+  Clicking another box, or switching tab or session, threw away a comment
+  being typed (on a box, a task or the plan), a reply, or an open edit of
+  a task's files, and closing the page did not ask about them. They are
+  now kept like the other editors: back where they were with their text,
+  asked about before the page closes, and let go once sent, cancelled, or
+  what they were on is gone.
+- **Confirm design and Submit wait for text you left open.** A summary,
+  section, caption, box note or (for Submit) task detail or files list
+  half written in an editor elsewhere on the page was dropped once the
+  sign-off locked it, and was never in the prompt. The button now waits,
+  saying which field to save or cancel first.
+- **A parent task whose subtasks were all dropped shows as dropped.** It
+  showed a ✓ Done, while the briefs said it was dropped whole and its
+  progress counted nothing done.
+- **Text you left open is not dropped unsaid when the plan locks from
+  chat.** The design confirmed or the plan submitted in chat (or another
+  tab) dropped text left open in a field the lock froze, without a word.
+  The page now says which field, and shows the text, with a button to
+  copy it.
+- **A message that has to start Coplan first stays within its hook's
+  time.** Starting the daemon took up to 5 s, and the call after it was
+  given 10 s more, past the 10 s the agent gives a message's hook: on a
+  slow start the agent cut it off, and the sign-off it carried counted as
+  delivered. The start and the call now share what the hook is given.
+- **Escape that drops an input method's choice keeps three more things
+  open.** Cancelling a Japanese, Chinese or Korean candidate with Escape
+  closed a new subtask's field (losing its title), a box's task list, and
+  on a narrow window the session list's drawer. They now leave that
+  Escape to the input method, as the other fields do.
+- **Opening another session closes what was open on the last.** The
+  prompt viewer stayed open, showing the new session's brief for the old
+  session's task id, and a jump made just before could flash the other
+  plan's item of the same id. Opening another session, or deleting the
+  one on screen, now closes the viewer and forgets the jump; opening the
+  same session again keeps them.
+- **An edit refused off screen says which plan it was.** An editor that
+  saved as you moved to another session, and was refused, said so over
+  the plan now on screen, where "t3" is another task. Like a sign-off's
+  message, it now names its own plan; renaming or deleting a session from
+  the list does too. A daemon that cannot be reached is said as it is.
+- **Links in the plan's text render as written.** A web address inside a
+  link's text was made a second link inside the first; one written right
+  before a link or a code span took it into its address; and `**` or a
+  backtick in a link's address turned into bold or code inside it. Each
+  now reads as written.
+- **No two sessions share a folder.** A session id is kept in a folder
+  named after it, with anything a folder name cannot hold made safe, so
+  ids that differed only there (`a/b`, `a_b`), or past 128 characters,
+  shared one: each read the other's plan and saved over it. Such an id's
+  folder now also carries a short hash of the id. Every agent's ids are
+  safe as they are and keep their folders; a session kept the old way is
+  saved to its new folder the next time Coplan starts, or when it is next
+  used, and deleting it deletes its old folder too. Once the new folder
+  holds it, that is the copy taken: an earlier build run again keeps its
+  own copy in the old one.
+- **A diagram the agent relinked says so.** Removing a task, or a task
+  list's `builds`, changed a diagram's box links but left it marked as
+  last edited by whoever edited it before: a save refused over it said
+  "changed by another edit", and the diagram's line said *edited by you*.
+  It now names the agent, and the agent refused over a diagram or section
+  is told to read the plan again.
+- **Removing many tasks no longer stalls Coplan.** Each removal copied
+  the whole plan to say what a comment left behind was on: on a big plan,
+  forty took close to a second, again for a proposal's preview and
+  accept. A tenth of that now.
+- **The agent setting many tasks' `builds` no longer stalls the page.**
+  Checking each one against your unread edits copied the whole plan, so on
+  a big plan a batch held Coplan for up to half a second. It now works out
+  which box links would change without the copy.
+- **A reply you are writing stays when the agent resolves its thread.**
+  It vanished with no word, the thread folded away among the resolved,
+  though a resolved thread still takes a reply. It now stays, its thread
+  in sight while it is being written, and sending it opens the thread
+  again: a reply to a resolved thread never reached the agent. *Reply*
+  goes while one is being written, as an editor's *Edit* does: clicking it
+  again emptied it.
+- **A section can be commented on once the design is confirmed.**
+  Comments are open until the plan is submitted, but a section's comment
+  button went dead with its text when the design was confirmed, and a
+  comment already being written there was hidden, never to be sent. Only
+  what the section says is locked now. Once the plan is submitted, no
+  thread offers *Resolve*, which a submitted plan refuses.
+- **A comment you are writing is held by Submit, as a field is.** A
+  submitted plan takes no comments, but a comment or reply left unsent
+  did not hold up *Submit plan*, and a submit from chat let it go without
+  a word, its box gone. Submit now waits for it, and a lock from
+  elsewhere tells you, with the text to copy. Once the plan is submitted,
+  its comments are there to read, with no box to write in or Reply.
+- **Your old note no longer saves over the agent's newer one.** A note
+  the agent sends with a status ("Blocked: DB creds missing") changes the
+  task without moving its revision, so a note editor you had open from
+  before saved over it without a word. The note editor now saves with the
+  note it started from, and is refused if the note has changed since;
+  your other open editors on that task are not held up by it. A one-line
+  field refused that way shows what is there now and stays open: leaving
+  it no longer saves yours over it after all, only Enter does.
+- **What you changed stays guarded however much happens after it.** The
+  plan's log keeps its last 500 changes, and the check that holds the
+  agent's edits to what it has read looked only at those: past that many
+  (comments, status clicks, the agent's own progress) before the agent
+  read the plan, it could edit, or remove, what you had changed, and was
+  not told of it. The log now keeps your changes the agent has not read,
+  and should it still not reach back far enough, everything the agent
+  read is compared.
+- **The agent's progress note cannot go over a note of yours it has
+  not read.** A note sent with a status was left out of the check that
+  holds the agent's edits to what it has read, so it replaced the note
+  you had just written. It is now refused until the agent reads the plan,
+  when what you changed is the note; a status alone still goes through.
+- **A save made against a version the item never had says so.** A save
+  carries the revision it was made on; one the item had never reached (a
+  page still holding a plan since replaced, say) was refused as "changed
+  by Claude while this edit was open", though nobody had changed it, and
+  a task saved that way went in over what was there. Both are now refused
+  as made against a version it never had.
+- **A box linking a task and its subtask lists both as linked.** The
+  subtask showed as building the box only through its parent, with no
+  Unlink, or, when linked first, sat above its parent. It now sits under
+  its parent with its own Unlink.
+
 ### Targeted checks: only what the change touched
 
 - **Every check the build runs is targeted.** A check runs only when the

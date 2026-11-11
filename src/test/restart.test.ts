@@ -62,6 +62,22 @@ async function waitForLock(previousPid: number, timeoutMs = 20_000): Promise<Dae
   return null;
 }
 
+test('a second start finds the running daemon, says so and exits, --force or not', async () => {
+  // `--force` once started a second daemon beside the first; nothing passes it.
+  for (const args of [[], ['--force']]) {
+    const out = await new Promise<string>((resolve, reject) => {
+      // Killed if it stays: a second daemon would never exit on its own.
+      const child = spawn(process.execPath, [DAEMON, ...args], { env: { ...process.env, CC_HARNESS_HOME: home }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000 });
+      let text = '';
+      child.stdout!.on('data', (d: Buffer) => (text += d.toString()));
+      child.on('error', reject);
+      child.on('exit', () => resolve(text));
+    });
+    assert.deepEqual({ ...JSON.parse(out) }, { alreadyRunning: true, ...first });
+  }
+  assert.equal(readLiveLock()?.pid, first.pid, 'the running daemon still holds the lock');
+});
+
 test('the daemon hands its address and token to its replacement', async () => {
   const res = await fetch(`${baseUrl(first)}/api/daemon/restart`, {
     method: 'POST',

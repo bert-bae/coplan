@@ -1,5 +1,6 @@
-import { useSyncExternalStore } from 'react';
+import { createContext, createElement, useCallback, useContext, useSyncExternalStore, type ReactNode } from 'react';
 import { api, eventsUrl, Unauthorized, type ProjectChecks } from './lib/api.ts';
+import { pruneDrafts, unsavedDrafts } from './lib/drafts.ts';
 
 const NO_CHECKS: ProjectChecks = { implement: [], review: [] };
 import { isLocked } from '../shared/plan.ts';
@@ -34,6 +35,9 @@ export interface Toast {
   id: string;
   kind: 'info' | 'success' | 'error';
   text: string;
+  /** Text the user may want to keep: offered to copy, and the toast stays
+   *  until dismissed. */
+  copy?: string;
 }
 
 export interface UiState {
@@ -54,8 +58,9 @@ export interface UiState {
   taskMode: TaskMode;
   /** Hide finished tasks in the outline. */
   hideDone: boolean;
-  /** Tasks whose subtasks are folded away in the outline, by id. */
-  collapsedTasks: string[];
+  /** Tasks whose subtasks are folded away in the outline, by session, then
+   *  task id: task ids repeat across plans. The most recently folded last. */
+  collapsedTasks: Map<string, string[]>;
   collapsedSidebar: boolean;
   /** The narrow-width sidebar drawer. Never persisted. */
   drawerOpen: boolean;
@@ -98,7 +103,7 @@ const initial: UiState = {
   connection: 'connecting',
   taskMode: 'outline',
   hideDone: false,
-  collapsedTasks: [],
+  collapsedTasks: new Map(),
   collapsedSidebar: false,
   drawerOpen: false,
   pinned: [],
@@ -119,7 +124,24 @@ const initial: UiState = {
   error: null,
 };
 
+/**
+ * What the page holds for the session on screen, let go when another opens
+ * (or it is deleted): its ids (a task's brief, an item to scroll to, a
+ * proposal, a diagram) may name others in the next.
+ */
+const SESSION_RESET: Partial<UiState> = {
+  planCheck: {},
+  diagramId: null,
+  proposalPreview: null,
+  viewer: null,
+  focusTarget: null,
+  exportOpen: false,
+};
+
 const PREFS_KEY = 'cc-harness:prefs';
+/** Sessions whose folded tasks are remembered, the most recently folded. */
+const FOLDS_KEPT = 100;
+
 /** The settings errors this browser has already been told about. */
 const SEEN_CONFIG_ERRORS_KEY = 'cc-harness:config-errors-seen';
 
@@ -156,6 +178,8 @@ class Store {
   private reconnectTimer: number | undefined;
   private retries = 0;
   private connectAttempt = 0;
+  /** A stream is being opened: its ticket is not back yet. */
+  private opening = false;
 
   getState = (): UiState => this.state;
 
@@ -166,7 +190,14 @@ class Store {
 
   set(patch: Partial<UiState>): void {
     this.state = { ...this.state, ...patch };
+    // A plan landing settles the drafts kept for it (see pruneDrafts).
+    const dropped = patch.session?.plan ? pruneDrafts(patch.session.sessionId, patch.session.plan) : [];
     for (const listener of this.listeners) listener();
+    const plan = patch.session?.plan;
+    for (const { name, text } of dropped) {
+      const how = plan?.submission ? 'was submitted' : 'had its design confirmed';
+      this.toast('error', `"${plan?.title}" ${how}, so the text you had open in ${name} could not be saved. Copy it to keep it:`, text);
+    }
   }
 
   /* ---------------------------------------------------------------- *
@@ -184,13 +215,13 @@ class Store {
       this.set({ error: describeError(err) });
     }
 
-    // Selecting a session opens the stream; with none to select, open it for
-    // the session list alone.
-    if (!this.source) this.connect();
-    // Closing or reloading with an edit still on its way would lose it
-    // without a word: the browser asks first.
+    // Selecting a session opens the stream (its ticket maybe not back yet);
+    // with none to select, open it for the session list alone.
+    if (!this.source && !this.opening) this.connect();
+    // Closing or reloading with an edit still on its way, or one open and
+    // not saved, would lose it without a word: the browser asks first.
     window.addEventListener('beforeunload', (e) => {
-      if (this.state.saving > 0 || this.state.canvasSaving) {
+      if (this.state.saving > 0 || this.state.canvasSaving || unsavedDrafts()) {
         e.preventDefault();
         e.returnValue = '';
       }
@@ -202,8 +233,17 @@ class Store {
   }
 
   async selectSession(id: string, updateHash = true): Promise<void> {
+    // A field being typed in saves when it loses focus: let it, before its
+    // view goes. Left to the removal, it would be dropped where a browser
+    // does not blur a removed field. Its save goes to its own session
+    // either way: each view's edits are bound to it (useCommit).
+    if (id !== this.state.sessionId) {
+      const typing = document.activeElement;
+      if (typing instanceof HTMLInputElement || typing instanceof HTMLTextAreaElement) typing.blur();
+    }
     if (updateHash) window.location.hash = `#/session/${id}`;
-    this.set({ sessionId: id, session: null, planCheck: {}, diagramId: null, error: null, exportOpen: false });
+    // Opened again, it reloads and keeps what was open on it.
+    this.set({ ...(id !== this.state.sessionId ? SESSION_RESET : {}), sessionId: id, session: null, error: null });
     this.connect();
     try {
       const { session, planCheck, projectChecks } = await api.session(id);
@@ -229,9 +269,11 @@ class Store {
     this.source = null;
     window.clearTimeout(this.reconnectTimer);
     const attempt = ++this.connectAttempt;
+    this.opening = true;
     void eventsUrl(this.state.sessionId)
       .then((url) => {
         if (attempt !== this.connectAttempt) return;
+        this.opening = false;
         const source = new EventSource(url);
         this.source = source;
         source.onopen = () => {
@@ -253,6 +295,7 @@ class Store {
       })
       .catch((err: unknown) => {
         if (attempt !== this.connectAttempt) return;
+        this.opening = false;
         if (err instanceof Unauthorized) {
           this.set({ connection: 'unauthorized' });
           return;
@@ -341,50 +384,63 @@ class Store {
    * ---------------------------------------------------------------- */
 
   /**
-   * Send edits to the daemon. Resolves true when they were accepted; on a
-   * refusal the daemon's reason is shown and the plan is left as it was.
+   * Send edits to one session's plan, and resolve with the plan exactly as
+   * the daemon left it after them — or null when they were refused (the
+   * reason is shown). Callers that build on the result (the canvas's
+   * revision) need the daemon's answer, not whatever the store holds by the
+   * time it arrives. The session is the caller's, never the one on screen
+   * when this runs: `useCommit` binds it when the view renders.
    */
-  async ops(ops: PlanOp[]): Promise<boolean> {
-    return (await this.commit(ops)) !== null;
-  }
-
-  /**
-   * Send edits, and resolve with the plan exactly as the daemon left it after
-   * them — or null when they were refused. Callers that build on the result
-   * (the canvas's revision) need the daemon's answer, not whatever the store
-   * holds by the time it arrives.
-   */
-  async commit(ops: PlanOp[], sessionId: string | null = this.state.sessionId): Promise<Plan | null> {
-    // A caller bound to one session's plan (the canvas) names it, so a save
-    // still queued when the user switches sessions lands where it was made.
-    const id = sessionId;
-    if (!id || ops.length === 0) return null;
+  async commit(ops: PlanOp[], sessionId: string | null): Promise<Plan | null> {
+    if (!sessionId || ops.length === 0) return null;
     this.set({ saving: this.state.saving + 1 });
     try {
-      const { plan } = await api.ops(id, ops);
-      const session = this.state.session;
-      // The live stream may already have delivered something newer — a change
-      // Claude made right after this one, or another tab's drag. Never roll
-      // the page back to it. `version` counts layout saves too; `seq` does not.
-      // A daemon started before `version` existed sends none; fall back to seq.
-      const order = (p: Plan) => p.version ?? p.seq;
-      if (session && session.sessionId === id && (!session.plan || order(plan) >= order(session.plan))) {
-        this.set({ session: { ...session, plan } });
-      }
-      return plan;
-    } catch (err) {
-      this.fail(err);
-      return null;
+      return await this.send(sessionId, (id) => api.ops(id, ops));
     } finally {
       this.set({ saving: Math.max(0, this.state.saving - 1) });
     }
   }
 
-  op(op: PlanOp): Promise<boolean> {
-    return this.ops([op]);
+  /**
+   * Ask the daemon for a change to a session's plan — edits, or a sign-off
+   * — and put its answer in place. Null when there is no session, or when
+   * the daemon refused: its reason is shown and the plan is left as it was.
+   */
+  private async send(sessionId: string | null, call: (sessionId: string) => Promise<{ plan: Plan }>): Promise<Plan | null> {
+    if (!sessionId) return null;
+    try {
+      const { plan } = await call(sessionId);
+      this.adoptPlan(sessionId, plan);
+      return plan;
+    } catch (err) {
+      this.failFor(sessionId, err);
+      return null;
+    }
   }
 
-  /** Put the daemon's answer in place, unless something newer has landed. */
+  /** Said of a session's plan: over another, it names the one it is about
+   *  ("t3" there is another task) — `title` if the answer gave one. */
+  private sayOf(sessionId: string | null, kind: Toast['kind'], text: string, title?: string): void {
+    if (this.isShown(sessionId)) return this.toast(kind, text);
+    const listed = this.state.sessions.find((s) => s.sessionId === sessionId);
+    const name = title ?? (listed ? sessionName(listed) : null);
+    this.toast(kind, name ? `"${name}": ${text}` : `Another plan: ${text}`);
+  }
+
+  /** A request about a session failed: said of it (sayOf), unless the
+   *  daemon was not reached at all, which is no one plan's doing. */
+  private failFor(sessionId: string | null, err: unknown): void {
+    if (unreachable(err)) this.fail(err);
+    else this.sayOf(sessionId, 'error', describeError(err));
+  }
+
+  /**
+   * Put the daemon's answer in place, unless something newer has landed:
+   * the live stream may already have delivered a change Claude made right
+   * after this one, or another tab's drag. Never roll the page back to it.
+   * `version` counts layout saves too; `seq` does not. A daemon started
+   * before `version` existed sends none; fall back to seq.
+   */
   private adoptPlan(sessionId: string, plan: Plan): void {
     const session = this.state.session;
     const order = (p: Plan) => p.version ?? p.seq;
@@ -394,76 +450,79 @@ class Store {
   }
 
   /**
+   * A sign-off for one session — the one its dialog showed, given by the
+   * caller, never the one on screen when it runs: the daemon's answer, that
+   * session's agent, and whether it is still on screen. What is done after
+   * the answer — moving the page, saying what happened — is for the
+   * session it was made on, which the user may have left by then.
+   */
+  private async signOff(
+    to: SignOffFor,
+    call: (sessionId: string) => Promise<{ plan: Plan }>,
+  ): Promise<{ plan: Plan; agent: AgentInfo; shown: () => boolean; say: (kind: Toast['kind'], text: string) => void } | null> {
+    const { sessionId: id, agent } = to;
+    const plan = await this.send(id, call);
+    if (!plan) return null;
+    const shown = () => this.isShown(id);
+    const say = (kind: Toast['kind'], text: string) => this.sayOf(id, kind, text, plan.title);
+    return { plan, agent, shown, say };
+  }
+
+  /** Whether a session is the one on screen: selected, loaded or still loading. */
+  isShown(sessionId: string | null): boolean {
+    return sessionId !== null && this.state.sessionId === sessionId;
+  }
+
+  /**
    * Sign the plan off. From here it is locked and the page follows the build
    * on the board. Resolves false when the daemon refused — most often
    * because the plan moved on since the preview was made.
    */
-  async submitPlan(input: { target: BuildTarget; mode?: ExecutionMode; note: string; expect: number; hash?: string; settings?: BuildSettings }): Promise<boolean> {
-    const id = this.state.sessionId;
-    if (!id) return false;
-    try {
-      const { plan } = await api.submitPlan(id, input);
-      this.adoptPlan(id, plan);
-      this.set({ tab: 'tasks', taskMode: 'board' });
-      const agent = agentInfo(this.state.session?.agent);
-      this.toast(
-        'success',
-        input.target !== 'session'
-          ? 'Plan submitted and locked. Paste the prompt where it will be built.'
-          : agent.promptContext
-            ? `Plan submitted and locked. Send any message in ${agent.name} to hand it the prompt.`
-            : `Plan submitted and locked. Paste the prompt into ${agent.name}'s chat.`,
-      );
-      return true;
-    } catch (err) {
-      this.fail(err);
-      return false;
-    }
+  async submitPlan(to: SignOffFor, input: { target: BuildTarget; mode?: ExecutionMode; note: string; expect: number; hash?: string; settings?: BuildSettings }): Promise<boolean> {
+    const done = await this.signOff(to, (id) => api.submitPlan(id, input));
+    if (!done) return false;
+    const { agent } = done;
+    if (done.shown()) this.set({ tab: 'tasks', taskMode: 'board' });
+    done.say(
+      'success',
+      input.target !== 'session'
+        ? 'Plan submitted and locked. Paste the prompt where it will be built.'
+        : agent.promptContext
+          ? `Plan submitted and locked. Send any message in ${agent.name} to hand it the prompt.`
+          : `Plan submitted and locked. Paste the prompt into ${agent.name}'s chat.`,
+    );
+    return true;
   }
 
   /** Unlock a submitted plan for changes. The design stays confirmed. */
-  async reopenPlan(): Promise<boolean> {
-    const id = this.state.sessionId;
-    if (!id) return false;
-    try {
-      const { plan } = await api.reopenPlan(id);
-      this.adoptPlan(id, plan);
-      const name = agentInfo(this.state.session?.agent).name;
-      this.toast(
-        'info',
-        plan.design
-          ? `The tasks are open for changes again; the design stays confirmed. Tell ${name} in chat once you have changed them.`
-          : `The plan is open for changes again. Tell ${name} in chat once you have changed it.`,
-      );
-      return true;
-    } catch (err) {
-      this.fail(err);
-      return false;
-    }
+  async reopenPlan(to: SignOffFor): Promise<boolean> {
+    const done = await this.signOff(to, (id) => api.reopenPlan(id));
+    if (!done) return false;
+    const { plan, agent } = done;
+    done.say(
+      'info',
+      plan.design
+        ? `The tasks are open for changes again; the design stays confirmed. Tell ${agent.name} in chat once you have changed them.`
+        : `The plan is open for changes again. Tell ${agent.name} in chat once you have changed it.`,
+    );
+    return true;
   }
 
   /**
    * Sign the design off. From here it is locked, and Claude gets the ask for
    * a task list with the user's next message.
    */
-  async confirmDesign(input: { note: string; expect: number; hash?: string }): Promise<boolean> {
-    const id = this.state.sessionId;
-    if (!id) return false;
-    try {
-      const { plan } = await api.confirmDesign(id, input);
-      this.adoptPlan(id, plan);
-      const agent = agentInfo(this.state.session?.agent);
-      this.toast(
-        'success',
-        agent.promptContext
-          ? `Design confirmed. Send any message in ${agent.name} to have it make the task list.`
-          : `Design confirmed. Paste the prompt into ${agent.name}'s chat to have it make the task list.`,
-      );
-      return true;
-    } catch (err) {
-      this.fail(err);
-      return false;
-    }
+  async confirmDesign(to: SignOffFor, input: { note: string; expect: number; hash?: string }): Promise<boolean> {
+    const done = await this.signOff(to, (id) => api.confirmDesign(id, input));
+    if (!done) return false;
+    const { agent } = done;
+    done.say(
+      'success',
+      agent.promptContext
+        ? `Design confirmed. Send any message in ${agent.name} to have it make the task list.`
+        : `Design confirmed. Paste the prompt into ${agent.name}'s chat to have it make the task list.`,
+    );
+    return true;
   }
 
   /**
@@ -471,56 +530,34 @@ class Store {
    * waits for the user's next message in the agent's chat: the page never
    * starts a turn.
    */
-  async queueRevision(input: { note: string; expect: number; hash?: string }, opts: { quiet?: boolean } = {}): Promise<boolean> {
-    const id = this.state.sessionId;
-    if (!id) return false;
-    try {
-      const { plan } = await api.queueRevision(id, input);
-      this.adoptPlan(id, plan);
-      const agent = agentInfo(this.state.session?.agent);
-      if (!opts.quiet) {
-        this.toast(
-          'success',
-          agent.promptContext
-            ? `Request queued. Send any message in ${agent.name}'s chat — "go" will do — and it goes with it.`
-            : `Request queued. Paste it into ${agent.name}'s chat, or ask ${agent.name} to read the plan.`,
-        );
-      }
-      return true;
-    } catch (err) {
-      this.fail(err);
-      return false;
-    }
+  async queueRevision(to: SignOffFor, input: { note: string; expect: number; hash?: string }, opts: { quiet?: boolean } = {}): Promise<boolean> {
+    const done = await this.signOff(to, (id) => api.queueRevision(id, input));
+    if (!done) return false;
+    if (opts.quiet) return true;
+    const { agent } = done;
+    done.say(
+      'success',
+      agent.promptContext
+        ? `Request queued. Send any message in ${agent.name}'s chat — "go" will do — and it goes with it.`
+        : `Request queued. Paste it into ${agent.name}'s chat, or ask ${agent.name} to read the plan.`,
+    );
+    return true;
   }
 
   /** Take back a revision request the agent has not been sent. */
-  async withdrawRevision(): Promise<boolean> {
-    const id = this.state.sessionId;
-    if (!id) return false;
-    try {
-      const { plan } = await api.withdrawRevision(id);
-      this.adoptPlan(id, plan);
-      this.toast('info', 'Request withdrawn: it will not be sent.');
-      return true;
-    } catch (err) {
-      this.fail(err);
-      return false;
-    }
+  async withdrawRevision(to: SignOffFor): Promise<boolean> {
+    const done = await this.signOff(to, (id) => api.withdrawRevision(id));
+    if (!done) return false;
+    done.say('info', 'Request withdrawn: it will not be sent.');
+    return true;
   }
 
   /** Unlock a confirmed design so it can be reshaped. */
-  async reopenDesign(): Promise<boolean> {
-    const id = this.state.sessionId;
-    if (!id) return false;
-    try {
-      const { plan } = await api.reopenDesign(id);
-      this.adoptPlan(id, plan);
-      this.toast('info', `The design is open for changes again. Tell ${agentInfo(this.state.session?.agent).name} in chat once you have changed it.`);
-      return true;
-    } catch (err) {
-      this.fail(err);
-      return false;
-    }
+  async reopenDesign(to: SignOffFor): Promise<boolean> {
+    const done = await this.signOff(to, (id) => api.reopenDesign(id));
+    if (!done) return false;
+    done.say('info', `The design is open for changes again. Tell ${done.agent.name} in chat once you have changed it.`);
+    return true;
   }
 
   /** Jump to an item from anywhere: a board card, the overview's "now". */
@@ -548,7 +585,10 @@ class Store {
         ancestors.add(cursor);
         cursor = tasks.find((t) => t.id === cursor)?.parentId ?? null;
       }
-      this.set({ collapsedTasks: this.state.collapsedTasks.filter((t) => !ancestors.has(t)), taskMode: 'outline' });
+      this.set({ taskMode: 'outline' });
+      const sessionId = this.state.session?.sessionId;
+      const folded = sessionId ? this.state.collapsedTasks.get(sessionId) : undefined;
+      if (sessionId && folded?.some((t) => ancestors.has(t))) this.setCollapsed(sessionId, folded.filter((t) => !ancestors.has(t)));
     }
     this.set({ tab, focusTarget: `${kind}:${id}` });
   }
@@ -595,7 +635,7 @@ class Store {
       statusFilter: this.state.statusFilter,
       taskMode: this.state.taskMode,
       hideDone: this.state.hideDone,
-      collapsedTasks: this.state.collapsedTasks,
+      collapsedTasks: [...this.state.collapsedTasks],
     });
   }
 
@@ -615,11 +655,21 @@ class Store {
     this.persistPrefs();
   }
 
-  toggleTaskCollapsed(id: string): void {
-    const collapsedTasks = this.state.collapsedTasks.includes(id)
-      ? this.state.collapsedTasks.filter((t) => t !== id)
-      : [...this.state.collapsedTasks, id];
-    this.set({ collapsedTasks });
+  /** Fold or unfold a task in the outline of the session the asking view
+   *  shows (useSessionId), whatever is on screen by then. */
+  toggleTaskCollapsed(sessionId: string | null, id: string): void {
+    if (!sessionId) return;
+    const now = this.state.collapsedTasks.get(sessionId) ?? [];
+    this.setCollapsed(sessionId, now.includes(id) ? now.filter((t) => t !== id) : [...now, id]);
+  }
+
+  /** Fold these in a session's outline. It becomes the most recently
+   *  folded, and only the FOLDS_KEPT most recent sessions' folds are kept. */
+  private setCollapsed(sessionId: string, tasks: string[]): void {
+    const folds = new Map(this.state.collapsedTasks);
+    folds.delete(sessionId);
+    if (tasks.length) folds.set(sessionId, tasks);
+    this.set({ collapsedTasks: new Map([...folds].slice(-FOLDS_KEPT)) });
     this.persistPrefs();
   }
 
@@ -658,7 +708,7 @@ class Store {
     try {
       await api.renameSession(sessionId, next);
     } catch (err) {
-      this.fail(err);
+      this.failFor(sessionId, err);
     }
   }
 
@@ -666,14 +716,17 @@ class Store {
     try {
       await api.deleteSession(sessionId);
     } catch (err) {
-      this.fail(err);
+      this.failFor(sessionId, err);
       return;
     }
     const sessions = this.state.sessions.filter((s) => s.sessionId !== sessionId);
-    this.set({ sessions, pinned: this.state.pinned.filter((id) => id !== sessionId) });
+    pruneDrafts(sessionId, null);
+    const collapsedTasks = new Map(this.state.collapsedTasks);
+    collapsedTasks.delete(sessionId);
+    this.set({ sessions, pinned: this.state.pinned.filter((id) => id !== sessionId), collapsedTasks });
     this.persistPrefs();
     if (this.state.sessionId === sessionId) {
-      this.set({ sessionId: null, session: null });
+      this.set({ ...SESSION_RESET, sessionId: null, session: null });
       window.location.hash = '';
       const next = listedSessions(sessions, null)[0]?.sessionId;
       if (next) await this.selectSession(next);
@@ -768,10 +821,10 @@ class Store {
     writeList(SEEN_CONFIG_ERRORS_KEY, [...errors, ...seen.filter((e) => !errors.includes(e) && !fixed(e))]);
   }
 
-  toast(kind: Toast['kind'], text: string): void {
-    const toast: Toast = { id: `t${Date.now()}${Math.random().toString(36).slice(2, 6)}`, kind, text };
+  toast(kind: Toast['kind'], text: string, copy?: string): void {
+    const toast: Toast = { id: `t${Date.now()}${Math.random().toString(36).slice(2, 6)}`, kind, text, ...(copy !== undefined ? { copy } : {}) };
     this.set({ toasts: [...this.state.toasts, toast] });
-    window.setTimeout(() => this.dismissToast(toast.id), kind === 'error' ? 8000 : 4000);
+    if (copy === undefined) window.setTimeout(() => this.dismissToast(toast.id), kind === 'error' ? 8000 : 4000);
   }
 
   dismissToast(id: string): void {
@@ -787,10 +840,20 @@ class Store {
  * Helpers
  * ------------------------------------------------------------------ */
 
+/** A session's name as the page shows it: its plan's title, else its own. */
+export function sessionName(s: Pick<SessionSummary, 'planTitle' | 'title'>): string {
+  return s.planTitle ?? s.title;
+}
+
+/** fetch's own failure: the daemon was not reached. */
+function unreachable(err: unknown): boolean {
+  return err instanceof TypeError && /fetch|network|load failed/i.test(err.message);
+}
+
 export function describeError(err: unknown): string {
   // fetch's own wording ("Failed to fetch", "NetworkError…") says nothing to
   // a reader: the daemon could not be reached, and the edit was not saved.
-  if (err instanceof TypeError && /fetch|network|load failed/i.test(err.message)) {
+  if (unreachable(err)) {
     return "Coplan's daemon is not reachable, so this was not saved. Run `coplan status` in a terminal to see why.";
   }
   if (err instanceof Error) return err.message;
@@ -832,7 +895,15 @@ function loadPrefs(): Partial<UiState> {
     if (typeof saved['collapsedSidebar'] === 'boolean') prefs.collapsedSidebar = saved['collapsedSidebar'];
     if (Array.isArray(saved['pinned'])) prefs.pinned = strings(saved['pinned']);
     if (Array.isArray(saved['collapsedProjects'])) prefs.collapsedProjects = strings(saved['collapsedProjects']);
-    if (Array.isArray(saved['collapsedTasks'])) prefs.collapsedTasks = strings(saved['collapsedTasks']);
+    // [session, task ids] pairs, the most recently folded last. A bare task
+    // id (kept before folds were by session) is no session's: dropped.
+    if (Array.isArray(saved['collapsedTasks'])) {
+      const folds = saved['collapsedTasks']
+        .filter((e): e is [string, unknown] => Array.isArray(e) && typeof e[0] === 'string')
+        .map(([id, tasks]): [string, string[]] => [id, strings(tasks)])
+        .filter(([, tasks]) => tasks.length > 0);
+      prefs.collapsedTasks = new Map(folds.slice(-FOLDS_KEPT));
+    }
     if (saved['taskMode'] === 'outline' || saved['taskMode'] === 'board' || saved['taskMode'] === 'boxes') prefs.taskMode = saved['taskMode'];
     if (typeof saved['hideDone'] === 'boolean') prefs.hideDone = saved['hideDone'];
     if ((PLAN_STATUSES as readonly unknown[]).includes(saved['statusFilter'])) prefs.statusFilter = saved['statusFilter'] as PlanStatus;
@@ -877,6 +948,65 @@ export function useStore<T>(select: (state: UiState) => T): T {
 
 export function useSession(): SessionState | null {
   return useStore((s) => s.session);
+}
+
+const ShownSession = createContext<string | null>(null);
+
+const NO_FOLDS: readonly string[] = [];
+
+/** The tasks folded away in the outline of the plan the view shows. */
+export function useCollapsedTasks(): readonly string[] {
+  const sessionId = useSessionId();
+  return useStore((s) => (sessionId && s.collapsedTasks.get(sessionId)) || NO_FOLDS);
+}
+
+/** The session whose plan the view shows, as it rendered: what its edits
+ *  and sign-offs go to, whatever is on screen by the time they are sent. */
+export function useSessionId(): string | null {
+  return useContext(ShownSession);
+}
+
+/** Who a sign-off is for, as the view that makes it rendered: the session,
+ *  and its agent, whose chat the toast says to go to. */
+export interface SignOffFor {
+  sessionId: string | null;
+  agent: AgentInfo;
+}
+
+/** Around everything that shows a session's plan: the session it shows,
+ *  read once here rather than by every component that edits it. */
+export function SessionScope({ children }: { children: ReactNode }) {
+  const sessionId = useStore((s) => s.session?.sessionId ?? null);
+  return createElement(ShownSession.Provider, { value: sessionId }, children);
+}
+
+/**
+ * Edits to the plan the view shows, bound to its session when the view
+ * renders, not when they are sent. A save that lands after the user
+ * switched sessions — an editor saving on its way out, a request still
+ * queued — goes to the plan it was made on, where task ids like t3 mean
+ * these tasks. Resolves with that plan as the daemon left it, or null when
+ * the edits were refused.
+ */
+export function useCommit(): (ops: PlanOp[]) => Promise<Plan | null> {
+  const sessionId = useSessionId();
+  return useCallback((ops) => store.commit(ops, sessionId), [sessionId]);
+}
+
+/**
+ * Whether the session this view showed when it rendered is still on screen.
+ * What a view does once an answer comes (focus a row, expand a task, close
+ * a preview) is for that session only: ids like t3 repeat across plans.
+ */
+export function useStillShown(): () => boolean {
+  const sessionId = useSessionId();
+  return useCallback(() => store.isShown(sessionId), [sessionId]);
+}
+
+/** One edit, by `useCommit`, for callers that only need to know it was taken. */
+export function useEdit(): (op: PlanOp) => Promise<boolean> {
+  const commit = useCommit();
+  return useCallback(async (op) => (await commit([op])) !== null, [commit]);
 }
 
 export function usePlan() {

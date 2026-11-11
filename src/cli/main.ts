@@ -6,12 +6,10 @@
  * Everything here is also reachable from the plugin, but a plain CLI is what
  * makes the daemon debuggable when the hook wiring is the thing that broke.
  */
-import { spawn } from 'node:child_process';
 import { readFileSync, existsSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { readLiveLock, readVerifiedLock, probeLock, baseUrl, paths, ensureHome } from '../shared/paths.ts';
+import { readLock, readLiveLock, readLockState, readVerifiedLock, probeLock, isPidAlive, baseUrl, paths, ensureDaemon, DAEMON_ENTRY } from '../shared/paths.ts';
 import { runDoctor } from './doctor.ts';
 import { runCheck } from './check.ts';
 import { runInit } from './init.ts';
@@ -24,44 +22,44 @@ import { CLEANUP_GROUPS, type CleanupGroupId, type CleanupOutcome, type DaemonLo
 declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
 
-const DAEMON_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'daemon', 'main.js');
+/** What a command says, not a crash: printed without a stack. */
+class Said extends Error {}
 
-async function ensureDaemon(): Promise<DaemonLock | null> {
-  const existing = (await readVerifiedLock());
-  if (existing) return existing;
-  ensureHome();
-  const child = spawn(process.execPath, [DAEMON_ENTRY], {
-    detached: true,
-    stdio: 'ignore',
-    env: process.env,
-  });
-  // `spawn` reports ENOENT asynchronously, on the child's `error` event. With
-  // no listener that is an unhandled `'error'`, which would take this process
-  // down mid-session — so attach one even though the failure is recoverable.
-  child.on('error', () => {
-    /* the lock-file poll below reports the failure */
-  });
-  child.unref();
-  for (let i = 0; i < 60; i++) {
-    await sleep(100);
-    const lock = (await readVerifiedLock());
-    if (lock) return lock;
-  }
-  return null;
+/** A daemon that holds its port but does not answer: busy, or hung. */
+function notAnswering(lock: DaemonLock, within?: number): Said {
+  return new Said(
+    `the daemon (pid ${lock.pid}) ${within ? `did not answer within ${within / 1000} s` : 'is not answering'}: ` +
+      'it may be busy; if it stays that way, run `coplan restart`',
+  );
 }
 
-async function api<T>(lock: DaemonLock, route: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${baseUrl(lock)}${route}`, {
-    ...init,
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}`, ...(init?.headers ?? {}) },
-  });
-  // Refusals (401, 403) come back as plain text: say what they said.
-  const text = await res.text();
+async function api<T>(lock: DaemonLock, route: string, init?: RequestInit, timeoutMs = 5_000): Promise<T> {
+  let res: Response;
+  let text: string;
   try {
-    return JSON.parse(text) as T;
-  } catch {
-    throw new Error(`the daemon answered ${res.status}: ${text.trim().slice(0, 200)}`);
+    res = await fetch(`${baseUrl(lock)}${route}`, {
+      ...init,
+      // A hung daemon takes the connection and never answers.
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${lock.token}`, ...(init?.headers ?? {}) },
+    });
+    text = await res.text();
+  } catch (err) {
+    if ((err as Error)?.name === 'TimeoutError') throw notAnswering(lock, timeoutMs);
+    throw err;
   }
+  // Refusals (401, 403) come back as plain text: say what they said.
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new Said(`the daemon answered ${res.status}: ${text.trim().slice(0, 200)}`);
+  }
+  if (!res.ok) {
+    const error = (body as { error?: unknown } | null)?.error;
+    throw new Said(`the daemon answered ${res.status}: ${typeof error === 'string' ? error : text.trim().slice(0, 200)}`);
+  }
+  return body as T;
 }
 
 /**
@@ -113,18 +111,39 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
     // to stop.
     const state = await probeLock(lock);
     if (state === 'stale') {
-      rmSync(paths.lockFile(), { force: true });
+      releaseLock(lock.pid);
       console.log('not running (removed a lock left by a daemon that is gone)');
       return 0;
     }
     if (state === 'busy') console.log(`the daemon (pid ${lock.pid}) is not answering; stopping it anyway`);
     try {
       process.kill(lock.pid, 'SIGTERM');
-      console.log(`stopped pid ${lock.pid}`);
     } catch (err) {
       console.error(`could not stop pid ${lock.pid}: ${(err as Error).message}`);
       return 1;
     }
+    // One that answered is saving its sessions on the way out: it has time.
+    // One that did not may be stuck too hard to run its SIGTERM handler at
+    // all (it is JavaScript), and nothing but SIGKILL stops that.
+    if (await exits(lock.pid, state === 'live' ? 15_000 : 3_000)) {
+      releaseLock(lock.pid);
+      console.log(`stopped pid ${lock.pid}`);
+      return 0;
+    }
+    try {
+      process.kill(lock.pid, 'SIGKILL');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+        console.error(`could not stop pid ${lock.pid}: ${(err as Error).message}`);
+        return 1;
+      }
+    }
+    if (!(await exits(lock.pid, 2_000))) {
+      console.error(`could not stop pid ${lock.pid}: it is still running`);
+      return 1;
+    }
+    releaseLock(lock.pid);
+    console.log(`stopped pid ${lock.pid} (it did not answer SIGTERM, so it was killed)`);
     return 0;
   },
 
@@ -141,11 +160,8 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
 
     try {
       // From this plugin's build: the daemon may be another install's, older.
-      const result = await api<{ restarting?: boolean }>(
-        lock,
-        '/api/daemon/restart',
-        { method: 'POST', body: JSON.stringify({ entry: DAEMON_ENTRY }) },
-      );
+      // A hung daemon never answers: api() gives up, and it is stopped instead.
+      const result = await api<{ restarting?: boolean }>(lock, '/api/daemon/restart', { method: 'POST', body: JSON.stringify({ entry: DAEMON_ENTRY }) });
       if (result.restarting) {
         const next = await waitForNewDaemon(lock.pid);
         if (next) {
@@ -159,7 +175,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
       // Fall through: an unreachable daemon is still one we can stop.
     }
 
-    await commands['stop']!(args);
+    if ((await commands['stop']!(args)) !== 0) return 1;
     await sleep(400);
     return commands['start']!(args);
   },
@@ -193,14 +209,19 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
       : args.includes('--all')
         ? [...CLEANUP_GROUPS]
         : CLEANUP_GROUPS.filter((id) => id !== 'sessions');
-    const lock = (await readVerifiedLock());
+    const found = await readLockState();
+    if (found?.state === 'busy') throw notAnswering(found.lock);
+    const lock = found?.lock ?? null;
     if (!lock) console.log('(no daemon running: live sessions are identified by age alone)');
 
     const outcome = lock
-      ? await api<{ result: CleanupOutcome }>(lock, '/api/storage/clean', {
-          method: 'POST',
-          body: JSON.stringify({ groups, dryRun }),
-        }).then((r) => r.result)
+      ? await api<{ result: CleanupOutcome }>(
+          lock,
+          '/api/storage/clean',
+          { method: 'POST', body: JSON.stringify({ groups, dryRun }) },
+          // Removing many files can take a while.
+          15_000,
+        ).then((r) => r.result)
       : cleanStorage({ groups, dryRun });
 
     for (const group of outcome.groups) {
@@ -225,12 +246,14 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
 
   /** The daemon, and every session with where its plan stands. */
   async status() {
-    const lock = (await readVerifiedLock());
-    if (!lock) {
+    const found = await readLockState();
+    if (!found) {
       console.log('not running');
       return 0;
     }
+    const { lock } = found;
     console.log(`coplan v${lock.version} on ${baseUrl(lock)} (pid ${lock.pid})`);
+    if (found.state === 'busy') throw notAnswering(lock);
     if (lock.version !== VERSION) console.log(`  this plugin is v${VERSION}: run \`coplan restart\` so the daemon runs it`);
     const { sessions } = await api<{ sessions: SessionSummary[] }>(lock, '/api/sessions');
     if (!sessions.length) {
@@ -326,6 +349,33 @@ async function heldSessionBytes(lock: DaemonLock | null): Promise<number> {
   }
 }
 
+/** Whether the process is gone within `ms`. */
+async function exits(pid: number, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (gone(pid)) return true;
+    await sleep(100);
+  }
+  return gone(pid);
+}
+
+/** Exited, if not yet reaped: a zombie answers signals, but it has stopped
+ *  for good. Where init is slow to reap (or never does, in some containers),
+ *  only Linux's process table tells. */
+function gone(pid: number): boolean {
+  if (!isPidAlive(pid)) return true;
+  try {
+    return readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ').at(-1)!.startsWith('Z');
+  } catch {
+    return false;
+  }
+}
+
+/** Remove the lock, if it is still this daemon's: never a successor's. */
+function releaseLock(pid: number): void {
+  if (readLock()?.pid === pid) rmSync(paths.lockFile(), { force: true });
+}
+
 /** Wait for the lock to be claimed by a process other than the one that had it. */
 async function waitForNewDaemon(previousPid: number): Promise<DaemonLock | null> {
   for (let i = 0; i < 100; i++) {
@@ -366,6 +416,17 @@ usage: coplan <command>
 `);
 }
 
+// Nothing left reading what this says (`coplan check 2>&1 | head`, an agent
+// that closed the pipe: EPIPE; a terminal closed: EIO) is no reason to stop
+// part way, before a check is stopped, say: what cannot be written is let go.
+// On stderr, whatever the failure (a full disk too): it says what is going
+// on, never the result. On stdout, where the report goes, any other failure
+// (a full disk under `--json > report.json`) still ends it.
+process.stderr.on('error', () => {});
+process.stdout.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code !== 'EPIPE' && err.code !== 'EIO') throw err;
+});
+
 const [, , command = 'status', ...rest] = process.argv;
 const handler = commands[command];
 if (!handler) {
@@ -375,6 +436,6 @@ if (!handler) {
 handler(rest)
   .then((code) => process.exit(code))
   .catch((err: unknown) => {
-    console.error((err as Error)?.stack ?? String(err));
+    console.error(err instanceof Said ? `coplan: ${err.message}` : ((err as Error)?.stack ?? String(err)));
     process.exit(1);
   });

@@ -1,7 +1,7 @@
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, stubFetch } from './dom-env.ts';
-import type { Plan, PlanInput, SessionState } from '../shared/types.ts';
+import type { Plan, PlanInput, SessionState, SessionSummary } from '../shared/types.ts';
 
 /**
  * The planning workspace in a browser: every edit becomes an op sent to the
@@ -11,9 +11,10 @@ import type { Plan, PlanInput, SessionState } from '../shared/types.ts';
 
 setupDom();
 
-const { render, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
+const { render, renderHook, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
-const { store } = await import('../ui/store.ts');
+const { store, SessionScope, useEdit, useStillShown } = await import('../ui/store.ts');
+const { openDrafts, draftsLockedBy } = await import('../ui/lib/drafts.ts');
 const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan, confirmDesign, queueRevision, markRevisionDelivered } = await import('../shared/plan.ts');
 
 const INPUT: PlanInput = {
@@ -81,7 +82,13 @@ async function boot(session: SessionState = makeSession(), extra?: (route: strin
   });
 }
 
+/** Nothing found. On failure it shows what was, briefly: a jsdom element
+ *  handed to assert whole makes the test runner print the entire DOM graph. */
+const none = (found: Element | null, what = 'nothing expected') => assert.ok(found === null, `${what}: found ${found?.outerHTML.slice(0, 200)}`);
+
 const opsSent = () => posts.filter((p) => p.route.endsWith('/plan/ops')).flatMap((p) => p.body['ops'] as Record<string, unknown>[]);
+/** The edits sent to one session's plan. */
+const sentTo = (id: string) => posts.filter((p) => p.route === `/api/session/${id}/plan/ops`).flatMap((p) => p.body['ops'] as Record<string, unknown>[]);
 
 const openTab = async (name: string) => {
   await act(async () => {
@@ -92,6 +99,10 @@ const openTab = async (name: string) => {
 beforeEach(() => {
   cleanup();
   window.localStorage.clear();
+  openDrafts.clear();
+  // Each test starts on s1, whatever session the one before it went to
+  // (replaceState: no hashchange for an earlier boot's listener to act on).
+  window.history.replaceState(null, '', '#/session/s1');
   store.set({
     sessions: [],
     sessionId: null,
@@ -101,7 +112,7 @@ beforeEach(() => {
     taskMode: 'outline',
     planCheck: {},
     hideDone: false,
-    collapsedTasks: [],
+    collapsedTasks: new Map(),
     collapsedSidebar: false,
     toasts: [],
     focusTarget: null,
@@ -109,6 +120,8 @@ beforeEach(() => {
     viewer: null,
     exportOpen: false,
     showBookkeeping: false,
+    // A page refused its key in one test is not refused in the next.
+    connection: 'connecting',
   });
 });
 
@@ -123,6 +136,15 @@ test('three views, architecture first, and no way to answer Claude here', async 
   assert.equal(screen.getByRole('tab', { selected: true }).textContent?.startsWith('Architecture'), true);
   assert.equal(screen.queryByText(/questions/i), null);
   assert.equal(screen.queryByText(/activity/i), null);
+});
+
+test('the page opens its live stream once on load, with one ticket', async () => {
+  // The session answers before the ticket does, as it can on a busy daemon.
+  await boot(makeSession(), (route) => (route === '/api/events/ticket' ? new Promise((resolve) => setTimeout(() => resolve({ ticket: 't' }), 20)) : undefined));
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 50));
+  });
+  assert.equal(posts.filter((p) => p.route === '/api/events/ticket').length, 1);
 });
 
 test('with no plan yet, the page says how to get one', async () => {
@@ -553,7 +575,7 @@ test('a late answer never rolls the page back past a newer version', async () =>
   store.set({ session: { ...s, plan: { ...s.plan!, title: 'Newer', version: s.plan!.version + 2 } } });
   stubFetch((route) => (route.endsWith('/plan/ops') ? { plan: older, changes: [] } : { ok: true }));
   await act(async () => {
-    await store.commit([{ op: 'set_meta', title: 'Older' }]);
+    await store.commit([{ op: 'set_meta', title: 'Older' }], 's1');
   });
   assert.equal(store.getState().session?.plan?.title, 'Newer');
 });
@@ -619,7 +641,7 @@ test('an answer from a daemon that predates version is still applied', async () 
   store.set({ session: { ...s, plan: { ...s.plan!, version: undefined as unknown as number } } });
   stubFetch((route) => (route.endsWith('/plan/ops') ? { plan: legacy, changes: [] } : { ok: true }));
   await act(async () => {
-    await store.commit([{ op: 'set_meta', title: 'From the old daemon' }]);
+    await store.commit([{ op: 'set_meta', title: 'From the old daemon' }], 's1');
   });
   assert.equal(store.getState().session?.plan?.title, 'From the old daemon');
 });
@@ -696,6 +718,30 @@ test('"By box" lists every task under each box it builds, and the tasks that bui
   assert.equal(store.getState().focusTarget === null || store.getState().focusTarget === 'node:d1:db', true);
 });
 
+test('a parent task is shown as its subtasks have it, in the outline and "By box"', async () => {
+  const plan = applyOps(
+    makePlan(),
+    [
+      { op: 'upsert_task', id: 'storage', status: 'blocked', note: 'waits on the ops team' },
+      { op: 'upsert_task', id: 't2', status: 'done' },
+    ],
+    'user',
+  ).plan;
+  assert.equal(plan.tasks.find((t) => t.id === 'storage')?.status, 'blocked', 'its own status, as stored');
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  const line = document.getElementById('task-storage')!;
+  assert.ok(line.classList.contains('is-done'), 'struck through, as its dot says');
+  assert.ok(screen.getByRole('treeitem', { name: '1 Storage layer, Done' }), 'and said so');
+  assert.equal(line.querySelector('.chip.is-note')?.classList.contains('is-warning'), false, 'its note not flagged as a blocker');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'By box' }));
+  });
+  const row = [...screen.getByRole('region', { name: 'Postgres' }).querySelectorAll('.by-box-row')].find((r) => r.querySelector('.by-box-title')?.textContent === 'Storage layer');
+  assert.ok(row?.classList.contains('is-done'), 'by box too');
+  assert.equal(row?.querySelector('.chip.is-note')?.classList.contains('is-warning'), false);
+});
+
 test('"By box" marks a box no task builds, as the plan check would', async () => {
   await boot();
   await openTab('Tasks');
@@ -715,6 +761,63 @@ test('clicking a status dot moves the task along', async () => {
     fireEvent.click(screen.getByLabelText(/^Invalidation: To do/));
   });
   assert.deepEqual(opsSent()[0], { op: 'upsert_task', id: 't2', status: 'in_progress' });
+});
+
+test('a status note is saved with the note it was written over', async () => {
+  await boot();
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^Status note: .*\. Edit$/ }));
+  });
+  const field = screen.getByRole('textbox', { name: 'Status note' });
+  const was = (field as HTMLInputElement).value;
+  fireEvent.change(field, { target: { value: 'Waiting on the cache client' } });
+  await act(async () => {
+    fireEvent.keyDown(field, { key: 'Enter' });
+  });
+  const op = opsSent().at(-1)!;
+  assert.equal(op['note'], 'Waiting on the cache client');
+  assert.equal(op['noteWas'], was, 'so a progress note made meanwhile is not saved over');
+});
+
+test("keys typed into a field are the field's: no task moves, no sidebar toggles", async () => {
+  await boot();
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getAllByRole('button', { name: /^Task title: Wire into API\. Edit$/ })[0]!);
+  });
+  const field = screen.getByRole('textbox', { name: 'Task title' });
+  const collapsed = store.getState().collapsedSidebar;
+  await act(async () => {
+    fireEvent.keyDown(field, { key: 'ArrowRight', altKey: true });
+    fireEvent.keyDown(field, { key: '[' });
+  });
+  assert.deepEqual(opsSent().filter((o) => o['op'] === 'move_task'), [], 'Alt+arrow moves the caret, not the task');
+  assert.equal(store.getState().collapsedSidebar, collapsed, '[ is a character');
+});
+
+test("a title's Enter that picks an input method's characters saves nothing; the next one does", async () => {
+  await boot();
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getAllByRole('button', { name: /^Task title: Wire into API\. Edit$/ })[0]!);
+  });
+  const field = screen.getByRole('textbox', { name: 'Task title' });
+  fireEvent.change(field, { target: { value: 'API に配線' } });
+  await act(async () => {
+    fireEvent.keyDown(field, { key: 'Enter', isComposing: true });
+    fireEvent.keyDown(field, { key: 'Enter', keyCode: 229 });
+    fireEvent.keyDown(field, { key: 'Escape', isComposing: true });
+  });
+  assert.deepEqual(opsSent(), [], 'still composing');
+  assert.ok(screen.getByRole('textbox', { name: 'Task title' }), 'and the edit is still open');
+  await act(async () => {
+    fireEvent.keyDown(field, { key: 'Enter' });
+  });
+  assert.deepEqual(opsSent().map((o) => o['title']), ['API に配線']);
 });
 
 test('Alt+arrows reorganize the tree from the keyboard', async () => {
@@ -747,6 +850,27 @@ test('a subtask is added under its parent', async () => {
     fireEvent.submit(input.closest('form')!);
   });
   assert.deepEqual(opsSent()[0], { op: 'upsert_task', parentId: 't3', title: 'Feature flag' });
+});
+
+test("an input method's Escape in a new subtask's field drops its choice, not the field", async () => {
+  await boot();
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Add a subtask to Wire into API'));
+  });
+  const input = screen.getByLabelText('New subtask of Wire into API') as HTMLInputElement;
+  fireEvent.change(input, { target: { value: 'にほん' } });
+  // On a narrow window, with the session list open as a drawer.
+  await act(async () => store.setDrawer(true));
+  await act(async () => {
+    fireEvent.keyDown(input, { key: 'Escape', isComposing: true });
+  });
+  assert.equal((screen.getByLabelText('New subtask of Wire into API') as HTMLInputElement).value, 'にほん', 'still open, with the title');
+  assert.equal(store.getState().drawerOpen, true, 'and the drawer with it');
+  await act(async () => {
+    fireEvent.keyDown(input, { key: 'Escape' });
+  });
+  assert.equal(screen.queryByLabelText('New subtask of Wire into API'), null, 'the next Escape closes it');
 });
 
 test('the board puts each leaf task in its status column', async () => {
@@ -808,6 +932,80 @@ test('a refused save keeps the editor open with the text intact', async () => {
   const still = screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
   assert.equal(still.value, 'My careful rewrite.', 'nothing typed is lost');
   assert.ok(store.getState().toasts.some((t) => /changed by Claude/.test(t.text)), 'and the reason is shown');
+});
+
+test('a refused files save stays open with the text, and the next save goes against the list as it is now', async () => {
+  let refuse = true;
+  await boot(makeSession(), (route) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    if (refuse) return { __status: 409, error: 'Task "Invalidation" was changed by Claude while this edit was open, so it was not saved.' };
+    return { plan: store.getState().session?.plan, changes: [] };
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Files, one per line' }), { target: { value: 'src/cache.ts' } });
+  // Claude changes the task meanwhile (its change on screen first): the save is refused.
+  const s = store.getState().session!;
+  const moved = applyOps(s.plan!, [{ op: 'upsert_task', id: 't2', files: ['src/old.ts'] }], 'claude').plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: moved } }));
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  });
+  assert.equal((screen.getByRole('textbox', { name: 'Files, one per line' }) as HTMLTextAreaElement).value, 'src/cache.ts', 'nothing typed is lost');
+  // Saved again, deliberately: against the task as it is now.
+  refuse = false;
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  });
+  const [first, second] = opsSent().filter((o) => o['op'] === 'upsert_task' && 'files' in o);
+  assert.equal(first?.['expect'], s.plan!.tasks.find((t) => t.id === 't2')!.rev ?? 1);
+  assert.equal(second?.['expect'], moved.tasks.find((t) => t.id === 't2')!.rev, 'the revision now on screen');
+  assert.equal(screen.queryByRole('textbox', { name: 'Files, one per line' }), null, 'saved, and closed');
+});
+
+test('a note refused as changed underneath is not saved over it by leaving the field: Enter does it, deliberately', async () => {
+  let refuse = true;
+  await boot(makeSession(), (route) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    if (refuse) return { __status: 409, error: 'The note of task "Invalidation" was changed while this edit was open, so it was not saved.' };
+    return { plan: store.getState().session?.plan, changes: [] };
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^Status note: .*\. Edit$/ }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Status note' }), { target: { value: 'Waiting on the cache client' } });
+  // The agent's progress note lands meanwhile: the save is refused.
+  const s = store.getState().session!;
+  const reported = applyOps(s.plan!, [{ op: 'upsert_task', id: 't2', status: 'blocked', note: 'Blocked: DB creds missing' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: reported } }));
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Status note' }), { key: 'Enter' });
+  });
+  const sent = () => opsSent().filter((o) => o['op'] === 'upsert_task' && 'note' in o).length;
+  assert.equal(sent(), 1);
+  refuse = false;
+  // Leaving the field is not a save over the agent's note.
+  await act(async () => {
+    fireEvent.blur(screen.getByRole('textbox', { name: 'Status note' }));
+  });
+  assert.equal(sent(), 1, 'nothing sent on leaving');
+  assert.ok(screen.getByText(/^Now: Blocked: DB creds missing\./), 'what is there now is shown');
+  // Enter is deliberate: saved over it, knowingly.
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Status note' }), { key: 'Enter' });
+  });
+  const last = opsSent().filter((o) => o['op'] === 'upsert_task' && 'note' in o).at(-1)!;
+  assert.equal(last['note'], 'Waiting on the cache client');
+  assert.equal(last['noteWas'], 'Blocked: DB creds missing');
 });
 
 test('a view that throws takes only itself down', async () => {
@@ -990,6 +1188,46 @@ test('the design is confirmed from the architecture view, after reading what Cla
   assert.match(screen.getByTestId('plan-status').textContent ?? '', /^✎ Planning · design confirmed$/);
 });
 
+test('a sign-off goes to the session its dialog was opened on, though the user moved on while it was copied', async () => {
+  // Cursor: the prompt is copied for the user to paste before the design is confirmed.
+  const session = makeSession(makePlan(), { agent: 'cursor' });
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  let release: () => void = () => {};
+  // A clipboard that holds the copy until released; the one before it comes back after.
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText: () => new Promise<void>((resolve) => (release = resolve)) }, configurable: true });
+  try {
+    await boot(session, (route) => {
+      if (route === '/api/session/s2') return { session: other };
+      if (route.endsWith('/plan/design/prompt')) return { prompt: 'DESIGN PROMPT', trimmed: false, version: session.plan!.version, budget: 9000, maxNote: 4000 };
+      if (route.endsWith('/plan/design/confirm')) return { plan: confirmedPlan() };
+      return undefined;
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Confirm design' }));
+    });
+    const dialog = screen.getByRole('dialog', { name: 'Confirm the design' });
+    const confirm = within(dialog).getByRole('button', { name: 'Copy and confirm design' }) as HTMLButtonElement;
+    await waitFor(() => assert.equal(confirm.disabled, false));
+    await act(async () => {
+      fireEvent.click(confirm);
+    });
+    // The copy waits on the clipboard; meanwhile the user opens another session.
+    await act(async () => {
+      await store.selectSession('s2');
+    });
+    await act(async () => {
+      release();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+  } finally {
+    if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+    else delete (navigator as { clipboard?: unknown }).clipboard;
+  }
+  const sent = posts.filter((p) => p.route.endsWith('/plan/design/confirm')).map((p) => p.route);
+  assert.deepEqual(sent, ['/api/session/s1/plan/design/confirm']);
+});
+
 test('the sign-off dialogs list each setting from config, read-only, with the file and key that set it', async () => {
   const { designPrompt, configRows, promptHash } = await import('../daemon/render.ts');
   const { parseProjectConfig } = await import('../shared/project.ts');
@@ -1078,6 +1316,43 @@ test('a prompt cut to fit says what it leaves out, and that the agent reads it w
   assert.match(list.querySelector('[data-key="instructions.build"]')?.textContent ?? '', /none$/);
 });
 
+/** The status a list on the canvas gives Storage layer, the parent of t1 and t2. */
+const storageDot = (root: Element) =>
+  [...root.querySelectorAll('li')].find((li) => li.textContent?.includes('Storage layer'))?.querySelector('.status-dot')?.getAttribute('aria-label');
+const subtasksDone = (plan: Plan) => applyOps(plan, [{ op: 'upsert_task', id: 't2', status: 'done' }], 'user').plan;
+
+test('the canvas shows a parent task as far along as its subtasks, as the Tasks tab does', async () => {
+  await boot(makeSession(subtasksDone(makePlan())));
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  const info = await waitFor(() => {
+    const el = document.querySelector<HTMLButtonElement>('button[aria-label="About Postgres"]');
+    assert.ok(el);
+    return el;
+  });
+  await act(async () => {
+    fireEvent.mouseEnter(info);
+  });
+  await waitFor(() => assert.ok(document.querySelector('.flow-summary')));
+  assert.equal(storageDot(document.querySelector('.flow-summary')!), 'Done, from its subtasks', 'in the box summary');
+  assert.equal(document.querySelector('.flow-summary .status-dot')?.hasAttribute('title'), false, 'with no tooltip over the summary');
+  await act(async () => {
+    fireEvent.keyDown(info, { key: 'Escape' });
+  });
+  await selectBox('Postgres');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  await waitFor(() => assert.match(panel.textContent ?? '', /Built by/));
+  assert.equal(storageDot(panel), 'Done, from its subtasks', 'and in its panel');
+});
+
+test('and so does the panel of a confirmed design', async () => {
+  await boot(makeSession(subtasksDone(confirmedPlan())));
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('Postgres');
+  const panel = screen.getByRole('complementary', { name: 'Details' });
+  await waitFor(() => assert.match(panel.textContent ?? '', /Built by/));
+  assert.equal(storageDot(panel), 'Done, from its subtasks');
+});
+
 test('with the design confirmed, boxes still link to tasks but nothing else on them changes', async () => {
   await boot(makeSession(confirmedPlan()));
   await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
@@ -1154,6 +1429,66 @@ test('a gap the repository counts as an error holds Submit, and is shown first',
   assert.equal(submit.title, 'Fix the gaps this repository counts as errors first');
   assert.match(dialog.textContent ?? '', /gaps the plan leaves open — (one is an error|\d+ are errors) in this repository, to fix first/);
   assert.match(dialog.querySelector('.submit-gap-error')?.textContent ?? '', /^Error: /);
+});
+
+test('confirming the design waits for text left open in it, which the lock would drop', async () => {
+  const session = makeSession();
+  await boot(session, (route) =>
+    route.endsWith('/plan/design/prompt') ? { prompt: 'DESIGN PROMPT', trimmed: false, version: session.plan!.version, budget: 9000, maxNote: 4000 } : undefined,
+  );
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'the plan summary' }), { target: { value: 'Half a summary' } });
+  await openTab('Architecture');
+  const confirmButton = async () => {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Confirm design' }));
+    });
+    const dialog = screen.getByRole('dialog', { name: 'Confirm the design' });
+    await waitFor(() => assert.equal(within(dialog).getByTestId('prompt-preview').textContent, 'DESIGN PROMPT'));
+    return { dialog, button: within(dialog).getByRole('button', { name: 'Confirm design' }) as HTMLButtonElement };
+  };
+  let { dialog, button } = await confirmButton();
+  assert.equal(button.disabled, true);
+  assert.equal(button.title, 'Save or cancel the text open in the summary first');
+  await act(async () => {
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+  });
+  // Saved, or here cancelled, and nothing holds it up.
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  });
+  await openTab('Architecture');
+  ({ button } = await confirmButton());
+  assert.equal(button.disabled, false);
+});
+
+test("submitting waits for a task's detail left open, which the lock would drop", async () => {
+  const session = makeSession(confirmedPlan());
+  await boot(session, (route) =>
+    route.endsWith('/plan/prompt')
+      ? { prompt: 'PROMPT', trimmed: false, version: session.plan!.version, budget: 9000, maxNote: 4000, mode: 'managed', settings: DEFAULTS, project: { file: null, mode: 'managed', defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [] } }
+      : undefined,
+  );
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Add approach or acceptance criteria: detail of "Invalidation"' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'detail of "Invalidation"' }), { target: { value: 'Half the criteria' } });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Review & submit plan' }));
+  });
+  const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
+  await waitFor(() => assert.equal(within(dialog).getByTestId('prompt-preview').textContent, 'PROMPT'));
+  const submit = within(dialog).getByRole('button', { name: 'Submit and lock' }) as HTMLButtonElement;
+  assert.equal(submit.disabled, true);
+  assert.equal(submit.title, 'Save or cancel the text open in the detail of task "Invalidation" first');
 });
 
 test('the plan is submitted after reading the prompt it sends, with how the build runs', async () => {
@@ -1517,6 +1852,26 @@ test('a submitted plan is followed by box too, beside the board, with nothing on
   assert.ok(document.querySelector('.board'));
 });
 
+test('jumping to a task unfolds the tasks over it, in its own plan, and only when one was folded', async () => {
+  await boot();
+  await act(async () => {
+    store.set({ taskMode: 'board', collapsedTasks: new Map([['s1', ['storage']], ['s2', ['storage']]]) });
+  });
+  const saved = () => window.localStorage.getItem('cc-harness:prefs');
+  const before = saved();
+  await act(async () => {
+    store.focus('task', 'storage');
+  });
+  assert.equal(store.getState().taskMode, 'outline');
+  assert.equal(saved(), before, 'nothing over it to unfold: nothing saved');
+  await act(async () => {
+    store.focus('task', 't2');
+  });
+  assert.ok(screen.getByRole('treeitem', { name: /Invalidation/ }), 'shown to scroll to');
+  assert.deepEqual([...store.getState().collapsedTasks], [['s2', ['storage']]], "another plan's fold stays");
+  assert.match(saved() ?? '', /"taskMode":"outline"/, 'saved with the outline it opened');
+});
+
 test("a box's task on a submitted plan opens its card on the board", async () => {
   await boot(makeSession(lockedPlan(true)));
   await act(async () => {
@@ -1701,6 +2056,48 @@ test('a proposal shown on the canvas marks what it adds and changes, and saves n
     fireEvent.click(screen.getAllByRole('button', { name: 'Close preview' })[0]!);
   });
   assert.equal(document.querySelector('.react-flow__node.diff-added'), null);
+});
+
+test('a session a newer Coplan saved says, as it opens, that nothing done in it here is kept', async () => {
+  await boot(makeSession(null, { savedByNewer: true }));
+  const said = screen.getAllByRole('alert').find((a) => /newer version of Coplan/.test(a.textContent ?? ''));
+  assert.match(said?.textContent ?? '', /nothing done in it here is saved/);
+  assert.match(said?.textContent ?? '', /Deleting it here deletes it for the newer version too/);
+});
+
+test('a session this Coplan saved says nothing of the kind', async () => {
+  await boot();
+  assert.ok(!screen.queryAllByRole('alert').some((a) => /newer version of Coplan/.test(a.textContent ?? '')));
+});
+
+test('what is folded or previewed in one plan stays with it, though another plan uses the same ids', async () => {
+  const other = makeSession(proposed(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(proposed()), (route) => (route === '/api/session/s2' ? { session: other } : undefined));
+  // Booleans: a failed assertion on an element would print all of the DOM it hangs in.
+  const subtask = () => screen.queryByRole('treeitem', { name: /Cache client/ }) !== null;
+  // In s1: its proposal on the canvas, and its Storage layer folded.
+  await act(async () => {
+    fireEvent.click(within(screen.getByRole('article', { name: 'Put Redis in front of Postgres' })).getByRole('button', { name: 'Show on canvas' }));
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Hide subtasks of Storage layer' }));
+  });
+  assert.equal(subtask(), false);
+  // s2's plan has a Storage layer and a p1 of its own.
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  assert.ok(subtask(), 'its Storage layer is not folded');
+  await openTab('Architecture');
+  assert.equal(document.querySelector('.react-flow__node.diff-added') !== null, false, 'nor its p1 previewed');
+  assert.ok(!screen.queryAllByRole('status').some((x) => /Previewing p1/.test(x.textContent ?? '')));
+  // Back in s1, its fold is as the user left it.
+  await act(async () => {
+    await store.selectSession('s1');
+  });
+  await openTab('Tasks');
+  assert.equal(subtask(), false);
 });
 
 test('a proposal the plan has moved past cannot be accepted, and says what moved', async () => {
@@ -1888,4 +2285,581 @@ test('a skipped check shows on the task, on its card mid-build — where the use
   await boot(makeSession(plan));
   await openTab('Overview');
   assert.match(screen.getByTestId('skipped-checks').textContent ?? '', /Checks you skipped: t3 Wire into API \(tests\)\./);
+});
+
+test("the summary says when the agent changed it while the user was editing; saving still goes in (warn, don't refuse)", async () => {
+  await boot();
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  const area = screen.getByRole('textbox', { name: 'the plan summary' }) as HTMLTextAreaElement;
+  fireEvent.change(area, { target: { value: 'Put a cache in front of the database. Typo fixed.' } });
+  none(screen.queryByRole('alert'), 'nothing has changed underneath yet');
+  // The agent rewrites the summary meanwhile.
+  const s = store.getState().session!;
+  const plan = { ...structuredClone(s.plan!), summary: 'A read-through cache, written by the agent.', version: s.plan!.version + 1 };
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...s, plan } });
+  });
+  assert.match(screen.getByRole('alert').textContent ?? '', /This changed while you were editing/);
+  assert.equal(area.value, 'Put a cache in front of the database. Typo fixed.', 'the typing stays');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  });
+  assert.deepEqual(opsSent().at(-1), { op: 'set_meta', summary: 'Put a cache in front of the database. Typo fixed.' });
+});
+
+test('a field with no revision (box notes, a caption) warns the same way, and only when it did change', async () => {
+  const { MarkdownField } = await import('../ui/components/Editable.tsx');
+  const saved: string[] = [];
+  const field = (value: string) => <MarkdownField value={value} label="notes on API" onSave={(v) => void saved.push(v)} />;
+  const view = render(field('Primary store.'));
+  await act(async () => {
+    fireEvent.click(view.getByRole('button', { name: 'Edit notes on API' }));
+  });
+  fireEvent.change(view.getByRole('textbox', { name: 'notes on API' }), { target: { value: 'Primary store. Mine.' } });
+  await act(async () => view.rerender(field('Primary store.')));
+  none(view.queryByRole('alert'), 'the same text again is no change');
+  await act(async () => view.rerender(field('Rewritten by the agent.')));
+  assert.ok(view.getByRole('alert'));
+  fireEvent.keyDown(view.getByRole('textbox', { name: 'notes on API' }), { key: 'Escape' });
+  await act(async () => {
+    fireEvent.click(view.getByRole('button', { name: 'Edit notes on API' }));
+  });
+  none(view.queryByRole('alert'), 'editing again starts from the newer text');
+  assert.deepEqual(saved, []);
+  // The user's own save landing before it resolves is not a change underneath.
+  fireEvent.change(view.getByRole('textbox', { name: 'notes on API' }), { target: { value: 'My notes.' } });
+  await act(async () => view.rerender(field('My notes.')));
+  none(view.queryByRole('alert'), 'their own text, landing');
+  view.unmount();
+});
+
+test('switching session closes the editors of the one left: nothing typed for one plan is saved into another', async () => {
+  // Another plan with the same task ids, as every plan has.
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => (route === '/api/session/s2' ? { session: other } : undefined));
+
+  // The summary open with a draft in it; the user goes Back to another session (no focus moves).
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'the plan summary' }), { target: { value: 'A summary written for s1' } });
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  none(screen.queryByRole('textbox', { name: 'the plan summary' }), "s1's editor is gone");
+  assert.deepEqual(sentTo('s2'), [], 'and its draft went nowhere near s2');
+
+  // A task title being typed in when the session changes: saved in s1, where it was typed.
+  await act(async () => {
+    await store.selectSession('s1');
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getAllByRole('button', { name: /^Task title: Storage layer\. Edit$/ })[0]!);
+  });
+  const title = screen.getByRole('textbox', { name: 'Task title' }) as HTMLInputElement;
+  title.focus();
+  fireEvent.change(title, { target: { value: 'Storage, renamed in s1' } });
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  assert.equal(sentTo('s2').length, 0, 'nothing reached s2');
+  assert.deepEqual(sentTo('s1').map((o) => [o['op'], o['title']]), [['upsert_task', 'Storage, renamed in s1']]);
+});
+
+test('an edit made while one plan was on screen goes to that plan, however late it is sent', async () => {
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => (route === '/api/session/s2' ? { session: other } : undefined));
+  const { result } = renderHook(() => useEdit(), { wrapper: SessionScope });
+  // What a view on s1 holds: an editor's save, a request still queued.
+  const madeOnS1 = result.current;
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  await act(async () => {
+    await madeOnS1({ op: 'upsert_task', id: 't1', title: 'Renamed on s1' });
+  });
+  assert.deepEqual(sentTo('s1').map((o) => o['title']), ['Renamed on s1']);
+  assert.deepEqual(sentTo('s2'), [], 'never into the plan now on screen, whose t1 is another task');
+  await act(async () => {
+    await result.current({ op: 'set_meta', title: 'Made on s2' });
+  });
+  assert.deepEqual(sentTo('s2').map((o) => o['title']), ['Made on s2'], 'and one made there now goes there');
+});
+
+test('what a view does after an answer is only for the plan it showed: never another on screen by then', async () => {
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => (route === '/api/session/s2' ? { session: other } : undefined));
+  const { result } = renderHook(() => useStillShown(), { wrapper: SessionScope });
+  const onS1 = result.current;
+  assert.equal(onS1(), true);
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  assert.equal(onS1(), false, 's1 is no longer on screen: its row is not focused, its task not expanded');
+  assert.equal(result.current(), true, 'and the view now on s2 is');
+});
+
+test('the task list offers no nesting under a task already started or finished', async () => {
+  await boot();
+  await openTab('Tasks');
+  // Invalidation sits below Cache client, which is done: nesting under it is not offered.
+  assert.equal((screen.getByRole('button', { name: 'Nest Invalidation under the task above' }) as HTMLButtonElement).disabled, true);
+  // Wire into API sits below Storage layer, which is a parent already: that is fine.
+  assert.equal((screen.getByRole('button', { name: 'Nest Wire into API under the task above' }) as HTMLButtonElement).disabled, false);
+});
+
+test('an open editor keeps its text across a tab switch, and closing the page asks first', async () => {
+  await boot();
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'the plan summary' }), { target: { value: 'Three paragraphs, half written' } });
+  const leaving = () => {
+    const e = new window.Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  };
+  assert.equal(leaving(), true, 'closing the page with it open asks first');
+  await openTab('Tasks');
+  await openTab('Overview');
+  assert.equal((screen.getByRole('textbox', { name: 'the plan summary' }) as HTMLTextAreaElement).value, 'Three paragraphs, half written', 'back where it was');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  });
+  assert.equal(leaving(), false, 'cancelled, there is nothing to lose');
+  await openTab('Tasks');
+  await openTab('Overview');
+  none(screen.queryByRole('textbox', { name: 'the plan summary' }), 'and it does not come back');
+});
+
+test('a comment, a reply and a files list being written keep their text when their view goes, and closing the page asks first', async () => {
+  const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  await boot(makeSession(plan));
+  const leaving = () => {
+    const e = new window.Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  };
+  // A comment on a box: another box selected, and back.
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('Postgres');
+  const panel = () => screen.getByRole('complementary', { name: 'Details' });
+  fireEvent.change(within(panel()).getByRole('textbox', { name: /^New comment on/ }), { target: { value: 'Half a comment' } });
+  assert.equal(leaving(), true, 'closing the page asks first');
+  await selectBox('API');
+  // The plan pushed meanwhile (the agent at work) keeps what is not saved.
+  await act(async () => store.apply({ type: 'snapshot', session: makeSession(plan) }));
+  await selectBox('Postgres');
+  assert.equal((within(panel()).getByRole('textbox', { name: /^New comment on/ }) as HTMLTextAreaElement).value, 'Half a comment');
+  // A reply, and a files list, on a task: another tab, and back.
+  const openTask = async () => {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '1 open comment(s) on Invalidation' }));
+    });
+  };
+  await openTab('Tasks');
+  await openTask();
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Reply' }), { target: { value: 'The Redis one' } });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Files, one per line' }), { target: { value: 'src/cache.ts' } });
+  await openTab('Overview');
+  await act(async () => store.apply({ type: 'snapshot', session: makeSession(plan) }));
+  await openTab('Tasks');
+  await openTask();
+  assert.equal((screen.getByRole('textbox', { name: 'Reply' }) as HTMLTextAreaElement).value, 'The Redis one');
+  assert.equal((screen.getByRole('textbox', { name: 'Files, one per line' }) as HTMLTextAreaElement).value, 'src/cache.ts');
+  // Each goes when cancelled; with all gone, there is nothing to ask about.
+  for (const name of ['Cancel', 'Cancel']) {
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole('button', { name })[0]!);
+    });
+  }
+  await openTab('Architecture');
+  await selectBox('Postgres');
+  fireEvent.change(within(panel()).getByRole('textbox', { name: /^New comment on/ }), { target: { value: '' } });
+  assert.equal(leaving(), false);
+});
+
+test('an edit refused after another session opened names its own plan', async () => {
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => {
+    if (route === '/api/session/s2') return { session: other };
+    if (route === '/api/session/s1/plan/ops') return { __status: 409, error: 'Task "Invalidation" was changed by Claude while this edit was open, so it was not saved.' };
+    return undefined;
+  });
+  await act(async () => {
+    store.set({ sessions: [{ sessionId: 's1', title: 'repo', planTitle: 'Add a cache' } as SessionSummary] });
+    await store.selectSession('s2');
+  });
+  // A save made on s1 (an editor saving as it closed) is answered with s2 on screen.
+  await act(async () => {
+    await store.commit([{ op: 'upsert_task', id: 't2', title: 'Renamed' }], 's1');
+  });
+  const said = () => store.getState().toasts.at(-1)?.text ?? '';
+  assert.equal(store.getState().toasts.at(-1)?.kind, 'error');
+  assert.match(said(), /^"Add a cache": Task "Invalidation" was changed by Claude/, 'over s2, whose t2 is another task');
+  // Not in the session list (deleted meanwhile, say): another plan, all the same.
+  await act(async () => {
+    store.set({ sessions: [] });
+    await store.commit([{ op: 'upsert_task', id: 't2', title: 'Again' }], 's1');
+  });
+  assert.match(said(), /^Another plan: Task "Invalidation"/);
+});
+
+test("a daemon that cannot be reached is said as it is, no one plan's doing", async () => {
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => {
+    if (route === '/api/session/s2') return { session: other };
+    if (route === '/api/session/s1/plan/ops') throw new TypeError('Failed to fetch');
+    return undefined;
+  });
+  await act(async () => {
+    store.set({ sessions: [{ sessionId: 's1', title: 'repo', planTitle: 'Add a cache' } as SessionSummary] });
+    await store.selectSession('s2');
+  });
+  await act(async () => {
+    await store.commit([{ op: 'upsert_task', id: 't2', title: 'Renamed' }], 's1');
+  });
+  assert.match(store.getState().toasts.at(-1)?.text ?? '', /^Coplan's daemon is not reachable/);
+});
+
+test("another session opened closes the prompt viewer and forgets a jump, both the old plan's", async () => {
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => (route === '/api/session/s2' ? { session: other } : undefined));
+  await act(async () => {
+    store.openViewer({ tab: 'brief', taskId: 't2' });
+    store.set({ focusTarget: 'task:t2' });
+  });
+  // Opened again (its row clicked), it is the same plan: they stay.
+  await act(async () => {
+    await store.selectSession('s1');
+  });
+  assert.deepEqual(store.getState().viewer, { tab: 'brief', taskId: 't2' });
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  assert.equal(store.getState().viewer, null, "s1's t2 is not s2's");
+  assert.equal(store.getState().focusTarget, null);
+});
+
+test('a kept comment goes with what it was on; a kept reply stays, its thread resolved or not', async () => {
+  const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  await boot(makeSession(plan));
+  const leaving = () => {
+    const e = new window.Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  };
+  await waitFor(() => assert.ok(document.querySelector('.react-flow__node')));
+  await selectBox('Postgres');
+  fireEvent.change(within(screen.getByRole('complementary', { name: 'Details' })).getByRole('textbox', { name: /^New comment on/ }), { target: { value: 'Half a comment' } });
+  await selectBox('API');
+  const without = applyOps(plan, [{ op: 'remove_node', diagramId: 'd1', id: 'db' }], 'claude').plan;
+  await act(async () => store.apply({ type: 'snapshot', session: makeSession(without) }));
+  assert.equal(leaving(), false, 'the box is gone, and the comment with it');
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '1 open comment(s) on Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Reply' }), { target: { value: 'The Redis one' } });
+  await openTab('Overview');
+  assert.equal(leaving(), true);
+  const resolved = applyOps(without, [{ op: 'resolve', threadId: without.threads[0]!.id, resolved: true }], 'claude').plan;
+  await act(async () => store.apply({ type: 'snapshot', session: makeSession(resolved) }));
+  assert.equal(leaving(), true, 'resolved, it still takes a reply');
+});
+
+test('a section can be commented on once the design is confirmed, as until the plan is submitted', async () => {
+  await boot(makeSession(confirmedPlan()));
+  await openTab('Overview');
+  const toggle = screen.getByRole('button', { name: 'Comment on Context' }) as HTMLButtonElement;
+  assert.equal(toggle.matches(':disabled'), false, 'its comments open');
+  await act(async () => {
+    fireEvent.click(toggle);
+  });
+  const box = screen.getByRole('textbox', { name: 'New comment on Context' }) as HTMLTextAreaElement;
+  assert.equal(box.matches(':disabled'), false, 'and can be written in');
+  fireEvent.change(box, { target: { value: 'Is "slow" measured?' } });
+  await act(async () => {
+    fireEvent.click(within(screen.getByLabelText('Comments on Context')).getByRole('button', { name: 'Comment' }));
+  });
+  assert.deepEqual(opsSent().at(-1), { op: 'comment', target: { kind: 'section', id: 's1' }, text: 'Is "slow" measured?' });
+  // What the section says stays locked with the design: its body, its title, its place.
+  assert.equal(screen.getByRole('button', { name: 'Edit section "Context"' }).matches(':disabled'), true, 'body');
+  assert.equal(screen.queryByRole('button', { name: /^Section title: / }) === null, true, 'title');
+  assert.equal(screen.queryByRole('button', { name: 'Move Context up' }) === null, true, 'place');
+  // Submitted, its comments are there to read, not to answer or resolve.
+  const commented = applyOps(confirmedPlan(), [{ op: 'comment', target: { kind: 'section', id: 's1' }, text: 'Measured?' }], 'user').plan;
+  const s = store.getState().session!;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(commented, { target: 'session', prompt: 'build' }) } }));
+  assert.ok(within(screen.getByLabelText('Comments on Context')).getByText('Measured?'));
+  assert.equal(within(screen.getByLabelText('Comments on Context')).queryByRole('button', { name: 'Resolve' }) === null, true, 'no Resolve');
+});
+
+test("a submitted plan offers comments only where there are some to read, as a diagram's", async () => {
+  await boot(makeSession(lockedPlan()));
+  await openTab('Overview');
+  assert.ok(screen.getByRole('heading', { name: 'Context' }), 'the section is there');
+  assert.equal(screen.queryByRole('button', { name: /on Context$/ }) === null, true, 'no section toggle onto an empty panel');
+  await openTab('Tasks');
+  assert.ok(screen.getAllByText('Invalidation').length, 'the task is there');
+  assert.equal(screen.queryByRole('button', { name: /on Invalidation$/ }) === null, true, 'nor a task one');
+  // One with a comment keeps it, to read.
+  const commented = applyOps(confirmedPlan(), [{ op: 'comment', target: { kind: 'section', id: 's1' }, text: 'Measured?' }], 'user').plan;
+  const s = store.getState().session!;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(commented, { target: 'session', prompt: 'build' }) } }));
+  await openTab('Overview');
+  assert.ok(screen.getByRole('button', { name: '1 open comment(s) on Context' }));
+  // Resolved, it is still there to read, and not offered as one to write.
+  const resolved = applyOps(commented, [{ op: 'resolve', threadId: commented.threads[0]!.id, resolved: true }], 'user').plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(resolved, { target: 'session', prompt: 'build' }) } }));
+  assert.ok(screen.getByRole('button', { name: 'Comments on Context' }));
+});
+
+test('Reply goes while the reply is being written, so nothing empties it', async () => {
+  const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '1 open comment(s) on Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Reply' }), { target: { value: 'Half a reply' } });
+  assert.equal(screen.queryByRole('button', { name: 'Reply' }) === null, true, 'no Reply to click again');
+  assert.equal((screen.getByRole('textbox', { name: 'Reply' }) as HTMLTextAreaElement).value, 'Half a reply');
+  // Cancelled, it is back.
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  });
+  assert.ok(screen.getByRole('button', { name: 'Reply' }));
+});
+
+test('a reply being written stays on screen, with its text, when the agent resolves its thread', async () => {
+  const plan = applyOps(makePlan(), [
+    { op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' },
+    { op: 'comment', target: { kind: 'task', id: 't2' }, text: 'And which TTL?' },
+  ], 'user').plan;
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '2 open comment(s) on Invalidation' }));
+  });
+  const [first, second] = screen.getAllByRole('button', { name: 'Reply' });
+  await act(async () => {
+    fireEvent.click(first!);
+    fireEvent.click(second!);
+  });
+  // One reply written, the other opened and left empty.
+  fireEvent.change(screen.getAllByRole('textbox', { name: 'Reply' })[0]!, { target: { value: 'The Redis one' } });
+  const resolved = applyOps(plan, plan.threads.map((t) => ({ op: 'resolve' as const, threadId: t.id, resolved: true })), 'claude').plan;
+  await act(async () => store.apply({ type: 'snapshot', session: makeSession(resolved) }));
+  const fields = screen.queryAllByRole('textbox', { name: 'Reply' }) as HTMLTextAreaElement[];
+  assert.deepEqual(fields.map((f) => f.value), ['The Redis one'], 'the written one stays; the empty one folds away with its thread');
+});
+
+test("an open editor's text waits in its own session while another is on screen", async () => {
+  const other = makeSession(makePlan(), { sessionId: 's2', title: 'other repo' });
+  await boot(makeSession(), (route) => (route === '/api/session/s2' ? { session: other } : undefined));
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'the plan summary' }), { target: { value: 'For s1 only' } });
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  await openTab('Overview');
+  none(screen.queryByRole('textbox', { name: 'the plan summary' }), 'not in s2');
+  await act(async () => {
+    await store.selectSession('s1');
+  });
+  await openTab('Overview');
+  assert.equal((screen.getByRole('textbox', { name: 'the plan summary' }) as HTMLTextAreaElement).value, 'For s1 only');
+});
+
+test('a comment being written is held by the submit lock, as a field is: Submit waits for it, and a lock from elsewhere says so', async () => {
+  // Comments are open until the plan is submitted, and then refused. One already there stays to read.
+  const confirmed = confirmDesign(applyOps(makePlan(), [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'Is a day of staleness fine?' }], 'user').plan, { prompt: 'tasks' });
+  await boot(makeSession(confirmed));
+  await openTab('Overview');
+  assert.ok(screen.getByRole('button', { name: 'Reply' }), 'replies open before');
+  fireEvent.change(screen.getByRole('textbox', { name: /^New comment on the plan/ }), { target: { value: 'Also handle a cache stampede' } });
+  const s = store.getState().session!;
+  assert.deepEqual(draftsLockedBy(s.sessionId, s.plan!, 'plan'), ['the comment on the plan'], 'Submit waits for it');
+  assert.deepEqual(draftsLockedBy(s.sessionId, s.plan!, 'design'), [], 'the design is confirmed already');
+  // A reply being written, likewise.
+  const threaded = applyOps(confirmed, [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  const reply = `elsewhere:reply:${threaded.threads.find((t) => t.target.kind === 'task')!.id}`;
+  openDrafts.set(reply, { draft: 'The pooled one', value: '', version: undefined });
+  try {
+    assert.deepEqual(draftsLockedBy('elsewhere', threaded, 'plan'), ['the reply on task "Invalidation"']);
+  } finally {
+    openDrafts.delete(reply);
+  }
+  // Submitted in chat: the comment can no longer be sent.
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(s.plan!, { target: 'session', prompt: 'build' }) } });
+  });
+  const said = store.getState().toasts.find((t) => /comment on the plan/.test(t.text));
+  assert.ok(said, 'said');
+  assert.equal(said.copy, 'Also handle a cache stampede', 'with the text to copy');
+  // Its box goes, as the plan takes no comments now: nothing typed there to be dropped again.
+  assert.ok(screen.getByText('Is a day of staleness fine?'), 'the comments there are still to read');
+  assert.equal(screen.queryByRole('textbox', { name: /^New comment on/ }) === null, true, 'no comment box');
+  assert.equal(screen.queryByRole('button', { name: 'Reply' }) === null, true, 'no Reply');
+  // Reopened, its box starts afresh: what the lock dropped was offered to copy, and does not come back untracked.
+  const relock = async (lock: (plan: Plan) => Plan) => {
+    await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: lock(store.getState().session!.plan!) } }));
+  };
+  const submit = (plan: Plan) => submitPlan(plan, { target: 'session', prompt: 'build' });
+  await relock(reopenPlan);
+  assert.equal((screen.getByRole('textbox', { name: /^New comment on the plan/ }) as HTMLTextAreaElement).value, '', 'comment box empty');
+  // A reply, likewise.
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Reply' }), { target: { value: 'A day is fine' } });
+  await relock(submit);
+  assert.ok(store.getState().toasts.some((t) => t.copy === 'A day is fine'), 'the reply offered to copy');
+  assert.equal([...openDrafts.keys()].some((k) => k.includes(':reply:')), false, 'and no longer kept');
+  await relock(reopenPlan);
+  assert.equal(screen.queryByRole('textbox', { name: 'Reply' }) === null, true, 'reply box closed');
+  assert.ok(screen.getByRole('button', { name: 'Reply' }), 'Reply offered again');
+});
+
+test('a toast holding text to copy is not timed out; others go on their own', async () => {
+  await boot();
+  // Time passes: every timer the toasts set comes due.
+  const due: (() => void)[] = [];
+  await act(async () => {
+    const real = window.setTimeout;
+    window.setTimeout = ((fn: () => void) => (due.push(fn), 0)) as unknown as typeof window.setTimeout;
+    try {
+      store.toast('error', 'The text you had open could not be saved. Copy it to keep it:', 'Half a summary');
+      store.toast('error', 'Something else went wrong.');
+    } finally {
+      window.setTimeout = real;
+    }
+  });
+  await act(async () => due.forEach((fn) => fn()));
+  assert.equal(document.querySelector('.toast-copy')?.textContent, 'Half a summary', 'the only copy of it is still on screen');
+  assert.equal(screen.queryByText('Something else went wrong.') === null, true, 'the other has gone');
+});
+
+test('a lock from elsewhere that drops text left open says so, with the text to copy', async () => {
+  await boot();
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'the plan summary' }), { target: { value: 'Half a summary' } });
+  await openTab('Tasks');
+  // The design confirmed in chat: the summary can no longer be saved.
+  const s = store.getState().session!;
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...s, plan: confirmDesign(s.plan!, { prompt: 'tasks' }) } });
+  });
+  const said = store.getState().toasts.find((t) => /the summary/.test(t.text));
+  assert.ok(said, 'said');
+  assert.match(said.text, /^"Add a cache" had its design confirmed, so the text you had open in the summary could not be saved/);
+  assert.equal(document.querySelector('.toast-copy')?.textContent, 'Half a summary', 'shown, to select where the clipboard is refused');
+  let copied = '';
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (t: string) => void (copied = t) }, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Copy text' }));
+    });
+  } finally {
+    if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+    else delete (navigator as { clipboard?: unknown }).clipboard;
+  }
+  assert.equal(copied, 'Half a summary');
+  assert.equal(document.querySelector('.toast-copy'), null, 'copied: the message goes');
+  // A draft already let go is not said again.
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(confirmDesign(s.plan!, { prompt: 'tasks' }), { target: 'session', prompt: 'build' }) } });
+  });
+  assert.equal(store.getState().toasts.filter((t) => /could not be saved/.test(t.text)).length, 0, 'not said again');
+});
+
+test('text saved in the same plan that locks its field is not said to be lost', async () => {
+  await boot();
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit the plan summary' }));
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: 'the plan summary' }), { target: { value: 'Saved just in time' } });
+  await openTab('Tasks');
+  const s = store.getState().session!;
+  const saved = applyOps(s.plan!, [{ op: 'set_meta', summary: 'Saved just in time' }], 'user').plan;
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...s, plan: confirmDesign(saved, { prompt: 'tasks' }) } });
+  });
+  assert.ok(!store.getState().toasts.some((t) => /could not be saved/.test(t.text)));
+});
+
+test('a kept draft goes once it is saved, or its field is gone or locked: closing the page does not ask for nothing', async () => {
+  await boot();
+  const leaving = () => {
+    const e = new window.Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  };
+  const writeIn = async (button: string, box: string, text: string) => {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: button }));
+    });
+    fireEvent.change(screen.getByRole('textbox', { name: box }), { target: { value: text } });
+  };
+  await openTab('Overview');
+
+  // Saved: nothing kept, whatever happens to the editor after.
+  await writeIn('Edit the plan summary', 'the plan summary', 'A summary, saved');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  });
+  assert.equal(leaving(), false, 'saved');
+
+  // A section half written, then removed (by the agent, say): nothing left to save it into.
+  await writeIn('Edit section "Context"', 'section "Context"', 'Half a thought');
+  await openTab('Tasks');
+  assert.equal(leaving(), true);
+  const s = store.getState().session!;
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...s, plan: { ...structuredClone(s.plan!), sections: [], version: s.plan!.version + 1 } } });
+  });
+  assert.equal(leaving(), false, 'its section is gone');
+  assert.ok(!store.getState().toasts.some((t) => /could not be saved/.test(t.text)), 'gone, not locked: nothing to say');
+
+  // The summary half written, then the design confirmed: it can no longer be saved.
+  await openTab('Overview');
+  await writeIn('Edit the plan summary', 'the plan summary', 'Another summary');
+  await openTab('Tasks');
+  const t = store.getState().session!;
+  await act(async () => {
+    store.apply({ type: 'snapshot', session: { ...t, plan: confirmDesign(t.plan!, { prompt: 'tasks' }) } });
+  });
+  assert.equal(leaving(), false, 'locked');
+  await openTab('Overview');
+  none(screen.queryByRole('textbox', { name: 'the plan summary' }), 'no editor reopens that cannot be closed');
 });

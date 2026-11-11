@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Markdown } from './Markdown.tsx';
+import { useKeptDraft } from '../lib/drafts.ts';
+import { useSessionId } from '../store.ts';
 import { classNames } from '../lib/format.ts';
+import { isComposing } from '../lib/keys.ts';
 
 /**
  * Edit-in-place. Everything in the plan is editable where it is shown,
@@ -9,6 +12,8 @@ import { classNames } from '../lib/format.ts';
  *
  * Both fields share one contract: Enter (or ⌘/Ctrl+Enter for prose) saves,
  * Escape abandons, and losing focus saves — the same as renaming a file.
+ * Refused because the text changed underneath, it stays open showing what
+ * is there now, and only Enter saves over it.
  */
 
 export function InlineText({
@@ -24,7 +29,7 @@ export function InlineText({
   value: string;
   /** Resolves false when the save was refused; the field then reopens with
    *  the text intact, so nothing typed is lost. */
-  onSave: (next: string, version: number | undefined) => void | Promise<unknown>;
+  onSave: (next: string, version: number | undefined, was: string) => void | Promise<unknown>;
   /** Accessible name for both the display and the input. */
   label: string;
   placeholder?: string;
@@ -33,15 +38,22 @@ export function InlineText({
   /** Shown, not editable: the plan is locked. */
   readOnly?: boolean;
   /** The item's revision, captured when editing starts and handed back on
-   *  save, so a save over someone else's newer change is refused. */
+   *  save, so a save over someone else's newer change is refused. The text
+   *  editing started from is handed back too (`was`). */
   version?: number;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
+  // Refused as changed underneath: saved over that only by Enter, never by
+  // leaving the field (a click anywhere would undo what the refusal was about).
+  const [refused, setRefused] = useState(false);
   const done = useRef(false);
   const startedAt = useRef<number | undefined>(version);
   const latest = useRef<number | undefined>(version);
   latest.current = version;
+  const startedFrom = useRef(value);
+  const shown = useRef(value);
+  shown.current = value;
   const input = useRef<HTMLInputElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   /** Finished from the keyboard: the keyboard stays on the text. */
@@ -62,27 +74,34 @@ export function InlineText({
   const start = () => {
     done.current = false;
     startedAt.current = version;
+    startedFrom.current = value;
     setDraft(value);
     setEditing(true);
   };
   const commit = () => {
     if (done.current) return;
     done.current = true;
+    setRefused(false);
     setEditing(false);
     const next = draft.trim();
     if (!next || next === value) return;
-    void Promise.resolve(onSave(next, startedAt.current)).then((result) => {
+    void Promise.resolve(onSave(next, startedAt.current, startedFrom.current)).then((result) => {
       if (result !== false) return;
       // Refused (most likely changed underneath): reopen with the text, on
       // the revision now on screen, so a deliberate second save goes in.
       done.current = false;
       startedAt.current = latest.current;
+      // Changed underneath (not a failure of some other kind): what is there
+      // now is shown, and only Enter saves over it.
+      setRefused(shown.current !== startedFrom.current);
+      startedFrom.current = shown.current;
       setDraft(next);
       setEditing(true);
     });
   };
   const abandon = () => {
     done.current = true;
+    setRefused(false);
     setEditing(false);
     setDraft(value);
   };
@@ -90,15 +109,16 @@ export function InlineText({
   if (readOnly) return <Tag className={classNames('inline-text', 'is-readonly', !value && 'is-empty', className)}>{value || placeholder}</Tag>;
 
   if (editing) {
-    return (
+    const field = (
       <input
         ref={input}
         className={classNames('inline-input', className)}
         value={draft}
         aria-label={label}
         onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
+        onBlur={refused ? undefined : commit}
         onKeyDown={(e) => {
+          if (isComposing(e)) return;
           if (e.key === 'Enter') {
             e.preventDefault();
             refocus.current = true;
@@ -111,6 +131,15 @@ export function InlineText({
           }
         }}
       />
+    );
+    if (!refused) return field;
+    return (
+      <>
+        {field}
+        <span className="inline-now muted" role="status">
+          Now: {value || '(empty)'}. Enter saves yours over it; Escape keeps it.
+        </span>
+      </>
     );
   }
 
@@ -134,8 +163,12 @@ export function MarkdownField({
   startEditing = false,
   onCancel,
   version,
+  draftKey,
 }: {
   value: string;
+  /** Names the field (`summary`, `task:t3:detail`): an editor left open
+   *  keeps its text, in this session, when it unmounts, and reopens with it. */
+  draftKey?: string;
   /** Resolves false when the save was refused; the editor then stays open
    *  with the text intact, so nothing typed is lost. */
   onSave: (next: string, version: number | undefined) => void | Promise<unknown>;
@@ -150,52 +183,32 @@ export function MarkdownField({
    *  save, so a save over someone else's newer change is refused. */
   version?: number;
 }) {
-  const [editing, setEditing] = useState(startEditing);
-  const [draft, setDraft] = useState(value);
-  const [saving, setSaving] = useState(false);
-  const startedAt = useRef<number | undefined>(version);
+  // A draft left open here (a tab or session switch unmounted it) reopens.
+  const { editing, draft, setDraft, started, saving, begin, close, save: keep } = useKeptDraft(useSessionId(), draftKey ?? null, value, version, startEditing);
   const area = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    if (!editing) setDraft(value);
-  }, [value, editing]);
 
   useEffect(() => {
     if (editing) area.current?.focus();
   }, [editing]);
 
-  const begin = () => {
-    startedAt.current = version;
-    setEditing(true);
-  };
-  const changedUnderneath = editing && version !== undefined && startedAt.current !== undefined && version !== startedAt.current;
+  // What editing started from: a field with a revision is watched by it; one
+  // with none (the summary, a box's notes, a caption) by its text, and its
+  // save is not refused (there is nothing to check it against): the warning
+  // below is all it gets. Showing the user's own text already (their save,
+  // landing) is nothing to lose, whatever moved.
+  const changedUnderneath =
+    editing && value !== draft && (started.version !== undefined ? version !== started.version : value !== started.value);
 
-  const save = async () => {
-    if (draft === value) {
-      setEditing(false);
-      return;
-    }
-    setSaving(true);
-    // With the "changed while you were editing" warning on screen, saving is
-    // a deliberate choice to replace the newer version, so it is made
-    // against that version. Otherwise it is made against the one edited.
-    const base = changedUnderneath ? version : startedAt.current;
-    const result = await onSave(draft, base);
-    setSaving(false);
-    if (result === false) {
-      // Refused — most likely changed underneath. Keep the text, and start
-      // from the revision now on screen so a deliberate second save goes in.
-      startedAt.current = version;
-      return;
-    }
-    setEditing(false);
-  };
+  // With the "changed while you were editing" warning on screen, saving is
+  // a deliberate choice to replace the newer version, so it is made against
+  // that version. Otherwise it is made against the one edited.
+  const save = () => keep(() => onSave(draft, changedUnderneath ? version : started.version));
   const cancel = () => {
-    setEditing(false);
-    setDraft(value);
+    close();
     onCancel?.();
   };
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (isComposing(e)) return;
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       void save();
@@ -295,6 +308,8 @@ export function AddField({
         autoFocus={autoFocus}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => {
+          // Escape that drops an input method's choice is its own (lib/keys.ts).
+          if (isComposing(e)) return;
           if (e.key === 'Escape' && onCancel) {
             e.stopPropagation();
             onCancel();

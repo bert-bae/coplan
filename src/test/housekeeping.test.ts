@@ -151,7 +151,7 @@ test('an abandoned .tmp is reclaimed even inside a live session', () => {
 
 test('a .tmp from a write still in flight is left alone', () => {
   const dir = session('live', 60_000);
-  writeFileSync(path.join(dir, '.diff.99.tmp'), 'x');
+  writeFileSync(path.join(dir, '.state.99.tmp'), 'x');
   assert.equal(group(scanStorage({ ...opts(), liveSessionIds: ['live'] }), 'partial-writes').count, 0);
 });
 

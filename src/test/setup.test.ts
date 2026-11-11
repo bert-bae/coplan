@@ -318,6 +318,53 @@ test('settings: the current values are the defaults, keys set before are kept, a
   assert.ok(said.some((l) => /had comments, which this rewrite drops: the file as it was is .*config\.json\.bak/.test(l)));
 });
 
+test("settings: a second run keeps the .bak of the user's comments, not one of the header setup wrote", async () => {
+  const home = tmp('settings-twice');
+  const before = '{\n  // mine, and the reason for it\n  "autoOpen": true,\n}\n';
+  writeFileSync(path.join(home, 'config.json'), before);
+  await askSettings(scripted(['', '', '', '', 'n']).io, home);
+  assert.equal(readFileSync(path.join(home, 'config.json.bak'), 'utf8'), before);
+  // Changed again: the file holds only setup's own header now, which is not the user's to keep.
+  const again = scripted(['', '', '', '', 'y']);
+  await askSettings(again.io, home);
+  assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'config.json'), 'utf8')), { autoOpen: true });
+  assert.equal(readFileSync(path.join(home, 'config.json.bak'), 'utf8'), before, 'the original is still there');
+  assert.equal(again.said.some((l) => /had comments/.test(l)), false);
+  // A comment the user adds after is theirs again: kept, as the file stands
+  // then, beside the first copy and not over it.
+  const edited = readFileSync(path.join(home, 'config.json'), 'utf8').replace('"autoOpen"', '// new note\n  "autoOpen"');
+  writeFileSync(path.join(home, 'config.json'), edited);
+  const third = scripted(['', '', '', '', 'n']);
+  await askSettings(third.io, home);
+  assert.equal(readFileSync(path.join(home, 'config.json.bak'), 'utf8'), before);
+  assert.equal(readFileSync(path.join(home, 'config.json.bak.1'), 'utf8'), edited);
+  assert.ok(third.said.some((l) => /the file as it was is .*config\.json\.bak\.1\)/.test(l)));
+});
+
+test("settings: setup's header is its own however the file was saved since, in either settings file", async () => {
+  const home = tmp('settings-resaved');
+  await askSettings(scripted(['', '2', '', '', 'y']).io, home);
+  // Opened and saved again in an editor that writes CRLF, a BOM, its own indent.
+  for (const name of ['coplan.json', 'config.json']) {
+    const file = path.join(home, name);
+    writeFileSync(file, `\uFEFF${readFileSync(file, 'utf8').replace(/\n {2}/g, '\n\t').replace(/\n/g, '\r\n')}`);
+  }
+  const { io, said } = scripted(['', '3', '', '', 'n']);
+  await askSettings(io, home);
+  assert.equal(said.some((l) => /had comments/.test(l)), false);
+  assert.equal(existsSync(path.join(home, 'coplan.json.bak')), false);
+  assert.equal(existsSync(path.join(home, 'config.json.bak')), false);
+});
+
+test('settings: a trailing comma is not a comment, so no copy is kept for it', async () => {
+  const home = tmp('settings-comma');
+  writeFileSync(path.join(home, 'config.json'), '{\n  "autoOpen": true,\n}\n');
+  const { io, said } = scripted(['', '', '', '', 'n']);
+  await askSettings(io, home);
+  assert.equal(said.some((l) => /had comments/.test(l)), false);
+  assert.equal(existsSync(path.join(home, 'config.json.bak')), false);
+});
+
 test('settings: a file without comments is rewritten with no copy left behind', async () => {
   const home = tmp('settings-plain');
   writeFileSync(path.join(home, 'config.json'), '{ "autoOpen": true }');
@@ -397,7 +444,7 @@ test("a repository's checks are written from its scripts; a folder that is not t
   const config = loadProjectConfig(dir, { globalDir: null });
   assert.deepEqual(config.errors, []);
   assert.deepEqual(config.hooks.implement.map((h) => h.run), ['npm run lint']);
-  assert.deepEqual(config.hooks.review.map((h) => h.run), ['npm test']);
+  assert.deepEqual(config.hooks.review.map((h) => h.run), ['npm run test']);
   assert.ok('iric' in (parseJsonc(readFileSync(written[0]!, 'utf8')) as object), 'the built-in build settings, with no defaults of your own');
 });
 

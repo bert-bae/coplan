@@ -19,6 +19,8 @@
 #      it is sh + curl rather than a Node process.
 
 set -u
+# The agent's clock on this hook started about now: what it allows is counted from here.
+STARTED=$(date +%s)
 
 EVENT="${1:-}"
 [ -n "$EVENT" ] || exit 0
@@ -40,21 +42,28 @@ PAYLOAD=$(cat)
 # to hear which session's tool finished — that is what clears a question or
 # a permission prompt off the board. A huge one (a big file read, a long
 # build log) is not worth shipping and parsing, so only the session goes.
-# The id is the payload's first one (agents put it first); the shortest
-# match up to it, then a plain string, so nothing in the output is taken.
-case "$EVENT" in
-  PostToolUse|postToolUse)
-    if [ "${#PAYLOAD}" -gt 262144 ]; then
-      ID_KEY=session_id
-      [ "$AGENT" = cursor ] && ID_KEY=conversation_id
-      REST=${PAYLOAD#*\"$ID_KEY\"}
-      [ "$REST" = "$PAYLOAD" ] && exit 0
-      ID=$(printf '%s' "$REST" | sed -n '1s/^[[:space:]]*:[[:space:]]*"\([A-Za-z0-9._:-]*\)".*/\1/p')
-      [ -n "$ID" ] || exit 0
-      PAYLOAD=$(printf '{"%s":"%s","hook_event_name":"%s"}' "$ID_KEY" "$ID" "$EVENT")
-    fi
-    ;;
-esac
+# What names the session is kept: Claude Code's session_id, or, where Cursor
+# runs Claude Code's hooks, its chat's conversation_id with the
+# cursor_version that tells the daemon whose it is. Each is its first match
+# as a plain "key": "value" pair (agents put theirs first): one in the
+# output is escaped, \"key\", and is never taken. grep, not the shell's own
+# prefix match, which on a payload this size takes minutes where a key is
+# missing.
+field() {
+  printf '%s' "$PAYLOAD" | grep -o "\"$1\"[[:space:]]*:[[:space:]]*\"[A-Za-z0-9._:-]*\"" | head -n 1 | sed 's/.*:[[:space:]]*"\(.*\)"$/\1/'
+}
+if [ "$EVENT" = PostToolUse ] && [ "${#PAYLOAD}" -gt 262144 ]; then
+  SLIM=
+  for KEY in session_id conversation_id cursor_version; do
+    VALUE=$(field "$KEY")
+    [ -n "$VALUE" ] && SLIM="$SLIM\"$KEY\":\"$VALUE\","
+  done
+  case "$SLIM" in
+    *'"session_id"'* | *'"conversation_id"'*) ;;
+    *) exit 0 ;;
+  esac
+  PAYLOAD=$(printf '{%s"hook_event_name":"%s"}' "$SLIM" "$EVENT")
+fi
 
 # An installed but unbuilt plugin (`dist/` is not in the repository) has no
 # daemon to start and no MCP server: everything would fail silently, and the
@@ -75,15 +84,28 @@ if [ -n "$PLUGIN_ROOT_DIR" ] && [ ! -f "$PLUGIN_ROOT_DIR/dist/daemon/main.js" ];
   exit 0
 fi
 
+# Where the daemon keeps its lock, found as it finds it (paths.ts): the
+# CC_HARNESS_HOME an agent passed on, unless it passed it unexpanded, else
+# ~/.claude/cc-harness. With HOME unset that home is Node's answer, from the
+# user database, which costs a Node start only here; a bare $HOME would end
+# the hook with status 2 under `set -u`, and that blocks the prompt.
+case "${CC_HARNESS_HOME:-}" in *'${'*) CC_HARNESS_HOME= ;; esac
+if [ -z "${CC_HARNESS_HOME:-}" ] && [ -z "${HOME:-}" ]; then
+  HOME=$(node -e 'process.stdout.write(require("os").homedir())' 2>/dev/null) || HOME=
+  [ -n "$HOME" ] || exit 0
+fi
 HOME_DIR="${CC_HARNESS_HOME:-$HOME/.claude/cc-harness}"
 LOCK="$HOME_DIR/daemon.json"
 
 # Nothing the harness does waits on the user, so every event is near instant.
 # A session's first call, or the first to a daemon just started, may wait on
-# it loading: those get longer. Starting the daemon (up to 5s) plus the call
-# stays inside the hook's 20-second budget.
+# it loading: those get longer, within what the agent gives the hook
+# (hooks/*.json: 20 s for a session's start, 10 for a message), less a
+# second in hand. Starting the daemon (only these two do) and the call after
+# it both come out of that BUDGET, counted from STARTED.
 case "$EVENT" in
-  SessionStart|sessionStart) MAX_TIME=10 ;;
+  SessionStart|sessionStart) MAX_TIME=10 BUDGET=19 ;;
+  UserPromptSubmit|beforeSubmitPrompt) MAX_TIME=4 BUDGET=9 ;;
   *) MAX_TIME=4 ;;
 esac
 
@@ -104,7 +126,7 @@ read_lock() {
   # Every other event saves the round trip — a dead port fails fast anyway.
   case "$EVENT" in
     SessionStart|sessionStart|UserPromptSubmit|beforeSubmitPrompt)
-      HEALTH=$(curl -s --max-time 2 --connect-timeout 1 "http://127.0.0.1:$PORT/health" 2>/dev/null)
+      HEALTH=$(curl -s --max-time "${PROBE_TIME:-2}" --connect-timeout 1 "http://127.0.0.1:$PORT/health" 2>/dev/null)
       RC=$?
       # Slow to answer (curl's timeout, 28) is a busy daemon, not a dead one:
       # starting another would only see it there and exit.
@@ -140,15 +162,28 @@ start_daemon() {
     UserPromptSubmit|beforeSubmitPrompt)
       [ -n "$(find "$FAILED" -mmin -5 2>/dev/null)" ] && return 1 ;;
   esac
-  (setsid node "$ENTRY" >/dev/null 2>&1 &) 2>/dev/null || (node "$ENTRY" >/dev/null 2>&1 &)
+  # Detached into a session of its own, so it outlives the agent that started
+  # it. Node does that itself: macOS has no setsid command, and a fallback
+  # after `( … &) ||` never runs, since a backgrounded command always succeeds.
+  node --input-type=commonjs -e 'require("child_process").spawn(process.execPath, [process.argv[1]], { detached: true, stdio: "ignore" }).unref()' "$ENTRY" >/dev/null 2>&1
   # Waited on by the clock, not by count: where sleep takes no fractions,
-  # fifty tries would be fifty seconds.
+  # fifty tries would be fifty seconds. Up to 5 s, leaving the call one.
   DEADLINE=$(( $(date +%s) + 5 ))
+  [ "$DEADLINE" -gt $(( STARTED + BUDGET - 1 )) ] && DEADLINE=$(( STARTED + BUDGET - 1 ))
   while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     sleep 0.1 2>/dev/null || sleep 1
+    # Asked no longer than the budget leaves, nor than it would be anyway.
+    PROBE_TIME=$(( STARTED + BUDGET - 1 - $(date +%s) ))
+    [ "$PROBE_TIME" -gt 2 ] && PROBE_TIME=2
+    [ "$PROBE_TIME" -lt 1 ] && PROBE_TIME=1
     if read_lock; then
       rm -f "$FAILED" 2>/dev/null
-      MAX_TIME=10
+      # Its first answer may wait on it loading: what is left of the budget,
+      # if any. None left, the call is not made: the agent would have cut it
+      # off, and the next message hands the prompt over.
+      MAX_TIME=$(( STARTED + BUDGET - $(date +%s) ))
+      [ "$MAX_TIME" -lt 1 ] && return 1
+      [ "$MAX_TIME" -gt 10 ] && MAX_TIME=10
       return 0
     fi
   done
@@ -176,6 +211,9 @@ if [ "$AUTH_LINE" = "Authorization: Bearer $TOKEN" ]; then
 else
   AUTH_ARG="Authorization: Bearer $TOKEN"
 fi
+# When curl gives up, so a daemon too busy to answer in time knows no one
+# will read what it says: a prompt it would hand over is kept for the next.
+GIVE_UP_AT=$(( $(date +%s) + MAX_TIME ))
 RESPONSE=$(printf '%s' "$PAYLOAD" | curl -s -S \
   --max-time "$MAX_TIME" \
   --connect-timeout 2 \
@@ -183,6 +221,7 @@ RESPONSE=$(printf '%s' "$PAYLOAD" | curl -s -S \
   -H 'Content-Type: application/json' \
   -H "$AUTH_ARG" \
   -H "X-Harness-Agent: $AGENT" \
+  -H "X-Harness-Deadline: $GIVE_UP_AT" \
   -H "X-Harness-Remote-Session: ${CLAUDE_CODE_REMOTE_SESSION_ID:-}" \
   -H "X-Harness-Remote-Sdk: ${CLAUDE_CODE_REMOTE_SDK_URL:-}" \
   -H "X-Harness-Bridge-Session: ${CLAUDE_CODE_BRIDGE_SESSION_ID:-}" \

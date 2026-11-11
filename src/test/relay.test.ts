@@ -1,8 +1,8 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import http from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,7 +25,7 @@ const RELAY = path.resolve(
 let home: string;
 let server: http.Server;
 let port: number;
-let received: { url: string; auth: string | undefined; agent: string | undefined; body: string }[] = [];
+let received: { url: string; auth: string | undefined; agent: string | undefined; deadline: string | undefined; body: string }[] = [];
 /** Set to delay the response, to exercise the relay's timeout. */
 let holdMs = 0;
 let responseBody = '{"suppressOutput":true}';
@@ -44,7 +44,8 @@ before(async () => {
     req.on('data', (c) => (body += c));
     req.on('end', () => {
       const agent = req.headers['x-harness-agent'];
-      received.push({ url: req.url ?? '', auth: req.headers.authorization, agent: typeof agent === 'string' ? agent : undefined, body });
+      const deadline = req.headers['x-harness-deadline'];
+      received.push({ url: req.url ?? '', auth: req.headers.authorization, agent: typeof agent === 'string' ? agent : undefined, deadline: typeof deadline === 'string' ? deadline : undefined, body });
       const send = () => {
         if (res.destroyed || res.writableEnded) return;
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -135,6 +136,43 @@ test('a daemon that hangs cannot hold a turn open', async () => {
   assert.ok(Date.now() - started < 8_000, `took ${Date.now() - started}ms`);
 });
 
+test('it finds the daemon where the daemon keeps it, with or without HOME, and never blocks a prompt', async () => {
+  // Node leaves out what is undefined: these run with the variable unset.
+  const unset = undefined as unknown as string;
+  // A home whose ~/.claude/cc-harness is this test's daemon home.
+  const user = mkdtempSync(path.join(tmpdir(), 'cc-harness-user-'));
+  mkdirSync(path.join(user, '.claude'));
+  symlinkSync(home, path.join(user, '.claude', 'cc-harness'));
+  // What Node answers for the user's home when HOME is unset, or nothing.
+  const bins: string[] = [];
+  const bin = (answer: string) => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'cc-harness-bin-'));
+    bins.push(dir);
+    writeFileSync(path.join(dir, 'node'), `#!/bin/sh\nprintf '%s' '${answer}'\n`);
+    chmodSync(path.join(dir, 'node'), 0o755);
+    return `${dir}:${process.env['PATH'] ?? ''}`;
+  };
+  const heard = async (env: Record<string, string>) => {
+    received = [];
+    const result = await relay('Stop', '{"session_id":"s1"}', env);
+    assert.equal(result.code, 0);
+    return received.length === 1;
+  };
+  try {
+    assert.ok(await heard({ HOME: unset }), 'CC_HARNESS_HOME alone is enough');
+    assert.ok(await heard({ HOME: unset, CC_HARNESS_HOME: unset, PATH: bin(user) }), "with HOME unset, Node's answer");
+    assert.ok(await heard({ HOME: user, CC_HARNESS_HOME: '${env:CC_HARNESS_HOME}' }), 'one passed on unexpanded is no directory');
+    // No home at all: nothing to find, and nothing blocked.
+    for (const event of ['UserPromptSubmit', 'SessionStart', 'Stop']) {
+      received = [];
+      const result = await relay(event, '{"session_id":"s1"}', { HOME: unset, CC_HARNESS_HOME: unset, PATH: bin('') });
+      assert.deepEqual([result, received.length], [{ stdout: '', code: 0 }, 0], event);
+    }
+  } finally {
+    for (const dir of [user, ...bins]) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a huge PostToolUse sends only its session: the daemon needs to hear a tool finished, not what it said', async () => {
   received = [];
   const huge = JSON.stringify({ session_id: 's-1', tool_input: { session_id: 'not-this' }, tool_response: `"session_id":"nor-this" ${'x'.repeat(300_000)}` });
@@ -142,11 +180,18 @@ test('a huge PostToolUse sends only its session: the daemon needs to hear a tool
   assert.equal(result.code, 0);
   assert.equal(received.length, 1, 'still heard: it is what clears a permission prompt off the board');
   assert.deepEqual(JSON.parse(received[0]!.body), { session_id: 's-1', hook_event_name: 'PostToolUse' });
-  const cursor = JSON.stringify({ conversation_id: 'c-1', output: 'y'.repeat(300_000) });
-  await relay('postToolUse', cursor, {}, ['cursor']);
-  assert.deepEqual(JSON.parse(received[1]!.body), { conversation_id: 'c-1', hook_event_name: 'postToolUse' });
+  // Cursor running Claude Code's hooks: its chat is conversation_id, and
+  // cursor_version is how the daemon tells it is Cursor's.
+  // No session_id in it: finding that it is missing must not take the hook's time.
+  const cursor = JSON.stringify({ conversation_id: 'c-9', cursor_version: '2.0.0', tool_output: `"conversation_id":"nor-this" ${'y'.repeat(300_000)}` });
+  const started = Date.now();
+  await relay('PostToolUse', cursor);
+  assert.ok(Date.now() - started < 3_000, `took ${Date.now() - started}ms of a 5s hook`);
+  assert.equal(received.length, 2);
+  assert.deepEqual(JSON.parse(received[1]!.body), { conversation_id: 'c-9', cursor_version: '2.0.0', hook_event_name: 'PostToolUse' });
+  received = received.slice(0, 1);
   await relay('PostToolUse', '{"session_id":"s1","tool_name":"Read"}');
-  assert.equal(received[2]!.body, '{"session_id":"s1","tool_name":"Read"}', 'an ordinary one goes as it is');
+  assert.equal(received[1]!.body, '{"session_id":"s1","tool_name":"Read"}', 'an ordinary one goes as it is');
 });
 
 test('says nothing when there is no daemon', async () => {
@@ -236,6 +281,16 @@ test('an agent it does not know is sent as Claude Code, never passed through', a
   assert.equal(received[0]?.agent, 'claude');
 });
 
+test('says when its curl gives up, so a daemon that answers later knows no one is reading', async () => {
+  for (const [event, budget] of [['UserPromptSubmit', 4], ['SessionStart', 10]] as const) {
+    received = [];
+    const before = Math.floor(Date.now() / 1000);
+    await relay(event, '{"session_id":"s1"}');
+    const deadline = Number(received[0]?.deadline);
+    assert.ok(deadline >= before + budget && deadline <= Math.floor(Date.now() / 1000) + budget, `${event}: ${received[0]?.deadline}`);
+  }
+});
+
 test('a daemon that will not start is not waited on again by every message the user sends', async () => {
   const plugin = mkdtempSync(path.join(tmpdir(), 'cc-harness-crashing-'));
   const empty = mkdtempSync(path.join(tmpdir(), 'cc-harness-nostart-'));
@@ -254,6 +309,129 @@ test('a daemon that will not start is not waited on again by every message the u
   } finally {
     rmSync(plugin, { recursive: true, force: true });
     rmSync(empty, { recursive: true, force: true });
+  }
+});
+
+test('a daemon slow to start leaves the call the time the agent gives the hook, not 10 seconds more', async () => {
+  // A message's hook has 10 s (hooks.json), and the relay keeps a second in hand.
+  const plugin = mkdtempSync(path.join(tmpdir(), 'cc-harness-slowstart-plugin-'));
+  const empty = mkdtempSync(path.join(tmpdir(), 'cc-harness-slowstart-home-'));
+  try {
+    mkdirSync(path.join(plugin, 'dist', 'daemon'), { recursive: true });
+    writeFileSync(
+      path.join(plugin, 'dist', 'daemon', 'main.js'),
+      `const http = require('node:http'), fs = require('node:fs'), path = require('node:path');
+const home = process.env.CC_HARNESS_HOME;
+const server = http.createServer((req, res) => {
+  if (req.url === '/health') return res.end(JSON.stringify({ ok: true, pid: process.pid }));
+  fs.writeFileSync(path.join(home, 'deadline'), String(req.headers['x-harness-deadline']));
+  res.setHeader('content-type', 'application/json');
+  res.end('{}');
+});
+server.listen(0, '127.0.0.1', () => setTimeout(() => {
+  fs.writeFileSync(path.join(home, 'daemon.json'), JSON.stringify({ pid: process.pid, port: server.address().port, token: 't' }));
+}, 2000));
+setTimeout(() => process.exit(0), 15000).unref();
+`,
+    );
+    const began = Date.now();
+    const started = Math.floor(began / 1000);
+    const out = await relay('UserPromptSubmit', '{"session_id":"s1"}', { CLAUDE_PLUGIN_ROOT: plugin, CC_HARNESS_HOME: empty });
+    assert.equal(out.code, 0);
+    const deadline = Number(readFileSync(path.join(empty, 'deadline'), 'utf8'));
+    assert.ok(deadline <= started + 10, `gives up ${deadline - started} s after it began, within the hook's 10 s`);
+    assert.ok(Date.now() - began < 10_000, 'and is done within them');
+  } finally {
+    try {
+      process.kill((JSON.parse(readFileSync(path.join(empty, 'daemon.json'), 'utf8')) as { pid: number }).pid);
+    } catch {
+      /* it never started */
+    }
+    for (const dir of [plugin, empty]) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the relay's budgets are the hook files' timeouts, less a second", () => {
+  const script = readFileSync(RELAY, 'utf8');
+  const budget = (event: string) => Number(new RegExp(`${event}\\|[^)]*\\) MAX_TIME=\\d+ BUDGET=(\\d+)`).exec(script)?.[1]);
+  const hooks = path.join(path.dirname(path.dirname(RELAY)), 'hooks');
+  const timeouts = (file: string) => {
+    const out: Record<string, number> = {};
+    const walk = (v: unknown, event?: string): void => {
+      if (Array.isArray(v)) v.forEach((x) => walk(x, event));
+      else if (v && typeof v === 'object') {
+        for (const [k, x] of Object.entries(v)) {
+          if (k === 'timeout' && typeof x === 'number' && event) out[event] = x;
+          else walk(x, /^[a-zA-Z]+$/.test(k) && k[0] === k[0]!.toUpperCase() || ['sessionStart', 'beforeSubmitPrompt'].includes(k) ? k : event);
+        }
+      }
+    };
+    walk(JSON.parse(readFileSync(path.join(hooks, file), 'utf8')));
+    return out;
+  };
+  for (const [file, start, message] of [['hooks.json', 'SessionStart', 'UserPromptSubmit'], ['codex.json', 'SessionStart', 'UserPromptSubmit'], ['cursor.json', 'sessionStart', 'beforeSubmitPrompt']] as const) {
+    const t = timeouts(file);
+    assert.equal(budget('SessionStart'), (t[start] ?? NaN) - 1, `${file} ${start}`);
+    assert.equal(budget('UserPromptSubmit'), (t[message] ?? NaN) - 1, `${file} ${message}`);
+  }
+});
+
+test('the daemon starts where there is no setsid, as on macOS', async () => {
+  const plugin = mkdtempSync(path.join(tmpdir(), 'cc-harness-nosetsid-plugin-'));
+  const empty = mkdtempSync(path.join(tmpdir(), 'cc-harness-nosetsid-home-'));
+  const bin = mkdtempSync(path.join(tmpdir(), 'cc-harness-nosetsid-bin-'));
+  try {
+    // A daemon that does what the real one does on start: listens, answers
+    // /health with its pid, writes its lock, and takes the hook.
+    mkdirSync(path.join(plugin, 'dist', 'daemon'), { recursive: true });
+    writeFileSync(
+      path.join(plugin, 'dist', 'daemon', 'main.js'),
+      `const http = require('node:http'), fs = require('node:fs'), path = require('node:path');
+const home = process.env.CC_HARNESS_HOME;
+const server = http.createServer((req, res) => {
+  if (req.url === '/health') return res.end(JSON.stringify({ ok: true, pid: process.pid }));
+  fs.writeFileSync(path.join(home, 'hook-received'), req.url);
+  res.setHeader('content-type', 'application/json');
+  res.end('{}');
+});
+server.listen(0, '127.0.0.1', () => {
+  fs.writeFileSync(path.join(home, 'daemon.json'), JSON.stringify({ pid: process.pid, port: server.address().port, token: 't' }));
+});
+setTimeout(() => process.exit(0), 15000).unref();
+`,
+    );
+    // Every command on PATH but setsid, the first of each name as PATH finds it.
+    const linked = new Set<string>();
+    for (const dir of (process.env['PATH'] ?? '').split(path.delimiter)) {
+      if (!path.isAbsolute(dir)) continue;
+      let names: string[] = [];
+      try {
+        names = readdirSync(dir);
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        if (name === 'setsid' || linked.has(name)) continue;
+        linked.add(name);
+        symlinkSync(path.join(dir, name), path.join(bin, name));
+      }
+    }
+    const out = await relay('SessionStart', '{"session_id":"s1"}', { CLAUDE_PLUGIN_ROOT: plugin, CC_HARNESS_HOME: empty, PATH: bin });
+    assert.equal(out.code, 0);
+    assert.ok(existsSync(path.join(empty, 'daemon.json')), 'the daemon started');
+    assert.equal(existsSync(path.join(empty, 'start-failed')), false, 'without waiting out the start timeout');
+    assert.equal(readFileSync(path.join(empty, 'hook-received'), 'utf8'), '/hook/SessionStart', 'and got the hook');
+    // Detached: a process group of its own, so the agent ending the hook's group leaves it running.
+    const { pid } = JSON.parse(readFileSync(path.join(empty, 'daemon.json'), 'utf8')) as { pid: number };
+    assert.equal(execFileSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' }).trim(), String(pid));
+  } finally {
+    try {
+      const { pid } = JSON.parse(readFileSync(path.join(empty, 'daemon.json'), 'utf8')) as { pid: number };
+      process.kill(pid);
+    } catch {
+      /* it never started */
+    }
+    for (const dir of [plugin, empty, bin]) rmSync(dir, { recursive: true, force: true });
   }
 });
 

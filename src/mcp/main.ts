@@ -7,11 +7,8 @@
  * and it means one shared state machine across every concurrent session.
  */
 import { createInterface } from 'node:readline';
-import { spawn } from 'node:child_process';
-import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setTimeout as sleep } from 'node:timers/promises';
-import { readLiveLock, readVerifiedLock, probeLock, baseUrl, ensureHome } from '../shared/paths.ts';
+import { readLiveLock, baseUrl, ensureDaemon } from '../shared/paths.ts';
 import { TOOLS, DEFAULT_BUDGET_MS } from './tools.ts';
 import { agentInfo, parseAgent, sessionFromEnv, workspaceFromEnv } from '../shared/agents.ts';
 import type { DaemonLock } from '../shared/types.ts';
@@ -20,11 +17,10 @@ declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
 
 const PROTOCOL_VERSION = '2024-11-05';
-const DAEMON_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'daemon', 'main.js');
 
 interface JsonRpcRequest {
   jsonrpc: '2.0';
-  id?: number | string | null;
+  id?: number | string;
   method: string;
   params?: Record<string, unknown>;
 }
@@ -99,12 +95,14 @@ let cachedLock: DaemonLock | null = null;
 
 async function daemon(): Promise<DaemonLock | null> {
   if (cachedLock && readLiveLock()?.pid === cachedLock.pid) return cachedLock;
-  // A lock is trusted once its daemon has answered: one left by a daemon
-  // that died may name a pid some other process has now.
-  cachedLock = await readVerifiedLock();
-  if (cachedLock) return cachedLock;
-  cachedLock = await startDaemon();
-  return cachedLock;
+  return (cachedLock = await ensureDaemon());
+}
+
+/** What the daemon answers a tool call: prose for the agent, or an error. */
+interface DaemonReply {
+  text?: string;
+  ok?: boolean;
+  error?: string;
 }
 
 /** Said once per server: the daemon runs another version of Coplan than
@@ -117,34 +115,6 @@ function versionNotice(lock: DaemonLock): string {
     `\n\n[cc-harness] Coplan's daemon is v${lock.version} but this plugin is v${VERSION}, so some tools may not work as ` +
     'described. Tell the user to run /coplan-restart (or `coplan restart`) to bring the daemon up to date.'
   );
-}
-
-/** Start the daemon detached, so it outlives the session that spawned it. */
-async function startDaemon(): Promise<DaemonLock | null> {
-  ensureHome();
-  try {
-    const child = spawn(process.execPath, [DAEMON_ENTRY], {
-      detached: true,
-      stdio: 'ignore',
-      env: process.env,
-    });
-    // `spawn` reports ENOENT asynchronously, on the child's `error` event. With
-    // no listener that is an unhandled `'error'`, which would take this process
-    // down mid-session — so attach one even though the failure is recoverable.
-    child.on('error', () => {
-      /* the lock-file poll below reports the failure */
-    });
-    child.unref();
-  } catch {
-    return null;
-  }
-  for (let i = 0; i < 60; i++) {
-    await sleep(100);
-    // Not the stale lock the new daemon is about to replace: one that answers.
-    const lock = readLiveLock();
-    if (lock && (await probeLock(lock, 500)) === 'live') return lock;
-  }
-  return null;
 }
 
 interface CallResult {
@@ -190,13 +160,25 @@ async function callDaemon(
       }),
       signal: controller.signal,
     });
-    // Refusals (401, 403) come back as plain text, not JSON.
     const raw = await res.text();
-    let body: { text?: string; ok?: boolean };
+    let body: DaemonReply | null = null;
     try {
-      body = JSON.parse(raw) as { text?: string; ok?: boolean };
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') body = parsed as DaemonReply;
     } catch {
-      return { ok: false, text: `[cc-harness] The daemon answered ${res.status}: ${raw.trim().slice(0, 200)}` };
+      /* refusals (401, 403) come back as plain text */
+    }
+    // A failed call is never a success, whatever its body says. Most answer
+    // `{ error }` (a handler that threw, a body too large); a tool the daemon
+    // does not know answers prose for the agent, passed on as it is.
+    if (!body || !res.ok) {
+      const said =
+        typeof body?.text === 'string'
+          ? body.text
+          : `[cc-harness] The daemon answered ${res.status}: ${typeof body?.error === 'string' ? body.error : raw.trim().slice(0, 200)}`;
+      // One that failed partway may have saved what came before the failure.
+      const check = res.status >= 500 ? ' It may have saved part of this call before failing: read the plan (harness_plan_read) before trying it again.' : '';
+      return { ok: false, text: said + check + versionNotice(lock) };
     }
     return { ok: body.ok !== false, text: (body.text ?? JSON.stringify(body)) + versionNotice(lock) };
   } catch (err) {
@@ -238,13 +220,20 @@ function send(message: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
+/** A notification (no id) is never answered; a request is, under its id,
+ *  and a line whose id could not be read under null, as JSON-RPC says. */
 function respond(id: number | string | null | undefined, result: unknown): void {
-  if (id === undefined || id === null) return;
+  if (id === undefined) return;
   send({ jsonrpc: '2.0', id, result });
 }
 
+/** An id as JSON-RPC allows one, to answer under: else null. */
+function replyId(id: unknown): number | string | null {
+  return typeof id === 'number' || typeof id === 'string' ? id : null;
+}
+
 function respondError(id: number | string | null | undefined, code: number, message: string): void {
-  if (id === undefined || id === null) return;
+  if (id === undefined) return;
   send({ jsonrpc: '2.0', id, error: { code, message } });
 }
 
@@ -309,9 +298,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
 
     default:
       // Unknown methods are ignored for notifications and rejected for calls.
-      if (req.id !== undefined && req.id !== null) {
-        respondError(req.id, -32601, `Method not found: ${req.method}`);
-      }
+      respondError(req.id, -32601, `Method not found: ${req.method}`);
   }
 }
 
@@ -326,20 +313,45 @@ function maybeExit(): void {
 
 const rl = createInterface({ input: process.stdin });
 rl.on('line', (line) => {
+  // Nothing a client sends may end the server, and with it the agent's
+  // tools: what is not a request it takes gets the JSON-RPC error for it.
+  try {
+    onLine(line);
+  } catch (err) {
+    respondError(null, -32603, `Internal error: ${(err as Error)?.message}`);
+  }
+});
+
+function onLine(line: string): void {
   const trimmed = line.trim();
   if (!trimmed) return;
-  let req: JsonRpcRequest;
+  let parsed: unknown;
   try {
-    req = JSON.parse(trimmed) as JsonRpcRequest;
+    parsed = JSON.parse(trimmed);
   } catch {
+    respondError(null, -32700, 'Parse error');
     return;
   }
+  // `null`, a number, a batch (MCP sends none): not a request this takes.
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    respondError(null, -32600, 'Invalid Request');
+    return;
+  }
+  const message = parsed as Record<string, unknown>;
   // The client answering a request of ours (`roots/list`), not asking one.
-  if (typeof req.method !== 'string') {
-    const id = String(req.id ?? '');
-    if (pendingRoots.delete(id)) onRoots((req as unknown as { result?: unknown }).result);
+  if (message['method'] === undefined && ('result' in message || 'error' in message)) {
+    const id = replyId(message['id']);
+    if (id !== null && pendingRoots.delete(String(id))) onRoots(message['result']);
     return;
   }
+  // A request's id is a string or a number (MCP: never null): one that is
+  // neither makes it no request to run, answered under null.
+  const id = replyId(message['id']);
+  if (typeof message['method'] !== 'string' || (message['id'] !== undefined && id === null)) {
+    respondError(id, -32600, 'Invalid Request');
+    return;
+  }
+  const req = message as unknown as JsonRpcRequest;
   inFlight++;
   void handleRequest(req)
     .catch((err: unknown) => {
@@ -349,7 +361,7 @@ rl.on('line', (line) => {
       inFlight--;
       maybeExit();
     });
-});
+}
 
 rl.on('close', () => {
   stdinClosed = true;

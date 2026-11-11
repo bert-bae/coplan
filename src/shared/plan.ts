@@ -50,7 +50,7 @@ import type {
   Thread,
 } from './types.ts';
 import { BUILD_TARGETS, EDGE_ARROWS, EXECUTION_MODES, IRIC_STAGES, TASK_CHECK_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
-import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, planMode, roundVerdict, validReview } from './build.ts';
+import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, isSettled, planMode, roundVerdict, validReview } from './build.ts';
 import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from './proposal-ops.ts';
 
 /** How many review verdicts a task keeps. */
@@ -145,7 +145,15 @@ function record(plan: Plan, author: Author, kind: ChangeKind, target: Target, su
   plan.version += 1;
   const change: Change = { seq: plan.seq, ts: now, author, kind, target, summary };
   plan.changes.push(change);
-  if (plan.changes.length > MAX_CHANGES) plan.changes.splice(0, plan.changes.length - MAX_CHANGES);
+  if (plan.changes.length > MAX_CHANGES) {
+    // Oldest first, but not a change of the user's Claude has not read:
+    // what holds Claude's edits to what it read, and what it is told, go by
+    // those. Unless they alone pass four times the bound (unreadContent
+    // then compares all that Claude read).
+    let over = plan.changes.length - MAX_CHANGES;
+    plan.changes = plan.changes.filter((c) => over <= 0 || (c.author === 'user' && c.seq > plan.claudeReadSeq) || (over--, false));
+    if (plan.changes.length > MAX_CHANGES * 4) plan.changes.splice(0, plan.changes.length - MAX_CHANGES * 4);
+  }
   plan.updatedAt = now;
   return change;
 }
@@ -452,16 +460,14 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
     const caption = clean(raw.caption, MAX_TEXT);
     const graph = buildGraph(raw.nodes ?? [], raw.edges ?? [], old, dTitle, new Set(tasks.map((t) => t.id)));
     const direction = validDirection(raw.direction) ?? old?.direction ?? suggestDirection(graph.nodes, graph.edges);
-    const same =
-      old &&
-      old.title === dTitle &&
-      old.caption === caption &&
-      old.direction === direction &&
-      JSON.stringify([old.nodes, old.edges]) === JSON.stringify([graph.nodes, graph.edges]);
+    const sameGraph = old && old.direction === direction && JSON.stringify([old.nodes, old.edges]) === JSON.stringify([graph.nodes, graph.edges]);
+    const same = sameGraph && old.title === dTitle && old.caption === caption;
+    const rev = same ? old.rev : (old?.rev ?? 0) + 1;
     diagrams.push({
       id,
       title: dTitle,
-      rev: same ? old.rev : (old?.rev ?? 0) + 1,
+      rev,
+      graphRev: sameGraph ? (old.graphRev ?? old.rev) : rev,
       ...graph,
       direction,
       ...(caption ? { caption } : {}),
@@ -473,7 +479,7 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
   next.sections = sections;
   next.diagrams = diagrams;
   next.tasks = tasks;
-  linkBuilds(next, builds, now, false);
+  linkBuilds(next, builds, now, 'claude', false);
   checkDependencies(next);
   next.threads = base.threads.map((thread) => detachIfOrphaned(next, base, thread));
   next.revision = base.revision + 1;
@@ -522,9 +528,9 @@ export function publishTasks(prev: Plan | null, input: TaskListInput, now = Date
       if (kept.length) n.taskIds = kept;
       else delete n.taskIds;
     }
-    if (touched) bumpDiagram(d, now);
+    if (touched) bumpDiagram(d, now, 'claude');
   }
-  linkBuilds(next, builds, now);
+  linkBuilds(next, builds, now, 'claude');
   checkDependencies(next);
   next.threads = base.threads.map((thread) => detachIfOrphaned(next, base, thread));
 
@@ -542,6 +548,23 @@ function refuseUnread(prev: Plan | null, then: string): void {
     `The user has changed ${unreadItems(prev)} item(s) in the plan since you last read it. ` +
       `Call harness_plan_read first, then ${then} so their edits are not overwritten.`,
   );
+}
+
+/**
+ * Whether a task can take subtasks. One already started or finished cannot:
+ * a subtask would make it a parent and take its progress (stage, rounds,
+ * checks) away, and its finished work out of the counts. One that is a
+ * parent already can. The page offers no move this refuses.
+ */
+export function canTakeSubtasks(plan: Pick<Plan, 'tasks'>, task: Task): boolean {
+  return task.status === 'todo' || plan.tasks.some((t) => t.parentId === task.id);
+}
+
+function refuseNewParent(plan: Plan, parent: Task, instead: string, { depends = true } = {}): void {
+  if (canTakeSubtasks(plan, parent)) return;
+  // Depending on dropped work means nothing.
+  const after = depends && parent.status !== 'dropped' ? `, depending on ${parent.id} if it builds on it` : '';
+  throw new PlanError(`"${parent.title}" is already ${STATUS_WORDS[parent.status]}, so it cannot take subtasks: ${instead}${after}.`);
 }
 
 /**
@@ -609,6 +632,13 @@ function buildTaskTree(
     });
   };
   walk(input, null, 0);
+  // A task that survives keeps its status, so one already started or
+  // finished that this publish nests work under would lose its progress.
+  // (Reusing a finished task's id for new work carries its status over too.)
+  const parents = new Set(tasks.map((t) => t.parentId));
+  for (const old of base.tasks) {
+    if (parents.has(old.id)) refuseNewParent(base, old, `list the work beside ${old.id} instead, giving any new task an id of its own`);
+  }
 
   // Dependencies are resolved once every task has its id, so a task can
   // name one written after it.
@@ -649,6 +679,7 @@ function linkBuilds(
   plan: Plan,
   builds: { id: string; refs: string[] }[],
   now: number,
+  author: Author,
   /** `builds` says which boxes the task builds now, so a box it no longer
    *  names loses the link. Off when the diagrams themselves declare links
    *  too (a whole publish), so the two add up. */
@@ -657,31 +688,39 @@ function linkBuilds(
   const linked: Part[] = [];
   const unlinked: Part[] = [];
   for (const { id, refs } of builds) {
-    const title = plan.tasks.find((t) => t.id === id)?.title ?? id;
-    const want = new Set(refs.map((ref) => {
-      const { diagram, node } = findBox(plan, ref, title);
-      return `${diagram.id}/${node.id}`;
-    }));
-    for (const diagram of plan.diagrams) {
-      let touched = false;
-      for (const node of diagram.nodes) {
-        const has = node.taskIds?.includes(id) ?? false;
-        const wanted = want.has(`${diagram.id}/${node.id}`);
-        if (wanted && !has) {
-          node.taskIds = [...(node.taskIds ?? []), id];
-          linked.push({ diagram, node });
-          touched = true;
-        } else if (!wanted && has && replace) {
-          const kept = node.taskIds!.filter((x) => x !== id);
-          if (kept.length) node.taskIds = kept;
-          else delete node.taskIds;
-          unlinked.push({ diagram, node });
-          touched = true;
-        }
-      }
-      // A canvas holding the old links must reload rather than save over
-      // them — but only when a link actually changed.
-      if (touched) bumpDiagram(diagram, now);
+    const change = buildsChange(plan, id, refs, replace);
+    const changed = new Set([...change.linked, ...change.unlinked].map((p) => p.diagram));
+    for (const { node } of change.linked) node.taskIds = [...(node.taskIds ?? []), id];
+    for (const { node } of change.unlinked) {
+      const kept = node.taskIds!.filter((x) => x !== id);
+      if (kept.length) node.taskIds = kept;
+      else delete node.taskIds;
+    }
+    // A canvas holding the old links must reload rather than save over
+    // them — but only when a link actually changed.
+    for (const diagram of changed) bumpDiagram(diagram, now, author);
+    linked.push(...change.linked);
+    unlinked.push(...change.unlinked);
+  }
+  return { linked, unlinked };
+}
+
+/** The boxes whose link to task `id` its `builds` (`refs`) would change:
+ *  those to link, and with `replace` those to unlink. Changes nothing. */
+function buildsChange(plan: Plan, id: string, refs: string[], replace: boolean): { linked: Part[]; unlinked: Part[] } {
+  const title = plan.tasks.find((t) => t.id === id)?.title ?? id;
+  const want = new Set(refs.map((ref) => {
+    const { diagram, node } = findBox(plan, ref, title);
+    return `${diagram.id}/${node.id}`;
+  }));
+  const linked: Part[] = [];
+  const unlinked: Part[] = [];
+  for (const diagram of plan.diagrams) {
+    for (const node of diagram.nodes) {
+      const has = node.taskIds?.includes(id) ?? false;
+      const wanted = want.has(`${diagram.id}/${node.id}`);
+      if (wanted && !has) linked.push({ diagram, node });
+      else if (!wanted && has && replace) unlinked.push({ diagram, node });
     }
   }
   return { linked, unlinked };
@@ -704,7 +743,6 @@ function logLinks(
       names(linked).length ? `linked "${task.title}" to ${names(linked).join(', ')}` : '',
       names(unlinked).length ? `unlinked it from ${names(unlinked).join(', ')}` : '',
     ].filter(Boolean);
-    diagram.updatedBy = author;
     out.push(log('edited', ref('diagram', diagram.id), `${facts.join(' and ')} in diagram "${diagram.title}"`.replace(/^unlinked it/, `unlinked "${task.title}"`)));
   }
   return out;
@@ -727,9 +765,23 @@ function findBox(plan: Plan, ref: string, title: string): { diagram: Diagram; no
 }
 
 /** A diagram's links changed under it: a canvas editing it must reload. */
-function bumpDiagram(d: Diagram, now: number): void {
+function bumpDiagram(d: Diagram, now: number, author: Author): void {
   d.rev += 1;
+  d.graphRev = d.rev;
   d.updatedAt = now;
+  d.updatedBy = author;
+}
+
+/** What a canvas draws: a change to it moves `graphRev`. */
+function graphOf(d: Diagram): string {
+  return JSON.stringify([d.nodes, d.edges, d.direction]);
+}
+
+/** A save of a diagram's graph alone, made against revision `expect`: it
+ *  conflicts with a graph changed since, not with a title or caption edit. */
+function checkGraphRev(d: Diagram, expect: unknown, author: Author): void {
+  if (typeof expect === 'number' && expect >= (d.graphRev ?? d.rev) && expect <= d.rev) return;
+  checkRev(d, expect, 'diagram', author);
 }
 
 function checkDependencies(plan: Plan): void {
@@ -951,16 +1003,36 @@ function checkOpFields(op: unknown): void {
  * plan, as `kind:id` — by the net effect, so edits that cancel out do not
  * count. Comments, task progress and positions are not content: Claude
  * acting on a comment it has not read yet loses nothing of the user's.
+ * Nor is where a task sits, but each task the user moved is `moved:id`,
+ * which only a removal looks at (contentTargetsOf).
  */
 function unreadContent(plan: Plan): Set<string> {
+  const unread = unreadByClaude(plan);
+  const moved = unread.filter((c) => c.kind === 'moved' && c.target.kind === 'task').map((c) => `moved:${c.target.id}`);
   const touched = new Set(
-    unreadByClaude(plan)
+    unread
       .filter((c) => c.kind === 'created' || c.kind === 'edited' || c.kind === 'deleted' || c.kind === 'published')
       .map((c) => `${c.target.kind}:${c.target.id}`),
   );
   const base = plan.claudeBaseline;
-  if (!base || touched.size === 0) return touched;
-  const now = baselineOf(plan);
+  // The log keeps its last MAX_CHANGES: one that has dropped changes since
+  // Claude's read cannot say what the user did, so everything Claude read,
+  // and everything there now, is compared, and every task's place.
+  const gap = !!base && plan.changes.length > 0 && plan.changes[0]!.seq > plan.claudeReadSeq + 1;
+  const now = base && (gap || touched.size) ? baselineOf(plan) : undefined;
+  if (gap && base && now) {
+    touched.add('plan:');
+    for (const b of [base, now]) {
+      for (const x of b.sections) touched.add(`section:${x.id}`);
+      for (const x of b.diagrams) touched.add(`diagram:${x.id}`);
+      for (const x of b.tasks) touched.add(`task:${x.id}`);
+    }
+    const parents = new Map(base.tasks.map((t) => [t.id, t.parentId ?? null]));
+    for (const t of now.tasks) if (parents.has(t.id) && parents.get(t.id) !== (t.parentId ?? null)) moved.push(`moved:${t.id}`);
+  }
+  // With no record of what Claude read, every task touched may have had its note changed.
+  const noteOf = (key: string) => `note:${splitKey(key)[1]}`;
+  if (!base || !now || touched.size === 0) return new Set([...touched, ...[...touched].filter((key) => key.startsWith('task:')).map(noteOf), ...moved]);
   const content = (b: PlanBaseline, kind: string, id: string): string => {
     switch (kind) {
       case 'plan':
@@ -977,43 +1049,98 @@ function unreadContent(plan: Plan): Set<string> {
         return '';
     }
   };
-  return new Set(
-    [...touched].filter((key) => {
-      const at = key.indexOf(':');
-      const [kind, id] = [key.slice(0, at), key.slice(at + 1)];
-      return content(base, kind, id) !== content(now, kind, id);
-    }),
-  );
+  const changed = [...touched].filter((key) => {
+    const [kind, id] = splitKey(key);
+    return content(base, kind, id) !== content(now, kind, id);
+  });
+  // A task's note apart, as `note:id`: a progress note goes over it alone.
+  const noteIn = (b: PlanBaseline, key: string) => b.tasks.find((t) => t.id === splitKey(key)[1])?.note ?? '';
+  const notes = changed.filter((key) => key.startsWith('task:') && noteIn(base, key) !== noteIn(now, key)).map(noteOf);
+  return new Set([...changed, ...notes, ...moved]);
 }
 
-/** What an edit of Claude's would overwrite, as `kind:id` — or null when
- *  it only tracks progress, moves something, or talks in a thread. */
-function contentTargetOf(op: PlanOp): string | null {
+/** The task and those under it in the plan as Claude last read it: only
+ *  the task when there is no such record. */
+function readUnder(plan: Plan, id: string): Set<string> {
+  const tasks = plan.claudeBaseline?.tasks as Task[] | undefined;
+  return new Set([id, ...(tasks ? descendants({ tasks }, id).map((t) => t.id) : [])]);
+}
+
+/** What an edit of Claude's would overwrite, as `kind:id` — none when it
+ *  only tracks progress, moves something, or talks in a thread. Every item
+ *  it changes, not only the one it names: a task's `builds` relinks boxes,
+ *  and a task goes with its subtasks, the dependencies on them and the
+ *  boxes' links to them. */
+function contentTargetsOf(plan: Plan, op: PlanOp): string[] {
   const has = (...keys: string[]) => keys.some((k) => (op as unknown as Record<string, unknown>)[k] !== undefined);
   switch (op.op) {
     case 'set_meta':
-      return 'plan:';
+      return ['plan:'];
     case 'upsert_section':
-      return op.id && has('title', 'body') ? `section:${op.id}` : null;
+      return op.id && has('title', 'body') ? [`section:${op.id}`] : [];
     case 'upsert_diagram':
-      return op.id && has('title', 'nodes', 'edges', 'direction', 'caption') ? `diagram:${op.id}` : null;
+      return op.id && has('title', 'nodes', 'edges', 'direction', 'caption') ? [`diagram:${op.id}`] : [];
     case 'upsert_node':
     case 'remove_node':
     case 'upsert_edge':
     case 'remove_edge':
-      return `diagram:${op.diagramId}`;
-    case 'upsert_task':
-      // A note with a status is a progress report (harness_task_update).
-      return op.id && (has('title', 'detail', 'files', 'dependsOn', 'branch', 'review') || (has('note') && !has('status', 'stage')))
-        ? `task:${op.id}`
-        : null;
-    case 'remove':
-      return `${op.kind}:${op.id}`;
+      return [`diagram:${op.diagramId}`];
+    case 'upsert_task': {
+      // A note with a status is a progress report (harness_task_update):
+      // held only to a change of the note itself.
+      const own = op.id && (has('title', 'detail', 'files', 'dependsOn', 'branch', 'review') || (has('note') && !has('status', 'stage')));
+      const progressNote =
+        op.id && has('note') && has('status', 'stage') && clean(op.note, MAX_TITLE * 2) !== findTask(plan, op.id)?.note;
+      return [...(own ? [`task:${op.id}`] : []), ...(progressNote ? [`note:${op.id}`] : []), ...(op.builds !== undefined ? relinked(plan, op.id, op.builds) : [])];
+    }
+    case 'remove': {
+      if (op.kind !== 'task') return [`${op.kind}:${op.id}`];
+      const { doomed, dependents, diagrams } = taskRemoval(plan, op.id);
+      // What it takes that was not under it when Claude last read the plan:
+      // there only if moved there since, by the user if `moved:id` is unread.
+      const was = readUnder(plan, op.id);
+      return [
+        ...[...doomed].map((id) => `task:${id}`),
+        ...[...doomed].filter((id) => !was.has(id)).map((id) => `moved:${id}`),
+        ...dependents.map((t) => `task:${t.id}`),
+        ...diagrams.map((d) => `diagram:${d.id}`),
+      ];
+    }
     case 'set_checks':
-      return `task:${op.id}`;
+      return [`task:${op.id}`];
     default:
-      return null;
+      return [];
   }
+}
+
+/** The diagrams whose box links a task's `builds` would change: an added
+ *  link can undo the user's unlink as surely as a dropped one undoes their
+ *  link. A ref that names no box changes nothing here; the edit itself says
+ *  what is wrong with it. */
+function relinked(plan: Plan, taskId: string | undefined, builds: string[]): string[] {
+  try {
+    const { linked, unlinked } = buildsChange(plan, taskId ?? '', cleanList(builds) ?? [], true);
+    return [...new Set([...linked, ...unlinked].map((p) => `diagram:${p.diagram.id}`))];
+  } catch {
+    return [];
+  }
+}
+
+/** What removing a task takes with it: its subtasks, the dependencies on
+ *  them, and the boxes' links to them. */
+function taskRemoval(plan: Plan, id: string): { doomed: Set<string>; dependents: Task[]; diagrams: Diagram[] } {
+  const doomed = new Set([id, ...descendants(plan, id).map((t) => t.id)]);
+  return {
+    doomed,
+    dependents: plan.tasks.filter((t) => !doomed.has(t.id) && t.dependsOn?.some((d) => doomed.has(d))),
+    diagrams: plan.diagrams.filter((d) => d.nodes.some((n) => n.taskIds?.some((t) => doomed.has(t)))),
+  };
+}
+
+/** `kind:id` apart, at the first colon: an id may hold one. */
+function splitKey(key: string): [string, string] {
+  const at = key.indexOf(':');
+  return [key.slice(0, at), key.slice(at + 1)];
 }
 
 /**
@@ -1023,12 +1150,25 @@ function contentTargetOf(op: PlanOp): string | null {
  * just added. Reading the plan clears it.
  */
 function refuseUnreadEdit(plan: Plan, op: PlanOp, unread: Set<string>): void {
-  const target = contentTargetOf(op);
-  if (!target || !unread.has(target)) return;
-  const [kind, id] = target.split(':') as [Target['kind'], string];
+  const target = contentTargetsOf(plan, op).find((key) => unread.has(key));
+  if (!target) return;
+  const [kind, id] = splitKey(target) as [Target['kind'] | 'moved' | 'note', string];
+  const what =
+    kind === 'moved'
+      ? `moved ${describeTarget(plan, { kind: 'task', id })}`
+      : kind === 'note'
+        ? `changed the note of ${describeTarget(plan, { kind: 'task', id })}`
+        : `changed ${describeTarget(plan, { kind, id })}`;
+  // Reached through what the edit takes with it, not what it names: say how.
+  const how =
+    op.op === 'remove' && target !== `task:${op.id}`
+      ? " Removing a task takes its subtasks, the dependencies on them and its boxes' links with it."
+      : op.op === 'upsert_task' && kind === 'diagram'
+        ? " The task's `builds` would change which of that diagram's boxes link it."
+        : '';
   throw new PlanError(
-    `The user changed ${describeTarget(plan, { kind, id })} since you last read the plan, so this edit was not applied — ` +
-      'it could undo theirs. Call harness_plan_read to see their version, then make the edit on top of it.',
+    `The user ${what} since you last read the plan, so this edit was not applied — ` +
+      `it could undo theirs.${how} Call harness_plan_read to see their version, then make the edit on top of it.`,
   );
 }
 
@@ -1100,19 +1240,82 @@ function arrowId(d: Diagram, op: { id?: string; from?: string; to?: string }): s
 }
 
 /**
- * A box or arrow op's `expect` is the diagram's rev as the caller read it —
- * before this batch. Each such op is its own diagram edit and moves the
- * rev, so it is checked here, against the plan the batch started from, and
- * not again as the batch goes on: several ops on one diagram, each with the
- * rev that was read, go through together.
+ * An edit's `expect` is the revision of what it edits as the author read
+ * it — before this batch. So it is checked here, against the plan the batch
+ * started from, and taken off, not checked again as the batch goes on:
+ * several edits to one item, each with the revision that was read, go
+ * through together. As `author`'s: Claude's, for the edits it proposes,
+ * which are tried as the user's.
  */
 function expectAtStart(plan: Plan, op: PlanOp, author: Author): PlanOp {
   if (!op || typeof op !== 'object') return op;
-  if (op.op !== 'upsert_node' && op.op !== 'remove_node' && op.op !== 'upsert_edge' && op.op !== 'remove_edge') return op;
-  if (op.expect === undefined) return op;
-  const d = plan.diagrams.find((x) => x.id === op.diagramId);
-  if (d) checkRev(d, op.expect, 'diagram', author);
-  const { expect: _checked, ...rest } = op;
+  // A proposal's edits were read on the same plan as the batch's own.
+  if (op.op === 'propose' && Array.isArray(op.ops)) {
+    const ops = op.ops;
+    return {
+      ...op,
+      ops: ops.map((inner, i) => {
+        try {
+          return expectAtStart(plan, inner, author);
+        } catch (err) {
+          if (!(err instanceof PlanError)) throw err;
+          const which = ops.length > 1 ? `edit ${i + 1} (${(inner as { op?: string })?.op ?? '?'}): ` : '';
+          throw new PlanError(`The proposal would not apply to the plan as it is: ${which}${err.message}`);
+        }
+      }),
+    };
+  }
+  if (op.op === 'upsert_task' && op.noteWas !== undefined) op = noteAtStart(plan, op);
+  if ((op as { expect?: unknown }).expect === undefined) return op;
+  switch (op.op) {
+    case 'upsert_node':
+    case 'remove_node':
+    case 'upsert_edge':
+    case 'remove_edge': {
+      const d = plan.diagrams.find((x) => x.id === op.diagramId);
+      if (d) checkGraphRev(d, op.expect, author);
+      break;
+    }
+    case 'upsert_diagram': {
+      const d = op.id ? plan.diagrams.find((x) => x.id === op.id) : undefined;
+      // A save of its graph alone conflicts with a graph changed since, not a title.
+      if (d && op.title === undefined && op.caption === undefined) checkGraphRev(d, op.expect, author);
+      else if (d) checkRev(d, op.expect, 'diagram', author);
+      break;
+    }
+    case 'upsert_section': {
+      const section = op.id ? plan.sections.find((x) => x.id === op.id) : undefined;
+      if (section) checkRev(section, op.expect, 'section', author);
+      break;
+    }
+    case 'upsert_task': {
+      const task = op.id ? findTask(plan, op.id) : undefined;
+      if (task) checkTaskRev(task, op.expect, author);
+      break;
+    }
+    default:
+      return op;
+  }
+  return withoutExpect(op);
+}
+
+/**
+ * A note given with a status is progress, and moves no revision (an open
+ * editor of the task's other fields is not held up by it), so the page's
+ * note editor says which note it started from (`noteWas`): refused if the
+ * note has changed since, then taken off.
+ */
+function noteAtStart(plan: Plan, op: Extract<PlanOp, { op: 'upsert_task' }>): PlanOp {
+  const { noteWas, ...rest } = op;
+  const task = op.id ? findTask(plan, op.id) : undefined;
+  if (task && typeof op.note === 'string' && (task.note ?? '') !== noteWas) {
+    throw new PlanError(`The note of task "${task.title}" was changed while this edit was open, so it was not saved. It now shows the latest version.`);
+  }
+  return rest as PlanOp;
+}
+
+function withoutExpect(op: PlanOp): PlanOp {
+  const { expect: _read, ...rest } = op as PlanOp & { expect?: unknown };
   return rest as PlanOp;
 }
 
@@ -1158,6 +1361,7 @@ export function applyOps(
   const next = structuredClone(plan);
   const changes: Change[] = [];
   const unread = author === 'claude' ? unreadContent(plan) : null;
+  const graphs = new Map(plan.diagrams.map((d) => [d.id, graphOf(d)]));
   ops.forEach((op, i) => {
     try {
       if (author === 'claude') {
@@ -1165,14 +1369,15 @@ export function applyOps(
         // Its own reason first: whatever else is wrong, this is the user's.
         if (op.op === 'set_checks') throw new PlanError(AGENT_SET_CHECKS);
         if (!opts.tracking) refuseProgress(op);
-        refuseUnreadEdit(plan, op, unread!);
-        // A proposal built on a version Claude never read could undo the
-        // user's change as surely as an edit — only later, when accepted.
-        if (op.op === 'propose' && Array.isArray(op.ops)) {
-          for (const inner of op.ops) if (inner && typeof inner === 'object') refuseUnreadEdit(plan, inner, unread!);
-        }
+        // Against the plan as the edits before it in this batch left it: a
+        // task moved under one being removed goes with it.
+        refuseUnreadEdit(next, op, unread!);
       }
-      changes.push(...applyOne(next, expectAtStart(plan, op, author), author, now));
+      // A proposal built on a version Claude never read could undo the
+      // user's change as surely as an edit — only later, when accepted: its
+      // edits are guarded too, in its trial (applyOne's `guard`).
+      const guard = unread ? (at: Plan, inner: PlanOp) => refuseUnreadEdit(at, inner, unread) : undefined;
+      changes.push(...applyOne(next, expectAtStart(plan, op, author), author, now, guard));
     } catch (err) {
       if (err instanceof PlanError && ops.length > 1) {
         throw new PlanError(`Edit ${i + 1} (${(op as { op?: string })?.op ?? '?'}): ${err.message}`);
@@ -1180,6 +1385,9 @@ export function applyOps(
       throw err;
     }
   });
+  // Whatever moved a diagram's boxes, arrows or direction (a canvas save, a
+  // box edit, a link) moved its graph revision with it.
+  for (const d of next.diagrams) if (graphs.get(d.id) !== graphOf(d)) d.graphRev = d.rev;
   // Dependencies are checked on the batch as a whole, so a task and the one
   // it waits on can be added together in either order. A problem the plan
   // already had (written by an older build) does not block unrelated edits.
@@ -1200,7 +1408,10 @@ export function applyOps(
   return { plan: next, changes };
 }
 
-function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[] {
+/** One edit, in `plan` itself. Its `expect` was checked, and taken off,
+ *  before the batch began (expectAtStart): every caller goes through it.
+ *  `guard`: Claude's unread-edit guard, for the edits a proposal carries. */
+function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (plan: Plan, op: PlanOp) => void): Change[] {
   const log = (kind: ChangeKind, target: Target, summary: string) => record(plan, author, kind, target, summary, now);
 
   switch (op?.op) {
@@ -1221,7 +1432,6 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
     case 'upsert_section': {
       const existing = op.id ? plan.sections.find((s) => s.id === op.id) : undefined;
       if (existing) {
-        checkRev(existing, op.expect, 'section', author);
         const title = clean(op.title, MAX_TITLE);
         const body = typeof op.body === 'string' ? clean(op.body, MAX_TEXT) ?? '' : undefined;
         const changed = (title && title !== existing.title) || (body !== undefined && body !== existing.body);
@@ -1257,7 +1467,6 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
     case 'upsert_diagram': {
       const existing = op.id ? plan.diagrams.find((d) => d.id === op.id) : undefined;
       if (existing) {
-        checkRev(existing, op.expect, 'diagram', author);
         const before = structuredClone(existing);
         const title = clean(op.title, MAX_TITLE);
         if (title) existing.title = title;
@@ -1307,6 +1516,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         id: claimId(plan, 'diagram', undefined),
         title,
         rev: 1,
+        graphRev: 1,
         ...graph,
         direction: validDirection(op.direction) ?? suggestDirection(graph.nodes, graph.edges),
         ...(caption ? { caption } : {}),
@@ -1324,16 +1534,9 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       const title = clean(op.title, MAX_TITLE);
       if (!title) throw new PlanError(op.id ? `No task "${op.id}".` : 'A new task needs a title.');
       if (plan.tasks.length >= MAX_TASKS) throw new PlanError(`A plan holds at most ${MAX_TASKS} tasks.`);
-      const parentId = op.parentId ? requireTask(plan, op.parentId).id : null;
-      // Under a task already started or finished, a subtask would make it a
-      // parent and take its progress — stage, rounds, checks — away.
-      const parent = parentId ? requireTask(plan, parentId) : null;
-      if (parent && parent.status !== 'todo' && !plan.tasks.some((t) => t.parentId === parent.id)) {
-        throw new PlanError(
-          `"${parent.title}" is already ${STATUS_WORDS[parent.status]}, so it cannot take subtasks: add the new work as its own ` +
-            `task beside it${parent.parentId ? ` (parentId "${parent.parentId}")` : ''}, depending on ${parent.id} if it builds on it.`,
-        );
-      }
+      const parent = op.parentId ? requireTask(plan, op.parentId) : null;
+      const parentId = parent?.id ?? null;
+      if (parent) refuseNewParent(plan, parent, `add the new work as its own task beside it${parent.parentId ? ` (parentId "${parent.parentId}")` : ''}`);
       const detail = clean(op.detail, MAX_TEXT);
       const note = clean(op.note, MAX_TITLE * 2);
       const files = cleanList(op.files);
@@ -1367,15 +1570,19 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       placeAmongSiblings(plan, task, op.index);
       const where = parentId ? ` under "${requireTask(plan, parentId).title}"` : '';
       const created = log('created', ref('task', task.id), `added task "${title}"${where}`);
-      const linked = op.builds?.length ? linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now) : { linked: [], unlinked: [] };
+      const linked = op.builds?.length ? linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now, author) : { linked: [], unlinked: [] };
       return [created, ...logLinks(linked, task, author, log)];
     }
 
     case 'move_task': {
       const task = requireTask(plan, op.id);
-      const parentId = op.parentId ? requireTask(plan, op.parentId).id : null;
+      const parent = op.parentId ? requireTask(plan, op.parentId) : null;
+      const parentId = parent?.id ?? null;
       if (parentId && (parentId === task.id || isDescendant(plan, parentId, task.id))) {
         throw new PlanError(`Cannot move "${task.title}" inside itself.`);
+      }
+      if (parent && parentId !== task.parentId) {
+        refuseNewParent(plan, parent, `move "${task.title}" beside it instead${parent.parentId ? ` (parentId "${parent.parentId}")` : ''}`, { depends: false });
       }
       const from = task.parentId;
       task.parentId = parentId;
@@ -1412,11 +1619,11 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       const d = plan.diagrams.find((x) => x.id === op.diagramId);
       if (!d) throw new PlanError(`No diagram "${op.diagramId}". The read lists each diagram's id.`);
       const { nodes, edges } = partEdit(d, op);
-      return applyOne(plan, { op: 'upsert_diagram', id: d.id, nodes, edges, ...(op.expect !== undefined ? { expect: op.expect } : {}) }, author, now);
+      return applyOne(plan, { op: 'upsert_diagram', id: d.id, nodes, edges }, author, now);
     }
 
     case 'remove':
-      return removeItem(plan, op.kind, op.id, log);
+      return removeItem(plan, op.kind, op.id, author, now, log);
 
     case 'comment': {
       const target = normalizeTarget(op.target);
@@ -1444,6 +1651,8 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       if (!text) throw new PlanError('A reply needs text.');
       if (thread.replies.length >= MAX_REPLIES) throw new PlanError('This thread is full; start a new comment.');
       thread.replies.push({ id: `${thread.id}.${thread.replies.length + 1}`, author, text, ts: now });
+      // The user taking up a resolved thread again: it is open, for the agent to hear.
+      if (thread.resolved && author === 'user') thread.resolved = false;
       return [log('replied', thread.target, `replied on ${describeTarget(plan, thread.target)}: ${short(text, 80)}`)];
     }
 
@@ -1536,13 +1745,27 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
       // As it would be taken: a proposal that cannot apply is refused now,
       // not when the user presses Accept. The lock is left out of the trial:
       // a design change proposed after sign-off is fair to suggest, and
-      // accepting it is where the lock holds.
+      // accepting it is where the lock holds. Each edit is guarded as those
+      // before it leave the plan, as a batch's are: a task moved under one
+      // it removes goes with it.
+      let refused: PlanError | undefined;
+      const guarded =
+        guard &&
+        ((at: Plan, inner: PlanOp, i: number) => {
+          try {
+            guard(at, inner);
+          } catch (err) {
+            if (!(err instanceof PlanError)) throw err;
+            throw (refused = new PlanError(`Proposed edit ${i + 1} (${inner.op}): ${err.message}`));
+          }
+        });
       try {
         const trial = structuredClone(plan);
         delete trial.design;
         delete trial.submission;
-        applyAsUser(trial, op.ops, now);
+        applyAsUser(trial, op.ops, now, guarded);
       } catch (err) {
+        if (err === refused) throw err;
         if (err instanceof PlanError) throw new PlanError(`The proposal would not apply to the plan as it is: ${err.message}`);
         throw err;
       }
@@ -1560,13 +1783,11 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number): Change[]
         replies: [],
       };
       plan.threads.push(thread);
-      // Kept without their `expect`: it checked them against what Claude read,
-      // just now. From here `base` says whether the proposal still fits —
-      // and a rev that moved with a dragged box must not refuse the accept.
-      const kept = op.ops.map((inner) => {
-        const { expect: _read, ...rest } = structuredClone(inner) as PlanOp & { expect?: unknown };
-        return rest as PlanOp;
-      });
+      // Kept without their `expect` (expectAtStart took it off): it checked
+      // them against what Claude read. From here `base` says whether the
+      // proposal still fits — and a rev that moved with a dragged box must
+      // not refuse the accept.
+      const kept = structuredClone(op.ops);
       proposals.push({ id, title, reason, ops: kept, threadId: thread.id, createdAt: now, base: proposalTouches(plan, op.ops), status: 'open' });
       // Settled ones go first when there are too many; open ones never.
       // An answer Claude has not heard yet is kept until it has: it is the
@@ -1679,7 +1900,6 @@ function editTask(
   now: number,
   log: (kind: ChangeKind, target: Target, summary: string) => Change,
 ): Change[] {
-  checkTaskRev(task, op.expect, author);
   // On a submitted plan, what a task the user signed off says is theirs:
   // Claude tracks the work (a note, the files it touched, a dependency it
   // found to be wrong) but does not re-scope it. Tasks it adds itself are
@@ -1801,7 +2021,7 @@ function editTask(
     out.push(log('edited', ref('task', task.id), `edited the ${edited.join(', ')} of "${task.title}"`));
   }
   // Given, builds says which boxes the task builds now ([] unlinks it).
-  if (op.builds !== undefined) out.push(...logLinks(linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now), task, author, log));
+  if (op.builds !== undefined) out.push(...logLinks(linkBuilds(plan, [{ id: task.id, refs: cleanList(op.builds) ?? [] }], now, author), task, author, log));
   if (typeof op.index === 'number') placeAmongSiblings(plan, task, op.index);
   return out;
 }
@@ -1886,9 +2106,15 @@ function removeItem(
   plan: Plan,
   kind: string,
   id: string,
+  author: Author,
+  now: number,
   log: (kind: ChangeKind, target: Target, summary: string) => Change,
 ): Change[] {
-  const before = structuredClone(plan);
+  // What a comment left without its item was on, named as it was. The
+  // removal replaces the lists, so these still hold what it removed; what
+  // it changes in the items left (a dependency, an order, a box's links)
+  // is no part of a name (describeTarget).
+  const before = { ...plan };
   let summary: string;
   switch (kind) {
     case 'section': {
@@ -1907,27 +2133,25 @@ function removeItem(
     }
     case 'task': {
       const t = requireTask(plan, id);
-      const doomed = new Set([t.id, ...descendants(plan, t.id).map((d) => d.id)]);
+      // What the unread-edit guard checked, exactly (taskRemoval).
+      const { doomed, dependents, diagrams } = taskRemoval(plan, t.id);
       plan.tasks = plan.tasks.filter((x) => !doomed.has(x.id));
       normalizeSiblings(plan, t.parentId);
       // Nothing waits on work that is no longer in the plan.
-      for (const other of plan.tasks) {
-        if (!other.dependsOn?.some((id) => doomed.has(id))) continue;
-        const kept = other.dependsOn.filter((id) => !doomed.has(id));
+      for (const other of dependents) {
+        const kept = other.dependsOn!.filter((id) => !doomed.has(id));
         if (kept.length) other.dependsOn = kept;
         else delete other.dependsOn;
       }
-      for (const d of plan.diagrams) {
-        let touched = false;
+      for (const d of diagrams) {
         for (const n of d.nodes) {
           if (!n.taskIds?.some((id) => doomed.has(id))) continue;
           n.taskIds = n.taskIds.filter((id) => !doomed.has(id));
           if (n.taskIds.length === 0) delete n.taskIds;
-          touched = true;
         }
         // Its boxes' links changed: a canvas holding the old ones must
         // reload rather than save them back — which would be refused.
-        if (touched) bumpDiagram(d, Date.now());
+        bumpDiagram(d, now, author);
       }
       const extra = doomed.size > 1 ? ` and its ${doomed.size - 1} subtask(s)` : '';
       summary = `removed task "${t.title}"${extra}`;
@@ -1999,7 +2223,7 @@ export function planPhase(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> &
   // is settled too: a build can end with nothing left to do.
   const tasks = plan?.tasks ?? [];
   const leaves = tasks.filter((t) => !tasks.some((c) => c.parentId === t.id));
-  if (!leaves.length || !leaves.every((t) => t.status === 'done' || t.status === 'dropped')) return 'building';
+  if (!leaves.length || !leaves.every(isSettled)) return 'building';
   // Every task done is not the build done: the final checks, the pull
   // requests and the report come after. The report closes it.
   return plan?.report ? 'built' : 'finalizing';
@@ -2064,16 +2288,18 @@ export function isLocked(plan: Pick<Plan, 'submission'> | null): boolean {
 
 /**
  * Apply a proposal's edits as the user's, in `plan` itself, the way a batch
- * is applied: each box or arrow edit's `expect` against the plan before the
- * batch, and what waits on what checked on the batch as a whole.
+ * is applied, with what waits on what checked on the batch as a whole. Their
+ * `expect`s were checked when Claude proposed them (expectAtStart), and kept
+ * without.
  */
-function applyAsUser(plan: Plan, ops: PlanOp[], now: number): Change[] {
+function applyAsUser(plan: Plan, ops: PlanOp[], now: number, before?: (plan: Plan, op: PlanOp, i: number) => void): Change[] {
   const start = structuredClone(plan);
   const had = new Set(dependencyProblems(plan));
   const out: Change[] = [];
   ops.forEach((inner, i) => {
+    before?.(plan, inner, i);
     try {
-      out.push(...applyOne(plan, expectAtStart(start, inner, 'user'), 'user', now));
+      out.push(...applyOne(plan, inner, 'user', now));
     } catch (err) {
       if (err instanceof PlanError && ops.length > 1) throw new PlanError(`edit ${i + 1} (${inner.op}): ${err.message}`);
       throw err;
@@ -2114,6 +2340,7 @@ function settleProposal(plan: Plan, p: Proposal, status: ProposalStatus, now: nu
  */
 export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, number | string> {
   const out: Record<string, number | string> = {};
+  const tasks = new Map(plan.tasks.map((t) => [t.id, t]));
   const rev = (kind: 'section' | 'diagram' | 'task', id: string): number | string => {
     if (kind === 'section') {
       const s = plan.sections.find((x) => x.id === id);
@@ -2123,11 +2350,46 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
       const d = plan.diagrams.find((x) => x.id === id);
       return d ? fingerprint(designWithoutLinks(d)) : 0;
     }
-    const t = plan.tasks.find((x) => x.id === id);
+    const t = tasks.get(id);
     // A task's own checks count once it has some — so a fingerprint taken
     // before they existed still matches a task that has none.
     const checks = t?.addChecks?.length || t?.skipChecks?.length ? [t.addChecks ?? [], t.skipChecks ?? []] : [];
     return t ? fingerprint(JSON.stringify([t.title, t.detail ?? '', t.parentId, t.dependsOn ?? [], t.branch ?? '', t.review ?? '', t.files ?? [], ...checks])) : 0;
+  };
+  // A note is apart from its task's print (progress writes it): printed
+  // where the proposal would write it, or delete it.
+  const note = (id: string) => fingerprint(tasks.get(id)?.note ?? '');
+  // Links are left out of a diagram's own print (tasks are linked to boxes
+  // all through planning), so an op that overwrites them is printed by the
+  // links it would overwrite. Sorted throughout: an order is no change.
+  const boxLinks = (n: DiagramNode | undefined) => [...(n?.taskIds ?? [])].sort();
+  const links = (id: string) =>
+    fingerprint(JSON.stringify(plan.diagrams.flatMap((d) => d.nodes.filter((n) => n.taskIds?.includes(id)).map((n) => `${d.id}/${n.id}`)).sort()));
+  const linksOfBox = (diagramId: string, nodeId: string) =>
+    fingerprint(JSON.stringify(boxLinks(plan.diagrams.find((d) => d.id === diagramId)?.nodes.find((n) => n.id === nodeId))));
+  const linksIn = (diagramId: string) =>
+    fingerprint(JSON.stringify((plan.diagrams.find((d) => d.id === diagramId)?.nodes ?? []).filter((n) => n.taskIds?.length).map((n) => [n.id, boxLinks(n)]).sort()));
+  // Where the proposal's moves put its tasks, before a removal that takes
+  // them: a move is the one edit that brings what is the user's (a task's
+  // dependencies, its box links) under a removal; the proposal's other
+  // edits only add its own.
+  const movedTo = new Map<string, string | null>();
+  const removal = (id: string) => {
+    // Tasks the proposal adds stand in by their place alone, for what is
+    // moved under them; printed are only those already in the plan.
+    const added = [...movedTo].filter(([t]) => !tasks.has(t)).map(([t, parentId]) => ({ id: t, title: t, parentId, order: 0, status: 'todo' }) as Task);
+    const outline = movedTo.size
+      ? { ...plan, tasks: [...plan.tasks.map((t) => (movedTo.has(t.id) ? { ...t, parentId: movedTo.get(t.id)! } : t)), ...added] }
+      : plan;
+    const { doomed, dependents, diagrams } = taskRemoval(outline, id);
+    return fingerprint(
+      JSON.stringify([
+        // The task itself is `task:<id>`'s (and `note:<id>`'s) to print.
+        [...doomed].filter((t) => t !== id && tasks.has(t)).sort().map((t) => [t, rev('task', t), note(t)]),
+        dependents.map((t) => [t.id, t.dependsOn]).sort(),
+        diagrams.flatMap((d) => d.nodes.filter((n) => n.taskIds?.some((t) => doomed.has(t))).map((n) => [`${d.id}/${n.id}`, boxLinks(n)])).sort(),
+      ]),
+    );
   };
   for (const op of ops) {
     switch (op.op) {
@@ -2141,20 +2403,39 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
       case 'upsert_diagram':
       case 'move_diagram':
         if (op.id) out[`diagram:${op.id}`] = rev('diagram', op.id);
+        // A new list of boxes replaces the links on them.
+        if (op.op === 'upsert_diagram' && op.id && op.nodes !== undefined) out[`diagramlinks:${op.id}`] = linksIn(op.id);
         break;
       case 'upsert_node':
       case 'remove_node':
       case 'upsert_edge':
       case 'remove_edge':
         out[`diagram:${op.diagramId}`] = rev('diagram', op.diagramId);
+        // A box's tasks set anew, or the box gone with its links.
+        if ((op.op === 'upsert_node' && op.taskIds !== undefined) || (op.op === 'remove_node' && op.id)) {
+          out[`boxlinks:${op.diagramId}/${op.id}`] = linksOfBox(op.diagramId, op.id!);
+        }
         break;
       case 'upsert_task':
       case 'move_task':
       case 'set_checks':
         if (op.id) out[`task:${op.id}`] = rev('task', op.id);
+        if (op.op === 'move_task' && op.id) movedTo.set(op.id, op.parentId ?? null);
+        if (op.op === 'upsert_task' && op.id && !tasks.has(op.id) && op.parentId) movedTo.set(op.id, op.parentId);
+        // `builds` replaces which boxes link the task: a link made since is undone.
+        if (op.op === 'upsert_task' && op.id && op.builds !== undefined) out[`links:${op.id}`] = links(op.id);
+        if (op.op === 'upsert_task' && op.id && typeof op.note === 'string') out[`note:${op.id}`] = note(op.id);
         break;
       case 'remove':
         if (op.kind === 'section' || op.kind === 'diagram' || op.kind === 'task') out[`${op.kind}:${op.id}`] = rev(op.kind, op.id);
+        // A diagram goes with its boxes' links, as a box does.
+        if (op.kind === 'diagram') out[`diagramlinks:${op.id}`] = linksIn(op.id);
+        // A task goes with its subtasks, the dependencies on them and its
+        // boxes' links (taskRemoval, as the unread-edit guard counts it).
+        if (op.kind === 'task') {
+          out[`removal:${op.id}`] = removal(op.id);
+          out[`note:${op.id}`] = note(op.id);
+        }
         break;
     }
   }
@@ -2166,13 +2447,32 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
 export function proposalStaleness(plan: Plan, p: Proposal): string[] {
   const now = proposalTouches(plan, p.ops);
   const out: string[] = [];
+  // One made before Coplan printed all it would change cannot be checked in
+  // full: it is out of date for that reason alone.
+  if (Object.keys(now).some((key) => !(key in p.base))) out.push('everything it would change (it was made before Coplan recorded that)');
   for (const [key, was] of Object.entries(p.base)) {
     if (now[key] === was) continue;
-    const [kind, id] = key.split(/:(.*)/s) as [string, string];
+    const [kind, id] = splitKey(key);
+    const task = () => {
+      const t = plan.tasks.find((x) => x.id === id);
+      return `task ${id}${t ? ` "${t.title}"` : ''}`;
+    };
+    const diagram = (did: string) => `diagram "${plan.diagrams.find((d) => d.id === did)?.title ?? did}"`;
     if (kind === 'plan') out.push("the plan's title or summary");
     else if (kind === 'section') out.push(`section "${plan.sections.find((s) => s.id === id)?.title ?? id}"`);
-    else if (kind === 'diagram') out.push(`diagram "${plan.diagrams.find((d) => d.id === id)?.title ?? id}"`);
-    else out.push(`task ${id}${plan.tasks.find((t) => t.id === id) ? ` "${plan.tasks.find((t) => t.id === id)!.title}"` : ''}`);
+    else if (kind === 'diagram') out.push(diagram(id));
+    else if (kind === 'diagramlinks') out.push(`the task links in ${diagram(id)}`);
+    else if (kind === 'boxlinks') {
+      const [did, nid] = [id.slice(0, id.indexOf('/')), id.slice(id.indexOf('/') + 1)];
+      const label = plan.diagrams.find((d) => d.id === did)?.nodes.find((n) => n.id === nid)?.label ?? nid;
+      out.push(`the tasks linked to box "${label}" in ${diagram(did)}`);
+    } else if (kind === 'removal') out.push(`what removing ${task()} takes (its subtasks and their notes, the dependencies on them, its boxes' links)`);
+    else if (kind === 'links') out.push(`the boxes ${task()} builds`);
+    // Named once: a task changed (or gone) says its note has too.
+    else if (kind === 'note') {
+      if (now[`task:${id}`] === p.base[`task:${id}`]) out.push(`the note on ${task()}`);
+    }
+    else out.push(task());
   }
   return out;
 }
@@ -2296,6 +2596,7 @@ export function submitPlan(
   const said = cleanUserSaid(input.userSaid);
   next.submission = {
     at: now,
+    seq: plan.seq,
     target: input.target,
     ...(input.mode ? { mode: input.mode } : {}),
     ...(note ? { note } : {}),
@@ -2359,17 +2660,26 @@ export function reopenDesign(plan: Plan, now = Date.now()): Plan {
   return next;
 }
 
+/**
+ * Whether a sign-off's prompt reaching Claude is Claude's read of the plan.
+ * The prompt was written at the sign-off: anything the user did since (a
+ * task changed, a proposal rejected with its reason) is not in it, so it all
+ * stays unread and Claude is told to read it. A trimmed prompt points Claude
+ * at harness_plan_read for what it could not quote, so it is never the read.
+ */
+function promptIsTheRead(plan: Plan, signoff: { at: number; seq?: number; trimmed?: boolean }): boolean {
+  // One signed off before its log position was recorded: by the clock.
+  const since = (c: Change) => (signoff.seq !== undefined ? c.seq > signoff.seq : c.ts > signoff.at);
+  return !signoff.trimmed && !unreadByClaude(plan).some(since);
+}
+
 /** The ask for a task list reached Claude, carrying the design: that is
  *  Claude reading the plan. */
 export function markDesignDelivered(plan: Plan, now = Date.now()): Plan {
   if (!plan.design || plan.design.deliveredAt || plan.submission) return plan;
   const next = structuredClone(plan);
   next.design!.deliveredAt = now;
-  // The prompt was written when the design was confirmed. Anything the
-  // user changed since — tasks, comments — is not in it, so it stays unread
-  // and Claude is told to read it.
-  const confirmedAt = plan.design.seq ?? plan.seq;
-  if (!plan.design.trimmed && !unreadByClaude(plan).some((c) => c.seq > confirmedAt)) markReadByClaude(next, now);
+  if (promptIsTheRead(plan, plan.design)) markReadByClaude(next, now);
   next.version += 1;
   next.updatedAt = now;
   return next;
@@ -2377,8 +2687,9 @@ export function markDesignDelivered(plan: Plan, now = Date.now()): Plan {
 
 /**
  * The prompt has reached Claude. It carries the whole plan as submitted —
- * or, when that was too long, tells Claude to read it — so this is Claude's
- * read of the plan too.
+ * or, when that was too long, tells Claude to read it — so it is Claude's
+ * read of the plan too, unless the user changed something after submitting
+ * (promptIsTheRead).
  */
 export function markDelivered(plan: Plan, now = Date.now()): Plan {
   // Only this session is ever handed the prompt.
@@ -2388,10 +2699,7 @@ export function markDelivered(plan: Plan, now = Date.now()): Plan {
   // The build prompt carries the design too: a task-list ask not yet sent
   // has nothing left to say.
   if (next.design && !next.design.deliveredAt) next.design.deliveredAt = now;
-  // A trimmed prompt points Claude at harness_plan_read for what it could
-  // not quote — the user's changes among them — so it is not Claude's read:
-  // that read is, and it still has them to show.
-  if (!plan.submission.trimmed) markReadByClaude(next, now);
+  if (promptIsTheRead(plan, plan.submission)) markReadByClaude(next, now);
   next.version += 1;
   next.updatedAt = now;
   return next;
@@ -2404,20 +2712,22 @@ export function markDelivered(plan: Plan, now = Date.now()): Plan {
 /** Revision requests a plan keeps, newest last. */
 export const MAX_REVISIONS = 20;
 
-function lastWord(t: Thread): Author {
-  return t.replies.length ? t.replies[t.replies.length - 1]!.author : t.author;
+/** Who a thread waits on to answer: whoever did not speak last in it, or
+ *  no one once it is resolved. */
+export function threadWaitsOn(t: Thread): Author | null {
+  if (t.resolved) return null;
+  return (t.replies.at(-1)?.author ?? t.author) === 'user' ? 'claude' : 'user';
 }
 
 /**
- * The comments a revision request carries: every open thread whose last
- * word is the user's — what is waiting on the agent. Not a proposal's own
- * thread (that waits on the user), and not one the agent has already
- * answered: the user replies in it to put it back.
+ * What waits on the agent, and so what a revision request carries and the
+ * plan check counts unanswered: every open thread whose last word is the
+ * user's. Not one the agent has answered, nor its proposal as it made it
+ * (that waits on the user); the user replies in either to put it back.
  */
-export function threadsForRevision(plan: Pick<Plan, 'threads' | 'proposals'> | null): Thread[] {
+export function threadsForRevision(plan: Pick<Plan, 'threads'> | null): Thread[] {
   if (!plan) return [];
-  const proposed = new Set((plan.proposals ?? []).map((p) => p.threadId));
-  return plan.threads.filter((t) => !t.resolved && !proposed.has(t.id) && lastWord(t) === 'user');
+  return plan.threads.filter((t) => threadWaitsOn(t) === 'claude');
 }
 
 /** The request waiting to reach the agent, if one is. */
@@ -2539,6 +2849,7 @@ function validSubmission(raw: unknown): Submission | undefined {
   const mode = (EXECUTION_MODES as readonly string[]).includes(s.mode as string) ? s.mode : undefined;
   const said = s.via === 'chat' ? cleanUserSaid(s.userSaid) : undefined;
   return {
+    ...(Number.isInteger(s.seq) && s.seq! >= 0 ? { seq: s.seq } : {}),
     at: s.at,
     target,
     // Kept across a restart: without it a Tracked build would read back as
@@ -2560,7 +2871,7 @@ function validDesign(raw: unknown): DesignSignoff | undefined {
   const said = d.via === 'chat' ? cleanUserSaid(d.userSaid) : undefined;
   return {
     at: d.at,
-    ...(typeof d.seq === 'number' ? { seq: d.seq } : {}),
+    ...(Number.isInteger(d.seq) && d.seq! >= 0 ? { seq: d.seq } : {}),
     ...(typeof d.note === 'string' && d.note ? { note: d.note } : {}),
     prompt: d.prompt,
     ...(d.trimmed === true ? { trimmed: true } : {}),
@@ -2606,7 +2917,9 @@ function buildGraph(
     // diagram without restating what the user wrote on every box.
     const description = raw.description === undefined ? prev?.description : clean(raw.description, MAX_DESCRIPTION);
     const notes = raw.notes === undefined ? prev?.notes : clean(raw.notes, MAX_TEXT);
-    const links = raw.taskIds === undefined ? prev?.taskIds : cleanList(raw.taskIds);
+    // Links carried over keep only tasks still in the plan (a republish that
+    // drops one drops its links, as removing it does); written ones are checked.
+    const links = raw.taskIds === undefined ? prev?.taskIds?.filter((t) => taskIds.has(t)) : cleanList(raw.taskIds);
     for (const t of links ?? []) {
       if (!taskIds.has(t)) throw new PlanError(`Diagram "${title}": node "${id}" links task "${t}", which is not in the plan.`);
     }
@@ -2762,22 +3075,40 @@ function layoutChanged(before: Diagram, after: Diagram): boolean {
  * throw away the other side's change — the one failure a shared plan must
  * not have. The caller reloads and tries again with the latest in front of it.
  */
+/** What a refused save is told to do next: the agent reads the plan again;
+ *  the page has the latest version on screen already. */
+function staleHint(author: Author): string {
+  return author === 'claude' ? 'Read the plan again (harness_plan_read), then redo the edit.' : 'It now shows the latest version.';
+}
+
 function checkRev(item: { rev: number; title: string; updatedBy: Author }, expect: unknown, kind: string, author: Author): void {
   if (typeof expect !== 'number' || expect === item.rev) return;
+  if (!reached(item.rev, expect)) refuseUnreached(kind, item.title, item.rev, expect, author);
   const who = item.updatedBy === author ? 'another edit' : item.updatedBy === 'claude' ? 'Claude' : 'the user';
   throw new PlanError(
     `${kind[0]!.toUpperCase()}${kind.slice(1)} "${item.title}" was changed by ${who} while this edit was open, so it was not saved. ` +
-      'It now shows the latest version.',
+      staleHint(author),
   );
 }
 
+/** Whether `expect` names a revision an item at `rev` has had: a whole
+ *  number from 1 to where it is now. */
+function reached(rev: number, expect: number): boolean {
+  return Number.isInteger(expect) && expect >= 1 && expect <= rev;
+}
+
 /**
- * A task edit made against revision `expect` is refused when the *other*
- * side changed what the task says since — the user saving over Claude's
- * newer text, or the other way round. One side's own quick successive
- * saves (ticking dependencies one after another) never trip it, and
- * progress (status, stage, checks) is not part of the revision.
+ * An edit made against a revision the item never had: nobody changed it,
+ * but the edit was made on a version it never was (a tab holding a plan
+ * since replaced, or a client's mistake), so it is refused, saying so.
  */
+function refuseUnreached(kind: string, title: string, rev: number, expect: number, author: Author): never {
+  throw new PlanError(
+    `${kind[0]!.toUpperCase()}${kind.slice(1)} "${title}" is at revision ${rev}, not ${expect}: this edit was made against a version it never had, so it was not saved. ` +
+      staleHint(author),
+  );
+}
+
 /** The latest result of each check: a new report replaces the one of the
  *  same name and leaves the others as they were. */
 export function mergeChecks(before: readonly CheckResult[] | undefined, reported: readonly CheckResult[]): CheckResult[] {
@@ -2795,14 +3126,23 @@ function taskContent(t: Task): string {
   return JSON.stringify([t.title, t.detail ?? '', t.note ?? '', t.files ?? [], t.dependsOn ?? [], t.branch ?? '', t.review ?? '']);
 }
 
+/**
+ * A task edit made against revision `expect` is refused when the *other*
+ * side changed what the task says since — the user saving over Claude's
+ * newer text, or the other way round. One side's own quick successive
+ * saves (ticking dependencies one after another) never trip it, and
+ * progress (status, stage, checks) is not part of the revision.
+ */
 function checkTaskRev(task: Task, expect: unknown, author: Author): void {
   if (typeof expect !== 'number') return;
+  const rev = task.rev ?? 1;
+  if (!reached(rev, expect)) refuseUnreached('task', task.title, rev, expect, author);
   const other: Author = author === 'user' ? 'claude' : 'user';
   const theirs = task.revBy?.[other];
   if (theirs === undefined || theirs <= expect) return;
   throw new PlanError(
     `Task "${task.title}" was changed by ${other === 'claude' ? 'Claude' : 'the user'} while this edit was open, so it was not saved. ` +
-      (author === 'claude' ? 'Read the plan again (harness_plan_read), then redo the edit.' : 'It now shows the latest version.'),
+      staleHint(author),
   );
 }
 
@@ -3085,9 +3425,9 @@ function validStatus(value: unknown): TaskStatus | undefined {
 }
 
 /** Trim and bound a string; `undefined` for anything empty or not a string. */
-function clean(value: unknown, max: number, trim = true): string | undefined {
+function clean(value: unknown, max: number): string | undefined {
   if (typeof value !== 'string') return undefined;
-  const out = (trim ? value.trim() : value.replace(/\s+$/, '')).slice(0, max);
+  const out = value.trim().slice(0, max);
   return out.trim() ? out : undefined;
 }
 

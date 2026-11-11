@@ -3,9 +3,6 @@
     "harness": {
       "command": "node",
       "args": ["${CLAUDE_PLUGIN_ROOT}/dist/mcp/main.js"],
-      "env": {
-        "CC_HARNESS_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
-      },
       "timeoutMs": 60000
     }
   }

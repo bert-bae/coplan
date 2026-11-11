@@ -1,6 +1,7 @@
 /**
  * What a change touched, as git says — the one thing every check is chosen
- * by (#52, and targeted checks).
+ * by (#52, and targeted checks) — and which repository and branch a session
+ * is in, for the rail to group and label it. Nothing here writes.
  *
  * A check runs for the areas the change really touched, never for the
  * files a task only planned to touch, nor for areas no commit or edit in
@@ -20,6 +21,8 @@ export const MAX_FILES = 5_000;
 const OPTS = { timeout: 10_000, maxBuffer: 8 * 1024 * 1024 } as const;
 
 async function git(root: string, args: string[]): Promise<string | null> {
+  // No folder: an empty cwd would run git wherever this process is.
+  if (!root) return null;
   try {
     const { stdout } = await exec('git', args, { cwd: root, ...OPTS });
     return stdout;
@@ -28,13 +31,20 @@ async function git(root: string, args: string[]): Promise<string | null> {
   }
 }
 
+/** git's one-line answer, or null for none (or no git, or no folder). */
+async function gitLine(root: string, args: string[]): Promise<string | null> {
+  return (await git(root, args))?.trim() || null;
+}
+
 /**
  * Whether `ref` names a commit: true; false when git says there is none
  * (`rev-parse --verify --quiet` exits 1, silently, for a ref that is not
  * there, or a repository with no commit yet); null when git could not say
- * (it failed or timed out). A failure is never taken for "not there".
+ * (it failed or timed out, or there is no folder). A failure is never taken
+ * for "not there".
  */
 async function hasCommit(root: string, ref: string): Promise<boolean | null> {
+  if (!root) return null;
   try {
     await exec('git', ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd: root, ...OPTS });
     return true;
@@ -71,7 +81,7 @@ async function findBase(root: string, base?: string | null): Promise<{ ref: stri
   const candidates: string[] = [];
   if (base) candidates.push(base, `origin/${base}`);
   else {
-    const head = (await git(root, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']))?.trim();
+    const head = await gitLine(root, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']);
     if (head) candidates.push(head);
     candidates.push('main', 'master', 'origin/main', 'origin/master');
   }
@@ -160,9 +170,20 @@ async function unborn(root: string): Promise<ChangedFiles> {
   return listed(await Promise.all([git(root, ['ls-files', '-z']), git(root, ['ls-files', '--others', '--exclude-standard', '-z'])]), null);
 }
 
+/** The root of the repository a folder is in; null outside one. */
+export async function repoRoot(cwd: string): Promise<string | null> {
+  return gitLine(cwd, ['rev-parse', '--show-toplevel']);
+}
+
+/** The branch checked out in a folder; null on a detached HEAD. */
+export async function currentBranch(cwd: string): Promise<string | null> {
+  const name = await gitLine(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  return name === 'HEAD' ? null : name;
+}
+
 /** The commit checked out in `root` now, or null outside git. */
 export async function headCommit(root: string): Promise<string | null> {
-  return (await git(root, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']))?.trim() || null;
+  return gitLine(root, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);
 }
 
 /** The working tree `branch` is checked out in — the repository's own or

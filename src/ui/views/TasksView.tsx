@@ -1,18 +1,20 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
-import { store, useAgent, usePlan, useStore } from '../store.ts';
+import { filesText, useKeptDraft } from '../lib/drafts.ts';
+import { store, useCollapsedTasks, useEdit, useAgent, usePlan, useSessionId, useStillShown, useStore } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
-import { CommentToggle, ThreadPanel, useThreads } from '../components/Threads.tsx';
+import { CommentToggle, ThreadPanel, useCommentsShown, useThreads } from '../components/Threads.tsx';
 import { Focusable } from '../components/Item.tsx';
 import { KIND_GLYPH } from '../components/FlowCanvas.tsx';
-import { ProgressBar, STATUS_GLYPH, STATUS_LABEL } from '../components/Progress.tsx';
+import { ProgressBar, STATUS_GLYPH, STATUS_LABEL, TaskStatusDot } from '../components/Progress.tsx';
 import { EmptyState } from '../components/primitives.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { TaskCheckChips, TaskChecksField } from '../components/TaskChecks.tsx';
 import { classNames } from '../lib/format.ts';
-import { boxRows } from '../lib/tasks.ts';
+import { boxRows, numbered, shownStatus } from '../lib/tasks.ts';
+import { isTyping } from '../lib/keys.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
 import { boxUnbuilt } from '../../shared/check.ts';
-import { childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
+import { canTakeSubtasks, childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
 import { DEFAULT_BUILD_SETTINGS, SESSION_BRANCH, roundVerdict, stackStatus, type StackEntry, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
 import { REVIEW_MODES, TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type ReviewMode, type Task, type TaskStatus } from '../../shared/types.ts';
 import type { TaskMode } from '../store.ts';
@@ -44,6 +46,7 @@ const DRAG_TYPE = 'application/x-harness-task';
  *   they build, and those that build none under "Not on the diagram".
  */
 export function TasksView() {
+  const edit = useEdit();
   const agent = useAgent();
   const plan = usePlan();
   const mode = useStore((s) => s.taskMode);
@@ -113,7 +116,7 @@ export function TasksView() {
       {plan.tasks.length === 0 ? (
         <>
           <EmptyState title="No tasks yet" hint={`Break the work down here, or ask ${agent.name} to publish a task tree with the plan.`} />
-          <AddField placeholder="Add a task…" label="New task" onAdd={(title) => store.op({ op: 'upsert_task', title })} />
+          <AddField placeholder="Add a task…" label="New task" onAdd={(title) => edit({ op: 'upsert_task', title })} />
         </>
       ) : mode === 'outline' ? (
         <>
@@ -164,6 +167,8 @@ function ModeSwitch({ mode, modes }: { mode: TaskMode; modes: TaskMode[] }) {
 function ByBox({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
   const severity = useStore((s) => s.planCheck['box-unbuilt']);
   const rows = outline(plan);
+  // Numbered once for every box listed, not once per box.
+  const byId = numbered(rows);
   const linked = new Set(plan.diagrams.flatMap((d) => d.nodes.flatMap((n) => n.taskIds ?? [])));
   const builds = (t: Task) => linked.has(t.id) || ancestorsOf(plan, t).some((a) => linked.has(a.id)) || descendants(plan, t.id).some((x) => linked.has(x.id));
   const off = rows.filter((r) => !builds(r.task));
@@ -177,7 +182,7 @@ function ByBox({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
           <section key={d.id} className="by-box-diagram" aria-label={several ? d.title : undefined}>
             {several && <h2 className="field-label by-box-diagram-title">{d.title}</h2>}
             {boxes.map((n) => {
-              const items = boxRows(plan, n.taskIds);
+              const items = boxRows(plan, n.taskIds, byId);
               const counts = countTasks({ tasks: items.map((r) => r.task) });
               const gap = severity !== 'off' && boxUnbuilt(plan, n);
               return (
@@ -207,7 +212,7 @@ function ByBox({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
                   {items.length ? (
                     <ul className="by-box-list" aria-label={`Tasks that build ${n.label}`}>
                       {items.map((r) => (
-                        <ByBoxRow key={r.task.id} plan={plan} task={r.task} number={r.number} depth={r.depth} readOnly={readOnly} />
+                        <ByBoxRow key={r.task.id} plan={plan} task={r.task} status={r.status} number={r.number} depth={r.depth} readOnly={readOnly} />
                       ))}
                     </ul>
                   ) : (
@@ -228,7 +233,7 @@ function ByBox({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
         {off.length ? (
           <ul className="by-box-list" aria-label="Tasks that build no box">
             {off.map((r) => (
-              <ByBoxRow key={r.task.id} plan={plan} task={r.task} number={r.number} depth={r.depth} readOnly={readOnly} />
+              <ByBoxRow key={r.task.id} plan={plan} task={r.task} status={shownStatus(plan, r.task)} number={r.number} depth={r.depth} readOnly={readOnly} />
             ))}
           </ul>
         ) : (
@@ -239,27 +244,18 @@ function ByBox({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
   );
 }
 
-function ByBoxRow({ plan, task, number, depth, readOnly }: { plan: Plan; task: Task; number: string; depth: number; readOnly: boolean }) {
-  const parent = hasChildren(plan, task.id);
+/** A task under a box; `status` is as the page shows it (see shownStatus). */
+function ByBoxRow({ plan, task, status, number, depth, readOnly }: { plan: Plan; task: Task; status: TaskStatus; number: string; depth: number; readOnly: boolean }) {
+  const parent = hasSubtasks(plan, task.id);
   return (
-    <li className={classNames('by-box-row', `is-${task.status}`)} style={{ ['--depth' as string]: depth }}>
-      {parent || readOnly ? (
-        parent ? (
-          <DerivedStatus plan={plan} task={task} />
-        ) : (
-          <span className={classNames('status-dot is-static', `is-${task.status}`)} role="img" aria-label={`${task.title}: ${STATUS_LABEL[task.status]}`}>
-            <span aria-hidden="true">{STATUS_GLYPH[task.status]}</span>
-          </span>
-        )
-      ) : (
-        <StatusDot task={task} />
-      )}
+    <li className={classNames('by-box-row', `is-${status}`)} style={{ ['--depth' as string]: depth }}>
+      {parent || readOnly ? <TaskStatusDot plan={plan} task={task} status={status} named /> : <StatusDot task={task} />}
       <span className="task-num">{number}</span>
       <button type="button" className="link by-box-title" title={readOnly ? 'Show its card on the board' : 'Show it in the outline'} onClick={() => store.focus('task', task.id)}>
         {task.title}
       </button>
       {task.note && (
-        <span className={classNames('chip is-note', task.status === 'blocked' && 'is-warning')} title={task.note}>
+        <span className={classNames('chip is-note', status === 'blocked' && 'is-warning')} title={task.note}>
           {task.note}
         </span>
       )}
@@ -418,7 +414,9 @@ function IricBadges({ task }: { task: Task }) {
  * ------------------------------------------------------------------ */
 
 function Outline({ plan, hideDone }: { plan: Plan; hideDone: boolean }) {
-  const collapsed = useStore((s) => s.collapsedTasks);
+  const edit = useEdit();
+  const sessionId = useSessionId();
+  const collapsed = useCollapsedTasks();
   const [dragging, setDragging] = useState<string | null>(null);
   const [hint, setHint] = useState<{ id: string; zone: DropZone } | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -440,13 +438,14 @@ function Outline({ plan, hideDone }: { plan: Plan; hideDone: boolean }) {
   const rows = useMemo(() => {
     const hidden = new Set<string>();
     for (const id of collapsed) for (const d of descendants(plan, id)) hidden.add(d.id);
-    return outline(plan).filter(({ task }) => !hidden.has(task.id) && !(hideDone && task.status === 'done' && !hasChildren(plan, task.id)));
+    return outline(plan).filter(({ task }) => !hidden.has(task.id) && !(hideDone && task.status === 'done' && !hasSubtasks(plan, task.id)));
   }, [plan, collapsed, hideDone]);
 
   /** Where a drop on `target` in `zone` puts the dragged task. */
   const dropOp = (draggedId: string, target: Task, zone: DropZone): PlanOp | null => {
     if (draggedId === target.id || descendants(plan, draggedId).some((d) => d.id === target.id)) return null;
-    if (zone === 'inside') return { op: 'move_task', id: draggedId, parentId: target.id, index: Number.MAX_SAFE_INTEGER };
+    // Not into a task already started or finished: it cannot take subtasks.
+    if (zone === 'inside') return canTakeSubtasks(plan, target) ? { op: 'move_task', id: draggedId, parentId: target.id, index: Number.MAX_SAFE_INTEGER } : null;
     const siblings = childrenOf(plan, target.parentId).filter((t) => t.id !== draggedId);
     const at = siblings.findIndex((t) => t.id === target.id);
     return { op: 'move_task', id: draggedId, parentId: target.parentId, index: zone === 'before' ? at : at + 1 };
@@ -475,8 +474,8 @@ function Outline({ plan, hideDone }: { plan: Plan; hideDone: boolean }) {
     if (!id || !zone) return;
     const op = dropOp(id, target, zone);
     if (!op) return;
-    if (zone === 'inside' && collapsed.includes(target.id)) store.toggleTaskCollapsed(target.id);
-    void store.op(op);
+    if (zone === 'inside' && collapsed.includes(target.id)) store.toggleTaskCollapsed(sessionId, target.id);
+    void edit(op);
   };
 
   return (
@@ -515,7 +514,7 @@ function Outline({ plan, hideDone }: { plan: Plan; hideDone: boolean }) {
           />
         ))}
       </div>
-      <AddField placeholder="Add a top-level task…" label="New top-level task" onAdd={(title) => store.op({ op: 'upsert_task', title })} />
+      <AddField placeholder="Add a top-level task…" label="New top-level task" onAdd={(title) => edit({ op: 'upsert_task', title })} />
       <p className="outline-help muted">
         Drag a row onto another to nest it, or to its top or bottom edge to place it beside. With a row focused: Alt+↑/↓
         reorders, Alt+→ nests under the row above, Alt+← moves it out a level.
@@ -548,13 +547,20 @@ function TaskRow(props: {
   /** The design is confirmed: say which tasks are ready. */
   tracking: boolean;
 }) {
+  const edit = useEdit();
+  const stillShown = useStillShown();
   const { plan, task, depth, number, expanded } = props;
-  const collapsed = useStore((s) => s.collapsedTasks.includes(task.id));
+  const sessionId = useSessionId();
+  const collapsed = useCollapsedTasks().includes(task.id);
   const [comments, setComments] = useState(false);
   const kids = childrenOf(plan, task.id);
+  // A parent is as far along as its subtasks: its row reads as its dot does.
+  const status = shownStatus(plan, task);
   const sub = kids.length ? countTasks({ tasks: [task, ...descendants(plan, task.id)] }) : null;
   const threads = useThreads({ kind: 'task', id: task.id });
   const target = { kind: 'task' as const, id: task.id };
+  // Open, unless the plan was locked with none to read.
+  const commenting = useCommentsShown(target) && comments;
   const parts = props.parts;
 
   const siblings = childrenOf(plan, task.parentId);
@@ -565,7 +571,7 @@ function TaskRow(props: {
     up: index > 0 ? ({ op: 'move_task', id: task.id, parentId: task.parentId, index: index - 1 } as PlanOp) : null,
     down: index < siblings.length - 1 ? ({ op: 'move_task', id: task.id, parentId: task.parentId, index: index + 1 } as PlanOp) : null,
     // Nest under the sibling above, at the end of its subtasks.
-    indent: index > 0 ? ({ op: 'move_task', id: task.id, parentId: siblings[index - 1]!.id, index: Number.MAX_SAFE_INTEGER } as PlanOp) : null,
+    indent: index > 0 && canTakeSubtasks(plan, siblings[index - 1]!) ? ({ op: 'move_task', id: task.id, parentId: siblings[index - 1]!.id, index: Number.MAX_SAFE_INTEGER } as PlanOp) : null,
     // Out one level, right after the old parent.
     outdent: parent
       ? ({
@@ -583,21 +589,23 @@ function TaskRow(props: {
       e.key === 'ArrowUp' ? moves.up : e.key === 'ArrowDown' ? moves.down : e.key === 'ArrowRight' ? moves.indent : e.key === 'ArrowLeft' ? moves.outdent : null;
     if (!op) return;
     e.preventDefault();
-    void store.op(op).then(() => {
-      // Keep the keyboard on the row it moved.
-      window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`#task-${task.id} .task-line`)?.focus());
+    void edit(op).then(() => {
+      // Keep the keyboard on the row it moved — in its own plan, still on screen.
+      window.requestAnimationFrame(() => {
+        if (stillShown()) document.querySelector<HTMLElement>(`#task-${task.id} .task-line`)?.focus();
+      });
     });
   };
 
   return (
-    <Focusable kind="task" id={task.id} as="div" className={classNames('task', `is-${task.status}`, props.dragging && 'is-dragging')}>
+    <Focusable kind="task" id={task.id} as="div" className={classNames('task', `is-${status}`, props.dragging && 'is-dragging')}>
       <div
         className={classNames('task-line', props.dropZone && `drop-${props.dropZone}`)}
         style={{ ['--depth' as string]: depth }}
         role="treeitem"
         aria-level={depth + 1}
         aria-expanded={kids.length ? !collapsed : undefined}
-        aria-label={`${number} ${task.title}, ${STATUS_LABEL[task.status]}`}
+        aria-label={`${number} ${task.title}, ${STATUS_LABEL[status]}`}
         tabIndex={0}
         draggable
         onDragStart={props.onDragStart}
@@ -615,21 +623,21 @@ function TaskRow(props: {
             type="button"
             className="twisty"
             aria-label={collapsed ? `Show subtasks of ${task.title}` : `Hide subtasks of ${task.title}`}
-            onClick={() => store.toggleTaskCollapsed(task.id)}
+            onClick={() => store.toggleTaskCollapsed(sessionId, task.id)}
           >
             {collapsed ? '▸' : '▾'}
           </button>
         ) : (
           <span className="twisty is-leaf" aria-hidden="true" />
         )}
-        {kids.length ? <DerivedStatus plan={plan} task={task} /> : <StatusDot task={task} />}
+        {kids.length ? <TaskStatusDot plan={plan} task={task} status={status} named /> : <StatusDot task={task} />}
         <span className="task-num">{number}</span>
         <InlineText
           className="task-title"
           value={task.title}
           label="Task title"
           version={revOf(task)}
-          onSave={(title, rev) => store.op({ op: 'upsert_task', id: task.id, title, ...expecting(rev) })}
+          onSave={(title, rev) => edit({ op: 'upsert_task', id: task.id, title, ...expecting(rev) })}
         />
         <span className="task-badges">
           {sub && (
@@ -638,7 +646,7 @@ function TaskRow(props: {
             </span>
           )}
           {task.note && (
-            <span className={classNames('chip is-note', task.status === 'blocked' && 'is-warning')} title={task.note}>
+            <span className={classNames('chip is-note', status === 'blocked' && 'is-warning')} title={task.note}>
               {task.note}
             </span>
           )}
@@ -698,10 +706,10 @@ function TaskRow(props: {
         </button>
       </div>
 
-      {(expanded || comments) && (
+      {(expanded || commenting) && (
         <div className="task-detail" style={{ ['--depth' as string]: depth }}>
           {expanded && <TaskDetail plan={plan} task={task} />}
-          {comments && <ThreadPanel target={target} label={task.title} />}
+          {commenting && <ThreadPanel target={target} label={task.title} />}
         </div>
       )}
 
@@ -713,8 +721,8 @@ function TaskRow(props: {
             autoFocus
             onCancel={props.onCloseAdd}
             onAdd={async (title) => {
-              const ok = await store.op({ op: 'upsert_task', parentId: task.id, title });
-              if (ok && collapsed) store.toggleTaskCollapsed(task.id);
+              const ok = await edit({ op: 'upsert_task', parentId: task.id, title });
+              if (ok && collapsed && stillShown()) store.toggleTaskCollapsed(sessionId, task.id);
               return ok;
             }}
           />
@@ -725,6 +733,7 @@ function TaskRow(props: {
 }
 
 function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
+  const edit = useEdit();
   const agent = useAgent();
   const [confirming, setConfirming] = useState(false);
   const subtasks = descendants(plan, task.id).length;
@@ -742,7 +751,7 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
           placeholder="One line — what it's blocked on, or what was done"
           label="Status note"
           version={revOf(task)}
-          onSave={(note, rev) => store.op({ op: 'upsert_task', id: task.id, note, ...expecting(rev) })}
+          onSave={(note, rev, was) => edit({ op: 'upsert_task', id: task.id, note, noteWas: was, ...expecting(rev) })}
         />
       </div>
       <div className="field-col">
@@ -753,7 +762,8 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
           placeholder="No detail yet."
           emptyAction="Add approach or acceptance criteria"
           version={revOf(task)}
-          onSave={(detail, rev) => store.op({ op: 'upsert_task', id: task.id, detail, ...expecting(rev) })}
+          draftKey={`task:${task.id}:detail`}
+          onSave={(detail, rev) => edit({ op: 'upsert_task', id: task.id, detail, ...expecting(rev) })}
         />
       </div>
       <div className="field-col">
@@ -775,7 +785,7 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
           })()}
           label="Branch"
           version={revOf(task)}
-          onSave={(branch, rev) => store.op({ op: 'upsert_task', id: task.id, branch, ...expecting(rev) })}
+          onSave={(branch, rev) => edit({ op: 'upsert_task', id: task.id, branch, ...expecting(rev) })}
         />
       </div>
       <div className="field-row">
@@ -794,7 +804,7 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
         {confirming ? (
           <span className="item-confirm">
             Remove{subtasks ? ` with ${subtasks} subtask(s)` : ''}?
-            <button type="button" className="link is-danger" onClick={() => void store.op({ op: 'remove', kind: 'task', id: task.id })}>
+            <button type="button" className="link is-danger" onClick={() => void edit({ op: 'remove', kind: 'task', id: task.id })}>
               Remove
             </button>
             <button type="button" className="link" onClick={() => setConfirming(false)}>
@@ -814,13 +824,14 @@ function TaskDetail({ plan, task }: { plan: Plan; task: Task }) {
 /** What a task waits on: chips to remove, a list to add from. A task can
  *  wait on anything but itself, its own parents and its own subtasks. */
 function DependsField({ plan, task }: { plan: Plan; task: Task }) {
+  const edit = useEdit();
   const deps = task.dependsOn ?? [];
   const excluded = new Set([task.id, ...deps, ...ancestorsOf(plan, task).map((t) => t.id), ...descendants(plan, task.id).map((t) => t.id)]);
   const rows = outline(plan);
   const numbers = new Map(rows.map((r) => [r.task.id, r.number]));
   // Made against what is on screen: if the agent changed the list since,
   // the whole-list save is refused rather than undoing its change.
-  const set = (dependsOn: string[]) => void store.op({ op: 'upsert_task', id: task.id, dependsOn, expect: revOf(task) });
+  const set = (dependsOn: string[]) => void edit({ op: 'upsert_task', id: task.id, dependsOn, expect: revOf(task) });
   const inherited = ancestorsOf(plan, task).flatMap((a) => (a.dependsOn ?? []).map((id) => ({ via: a, id })));
   return (
     <div className="depends">
@@ -864,6 +875,7 @@ function DependsField({ plan, task }: { plan: Plan; task: Task }) {
 }
 
 function ReviewPicker({ task }: { task: Task }) {
+  const edit = useEdit();
   const options: (ReviewMode | '')[] = ['', ...REVIEW_MODES];
   return (
     <div className="segmented is-small" role="radiogroup" aria-label={`How ${task.title} is reviewed`}>
@@ -875,7 +887,7 @@ function ReviewPicker({ task }: { task: Task }) {
           aria-checked={(task.review ?? '') === mode}
           className={classNames('seg', (task.review ?? '') === mode && 'is-active')}
           title={mode ? undefined : "The build's default, or its parent's"}
-          onClick={() => void store.op({ op: 'upsert_task', id: task.id, review: mode, expect: revOf(task) })}
+          onClick={() => void edit({ op: 'upsert_task', id: task.id, review: mode, expect: revOf(task) })}
         >
           {mode ? REVIEW_LABEL[mode] : 'Default'}
         </button>
@@ -886,12 +898,11 @@ function ReviewPicker({ task }: { task: Task }) {
 
 /** Expected files, one per line. */
 function FilesField({ task }: { task: Task }) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState((task.files ?? []).join('\n'));
-  const [startedAt, setStartedAt] = useState(revOf(task));
-  const latest = useRef(revOf(task));
-  latest.current = revOf(task);
-  if (!editing) {
+  const edit = useEdit();
+  // Kept, as a markdown field's draft is, while open: its view going (a tab
+  // or session switch) reopens it with the text.
+  const kept = useKeptDraft(useSessionId(), `task:${task.id}:files`, filesText(task.files), revOf(task));
+  if (!kept.editing) {
     return (
       <div className="files">
         {task.files?.length ? (
@@ -903,15 +914,7 @@ function FilesField({ task }: { task: Task }) {
         ) : (
           <span className="muted">None listed.</span>
         )}{' '}
-        <button
-          type="button"
-          className="link"
-          onClick={() => {
-            setDraft((task.files ?? []).join('\n'));
-            setStartedAt(revOf(task));
-            setEditing(true);
-          }}
-        >
+        <button type="button" className="link" onClick={kept.begin}>
           Edit
         </button>
       </div>
@@ -919,24 +922,24 @@ function FilesField({ task }: { task: Task }) {
   }
   return (
     <div className="md-field is-editing">
-      <textarea className="input mono" rows={4} value={draft} aria-label="Files, one per line" onChange={(e) => setDraft(e.target.value)} />
+      <textarea className="input mono" rows={4} value={kept.draft} aria-label="Files, one per line" onChange={(e) => kept.setDraft(e.target.value)} />
       <div className="md-field-foot">
         <span className="muted">One path per line</span>
         <span className="spacer" />
-        <button type="button" className="btn btn-sm btn-ghost" onClick={() => setEditing(false)}>
+        <button type="button" className="btn btn-sm btn-ghost" onClick={kept.close}>
           Cancel
         </button>
         <button
           type="button"
           className="btn btn-sm btn-primary"
-          onClick={async () => {
-            const files = draft.split('\n').map((f) => f.trim()).filter(Boolean);
-            // Refused when changed underneath: stay open, with the text.
-            if (await store.op({ op: 'upsert_task', id: task.id, files, expect: startedAt })) setEditing(false);
-            else setStartedAt(latest.current);
+          disabled={kept.saving}
+          onClick={() => {
+            const files = kept.draft.split('\n').map((f) => f.trim()).filter(Boolean);
+            // Refused when changed underneath: stays open, with the text.
+            void kept.save(() => edit({ op: 'upsert_task', id: task.id, files, ...expecting(kept.started.version) }));
           }}
         >
-          Save
+          {kept.saving ? 'Saving…' : 'Save'}
         </button>
       </div>
     </div>
@@ -944,38 +947,16 @@ function FilesField({ task }: { task: Task }) {
 }
 
 function MoveButton({ op, glyph, label }: { op: PlanOp | null; glyph: string; label: string }) {
+  const edit = useEdit();
   return (
-    <button type="button" className="icon-btn is-tiny" disabled={!op} title={label} aria-label={label} onClick={() => op && void store.op(op)}>
+    <button type="button" className="icon-btn is-tiny" disabled={!op} title={label} aria-label={label} onClick={() => op && void edit(op)}>
       <span aria-hidden="true">{glyph}</span>
     </button>
   );
 }
 
-/** Where a parent's subtasks stand: done when all are, blocked or in
- *  progress when any is. A parent has no status of its own to set — what
- *  is built, and what the agent reports, is its subtasks. */
-function derivedStatus(plan: Plan, task: Task): TaskStatus {
-  // The same roll-up harness_task_next and the briefs use, so the board and
-  // the agent never disagree about a parent.
-  const r = readinessOf(plan, task);
-  return r === 'ready' || r === 'waiting' ? 'todo' : r;
-}
-
-function DerivedStatus({ plan, task }: { plan: Plan; task: Task }) {
-  const status = derivedStatus(plan, task);
-  return (
-    <span
-      className={classNames('status-dot', 'is-static', `is-${status}`)}
-      role="img"
-      title={`${STATUS_LABEL[status]}, from its subtasks`}
-      aria-label={`${task.title}: ${STATUS_LABEL[status]}, from its subtasks`}
-    >
-      <span aria-hidden="true">{STATUS_GLYPH[status]}</span>
-    </span>
-  );
-}
-
 function StatusDot({ task }: { task: Task }) {
+  const edit = useEdit();
   const next = NEXT_STATUS[task.status];
   return (
     <button
@@ -983,7 +964,7 @@ function StatusDot({ task }: { task: Task }) {
       className={classNames('status-dot', `is-${task.status}`)}
       title={`${STATUS_LABEL[task.status]} — click to mark ${STATUS_LABEL[next].toLowerCase()}`}
       aria-label={`${task.title}: ${STATUS_LABEL[task.status]}. Mark ${STATUS_LABEL[next].toLowerCase()}`}
-      onClick={() => void store.op({ op: 'upsert_task', id: task.id, status: next })}
+      onClick={() => void edit({ op: 'upsert_task', id: task.id, status: next })}
     >
       <span aria-hidden="true">{STATUS_GLYPH[task.status]}</span>
     </button>
@@ -991,6 +972,7 @@ function StatusDot({ task }: { task: Task }) {
 }
 
 function StatusPicker({ task }: { task: Task }) {
+  const edit = useEdit();
   return (
     <div className="segmented" role="radiogroup" aria-label={`Status of ${task.title}`}>
       {TASK_STATUSES.map((s) => (
@@ -1000,7 +982,7 @@ function StatusPicker({ task }: { task: Task }) {
           role="radio"
           aria-checked={task.status === s}
           className={classNames('seg', `status-${s}`, task.status === s && 'is-active')}
-          onClick={() => void store.op({ op: 'upsert_task', id: task.id, status: s })}
+          onClick={() => void edit({ op: 'upsert_task', id: task.id, status: s })}
         >
           {STATUS_LABEL[s]}
         </button>
@@ -1014,12 +996,13 @@ function StatusPicker({ task }: { task: Task }) {
  * ------------------------------------------------------------------ */
 
 function Board({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
+  const edit = useEdit();
   const [over, setOver] = useState<TaskStatus | null>(null);
   const { arrived, announcement } = useArrivals(plan);
   // Leaves only: a parent is a heading, and its progress is its subtasks'.
   const leaves = outline(plan)
     .map((r) => r.task)
-    .filter((t) => !hasChildren(plan, t.id));
+    .filter((t) => !hasSubtasks(plan, t.id));
 
   return (
     <div className={classNames('board', readOnly && 'is-readonly')}>
@@ -1042,7 +1025,7 @@ function Board({ plan, readOnly = false }: { plan: Plan; readOnly?: boolean }) {
               setOver(null);
               const id = e.dataTransfer.getData(DRAG_TYPE);
               const task = plan.tasks.find((t) => t.id === id);
-              if (task && task.status !== status) void store.op({ op: 'upsert_task', id, status });
+              if (task && task.status !== status) void edit({ op: 'upsert_task', id, status });
             }}
           >
             <header className="board-col-head">
@@ -1091,7 +1074,7 @@ function useArrivals(plan: Plan): { arrived: Set<string>; announcement: string }
     const before = last.current;
     last.current = new Map(plan.tasks.map((t) => [t.id, t.status]));
     if (!before) return;
-    const moved = plan.tasks.filter((t) => before.has(t.id) && before.get(t.id) !== t.status && !hasChildren(plan, t.id));
+    const moved = plan.tasks.filter((t) => before.has(t.id) && before.get(t.id) !== t.status && !hasSubtasks(plan, t.id));
     if (!moved.length) return;
     const ids = moved.map((t) => t.id);
     setArrived((cur) => new Set([...cur, ...ids]));
@@ -1212,6 +1195,7 @@ function ReviewHistory({ task }: { task: Task }) {
  * agent cannot mark it done without their pass — given here, or in chat.
  */
 function UserReview({ plan, task }: { plan: Plan; task: Task }) {
+  const edit = useEdit();
   const agent = useAgent();
   const [asking, setAsking] = useState(false);
   const [why, setWhy] = useState('');
@@ -1220,7 +1204,7 @@ function UserReview({ plan, task }: { plan: Plan; task: Task }) {
   const decided = roundVerdict(task, 'user');
   if (decided) return null;
   const send = async (verdict: 'pass' | 'changes', summary?: string) => {
-    const ok = await store.op({ op: 'review_task', id: task.id, verdict, ...(summary ? { summary } : {}) });
+    const ok = await edit({ op: 'review_task', id: task.id, verdict, ...(summary ? { summary } : {}) });
     if (ok) setAsking(false);
   };
   return (
@@ -1253,6 +1237,7 @@ function UserReview({ plan, task }: { plan: Plan; task: Task }) {
 }
 
 function BoardCard({ plan, task }: { plan: Plan; task: Task }) {
+  const edit = useEdit();
   const path: string[] = [];
   let cursor = task.parentId ? plan.tasks.find((t) => t.id === task.parentId) : undefined;
   while (cursor) {
@@ -1291,7 +1276,7 @@ function BoardCard({ plan, task }: { plan: Plan; task: Task }) {
           id={`status-${task.id}`}
           className="board-status"
           value={task.status}
-          onChange={(e) => void store.op({ op: 'upsert_task', id: task.id, status: e.target.value as TaskStatus })}
+          onChange={(e) => void edit({ op: 'upsert_task', id: task.id, status: e.target.value as TaskStatus })}
         >
           {TASK_STATUSES.map((s) => (
             <option key={s} value={s}>
@@ -1305,15 +1290,6 @@ function BoardCard({ plan, task }: { plan: Plan; task: Task }) {
 }
 
 /* ------------------------------------------------------------------ */
-
-function hasChildren(plan: Pick<Plan, 'tasks'>, id: string): boolean {
-  return hasSubtasks(plan, id);
-}
-
-function isTyping(target: EventTarget | null): boolean {
-  const el = target as HTMLElement | null;
-  return Boolean(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable));
-}
 
 /** A task's content revision; tasks written before it existed are at 1. */
 function revOf(task: Task): number {

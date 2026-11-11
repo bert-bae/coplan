@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync, readdirSync, existsSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { paths, ensureHome, sanitizeId } from '../shared/paths.ts';
+import { paths, ensureHome, legacyName, sanitizeId } from '../shared/paths.ts';
 import {
   PlanError,
   applyOps,
@@ -45,7 +45,25 @@ const PERSIST_DEBOUNCE_MS = 400;
 /** Sessions untouched for longer than this are dropped from memory and disk on boot. */
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** Hard cap on sessions held in memory, newest first. */
+/** Sessions kept in memory per pool (see `kept`). */
 const MAX_SESSIONS = 60;
+
+/**
+ * Which sessions stay in memory, and so in the browser's list and for
+ * `coplan open` and finding a session by its pid or folder, when there are
+ * more than fit: the newest of those the user planned in (a plan, or Coplan
+ * used), and the newest of the rest, each up to the cap. Two pools, so the
+ * many sessions that never touch Coplan cannot push out a plan, nor a pile
+ * of old plans a session running now. Past them a session stays on disk.
+ */
+function kept(states: SessionState[]): SessionState[] {
+  const newest = [...states].sort((a, b) => b.updatedAt - a.updatedAt);
+  // A newer build's session is blank here, but a used one on disk.
+  const used = (s: SessionState) => Boolean(s.plan || s.engagedAt || s.savedByNewer);
+  const planned = newest.filter(used);
+  const plain = newest.filter((s) => !used(s));
+  return [...planned.slice(0, MAX_SESSIONS), ...plain.slice(0, MAX_SESSIONS)];
+}
 
 export function newSession(sessionId: string, cwd: string, agent: AgentKind = DEFAULT_AGENT): SessionState {
   const now = Date.now();
@@ -88,8 +106,6 @@ const NEWER = Symbol('newer');
 export class SessionStore extends EventEmitter {
   private sessions = new Map<string, SessionState>();
   private persistTimers = new Map<string, NodeJS.Timeout>();
-  /** Sessions on disk in a newer format than this build writes. */
-  private foreign = new Set<string>();
   /** The last write failure said for each session, so it is said once. */
   private persistFailed = new Map<string, string>();
 
@@ -108,7 +124,11 @@ export class SessionStore extends EventEmitter {
     const dir = paths.sessionsDir();
     if (!existsSync(dir)) return;
 
-    const loaded: SessionState[] = [];
+    const found: { state: SessionState; old: boolean }[] = [];
+    // The folders a newer Coplan's sessions are in, and the session each
+    // folder of its own holds.
+    const newer = new Set<string>();
+    const holds = new Map<string, string>();
     const expired: string[] = [];
     const cutoff = Date.now() - SESSION_TTL_MS;
 
@@ -121,24 +141,38 @@ export class SessionStore extends EventEmitter {
         continue;
       }
       const state = readState(file);
-      if (state === NEWER) {
-        // Written by a newer Coplan than this daemon: left exactly as it is,
-        // and never saved over (see persistNow), until that build runs.
-        this.foreign.add(entry.name);
-        continue;
-      }
-      if (!state) continue;
+      // One written by a newer Coplan than this daemon is left exactly as it
+      // is until that build runs: not loaded, and never saved over
+      // (`savedByNewer`, set by ensure and checked by persistNow).
+      if (state === NEWER) newer.add(entry.name);
+      if (!state || state === NEWER) continue;
       if ((state.updatedAt ?? 0) < cutoff) {
         expired.push(sessionDir);
         continue;
       }
-      loaded.push(state);
+      holds.set(entry.name, state.sessionId);
+      found.push({ state, old: entry.name !== sanitizeId(state.sessionId) });
     }
 
+    // One copy a session. A folder named by an earlier build, which made an
+    // id safe without its hash (see sanitizeId), is read only while the
+    // session's own folder holds no readable state (nor a newer build's),
+    // and saved there once loaded. Its time is not weighed against the own
+    // copy's: a tie, a fresh stamp from that build's hook, a clock running
+    // ahead would each put it over work done since. Left as it is, for
+    // housekeeping, and for that earlier build.
+    const chosen = new Map<string, { state: SessionState; old: boolean }>();
+    for (const copy of found) {
+      const own = sanitizeId(copy.state.sessionId);
+      if (copy.old && (newer.has(own) || holds.has(own))) continue;
+      chosen.set(copy.state.sessionId, copy);
+    }
     // Anything past the cap stays on disk — cold, not stale.
-    loaded.sort((a, b) => b.updatedAt - a.updatedAt);
-    for (const state of loaded.slice(0, MAX_SESSIONS)) this.sessions.set(state.sessionId, state);
+    for (const state of kept([...chosen.values()].map((c) => c.state))) this.sessions.set(state.sessionId, state);
+    // Expired first: a session's own folder past keeping is where a copy
+    // from its old folder goes.
     for (const sessionDir of expired) discardDir(sessionDir);
+    for (const { state, old } of chosen.values()) if (old && this.sessions.has(state.sessionId)) this.persistNow(state.sessionId);
   }
 
   /** Forget a session in memory; its state stays on disk. */
@@ -167,7 +201,12 @@ export class SessionStore extends EventEmitter {
     }
     const removed = this.sessions.delete(id);
     this.persistFailed.delete(id);
-    discardDir(paths.sessionDir(id));
+    // A session's folder, and only one: never sessions/ or what holds it.
+    // One an earlier build kept it in goes too, or the next start reads it.
+    const dir = paths.sessionDir(id);
+    if (path.dirname(dir) === paths.sessionsDir()) discardDir(dir);
+    const old = legacyFile(id);
+    if (old && ownerOf(old) === id) discardDir(path.dirname(old));
     if (removed) this.broadcastSessionList();
     return removed;
   }
@@ -182,8 +221,10 @@ export class SessionStore extends EventEmitter {
         dropped++;
       }
     }
-    for (const state of this.all().slice(MAX_SESSIONS)) {
-      this.drop(state.sessionId);
+    const keep = new Set(kept([...this.sessions.values()]).map((s) => s.sessionId));
+    for (const id of [...this.sessions.keys()]) {
+      if (keep.has(id)) continue;
+      this.drop(id);
       dropped++;
     }
     return dropped;
@@ -202,23 +243,9 @@ export class SessionStore extends EventEmitter {
 
   persistNow(id: string): void {
     const state = this.sessions.get(id);
-    if (!state || this.foreign.has(id)) return;
+    if (!state || state.savedByNewer) return;
     try {
-      const dir = paths.sessionDir(id);
-      mkdirSync(dir, { recursive: true });
-      const tmp = path.join(dir, `.state.${process.pid}.tmp`);
-      // On disk before it replaces the old file: a power cut between the two
-      // must leave the old state, not an empty new one.
-      const fd = openSync(tmp, 'w', 0o600);
-      try {
-        // writeFileSync on a descriptor loops until every byte is written;
-        // a single writeSync may stop short.
-        writeFileSync(fd, JSON.stringify({ schemaVersion: STATE_SCHEMA, ...state }, null, 2));
-        fsyncSync(fd);
-      } finally {
-        closeSync(fd);
-      }
-      renameSync(tmp, path.join(dir, 'state.json'));
+      writeState(paths.sessionDir(id), state);
       this.persistFailed.delete(id);
     } catch (err) {
       // The live session goes on — but nobody may be told their edits are
@@ -247,18 +274,67 @@ export class SessionStore extends EventEmitter {
   ensure(id: string, cwd?: string, agent?: AgentKind): SessionState {
     let state = this.sessions.get(id);
     if (!state) {
-      const saved = readState(paths.sessionState(id));
-      // A newer build's session is served blank from memory, never saved.
-      if (saved === NEWER) this.foreign.add(id);
-      state = saved && saved !== NEWER ? saved : newSession(id, cwd || process.cwd(), agent);
+      const { saved, old } = this.readSaved(id);
+      // No folder (a Codex tool call, whose hooks are not trusted yet) is
+      // left unknown: the daemon's own is some other session's repository,
+      // and its checks, base branch and git would be taken for this one's.
+      state = saved && saved !== NEWER ? saved : newSession(id, cwd ?? '', agent);
+      // A newer build's session is served blank from memory, marked so the
+      // page says why, and never saved (persistNow).
+      if (saved === NEWER) state.savedByNewer = true;
       this.sessions.set(id, state);
       mkdirSync(paths.sessionDir(id), { recursive: true });
+      // Read from the folder an earlier build kept it in: saved to its own.
+      if (old) this.persistNow(id);
       this.emitEvent({ type: 'snapshot', session: state });
       this.broadcastSessionList();
     } else if (cwd && state.cwd !== cwd && !state.repoRoot) {
+      // A session first seen with no folder learns it here, and takes its
+      // name rather than its id's, as one seen first by its hooks does.
+      if (!state.cwd && !state.titleLocked && state.title === id.slice(0, 8)) state.title = path.basename(cwd) || state.title;
       state.cwd = cwd;
     }
     return state;
+  }
+
+  /**
+   * A session's saved state: from its own folder or, while that holds no
+   * state file, from the folder an earlier build kept it in (see
+   * loadFromDisk), if the state there is this session's and not past
+   * keeping. A state in its own folder that is another session's (an earlier
+   * build's, whose id this one is spelled like that session's folder name)
+   * is no state of this one's: it is first copied to that session's own
+   * folder, unless that session is here to save itself, so this one's saves
+   * take nothing from it.
+   */
+  private readSaved(id: string): { saved: SessionState | typeof NEWER | undefined; old: boolean } {
+    const file = paths.sessionState(id);
+    const legacy = () => {
+      const old = legacyFile(id);
+      const state = old ? readState(old) : undefined;
+      return state && state !== NEWER && state.sessionId === id && (state.updatedAt ?? 0) >= Date.now() - SESSION_TTL_MS ? state : undefined;
+    };
+    if (existsSync(file)) {
+      const own = readState(file);
+      if (own === NEWER) return { saved: own, old: false };
+      // Unreadable, and moved aside: as though its folder held nothing.
+      if (!own) {
+        const saved = legacy();
+        return { saved, old: saved !== undefined };
+      }
+      if (own.sessionId === id) return { saved: own, old: false };
+      if (!this.sessions.has(own.sessionId) && !existsSync(paths.sessionState(own.sessionId))) {
+        try {
+          writeState(paths.sessionDir(own.sessionId), own);
+        } catch (err) {
+          // Said as any failed save is (and logged): this one's saves wait on nothing.
+          this.emitEvent({ type: 'persist-error', sessionId: own.sessionId, message: (err as NodeJS.ErrnoException)?.code ?? String(err) });
+        }
+      }
+      return { saved: undefined, old: false };
+    }
+    const saved = legacy();
+    return { saved, old: saved !== undefined };
   }
 
   all(): SessionState[] {
@@ -607,10 +683,47 @@ export function summarize(s: SessionState): SessionSummary {
     link: s.link,
     openThreads: plan?.threads.filter((t) => !t.resolved).length ?? 0,
     unreadByClaude: unreadItems(plan),
-    // A plan saved before sessions were stamped still counts.
-    engaged: Boolean(s.engagedAt) || plan !== null,
+    // A plan saved before sessions were stamped still counts, and so does
+    // a newer build's session: blank here, but one it kept.
+    engaged: Boolean(s.engagedAt) || plan !== null || Boolean(s.savedByNewer),
     hooked: s.hookedAt !== null,
+    ...(s.savedByNewer ? { savedByNewer: true } : {}),
   };
+}
+
+/** Write a session's state into its folder, made if need be: on disk
+ *  before it replaces the old file, so a power cut between the two leaves
+ *  the old state, not an empty new one. */
+function writeState(dir: string, state: SessionState): void {
+  mkdirSync(dir, { recursive: true });
+  const tmp = path.join(dir, `.state.${process.pid}.tmp`);
+  const fd = openSync(tmp, 'w', 0o600);
+  try {
+    // writeFileSync on a descriptor loops until every byte is written;
+    // a single writeSync may stop short.
+    writeFileSync(fd, JSON.stringify({ schemaVersion: STATE_SCHEMA, ...state }, null, 2));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, path.join(dir, 'state.json'));
+}
+
+/** The state file an earlier build kept a session in, where that is not its own. */
+function legacyFile(id: string): string | null {
+  const old = legacyName(id);
+  return old === sanitizeId(id) ? null : path.join(paths.sessionsDir(), old, 'state.json');
+}
+
+/** Whose session a state file holds, if it can be read: looked at only,
+ *  never moved aside, whosever folder it is in. */
+function ownerOf(file: string): string | undefined {
+  try {
+    const id = (JSON.parse(readFileSync(file, 'utf8')) as { sessionId?: unknown } | null)?.sessionId;
+    return typeof id === 'string' ? id : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -629,6 +742,8 @@ function readState(file: string): SessionState | typeof NEWER | undefined {
     // submission it would read as invalid, and so as unlocked. Hands off.
     if (typeof state.schemaVersion === 'number' && state.schemaVersion > STATE_SCHEMA) return NEWER;
     delete state.schemaVersion;
+    // Only ever set in memory: on disk it would stop this one being saved.
+    delete state.savedByNewer;
     migrate(state);
     return state;
   } catch {
@@ -737,5 +852,3 @@ function discardDir(dir: string): void {
     /* not worth failing over */
   }
 }
-
-export { sanitizeId };

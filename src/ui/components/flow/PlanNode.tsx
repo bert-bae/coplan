@@ -2,8 +2,9 @@ import { useEffect, useLayoutEffect, useRef, useState, type FocusEvent, type Mou
 import { Handle, NodeToolbar, Position, useEdges, useNodes, type NodeProps } from '@xyflow/react';
 import { usePlan } from '../../store.ts';
 import { Markdown } from '../Markdown.tsx';
-import { ProgressBar, STATUS_GLYPH, STATUS_LABEL } from '../Progress.tsx';
+import { ProgressBar, TaskStatusDot } from '../Progress.tsx';
 import { classNames } from '../../lib/format.ts';
+import { isComposing } from '../../lib/keys.ts';
 import { BoxFoot, BoxTasks } from './BoxTasks.tsx';
 import { KIND_GLYPH, KIND_LABEL, useCanvas, type FlowData, type FlowEdge, type FlowNode } from './shared.ts';
 
@@ -195,7 +196,7 @@ function NodeSummary({ id, data, onEnter, onLeave }: { id: string; data: FlowDat
         </section>
       )}
 
-      {tasks.length > 0 && (
+      {plan && tasks.length > 0 && (
         <section className="flow-summary-section">
           <p className="flow-summary-label">
             Built by
@@ -208,9 +209,7 @@ function NodeSummary({ id, data, onEnter, onLeave }: { id: string; data: FlowDat
           <ul className="flow-summary-list">
             {tasks.slice(0, SHOWN).map((t) => (
               <li key={t.id}>
-                <span className={classNames('status-dot is-static', `is-${t.status}`)} aria-label={STATUS_LABEL[t.status]}>
-                  {STATUS_GLYPH[t.status]}
-                </span>
+                <TaskStatusDot plan={plan} task={t} tooltip={false} />
                 {t.title}
               </li>
             ))}
@@ -297,6 +296,7 @@ export function LabelInput({
       onBlur={() => finish(draft)}
       onKeyDown={(e) => {
         e.stopPropagation();
+        if (isComposing(e)) return;
         if (e.key === 'Enter') finish(draft);
         if (e.key === 'Escape') finish(null);
         // Tab finishes the name and stays on the canvas, ready for the next

@@ -300,12 +300,12 @@ test('deleting the open session moves to another one', async () => {
   assert.equal(store.getState().sessionId, 's2');
 });
 
-test('deleting a session forgets the pin hanging off it', async () => {
+test('deleting a session forgets the pin and the folds hanging off it', async () => {
   await boot();
   // Flushed before the click: pinning re-parents the row into the Pinned
   // group, which remounts it and would drop the confirm mid-test.
   await act(async () => {
-    store.set({ pinned: ['s2'] });
+    store.set({ pinned: ['s2'], collapsedTasks: new Map([['s1', ['t1']], ['s2', ['t1']]]) });
   });
 
   await act(async () => {
@@ -317,6 +317,22 @@ test('deleting a session forgets the pin hanging off it', async () => {
 
   // Nothing else will ever clean it up: the session id is gone for good.
   assert.deepEqual(store.getState().pinned, []);
+  assert.deepEqual([...store.getState().collapsedTasks.keys()], ['s1'], "another session's stay");
+});
+
+test('a session a newer Coplan saved says so in the list, and deleting it asks knowing that', async () => {
+  await boot(() => {
+    const now = Date.now();
+    return [summary('s1', 'repo', now), { ...summary('s2', 'other', now - 1000), savedByNewer: true }];
+  });
+  const row = rowFor('s2 title');
+  assert.match(row.textContent ?? '', /saved by a newer Coplan/);
+  assert.doesNotMatch(row.textContent ?? '', /no plan yet/, 'not an empty session');
+  await act(async () => {
+    fireEvent.click(within(row).getByTitle('Delete session'));
+  });
+  assert.match(rowFor('s2 title').textContent ?? '', /Delete permanently, for the newer Coplan too\?/);
+  assert.match(rowFor('s1 title').textContent ?? '', /no plan yet/, 'others as they were');
 });
 
 test('collapsing the sidebar narrows the column it sits in', async () => {

@@ -24,6 +24,7 @@ import {
   proposalStaleness,
   taskCheckWords,
   threadsForRevision,
+  threadWaitsOn,
 } from '../shared/plan.ts';
 import { KIND_NOUN, contentOf, diagramBlocks, diagramChanges, diagramToMarkdown, edgePhrase, hang, indent, nestHeadings } from '../shared/architecture.ts';
 import { BlockList, CHANGES, NOTE, TEMPLATE, blockLines, blocksText, derived, dropAll, field, joinBlocks, setting, type Block, type BlockSource, type ConfigRow } from '../shared/blocks.ts';
@@ -39,8 +40,10 @@ import {
   dependents,
   effectiveBranch,
   hasDependencies,
+  droppedWhole,
   hasSubtasks,
   inheritedDeps,
+  isComplete,
   leafTasks,
   leavesUnder,
   modeFor,
@@ -102,7 +105,7 @@ export function planBlocks(plan: Plan, opts: RenderOptions = {}): Block[] {
   const proposalBlock = () => b.gap().add('proposals', derived('its proposals, and your answers'), proposals, { bookkeeping: true });
   if (opts.changesOnly) {
     const touched = new Set(unread.map((c) => `${c.target.kind}:${c.target.id}`));
-    const threads = plan.threads.filter((t) => !t.resolved && (touched.has(`${t.target.kind}:${t.target.id}`) || lastAuthor(t) === 'user'));
+    const threads = plan.threads.filter((t) => threadWaitsOn(t) === 'claude' || (!t.resolved && touched.has(`${t.target.kind}:${t.target.id}`)));
     if (threads.length) {
       b.gap().add('comments', TEMPLATE, '## Comments waiting on you');
       for (const t of threads) b.push(...threadBlocks(plan, t));
@@ -960,8 +963,11 @@ function exportBriefBlocks(plan: Plan, task: Task, repoBase: string | undefined)
   if (before.length) {
     b.gap().add(`${key}:after`, TEMPLATE, 'It comes after:');
     for (const t of before) {
-      const done = leavesUnder(plan, t.id).every((l) => l.status === 'done');
-      b.add(`${key}:after:${t.id}`, field('task', t.id), `- ${done ? '[x]' : '[ ]'} ${t.id} ${t.title}`);
+      // Settled, as the board's readiness counts it: done, or dropped with a
+      // reason. All of it dropped leaves nothing to build on, and says so.
+      const dropped = droppedWhole(plan, t.id);
+      const mark = dropped ? '[-]' : isComplete(plan, t.id) ? '[x]' : '[ ]';
+      b.add(`${key}:after:${t.id}`, field('task', t.id), `- ${mark} ${t.id} ${t.title}${dropped ? ' (dropped: nothing of it to build on)' : ''}`);
     }
   }
   const after = dependents(plan, task);
@@ -1042,10 +1048,6 @@ export function checksBlocks(project: ProjectConfig, bin?: string, planning = fa
   return b.blocks;
 }
 
-export function checksSection(project: ProjectConfig, bin?: string, planning = false): string[] {
-  return blockLines(checksBlocks(project, bin, planning));
-}
-
 /** How the build's pull requests are opened, as the repository says
  *  (`pullRequests` in .coplan/config.json). */
 export function pullRequestWords(project: ProjectConfig, opts: { pointer?: boolean } = {}): string {
@@ -1100,10 +1102,6 @@ export function instructionBlocks(project: ProjectConfig, point: InstructionPoin
     ],
     cut ? { cut: true } : {},
   ).blocks;
-}
-
-export function instructionLines(project: ProjectConfig, point: InstructionPoint, heading = '## Standing instructions', max = Infinity): string[] {
-  return blockLines(instructionBlocks(project, point, heading, max));
 }
 
 /**
@@ -1376,14 +1374,10 @@ function threadBlocks(plan: Plan, t: Thread, reader: 'claude' | 'outside' = 'cla
   const lines = [`- [${t.id}] on ${describeTarget(plan, t.target)} — ${who(t.author)}: ${hang(t.text, 4)}`];
   for (const r of t.replies) lines.push(`  ↳ ${who(r.author)}: ${hang(r.text, 4)}`);
   const b = new BlockList().add(`thread:${t.id}`, { kind: 'field', target: t.target }, lines);
-  if (hint && reader === 'claude' && lastAuthor(t) === 'user') {
+  if (hint && reader === 'claude' && threadWaitsOn(t) === 'claude') {
     b.add(`thread:${t.id}:reply`, TEMPLATE, `  → reply with harness_plan_edit {ops: [{op: "reply", threadId: "${t.id}", text}]} once you have acted on it`, { bookkeeping: true });
   }
   return b.blocks;
-}
-
-function lastAuthor(t: Thread): 'user' | 'claude' {
-  return t.replies.length ? t.replies[t.replies.length - 1]!.author : t.author;
 }
 
 /**

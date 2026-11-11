@@ -1,12 +1,13 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react';
 import { store, useAgent } from '../../store.ts';
 import { MarkdownField } from '../Editable.tsx';
 import { Markdown } from '../Markdown.tsx';
-import { STATUS_GLYPH, STATUS_LABEL } from '../Progress.tsx';
+import { TaskStatusDot } from '../Progress.tsx';
 import { classNames } from '../../lib/format.ts';
-import { isLocked, outline } from '../../../shared/plan.ts';
+import { isComposing } from '../../lib/keys.ts';
+import { outline } from '../../../shared/plan.ts';
 import { NODE_KINDS, type NodeKind, type Plan, type Target } from '../../../shared/types.ts';
-import { ThreadPanel } from '../Threads.tsx';
+import { ThreadPanel, useCommentsShown } from '../Threads.tsx';
 import { KIND_GLYPH, KIND_HINT, KIND_LABEL, type EdgePatch, type FlowEdge, type FlowNode, type NodePatch } from './shared.ts';
 
 /**
@@ -24,13 +25,100 @@ import { KIND_GLYPH, KIND_HINT, KIND_LABEL, type EdgePatch, type FlowEdge, type 
  * Fields
  * ------------------------------------------------------------------ */
 
-/** One line. Saves on Enter or leaving the field; Escape puts it back. */
-export function CommitInput({
+/**
+ * A field's draft. Once the user types in the field it is theirs: a change
+ * the agent publishes to the same box never replaces what they have not
+ * saved, and `changed` says one came in. Otherwise — out of the field, or in
+ * it without typing — it follows the plan, so a save the plan refused or
+ * reshaped shows as the plan has it, and leaving saves nothing over a push.
+ *
+ * `commit` saves the draft unless it is what the field last saved, or the
+ * plan's text since: Enter then leaving, or leaving then the field going
+ * (a session switch), saves once, however soon the plan answers.
+ */
+function useFieldDraft(value: string, onCommit: (v: string) => void) {
+  const [draft, setDraft] = useState(value);
+  const [editing, setEditing] = useState(false);
+  // Typed in since entering the field, or since that was saved or dropped:
+  // until then the field is the plan's, follows its pushes, and has nothing
+  // to save. Kept in a ref for the handlers, and in state for the warning.
+  const typed = useRef(false);
+  const [typedShown, setTypedShown] = useState(false);
+  const setTyped = (next: boolean) => {
+    typed.current = next;
+    setTypedShown(next);
+  };
+  // The plan's text as the user last saw it (on entering, taking it with
+  // Esc, or saving over it), and what they last saved here, which the plan
+  // will answer with: a push of anything else is what `changed` warns of.
+  const knew = useRef(value);
+  const mine = useRef<string | null>(null);
+  const saved = useRef(value);
+  const live = useRef({ draft, value, onCommit });
+  live.current = { draft, value, onCommit };
+  useEffect(() => {
+    saved.current = value;
+    if (!editing || !typed.current) {
+      setDraft(value);
+      knew.current = value;
+    }
+  }, [value, editing]);
+  const commit = useCallback(() => {
+    // Untyped, the draft is the plan's text, or about to be once this push
+    // renders: nothing to save over it.
+    if (!typed.current) return;
+    typed.current = false;
+    setTypedShown(false);
+    const text = live.current.draft.trim();
+    knew.current = live.current.value;
+    mine.current = text;
+    if (text === saved.current.trim()) return;
+    live.current.onCommit(text);
+    saved.current = text;
+  }, []);
+  // Switching to another box unmounts the field without a blur in some
+  // browsers; whatever was typed is saved all the same.
+  useEffect(() => commit, [commit]);
+  return {
+    draft,
+    type: (next: string) => {
+      setTyped(true);
+      setDraft(next);
+    },
+    changed: editing && typedShown && value !== knew.current && value !== mine.current && draft.trim() !== value.trim(),
+    commit,
+    enter: () => setEditing(true),
+    leave: () => setEditing(false),
+    /** Escape: take the plan's text, the newer one if it changed. */
+    revert: () => {
+      setTyped(false);
+      knew.current = value;
+      setDraft(value);
+    },
+  };
+}
+
+/** Said in the field when the agent changed it while the user was typing. */
+function ChangedWhileTyping() {
+  return (
+    <span className="md-conflict" role="alert">
+      This changed while you were typing. Leaving the field keeps your text; Esc takes the new one.
+    </span>
+  );
+}
+
+/**
+ * A field that saves when you leave it; Escape puts it back. One line also
+ * saves on Enter. A `multiline` one is a paragraph that grows with its
+ * text: Enter is a new line, and ⌘/Ctrl+Enter leaves it, which saves.
+ */
+export function CommitField({
   value,
   label,
   placeholder,
   className,
   maxLength,
+  multiline = false,
   onCommit,
 }: {
   value: string;
@@ -38,107 +126,47 @@ export function CommitInput({
   placeholder?: string;
   className?: string;
   maxLength?: number;
+  multiline?: boolean;
   onCommit: (v: string) => void;
 }) {
-  const [draft, setDraft] = useState(value);
-  const live = useRef({ draft, value, onCommit });
-  live.current = { draft, value, onCommit };
-  useEffect(() => setDraft(value), [value]);
-  // Switching to another box unmounts the field without a blur in some
-  // browsers; whatever was typed is saved all the same.
-  useEffect(
-    () => () => {
-      const { draft, value, onCommit } = live.current;
-      if (draft.trim() !== value) onCommit(draft.trim());
-    },
-    [],
-  );
-  const commit = () => {
-    if (draft.trim() !== value) onCommit(draft.trim());
-  };
-  return (
-    <input
-      className={classNames('input', className)}
-      value={draft}
-      aria-label={label}
-      placeholder={placeholder}
-      maxLength={maxLength}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') commit();
-        if (e.key === 'Escape') {
-          e.stopPropagation();
-          setDraft(value);
-        }
-      }}
-    />
-  );
-}
-
-/**
- * A paragraph. Grows with its text, saves when you leave it or press
- * ⌘/Ctrl+Enter; Escape puts it back. Plain Enter is a new line.
- */
-export function CommitTextArea({
-  value,
-  label,
-  placeholder,
-  minRows = 3,
-  maxLength,
-  onCommit,
-}: {
-  value: string;
-  label: string;
-  placeholder?: string;
-  minRows?: number;
-  maxLength?: number;
-  onCommit: (v: string) => void;
-}) {
-  const [draft, setDraft] = useState(value);
+  const { draft, type, changed, commit, enter, leave, revert } = useFieldDraft(value, onCommit);
   const area = useRef<HTMLTextAreaElement>(null);
-  const live = useRef({ draft, value, onCommit });
-  live.current = { draft, value, onCommit };
-  useEffect(() => setDraft(value), [value]);
-  useEffect(
-    () => () => {
-      const { draft, value, onCommit } = live.current;
-      if (draft.trim() !== value.trim()) onCommit(draft.trim());
-    },
-    [],
-  );
   useLayoutEffect(() => {
     const el = area.current;
     if (!el) return;
     el.style.height = 'auto';
     if (el.scrollHeight) el.style.height = `${Math.min(el.scrollHeight + 2, 420)}px`;
   }, [draft]);
-  const commit = () => {
-    if (draft.trim() !== value.trim()) onCommit(draft.trim());
+  const field = {
+    className: classNames('input', multiline && 'text-area', className),
+    value: draft,
+    'aria-label': label,
+    placeholder,
+    maxLength,
+    onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => type(e.target.value),
+    onFocus: enter,
+    onBlur: () => {
+      commit();
+      leave();
+    },
+    onKeyDown: (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (isComposing(e)) return;
+      if (e.key === 'Enter' && !multiline) commit();
+      if (e.key === 'Enter' && multiline && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        e.currentTarget.blur();
+      }
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        revert();
+      }
+    },
   };
   return (
-    <textarea
-      ref={area}
-      className="input text-area"
-      value={draft}
-      rows={minRows}
-      aria-label={label}
-      placeholder={placeholder}
-      maxLength={maxLength}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-          e.preventDefault();
-          commit();
-          area.current?.blur();
-        }
-        if (e.key === 'Escape') {
-          e.stopPropagation();
-          setDraft(value);
-        }
-      }}
-    />
+    <>
+      {multiline ? <textarea ref={area} rows={3} {...field} /> : <input {...field} />}
+      {changed && <ChangedWhileTyping />}
+    </>
   );
 }
 
@@ -196,11 +224,14 @@ export function NodePanel({
   onRemove,
   onClose,
   commentTarget,
+  diagramId,
 }: {
   node: FlowNode;
   nodes: FlowNode[];
   edges: FlowEdge[];
   plan: Plan;
+  /** The diagram the box is in: names its notes' kept draft. */
+  diagramId: string;
   /** Where comments on this box live, once it is saved. */
   commentTarget?: Target;
   onChange: (patch: NodePatch) => void;
@@ -238,7 +269,7 @@ export function NodePanel({
         </button>
       </header>
 
-      <CommitInput
+      <CommitField
         className="panel-title-input"
         value={node.data.label}
         label="Box label"
@@ -255,14 +286,15 @@ export function NodePanel({
         <span className="field-label">
           On the box <span className="field-aside">a few words: technology or role</span>
         </span>
-        <CommitInput value={node.data.detail ?? ''} label="Box detail" placeholder="e.g. Redis, read-through" maxLength={80} onCommit={(detail) => onChange({ detail })} />
+        <CommitField value={node.data.detail ?? ''} label="Box detail" placeholder="e.g. Redis, read-through" maxLength={80} onCommit={(detail) => onChange({ detail })} />
       </label>
 
       <label className="field">
         <span className="field-label">
           Description <span className="field-aside">shown when hovering ⓘ</span>
         </span>
-        <CommitTextArea
+        <CommitField
+          multiline
           value={node.data.description ?? ''}
           label={`Description of ${node.data.label}`}
           placeholder="What this part does, what it owns, and how other parts talk to it."
@@ -279,6 +311,7 @@ export function NodePanel({
           placeholder="What was decided about this part, and why."
           emptyAction="Add a decision"
           rows={6}
+          draftKey={`notes:${diagramId}/${node.id}`}
           onSave={(notes) => onChange({ notes })}
         />
       </div>
@@ -292,9 +325,7 @@ export function NodePanel({
               if (!task) return null;
               return (
                 <li key={id}>
-                  <span className={classNames('status-dot is-static', `is-${task.status}`)} title={STATUS_LABEL[task.status]} aria-label={STATUS_LABEL[task.status]}>
-                    {STATUS_GLYPH[task.status]}
-                  </span>
+                  <TaskStatusDot plan={plan} task={task} />
                   <button type="button" className="link panel-task" onClick={() => store.focus('task', id)}>
                     {task.title}
                   </button>
@@ -454,7 +485,7 @@ export function EdgePanel({
 
       <label className="field">
         <span className="field-label">What flows along it</span>
-        <CommitInput value={edge.data?.label ?? ''} label="Arrow label" placeholder="e.g. REST, publishes events" maxLength={120} onCommit={(label) => onChange({ label })} />
+        <CommitField value={edge.data?.label ?? ''} label="Arrow label" placeholder="e.g. REST, publishes events" maxLength={120} onCommit={(label) => onChange({ label })} />
       </label>
 
       <div className="field">
@@ -515,8 +546,8 @@ export function EdgePanel({
  * on, and afterwards wherever there are comments to read.
  */
 function PartComments({ plan, target, label }: { plan: Plan | undefined; target: Target; label: string }) {
-  const any = plan?.threads.some((t) => t.target.kind === target.kind && t.target.id === target.id);
-  if (!plan || (isLocked(plan) && !any)) return null;
+  const shown = useCommentsShown(target);
+  if (!plan || !shown) return null;
   return (
     <div className="field">
       <span className="field-label">Comments</span>
@@ -657,9 +688,7 @@ export function ReadOnlyPanel({
             <ul className="panel-tasks">
               {tasks.map((task) => (
                 <li key={task.id}>
-                  <span className={classNames('status-dot is-static', `is-${task.status}`)} title={STATUS_LABEL[task.status]} aria-label={STATUS_LABEL[task.status]}>
-                    {STATUS_GLYPH[task.status]}
-                  </span>
+                  <TaskStatusDot plan={plan} task={task} />
                   <button
                     type="button"
                     className="link panel-task"

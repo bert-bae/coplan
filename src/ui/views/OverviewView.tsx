@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { store, useAgent, usePlan } from '../store.ts';
+import { store, useEdit, useAgent, usePlan } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
-import { CommentToggle, ThreadPanel } from '../components/Threads.tsx';
+import { CommentToggle, ThreadPanel, useCommentsShown } from '../components/Threads.tsx';
 import { Focusable, ItemActions } from '../components/Item.tsx';
 import { ProgressBar } from '../components/Progress.tsx';
 import { scrollBehavior } from '../lib/motion.ts';
@@ -18,8 +18,11 @@ import type { Plan, Section } from '../../shared/types.ts';
  * and each one is a way into the tab that holds the detail.
  */
 export function OverviewView() {
+  const edit = useEdit();
   const plan = usePlan();
+  const generalShown = useCommentsShown({ kind: 'plan', id: '' });
   if (!plan) return null;
+  const designLocked = isDesignLocked(plan);
   return (
     <div className="view-pad doc">
       <Glance plan={plan} />
@@ -35,8 +38,9 @@ export function OverviewView() {
       )}
 
       {/* A confirmed or submitted design reads the same, but every control
-          in it is off. Comments stay open until the plan is submitted. */}
-      <fieldset className="lockable" disabled={isDesignLocked(plan)}>
+          in it is off. Comments stay open until the plan is submitted: a
+          section locks what it says, not its comments (SectionCard). */}
+      <fieldset className="lockable" disabled={designLocked}>
       <Focusable kind="plan" id="summary" className="doc-block" labelledBy="summary-head">
         <h2 id="summary-head" className="doc-label">
           Summary
@@ -46,27 +50,27 @@ export function OverviewView() {
           label="the plan summary"
           placeholder="No summary yet."
           emptyAction="Write one"
-          onSave={(summary) => store.op({ op: 'set_meta', summary })}
+          draftKey="summary"
+          onSave={(summary) => edit({ op: 'set_meta', summary })}
         />
       </Focusable>
+      </fieldset>
 
       {plan.sections.map((section, i) => (
-        <SectionCard key={section.id} section={section} index={i} count={plan.sections.length} />
+        <SectionCard key={section.id} section={section} index={i} count={plan.sections.length} locked={designLocked} />
       ))}
 
-      {!isDesignLocked(plan) && (
+      {!designLocked && (
         <div className="doc-add">
           <AddField
             placeholder="New section title — e.g. Data model, Risks, Out of scope"
             label="New section title"
-            onAdd={(title) => store.op({ op: 'upsert_section', title, body: '' })}
+            onAdd={(title) => edit({ op: 'upsert_section', title, body: '' })}
           />
         </div>
       )}
 
-      </fieldset>
-
-      {(!isLocked(plan) || plan.threads.some((t) => t.target.kind === 'plan')) && (
+      {generalShown && (
         <fieldset className="lockable" disabled={isLocked(plan)}>
           <section className="doc-block" aria-labelledby="general-head">
             <h2 id="general-head" className="doc-label">
@@ -133,7 +137,8 @@ function Glance({ plan }: { plan: Plan }) {
   );
 }
 
-function SectionCard({ section, index, count }: { section: Section; index: number; count: number }) {
+function SectionCard({ section, index, count, locked }: { section: Section; index: number; count: number; locked: boolean }) {
+  const edit = useEdit();
   const [comments, setComments] = useState(false);
   const target = { kind: 'section' as const, id: section.id };
   return (
@@ -144,26 +149,32 @@ function SectionCard({ section, index, count }: { section: Section; index: numbe
           className="section-title"
           value={section.title}
           label="Section title"
-          onSave={(title) => store.op({ op: 'upsert_section', id: section.id, title })}
+          readOnly={locked}
+          onSave={(title) => edit({ op: 'upsert_section', id: section.id, title })}
         />
         <span className="item-id">{section.id}</span>
         <span className="spacer" />
         <CommentToggle target={target} label={section.title} open={comments} onToggle={() => setComments((v) => !v)} />
-        <ItemActions
-          label={section.title}
-          index={index}
-          count={count}
-          onMove={(to) => store.op({ op: 'move_section', id: section.id, index: to })}
-          onRemove={() => store.op({ op: 'remove', kind: 'section', id: section.id })}
-        />
+        {!locked && (
+          <ItemActions
+            label={section.title}
+            index={index}
+            count={count}
+            onMove={(to) => edit({ op: 'move_section', id: section.id, index: to })}
+            onRemove={() => edit({ op: 'remove', kind: 'section', id: section.id })}
+          />
+        )}
       </header>
-      <MarkdownField
-        value={section.body}
-        label={`section "${section.title}"`}
-        rows={8}
-        version={section.rev}
-        onSave={(body, rev) => store.op({ op: 'upsert_section', id: section.id, body, ...(rev !== undefined ? { expect: rev } : {}) })}
-      />
+      <fieldset className="lockable" disabled={locked}>
+        <MarkdownField
+          value={section.body}
+          label={`section "${section.title}"`}
+          rows={8}
+          version={section.rev}
+          draftKey={`section:${section.id}`}
+          onSave={(body, rev) => edit({ op: 'upsert_section', id: section.id, body, ...(rev !== undefined ? { expect: rev } : {}) })}
+        />
+      </fieldset>
       {comments && <ThreadPanel target={target} label={section.title} />}
     </Focusable>
   );

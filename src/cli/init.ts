@@ -5,9 +5,10 @@
  * not a guess to trust; `/coplan-init` has Claude check it against CI.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { parseJsonc } from '../shared/jsonc.ts';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { repoRootOf } from './check.ts';
+import { repoRoot } from '../shared/changes.ts';
 import { DEFAULT_BUILD_SETTINGS } from '../shared/build.ts';
 import { PROJECT_CONFIG_PATH, type CheckHook, type HookStage } from '../shared/project.ts';
 
@@ -24,6 +25,15 @@ const JS = ['*.ts', '*.tsx', '*.js', '*.jsx', '*.mjs', '*.cjs', '*.mts', '*.cts'
 const RUST = ['*.rs', 'Cargo.toml', 'Cargo.lock'];
 const GO = ['*.go', 'go.mod', 'go.sum'];
 const PY = ['*.py', 'pyproject.toml'];
+
+/** Each lockfile and the package manager that writes it, in the order they are believed. */
+const LOCKFILES: [string, string][] = [
+  ['pnpm-lock.yaml', 'pnpm'],
+  ['yarn.lock', 'yarn'],
+  ['bun.lock', 'bun'],
+  ['bun.lockb', 'bun'],
+  ['package-lock.json', 'npm'],
+];
 
 export function detectHooks(root: string): { hooks: Detected; found: string[] } {
   const hooks: Detected = { implement: [], review: [], final: [] };
@@ -42,15 +52,20 @@ export function detectHooks(root: string): { hooks: Detected; found: string[] } 
   const pkg = read('package.json');
   if (pkg) {
     try {
-      const scripts = (JSON.parse(pkg) as { scripts?: Record<string, string> }).scripts ?? {};
-      const pm = existsSync(path.join(root, 'pnpm-lock.yaml'))
-        ? 'pnpm'
-        : existsSync(path.join(root, 'yarn.lock'))
-          ? 'yarn'
-          : existsSync(path.join(root, 'bun.lockb')) || existsSync(path.join(root, 'bun.lock'))
-            ? 'bun'
-            : 'npm';
-      const run = (s: string) => (pm === 'npm' ? (s === 'test' ? 'npm test' : `npm run ${s}`) : `${pm} ${s === 'test' && pm !== 'yarn' ? 'test' : s}`);
+      // Through parseJsonc: a package.json with a byte order mark, which npm reads, is read too.
+      const manifest = parseJsonc(pkg) as { scripts?: Record<string, string>; packageManager?: unknown };
+      const scripts = manifest.scripts ?? {};
+      // The one package.json names in `packageManager` (`pnpm@10.28.0`, the
+      // field Corepack uses), whatever lockfile is there or not yet; else
+      // the lockfile's; else npm.
+      const named = typeof manifest.packageManager === 'string' ? /^(npm|pnpm|yarn|bun)@/.exec(manifest.packageManager)?.[1] : undefined;
+      const locked = LOCKFILES.find(([file]) => existsSync(path.join(root, file)));
+      const pm = named ?? locked?.[1] ?? 'npm';
+      const why = named ? 'packageManager' : (locked?.[0] ?? 'no lockfile');
+      // Always through `run`: a script named like a command of the package
+      // manager's own (yarn check, bun test, pnpm ci) runs that command
+      // instead, and passes or fails without running the script.
+      const run = (s: string) => `${pm} run ${s}`;
       const pick = (names: string[]) => names.find((n) => scripts[n]);
       const typecheck = pick(['typecheck', 'type-check', 'types', 'tsc', 'check:types']);
       const lint = pick(['lint', 'lint:check', 'eslint']);
@@ -64,7 +79,7 @@ export function detectHooks(root: string): { hooks: Detected; found: string[] } 
       if (test) add('review', 'tests', run(test), { timeout: 900 });
       if (check) add('final', check, run(check), { timeout: 1200 });
       else if (build) add('final', 'build', run(build));
-      found.push(`package.json scripts (${pm})`);
+      found.push(`package.json scripts (${pm}, from ${why})`);
     } catch {
       found.push('package.json (unreadable — skipped)');
     }
@@ -168,7 +183,7 @@ ${opts.settings === false ? MANAGED : SETTINGS}  "branches": ${JSON.stringify({ 
 }
 
 export async function runInit(args: string[], cwd = process.cwd()): Promise<number> {
-  const root = repoRootOf(cwd);
+  const root = (await repoRoot(cwd)) ?? cwd;
   const file = path.join(root, PROJECT_CONFIG_PATH);
   const print = args.includes('--print');
   const { hooks, found } = detectHooks(root);

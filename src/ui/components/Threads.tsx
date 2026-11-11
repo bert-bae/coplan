@@ -1,7 +1,10 @@
-import { useState } from 'react';
-import { store, useAgent, usePlan } from '../store.ts';
+import { useRef, useState } from 'react';
+import { useAgent, useEdit, usePlan, useSessionId } from '../store.ts';
+import { keptDraft, useKeptDraft } from '../lib/drafts.ts';
 import { Markdown } from './Markdown.tsx';
+import { isComposing } from '../lib/keys.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
+import { isLocked, threadWaitsOn } from '../../shared/plan.ts';
 import type { Author, Target, Thread } from '../../shared/types.ts';
 
 /**
@@ -19,6 +22,13 @@ export function useThreads(target: Target): Thread[] {
   return (plan?.threads ?? []).filter((t) => t.target.kind === target.kind && t.target.id === target.id);
 }
 
+/** Locked, comments are read, not written: shown only where there are some. */
+export function useCommentsShown(target: Target): boolean {
+  const plan = usePlan();
+  const threads = useThreads(target);
+  return !plan || !isLocked(plan) || threads.length > 0;
+}
+
 /** The speech-bubble toggle that sits in an item's header. */
 export function CommentToggle({
   target,
@@ -32,15 +42,20 @@ export function CommentToggle({
   label: string;
 }) {
   const threads = useThreads(target);
+  const plan = usePlan();
+  const shown = useCommentsShown(target);
+  if (!shown) return null;
   const unresolved = threads.filter((t) => !t.resolved).length;
-  const waiting = threads.some((t) => !t.resolved && lastAuthor(t) === 'claude');
+  const waiting = threads.some((t) => threadWaitsOn(t) === 'user');
+  // Locked, its comments are there to read, not to add to.
+  const verb = plan && isLocked(plan) ? 'Comments' : 'Comment';
   return (
     <button
       type="button"
       className={classNames('comment-toggle', open && 'is-active', unresolved > 0 && 'has-comments', waiting && 'has-reply')}
       aria-expanded={open}
-      title={unresolved ? `${unresolved} open comment(s)` : 'Comment'}
-      aria-label={unresolved ? `${unresolved} open comment(s) on ${label}` : `Comment on ${label}`}
+      title={unresolved ? `${unresolved} open comment(s)` : verb}
+      aria-label={unresolved ? `${unresolved} open comment(s) on ${label}` : `${verb} on ${label}`}
       onClick={onToggle}
     >
       <span aria-hidden="true">💬</span>
@@ -50,10 +65,22 @@ export function CommentToggle({
 }
 
 export function ThreadPanel({ target, label }: { target: Target; label: string }) {
+  const edit = useEdit();
   const threads = useThreads(target);
+  // Saved only once sent; kept (drafts.ts) while being written.
+  const sessionId = useSessionId();
+  const comment = useKeptDraft(sessionId, `comment:${target.kind}:${target.id}`, '', undefined, true);
   const [showResolved, setShowResolved] = useState(false);
-  const open = threads.filter((t) => !t.resolved);
-  const resolved = threads.filter((t) => t.resolved);
+  const shown = useCommentsShown(target);
+  // A submitted plan takes no comments: its threads are there to read.
+  const plan = usePlan();
+  const locked = plan ? isLocked(plan) : false;
+  // A resolved thread with a reply being written to it stays in sight, the
+  // reply with it: sent, it opens the thread again.
+  const writing = (t: Thread) => keptDraft(sessionId, `reply:${t.id}`) !== undefined;
+  const open = threads.filter((t) => !t.resolved || writing(t));
+  const resolved = threads.filter((t) => t.resolved && !open.includes(t));
+  if (!shown) return null;
 
   return (
     <div className="threads" aria-label={`Comments on ${label}`}>
@@ -66,18 +93,26 @@ export function ThreadPanel({ target, label }: { target: Target; label: string }
         </button>
       )}
       {showResolved && resolved.map((t) => <ThreadView key={t.id} thread={t} />)}
-      <Composer
-        placeholder={open.length ? 'Add another comment…' : `Comment on ${label}…`}
-        label={`New comment on ${label}`}
-        onSend={(text) => store.op({ op: 'comment', target, text })}
-      />
+      {!locked && (
+        <Composer
+          text={comment.draft}
+          setText={comment.setDraft}
+          placeholder={open.length ? 'Add another comment…' : `Comment on ${label}…`}
+          label={`New comment on ${label}`}
+          onSend={(text) => edit({ op: 'comment', target, text })}
+        />
+      )}
     </div>
   );
 }
 
 function ThreadView({ thread }: { thread: Thread }) {
+  const edit = useEdit();
   const agent = useAgent();
-  const [replying, setReplying] = useState(false);
+  // A reply left half written (its view went) opens again with it.
+  const reply = useKeptDraft(useSessionId(), `reply:${thread.id}`, '', undefined);
+  const plan = usePlan();
+  const locked = plan ? isLocked(plan) : false;
   return (
     <article className={classNames('thread', thread.resolved && 'is-resolved')}>
       <Entry author={thread.author} text={thread.text} ts={thread.ts} />
@@ -85,27 +120,29 @@ function ThreadView({ thread }: { thread: Thread }) {
         <Entry key={r.id} author={r.author} text={r.text} ts={r.ts} reply />
       ))}
       <div className="thread-actions">
-        {!thread.resolved && (
-          <button type="button" className="link" onClick={() => setReplying((v) => !v)}>
+        {!thread.resolved && !locked && !reply.editing && (
+          // Opens it: Cancel or Escape closes it, and drops what was written.
+          // Gone while it is open, as an editor's Edit is.
+          <button type="button" className="link" onClick={reply.begin}>
             Reply
           </button>
         )}
-        <button type="button" className="link" onClick={() => void store.op({ op: 'resolve', threadId: thread.id, resolved: !thread.resolved })}>
-          {thread.resolved ? 'Reopen' : 'Resolve'}
-        </button>
-        {!thread.resolved && lastAuthor(thread) === 'user' && <span className="muted">{agent.name} sees this when it next reads the plan, or with <em>Request revisions</em></span>}
+        {!locked && (
+          <button type="button" className="link" onClick={() => void edit({ op: 'resolve', threadId: thread.id, resolved: !thread.resolved })}>
+            {thread.resolved ? 'Reopen' : 'Resolve'}
+          </button>
+        )}
+        {threadWaitsOn(thread) === 'claude' && <span className="muted">{agent.name} sees this when it next reads the plan, or with <em>Request revisions</em></span>}
       </div>
-      {replying && (
+      {reply.editing && !locked && (
         <Composer
+          text={reply.draft}
+          setText={reply.setDraft}
           placeholder="Reply…"
           label="Reply"
           autoFocus
-          onSend={async (text) => {
-            const ok = await store.op({ op: 'reply', threadId: thread.id, text });
-            if (ok) setReplying(false);
-            return ok;
-          }}
-          onCancel={() => setReplying(false)}
+          onSend={(text) => reply.save(() => edit({ op: 'reply', threadId: thread.id, text }))}
+          onCancel={reply.close}
         />
       )}
     </article>
@@ -130,19 +167,25 @@ export function AuthorBadge({ author }: { author: Author }) {
 }
 
 function Composer({
+  text,
+  setText,
   placeholder,
   label,
   onSend,
   autoFocus,
   onCancel,
 }: {
+  /** What is written, held (and kept) by the view that shows it. */
+  text: string;
+  setText: (next: string) => void;
   placeholder: string;
   label: string;
   onSend: (text: string) => Promise<boolean>;
   autoFocus?: boolean;
   onCancel?: () => void;
 }) {
-  const [text, setText] = useState('');
+  const latest = useRef(text);
+  latest.current = text;
   const [busy, setBusy] = useState(false);
   const send = async () => {
     const value = text.trim();
@@ -150,8 +193,13 @@ function Composer({
     setBusy(true);
     const ok = await onSend(value);
     setBusy(false);
-    if (ok) setText('');
+    // Sent: cleared, unless more was typed while it went.
+    if (ok && latest.current.trim() === value) setText('');
   };
+  const cancel = onCancel && (() => {
+    setText('');
+    onCancel();
+  });
   return (
     <div className="thread-composer">
       <textarea
@@ -164,21 +212,22 @@ function Composer({
         autoFocus={autoFocus}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
+          if (isComposing(e)) return;
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
             e.preventDefault();
             void send();
           }
-          if (e.key === 'Escape' && onCancel) {
+          if (e.key === 'Escape' && cancel) {
             e.stopPropagation();
-            onCancel();
+            cancel();
           }
         }}
       />
       <div className="thread-composer-foot">
         <span className="muted">⌘/Ctrl+Enter</span>
         <span className="spacer" />
-        {onCancel && (
-          <button type="button" className="btn btn-sm btn-ghost" onClick={onCancel}>
+        {cancel && (
+          <button type="button" className="btn btn-sm btn-ghost" onClick={cancel}>
             Cancel
           </button>
         )}
@@ -188,8 +237,4 @@ function Composer({
       </div>
     </div>
   );
-}
-
-function lastAuthor(t: Thread): Author {
-  return t.replies.length ? t.replies[t.replies.length - 1]!.author : t.author;
 }

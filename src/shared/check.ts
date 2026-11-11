@@ -10,7 +10,7 @@
  */
 
 import { SESSION_BRANCH, ancestorsOf, branchPlan, hasSubtasks } from './build.ts';
-import { planPhase } from './plan.ts';
+import { planPhase, threadsForRevision } from './plan.ts';
 import type { DiagramNode, Plan, Target, Task } from './types.ts';
 
 export const GAP_RULES = [
@@ -118,10 +118,12 @@ export function planGaps(plan: Plan, severities: GapSeverities = {}): Gap[] {
     }
   }
 
-  // The user asked something and nobody answered.
-  for (const th of plan.threads) {
-    const last = th.replies.at(-1)?.author ?? th.author;
-    if (!th.resolved && last === 'user') add('comment-unanswered', th.target, `Comment ${th.id} from the user has no answer yet: "${th.text.slice(0, 80)}${th.text.length > 80 ? '…' : ''}"`);
+  // The user asked something and nobody answered: what Request revisions
+  // would carry to the agent. Quoted is what the user said last, which in a
+  // proposal's thread is not what opened it.
+  for (const th of threadsForRevision(plan)) {
+    const said = th.replies.at(-1)?.text ?? th.text;
+    add('comment-unanswered', th.target, `Comment ${th.id} from the user has no answer yet: "${said.slice(0, 80)}${said.length > 80 ? '…' : ''}"`);
   }
   // What holds the sign-off first; a rule turned off is not shown at all.
   return gaps

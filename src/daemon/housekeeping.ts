@@ -204,7 +204,7 @@ function touchedAt(dir: string): number {
   return latest;
 }
 
-/** `.state.<pid>.tmp` and `.diff.<pid>.tmp` that never got renamed. */
+/** `.state.<pid>.tmp` files that never got renamed. */
 function partialWrites(now: number): Candidate[] {
   const root = paths.sessionsDir();
   if (!existsSync(root)) return [];
@@ -215,7 +215,7 @@ function partialWrites(now: number): Candidate[] {
     const dir = path.join(root, entry.name);
     for (const file of safeReaddir(dir)) {
       if (!file.isFile()) continue;
-      if (!/^\.(state|diff)\..*\.tmp$/.test(file.name)) continue;
+      if (!/^\.state\..*\.tmp$/.test(file.name)) continue;
       const full = path.join(dir, file.name);
       if (now - mtimeOf(full) < PARTIAL_WRITE_MS) continue;
       out.push({ path: full, bytes: sizeOf(full) });

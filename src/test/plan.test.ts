@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, submitPlan, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, confirmDesign, countTasks, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import { previewProposal } from '../shared/proposals.ts';
-import type { Plan, PlanInput, PlanOp } from '../shared/types.ts';
+import type { DiagramNodeInput, Plan, PlanInput, PlanOp } from '../shared/types.ts';
 
 /**
  * The plan document: publishing, editing from either side, and the change
@@ -103,6 +103,30 @@ test('a republish keeps comments and statuses on surviving ids', () => {
   assert.equal(next.revision, 2);
 });
 
+/** How many times `run` copies a plan (structuredClone). */
+function countCopies(run: () => void): number {
+  const real = globalThis.structuredClone;
+  let n = 0;
+  globalThis.structuredClone = ((value: unknown, options?: StructuredSerializeOptions) => (n++, real(value, options))) as typeof real;
+  try {
+    run();
+  } finally {
+    globalThis.structuredClone = real;
+  }
+  return n;
+}
+
+test('removals do not copy the plan, each one, to say what a comment left behind was on', () => {
+  // On a big plan, a batch of them held the daemon close to a second.
+  let plan = publishPlan(null, { title: 'x', tasks: ['a', 'b', 'c', 'd', 'e'].map((id) => ({ id, title: id.toUpperCase() })) }, 1_000).plan;
+  plan = applyOps(plan, ['a', 'b', 'c', 'd'].map((id) => ({ op: 'comment', target: { kind: 'task', id }, text: `on ${id}` })), 'user').plan;
+  const removing = (ids: string[]) => () => applyOps(plan, ids.map((id) => ({ op: 'remove', kind: 'task', id })), 'user');
+  assert.equal(countCopies(removing(['a', 'b', 'c', 'd'])), countCopies(removing(['a'])));
+  // Each comment still says, by its title, what it was on.
+  const after = applyOps(plan, ['a', 'b', 'c', 'd'].map((id) => ({ op: 'remove', kind: 'task', id })), 'user').plan;
+  assert.deepEqual(after.threads.map((t) => t.text), ['A', 'B', 'C', 'D'].map((title) => `(on removed task "${title}") on ${title.toLowerCase()}`));
+});
+
 test('a comment on a removed item is kept, re-homed on the plan', () => {
   let plan = applyOps(fresh(), [{ op: 'comment', target: { kind: 'task', id: 't4' }, text: 'drop this?' }], 'user').plan;
   plan = applyOps(plan, [{ op: 'remove', kind: 'task', id: 't4' }], 'user').plan;
@@ -145,6 +169,16 @@ test('a batch is all or nothing', () => {
     /Edit 2 \(remove\): No task "t99"/,
   );
   assert.equal(before.tasks.length, 4, 'the plan passed in is untouched');
+});
+
+test("the user's reply to a resolved thread opens it again, for the agent to hear", () => {
+  let plan = applyOps(fresh(), [{ op: 'comment', target: { kind: 'task', id: 't4' }, text: 'Which client?' }], 'user').plan;
+  const id = plan.threads[0]!.id;
+  plan = applyOps(plan, [{ op: 'resolve', threadId: id, resolved: true }], 'claude').plan;
+  assert.equal(applyOps(plan, [{ op: 'reply', threadId: id, text: 'Done, thanks' }], 'claude').plan.threads[0]!.resolved, true, "the agent's leaves it as it is");
+  plan = applyOps(plan, [{ op: 'reply', threadId: id, text: 'Not quite: the pooled one' }], 'user').plan;
+  assert.equal(plan.threads[0]!.resolved, false);
+  assert.equal(threadWaitsOn(plan.threads[0]!), 'claude');
 });
 
 test('ids are never reused, even after a delete', () => {
@@ -304,6 +338,44 @@ test('a save made against an old revision is refused, naming who changed it', ()
   );
   const ok = applyOps(plan, [{ op: 'upsert_section', id: 's1', body: 'my edit', expect: plan.sections[0]!.rev }], 'user').plan;
   assert.equal(ok.sections[0]!.body, 'my edit');
+});
+
+test('a save made against a revision the item never reached says so, and is not saved', () => {
+  // A tab holding a plan since replaced, or a client's mistake: nobody changed anything.
+  const plan = applyOps(fresh(), [{ op: 'upsert_task', id: 't4', detail: 'Claude wrote this.' }], 'claude').plan;
+  const ahead = (rev: number | undefined) => (rev ?? 1) + 5;
+  const edits: [string, PlanOp, RegExp][] = [
+    ['section', { op: 'upsert_section', id: 's1', body: 'stale', expect: ahead(plan.sections[0]!.rev) }, /^Section "[^"]+" is at revision \d+, not \d+: this edit was made against a version it never had/],
+    ['diagram', { op: 'upsert_node', diagramId: plan.diagrams[0]!.id, id: 'db', label: 'stale', expect: ahead(plan.diagrams[0]!.rev) }, /^Diagram "[^"]+" is at revision \d+, not \d+/],
+    ['diagram caption', { op: 'upsert_diagram', id: plan.diagrams[0]!.id, caption: 'stale', expect: ahead(plan.diagrams[0]!.rev) }, /^Diagram "[^"]+" is at revision \d+, not \d+/],
+    ['task', { op: 'upsert_task', id: 't4', detail: 'stale', expect: ahead(plan.tasks.find((t) => t.id === 't4')!.rev) }, /^Task "Wire into API" is at revision 2, not 7/],
+    // Nor one below any it can have.
+    ['section at 0', { op: 'upsert_section', id: 's1', body: 'stale', expect: 0 }, /^Section "[^"]+" is at revision \d+, not 0/],
+    ['task at 1.5', { op: 'upsert_task', id: 't4', detail: 'stale', expect: 1.5 }, /^Task "Wire into API" is at revision 2, not 1\.5/],
+  ];
+  for (const [what, op, said] of edits) {
+    assert.throws(() => applyOps(plan, [op], 'user'), (err: Error) => said.test(err.message) && /latest version/.test(err.message) && !/changed by/.test(err.message), what);
+  }
+  // The agent is told to read the plan again.
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_task', id: 't4', detail: 'stale', expect: 9 }], 'claude'), /is at revision 2, not 9: .*harness_plan_read/);
+});
+
+test("a diagram conflict names who changed it, its links included, and tells the agent to read again", () => {
+  // The user links a box; Claude, having read it, removes the task: the box's links change under the canvas.
+  let plan = read(applyOps(linkedPlan(), [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t2'] }], 'user').plan);
+  const canvas = { rev: plan.diagrams[0]!.rev, nodes: structuredClone(plan.diagrams[0]!.nodes) };
+  plan = applyOps(plan, [{ op: 'remove', kind: 'task', id: 't1' }], 'claude').plan;
+  assert.throws(
+    () => applyOps(plan, [{ op: 'upsert_diagram', id: 'd1', nodes: canvas.nodes, edges: [], expect: canvas.rev }], 'user'),
+    /Diagram "Arch" was changed by Claude while this edit was open, so it was not saved\. It now shows the latest version/,
+  );
+  // The user adds a box; Claude's box edit, on the revision it read, is told who, and what to do.
+  const read1 = linkedPlan();
+  const boxed = read(applyOps(read1, [{ op: 'upsert_node', diagramId: 'd1', id: 'c', label: 'C' }], 'user').plan);
+  assert.throws(
+    () => applyOps(boxed, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', label: 'Gateway', expect: read1.diagrams[0]!.rev }], 'claude'),
+    /Diagram "Arch" was changed by the user while this edit was open, so it was not saved\. Read the plan again \(harness_plan_read\)/,
+  );
 });
 
 test('every change to a diagram moves its revision; a no-op does not', () => {
@@ -469,6 +541,18 @@ test("the user's own quick successive saves never conflict with each other, and 
   const rev = plan.tasks.find((t) => t.id === 't4')!.rev;
   plan = applyOps(plan, [{ op: 'upsert_task', id: 't4', status: 'in_progress', note: 'started' }], 'claude', undefined, { tracking: true }).plan;
   assert.equal(plan.tasks.find((t) => t.id === 't4')!.rev, rev, 'a status report does not move the revision');
+});
+
+test("the agent's progress note is not saved over by the user's note editor from before it", () => {
+  const plan = fresh();
+  const opened = { rev: plan.tasks.find((t) => t.id === 't4')!.rev ?? 1, note: plan.tasks.find((t) => t.id === 't4')!.note ?? '' };
+  const reported = applyOps(plan, [{ op: 'upsert_task', id: 't4', status: 'blocked', note: 'Blocked: DB creds missing' }], 'claude', undefined, { tracking: true }).plan;
+  const mine: PlanOp = { op: 'upsert_task', id: 't4', note: 'my older note', noteWas: opened.note, expect: opened.rev };
+  assert.throws(() => applyOps(reported, [mine], 'user'), /The note of task "Wire into API" was changed while this edit was open/);
+  // Made on the note as it is now, it goes in; and the task's other editors are not held up by it.
+  const ok = applyOps(reported, [{ ...mine, noteWas: 'Blocked: DB creds missing' }], 'user').plan;
+  assert.equal(ok.tasks.find((t) => t.id === 't4')?.note, 'my older note');
+  assert.equal(applyOps(reported, [{ op: 'upsert_task', id: 't4', title: 'Wire it in', expect: opened.rev }], 'user').plan.tasks.find((t) => t.id === 't4')?.title, 'Wire it in');
 });
 
 test("Claude republishing a task with new content moves its revision; unchanged tasks keep theirs", () => {
@@ -820,4 +904,448 @@ test('proposals survive a reload; one that lost its edits does not', () => {
   assert.equal(normalizePlan(raw as unknown as Parameters<typeof normalizePlan>[0], 'x').proposals?.length, 1);
   (raw.proposals![0] as unknown as Record<string, unknown>)['ops'] = 'gone';
   assert.equal(normalizePlan(raw as unknown as Parameters<typeof normalizePlan>[0], 'x').proposals, undefined);
+});
+
+/* An edit of Claude's is refused when it would overwrite a change of the
+ * user's it has not read: every item it changes counts, not only the one it names. */
+
+function linkedPlan(): Plan {
+  return publishPlan(null, {
+    title: 'x',
+    tasks: [{ id: 't1', title: 'API', subtasks: [{ id: 't2', title: 'Routes' }] }, { id: 't3', title: 'UI' }, { id: 't4', title: 'Docs' }],
+    diagrams: [{ id: 'd1', title: 'Arch', nodes: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }], edges: [] }],
+  }, 1_000).plan;
+}
+const UNREAD = /The user changed .* since you last read the plan, so this edit was not applied/;
+const read = (plan: Plan) => {
+  const next = structuredClone(plan);
+  markReadByClaude(next);
+  return next;
+};
+
+test("a task's builds cannot drop a box link the user just made, unread", () => {
+  const plan = applyOps(linkedPlan(), [{ op: 'upsert_node', diagramId: 'd1', id: 'b', taskIds: ['t3'] }], 'user').plan;
+  // Replacing t3's links with box a would take away the user's link to b.
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_task', id: 't3', builds: ['a'] }], 'claude'), UNREAD);
+  const after = applyOps(read(plan), [{ op: 'upsert_task', id: 't3', builds: ['a'] }], 'claude').plan;
+  assert.deepEqual(after.diagrams[0]!.nodes.map((n) => [n.id, n.taskIds ?? []]), [['a', ['t3']], ['b', []]], 'read first, then relink');
+});
+
+test("removing a task cannot take a subtask, a dependency or a box link the user just changed, unread", () => {
+  const cases: [string, PlanOp][] = [
+    ['a subtask the user wrote on', { op: 'upsert_task', id: 't2', detail: 'Must use REST — a legal requirement' }],
+    ['a dependency the user added', { op: 'upsert_task', id: 't4', dependsOn: ['t2'] }],
+    ['a box the user linked', { op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t2'] }],
+  ];
+  for (const [what, edit] of cases) {
+    const plan = applyOps(linkedPlan(), [edit], 'user').plan;
+    assert.throws(() => applyOps(plan, [{ op: 'remove', kind: 'task', id: 't1' }], 'claude'), UNREAD, what);
+    assert.deepEqual(applyOps(read(plan), [{ op: 'remove', kind: 'task', id: 't1' }], 'claude').plan.tasks.map((t) => t.id), ['t3', 't4'], `${what}: read first, then remove`);
+  }
+  // A change elsewhere does not hold it up.
+  const elsewhere = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', detail: 'unrelated' }], 'user').plan;
+  assert.deepEqual(applyOps(elsewhere, [{ op: 'remove', kind: 'task', id: 't1' }], 'claude').plan.tasks.map((t) => t.id), ['t3', 't4']);
+});
+
+test("an unread change of the user's is held to however many changes come after it, the log trimmed or not", () => {
+  const edited = () =>
+    applyOps(linkedPlan(), [
+      { op: 'upsert_task', id: 't3', detail: 'Must be accessible: a legal requirement', note: 'Creds are in the vault' },
+      { op: 'move_task', id: 't4', parentId: 't1', index: 1 },
+    ], 'user').plan;
+  const held = (plan: Plan, why: string) => {
+    assert.throws(() => applyOps(plan, [{ op: 'upsert_task', id: 't3', detail: 'Claude text' }], 'claude'), UNREAD, why);
+    assert.throws(() => applyOps(plan, [{ op: 'upsert_task', id: 't3', status: 'blocked', note: 'Blocked' }], 'claude', undefined, { tracking: true }), /changed the note of task "UI"/, why);
+    assert.throws(() => applyOps(plan, [{ op: 'remove', kind: 'task', id: 't1' }], 'claude'), /moved task "Docs"/, why);
+    assert.doesNotThrow(() => applyOps(plan, [{ op: 'upsert_task', id: 't2', detail: 'Its own' }], 'claude'), why);
+    assert.doesNotThrow(() => applyOps(read(plan), [{ op: 'upsert_task', id: 't3', detail: 'Claude text' }], 'claude'), `${why}: once read`);
+  };
+  // More than the log keeps after them: the user's own, or the agent's (its progress, its comments).
+  let byUser = edited();
+  for (let i = 0; i < 500; i++) byUser = applyOps(byUser, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: `note ${i}` }], 'user').plan;
+  held(byUser, "the user's");
+  let byAgent = edited();
+  for (let i = 0; i < 500; i++) byAgent = applyOps(byAgent, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: `note ${i}` }], 'claude').plan;
+  byAgent = applyOps(byAgent, [{ op: 'upsert_task', id: 't2', status: 'in_progress' }], 'claude', undefined, { tracking: true }).plan;
+  assert.ok(byAgent.changes.some((c) => c.author === 'user' && c.target.id === 't3'), 'its change is kept in the log');
+  held(byAgent, "the agent's");
+  // A log an earlier build trimmed: all that Claude read is compared.
+  const trimmed = edited();
+  trimmed.changes = [];
+  const gap = applyOps(trimmed, [{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'later' }], 'user').plan;
+  assert.ok(gap.changes[0]!.seq > gap.claudeReadSeq + 1);
+  held(gap, 'trimmed');
+});
+
+test("the agent's progress note cannot go over a note of the user's it has not read", () => {
+  const report: PlanOp = { op: 'upsert_task', id: 't3', status: 'blocked', note: 'Blocked: DB creds missing' };
+  const track = (plan: Plan) => applyOps(plan, [report], 'claude', undefined, { tracking: true }).plan;
+  const noted = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', note: 'Creds are in the vault' }], 'user').plan;
+  assert.throws(() => track(noted), /The user changed the note of task "UI" since you last read the plan/);
+  assert.equal(track(read(noted)).tasks.find((t) => t.id === 't3')?.note, 'Blocked: DB creds missing', 'read first, then report');
+  // Its progress alone goes through, and so does a note when what the user changed is not the note.
+  assert.equal(applyOps(noted, [{ op: 'upsert_task', id: 't3', status: 'blocked' }], 'claude', undefined, { tracking: true }).plan.tasks.find((t) => t.id === 't3')?.status, 'blocked');
+  const titled = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', title: 'UI, again' }], 'user').plan;
+  assert.equal(track(titled).tasks.find((t) => t.id === 't3')?.note, 'Blocked: DB creds missing');
+  // Nor when it says what the user wrote: nothing of theirs goes.
+  const same: PlanOp = { op: 'upsert_task', id: 't3', status: 'blocked', note: 'Creds are in the vault' };
+  assert.equal(applyOps(noted, [same], 'claude', undefined, { tracking: true }).plan.tasks.find((t) => t.id === 't3')?.status, 'blocked');
+  // With no record of what Claude read, a note the user touched counts as changed.
+  const unrecorded = structuredClone(linkedPlan());
+  delete unrecorded.claudeBaseline;
+  assert.throws(() => track(applyOps(unrecorded, [{ op: 'upsert_task', id: 't3', note: 'Creds are in the vault' }], 'user').plan), /changed the note of task "UI"/);
+});
+
+test('removing a task cannot take one the user just moved under it, unread', () => {
+  const ids = (plan: Plan) => plan.tasks.map((t) => t.id);
+  const remove: PlanOp = { op: 'remove', kind: 'task', id: 't1' };
+  // The user moves UI under Routes, inside API: removing API would take it.
+  const plan = applyOps(linkedPlan(), [{ op: 'move_task', id: 't3', parentId: 't2', index: 0 }], 'user').plan;
+  assert.throws(() => applyOps(plan, [remove], 'claude'), /The user moved task "UI" since you last read the plan, so this edit was not applied.* Removing a task takes its subtasks/);
+  assert.deepEqual(ids(applyOps(read(plan), [remove], 'claude').plan), ['t4'], 'read first, and it goes with it knowingly');
+  const andMore = applyOps(plan, [{ op: 'upsert_task', id: 't4', detail: 'unrelated' }], 'user').plan;
+  assert.throws(() => applyOps(andMore, [remove], 'claude'), /moved task "UI"/, 'whatever else the user changed meanwhile');
+  // A move is not an edit of what moved: Claude may still edit it.
+  assert.equal(applyOps(plan, [{ op: 'upsert_task', id: 't3', title: 'UI, again' }], 'claude').plan.tasks.find((t) => t.id === 't3')?.title, 'UI, again');
+  // Moved back out, nothing of the user's is taken.
+  const back = applyOps(plan, [{ op: 'move_task', id: 't3', parentId: null, index: 1 }], 'user').plan;
+  assert.deepEqual(ids(applyOps(back, [remove], 'claude').plan), ['t3', 't4']);
+  // Nor when a subtask moved out and back, or about inside what is removed: it was there when Claude read it.
+  const outAndBack = applyOps(linkedPlan(), [
+    { op: 'move_task', id: 't2', parentId: null, index: 0 },
+    { op: 'move_task', id: 't2', parentId: 't1', index: 0 },
+  ], 'user').plan;
+  assert.deepEqual(ids(applyOps(outAndBack, [remove], 'claude').plan), ['t3', 't4']);
+  const deeper = read(applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't5', title: 'Auth', parentId: 't1' }], 'user').plan);
+  const within = applyOps(deeper, [{ op: 'move_task', id: 't2', parentId: 't5', index: 0 }], 'user').plan;
+  assert.deepEqual(ids(applyOps(within, [remove], 'claude').plan), ['t3', 't4']);
+});
+
+test('the guard follows the batch: a task moved under one being removed goes with it, so it counts', () => {
+  const plan = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', detail: 'the user wrote this' }], 'user').plan;
+  assert.throws(
+    () => applyOps(plan, [{ op: 'move_task', id: 't3', parentId: 't1', index: 0 }, { op: 'remove', kind: 'task', id: 't1' }], 'claude'),
+    /Edit 2 \(remove\): The user changed task "UI" since you last read the plan.* Removing a task takes its subtasks/,
+  );
+});
+
+test('a proposal is guarded as a batch is: a task its edits move under one it removes goes with it, so it counts', () => {
+  const plan = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', detail: 'the user wrote this' }], 'user').plan;
+  const ops: PlanOp[] = [{ op: 'move_task', id: 't3', parentId: 't1', index: 0 }, { op: 'remove', kind: 'task', id: 't1' }];
+  assert.throws(() => applyOps(plan, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops }], 'claude'), /Proposed edit 2 \(remove\): The user changed task "UI" since you last read the plan/);
+  assert.equal(applyOps(read(plan), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops }], 'claude').plan.proposals?.length, 1, 'read first, then propose');
+  // What a proposal cannot carry is said first, as for any proposal.
+  const progress: PlanOp = { op: 'upsert_task', id: 't3', detail: 'x', status: 'done' };
+  assert.throws(() => applyOps(plan, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [progress] }], 'claude'), /Proposed edit 1 \(upsert_task\): .*harness_task_update/);
+});
+
+test("builds is held to the links it would really change: an unlink undone counts, a restated link does not", () => {
+  // The user unlinks t3 from b; builds naming b again (however it is spelt) would undo that.
+  let plan = applyOps(linkedPlan(), [{ op: 'upsert_node', diagramId: 'd1', id: 'b', taskIds: ['t3'] }], 'user').plan;
+  plan = read(plan);
+  plan = applyOps(plan, [{ op: 'upsert_node', diagramId: 'd1', id: 'b', taskIds: [] }], 'user').plan;
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_task', id: 't3', builds: [' b'] }], 'claude'), /which of that diagram's boxes link it/);
+  // An unrelated change in the diagram does not hold up builds that change no link there.
+  let other = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', builds: ['a'] }], 'claude').plan;
+  other = applyOps(other, [{ op: 'upsert_node', diagramId: 'd1', id: 'b', label: 'Renamed' }], 'user').plan;
+  const after = applyOps(other, [{ op: 'upsert_task', id: 't3', title: 'UI, again', builds: ['a'] }], 'claude').plan;
+  assert.equal(after.tasks.find((t) => t.id === 't3')?.title, 'UI, again');
+});
+
+test('the unread guard does not copy the plan for each builds edit', () => {
+  // Working out which links a builds would change copied the plan: on a big
+  // plan, a batch of them held the daemon for half a second. Counted as
+  // copies: four make no more than one edit with no builds, with nothing
+  // unread or with a change of the user's elsewhere.
+  const copies = (plan: Plan, ops: PlanOp[]) => countCopies(() => applyOps(plan, ops, 'claude'));
+  const elsewhere = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't4', detail: 'the user wrote this' }], 'user').plan;
+  const builds: PlanOp[] = ['t1', 't2', 't3', 't4'].map((id) => ({ op: 'upsert_task', id, builds: ['a'] }));
+  for (const plan of [linkedPlan(), elsewhere]) assert.equal(copies(plan, builds), copies(plan, [{ op: 'upsert_task', id: 't1', title: 'API, again' }]));
+});
+
+test('handing over the build prompt is not a read of what the user did after submitting', () => {
+  const proposed = applyOps(publishPlan(null, { title: 'x', tasks: [{ id: 't1', title: 'Build API' }] }, 1_000).plan, [
+    { op: 'propose', title: 'Add cache', reason: 'faster', ops: [{ op: 'upsert_task', title: 'Cache' }] },
+  ], 'claude').plan;
+  for (const reload of [false, true]) {
+    let plan = submitPlan(proposed, { target: 'session', prompt: 'build it' }, 2_000);
+    // The daemon may restart between the sign-off and its delivery.
+    if (reload) plan = normalizePlan(JSON.parse(JSON.stringify(plan)) as Parameters<typeof normalizePlan>[0], 'x');
+    plan = applyOps(plan, [{ op: 'reject_proposal', id: 'p1', note: 'No cache: we must stay stateless' }], 'user').plan;
+    plan = markDelivered(plan, 3_000);
+    assert.ok(plan.submission!.deliveredAt, 'delivered');
+    assert.deepEqual(unreadByClaude(plan).map((c) => c.summary), ['rejected proposal p1 "Add cache": No cache: we must stay stateless'], `reload: ${reload}`);
+    assert.match(renderPlan(plan, { changesOnly: true }), /No cache: we must stay stateless/, 'the agent is shown the reason when it reads');
+  }
+  // A plan submitted before the sign-off's log position was recorded: by the clock.
+  const legacy = submitPlan(proposed, { target: 'session', prompt: 'build it' }, 2_000);
+  delete legacy.submission!.seq;
+  const rejected = applyOps(legacy, [{ op: 'reject_proposal', id: 'p1', note: 'No' }], 'user', 2_500).plan;
+  assert.equal(unreadByClaude(markDelivered(rejected, 3_000)).length, 1, 'a legacy submission too');
+  // With nothing after the sign-off, the prompt it carried is the agent's read, as before.
+  const quiet = markDelivered(submitPlan(proposed, { target: 'session', prompt: 'build it' }, 2_000), 3_000);
+  assert.deepEqual(unreadByClaude(quiet), []);
+  // The design's hand-over works the same way.
+  const design = applyOps(confirmDesign(proposed, { prompt: 'make tasks' }, 2_000), [{ op: 'reject_proposal', id: 'p1', note: 'No' }], 'user').plan;
+  assert.equal(unreadByClaude(markDesignDelivered(design, 3_000)).length, 1);
+});
+
+/* A proposal is checked on accept against everything it would change, as
+ * an edit is: what the user changed since it was made makes it out of date. */
+
+function proposing(op: PlanOp): Plan {
+  return applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [op] }], 'claude').plan;
+}
+const accept = (plan: Plan) => applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user').plan;
+const STALE = /Proposal p1 is out of date/;
+
+test("a proposal's edits are held to the revision Claude read as its own edits are", () => {
+  const opened = linkedPlan().tasks.find((t) => t.id === 't3')!.rev ?? 1;
+  // The user rewrote t3 after Claude's read; Claude reads again, but proposes on what it read first.
+  const plan = read(applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', detail: 'Must be accessible: a legal requirement' }], 'user').plan);
+  const stale: PlanOp = { op: 'upsert_task', id: 't3', detail: 'Claude text', expect: opened };
+  assert.throws(() => applyOps(plan, [stale], 'claude'), /Task "UI" was changed by the user while this edit was open/);
+  assert.throws(
+    () => applyOps(plan, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [stale] }], 'claude'),
+    /would not apply to the plan as it is: Task "UI" was changed by the user while this edit was open.*harness_plan_read/,
+    'proposed, as made directly',
+  );
+  // Claude's own edit since is no conflict, proposed or not.
+  const own = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't3', detail: 'Claude first' }], 'claude').plan;
+  const next: PlanOp = { op: 'upsert_task', id: 't3', detail: 'Claude second', expect: opened };
+  assert.doesNotThrow(() => applyOps(own, [next], 'claude'));
+  const proposed = applyOps(own, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [next] }], 'claude').plan;
+  assert.equal(accept(proposed).tasks.find((t) => t.id === 't3')?.detail, 'Claude second');
+  // Beside an edit only the user makes (a task's checks), which the proposal is for, either side of it;
+  // and several edits to one item, each on the revision that was read.
+  const checks: PlanOp = { op: 'set_checks', id: 't3', skip: ['tests'] };
+  for (const ops of [[next, checks], [checks, next], [next, { op: 'upsert_task', id: 't3', title: 'UI, again', expect: opened }]] as PlanOp[][]) {
+    const made = applyOps(own, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops }], 'claude').plan;
+    assert.equal(accept(made).tasks.find((t) => t.id === 't3')?.detail, 'Claude second', ops.map((o) => o.op).join());
+  }
+  const sectioned = applyOps(own, [{ op: 'upsert_section', title: 'Context', body: 'Why.' }], 'claude').plan;
+  const s = sectioned.sections[0]!;
+  const twice: PlanOp[] = [{ op: 'upsert_section', id: s.id, title: 'Background', expect: s.rev }, { op: 'upsert_section', id: s.id, body: 'Why, at length.', expect: s.rev }];
+  assert.equal(accept(applyOps(sectioned, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: twice }], 'claude').plan).sections[0]!.body, 'Why, at length.');
+  // Its edits are checked against the plan as the batch found it, not as the batch's own edits before it left it.
+  const mixed = applyOps(sectioned, [{ op: 'upsert_section', id: s.id, body: 'Why, in short.', expect: s.rev }, { op: 'propose', title: 'Tidy', reason: 'simpler', ops: [{ op: 'upsert_section', id: s.id, title: 'Background', expect: s.rev }] }], 'claude').plan;
+  const took = accept(mixed).sections[0]!;
+  assert.deepEqual([took.title, took.body], ['Background', 'Why, in short.']);
+  // A box edit made on a diagram the user has changed since is refused, proposed or not.
+  const graph = linkedPlan().diagrams[0]!.rev;
+  const boxed = read(applyOps(linkedPlan(), [{ op: 'upsert_node', diagramId: 'd1', id: 'c', label: 'C' }], 'user').plan);
+  const relabel: PlanOp = { op: 'upsert_node', diagramId: 'd1', id: 'a', label: 'Gateway', expect: graph };
+  assert.throws(() => applyOps(boxed, [relabel], 'claude'), /Diagram "Arch" was changed by the user while this edit was open/);
+  assert.throws(() => applyOps(boxed, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [relabel] }], 'claude'), /would not apply.*Diagram "Arch" was changed by the user/);
+});
+
+test("a proposed task removal is out of date once the user changed what it would take", () => {
+  const removal: PlanOp = { op: 'remove', kind: 'task', id: 't1' };
+  const cases: [string, PlanOp][] = [
+    ['a subtask they wrote on', { op: 'upsert_task', id: 't2', detail: 'Must use REST — a legal requirement' }],
+    ['a subtask they added', { op: 'upsert_task', title: 'Auth', parentId: 't1' }],
+    ['a dependency they added', { op: 'upsert_task', id: 't4', dependsOn: ['t2'] }],
+    ['a box they linked', { op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t2'] }],
+    ['a note on a subtask', { op: 'upsert_task', id: 't2', note: 'Half done: keep the router' }],
+  ];
+  for (const [what, edit] of cases) {
+    const plan = applyOps(proposing(removal), [edit], 'user').plan;
+    assert.throws(() => accept(plan), new RegExp(`${STALE.source}: what removing task t1 "API" takes`), what);
+  }
+  // The note on the task itself, likewise: removing it would delete the note.
+  const noted = applyOps(proposing(removal), [{ op: 'upsert_task', id: 't1', note: 'Keep: the mobile app calls it' }], 'user').plan;
+  assert.throws(() => accept(noted), new RegExp(`${STALE.source}: the note on task t1 "API"`));
+  // A change elsewhere leaves it as it was proposed.
+  const elsewhere = applyOps(proposing(removal), [{ op: 'upsert_task', id: 't3', detail: 'unrelated' }], 'user').plan;
+  assert.deepEqual(accept(elsewhere).tasks.map((t) => t.id), ['t3', 't4']);
+});
+
+test('a proposed removal is out of date once the user changed what it would take of a task the proposal moves under it', () => {
+  const ops: PlanOp[] = [{ op: 'move_task', id: 't3', parentId: 't1', index: 0 }, { op: 'remove', kind: 'task', id: 't1' }];
+  const proposed = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops }], 'claude').plan;
+  for (const [what, edit] of [
+    ['a dependency on it the user added', { op: 'upsert_task', id: 't4', dependsOn: ['t3'] }],
+    ['a box the user linked to it', { op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }],
+  ] as [string, PlanOp][]) {
+    assert.throws(() => accept(applyOps(proposed, [edit], 'user').plan), new RegExp(`${STALE.source}: what removing task t1 "API" takes`), what);
+  }
+  // Moved under a task the proposal adds under the one it removes, likewise.
+  const viaNew: PlanOp[] = [{ op: 'upsert_task', id: 't9', title: 'Frontend', parentId: 't1' }, { op: 'move_task', id: 't3', parentId: 't9', index: 0 }, { op: 'remove', kind: 'task', id: 't1' }];
+  const proposedVia = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: viaNew }], 'claude').plan;
+  assert.throws(() => accept(applyOps(proposedVia, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan), STALE);
+  assert.deepEqual(accept(proposedVia).tasks.map((t) => t.id), ['t4'], 'nothing changed since: accepted');
+  // A move alone leaves the moved task's links and dependencies as they are: no reason to refuse it.
+  const moved = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [ops[0]!] }], 'claude').plan;
+  const linked = applyOps(moved, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan;
+  assert.equal(accept(linked).tasks.find((t) => t.id === 't3')?.parentId, 't1');
+});
+
+test("a proposed builds is out of date once the user relinked that task's boxes", () => {
+  const relink: PlanOp = { op: 'upsert_task', id: 't3', builds: ['a'] };
+  const plan = applyOps(proposing(relink), [{ op: 'upsert_node', diagramId: 'd1', id: 'b', taskIds: ['t3'] }], 'user').plan;
+  assert.throws(() => accept(plan), new RegExp(`${STALE.source}: the boxes task t3 "UI" builds`));
+  const elsewhere = applyOps(proposing(relink), [{ op: 'upsert_node', diagramId: 'd1', id: 'b', label: 'Renamed' }], 'user').plan;
+  assert.deepEqual(accept(elsewhere).diagrams[0]!.nodes.find((n) => n.id === 'a')?.taskIds, ['t3']);
+});
+
+test("a proposed note is out of date once the user rewrote that task's note", () => {
+  const noted: PlanOp = { op: 'upsert_task', id: 't3', note: 'Claude note' };
+  const plan = applyOps(proposing(noted), [{ op: 'upsert_task', id: 't3', note: 'User note' }], 'user').plan;
+  assert.throws(() => accept(plan), new RegExp(`${STALE.source}: the note on task t3 "UI"`));
+  // A task gone is named once, not again for its note.
+  const gone = applyOps(proposing(noted), [{ op: 'remove', kind: 'task', id: 't3' }], 'user').plan;
+  assert.throws(() => accept(gone), new RegExp(`${STALE.source}: task t3 changed since`));
+  // A proposal that leaves the note alone is not held up by it.
+  const titled = applyOps(proposing({ op: 'upsert_task', id: 't3', title: 'Screens' }), [{ op: 'upsert_task', id: 't3', note: 'User note' }], 'user').plan;
+  assert.equal(accept(titled).tasks.find((t) => t.id === 't3')?.note, 'User note');
+});
+
+test('a proposal that would overwrite box links is out of date once the user linked them since; an order alone is no change', () => {
+  // Box a's tasks set anew, and box b removed: both would undo a link the user made after.
+  for (const [what, op, edit] of [
+    ["box a's tasks", { op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }, { op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t1'] }],
+    ['box b, removed', { op: 'remove_node', diagramId: 'd1', id: 'b' }, { op: 'upsert_node', diagramId: 'd1', id: 'b', taskIds: ['t4'] }],
+  ] as [string, PlanOp, PlanOp][]) {
+    const plan = applyOps(proposing(op), [edit], 'user').plan;
+    assert.throws(() => accept(plan), /Proposal p1 is out of date: the tasks linked to box "[AB]" in diagram "Arch"/, what);
+  }
+  // So would the whole diagram, removed with them.
+  const gone = applyOps(proposing({ op: 'remove', kind: 'diagram', id: 'd1' }), [{ op: 'upsert_node', diagramId: 'd1', id: 'b', taskIds: ['t4'] }], 'user').plan;
+  assert.throws(() => accept(gone), /Proposal p1 is out of date: the task links in diagram "Arch"/);
+  // A link made in another diagram leaves it as proposed.
+  let other = applyOps(linkedPlan(), [{ op: 'upsert_diagram', title: 'Data', nodes: [{ id: 'x', label: 'X' }], edges: [] }], 'claude').plan;
+  const data = other.diagrams[1]!.id;
+  other = applyOps(other, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [{ op: 'remove', kind: 'diagram', id: 'd1' }] }], 'claude').plan;
+  other = applyOps(other, [{ op: 'upsert_node', diagramId: data, id: 'x', taskIds: ['t4'] }], 'user').plan;
+  assert.deepEqual(accept(other).diagrams.map((d) => d.id), [data]);
+  // A link somewhere else in the diagram does not hold up a proposal about box a.
+  const elsewhere = applyOps(proposing({ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }), [{ op: 'upsert_node', diagramId: 'd1', id: 'b', taskIds: ['t4'] }], 'user').plan;
+  assert.deepEqual(accept(elsewhere).diagrams[0]!.nodes.find((n) => n.id === 'a')?.taskIds, ['t3']);
+  // Diagrams reordered, with the task linked in both: its builds still fits.
+  let two = publishPlan(linkedPlan(), { title: 'x', tasks: [{ id: 't3', title: 'UI' }], diagrams: [
+    { id: 'd1', title: 'Arch', nodes: [{ id: 'a', label: 'A', taskIds: ['t3'] }], edges: [] },
+    { id: 'd2', title: 'Data', nodes: [{ id: 'x', label: 'X', taskIds: ['t3'] }], edges: [] },
+  ] }, 2_000).plan;
+  two = applyOps(two, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [{ op: 'upsert_task', id: 't3', builds: ['d2/x'] }] }], 'claude').plan;
+  two = applyOps(two, [{ op: 'move_diagram', id: 'd2', index: 0 }], 'user').plan;
+  assert.deepEqual(accept(two).diagrams.map((d) => [d.id, d.nodes[0]!.taskIds ?? []]), [['d2', ['t3']], ['d1', []]]);
+});
+
+test('a proposed removal over an edit of the task itself says so once; one made by an older Coplan is out of date', () => {
+  const plan = applyOps(proposing({ op: 'remove', kind: 'task', id: 't1' }), [{ op: 'upsert_task', id: 't1', detail: 'mine' }], 'user').plan;
+  assert.throws(() => accept(plan), /out of date: task t1 "API" changed since it was made/);
+  // Made before the footprint was recorded: it cannot be checked in full.
+  const old = proposing({ op: 'remove', kind: 'task', id: 't1' });
+  delete (old.proposals![0]!.base as Record<string, unknown>)['removal:t1'];
+  assert.throws(() => accept(old), /out of date: everything it would change \(it was made before Coplan recorded that\)/);
+});
+
+/* A task already started or finished cannot become a parent, however the
+ * subtask would get under it: its progress (stage, rounds, checks) would go. */
+
+test('no task is moved, or published, under a task already started or finished', () => {
+  const base = applyOps(publishPlan(null, { title: 'x', tasks: [{ id: 't1', title: 'Auth' }, { id: 't2', title: 'Tokens' }, { id: 't3', title: 'UI' }] }, 1_000).plan, [{ op: 'upsert_task', id: 't1', status: 'done' }], 'user').plan;
+  assert.throws(() => applyOps(base, [{ op: 'move_task', id: 't2', parentId: 't1', index: 0 }], 'user'), /"Auth" is already done, so it cannot take subtasks: move "Tokens" beside it/);
+  assert.equal(countTasks(base).done, 1, 'the finished work still counts');
+  // Dropped work is not worth depending on: no such advice for it.
+  const dropped = applyOps(base, [{ op: 'upsert_task', id: 't3', status: 'dropped', note: 'not needed' }], 'user').plan;
+  assert.throws(() => applyOps(dropped, [{ op: 'upsert_task', parentId: 't3', title: 'More' }], 'user'), (err: Error) => /already dropped/.test(err.message) && !/depending on/.test(err.message));
+  // Under a task not started yet, a move is fine.
+  assert.equal(applyOps(base, [{ op: 'move_task', id: 't2', parentId: 't3', index: 0 }], 'user').plan.tasks.find((t) => t.id === 't2')?.parentId, 't3');
+  // A republish that nests new work under it is refused the same way.
+  assert.throws(
+    () => publishPlan(read(base), { title: 'x', tasks: [{ id: 't1', title: 'Auth', subtasks: [{ title: 'Refresh' }] }, { id: 't2', title: 'Tokens' }, { id: 't3', title: 'UI' }] }, 2_000),
+    /"Auth" is already done, so it cannot take subtasks: list the work beside t1 instead, giving any new task an id of its own, depending on t1 if it builds on it\./,
+  );
+});
+
+test("a republish that drops a task the user linked to a box drops the link, not the publish", () => {
+  const input = (tasks: PlanInput['tasks'], nodes: DiagramNodeInput[] = [{ id: 'a', label: 'A' }]) => ({ title: 'x', tasks, diagrams: [{ id: 'd1', title: 'Arch', nodes, edges: [] }] });
+  let plan = publishPlan(null, input([{ id: 't1', title: 'one' }, { id: 't2', title: 'two' }]), 1_000).plan;
+  plan = read(applyOps(plan, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t1', 't2'] }], 'user').plan);
+  // The agent read it, and republishes without t2: the box keeps only what is still in the plan.
+  const after = publishPlan(plan, input([{ id: 't1', title: 'one' }]), 2_000).plan;
+  assert.deepEqual(after.diagrams[0]!.nodes[0]!.taskIds, ['t1']);
+  assert.ok(after.diagrams[0]!.rev > plan.diagrams[0]!.rev, 'a new revision, so an open canvas reloads rather than saving the old links back');
+  // A link it writes itself to a task that is not there is still a mistake to report.
+  assert.throws(() => publishPlan(plan, input([{ id: 't1', title: 'one' }], [{ id: 'a', label: 'A', taskIds: ['t9'] }]), 2_000), /node "a" links task "t9", which is not in the plan/);
+});
+
+test("a save of a diagram's graph is refused for a graph changed since it was based, not for a title or caption", () => {
+  let plan = fresh();
+  const d = () => plan.diagrams[0]!;
+  const id = d().id;
+  const base = d().rev;
+  const moved = (x: number): PlanOp => ({ op: 'upsert_diagram', id, nodes: d().nodes.map((n) => (n.id === 'api' ? { ...n, x, y: 40 } : n)), edges: d().edges, expect: base });
+  // The user renames the diagram while a box is being dragged: the drag's save still lands.
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id, title: 'Renamed', caption: 'Meanwhile' }], 'claude').plan;
+  plan = applyOps(plan, [moved(120)], 'user').plan;
+  assert.deepEqual([d().title, d().caption, d().nodes.find((n) => n.id === 'api')?.x], ['Renamed', 'Meanwhile', 120]);
+  // Boxes Claude moved since are a conflict, as is a title edited against a stale revision.
+  const graphBase = d().rev;
+  plan = applyOps(plan, [{ op: 'upsert_diagram', id, nodes: d().nodes.map((n) => (n.id === 'db' ? { ...n, x: 300, y: 80 } : n)), edges: d().edges }], 'claude').plan;
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_diagram', id, nodes: d().nodes, edges: d().edges, expect: graphBase }], 'user'), PlanError);
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_diagram', id, title: 'Again', expect: graphBase }], 'user'), PlanError);
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_node', diagramId: id, id: 'api', label: 'API 2', expect: graphBase }], 'user'), PlanError, 'a box edit too');
+});
+
+/** INPUT with the ids its tasks were published under: a republish of it
+ *  changes only what a test changes. */
+const SAME_TASKS: PlanInput = {
+  ...INPUT,
+  tasks: [
+    { id: 't1', title: 'Storage layer', subtasks: [{ id: 't2', title: 'Cache client' }, { id: 't3', title: 'Invalidation', status: 'blocked' }] },
+    { id: 't4', title: 'Wire into API' },
+  ],
+};
+/** A canvas save of d1's boxes, made against revision `expect`. */
+const graphSave = (plan: Plan, nodes: DiagramNodeInput[], expect: number): PlanOp => ({ op: 'upsert_diagram', id: 'd1', nodes, edges: plan.diagrams[0]!.edges, expect });
+/** A save refused for a change made since its base. */
+const CHANGED = /was changed by Claude while this edit was open/;
+
+test("a canvas save is refused for a graph Claude republished since it was based, and not for a republish that left the graph alone", () => {
+  let plan = fresh();
+  const d = () => plan.diagrams[0]!;
+  const dragged = (keep = (_: string) => true) => d().nodes.filter((n) => keep(n.id)).map((n) => (n.id === 'api' ? { ...n, x: 10, y: 10 } : n));
+  // Republished with the same boxes and a new title: a drag based before it still lands.
+  let base = d().rev;
+  const graphRev = d().graphRev;
+  plan = publishPlan(plan, { ...SAME_TASKS, diagrams: [{ ...INPUT.diagrams![0]!, id: 'd1', title: 'Parts' }] }, 2_000).plan;
+  assert.ok(d().rev > base, 'the diagram moved on');
+  assert.equal(d().graphRev, graphRev, 'its graph did not');
+  plan = applyOps(plan, [graphSave(plan, dragged(), base)], 'user').plan;
+  assert.deepEqual([d().title, d().nodes.find((n) => n.id === 'api')?.x], ['Parts', 10], 'the drag landed, and the title stayed');
+  // Republished with a box added: a drag based before it would drop the box.
+  base = d().rev;
+  const withQueue = { ...INPUT.diagrams![0]!, id: 'd1', nodes: [...d().nodes, { id: 'queue', label: 'Queue', kind: 'queue' as const }] };
+  plan = publishPlan(plan, { ...SAME_TASKS, diagrams: [withQueue] }, 3_000).plan;
+  assert.throws(() => applyOps(plan, [graphSave(plan, dragged((id) => id !== 'queue'), base)], 'user'), CHANGED);
+});
+
+test("a canvas save is refused for links Claude's task list changed since it was based", () => {
+  let plan = fresh();
+  const base = plan.diagrams[0]!.rev;
+  const before = structuredClone(plan.diagrams[0]!.nodes);
+  // The task list says t4 builds the API: the API box's links change under the canvas.
+  plan = publishTasks(plan, { tasks: SAME_TASKS.tasks!.map((t) => (t.id === 't4' ? { ...t, builds: ['api'] } : t)) }, 2_000).plan;
+  assert.deepEqual(plan.diagrams[0]!.nodes.find((n) => n.id === 'api')?.taskIds, ['t4']);
+  assert.throws(() => applyOps(plan, [graphSave(plan, before, base)], 'user'), CHANGED, 'it would unlink t4');
+});
+
+test('a save against a revision the diagram has not reached is refused', () => {
+  const plan = fresh();
+  const d = plan.diagrams[0]!;
+  // Refused as stale today, in words that blame a change nobody made (row B34).
+  assert.throws(() => applyOps(plan, [graphSave(plan, d.nodes, d.rev + 5)], 'user'), PlanError);
+  assert.throws(() => applyOps(plan, [{ op: 'upsert_node', diagramId: 'd1', id: 'api', label: 'API 2', expect: d.rev + 5 }], 'user'), PlanError);
+});
+
+test("a proposal that restates a diagram's boxes is out of date once the user links a task to one", () => {
+  let plan = fresh();
+  const d = plan.diagrams[0]!;
+  const restated = d.nodes.map((n) => (n.id === 'cache' ? { ...n, label: 'Redis' } : n));
+  plan = applyOps(plan, [{ op: 'propose', title: 'Name the cache', reason: 'It is Redis.', ops: [{ op: 'upsert_diagram', id: 'd1', nodes: restated, edges: d.edges }] }], 'claude').plan;
+  plan = applyOps(plan, [{ op: 'upsert_node', diagramId: 'd1', id: 'api', taskIds: ['t4'] }], 'user').plan;
+  // Accepting would put back the boxes as restated, without that link.
+  assert.throws(() => applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user'), /p1 is out of date: the task links in diagram "Components"/);
 });

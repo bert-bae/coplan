@@ -1,6 +1,10 @@
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { chmodSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { DaemonLock } from './types.ts';
 
 /** Root for all harness state. Overridable so tests can run hermetically.
@@ -18,16 +22,33 @@ export const paths = {
   sessionsDir: () => path.join(harnessHome(), 'sessions'),
   sessionDir: (id: string) => path.join(harnessHome(), 'sessions', sanitizeId(id)),
   sessionState: (id: string) => path.join(harnessHome(), 'sessions', sanitizeId(id), 'state.json'),
-  sessionEvents: (id: string) => path.join(harnessHome(), 'sessions', sanitizeId(id), 'events.jsonl'),
   configDir: harnessHome,
   /** The bearer header, for the hook relay to hand curl as a file: on the
    *  command line, any local user could read the token from /proc. */
   authHeader: () => path.join(harnessHome(), 'auth.header'),
 };
 
-/** Session ids come from the CLI, but they end up in filesystem paths. */
+/** Session ids come from the CLI, but they end up in filesystem paths.
+ *  An id of dots alone is never one: `.` would be sessions/ itself and
+ *  `..` the home, which purging the session would delete. An id that is a
+ *  safe name already is its own (every agent's is); one changed to make it
+ *  safe also carries a hash of itself, so two ids changed alike never share
+ *  a folder (one typed as another's hashed name would). A name made here
+ *  is its own name again. */
 export function sanitizeId(id: string): string {
-  return id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128) || 'unknown';
+  const name = legacyName(id);
+  if (name === id) return name;
+  // Hashed as UTF-16, as the id is held: as UTF-8, every lone surrogate
+  // would be the same U+FFFD, and ids differing only there one folder.
+  return `${name.slice(0, 119)}-${createHash('sha256').update(id, 'utf16le').digest('hex').slice(0, 8)}`;
+}
+
+/** The folder name an earlier build gave a session: its id made safe, with
+ *  no hash, so two ids changed alike shared it. sanitizeId's, for an id
+ *  already safe. */
+export function legacyName(id: string): string {
+  const safe = id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128) || 'unknown';
+  return /^\.+$/.test(safe) ? safe.replace(/\./g, '_') : safe;
 }
 
 /**
@@ -104,10 +125,49 @@ export async function probeLock(lock: DaemonLock, timeoutMs = 1_500): Promise<'l
   }
 }
 
-/** The lock of a daemon that is running and answering — not merely one
- *  whose pid exists. */
-export async function readVerifiedLock(timeoutMs?: number): Promise<DaemonLock | null> {
+/** The lock of a daemon that is running — not merely one whose pid exists —
+ *  and whether it answered in time or is too busy to (`busy`): a daemon
+ *  not to start another over, nor to wait on. */
+export async function readLockState(timeoutMs?: number): Promise<{ lock: DaemonLock; state: 'live' | 'busy' } | null> {
   const lock = readLiveLock();
   if (!lock) return null;
-  return (await probeLock(lock, timeoutMs)) === 'stale' ? null : lock;
+  const state = await probeLock(lock, timeoutMs);
+  return state === 'stale' ? null : { lock, state };
+}
+
+/** The lock of a daemon that is running, answering or not (readLockState). */
+export async function readVerifiedLock(timeoutMs?: number): Promise<DaemonLock | null> {
+  return (await readLockState(timeoutMs))?.lock ?? null;
+}
+
+/** The daemon's script. Each bundle (cli/, mcp/) and the tests sit one
+ *  folder under dist/, beside daemon/. */
+export const DAEMON_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'daemon', 'main.js');
+
+/**
+ * The running daemon's lock, starting one if none answers: for the CLI, the
+ * MCP server and the doctor alike. Started detached, so it outlives whatever
+ * started it. Null when it did not come up in six seconds; its log says why.
+ */
+export async function ensureDaemon(): Promise<DaemonLock | null> {
+  const existing = await readVerifiedLock();
+  if (existing) return existing;
+  ensureHome();
+  try {
+    const child = spawn(process.execPath, [DAEMON_ENTRY], { detached: true, stdio: 'ignore', env: process.env });
+    // A missing binary is reported on `error`, which unheard would take this
+    // process down; the poll below reports the failure instead.
+    child.on('error', () => {});
+    child.unref();
+  } catch {
+    return null;
+  }
+  // The same test as above: the stale lock the new daemon replaces fails it.
+  const deadline = Date.now() + 6_000;
+  while (Date.now() < deadline) {
+    await sleep(100);
+    const lock = await readVerifiedLock(500);
+    if (lock) return lock;
+  }
+  return null;
 }

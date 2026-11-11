@@ -8,8 +8,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readLiveLock, baseUrl } from '../shared/paths.ts';
-import { BUILD_MARKER } from '../daemon/render.ts';
-import { readAgentHook, writeAgentOutput } from '../daemon/agentHooks.ts';
+import { BUILD_MARKER, PROMPT_BUDGET } from '../daemon/render.ts';
+import { hookAgent, readAgentHook, writeAgentOutput } from '../daemon/agentHooks.ts';
 import { agentInfo, parseAgent, sessionFromEnv, workspaceFromEnv } from '../shared/agents.ts';
 import { codexHooks, relayCalls } from '../cli/doctor.ts';
 import type { DaemonLock, SessionState, SessionSummary } from '../shared/types.ts';
@@ -320,6 +320,39 @@ function serverCall(
   });
 }
 
+test("a Claude tool call naming no session never takes over another agent's in its folder", async () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'coplan-shared-folder-'));
+  const other = mkdtempSync(path.join(tmpdir(), 'coplan-cursor-folder-'));
+  const elsewhere = mkdtempSync(path.join(tmpdir(), 'coplan-elsewhere-'));
+  try {
+    const thread = '019a0000-0000-7000-8000-00000000b7b7';
+    await hook('codex', 'SessionStart', { session_id: thread, cwd: folder, hook_event_name: 'SessionStart', source: 'startup' });
+    assert.equal((await mcp('codex', 'publish', { ...PLAN, title: "Codex's plan", cwd: folder }, thread)).ok, true);
+    // A Claude Code that names no session (no CLAUDE_CODE_SESSION_ID) and has none of its own here.
+    const read = await mcp('claude', 'read', { cwd: folder, pid: 424242 });
+    assert.doesNotMatch(read.text, /Codex's plan/, "it is not handed the Codex thread's plan");
+    // Nor does its process come to stand for the thread: the reaper would end the thread when Claude exits.
+    assert.doesNotMatch((await mcp('claude', 'read', { cwd: elsewhere, pid: 424242 })).text, /Codex's plan/);
+    // And a pid the Codex app gave its thread is the Codex app's: a Claude call with the same one is not the thread's.
+    await mcp('codex', 'read', { cwd: folder, pid: 515151 }, thread);
+    assert.doesNotMatch((await mcp('claude', 'read', { cwd: elsewhere, pid: 515151 })).text, /Codex's plan/);
+
+    // What the fallback is for: Cursor running Claude Code's config names itself Claude, and still finds its chat.
+    const chat = 'cursor-chat-b7';
+    await hook('cursor', 'sessionStart', { ...cursorBase, conversation_id: chat, workspace_roots: [other], hook_event_name: 'sessionStart', session_id: chat });
+    const published = await mcp('claude', 'publish', { ...PLAN, title: "Cursor's plan", cwd: other, pid: 434343 });
+    assert.equal(published.ok, true, published.text);
+    assert.equal((await session(chat)).plan?.title, "Cursor's plan");
+    // Its process stands for the chat from then on: a Claude session started in that folder later does not take its calls.
+    await hook('claude', 'SessionStart', { session_id: 'claude-later-b7', cwd: other, source: 'startup' });
+    assert.equal((await mcp('claude', 'publish', { ...PLAN, title: "Cursor's plan, again", cwd: other, pid: 434343 })).ok, true);
+    assert.equal((await session(chat)).plan?.title, "Cursor's plan, again");
+    assert.equal((await session('claude-later-b7')).plan, null);
+  } finally {
+    for (const dir of [folder, other, elsewhere]) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the Codex MCP server takes its thread from each call, not from its folder or environment', async () => {
   const other = '0199a213-81c0-7800-8aa1-000000000002';
   await hook('codex', 'SessionStart', { session_id: other, cwd: repo, hook_event_name: 'SessionStart', source: 'startup' });
@@ -507,4 +540,25 @@ test("each agent's MCP config and hooks name that agent", () => {
   const codexServer = (readJson('mcp/codex.json')['mcpServers'] as Record<string, { args: string[]; cwd?: string }>)['harness']!;
   assert.equal(codexServer.cwd, '.', 'Codex resolves a plugin server only through a relative cwd');
   assert.ok(!codexServer.args.some((a) => a.includes('${')), 'Codex expands nothing in a plugin server');
+});
+
+test('Codex takes the most a message can carry whole: one prompt and the unread notice, in any script', () => {
+  const hooks = JSON.parse(readFileSync(path.join(ROOT, 'hooks', 'codex.json'), 'utf8')) as { hooks: Record<string, { hooks: { additionalContextLimit?: number }[] }[]> };
+  const limit = hooks.hooks['UserPromptSubmit']![0]!.hooks[0]!.additionalContextLimit;
+  // Codex counts approximate tokens, about four bytes each, and past the limit
+  // saves the text to a file the model sees only a preview of. A message
+  // carries one prompt, up to the budget in characters, and the unread notice
+  // (a line); a plan in Chinese or Japanese takes three bytes a character.
+  const most = Math.ceil(((PROMPT_BUDGET + 1_000) * 3) / 4);
+  assert.ok(typeof limit === 'number' && limit >= most, `additionalContextLimit ${limit} is under ${most}`);
+});
+
+test("a huge tool event from Cursor running Claude Code's hooks, cut down by the relay, is still read as its chat's", () => {
+  // What the relay keeps of it: see relay.test.ts.
+  const slim = { conversation_id: 'c-9', cursor_version: '2.0.0', hook_event_name: 'PostToolUse' };
+  const agent = hookAgent('claude', slim);
+  assert.equal(agent, 'cursor');
+  const { event, input } = readAgentHook(agent, 'PostToolUse', slim);
+  assert.equal(event, 'PostToolUse');
+  assert.equal(input.session_id, 'c-9');
 });

@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { store, useAgent, useStore } from '../store.ts';
+import { useAgent, useEdit, useStore } from '../store.ts';
 import { classNames } from '../lib/format.ts';
+import { isComposing } from '../lib/keys.ts';
 import { ancestorsOf, effectiveChecks, leafTasks } from '../../shared/build.ts';
 import { TASK_CHECK_STAGES, type Plan, type Task, type TaskCheck, type TaskCheckStage } from '../../shared/types.ts';
 
@@ -36,6 +37,7 @@ export function TaskCheckChips({ plan, task }: { plan: Plan; task: Task }) {
  * its own. What its parents set holds too, and is shown, not editable here.
  */
 export function TaskChecksField({ plan, task }: { plan: Plan; task: Task }) {
+  const edit = useEdit();
   const agent = useAgent();
   const repo = useStore((s) => s.projectChecks);
   const own = { add: task.addChecks ?? [], skip: task.skipChecks ?? [] };
@@ -44,7 +46,7 @@ export function TaskChecksField({ plan, task }: { plan: Plan; task: Task }) {
     skip: inherited.skip.filter((n) => !own.skip.includes(n)),
     add: inherited.add.filter((c) => !own.add.some((a) => a.name === c.name)),
   };
-  const set = (patch: { add?: TaskCheck[]; skip?: string[] }) => void store.op({ op: 'set_checks', id: task.id, ...patch });
+  const set = (patch: { add?: TaskCheck[]; skip?: string[] }) => void edit({ op: 'set_checks', id: task.id, ...patch });
   const names = [...new Set([...repo.implement, ...repo.review])];
   const parent = ancestorsOf(plan, task)[0];
   return (
@@ -120,7 +122,7 @@ function AddCheck({ onAdd, taken }: { onAdd: (c: TaskCheck) => void; taken: stri
   };
   return (
     <div className="task-checks-add" role="group" aria-label="Add a check for this task">
-      <input className="input mono" value={run} placeholder="Command, e.g. pnpm db:check" aria-label="Command of the check to add" onChange={(e) => setRun(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} />
+      <input className="input mono" value={run} placeholder="Command, e.g. pnpm db:check" aria-label="Command of the check to add" onChange={(e) => setRun(e.target.value)} onKeyDown={(e) => !isComposing(e) && e.key === 'Enter' && add()} />
       <input className="input" value={name} placeholder="Name (optional)" aria-label="Name of the check to add" onChange={(e) => setName(e.target.value)} />
       <select className="input" value={stage} aria-label="When it runs" onChange={(e) => setStage(e.target.value as TaskCheckStage)}>
         <option value="review">at review</option>
