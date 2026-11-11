@@ -111,6 +111,8 @@ export class SessionStore extends EventEmitter {
   private persistTimers = new Map<string, NodeJS.Timeout>();
   /** The last write failure said for each session, so it is said once. */
   private persistFailed = new Map<string, string>();
+  /** Save failures raised before anyone listened, for the first listener. */
+  private unheard: ServerEvent[] = [];
 
   constructor() {
     super();
@@ -646,6 +648,22 @@ export class SessionStore extends EventEmitter {
    * ---------------------------------------------------------------- */
 
   emitEvent(event: ServerEvent): void {
+    // Raised before anyone listens (a save that failed as the store loaded,
+    // in its constructor): held for the first listener, the daemon's log.
+    if (this.listenerCount('event') === 0) {
+      if (event.type !== 'persist-error') return;
+      if (!this.unheard.length) {
+        this.once('newListener', (name) => {
+          if (name !== 'event') return;
+          // Told once it is on (newListener comes just before).
+          process.nextTick(() => {
+            for (const held of this.unheard.splice(0)) this.emit('event', held);
+          });
+        });
+      }
+      this.unheard.push(event);
+      return;
+    }
     this.emit('event', event);
   }
 

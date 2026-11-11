@@ -463,6 +463,30 @@ test('an undated session loaded is saved with the date its file gave it, so a la
   assert.ok(Math.abs((onDisk.updatedAt ?? 0) - days20) < 60_000, `dated on disk by its file: ${onDisk.updatedAt}`);
 });
 
+test('a save that fails while the store starts, before anyone listens, is told to the first listener', async () => {
+  const { paths } = await import('../shared/paths.ts');
+  mkdirSync(paths.sessionDir('unsaved-at-start'), { recursive: true });
+  writeFileSync(paths.sessionState('unsaved-at-start'), JSON.stringify({ sessionId: 'unsaved-at-start', cwd: process.cwd(), title: 'early build', status: 'idle', plan: null }));
+  // Its temp file's name taken by a folder: every save of it fails (EISDIR), the one at start too.
+  const blocker = path.join(paths.sessionDir('unsaved-at-start'), `.state.${process.pid}.tmp`);
+  mkdirSync(blocker);
+  try {
+    const store = await freshStore();
+    const told: string[] = [];
+    store.on('event', (e: { type: string; sessionId?: string; message?: string }) => {
+      if (e.type === 'persist-error') told.push(`${e.sessionId}:${e.message}`);
+    });
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(told, ['unsaved-at-start:EISDIR'], 'the save at start, told once someone listens');
+    // Said once per kind of failure, as any.
+    store.publishPlan('unsaved-at-start', PLAN);
+    store.drop('unsaved-at-start');
+    assert.deepEqual(told, ['unsaved-at-start:EISDIR']);
+  } finally {
+    rmSync(blocker, { recursive: true, force: true });
+  }
+});
+
 test('a session saved by a newer Coplan is never read wrongly or saved over', async () => {
   const dir = path.join(home, 'sessions', 'from-the-future');
   mkdirSync(dir, { recursive: true });
