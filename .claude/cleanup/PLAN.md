@@ -202,7 +202,13 @@ the audit's finding numbers.
 | B64 | A saved session with no `updatedAt` never expires: readState's migrate stamps it `Date.now()`, so load's and `legacy()`'s `(updatedAt ?? 0) < cutoff` never see it undated, and an early build's old copy passes the TTL on every start. Decide what undated means and say it in one place (daemon/store.ts:148, 315, 772) (bert-bae/coplan#99) [review of B57] | 5 smaller | done: undated means as old as its file | f5a91f2 |
 | B65 | Submit's and Confirm's "would drop" warning does not list a refused inline field: `refusedFields` holds bare tokens, so draftsLockedBy cannot see them; the text is offered only after the lock. Key them by session and field (ui/lib/drafts.ts) (bert-bae/coplan#100) [review of B62] | 5 smaller | done: kept by session, name and the sign-off that locks it | 111080c |
 | B66 | A change request being typed on a board card (UserReview's `asking`/`why`) is lost without a word when the agent moves the card: it is drawn anew in its new column. So are keyboard focus and "Show N resolved". Keep the reason as a kept draft, or the card mounted across columns (TasksView.tsx Board, UserReview) (bert-bae/coplan#101) [review of B63] | 5 smaller | done: the reason is a kept draft, by task and round | 1126150 |
-| A5 | Re-audit the areas the rows after A4 touched with `/ponytail-audit`, and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing | 6 re-audit | open | |
+| A5 | Re-audit the areas the rows after A4 touched with `/ponytail-audit`, and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing | 6 re-audit | done: no must fix, 4 should fix, 2 nice to have, now rows F48-F51, B67 and A6 | A5REPORT |
+| F48 | B59 regression: a proposal removing a new task takes only its own id out of `seenNew`/`movedTo`, so a new subtask going with it keeps its old place and the proposal adding it again under another parent is ignored: a link the user makes after to what it moves under it is lost on accept. Take every doomed id out (shared/plan.ts proposalTouches `remove`) (bert-bae/coplan#102) [re-audit A5 1] | 2 should fix | open | |
+| F49 | An existing task a proposal removes and adds again is placed, in its print, where it was, though applying creates it under the new parent: a link the user makes after to what the proposal moves under it is lost on accept. Place an upsert of a removed id by its parentId, as a new task's (shared/plan.ts:2432) (bert-bae/coplan#103) [re-audit A5 2] | 2 should fix | open | |
+| F50 | B66 gap: useKeptDraft fixes its key at mount, so a card on screen when its task enters review (or a new round) keeps `review:t3:undefined` (or the old round): pruneDrafts drops the draft at the next snapshot, closing the page stops asking, and a move loses the text. Key UserReview by task and round (TasksView.tsx TrackedCard) (bert-bae/coplan#104) [re-audit A5 3] | 2 should fix | open | |
+| F51 | F45's 5 s cap cuts a live but slow reader (`coplan check \| less`) without a word and keeps the exit code (0 with an optional failure): 64926 of 200108 bytes reached `(sleep 7; wc -c)`. Fail with a message when output is still pending at the cap, or wait for EPIPE (cli/main.ts:445) (bert-bae/coplan#105) [re-audit A5 4] | 2 should fix | open | |
+| B67 | Tests: a report over a pipe's buffer reaches a reader in full (F45's point, untested); B64's ensure assertion is vacuous (write the old copy after load); skip `write('')` when nothing is pending, for Windows (project.test.ts, store.test.ts:436, cli/main.ts:446) (bert-bae/coplan#106) [re-audit A5 5, 6] | 5 smaller | open | |
+| A6 | Re-audit the areas the rows after A5 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -696,3 +702,32 @@ the build), then 2, 1 and 4.
 **Not checked:** a real browser's blur and focus, macOS and Windows, network
 filesystems' ENOSPC/EDQUOT, readdir orders other than sorted, render.ts's
 summary past 2000 unread changes.
+
+## Re-audit report (row A5, four auditors, 2026-11-11)
+
+Scope: the changes since 8c30940 (the A4 work, squashed into main), by four
+auditors (plan model, check runner, store, page); each finding kept was
+reproduced.
+
+### Should fix
+
+1. **B59 forgets a removed new task's subtasks** (`shared/plan.ts` proposalTouches `remove`). A new subtask that goes with a removed new task keeps its old place, so the proposal adding it again elsewhere is printed wrongly and a user's later link is lost on accept. Reproduced; 8c30940 refused it.
+2. **A removed task added again keeps its old place in the print** (`plan.ts:2432`). Older; same effect.
+3. **B66 misses a card that enters review on screen** (`TasksView.tsx` UserReview): the kept draft's key is fixed at mount, so the request is dropped at the next snapshot. Reproduced in jsdom.
+4. **F45's 5 s cap cuts a slow reader silently** (`cli/main.ts:445`): `| (sleep 7; wc -c)` got 64926 of 200108 bytes, exit 0.
+
+### Nice to have
+
+5. No test that a report over 64 KB reaches a pipe reader in full; skip `write('')` with nothing pending.
+6. B64's ensure assertion checks nothing (load already deleted the folder).
+
+Not new, noted only: a session reached only by read-only calls is never re-dated, so it can expire while in use (as before B64 for dated files).
+
+Checked and fine: B60 (agent's noteWas refused, user's checked), B61's tests,
+T7/B55/B56/B57 and B64's expiry and migration (scratch tests), F43/B62/B65's
+refused text (offered once, beforeunload cleared, named by sign-off), B58's
+holders loop, F44/F47/B63 comments and open cards, F45 on a full disk, EPIPE,
+signals and long-running commands.
+
+**Verdict:** no Must fix; fix 1 first (it can lose a user's link), then 3, 4, 2.
+
