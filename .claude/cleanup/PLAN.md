@@ -221,7 +221,13 @@ the audit's finding numbers.
 | F58 | `coplan check` starts the next check after stdout failed (a sync write's error comes a tick later), then exit(1) SIGKILLs it: `check --all >/dev/full` ran check two's side effect. Wait a tick and stop on a failed stdout before each check (cli/check.ts hook loop, cli/main.ts `unwritten`) (bert-bae/coplan#118) [re-audit A7 3] | 2 should fix | done: failure kept in output.ts; check stops before each check; main lets a running command end itself (that part untested: a stdout failing late, not EPIPE, could not be made here) | 90cd05b |
 | F59 | A page opened after a save failure was heard (by the daemon's log) is never told: persistFailed says it once per kind, to whoever listens then, so the user edits a session that is not saved. Make a session's save failure part of what a page gets on connect; readSaved's own persist-error skips the dedup (daemon/store.ts persistNow, readSaved; the stream) (bert-bae/coplan#121) [review of F56] | 2 should fix | done: sent with the snapshot on connect (a reconnect says it again: still failing); readSaved's copy deduped, cleared on success | 15eac3c |
 | B70 | normalizeTask keeps a stage on a task not in progress (and B68 gives it round 1); an undated session past the cap is not saved with its date at load; the review toast names a removed task by id; exit()'s comment ("as on Windows", ">&-" exits 0 with nothing written); a release note for F52's old double-removal proposals (shared/plan.ts, daemon/store.ts, ui/lib/drafts.ts, cli/main.ts) (bert-bae/coplan#119) [re-audit A7 4-8] | 5 smaller | done: all five. Noted, not done: publish keeps a stage for in_progress only (a blocked task loses it on republish), where edits and load keep it | 77e9506 |
-| A8 | Re-audit the areas the rows after A7 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#120) | 6 re-audit | open | |
+| A8 | Re-audit the areas the rows after A7 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#120) | 6 re-audit | done: 1 must fix, 3 should fix, 4 nice to have, now rows F60-F63, B71 and A9 | {A8} |
+| F60 | B70 regression: normalizeTask drops the round of a todo task at load, but only the user putting a task back clears rounds and reviews (the agent cannot, by design): after a restart, an agent-todo'd task's next review is round 1 again and roundVerdict finds the old round-1 pass, which meets the done gate unreviewed and resets the round limit. Keep the round at load (shared/plan.ts normalizeTask) (bert-bae/coplan#122) [re-audit A8 1] | 1 must fix | open | |
+| F61 | A republish drops a kept task's `reviews` (review history gone from the page) and a blocked task's stage (kept for in_progress only, where edits and load keep it for blocked too). Carry `reviews` over; one rule for which statuses keep a stage (shared/plan.ts publishTasks/buildTaskTree) (bert-bae/coplan#123) [re-audit A8 2] | 2 should fix | open | |
+| F62 | F57 gap: a review box drawn anew while its request is being sent (task set blocked in review, a tab switch) mounts with Send enabled: a second review_task is sent, and the first save's finally clears the key from `sending` while the second is out. A key being sent is saving (ui/lib/drafts.ts useKeptDraft, TasksView.tsx UserReview) (bert-bae/coplan#124) [re-audit A8 3] | 2 should fix | open | |
+| F63 | F58 regression: interactive `coplan setup` with stdout failing (a full disk) no longer ends at once; it waits on prompts no one can see (hung 8 s, killed, no message), and Enter walks it on defaults unseen. Ask nothing once stdout has failed (cli/setup.ts askTerminal) (bert-bae/coplan#125) [re-audit A8 4] | 2 should fix | open | |
+| B71 | A held persist-error is lost if the first listener added is not an 'event' one, or the first is removed before the next tick; a failed copy's saveFailure outlives the cause for a session later made fresh; normalizeTask keeps an invalid status; Windows may say EOF for a gone reader (unconfirmed) (daemon/store.ts emitEvent, ensure; shared/plan.ts; cli/output.ts) (bert-bae/coplan#126) [re-audit A8 5-8] | 5 smaller | open | |
+| A9 | Re-audit the areas the rows after A8 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#127) | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -813,3 +819,40 @@ save()'s try/finally; exit() on pipes, slow and early-closing readers,
 
 **Verdict:** no Must fix; fix 2 first (it loses what the user typed), then
 1, 3.
+
+## Re-audit report (row A8, four auditors, 2026-11-11)
+
+Scope: the changes since 137b984 (rows F56-F59, B70), at 34d17d3, by four
+auditors (plan model, check runner, store and stream, page), each in its
+own worktree at that commit; each finding kept was reproduced, except
+where marked.
+
+### Must fix
+
+1. **A restart clears an agent-todo'd task's round** (`shared/plan.ts` normalizeTask, B70): its next review is round 1 again, and the old round-1 pass gets it past the done gate unreviewed.
+
+### Should fix
+
+2. **A republish drops review history and a blocked task's stage** (`plan.ts` publishTasks). Older.
+3. **A review box drawn anew mid-send can send again** (`ui/lib/drafts.ts`, `TasksView.tsx`). F57 gap.
+4. **Interactive `setup` with stdout failing waits on unseen prompts** (`cli/setup.ts`). F58 regression.
+
+### Nice to have
+
+5. A held persist-error lost if a listener of another name comes first, or the first is removed before the next tick (not so today).
+6. A failed copy's saveFailure outlives its cause for a session later made fresh.
+7. normalizeTask keeps an invalid status.
+8. Windows may report EOF, not EPIPE, for a gone reader (not reproduced).
+
+Checked and fine: every CLI command to /dev/full (rc 1, said once),
+exit() twice, check with --json, --list, zero hooks, a disk filling
+partway, `| head -c1`, `>&-`, a slow reader, a TTY, SIGINT; held events
+reach the log once and in order; the stream sends only the focused
+session's failure; persistFailed cleared on save, drop, purge and a good
+copy; B70's write-back as nobody (read-only, newer build, old copy; 12 ms
+for 65 sessions); F57's refused send offered once (card in place, moved,
+session switched), own request first, throws, other editors untouched;
+blocked keeps its stage, done/dropped keep round and reviews; proposals'
+prints unchanged across a reload.
+
+**Verdict:** 1 Must fix; fix 1 first, then 4, 3, 2.
