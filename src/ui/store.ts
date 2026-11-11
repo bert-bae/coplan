@@ -1,6 +1,6 @@
 import { createContext, createElement, useCallback, useContext, useSyncExternalStore, type ReactNode } from 'react';
 import { api, eventsUrl, Unauthorized, type ProjectChecks } from './lib/api.ts';
-import { pruneDrafts, unsavedDrafts } from './lib/drafts.ts';
+import { onDroppedAfterSend, pruneDrafts, unsavedDrafts, type DroppedDraft } from './lib/drafts.ts';
 
 const NO_CHECKS: ProjectChecks = { implement: [], review: [] };
 import { isLocked } from '../shared/plan.ts';
@@ -194,10 +194,21 @@ class Store {
     const dropped = patch.session?.plan ? pruneDrafts(patch.session.sessionId, patch.session.plan) : [];
     for (const listener of this.listeners) listener();
     const plan = patch.session?.plan;
-    for (const { name, text } of dropped) {
-      const how = plan?.submission ? 'was submitted' : 'had its design confirmed';
-      this.toast('error', `"${plan?.title}" ${how}, so the text you had open in ${name} could not be saved. Copy it to keep it:`, text);
-    }
+    for (const d of dropped) this.offerDropped(d, plan, patch.session!.sessionId);
+  }
+
+  /** A change request whose round stopped waiting, offered of its own
+   *  session's plan (named if that is not the one shown). */
+  offerDroppedNow(sessionId: string | null, { name, text }: DroppedDraft, title?: string): void {
+    this.sayOf(sessionId, 'error', `That task no longer waits on your review, so ${name} could not be sent. Copy it to keep it:`, title, text);
+  }
+
+  /** Text a plan landing took the field of, offered to copy. */
+  private offerDropped(dropped: DroppedDraft, plan: Plan | null | undefined, sessionId: string): void {
+    const { name, text, why } = dropped;
+    if (why === 'review') return this.offerDroppedNow(sessionId, dropped, plan?.title);
+    const how = plan?.submission ? 'was submitted' : 'had its design confirmed';
+    this.toast('error', `"${plan?.title}" ${how}, so the text you had open in ${name} could not be saved. Copy it to keep it:`, text);
   }
 
   /* ---------------------------------------------------------------- *
@@ -923,6 +934,9 @@ function savePrefs(prefs: Record<string, unknown>): void {
 }
 
 export const store = new Store();
+// A change request refused as its round stopped waiting is offered as one
+// a plan landing let go is (Store.set).
+onDroppedAfterSend((sessionId, dropped) => store.offerDroppedNow(sessionId, dropped));
 
 /**
  * The sessions the rail lists: the ones that have used Coplan. Every session

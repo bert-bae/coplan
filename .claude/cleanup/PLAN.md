@@ -207,8 +207,27 @@ the audit's finding numbers.
 | F49 | An existing task a proposal removes and adds again is placed, in its print, where it was, though applying creates it under the new parent: a link the user makes after to what the proposal moves under it is lost on accept. Place an upsert of a removed id by its parentId, as a new task's (shared/plan.ts:2432) (bert-bae/coplan#103) [re-audit A5 2] | 2 should fix | done: the outline follows removals; a task added again is placed by its upsert | 6c4200e |
 | F50 | B66 gap: useKeptDraft fixes its key at mount, so a card on screen when its task enters review (or a new round) keeps `review:t3:undefined` (or the old round): pruneDrafts drops the draft at the next snapshot, closing the page stops asking, and a move loses the text. Key UserReview by task and round (TasksView.tsx TrackedCard) (bert-bae/coplan#104) [re-audit A5 3] | 2 should fix | done: UserReview keyed by task and round | d456d06 |
 | F51 | F45's 5 s cap cuts a live but slow reader (`coplan check \| less`) without a word and keeps the exit code (0 with an optional failure): 64926 of 200108 bytes reached `(sleep 7; wc -c)`. Fail with a message when output is still pending at the cap, or wait for EPIPE (cli/main.ts:445) (bert-bae/coplan#105) [re-audit A5 4] | 2 should fix | done: no cap; waits as any pipe writer does (a reader that keeps the pipe without reading now holds it) | ab6f03d |
-| B67 | Tests: a report over a pipe's buffer reaches a reader in full (F45's point, untested); B64's ensure assertion is vacuous (write the old copy after load); skip `write('')` when nothing is pending, for Windows (project.test.ts, store.test.ts:436, cli/main.ts:446) (bert-bae/coplan#106) [re-audit A5 5, 6] | 5 smaller | open | |
-| A6 | Re-audit the areas the rows after A5 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing | 6 re-audit | open | |
+| B67 | Tests: ~~a report over a pipe's buffer reaches a reader in full~~ (done by F51); B64's ensure assertion is vacuous (write the old copy after load); skip `write('')` when nothing is pending, for Windows (project.test.ts, store.test.ts:436, cli/main.ts:446) (bert-bae/coplan#106) [re-audit A5 5, 6] | 5 smaller | done: ensure judges a copy written after load; no empty write with nothing pending | fdf2edb |
+| A6 | Re-audit the areas the rows after A5 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#108) | 6 re-audit | done: 2 must fix, 2 should fix, 4 nice to have, now rows F52-F55, B68 and A7 | 3e5350e |
+| F52 | F49 regression: a proposal that removes the same id twice (`remove t3, upsert t3, remove t3, upsert t3`) keys both removals' prints `removal:t3`, and the second, worked out from an outline the first already emptied, overwrites the first: a subtask the user adds under t3, a task moved under it, or a link on that task is lost on accept, where 766a32f refused it. Combine the prints under one key (shared/plan.ts proposalTouches `remove`) (bert-bae/coplan#109) [re-audit A6 1] | 1 must fix | done: prints combined under one key (an open proposal of the old build that removes a task twice reads as out of date: refused, not lost) | 871d809 |
+| F53 | A cycle in a proposal's working outline crashes: proposal `[move t3 under t2, remove t1]`, then the user moves t1 under t3 (legal in the plan) gives t1→t3→t2→t1, and `descendants` recurses until RangeError in accept_proposal, renderPlan and previewProposal. Skip a move into its own subtree in the outline, and call the proposal out of date (shared/plan.ts proposalTouches `outline`, `descendants`) (bert-bae/coplan#110) [re-audit A6 2] | 1 must fix | done: such a move is out of date (found walking up); descendants stops at a task seen | 7583969 |
+| F54 | `ensure` takes an expired session from its own folder (40-day undated file), though `legacy()` refuses the same from an earlier build's folder; and ensure(x) copying y's expired state to y's own folder lets ensure(y) take it. State the keeping rule once for load, legacy() and the own-folder path (daemon/store.ts readSaved) (bert-bae/coplan#111) [re-audit A6 3] | 2 should fix | done: a start deletes what is past keeping; ensure reads it back from either folder and dates it now | 62cc5bd |
+| F55 | F50 gap: a change request being typed is dropped without a word when the agent takes the task out of review (to implement, then round 2): pruneDrafts drops it, nothing offers it, closing the page does not ask; before F50 the stale box came back with it. Offer a dropped `review:` draft with text as a locked one is (ui/lib/drafts.ts pruneDrafts, TasksView.tsx UserReview) (bert-bae/coplan#112) [re-audit A6 4] | 2 should fix | done: offered to copy, named by task and round; not while its own send is in flight | d116f46 |
+| B68 | An undated state loaded from its own folder is never saved with its date (an mtime bump makes it new again); a task in review with no round keys its draft `review:t3:undefined`, dropped every snapshot; a stray doc comment at store.ts:47; optionally say in exit()'s comment that a reader holding the pipe unread holds the CLI (daemon/store.ts load, TasksView.tsx UserReview, cli/main.ts) (bert-bae/coplan#113) [re-audit A6 5-8] | 5 smaller | done: saved with its file's date at load and ensure; a review with no round is round 1 (normalizeTask); comment gone; exit()'s comment says it | 13d9d49 |
+| B69 | A proposed move to a parent the user since removed, or set done or dropped, reads as current (`task:<id>` prints the moved task only) and accept fails with the raw apply error, not "out of date". Print a move's destination, or call an apply error at accept out of date (shared/plan.ts proposalTouches `move_task`) (bert-bae/coplan#115) [review of F53] | 5 smaller | done: moves and new tasks placed by `place`, against the outline; out of date with the reason | c4ba8e3 |
+| A7 | Re-audit the areas the rows after A6 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#114) | 6 re-audit | done: no must fix, 3 should fix, 5 nice to have, now rows F56-F58, B70 and A8 | dca5b2b |
+| F56 | B68 widened: load saves every undated session (and copies from an old folder) in the constructor, before main.ts listens: a failed save's persist-error goes to no one, and persistFailed then swallows the same failure later, so the user edits a session that never saves, untold. Save after the listeners are on, or record no failure no one heard (daemon/store.ts loadFromDisk, persistNow) (bert-bae/coplan#116) [re-audit A7 1] | 2 should fix | done: held for the first listener (the daemon's log) | cf45a22 |
+| F57 | F55 gap: a change request sent as its round stops waiting on the user is refused (409 "not in review"), but pruneDrafts let its draft go unoffered while it was in `sending`: lost (card redrawn) or offered only at a later snapshot, its box hidden. Offer it when save is refused for a key let go while sending; disable Send while saving (ui/lib/drafts.ts pruneDrafts, save; TasksView.tsx UserReview) (bert-bae/coplan#117) [re-audit A7 2] | 2 should fix | done: kept aside while sent, offered on refusal; Send disabled while saving | 3a6f520 |
+| F58 | `coplan check` starts the next check after stdout failed (a sync write's error comes a tick later), then exit(1) SIGKILLs it: `check --all >/dev/full` ran check two's side effect. Wait a tick and stop on a failed stdout before each check (cli/check.ts hook loop, cli/main.ts `unwritten`) (bert-bae/coplan#118) [re-audit A7 3] | 2 should fix | done: failure kept in output.ts; check stops before each check; main lets a running command end itself (that part untested: a stdout failing late, not EPIPE, could not be made here) | 90cd05b |
+| F59 | A page opened after a save failure was heard (by the daemon's log) is never told: persistFailed says it once per kind, to whoever listens then, so the user edits a session that is not saved. Make a session's save failure part of what a page gets on connect; readSaved's own persist-error skips the dedup (daemon/store.ts persistNow, readSaved; the stream) (bert-bae/coplan#121) [review of F56] | 2 should fix | done: sent with the snapshot on connect (a reconnect says it again: still failing); readSaved's copy deduped, cleared on success | 15eac3c |
+| B70 | normalizeTask keeps a stage on a task not in progress (and B68 gives it round 1); an undated session past the cap is not saved with its date at load; the review toast names a removed task by id; exit()'s comment ("as on Windows", ">&-" exits 0 with nothing written); a release note for F52's old double-removal proposals (shared/plan.ts, daemon/store.ts, ui/lib/drafts.ts, cli/main.ts) (bert-bae/coplan#119) [re-audit A7 4-8] | 5 smaller | done: all five. Noted, not done: publish keeps a stage for in_progress only (a blocked task loses it on republish), where edits and load keep it | 77e9506 |
+| A8 | Re-audit the areas the rows after A7 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#120) | 6 re-audit | done: 1 must fix, 3 should fix, 4 nice to have, now rows F60-F63, B71 and A9 | d68acb5 |
+| F60 | B70 regression: normalizeTask drops the round of a todo task at load, but only the user putting a task back clears rounds and reviews (the agent cannot, by design): after a restart, an agent-todo'd task's next review is round 1 again and roundVerdict finds the old round-1 pass, which meets the done gate unreviewed and resets the round limit. Keep the round at load (shared/plan.ts normalizeTask) (bert-bae/coplan#122) [re-audit A8 1] | 1 must fix | done: load keeps the round; tested through an agent edit and a reload | ac8d31f |
+| F61 | A republish drops a kept task's `reviews` (review history gone from the page) and a blocked task's stage (kept for in_progress only, where edits and load keep it for blocked too). Carry `reviews` over; one rule for which statuses keep a stage (shared/plan.ts publishTasks/buildTaskTree) (bert-bae/coplan#123) [re-audit A8 2] | 2 should fix | done: reviews carried with the round; keepsStage shared by publish, edits and load (a publish never runs mid-build, so the blocked case is for consistency); startCommit, own checks, addedInBuild left out on purpose | 520d084 |
+| F62 | F57 gap: a review box drawn anew while its request is being sent (task set blocked in review, a tab switch) mounts with Send enabled: a second review_task is sent, and the first save's finally clears the key from `sending` while the second is out. A key being sent is saving (ui/lib/drafts.ts useKeptDraft, TasksView.tsx UserReview) (bert-bae/coplan#124) [re-audit A8 3] | 2 should fix | done: a send's progress and outcome told to every editor of its key (tested on the review box; the reply composer's `sending` wired, not tested) | a39c09b |
+| F63 | F58 regression: interactive `coplan setup` with stdout failing (a full disk) no longer ends at once; it waits on prompts no one can see (hung 8 s, killed, no message), and Enter walks it on defaults unseen. Ask nothing once stdout has failed (cli/setup.ts askTerminal) (bert-bae/coplan#125) [re-audit A8 4] | 2 should fix | done: answer() stops the walk once stdout failed (a tick late too); checked by hand under a pty: rc 1 in 0.09 s. --yes still finishes unseen, on purpose | 0866853 |
+| B71 | A held persist-error is lost if the first listener added is not an 'event' one, or the first is removed before the next tick; a failed copy's saveFailure outlives the cause for a session later made fresh; normalizeTask keeps an invalid status; Windows may say EOF for a gone reader (unconfirmed) (daemon/store.ts emitEvent, ensure; shared/plan.ts; cli/output.ts) (bert-bae/coplan#126) [re-audit A8 5-8] | 5 smaller | done: held event waits for an 'event' listener; unknown status taken as todo. Not done: clearing the stale copy failure hides a real one (stays until the first save); Windows EOF unconfirmed | 08f7a71 |
+| A9 | Re-audit the areas the rows after A8 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#127) | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -731,3 +750,109 @@ signals and long-running commands.
 
 **Verdict:** no Must fix; fix 1 first (it can lose a user's link), then 3, 4, 2.
 
+## Re-audit report (row A6, four auditors, 2026-11-11)
+
+Scope: the changes since 766a32f (rows F48-F51 and B67), by four auditors
+(plan model, check runner, store, page), each in its own worktree; each
+finding kept was reproduced with a scratch test or command.
+
+### Must fix
+
+1. **A second removal of the same id overwrites the first's print** (`shared/plan.ts` proposalTouches `remove`). `[remove t3, upsert t3, remove t3, upsert t3]`, then the user adds a subtask under t3, moves t4 under it, or links t4 and moves it: accept goes through and the user's edit is lost. 766a32f refused all three. F49 regression.
+2. **A cyclic working outline crashes** (`plan.ts` `descendants`). `[move t3 under t2, remove t1]`, then the user moves t1 under t3: RangeError in accept_proposal, renderPlan and previewProposal. Predates F48/F49.
+
+### Should fix
+
+3. **`ensure` takes an expired session from its own folder** (`daemon/store.ts` readSaved), though not from an earlier build's folder. Predates B64.
+4. **A change request being typed is dropped when the task leaves review** (`TasksView.tsx` UserReview, `drafts.ts` pruneDrafts): not offered, not asked about on close. Follows from F50.
+
+### Nice to have
+
+5. An undated own-folder state is never saved with its date.
+6. A task in review with no round: draft key `review:t3:undefined`, dropped each snapshot.
+7. A stray doc comment at `store.ts:47`.
+8. `exit()`'s comment could say a reader holding the pipe unread holds the CLI (F51's accepted trade-off; no internal caller pipes the CLI without reading).
+
+Checked and fine: a fuzz of ~4,700 proposals against ~70 user edits each
+(nothing else lost or wrongly refused); F48's and F49's named sequences
+against applyOps; exit() with a slow reader (200056 of 200056 bytes, exit
+1), an early-closing reader, stdout closed, /dev/full (ENOSPC, exit 1), a
+TTY, SIGTERM/SIGINT/SIGHUP while blocked, and the order of the error event
+and leave; B67's empty-write skip (same results); dating by file on every
+read path; the copy-to-own-folder write keeps the old date; failed saves
+keep the old mtime; UserReview's remount keeps the draft across a column
+move and beforeunload still asks.
+
+**Verdict:** 2 Must fix. Fix 1 first (it loses a user's edit silently),
+then 2, 4, 3.
+
+## Re-audit report (row A7, four auditors, 2026-11-11)
+
+Scope: the changes since 28e7a26 (rows F52-F55, B68, B69), at e81dc2d, by
+four auditors (plan model, check runner, store, page), each in its own
+worktree checked out at that commit; each finding kept was reproduced,
+except where marked.
+
+### Should fix
+
+1. **A save failing at daemon start is told to no one** (`daemon/store.ts` loadFromDisk): it runs before main.ts listens, and persistFailed then swallows the same failure later. Wider since B68.
+2. **A change request sent as its round stops waiting is lost** (`ui/lib/drafts.ts`): refused by the daemon, and let go unoffered while it was being sent. F55 gap.
+3. **`coplan check` starts the next check after its output failed, then kills it** (`cli/check.ts`). Older.
+
+### Nice to have
+
+4. normalizeTask keeps a stage on a task not in progress (and B68 gives it round 1).
+5. An undated session past the cap is not saved with its date at load.
+6. The review toast names a removed task by id (not reproduced).
+7. exit()'s comment: "as on Windows"; `>&-` exits 0 with nothing written.
+8. F52 reads an old proposal that removes a task twice as out of date (not run): a release note.
+
+Checked and fine: a fuzz of ~25,000 proposals with 1-5 user edits each (no
+crash, no false out-of-date, none judged current that then failed, no user
+edit lost); `place`'s closed check against applyOps' (reorders, earlier
+moves, re-added tasks); sentinels against fingerprints; B68's round against
+the pile and later reviews; ensure's revival kept at the next start, the
+copy branch, WeakSet identity through migrate, the rail's order; F55's
+offer once, session switches, boot, two tabs, the own send landing first,
+save()'s try/finally; exit() on pipes, slow and early-closing readers,
+/dev/full, a TTY, and signals.
+
+**Verdict:** no Must fix; fix 2 first (it loses what the user typed), then
+1, 3.
+
+## Re-audit report (row A8, four auditors, 2026-11-11)
+
+Scope: the changes since 137b984 (rows F56-F59, B70), at 34d17d3, by four
+auditors (plan model, check runner, store and stream, page), each in its
+own worktree at that commit; each finding kept was reproduced, except
+where marked.
+
+### Must fix
+
+1. **A restart clears an agent-todo'd task's round** (`shared/plan.ts` normalizeTask, B70): its next review is round 1 again, and the old round-1 pass gets it past the done gate unreviewed.
+
+### Should fix
+
+2. **A republish drops review history and a blocked task's stage** (`plan.ts` publishTasks). Older.
+3. **A review box drawn anew mid-send can send again** (`ui/lib/drafts.ts`, `TasksView.tsx`). F57 gap.
+4. **Interactive `setup` with stdout failing waits on unseen prompts** (`cli/setup.ts`). F58 regression.
+
+### Nice to have
+
+5. A held persist-error lost if a listener of another name comes first, or the first is removed before the next tick (not so today).
+6. A failed copy's saveFailure outlives its cause for a session later made fresh.
+7. normalizeTask keeps an invalid status.
+8. Windows may report EOF, not EPIPE, for a gone reader (not reproduced).
+
+Checked and fine: every CLI command to /dev/full (rc 1, said once),
+exit() twice, check with --json, --list, zero hooks, a disk filling
+partway, `| head -c1`, `>&-`, a slow reader, a TTY, SIGINT; held events
+reach the log once and in order; the stream sends only the focused
+session's failure; persistFailed cleared on save, drop, purge and a good
+copy; B70's write-back as nobody (read-only, newer build, old copy; 12 ms
+for 65 sessions); F57's refused send offered once (card in place, moved,
+session switched), own request first, throws, other editors untouched;
+blocked keeps its stage, done/dropped keep round and reviews; proposals'
+prints unchanged across a reload.
+
+**Verdict:** 1 Must fix; fix 1 first, then 4, 3, 2.

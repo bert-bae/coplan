@@ -31,6 +31,29 @@ export const openDrafts = new Map<string, OpenDraft>();
  *  so what was written does not stay on screen untracked. */
 const holders = new Map<string, () => void>();
 
+/** Kept drafts being saved now: a plan that lands meanwhile may be their
+ *  own save's, so what they hold is not lost. */
+const sending = new Set<string>();
+/** How a send went, told to the editors of its draft that did not make it
+ *  (drawn anew while it was out: its card moved): they wait on it, then
+ *  close on its text sent, or start again from the field if refused. */
+type SendNews = 'sending' | 'sent' | 'refused';
+const sendWatchers = new Map<string, Set<(news: SendNews) => void>>();
+function tellSend(key: string, news: SendNews, from: (news: SendNews) => void): void {
+  if (news === 'sending') sending.add(key);
+  else sending.delete(key);
+  for (const watch of sendWatchers.get(key) ?? []) if (watch !== from) watch(news);
+}
+/** Of those, change requests a plan landing let go (their round no longer
+ *  waits on the user) while being sent: offered if the send is refused. */
+const letGoWhileSending = new Map<string, DroppedDraft>();
+let offerDropped: ((sessionId: string | null, dropped: DroppedDraft) => void) | null = null;
+/** Where a draft let go while being sent, then refused, is offered (the
+ *  store's copy toast). */
+export function onDroppedAfterSend(offer: (sessionId: string | null, dropped: DroppedDraft) => void): void {
+  offerDropped = offer;
+}
+
 /** A kept draft's key: the session it was written in, and its field. */
 function draftKey(sessionId: string | null, field: string): string {
   return `${sessionId ?? ''}:${field}`;
@@ -48,7 +71,7 @@ export const refusedFields = new Map<object, { sessionId: string | null; name: s
 
 /** Whether any open editor holds text not saved yet. */
 export function unsavedDrafts(): boolean {
-  if (refusedFields.size) return true;
+  if (refusedFields.size || letGoWhileSending.size) return true;
   for (const d of openDrafts.values()) if (d.draft !== d.value) return true;
   return false;
 }
@@ -61,11 +84,12 @@ export function unsavedDrafts(): boolean {
  * An editor still open whose field a lock takes is told, kept or not.
  * With no plan (the session was deleted), all of them go. Returns those
  * that held unsaved text a lock took the field from (a sign-off made in
- * chat, say), named, for the user to be told, and to copy.
+ * chat, say), or a change request whose round no longer waits on the user,
+ * named, for the user to be told, and to copy.
  */
-export function pruneDrafts(sessionId: string, plan: Plan | null): { name: string; text: string }[] {
+export function pruneDrafts(sessionId: string, plan: Plan | null): DroppedDraft[] {
   const prefix = `${sessionId}:`;
-  const locked: { name: string; text: string }[] = [];
+  const locked: DroppedDraft[] = [];
   const locks = plan ? { design: isDesignLocked(plan), plan: isLocked(plan) } : null;
   const told = new Set<string>();
   for (const [key, open] of openDrafts) {
@@ -81,7 +105,19 @@ export function pruneDrafts(sessionId: string, plan: Plan | null): { name: strin
       told.add(key);
     }
     // Held, with text not saved (nor saved in the same plan as the lock).
-    if (held && open.draft !== open.value && open.draft !== text) locked.push({ name: fieldName(plan!, field), text: open.draft });
+    if (held && open.draft !== open.value && open.draft !== text) locked.push({ name: fieldName(plan!, field), text: open.draft, why: 'locked' });
+    // A change request whose round no longer waits on the user (the agent
+    // took the task back, or a verdict came in chat): its box is gone. One
+    // being sent waits on its answer (its own verdict may land first): it
+    // is offered only if the send is refused (save).
+    const review = /^review:(.+):(\d+)$/.exec(field);
+    if (review && plan && text === undefined && open.draft.trim()) {
+      const title = plan.tasks.find((t) => t.id === review[1])?.title;
+      const on = title === undefined ? 'a task since removed' : `task "${title}"`;
+      const dropped: DroppedDraft = { name: `your change request on ${on} (round ${review[2]})`, text: open.draft, why: 'review' };
+      if (sending.has(key)) letGoWhileSending.set(key, dropped);
+      else locked.push(dropped);
+    }
   }
   // One open with nothing typed was let go at an earlier plan (above), so
   // is not kept: the lock that takes its field tells it too.
@@ -93,6 +129,14 @@ export function pruneDrafts(sessionId: string, plan: Plan | null): { name: strin
     }
   }
   return locked;
+}
+
+/** Unsaved text a plan landing took the field of: a sign-off's lock, or a
+ *  review round that no longer waits on the user. */
+export interface DroppedDraft {
+  name: string;
+  text: string;
+  why: 'locked' | 'review';
 }
 
 /** Which of the plan's sign-offs hold its fields still. */
@@ -202,11 +246,36 @@ export function filesText(files: string[] | undefined): string {
  */
 export function useKeptDraft(sessionId: string | null, field: string | null, value: string, version: number | undefined, openAtFirst = false) {
   const [key] = useState(() => (field ? draftKey(sessionId, field) : null));
+  // The session it was kept in, as its key is: fixed at mount.
+  const [keySession] = useState(sessionId);
   const [kept] = useState(() => (key ? openDrafts.get(key) : undefined));
   const [editing, setEditing] = useState(openAtFirst || Boolean(kept));
   const [draft, setDraft] = useState(kept?.draft ?? value);
   const [started, setStarted] = useState<Started>(() => (kept ? { version: kept.version, value: kept.value } : { version, value }));
   const [saving, setSaving] = useState(false);
+  // Its draft being sent from an editor drawn before this one, and how that
+  // went (tellSend).
+  const [sentElsewhere, setSentElsewhere] = useState(() => (key ? sending.has(key) : false));
+  const watchRef = useRef<(news: SendNews) => void>(() => {});
+  watchRef.current = (news) => {
+    setSentElsewhere(news === 'sending');
+    if (news === 'sent') {
+      setDraft(now.current.value);
+      setEditing(openAtFirst);
+    } else if (news === 'refused') setStarted(now.current);
+  };
+  const watch = useRef((news: SendNews) => watchRef.current(news)).current;
+  useEffect(() => {
+    if (!key) return;
+    const watchers = sendWatchers.get(key) ?? new Set();
+    sendWatchers.set(key, watchers);
+    watchers.add(watch);
+    setSentElsewhere(sending.has(key));
+    return () => {
+      watchers.delete(watch);
+      if (!watchers.size) sendWatchers.delete(key);
+    };
+  }, [key, watch]);
   // The field as it is on screen now, for a save's answer that lands later.
   const now = useRef<Started>({ version, value });
   now.current = { version, value };
@@ -234,7 +303,7 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
     draft,
     setDraft,
     started,
-    saving,
+    saving: saving || sentElsewhere,
     /** Open it on the field as it is now. */
     begin: () => {
       setStarted(now.current);
@@ -255,9 +324,31 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
         close();
         return true;
       }
+      // On its way already, from this editor or one drawn before it.
+      if (key && sending.has(key)) return false;
       setSaving(true);
-      const result = await send();
-      setSaving(false);
+      if (key) tellSend(key, 'sending', watch);
+      let result: unknown = false;
+      let letGo: DroppedDraft | undefined;
+      try {
+        result = await send();
+      } finally {
+        if (key) {
+          tellSend(key, result === false ? 'refused' : 'sent', watch);
+          letGo = letGoWhileSending.get(key);
+          letGoWhileSending.delete(key);
+        }
+        setSaving(false);
+        // Thrown, once its field had gone: offered all the same.
+        if (result === false && letGo) offerDropped?.(keySession, letGo);
+      }
+      // Refused once its field had gone (a change request whose round
+      // stopped waiting as it was sent): offered now, and closed.
+      if (result === false && letGo) {
+        openDrafts.delete(key!);
+        close();
+        return false;
+      }
       if (result !== false) {
         if (key) openDrafts.delete(key);
         close();

@@ -415,7 +415,7 @@ test('whether a session\'s hooks ran is kept; one saved before it was recorded i
   assert.equal(summarize(reloaded.get('tools-only')!).hooked, false);
 });
 
-test('a saved session with no time of its own is dated by its file: one untouched for months expires', async () => {
+test('a saved session with no time of its own is dated by its file: one untouched for months expires at a start', async () => {
   const { paths, legacyName } = await import('../shared/paths.ts');
   const months = (Date.now() - 120 * 24 * 60 * 60 * 1000) / 1000;
   const undated = (id: string) => ({ sessionId: id, cwd: process.cwd(), title: 'early build', status: 'idle', plan: null });
@@ -433,8 +433,83 @@ test('a saved session with no time of its own is dated by its file: one untouche
   const store = await freshStore();
   assert.equal(store.get('undated-own')?.sessionId, undefined, 'past keeping, not loaded');
   assert.equal(store.get('undated:old')?.sessionId, undefined, 'nor its old-folder copy');
-  assert.notEqual(store.ensure('undated:old', process.cwd()).title, 'early build', 'nor taken by ensure');
+  assert.notEqual(store.ensure('undated:old', process.cwd()).title, 'early build', 'nor brought back by ensure');
+  // While the store runs, a session a hook asks for is live: one past keeping is read back, from an earlier
+  // build's folder or its own (dropped from memory, say), not saved over with a blank one.
+  const late = path.join(home, 'sessions', legacyName('undated:late'));
+  mkdirSync(late, { recursive: true });
+  writeFileSync(path.join(late, 'state.json'), JSON.stringify(undated('undated:late')));
+  utimesSync(path.join(late, 'state.json'), months, months);
+  assert.equal(store.ensure('undated:late', process.cwd()).title, 'early build', 'read back from its old folder');
+  mkdirSync(paths.sessionDir('undated-late-own'), { recursive: true });
+  writeFileSync(paths.sessionState('undated-late-own'), JSON.stringify(undated('undated-late-own')));
+  utimesSync(paths.sessionState('undated-late-own'), months, months);
+  assert.equal(store.ensure('undated-late-own', process.cwd()).title, 'early build', 'read back from its own folder');
+  // Dated now and saved, so the next start keeps it.
+  const next = await freshStore();
+  assert.equal(next.get('undated:late')?.title, 'early build', 'kept at the next start (old folder)');
+  assert.equal(next.get('undated-late-own')?.title, 'early build', 'kept at the next start (own folder)');
   assert.ok(Math.abs((store.get('undated-recent')?.updatedAt ?? 0) - Date.now()) < 60_000, 'a recent one is kept');
+});
+
+test('an undated session loaded is saved with the date its file gave it, so a later copy of the file keeps its age', async () => {
+  const { paths } = await import('../shared/paths.ts');
+  const days20 = Date.now() - 20 * 24 * 60 * 60 * 1000;
+  mkdirSync(paths.sessionDir('undated-saved'), { recursive: true });
+  writeFileSync(paths.sessionState('undated-saved'), JSON.stringify({ sessionId: 'undated-saved', cwd: process.cwd(), title: 'early build', status: 'idle', plan: null }));
+  utimesSync(paths.sessionState('undated-saved'), days20 / 1000, days20 / 1000);
+  await freshStore();
+  const onDisk = JSON.parse(readFileSync(paths.sessionState('undated-saved'), 'utf8')) as { updatedAt?: number };
+  assert.ok(Math.abs((onDisk.updatedAt ?? 0) - days20) < 60_000, `dated on disk by its file: ${onDisk.updatedAt}`);
+});
+
+test('an undated session past the cap on sessions held in memory is saved with its date too', async () => {
+  const { paths } = await import('../shared/paths.ts');
+  const days25 = Date.now() - 25 * 24 * 60 * 60 * 1000;
+  // More sessions with a plan than are held, all newer: the undated one stays cold, on disk.
+  const plan = { title: 'p', summary: '', sections: [], diagrams: [], tasks: [], threads: [] };
+  for (let i = 0; i < 61; i++) {
+    mkdirSync(paths.sessionDir(`held-${i}`), { recursive: true });
+    writeFileSync(paths.sessionState(`held-${i}`), JSON.stringify({ sessionId: `held-${i}`, cwd: process.cwd(), title: 'x', status: 'idle', plan, updatedAt: Date.now() - i * 1000 }));
+  }
+  mkdirSync(paths.sessionDir('cold-undated'), { recursive: true });
+  writeFileSync(paths.sessionState('cold-undated'), JSON.stringify({ sessionId: 'cold-undated', cwd: process.cwd(), title: 'early build', status: 'idle', plan }));
+  utimesSync(paths.sessionState('cold-undated'), days25 / 1000, days25 / 1000);
+  try {
+    const store = await freshStore();
+    assert.equal(store.get('cold-undated'), undefined, 'past the cap, not in memory');
+    const onDisk = JSON.parse(readFileSync(paths.sessionState('cold-undated'), 'utf8')) as { updatedAt?: number };
+    assert.ok(Math.abs((onDisk.updatedAt ?? 0) - days25) < 60_000, `dated on disk by its file: ${onDisk.updatedAt}`);
+  } finally {
+    for (let i = 0; i < 61; i++) rmSync(paths.sessionDir(`held-${i}`), { recursive: true, force: true });
+    rmSync(paths.sessionDir('cold-undated'), { recursive: true, force: true });
+  }
+});
+
+test('a save that fails while the store starts, before anyone listens, is told to the first listener', async () => {
+  const { paths } = await import('../shared/paths.ts');
+  mkdirSync(paths.sessionDir('unsaved-at-start'), { recursive: true });
+  writeFileSync(paths.sessionState('unsaved-at-start'), JSON.stringify({ sessionId: 'unsaved-at-start', cwd: process.cwd(), title: 'early build', status: 'idle', plan: null }));
+  // Its temp file's name taken by a folder: every save of it fails (EISDIR), the one at start too.
+  const blocker = path.join(paths.sessionDir('unsaved-at-start'), `.state.${process.pid}.tmp`);
+  mkdirSync(blocker);
+  try {
+    const store = await freshStore();
+    const told: string[] = [];
+    // A listener of another name first: the held one waits for an 'event' listener.
+    store.on('other', () => {});
+    store.on('event', (e: { type: string; sessionId?: string; message?: string }) => {
+      if (e.type === 'persist-error') told.push(`${e.sessionId}:${e.message}`);
+    });
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(told, ['unsaved-at-start:EISDIR'], 'the save at start, told once someone listens');
+    // Said once per kind of failure, as any.
+    store.publishPlan('unsaved-at-start', PLAN);
+    store.drop('unsaved-at-start');
+    assert.deepEqual(told, ['unsaved-at-start:EISDIR']);
+  } finally {
+    rmSync(blocker, { recursive: true, force: true });
+  }
 });
 
 test('a session saved by a newer Coplan is never read wrongly or saved over', async () => {
@@ -711,6 +786,36 @@ test("a newer Coplan's session is not pushed out of memory by newer plain sessio
   } finally {
     process.env['CC_HARNESS_HOME'] = home;
     rmSync(own, { recursive: true, force: true });
+  }
+});
+
+test("a failed copy of another session's state, found in a folder it was named into, is said once, as any failed save", async () => {
+  const { paths } = await import('../shared/paths.ts');
+  const store = await freshStore();
+  // Then `q_r`'s own folder is found holding `q:r`'s state (an earlier build named it so); copying it to
+  // `q:r`'s folder fails.
+  mkdirSync(paths.sessionDir('q_r'), { recursive: true });
+  writeFileSync(paths.sessionState('q_r'), JSON.stringify({ sessionId: 'q:r', cwd: process.cwd(), title: 'theirs', status: 'idle', plan: null, updatedAt: Date.now() }));
+  const blocker = path.join(paths.sessionDir('q:r'), `.state.${process.pid}.tmp`);
+  mkdirSync(blocker, { recursive: true });
+  try {
+    const told: string[] = [];
+    store.on('event', (e: { type: string; sessionId?: string; message?: string }) => {
+      if (e.type === 'persist-error') told.push(`${e.sessionId}:${e.message}`);
+    });
+    store.ensure('q_r', process.cwd());
+    store.drop('q_r');
+    store.ensure('q_r', process.cwd());
+    assert.deepEqual(told, ['q:r:EISDIR'], 'once, not on every read');
+    assert.equal(store.saveFailure('q:r'), 'EISDIR', 'and a page opening on it is told');
+    // Copied once it can be: no longer said to be failing.
+    rmSync(blocker, { recursive: true, force: true });
+    store.drop('q_r');
+    store.ensure('q_r', process.cwd());
+    assert.equal(existsSync(paths.sessionState('q:r')), true);
+    assert.equal(store.saveFailure('q:r'), undefined);
+  } finally {
+    rmSync(blocker, { recursive: true, force: true });
   }
 });
 

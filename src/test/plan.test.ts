@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, MAX_CHANGES, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, proposalTouches, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, confirmDesign, countTasks, descendants, MAX_CHANGES, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, proposalTouches, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import { previewProposal } from '../shared/proposals.ts';
-import type { DiagramNodeInput, Plan, PlanInput, PlanOp } from '../shared/types.ts';
+import type { DiagramNodeInput, Plan, PlanInput, PlanOp, Task } from '../shared/types.ts';
 
 /**
  * The plan document: publishing, editing from either side, and the change
@@ -916,6 +916,36 @@ test('proposals survive a reload; one that lost its edits does not', () => {
 /* An edit of Claude's is refused when it would overwrite a change of the
  * user's it has not read: every item it changes counts, not only the one it names. */
 
+test('a task the agent puts back to todo keeps its round across a restart, as the edit kept it', () => {
+  const claude = (plan: Plan, op: PlanOp) => applyOps(plan, [op], 'claude', undefined, { tracking: true }).plan;
+  let plan = claude(fresh(), { op: 'upsert_task', id: 't2', status: 'in_progress' });
+  for (const stage of ['review', 'implement', 'review'] as const) plan = claude(plan, { op: 'upsert_task', id: 't2', stage });
+  plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'todo' });
+  assert.equal(plan.tasks.find((t) => t.id === 't2')?.round, 2, 'the edit keeps it');
+  const reloaded = normalizePlan(JSON.parse(JSON.stringify(plan)) as Plan & Record<string, unknown>, 'x');
+  assert.equal(reloaded.tasks.find((t) => t.id === 't2')?.round, 2, 'so does a restart: its next review is round 3');
+});
+
+test('a task in review with no round (an older or hand-edited plan) is in its first, so it can be reviewed', () => {
+  const plan = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'in_progress', order: 0, parentId: null, stage: 'review' }, { id: 't2', title: 'UI', status: 'todo', order: 1, parentId: null }] } as unknown as Plan & Record<string, unknown>, 'x');
+  assert.equal(plan.tasks.find((t) => t.id === 't1')?.round, 1);
+  assert.equal(plan.tasks.find((t) => t.id === 't2')?.round, undefined, 'not one that is not in review');
+  // A stage on a task not in progress (hand-edited) is dropped, as an edit drops it.
+  const stale = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'todo', order: 0, parentId: null, stage: 'review', round: 3 }, { id: 't2', title: 'UI', order: 1, parentId: null, stage: 'review' }] } as unknown as Plan & Record<string, unknown>, 'x');
+  assert.equal(stale.tasks[0]!.stage, undefined);
+  // Its round stays: only the user putting it back starts it over (an edit by the agent keeps it, so a
+  // restart may not), or its next review would meet an old round's verdict.
+  assert.equal(stale.tasks[0]!.round, 3, 'its round kept');
+  assert.equal(stale.tasks[1]!.stage, undefined, 'nor one with no status of its own');
+  assert.equal(stale.tasks[1]!.round, undefined);
+  const blocked = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'blocked', order: 0, parentId: null, stage: 'implement' }] } as unknown as Plan & Record<string, unknown>, 'x');
+  assert.equal(blocked.tasks[0]!.stage, 'implement', 'a blocked one keeps its stage');
+  // A status it does not know is taken as not started.
+  const odd = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'bogus', order: 0, parentId: null, stage: 'review', round: 2 }] } as unknown as Plan & Record<string, unknown>, 'x');
+  assert.equal(odd.tasks[0]!.status, 'todo');
+  assert.equal(odd.tasks[0]!.stage, undefined);
+});
+
 function linkedPlan(): Plan {
   return publishPlan(null, {
     title: 'x',
@@ -1246,10 +1276,57 @@ test('a proposed removal is out of date once the user changed what it would take
   assert.equal(accept(proposedTop).tasks.find((t) => t.id === 't2')?.parentId, null, 'as applied: t2 stays, at the top');
   const movedOut = applyOps(linkedPlan(), [{ op: 'move_task', id: 't2', parentId: null, index: 0 }], 'user').plan;
   assert.equal(proposalTouches(linkedPlan(), toTop)['removal:t1'], proposalTouches(movedOut, [{ op: 'remove', kind: 'task', id: 't1' }])['removal:t1']);
+  // Removed twice: what the first removal takes counts as much as the second's, which sees it gone already.
+  const removedTwice: PlanOp[] = [{ op: 'remove', kind: 'task', id: 't3' }, { op: 'upsert_task', id: 't3', title: 'UI' }, { op: 'remove', kind: 'task', id: 't3' }, { op: 'upsert_task', id: 't3', title: 'UI' }];
+  const proposedRemovedTwice = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: removedTwice }], 'claude').plan;
+  for (const [what, edits] of [
+    ['a subtask added under it', [{ op: 'upsert_task', id: 'u9', title: 'Mine', parentId: 't3' }]],
+    ['a task moved under it', [{ op: 'move_task', id: 't4', parentId: 't3', index: 0 }]],
+  ] as [string, PlanOp[]][]) {
+    const edited = applyOps(proposedRemovedTwice, edits, 'user').plan;
+    assert.throws(() => accept(edited), STALE, `removed twice, ${what}`);
+  }
+  assert.equal(accept(proposedRemovedTwice).tasks.find((t) => t.id === 't3')?.title, 'UI', 'with nothing changed, it applies');
   // A move alone leaves the moved task's links and dependencies as they are: no reason to refuse it.
   const moved = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [ops[0]!] }], 'claude').plan;
   const linked = applyOps(moved, [{ op: 'upsert_node', diagramId: 'd1', id: 'a', taskIds: ['t3'] }], 'user').plan;
   assert.equal(accept(linked).tasks.find((t) => t.id === 't3')?.parentId, 't1');
+});
+
+test("a proposed move the user's moves since put inside itself makes the proposal out of date, not a crash", () => {
+  // t3 under t2 fit when proposed; the user then moved t1 under t3, so t2 is inside t3.
+  for (const [what, ops] of [
+    ['a move and a removal', [{ op: 'move_task', id: 't3', parentId: 't2', index: 0 }, { op: 'remove', kind: 'task', id: 't1' }]],
+    ['a move, a later edit to it, and a removal', [{ op: 'move_task', id: 't3', parentId: 't2', index: 0 }, { op: 'upsert_task', id: 't3', detail: 'Screens' }, { op: 'remove', kind: 'task', id: 't1' }]],
+  ] as [string, PlanOp[]][]) {
+    const proposed = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops }], 'claude').plan;
+    const moved = applyOps(proposed, [{ op: 'move_task', id: 't1', parentId: 't3', index: 0 }], 'user').plan;
+    assert.doesNotThrow(() => renderPlan(moved), what);
+    assert.doesNotThrow(() => previewProposal(moved, moved.proposals![0]!), what);
+    assert.throws(() => accept(moved), new RegExp(`${STALE.source}: where task t3 "UI" goes \\(the task it goes under is now inside it\\)`), what);
+  }
+  // A circle of parents, which no path should build, ends the walk under a task rather than the stack.
+  const circle = { tasks: [{ id: 'a', parentId: 'b' }, { id: 'b', parentId: 'a' }] as Task[] };
+  assert.deepEqual(descendants(circle, 'a').map((t) => t.id), ['b']);
+});
+
+test("a proposed move to a task the user since removed or closed is out of date, not a raw error on accept", () => {
+  const proposed = applyOps(linkedPlan(), [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [{ op: 'move_task', id: 't3', parentId: 't2', index: 0 }] }], 'claude').plan;
+  for (const [what, edit, why] of [
+    ['removed', { op: 'remove', kind: 'task', id: 't2' }, 'is gone'],
+    ['done', { op: 'upsert_task', id: 't2', status: 'done' }, 'takes no subtasks now'],
+  ] as [string, PlanOp, string][]) {
+    const edited = applyOps(proposed, [edit], 'user').plan;
+    assert.throws(() => accept(edited), new RegExp(`${STALE.source}: where task t3 "UI" goes \\(the task it goes under ${why}\\)`), what);
+    // A new task the proposal adds under it, likewise.
+    const adding = applyOps(linkedPlan(), [{ op: 'propose', title: 'More', reason: 'needed', ops: [{ op: 'upsert_task', id: 'n1', title: 'Paging', parentId: 't2' }] }], 'claude').plan;
+    assert.throws(() => accept(applyOps(adding, [edit], 'user').plan), new RegExp(`${STALE.source}: where task n1 goes \\(the task it goes under ${why}\\)`), `adding, ${what}`);
+  }
+  assert.equal(accept(proposed).tasks.find((t) => t.id === 't3')?.parentId, 't2', 'unchanged, it applies');
+  // Closed, with subtasks the proposal moves out first: it takes none by the time the move applies.
+  const closed = applyOps(linkedPlan(), [{ op: 'upsert_task', id: 'c1', title: 'Spare', parentId: 't1' }, { op: 'upsert_task', id: 't1', status: 'done' }], 'user').plan;
+  const outFirst = applyOps(closed, [{ op: 'propose', title: 'Tidy', reason: 'simpler', ops: [{ op: 'move_task', id: 't2', parentId: null, index: 0 }, { op: 'move_task', id: 't3', parentId: 't1', index: 0 }] }], 'claude').plan;
+  assert.throws(() => accept(applyOps(outFirst, [{ op: 'remove', kind: 'task', id: 'c1' }], 'user').plan), new RegExp(`${STALE.source}: where task t3 "UI" goes \\(the task it goes under takes no subtasks now\\)`), 'by the outline');
 });
 
 test("a proposed builds is out of date once the user relinked that task's boxes", () => {
@@ -1397,6 +1474,17 @@ test("a canvas save is refused for a graph Claude republished since it was based
   const withQueue = { ...INPUT.diagrams![0]!, id: 'd1', nodes: [...d().nodes, { id: 'queue', label: 'Queue', kind: 'queue' as const }] };
   plan = publishPlan(plan, { ...SAME_TASKS, diagrams: [withQueue] }, 3_000).plan;
   assert.throws(() => applyOps(plan, [graphSave(plan, dragged((id) => id !== 'queue'), base)], 'user'), CHANGED);
+});
+
+test('a republish keeps a kept task\'s review history with its round, and a blocked task\'s stage', () => {
+  const plan = fresh();
+  const t4 = plan.tasks.find((t) => t.id === 't4')!;
+  Object.assign(t4, { status: 'blocked', stage: 'review', round: 2, reviews: [{ round: 1, by: 'user', verdict: 'changes', summary: 'Add a timeout', at: 1_000 }] });
+  const next = publishTasks(plan, { tasks: SAME_TASKS.tasks! }, 2_000).plan;
+  const kept = next.tasks.find((t) => t.id === 't4')!;
+  assert.deepEqual(kept.reviews, t4.reviews, 'its review history');
+  assert.equal(kept.round, 2);
+  assert.equal(kept.stage, 'review', 'its stage, blocked in it');
 });
 
 test("a canvas save is refused for links Claude's task list changed since it was based", () => {

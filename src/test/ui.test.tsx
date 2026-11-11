@@ -1,7 +1,7 @@
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { setupDom, stubFetch } from './dom-env.ts';
-import type { Plan, PlanInput, SessionState, SessionSummary } from '../shared/types.ts';
+import type { Plan, PlanInput, PlanOp, SessionState, SessionSummary } from '../shared/types.ts';
 
 /**
  * The planning workspace in a browser: every edit becomes an op sent to the
@@ -14,7 +14,7 @@ setupDom();
 const { render, renderHook, fireEvent, within, cleanup, act, screen, waitFor } = await import('@testing-library/react');
 const { App } = await import('../ui/App.tsx');
 const { store, SessionScope, useEdit, useStillShown } = await import('../ui/store.ts');
-const { openDrafts, draftsLockedBy, unsavedDrafts } = await import('../ui/lib/drafts.ts');
+const { openDrafts, draftsLockedBy, pruneDrafts, unsavedDrafts } = await import('../ui/lib/drafts.ts');
 const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan, confirmDesign, queueRevision, markRevisionDelivered } = await import('../shared/plan.ts');
 
 const INPUT: PlanInput = {
@@ -1990,6 +1990,227 @@ test('a change request typed on a card that went into review while on screen is 
   assert.equal(round2.tasks.find((t) => t.id === 't3')!.round, 2);
   assert.ok(within(review()).getByRole('button', { name: 'Request changes' }), 'a fresh box');
   assert.equal(unsavedDrafts(), false, "round 1's request no longer kept");
+  const offered = store.getState().toasts.find((t) => t.copy !== undefined);
+  assert.equal(offered?.copy, 'Add a timeout', 'but offered to copy');
+});
+
+test('a change request being typed is offered to copy when the task no longer waits on the user', async () => {
+  const plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  // The user's own request lands over the stream before its answer does.
+  let landFirst: Plan | null = null;
+  await boot(makeSession(plan), (route) => {
+    if (!route.endsWith('/plan/ops') || !landFirst) return undefined;
+    const s = store.getState().session!;
+    store.apply({ type: 'snapshot', session: { ...s, plan: landFirst } });
+    return { plan: landFirst, changes: [] };
+  });
+  await openTab('Tasks');
+  const s = store.getState().session!;
+  const review = () => within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  const offered = () => store.getState().toasts.filter((t) => t.copy !== undefined);
+  const land = async (next: Plan) => act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: next } }));
+  const type = async (text: string) => {
+    await act(async () => {
+      fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+    });
+    fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: text } });
+  };
+  const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
+  const inReview = claude(s.plan!, { op: 'upsert_task', id: 't3', stage: 'review' });
+  await land(inReview);
+  await type('Add a timeout');
+  // The agent takes it back to building before the user sends it.
+  const back = claude(inReview, { op: 'upsert_task', id: 't3', stage: 'implement' });
+  await land(back);
+  assert.equal(offered().length, 1, 'offered once');
+  assert.equal(offered()[0]!.copy, 'Add a timeout');
+  assert.match(offered()[0]!.text, /change request on task "Wire into API" \(round 1\)/);
+  assert.match(offered()[0]!.text, /no longer waits on your review/);
+  await land({ ...back });
+  assert.equal(offered().length, 1, 'not offered again');
+  // A box opened and left empty: nothing to offer.
+  const round2 = claude(back, { op: 'upsert_task', id: 't3', stage: 'review' });
+  await land(round2);
+  await type('  ');
+  const round2Back = claude(round2, { op: 'upsert_task', id: 't3', stage: 'implement' });
+  await land(round2Back);
+  assert.equal(offered().length, 1, 'an empty box is not offered');
+  // A verdict the user gave in chat, which the agent records as theirs: what the box held is offered.
+  const round3 = claude(round2Back, { op: 'upsert_task', id: 't3', stage: 'review' });
+  await land(round3);
+  await type('Log the retries');
+  await land(claude(round3, { op: 'review_task', id: 't3', verdict: 'pass', userApproved: true }));
+  assert.equal(offered().length, 2, 'a verdict from chat offers it');
+  assert.equal(offered()[1]!.copy, 'Log the retries');
+  // The box's own request, landing before its answer: nothing to offer.
+  const round4 = claude(claude(round3, { op: 'upsert_task', id: 't3', stage: 'implement' }), { op: 'upsert_task', id: 't3', stage: 'review' });
+  await land(round4);
+  await type('Retry twice');
+  landFirst = applyOps(round4, [{ op: 'review_task', id: 't3', verdict: 'changes', summary: 'Retry twice' }], 'user').plan;
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Send' }));
+  });
+  assert.ok(opsSent().some((op) => op['op'] === 'review_task' && op['summary'] === 'Retry twice'), 'sent');
+  assert.equal(offered().length, 2, 'its own request is not offered');
+});
+
+test('a change request on a task since removed is offered, named as such rather than by its id', () => {
+  openDrafts.set('s-gone:review:t-gone:2', { draft: 'Add a timeout', value: '', version: undefined });
+  const dropped = pruneDrafts('s-gone', lockedPlan(true));
+  assert.deepEqual(dropped.map((d) => [d.name, d.text]), [['your change request on a task since removed (round 2)', 'Add a timeout']]);
+});
+
+test('a change request refused because its round stopped waiting while it was sent is offered to copy at once', async () => {
+  const plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  // While the request is on its way, the agent takes the task back: it lands first, then the daemon refuses.
+  let takenBack: Plan | null = null;
+  await boot(makeSession(plan), (route) => {
+    if (!route.endsWith('/plan/ops') || !takenBack) return undefined;
+    const s = store.getState().session!;
+    store.apply({ type: 'snapshot', session: { ...s, plan: takenBack } });
+    askedMeanwhile.push(unsavedDrafts());
+    return { __status: 409, error: 'Task "Wire into API" is not in review.' };
+  });
+  const askedMeanwhile: boolean[] = [];
+  await openTab('Tasks');
+  const s = store.getState().session!;
+  const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
+  const offered = () => store.getState().toasts.filter((t) => t.copy !== undefined);
+  const review = () => within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  let current = claude(s.plan!, { op: 'upsert_task', id: 't3', stage: 'review' });
+  for (const [what, back] of [
+    ['the card where it was', (p: Plan) => claude(p, { op: 'upsert_task', id: 't3', stage: 'implement' })],
+    ['the card moved', (p: Plan) => claude(claude(p, { op: 'upsert_task', id: 't3', stage: 'implement' }), { op: 'upsert_task', id: 't3', status: 'blocked', note: 'Waiting' })],
+  ] as [string, (p: Plan) => Plan][]) {
+    await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: current } }));
+    await act(async () => {
+      fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+    });
+    fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: `Add a timeout (${what})` } });
+    const before = offered().length;
+    takenBack = back(current);
+    await act(async () => {
+      fireEvent.click(within(review()).getByRole('button', { name: 'Send' }));
+    });
+    takenBack = null;
+    assert.equal(offered().length, before + 1, `${what}: offered once, at once`);
+    assert.equal(offered().at(-1)!.copy, `Add a timeout (${what})`);
+    assert.equal(unsavedDrafts(), false, `${what}: not kept as well`);
+    assert.equal(askedMeanwhile.at(-1), true, `${what}: closing the page asks while its answer is awaited`);
+    // Back in review, a new round: a fresh box, nothing offered again.
+    current = claude(store.getState().session!.plan!, { op: 'upsert_task', id: 't3', status: 'in_progress' });
+    current = claude(current, { op: 'upsert_task', id: 't3', stage: 'review' });
+    await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: current } }));
+    assert.equal(offered().length, before + 1, `${what}: not offered again`);
+  }
+});
+
+test('a review box drawn anew while its request is on its way cannot send it again', async () => {
+  const plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  const s = store.getState().session!;
+  const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
+  const inReview = claude(s.plan!, { op: 'upsert_task', id: 't3', stage: 'review' });
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: inReview } }));
+  const review = () => within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+  });
+  fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout' } });
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.click(within(review()).getByRole('button', { name: 'Send' }));
+    });
+    // Meanwhile the agent marks it blocked, still in review: the card is drawn anew in another column.
+    await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: claude(inReview, { op: 'upsert_task', id: 't3', status: 'blocked', note: 'Waiting' }) } }));
+    const send = within(review()).getByRole('button', { name: 'Send' }) as HTMLButtonElement;
+    assert.equal(send.disabled, true, 'the new box knows its request is on its way');
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await act(async () => {
+    await held;
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  assert.equal(opsSent().filter((op) => op['op'] === 'review_task').length, 1, 'sent once');
+  // Sent: the box drawn anew closes too, rather than hold what went.
+  assert.equal(within(review()).queryByLabelText('What to change') === null, true, 'closed');
+  assert.equal(unsavedDrafts(), false);
+});
+
+test('a review box drawn anew while its request is on its way and then refused keeps the text, and can send again', async () => {
+  const plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  await boot(makeSession(plan), (route) => (route.endsWith('/plan/ops') ? { __status: 409, error: 'Busy, try again.' } : undefined));
+  await openTab('Tasks');
+  const s = store.getState().session!;
+  const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
+  const inReview = claude(s.plan!, { op: 'upsert_task', id: 't3', stage: 'review' });
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: inReview } }));
+  const review = () => within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+  });
+  fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout' } });
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.click(within(review()).getByRole('button', { name: 'Send' }));
+    });
+    await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: claude(inReview, { op: 'upsert_task', id: 't3', status: 'blocked', note: 'Waiting' }) } }));
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await act(async () => {
+    await held;
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  assert.equal((within(review()).getByLabelText('What to change') as HTMLInputElement).value, 'Add a timeout', 'kept');
+  assert.equal((within(review()).getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled, false, 'and can be sent again');
+});
+
+test('Send on a change request cannot be pressed twice while the first is on its way', async () => {
+  const plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  let answer: ((v: unknown) => void) | null = null;
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  const s = store.getState().session!;
+  const inReview = applyOps(s.plan!, [{ op: 'upsert_task', id: 't3', stage: 'review' }], 'claude', undefined, { tracking: true }).plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: inReview } }));
+  const review = () => within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+  });
+  fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout' } });
+  const held = new Promise((r) => (answer = r));
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.click(within(review()).getByRole('button', { name: 'Send' }));
+    });
+    assert.equal((within(review()).getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled, true, 'disabled while sending');
+  } finally {
+    answer!(null);
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+  }
+  await act(async () => {
+    await held;
+  });
 });
 
 test('a submitted plan is followed by box too, beside the board, with nothing on it to edit', async () => {

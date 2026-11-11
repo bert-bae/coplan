@@ -970,6 +970,10 @@ function buildRouter(deps: Deps): Router {
     const focus = ctx.url.searchParams.get('session');
     const focused = focus ? store.get(focus) : undefined;
     if (focused) send({ type: 'snapshot', session: focused });
+    // Its saves failing since before this page opened: said once, to
+    // whoever listened then (the log, or another page), so said again here.
+    const failing = focused ? store.saveFailure(focused.sessionId) : undefined;
+    if (focused && failing) send({ type: 'persist-error', sessionId: focused.sessionId, message: failing });
     // The settings this page's session reads — the global file and its
     // repository's — as they are now: read when it opens, then sent again
     // whenever a read finds them changed. One timer for the daemon reads

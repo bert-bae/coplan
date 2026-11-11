@@ -550,6 +550,12 @@ function refuseUnread(prev: Plan | null, then: string): void {
   );
 }
 
+/** Whether a task with this status is in the build's cycle, and so keeps
+ *  its stage: in progress, or blocked part way. */
+function keepsStage(status: TaskStatus): boolean {
+  return status === 'in_progress' || status === 'blocked';
+}
+
 /**
  * Whether a task can take subtasks. One already started or finished cannot:
  * a subtask would make it a parent and take its progress (stage, rounds,
@@ -615,9 +621,11 @@ function buildTaskTree(
         ...(note ? { note } : {}),
         ...(branch ? { branch } : {}),
         ...(review ? { review } : {}),
-        ...(old?.stage && status === 'in_progress' ? { stage: old.stage } : {}),
+        ...(old?.stage && keepsStage(status) ? { stage: old.stage } : {}),
+        // Its rounds' record goes with its round, as its status does.
         ...(old?.round ? { round: old.round } : {}),
         ...(old?.checks?.length ? { checks: old.checks } : {}),
+        ...(old?.reviews?.length ? { reviews: old.reviews } : {}),
         createdAt: old?.createdAt ?? now,
         updatedAt: now,
         createdBy: old?.createdBy ?? 'claude',
@@ -903,6 +911,16 @@ function normalizeTask(task: Task): Task {
   if (!validReview(t.review)) delete t.review;
   if (!validStage(t.stage)) delete t.stage;
   if (typeof t.round !== 'number' || !(t.round > 0)) delete t.round;
+  // A status it does not know is taken as not started.
+  t.status = validStatus(t.status) ?? 'todo';
+  // Only a task in the cycle has a stage, as an edit leaves it. Its round
+  // stays, whatever its status: only the user putting a task back starts it
+  // over (an edit by the agent keeps it), and a round lost here would meet
+  // an old round's verdict next review.
+  if (!keepsStage(t.status)) delete t.stage;
+  // In review with no round (an older or hand-edited plan): its first, so a
+  // verdict can be given and a review box keyed.
+  if (t.stage === 'review' && t.round === undefined) t.round = 1;
   const checks = cleanChecks(t.checks);
   if (checks?.length) t.checks = checks;
   else delete t.checks;
@@ -1984,7 +2002,7 @@ function editTask(
       out.push(log('status', ref('task', task.id), `marked "${task.title}" ${STATUS_WORDS[status]}${note}`));
     }
     // Finished, or back in the pile: no longer anywhere in the cycle.
-    if (status === 'done' || status === 'todo' || status === 'dropped') delete task.stage;
+    if (!keepsStage(status)) delete task.stage;
     // Put back in the pile by the user, it starts its cycle over: the rounds
     // and checks of the work it had are not this work's. Claude cannot do
     // that to itself — it would be a way round the round limit.
@@ -1997,7 +2015,7 @@ function editTask(
   const progress: string[] = [];
   // Going into review is a round. Reporting review again while in it —
   // with the review checks, say — is the same round.
-  if (stage && task.status !== 'done' && task.status !== 'todo' && task.status !== 'dropped' && stage !== task.stage) {
+  if (stage && keepsStage(task.status) && stage !== task.stage) {
     task.stage = stage;
     if (stage === 'review') task.round = (task.round ?? 0) + 1;
     progress.push(stage === 'review' ? `in review (round ${task.round})` : STAGE_WORDS[stage]);
@@ -2383,6 +2401,30 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
   const placed = new Set<string>();
   // The plan's tasks the proposal has removed, and not added again.
   const gone = new Set<string>();
+  // Tasks the proposal can no longer put where it says (see `place`), and
+  // why: out of date, whatever else the proposal does to them.
+  const unfit = new Map<string, string>();
+  // A task and those it is under, in the outline (walked up, so a circle
+  // ends the walk rather than the stack).
+  const ancestry = (id: string): Set<string> => {
+    const seen = new Set<string>();
+    for (let at: string | null | undefined = id; at && !seen.has(at); at = movedTo.has(at) ? movedTo.get(at) : tasks.get(at)?.parentId) seen.add(at);
+    return seen;
+  };
+  // Put a task under `to` in the outline (`added`: by the edit that adds
+  // it), unless the user's edits since mean applying cannot: `to` is now
+  // inside it (and the outline would go round in a circle), gone, or one
+  // of the plan's that takes no subtasks now.
+  const place = (id: string, to: string | null, added: boolean) => {
+    const theirs = to && !placed.has(to) ? tasks.get(to) : undefined;
+    const from = added ? undefined : movedTo.has(id) ? movedTo.get(id) : tasks.get(id)?.parentId;
+    let why: string | undefined;
+    if (to && ancestry(to).has(id)) why = MOVE_UNFIT.inside;
+    else if (to && !placed.has(to) && (!theirs || gone.has(to))) why = MOVE_UNFIT.gone;
+    else if (theirs && to !== from && !canTakeSubtasks(outline(), theirs)) why = MOVE_UNFIT.closed;
+    if (why) unfit.set(id, why);
+    else movedTo.set(id, to);
+  };
   // The plan as the proposal's edits have it so far: its removals gone, its
   // moves made. Tasks the proposal adds stand in by their place alone, for
   // what is moved under them.
@@ -2432,14 +2474,14 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
       case 'move_task':
       case 'set_checks':
         if (op.id) out[`task:${op.id}`] = rev('task', op.id);
-        if (op.op === 'move_task' && op.id) movedTo.set(op.id, op.parentId ?? null);
+        if (op.op === 'move_task' && op.id) place(op.id, op.parentId ?? null, false);
         // A task the proposal adds is placed by its first edit, as applying
         // it is: a later upsert's parentId moves nothing. One of the plan's
         // it removed first is added afresh, where this edit puts it.
         if (op.op === 'upsert_task' && op.id && (!tasks.has(op.id) || gone.has(op.id)) && !placed.has(op.id)) {
           placed.add(op.id);
           gone.delete(op.id);
-          if (op.parentId || tasks.has(op.id)) movedTo.set(op.id, op.parentId ?? null);
+          if (op.parentId || tasks.has(op.id)) place(op.id, op.parentId ?? null, true);
         }
         // `builds` replaces which boxes link the task: a link made since is undone.
         if (op.op === 'upsert_task' && op.id && op.builds !== undefined) out[`links:${op.id}`] = links(op.id);
@@ -2453,7 +2495,11 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
         // boxes' links (taskRemoval, as the unread-edit guard counts it).
         if (op.kind === 'task') {
           const taken = taskRemoval(outline(), op.id);
-          out[`removal:${op.id}`] = removal(op.id, taken);
+          // Removed again (added back in between): what each removal takes
+          // counts, the later one seeing the earlier one's taken already.
+          const key = `removal:${op.id}`;
+          const print = removal(op.id, taken);
+          out[key] = key in out ? fingerprint(JSON.stringify([out[key], print])) : print;
           out[`note:${op.id}`] = note(op.id);
           // What it takes is gone from the outline, and placed afresh if the
           // proposal adds it again.
@@ -2466,8 +2512,18 @@ export function proposalTouches(plan: Plan, ops: PlanOp[]): Record<string, numbe
         break;
     }
   }
+  for (const [id, why] of unfit) out[`task:${id}`] = why;
   return out;
 }
+
+/** A move's print once the plan cannot take it where it says, by why:
+ *  never what the proposal was made on (it applied then). */
+const MOVE_UNFIT: Record<'inside' | 'gone' | 'closed', string> = {
+  inside: 'the task it goes under is now inside it',
+  gone: 'the task it goes under is gone',
+  closed: 'the task it goes under takes no subtasks now',
+};
+const UNFIT_WORDS = new Set(Object.values(MOVE_UNFIT));
 
 /** What changed since a proposal was made, in words; empty while it still
  *  fits the plan. */
@@ -2499,6 +2555,7 @@ export function proposalStaleness(plan: Plan, p: Proposal): string[] {
     else if (kind === 'note') {
       if (now[`task:${id}`] === p.base[`task:${id}`]) out.push(`the note on ${task()}`);
     }
+    else if (typeof now[key] === 'string' && UNFIT_WORDS.has(now[key])) out.push(`where ${task()} goes (${now[key]})`);
     else out.push(task());
   }
   return out;
@@ -3290,8 +3347,12 @@ export function childrenOf(plan: Pick<Plan, 'tasks'>, parentId: string | null): 
 
 export function descendants(plan: Pick<Plan, 'tasks'>, id: string): Task[] {
   const out: Task[] = [];
+  // A circle of parents (a plan never has one) ends the walk, not the stack.
+  const seen = new Set([id]);
   const visit = (pid: string) => {
     for (const child of childrenOf(plan, pid)) {
+      if (seen.has(child.id)) continue;
+      seen.add(child.id);
       out.push(child);
       visit(child.id);
     }

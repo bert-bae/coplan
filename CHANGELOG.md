@@ -4,10 +4,32 @@
 
 ### Fixes
 
+- **A finished task carried into the next plan keeps its review history.** Publishing the next plan kept its
+  review round but dropped the reviews themselves from the page.
+- **A task left in review by a hand-edited plan, though no longer in progress, is not put in a review round.**
+  A stage is dropped from a task not started, done or dropped, as an edit drops it; its round is kept.
+- **A session that could not be saved as Coplan started is said in its log.** Such a failure was told to no one,
+  and then never again while it went on failing.
+- **A page opened on a plan that cannot be saved says so.** A save failure was said once, to whoever was
+  listening then (the daemon's log, with no page open), and never again while it went on failing.
+- **A session you come back to after a month keeps its plan while Coplan runs.** One not touched for 30 days
+  and since let go from memory came back with its plan from one folder and blank from the other, and a blank one
+  was then saved over it. A hook for it now reads it back from either folder and dates it anew, so the next start
+  keeps it too. Sessions untouched for 30 days are still cleared at start, as before.
+- **A proposal no longer stops the plan from showing after you move a task under one it moves.** If your move
+  put where the proposal moves a task inside that task, reading the plan, previewing the proposal and accepting
+  it all failed; the proposal now reads as out of date, naming the move. So does one that puts a task under a
+  task you have since removed or marked done, which used to look current and then fail on accept.
 - **`coplan check | less` shows the whole report.** A long report piped to a reader that was slow to read it was
   cut off after five seconds, without a word; the CLI now waits for it, as any command writing to a pipe does.
 - **A change request you are typing on a card is kept when the agent moves the card.** It was lost without a word
   as the card changed column; closing the page now asks first too.
+- **A task left in review by an older or hand-edited plan can be reviewed.** With no review round recorded, its
+  box said "round undefined" and lost what you typed, and no verdict could be given; it is now in its first round.
+- **A change request you were typing is offered to copy when the task stops waiting on your review.** If the
+  agent took the task back to building, or you gave your verdict in chat, the text went without a word. So is
+  one you sent just as that happened, which is refused; and Send cannot be pressed twice while it is on its way,
+  even after the card moves meanwhile.
 - **Submitting or confirming the design waits for a field whose save was refused.** Its warning names the field,
   as it does for text left open in an editor, instead of dropping it and offering it to copy afterwards.
 - **A board card you opened stays open when the agent moves it.** Its details and comments no longer close as
@@ -17,13 +39,19 @@
   own plan.
 - **Accepting a proposal no longer drops a link you made to a task it removes by way of a new one.** A proposal
   that names a new task twice, or removes a task (new or not) and adds it again, with its subtasks, is placed as
-  it will be applied, so your change shows it as out of date.
+  it will be applied, so your change shows it as out of date. One that removes the same task twice counts what
+  each removal takes, so a subtask you add under it, or a task you move under it, is not lost on accept. A proposal of
+  that kind left open from an earlier version reads as out of date: reject it, and the agent can propose it
+  again.
 - **An editor you opened but didn't type in closes when the plan is signed off elsewhere.** It stayed open and
   disabled, and came back on stale text with a warning.
 - **A submitted plan's comments on parent tasks, and in By box, can be read.** Parent tasks with comments are
   listed above the board, and each task in By box has the same read-only toggle as a card.
 - **`coplan check --json > report.json` on a full disk now fails.** It exited 0 with nothing written; it now
   says the output could not be written and exits 1.
+- **`coplan check` stops before the next check when its output cannot be written.** On a full disk it started
+  the next check and killed it part way; a command running when its output fails now ends itself. `setup` asks
+  nothing once its output fails, rather than wait on a question no one can see.
 - **A submitted plan's task comments can be read on its board.** A card with comments has a toggle that shows
   them, and the agent's replies, to read. Before, they were on no tab once the plan was submitted.
 - **Text in a field whose save was refused is no longer lost when the field goes.** Switching tabs or

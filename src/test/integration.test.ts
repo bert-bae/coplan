@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { readLiveLock, baseUrl } from '../shared/paths.ts';
+import { readLiveLock, baseUrl, paths } from '../shared/paths.ts';
 import type { DaemonLock, SessionState } from '../shared/types.ts';
 import type { HookOutput } from '../shared/hooks.ts';
 import { asksForCoplan } from '../daemon/hookIngest.ts';
@@ -1796,6 +1796,44 @@ async function settingsStream(session: string): Promise<{ events: string[][]; fi
   });
   return { events, files, close: () => req?.destroy() };
 }
+
+test('a page opened on a session that cannot be saved is told, though the failure was heard before it opened', async () => {
+  const id = 'unsaved-before-page';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  // Its temp file's name taken by a folder: every save of it fails (EISDIR).
+  const blocker = path.join(paths.sessionDir(id), `.state.${lock.pid}.tmp`);
+  mkdirSync(blocker, { recursive: true });
+  try {
+    await hookFor(id, 'UserPromptSubmit', { prompt: 'hello' });
+    // The save, debounced, fails with no page open: only the daemon's log hears it. Then a page opens.
+    const opened = async (): Promise<string[]> => {
+      const told: string[] = [];
+      const { ticket } = await call<{ ticket: string }>('/api/events/ticket', { method: 'POST', body: '{}' });
+      const req = http.get(`${baseUrl(lock)}/api/events?ticket=${ticket}&session=${id}`, (res) => {
+        let buf = '';
+        res.on('data', (chunk: Buffer) => {
+          buf += chunk.toString('utf8');
+          let cut: number;
+          while ((cut = buf.indexOf('\n\n')) >= 0) {
+            const frame = buf.slice(0, cut);
+            buf = buf.slice(cut + 2);
+            if (!frame.startsWith('data: ')) continue;
+            const event = JSON.parse(frame.slice(6)) as { type: string; sessionId?: string; message?: string };
+            if (event.type === 'persist-error') told.push(`${event.sessionId}:${event.message}`);
+          }
+        });
+      });
+      await sleep(300);
+      req.destroy();
+      return told;
+    };
+    let told: string[] = [];
+    for (let i = 0; i < 20 && !told.length; i++) told = await opened();
+    assert.deepEqual(told, [`${id}:EISDIR`]);
+  } finally {
+    rmSync(blocker, { recursive: true, force: true });
+  }
+});
 
 test("a mistake in the harness config reaches the page: when it opens, and as soon as it is made or fixed (#52)", async () => {
   const id = 'config-errors';
