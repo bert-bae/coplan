@@ -227,7 +227,11 @@ the audit's finding numbers.
 | F62 | F57 gap: a review box drawn anew while its request is being sent (task set blocked in review, a tab switch) mounts with Send enabled: a second review_task is sent, and the first save's finally clears the key from `sending` while the second is out. A key being sent is saving (ui/lib/drafts.ts useKeptDraft, TasksView.tsx UserReview) (bert-bae/coplan#124) [re-audit A8 3] | 2 should fix | done: a send's progress and outcome told to every editor of its key (tested on the review box; the reply composer's `sending` wired, not tested) | a39c09b |
 | F63 | F58 regression: interactive `coplan setup` with stdout failing (a full disk) no longer ends at once; it waits on prompts no one can see (hung 8 s, killed, no message), and Enter walks it on defaults unseen. Ask nothing once stdout has failed (cli/setup.ts askTerminal) (bert-bae/coplan#125) [re-audit A8 4] | 2 should fix | done: answer() stops the walk once stdout failed (a tick late too); checked by hand under a pty: rc 1 in 0.09 s. --yes still finishes unseen, on purpose | 0866853 |
 | B71 | A held persist-error is lost if the first listener added is not an 'event' one, or the first is removed before the next tick; a failed copy's saveFailure outlives the cause for a session later made fresh; normalizeTask keeps an invalid status; Windows may say EOF for a gone reader (unconfirmed) (daemon/store.ts emitEvent, ensure; shared/plan.ts; cli/output.ts) (bert-bae/coplan#126) [re-audit A8 5-8] | 5 smaller | done: held event waits for an 'event' listener; unknown status taken as todo. Not done: clearing the stale copy failure hides a real one (stays until the first save); Windows EOF unconfirmed | 08f7a71 |
-| A9 | Re-audit the areas the rows after A8 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#127) | 6 re-audit | open | |
+| A9 | Re-audit the areas the rows after A8 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#127) | 6 re-audit | done: no must fix, 2 should fix, 3 nice to have, now rows F64, F65, B72 and A10 | {A9} |
+| F64 | F61 widened: a task reused in the next plan keeps its old build's reviews and round; the agent drops it (ungated before submission), then restarts it after submit, and the old round's pass meets the done gate unreviewed. editTask clears the current round's reviews only on done → not dropped: clear them whenever a task leaves done or dropped for todo, in progress or blocked (shared/plan.ts editTask) (bert-bae/coplan#129) [re-audit A9 1] | 2 should fix | open | |
+| F65 | F62 gap: text typed into an editor drawn anew while its draft is out (its field still takes input while it shows Saving…) is lost when the send goes through: the 'sent' news closes it whatever it holds. Close only if it holds the text sent; else start again from the field (ui/lib/drafts.ts useKeptDraft) (bert-bae/coplan#130) [re-audit A9 2] | 2 should fix | open | |
+| B72 | An interactive setup whose output fails skips the daemon restart (stops at the settings question, after installing; not a regression); a live persist-error just after the first listener can come before held ones; removeAllListeners() strands held events (nothing calls it) (cli/setup.ts setup; daemon/store.ts emitEvent) (bert-bae/coplan#131) [re-audit A9 3-5] | 5 smaller | open | |
+| A10 | Re-audit the areas the rows after A9 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#132) | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -856,3 +860,34 @@ blocked keeps its stage, done/dropped keep round and reviews; proposals'
 prints unchanged across a reload.
 
 **Verdict:** 1 Must fix; fix 1 first, then 4, 3, 2.
+
+## Re-audit report (row A9, four auditors, 2026-11-11)
+
+Scope: the changes since 712303e (rows F60-F63, B71), at 95ad9d2 (merged
+as #128), by four auditors (plan model, setup/CLI, store, page), each in
+its own worktree at that commit; each finding kept was reproduced. The
+page auditor stopped at a usage limit and was resumed after it reset.
+
+### Should fix
+
+1. **A task reused in the next plan passes the done gate on its old review** (`shared/plan.ts` editTask, with F61's carried reviews): done, then dropped, then restarted keeps the old round's pass.
+2. **Text typed into an editor drawn anew while its draft is out is lost on 'sent'** (`ui/lib/drafts.ts`). F62 gap.
+
+### Nice to have
+
+3. An interactive setup whose output fails skips the daemon restart (not a regression).
+4. A live persist-error just after the first listener can come before held ones.
+5. removeAllListeners() strands held events (nothing calls it).
+
+Checked and fine: keepsStage matches the old deny-list for all five
+statuses; status coercion changes no plan current code writes; load ->
+publish -> load is byte-identical; setup on a healthy pty (a full walk,
+Ctrl+C and Ctrl+D 130), the first write being the question (rc 1 in 0.08
+s), uninstall and --yes to /dev/full; askTerminal the only prompt in the
+CLI; held events with a listener removed before the tick, once(), two
+listeners, real startup order; the persist-error path end to end;
+F62's watchers across the summary, replies and the review box (sender
+unmounted, refused, sent), no two editors of one key open at once,
+F57's offer still once.
+
+**Verdict:** no Must fix; fix 1 first (it passes the review gate), then 2.
