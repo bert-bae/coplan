@@ -56,7 +56,7 @@ import { ConfigCache, configStamp, globalConfigFile, projectHarnessFile, type Ha
 import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
-import type { BuildChoice, BuildSettings, CleanupGroupId, DaemonLock, ExecutionMode, Plan, PlanInput, PlanOp, ServerEvent, SessionState, Task, TaskListInput, TaskStatus } from '../shared/types.ts';
+import type { BuildChoice, BuildSettings, CleanupGroupId, DaemonLock, ExecutionMode, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, Task, TaskListInput, TaskStatus } from '../shared/types.ts';
 import { CLEANUP_GROUPS } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
@@ -514,8 +514,12 @@ function buildRouter(deps: Deps): Router {
    *  once — and otherwise kept: a stat per file, not a read and a parse of
    *  every one, on each call. */
   const projects = new Map<string, { stamp: string; config: ProjectConfig }>();
-  const projectFor = (session: SessionState): ProjectConfig => {
-    const root = session.repoRoot ?? session.cwd;
+  /** Told, after the read, of each repository whose review mode a read
+   *  found changed, with the new one: an open page has it sent. */
+  const reviewChanges = new Set<(root: string, review: ReviewMode) => void>();
+  /** Each repository's review mode as last read, to tell a change. */
+  const reviewRead = new Map<string, ReviewMode>();
+  const projectAt = (root: string): ProjectConfig => {
     const hit = projects.get(root);
     if (hit && hit.config.sources && configStamp(hit.config.sources) === hit.stamp) return hit.config;
     const started = Date.now();
@@ -534,8 +538,14 @@ function buildRouter(deps: Deps): Router {
     });
     if (settled) projects.set(root, { stamp: configStamp(sources), config });
     else projects.delete(root);
+    const was = reviewRead.get(root);
+    const review = config.settings.review;
+    if (reviewRead.size >= MAX_PROJECT_CONFIGS && was === undefined) reviewRead.clear();
+    reviewRead.set(root, review);
+    if (was !== undefined && was !== review) queueMicrotask(() => reviewChanges.forEach((fn) => fn(root, review)));
     return config;
   };
+  const projectFor = (session: SessionState): ProjectConfig => projectAt(session.repoRoot ?? session.cwd);
 
   /** How a brief is rendered for a session: the same for the agent's tool
    *  and the page, so both read the same text. */
@@ -604,7 +614,11 @@ function buildRouter(deps: Deps): Router {
         dirs.set(dir, (dirs.get(dir) ?? 0) + 1);
         if (!timer) {
           timer = setInterval(() => {
-            for (const d of dirs.keys()) config.get(d);
+            for (const d of dirs.keys()) {
+              config.get(d);
+              // The repository's own config too: who reviews, for its pages.
+              if (d) projectAt(d);
+            }
           }, 25_000);
           timer.unref?.();
         }
@@ -960,6 +974,9 @@ function buildRouter(deps: Deps): Router {
     res.write(': connected\n\n');
     clients.count++;
 
+    // Who reviews, as last sent with a snapshot: sent again when a read of
+    // the repository's config finds it changed (reviewChanges).
+    let reviewSent: ReviewMode | undefined;
     const send = (event: ServerEvent) => {
       // A tab that stopped reading (a laptop asleep with the socket open)
       // would buffer a whole plan per edit without end. Past a megabyte it
@@ -972,7 +989,10 @@ function buildRouter(deps: Deps): Router {
       // repository says it now: the board judges it as the daemon does from
       // the moment it lands (the agent's report that puts a task in review
       // is a snapshot too).
-      if (event.type === 'snapshot') event = { ...event, projectReview: projectFor(event.session).settings.review };
+      if (event.type === 'snapshot') {
+        reviewSent = projectFor(event.session).settings.review;
+        event = { ...event, projectReview: reviewSent };
+      }
       res.write(`data: ${JSON.stringify(forBrowser(event))}\n\n`);
     };
     send({ type: 'sessions', sessions: store.summaries() });
@@ -1035,6 +1055,18 @@ function buildRouter(deps: Deps): Router {
       }
     };
     store.on('event', listener);
+    // The repository's review mode changed (an edit, found by a call or the
+    // settings timer): it reaches the page with its plan.
+    const reviewChanged = (root: string, review: ReviewMode) => {
+      const shown = focus ? store.get(focus) : undefined;
+      if (!shown || reviewSent === undefined || review === reviewSent || (shown.repoRoot ?? shown.cwd) !== root) return;
+      try {
+        send({ type: 'snapshot', session: shown });
+      } catch {
+        /* cleanup below fires */
+      }
+    };
+    reviewChanges.add(reviewChanged);
     const heartbeat = setInterval(() => {
       try {
         send({ type: 'ping', ts: Date.now() });
@@ -1051,6 +1083,7 @@ function buildRouter(deps: Deps): Router {
       clients.count = Math.max(0, clients.count - 1);
       clearInterval(heartbeat);
       store.off('event', listener);
+      reviewChanges.delete(reviewChanged);
       stopSettings();
     };
     ctx.req.on('close', cleanup);

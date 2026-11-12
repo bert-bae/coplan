@@ -2013,6 +2013,48 @@ test("a mistake in the harness config reaches the page: when it opens, and as so
   }
 });
 
+test("a change to the repository's review mode reaches its open page, with no edit to the plan (#158)", async () => {
+  const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-review-'));
+  const file = path.join(other, '.coplan', 'config.json');
+  try {
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: other, stdio: 'pipe' });
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ iric: { review: 'user' } }));
+    const id = 'review-mode-change';
+    await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: other, start_reason: 'startup' }) });
+    const page = await settingsStream(id);
+    try {
+      for (let i = 0; i < 50 && !page.reviews.length; i++) await sleep(50);
+      assert.deepEqual(page.reviews, ['user'], 'the repository says, not the default');
+      // Changed: the next time the daemon reads it (its timer, or any call that needs it), the page hears.
+      // (Dated a moment back: a read that finds it settled keeps it.)
+      writeFileSync(file, JSON.stringify({ iric: { review: 'subagent' } }));
+      utimesSync(file, new Date(), new Date(Date.now() - 1000));
+      await call(`/api/session/${id}`);
+      for (let i = 0; i < 50 && page.reviews.at(-1) !== 'subagent'; i++) await sleep(50);
+      assert.equal(page.reviews.at(-1), 'subagent', JSON.stringify(page.reviews));
+      // Read again unchanged: nothing more is sent.
+      const sent = page.reviews.length;
+      await call(`/api/session/${id}`);
+      await sleep(200);
+      assert.equal(page.reviews.length, sent);
+      // Dated ahead (clock skew): never kept, so read on each call, but told once, and the daemon answers at once.
+      writeFileSync(file, JSON.stringify({ iric: { review: 'self' } }));
+      utimesSync(file, new Date(), new Date(Date.now() + 60_000));
+      const started = Date.now();
+      await call(`/api/session/${id}`);
+      await call(`/api/session/${id}`);
+      for (let i = 0; i < 50 && page.reviews.at(-1) !== 'self'; i++) await sleep(50);
+      assert.ok(Date.now() - started < 2000, `answered in ${Date.now() - started} ms`);
+      assert.deepEqual(page.reviews.slice(sent), ['self'], 'told once');
+    } finally {
+      page.close();
+    }
+  } finally {
+    rmSync(other, { recursive: true, force: true });
+  }
+});
+
 /* ------------------------------------------------------------------ *
  * A task's own checks (#54)
  * ------------------------------------------------------------------ */
