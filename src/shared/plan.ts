@@ -35,6 +35,7 @@ import type {
   PlanStatus,
   Proposal,
   ProposalStatus,
+  ReviewMode,
   ReviewRecord,
   RevisionRequest,
   TaskCheck,
@@ -46,7 +47,6 @@ import type {
   TaskCounts,
   TaskInput,
   TaskListInput,
-  ReviewMode,
   TaskStatus,
   Thread,
 } from './types.ts';
@@ -563,7 +563,10 @@ function keepsStage(status: TaskStatus): boolean {
 export function passedAndClosed(plan: Plan, task: Task, fallback: ReviewMode = plan.submission?.settings?.review ?? DEFAULT_BUILD_SETTINGS.review): boolean {
   if (!wasFinished(task) || !task.round) return false;
   // The round's verdict that stands, by whoever reviews it (the user's own,
-  // for a task they review); with no review, closing it done passed it.
+  // for a task they review); with no review, closing it done passed it — so
+  // under `skip` a finished task that went to review, taken up again, always
+  // has one more round: even one the user accepted as it was over failing
+  // checks (nothing records how a round closed, only that it did).
   const mode = effectiveReview(plan, task, fallback);
   return mode === 'skip' || roundVerdict(task, mode)?.verdict === 'pass';
 }

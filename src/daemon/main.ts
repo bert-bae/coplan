@@ -1500,8 +1500,8 @@ function buildRouter(deps: Deps): Router {
     // more: taken up again (by stage alone too, or from a drop made while it
     // was done: wasDone), or dropped.
     const finishedBefore = wasFinished(task) && !(task.status === 'dropped' && now.status === 'dropped');
-    const reopened = finishedBefore && now.status !== 'done' && changes.length > 0;
-    const built = reopened ? waiting.filter((t) => t.status === 'in_progress' || t.status === 'blocked' || t.status === 'done') : [];
+    const noLongerFinished = finishedBefore && now.status !== 'done' && changes.length > 0;
+    const built = noLongerFinished ? waiting.filter((t) => t.status === 'in_progress' || t.status === 'blocked' || t.status === 'done') : [];
     if (built.length) {
       out.push(
         `${built.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ')} already went ahead on this task's work: ` +
