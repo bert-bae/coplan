@@ -15,7 +15,7 @@ const { render, renderHook, fireEvent, within, cleanup, act, screen, waitFor } =
 const { App } = await import('../ui/App.tsx');
 const { store, SessionScope, useEdit, useStillShown } = await import('../ui/store.ts');
 const { openDrafts, draftsLockedBy, pruneDrafts, unsavedDrafts } = await import('../ui/lib/drafts.ts');
-const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan, confirmDesign, queueRevision, markRevisionDelivered } = await import('../shared/plan.ts');
+const { publishPlan, applyOps, submitPlan, markDelivered, markReadByClaude, reopenPlan, confirmDesign, queueRevision, markRevisionDelivered } = await import('../shared/plan.ts');
 
 const INPUT: PlanInput = {
   title: 'Add a cache',
@@ -952,6 +952,81 @@ test('text typed while a save is on its way is kept when the save goes through',
   });
   const sections = opsSent().filter((op) => op['op'] === 'upsert_section');
   assert.deepEqual(sections.map((op) => [op['body'], op['expect']]), [['First.', 1], ['First. Second.', 2]]);
+});
+
+test('a section saved, typed on, and off screen when the save goes in reopens on its text with no false warning', async () => {
+  await boot(undefined, (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+    return { plan: next, changes: [] };
+  });
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+  });
+  const area = () => screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
+  await act(async () => {
+    fireEvent.change(area(), { target: { value: 'First.' } });
+  });
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+    });
+    fireEvent.change(area(), { target: { value: 'First. Second.' } });
+    await openTab('Tasks');
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await act(async () => {
+    await held;
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  assert.equal(unsavedDrafts(), true, 'kept, off screen, as not saved');
+  await openTab('Overview');
+  assert.equal(area().value, 'First. Second.');
+  assert.equal(document.body.textContent?.includes('This changed while you were editing'), false, 'its own save is no change underneath');
+  await act(async () => {
+    fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+  });
+  const sections = opsSent().filter((op) => op['op'] === 'upsert_section');
+  assert.deepEqual(sections.map((op) => [op['body'], op['expect']]), [['First.', 1], ['First. Second.', 2]]);
+  // Saved again off screen, then changed by the agent before it is reopened: that change is warned of.
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+  });
+  fireEvent.change(area(), { target: { value: 'Third.' } });
+  let again: (() => void) | null = null;
+  const heldAgain = new Promise<void>((r) => (again = r));
+  const realFetch2 = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await heldAgain, realFetch2(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+    });
+    fireEvent.change(area(), { target: { value: 'Third. Fourth.' } });
+    await openTab('Tasks');
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch2, writable: true, configurable: true });
+    again!();
+  }
+  await act(async () => {
+    await heldAgain;
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  const s2 = store.getState().session!;
+  const read = structuredClone(s2.plan!);
+  markReadByClaude(read);
+  const byAgent = applyOps(read, [{ op: 'upsert_section', id: 's1', body: 'The agent wrote this.' }], 'claude').plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s2, plan: byAgent } }));
+  await openTab('Overview');
+  assert.equal(area().value, 'Third. Fourth.');
+  assert.equal(document.body.textContent?.includes('This changed while you were editing'), true, "the agent's change is warned of");
 });
 
 test('a reply typed on while it is posted keeps only what came after, so nothing posts twice', async () => {

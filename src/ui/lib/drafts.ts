@@ -16,6 +16,11 @@ import type { Plan, TargetKind } from '../../shared/types.ts';
  */
 export interface OpenDraft extends Started {
   draft: string;
+  /** Saved while its editor was off screen, with more typed: `value` is
+   *  the text that save put in. Next drawn, it starts from the field if the
+   *  field still holds that; if someone changed it since, from the save,
+   *  so the change is warned of. */
+  restart?: boolean;
 }
 
 /** What editing started from, for the "changed while you were editing"
@@ -254,7 +259,9 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
   const [kept] = useState(() => (key ? openDrafts.get(key) : undefined));
   const [editing, setEditing] = useState(openAtFirst || Boolean(kept));
   const [draft, setDraft] = useState(kept?.draft ?? value);
-  const [started, setStarted] = useState<Started>(() => (kept ? { version: kept.version, value: kept.value } : { version, value }));
+  const [started, setStarted] = useState<Started>(() =>
+    kept && !(kept.restart && value === kept.value) ? { version: kept.version, value: kept.value } : { version, value },
+  );
   const [saving, setSaving] = useState(false);
   // Its draft being sent from an editor drawn before this one, and how that
   // went (tellSend).
@@ -376,9 +383,10 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
           const rest = adds && draftNow.current.startsWith(sent) ? draftNow.current.slice(sent.length).replace(/^\s+/, '') : draftNow.current;
           if (rest !== draftNow.current) setDraft(rest);
           setStarted(now.current);
-          // Kept so too, for an editor off screen meanwhile.
+          // Kept so too, for an editor off screen meanwhile: it cannot see
+          // the field now, so it starts from it when next drawn.
           const open = key ? openDrafts.get(key) : undefined;
-          if (key && open) openDrafts.set(key, { ...open, draft: rest, ...now.current });
+          if (key && open) openDrafts.set(key, { ...open, draft: rest, version: now.current.version, value: sent, restart: true });
           return true;
         }
         // Gone from the kept drafts, unless an editor drawn anew meanwhile
