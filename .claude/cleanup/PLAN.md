@@ -248,7 +248,12 @@ the audit's finding numbers.
 | F74 | F70: a drop clears `reopened`, so done (pass) -> taken up -> dropped -> taken up -> review is refused at the limit though no round failed (its pass went at the first take-up). Keep it through a drop; clear on review, done, the user's reset; test that later rounds are held to the limit (shared/plan.ts editTask) (bert-bae/coplan#146) [re-audit A12 2, 5] | 2 should fix | done: kept through a drop; goes on done, review (tested), the user's reset; load drops it from a done task | ac522a5 |
 | F75 | F71: the remount check compares the field with the untrimmed sent text, but the daemon trims fields: a section saved as "First.\n" off screen reopens warning of the user's own save (summary, captions, notes too). Compare trimmed (ui/lib/drafts.ts) (bert-bae/coplan#147) [re-audit A12 3] | 2 should fix | done: compared trimmed (a field cut at 20,000 characters is not) | 0863a74 |
 | B76 | A stale `reopened` from an older daemon is trusted; done for a task in refine/blocked after "changes" at the limit points to review, then refused; a section cleared mid-save off screen stays kept empty; untested: drafts.ts's blank guard, brief.ts's !t.reopened (shared/plan.ts, daemon/main.ts, ui/lib/drafts.ts, daemon/brief.ts) (bert-bae/coplan#148) [re-audit A12 4, 6-8] | 5 smaller | done: all four (a field emptied on purpose mid-save is taken as nothing to keep) | 4748d92 |
-| A13 | Re-audit the areas the rows after A12 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#149) | 6 re-audit | open | |
+| A13 | Re-audit the areas the rows after A12 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#149) | 6 re-audit | done: no must fix, 3 should fix, 6 nice to have, now rows F76-F78, B77 and A14 | {A13} |
+| F76 | F73: without a submission, editTask judges the round under DEFAULT 'self', the daemon under the project's review: in an unsubmitted Managed build a user-reviewed task closed on the user's word gets `reopened` (round 2 of 1, unapproved), a skip-mode one does not (refused). Pass the effective review fallback into applyOps/editTask, and to review_task's record (shared/plan.ts; daemon/main.ts) (bert-bae/coplan#150) [re-audit A13 1] | 2 should fix | open | |
+| F77 | Older: a reply box drawn anew while its reply posts, typed on, keeps the whole text when the post goes in (on screen or off): posting again repeats the first part. Apply the sender's rule in the watcher and the kept draft: drop the sent text from the front for replies/comments; close on the sent text trimmed or blanks (ui/lib/drafts.ts) (bert-bae/coplan#151) [re-audit A13 2, 4] | 2 should fix | open | |
+| F78 | B76's done-gate message does not say another round is stage "review" with user_approved, and words it unlike the round-limit gate; its comment sits above the wrong branch; F73's test passes with the mode ignored (add user "changes" then agent pass); B76's whitespace case untested (daemon/main.ts, test/plan.test.ts, ui/lib/drafts.ts) (bert-bae/coplan#152) [re-audit A13 3, 5, 6] | 2 should fix | open | |
+| B77 | Skip mode puts no real limit on rounds (document or decide); a local `reopened` in main.ts means something else; ReviewMode import order (daemon/main.ts, shared/plan.ts) (bert-bae/coplan#153) [re-audit A13 7-9] | 5 smaller | open | |
+| A14 | Re-audit the areas the rows after A13 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#154) | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -1007,3 +1012,38 @@ second post, refused, lock); replies off screen.
 
 **Verdict:** no Must fix; fix 1 first (it lets the agent past the user's
 round limit), then 2, 3.
+
+## Re-audit report (row A13, four auditors, 2026-11-12)
+
+Scope: the changes since af1c662 (rows F73-F75, B76), at a4c471e, by four
+auditors (plan model and gates, whole branch and checks, store, page),
+each in its own worktree at that commit; each finding kept was
+reproduced, except where marked. Two auditors stopped at a usage limit
+and were resumed after it reset.
+
+### Should fix
+
+1. **An unsubmitted Managed build judges the round under the default review mode** (`shared/plan.ts` editTask): a user-reviewed task closed on the user's word gets past the limit; a skip-mode one is held.
+2. **A reply box drawn anew mid-post keeps the whole text** (`ui/lib/drafts.ts`): posting again repeats the first part. Older.
+3. **B76's done-gate message is unclear** (`daemon/main.ts`), and F73's user-review case and B76's whitespace case are not pinned by tests.
+
+### Nice to have
+
+4. The watcher matches the sent text exactly (a redrawn box with a newline or cleared stays open).
+5-6. (with 3) the misplaced comment; the whitespace test.
+7. Skip mode puts no real limit on rounds.
+8. A local `reopened` in main.ts means something else.
+9. ReviewMode import order.
+
+Checked and fine: check implement, review (twice), final; the Node
+20.11.0 runtime suite (693 pass); UI tests five times in a row and six at
+once, no flake; every fix since A12 pinned (each reverted); the CHANGELOG
+matches the code; no dead code or unused exports; submitted builds under
+self, user and skip review: the free round given and held as intended,
+every done-gate message points to an accepted action; save/reload
+round-trips byte-identical, an older build's stale flags dropped on
+load with no spurious change, revision or unread; text differing inside
+is kept, the remount comparison sound (the daemon trims every field).
+
+**Verdict:** no Must fix; fix 1 first (it can pass the user's round
+limit), then 2, 3.
