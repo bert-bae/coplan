@@ -265,7 +265,10 @@ the audit's finding numbers.
 | F83 | F80: the project config cache and the last-read review modes clear at different times (a cache hit records no mode): past 50 repositories a review-mode change reads as a first read and notifies nothing; an editor emptying the file mid-save can push the default for a moment (daemon/main.ts) (bert-bae/coplan#163) [re-audit A15 daemon 1, 3] | 2 should fix | done: ReviewReads, least recently read first out, cached reads count; the emptied-file moment left | d8b0e3f |
 | T8 | Flaky: the board verdict test (B78/F82), and F81's section and reply redraw tests, fail now and then in full UI runs; the board test's title says Tracked of a Managed plan, and its #162 check reads page text the build strip alone gives (test/ui.test.tsx) (bert-bae/coplan#164) [re-audit A15 page 2, store 1-2] | 0 safety net | done: not reproduced in 47 runs (alone, 6 at once, during builds); the tests settle on what they assert; title fixed, pill and strip each pinned | b7e300f |
 | B81 | Small: summaries reads the project for Tracked/Export submissions too; a dead branch in drafts.ts save; the settings timer's projectAt untested; summaries' skip and memo unpinned; a list row for an unwatched repository not refreshed on a change (daemon/store.ts, ui/lib/drafts.ts, daemon/main.ts) (bert-bae/coplan#165) [re-audit A15 plan 1-2, page 1, daemon 2] | 5 smaller | done: list reads only Managed on defaults (holdsForReview), pinned with the memo; the 'dead' branch is live (kept, comment fixed); timer path and unwatched rows left | 65649d2 |
-| A16 | Re-audit the areas the rows after A15 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#166) | 6 re-audit | open | |
+| A16 | Re-audit the areas the rows after A15 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#166) | 6 re-audit | done: no must fix, 2 should fix (test gaps, no code defect), 4 nice to have, now rows T9, B82 and A17 | (this commit) |
+| T9 | F83's cache-hit `reviewRead.saw` in projectAt is untested (deleting it passes every test); B81's store test catches a revert only when `tracked` gets a later millisecond (all in one folder) (daemon/main.ts, test/store.test.ts) (bert-bae/coplan#167) [re-audit A16 daemon 1, plan 1] | 0 safety net | open | |
+| B82 | Small: drafts.ts's "kept with more" branch is unreachable (never ran across the suite; no key is drawn twice), its B81 comment wrong; ReviewReads' bound under one list pass past 50 held repositories; nine held-save tests on the old inline settle; the `saved` comment overstates (ui/lib/drafts.ts, daemon/main.ts, test/ui.test.tsx) (bert-bae/coplan#168) [re-audit A16 page 1, daemon 2, ui 1-2] | 5 smaller | open | |
+| A17 | Re-audit the areas the rows after A16 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#169) | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -1110,3 +1113,21 @@ Scope: the changes since 9ceadfd (rows F79-F82, B80), by four auditors.
 Checked and fine: build clean; plan 105, status 5, store 42, integration 81, UI 155 + sidebar 29; no notification loop (only a change notifies, a re-read is quiet, a file dated ahead told once); listeners removed on close; repoRoot vs cwd keyed alike; every caller of the review fallback now passes the project's mode; hook order in StatusChip/BuildStrip; F81 sound with and without a redrawn editor, cancelled/closed, refused, the comment composer; each fix's test fails reverted.
 
 **Verdict:** no Must fix, 2 Should fix: F83, T8, then B81.
+
+### Re-audit A16
+
+Scope: the changes since 4f2b078 (rows F83, T8, B81), by four auditors,
+each building and testing in its own worktree.
+
+### Should fix
+
+1. **F83's cache-hit wiring is untested** (`daemon/main.ts`): deleting the `saw` call on a hit passes every test. (T9)
+2. **B81's store test depends on the clock** (`test/store.test.ts`): one folder for every session, so a revert is caught only across a millisecond. (T9)
+
+### Nice to have
+
+3. drafts.ts's "kept with more" branch is unreachable after all (instrumented: never ran; no key drawn twice), its B81 comment wrong; 4. ReviewReads' bound past 50 held repositories; 5. nine tests on the old inline settle; 6. the `saved` comment overstates. (B82)
+
+No code defect found. Checked and fine: holdsForReview matches the old checks (an export with no mode is export, an old Managed build counts); no row gets a wrong review mode; a cache hit can never carry a mode other than the last read (an unsettled read is never cached); eviction order; no notify loop; the hot path costs a Map delete and set; the `saved` helper's claim holds (the answer's handling is all microtasks, the stub has no timers); 13 more full UI runs, alone and at once, all pass; every fix pinned (each reverted, the two above aside).
+
+**Verdict:** no Must fix, 2 Should fix, both test gaps: T9, then B82.
