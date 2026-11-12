@@ -296,7 +296,9 @@ the audit's finding numbers.
 | A16 | Re-audit the areas the rows after A15 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#166) | 6 re-audit | done: no must fix, 2 should fix (test gaps, no code defect), 4 nice to have, now rows T9, B82 and A17 | 59f4d44 |
 | T9 | F83's cache-hit `reviewRead.saw` in projectAt is untested (deleting it passes every test); B81's store test catches a revert only when `tracked` gets a later millisecond (all in one folder) (daemon/main.ts, test/store.test.ts) (bert-bae/coplan#167) [re-audit A16 daemon 1, plan 1] | 0 safety net | done: ProjectConfigs class with the disk injected; the page's edit told at every point, settle guard and listener isolation pinned; store test one folder per kind | 1241f93 |
 | B82 | Small: drafts.ts's "kept with more" branch is unreachable (never ran across the suite; no key is drawn twice), its B81 comment wrong; ReviewReads' bound under one list pass past 50 held repositories; nine held-save tests on the old inline settle; the `saved` comment overstates (ui/lib/drafts.ts, daemon/main.ts, test/ui.test.tsx) (bert-bae/coplan#168) [re-audit A16 page 1, daemon 2, ui 1-2] | 5 smaller | done: review modes remembered past a list pass (pinned); one settle helper; the branch kept as a guard, comment says so | 005f08b |
-| A17 | Re-audit the areas the rows after A16 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#169) | 6 re-audit | open | |
+| A17 | Re-audit the areas the rows after A16 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#169) | 6 re-audit | done: no must fix, 2 should fix (now backlog T10, B83), 4 nice to have; batch 1 ends here | (this commit) |
+| T10 | ProjectConfigs: no test has a source file that does not exist (the stand-in mtime never returns undefined): `?? -Infinity` turned to `?? Infinity` passes, and would stop all caching (global instruction files are listed whether present or not) (daemon/projectConfigs.ts, test/projectConfigs.test.ts) [re-audit A17 cache 1] | 0 safety net | backlog | |
+| B83 | ProjectConfigs (T9) swallows a review-change listener's error unlogged: before, it reached the daemon's uncaughtException log; the session-list broadcast listener has no catch of its own. Log it in the catch (daemon/projectConfigs.ts) [re-audit A17 cache 2] | 5 smaller | backlog | |
 
 ### F19: the take-back never fires
 
@@ -1159,3 +1161,20 @@ each building and testing in its own worktree.
 No code defect found. Checked and fine: holdsForReview matches the old checks (an export with no mode is export, an old Managed build counts); no row gets a wrong review mode; a cache hit can never carry a mode other than the last read (an unsettled read is never cached); eviction order; no notify loop; the hot path costs a Map delete and set; the `saved` helper's claim holds (the answer's handling is all microtasks, the stub has no timers); 13 more full UI runs, alone and at once, all pass; every fix pinned (each reverted, the two above aside).
 
 **Verdict:** no Must fix, 2 Should fix, both test gaps: T9, then B82.
+
+### Re-audit A17 (the last of batch 1)
+
+Scope: the changes since beb42ba (rows T9, B82), by four auditors, each in its
+own worktree. Run under the batch rules adopted after it: its findings go to
+the backlog, and batch 1 ends here.
+
+### Should fix (backlog)
+
+1. **No test of a missing source file** (`daemon/projectConfigs.ts`): a regression that stops all caching passes every test. (T10)
+2. **A failing review-change listener is swallowed unlogged** (`daemon/projectConfigs.ts`): T9 lost the daemon-log line it had. (B83)
+
+### Nice to have (not rows)
+
+3. The `Math.max(1, knownReviews)` clamp untested. 4. drafts.ts's "kept with more" guard: two copies of a box are drawn (ByBox, a task under two boxes, on a locked plan) but none editable; were one, the copy's own watcher already trims the sent text and the sender's effect overwrites the guard's write, so the branch is redundant and its comment inaccurate: delete it. 5. Two held sends (ui.test.tsx ~1532, ~2814) do not settle through `saved`. 6. Nothing checks `saving` is 0 between UI tests.
+
+No code defect found in the batch's own changes. Checked and fine: ProjectConfigs matches the old closure (a missing file still counts as unchanged); every caller in main.ts wired, in order; listeners removed on SSE close; integration 81/81 and UI 155/155 in each auditor's copy, alone and three at once; every fix pinned (each reverted).
