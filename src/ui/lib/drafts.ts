@@ -285,6 +285,15 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
   const watchRef = useRef<SendWatcher>(() => {});
   const draftNow = useRef(draft);
   draftNow.current = draft;
+  // Whether this editor is still drawn: a save that lands after it went
+  // goes by the kept draft, which an editor drawn anew since has kept up.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   watchRef.current = (news, text) => {
     setSentElsewhere(news === 'sending');
     // Sent, and its box gone with its round (parked): closed, whatever it
@@ -403,10 +412,13 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
         // from the field as it is now (the save in). A reply or a comment
         // adds rather than replaces, so it keeps only what came after what
         // was sent; a field keeps all of it, which the next save replaces.
-        if (draftNow.current.trim() && draftNow.current.trim() !== sent.trim() && !letGo) {
+        // (Its editor gone: the kept draft holds what was typed since, and
+        // none kept is nothing typed — closed, or cleared, meanwhile.)
+        const typed = mounted.current ? draftNow.current : ((key ? openDrafts.get(key)?.draft : undefined) ?? '');
+        if (typed.trim() && typed.trim() !== sent.trim() && !letGo) {
           const adds = addsTo(field);
-          const rest = afterSent(field, draftNow.current, sent);
-          if (rest !== draftNow.current) setDraft(rest);
+          const rest = afterSent(field, typed, sent);
+          if (mounted.current && rest !== draftNow.current) setDraft(rest);
           setStarted(now.current);
           // Kept so too, for an editor off screen meanwhile: it cannot see
           // the field now, so it starts from it when next drawn (one that

@@ -954,6 +954,56 @@ test('text typed while a save is on its way is kept when the save goes through',
   assert.deepEqual(sections.map((op) => [op['body'], op['expect']]), [['First.', 1], ['First. Second.', 2]]);
 });
 
+test('a section saved, typed on, drawn anew, typed on again and off screen when the save goes in keeps all of it', async () => {
+  await boot(undefined, (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+    return { plan: next, changes: [] };
+  });
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+  });
+  const area = () => screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
+  fireEvent.change(area(), { target: { value: 'First.' } });
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', {
+    value: async (...args: Parameters<typeof fetch>) => (String(args[0]).endsWith('/plan/ops') && (await held), realFetch(...args)),
+    writable: true,
+    configurable: true,
+  });
+  try {
+    await act(async () => {
+      fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+    });
+    fireEvent.change(area(), { target: { value: 'First. Second.' } });
+    // Drawn anew while it saves, typed on there, and left before the save goes in.
+    await openTab('Tasks');
+    await openTab('Overview');
+    assert.equal(area().value, 'First. Second.');
+    fireEvent.change(area(), { target: { value: 'First. Second. Third.' } });
+    await openTab('Tasks');
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await act(async () => {
+    await held;
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  await openTab('Overview');
+  assert.equal(area().value, 'First. Second. Third.', 'nothing typed after it was drawn anew is lost');
+  assert.equal(document.body.textContent?.includes('This changed while you were editing'), false, 'its own save is no change underneath');
+  await act(async () => {
+    fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+  });
+  const sections = opsSent().filter((op) => op['op'] === 'upsert_section');
+  assert.deepEqual(sections.map((op) => [op['body'], op['expect']]), [['First.', 1], ['First. Second. Third.', 2]], 'saved again, against the save that went in');
+});
+
 test('a section saved, typed on, and off screen when the save goes in reopens on its text with no false warning', async () => {
   await boot(undefined, (route, init) => {
     if (!route.endsWith('/plan/ops')) return undefined;
@@ -1154,8 +1204,9 @@ test('a reply typed on while it is posted keeps only what came after, so nothing
   assert.equal(box().value, 'With a pool.', 'what came after, not what was posted');
 });
 
-test('a reply box drawn anew while its reply posts, typed on, keeps only what came after, on screen or off', async () => {
-  for (const offScreen of [false, true]) {
+test('a reply box drawn anew while its reply posts, typed on (before it too), keeps only what came after, on screen or off', async () => {
+  // `early`: typed on before the box is drawn anew as well as after (the sender's own text is then stale).
+  for (const [offScreen, early] of [[false, false], [true, false], [false, true], [true, true]] as const) {
     cleanup();
     openDrafts.clear();
     const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
@@ -1190,12 +1241,13 @@ test('a reply box drawn anew while its reply posts, typed on, keeps only what ca
         fireEvent.keyDown(box(), { key: 'Enter', ctrlKey: true });
       });
       // The box goes and is drawn anew, on what it held, while the reply posts.
+      if (early) fireEvent.change(box(), { target: { value: 'The Redis one. With' } });
       await openTab('Overview');
       assert.equal(screen.queryByRole('textbox', { name: 'Reply' }) === null, true, 'the box goes');
       await openTab('Tasks');
       if (!screen.queryByRole('textbox', { name: 'Reply' })) await details();
       if (!screen.queryByRole('textbox', { name: 'Reply' })) await thread();
-      assert.equal(box().value, 'The Redis one.');
+      assert.equal(box().value, early ? 'The Redis one. With' : 'The Redis one.');
       fireEvent.change(box(), { target: { value: 'The Redis one. With a pool.' } });
       if (offScreen) await openTab('Overview');
     } finally {
@@ -1211,7 +1263,7 @@ test('a reply box drawn anew while its reply posts, typed on, keeps only what ca
       if (!screen.queryByRole('textbox', { name: 'Reply' })) await details();
       if (!screen.queryByRole('textbox', { name: 'Reply' })) await thread();
     }
-    assert.equal(box().value, 'With a pool.', `what came after, not what was posted (${offScreen ? 'off' : 'on'} screen)`);
+    assert.equal(box().value, 'With a pool.', `what came after, not what was posted (${offScreen ? 'off' : 'on'} screen${early ? ', typed on before it was drawn anew' : ''})`);
   }
 });
 

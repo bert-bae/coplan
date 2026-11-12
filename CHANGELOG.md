@@ -18,7 +18,8 @@
 - **What you type into a field while it is saving is kept.** The field closed once the save went in, and the
   rest was gone; it now stays open on it, also when you were on another tab as the save went in (it no longer
   comes back saying it changed while you were editing). A reply or a new comment typed on while it is posted
-  keeps only what came after, also in a box drawn anew meanwhile (another tab and back), so nothing posts twice.
+  keeps only what came after, also in a box drawn anew meanwhile (another tab and back), so nothing posts twice;
+  and what you type into a box drawn anew is kept when you leave it before the save goes in.
 - **A finished task taken up again needs a new review, even by way of dropped.** Dropped and then restarted,
   it kept the pass that closed its round, so it could be marked done again on that. A drop undone (set done
   again, nothing changed) keeps its pass, and a task dropped before it was finished keeps its verdicts. Taken up
