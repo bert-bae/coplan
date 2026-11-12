@@ -564,11 +564,11 @@ function keepsStage(status: TaskStatus): boolean {
  *  default alone would differ from it). */
 export function passedAndClosed(plan: Plan, task: Task, fallback: ReviewMode): boolean {
   if (!wasFinished(task) || !task.round) return false;
+  // Closed over failing checks, the work was accepted as it was: its round
+  // did not pass, and accepting it allowed no further round (D4).
+  if (task.acceptedFailing) return false;
   // The round's verdict that stands, by whoever reviews it (the user's own,
-  // for a task they review); with no review, closing it done passed it — so
-  // under `skip` a finished task that went to review, taken up again, always
-  // has one more round: even one the user accepted as it was over failing
-  // checks (nothing records how a round closed, only that it did).
+  // for a task they review); with no review, closing it done passed it.
   const mode = effectiveReview(plan, task, fallback);
   return mode === 'skip' || roundVerdict(task, mode)?.verdict === 'pass';
 }
@@ -656,6 +656,7 @@ function buildTaskTree(
         ...(old?.reviews?.length ? { reviews: old.reviews } : {}),
         ...(old?.wasDone && status === 'dropped' ? { wasDone: true } : {}),
         ...(old?.reopened ? { reopened: true } : {}),
+        ...(old?.acceptedFailing && (status === 'done' || (status === 'dropped' && old.wasDone)) ? { acceptedFailing: true } : {}),
         createdAt: old?.createdAt ?? now,
         updatedAt: now,
         createdBy: old?.createdBy ?? 'claude',
@@ -959,6 +960,8 @@ function normalizeTask(task: Task): Task {
   // Its next round not yet begun: gone once done, or once in review (an
   // older build may have sent it there without clearing it).
   if (t.reopened !== true || t.status === 'done' || t.stage === 'review') delete t.reopened;
+  // How it was closed, while it stays finished.
+  if (t.acceptedFailing !== true || !wasFinished(t)) delete t.acceptedFailing;
   // What a task's own checks say, from disk: anything malformed is dropped,
   // never allowed to break a gate.
   const added = Array.isArray(t.addChecks) ? t.addChecks.map(validTaskCheck).filter((c): c is TaskCheck => Boolean(c)) : [];
@@ -1012,6 +1015,7 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
     'stage',
     'checks',
     'startCommit',
+    'acceptedFailing',
     'builds',
     'expect',
   ],
@@ -1056,7 +1060,7 @@ function checkOpFields(op: unknown): void {
  * count. Comments, task progress and positions are not content: Claude
  * acting on a comment it has not read yet loses nothing of the user's.
  * Nor is where a task sits, but each task the user moved is `moved:id`,
- * which only a removal looks at (contentTargetsOf).
+ * which a removal and a move of that task look at (contentTargetsOf).
  */
 function unreadContent(plan: Plan): Set<string> {
   const unread = unreadByClaude(plan);
@@ -1119,7 +1123,9 @@ function readUnder(plan: Plan, id: string): Set<string> {
 }
 
 /** What an edit of Claude's would overwrite, as `kind:id` — none when it
- *  only tracks progress, moves something, or talks in a thread. Every item
+ *  only tracks progress or talks in a thread. A move undoes the user's
+ *  move of that task (`moved:id`): moved back under a task it was taken
+ *  out of, a removal of that task would then take it (D2). Every item
  *  it changes, not only the one it names: a task's `builds` relinks boxes,
  *  and a task goes with its subtasks, the dependencies on them and the
  *  boxes' links to them. */
@@ -1160,6 +1166,8 @@ function contentTargetsOf(plan: Plan, op: PlanOp): string[] {
     }
     case 'set_checks':
       return [`task:${op.id}`];
+    case 'move_task':
+      return [`moved:${op.id}`];
     default:
       return [];
   }
@@ -1377,7 +1385,7 @@ function withoutExpect(op: PlanOp): PlanOp {
 
 /** The fields of upsert_task that report progress rather than say what
  *  the task is. Claude reports them only through harness_task_update. */
-export const PROGRESS_FIELDS = ['status', 'stage', 'checks', 'startCommit'] as const;
+export const PROGRESS_FIELDS = ['status', 'stage', 'checks', 'startCommit', 'acceptedFailing'] as const;
 
 /**
  * Claude's progress goes through harness_task_update, which refuses what
@@ -2041,6 +2049,12 @@ function editTask(
       if (isWorking(status) && passedAndClosed(plan, task, reviewFallback)) {
         task.reopened = true;
       } else if (status === 'done') delete task.reopened;
+      // How it was closed: read while it stays finished (dropped too), and
+      // gone once it is work again, or closed anew.
+      // A drop undone (back to done) keeps it, as it keeps the verdicts.
+      const undropped = status === 'done' && task.status === 'dropped' && task.wasDone === true;
+      if (status === 'done' && op.acceptedFailing === true) task.acceptedFailing = true;
+      else if ((status === 'done' && !undropped) || isWorking(status)) delete task.acceptedFailing;
       if (isWorking(status) && wasFinished(task) && task.reviews) {
         task.reviews = task.reviews.filter((r) => r.round !== task.round);
         if (!task.reviews.length) delete task.reviews;
@@ -2062,6 +2076,7 @@ function editTask(
       delete task.checks;
       delete task.reviews;
       delete task.reopened;
+      delete task.acceptedFailing;
     }
   }
   const progress: string[] = [];

@@ -212,6 +212,9 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
     const ok = outcome.code === 0;
     const what = outcome.timedOut ? `timed out after ${hook.timeout ?? DEFAULT_HOOK_TIMEOUT}s` : `exit ${outcome.code}`;
     if (!opts.json) console.log(`${ok ? '✓' : hook.optional ? '⚠' : '✗'} ${hook.name}  (${ok ? secs : `${what}, ${secs}`})${hook.optional && !ok ? ' — optional' : ''}`);
+    if (outcome.leftovers && !opts.json) {
+      console.log(`    stopped what it left running in its process group (start a server for later checks with \`setsid\`)`);
+    }
     if (!ok && !opts.json) {
       const tail = outcome.output.trimEnd().split('\n').slice(-TAIL_LINES);
       for (const line of tail) console.log(`    ${line}`);
@@ -235,7 +238,16 @@ const STOP_GRACE_MS = 3000;
  *  held open from outside its group. */
 const LET_GO_MS = 200;
 
-function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: string; ms: number; timedOut: boolean }> {
+type HookOutcome = {
+  code: number;
+  output: string;
+  ms: number;
+  timedOut: boolean;
+  /** It ended with something it started still running in its group, which was stopped. */
+  leftovers?: boolean;
+};
+
+function runHook(hook: CheckHook, cwd: string): Promise<HookOutcome> {
   const started = Date.now();
   // A hook whose folder is not there fails, saying so: run anywhere else it
   // could pass without checking what it is for.
@@ -345,6 +357,7 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
     // as it may be held open from outside its group. Interrupted, this
     // command ends instead.
     let closed = false;
+    let leftovers = false;
     let ended: number | undefined;
     child.once('exit', () => (ended = Date.now()));
     let interrupts = 0;
@@ -362,17 +375,24 @@ function runHook(hook: CheckHook, cwd: string): Promise<{ code: number; output: 
           (out as unknown as { unref?: () => void }).unref?.();
         }
       }
-      resolve({ code: timedOut ? 124 : (child.exitCode ?? 1), output, ms: (ended ?? Date.now()) - started, timedOut });
+      resolve({ code: timedOut ? 124 : (child.exitCode ?? 1), output, ms: (ended ?? Date.now()) - started, timedOut, leftovers });
     };
     const letGo = () => (closed ? settle() : setTimeout(settle, LET_GO_MS));
     // Ended on its own, it is over as it ended, whatever holds its output.
-    afterGroup(
-      () => !stopping && letGo(),
-      () => settled || stopping !== undefined,
-    );
+    // What it left running in its group (a stray test worker, a server
+    // started with `&`) is stopped as a timed-out one is: nothing a check
+    // starts outlives it, or holds it to its timeout (D3). A server for the
+    // checks after it is started in a group of its own (`setsid`).
+    child.once('exit', () => {
+      if (settled || stopping) return;
+      if (!groupAlive()) return letGo();
+      leftovers = true;
+      void stop().then(letGo);
+    });
     const timer = setTimeout(() => {
-      // Ended in time, all of it, and its output being let go: not a timeout.
-      if (ended !== undefined && !groupAlive()) return;
+      // Ended in time, and what it left being stopped or its output let go:
+      // not a timeout.
+      if (ended !== undefined) return;
       timedOut = true;
       void stop().then(letGo);
     }, (hook.timeout ?? DEFAULT_HOOK_TIMEOUT) * 1000);

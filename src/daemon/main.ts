@@ -1353,6 +1353,17 @@ function buildRouter(deps: Deps): Router {
       );
     }
 
+    // The required checks failing as it is closed: the checks the user set
+    // for it (#54) count — one they skipped does not, nor an optional one.
+    const set = effectiveChecks(before, task);
+    const optional = new Set([
+      ...HOOK_STAGES.flatMap((st) => project.hooks[st].filter((h) => h.optional).map((h) => h.name)),
+      ...set.add.filter((c) => c.optional).map((c) => c.name),
+      ...set.skip,
+    ]);
+    const latest = mergeChecks(task.checks, checks ?? []);
+    const failing = status === 'done' ? latest.filter((c) => !c.ok && !optional.has(c.name)) : [];
+
     if (status === 'done' && !approved) {
       // Done means the cycle ran: it went to review at least once, …
       if (!task.round) {
@@ -1365,14 +1376,6 @@ function buildRouter(deps: Deps): Router {
       // … and every check that gates it passed when it was last run.
       // The checks the user set for it (#54): one they skipped neither holds
       // it back nor is waited on; one they added does both, unless optional.
-      const set = effectiveChecks(before, task);
-      const optional = new Set([
-        ...HOOK_STAGES.flatMap((st) => project.hooks[st].filter((h) => h.optional).map((h) => h.name)),
-        ...set.add.filter((c) => c.optional).map((c) => c.name),
-        ...set.skip,
-      ]);
-      const latest = mergeChecks(task.checks, checks ?? []);
-      const failing = latest.filter((c) => !c.ok && !optional.has(c.name));
       // Targeted: the checks for what the task's change touched — none for
       // an area it did not touch, however it was planned. Outside git, the
       // checks for the files it planned to touch, as before. Where git
@@ -1462,6 +1465,9 @@ function buildRouter(deps: Deps): Router {
       ...(stage ? { stage: stage as NonNullable<ReturnType<typeof validStage>> } : {}),
       ...(checks ? { checks } : {}),
       ...(git.startCommit ? { startCommit: git.startCommit } : {}),
+      // Done over failing checks (accepted by the user, or the agent's call
+      // outside a Managed build) is not a round that passed (D4).
+      ...(failing.length ? { acceptedFailing: true } : {}),
       ...(note !== undefined ? { note: approved ? `${note} (approved by the user)` : note } : {}),
     };
     const review: PlanOp[] = verdict
