@@ -4,6 +4,10 @@
 
 ### Fixes
 
+- **A task taken up again is judged by your project's review mode before you submit.** Before a
+  Managed build was submitted, or on a Tracked build, reopening a finished task judged its last round as
+  self-reviewed: a task you review yourself could get past your round limit on the agent's pass, and one that
+  skips review could be refused another round.
 - **What you type into a field while it is saving is kept.** The field closed once the save went in, and the
   rest was gone; it now stays open on it, also when you were on another tab as the save went in (it no longer
   comes back saying it changed while you were editing). A reply or a new comment typed on while it is posted

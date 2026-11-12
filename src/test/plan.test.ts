@@ -1007,6 +1007,31 @@ test('a finished task taken up again keeps its one round past the limit through 
   assert.equal(inReview.tasks[0]!.reopened, undefined);
 });
 
+test("before submission, a task taken up again is judged under the project's review mode, as the build is", () => {
+  const claude = (plan: Plan, op: PlanOp, review?: 'user' | 'skip') => applyOps(plan, [op], 'claude', undefined, { tracking: true, ...(review ? { review } : {}) }).plan;
+  const start = (reviews: unknown[]) => {
+    const plan = fresh();
+    Object.assign(plan.tasks.find((t) => t.id === 't2')!, { status: 'done', round: 1, reviews });
+    return plan;
+  };
+  // The project reviews by the user: the agent's pass, closed on the user's word, is no pass of theirs.
+  const userReviewed = claude(start([{ round: 1, by: 'claude', verdict: 'pass', at: 1 }]), { op: 'upsert_task', id: 't2', status: 'in_progress' }, 'user');
+  assert.equal(userReviewed.tasks.find((t) => t.id === 't2')!.reopened, undefined);
+  // It skips review: closed done is passed.
+  const skipped = claude(start([]), { op: 'upsert_task', id: 't2', status: 'in_progress' }, 'skip');
+  assert.equal(skipped.tasks.find((t) => t.id === 't2')!.reopened, true);
+  // A submitted Managed build is judged by the settings the user submitted, not the project's.
+  const submitted = start([{ round: 1, by: 'claude', verdict: 'pass', at: 1 }]);
+  submitted.submission = { settings: { review: 'user' } } as unknown as Plan['submission'];
+  const held = claude(submitted, { op: 'upsert_task', id: 't2', status: 'in_progress' }, 'skip');
+  assert.equal(held.tasks.find((t) => t.id === 't2')!.reopened, undefined);
+  // A verdict records the mode it was given under.
+  const inReview = start([]);
+  Object.assign(inReview.tasks.find((t) => t.id === 't2')!, { status: 'in_progress', stage: 'review' });
+  const passed = applyOps(inReview, [{ op: 'review_task', id: 't2', verdict: 'pass' }], 'user', undefined, { review: 'user' }).plan;
+  assert.equal(passed.tasks.find((t) => t.id === 't2')!.reviews!.at(-1)!.mode, 'user');
+});
+
 test('a task the agent puts back to todo keeps its round across a restart, as the edit kept it', () => {
   const claude = (plan: Plan, op: PlanOp) => applyOps(plan, [op], 'claude', undefined, { tracking: true }).plan;
   let plan = claude(fresh(), { op: 'upsert_task', id: 't2', status: 'in_progress' });

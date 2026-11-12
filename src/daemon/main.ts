@@ -539,6 +539,7 @@ function buildRouter(deps: Deps): Router {
 
   /** How a brief is rendered for a session: the same for the agent's tool
    *  and the page, so both read the same text. */
+  store.reviewFor = (session) => projectFor(session).settings.review;
   const briefOptions = (session: SessionState) => ({ agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) });
 
   /** Settings as the page sent them, over the repository's defaults. */
@@ -1452,6 +1453,8 @@ function buildRouter(deps: Deps): Router {
     // into review, after it; otherwise before the rest (done ends the review).
     const { plan, changes } = store.applyOps(session.sessionId, stage ? [progress, ...review] : [...review, progress], 'claude', {
       tracking: true,
+      // Judged by the same review mode as the gates above.
+      review: settings.review,
     });
     const now = plan.tasks.find((t) => t.id === taskId)!;
     const out: string[] = [];

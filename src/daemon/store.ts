@@ -34,7 +34,7 @@ const REVISION_MOVED =
 import { blockingGaps } from '../shared/check.ts';
 import { modeFor } from '../shared/build.ts';
 import { DEFAULT_AGENT, isAgentKind, type AgentKind } from '../shared/agents.ts';
-import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ServerEvent, SessionState, SessionSummary, TaskListInput } from '../shared/types.ts';
+import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, SessionSummary, TaskListInput } from '../shared/types.ts';
 
 const PERSIST_DEBOUNCE_MS = 400;
 
@@ -113,6 +113,10 @@ export class SessionStore extends EventEmitter {
   private persistFailed = new Map<string, string>();
   /** Save failures raised before anyone listened, for the first listener. */
   private unheard: ServerEvent[] = [];
+  /** The project's review mode for a session: what a plan with none of its
+   *  own (not a submitted Managed build) is judged by, as the daemon's gates
+   *  judge it. Set by the daemon; every edit falls back to it. */
+  reviewFor?: (session: SessionState) => ReviewMode;
 
   constructor() {
     super();
@@ -445,12 +449,13 @@ export class SessionStore extends EventEmitter {
 
   /** Apply edits from either side. Throws `PlanError` when any op fails, in
    *  which case nothing is changed. */
-  applyOps(id: string, ops: PlanOp[], author: Author, opts: { tracking?: boolean } = {}): { plan: Plan; changes: Change[] } {
+  applyOps(id: string, ops: PlanOp[], author: Author, opts: { tracking?: boolean; review?: ReviewMode } = {}): { plan: Plan; changes: Change[] } {
     const session = this.sessions.get(id);
     if (!session) throw new Error('unknown session');
     // The user can start a plan from the browser before Claude has published.
     const base = session.plan ?? emptyPlan(session.title);
-    const result = applyOps(base, ops, author, Date.now(), opts);
+    const review = opts.review ?? this.reviewFor?.(session);
+    const result = applyOps(base, ops, author, Date.now(), { ...opts, ...(review ? { review } : {}) });
     this.mutate(id, (s) => {
       s.plan = result.plan;
     });

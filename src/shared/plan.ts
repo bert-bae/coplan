@@ -1401,8 +1401,11 @@ export function applyOps(
   ops: PlanOp[],
   author: Author,
   now = Date.now(),
-  /** `tracking`: Claude's progress report, already through harness_task_update's gates. */
-  opts: { tracking?: boolean } = {},
+  /** `tracking`: Claude's progress report, already through harness_task_update's gates.
+   *  `review`: the project's review mode, for a plan that holds none of its
+   *  own — any plan but a submitted Managed build — as the daemon's gates
+   *  judge by. The session store fills it in for every edit. */
+  opts: { tracking?: boolean; review?: ReviewMode } = {},
 ): { plan: Plan; changes: Change[] } {
   if (!Array.isArray(ops) || ops.length === 0) {
     throw new PlanError('No edits were given: pass them as {ops: [{op: "upsert_task", id: "t3", note: "…"}, …]}.');
@@ -1428,7 +1431,7 @@ export function applyOps(
       // user's change as surely as an edit — only later, when accepted: its
       // edits are guarded too, in its trial (applyOne's `guard`).
       const guard = unread ? (at: Plan, inner: PlanOp) => refuseUnreadEdit(at, inner, unread) : undefined;
-      changes.push(...applyOne(next, expectAtStart(plan, op, author), author, now, guard));
+      changes.push(...applyOne(next, expectAtStart(plan, op, author), author, now, guard, opts.review));
     } catch (err) {
       if (err instanceof PlanError && ops.length > 1) {
         throw new PlanError(`Edit ${i + 1} (${(op as { op?: string })?.op ?? '?'}): ${err.message}`);
@@ -1462,7 +1465,9 @@ export function applyOps(
 /** One edit, in `plan` itself. Its `expect` was checked, and taken off,
  *  before the batch began (expectAtStart): every caller goes through it.
  *  `guard`: Claude's unread-edit guard, for the edits a proposal carries. */
-function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (plan: Plan, op: PlanOp) => void): Change[] {
+function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (plan: Plan, op: PlanOp) => void, review?: ReviewMode): Change[] {
+  // The review mode a task falls back to: the build's.
+  const reviewFallback = plan.submission?.settings?.review ?? review ?? DEFAULT_BUILD_SETTINGS.review;
   const log = (kind: ChangeKind, target: Target, summary: string) => record(plan, author, kind, target, summary, now);
 
   switch (op?.op) {
@@ -1580,7 +1585,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
 
     case 'upsert_task': {
       const existing = op.id ? findTask(plan, op.id) : undefined;
-      if (existing) return editTask(plan, existing, op, author, now, log);
+      if (existing) return editTask(plan, existing, op, author, now, log, reviewFallback);
 
       const title = clean(op.title, MAX_TITLE);
       if (!title) throw new PlanError(op.id ? `No task "${op.id}".` : 'A new task needs a title.');
@@ -1739,7 +1744,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
         round: task.round,
         verdict,
         by,
-        mode: effectiveReview(plan, task, plan.submission?.settings?.review ?? DEFAULT_BUILD_SETTINGS.review),
+        mode: effectiveReview(plan, task, reviewFallback),
         ...(summary ? { summary } : {}),
         at: now,
       };
@@ -1814,7 +1819,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
         const trial = structuredClone(plan);
         delete trial.design;
         delete trial.submission;
-        applyAsUser(trial, op.ops, now, guarded);
+        applyAsUser(trial, op.ops, now, guarded, review);
       } catch (err) {
         if (err === refused) throw err;
         if (err instanceof PlanError) throw new PlanError(`The proposal would not apply to the plan as it is: ${err.message}`);
@@ -1875,7 +1880,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
       } else if (plan.design) {
         checkDesignLocked(p.ops, 'user');
       }
-      const out = applyAsUser(plan, p.ops, now);
+      const out = applyAsUser(plan, p.ops, now, undefined, review);
       settleProposal(plan, p, 'accepted', now, 'Accepted.');
       const accepted = log('edited', { kind: 'plan', id: '' }, `accepted proposal ${p.id} "${p.title}"`);
       p.resolvedSeq = accepted.seq;
@@ -1950,6 +1955,7 @@ function editTask(
   author: Author,
   now: number,
   log: (kind: ChangeKind, target: Target, summary: string) => Change,
+  reviewFallback: ReviewMode,
 ): Change[] {
   // On a submitted plan, what a task the user signed off says is theirs:
   // Claude tracks the work (a note, the files it touched, a dependency it
@@ -2027,7 +2033,7 @@ function editTask(
       // `reopened` (its next round past the limit, as the last one passed)
       // is kept through a drop, and goes once it is done again (or on entering
       // review, or the user's reset).
-      if (isWorking(status) && passedAndClosed(plan, task)) {
+      if (isWorking(status) && passedAndClosed(plan, task, reviewFallback)) {
         task.reopened = true;
       } else if (status === 'done') delete task.reopened;
       if (isWorking(status) && wasFinished(task) && task.reviews) {
@@ -2358,14 +2364,14 @@ export function isLocked(plan: Pick<Plan, 'submission'> | null): boolean {
  * `expect`s were checked when Claude proposed them (expectAtStart), and kept
  * without.
  */
-function applyAsUser(plan: Plan, ops: PlanOp[], now: number, before?: (plan: Plan, op: PlanOp, i: number) => void): Change[] {
+function applyAsUser(plan: Plan, ops: PlanOp[], now: number, before?: (plan: Plan, op: PlanOp, i: number) => void, review?: ReviewMode): Change[] {
   const start = structuredClone(plan);
   const had = new Set(dependencyProblems(plan));
   const out: Change[] = [];
   ops.forEach((inner, i) => {
     before?.(plan, inner, i);
     try {
-      out.push(...applyOne(plan, inner, 'user', now));
+      out.push(...applyOne(plan, inner, 'user', now, undefined, review));
     } catch (err) {
       if (err instanceof PlanError && ops.length > 1) throw new PlanError(`edit ${i + 1} (${inner.op}): ${err.message}`);
       throw err;

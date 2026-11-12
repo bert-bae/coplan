@@ -882,3 +882,15 @@ test('a save that fails is said — once — instead of being dropped', { skip: 
   store.persistNow('readonly');
   assert.ok(existsSync(path.join(dir, 'state.json')));
 });
+
+test("every edit falls back to the project's review mode the daemon gives the store", async () => {
+  const store = await freshStore();
+  store.ensure('rv', process.cwd());
+  store.publishPlan('rv', PLAN);
+  store.reviewFor = () => 'skip';
+  const plan = store.applyOps('rv', [{ op: 'upsert_task', id: 't1', status: 'done' }], 'user').plan;
+  Object.assign(plan.tasks.find((t) => t.id === 't1')!, { round: 1 });
+  // Closed done under a project that skips review counts as passed: taken up again, it is reopened.
+  const again = store.applyOps('rv', [{ op: 'upsert_task', id: 't1', status: 'in_progress' }], 'user').plan;
+  assert.equal(again.tasks.find((t) => t.id === 't1')!.reopened, true);
+});
