@@ -4,6 +4,16 @@
 
 ### Fixes
 
+- **The agent cannot move back a task you just moved.** If you moved a task since the agent last read the
+  plan, the agent's move of that task is refused until it reads the plan again. Before, it could move a task
+  you had taken out of another back under it, and then remove that task, taking yours with it.
+- **A check that exits ends with its own exit code.** Anything it left running in its process group (a stray
+  test worker, a server started with `&`) is now stopped when it exits. Before, `coplan check` waited for
+  those, failed the check as timed out, and could leave them running past the run. A server meant for the
+  checks after it needs a group of its own: `setsid npm run dev &`.
+- **A task you accepted over failing checks gets no free round.** Taken up again, a task marked done while a
+  required check still failed is now held to `maxRounds`: you accepted the work as it was, not another round.
+  Before, under `skip` review, it got one more round without asking.
 - **The board asks for your verdict wherever your project has you review.** On a build whose plan does not
   hold a review mode (a Tracked build), the board went by the default and never showed you the review box, while
   the agent waited on your verdict. A change request you were writing there could also be let go. Changing the

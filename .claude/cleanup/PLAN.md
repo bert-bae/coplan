@@ -161,7 +161,7 @@ the audit's finding numbers.
 | F27 | The comment composer and the Files field lose their text when their view goes (clicking another box, a tab or session switch), and closing the page does not ask: their text is component state, outside the kept drafts (components/Threads.tsx:149, views/TasksView.tsx:895, store.ts beforeunload) [re-audit 6] | 2 should fix | done | b9e02fe |
 | F28 | Confirm design and Submit throw away a half-written draft without asking: the dialogs wait only for saves in flight, and once the plan locks `pruneDrafts` drops the kept draft (a summary started on Overview, a task detail), which was never in the prompt (components/Submit.tsx:379, 496; lib/drafts.ts:34-64) [re-audit 7] | 2 should fix | done | a15ed11 |
 | F29 | A parent whose subtasks were all dropped shows ✓ Done, while the briefs say it was dropped whole and progress counts 0 done: `shownStatus` rolls up through `readinessOf`, which settles dropped leaves as done. Rewriting it over `leavesUnder` (all dropped → dropped, all settled → done, then in progress, blocked, else to do) fixes this and makes it about 20x faster (78 ms → 3.6 ms per row on 400 tasks); `boxRows` also rebuilds `outline` once per box (ui/lib/tasks.ts:23, 41-45) [re-audit 8] | 2 should fix | done: dropped shows dropped; outline numbered once. The faster roll-up was dropped: 6 ms to 4 ms for 400 rows here, not worth a second copy of readinessOf's rule | 162366f |
-| F30 | Claude's `move_task` is not held against a move the user made that it has not read: the user moves t3 out of t1 to keep it, Claude (unread) moves it back under t1 and then removes t1, and t3 goes. Moves are left out of the unread-edit guard by design (`contentTargetsOf`: "none when it only … moves something"); refusing Claude's move of a task in `moved:` would close it, but it is a change to what the agent may do (found reviewing F22) | 2 should fix | needs-decision: D2, asked in bert-bae/coplan#81 | |
+| F30 | Claude's `move_task` is not held against a move the user made that it has not read: the user moves t3 out of t1 to keep it, Claude (unread) moves it back under t1 and then removes t1, and t3 goes. Moves are left out of the unread-edit guard by design (`contentTargetsOf`: "none when it only … moves something"); refusing Claude's move of a task in `moved:` would close it, but it is a change to what the agent may do (found reviewing F22) | 2 should fix | done in batch 3: D2 decided, refuse (`move_task` targets `moved:<id>`) | batch 3 |
 | R8 | One kept-draft hook: MarkdownField (Editable.tsx), FilesField (TasksView.tsx) and the comment composer (Threads.tsx) each keep their draft in `openDrafts` by hand, and the copies drift (F27's review found FilesField missing the delete after a save and the reset after a refusal). A `useKeptDraft(field, value, version)` in drafts.ts would hold the key, the kept entry and its lifecycle for all three (found reviewing F27) | 4 refactor | done | e99e6a5, f989182 |
 | B35 | A lock that comes another way (the agent confirming or submitting from chat, another tab) still drops text left open in a field it locks, without a word: `pruneDrafts` lets the draft go once `fieldText` says the field is locked. Say what was dropped, with its text to copy, when a kept draft goes because its field locked rather than because it was saved (ui/lib/drafts.ts `pruneDrafts`, store.ts snapshot; found reviewing F28) | 5 smaller | done | 493d838 |
 | B22 | B19's old-named folders are read only at boot, and `ensure`/`purge` know only the new name: a deleted `a:b` comes back on restart from `a_b`; one past the cap at boot gets a blank `a_b-<hash>` and its plan is never read again; a session whose id is `a_b` is served `a:b`'s saved state. Ignore saved state whose `sessionId` is not the id, read the old folder in `ensure` when it names this id, and remove it in `purge` (daemon/store.ts:153, 194, 276) [re-audit 10] | 5 smaller | done | 72dddaf |
@@ -179,7 +179,7 @@ the audit's finding numbers.
 | B34 | A save against a revision the item has not reached (a buggy client, or a tab holding a plan since replaced) is refused as "was changed by Claude while this edit was open", though nobody changed it, so the cause stays hidden. Say the revision is newer than the item's (shared/plan.ts `checkRev`; found reviewing T5) | 5 smaller | done: tasks too, which let such an edit through; and a revision below 1 or not whole | 3b5c32e |
 | B36 | A check that times out has the rest of its group killed only by an unref'd timer, three seconds on, and its close is reported at once: a worker that ignores SIGTERM with its output redirected runs beside the next check, and on past `coplan check` if it ends first. Share the interrupt's wait for the group (cli/check.ts `stop`; found reviewing B31) | 5 smaller | done: one joined stop for both, and a check whose output is held open from outside now ends; the normal-exit path is row B37 | acd9060 |
 | B37 | A check that exits on its own is over only when its output closes: something it started out of its group holding that open (a dev server started detached) makes it run to its timeout and fail as timed out, though its exit code is known; and what it left running in its group (a stray test worker, its output redirected) runs on beside the next check. End it as a stopped one ends: on its exit, the rest of its group stopped, its output read or let go a moment on (cli/check.ts `runHook`; found reviewing B36) | 5 smaller | done: the output half; stopping what is left in its group is B38 (D3) | 1958574 |
-| B38 | A check that exits on its own while something it started still runs in its group (a stray test worker, a server started with `&` and its output redirected) is over at once, and that runs on beside the next check and past `coplan check`. Stopping the rest of the group on exit would end it, but also a server a check starts for the checks after it (split from B37) | 5 smaller | needs-decision: D3, asked in bert-bae/coplan#82 | |
+| B38 | A check that exits on its own while something it started still runs in its group (a stray test worker, a server started with `&` and its output redirected) is over at once, and that runs on beside the next check and past `coplan check`. Stopping the rest of the group on exit would end it, but also a server a check starts for the checks after it (split from B37) | 5 smaller | done in batch 3: D3 decided, stop the group on exit | batch 3 |
 | A2 | Re-audit the areas the rows after A1 touched with `/ponytail-audit`, and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing | 6 re-audit | done: no must fix, 7 should fix, 9 nice to have, now rows T6, F31-F36, B39-B47 and A3; D3 amended | fb5c76d |
 | T6 | Three guards in the store's code for folders an earlier build named have no test that fails when they break (each removed alone, the store and integration tests still pass): `purge` deletes the old folder only when `ownerOf(old) === id`, else deleting `a:b` deletes the plan of session `a_b`; `readSaved` moves another session's state only when that session has none of its own, else an old copy goes over its newer one; and it serves an old folder only when it holds the id asked for, else `a:b` is served `a_b`'s plan. One store test each (daemon/store.ts:197, 303, 315) [re-audit A2 7] | 0 safety net | done: two tests, each guard removed alone fails one | 8786ead |
 | F31 | A proposal's inner `expect` is checked as the user's (its trial runs `applyAsUser`): a stale task `expect` the agent would be refused directly goes through, and accepting it overwrites the user's newer text; the agent's own successive edits are refused instead, and sections and diagrams name the wrong side. Check inner `expect`s as Claude's when the proposal is made (shared/plan.ts:1649-1653, 2183, 2987-2993) [re-audit A2 1] | 2 should fix | done: every `expect` is checked once, before the batch (expectAtStart), as its reader's; a proposal's as Claude's | 93a6874 |
@@ -282,7 +282,7 @@ the audit's finding numbers.
 | F78 | B76's done-gate message does not say another round is stage "review" with user_approved, and words it unlike the round-limit gate; its comment sits above the wrong branch; F73's test passes with the mode ignored (add user "changes" then agent pass); B76's whitespace case untested (daemon/main.ts, test/plan.test.ts, ui/lib/drafts.ts) (bert-bae/coplan#152) [re-audit A13 3, 5, 6] | 2 should fix | done: one shared round-limit message with a call per choice; tests for the user-review case, both paths, whitespace on and off screen | bd722af |
 | B77 | Skip mode puts no real limit on rounds (document or decide); a local `reopened` in main.ts means something else; ReviewMode import order (daemon/main.ts, shared/plan.ts) (bert-bae/coplan#153) [re-audit A13 7-9] | 5 smaller | done: skip's extra round documented (holding an accepted one is B79, D4); rename and import order | 0f4be10 |
 | B78 | The board (TasksView's review box, drafts.ts's review field) resolves a task's review mode as submission ?? DEFAULT 'self', without the project's: a user-reviewed unsubmitted or Tracked build never shows the user the verdict box while the daemon waits on it. Give the page the project's review mode and fall back to it (ui/views/TasksView.tsx, ui/lib/drafts.ts) (bert-bae/coplan#155) [code review F76] | 2 should fix | done: the project's review mode comes with the session and every snapshot; board and pruneDrafts fall back to it | d8e1369 |
-| B79 | Under `skip` review a finished task that went to review counts as passed, so taken up again it gets a round past the limit: even one the user accepted as it was over failing checks, who allowed no further round. Holding it would mean recording how a round closed (shared/plan.ts passedAndClosed; found reviewing B77) | 5 smaller | needs-decision: D4, asked in bert-bae/coplan#156 | |
+| B79 | Under `skip` review a finished task that went to review counts as passed, so taken up again it gets a round past the limit: even one the user accepted as it was over failing checks, who allowed no further round. Holding it would mean recording how a round closed (shared/plan.ts passedAndClosed; found reviewing B77) | 5 smaller | done in batch 3: D4 decided, hold to the limit (`acceptedFailing`) | batch 3 |
 | A14 | Re-audit the areas the rows after A13 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#154) | 6 re-audit | done: no must fix, 4 should fix, 8 nice to have, now rows F79-F81, B80 and A15 | fdd79ba |
 | F79 | F78: in a Tracked build past maxRounds the stage-review note says the agent decides, the done note that it is the user's call; the stage-review refusal's new wording is unpinned (daemon/main.ts, test/integration.test.ts) (bert-bae/coplan#157) [re-audit A14 daemon 1, 5] | 2 should fix | done: both Tracked notes ask the agent why, against the limit the user set; both wordings pinned | 0ebb307 |
 | F80 | B78: `projectReview` reaches the page only with a snapshot or fetch; a change to `.coplan/config.json` sends neither (its watcher follows harness.json), so the board keeps the old mode while the daemon gates on the new; a late fetch can overwrite a newer streamed value (daemon/main.ts, ui/store.ts) (bert-bae/coplan#158) [re-audit A14 store 1-2, daemon 2] | 2 should fix | done: a read that finds the review mode changed sends open pages a snapshot (the settings timer reads it too); a late fetch overtaking it left (narrow) | 8568d41 |
@@ -301,12 +301,22 @@ the audit's finding numbers.
 ### Batch 2
 
 Rows T10 and B83 (bert-bae/coplan#171), then the batch's one re-audit (done: no must or should fix; see *Re-audit report (batch 2)*). F30, B38
-and B79 stay `needs-decision` (D2-D4 not answered yet).
+and B79 were `needs-decision` until D2-D4 were answered (2026-11-12): they are done in batch 3.
 
 | Row | What | Phase | Status | Commit |
 |-----|------|-------|--------|--------|
 | T10 | ProjectConfigs: no test has a source file that does not exist (the stand-in mtime never returns undefined): `?? -Infinity` turned to `?? Infinity` passes, and would stop all caching (global instruction files are listed whether present or not) (daemon/projectConfigs.ts, test/projectConfigs.test.ts) [re-audit A17 cache 1] | 0 safety net | done: missing source (no mtime) counts as settled, pinned; ?? Infinity fails it | 412a594 |
 | B83 | ProjectConfigs (T9) swallows a review-change listener's error unlogged: before, it reached the daemon's uncaughtException log; the session-list broadcast listener has no catch of its own. Log it in the catch (daemon/projectConfigs.ts) [re-audit A17 cache 2] | 5 smaller | done: logged via ProjectConfigs.logError (daemon log), pinned with the next listener still told; a throwing logger left (the daemon's log guards itself) | 8810fdf |
+
+### Batch 3
+
+The three decided rows (D2-D4, 2026-11-12).
+
+| Row | What | Phase | Status | Commit |
+|-----|------|-------|--------|--------|
+| F30 | D2: the agent's `move_task` of a task the user moved, unread, is refused (shared/plan.ts contentTargetsOf) (bert-bae/coplan#81) | 2 should fix | done: pinned with the move-back-then-remove case | batch 3 |
+| B38 | D3: a check that exits has what it left in its group stopped (SIGTERM, SIGKILL 3 s on), ends with its own exit code, and the report says so; docs name `setsid` (cli/check.ts runHook, docs/CONFIG.md) (bert-bae/coplan#82) | 5 smaller | done: pinned with a stray worker ignoring SIGTERM, and a setsid server kept | batch 3 |
+| B79 | D4: done over required failing checks sets `acceptedFailing`; `passedAndClosed` reads it, so the task taken up again is held to the limit; kept through drops, loads and republishes while finished (shared/plan.ts, daemon/main.ts, docs/CONFIG.md) (bert-bae/coplan#156) | 5 smaller | done: lifecycle pinned in plan tests, set by the daemon pinned in the gates test | batch 3 |
 
 ### F19: the take-back never fires
 
@@ -354,6 +364,8 @@ Found while writing T1b (2026-11-10).
     first, as for any unread edit. Cost: an agent reorganising the outline
     after the user dragged tasks about reads the plan first.
   - **Leave moves unchecked** (as now): the two-step loss stays possible.
+
+  **Decided: refuse** (2026-11-12).
 - **D3 (B38, asked in bert-bae/coplan#82):** A check that exits on its own while something it started
   is still running in its process group (a test runner's stray worker, a
   server started with `&`, its output redirected) is over at once, and that
@@ -368,6 +380,8 @@ Found while writing T1b (2026-11-10).
     until its timeout, which fails it as timed out. Leaving it running
     means letting the check go on its shell's exit instead, not waiting
     for its group (found in re-audit A2); stopping the group fixes that too.
+
+  **Decided: stop the rest of its group when it exits** (2026-11-12).
 - **D4 (B79, asked in bert-bae/coplan#156):** Under `skip` review, closing a
   task done counts as passing its round, so taken up again it gets one more
   round past `maxRounds`, even when the user accepted it as it was over
@@ -378,6 +392,9 @@ Found while writing T1b (2026-11-10).
     `reopened`.
   - **Leave it** (as now, documented in B77): accepting the work also lets
     the agent take it up for one more round.
+
+  **Decided: hold that one to the limit** (2026-11-12). The flag is set on
+  any done over required failing checks, under every review mode.
 
 ---
 

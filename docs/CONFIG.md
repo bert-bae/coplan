@@ -119,6 +119,13 @@ A hook is a command, run from the repository root, or an object:
 
 A stage holds at most 20 hooks.
 
+Each hook runs in a process group of its own. When it exits, anything it
+started that is still running in that group (a stray test worker, a server
+started with `&`) is stopped, so nothing outlives the check it belongs to.
+A server meant for the checks after it needs a group of its own:
+`setsid npm run dev &` (on macOS, which has no `setsid`, run the server and
+the checks that use it as one hook).
+
 **One task's checks.** A task can skip some of these checks, or add checks of
 its own — a docs-only task skipping the test suite, a migration adding
 `pnpm db:check`. Only the user sets them, in the task's details in Coplan
@@ -187,7 +194,7 @@ there Managed by default (see [`mode`](#mode)):
 | --- | --- | --- |
 | `review` | `self` | Who reviews a task that does not say otherwise: `subagent` (a fresh agent that did not write the change, where the agent has subagents), `self`, `user` (Claude stops and asks you), or `skip` (the review checks only). |
 | `parallel` | `1` | How many ready tasks are built at once — with subagents, where the agent has them. 1 to 8. |
-| `maxRounds` | `3` | Review rounds a task may take; another past them is yours to allow. 1 to 10. A finished task taken up again on a passing last round gets one more. Under `skip` there is no verdict, so closing a task done counts as passing: any that went to review gets one more, even one you accepted as it was over failing checks. |
+| `maxRounds` | `3` | Review rounds a task may take; another past them is yours to allow. 1 to 10. A finished task taken up again on a passing last round gets one more. Under `skip` there is no verdict, so closing a task done with its checks passing counts as passing. One closed while a required check still failed (you accepted it as it was) gets none: another round is yours to allow. |
 
 The defaults assume nothing about the agent: it reviews its own change,
 one task at a time. Set `review: "subagent"` or a higher `parallel` where
