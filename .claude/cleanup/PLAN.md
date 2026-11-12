@@ -252,8 +252,9 @@ the audit's finding numbers.
 | F76 | F73: without a submission, editTask judges the round under DEFAULT 'self', the daemon under the project's review: in an unsubmitted Managed build a user-reviewed task closed on the user's word gets `reopened` (round 2 of 1, unapproved), a skip-mode one does not (refused). Pass the effective review fallback into applyOps/editTask, and to review_task's record (shared/plan.ts; daemon/main.ts) (bert-bae/coplan#150) [re-audit A13 1] | 2 should fix | done: store falls back to the project's review for every edit; board's fallback now row B78 | 31237fd |
 | F77 | Older: a reply box drawn anew while its reply posts, typed on, keeps the whole text when the post goes in (on screen or off): posting again repeats the first part. Apply the sender's rule in the watcher and the kept draft: drop the sent text from the front for replies/comments; close on the sent text trimmed or blanks (ui/lib/drafts.ts) (bert-bae/coplan#151) [re-audit A13 2, 4] | 2 should fix | done: watcher and kept draft drop the sent text for replies/comments; an edited sent part still keeps all (no way to tell) | 7e6f78a |
 | F78 | B76's done-gate message does not say another round is stage "review" with user_approved, and words it unlike the round-limit gate; its comment sits above the wrong branch; F73's test passes with the mode ignored (add user "changes" then agent pass); B76's whitespace case untested (daemon/main.ts, test/plan.test.ts, ui/lib/drafts.ts) (bert-bae/coplan#152) [re-audit A13 3, 5, 6] | 2 should fix | done: one shared round-limit message with a call per choice; tests for the user-review case, both paths, whitespace on and off screen | bd722af |
-| B77 | Skip mode puts no real limit on rounds (document or decide); a local `reopened` in main.ts means something else; ReviewMode import order (daemon/main.ts, shared/plan.ts) (bert-bae/coplan#153) [re-audit A13 7-9] | 5 smaller | open | |
+| B77 | Skip mode puts no real limit on rounds (document or decide); a local `reopened` in main.ts means something else; ReviewMode import order (daemon/main.ts, shared/plan.ts) (bert-bae/coplan#153) [re-audit A13 7-9] | 5 smaller | done: skip's extra round documented (holding an accepted one is B79, D4); rename and import order | 0f4be10 |
 | B78 | The board (TasksView's review box, drafts.ts's review field) resolves a task's review mode as submission ?? DEFAULT 'self', without the project's: a user-reviewed unsubmitted or Tracked build never shows the user the verdict box while the daemon waits on it. Give the page the project's review mode and fall back to it (ui/views/TasksView.tsx, ui/lib/drafts.ts) (bert-bae/coplan#155) [code review F76] | 2 should fix | open | |
+| B79 | Under `skip` review a finished task that went to review counts as passed, so taken up again it gets a round past the limit: even one the user accepted as it was over failing checks, who allowed no further round. Holding it would mean recording how a round closed (shared/plan.ts passedAndClosed; found reviewing B77) | 5 smaller | needs-decision: D4, asked in bert-bae/coplan#156 | |
 | A14 | Re-audit the areas the rows after A13 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#154) | 6 re-audit | open | |
 
 ### F19: the take-back never fires
@@ -316,6 +317,16 @@ Found while writing T1b (2026-11-10).
     until its timeout, which fails it as timed out. Leaving it running
     means letting the check go on its shell's exit instead, not waiting
     for its group (found in re-audit A2); stopping the group fixes that too.
+- **D4 (B79, asked in bert-bae/coplan#156):** Under `skip` review, closing a
+  task done counts as passing its round, so taken up again it gets one more
+  round past `maxRounds`, even when the user accepted it as it was over
+  failing checks and never allowed another round. Options:
+  - **Hold that one to the limit:** record when done is approved over failing
+    checks (a flag on the task), and have `passedAndClosed` read it. Cost: one
+    more task flag, carried through drops, loads and republishes like
+    `reopened`.
+  - **Leave it** (as now, documented in B77): accepting the work also lets
+    the agent take it up for one more round.
 
 ---
 
