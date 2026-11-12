@@ -12,7 +12,7 @@ import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from '
 import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
-import { MAX_NOTE, MAX_USER_SAID, PlanError, cleanChecks, cleanNote, cleanUserSaid, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
+import { MAX_NOTE, MAX_USER_SAID, PlanError, cleanChecks, cleanNote, cleanUserSaid, mergeChecks, passedAndClosed, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
 import {
   PROMPT_BUDGET,
   askRule,
@@ -1321,7 +1321,10 @@ function buildRouter(deps: Deps): Router {
     }
 
     // The round limit is the user's: past it, stop and ask them.
-    if (stage === 'review' && task.stage !== 'review' && (task.round ?? 0) >= settings.maxRounds && !approved) {
+    // (A finished task taken up again has its next round: the last one passed.
+    // Taken up and sent to review in this one call, too.)
+    const takenUpAgain = task.reopened || passedAndClosed(task);
+    if (stage === 'review' && task.stage !== 'review' && (task.round ?? 0) >= settings.maxRounds && !takenUpAgain && !approved) {
       gate(
         `"${task.title}" has had ${task.round} review round(s), the most the user allowed (${settings.maxRounds}). Stop: mark it ` +
           'blocked with a note on what still fails, and ask the user — another round, accept it as it is, or take it over. ' +
@@ -1396,7 +1399,18 @@ function buildRouter(deps: Deps): Router {
         const last = verdict ? (mode === 'user' ? roundVerdict(task, mode) : { verdict }) : roundVerdict(task, mode);
         const passed = last?.verdict === 'pass';
         // Without a round there is no verdict to miss: that note is above.
-        if (!passed && task.round) {
+        // Not in review: the verdict is given in a review round, so that is
+        // where to go (a finished task taken up again lost its pass).
+        if (!passed && task.round && task.stage !== 'review') {
+          const why = task.reopened ? ': its last pass went when it was taken up again' : '';
+          gate(
+            mode === 'user'
+              ? `"${task.title}" is not in review${why}. Report stage "review" (a new round): the user's verdict is given there, ` +
+                  'on the board in Coplan, or in chat (then call again with verdict "pass", user_approved: true and their words in the note).'
+              : `"${task.title}" is not in review${why}. Report stage "review" (a new round) and give its verdict there.`,
+            `not in review${why}: report stage "review" for a new round`,
+          );
+        } else if (!passed && task.round) {
           gate(
             mode === 'user'
               ? `"${task.title}" is the user's to review, and they have not passed it: show them the change and ask with ` +

@@ -242,6 +242,9 @@ export interface Task {
    *  verdicts go, as they do when it leaves done; set done again (the drop
    *  undone), they stay. */
   wasDone?: boolean;
+  /** Finished, and taken up again: its round's verdicts went, so its next
+   *  review round is not held to the round limit (that round never failed). */
+  reopened?: boolean;
   /** Checks of its own, on top of the repository's (#54): required unless
    *  `optional`. The user's to set (`set_checks`), or an accepted proposal's.
    *  Subtasks inherit them. */

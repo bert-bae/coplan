@@ -556,6 +556,14 @@ function keepsStage(status: TaskStatus): boolean {
   return status === 'in_progress' || status === 'blocked';
 }
 
+/** Finished (done, or dropped while done) on a passing last round: taken up
+ *  again, its next review round is not held to the round limit, as that
+ *  round never failed (`reopened`). */
+export function passedAndClosed(task: Task): boolean {
+  const finished = task.status === 'done' || (task.status === 'dropped' && Boolean(task.wasDone));
+  return finished && Boolean(task.round) && Boolean(task.reviews?.some((r) => r.round === task.round && r.verdict === 'pass'));
+}
+
 /** Whether a task with this status is work still to do (not done, not
  *  dropped). */
 function isWorking(status: TaskStatus): boolean {
@@ -633,6 +641,7 @@ function buildTaskTree(
         ...(old?.checks?.length ? { checks: old.checks } : {}),
         ...(old?.reviews?.length ? { reviews: old.reviews } : {}),
         ...(old?.wasDone && status === 'dropped' ? { wasDone: true } : {}),
+        ...(old?.reopened ? { reopened: true } : {}),
         createdAt: old?.createdAt ?? now,
         updatedAt: now,
         createdBy: old?.createdBy ?? 'claude',
@@ -933,6 +942,7 @@ function normalizeTask(task: Task): Task {
   else delete t.checks;
   if (typeof t.startCommit !== 'string' || !/^[0-9a-f]{7,64}$/.test(t.startCommit)) delete t.startCommit;
   if (t.wasDone !== true || t.status !== 'dropped') delete t.wasDone;
+  if (t.reopened !== true) delete t.reopened;
   // What a task's own checks say, from disk: anything malformed is dropped,
   // never allowed to break a gate.
   const added = Array.isArray(t.addChecks) ? t.addChecks.map(validTaskCheck).filter((c): c is TaskCheck => Boolean(c)) : [];
@@ -2003,6 +2013,9 @@ function editTask(
       // verdicts go when it leaves done for work, straight or by way of
       // dropped (wasDone). Dropped, or a drop undone (back to done), it keeps
       // them; one dropped before it was done keeps its own.
+      if (isWorking(status) && passedAndClosed(task)) {
+        task.reopened = true;
+      } else if (!isWorking(status)) delete task.reopened;
       const finished = task.status === 'done' || (task.status === 'dropped' && task.wasDone);
       if (isWorking(status) && finished && task.reviews) {
         task.reviews = task.reviews.filter((r) => r.round !== task.round);
@@ -2024,6 +2037,7 @@ function editTask(
       delete task.round;
       delete task.checks;
       delete task.reviews;
+      delete task.reopened;
     }
   }
   const progress: string[] = [];
@@ -2031,7 +2045,10 @@ function editTask(
   // with the review checks, say — is the same round.
   if (stage && keepsStage(task.status) && stage !== task.stage) {
     task.stage = stage;
-    if (stage === 'review') task.round = (task.round ?? 0) + 1;
+    if (stage === 'review') {
+      task.round = (task.round ?? 0) + 1;
+      delete task.reopened;
+    }
     progress.push(stage === 'review' ? `in review (round ${task.round})` : STAGE_WORDS[stage]);
   }
   const checks = op.checks === undefined ? undefined : cleanChecks(op.checks);

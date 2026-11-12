@@ -1075,7 +1075,7 @@ test('each build gate refuses in a Managed build, and in a Tracked one is a note
   const GATED = {
     title: 'Gates',
     summary: 'One task per gate.',
-    tasks: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'].map((id) => ({ id, title: id.toUpperCase(), ...(id === 'e' ? { review: 'user' as const } : {}) })),
+    tasks: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'].map((id) => ({ id, title: id.toUpperCase(), ...(id === 'e' ? { review: 'user' as const } : {}) })),
   };
   for (const mode of ['managed', 'tracked'] as const) {
     mkdirSync(dir, { recursive: true });
@@ -1160,6 +1160,32 @@ test('each build gate refuses in a Managed build, and in a Tracked one is a note
       await settle('h');
       // Dropping work the user signed off.
       await gate({ task_id: 'i', status: 'dropped', note: 'not needed' }, /dropping it is theirs to decide/, /it was part of the plan the user submitted: tell them you dropped it/);
+      // A finished task dropped and taken up again: its pass went, so done points to a new review round, which
+      // the round limit does not hold against it (the last round passed).
+      await task({ task_id: 'j', stage: 'implement' });
+      await task({ task_id: 'j', stage: 'review', checks: [{ name: 'tests', ok: true }] });
+      const passed = await task({ task_id: 'j', status: 'done', verdict: 'pass', note: 'passes' });
+      assert.equal(passed['ok'], true, String(passed['text']));
+      assert.equal((await task({ task_id: 'j', status: 'dropped', note: 'user: drop it', user_approved: true }))['ok'], true);
+      assert.equal((await task({ task_id: 'j', status: 'in_progress' }))['ok'], true);
+      await gate(
+        { task_id: 'j', status: 'done', note: 'x' },
+        /"J" is not in review: its last pass went when it was taken up again\. Report stage "review" \(a new round\)/,
+        /not in review: its last pass went when it was taken up again/,
+      );
+      if (mode === 'managed') {
+        const again = await task({ task_id: 'j', stage: 'review', checks: [{ name: 'tests', ok: true }] });
+        assert.equal(again['ok'], true, `a new round, past the limit: ${String(again['text'])}`);
+        const done = await task({ task_id: 'j', status: 'done', verdict: 'pass', note: 'passes again' });
+        assert.equal(done['ok'], true, String(done['text']));
+        // Dropped again and sent straight to review in one call: a new round too.
+        assert.equal((await task({ task_id: 'j', status: 'dropped', note: 'user: drop it', user_approved: true }))['ok'], true);
+        const oneCall = await task({ task_id: 'j', stage: 'review', checks: [{ name: 'tests', ok: true }] });
+        assert.equal(oneCall['ok'], true, `taken up and reviewed in one call: ${String(oneCall['text'])}`);
+        // One accepted past a failing last round (d: done on the user's word) is held to the limit taken up again.
+        await task({ task_id: 'd', status: 'in_progress' });
+        await gate({ task_id: 'd', stage: 'review' }, /the most the user allowed \(1\)/, /past the 1 a Managed build allows/);
+      }
 
       const plan = (await sessionFor(id)).plan!;
       const statuses = Object.fromEntries(plan.tasks.map((t) => [t.id, t.status]));
