@@ -243,7 +243,12 @@ the audit's finding numbers.
 | F71 | Older (F69 claimed it): an editor off screen when its save goes in keeps the revision from before it (now.current is not updated unmounted): a section reopens with a false "changed while you were editing"; the files' next save is refused for the user's own save. Take the starting point from the plan as it lands, or restart a kept draft from the field on remount (ui/lib/drafts.ts) (bert-bae/coplan#141) [re-audit A11 2] | 2 should fix | done: the kept draft records the saved text and restarts from the field only if it still holds it; a change since is warned of | 033f8d0 |
 | F72 | F69 gap: a new comment goes through edit, not the kept draft's save: typed on while posted, it keeps the posted text and posting again repeats it. Post it through comment.save, or drop the sent text from the front (ui/components/Threads.tsx) (bert-bae/coplan#142) [re-audit A11 3] | 2 should fix | done: posted through comment.save; a post returns the composer to open and empty | 16dc3d5 |
 | B75 | Tests: wasDone across a republish, B74's done dependent, a comment keeping what came after, a throwing listener; reopening from a drop-while-done gives no "went ahead" warning; a reply or comment edited mid-post is kept whole; the 'added' offer on deleted text; CHANGELOG: comments, B73/B74 (optional) (shared/plan.ts, daemon/main.ts, daemon/store.ts, ui/lib/drafts.ts, CHANGELOG.md) (bert-bae/coplan#143) [re-audit A11 4-11] | 5 smaller | done: two tests, the reopen-from-drop warning (wasFinished), the toast's wording. Not done: a throwing-listener test, mid-post edits kept whole, B73/B74 CHANGELOG | 96754d7 |
-| A12 | Re-audit the areas the rows after A11 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#144) | 6 re-audit | open | |
+| A12 | Re-audit the areas the rows after A11 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#144) | 6 re-audit | done: no must fix, 3 should fix, 4 nice to have, now rows F73-F75, B76 and A13 | {A12} |
+| F73 | F70: passedAndClosed counts any pass in the round, not its standing verdict: pass then "changes" then done on the user's word, taken up again, escapes the round limit (self and user review). Use roundVerdict with the effective review mode; in skip mode a round closed done counts as passed (shared/plan.ts passedAndClosed) (bert-bae/coplan#145) [re-audit A12 1] | 2 should fix | open | |
+| F74 | F70: a drop clears `reopened`, so done (pass) -> taken up -> dropped -> taken up -> review is refused at the limit though no round failed (its pass went at the first take-up). Keep it through a drop; clear on review, done, the user's reset; test that later rounds are held to the limit (shared/plan.ts editTask) (bert-bae/coplan#146) [re-audit A12 2, 5] | 2 should fix | open | |
+| F75 | F71: the remount check compares the field with the untrimmed sent text, but the daemon trims fields: a section saved as "First.\n" off screen reopens warning of the user's own save (summary, captions, notes too). Compare trimmed (ui/lib/drafts.ts) (bert-bae/coplan#147) [re-audit A12 3] | 2 should fix | open | |
+| B76 | A stale `reopened` from an older daemon is trusted; done for a task in refine/blocked after "changes" at the limit points to review, then refused; a section cleared mid-save off screen stays kept empty; untested: drafts.ts's blank guard, brief.ts's !t.reopened (shared/plan.ts, daemon/main.ts, ui/lib/drafts.ts, daemon/brief.ts) (bert-bae/coplan#148) [re-audit A12 4, 6-8] | 5 smaller | open | |
+| A13 | Re-audit the areas the rows after A12 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#149) | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -968,3 +973,37 @@ mid-flush, re-entrant failures, flushPending; restart points on screen;
 the 'added' offer once, not on blanks.
 
 **Verdict:** no Must fix; fix 1 first (it can stall a build), then 3, 2.
+
+## Re-audit report (row A12, four auditors, 2026-11-12)
+
+Scope: the changes since b0647d1 (rows F70-F72, B75), at 8e8f2b5, by four
+auditors (plan model and gates, whole branch and checks, store, page),
+each in its own worktree at that commit; each finding kept was reproduced,
+except where marked.
+
+### Should fix
+
+1. **A round that ended in "changes" escapes the round limit when taken up again** (`shared/plan.ts` passedAndClosed). From F70.
+2. **A reopened task dropped and taken up again is stopped at the limit** (`shared/plan.ts` editTask), found by two auditors; and nothing tests that later rounds are held. From F70.
+3. **A field saved off screen reopens with a false warning when the daemon trimmed it** (`ui/lib/drafts.ts`). From F71.
+
+### Nice to have
+
+4. A stale `reopened` from an older daemon is trusted (not reproduced end to end).
+5. (with 2) the clear on entering review has no test.
+6. Done for a task in refine/blocked at the limit points to review, then refused.
+7. A section cleared mid-save off screen stays kept empty.
+8. Untested: drafts.ts's blank guard, brief.ts's !t.reopened.
+
+Checked and fine: check implement, review (twice), final; the Node 20.11.0
+runtime suite twice (690 pass); every test added since A11 pins its fix
+(each reverted); no flake; the CHANGELOG matches the code (but for 2);
+wasDone/reopened do not touch proposal prints, change baselines, rendered
+or exported plans, or the page; save/reload round-trips byte-identical;
+older builds load the fields; STATE_SCHEMA stays (bumping would blank
+this build's files for older daemons); held save failures at startup; the
+user-reviewed reopen path; the comment composer (typed on, cleared,
+second post, refused, lock); replies off screen.
+
+**Verdict:** no Must fix; fix 1 first (it lets the agent past the user's
+round limit), then 2, 3.
