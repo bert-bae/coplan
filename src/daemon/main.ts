@@ -7,6 +7,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { SessionStore } from './store.ts';
+import { ReviewReads } from './reviewReads.ts';
 import { isIdle } from './idle.ts';
 import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from './http.ts';
 import { ingestHook } from './hookIngest.ts';
@@ -517,13 +518,17 @@ function buildRouter(deps: Deps): Router {
   /** Told, after the read, of each repository whose review mode a read
    *  found changed, with the new one: an open page has it sent. */
   const reviewChanges = new Set<(root: string, review: ReviewMode) => void>();
-  /** Each repository's review mode as last read, to tell a change. */
-  const reviewRead = new Map<string, ReviewMode>();
+  /** Each repository's review mode as last read, to tell a change (#163). */
+  const reviewRead = new ReviewReads(MAX_PROJECT_CONFIGS);
   // The session list judges what waits on the user by it too.
   reviewChanges.add(() => store.broadcastSessionList());
   const projectAt = (root: string): ProjectConfig => {
     const hit = projects.get(root);
-    if (hit && hit.config.sources && configStamp(hit.config.sources) === hit.stamp) return hit.config;
+    if (hit && hit.config.sources && configStamp(hit.config.sources) === hit.stamp) {
+      // A cached read keeps the repository among those known.
+      reviewRead.saw(root, hit.config.settings.review);
+      return hit.config;
+    }
     const started = Date.now();
     const config = loadProjectConfig(root);
     if (projects.size >= MAX_PROJECT_CONFIGS) projects.clear();
@@ -540,11 +545,8 @@ function buildRouter(deps: Deps): Router {
     });
     if (settled) projects.set(root, { stamp: configStamp(sources), config });
     else projects.delete(root);
-    const was = reviewRead.get(root);
     const review = config.settings.review;
-    if (reviewRead.size >= MAX_PROJECT_CONFIGS && was === undefined) reviewRead.clear();
-    reviewRead.set(root, review);
-    if (was !== undefined && was !== review) queueMicrotask(() => reviewChanges.forEach((fn) => fn(root, review)));
+    if (reviewRead.saw(root, review)) queueMicrotask(() => reviewChanges.forEach((fn) => fn(root, review)));
     return config;
   };
   const projectFor = (session: SessionState): ProjectConfig => projectAt(session.repoRoot ?? session.cwd);
