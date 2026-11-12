@@ -255,7 +255,12 @@ the audit's finding numbers.
 | B77 | Skip mode puts no real limit on rounds (document or decide); a local `reopened` in main.ts means something else; ReviewMode import order (daemon/main.ts, shared/plan.ts) (bert-bae/coplan#153) [re-audit A13 7-9] | 5 smaller | done: skip's extra round documented (holding an accepted one is B79, D4); rename and import order | 0f4be10 |
 | B78 | The board (TasksView's review box, drafts.ts's review field) resolves a task's review mode as submission ?? DEFAULT 'self', without the project's: a user-reviewed unsubmitted or Tracked build never shows the user the verdict box while the daemon waits on it. Give the page the project's review mode and fall back to it (ui/views/TasksView.tsx, ui/lib/drafts.ts) (bert-bae/coplan#155) [code review F76] | 2 should fix | done: the project's review mode comes with the session and every snapshot; board and pruneDrafts fall back to it | d8e1369 |
 | B79 | Under `skip` review a finished task that went to review counts as passed, so taken up again it gets a round past the limit: even one the user accepted as it was over failing checks, who allowed no further round. Holding it would mean recording how a round closed (shared/plan.ts passedAndClosed; found reviewing B77) | 5 smaller | needs-decision: D4, asked in bert-bae/coplan#156 | |
-| A14 | Re-audit the areas the rows after A13 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#154) | 6 re-audit | open | |
+| A14 | Re-audit the areas the rows after A13 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#154) | 6 re-audit | done: no must fix, 4 should fix, 8 nice to have, now rows F79-F81, B80 and A15 | (this commit) |
+| F79 | F78: in a Tracked build past maxRounds the stage-review note says the agent decides, the done note that it is the user's call; the stage-review refusal's new wording is unpinned (daemon/main.ts, test/integration.test.ts) (bert-bae/coplan#157) [re-audit A14 daemon 1, 5] | 2 should fix | open | |
+| F80 | B78: `projectReview` reaches the page only with a snapshot or fetch; a change to `.coplan/config.json` sends neither (its watcher follows harness.json), so the board keeps the old mode while the daemon gates on the new; a late fetch can overwrite a newer streamed value (daemon/main.ts, ui/store.ts) (bert-bae/coplan#158) [re-audit A14 store 1-2, daemon 2] | 2 should fix | open | |
+| F81 | Older, F77's off-screen claim: the sender, its editor gone, rebuilds the kept draft from its own last text, not from the redrawn box's kept draft: typing after the redraw is lost (replies, and sections via restart) (ui/lib/drafts.ts) (bert-bae/coplan#159) [re-audit A14 page 1] | 2 should fix | open | |
+| B80 | Test gaps and small items: the watcher's close condition untested (needs a redrawn box); store.reviewFor wiring untested at the daemon; the SSE projectReview test uses the default; previewProposal skips the review fallback; passedAndClosed's default ignores the project; no projectReview test on resync/switch (ui/lib/drafts.ts, daemon/main.ts, shared/proposals.ts, shared/plan.ts, ui/store.ts, tests) (bert-bae/coplan#160) [re-audit A14 page 2, daemon 3-4, plan 1-3, store 3] | 5 smaller | open | |
+| A15 | Re-audit the areas the rows after A14 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#161) | 6 re-audit | open | |
 
 ### F19: the take-back never fires
 
@@ -1059,3 +1064,27 @@ is kept, the remount comparison sound (the daemon trims every field).
 
 **Verdict:** no Must fix; fix 1 first (it can pass the user's round
 limit), then 2, 3.
+
+### Re-audit A14
+
+Scope: the changes since 6e5f565 (rows F76-F78, B77, B78), by four
+auditors (plan model, check runner/daemon, UI store, page).
+
+### Should fix
+
+1. **The Tracked round-limit notes contradict each other** (`daemon/main.ts`): one leaves the choice to the agent, the other to the user. (F79)
+2. **The board does not hear a change to the project's review mode** (`daemon/main.ts`, `ui/store.ts`): both the store and daemon auditors found it. (F80)
+3. **A redrawn box's typing is lost off screen** (`ui/lib/drafts.ts`): the sender rebuilds the kept draft from its own stale text. Older code. (F81)
+4. **The watcher's close condition is untested** (`ui/lib/drafts.ts`). (B80)
+
+### Nice to have
+
+5. store.reviewFor wiring untested at the daemon level; 6. the SSE test asserts the default mode; 7. previewProposal skips the fallback; 8. passedAndClosed's default argument; 9. no proposal-accept mode test (proposals cannot set status, so moot); 10. a late fetch can overwrite a newer projectReview; 11. no resync/switch test; 12. the stage-review refusal's wording unpinned. (B80, F79, F80)
+
+Checked and fine: plan 105 + store 41, integration 79, UI 152 pass; the
+review-mode precedence matches the daemon's gates; every daemon edit goes
+through the store's fallback; both round-limit refusals point to calls the
+gates accept (walked through); projectFor per snapshot is cached and cannot
+throw; UserReview's hook order; set() prunes after merging the patch.
+
+**Verdict:** no Must fix, 4 Should fix: F79, F80, F81, then B80.
