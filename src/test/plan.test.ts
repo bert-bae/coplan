@@ -977,6 +977,33 @@ test("a finished task's last round counts as passed only by the verdict that sta
   assert.equal(closed([], 'skip'), true, 'no review: closed done is passed');
 });
 
+test('a finished task taken up again keeps its one round past the limit through a drop, and only that one', () => {
+  const claude = (plan: Plan, op: PlanOp) => applyOps(plan, [op], 'claude', undefined, { tracking: true }).plan;
+  let plan = fresh();
+  Object.assign(plan.tasks.find((t) => t.id === 't2')!, { status: 'done', round: 1, reviews: [{ round: 1, by: 'claude', verdict: 'pass', at: 1 }] });
+  const t2 = () => plan.tasks.find((t) => t.id === 't2')!;
+  plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'in_progress' });
+  assert.equal(t2().reopened, true, 'taken up again on a pass');
+  plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'dropped' });
+  assert.equal(t2().reopened, true, 'kept through a drop: its round never failed');
+  plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'in_progress' });
+  assert.equal(t2().reopened, true);
+  plan = claude(plan, { op: 'upsert_task', id: 't2', stage: 'review' });
+  assert.equal(t2().reopened, undefined, 'its next round used: the rounds after it are held to the limit');
+  // Gone too when it is done again (a drop undone), and on the user's reset.
+  const reopen = () => {
+    let p = fresh();
+    Object.assign(p.tasks.find((t) => t.id === 't2')!, { status: 'done', round: 1, reviews: [{ round: 1, by: 'claude', verdict: 'pass', at: 1 }] });
+    p = claude(p, { op: 'upsert_task', id: 't2', status: 'in_progress' });
+    return claude(p, { op: 'upsert_task', id: 't2', status: 'dropped' });
+  };
+  assert.equal(claude(reopen(), { op: 'upsert_task', id: 't2', status: 'done' }).tasks.find((t) => t.id === 't2')!.reopened, undefined);
+  assert.equal(applyOps(reopen(), [{ op: 'upsert_task', id: 't2', status: 'todo' }], 'user').plan.tasks.find((t) => t.id === 't2')!.reopened, undefined);
+  // A stale one on a done task (an older build, a hand edit) is dropped on load.
+  const stale = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'done', order: 0, parentId: null, round: 2, reopened: true }] } as unknown as Plan & Record<string, unknown>, 'x');
+  assert.equal(stale.tasks[0]!.reopened, undefined);
+});
+
 test('a task the agent puts back to todo keeps its round across a restart, as the edit kept it', () => {
   const claude = (plan: Plan, op: PlanOp) => applyOps(plan, [op], 'claude', undefined, { tracking: true }).plan;
   let plan = claude(fresh(), { op: 'upsert_task', id: 't2', status: 'in_progress' });

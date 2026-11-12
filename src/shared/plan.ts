@@ -951,7 +951,7 @@ function normalizeTask(task: Task): Task {
   else delete t.checks;
   if (typeof t.startCommit !== 'string' || !/^[0-9a-f]{7,64}$/.test(t.startCommit)) delete t.startCommit;
   if (t.wasDone !== true || t.status !== 'dropped') delete t.wasDone;
-  if (t.reopened !== true) delete t.reopened;
+  if (t.reopened !== true || t.status === 'done') delete t.reopened;
   // What a task's own checks say, from disk: anything malformed is dropped,
   // never allowed to break a gate.
   const added = Array.isArray(t.addChecks) ? t.addChecks.map(validTaskCheck).filter((c): c is TaskCheck => Boolean(c)) : [];
@@ -2022,9 +2022,12 @@ function editTask(
       // verdicts go when it leaves done for work, straight or by way of
       // dropped (wasDone). Dropped, or a drop undone (back to done), it keeps
       // them; one dropped before it was done keeps its own.
+      // `reopened` (its next round past the limit, as the last one passed)
+      // is kept through a drop, and goes once it is done again (or on entering
+      // review, or the user's reset).
       if (isWorking(status) && passedAndClosed(plan, task)) {
         task.reopened = true;
-      } else if (!isWorking(status)) delete task.reopened;
+      } else if (status === 'done') delete task.reopened;
       if (isWorking(status) && wasFinished(task) && task.reviews) {
         task.reviews = task.reviews.filter((r) => r.round !== task.round);
         if (!task.reviews.length) delete task.reviews;
