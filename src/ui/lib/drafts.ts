@@ -260,7 +260,8 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
   const [editing, setEditing] = useState(openAtFirst || Boolean(kept));
   const [draft, setDraft] = useState(kept?.draft ?? value);
   const [started, setStarted] = useState<Started>(() =>
-    kept && !(kept.restart && value === kept.value) ? { version: kept.version, value: kept.value } : { version, value },
+    // (Compared trimmed: the daemon trims what it saves.)
+    kept && !(kept.restart && value.trim() === kept.value.trim()) ? { version: kept.version, value: kept.value } : { version, value },
   );
   const [saving, setSaving] = useState(false);
   // Its draft being sent from an editor drawn before this one, and how that

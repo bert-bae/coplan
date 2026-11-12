@@ -967,7 +967,8 @@ test('a section saved, typed on, and off screen when the save goes in reopens on
   });
   const area = () => screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
   await act(async () => {
-    fireEvent.change(area(), { target: { value: 'First.' } });
+    // Ending in a newline the daemon trims off.
+    fireEvent.change(area(), { target: { value: 'First.\n' } });
   });
   let answer: (() => void) | null = null;
   const held = new Promise<void>((r) => (answer = r));
@@ -977,7 +978,7 @@ test('a section saved, typed on, and off screen when the save goes in reopens on
     await act(async () => {
       fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
     });
-    fireEvent.change(area(), { target: { value: 'First. Second.' } });
+    fireEvent.change(area(), { target: { value: 'First.\nSecond.' } });
     await openTab('Tasks');
   } finally {
     Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
@@ -989,13 +990,13 @@ test('a section saved, typed on, and off screen when the save goes in reopens on
   });
   assert.equal(unsavedDrafts(), true, 'kept, off screen, as not saved');
   await openTab('Overview');
-  assert.equal(area().value, 'First. Second.');
+  assert.equal(area().value, 'First.\nSecond.');
   assert.equal(document.body.textContent?.includes('This changed while you were editing'), false, 'its own save is no change underneath');
   await act(async () => {
     fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
   });
   const sections = opsSent().filter((op) => op['op'] === 'upsert_section');
-  assert.deepEqual(sections.map((op) => [op['body'], op['expect']]), [['First.', 1], ['First. Second.', 2]]);
+  assert.deepEqual(sections.map((op) => [op['body'], op['expect']]), [['First.\n', 1], ['First.\nSecond.', 2]]);
   // Saved again off screen, then changed by the agent before it is reopened: that change is warned of.
   await act(async () => {
     fireEvent.click(screen.getByLabelText('Edit section "Context"'));
