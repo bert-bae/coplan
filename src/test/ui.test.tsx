@@ -1154,6 +1154,67 @@ test('a reply typed on while it is posted keeps only what came after, so nothing
   assert.equal(box().value, 'With a pool.', 'what came after, not what was posted');
 });
 
+test('a reply box drawn anew while its reply posts, typed on, keeps only what came after, on screen or off', async () => {
+  for (const offScreen of [false, true]) {
+    cleanup();
+    openDrafts.clear();
+    const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+    await boot(makeSession(plan), (route, init) => {
+      if (!route.endsWith('/plan/ops')) return undefined;
+      const s = store.getState().session!;
+      const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+      return { plan: next, changes: [] };
+    });
+    await openTab('Tasks');
+    const details = async () =>
+      act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+      });
+    const thread = async () =>
+      act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /open comment\(s\) on Invalidation/ }));
+      });
+    await details();
+    await thread();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+    });
+    const box = () => screen.getByRole('textbox', { name: 'Reply' }) as HTMLTextAreaElement;
+    fireEvent.change(box(), { target: { value: 'The Redis one.' } });
+    let answer: (() => void) | null = null;
+    const held = new Promise<void>((r) => (answer = r));
+    const realFetch = globalThis.fetch;
+    Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (String(args[0]).endsWith('/plan/ops') && (await held), realFetch(...args)), writable: true, configurable: true });
+    try {
+      await act(async () => {
+        fireEvent.keyDown(box(), { key: 'Enter', ctrlKey: true });
+      });
+      // The box goes and is drawn anew, on what it held, while the reply posts.
+      await openTab('Overview');
+      assert.equal(screen.queryByRole('textbox', { name: 'Reply' }) === null, true, 'the box goes');
+      await openTab('Tasks');
+      if (!screen.queryByRole('textbox', { name: 'Reply' })) await details();
+      if (!screen.queryByRole('textbox', { name: 'Reply' })) await thread();
+      assert.equal(box().value, 'The Redis one.');
+      fireEvent.change(box(), { target: { value: 'The Redis one. With a pool.' } });
+      if (offScreen) await openTab('Overview');
+    } finally {
+      Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+      answer!();
+    }
+    await act(async () => {
+      await held;
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    if (offScreen) {
+      await openTab('Tasks');
+      if (!screen.queryByRole('textbox', { name: 'Reply' })) await details();
+      if (!screen.queryByRole('textbox', { name: 'Reply' })) await thread();
+    }
+    assert.equal(box().value, 'With a pool.', `what came after, not what was posted (${offScreen ? 'off' : 'on'} screen)`);
+  }
+});
+
 test('a refused save keeps the editor open with the text intact', async () => {
   await boot();
   await openTab('Overview');

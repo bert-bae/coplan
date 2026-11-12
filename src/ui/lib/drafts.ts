@@ -242,6 +242,15 @@ export function filesText(files: string[] | undefined): string {
   return (files ?? []).join('\n');
 }
 
+/** A reply or a comment adds to what is there, rather than replacing it. */
+const addsTo = (field: string | null): boolean => field !== null && /^(reply|comment):/.test(field);
+
+/** What a draft still holds once `sent` has gone: for a field that adds,
+ *  what came after it; for any other, all of it (the next save replaces). */
+function afterSent(field: string | null, draft: string, sent: string): string {
+  return addsTo(field) && draft.startsWith(sent) ? draft.slice(sent.length).replace(/^\s+/, '') : draft;
+}
+
 /**
  * An editor's draft, kept among the open drafts while it is open: its view
  * going (a tab or session switch, another box selected) reopens it with
@@ -275,10 +284,18 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
     // Sent, and its box gone with its round (parked): closed, whatever it
     // holds; what was added while it went is offered by the sender (save).
     const parked = news === 'sent' && key !== null && letGoWhileSending.has(key);
-    if (news === 'sent' && (draftNow.current === text || parked)) {
+    if (news === 'sent' && (draftNow.current.trim() === text.trim() || (addsTo(field) && !draftNow.current.trim()) || parked)) {
       setDraft(now.current.value);
       setEditing(openAtFirst);
-    } else if (news !== 'sending') setStarted(now.current);
+    } else if (news !== 'sending') {
+      // Sent, and typed on here (an editor drawn anew while it went): a reply
+      // or a comment keeps only what came after, as the sender's own does.
+      if (news === 'sent') {
+        const rest = afterSent(field, draftNow.current, text);
+        if (rest !== draftNow.current) setDraft(rest);
+      }
+      setStarted(now.current);
+    }
   };
   const watch = useRef<SendWatcher>((news, text) => watchRef.current(news, text)).current;
   useEffect(() => {
@@ -381,8 +398,8 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
         // adds rather than replaces, so it keeps only what came after what
         // was sent; a field keeps all of it, which the next save replaces.
         if (draftNow.current.trim() && draftNow.current.trim() !== sent.trim() && !letGo) {
-          const adds = field !== null && /^(reply|comment):/.test(field);
-          const rest = adds && draftNow.current.startsWith(sent) ? draftNow.current.slice(sent.length).replace(/^\s+/, '') : draftNow.current;
+          const adds = addsTo(field);
+          const rest = afterSent(field, draftNow.current, sent);
           if (rest !== draftNow.current) setDraft(rest);
           setStarted(now.current);
           // Kept so too, for an editor off screen meanwhile: it cannot see
@@ -399,6 +416,9 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
         // (Or cleared while it went: nothing there to keep.)
         const keptNow = key ? openDrafts.get(key) : undefined;
         if (key && keptNow && (keptNow.draft.trim() === sent.trim() || !keptNow.draft.trim())) openDrafts.delete(key);
+        // Kept with more (typed into one drawn anew, now off screen): a reply
+        // or a comment keeps only what came after.
+        else if (key && keptNow && addsTo(field)) openDrafts.set(key, { ...keptNow, draft: afterSent(field, keptNow.draft, sent) });
         // Back to how it opens: closed, or (a comment composer) open, empty.
         setEditing(openAtFirst);
         return true;
