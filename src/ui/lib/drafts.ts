@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { describeTarget, isDesignLocked, isLocked, targetExists } from '../../shared/plan.ts';
 import { DEFAULT_BUILD_SETTINGS, effectiveReview, roundVerdict } from '../../shared/build.ts';
-import type { Plan, TargetKind } from '../../shared/types.ts';
+import type { Plan, ReviewMode, TargetKind } from '../../shared/types.ts';
 
 /**
  * Editors open with text, by session and field (`<session>:summary`,
@@ -95,7 +95,7 @@ export function unsavedDrafts(): boolean {
  * chat, say), or a change request whose round no longer waits on the user,
  * named, for the user to be told, and to copy.
  */
-export function pruneDrafts(sessionId: string, plan: Plan | null): DroppedDraft[] {
+export function pruneDrafts(sessionId: string, plan: Plan | null, projectReview: ReviewMode = DEFAULT_BUILD_SETTINGS.review): DroppedDraft[] {
   const prefix = `${sessionId}:`;
   const locked: DroppedDraft[] = [];
   const locks = plan ? { design: isDesignLocked(plan), plan: isLocked(plan) } : null;
@@ -104,8 +104,8 @@ export function pruneDrafts(sessionId: string, plan: Plan | null): DroppedDraft[
     if (!key.startsWith(prefix)) continue;
     const field = key.slice(prefix.length);
     // The field as it is, and whether the plan's sign-offs hold it still.
-    const text = plan ? fieldText(plan, field, { design: false, plan: false }) : undefined;
-    const held = text !== undefined && fieldText(plan!, field, locks!) === undefined;
+    const text = plan ? fieldText(plan, field, { design: false, plan: false }, projectReview) : undefined;
+    const held = text !== undefined && fieldText(plan!, field, locks!, projectReview) === undefined;
     if (text !== undefined && !held && text !== open.draft) continue;
     openDrafts.delete(key);
     if (held) {
@@ -133,7 +133,7 @@ export function pruneDrafts(sessionId: string, plan: Plan | null): DroppedDraft[
     for (const [key, drop] of holders) {
       if (!key.startsWith(prefix) || told.has(key) || openDrafts.has(key)) continue;
       const field = key.slice(prefix.length);
-      if (fieldText(plan, field, { design: false, plan: false }) !== undefined && fieldText(plan, field, locks!) === undefined) drop();
+      if (fieldText(plan, field, { design: false, plan: false }, projectReview) !== undefined && fieldText(plan, field, locks!, projectReview) === undefined) drop();
     }
   }
   return locked;
@@ -155,7 +155,13 @@ interface Locks {
 
 /** A field's text now: undefined when it is gone, or locked (as the plan
  *  is, or as it would be with `locks`). */
-function fieldText(plan: Plan, field: string, locks: Locks = { design: isDesignLocked(plan), plan: isLocked(plan) }): string | undefined {
+function fieldText(
+  plan: Plan,
+  field: string,
+  locks: Locks = { design: isDesignLocked(plan), plan: isLocked(plan) },
+  /** The project's review mode, where the plan holds none. */
+  review: ReviewMode = DEFAULT_BUILD_SETTINGS.review,
+): string | undefined {
   const design = locks.design;
   if (field === 'summary') return design ? undefined : plan.summary;
   let m = /^section:(.+)$/.exec(field);
@@ -179,7 +185,7 @@ function fieldText(plan: Plan, field: string, locks: Locks = { design: isDesignL
   m = /^review:(.+):(\d+)$/.exec(field);
   if (m) {
     const task = plan.tasks.find((t) => t.id === m![1]);
-    const mode = task && effectiveReview(plan, task, plan.submission?.settings?.review ?? DEFAULT_BUILD_SETTINGS.review);
+    const mode = task && effectiveReview(plan, task, plan.submission?.settings?.review ?? review);
     return task?.stage === 'review' && String(task.round) === m[2] && mode === 'user' && !roundVerdict(task, 'user') ? '' : undefined;
   }
   m = /^caption:(.+)$/.exec(field);

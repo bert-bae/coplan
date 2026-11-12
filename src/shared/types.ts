@@ -896,7 +896,8 @@ export interface SessionSummary {
  * ------------------------------------------------------------------ */
 
 export type ServerEvent =
-  | { type: 'snapshot'; session: SessionState }
+  /** `projectReview`: the session's repository review mode (the daemon adds it). */
+  | { type: 'snapshot'; session: SessionState; projectReview?: ReviewMode }
   | { type: 'sessions'; sessions: SessionSummary[] }
   | { type: 'ping'; ts: number }
   /** A session's state could not be written to disk: edits are not saved. */

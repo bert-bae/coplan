@@ -2359,6 +2359,40 @@ test('a change request being typed is offered to copy when the task no longer wa
   assert.equal(offered().length, 2, 'its own request is not offered');
 });
 
+test("the board asks for the user's verdict where the project has them review and the plan does not say (a Tracked build)", async () => {
+  const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
+  const plan = claude(lockedPlan(true), { op: 'upsert_task', id: 't3', stage: 'review' });
+  assert.equal(plan.submission?.settings === undefined, true, 'the plan holds no review mode');
+  const session = makeSession(plan);
+  await boot(session, (route, init) => (/^\/api\/session\/[^/]+$/.test(route) && !init?.method ? { session, projectReview: 'user' } : undefined));
+  await openTab('Tasks');
+  const box = () => within(document.getElementById('task-t3')!).queryByRole('group', { name: 'Your review of Wire into API' });
+  assert.equal(box() !== null, true, "the user's verdict is asked for");
+  // A change request kept for it stays kept when the plan lands again.
+  const key = `${session.sessionId}:review:t3:1`;
+  openDrafts.set(key, { draft: 'Add a timeout', value: '', version: undefined });
+  assert.deepEqual(pruneDrafts(session.sessionId, plan, 'user'), []);
+  assert.equal(openDrafts.has(key), true, 'kept');
+  assert.equal(pruneDrafts(session.sessionId, plan).length, 1, 'under the default (self) it no longer waits on the user: offered');
+  openDrafts.clear();
+});
+
+test("a plan streamed in brings who reviews with it, so a change request kept for the user's review is not let go first", async () => {
+  const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
+  const plan = claude(lockedPlan(true), { op: 'upsert_task', id: 't3', stage: 'review' });
+  const session = makeSession(plan);
+  // The fetch says nothing of it (an older daemon, or not back yet): the stream's snapshot does.
+  await boot(session);
+  await openTab('Tasks');
+  const key = `${session.sessionId}:review:t3:1`;
+  openDrafts.set(key, { draft: 'Add a timeout', value: '', version: undefined });
+  await act(async () => store.apply({ type: 'snapshot', session: { ...session, plan: { ...plan, version: plan.version + 1 } }, projectReview: 'user' }));
+  assert.equal(openDrafts.has(key), true, 'kept: the round waits on the user');
+  assert.equal(within(document.getElementById('task-t3')!).queryByRole('group', { name: 'Your review of Wire into API' }) !== null, true);
+  assert.equal(store.getState().toasts.some((t) => t.copy !== undefined), false, 'nothing offered as dropped');
+  openDrafts.clear();
+});
+
 test('a change request on a task since removed is offered, named as such rather than by its id', () => {
   openDrafts.set('s-gone:review:t-gone:2', { draft: 'Add a timeout', value: '', version: undefined });
   const dropped = pruneDrafts('s-gone', lockedPlan(true));

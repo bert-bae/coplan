@@ -15,7 +15,7 @@ import { isTyping } from '../lib/keys.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
 import { boxUnbuilt } from '../../shared/check.ts';
 import { canTakeSubtasks, childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
-import { DEFAULT_BUILD_SETTINGS, SESSION_BRANCH, roundVerdict, stackStatus, type StackEntry, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
+import { SESSION_BRANCH, roundVerdict, stackStatus, type StackEntry, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
 import { REVIEW_MODES, TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type ReviewMode, type Task, type TaskStatus } from '../../shared/types.ts';
 import type { TaskMode } from '../store.ts';
 
@@ -1259,7 +1259,8 @@ function UserReview({ plan, task }: { plan: Plan; task: Task }) {
   // Kept (drafts.ts) while typed: the agent moving the card draws it anew
   // in another column, and closing the page asks first.
   const { editing: asking, draft: why, setDraft: setWhy, begin, close, save, saving } = useKeptDraft(useSessionId(), `review:${task.id}:${task.round}`, '', undefined);
-  const mode = effectiveReview(plan, task, plan.submission?.settings?.review ?? DEFAULT_BUILD_SETTINGS.review);
+  const projectReview = useStore((s) => s.projectReview);
+  const mode = effectiveReview(plan, task, plan.submission?.settings?.review ?? projectReview);
   if (mode !== 'user' || task.stage !== 'review') return null;
   const decided = roundVerdict(task, 'user');
   if (decided) return null;

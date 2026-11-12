@@ -3,10 +3,12 @@ import { api, eventsUrl, Unauthorized, type ProjectChecks } from './lib/api.ts';
 import { onDroppedAfterSend, pruneDrafts, unsavedDrafts, type DroppedDraft } from './lib/drafts.ts';
 
 const NO_CHECKS: ProjectChecks = { implement: [], review: [] };
+const NO_REVIEW: ReviewMode = DEFAULT_BUILD_SETTINGS.review;
 import { isLocked } from '../shared/plan.ts';
+import { DEFAULT_BUILD_SETTINGS } from '../shared/build.ts';
 import { agentInfo, type AgentInfo } from '../shared/agents.ts';
 import type { GapSeverities } from '../shared/check.ts';
-import type { BuildSettings, BuildTarget, CleanupGroupId, ExecutionMode, Plan, PlanOp, PlanStatus, ServerEvent, SessionState, SessionSummary, StorageReport, Target } from '../shared/types.ts';
+import type { BuildSettings, BuildTarget, CleanupGroupId, ExecutionMode, Plan, PlanOp, PlanStatus, ReviewMode, ServerEvent, SessionState, SessionSummary, StorageReport, Target } from '../shared/types.ts';
 import { PLAN_STATUSES } from '../shared/types.ts';
 
 export type Tab = 'diagrams' | 'tasks' | 'overview';
@@ -49,6 +51,9 @@ export interface UiState {
   planCheck: GapSeverities;
   /** The open session's repository checks by stage, which a task can skip. */
   projectChecks: ProjectChecks;
+  /** The open session's repository review mode: who reviews a task where
+   *  the plan does not say (any plan but a submitted Managed build). */
+  projectReview: ReviewMode;
   tab: Tab;
   /** The diagram open on the Architecture tab; the first one when unset. */
   diagramId: string | null;
@@ -98,6 +103,7 @@ const initial: UiState = {
   session: null,
   planCheck: {},
   projectChecks: { implement: [], review: [] },
+  projectReview: NO_REVIEW,
   tab: 'diagrams',
   diagramId: null,
   connection: 'connecting',
@@ -131,6 +137,7 @@ const initial: UiState = {
  */
 const SESSION_RESET: Partial<UiState> = {
   planCheck: {},
+  projectReview: NO_REVIEW,
   diagramId: null,
   proposalPreview: null,
   viewer: null,
@@ -191,7 +198,7 @@ class Store {
   set(patch: Partial<UiState>): void {
     this.state = { ...this.state, ...patch };
     // A plan landing settles the drafts kept for it (see pruneDrafts).
-    const dropped = patch.session?.plan ? pruneDrafts(patch.session.sessionId, patch.session.plan) : [];
+    const dropped = patch.session?.plan ? pruneDrafts(patch.session.sessionId, patch.session.plan, this.state.projectReview) : [];
     for (const listener of this.listeners) listener();
     const plan = patch.session?.plan;
     for (const d of dropped) this.offerDropped(d, plan, patch.session!.sessionId);
@@ -261,9 +268,9 @@ class Store {
     this.set({ ...(id !== this.state.sessionId ? SESSION_RESET : {}), sessionId: id, session: null, error: null });
     this.connect();
     try {
-      const { session, planCheck, projectChecks } = await api.session(id);
+      const opened = await api.session(id);
       // Clicking through the rail quickly: only the last choice may land.
-      if (this.state.sessionId === id) this.set({ session: this.newest(session), planCheck: planCheck ?? {}, projectChecks: projectChecks ?? NO_CHECKS });
+      if (this.state.sessionId === id) this.set(this.opened(opened));
     } catch (err) {
       if (this.state.sessionId === id) this.set({ error: describeError(err) });
     }
@@ -330,13 +337,23 @@ class Store {
     }, delay);
   }
 
+  /** The open session as fetched, with what its repository says of it. */
+  private opened(res: Awaited<ReturnType<typeof api.session>>): Partial<UiState> {
+    return {
+      session: this.newest(res.session),
+      planCheck: res.planCheck ?? {},
+      projectChecks: res.projectChecks ?? NO_CHECKS,
+      projectReview: res.projectReview ?? NO_REVIEW,
+    };
+  }
+
   /** Catch up on what was missed while the stream was down. The stream
    *  says when it is live again; a fetch does not. */
   private async resync(): Promise<void> {
     if (!this.state.sessionId) return;
     try {
-      const { session, planCheck, projectChecks } = await api.session(this.state.sessionId);
-      if (session.sessionId === this.state.sessionId) this.set({ session: this.newest(session), planCheck: planCheck ?? {}, projectChecks: projectChecks ?? NO_CHECKS });
+      const opened = await api.session(this.state.sessionId);
+      if (opened.session.sessionId === this.state.sessionId) this.set(this.opened(opened));
     } catch {
       /* the next connect says what is wrong */
     }
@@ -362,7 +379,7 @@ class Store {
         } else if (before?.design && !before.design.deliveredAt && after?.design?.deliveredAt && !after.submission) {
           this.toast('success', `${agent} has the confirmed design and is making the task list.`);
         }
-        this.set({ session: this.newest(event.session) });
+        this.set({ session: this.newest(event.session), ...(event.projectReview ? { projectReview: event.projectReview } : {}) });
         return;
       }
       case 'ping':

@@ -643,6 +643,9 @@ function buildRouter(deps: Deps): Router {
       planCheck: project.planCheck,
       // The repository's checks a task can skip, by stage (#54).
       projectChecks: { implement: project.hooks.implement.map((h) => h.name), review: project.hooks.review.map((h) => h.name) },
+      // Who reviews a task, where the plan does not say (any but a submitted
+      // Managed build): the board asks the user where the daemon waits on them.
+      projectReview: project.settings.review,
     });
   });
 
@@ -965,6 +968,11 @@ function buildRouter(deps: Deps): Router {
         res.destroy();
         return;
       }
+      // A plan comes with who reviews where it does not say, as the
+      // repository says it now: the board judges it as the daemon does from
+      // the moment it lands (the agent's report that puts a task in review
+      // is a snapshot too).
+      if (event.type === 'snapshot') event = { ...event, projectReview: projectFor(event.session).settings.review };
       res.write(`data: ${JSON.stringify(forBrowser(event))}\n\n`);
     };
     send({ type: 'sessions', sessions: store.summaries() });

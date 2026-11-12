@@ -4,6 +4,9 @@
 
 ### Fixes
 
+- **The board asks for your verdict wherever your project has you review.** On a build whose plan does not
+  hold a review mode (a Tracked build), the board went by the default and never showed you the review box, while
+  the agent waited on your verdict. A change request you were writing there could also be let go.
 - **At the round limit, the agent is told how to carry out your answer.** Whether it was sending a task to
   review or marking it done, it is now told the same thing: another round is a new review, accepting it marks
   it done, and taking it over leaves it blocked for you.

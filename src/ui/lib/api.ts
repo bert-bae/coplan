@@ -7,6 +7,7 @@ import type {
   CleanupOutcome,
   Plan,
   PlanOp,
+  ReviewMode,
   SessionState,
   SessionSummary,
   StorageReport,
@@ -92,7 +93,7 @@ export const api = {
    *  repository's checks a task can skip. (What is wrong with the harness
    *  config it reads comes over the live stream, as `config-errors`.) */
   session: (id: string) =>
-    request<{ session: SessionState; planCheck?: GapSeverities; projectChecks?: ProjectChecks }>(`/api/session/${id}`),
+    request<{ session: SessionState; planCheck?: GapSeverities; projectChecks?: ProjectChecks; projectReview?: ReviewMode }>(`/api/session/${id}`),
 
   /** Permanent: the daemon removes the session's on-disk directory too. */
   deleteSession: (id: string) => request<{ deleted: boolean }>(`/api/session/${id}`, { method: 'DELETE' }),

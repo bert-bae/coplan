@@ -940,8 +940,9 @@ test("the repository's customizations reach the agent, and its errors and final 
     const design = await post<Preview & { project: { planCheck: Record<string, string> } }>(`/api/session/${id}/plan/design/prompt`);
     assert.match(design.prompt, /## Standing instructions[\s\S]*Name every box after its service\./);
     assert.deepEqual(design.project.planCheck, { 'box-undescribed': 'error', 'comment-unanswered': 'off' }, 'the page is told how gaps count');
-    const opened = await call<{ planCheck?: Record<string, string> }>(`/api/session/${id}`);
+    const opened = await call<{ planCheck?: Record<string, string>; projectReview?: string }>(`/api/session/${id}`);
     assert.deepEqual(opened.planCheck, { 'box-undescribed': 'error', 'comment-unanswered': 'off' }, 'and so is the canvas, which marks the boxes the check lists');
+    assert.equal(opened.projectReview, 'subagent', "and the board, who reviews where the plan does not say");
     const brief = String((await mcpFor(id, 'brief', { task_id: 't2' }))['text']);
     assert.match(brief, /Write the test first\./);
     assert.match(brief, /Run the reviewer on the `opus` model\./);
@@ -1873,8 +1874,9 @@ test("done waits on the checks for what the task changed since it began — not 
 
 /** The `config-errors` events a page's live stream for `session` receives,
  *  as they come; `close` ends the stream. */
-async function settingsStream(session: string): Promise<{ events: string[][]; files: string[][]; close: () => void }> {
+async function settingsStream(session: string): Promise<{ events: string[][]; files: string[][]; reviews: string[]; close: () => void }> {
   const events: string[][] = [];
+  const reviews: string[] = [];
   const files: string[][] = [];
   const { ticket } = await call<{ ticket: string }>('/api/events/ticket', { method: 'POST', body: '{}' });
   let req: http.ClientRequest | undefined;
@@ -1888,7 +1890,8 @@ async function settingsStream(session: string): Promise<{ events: string[][]; fi
           const frame = buf.slice(0, cut);
           buf = buf.slice(cut + 2);
           if (!frame.startsWith('data: ')) continue;
-          const event = JSON.parse(frame.slice(6)) as { type: string; errors?: string[]; files?: string[] };
+          const event = JSON.parse(frame.slice(6)) as { type: string; errors?: string[]; files?: string[]; projectReview?: string };
+          if (event.type === 'snapshot') reviews.push(String(event.projectReview));
           if (event.type === 'config-errors') {
             events.push(event.errors!);
             files.push(event.files!);
@@ -1899,7 +1902,7 @@ async function settingsStream(session: string): Promise<{ events: string[][]; fi
     });
     req.on('error', reject);
   });
-  return { events, files, close: () => req?.destroy() };
+  return { events, files, reviews, close: () => req?.destroy() };
 }
 
 test('a page opened on a session that cannot be saved is told, though the failure was heard before it opened', async () => {
@@ -1959,6 +1962,8 @@ test("a mistake in the harness config reaches the page: when it opens, and as so
     assert.match(first.join('\n'), /harness\.json: "promptNotice" must be true or false/);
     assert.match(first.join('\n'), /harness\.json: "idleShutdownMinutes" can only be set in the global config/);
     assert.ok(page.files[0]!.some((f) => f.endsWith(path.join('.claude', 'harness.json'))), 'it says which files it speaks for');
+    // Its plan comes with who reviews where the plan does not say.
+    assert.ok(page.reviews.length > 0 && page.reviews.every((r) => r === 'self'), JSON.stringify(page.reviews));
 
     // A page that asked for a session the daemon did not hold yet watches
     // its repository once the session arrives.
