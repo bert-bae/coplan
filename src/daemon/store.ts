@@ -6,6 +6,7 @@ import {
   PlanError,
   applyOps,
   awaitingUserReview,
+  holdsForReview,
   confirmDesign,
   countTasks,
   currentTask,
@@ -380,11 +381,12 @@ export class SessionStore extends EventEmitter {
   /** The rail's rows, newest session first. Ordered on creation so rows
    *  never move out from under the cursor. */
   summaries(): SessionSummary[] {
-    // The project's review mode, read only where it can count — a build
-    // submitted on the repository's defaults — and once a repository.
+    // The project's review mode, read only where it can count — a Managed
+    // build (the only kind that holds work for a review) submitted on the
+    // repository's defaults — and once a repository.
     const byRoot = new Map<string, ReviewMode | undefined>();
     const reviewOf = (s: SessionState): ReviewMode | undefined => {
-      if (!s.plan?.submission || s.plan.submission.settings || !this.reviewFor) return undefined;
+      if (!holdsForReview(s.plan) || s.plan.submission.settings || !this.reviewFor) return undefined;
       const root = s.repoRoot ?? s.cwd;
       if (!byRoot.has(root)) byRoot.set(root, this.reviewFor(s));
       return byRoot.get(root);

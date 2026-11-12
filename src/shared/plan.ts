@@ -2306,6 +2306,11 @@ export function planPhase(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> &
   return plan?.report ? 'built' : 'finalizing';
 }
 
+/** A build that can hold work for the user's review: a submitted Managed one. */
+export function holdsForReview<P extends Pick<Plan, 'submission'>>(plan: P | null | undefined): plan is P & { submission: NonNullable<P['submission']> } {
+  return Boolean(plan?.submission) && planMode(plan, 'managed') === 'managed';
+}
+
 /**
  * The tasks a Managed build is holding for the user's own review: in
  * review, reviewed by the user (the task's own mode, or the build's), with
@@ -2315,7 +2320,7 @@ export function planPhase(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> &
  * the daemon's gates judge by.
  */
 export function awaitingUserReview(plan: Pick<Plan, 'submission' | 'tasks'> | null, review: ReviewMode): Task[] {
-  if (!plan?.submission || planMode(plan, 'managed') !== 'managed') return [];
+  if (!holdsForReview(plan)) return [];
   const fallback = plan.submission.settings?.review ?? review;
   return plan.tasks.filter(
     (t) =>

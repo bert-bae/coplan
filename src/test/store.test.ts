@@ -911,3 +911,32 @@ test("the session list counts a task held for the user's review by the project's
   assert.equal(row().awaitingReview, 1);
   assert.equal(row().planStatus, 'review');
 });
+
+test("the session list reads the project's review mode only where it counts, and once a repository (#165)", async () => {
+  const store = await freshStore();
+  const { confirmDesign, markDelivered, submitPlan } = await import('../shared/plan.ts');
+  const submitted = (mode: 'managed' | 'tracked', settings?: { review: 'self'; parallel: number; maxRounds: number }) => (s: { plan: import('../shared/types.ts').Plan | null }) => {
+    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { target: 'session', mode, prompt: 'p', ...(settings ? { settings } : {}) }));
+  };
+  const dir = process.cwd();
+  for (const [id, how] of [
+    ['m1', submitted('managed')],
+    ['m2', submitted('managed')],
+    ['own', submitted('managed', { review: 'self', parallel: 1, maxRounds: 3 })],
+    ['tracked', submitted('tracked')],
+  ] as const) {
+    store.ensure(id, dir);
+    store.publishPlan(id, PLAN);
+    store.mutate(id, how);
+  }
+  store.ensure('unpublished', dir);
+  const asked: string[] = [];
+  store.reviewFor = (s) => {
+    asked.push(s.sessionId);
+    return 'user';
+  };
+  store.summaries();
+  // Only builds on the repository's defaults that hold work for review (Managed): the two in one repository, once.
+  assert.equal(asked.length, 1, JSON.stringify(asked));
+  assert.ok(['m1', 'm2'].includes(asked[0]!));
+});
