@@ -99,7 +99,10 @@ export function ThreadPanel({ target, label }: { target: Target; label: string }
           setText={comment.setDraft}
           placeholder={open.length ? 'Add another comment…' : `Comment on ${label}…`}
           label={`New comment on ${label}`}
-          onSend={(text) => edit({ op: 'comment', target, text })}
+          // Through its kept draft, as a reply is: what is typed while it
+          // posts stays, and only that (not what was posted).
+          onSend={(text) => comment.save(() => edit({ op: 'comment', target, text }))}
+          sending={comment.saving}
         />
       )}
     </div>

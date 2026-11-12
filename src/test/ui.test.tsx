@@ -1029,6 +1029,52 @@ test('a section saved, typed on, and off screen when the save goes in reopens on
   assert.equal(document.body.textContent?.includes('This changed while you were editing'), true, "the agent's change is warned of");
 });
 
+test('a new comment typed on while it is posted keeps only what came after, so nothing posts twice', async () => {
+  await boot(makeSession(makePlan()), (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+    return { plan: next, changes: [] };
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /Comment on Invalidation|comment\(s\) on Invalidation/ }));
+  });
+  const box = () => screen.getByRole('textbox', { name: /^New comment on/ }) as HTMLTextAreaElement;
+  fireEvent.change(box(), { target: { value: 'Which client?' } });
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.keyDown(box(), { key: 'Enter', ctrlKey: true });
+    });
+    fireEvent.change(box(), { target: { value: 'Which client? And which pool?' } });
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await act(async () => {
+    await held;
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  assert.equal(box().value, 'And which pool?', 'what came after, not what was posted');
+  // Posted whole too: the box still keeps what is typed next (closing the page asks).
+  await act(async () => {
+    fireEvent.keyDown(box(), { key: 'Enter', ctrlKey: true });
+  });
+  assert.equal(box().value, '');
+  fireEvent.change(box(), { target: { value: 'And how many?' } });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  assert.equal(unsavedDrafts(), true, 'kept after a post, as before one');
+});
+
 test('a reply typed on while it is posted keeps only what came after, so nothing posts twice', async () => {
   const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
   await boot(makeSession(plan), (route, init) => {
