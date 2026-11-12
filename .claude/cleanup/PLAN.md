@@ -15,26 +15,52 @@ Baseline when this was written: `pnpm typecheck` clean, `pnpm test` 682 pass,
    a test that reproduces the audit's case and fails.
 3. **Clean up:** delete what is dead.
 4. **Refactor:** merge the copies, now pinned by the tests from step 1.
-5. **Smaller rows**, then **re-audit** the touched areas. New findings become
-   new rows. The loop ends when a re-audit finds only Nice-to-have or nothing.
+5. **Smaller rows**, then **one re-audit** of the touched areas, which ends
+   the batch (see *Batches*).
 
 Tests come before the clean-up and refactor rows on purpose: a refactor with
 no test that fails when it breaks is the risk the audit itself flags.
 
+## Batches
+
+The work goes in **batches**, so it ends. (Batch 1 ran rows F64-F83, B72-B82,
+T8-T9 and re-audits A6-A17 in one loop: each re-audit's Should-fix findings
+became new rows, each with its own issue and a re-audit after it, and the
+loop never closed. These rules stop that.)
+
+- **A batch is a fixed list of rows**, chosen when it starts and named in its
+  heading in the ledger (at most about ten). The loop works only those rows.
+- **New findings go to the backlog, not the batch.** Anything found while
+  working a row (by `/code-review`, a test, or reading) that is outside that
+  row's own diff becomes a `backlog` row. Only a **Must fix** may join the
+  running batch.
+- **One re-audit per batch**, after its last row, of the areas the batch
+  touched. Its findings go to the backlog: Must fix and Should fix as rows,
+  Nice to have listed in its report only. A re-audit never adds another
+  re-audit.
+- **Then the batch ends:** `./bin/coplan check final`, one pull request for
+  the batch, and stop. The next batch is chosen from the backlog, by the user
+  or with them, in a new session.
+- **Issues:** one GitHub issue per batch, listing its rows (the PR closes
+  it). A row gets an issue of its own only if it is Must fix or needs the
+  user's decision. Findings are tracked in the ledger, not as issues.
+
 ## One turn of the loop
 
-1. **Pick** the first `open` row in the ledger, top to bottom. Skip `blocked`
-   and `needs-decision` rows.
+1. **Pick** the first `open` row of the current batch, top to bottom. Skip
+   `blocked`, `needs-decision` and `backlog` rows.
 2. **Pin.** For a fix: write the test from the finding's case and see it fail.
    For a clean-up or refactor: find the test that covers the code, or write one
    that passes now. No test, no refactor.
 3. **Change** the smallest thing the finding names. Something new you notice
-   goes in the ledger as a new row, not into this commit.
+   goes in the ledger as a `backlog` row (Must fix: an `open` row in this
+   batch), not into this commit.
 4. **Check** with the repo's own runner, which targets what changed:
    `./bin/coplan check implement` (typecheck), then `./bin/coplan check review`
    (build and test). At the end of a phase: `./bin/coplan check final`
    (`pnpm check` and the doctor).
-5. **Review** the diff with `/code-review medium` and fix what it confirms.
+5. **Review** the diff with `/code-review medium` and fix what it confirms
+   in this row's own change. What it finds elsewhere is a `backlog` row.
    For refactor rows, also run `/simplify`.
 6. **Record.** For anything a user would notice, add a line under *Unreleased*
    in CHANGELOG.md. If a hook, tool or stored file changes, update the README's
@@ -44,24 +70,26 @@ no test that fails when it breaks is the risk the audit itself flags.
    - The same check fails twice on this row. Set it to `blocked` with the
      reason, and go to the next row on the next turn.
    - The row needs a choice only the user can make. Set it to `needs-decision`.
-   - No row is `open`. Run `./bin/coplan check final` and end the loop.
+   - No row of the batch is `open`: run the batch's one re-audit (if it has
+     not run), put its findings in the backlog, run `./bin/coplan check
+     final`, open the batch's pull request, and end the loop.
 
 Run it self-paced:
 
 ```
-/loop Work the next open row of .claude/cleanup/PLAN.md, following its "One turn of the loop" section exactly. One row per turn. Stop when no row is open.
+/loop Work the next open row of the current batch in .claude/cleanup/PLAN.md, following its "Batches" and "One turn of the loop" sections exactly. One row per turn. Stop when the batch ends.
 ```
 
 Or run it in Coplan itself. Publish these rows as a plan and submit it as a
 *Managed* build: `.coplan/config.json` already runs implement → review →
 refine per task, with these checks and a reviewing subagent.
 
-**Pull requests:** CONTRIBUTING asks for one change per pull request. Open one
-per Must-fix row, and one each for the clean-up phase and every refactor row.
+**Pull requests:** one per batch (see *Batches*); a Must-fix row may have its
+own, as CONTRIBUTING asks for one change per pull request.
 
 ## Ledger
 
-Status: `open`, `done`, `blocked`, `needs-decision`. Numbers in brackets are
+Status: `open`, `done`, `blocked`, `needs-decision`, `backlog` (found, not yet in a batch). Numbers in brackets are
 the audit's finding numbers.
 
 | Row | What | Phase | Status | Commit |
