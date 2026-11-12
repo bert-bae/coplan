@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, descendants, MAX_CHANGES, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, proposalTouches, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, confirmDesign, countTasks, descendants, MAX_CHANGES, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, passedAndClosed, PlanError, proposalTouches, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import { roundVerdict } from '../shared/build.ts';
 import { previewProposal } from '../shared/proposals.ts';
@@ -960,6 +960,21 @@ test('a finished task taken up again, by way of dropped too, has no verdict for 
   reload = normalizePlan(JSON.parse(JSON.stringify(claude(reload, { op: 'upsert_task', id: 't2', status: 'dropped' }))) as Plan & Record<string, unknown>, 'x');
   reload = claude(reload, { op: 'upsert_task', id: 't2', status: 'in_progress' });
   assert.equal(roundVerdict(reload.tasks.find((t) => t.id === 't2')!, 'self'), undefined);
+});
+
+test("a finished task's last round counts as passed only by the verdict that stands, under its review mode", () => {
+  const plan = fresh();
+  const t2 = plan.tasks.find((t) => t.id === 't2')!;
+  const closed = (reviews: unknown[], review?: string) => {
+    Object.assign(t2, { status: 'done', round: 1, reviews, ...(review ? { review } : {}) });
+    if (!review) delete t2.review;
+    return passedAndClosed(plan, t2);
+  };
+  assert.equal(closed([{ round: 1, by: 'claude', verdict: 'pass', at: 1 }]), true);
+  assert.equal(closed([{ round: 1, by: 'claude', verdict: 'pass', at: 1 }, { round: 1, by: 'claude', verdict: 'changes', at: 2 }]), false, 'a pass, then changes: not passed');
+  assert.equal(closed([{ round: 1, by: 'claude', verdict: 'pass', at: 1 }, { round: 1, by: 'user', verdict: 'changes', at: 2 }], 'user'), false, "the user's review: the agent's pass does not count");
+  assert.equal(closed([{ round: 1, by: 'user', verdict: 'pass', at: 1 }], 'user'), true);
+  assert.equal(closed([], 'skip'), true, 'no review: closed done is passed');
 });
 
 test('a task the agent puts back to todo keeps its round across a restart, as the edit kept it', () => {

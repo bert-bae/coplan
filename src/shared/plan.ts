@@ -46,6 +46,7 @@ import type {
   TaskCounts,
   TaskInput,
   TaskListInput,
+  ReviewMode,
   TaskStatus,
   Thread,
 } from './types.ts';
@@ -559,8 +560,12 @@ function keepsStage(status: TaskStatus): boolean {
 /** Finished (done, or dropped while done) on a passing last round: taken up
  *  again, its next review round is not held to the round limit, as that
  *  round never failed (`reopened`). */
-export function passedAndClosed(task: Task): boolean {
-  return wasFinished(task) && Boolean(task.round) && Boolean(task.reviews?.some((r) => r.round === task.round && r.verdict === 'pass'));
+export function passedAndClosed(plan: Plan, task: Task, fallback: ReviewMode = plan.submission?.settings?.review ?? DEFAULT_BUILD_SETTINGS.review): boolean {
+  if (!wasFinished(task) || !task.round) return false;
+  // The round's verdict that stands, by whoever reviews it (the user's own,
+  // for a task they review); with no review, closing it done passed it.
+  const mode = effectiveReview(plan, task, fallback);
+  return mode === 'skip' || roundVerdict(task, mode)?.verdict === 'pass';
 }
 
 /** Finished: done, or dropped while it was done (wasDone). */
@@ -2017,7 +2022,7 @@ function editTask(
       // verdicts go when it leaves done for work, straight or by way of
       // dropped (wasDone). Dropped, or a drop undone (back to done), it keeps
       // them; one dropped before it was done keeps its own.
-      if (isWorking(status) && passedAndClosed(task)) {
+      if (isWorking(status) && passedAndClosed(plan, task)) {
         task.reopened = true;
       } else if (!isWorking(status)) delete task.reopened;
       if (isWorking(status) && wasFinished(task) && task.reviews) {

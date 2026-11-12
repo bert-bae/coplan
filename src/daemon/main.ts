@@ -1323,7 +1323,7 @@ function buildRouter(deps: Deps): Router {
     // The round limit is the user's: past it, stop and ask them.
     // (A finished task taken up again has its next round: the last one passed.
     // Taken up and sent to review in this one call, too.)
-    const takenUpAgain = task.reopened || passedAndClosed(task);
+    const takenUpAgain = task.reopened || passedAndClosed(before, task, settings.review);
     if (stage === 'review' && task.stage !== 'review' && (task.round ?? 0) >= settings.maxRounds && !takenUpAgain && !approved) {
       gate(
         `"${task.title}" has had ${task.round} review round(s), the most the user allowed (${settings.maxRounds}). Stop: mark it ` +
