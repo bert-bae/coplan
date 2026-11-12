@@ -1343,7 +1343,7 @@ function buildRouter(deps: Deps): Router {
     if (stage === 'review' && task.stage !== 'review' && (task.round ?? 0) >= settings.maxRounds && !takenUpAgain && !approved) {
       gate(
         roundLimit(''),
-        `this is review round ${(task.round ?? 0) + 1}, past the ${settings.maxRounds} a Managed build allows: decide whether another round is worth it, and say why in the task's note`,
+        `this is review round ${(task.round ?? 0) + 1}, past the ${settings.maxRounds} the user set: say in the task's note why another round is worth it`,
       );
     }
 
@@ -1414,11 +1414,12 @@ function buildRouter(deps: Deps): Router {
         const passed = last?.verdict === 'pass';
         // Without a round there is no verdict to miss: that note is above.
         // Not in review, its rounds used, and no new one its own: another
-        // round, or done as it is, is the user's to allow.
+        // round, or done as it is, is the user's to allow in a Managed build;
+        // in a Tracked one the agent has decided, and says why (the note).
         if (!passed && task.round && task.stage !== 'review' && task.round >= settings.maxRounds && !takenUpAgain) {
           gate(
             roundLimit('is not in review, and '),
-            `not in review, and its ${task.round} review round(s) are the most a Managed build allows: another round, or done as it is, is the user's call`,
+            `marked done out of review after ${task.round} review round(s), the most the user set: say in the task's note why it is right as it is`,
           );
         } else if (!passed && task.round && task.stage !== 'review') {
           // Not in review: the verdict is given in a review round, so that is

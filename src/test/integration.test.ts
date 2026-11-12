@@ -1152,7 +1152,11 @@ test('each build gate refuses in a Managed build, and in a Tracked one is a note
       await task({ task_id: 'f', stage: 'implement' });
       await task({ task_id: 'f', stage: 'review' });
       await task({ task_id: 'f', stage: 'refine' });
-      await gate({ task_id: 'f', stage: 'review' }, /the most the user allowed \(1\)/, /this is review round 2, past the 1 a Managed build allows/);
+      await gate(
+        { task_id: 'f', stage: 'review' },
+        /the most the user allowed \(1\)\. Stop: .*stage "review" for another round, status "done" to accept it/,
+        /this is review round 2, past the 1 the user set: say in the task's note why another round is worth it/,
+      );
       await settle('f');
       // A start past the parallel limit.
       await task({ task_id: 'g', stage: 'implement' });
@@ -1186,7 +1190,7 @@ test('each build gate refuses in a Managed build, and in a Tracked one is a note
         // One accepted past a failing last round (d: done on the user's word) is held to the limit taken up again,
         // and done says so, rather than point to a review the limit refuses.
         await task({ task_id: 'd', status: 'in_progress' });
-        await gate({ task_id: 'd', stage: 'review' }, /the most the user allowed \(1\)/, /past the 1 a Managed build allows/);
+        await gate({ task_id: 'd', stage: 'review' }, /the most the user allowed \(1\)/, /past the 1 the user set/);
         await gate(
           { task_id: 'd', status: 'done', note: 'x' },
           /"D" is not in review, and has had 1 review round\(s\), the most the user allowed \(1\)\. Stop: .*stage "review" for another round, status "done" to accept it/,
@@ -1201,6 +1205,14 @@ test('each build gate refuses in a Managed build, and in a Tracked one is a note
         assert.equal((await task({ task_id: 'd', status: 'blocked', note: 'still fails' }))['ok'], true);
         const accepted = await task({ task_id: 'd', status: 'done', note: 'user: accept it as it is', user_approved: true });
         assert.equal(accepted['ok'], true, `accepted as it is: ${String(accepted['text'])}`);
+      } else {
+        // In a Tracked build the limit is the agent's to weigh, on done as on a round past it: the done goes
+        // through, and the agent is asked why, not pointed to a new round.
+        await task({ task_id: 'd', status: 'in_progress' });
+        const noted = String((await task({ task_id: 'd', status: 'done', note: 'x' }))['text']);
+        assert.match(noted, /Noted, not refused \(this build is Tracked\): marked done out of review after 1 review round\(s\), the most the user set: say in the task's note why it is right as it is/);
+        assert.doesNotMatch(noted, /a new round/);
+        assert.equal((await sessionFor(id)).plan!.tasks.find((t) => t.id === 'd')!.status, 'done');
       }
 
       const plan = (await sessionFor(id)).plan!;
