@@ -91,8 +91,10 @@ const opsSent = () => posts.filter((p) => p.route.endsWith('/plan/ops')).flatMap
 const sentTo = (id: string) => posts.filter((p) => p.route === `/api/session/${id}/plan/ops`).flatMap((p) => p.body['ops'] as Record<string, unknown>[]);
 
 /** A held save, let go, and done with: its answer in, and what the editor
- *  does with it (all in the microtasks after it: none of it waits on a
- *  timer, so one macrotask after `saving` falls to 0 sees it all). */
+ *  does with it. All of that runs in microtasks (the stub answers with no
+ *  timer, and nothing after it waits on one), so one macrotask after it sees
+ *  it all; waiting for `saving` to fall to 0 only guards that, should a save
+ *  ever answer later. One place for it, for every held save. */
 const saved = async (held: Promise<void>) => {
   await act(async () => {
     await held;
@@ -953,10 +955,7 @@ test('text typed while a save is on its way is kept when the save goes through',
     Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
     answer!();
   }
-  await act(async () => {
-    await held;
-    await new Promise((r) => setTimeout(r, 0));
-  });
+  await saved(held);
   assert.equal(area().value, 'First. Second.', 'still open, with what was typed meanwhile');
   assert.equal(unsavedDrafts(), true, 'and closing the page asks');
   // Saved again: made against the revision the first save made, so it goes in.
@@ -999,10 +998,7 @@ test('a box drawn anew while its save is out, then changed only by whitespace (o
       Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
       answer!();
     }
-    await act(async () => {
-      await wait;
-      await new Promise((r) => setTimeout(r, 0));
-    });
+    await saved(wait);
   };
   // A section changed only by whitespace.
   await openTab('Overview');
@@ -1120,10 +1116,7 @@ test('a section saved, typed on, and off screen when the save goes in reopens on
     Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
     answer!();
   }
-  await act(async () => {
-    await held;
-    await new Promise((r) => setTimeout(r, 0));
-  });
+  await saved(held);
   assert.equal(unsavedDrafts(), true, 'kept, off screen, as not saved');
   await openTab('Overview');
   assert.equal(area().value, 'First.\nSecond.');
@@ -1152,10 +1145,7 @@ test('a section saved, typed on, and off screen when the save goes in reopens on
     Object.defineProperty(globalThis, 'fetch', { value: realFetch2, writable: true, configurable: true });
     again!();
   }
-  await act(async () => {
-    await heldAgain;
-    await new Promise((r) => setTimeout(r, 0));
-  });
+  await saved(heldAgain);
   const s2 = store.getState().session!;
   const read = structuredClone(s2.plan!);
   markReadByClaude(read);
@@ -1195,10 +1185,7 @@ test('a new comment typed on while it is posted keeps only what came after, so n
     Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
     answer!();
   }
-  await act(async () => {
-    await held;
-    await new Promise((r) => setTimeout(r, 0));
-  });
+  await saved(held);
   assert.equal(box().value, 'And which pool?', 'what came after, not what was posted');
   // Posted whole too: the box still keeps what is typed next (closing the page asks).
   await act(async () => {
@@ -1240,10 +1227,7 @@ test('a field cleared, or changed only by whitespace, while its save is out clos
       Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
       answer!();
     }
-    await act(async () => {
-      await held;
-      await new Promise((r) => setTimeout(r, 0));
-    });
+    await saved(held);
     assert.equal(unsavedDrafts(), false, `${offScreen ? 'off' : 'on'} screen, ${JSON.stringify(after)}: nothing left kept`);
     if (offScreen) await openTab('Overview');
     assert.equal(screen.queryByLabelText('section "Context"') === null, true, `${offScreen ? 'off' : 'on'} screen, ${JSON.stringify(after)}: closed`);
@@ -1283,10 +1267,7 @@ test('a reply typed on while it is posted keeps only what came after, so nothing
     Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
     answer!();
   }
-  await act(async () => {
-    await held;
-    await new Promise((r) => setTimeout(r, 0));
-  });
+  await saved(held);
   assert.equal(box().value, 'With a pool.', 'what came after, not what was posted');
 });
 
@@ -2637,10 +2618,7 @@ test('a review box drawn anew while its request is on its way cannot send it aga
     Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
     answer!();
   }
-  await act(async () => {
-    await held;
-    await new Promise((r) => setTimeout(r, 0));
-  });
+  await saved(held);
   assert.equal(opsSent().filter((op) => op['op'] === 'review_task').length, 1, 'sent once');
   // Sent: the box drawn anew closes too, rather than hold what went.
   assert.equal(within(review()).queryByLabelText('What to change') === null, true, 'closed');
@@ -2676,10 +2654,7 @@ test('text typed into a box drawn anew while its request is on its way is kept w
     Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
     answer!();
   }
-  await act(async () => {
-    await held;
-    await new Promise((r) => setTimeout(r, 0));
-  });
+  await saved(held);
   assert.equal((within(review()).getByLabelText('What to change') as HTMLInputElement).value, 'Add a timeout, and log retries', 'kept open with what was added');
   assert.equal(unsavedDrafts(), true, 'and closing the page asks');
   // Likewise when that box is not on screen as the request goes through (another tab): kept, and back on return.
@@ -2699,10 +2674,7 @@ test('text typed into a box drawn anew while its request is on its way is kept w
     Object.defineProperty(globalThis, 'fetch', { value: realFetch2, writable: true, configurable: true });
     again!();
   }
-  await act(async () => {
-    await heldAgain;
-    await new Promise((r) => setTimeout(r, 0));
-  });
+  await saved(heldAgain);
   assert.equal(unsavedDrafts(), true, 'kept while off screen');
   await openTab('Tasks');
   assert.equal((within(review()).getByLabelText('What to change') as HTMLInputElement).value, 'Add a timeout, and log retries, and alert');
@@ -2745,10 +2717,7 @@ test('text added to a box drawn anew while its request is on its way is offered,
     Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
     answer!();
   }
-  await act(async () => {
-    await held;
-    await new Promise((r) => setTimeout(r, 0));
-  });
+  await saved(held);
   const offered = store.getState().toasts.filter((t) => t.copy !== undefined);
   assert.equal(offered.length, 1, 'offered once');
   assert.equal(offered[0]!.copy, 'Add a timeout, and log retries');
@@ -2776,10 +2745,7 @@ test('text added to a box drawn anew while its request is on its way is offered,
     Object.defineProperty(globalThis, 'fetch', { value: realFetch2, writable: true, configurable: true });
     again!();
   }
-  await act(async () => {
-    await heldAgain;
-    await new Promise((r) => setTimeout(r, 0));
-  });
+  await saved(heldAgain);
   const offeredAgain = store.getState().toasts.filter((t) => t.copy !== undefined);
   assert.equal(offeredAgain.length, 2);
   assert.equal(offeredAgain[1]!.copy, 'Retry twice, with backoff');
@@ -2813,10 +2779,7 @@ test('a review box drawn anew while its request is on its way and then refused k
     Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
     answer!();
   }
-  await act(async () => {
-    await held;
-    await new Promise((r) => setTimeout(r, 0));
-  });
+  await saved(held);
   assert.equal((within(review()).getByLabelText('What to change') as HTMLInputElement).value, 'Add a timeout', 'kept');
   assert.equal((within(review()).getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled, false, 'and can be sent again');
 });

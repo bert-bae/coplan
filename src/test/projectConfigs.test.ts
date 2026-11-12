@@ -49,7 +49,8 @@ test("an open page's repository, read between many others, has its edit told whe
   // tried at every point of that: each must be told.
   for (let at = 0; at < 40; at++) {
     const { files, edit } = disk();
-    const projects = new ProjectConfigs(5, files);
+    // (Remembering no more review modes than configs: the cache-hit read is what keeps it known.)
+    const projects = new ProjectConfigs(5, files, 5);
     const out = told(projects);
     edit('page', 'user');
     projects.at('page');
@@ -91,4 +92,21 @@ test('a listener that fails stops none of the others (#163)', async () => {
   projects.at('a');
   await Promise.resolve();
   assert.deepEqual(out, ['a:self']);
+});
+
+test("one session-list pass over many repositories does not push out an open page's (#168)", async () => {
+  const { files, edit } = disk();
+  const projects = new ProjectConfigs(5, files);
+  const out = told(projects);
+  edit('page', 'user');
+  projects.at('page');
+  // The list reads 120 repositories in a row, the page's not among them.
+  for (let i = 0; i < 120; i++) {
+    edit(`r${i}`, 'self');
+    projects.at(`r${i}`);
+  }
+  edit('page', 'subagent');
+  projects.at('page');
+  await Promise.resolve();
+  assert.deepEqual(out, ['page:subagent']);
 });

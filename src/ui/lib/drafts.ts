@@ -434,9 +434,10 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
         // (Or cleared while it went: nothing there to keep.)
         const keptNow = key ? openDrafts.get(key) : undefined;
         if (key && keptNow && (keptNow.draft.trim() === sent.trim() || !keptNow.draft.trim())) openDrafts.delete(key);
-        // Kept with more by another copy of this box, typed on elsewhere while
-        // this one, still drawn, sent (a comment composer is always drawn): a
-        // reply or a comment keeps only what came after.
+        // Kept with more, though this editor is still drawn: only another copy
+        // of the box, typed on while this one sent, could do that. None is
+        // drawn today (never reached in the tests); kept as a guard, so such a
+        // copy would keep what came after rather than post the reply twice.
         else if (key && keptNow && addsTo(field)) openDrafts.set(key, { ...keptNow, draft: afterSent(field, keptNow.draft, sent) });
         // Back to how it opens: closed, or (a comment composer) open, empty.
         setEditing(openAtFirst);

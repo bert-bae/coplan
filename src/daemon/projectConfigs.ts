@@ -41,11 +41,16 @@ export class ProjectConfigs {
    *  the new one: an open page has it sent, the session list too. */
   readonly reviewChanges = new Set<(root: string, review: ReviewMode) => void>();
 
+  /** `max`: configs kept. `knownReviews`: repositories whose review mode is
+   *  remembered — more than one session-list pass reads (the list holds 120
+   *  sessions at most: store.ts MAX_SESSIONS, twice), so a pass never pushes
+   *  out the one an open page shows. */
   constructor(
     private readonly max: number,
     private readonly files: ProjectFiles = DISK,
+    knownReviews = 1000,
   ) {
-    this.reviews = new ReviewReads(max);
+    this.reviews = new ReviewReads(Math.max(1, knownReviews));
   }
 
   at(root: string): ProjectConfig {
