@@ -306,7 +306,7 @@ and B79 stay `needs-decision` (D2-D4 not answered yet).
 | Row | What | Phase | Status | Commit |
 |-----|------|-------|--------|--------|
 | T10 | ProjectConfigs: no test has a source file that does not exist (the stand-in mtime never returns undefined): `?? -Infinity` turned to `?? Infinity` passes, and would stop all caching (global instruction files are listed whether present or not) (daemon/projectConfigs.ts, test/projectConfigs.test.ts) [re-audit A17 cache 1] | 0 safety net | done: missing source (no mtime) counts as settled, pinned; ?? Infinity fails it | 412a594 |
-| B83 | ProjectConfigs (T9) swallows a review-change listener's error unlogged: before, it reached the daemon's uncaughtException log; the session-list broadcast listener has no catch of its own. Log it in the catch (daemon/projectConfigs.ts) [re-audit A17 cache 2] | 5 smaller | open | |
+| B83 | ProjectConfigs (T9) swallows a review-change listener's error unlogged: before, it reached the daemon's uncaughtException log; the session-list broadcast listener has no catch of its own. Log it in the catch (daemon/projectConfigs.ts) [re-audit A17 cache 2] | 5 smaller | done: logged via ProjectConfigs.logError (daemon log), pinned with the next listener still told; a throwing logger left (the daemon's log guards itself) | 8810fdf |
 
 ### F19: the take-back never fires
 
