@@ -954,6 +954,82 @@ test('text typed while a save is on its way is kept when the save goes through',
   assert.deepEqual(sections.map((op) => [op['body'], op['expect']]), [['First.', 1], ['First. Second.', 2]]);
 });
 
+test('a box drawn anew while its save is out, then changed only by whitespace (or, a reply, cleared), closes as saved', async () => {
+  const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  await boot(makeSession(plan), (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+    return { plan: next, changes: [] };
+  });
+  const held = async (open: () => Promise<void>, field: () => HTMLTextAreaElement, typed: string, after: string, tab: string) => {
+    await open();
+    fireEvent.change(field(), { target: { value: typed } });
+    let answer: (() => void) | null = null;
+    const wait = new Promise<void>((r) => (answer = r));
+    const realFetch = globalThis.fetch;
+    Object.defineProperty(globalThis, 'fetch', {
+      value: async (...args: Parameters<typeof fetch>) => (String(args[0]).endsWith('/plan/ops') && (await wait), realFetch(...args)),
+      writable: true,
+      configurable: true,
+    });
+    try {
+      await act(async () => {
+        fireEvent.keyDown(field(), { key: 'Enter', ctrlKey: true });
+      });
+      // Drawn anew (another tab and back), then changed there only by whitespace, or cleared.
+      await openTab(tab === 'Tasks' ? 'Overview' : 'Tasks');
+      await openTab(tab);
+      await open();
+      fireEvent.change(field(), { target: { value: after } });
+    } finally {
+      Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+      answer!();
+    }
+    await act(async () => {
+      await wait;
+      await new Promise((r) => setTimeout(r, 0));
+    });
+  };
+  // A section changed only by whitespace.
+  await openTab('Overview');
+  const area = () => screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
+  const editSection = async () => {
+    if (!screen.queryByLabelText('section "Context"')) {
+      await act(async () => {
+        fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+      });
+    }
+  };
+  await held(editSection, area, 'First.', '  First.\n', 'Overview');
+  assert.equal(screen.queryByLabelText('section "Context"') === null, true, 'the section: closed');
+  assert.equal(unsavedDrafts(), false, 'the section: nothing kept');
+  // A reply cleared.
+  await openTab('Tasks');
+  const reply = () => screen.getByRole('textbox', { name: 'Reply' }) as HTMLTextAreaElement;
+  const openReply = async () => {
+    if (screen.queryByRole('textbox', { name: 'Reply' })) return;
+    if (!screen.queryByRole('button', { name: /open comment\(s\) on Invalidation/ })) {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+      });
+    }
+    if (!screen.queryByRole('button', { name: 'Reply' })) {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /open comment\(s\) on Invalidation/ }));
+      });
+    }
+    if (!screen.queryByRole('textbox', { name: 'Reply' })) {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+      });
+    }
+  };
+  await held(openReply, reply, 'The Redis one.', '', 'Tasks');
+  assert.equal(screen.queryByRole('textbox', { name: 'Reply' }) === null, true, 'the reply: closed');
+  assert.equal(unsavedDrafts(), false, 'the reply: nothing kept');
+});
+
 test('a section saved, typed on, drawn anew, typed on again and off screen when the save goes in keeps all of it', async () => {
   await boot(undefined, (route, init) => {
     if (!route.endsWith('/plan/ops')) return undefined;
@@ -2427,6 +2503,28 @@ test("the board asks for the user's verdict where the project has them review an
   assert.equal(openDrafts.has(key), true, 'kept');
   assert.equal(pruneDrafts(session.sessionId, plan).length, 1, 'under the default (self) it no longer waits on the user: offered');
   openDrafts.clear();
+});
+
+test("who reviews follows the session open, and is fetched again on a resync", async () => {
+  let review: string | undefined = 'user';
+  await boot(makeSession(), (route, init) => {
+    if (!/^\/api\/session\/[^/]+$/.test(route) || init?.method) return undefined;
+    const id = route.split('/').at(-1)!;
+    return { session: { ...makeSession(), sessionId: id }, ...(review ? { projectReview: review } : {}) };
+  });
+  assert.equal(store.getState().projectReview, 'user', 'from the fetch');
+  // Another session, whose daemon says nothing of it: not the last one's.
+  review = undefined;
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  assert.equal(store.getState().projectReview, 'self', "the default, not the other session's");
+  // Changed while the stream was down: the resync brings it.
+  review = 'skip';
+  await act(async () => {
+    await (store as unknown as { resync: () => Promise<void> }).resync();
+  });
+  assert.equal(store.getState().projectReview, 'skip');
 });
 
 test("a plan streamed in brings who reviews with it, so a change request kept for the user's review is not let go first", async () => {

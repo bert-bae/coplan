@@ -968,7 +968,7 @@ test("a finished task's last round counts as passed only by the verdict that sta
   const closed = (reviews: unknown[], review?: string) => {
     Object.assign(t2, { status: 'done', round: 1, reviews, ...(review ? { review } : {}) });
     if (!review) delete t2.review;
-    return passedAndClosed(plan, t2);
+    return passedAndClosed(plan, t2, 'self');
   };
   assert.equal(closed([{ round: 1, by: 'claude', verdict: 'pass', at: 1 }]), true);
   assert.equal(closed([{ round: 1, by: 'claude', verdict: 'pass', at: 1 }, { round: 1, by: 'claude', verdict: 'changes', at: 2 }]), false, 'a pass, then changes: not passed');

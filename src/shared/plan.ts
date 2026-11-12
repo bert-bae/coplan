@@ -559,8 +559,10 @@ function keepsStage(status: TaskStatus): boolean {
 
 /** Finished (done, or dropped while done) on a passing last round: taken up
  *  again, its next review round is not held to the round limit, as that
- *  round never failed (`reopened`). */
-export function passedAndClosed(plan: Plan, task: Task, fallback: ReviewMode = plan.submission?.settings?.review ?? DEFAULT_BUILD_SETTINGS.review): boolean {
+ *  round never failed (`reopened`). `fallback`: the review mode where the
+ *  plan holds none — the project's, as the daemon judges by (required: the
+ *  default alone would differ from it). */
+export function passedAndClosed(plan: Plan, task: Task, fallback: ReviewMode): boolean {
   if (!wasFinished(task) || !task.round) return false;
   // The round's verdict that stands, by whoever reviews it (the user's own,
   // for a task they review); with no review, closing it done passed it — so

@@ -2013,6 +2013,31 @@ test("a mistake in the harness config reaches the page: when it opens, and as so
   }
 });
 
+test("the user's own edits are judged by the repository's review mode, as the daemon's gates are (#150)", async () => {
+  const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-skip-'));
+  try {
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: other, stdio: 'pipe' });
+    mkdirSync(path.join(other, '.coplan'), { recursive: true });
+    writeFileSync(path.join(other, '.coplan', 'config.json'), JSON.stringify({ iric: { review: 'skip' } }));
+    const id = 'user-edit-review-mode';
+    const at = (route: string, body: Record<string, unknown>) =>
+      call<Record<string, unknown>>(route, { method: 'POST', headers: { 'x-harness-session': id }, body: JSON.stringify({ cwd: other, ...body }) });
+    await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: other, start_reason: 'startup' }) });
+    await at('/mcp/publish', { title: 'One task', tasks: [{ id: 't1', title: 'Build it' }] });
+    await at('/mcp/read', {});
+    for (const body of [{ stage: 'review' }, { status: 'done', note: 'passes its checks' }]) {
+      const res = await at('/mcp/task', { task_id: 't1', ...body });
+      assert.equal(res['ok'], true, String(res['text']));
+    }
+    // Taken up again by the user on the board: under `skip`, closed done is passed, so its next round is its own.
+    const { plan, error } = await opsOn(id, [{ op: 'upsert_task', id: 't1', status: 'in_progress' }]);
+    assert.ok(plan, error);
+    assert.equal(plan.tasks.find((t) => t.id === 't1')!.reopened, true, "the repository's mode, not the default (self, with no verdict: not passed)");
+  } finally {
+    rmSync(other, { recursive: true, force: true });
+  }
+});
+
 test("a change to the repository's review mode reaches its open page, with no edit to the plan (#158)", async () => {
   const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-review-'));
   const file = path.join(other, '.coplan', 'config.json');
