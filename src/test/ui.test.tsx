@@ -1076,7 +1076,7 @@ test('a new comment typed on while it is posted keeps only what came after, so n
   assert.equal(unsavedDrafts(), true, 'kept after a post, as before one');
 });
 
-test('a field cleared while its save is out closes as saved, on screen or off', async () => {
+test('a field cleared, or changed only by whitespace, while its save is out closes as saved, on screen or off', async () => {
   await boot(undefined, (route, init) => {
     if (!route.endsWith('/plan/ops')) return undefined;
     const s = store.getState().session!;
@@ -1085,11 +1085,11 @@ test('a field cleared while its save is out closes as saved, on screen or off', 
   });
   await openTab('Overview');
   const area = () => screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
-  for (const offScreen of [false, true]) {
+  for (const [offScreen, typed, after] of [[false, 'First.', ''], [true, 'Second.', ''], [false, 'Third.', 'Third. '], [true, 'Fourth.', '  Fourth.\n']] as const) {
     await act(async () => {
       fireEvent.click(screen.getByLabelText('Edit section "Context"'));
     });
-    fireEvent.change(area(), { target: { value: offScreen ? 'Second.' : 'First.' } });
+    fireEvent.change(area(), { target: { value: typed } });
     let answer: (() => void) | null = null;
     const held = new Promise<void>((r) => (answer = r));
     const realFetch = globalThis.fetch;
@@ -1098,7 +1098,7 @@ test('a field cleared while its save is out closes as saved, on screen or off', 
       await act(async () => {
         fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
       });
-      fireEvent.change(area(), { target: { value: '' } });
+      fireEvent.change(area(), { target: { value: after } });
       if (offScreen) await openTab('Tasks');
     } finally {
       Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
@@ -1108,9 +1108,9 @@ test('a field cleared while its save is out closes as saved, on screen or off', 
       await held;
       await new Promise((r) => setTimeout(r, 0));
     });
-    assert.equal(unsavedDrafts(), false, `${offScreen ? 'off' : 'on'} screen: nothing left kept`);
+    assert.equal(unsavedDrafts(), false, `${offScreen ? 'off' : 'on'} screen, ${JSON.stringify(after)}: nothing left kept`);
     if (offScreen) await openTab('Overview');
-    assert.equal(screen.queryByLabelText('section "Context"') === null, true, `${offScreen ? 'off' : 'on'} screen: closed`);
+    assert.equal(screen.queryByLabelText('section "Context"') === null, true, `${offScreen ? 'off' : 'on'} screen, ${JSON.stringify(after)}: closed`);
   }
 });
 

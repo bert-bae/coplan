@@ -974,6 +974,7 @@ test("a finished task's last round counts as passed only by the verdict that sta
   assert.equal(closed([{ round: 1, by: 'claude', verdict: 'pass', at: 1 }, { round: 1, by: 'claude', verdict: 'changes', at: 2 }]), false, 'a pass, then changes: not passed');
   assert.equal(closed([{ round: 1, by: 'claude', verdict: 'pass', at: 1 }, { round: 1, by: 'user', verdict: 'changes', at: 2 }], 'user'), false, "the user's review: the agent's pass does not count");
   assert.equal(closed([{ round: 1, by: 'user', verdict: 'pass', at: 1 }], 'user'), true);
+  assert.equal(closed([{ round: 1, by: 'user', verdict: 'changes', at: 1 }, { round: 1, by: 'claude', verdict: 'pass', at: 2 }], 'user'), false, "the user's changes stand over the agent's later pass");
   assert.equal(closed([], 'skip'), true, 'no review: closed done is passed');
 });
 

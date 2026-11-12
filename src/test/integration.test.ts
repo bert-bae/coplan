@@ -1186,7 +1186,20 @@ test('each build gate refuses in a Managed build, and in a Tracked one is a note
         // and done says so, rather than point to a review the limit refuses.
         await task({ task_id: 'd', status: 'in_progress' });
         await gate({ task_id: 'd', stage: 'review' }, /the most the user allowed \(1\)/, /past the 1 a Managed build allows/);
-        await gate({ task_id: 'd', status: 'done', note: 'x' }, /"D" is not in review, and has had 1 review round\(s\), the most the user allowed \(1\)/, /not in review/);
+        await gate(
+          { task_id: 'd', status: 'done', note: 'x' },
+          /"D" is not in review, and has had 1 review round\(s\), the most the user allowed \(1\)\. Stop: .*stage "review" for another round, status "done" to accept it/,
+          /not in review/,
+        );
+        // Each way it points goes: blocked, then another round as the user allowed, …
+        assert.equal((await task({ task_id: 'd', status: 'blocked', note: 'still fails: the retry test' }))['ok'], true);
+        const allowed = await task({ task_id: 'd', stage: 'review', note: 'user: one more round', user_approved: true });
+        assert.equal(allowed['ok'], true, `another round: ${String(allowed['text'])}`);
+        // … and, that round asking for changes too, done as it is.
+        await task({ task_id: 'd', stage: 'refine' });
+        assert.equal((await task({ task_id: 'd', status: 'blocked', note: 'still fails' }))['ok'], true);
+        const accepted = await task({ task_id: 'd', status: 'done', note: 'user: accept it as it is', user_approved: true });
+        assert.equal(accepted['ok'], true, `accepted as it is: ${String(accepted['text'])}`);
       }
 
       const plan = (await sessionFor(id)).plan!;

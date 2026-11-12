@@ -4,6 +4,9 @@
 
 ### Fixes
 
+- **At the round limit, the agent is told how to carry out your answer.** Whether it was sending a task to
+  review or marking it done, it is now told the same thing: another round is a new review, accepting it marks
+  it done, and taking it over leaves it blocked for you.
 - **A task taken up again is judged by your project's review mode before you submit.** Before a
   Managed build was submitted, or on a Tracked build, reopening a finished task judged its last round as
   self-reviewed: a task you review yourself could get past your round limit on the agent's pass, and one that

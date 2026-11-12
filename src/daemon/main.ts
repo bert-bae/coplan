@@ -1325,11 +1325,16 @@ function buildRouter(deps: Deps): Router {
     // (A finished task taken up again has its next round: the last one passed.
     // Taken up and sent to review in this one call, too.)
     const takenUpAgain = task.reopened || passedAndClosed(before, task, settings.review);
+    // Said the same wherever the limit stops it (here, and done below), with
+    // the call for each choice the user may make.
+    const roundLimit = (where: string) =>
+      `"${task.title}" ${where}has had ${task.round} review round(s), the most the user allowed (${settings.maxRounds}). Stop: mark it ` +
+      'blocked with a note on what still fails, and ask the user — another round, accept it as it is, or take it over. Then call ' +
+      'again with user_approved: true and their answer in the note: stage "review" for another round, status "done" to accept it; ' +
+      'for them to take it over, leave it blocked.';
     if (stage === 'review' && task.stage !== 'review' && (task.round ?? 0) >= settings.maxRounds && !takenUpAgain && !approved) {
       gate(
-        `"${task.title}" has had ${task.round} review round(s), the most the user allowed (${settings.maxRounds}). Stop: mark it ` +
-          'blocked with a note on what still fails, and ask the user — another round, accept it as it is, or take it over. ' +
-          'If they say to go on, call again with user_approved: true and their answer in the note.',
+        roundLimit(''),
         `this is review round ${(task.round ?? 0) + 1}, past the ${settings.maxRounds} a Managed build allows: decide whether another round is worth it, and say why in the task's note`,
       );
     }
@@ -1400,18 +1405,16 @@ function buildRouter(deps: Deps): Router {
         const last = verdict ? (mode === 'user' ? roundVerdict(task, mode) : { verdict }) : roundVerdict(task, mode);
         const passed = last?.verdict === 'pass';
         // Without a round there is no verdict to miss: that note is above.
-        // Not in review: the verdict is given in a review round, so that is
-        // where to go (a finished task taken up again lost its pass).
         // Not in review, its rounds used, and no new one its own: another
         // round, or done as it is, is the user's to allow.
         if (!passed && task.round && task.stage !== 'review' && task.round >= settings.maxRounds && !takenUpAgain) {
           gate(
-            `"${task.title}" is not in review, and has had ${task.round} review round(s), the most the user allowed (${settings.maxRounds}): ` +
-              'another round, or done as it is, is theirs to allow. Mark it blocked with a note on what still fails; when they decide, ' +
-              'call again with user_approved: true and their words in the note.',
-            `not in review, and its ${task.round} review round(s) are the most a Managed build allows`,
+            roundLimit('is not in review, and '),
+            `not in review, and its ${task.round} review round(s) are the most a Managed build allows: another round, or done as it is, is the user's call`,
           );
         } else if (!passed && task.round && task.stage !== 'review') {
+          // Not in review: the verdict is given in a review round, so that is
+          // where to go (a finished task taken up again lost its pass).
           const why = task.reopened ? ': its last pass went when it was taken up again' : '';
           gate(
             mode === 'user'
