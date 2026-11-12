@@ -915,28 +915,36 @@ test("the session list counts a task held for the user's review by the project's
 test("the session list reads the project's review mode only where it counts, and once a repository (#165)", async () => {
   const store = await freshStore();
   const { confirmDesign, markDelivered, submitPlan } = await import('../shared/plan.ts');
-  const submitted = (mode: 'managed' | 'tracked', settings?: { review: 'self'; parallel: number; maxRounds: number }) => (s: { plan: import('../shared/types.ts').Plan | null }) => {
-    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { target: 'session', mode, prompt: 'p', ...(settings ? { settings } : {}) }));
+  type Submit = Parameters<typeof submitPlan>[1];
+  const submitted = (input: Partial<Submit>) => (s: { plan: import('../shared/types.ts').Plan | null }) => {
+    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { target: 'session', prompt: 'p', ...input } as Submit));
   };
-  const dir = process.cwd();
-  for (const [id, how] of [
-    ['m1', submitted('managed')],
-    ['m2', submitted('managed')],
-    ['own', submitted('managed', { review: 'self', parallel: 1, maxRounds: 3 })],
-    ['tracked', submitted('tracked')],
+  // Each kind in a folder of its own, so reading one it should not shows as a read of its own folder.
+  const folder = (name: string) => {
+    const dir = path.join(home, `rl-${name}`);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+  const shared = folder('managed');
+  for (const [id, dir, how] of [
+    ['m1', shared, submitted({ mode: 'managed' })],
+    ['m2', shared, submitted({ mode: 'managed' })],
+    ['own', folder('own'), submitted({ mode: 'managed', settings: { review: 'self', parallel: 1, maxRounds: 3 } })],
+    ['tracked', folder('tracked'), submitted({ mode: 'tracked' })],
+    ['export', folder('export'), submitted({ target: 'elsewhere' })],
   ] as const) {
     store.ensure(id, dir);
     store.publishPlan(id, PLAN);
     store.mutate(id, how);
   }
-  store.ensure('unpublished', dir);
+  store.ensure('unpublished', folder('unpublished'));
   const asked: string[] = [];
   store.reviewFor = (s) => {
     asked.push(s.sessionId);
     return 'user';
   };
   store.summaries();
-  // Only builds on the repository's defaults that hold work for review (Managed): the two in one repository, once.
+  // Only builds on the repository's defaults that hold work for review (Managed): the two in one folder, once.
   assert.equal(asked.length, 1, JSON.stringify(asked));
-  assert.ok(['m1', 'm2'].includes(asked[0]!));
+  assert.ok(['m1', 'm2'].includes(asked[0]!), JSON.stringify(asked));
 });

@@ -1,13 +1,13 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { unlinkSync, appendFileSync, existsSync, linkSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { unlinkSync, appendFileSync, existsSync, linkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { SessionStore } from './store.ts';
-import { ReviewReads } from './reviewReads.ts';
+import { ProjectConfigs } from './projectConfigs.ts';
 import { isIdle } from './idle.ts';
 import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from './http.ts';
 import { ingestHook } from './hookIngest.ts';
@@ -50,10 +50,10 @@ import {
   validMode,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, filesInScope, hookScope, loadProjectConfig, taskHooks, type ProjectConfig } from '../shared/project.ts';
+import { HOOK_STAGES, filesInScope, hookScope, taskHooks, type ProjectConfig } from '../shared/project.ts';
 import { changedFiles, changedSince, committedOn, headCommit, unreadWords, worktreeOf, type ChangedFiles } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
-import { ConfigCache, configStamp, globalConfigFile, projectHarnessFile, type HarnessConfig } from '../shared/config.ts';
+import { ConfigCache, globalConfigFile, projectHarnessFile, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
@@ -510,45 +510,13 @@ function buildRouter(deps: Deps): Router {
 
   const configFor = (session: SessionState): HarnessConfig => config.get(session.repoRoot ?? session.cwd);
 
-  /** The repository's `.coplan/config.json` over the user's own layer. Read
-   *  again as soon as any file it came from changes — an edit counts at
-   *  once — and otherwise kept: a stat per file, not a read and a parse of
-   *  every one, on each call. */
-  const projects = new Map<string, { stamp: string; config: ProjectConfig }>();
-  /** Told, after the read, of each repository whose review mode a read
-   *  found changed, with the new one: an open page has it sent. */
-  const reviewChanges = new Set<(root: string, review: ReviewMode) => void>();
-  /** Each repository's review mode as last read, to tell a change (#163). */
-  const reviewRead = new ReviewReads(MAX_PROJECT_CONFIGS);
+  /** Each repository's config, cached, and who is told when a read finds
+   *  its review mode changed (projectConfigs.ts). */
+  const projects = new ProjectConfigs(MAX_PROJECT_CONFIGS);
+  const reviewChanges = projects.reviewChanges;
   // The session list judges what waits on the user by it too.
   reviewChanges.add(() => store.broadcastSessionList());
-  const projectAt = (root: string): ProjectConfig => {
-    const hit = projects.get(root);
-    if (hit && hit.config.sources && configStamp(hit.config.sources) === hit.stamp) {
-      // A cached read keeps the repository among those known.
-      reviewRead.saw(root, hit.config.settings.review);
-      return hit.config;
-    }
-    const started = Date.now();
-    const config = loadProjectConfig(root);
-    if (projects.size >= MAX_PROJECT_CONFIGS) projects.clear();
-    // A file saved while it was being read may have been read half old: if
-    // any changed since the load began, nothing is kept, and the next call
-    // reads it again.
-    const sources = config.sources ?? [];
-    const settled = !sources.some((f) => {
-      try {
-        return statSync(f).mtimeMs >= started - 1;
-      } catch {
-        return false;
-      }
-    });
-    if (settled) projects.set(root, { stamp: configStamp(sources), config });
-    else projects.delete(root);
-    const review = config.settings.review;
-    if (reviewRead.saw(root, review)) queueMicrotask(() => reviewChanges.forEach((fn) => fn(root, review)));
-    return config;
-  };
+  const projectAt = (root: string): ProjectConfig => projects.at(root);
   const projectFor = (session: SessionState): ProjectConfig => projectAt(session.repoRoot ?? session.cwd);
 
   /** How a brief is rendered for a session: the same for the agent's tool
