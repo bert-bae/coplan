@@ -513,6 +513,7 @@ function buildRouter(deps: Deps): Router {
   /** Each repository's config, cached, and who is told when a read finds
    *  its review mode changed (projectConfigs.ts). */
   const projects = new ProjectConfigs(MAX_PROJECT_CONFIGS);
+  projects.logError = log;
   const reviewChanges = projects.reviewChanges;
   // The session list judges what waits on the user by it too.
   reviewChanges.add(() => store.broadcastSessionList());

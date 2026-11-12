@@ -1,4 +1,5 @@
 import { statSync } from 'node:fs';
+import { inspect } from 'node:util';
 import { configStamp } from '../shared/config.ts';
 import { loadProjectConfig, type ProjectConfig } from '../shared/project.ts';
 import type { ReviewMode } from '../shared/types.ts';
@@ -40,6 +41,8 @@ export class ProjectConfigs {
   /** Told of each repository whose review mode a read found changed, with
    *  the new one: an open page has it sent, the session list too. */
   readonly reviewChanges = new Set<(root: string, review: ReviewMode) => void>();
+  /** Where a listener's error goes: the daemon sets its log (B83). */
+  logError: (message: string) => void = () => {};
 
   /** `max`: configs kept. `knownReviews`: repositories whose review mode is
    *  remembered — more than one session-list pass reads (the list holds 120
@@ -73,12 +76,12 @@ export class ProjectConfigs {
     const review = config.settings.review;
     if (this.reviews.saw(root, review)) {
       queueMicrotask(() => {
-        // Each on its own: one that fails (a page gone mid-write) stops none of the others.
+        // Each on its own: one that fails is logged and stops none of the others.
         for (const fn of this.reviewChanges) {
           try {
             fn(root, review);
-          } catch {
-            /* that one's own to say */
+          } catch (err) {
+            this.logError(`review change listener failed: ${inspect(err)}`);
           }
         }
       });

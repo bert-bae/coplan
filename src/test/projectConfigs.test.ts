@@ -110,3 +110,40 @@ test("one session-list pass over many repositories does not push out an open pag
   await Promise.resolve();
   assert.deepEqual(out, ['page:subagent']);
 });
+
+test('a source file that does not exist (a global instruction file never written) still lets the read be kept', () => {
+  // Sources are listed whether present or not; a missing one has no mtime and must count as settled.
+  let loads = 0;
+  const files: ProjectFiles = {
+    load: () => {
+      loads++;
+      return { sources: ['present', 'missing'], settings: { review: 'self' } } as unknown as ProjectConfig;
+    },
+    stamp: (sources) => sources.join(','),
+    mtime: (file) => (file === 'present' ? 0 : undefined),
+    now: () => 1_000,
+  };
+  const projects = new ProjectConfigs(10, files);
+  projects.at('a');
+  projects.at('a');
+  assert.equal(loads, 1);
+});
+
+test("a listener that fails has its error logged, not swallowed (B83)", async () => {
+  const { files, edit } = disk();
+  const logged: string[] = [];
+  const projects = new ProjectConfigs(10, files);
+  projects.logError = (message) => logged.push(message);
+  projects.reviewChanges.add(() => {
+    throw new Error('a page gone');
+  });
+  const out = told(projects);
+  edit('a', 'user');
+  projects.at('a');
+  edit('a', 'self');
+  projects.at('a');
+  await Promise.resolve();
+  assert.equal(logged.length, 1);
+  assert.match(logged[0]!, /a page gone/);
+  assert.deepEqual(out, ['a:self'], 'the next listener still told');
+});
