@@ -1002,6 +1002,9 @@ test('a finished task taken up again keeps its one round past the limit through 
   // A stale one on a done task (an older build, a hand edit) is dropped on load.
   const stale = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'done', order: 0, parentId: null, round: 2, reopened: true }] } as unknown as Plan & Record<string, unknown>, 'x');
   assert.equal(stale.tasks[0]!.reopened, undefined);
+  // Nor on a task already in review (an older build sent it there without clearing it).
+  const inReview = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'in_progress', stage: 'review', order: 0, parentId: null, round: 4, reopened: true }] } as unknown as Plan & Record<string, unknown>, 'x');
+  assert.equal(inReview.tasks[0]!.reopened, undefined);
 });
 
 test('a task the agent puts back to todo keeps its round across a restart, as the edit kept it', () => {

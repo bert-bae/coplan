@@ -1401,7 +1401,16 @@ function buildRouter(deps: Deps): Router {
         // Without a round there is no verdict to miss: that note is above.
         // Not in review: the verdict is given in a review round, so that is
         // where to go (a finished task taken up again lost its pass).
-        if (!passed && task.round && task.stage !== 'review') {
+        // Not in review, its rounds used, and no new one its own: another
+        // round, or done as it is, is the user's to allow.
+        if (!passed && task.round && task.stage !== 'review' && task.round >= settings.maxRounds && !takenUpAgain) {
+          gate(
+            `"${task.title}" is not in review, and has had ${task.round} review round(s), the most the user allowed (${settings.maxRounds}): ` +
+              'another round, or done as it is, is theirs to allow. Mark it blocked with a note on what still fails; when they decide, ' +
+              'call again with user_approved: true and their words in the note.',
+            `not in review, and its ${task.round} review round(s) are the most a Managed build allows`,
+          );
+        } else if (!passed && task.round && task.stage !== 'review') {
           const why = task.reopened ? ': its last pass went when it was taken up again' : '';
           gate(
             mode === 'user'

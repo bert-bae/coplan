@@ -396,7 +396,9 @@ export function useKeptDraft(sessionId: string | null, field: string | null, val
         }
         // Gone from the kept drafts, unless an editor drawn anew meanwhile
         // (since let go) holds more than was sent.
-        if (key && openDrafts.get(key)?.draft === sent) openDrafts.delete(key);
+        // (Or cleared while it went: nothing there to keep.)
+        const keptNow = key ? openDrafts.get(key) : undefined;
+        if (key && keptNow && (keptNow.draft.trim() === sent.trim() || !keptNow.draft.trim())) openDrafts.delete(key);
         // Back to how it opens: closed, or (a comment composer) open, empty.
         setEditing(openAtFirst);
         return true;

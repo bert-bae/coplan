@@ -1076,6 +1076,44 @@ test('a new comment typed on while it is posted keeps only what came after, so n
   assert.equal(unsavedDrafts(), true, 'kept after a post, as before one');
 });
 
+test('a field cleared while its save is out closes as saved, on screen or off', async () => {
+  await boot(undefined, (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+    return { plan: next, changes: [] };
+  });
+  await openTab('Overview');
+  const area = () => screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
+  for (const offScreen of [false, true]) {
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+    });
+    fireEvent.change(area(), { target: { value: offScreen ? 'Second.' : 'First.' } });
+    let answer: (() => void) | null = null;
+    const held = new Promise<void>((r) => (answer = r));
+    const realFetch = globalThis.fetch;
+    Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+    try {
+      await act(async () => {
+        fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+      });
+      fireEvent.change(area(), { target: { value: '' } });
+      if (offScreen) await openTab('Tasks');
+    } finally {
+      Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+      answer!();
+    }
+    await act(async () => {
+      await held;
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    assert.equal(unsavedDrafts(), false, `${offScreen ? 'off' : 'on'} screen: nothing left kept`);
+    if (offScreen) await openTab('Overview');
+    assert.equal(screen.queryByLabelText('section "Context"') === null, true, `${offScreen ? 'off' : 'on'} screen: closed`);
+  }
+});
+
 test('a reply typed on while it is posted keeps only what came after, so nothing posts twice', async () => {
   const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
   await boot(makeSession(plan), (route, init) => {

@@ -1182,9 +1182,11 @@ test('each build gate refuses in a Managed build, and in a Tracked one is a note
         assert.equal((await task({ task_id: 'j', status: 'dropped', note: 'user: drop it', user_approved: true }))['ok'], true);
         const oneCall = await task({ task_id: 'j', stage: 'review', checks: [{ name: 'tests', ok: true }] });
         assert.equal(oneCall['ok'], true, `taken up and reviewed in one call: ${String(oneCall['text'])}`);
-        // One accepted past a failing last round (d: done on the user's word) is held to the limit taken up again.
+        // One accepted past a failing last round (d: done on the user's word) is held to the limit taken up again,
+        // and done says so, rather than point to a review the limit refuses.
         await task({ task_id: 'd', status: 'in_progress' });
         await gate({ task_id: 'd', stage: 'review' }, /the most the user allowed \(1\)/, /past the 1 a Managed build allows/);
+        await gate({ task_id: 'd', status: 'done', note: 'x' }, /"D" is not in review, and has had 1 review round\(s\), the most the user allowed \(1\)/, /not in review/);
       }
 
       const plan = (await sessionFor(id)).plan!;

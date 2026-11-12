@@ -427,6 +427,17 @@ test('what is next says what to start, how many at once, and what the rest wait 
   assert.match(one, /already in progress, the most this build runs at once \(1\)/);
 });
 
+test("next warns of the round limit, but not for a finished task taken up again (its next round is its own)", () => {
+  let plan = tasked();
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', stage: 'implement' }], 'claude', undefined, { tracking: true }).plan;
+  const client = plan.tasks.find((t) => t.id === 'client')!;
+  client.round = 3;
+  const opts = { mode: 'managed' as const, settings: { review: 'self' as const, parallel: 3, maxRounds: 3 } };
+  assert.match(renderNext(plan, opts), /3 of 3 review rounds used/);
+  client.reopened = true;
+  assert.doesNotMatch(renderNext(plan, opts), /review rounds used/);
+});
+
 test('when every task is done, next says how to finish', () => {
   const plan = done(tasked(), 'client', 'config', 'invalidate', 'wire', 'docs');
   const next = renderNext(plan, { project: PROJECT, bin: '/x/coplan' });

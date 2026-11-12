@@ -951,7 +951,9 @@ function normalizeTask(task: Task): Task {
   else delete t.checks;
   if (typeof t.startCommit !== 'string' || !/^[0-9a-f]{7,64}$/.test(t.startCommit)) delete t.startCommit;
   if (t.wasDone !== true || t.status !== 'dropped') delete t.wasDone;
-  if (t.reopened !== true || t.status === 'done') delete t.reopened;
+  // Its next round not yet begun: gone once done, or once in review (an
+  // older build may have sent it there without clearing it).
+  if (t.reopened !== true || t.status === 'done' || t.stage === 'review') delete t.reopened;
   // What a task's own checks say, from disk: anything malformed is dropped,
   // never allowed to break a gate.
   const added = Array.isArray(t.addChecks) ? t.addChecks.map(validTaskCheck).filter((c): c is TaskCheck => Boolean(c)) : [];
