@@ -110,3 +110,21 @@ test("one session-list pass over many repositories does not push out an open pag
   await Promise.resolve();
   assert.deepEqual(out, ['page:subagent']);
 });
+
+test('a source file that does not exist (a global instruction file never written) still lets the read be kept', () => {
+  // Sources are listed whether present or not; a missing one has no mtime and must count as settled.
+  let loads = 0;
+  const files: ProjectFiles = {
+    load: () => {
+      loads++;
+      return { sources: ['present', 'missing'], settings: { review: 'self' } } as unknown as ProjectConfig;
+    },
+    stamp: (sources) => sources.join(','),
+    mtime: (file) => (file === 'present' ? 0 : undefined),
+    now: () => 1_000,
+  };
+  const projects = new ProjectConfigs(10, files);
+  projects.at('a');
+  projects.at('a');
+  assert.equal(loads, 1);
+});
