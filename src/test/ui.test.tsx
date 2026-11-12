@@ -90,6 +90,19 @@ const opsSent = () => posts.filter((p) => p.route.endsWith('/plan/ops')).flatMap
 /** The edits sent to one session's plan. */
 const sentTo = (id: string) => posts.filter((p) => p.route === `/api/session/${id}/plan/ops`).flatMap((p) => p.body['ops'] as Record<string, unknown>[]);
 
+/** A held save, let go, and done with: its answer in, and what the editor
+ *  does with it (all in the microtasks after it: none of it waits on a
+ *  timer, so one macrotask after `saving` falls to 0 sees it all). */
+const saved = async (held: Promise<void>) => {
+  await act(async () => {
+    await held;
+  });
+  await waitFor(() => assert.equal(store.getState().saving, 0));
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 0));
+  });
+};
+
 const openTab = async (name: string) => {
   await act(async () => {
     fireEvent.click(screen.getByRole('tab', { name: new RegExp(`^${name}`) }));
@@ -1066,10 +1079,7 @@ test('a section saved, typed on, drawn anew, typed on again and off screen when 
     Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
     answer!();
   }
-  await act(async () => {
-    await held;
-    await new Promise((r) => setTimeout(r, 0));
-  });
+  await saved(held);
   await openTab('Overview');
   assert.equal(area().value, 'First. Second. Third.', 'nothing typed after it was drawn anew is lost');
   assert.equal(document.body.textContent?.includes('This changed while you were editing'), false, 'its own save is no change underneath');
@@ -1330,10 +1340,7 @@ test('a reply box drawn anew while its reply posts, typed on (before it too), ke
       Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
       answer!();
     }
-    await act(async () => {
-      await held;
-      await new Promise((r) => setTimeout(r, 0));
-    });
+    await saved(held);
     if (offScreen) {
       await openTab('Tasks');
       if (!screen.queryByRole('textbox', { name: 'Reply' })) await details();
@@ -2487,7 +2494,7 @@ test('a change request being typed is offered to copy when the task no longer wa
   assert.equal(offered().length, 2, 'its own request is not offered');
 });
 
-test("the board asks for the user's verdict where the project has them review and the plan does not say (a Tracked build)", async () => {
+test("the board asks for the user's verdict where the project has them review and the plan does not say (a Managed build on the repository's defaults)", async () => {
   const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
   const plan = claude(lockedPlan(true), { op: 'upsert_task', id: 't3', stage: 'review' });
   assert.equal(plan.submission?.settings === undefined, true, 'the plan holds no review mode');
@@ -2495,9 +2502,12 @@ test("the board asks for the user's verdict where the project has them review an
   await boot(session, (route, init) => (/^\/api\/session\/[^/]+$/.test(route) && !init?.method ? { session, projectReview: 'user' } : undefined));
   await openTab('Tasks');
   const box = () => within(document.getElementById('task-t3')!).queryByRole('group', { name: 'Your review of Wire into API' });
-  assert.equal(box() !== null, true, "the user's verdict is asked for");
-  // And the header says the build waits on them (#162).
-  assert.equal(document.body.textContent?.includes('1 task waits on your review'), true, 'the status says so');
+  await waitFor(() => assert.equal(box() !== null, true, "the user's verdict is asked for"));
+  // And the header's status says the build waits on them (#162).
+  await openTab('Architecture');
+  const pill = screen.getByTestId('plan-status');
+  assert.match(pill.textContent ?? '', /Review · 1 task waits on your review/);
+  assert.match(screen.getByRole('region', { name: 'The build' }).textContent ?? '', /Review · 1 task waits on your review/, 'and the build strip');
   // A change request kept for it stays kept when the plan lands again.
   const key = `${session.sessionId}:review:t3:1`;
   openDrafts.set(key, { draft: 'Add a timeout', value: '', version: undefined });
