@@ -300,7 +300,7 @@ the audit's finding numbers.
 
 ### Batch 2
 
-Rows T10 and B83 (bert-bae/coplan#171), then the batch's one re-audit. F30, B38
+Rows T10 and B83 (bert-bae/coplan#171), then the batch's one re-audit (done: no must or should fix; see *Re-audit report (batch 2)*). F30, B38
 and B79 stay `needs-decision` (D2-D4 not answered yet).
 
 | Row | What | Phase | Status | Commit |
@@ -1186,3 +1186,20 @@ the backlog, and batch 1 ends here.
 3. The `Math.max(1, knownReviews)` clamp untested. 4. drafts.ts's "kept with more" guard: two copies of a box are drawn (ByBox, a task under two boxes, on a locked plan) but none editable; were one, the copy's own watcher already trims the sent text and the sender's effect overwrites the guard's write, so the branch is redundant and its comment inaccurate: delete it. 5. Two held sends (ui.test.tsx ~1532, ~2814) do not settle through `saved`. 6. Nothing checks `saving` is 0 between UI tests.
 
 No code defect found in the batch's own changes. Checked and fine: ProjectConfigs matches the old closure (a missing file still counts as unchanged); every caller in main.ts wired, in order; listeners removed on SSE close; integration 81/81 and UI 155/155 in each auditor's copy, alone and three at once; every fix pinned (each reverted).
+
+## Re-audit report (batch 2, 2026-11-12)
+
+The batch's one re-audit, of what it touched: `daemon/projectConfigs.ts`
+(and `reviewReads.ts` it calls), its wiring in `daemon/main.ts`, and
+`test/projectConfigs.test.ts`. No must fix, no should fix: nothing goes to
+the backlog, and batch 2 ends here.
+
+### Nice to have (not rows)
+
+- `at`'s cache-hit test needs `hit.config.sources`, while the stored stamp
+  is taken over `sources ?? []`: a config with no `sources` would never be
+  read from the cache. The loader always sets it (shared/project.ts), so
+  only a stand-in can hit this.
+- A `logError` that throws would leave the listener loop and skip the
+  listeners after it (found reviewing B83). The daemon's `log` catches its
+  own write errors, so it cannot now.
