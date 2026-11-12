@@ -322,7 +322,8 @@ export function sharedFiles(a: Task, b: Task): string[] {
  *  a parent. */
 export function dependents(plan: Tasks, task: Task): Task[] {
   const mine = new Set(leavesUnder(plan, task.id).map((t) => t.id));
-  return leafTasks(plan).filter((leaf) => !mine.has(leaf.id) && inheritedDeps(plan, leaf).some((id) => leavesUnder(plan, id).some((l) => mine.has(l.id))));
+  // One dropped waits on nothing.
+  return leafTasks(plan).filter((leaf) => leaf.status !== 'dropped' && !mine.has(leaf.id) && inheritedDeps(plan, leaf).some((id) => leavesUnder(plan, id).some((l) => mine.has(l.id))));
 }
 
 /* ------------------------------------------------------------------ *

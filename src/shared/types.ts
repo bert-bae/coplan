@@ -238,6 +238,13 @@ export interface Task {
   /** Each review's verdict, newest last: who gave it, in which round, under
    *  which review mode. Done needs a pass for the current round. */
   reviews?: ReviewRecord[];
+  /** Dropped while it was done: taken up again for work, its round's
+   *  verdicts go, as they do when it leaves done; set done again (the drop
+   *  undone), they stay. */
+  wasDone?: boolean;
+  /** Finished, and taken up again: its round's verdicts went, so its next
+   *  review round is not held to the round limit (that round never failed). */
+  reopened?: boolean;
   /** Checks of its own, on top of the repository's (#54): required unless
    *  `optional`. The user's to set (`set_checks`), or an accepted proposal's.
    *  Subtasks inherit them. */
@@ -889,7 +896,8 @@ export interface SessionSummary {
  * ------------------------------------------------------------------ */
 
 export type ServerEvent =
-  | { type: 'snapshot'; session: SessionState }
+  /** `projectReview`: the session's repository review mode (the daemon adds it). */
+  | { type: 'snapshot'; session: SessionState; projectReview?: ReviewMode }
   | { type: 'sessions'; sessions: SessionSummary[] }
   | { type: 'ping'; ts: number }
   /** A session's state could not be written to disk: edits are not saved. */

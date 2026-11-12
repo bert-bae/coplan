@@ -187,7 +187,7 @@ there Managed by default (see [`mode`](#mode)):
 | --- | --- | --- |
 | `review` | `self` | Who reviews a task that does not say otherwise: `subagent` (a fresh agent that did not write the change, where the agent has subagents), `self`, `user` (Claude stops and asks you), or `skip` (the review checks only). |
 | `parallel` | `1` | How many ready tasks are built at once — with subagents, where the agent has them. 1 to 8. |
-| `maxRounds` | `3` | Review rounds a task may take; another past them is yours to allow. 1 to 10. |
+| `maxRounds` | `3` | Review rounds a task may take; another past them is yours to allow. 1 to 10. A finished task taken up again on a passing last round gets one more. Under `skip` there is no verdict, so closing a task done counts as passing: any that went to review gets one more, even one you accepted as it was over failing checks. |
 
 The defaults assume nothing about the agent: it reviews its own change,
 one task at a time. Set `review: "subagent"` or a higher `parallel` where

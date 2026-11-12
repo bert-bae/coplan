@@ -63,9 +63,9 @@ const progress = (p: Plan, id: string, fields: Record<string, unknown>) =>
   applyOps(p, [{ op: 'upsert_task', id, ...fields } as never], 'claude', undefined, { tracking: true }).plan;
 
 test('each phase of a real plan shows its status, with its detail', () => {
-  const said = (p: Plan) => statusWords(statusFacts(p), 'Claude');
+  const said = (p: Plan) => statusWords(statusFacts(p, 'self'), 'Claude');
   const designing = plan();
-  assert.equal(planStatus(designing), 'planning');
+  assert.equal(planStatus(designing, 'self'), 'planning');
   assert.equal(said(designing), 'Planning', 'nothing to add while designing');
   const confirmed = confirmDesign(designing, { prompt: 'd' });
   assert.equal(planPhase(confirmed), 'tasking');
@@ -82,38 +82,48 @@ test('each phase of a real plan shows its status, with its detail', () => {
   built = applyOps(built, [{ op: 'report', text: 'Built.' }], 'claude').plan;
   assert.equal(said(built), 'Done · built');
   assert.equal(said(building('export')), 'Done · exported');
-  assert.equal(planStatus(null), 'planning', 'a session with no plan yet is planning');
+  assert.equal(planStatus(null, 'self'), 'planning', 'a session with no plan yet is planning');
 });
 
 test('a task a Managed build holds for the user\'s review is Review, until they answer it', () => {
   // `wire` is the user's to review; `client` the build's default (self).
   let p = building();
   p = progress(p, 'client', { stage: 'review' });
-  assert.equal(planStatus(p), 'in_progress', 'a review the agent runs is not the user\'s');
+  assert.equal(planStatus(p, 'self'), 'in_progress', 'a review the agent runs is not the user\'s');
   p = progress(p, 'client', { status: 'done' });
   p = progress(p, 'wire', { stage: 'implement' });
-  assert.equal(planStatus(p), 'in_progress');
+  assert.equal(planStatus(p, 'self'), 'in_progress');
   p = progress(p, 'wire', { stage: 'review' });
-  assert.deepEqual(awaitingUserReview(p).map((t) => t.id), ['wire']);
-  assert.equal(planStatus(p), 'review');
-  assert.equal(statusDetail(statusFacts(p), 'Claude'), '1 task waits on your review');
+  assert.deepEqual(awaitingUserReview(p, 'self').map((t) => t.id), ['wire']);
+  assert.equal(planStatus(p, 'self'), 'review');
+  assert.equal(statusDetail(statusFacts(p, 'self'), 'Claude'), '1 task waits on your review');
   // The user's verdict, given: back to In progress, whichever it was.
   const passed = applyOps(p, [{ op: 'review_task', id: 'wire', verdict: 'pass' }], 'user').plan;
-  assert.equal(planStatus(passed), 'in_progress');
+  assert.equal(planStatus(passed, 'self'), 'in_progress');
   const changes = applyOps(p, [{ op: 'review_task', id: 'wire', verdict: 'changes' }], 'user').plan;
-  assert.equal(planStatus(changes), 'in_progress');
+  assert.equal(planStatus(changes, 'self'), 'in_progress');
   // A new round waits on them again.
-  assert.equal(planStatus(progress(progress(changes, 'wire', { stage: 'refine' }), 'wire', { stage: 'review' })), 'review');
+  assert.equal(planStatus(progress(progress(changes, 'wire', { stage: 'refine' }), 'wire', { stage: 'review' }), 'self'), 'review');
 });
 
 test('the build\'s own default reviewer counts, and a Tracked build holds nothing for anyone', () => {
   let p = building('managed', { ...SETTINGS, review: 'user' });
   p = progress(p, 'client', { stage: 'review' });
-  assert.equal(planStatus(p), 'review', 'the user reviews every task by default');
+  assert.equal(planStatus(p, 'self'), 'review', 'the user reviews every task by default');
   let tracked = building('tracked');
   tracked = progress(tracked, 'wire', { stage: 'review' });
-  assert.deepEqual(awaitingUserReview(tracked), []);
-  assert.equal(planStatus(tracked), 'in_progress');
+  assert.deepEqual(awaitingUserReview(tracked, 'self'), []);
+  assert.equal(planStatus(tracked, 'self'), 'in_progress');
   // Not submitted: nothing is being built, so nothing waits on a review.
-  assert.deepEqual(awaitingUserReview(plan()), []);
+  assert.deepEqual(awaitingUserReview(plan(), 'self'), []);
+});
+
+test("a Managed build submitted on the repository's defaults holds a task for the user where the repository has them review (#162)", () => {
+  let p = markDelivered(submitPlan(confirmDesign(plan(), { prompt: 'd' }), { target: 'session', mode: 'managed', prompt: 'p' }));
+  assert.equal(p.submission?.settings === undefined, true, 'no settings of its own');
+  p = progress(p, 'client', { stage: 'review' });
+  assert.deepEqual(awaitingUserReview(p, 'user').map((t) => t.id), ['client'], "the repository's mode, as the daemon's gates judge by");
+  assert.equal(planStatus(p, 'user'), 'review');
+  assert.equal(statusFacts(p, 'user').awaitingReview, 1);
+  assert.equal(planStatus(p, 'self'), 'in_progress');
 });

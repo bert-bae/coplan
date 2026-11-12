@@ -940,8 +940,9 @@ test("the repository's customizations reach the agent, and its errors and final 
     const design = await post<Preview & { project: { planCheck: Record<string, string> } }>(`/api/session/${id}/plan/design/prompt`);
     assert.match(design.prompt, /## Standing instructions[\s\S]*Name every box after its service\./);
     assert.deepEqual(design.project.planCheck, { 'box-undescribed': 'error', 'comment-unanswered': 'off' }, 'the page is told how gaps count');
-    const opened = await call<{ planCheck?: Record<string, string> }>(`/api/session/${id}`);
+    const opened = await call<{ planCheck?: Record<string, string>; projectReview?: string }>(`/api/session/${id}`);
     assert.deepEqual(opened.planCheck, { 'box-undescribed': 'error', 'comment-unanswered': 'off' }, 'and so is the canvas, which marks the boxes the check lists');
+    assert.equal(opened.projectReview, 'subagent', "and the board, who reviews where the plan does not say");
     const brief = String((await mcpFor(id, 'brief', { task_id: 't2' }))['text']);
     assert.match(brief, /Write the test first\./);
     assert.match(brief, /Run the reviewer on the `opus` model\./);
@@ -1075,7 +1076,7 @@ test('each build gate refuses in a Managed build, and in a Tracked one is a note
   const GATED = {
     title: 'Gates',
     summary: 'One task per gate.',
-    tasks: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'].map((id) => ({ id, title: id.toUpperCase(), ...(id === 'e' ? { review: 'user' as const } : {}) })),
+    tasks: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'].map((id) => ({ id, title: id.toUpperCase(), ...(id === 'e' ? { review: 'user' as const } : {}) })),
   };
   for (const mode of ['managed', 'tracked'] as const) {
     mkdirSync(dir, { recursive: true });
@@ -1151,7 +1152,11 @@ test('each build gate refuses in a Managed build, and in a Tracked one is a note
       await task({ task_id: 'f', stage: 'implement' });
       await task({ task_id: 'f', stage: 'review' });
       await task({ task_id: 'f', stage: 'refine' });
-      await gate({ task_id: 'f', stage: 'review' }, /the most the user allowed \(1\)/, /this is review round 2, past the 1 a Managed build allows/);
+      await gate(
+        { task_id: 'f', stage: 'review' },
+        /the most the user allowed \(1\)\. Stop: .*stage "review" for another round, status "done" to accept it/,
+        /this is review round 2, past the 1 the user set: say in the task's note why another round is worth it/,
+      );
       await settle('f');
       // A start past the parallel limit.
       await task({ task_id: 'g', stage: 'implement' });
@@ -1160,6 +1165,55 @@ test('each build gate refuses in a Managed build, and in a Tracked one is a note
       await settle('h');
       // Dropping work the user signed off.
       await gate({ task_id: 'i', status: 'dropped', note: 'not needed' }, /dropping it is theirs to decide/, /it was part of the plan the user submitted: tell them you dropped it/);
+      // A finished task dropped and taken up again: its pass went, so done points to a new review round, which
+      // the round limit does not hold against it (the last round passed).
+      await task({ task_id: 'j', stage: 'implement' });
+      await task({ task_id: 'j', stage: 'review', checks: [{ name: 'tests', ok: true }] });
+      const passed = await task({ task_id: 'j', status: 'done', verdict: 'pass', note: 'passes' });
+      assert.equal(passed['ok'], true, String(passed['text']));
+      assert.equal((await task({ task_id: 'j', status: 'dropped', note: 'user: drop it', user_approved: true }))['ok'], true);
+      assert.equal((await task({ task_id: 'j', status: 'in_progress' }))['ok'], true);
+      await gate(
+        { task_id: 'j', status: 'done', note: 'x' },
+        /"J" is not in review: its last pass went when it was taken up again\. Report stage "review" \(a new round\)/,
+        /not in review: its last pass went when it was taken up again/,
+      );
+      if (mode === 'managed') {
+        const again = await task({ task_id: 'j', stage: 'review', checks: [{ name: 'tests', ok: true }] });
+        assert.equal(again['ok'], true, `a new round, past the limit: ${String(again['text'])}`);
+        const done = await task({ task_id: 'j', status: 'done', verdict: 'pass', note: 'passes again' });
+        assert.equal(done['ok'], true, String(done['text']));
+        // Dropped again and sent straight to review in one call: a new round too.
+        assert.equal((await task({ task_id: 'j', status: 'dropped', note: 'user: drop it', user_approved: true }))['ok'], true);
+        const oneCall = await task({ task_id: 'j', stage: 'review', checks: [{ name: 'tests', ok: true }] });
+        assert.equal(oneCall['ok'], true, `taken up and reviewed in one call: ${String(oneCall['text'])}`);
+        // One accepted past a failing last round (d: done on the user's word) is held to the limit taken up again,
+        // and done says so, rather than point to a review the limit refuses.
+        await task({ task_id: 'd', status: 'in_progress' });
+        await gate({ task_id: 'd', stage: 'review' }, /the most the user allowed \(1\)/, /past the 1 the user set/);
+        await gate(
+          { task_id: 'd', status: 'done', note: 'x' },
+          /"D" is not in review, and has had 1 review round\(s\), the most the user allowed \(1\)\. Stop: .*stage "review" for another round, status "done" to accept it/,
+          /not in review/,
+        );
+        // Each way it points goes: blocked, then another round as the user allowed, …
+        assert.equal((await task({ task_id: 'd', status: 'blocked', note: 'still fails: the retry test' }))['ok'], true);
+        const allowed = await task({ task_id: 'd', stage: 'review', note: 'user: one more round', user_approved: true });
+        assert.equal(allowed['ok'], true, `another round: ${String(allowed['text'])}`);
+        // … and, that round asking for changes too, done as it is.
+        await task({ task_id: 'd', stage: 'refine' });
+        assert.equal((await task({ task_id: 'd', status: 'blocked', note: 'still fails' }))['ok'], true);
+        const accepted = await task({ task_id: 'd', status: 'done', note: 'user: accept it as it is', user_approved: true });
+        assert.equal(accepted['ok'], true, `accepted as it is: ${String(accepted['text'])}`);
+      } else {
+        // In a Tracked build the limit is the agent's to weigh, on done as on a round past it: the done goes
+        // through, and the agent is asked why, not pointed to a new round.
+        await task({ task_id: 'd', status: 'in_progress' });
+        const noted = String((await task({ task_id: 'd', status: 'done', note: 'x' }))['text']);
+        assert.match(noted, /Noted, not refused \(this build is Tracked\): marked done out of review after 1 review round\(s\), the most the user set: say in the task's note why it is right as it is/);
+        assert.doesNotMatch(noted, /a new round/);
+        assert.equal((await sessionFor(id)).plan!.tasks.find((t) => t.id === 'd')!.status, 'done');
+      }
 
       const plan = (await sessionFor(id)).plan!;
       const statuses = Object.fromEntries(plan.tasks.map((t) => [t.id, t.status]));
@@ -1232,6 +1286,70 @@ test('dropping a task needs a reason; dropping or reopening one says what it mea
   await task({ task_id: 't4', stage: 'implement' });
   const reopened = String((await task({ task_id: 't3', status: 'in_progress', stage: 'refine' }))['text']);
   assert.match(reopened, /t4 "Wire up" \(in progress\) already went ahead on this task's work/);
+
+  // Finished again, then dropped: said then, as reopening it from dropped later has no way to know.
+  await task({ task_id: 't3', stage: 'review' });
+  assert.equal((await task({ task_id: 't3', status: 'done', verdict: 'pass', note: 'done again' }))['ok'], true);
+  const droppedDone = String((await task({ task_id: 't3', status: 'dropped', note: 'superseded' }))['text']);
+  assert.match(droppedDone, /t4 "Wire up" \(in progress\) already went ahead on this task's work: check they still hold without it/);
+  assert.doesNotMatch(droppedDone, /no longer do/, 'said once, not as waiting too');
+
+  // Taken up again by stage alone: said as well.
+  const other = 'scope-session-stage';
+  const otherTask = (body: Record<string, unknown>) => mcpFor(other, 'task', body);
+  await hookFor(other, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(other, 'publish', PLAN);
+  await mcpFor(other, 'edit', { ops: [{ op: 'upsert_task', id: 't4', dependsOn: ['t1'] }] });
+  await otherTask({ task_id: 't2', status: 'dropped', note: 'the client already exists' });
+  await otherTask({ task_id: 't3', stage: 'review' });
+  assert.equal((await otherTask({ task_id: 't3', status: 'done', verdict: 'pass', note: 'done' }))['ok'], true);
+  await otherTask({ task_id: 't4', stage: 'implement' });
+  const byStage = String((await otherTask({ task_id: 't3', stage: 'refine' }))['text']);
+  assert.match(byStage, /t4 "Wire up" \(in progress\) already went ahead on this task's work: check they still hold once it changes/);
+});
+
+test('dropping a task does not tell a dependent that is itself dropped that it no longer waits', async () => {
+  const id = 'scope-session-dropped-dependent';
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't4', dependsOn: ['t3'] }] });
+  assert.equal((await task({ task_id: 't4', status: 'dropped', note: 'not needed' }))['ok'], true);
+  const reply = await task({ task_id: 't3', status: 'dropped', note: 'not needed either' });
+  assert.equal(reply['ok'], true, String(reply['text']));
+  assert.doesNotMatch(String(reply['text']), /t4 "Wire up"/);
+});
+
+test('a task never finished, dropped, does not tell a dependent already done that it waited on it', async () => {
+  const id = 'scope-session-done-dependent';
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await task({ task_id: 't4', stage: 'review' });
+  assert.equal((await task({ task_id: 't4', status: 'done', verdict: 'pass', note: 'done' }))['ok'], true);
+  // Found to build on t3 after it was done.
+  const edited = await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't4', dependsOn: ['t3'] }] });
+  assert.equal(edited['ok'], true, String(edited['text']));
+  const reply = await task({ task_id: 't3', status: 'dropped', note: 'not needed' });
+  assert.equal(reply['ok'], true, String(reply['text']));
+  assert.doesNotMatch(String(reply['text']), /waited on it/);
+});
+
+test('a finished task taken up from a drop says who went ahead on its work, as one taken up from done does', async () => {
+  const id = 'scope-session-from-drop';
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't4', dependsOn: ['t1'] }] });
+  await task({ task_id: 't2', status: 'dropped', note: 'the client already exists' });
+  await task({ task_id: 't3', stage: 'review' });
+  assert.equal((await task({ task_id: 't3', status: 'done', verdict: 'pass', note: 'done' }))['ok'], true);
+  assert.equal((await task({ task_id: 't3', status: 'dropped', note: 'superseded' }))['ok'], true);
+  await task({ task_id: 't4', stage: 'implement' });
+  await task({ task_id: 't4', status: 'blocked', note: 'waiting on t3' });
+  const reopened = await task({ task_id: 't3', status: 'in_progress' });
+  assert.equal(reopened['ok'], true, String(reopened['text']));
+  assert.match(String(reopened['text']), /t4 "Wire up" \(blocked\) already went ahead on this task's work: check they still hold once it changes/);
 });
 
 test("done needs the round's passing verdict — the user's own, when the user reviews it", async () => {
@@ -1768,8 +1886,10 @@ test("done waits on the checks for what the task changed since it began — not 
 
 /** The `config-errors` events a page's live stream for `session` receives,
  *  as they come; `close` ends the stream. */
-async function settingsStream(session: string): Promise<{ events: string[][]; files: string[][]; close: () => void }> {
+async function settingsStream(session: string): Promise<{ events: string[][]; files: string[][]; reviews: string[]; lists: { n: number }; close: () => void }> {
   const events: string[][] = [];
+  const reviews: string[] = [];
+  const lists = { n: 0 };
   const files: string[][] = [];
   const { ticket } = await call<{ ticket: string }>('/api/events/ticket', { method: 'POST', body: '{}' });
   let req: http.ClientRequest | undefined;
@@ -1783,7 +1903,9 @@ async function settingsStream(session: string): Promise<{ events: string[][]; fi
           const frame = buf.slice(0, cut);
           buf = buf.slice(cut + 2);
           if (!frame.startsWith('data: ')) continue;
-          const event = JSON.parse(frame.slice(6)) as { type: string; errors?: string[]; files?: string[] };
+          const event = JSON.parse(frame.slice(6)) as { type: string; errors?: string[]; files?: string[]; projectReview?: string };
+          if (event.type === 'snapshot') reviews.push(String(event.projectReview));
+          if (event.type === 'sessions') lists.n++;
           if (event.type === 'config-errors') {
             events.push(event.errors!);
             files.push(event.files!);
@@ -1794,7 +1916,7 @@ async function settingsStream(session: string): Promise<{ events: string[][]; fi
     });
     req.on('error', reject);
   });
-  return { events, files, close: () => req?.destroy() };
+  return { events, files, reviews, lists, close: () => req?.destroy() };
 }
 
 test('a page opened on a session that cannot be saved is told, though the failure was heard before it opened', async () => {
@@ -1854,6 +1976,8 @@ test("a mistake in the harness config reaches the page: when it opens, and as so
     assert.match(first.join('\n'), /harness\.json: "promptNotice" must be true or false/);
     assert.match(first.join('\n'), /harness\.json: "idleShutdownMinutes" can only be set in the global config/);
     assert.ok(page.files[0]!.some((f) => f.endsWith(path.join('.claude', 'harness.json'))), 'it says which files it speaks for');
+    // Its plan comes with who reviews where the plan does not say.
+    assert.ok(page.reviews.length > 0 && page.reviews.every((r) => r === 'self'), JSON.stringify(page.reviews));
 
     // A page that asked for a session the daemon did not hold yet watches
     // its repository once the session arrives.
@@ -1888,6 +2012,77 @@ test("a mistake in the harness config reaches the page: when it opens, and as so
   } finally {
     page.close();
     rmSync(file, { force: true });
+  }
+});
+
+test("the user's own edits are judged by the repository's review mode, as the daemon's gates are (#150)", async () => {
+  const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-skip-'));
+  try {
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: other, stdio: 'pipe' });
+    mkdirSync(path.join(other, '.coplan'), { recursive: true });
+    writeFileSync(path.join(other, '.coplan', 'config.json'), JSON.stringify({ iric: { review: 'skip' } }));
+    const id = 'user-edit-review-mode';
+    const at = (route: string, body: Record<string, unknown>) =>
+      call<Record<string, unknown>>(route, { method: 'POST', headers: { 'x-harness-session': id }, body: JSON.stringify({ cwd: other, ...body }) });
+    await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: other, start_reason: 'startup' }) });
+    await at('/mcp/publish', { title: 'One task', tasks: [{ id: 't1', title: 'Build it' }] });
+    await at('/mcp/read', {});
+    for (const body of [{ stage: 'review' }, { status: 'done', note: 'passes its checks' }]) {
+      const res = await at('/mcp/task', { task_id: 't1', ...body });
+      assert.equal(res['ok'], true, String(res['text']));
+    }
+    // Taken up again by the user on the board: under `skip`, closed done is passed, so its next round is its own.
+    const { plan, error } = await opsOn(id, [{ op: 'upsert_task', id: 't1', status: 'in_progress' }]);
+    assert.ok(plan, error);
+    assert.equal(plan.tasks.find((t) => t.id === 't1')!.reopened, true, "the repository's mode, not the default (self, with no verdict: not passed)");
+  } finally {
+    rmSync(other, { recursive: true, force: true });
+  }
+});
+
+test("a change to the repository's review mode reaches its open page, with no edit to the plan (#158)", async () => {
+  const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-review-'));
+  const file = path.join(other, '.coplan', 'config.json');
+  try {
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: other, stdio: 'pipe' });
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ iric: { review: 'user' } }));
+    const id = 'review-mode-change';
+    await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: other, start_reason: 'startup' }) });
+    const page = await settingsStream(id);
+    try {
+      for (let i = 0; i < 50 && !page.reviews.length; i++) await sleep(50);
+      assert.deepEqual(page.reviews, ['user'], 'the repository says, not the default');
+      // Changed: the next time the daemon reads it (its timer, or any call that needs it), the page hears.
+      // (Dated a moment back: a read that finds it settled keeps it.)
+      const listsBefore = page.lists.n;
+      writeFileSync(file, JSON.stringify({ iric: { review: 'subagent' } }));
+      utimesSync(file, new Date(), new Date(Date.now() - 1000));
+      await call(`/api/session/${id}`);
+      for (let i = 0; i < 50 && page.reviews.at(-1) !== 'subagent'; i++) await sleep(50);
+      assert.equal(page.reviews.at(-1), 'subagent', JSON.stringify(page.reviews));
+      // The session list too, which says what waits on the user by it.
+      for (let i = 0; i < 50 && page.lists.n === listsBefore; i++) await sleep(50);
+      assert.ok(page.lists.n > listsBefore, 'the list is sent again');
+      // Read again unchanged: nothing more is sent.
+      const sent = page.reviews.length;
+      await call(`/api/session/${id}`);
+      await sleep(200);
+      assert.equal(page.reviews.length, sent);
+      // Dated ahead (clock skew): never kept, so read on each call, but told once, and the daemon answers at once.
+      writeFileSync(file, JSON.stringify({ iric: { review: 'self' } }));
+      utimesSync(file, new Date(), new Date(Date.now() + 60_000));
+      const started = Date.now();
+      await call(`/api/session/${id}`);
+      await call(`/api/session/${id}`);
+      for (let i = 0; i < 50 && page.reviews.at(-1) !== 'self'; i++) await sleep(50);
+      assert.ok(Date.now() - started < 2000, `answered in ${Date.now() - started} ms`);
+      assert.deepEqual(page.reviews.slice(sent), ['self'], 'told once');
+    } finally {
+      page.close();
+    }
+  } finally {
+    rmSync(other, { recursive: true, force: true });
   }
 });
 

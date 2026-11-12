@@ -789,6 +789,48 @@ test("a newer Coplan's session is not pushed out of memory by newer plain sessio
   }
 });
 
+test('save failures held for the first listener come in order, and are not stranded by removeAllListeners', async () => {
+  const store = await freshStore();
+  const fail = (id: string) => store.emitEvent({ type: 'persist-error', sessionId: id, message: 'EIO' });
+  fail('a');
+  fail('b');
+  // Every listener removed (and with them the one waiting for the first): still held.
+  store.removeAllListeners();
+  const told: string[] = [];
+  store.on('event', (e: { type: string; sessionId?: string }) => {
+    if (e.type === 'persist-error') told.push(e.sessionId!);
+  });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(told, ['a', 'b'], 'told once a listener is on');
+  // Held again (no listener), then one raised live before they are told comes after them.
+  store.removeAllListeners();
+  fail('c');
+  store.on('event', (e: { type: string; sessionId?: string }) => {
+    if (e.type === 'persist-error') told.push(e.sessionId!);
+  });
+  fail('live');
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(told, ['a', 'b', 'c', 'live']);
+});
+
+test('save failures still held when the only listener goes part way through are told to the next one', async () => {
+  const store = await freshStore();
+  const fail = (id: string) => store.emitEvent({ type: 'persist-error', sessionId: id, message: 'EIO' });
+  fail('a');
+  fail('b');
+  fail('c');
+  const first: string[] = [];
+  store.once('event', (e: { sessionId?: string }) => first.push(e.sessionId!));
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(first, ['a'], 'a once() listener takes one');
+  const next: string[] = [];
+  store.on('event', (e: { type: string; sessionId?: string }) => {
+    if (e.type === 'persist-error') next.push(e.sessionId!);
+  });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(next, ['b', 'c'], 'the rest go to the next listener');
+});
+
 test("a failed copy of another session's state, found in a folder it was named into, is said once, as any failed save", async () => {
   const { paths } = await import('../shared/paths.ts');
   const store = await freshStore();
@@ -839,4 +881,70 @@ test('a save that fails is said — once — instead of being dropped', { skip: 
   // Once it works again it is quiet, and a later failure is said again.
   store.persistNow('readonly');
   assert.ok(existsSync(path.join(dir, 'state.json')));
+});
+
+test("every edit falls back to the project's review mode the daemon gives the store", async () => {
+  const store = await freshStore();
+  store.ensure('rv', process.cwd());
+  store.publishPlan('rv', PLAN);
+  store.reviewFor = () => 'skip';
+  const plan = store.applyOps('rv', [{ op: 'upsert_task', id: 't1', status: 'done' }], 'user').plan;
+  Object.assign(plan.tasks.find((t) => t.id === 't1')!, { round: 1 });
+  // Closed done under a project that skips review counts as passed: taken up again, it is reopened.
+  const again = store.applyOps('rv', [{ op: 'upsert_task', id: 't1', status: 'in_progress' }], 'user').plan;
+  assert.equal(again.tasks.find((t) => t.id === 't1')!.reopened, true);
+});
+
+test("the session list counts a task held for the user's review by the project's review mode (#162)", async () => {
+  const store = await freshStore();
+  const { confirmDesign, markDelivered, submitPlan } = await import('../shared/plan.ts');
+  store.ensure('rl', process.cwd());
+  store.publishPlan('rl', PLAN);
+  // A Managed build submitted on the repository's defaults: no settings of its own.
+  store.mutate('rl', (s) => {
+    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { target: 'session', mode: 'managed', prompt: 'p' }));
+  });
+  store.applyOps('rl', [{ op: 'upsert_task', id: 't1', stage: 'review' }], 'claude', { tracking: true });
+  const row = () => store.summaries().find((s) => s.sessionId === 'rl')!;
+  assert.equal(row().awaitingReview, 0, 'the default: self-review');
+  store.reviewFor = () => 'user';
+  assert.equal(row().awaitingReview, 1);
+  assert.equal(row().planStatus, 'review');
+});
+
+test("the session list reads the project's review mode only where it counts, and once a repository (#165)", async () => {
+  const store = await freshStore();
+  const { confirmDesign, markDelivered, submitPlan } = await import('../shared/plan.ts');
+  type Submit = Parameters<typeof submitPlan>[1];
+  const submitted = (input: Partial<Submit>) => (s: { plan: import('../shared/types.ts').Plan | null }) => {
+    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { target: 'session', prompt: 'p', ...input } as Submit));
+  };
+  // Each kind in a folder of its own, so reading one it should not shows as a read of its own folder.
+  const folder = (name: string) => {
+    const dir = path.join(home, `rl-${name}`);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+  const shared = folder('managed');
+  for (const [id, dir, how] of [
+    ['m1', shared, submitted({ mode: 'managed' })],
+    ['m2', shared, submitted({ mode: 'managed' })],
+    ['own', folder('own'), submitted({ mode: 'managed', settings: { review: 'self', parallel: 1, maxRounds: 3 } })],
+    ['tracked', folder('tracked'), submitted({ mode: 'tracked' })],
+    ['export', folder('export'), submitted({ target: 'elsewhere' })],
+  ] as const) {
+    store.ensure(id, dir);
+    store.publishPlan(id, PLAN);
+    store.mutate(id, how);
+  }
+  store.ensure('unpublished', folder('unpublished'));
+  const asked: string[] = [];
+  store.reviewFor = (s) => {
+    asked.push(s.sessionId);
+    return 'user';
+  };
+  store.summaries();
+  // Only builds on the repository's defaults that hold work for review (Managed): the two in one folder, once.
+  assert.equal(asked.length, 1, JSON.stringify(asked));
+  assert.ok(['m1', 'm2'].includes(asked[0]!), JSON.stringify(asked));
 });

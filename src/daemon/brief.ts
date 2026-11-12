@@ -170,7 +170,7 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
       } else if (t.stage === 'review' && mode === 'user') {
         out.push('  ⏸ waiting on the user\'s review: show them the change; they approve it in chat or in Coplan.');
       }
-      if (t.round && t.round >= settings.maxRounds && t.stage !== 'review') {
+      if (t.round && t.round >= settings.maxRounds && t.stage !== 'review' && !t.reopened) {
         out.push(`  ⚠ ${t.round} of ${settings.maxRounds} review rounds used: another needs the user's go-ahead (user_approved).`);
       }
     }

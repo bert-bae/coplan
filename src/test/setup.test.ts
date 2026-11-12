@@ -272,6 +272,24 @@ test('--agents installs in exactly those, found or not', async () => {
   assert.ok(!ran.some((l) => l.startsWith('claude plugin')));
 });
 
+test('with its output failing once it has installed, setup asks no more and finishes as --yes does', async () => {
+  const coplanHome = tmp('coplan-home');
+  const { io, asked } = scripted(['y'], { 'claude --version': missing });
+  // Fails once the install says what it did (the line is told a tick late, as a failed write is).
+  let failed = false;
+  const failing: SetupIo = { ...io, say: (line) => (io.say(line), void setImmediate(() => (failed = true))), unwritable: () => failed };
+  const result = await setup({ root: ROOT, stage: path.join(tmp('clone'), '.plugin'), home: tmp('home'), coplanHome, agents: ['codex'] }, failing);
+  assert.deepEqual(result.installed, ['codex'], 'installed, and the walk ends normally (so the daemon restarts after it)');
+  assert.deepEqual(asked, [], 'not asked to adjust settings no one can see');
+  // Failing part way through the settings: the walk ends as well, its install kept.
+  const late = scripted(['y'], { 'claude --version': missing });
+  let lateFailed = false;
+  const partWay: SetupIo = { ...late.io, ask: async (q) => ((lateFailed = true), late.io.ask!(q)), unwritable: () => lateFailed };
+  const after = await setup({ root: ROOT, stage: path.join(tmp('clone'), '.plugin'), home: tmp('home'), coplanHome: tmp('coplan-home'), agents: ['codex'] }, partWay);
+  assert.deepEqual(after.installed, ['codex']);
+  assert.equal(late.asked.length, 1, 'the one question, then no more');
+});
+
 test('settings are asked only when the user wants to adjust them, which is not the default', async () => {
   const coplanHome = tmp('coplan-home');
   const skip = scripted(['', ''], { 'codex --version': missing, 'cursor-agent --version': missing });

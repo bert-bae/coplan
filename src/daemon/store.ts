@@ -6,6 +6,7 @@ import {
   PlanError,
   applyOps,
   awaitingUserReview,
+  holdsForReview,
   confirmDesign,
   countTasks,
   currentTask,
@@ -32,9 +33,9 @@ import { BUILD_MARKER, DESIGN_MARKER, PROMPT_MOVED, REVISION_MARKER, buildPrompt
 const REVISION_MOVED =
   'The request changed since you read it (a comment was added, answered or resolved). It now shows what would be sent — read it, then send it again.';
 import { blockingGaps } from '../shared/check.ts';
-import { modeFor } from '../shared/build.ts';
+import { DEFAULT_BUILD_SETTINGS, modeFor } from '../shared/build.ts';
 import { DEFAULT_AGENT, isAgentKind, type AgentKind } from '../shared/agents.ts';
-import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ServerEvent, SessionState, SessionSummary, TaskListInput } from '../shared/types.ts';
+import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, SessionSummary, TaskListInput } from '../shared/types.ts';
 
 const PERSIST_DEBOUNCE_MS = 400;
 
@@ -113,6 +114,10 @@ export class SessionStore extends EventEmitter {
   private persistFailed = new Map<string, string>();
   /** Save failures raised before anyone listened, for the first listener. */
   private unheard: ServerEvent[] = [];
+  /** The project's review mode for a session: what a plan with none of its
+   *  own (not a submitted Managed build) is judged by, as the daemon's gates
+   *  judge it. Set by the daemon; every edit falls back to it. */
+  reviewFor?: (session: SessionState) => ReviewMode;
 
   constructor() {
     super();
@@ -376,9 +381,17 @@ export class SessionStore extends EventEmitter {
   /** The rail's rows, newest session first. Ordered on creation so rows
    *  never move out from under the cursor. */
   summaries(): SessionSummary[] {
-    return [...this.sessions.values()]
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .map((s) => summarize(s));
+    // The project's review mode, read only where it can count — a Managed
+    // build (the only kind that holds work for a review) submitted on the
+    // repository's defaults — and once a repository.
+    const byRoot = new Map<string, ReviewMode | undefined>();
+    const reviewOf = (s: SessionState): ReviewMode | undefined => {
+      if (!holdsForReview(s.plan) || s.plan.submission.settings || !this.reviewFor) return undefined;
+      const root = s.repoRoot ?? s.cwd;
+      if (!byRoot.has(root)) byRoot.set(root, this.reviewFor(s));
+      return byRoot.get(root);
+    };
+    return [...this.sessions.values()].sort((a, b) => b.createdAt - a.createdAt).map((s) => summarize(s, reviewOf(s)));
   }
 
   /** Most recently updated session rooted at `cwd` — of `agent`, when one is
@@ -445,12 +458,13 @@ export class SessionStore extends EventEmitter {
 
   /** Apply edits from either side. Throws `PlanError` when any op fails, in
    *  which case nothing is changed. */
-  applyOps(id: string, ops: PlanOp[], author: Author, opts: { tracking?: boolean } = {}): { plan: Plan; changes: Change[] } {
+  applyOps(id: string, ops: PlanOp[], author: Author, opts: { tracking?: boolean; review?: ReviewMode } = {}): { plan: Plan; changes: Change[] } {
     const session = this.sessions.get(id);
     if (!session) throw new Error('unknown session');
     // The user can start a plan from the browser before Claude has published.
     const base = session.plan ?? emptyPlan(session.title);
-    const result = applyOps(base, ops, author, Date.now(), opts);
+    const review = opts.review ?? this.reviewFor?.(session);
+    const result = applyOps(base, ops, author, Date.now(), { ...opts, ...(review ? { review } : {}) });
     this.mutate(id, (s) => {
       s.plan = result.plan;
     });
@@ -673,25 +687,59 @@ export class SessionStore extends EventEmitter {
   emitEvent(event: ServerEvent): void {
     // Raised before anyone listens (a save that failed as the store loaded,
     // in its constructor): held for the first listener, the daemon's log.
-    if (this.listenerCount('event') === 0) {
+    // While some are held, a later one waits behind them, in order.
+    if (this.listenerCount('event') === 0 || (this.unheard.length && event.type === 'persist-error')) {
       if (event.type !== 'persist-error') return;
-      if (!this.unheard.length) {
-        const onListener = (name: string | symbol) => {
-          if (name !== 'event') return;
-          this.off('newListener', onListener);
-          // Told once it is on (newListener comes just before); held again
-          // if it went before then.
-          process.nextTick(() => {
-            const held = this.unheard.splice(0);
-            for (const event of held) this.emitEvent(event);
-          });
-        };
-        this.on('newListener', onListener);
-      }
       this.unheard.push(event);
+      this.passOnHeld();
       return;
     }
     this.emit('event', event);
+  }
+
+  /** The first 'event' listener: told what was held, once it is on
+   *  (newListener comes just before). */
+  private readonly onListener = (name: string | symbol): void => {
+    if (name !== 'event') return;
+    this.off('newListener', this.onListener);
+    this.flushSoon();
+  };
+
+  private flushPending = false;
+
+  /** What was held, told on the next tick, one at a time and in order: one
+   *  raised meanwhile waits behind them (and is told in the same pass).
+   *  What is still held after it (the listener gone part way, or one that
+   *  threw: its event is gone, as a live one would be) goes on. */
+  private flushSoon(): void {
+    if (this.flushPending) return;
+    this.flushPending = true;
+    process.nextTick(() => {
+      try {
+        while (this.unheard.length && this.listenerCount('event')) this.emit('event', this.unheard.shift()!);
+      } finally {
+        this.flushPending = false;
+        this.passOnHeld();
+      }
+    });
+  }
+
+  /** What is held, on its way: told soon while someone listens, else
+   *  waiting for the first listener (once). */
+  private passOnHeld(): void {
+    if (!this.unheard.length) return;
+    if (this.listenerCount('event') > 0) this.flushSoon();
+    else if (!this.listeners('newListener').includes(this.onListener)) this.on('newListener', this.onListener);
+  }
+
+  /** Every listener off, the one waiting for the first too: it waits again
+   *  while anything is held. */
+  override removeAllListeners(name?: string | symbol): this {
+    // No name is every name: passed on as none, not as undefined.
+    if (name === undefined) super.removeAllListeners();
+    else super.removeAllListeners(name);
+    this.passOnHeld();
+    return this;
   }
 
   /**
@@ -711,7 +759,8 @@ export class SessionStore extends EventEmitter {
   private listQueued = false;
 }
 
-export function summarize(s: SessionState): SessionSummary {
+/** `review`: the project's review mode (the daemon's `reviewFor`), else the default. */
+export function summarize(s: SessionState, review: ReviewMode = DEFAULT_BUILD_SETTINGS.review): SessionSummary {
   const plan = s.plan;
   return {
     sessionId: s.sessionId,
@@ -727,8 +776,8 @@ export function summarize(s: SessionState): SessionSummary {
     updatedAt: s.updatedAt,
     tasks: countTasks(plan),
     phase: planPhase(plan),
-    planStatus: planStatus(plan),
-    awaitingReview: awaitingUserReview(plan).length,
+    planStatus: planStatus(plan, review),
+    awaitingReview: awaitingUserReview(plan, review).length,
     current: currentTask(plan)?.title ?? null,
     waiting: s.waiting,
     surface: s.surface,

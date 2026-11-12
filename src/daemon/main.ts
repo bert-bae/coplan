@@ -1,18 +1,19 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { unlinkSync, appendFileSync, existsSync, linkSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { unlinkSync, appendFileSync, existsSync, linkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { SessionStore } from './store.ts';
+import { ProjectConfigs } from './projectConfigs.ts';
 import { isIdle } from './idle.ts';
 import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from './http.ts';
 import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
-import { MAX_NOTE, MAX_USER_SAID, PlanError, cleanChecks, cleanNote, cleanUserSaid, mergeChecks, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
+import { MAX_NOTE, MAX_USER_SAID, PlanError, cleanChecks, cleanNote, cleanUserSaid, mergeChecks, passedAndClosed, planPhase, wasFinished, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
 import {
   PROMPT_BUDGET,
   askRule,
@@ -49,14 +50,14 @@ import {
   validMode,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, filesInScope, hookScope, loadProjectConfig, taskHooks, type ProjectConfig } from '../shared/project.ts';
+import { HOOK_STAGES, filesInScope, hookScope, taskHooks, type ProjectConfig } from '../shared/project.ts';
 import { changedFiles, changedSince, committedOn, headCommit, unreadWords, worktreeOf, type ChangedFiles } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
-import { ConfigCache, configStamp, globalConfigFile, projectHarnessFile, type HarnessConfig } from '../shared/config.ts';
+import { ConfigCache, globalConfigFile, projectHarnessFile, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
-import type { BuildChoice, BuildSettings, CleanupGroupId, DaemonLock, ExecutionMode, Plan, PlanInput, PlanOp, ServerEvent, SessionState, Task, TaskListInput, TaskStatus } from '../shared/types.ts';
+import type { BuildChoice, BuildSettings, CleanupGroupId, DaemonLock, ExecutionMode, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, Task, TaskListInput, TaskStatus } from '../shared/types.ts';
 import { CLEANUP_GROUPS } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
@@ -509,36 +510,18 @@ function buildRouter(deps: Deps): Router {
 
   const configFor = (session: SessionState): HarnessConfig => config.get(session.repoRoot ?? session.cwd);
 
-  /** The repository's `.coplan/config.json` over the user's own layer. Read
-   *  again as soon as any file it came from changes — an edit counts at
-   *  once — and otherwise kept: a stat per file, not a read and a parse of
-   *  every one, on each call. */
-  const projects = new Map<string, { stamp: string; config: ProjectConfig }>();
-  const projectFor = (session: SessionState): ProjectConfig => {
-    const root = session.repoRoot ?? session.cwd;
-    const hit = projects.get(root);
-    if (hit && hit.config.sources && configStamp(hit.config.sources) === hit.stamp) return hit.config;
-    const started = Date.now();
-    const config = loadProjectConfig(root);
-    if (projects.size >= MAX_PROJECT_CONFIGS) projects.clear();
-    // A file saved while it was being read may have been read half old: if
-    // any changed since the load began, nothing is kept, and the next call
-    // reads it again.
-    const sources = config.sources ?? [];
-    const settled = !sources.some((f) => {
-      try {
-        return statSync(f).mtimeMs >= started - 1;
-      } catch {
-        return false;
-      }
-    });
-    if (settled) projects.set(root, { stamp: configStamp(sources), config });
-    else projects.delete(root);
-    return config;
-  };
+  /** Each repository's config, cached, and who is told when a read finds
+   *  its review mode changed (projectConfigs.ts). */
+  const projects = new ProjectConfigs(MAX_PROJECT_CONFIGS);
+  const reviewChanges = projects.reviewChanges;
+  // The session list judges what waits on the user by it too.
+  reviewChanges.add(() => store.broadcastSessionList());
+  const projectAt = (root: string): ProjectConfig => projects.at(root);
+  const projectFor = (session: SessionState): ProjectConfig => projectAt(session.repoRoot ?? session.cwd);
 
   /** How a brief is rendered for a session: the same for the agent's tool
    *  and the page, so both read the same text. */
+  store.reviewFor = (session) => projectFor(session).settings.review;
   const briefOptions = (session: SessionState) => ({ agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) });
 
   /** Settings as the page sent them, over the repository's defaults. */
@@ -603,7 +586,11 @@ function buildRouter(deps: Deps): Router {
         dirs.set(dir, (dirs.get(dir) ?? 0) + 1);
         if (!timer) {
           timer = setInterval(() => {
-            for (const d of dirs.keys()) config.get(d);
+            for (const d of dirs.keys()) {
+              config.get(d);
+              // The repository's own config too: who reviews, for its pages.
+              if (d) projectAt(d);
+            }
           }, 25_000);
           timer.unref?.();
         }
@@ -642,6 +629,9 @@ function buildRouter(deps: Deps): Router {
       planCheck: project.planCheck,
       // The repository's checks a task can skip, by stage (#54).
       projectChecks: { implement: project.hooks.implement.map((h) => h.name), review: project.hooks.review.map((h) => h.name) },
+      // Who reviews a task, where the plan does not say (any but a submitted
+      // Managed build): the board asks the user where the daemon waits on them.
+      projectReview: project.settings.review,
     });
   });
 
@@ -956,6 +946,9 @@ function buildRouter(deps: Deps): Router {
     res.write(': connected\n\n');
     clients.count++;
 
+    // Who reviews, as last sent with a snapshot: sent again when a read of
+    // the repository's config finds it changed (reviewChanges).
+    let reviewSent: ReviewMode | undefined;
     const send = (event: ServerEvent) => {
       // A tab that stopped reading (a laptop asleep with the socket open)
       // would buffer a whole plan per edit without end. Past a megabyte it
@@ -963,6 +956,14 @@ function buildRouter(deps: Deps): Router {
       if (res.writableLength > SSE_BUFFER_LIMIT) {
         res.destroy();
         return;
+      }
+      // A plan comes with who reviews where it does not say, as the
+      // repository says it now: the board judges it as the daemon does from
+      // the moment it lands (the agent's report that puts a task in review
+      // is a snapshot too).
+      if (event.type === 'snapshot') {
+        reviewSent = projectFor(event.session).settings.review;
+        event = { ...event, projectReview: reviewSent };
       }
       res.write(`data: ${JSON.stringify(forBrowser(event))}\n\n`);
     };
@@ -1026,6 +1027,18 @@ function buildRouter(deps: Deps): Router {
       }
     };
     store.on('event', listener);
+    // The repository's review mode changed (an edit, found by a call or the
+    // settings timer): it reaches the page with its plan.
+    const reviewChanged = (root: string, review: ReviewMode) => {
+      const shown = focus ? store.get(focus) : undefined;
+      if (!shown || reviewSent === undefined || review === reviewSent || (shown.repoRoot ?? shown.cwd) !== root) return;
+      try {
+        send({ type: 'snapshot', session: shown });
+      } catch {
+        /* cleanup below fires */
+      }
+    };
+    reviewChanges.add(reviewChanged);
     const heartbeat = setInterval(() => {
       try {
         send({ type: 'ping', ts: Date.now() });
@@ -1042,6 +1055,7 @@ function buildRouter(deps: Deps): Router {
       clients.count = Math.max(0, clients.count - 1);
       clearInterval(heartbeat);
       store.off('event', listener);
+      reviewChanges.delete(reviewChanged);
       stopSettings();
     };
     ctx.req.on('close', cleanup);
@@ -1321,12 +1335,20 @@ function buildRouter(deps: Deps): Router {
     }
 
     // The round limit is the user's: past it, stop and ask them.
-    if (stage === 'review' && task.stage !== 'review' && (task.round ?? 0) >= settings.maxRounds && !approved) {
+    // (A finished task taken up again has its next round: the last one passed.
+    // Taken up and sent to review in this one call, too.)
+    const takenUpAgain = task.reopened || passedAndClosed(before, task, settings.review);
+    // Said the same wherever the limit stops it (here, and done below), with
+    // the call for each choice the user may make.
+    const roundLimit = (where: string) =>
+      `"${task.title}" ${where}has had ${task.round} review round(s), the most the user allowed (${settings.maxRounds}). Stop: mark it ` +
+      'blocked with a note on what still fails, and ask the user — another round, accept it as it is, or take it over. Then call ' +
+      'again with user_approved: true and their answer in the note: stage "review" for another round, status "done" to accept it; ' +
+      'for them to take it over, leave it blocked.';
+    if (stage === 'review' && task.stage !== 'review' && (task.round ?? 0) >= settings.maxRounds && !takenUpAgain && !approved) {
       gate(
-        `"${task.title}" has had ${task.round} review round(s), the most the user allowed (${settings.maxRounds}). Stop: mark it ` +
-          'blocked with a note on what still fails, and ask the user — another round, accept it as it is, or take it over. ' +
-          'If they say to go on, call again with user_approved: true and their answer in the note.',
-        `this is review round ${(task.round ?? 0) + 1}, past the ${settings.maxRounds} a Managed build allows: decide whether another round is worth it, and say why in the task's note`,
+        roundLimit(''),
+        `this is review round ${(task.round ?? 0) + 1}, past the ${settings.maxRounds} the user set: say in the task's note why another round is worth it`,
       );
     }
 
@@ -1396,7 +1418,26 @@ function buildRouter(deps: Deps): Router {
         const last = verdict ? (mode === 'user' ? roundVerdict(task, mode) : { verdict }) : roundVerdict(task, mode);
         const passed = last?.verdict === 'pass';
         // Without a round there is no verdict to miss: that note is above.
-        if (!passed && task.round) {
+        // Not in review, its rounds used, and no new one its own: another
+        // round, or done as it is, is the user's to allow in a Managed build;
+        // in a Tracked one the agent has decided, and says why (the note).
+        if (!passed && task.round && task.stage !== 'review' && task.round >= settings.maxRounds && !takenUpAgain) {
+          gate(
+            roundLimit('is not in review, and '),
+            `marked done out of review after ${task.round} review round(s), the most the user set: say in the task's note why it is right as it is`,
+          );
+        } else if (!passed && task.round && task.stage !== 'review') {
+          // Not in review: the verdict is given in a review round, so that is
+          // where to go (a finished task taken up again lost its pass).
+          const why = task.reopened ? ': its last pass went when it was taken up again' : '';
+          gate(
+            mode === 'user'
+              ? `"${task.title}" is not in review${why}. Report stage "review" (a new round): the user's verdict is given there, ` +
+                  'on the board in Coplan, or in chat (then call again with verdict "pass", user_approved: true and their words in the note).'
+              : `"${task.title}" is not in review${why}. Report stage "review" (a new round) and give its verdict there.`,
+            `not in review${why}: report stage "review" for a new round`,
+          );
+        } else if (!passed && task.round) {
           gate(
             mode === 'user'
               ? `"${task.title}" is the user's to review, and they have not passed it: show them the change and ask with ` +
@@ -1429,6 +1470,8 @@ function buildRouter(deps: Deps): Router {
     // into review, after it; otherwise before the rest (done ends the review).
     const { plan, changes } = store.applyOps(session.sessionId, stage ? [progress, ...review] : [...review, progress], 'claude', {
       tracking: true,
+      // Judged by the same review mode as the gates above.
+      review: settings.review,
     });
     const now = plan.tasks.find((t) => t.id === taskId)!;
     const out: string[] = [];
@@ -1467,20 +1510,25 @@ function buildRouter(deps: Deps): Router {
     // The tasks that wait on this one: what dropping or reopening it means
     // for them is worth saying out loud.
     const waiting = dependents(plan, now);
-    if (status === 'dropped' && changes.length && waiting.length) {
+    // Those that went ahead on its finished work, when it is finished no
+    // more: taken up again (by stage alone too, or from a drop made while it
+    // was done: wasDone), or dropped.
+    const finishedBefore = wasFinished(task) && !(task.status === 'dropped' && now.status === 'dropped');
+    const noLongerFinished = finishedBefore && now.status !== 'done' && changes.length > 0;
+    const built = noLongerFinished ? waiting.filter((t) => t.status === 'in_progress' || t.status === 'blocked' || t.status === 'done') : [];
+    if (built.length) {
       out.push(
-        `${waiting.map((t) => `${t.id} "${t.title}"`).join(', ')} waited on it and no longer do${waiting.length === 1 ? 'es' : ''}: ` +
-          'check they do not need its work, and tell the user.',
+        `${built.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ')} already went ahead on this task's work: ` +
+          (now.status === 'dropped' ? 'check they still hold without it, and tell the user.' : 'check they still hold once it changes.'),
       );
     }
-    if (task.status === 'done' && status && status !== 'done' && status !== 'dropped') {
-      const built = waiting.filter((t) => t.status !== 'todo');
-      if (built.length) {
-        out.push(
-          `${built.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ')} already went ahead on this task's work: ` +
-            'check they still hold once it changes.',
-        );
-      }
+    // Those still to build on it (one done already is not waiting).
+    const unbuilt = waiting.filter((t) => !built.includes(t) && t.status !== 'done');
+    if (status === 'dropped' && changes.length && unbuilt.length) {
+      out.push(
+        `${unbuilt.map((t) => `${t.id} "${t.title}"`).join(', ')} waited on it and no longer do${unbuilt.length === 1 ? 'es' : ''}: ` +
+          'check they do not need its work, and tell the user.',
+      );
     }
     if ((status === 'done' || status === 'dropped') && changes.length) {
       if (planPhase(plan) === 'finalizing' || planPhase(plan) === 'built') {

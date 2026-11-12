@@ -1,5 +1,5 @@
 import { awaitingUserReview, currentTask, planPhase, planStatus, statusOfPhase } from '../../shared/plan.ts';
-import type { Plan, PlanPhase, PlanStatus, SessionSummary } from '../../shared/types.ts';
+import type { Plan, PlanPhase, PlanStatus, ReviewMode, SessionSummary } from '../../shared/types.ts';
 
 /**
  * The four statuses, as the page shows them (#66): one word for each, the
@@ -24,12 +24,13 @@ export interface StatusFacts {
   awaitingReview: number;
 }
 
-export function statusFacts(plan: Plan | null): StatusFacts {
+/** `review`: the project's review mode (the store's `projectReview`). */
+export function statusFacts(plan: Plan | null, review: ReviewMode): StatusFacts {
   return {
-    planStatus: planStatus(plan),
+    planStatus: planStatus(plan, review),
     phase: planPhase(plan),
     current: currentTask(plan)?.title ?? null,
-    awaitingReview: awaitingUserReview(plan).length,
+    awaitingReview: awaitingUserReview(plan, review).length,
   };
 }
 

@@ -15,26 +15,52 @@ Baseline when this was written: `pnpm typecheck` clean, `pnpm test` 682 pass,
    a test that reproduces the audit's case and fails.
 3. **Clean up:** delete what is dead.
 4. **Refactor:** merge the copies, now pinned by the tests from step 1.
-5. **Smaller rows**, then **re-audit** the touched areas. New findings become
-   new rows. The loop ends when a re-audit finds only Nice-to-have or nothing.
+5. **Smaller rows**, then **one re-audit** of the touched areas, which ends
+   the batch (see *Batches*).
 
 Tests come before the clean-up and refactor rows on purpose: a refactor with
 no test that fails when it breaks is the risk the audit itself flags.
 
+## Batches
+
+The work goes in **batches**, so it ends. (Batch 1 ran rows F64-F83, B72-B82,
+T8-T9 and re-audits A6-A17 in one loop: each re-audit's Should-fix findings
+became new rows, each with its own issue and a re-audit after it, and the
+loop never closed. These rules stop that.)
+
+- **A batch is a fixed list of rows**, chosen when it starts and named in its
+  heading in the ledger (at most about ten). The loop works only those rows.
+- **New findings go to the backlog, not the batch.** Anything found while
+  working a row (by `/code-review`, a test, or reading) that is outside that
+  row's own diff becomes a `backlog` row. Only a **Must fix** may join the
+  running batch.
+- **One re-audit per batch**, after its last row, of the areas the batch
+  touched. Its findings go to the backlog: Must fix and Should fix as rows,
+  Nice to have listed in its report only. A re-audit never adds another
+  re-audit.
+- **Then the batch ends:** `./bin/coplan check final`, one pull request for
+  the batch, and stop. The next batch is chosen from the backlog, by the user
+  or with them, in a new session.
+- **Issues:** one GitHub issue per batch, listing its rows (the PR closes
+  it). A row gets an issue of its own only if it is Must fix or needs the
+  user's decision. Findings are tracked in the ledger, not as issues.
+
 ## One turn of the loop
 
-1. **Pick** the first `open` row in the ledger, top to bottom. Skip `blocked`
-   and `needs-decision` rows.
+1. **Pick** the first `open` row of the current batch, top to bottom. Skip
+   `blocked`, `needs-decision` and `backlog` rows.
 2. **Pin.** For a fix: write the test from the finding's case and see it fail.
    For a clean-up or refactor: find the test that covers the code, or write one
    that passes now. No test, no refactor.
 3. **Change** the smallest thing the finding names. Something new you notice
-   goes in the ledger as a new row, not into this commit.
+   goes in the ledger as a `backlog` row (Must fix: an `open` row in this
+   batch), not into this commit.
 4. **Check** with the repo's own runner, which targets what changed:
    `./bin/coplan check implement` (typecheck), then `./bin/coplan check review`
    (build and test). At the end of a phase: `./bin/coplan check final`
    (`pnpm check` and the doctor).
-5. **Review** the diff with `/code-review medium` and fix what it confirms.
+5. **Review** the diff with `/code-review medium` and fix what it confirms
+   in this row's own change. What it finds elsewhere is a `backlog` row.
    For refactor rows, also run `/simplify`.
 6. **Record.** For anything a user would notice, add a line under *Unreleased*
    in CHANGELOG.md. If a hook, tool or stored file changes, update the README's
@@ -44,24 +70,26 @@ no test that fails when it breaks is the risk the audit itself flags.
    - The same check fails twice on this row. Set it to `blocked` with the
      reason, and go to the next row on the next turn.
    - The row needs a choice only the user can make. Set it to `needs-decision`.
-   - No row is `open`. Run `./bin/coplan check final` and end the loop.
+   - No row of the batch is `open`: run the batch's one re-audit (if it has
+     not run), put its findings in the backlog, run `./bin/coplan check
+     final`, open the batch's pull request, and end the loop.
 
 Run it self-paced:
 
 ```
-/loop Work the next open row of .claude/cleanup/PLAN.md, following its "One turn of the loop" section exactly. One row per turn. Stop when no row is open.
+/loop Work the next open row of the current batch in .claude/cleanup/PLAN.md, following its "Batches" and "One turn of the loop" sections exactly. One row per turn. Stop when the batch ends.
 ```
 
 Or run it in Coplan itself. Publish these rows as a plan and submit it as a
 *Managed* build: `.coplan/config.json` already runs implement → review →
 refine per task, with these checks and a reviewing subagent.
 
-**Pull requests:** CONTRIBUTING asks for one change per pull request. Open one
-per Must-fix row, and one each for the clean-up phase and every refactor row.
+**Pull requests:** one per batch (see *Batches*); a Must-fix row may have its
+own, as CONTRIBUTING asks for one change per pull request.
 
 ## Ledger
 
-Status: `open`, `done`, `blocked`, `needs-decision`. Numbers in brackets are
+Status: `open`, `done`, `blocked`, `needs-decision`, `backlog` (found, not yet in a batch). Numbers in brackets are
 the audit's finding numbers.
 
 | Row | What | Phase | Status | Commit |
@@ -227,7 +255,50 @@ the audit's finding numbers.
 | F62 | F57 gap: a review box drawn anew while its request is being sent (task set blocked in review, a tab switch) mounts with Send enabled: a second review_task is sent, and the first save's finally clears the key from `sending` while the second is out. A key being sent is saving (ui/lib/drafts.ts useKeptDraft, TasksView.tsx UserReview) (bert-bae/coplan#124) [re-audit A8 3] | 2 should fix | done: a send's progress and outcome told to every editor of its key (tested on the review box; the reply composer's `sending` wired, not tested) | a39c09b |
 | F63 | F58 regression: interactive `coplan setup` with stdout failing (a full disk) no longer ends at once; it waits on prompts no one can see (hung 8 s, killed, no message), and Enter walks it on defaults unseen. Ask nothing once stdout has failed (cli/setup.ts askTerminal) (bert-bae/coplan#125) [re-audit A8 4] | 2 should fix | done: answer() stops the walk once stdout failed (a tick late too); checked by hand under a pty: rc 1 in 0.09 s. --yes still finishes unseen, on purpose | 0866853 |
 | B71 | A held persist-error is lost if the first listener added is not an 'event' one, or the first is removed before the next tick; a failed copy's saveFailure outlives the cause for a session later made fresh; normalizeTask keeps an invalid status; Windows may say EOF for a gone reader (unconfirmed) (daemon/store.ts emitEvent, ensure; shared/plan.ts; cli/output.ts) (bert-bae/coplan#126) [re-audit A8 5-8] | 5 smaller | done: held event waits for an 'event' listener; unknown status taken as todo. Not done: clearing the stale copy failure hides a real one (stays until the first save); Windows EOF unconfirmed | 08f7a71 |
-| A9 | Re-audit the areas the rows after A8 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#127) | 6 re-audit | open | |
+| A9 | Re-audit the areas the rows after A8 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#127) | 6 re-audit | done: no must fix, 2 should fix, 3 nice to have, now rows F64, F65, B72 and A10 | ac99e3f |
+| F64 | F61 widened: a task reused in the next plan keeps its old build's reviews and round; the agent drops it (ungated before submission), then restarts it after submit, and the old round's pass meets the done gate unreviewed. editTask clears the current round's reviews only on done → not dropped: clear them whenever a task leaves done or dropped for todo, in progress or blocked (shared/plan.ts editTask) (bert-bae/coplan#129) [re-audit A9 1] | 2 should fix | done: the round's pass goes whenever a task leaves done; dropped mid-review keeps its verdicts | 1bfda40 |
+| F65 | F62 gap: text typed into an editor drawn anew while its draft is out (its field still takes input while it shows Saving…) is lost when the send goes through: the 'sent' news closes it whatever it holds. Close only if it holds the text sent; else start again from the field (ui/lib/drafts.ts useKeptDraft) (bert-bae/coplan#130) [re-audit A9 2] | 2 should fix | done: 'sent' closes only an editor holding the text sent; the kept draft deleted only if it holds it (on screen or not) | 772ab40 |
+| B72 | An interactive setup whose output fails skips the daemon restart (stops at the settings question, after installing; not a regression); a live persist-error just after the first listener can come before held ones; removeAllListeners() strands held events (nothing calls it) (cli/setup.ts setup; daemon/store.ts emitEvent) (bert-bae/coplan#131) [re-audit A9 3-5] | 5 smaller | done: setup ends as --yes once output fails after installing (settings too); held events told in order, kept through removeAllListeners | c7253cc |
+| B73 | Reopening a finished task by way of dropped skips the warning that its dependents went ahead on its work (main.ts ~1476 checks done → not done/dropped only) (daemon/main.ts) (bert-bae/coplan#133) [review of F64] | 5 smaller | done: warned when a finished task is no longer done (by its new status, dropped included, by stage alone too); one line per dependent | bf11bd0 |
+| A10 | Re-audit the areas the rows after A9 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#132) | 6 re-audit | done: no must fix, 4 should fix, 3 nice to have, now rows F66-F69, B74 and A11 | b42df2b |
+| F66 | F64: undoing a mistaken drop of a finished task (done -> dropped -> done, nothing changed) is refused, and the gate's messages loop: give the pass (not in review), go to review (round limit: "what still fails"); a user-reviewed one is told the user has not passed it, not that the pass was cleared. Clear the pass when it leaves dropped for todo, in progress or blocked, not at the drop; say so where a pass was cleared (shared/plan.ts editTask; daemon/main.ts done gate) (bert-bae/coplan#134) [re-audit A10 1] | 2 should fix | done: wasDone marks a drop of a finished task; verdicts go on leaving it for work, kept on undo; never-done drops keep theirs (also B74's board item) | cb6cef2 |
+| F67 | B72 regressed B71: the only listener going part way through a flush (once(), or a page's cleanup) leaves the rest held with no wait for the next listener: stranded until another failure. Put the wait back after the loop when some are still held and no listener is left; a listener that throws runs delivery one behind (daemon/store.ts flushSoon) (bert-bae/coplan#135) [re-audit A10 2] | 2 should fix | done: what is still held after a pass goes on (passOnHeld), the wait added once; a throwing listener's own event is gone, as live (untested) | ac5449f |
+| F68 | F65 gap: a review box redrawn while its request is out, holding more than was sent: the request goes through, save drops the parked draft, 'sent' restarts the box and re-keeps its draft, but the round is decided so the box is gone: text on no screen, unoffered, closing the page asks; offered later (if ever) as "could not be sent". Offer the extra on 'sent' when the draft was parked (ui/lib/drafts.ts) (bert-bae/coplan#136) [re-audit A10 3] | 2 should fix | done: save offers what a parked draft holds beyond what went ('added'); its boxes close | c533d46 |
+| F69 | Older: text typed into an editor while its own save is out is lost when the save goes through (close() regardless); an editor redrawn meanwhile keeps it since F65. Close only if it holds what was sent (ui/lib/drafts.ts save) (bert-bae/coplan#137) [re-audit A10 4] | 2 should fix | done: kept open on what was typed (a reply: only what came after), started from the field; not from the returned revision (an agent edit in that instant is not warned of) | 1489143 |
+| B74 | A dropped dependent is told it "no longer" waits; the board's drop then done of a done task loses its round's verdict unnoticed (F66 may cover it); onListener may be registered twice (harmless) (daemon/main.ts, daemon/store.ts) (bert-bae/coplan#138) [re-audit A10 5-7] | 5 smaller | done: dependents() leaves dropped tasks out (reply, brief, page); the other two items by F66 and F67 | 7bd83dc |
+| A11 | Re-audit the areas the rows after A10 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#139) | 6 re-audit | done: no must fix, 3 should fix, 8 nice to have, now rows F70-F72, B75 and A12 | f4436c4 |
+| F70 | F66's undone half: the done gate's messages loop for a task not in review whose round has no pass (a finished task taken up again; refine; blocked): "verdict pass is fine" (refused: not in review), go to review (round limit: "what still fails"); a user-reviewed one is told "they have not passed it", which the board cannot fix. Point to stage review for a new round, allow it when the pass was cleared, and say the pass was cleared (daemon/main.ts done gate, verdict check) (bert-bae/coplan#140) [re-audit A11 1] | 2 should fix | done: not in review → told to report review for a new round; `reopened` (finished on a pass, taken up again) not held to the round limit | c78e744 |
+| F71 | Older (F69 claimed it): an editor off screen when its save goes in keeps the revision from before it (now.current is not updated unmounted): a section reopens with a false "changed while you were editing"; the files' next save is refused for the user's own save. Take the starting point from the plan as it lands, or restart a kept draft from the field on remount (ui/lib/drafts.ts) (bert-bae/coplan#141) [re-audit A11 2] | 2 should fix | done: the kept draft records the saved text and restarts from the field only if it still holds it; a change since is warned of | 033f8d0 |
+| F72 | F69 gap: a new comment goes through edit, not the kept draft's save: typed on while posted, it keeps the posted text and posting again repeats it. Post it through comment.save, or drop the sent text from the front (ui/components/Threads.tsx) (bert-bae/coplan#142) [re-audit A11 3] | 2 should fix | done: posted through comment.save; a post returns the composer to open and empty | 16dc3d5 |
+| B75 | Tests: wasDone across a republish, B74's done dependent, a comment keeping what came after, a throwing listener; reopening from a drop-while-done gives no "went ahead" warning; a reply or comment edited mid-post is kept whole; the 'added' offer on deleted text; CHANGELOG: comments, B73/B74 (optional) (shared/plan.ts, daemon/main.ts, daemon/store.ts, ui/lib/drafts.ts, CHANGELOG.md) (bert-bae/coplan#143) [re-audit A11 4-11] | 5 smaller | done: two tests, the reopen-from-drop warning (wasFinished), the toast's wording. Not done: a throwing-listener test, mid-post edits kept whole, B73/B74 CHANGELOG | 96754d7 |
+| A12 | Re-audit the areas the rows after A11 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#144) | 6 re-audit | done: no must fix, 3 should fix, 4 nice to have, now rows F73-F75, B76 and A13 | 83f037a |
+| F73 | F70: passedAndClosed counts any pass in the round, not its standing verdict: pass then "changes" then done on the user's word, taken up again, escapes the round limit (self and user review). Use roundVerdict with the effective review mode; in skip mode a round closed done counts as passed (shared/plan.ts passedAndClosed) (bert-bae/coplan#145) [re-audit A12 1] | 2 should fix | done: the round's standing verdict under its review mode (skip: closed done passes); the daemon passes its own setting | 5960091 |
+| F74 | F70: a drop clears `reopened`, so done (pass) -> taken up -> dropped -> taken up -> review is refused at the limit though no round failed (its pass went at the first take-up). Keep it through a drop; clear on review, done, the user's reset; test that later rounds are held to the limit (shared/plan.ts editTask) (bert-bae/coplan#146) [re-audit A12 2, 5] | 2 should fix | done: kept through a drop; goes on done, review (tested), the user's reset; load drops it from a done task | ac522a5 |
+| F75 | F71: the remount check compares the field with the untrimmed sent text, but the daemon trims fields: a section saved as "First.\n" off screen reopens warning of the user's own save (summary, captions, notes too). Compare trimmed (ui/lib/drafts.ts) (bert-bae/coplan#147) [re-audit A12 3] | 2 should fix | done: compared trimmed (a field cut at 20,000 characters is not) | 0863a74 |
+| B76 | A stale `reopened` from an older daemon is trusted; done for a task in refine/blocked after "changes" at the limit points to review, then refused; a section cleared mid-save off screen stays kept empty; untested: drafts.ts's blank guard, brief.ts's !t.reopened (shared/plan.ts, daemon/main.ts, ui/lib/drafts.ts, daemon/brief.ts) (bert-bae/coplan#148) [re-audit A12 4, 6-8] | 5 smaller | done: all four (a field emptied on purpose mid-save is taken as nothing to keep) | 4748d92 |
+| A13 | Re-audit the areas the rows after A12 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#149) | 6 re-audit | done: no must fix, 3 should fix, 6 nice to have, now rows F76-F78, B77 and A14 | 6e5f565 |
+| F76 | F73: without a submission, editTask judges the round under DEFAULT 'self', the daemon under the project's review: in an unsubmitted Managed build a user-reviewed task closed on the user's word gets `reopened` (round 2 of 1, unapproved), a skip-mode one does not (refused). Pass the effective review fallback into applyOps/editTask, and to review_task's record (shared/plan.ts; daemon/main.ts) (bert-bae/coplan#150) [re-audit A13 1] | 2 should fix | done: store falls back to the project's review for every edit; board's fallback now row B78 | 31237fd |
+| F77 | Older: a reply box drawn anew while its reply posts, typed on, keeps the whole text when the post goes in (on screen or off): posting again repeats the first part. Apply the sender's rule in the watcher and the kept draft: drop the sent text from the front for replies/comments; close on the sent text trimmed or blanks (ui/lib/drafts.ts) (bert-bae/coplan#151) [re-audit A13 2, 4] | 2 should fix | done: watcher and kept draft drop the sent text for replies/comments; an edited sent part still keeps all (no way to tell) | 7e6f78a |
+| F78 | B76's done-gate message does not say another round is stage "review" with user_approved, and words it unlike the round-limit gate; its comment sits above the wrong branch; F73's test passes with the mode ignored (add user "changes" then agent pass); B76's whitespace case untested (daemon/main.ts, test/plan.test.ts, ui/lib/drafts.ts) (bert-bae/coplan#152) [re-audit A13 3, 5, 6] | 2 should fix | done: one shared round-limit message with a call per choice; tests for the user-review case, both paths, whitespace on and off screen | bd722af |
+| B77 | Skip mode puts no real limit on rounds (document or decide); a local `reopened` in main.ts means something else; ReviewMode import order (daemon/main.ts, shared/plan.ts) (bert-bae/coplan#153) [re-audit A13 7-9] | 5 smaller | done: skip's extra round documented (holding an accepted one is B79, D4); rename and import order | 0f4be10 |
+| B78 | The board (TasksView's review box, drafts.ts's review field) resolves a task's review mode as submission ?? DEFAULT 'self', without the project's: a user-reviewed unsubmitted or Tracked build never shows the user the verdict box while the daemon waits on it. Give the page the project's review mode and fall back to it (ui/views/TasksView.tsx, ui/lib/drafts.ts) (bert-bae/coplan#155) [code review F76] | 2 should fix | done: the project's review mode comes with the session and every snapshot; board and pruneDrafts fall back to it | d8e1369 |
+| B79 | Under `skip` review a finished task that went to review counts as passed, so taken up again it gets a round past the limit: even one the user accepted as it was over failing checks, who allowed no further round. Holding it would mean recording how a round closed (shared/plan.ts passedAndClosed; found reviewing B77) | 5 smaller | needs-decision: D4, asked in bert-bae/coplan#156 | |
+| A14 | Re-audit the areas the rows after A13 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#154) | 6 re-audit | done: no must fix, 4 should fix, 8 nice to have, now rows F79-F81, B80 and A15 | fdd79ba |
+| F79 | F78: in a Tracked build past maxRounds the stage-review note says the agent decides, the done note that it is the user's call; the stage-review refusal's new wording is unpinned (daemon/main.ts, test/integration.test.ts) (bert-bae/coplan#157) [re-audit A14 daemon 1, 5] | 2 should fix | done: both Tracked notes ask the agent why, against the limit the user set; both wordings pinned | 0ebb307 |
+| F80 | B78: `projectReview` reaches the page only with a snapshot or fetch; a change to `.coplan/config.json` sends neither (its watcher follows harness.json), so the board keeps the old mode while the daemon gates on the new; a late fetch can overwrite a newer streamed value (daemon/main.ts, ui/store.ts) (bert-bae/coplan#158) [re-audit A14 store 1-2, daemon 2] | 2 should fix | done: a read that finds the review mode changed sends open pages a snapshot (the settings timer reads it too); a late fetch overtaking it left (narrow) | 8568d41 |
+| F81 | Older, F77's off-screen claim: the sender, its editor gone, rebuilds the kept draft from its own last text, not from the redrawn box's kept draft: typing after the redraw is lost (replies, and sections via restart) (ui/lib/drafts.ts) (bert-bae/coplan#159) [re-audit A14 page 1] | 2 should fix | done: a sender whose editor has gone starts from the kept draft (none kept: nothing typed); reply and section cases pinned | 6a0291c |
+| B80 | Test gaps and small items: the watcher's close condition untested (needs a redrawn box); store.reviewFor wiring untested at the daemon; the SSE projectReview test uses the default; previewProposal skips the review fallback; passedAndClosed's default ignores the project; no projectReview test on resync/switch (ui/lib/drafts.ts, daemon/main.ts, shared/proposals.ts, shared/plan.ts, ui/store.ts, tests) (bert-bae/coplan#160) [re-audit A14 page 2, daemon 3-4, plan 1-3, store 3] | 5 smaller | done: fallback required; watcher close, reviewFor wiring, switch/resync pinned; SSE test covered by F80; preview moot; awaitingUserReview now F82 | 26388b9 |
+| F82 | Older: `awaitingUserReview` (and so `planStatus`, the Submit panel's verdict prompt and the store's awaiting-review count) falls back to the default review mode, not the project's: a user-reviewed Tracked build (or Managed without settings) shows Building and asks for no verdict while the daemon waits on the user. One helper for the review-mode order (task, submission, project, default) for every effectiveReview caller (shared/plan.ts, daemon/store.ts, ui) (bert-bae/coplan#162) [code review B80] | 2 should fix | done: awaitingUserReview/planStatus take the project's mode (required); page, list (read only where it counts) and its refresh on a change pinned | 17bbcc8 |
+| A15 | Re-audit the areas the rows after A14 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#161) | 6 re-audit | done: no must fix, 2 should fix, 7 nice to have, now rows F83, T8, B81 and A16 | b7eea3f |
+| F83 | F80: the project config cache and the last-read review modes clear at different times (a cache hit records no mode): past 50 repositories a review-mode change reads as a first read and notifies nothing; an editor emptying the file mid-save can push the default for a moment (daemon/main.ts) (bert-bae/coplan#163) [re-audit A15 daemon 1, 3] | 2 should fix | done: ReviewReads, least recently read first out, cached reads count; the emptied-file moment left | d8b0e3f |
+| T8 | Flaky: the board verdict test (B78/F82), and F81's section and reply redraw tests, fail now and then in full UI runs; the board test's title says Tracked of a Managed plan, and its #162 check reads page text the build strip alone gives (test/ui.test.tsx) (bert-bae/coplan#164) [re-audit A15 page 2, store 1-2] | 0 safety net | done: not reproduced in 47 runs (alone, 6 at once, during builds); the tests settle on what they assert; title fixed, pill and strip each pinned | b7e300f |
+| B81 | Small: summaries reads the project for Tracked/Export submissions too; a dead branch in drafts.ts save; the settings timer's projectAt untested; summaries' skip and memo unpinned; a list row for an unwatched repository not refreshed on a change (daemon/store.ts, ui/lib/drafts.ts, daemon/main.ts) (bert-bae/coplan#165) [re-audit A15 plan 1-2, page 1, daemon 2] | 5 smaller | done: list reads only Managed on defaults (holdsForReview), pinned with the memo; the 'dead' branch is live (kept, comment fixed); timer path and unwatched rows left | 65649d2 |
+| A16 | Re-audit the areas the rows after A15 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#166) | 6 re-audit | done: no must fix, 2 should fix (test gaps, no code defect), 4 nice to have, now rows T9, B82 and A17 | 59f4d44 |
+| T9 | F83's cache-hit `reviewRead.saw` in projectAt is untested (deleting it passes every test); B81's store test catches a revert only when `tracked` gets a later millisecond (all in one folder) (daemon/main.ts, test/store.test.ts) (bert-bae/coplan#167) [re-audit A16 daemon 1, plan 1] | 0 safety net | done: ProjectConfigs class with the disk injected; the page's edit told at every point, settle guard and listener isolation pinned; store test one folder per kind | 1241f93 |
+| B82 | Small: drafts.ts's "kept with more" branch is unreachable (never ran across the suite; no key is drawn twice), its B81 comment wrong; ReviewReads' bound under one list pass past 50 held repositories; nine held-save tests on the old inline settle; the `saved` comment overstates (ui/lib/drafts.ts, daemon/main.ts, test/ui.test.tsx) (bert-bae/coplan#168) [re-audit A16 page 1, daemon 2, ui 1-2] | 5 smaller | done: review modes remembered past a list pass (pinned); one settle helper; the branch kept as a guard, comment says so | 005f08b |
+| A17 | Re-audit the areas the rows after A16 touched with four auditors (plan model, check runner, store, page), and add any new findings as rows. The loop ends when a re-audit finds only Nice-to-have or nothing (bert-bae/coplan#169) | 6 re-audit | done: no must fix, 2 should fix (now backlog T10, B83), 4 nice to have; batch 1 ends here | 23cef7f |
+| T10 | ProjectConfigs: no test has a source file that does not exist (the stand-in mtime never returns undefined): `?? -Infinity` turned to `?? Infinity` passes, and would stop all caching (global instruction files are listed whether present or not) (daemon/projectConfigs.ts, test/projectConfigs.test.ts) [re-audit A17 cache 1] | 0 safety net | backlog | |
+| B83 | ProjectConfigs (T9) swallows a review-change listener's error unlogged: before, it reached the daemon's uncaughtException log; the session-list broadcast listener has no catch of its own. Log it in the catch (daemon/projectConfigs.ts) [re-audit A17 cache 2] | 5 smaller | backlog | |
 
 ### F19: the take-back never fires
 
@@ -289,6 +360,16 @@ Found while writing T1b (2026-11-10).
     until its timeout, which fails it as timed out. Leaving it running
     means letting the check go on its shell's exit instead, not waiting
     for its group (found in re-audit A2); stopping the group fixes that too.
+- **D4 (B79, asked in bert-bae/coplan#156):** Under `skip` review, closing a
+  task done counts as passing its round, so taken up again it gets one more
+  round past `maxRounds`, even when the user accepted it as it was over
+  failing checks and never allowed another round. Options:
+  - **Hold that one to the limit:** record when done is approved over failing
+    checks (a flag on the task), and have `passedAndClosed` read it. Cost: one
+    more task flag, carried through drops, loads and republishes like
+    `reopened`.
+  - **Leave it** (as now, documented in B77): accepting the work also lets
+    the agent take it up for one more round.
 
 ---
 
@@ -856,3 +937,244 @@ blocked keeps its stage, done/dropped keep round and reviews; proposals'
 prints unchanged across a reload.
 
 **Verdict:** 1 Must fix; fix 1 first, then 4, 3, 2.
+
+## Re-audit report (row A9, four auditors, 2026-11-11)
+
+Scope: the changes since 712303e (rows F60-F63, B71), at 95ad9d2 (merged
+as #128), by four auditors (plan model, setup/CLI, store, page), each in
+its own worktree at that commit; each finding kept was reproduced. The
+page auditor stopped at a usage limit and was resumed after it reset.
+
+### Should fix
+
+1. **A task reused in the next plan passes the done gate on its old review** (`shared/plan.ts` editTask, with F61's carried reviews): done, then dropped, then restarted keeps the old round's pass.
+2. **Text typed into an editor drawn anew while its draft is out is lost on 'sent'** (`ui/lib/drafts.ts`). F62 gap.
+
+### Nice to have
+
+3. An interactive setup whose output fails skips the daemon restart (not a regression).
+4. A live persist-error just after the first listener can come before held ones.
+5. removeAllListeners() strands held events (nothing calls it).
+
+Checked and fine: keepsStage matches the old deny-list for all five
+statuses; status coercion changes no plan current code writes; load ->
+publish -> load is byte-identical; setup on a healthy pty (a full walk,
+Ctrl+C and Ctrl+D 130), the first write being the question (rc 1 in 0.08
+s), uninstall and --yes to /dev/full; askTerminal the only prompt in the
+CLI; held events with a listener removed before the tick, once(), two
+listeners, real startup order; the persist-error path end to end;
+F62's watchers across the summary, replies and the review box (sender
+unmounted, refused, sent), no two editors of one key open at once,
+F57's offer still once.
+
+**Verdict:** no Must fix; fix 1 first (it passes the review gate), then 2.
+
+## Re-audit report (row A10, four auditors, 2026-11-11)
+
+Scope: the changes since 323294e (rows F64, F65, B72, B73), at 90f01e5,
+by four auditors (plan model and task route, setup/CLI, store events,
+page), each in its own worktree at that commit; each finding kept was
+reproduced, except where marked.
+
+### Should fix
+
+1. **Undoing a mistaken drop of a finished task is refused, its messages looping** (`shared/plan.ts` editTask, `daemon/main.ts` done gate). From F64.
+2. **Held save failures stranded if the only listener goes part way through** (`daemon/store.ts` flushSoon). B72 regressed B71; not reached by the daemon today.
+3. **A review box redrawn mid-send, holding more than was sent, hides it once the request goes through** (`ui/lib/drafts.ts`). F65 gap.
+4. **Text typed into an editor during its own save is lost** (`ui/lib/drafts.ts` save). Older (not reproduced for replies and the review box).
+
+### Nice to have
+
+5. A dropped dependent told it "no longer" waits.
+6. The board's drop then done of a done task loses its round's verdict.
+7. onListener can be registered twice (harmless).
+
+Checked and fine: setup on a pty (healthy walk, Ctrl+C/D 130, stdout
+failing at chosen points on a small tmpfs: settings files whole or not
+written, the daemon restarted, rc 1), --uninstall; a listener raising a
+failure while told one; removeAllListeners with a removeListener
+listener; snapshots unaffected by held failures; done set again on a
+done task changes nothing; mixed dependents named once; a stage-only
+reopen warns; a versioned section redrawn mid-save takes the new
+revision (no false warning); trimming; comments unaffected.
+
+**Verdict:** no Must fix; fix 1 and 3 first (they refuse or hide the
+user's work), then 4, 2.
+
+## Re-audit report (row A11, four auditors, 2026-11-11)
+
+Scope: the changes since a13d287 (rows F66-F69, B74), at f6de757, by four
+auditors (plan model, whole branch and checks, store events, page), each
+in its own worktree at that commit; each finding kept was reproduced,
+except where marked.
+
+### Should fix
+
+1. **The done gate's messages loop for a task not in review whose round has no pass** (`daemon/main.ts`). F66's undone half.
+2. **An editor off screen when its save goes in keeps a stale starting point** (`ui/lib/drafts.ts`). Older; F69 claimed it.
+3. **A new comment typed on while posted repeats its first part when posted again** (`ui/components/Threads.tsx`). F69 gap.
+
+### Nice to have
+
+4-7. Tests for wasDone across a republish, B74's done dependent, a comment's kept rest, a throwing listener.
+8. Reopening from a drop-while-done gives no "went ahead" warning.
+9. A reply edited mid-post is kept whole.
+10. The 'added' offer on deleted text (not reproduced).
+11. CHANGELOG: comments; B73/B74 (optional).
+
+Checked and fine: check implement, review (twice) and final pass; the
+runtime suite on Node 20.11.0 (688 pass); ui.test six times at once, no
+flake; every fix since #128 pinned by a test that fails when it is
+reverted; the CHANGELOG entries match the code; a drop undone keeps its
+pass (user-reviewed too); taking work up again clears it; wasDone on
+reload, republish and the user's own edits; dependents() callers (no
+readiness change); held events with once(), listeners added or removed
+mid-flush, re-entrant failures, flushPending; restart points on screen;
+the 'added' offer once, not on blanks.
+
+**Verdict:** no Must fix; fix 1 first (it can stall a build), then 3, 2.
+
+## Re-audit report (row A12, four auditors, 2026-11-12)
+
+Scope: the changes since b0647d1 (rows F70-F72, B75), at 8e8f2b5, by four
+auditors (plan model and gates, whole branch and checks, store, page),
+each in its own worktree at that commit; each finding kept was reproduced,
+except where marked.
+
+### Should fix
+
+1. **A round that ended in "changes" escapes the round limit when taken up again** (`shared/plan.ts` passedAndClosed). From F70.
+2. **A reopened task dropped and taken up again is stopped at the limit** (`shared/plan.ts` editTask), found by two auditors; and nothing tests that later rounds are held. From F70.
+3. **A field saved off screen reopens with a false warning when the daemon trimmed it** (`ui/lib/drafts.ts`). From F71.
+
+### Nice to have
+
+4. A stale `reopened` from an older daemon is trusted (not reproduced end to end).
+5. (with 2) the clear on entering review has no test.
+6. Done for a task in refine/blocked at the limit points to review, then refused.
+7. A section cleared mid-save off screen stays kept empty.
+8. Untested: drafts.ts's blank guard, brief.ts's !t.reopened.
+
+Checked and fine: check implement, review (twice), final; the Node 20.11.0
+runtime suite twice (690 pass); every test added since A11 pins its fix
+(each reverted); no flake; the CHANGELOG matches the code (but for 2);
+wasDone/reopened do not touch proposal prints, change baselines, rendered
+or exported plans, or the page; save/reload round-trips byte-identical;
+older builds load the fields; STATE_SCHEMA stays (bumping would blank
+this build's files for older daemons); held save failures at startup; the
+user-reviewed reopen path; the comment composer (typed on, cleared,
+second post, refused, lock); replies off screen.
+
+**Verdict:** no Must fix; fix 1 first (it lets the agent past the user's
+round limit), then 2, 3.
+
+## Re-audit report (row A13, four auditors, 2026-11-12)
+
+Scope: the changes since af1c662 (rows F73-F75, B76), at a4c471e, by four
+auditors (plan model and gates, whole branch and checks, store, page),
+each in its own worktree at that commit; each finding kept was
+reproduced, except where marked. Two auditors stopped at a usage limit
+and were resumed after it reset.
+
+### Should fix
+
+1. **An unsubmitted Managed build judges the round under the default review mode** (`shared/plan.ts` editTask): a user-reviewed task closed on the user's word gets past the limit; a skip-mode one is held.
+2. **A reply box drawn anew mid-post keeps the whole text** (`ui/lib/drafts.ts`): posting again repeats the first part. Older.
+3. **B76's done-gate message is unclear** (`daemon/main.ts`), and F73's user-review case and B76's whitespace case are not pinned by tests.
+
+### Nice to have
+
+4. The watcher matches the sent text exactly (a redrawn box with a newline or cleared stays open).
+5-6. (with 3) the misplaced comment; the whitespace test.
+7. Skip mode puts no real limit on rounds.
+8. A local `reopened` in main.ts means something else.
+9. ReviewMode import order.
+
+Checked and fine: check implement, review (twice), final; the Node
+20.11.0 runtime suite (693 pass); UI tests five times in a row and six at
+once, no flake; every fix since A12 pinned (each reverted); the CHANGELOG
+matches the code; no dead code or unused exports; submitted builds under
+self, user and skip review: the free round given and held as intended,
+every done-gate message points to an accepted action; save/reload
+round-trips byte-identical, an older build's stale flags dropped on
+load with no spurious change, revision or unread; text differing inside
+is kept, the remount comparison sound (the daemon trims every field).
+
+**Verdict:** no Must fix; fix 1 first (it can pass the user's round
+limit), then 2, 3.
+
+### Re-audit A14
+
+Scope: the changes since 6e5f565 (rows F76-F78, B77, B78), by four
+auditors (plan model, check runner/daemon, UI store, page).
+
+### Should fix
+
+1. **The Tracked round-limit notes contradict each other** (`daemon/main.ts`): one leaves the choice to the agent, the other to the user. (F79)
+2. **The board does not hear a change to the project's review mode** (`daemon/main.ts`, `ui/store.ts`): both the store and daemon auditors found it. (F80)
+3. **A redrawn box's typing is lost off screen** (`ui/lib/drafts.ts`): the sender rebuilds the kept draft from its own stale text. Older code. (F81)
+4. **The watcher's close condition is untested** (`ui/lib/drafts.ts`). (B80)
+
+### Nice to have
+
+5. store.reviewFor wiring untested at the daemon level; 6. the SSE test asserts the default mode; 7. previewProposal skips the fallback; 8. passedAndClosed's default argument; 9. no proposal-accept mode test (proposals cannot set status, so moot); 10. a late fetch can overwrite a newer projectReview; 11. no resync/switch test; 12. the stage-review refusal's wording unpinned. (B80, F79, F80)
+
+Checked and fine: plan 105 + store 41, integration 79, UI 152 pass; the
+review-mode precedence matches the daemon's gates; every daemon edit goes
+through the store's fallback; both round-limit refusals point to calls the
+gates accept (walked through); projectFor per snapshot is cached and cannot
+throw; UserReview's hook order; set() prunes after merging the patch.
+
+**Verdict:** no Must fix, 4 Should fix: F79, F80, F81, then B80.
+
+### Re-audit A15
+
+Scope: the changes since 9ceadfd (rows F79-F82, B80), by four auditors.
+
+### Should fix
+
+1. **A review-mode change can be missed past 50 repositories** (`daemon/main.ts`): the two caches clear apart. (F83)
+2. **Flaky tests** (`test/ui.test.tsx`): the board verdict test and F81's redraw tests fail now and then in full runs (rated Nice to have by the auditor; a flaky test hides or fakes regressions, so taken as Should fix). (T8)
+
+### Nice to have
+
+3. summaries reads the project for Tracked/Export; 4. a dead branch in drafts.ts; 5. the settings timer path untested; 6. summaries' skip/memo unpinned; 7. an unwatched repository's list row; 8. the editor-emptied file; 9. the board test's title and text check. (B81, F83, T7)
+
+Checked and fine: build clean; plan 105, status 5, store 42, integration 81, UI 155 + sidebar 29; no notification loop (only a change notifies, a re-read is quiet, a file dated ahead told once); listeners removed on close; repoRoot vs cwd keyed alike; every caller of the review fallback now passes the project's mode; hook order in StatusChip/BuildStrip; F81 sound with and without a redrawn editor, cancelled/closed, refused, the comment composer; each fix's test fails reverted.
+
+**Verdict:** no Must fix, 2 Should fix: F83, T8, then B81.
+
+### Re-audit A16
+
+Scope: the changes since 4f2b078 (rows F83, T8, B81), by four auditors,
+each building and testing in its own worktree.
+
+### Should fix
+
+1. **F83's cache-hit wiring is untested** (`daemon/main.ts`): deleting the `saw` call on a hit passes every test. (T9)
+2. **B81's store test depends on the clock** (`test/store.test.ts`): one folder for every session, so a revert is caught only across a millisecond. (T9)
+
+### Nice to have
+
+3. drafts.ts's "kept with more" branch is unreachable after all (instrumented: never ran; no key drawn twice), its B81 comment wrong; 4. ReviewReads' bound past 50 held repositories; 5. nine tests on the old inline settle; 6. the `saved` comment overstates. (B82)
+
+No code defect found. Checked and fine: holdsForReview matches the old checks (an export with no mode is export, an old Managed build counts); no row gets a wrong review mode; a cache hit can never carry a mode other than the last read (an unsettled read is never cached); eviction order; no notify loop; the hot path costs a Map delete and set; the `saved` helper's claim holds (the answer's handling is all microtasks, the stub has no timers); 13 more full UI runs, alone and at once, all pass; every fix pinned (each reverted, the two above aside).
+
+**Verdict:** no Must fix, 2 Should fix, both test gaps: T9, then B82.
+
+### Re-audit A17 (the last of batch 1)
+
+Scope: the changes since beb42ba (rows T9, B82), by four auditors, each in its
+own worktree. Run under the batch rules adopted after it: its findings go to
+the backlog, and batch 1 ends here.
+
+### Should fix (backlog)
+
+1. **No test of a missing source file** (`daemon/projectConfigs.ts`): a regression that stops all caching passes every test. (T10)
+2. **A failing review-change listener is swallowed unlogged** (`daemon/projectConfigs.ts`): T9 lost the daemon-log line it had. (B83)
+
+### Nice to have (not rows)
+
+3. The `Math.max(1, knownReviews)` clamp untested. 4. drafts.ts's "kept with more" guard: two copies of a box are drawn (ByBox, a task under two boxes, on a locked plan) but none editable; were one, the copy's own watcher already trims the sent text and the sender's effect overwrites the guard's write, so the branch is redundant and its comment inaccurate: delete it. 5. Two held sends (ui.test.tsx ~1532, ~2814) do not settle through `saved`. 6. Nothing checks `saving` is 0 between UI tests.
+
+No code defect found in the batch's own changes. Checked and fine: ProjectConfigs matches the old closure (a missing file still counts as unchanged); every caller in main.ts wired, in order; listeners removed on SSE close; integration 81/81 and UI 155/155 in each auditor's copy, alone and three at once; every fix pinned (each reverted).

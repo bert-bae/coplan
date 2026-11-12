@@ -191,7 +191,7 @@ export function SubmitControl() {
  * is on, or what waits on the user.
  */
 export function StatusChip({ plan, agent, note }: { plan: Plan; agent: AgentInfo; note?: string }) {
-  const facts = statusFacts(plan);
+  const facts = statusFacts(plan, useStore((s) => s.projectReview));
   const status = PLAN_STATUS[facts.planStatus];
   const detail = statusDetail(facts, agent.name);
   return (
@@ -1064,14 +1064,15 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
   const tab = useStore((s) => s.tab);
   const agent = agentInfo(session.agent);
   const [confirming, setConfirming] = useState(false);
+  const projectReview = useStore((s) => s.projectReview);
   const submission = plan.submission;
   if (!submission) return null;
   const counts = countTasks(plan);
   const now = currentTask(plan);
   const blocked = plan.tasks.filter((t) => t.status === 'blocked' && !plan.tasks.some((c) => c.parentId === t.id));
-  const facts = statusFacts(plan);
+  const facts = statusFacts(plan, projectReview);
   const label = PLAN_STATUS[facts.planStatus].label;
-  const reviewing = awaitingUserReview(plan);
+  const reviewing = awaitingUserReview(plan, projectReview);
 
   let head: string;
   let text: ReactNode;

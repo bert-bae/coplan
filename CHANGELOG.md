@@ -4,6 +4,28 @@
 
 ### Fixes
 
+- **The board asks for your verdict wherever your project has you review.** On a build whose plan does not
+  hold a review mode (a Tracked build), the board went by the default and never showed you the review box, while
+  the agent waited on your verdict. A change request you were writing there could also be let go. Changing the
+  review mode in `.coplan/config.json` now reaches an open board too. A Managed build submitted on the
+  repository's defaults shows Review, in the header and the session list, while a task waits on your verdict.
+- **At the round limit, the agent is told how to carry out your answer.** Whether it was sending a task to
+  review or marking it done, it is now told the same thing: another round is a new review, accepting it marks
+  it done, and taking it over leaves it blocked for you.
+- **A task taken up again is judged by your project's review mode before you submit.** Before a
+  Managed build was submitted, or on a Tracked build, reopening a finished task judged its last round as
+  self-reviewed: a task you review yourself could get past your round limit on the agent's pass, and one that
+  skips review could be refused another round.
+- **What you type into a field while it is saving is kept.** The field closed once the save went in, and the
+  rest was gone; it now stays open on it, also when you were on another tab as the save went in (it no longer
+  comes back saying it changed while you were editing). A reply or a new comment typed on while it is posted
+  keeps only what came after, also in a box drawn anew meanwhile (another tab and back), so nothing posts twice;
+  and what you type into a box drawn anew is kept when you leave it before the save goes in.
+- **A finished task taken up again needs a new review, even by way of dropped.** Dropped and then restarted,
+  it kept the pass that closed its round, so it could be marked done again on that. A drop undone (set done
+  again, nothing changed) keeps its pass, and a task dropped before it was finished keeps its verdicts. Taken up
+  again, it gets a new review round even at the round limit (its last round passed), and the agent is told to go
+  to review rather than to give a verdict it cannot.
 - **A finished task carried into the next plan keeps its review history.** Publishing the next plan kept its
   review round but dropped the reviews themselves from the page.
 - **A task left in review by a hand-edited plan, though no longer in progress, is not put in a review round.**
@@ -29,7 +51,8 @@
 - **A change request you were typing is offered to copy when the task stops waiting on your review.** If the
   agent took the task back to building, or you gave your verdict in chat, the text went without a word. So is
   one you sent just as that happened, which is refused; and Send cannot be pressed twice while it is on its way,
-  even after the card moves meanwhile.
+  even after the card moves meanwhile; what you type into it while the first is on its way is kept, or, once
+  that request has decided the round, offered to copy.
 - **Submitting or confirming the design waits for a field whose save was refused.** Its warning names the field,
   as it does for text left open in an editor, instead of dropping it and offering it to copy afterwards.
 - **A board card you opened stays open when the agent moves it.** Its details and comments no longer close as
@@ -51,7 +74,8 @@
   says the output could not be written and exits 1.
 - **`coplan check` stops before the next check when its output cannot be written.** On a full disk it started
   the next check and killed it part way; a command running when its output fails now ends itself. `setup` asks
-  nothing once its output fails, rather than wait on a question no one can see.
+  nothing once its output fails, rather than wait on a question no one can see, and still restarts Coplan on
+  the new build.
 - **A submitted plan's task comments can be read on its board.** A card with comments has a toggle that shows
   them, and the agent's replies, to read. Before, they were on no tab once the plan was submitted.
 - **Text in a field whose save was refused is no longer lost when the field goes.** Switching tabs or

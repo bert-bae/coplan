@@ -15,7 +15,7 @@ const { render, renderHook, fireEvent, within, cleanup, act, screen, waitFor } =
 const { App } = await import('../ui/App.tsx');
 const { store, SessionScope, useEdit, useStillShown } = await import('../ui/store.ts');
 const { openDrafts, draftsLockedBy, pruneDrafts, unsavedDrafts } = await import('../ui/lib/drafts.ts');
-const { publishPlan, applyOps, submitPlan, markDelivered, reopenPlan, confirmDesign, queueRevision, markRevisionDelivered } = await import('../shared/plan.ts');
+const { publishPlan, applyOps, submitPlan, markDelivered, markReadByClaude, reopenPlan, confirmDesign, queueRevision, markRevisionDelivered } = await import('../shared/plan.ts');
 
 const INPUT: PlanInput = {
   title: 'Add a cache',
@@ -89,6 +89,21 @@ const none = (found: Element | null, what = 'nothing expected') => assert.ok(fou
 const opsSent = () => posts.filter((p) => p.route.endsWith('/plan/ops')).flatMap((p) => p.body['ops'] as Record<string, unknown>[]);
 /** The edits sent to one session's plan. */
 const sentTo = (id: string) => posts.filter((p) => p.route === `/api/session/${id}/plan/ops`).flatMap((p) => p.body['ops'] as Record<string, unknown>[]);
+
+/** A held save, let go, and done with: its answer in, and what the editor
+ *  does with it. All of that runs in microtasks (the stub answers with no
+ *  timer, and nothing after it waits on one), so one macrotask after it sees
+ *  it all; waiting for `saving` to fall to 0 only guards that, should a save
+ *  ever answer later. One place for it, for every held save. */
+const saved = async (held: Promise<void>) => {
+  await act(async () => {
+    await held;
+  });
+  await waitFor(() => assert.equal(store.getState().saving, 0));
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 0));
+  });
+};
 
 const openTab = async (name: string) => {
   await act(async () => {
@@ -909,6 +924,411 @@ test('a section is edited in place and saved as an op', async () => {
     fireEvent.keyDown(area, { key: 'Enter', ctrlKey: true });
   });
   assert.deepEqual(opsSent()[0], { op: 'upsert_section', id: 's1', body: 'Reads take 400ms.', expect: 1 }, 'made against the revision edited');
+});
+
+test('text typed while a save is on its way is kept when the save goes through', async () => {
+  // The daemon applies the edits it is sent.
+  await boot(undefined, (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+    return { plan: next, changes: [] };
+  });
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+  });
+  const area = () => screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
+  await act(async () => {
+    fireEvent.change(area(), { target: { value: 'First.' } });
+  });
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+    });
+    fireEvent.change(area(), { target: { value: 'First. Second.' } });
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await saved(held);
+  assert.equal(area().value, 'First. Second.', 'still open, with what was typed meanwhile');
+  assert.equal(unsavedDrafts(), true, 'and closing the page asks');
+  // Saved again: made against the revision the first save made, so it goes in.
+  await act(async () => {
+    fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+  });
+  const sections = opsSent().filter((op) => op['op'] === 'upsert_section');
+  assert.deepEqual(sections.map((op) => [op['body'], op['expect']]), [['First.', 1], ['First. Second.', 2]]);
+});
+
+test('a box drawn anew while its save is out, then changed only by whitespace (or, a reply, cleared), closes as saved', async () => {
+  const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  await boot(makeSession(plan), (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+    return { plan: next, changes: [] };
+  });
+  const held = async (open: () => Promise<void>, field: () => HTMLTextAreaElement, typed: string, after: string, tab: string) => {
+    await open();
+    fireEvent.change(field(), { target: { value: typed } });
+    let answer: (() => void) | null = null;
+    const wait = new Promise<void>((r) => (answer = r));
+    const realFetch = globalThis.fetch;
+    Object.defineProperty(globalThis, 'fetch', {
+      value: async (...args: Parameters<typeof fetch>) => (String(args[0]).endsWith('/plan/ops') && (await wait), realFetch(...args)),
+      writable: true,
+      configurable: true,
+    });
+    try {
+      await act(async () => {
+        fireEvent.keyDown(field(), { key: 'Enter', ctrlKey: true });
+      });
+      // Drawn anew (another tab and back), then changed there only by whitespace, or cleared.
+      await openTab(tab === 'Tasks' ? 'Overview' : 'Tasks');
+      await openTab(tab);
+      await open();
+      fireEvent.change(field(), { target: { value: after } });
+    } finally {
+      Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+      answer!();
+    }
+    await saved(wait);
+  };
+  // A section changed only by whitespace.
+  await openTab('Overview');
+  const area = () => screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
+  const editSection = async () => {
+    if (!screen.queryByLabelText('section "Context"')) {
+      await act(async () => {
+        fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+      });
+    }
+  };
+  await held(editSection, area, 'First.', '  First.\n', 'Overview');
+  assert.equal(screen.queryByLabelText('section "Context"') === null, true, 'the section: closed');
+  assert.equal(unsavedDrafts(), false, 'the section: nothing kept');
+  // A reply cleared.
+  await openTab('Tasks');
+  const reply = () => screen.getByRole('textbox', { name: 'Reply' }) as HTMLTextAreaElement;
+  const openReply = async () => {
+    if (screen.queryByRole('textbox', { name: 'Reply' })) return;
+    if (!screen.queryByRole('button', { name: /open comment\(s\) on Invalidation/ })) {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+      });
+    }
+    if (!screen.queryByRole('button', { name: 'Reply' })) {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /open comment\(s\) on Invalidation/ }));
+      });
+    }
+    if (!screen.queryByRole('textbox', { name: 'Reply' })) {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+      });
+    }
+  };
+  await held(openReply, reply, 'The Redis one.', '', 'Tasks');
+  assert.equal(screen.queryByRole('textbox', { name: 'Reply' }) === null, true, 'the reply: closed');
+  assert.equal(unsavedDrafts(), false, 'the reply: nothing kept');
+});
+
+test('a section saved, typed on, drawn anew, typed on again and off screen when the save goes in keeps all of it', async () => {
+  await boot(undefined, (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+    return { plan: next, changes: [] };
+  });
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+  });
+  const area = () => screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
+  fireEvent.change(area(), { target: { value: 'First.' } });
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', {
+    value: async (...args: Parameters<typeof fetch>) => (String(args[0]).endsWith('/plan/ops') && (await held), realFetch(...args)),
+    writable: true,
+    configurable: true,
+  });
+  try {
+    await act(async () => {
+      fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+    });
+    fireEvent.change(area(), { target: { value: 'First. Second.' } });
+    // Drawn anew while it saves, typed on there, and left before the save goes in.
+    await openTab('Tasks');
+    await openTab('Overview');
+    assert.equal(area().value, 'First. Second.');
+    fireEvent.change(area(), { target: { value: 'First. Second. Third.' } });
+    await openTab('Tasks');
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await saved(held);
+  await openTab('Overview');
+  assert.equal(area().value, 'First. Second. Third.', 'nothing typed after it was drawn anew is lost');
+  assert.equal(document.body.textContent?.includes('This changed while you were editing'), false, 'its own save is no change underneath');
+  await act(async () => {
+    fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+  });
+  const sections = opsSent().filter((op) => op['op'] === 'upsert_section');
+  assert.deepEqual(sections.map((op) => [op['body'], op['expect']]), [['First.', 1], ['First. Second. Third.', 2]], 'saved again, against the save that went in');
+});
+
+test('a section saved, typed on, and off screen when the save goes in reopens on its text with no false warning', async () => {
+  await boot(undefined, (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+    return { plan: next, changes: [] };
+  });
+  await openTab('Overview');
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+  });
+  const area = () => screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
+  await act(async () => {
+    // Ending in a newline the daemon trims off.
+    fireEvent.change(area(), { target: { value: 'First.\n' } });
+  });
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+    });
+    fireEvent.change(area(), { target: { value: 'First.\nSecond.' } });
+    await openTab('Tasks');
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await saved(held);
+  assert.equal(unsavedDrafts(), true, 'kept, off screen, as not saved');
+  await openTab('Overview');
+  assert.equal(area().value, 'First.\nSecond.');
+  assert.equal(document.body.textContent?.includes('This changed while you were editing'), false, 'its own save is no change underneath');
+  await act(async () => {
+    fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+  });
+  const sections = opsSent().filter((op) => op['op'] === 'upsert_section');
+  assert.deepEqual(sections.map((op) => [op['body'], op['expect']]), [['First.\n', 1], ['First.\nSecond.', 2]]);
+  // Saved again off screen, then changed by the agent before it is reopened: that change is warned of.
+  await act(async () => {
+    fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+  });
+  fireEvent.change(area(), { target: { value: 'Third.' } });
+  let again: (() => void) | null = null;
+  const heldAgain = new Promise<void>((r) => (again = r));
+  const realFetch2 = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await heldAgain, realFetch2(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+    });
+    fireEvent.change(area(), { target: { value: 'Third. Fourth.' } });
+    await openTab('Tasks');
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch2, writable: true, configurable: true });
+    again!();
+  }
+  await saved(heldAgain);
+  const s2 = store.getState().session!;
+  const read = structuredClone(s2.plan!);
+  markReadByClaude(read);
+  const byAgent = applyOps(read, [{ op: 'upsert_section', id: 's1', body: 'The agent wrote this.' }], 'claude').plan;
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s2, plan: byAgent } }));
+  await openTab('Overview');
+  assert.equal(area().value, 'Third. Fourth.');
+  assert.equal(document.body.textContent?.includes('This changed while you were editing'), true, "the agent's change is warned of");
+});
+
+test('a new comment typed on while it is posted keeps only what came after, so nothing posts twice', async () => {
+  await boot(makeSession(makePlan()), (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+    return { plan: next, changes: [] };
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /Comment on Invalidation|comment\(s\) on Invalidation/ }));
+  });
+  const box = () => screen.getByRole('textbox', { name: /^New comment on/ }) as HTMLTextAreaElement;
+  fireEvent.change(box(), { target: { value: 'Which client?' } });
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.keyDown(box(), { key: 'Enter', ctrlKey: true });
+    });
+    fireEvent.change(box(), { target: { value: 'Which client? And which pool?' } });
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await saved(held);
+  assert.equal(box().value, 'And which pool?', 'what came after, not what was posted');
+  // Posted whole too: the box still keeps what is typed next (closing the page asks).
+  await act(async () => {
+    fireEvent.keyDown(box(), { key: 'Enter', ctrlKey: true });
+  });
+  assert.equal(box().value, '');
+  fireEvent.change(box(), { target: { value: 'And how many?' } });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  assert.equal(unsavedDrafts(), true, 'kept after a post, as before one');
+});
+
+test('a field cleared, or changed only by whitespace, while its save is out closes as saved, on screen or off', async () => {
+  await boot(undefined, (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+    return { plan: next, changes: [] };
+  });
+  await openTab('Overview');
+  const area = () => screen.getByLabelText('section "Context"') as HTMLTextAreaElement;
+  for (const [offScreen, typed, after] of [[false, 'First.', ''], [true, 'Second.', ''], [false, 'Third.', 'Third. '], [true, 'Fourth.', '  Fourth.\n']] as const) {
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Edit section "Context"'));
+    });
+    fireEvent.change(area(), { target: { value: typed } });
+    let answer: (() => void) | null = null;
+    const held = new Promise<void>((r) => (answer = r));
+    const realFetch = globalThis.fetch;
+    Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+    try {
+      await act(async () => {
+        fireEvent.keyDown(area(), { key: 'Enter', ctrlKey: true });
+      });
+      fireEvent.change(area(), { target: { value: after } });
+      if (offScreen) await openTab('Tasks');
+    } finally {
+      Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+      answer!();
+    }
+    await saved(held);
+    assert.equal(unsavedDrafts(), false, `${offScreen ? 'off' : 'on'} screen, ${JSON.stringify(after)}: nothing left kept`);
+    if (offScreen) await openTab('Overview');
+    assert.equal(screen.queryByLabelText('section "Context"') === null, true, `${offScreen ? 'off' : 'on'} screen, ${JSON.stringify(after)}: closed`);
+  }
+});
+
+test('a reply typed on while it is posted keeps only what came after, so nothing posts twice', async () => {
+  const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+  await boot(makeSession(plan), (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+    return { plan: next, changes: [] };
+  });
+  await openTab('Tasks');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '1 open comment(s) on Invalidation' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+  });
+  const box = () => screen.getByRole('textbox', { name: 'Reply' }) as HTMLTextAreaElement;
+  fireEvent.change(box(), { target: { value: 'The Redis one.' } });
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.keyDown(box(), { key: 'Enter', ctrlKey: true });
+    });
+    fireEvent.change(box(), { target: { value: 'The Redis one. With a pool.' } });
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await saved(held);
+  assert.equal(box().value, 'With a pool.', 'what came after, not what was posted');
+});
+
+test('a reply box drawn anew while its reply posts, typed on (before it too), keeps only what came after, on screen or off', async () => {
+  // `early`: typed on before the box is drawn anew as well as after (the sender's own text is then stale).
+  for (const [offScreen, early] of [[false, false], [true, false], [false, true], [true, true]] as const) {
+    cleanup();
+    openDrafts.clear();
+    const plan = applyOps(makePlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
+    await boot(makeSession(plan), (route, init) => {
+      if (!route.endsWith('/plan/ops')) return undefined;
+      const s = store.getState().session!;
+      const next = applyOps(s.plan!, (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops, 'user').plan;
+      return { plan: next, changes: [] };
+    });
+    await openTab('Tasks');
+    const details = async () =>
+      act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Details of Invalidation' }));
+      });
+    const thread = async () =>
+      act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /open comment\(s\) on Invalidation/ }));
+      });
+    await details();
+    await thread();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+    });
+    const box = () => screen.getByRole('textbox', { name: 'Reply' }) as HTMLTextAreaElement;
+    fireEvent.change(box(), { target: { value: 'The Redis one.' } });
+    let answer: (() => void) | null = null;
+    const held = new Promise<void>((r) => (answer = r));
+    const realFetch = globalThis.fetch;
+    Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (String(args[0]).endsWith('/plan/ops') && (await held), realFetch(...args)), writable: true, configurable: true });
+    try {
+      await act(async () => {
+        fireEvent.keyDown(box(), { key: 'Enter', ctrlKey: true });
+      });
+      // The box goes and is drawn anew, on what it held, while the reply posts.
+      if (early) fireEvent.change(box(), { target: { value: 'The Redis one. With' } });
+      await openTab('Overview');
+      assert.equal(screen.queryByRole('textbox', { name: 'Reply' }) === null, true, 'the box goes');
+      await openTab('Tasks');
+      if (!screen.queryByRole('textbox', { name: 'Reply' })) await details();
+      if (!screen.queryByRole('textbox', { name: 'Reply' })) await thread();
+      assert.equal(box().value, early ? 'The Redis one. With' : 'The Redis one.');
+      fireEvent.change(box(), { target: { value: 'The Redis one. With a pool.' } });
+      if (offScreen) await openTab('Overview');
+    } finally {
+      Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+      answer!();
+    }
+    await saved(held);
+    if (offScreen) {
+      await openTab('Tasks');
+      if (!screen.queryByRole('textbox', { name: 'Reply' })) await details();
+      if (!screen.queryByRole('textbox', { name: 'Reply' })) await thread();
+    }
+    assert.equal(box().value, 'With a pool.', `what came after, not what was posted (${offScreen ? 'off' : 'on'} screen${early ? ', typed on before it was drawn anew' : ''})`);
+  }
 });
 
 test('a refused save keeps the editor open with the text intact', async () => {
@@ -2055,6 +2475,67 @@ test('a change request being typed is offered to copy when the task no longer wa
   assert.equal(offered().length, 2, 'its own request is not offered');
 });
 
+test("the board asks for the user's verdict where the project has them review and the plan does not say (a Managed build on the repository's defaults)", async () => {
+  const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
+  const plan = claude(lockedPlan(true), { op: 'upsert_task', id: 't3', stage: 'review' });
+  assert.equal(plan.submission?.settings === undefined, true, 'the plan holds no review mode');
+  const session = makeSession(plan);
+  await boot(session, (route, init) => (/^\/api\/session\/[^/]+$/.test(route) && !init?.method ? { session, projectReview: 'user' } : undefined));
+  await openTab('Tasks');
+  const box = () => within(document.getElementById('task-t3')!).queryByRole('group', { name: 'Your review of Wire into API' });
+  await waitFor(() => assert.equal(box() !== null, true, "the user's verdict is asked for"));
+  // And the header's status says the build waits on them (#162).
+  await openTab('Architecture');
+  const pill = screen.getByTestId('plan-status');
+  assert.match(pill.textContent ?? '', /Review · 1 task waits on your review/);
+  assert.match(screen.getByRole('region', { name: 'The build' }).textContent ?? '', /Review · 1 task waits on your review/, 'and the build strip');
+  // A change request kept for it stays kept when the plan lands again.
+  const key = `${session.sessionId}:review:t3:1`;
+  openDrafts.set(key, { draft: 'Add a timeout', value: '', version: undefined });
+  assert.deepEqual(pruneDrafts(session.sessionId, plan, 'user'), []);
+  assert.equal(openDrafts.has(key), true, 'kept');
+  assert.equal(pruneDrafts(session.sessionId, plan).length, 1, 'under the default (self) it no longer waits on the user: offered');
+  openDrafts.clear();
+});
+
+test("who reviews follows the session open, and is fetched again on a resync", async () => {
+  let review: string | undefined = 'user';
+  await boot(makeSession(), (route, init) => {
+    if (!/^\/api\/session\/[^/]+$/.test(route) || init?.method) return undefined;
+    const id = route.split('/').at(-1)!;
+    return { session: { ...makeSession(), sessionId: id }, ...(review ? { projectReview: review } : {}) };
+  });
+  assert.equal(store.getState().projectReview, 'user', 'from the fetch');
+  // Another session, whose daemon says nothing of it: not the last one's.
+  review = undefined;
+  await act(async () => {
+    await store.selectSession('s2');
+  });
+  assert.equal(store.getState().projectReview, 'self', "the default, not the other session's");
+  // Changed while the stream was down: the resync brings it.
+  review = 'skip';
+  await act(async () => {
+    await (store as unknown as { resync: () => Promise<void> }).resync();
+  });
+  assert.equal(store.getState().projectReview, 'skip');
+});
+
+test("a plan streamed in brings who reviews with it, so a change request kept for the user's review is not let go first", async () => {
+  const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
+  const plan = claude(lockedPlan(true), { op: 'upsert_task', id: 't3', stage: 'review' });
+  const session = makeSession(plan);
+  // The fetch says nothing of it (an older daemon, or not back yet): the stream's snapshot does.
+  await boot(session);
+  await openTab('Tasks');
+  const key = `${session.sessionId}:review:t3:1`;
+  openDrafts.set(key, { draft: 'Add a timeout', value: '', version: undefined });
+  await act(async () => store.apply({ type: 'snapshot', session: { ...session, plan: { ...plan, version: plan.version + 1 } }, projectReview: 'user' }));
+  assert.equal(openDrafts.has(key), true, 'kept: the round waits on the user');
+  assert.equal(within(document.getElementById('task-t3')!).queryByRole('group', { name: 'Your review of Wire into API' }) !== null, true);
+  assert.equal(store.getState().toasts.some((t) => t.copy !== undefined), false, 'nothing offered as dropped');
+  openDrafts.clear();
+});
+
 test('a change request on a task since removed is offered, named as such rather than by its id', () => {
   openDrafts.set('s-gone:review:t-gone:2', { draft: 'Add a timeout', value: '', version: undefined });
   const dropped = pruneDrafts('s-gone', lockedPlan(true));
@@ -2137,13 +2618,137 @@ test('a review box drawn anew while its request is on its way cannot send it aga
     Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
     answer!();
   }
-  await act(async () => {
-    await held;
-    await new Promise((r) => setTimeout(r, 0));
-  });
+  await saved(held);
   assert.equal(opsSent().filter((op) => op['op'] === 'review_task').length, 1, 'sent once');
   // Sent: the box drawn anew closes too, rather than hold what went.
   assert.equal(within(review()).queryByLabelText('What to change') === null, true, 'closed');
+  assert.equal(unsavedDrafts(), false);
+});
+
+test('text typed into a box drawn anew while its request is on its way is kept when the request goes through', async () => {
+  const plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  await boot(makeSession(plan));
+  await openTab('Tasks');
+  const s = store.getState().session!;
+  const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
+  const inReview = claude(s.plan!, { op: 'upsert_task', id: 't3', stage: 'review' });
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: inReview } }));
+  const review = () => within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+  });
+  fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout' } });
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.click(within(review()).getByRole('button', { name: 'Send' }));
+    });
+    await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: claude(inReview, { op: 'upsert_task', id: 't3', status: 'blocked', note: 'Waiting' }) } }));
+    // More typed into the box drawn anew while the first goes.
+    fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout, and log retries' } });
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await saved(held);
+  assert.equal((within(review()).getByLabelText('What to change') as HTMLInputElement).value, 'Add a timeout, and log retries', 'kept open with what was added');
+  assert.equal(unsavedDrafts(), true, 'and closing the page asks');
+  // Likewise when that box is not on screen as the request goes through (another tab): kept, and back on return.
+  let again: (() => void) | null = null;
+  const heldAgain = new Promise<void>((r) => (again = r));
+  const realFetch2 = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await heldAgain, realFetch2(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.click(within(review()).getByRole('button', { name: 'Send' }));
+    });
+    const blocked = store.getState().session!.plan!;
+    await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: claude(blocked, { op: 'upsert_task', id: 't3', status: 'in_progress', note: 'Back' }) } }));
+    fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout, and log retries, and alert' } });
+    await openTab('Overview');
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch2, writable: true, configurable: true });
+    again!();
+  }
+  await saved(heldAgain);
+  assert.equal(unsavedDrafts(), true, 'kept while off screen');
+  await openTab('Tasks');
+  assert.equal((within(review()).getByLabelText('What to change') as HTMLInputElement).value, 'Add a timeout, and log retries, and alert');
+});
+
+test('text added to a box drawn anew while its request is on its way is offered, once the request decides the round', async () => {
+  const plan = lockedPlan(true);
+  plan.tasks.find((t) => t.id === 't3')!.review = 'user';
+  let answer: (() => void) | null = null;
+  const held = new Promise<void>((r) => (answer = r));
+  // The daemon applies the verdict: its plan lands over the stream before the answer.
+  await boot(makeSession(plan), (route, init) => {
+    if (!route.endsWith('/plan/ops')) return undefined;
+    const s = store.getState().session!;
+    const ops = (JSON.parse(String(init?.body)) as { ops: PlanOp[] }).ops;
+    const next = applyOps(s.plan!, ops, 'user').plan;
+    store.apply({ type: 'snapshot', session: { ...s, plan: next } });
+    return { plan: next, changes: [] };
+  });
+  await openTab('Tasks');
+  const s = store.getState().session!;
+  const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
+  const inReview = claude(s.plan!, { op: 'upsert_task', id: 't3', stage: 'review' });
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: inReview } }));
+  const review = () => within(document.getElementById('task-t3')!).getByRole('group', { name: 'Your review of Wire into API' });
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+  });
+  fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout' } });
+  const realFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await held, realFetch(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.click(within(review()).getByRole('button', { name: 'Send' }));
+    });
+    await openTab('Overview');
+    await openTab('Tasks');
+    fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Add a timeout, and log retries' } });
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
+    answer!();
+  }
+  await saved(held);
+  const offered = store.getState().toasts.filter((t) => t.copy !== undefined);
+  assert.equal(offered.length, 1, 'offered once');
+  assert.equal(offered[0]!.copy, 'Add a timeout, and log retries');
+  assert.match(offered[0]!.text, /went in/);
+  assert.equal(unsavedDrafts(), false, 'and not kept, on no screen');
+
+  // In the same box, not drawn anew, and with that box off screen when it goes through: offered as well.
+  const round2 = claude(claude(store.getState().session!.plan!, { op: 'upsert_task', id: 't3', stage: 'implement' }), { op: 'upsert_task', id: 't3', stage: 'review' });
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: round2 } }));
+  await act(async () => {
+    fireEvent.click(within(review()).getByRole('button', { name: 'Request changes' }));
+  });
+  fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Retry twice' } });
+  let again: (() => void) | null = null;
+  const heldAgain = new Promise<void>((r) => (again = r));
+  const realFetch2 = globalThis.fetch;
+  Object.defineProperty(globalThis, 'fetch', { value: async (...args: Parameters<typeof fetch>) => (await heldAgain, realFetch2(...args)), writable: true, configurable: true });
+  try {
+    await act(async () => {
+      fireEvent.click(within(review()).getByRole('button', { name: 'Send' }));
+    });
+    fireEvent.change(within(review()).getByLabelText('What to change'), { target: { value: 'Retry twice, with backoff' } });
+    await openTab('Overview');
+  } finally {
+    Object.defineProperty(globalThis, 'fetch', { value: realFetch2, writable: true, configurable: true });
+    again!();
+  }
+  await saved(heldAgain);
+  const offeredAgain = store.getState().toasts.filter((t) => t.copy !== undefined);
+  assert.equal(offeredAgain.length, 2);
+  assert.equal(offeredAgain[1]!.copy, 'Retry twice, with backoff');
   assert.equal(unsavedDrafts(), false);
 });
 
@@ -2174,10 +2779,7 @@ test('a review box drawn anew while its request is on its way and then refused k
     Object.defineProperty(globalThis, 'fetch', { value: realFetch, writable: true, configurable: true });
     answer!();
   }
-  await act(async () => {
-    await held;
-    await new Promise((r) => setTimeout(r, 0));
-  });
+  await saved(held);
   assert.equal((within(review()).getByLabelText('What to change') as HTMLInputElement).value, 'Add a timeout', 'kept');
   assert.equal((within(review()).getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled, false, 'and can be sent again');
 });
