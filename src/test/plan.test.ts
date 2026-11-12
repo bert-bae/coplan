@@ -946,6 +946,14 @@ test('a finished task taken up again, by way of dropped too, has no verdict for 
   mixed = claude(mixed, { op: 'upsert_task', id: 't2', status: 'dropped' });
   mixed = claude(mixed, { op: 'upsert_task', id: 't2', status: 'in_progress' });
   assert.equal(roundVerdict(mixed.tasks.find((t) => t.id === 't2')!, 'self'), undefined);
+  // Known across a republish too.
+  let republished = fresh();
+  Object.assign(republished.tasks.find((t) => t.id === 't2')!, { status: 'done', round: 1, reviews: [{ round: 1, by: 'claude', verdict: 'pass', summary: 'ok', at: 1 }] });
+  republished = claude(republished, { op: 'upsert_task', id: 't2', status: 'dropped' });
+  republished = publishTasks(republished, { tasks: SAME_TASKS.tasks! }, 2_000).plan;
+  assert.equal(republished.tasks.find((t) => t.id === 't2')!.wasDone, true, 'kept by a republish');
+  republished = claude(republished, { op: 'upsert_task', id: 't2', status: 'in_progress' });
+  assert.equal(roundVerdict(republished.tasks.find((t) => t.id === 't2')!, 'self'), undefined);
   // Known across a restart.
   let reload = fresh();
   Object.assign(reload.tasks.find((t) => t.id === 't2')!, { status: 'done', round: 1, reviews: [{ round: 1, by: 'claude', verdict: 'pass', summary: 'ok', at: 1 }] });

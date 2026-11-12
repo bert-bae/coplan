@@ -1292,6 +1292,38 @@ test('dropping a task does not tell a dependent that is itself dropped that it n
   assert.doesNotMatch(String(reply['text']), /t4 "Wire up"/);
 });
 
+test('a task never finished, dropped, does not tell a dependent already done that it waited on it', async () => {
+  const id = 'scope-session-done-dependent';
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await task({ task_id: 't4', stage: 'review' });
+  assert.equal((await task({ task_id: 't4', status: 'done', verdict: 'pass', note: 'done' }))['ok'], true);
+  // Found to build on t3 after it was done.
+  const edited = await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't4', dependsOn: ['t3'] }] });
+  assert.equal(edited['ok'], true, String(edited['text']));
+  const reply = await task({ task_id: 't3', status: 'dropped', note: 'not needed' });
+  assert.equal(reply['ok'], true, String(reply['text']));
+  assert.doesNotMatch(String(reply['text']), /waited on it/);
+});
+
+test('a finished task taken up from a drop says who went ahead on its work, as one taken up from done does', async () => {
+  const id = 'scope-session-from-drop';
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', PLAN);
+  await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't4', dependsOn: ['t1'] }] });
+  await task({ task_id: 't2', status: 'dropped', note: 'the client already exists' });
+  await task({ task_id: 't3', stage: 'review' });
+  assert.equal((await task({ task_id: 't3', status: 'done', verdict: 'pass', note: 'done' }))['ok'], true);
+  assert.equal((await task({ task_id: 't3', status: 'dropped', note: 'superseded' }))['ok'], true);
+  await task({ task_id: 't4', stage: 'implement' });
+  await task({ task_id: 't4', status: 'blocked', note: 'waiting on t3' });
+  const reopened = await task({ task_id: 't3', status: 'in_progress' });
+  assert.equal(reopened['ok'], true, String(reopened['text']));
+  assert.match(String(reopened['text']), /t4 "Wire up" \(blocked\) already went ahead on this task's work: check they still hold once it changes/);
+});
+
 test("done needs the round's passing verdict — the user's own, when the user reviews it", async () => {
   const id = 'review-session';
   const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);

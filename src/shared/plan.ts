@@ -560,8 +560,12 @@ function keepsStage(status: TaskStatus): boolean {
  *  again, its next review round is not held to the round limit, as that
  *  round never failed (`reopened`). */
 export function passedAndClosed(task: Task): boolean {
-  const finished = task.status === 'done' || (task.status === 'dropped' && Boolean(task.wasDone));
-  return finished && Boolean(task.round) && Boolean(task.reviews?.some((r) => r.round === task.round && r.verdict === 'pass'));
+  return wasFinished(task) && Boolean(task.round) && Boolean(task.reviews?.some((r) => r.round === task.round && r.verdict === 'pass'));
+}
+
+/** Finished: done, or dropped while it was done (wasDone). */
+export function wasFinished(task: Task): boolean {
+  return task.status === 'done' || (task.status === 'dropped' && task.wasDone === true);
 }
 
 /** Whether a task with this status is work still to do (not done, not
@@ -2016,8 +2020,7 @@ function editTask(
       if (isWorking(status) && passedAndClosed(task)) {
         task.reopened = true;
       } else if (!isWorking(status)) delete task.reopened;
-      const finished = task.status === 'done' || (task.status === 'dropped' && task.wasDone);
-      if (isWorking(status) && finished && task.reviews) {
+      if (isWorking(status) && wasFinished(task) && task.reviews) {
         task.reviews = task.reviews.filter((r) => r.round !== task.round);
         if (!task.reviews.length) delete task.reviews;
       }

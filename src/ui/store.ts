@@ -202,7 +202,7 @@ class Store {
   offerDroppedNow(sessionId: string | null, { name, text, why }: DroppedDraft, title?: string): void {
     const say =
       why === 'added'
-        ? `${name[0]!.toUpperCase()}${name.slice(1)} went in; what you added while it was on its way was not sent. Copy it to keep it:`
+        ? `${name[0]!.toUpperCase()}${name.slice(1)} went in as it was sent, not as you left it. Here it is as you left it, to copy what you changed:`
         : `That task no longer waits on your review, so ${name} could not be sent. Copy it to keep it:`;
     this.sayOf(sessionId, 'error', say, title, text);
   }

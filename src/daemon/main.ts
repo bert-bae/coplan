@@ -12,7 +12,7 @@ import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from '
 import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
-import { MAX_NOTE, MAX_USER_SAID, PlanError, cleanChecks, cleanNote, cleanUserSaid, mergeChecks, passedAndClosed, planPhase, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
+import { MAX_NOTE, MAX_USER_SAID, PlanError, cleanChecks, cleanNote, cleanUserSaid, mergeChecks, passedAndClosed, planPhase, wasFinished, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
 import {
   PROMPT_BUDGET,
   askRule,
@@ -1482,9 +1482,10 @@ function buildRouter(deps: Deps): Router {
     // for them is worth saying out loud.
     const waiting = dependents(plan, now);
     // Those that went ahead on its finished work, when it is finished no
-    // more: taken up again (by stage alone too), or dropped. Said now, as one
-    // taken up from dropped later cannot tell it was finished (F64).
-    const reopened = task.status === 'done' && now.status !== 'done' && changes.length > 0;
+    // more: taken up again (by stage alone too, or from a drop made while it
+    // was done: wasDone), or dropped.
+    const finishedBefore = wasFinished(task) && !(task.status === 'dropped' && now.status === 'dropped');
+    const reopened = finishedBefore && now.status !== 'done' && changes.length > 0;
     const built = reopened ? waiting.filter((t) => t.status === 'in_progress' || t.status === 'blocked' || t.status === 'done') : [];
     if (built.length) {
       out.push(
