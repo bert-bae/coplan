@@ -464,6 +464,42 @@ test('a hook that ends with its output held open from outside its group is over 
   }
 });
 
+test('a hook that exits leaving something running in its group has that stopped, and ends with its own exit code (D3)', { skip: process.platform === 'win32' }, () => {
+  // A stray worker, its output redirected, that ignores SIGTERM; and a server in a group of its own (setsid), kept.
+  const stray = `sh -c 'trap "" TERM; echo $$ > stray; exec sleep 30' >/dev/null 2>&1 &`;
+  const kept = process.platform === 'linux' ? `setsid sh -c 'echo $$ > kept; exec sleep 30' >/dev/null 2>&1 & ` : '';
+  const up = (file: string) => `case "$(ps -o stat= -p "$(cat ${file})")" in ""|Z*) echo gone ;; *) echo up ;; esac`;
+  const dir = repo({
+    '.coplan/config.json': JSON.stringify({
+      hooks: {
+        review: [
+          { name: 'fails', run: `${stray} ${kept}sleep 0.3; exit 3`, timeout: 20 },
+          { name: 'after', run: `sleep 0.3; ${up('stray')} > stray-after; ${kept ? `${up('kept')} > kept-after` : 'true'}` },
+        ],
+      },
+    }),
+  });
+  try {
+    const started = Date.now();
+    const out = spawnSync(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
+    assert.ok(Date.now() - started < 10_000, `not its timeout (${Date.now() - started}ms)`);
+    assert.match(out.stdout, /✗ fails {2}\(exit 3,/, out.stdout);
+    assert.match(out.stdout, /stopped what it left running in its process group/);
+    assert.match(out.stdout, /✓ after/);
+    assert.equal(readFileSync(path.join(dir, 'stray-after'), 'utf8').trim(), 'gone', 'the stray worker was stopped, SIGTERM ignored');
+    if (kept) assert.equal(readFileSync(path.join(dir, 'kept-after'), 'utf8').trim(), 'up', 'a server in a group of its own runs on');
+  } finally {
+    for (const file of ['stray', 'kept']) {
+      try {
+        process.kill(Number(readFileSync(path.join(dir, file), 'utf8')), 'SIGKILL');
+      } catch {
+        /* gone */
+      }
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("coplan init runs the repository's own scripts, never a package manager's command of the same name", () => {
   // yarn check is yarn's integrity check, bun test is Bun's test runner, pnpm ci is pnpm's own (unimplemented) command.
   const cases: [string, string, Record<string, string>, { implement?: string; review?: string; final?: string }][] = [
