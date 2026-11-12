@@ -245,6 +245,11 @@ export interface Task {
   /** Finished, and taken up again: its round's verdicts went, so its next
    *  review round is not held to the round limit (that round never failed). */
   reopened?: boolean;
+  /** Finished over required checks that still failed: the work accepted as
+   *  it was (by the user, or the agent's call outside a Managed build), not
+   *  a round that passed. Taken up again, its next review round is held to
+   *  the round limit (D4). Kept while it stays finished. */
+  acceptedFailing?: boolean;
   /** Checks of its own, on top of the repository's (#54): required unless
    *  `optional`. The user's to set (`set_checks`), or an accepted proposal's.
    *  Subtasks inherit them. */
@@ -644,6 +649,9 @@ export type PlanOp =
       /** The commit the task's work began at, as the daemon read it when the
        *  task started: progress, never set by hand. */
       startCommit?: string;
+      /** With status done: closed over required checks that failed, as the
+       *  daemon judged them (Task.acceptedFailing). Progress, never set by hand. */
+      acceptedFailing?: boolean;
       /** The boxes this task builds now: replaces its links; [] unlinks it. */
       builds?: string[];
       /** The task's `rev` the edit was made against. Refused if the other

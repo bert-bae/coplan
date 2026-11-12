@@ -1132,7 +1132,11 @@ test('each build gate refuses in a Managed build, and in a Tracked one is a note
       await task({ task_id: 'b', stage: 'implement' });
       await task({ task_id: 'b', stage: 'review', checks: [{ name: 'tests', ok: false, note: '1 failing' }] });
       await gate({ task_id: 'b', status: 'done', verdict: 'pass', note: 'x' }, /its last checks failed \(tests: 1 failing\)/, /its last checks failed \(tests: 1 failing\)/);
-      await settle('b');
+      if (mode === 'managed') await settle('b');
+      // Closed over a failing check, it is recorded as accepted as it was (D4); closed clean, it is not.
+      const closedHow = async (taskId: string) => (await sessionFor(id)).plan!.tasks.find((t) => t.id === taskId)!.acceptedFailing;
+      assert.equal(await closedHow('b'), true);
+      assert.equal(await closedHow('a'), undefined);
       // Done with a required check never reported.
       await task({ task_id: 'c', stage: 'implement' });
       await task({ task_id: 'c', stage: 'review' });

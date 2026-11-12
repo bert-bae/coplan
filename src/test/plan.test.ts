@@ -978,6 +978,49 @@ test("a finished task's last round counts as passed only by the verdict that sta
   assert.equal(closed([], 'skip'), true, 'no review: closed done is passed');
 });
 
+test('a task closed over failing checks gets no free round when taken up again, under any review mode (D4)', () => {
+  const claude = (plan: Plan, op: PlanOp) => applyOps(plan, [op], 'claude', undefined, { tracking: true }).plan;
+  const failing = [{ name: 'tests', ok: false, note: '1 failing' }];
+  const closed = (review: string) => {
+    let p = fresh();
+    Object.assign(p.tasks.find((t) => t.id === 't2')!, { status: 'in_progress', stage: 'review', round: 1, review, checks: failing, reviews: [{ round: 1, by: 'claude', verdict: 'pass', at: 1 }] });
+    p = claude(p, { op: 'upsert_task', id: 't2', status: 'done', acceptedFailing: true });
+    return p;
+  };
+  const t2 = (p: Plan) => p.tasks.find((t) => t.id === 't2')!;
+  for (const review of ['skip', 'self']) {
+    let plan = closed(review);
+    assert.equal(t2(plan).acceptedFailing, true, review);
+    assert.equal(passedAndClosed(plan, t2(plan), 'self'), false, `${review}: accepted as it was, not passed`);
+    // Through a drop, and a drop undone; known across a restart.
+    plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'dropped' });
+    assert.equal(t2(plan).acceptedFailing, true, 'kept through a drop');
+    plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'done' });
+    assert.equal(t2(plan).acceptedFailing, true, 'kept by a drop undone');
+    plan = normalizePlan(JSON.parse(JSON.stringify(plan)) as Plan & Record<string, unknown>, 'x');
+    assert.equal(t2(plan).acceptedFailing, true, 'kept across a restart');
+    // Taken up again: no `reopened`, so its next round is held to the limit; and the flag goes.
+    plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'in_progress' });
+    assert.equal(t2(plan).reopened, undefined, `${review}: no free round`);
+    assert.equal(t2(plan).acceptedFailing, undefined, 'work again: how it was closed no longer applies');
+  }
+  // Without failing checks, skip's closed-done still counts as passed, as before.
+  let clean = fresh();
+  Object.assign(clean.tasks.find((t) => t.id === 't2')!, { status: 'in_progress', stage: 'review', round: 1, review: 'skip' });
+  clean = claude(clean, { op: 'upsert_task', id: 't2', status: 'done' });
+  assert.equal(passedAndClosed(clean, t2(clean), 'self'), true);
+  // Closed anew without it, it goes; set on a task not finished, a load drops it.
+  let again = closed('skip');
+  again = claude(again, { op: 'upsert_task', id: 't2', status: 'in_progress' });
+  again = claude(again, { op: 'upsert_task', id: 't2', status: 'done' });
+  assert.equal(t2(again).acceptedFailing, undefined);
+  const stray = fresh();
+  Object.assign(stray.tasks.find((t) => t.id === 't2')!, { status: 'in_progress', acceptedFailing: true });
+  assert.equal(t2(normalizePlan(JSON.parse(JSON.stringify(stray)) as Plan & Record<string, unknown>, 'x')).acceptedFailing, undefined);
+  // Progress, not the agent's to set through an edit.
+  assert.throws(() => applyOps(fresh(), [{ op: 'upsert_task', id: 't2', acceptedFailing: true }], 'claude'), /upsert_task does not set acceptedFailing/);
+});
+
 test('a finished task taken up again keeps its one round past the limit through a drop, and only that one', () => {
   const claude = (plan: Plan, op: PlanOp) => applyOps(plan, [op], 'claude', undefined, { tracking: true }).plan;
   let plan = fresh();
@@ -1203,6 +1246,20 @@ test('removing a task cannot take one the user just moved under it, unread', () 
   const deeper = read(applyOps(linkedPlan(), [{ op: 'upsert_task', id: 't5', title: 'Auth', parentId: 't1' }], 'user').plan);
   const within = applyOps(deeper, [{ op: 'move_task', id: 't2', parentId: 't5', index: 0 }], 'user').plan;
   assert.deepEqual(ids(applyOps(within, [remove], 'claude').plan), ['t3', 't4']);
+});
+
+test('Claude cannot move a task back that the user moved, unread (D2)', () => {
+  // The user takes Routes out of API to keep it; Claude, unread, would put it back, then remove API.
+  const plan = applyOps(linkedPlan(), [{ op: 'move_task', id: 't2', parentId: null, index: 1 }], 'user').plan;
+  const back: PlanOp = { op: 'move_task', id: 't2', parentId: 't1', index: 0 };
+  assert.throws(() => applyOps(plan, [back], 'claude'), /The user moved task "Routes" since you last read the plan, so this edit was not applied/);
+  assert.throws(() => applyOps(plan, [back, { op: 'remove', kind: 'task', id: 't1' }], 'claude'), /Edit 1 \(move_task\): The user moved task "Routes"/);
+  // A reorder of it is a move too: it was the user's to place.
+  assert.throws(() => applyOps(plan, [{ op: 'move_task', id: 't2', parentId: null, index: 0 }], 'claude'), /moved task "Routes"/);
+  // Read first, and the move goes through, knowingly.
+  assert.equal(applyOps(read(plan), [back], 'claude').plan.tasks.find((t) => t.id === 't2')?.parentId, 't1');
+  // A task the user did not move is Claude's to move.
+  assert.equal(applyOps(plan, [{ op: 'move_task', id: 't4', parentId: 't1', index: 0 }], 'claude').plan.tasks.find((t) => t.id === 't4')?.parentId, 't1');
 });
 
 test('the guard follows the batch: a task moved under one being removed goes with it, so it counts', () => {
