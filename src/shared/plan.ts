@@ -2310,11 +2310,13 @@ export function planPhase(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> &
  * The tasks a Managed build is holding for the user's own review: in
  * review, reviewed by the user (the task's own mode, or the build's), with
  * no verdict from them for this round yet. A Tracked build holds nothing
- * for anyone, so it has none.
+ * for anyone, so it has none. `review`: the project's review mode, for a
+ * build submitted on the repository's defaults (no settings of its own), as
+ * the daemon's gates judge by.
  */
-export function awaitingUserReview(plan: Pick<Plan, 'submission' | 'tasks'> | null): Task[] {
+export function awaitingUserReview(plan: Pick<Plan, 'submission' | 'tasks'> | null, review: ReviewMode): Task[] {
   if (!plan?.submission || planMode(plan, 'managed') !== 'managed') return [];
-  const fallback = plan.submission.settings?.review ?? DEFAULT_BUILD_SETTINGS.review;
+  const fallback = plan.submission.settings?.review ?? review;
   return plan.tasks.filter(
     (t) =>
       t.status === 'in_progress' &&
@@ -2330,10 +2332,11 @@ export function awaitingUserReview(plan: Pick<Plan, 'submission' | 'tasks'> | nu
  * Review is what was built waiting on the user — the final checks and the
  * report once every task is done, or a task a Managed build holds for
  * their review — not the plan before the build: that is Planning.
+ * `review`: the project's review mode (awaitingUserReview).
  */
-export function planStatus(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> & Partial<Pick<Plan, 'report'>>) | null): PlanStatus {
+export function planStatus(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> & Partial<Pick<Plan, 'report'>>) | null, review: ReviewMode): PlanStatus {
   const phase = planPhase(plan);
-  return statusOfPhase(phase, (phase === 'submitted' || phase === 'building') && awaitingUserReview(plan).length > 0);
+  return statusOfPhase(phase, (phase === 'submitted' || phase === 'building') && awaitingUserReview(plan, review).length > 0);
 }
 
 /** The status a phase shows as; `waitingOnUser` is a task held for the

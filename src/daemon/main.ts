@@ -519,6 +519,8 @@ function buildRouter(deps: Deps): Router {
   const reviewChanges = new Set<(root: string, review: ReviewMode) => void>();
   /** Each repository's review mode as last read, to tell a change. */
   const reviewRead = new Map<string, ReviewMode>();
+  // The session list judges what waits on the user by it too.
+  reviewChanges.add(() => store.broadcastSessionList());
   const projectAt = (root: string): ProjectConfig => {
     const hit = projects.get(root);
     if (hit && hit.config.sources && configStamp(hit.config.sources) === hit.stamp) return hit.config;

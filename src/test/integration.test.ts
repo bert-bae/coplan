@@ -1886,9 +1886,10 @@ test("done waits on the checks for what the task changed since it began — not 
 
 /** The `config-errors` events a page's live stream for `session` receives,
  *  as they come; `close` ends the stream. */
-async function settingsStream(session: string): Promise<{ events: string[][]; files: string[][]; reviews: string[]; close: () => void }> {
+async function settingsStream(session: string): Promise<{ events: string[][]; files: string[][]; reviews: string[]; lists: { n: number }; close: () => void }> {
   const events: string[][] = [];
   const reviews: string[] = [];
+  const lists = { n: 0 };
   const files: string[][] = [];
   const { ticket } = await call<{ ticket: string }>('/api/events/ticket', { method: 'POST', body: '{}' });
   let req: http.ClientRequest | undefined;
@@ -1904,6 +1905,7 @@ async function settingsStream(session: string): Promise<{ events: string[][]; fi
           if (!frame.startsWith('data: ')) continue;
           const event = JSON.parse(frame.slice(6)) as { type: string; errors?: string[]; files?: string[]; projectReview?: string };
           if (event.type === 'snapshot') reviews.push(String(event.projectReview));
+          if (event.type === 'sessions') lists.n++;
           if (event.type === 'config-errors') {
             events.push(event.errors!);
             files.push(event.files!);
@@ -1914,7 +1916,7 @@ async function settingsStream(session: string): Promise<{ events: string[][]; fi
     });
     req.on('error', reject);
   });
-  return { events, files, reviews, close: () => req?.destroy() };
+  return { events, files, reviews, lists, close: () => req?.destroy() };
 }
 
 test('a page opened on a session that cannot be saved is told, though the failure was heard before it opened', async () => {
@@ -2053,11 +2055,15 @@ test("a change to the repository's review mode reaches its open page, with no ed
       assert.deepEqual(page.reviews, ['user'], 'the repository says, not the default');
       // Changed: the next time the daemon reads it (its timer, or any call that needs it), the page hears.
       // (Dated a moment back: a read that finds it settled keeps it.)
+      const listsBefore = page.lists.n;
       writeFileSync(file, JSON.stringify({ iric: { review: 'subagent' } }));
       utimesSync(file, new Date(), new Date(Date.now() - 1000));
       await call(`/api/session/${id}`);
       for (let i = 0; i < 50 && page.reviews.at(-1) !== 'subagent'; i++) await sleep(50);
       assert.equal(page.reviews.at(-1), 'subagent', JSON.stringify(page.reviews));
+      // The session list too, which says what waits on the user by it.
+      for (let i = 0; i < 50 && page.lists.n === listsBefore; i++) await sleep(50);
+      assert.ok(page.lists.n > listsBefore, 'the list is sent again');
       // Read again unchanged: nothing more is sent.
       const sent = page.reviews.length;
       await call(`/api/session/${id}`);

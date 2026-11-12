@@ -894,3 +894,20 @@ test("every edit falls back to the project's review mode the daemon gives the st
   const again = store.applyOps('rv', [{ op: 'upsert_task', id: 't1', status: 'in_progress' }], 'user').plan;
   assert.equal(again.tasks.find((t) => t.id === 't1')!.reopened, true);
 });
+
+test("the session list counts a task held for the user's review by the project's review mode (#162)", async () => {
+  const store = await freshStore();
+  const { confirmDesign, markDelivered, submitPlan } = await import('../shared/plan.ts');
+  store.ensure('rl', process.cwd());
+  store.publishPlan('rl', PLAN);
+  // A Managed build submitted on the repository's defaults: no settings of its own.
+  store.mutate('rl', (s) => {
+    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { target: 'session', mode: 'managed', prompt: 'p' }));
+  });
+  store.applyOps('rl', [{ op: 'upsert_task', id: 't1', stage: 'review' }], 'claude', { tracking: true });
+  const row = () => store.summaries().find((s) => s.sessionId === 'rl')!;
+  assert.equal(row().awaitingReview, 0, 'the default: self-review');
+  store.reviewFor = () => 'user';
+  assert.equal(row().awaitingReview, 1);
+  assert.equal(row().planStatus, 'review');
+});

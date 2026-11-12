@@ -2496,6 +2496,8 @@ test("the board asks for the user's verdict where the project has them review an
   await openTab('Tasks');
   const box = () => within(document.getElementById('task-t3')!).queryByRole('group', { name: 'Your review of Wire into API' });
   assert.equal(box() !== null, true, "the user's verdict is asked for");
+  // And the header says the build waits on them (#162).
+  assert.equal(document.body.textContent?.includes('1 task waits on your review'), true, 'the status says so');
   // A change request kept for it stays kept when the plan lands again.
   const key = `${session.sessionId}:review:t3:1`;
   openDrafts.set(key, { draft: 'Add a timeout', value: '', version: undefined });

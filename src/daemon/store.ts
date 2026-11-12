@@ -32,7 +32,7 @@ import { BUILD_MARKER, DESIGN_MARKER, PROMPT_MOVED, REVISION_MARKER, buildPrompt
 const REVISION_MOVED =
   'The request changed since you read it (a comment was added, answered or resolved). It now shows what would be sent — read it, then send it again.';
 import { blockingGaps } from '../shared/check.ts';
-import { modeFor } from '../shared/build.ts';
+import { DEFAULT_BUILD_SETTINGS, modeFor } from '../shared/build.ts';
 import { DEFAULT_AGENT, isAgentKind, type AgentKind } from '../shared/agents.ts';
 import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, SessionSummary, TaskListInput } from '../shared/types.ts';
 
@@ -380,9 +380,16 @@ export class SessionStore extends EventEmitter {
   /** The rail's rows, newest session first. Ordered on creation so rows
    *  never move out from under the cursor. */
   summaries(): SessionSummary[] {
-    return [...this.sessions.values()]
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .map((s) => summarize(s));
+    // The project's review mode, read only where it can count — a build
+    // submitted on the repository's defaults — and once a repository.
+    const byRoot = new Map<string, ReviewMode | undefined>();
+    const reviewOf = (s: SessionState): ReviewMode | undefined => {
+      if (!s.plan?.submission || s.plan.submission.settings || !this.reviewFor) return undefined;
+      const root = s.repoRoot ?? s.cwd;
+      if (!byRoot.has(root)) byRoot.set(root, this.reviewFor(s));
+      return byRoot.get(root);
+    };
+    return [...this.sessions.values()].sort((a, b) => b.createdAt - a.createdAt).map((s) => summarize(s, reviewOf(s)));
   }
 
   /** Most recently updated session rooted at `cwd` — of `agent`, when one is
@@ -750,7 +757,8 @@ export class SessionStore extends EventEmitter {
   private listQueued = false;
 }
 
-export function summarize(s: SessionState): SessionSummary {
+/** `review`: the project's review mode (the daemon's `reviewFor`), else the default. */
+export function summarize(s: SessionState, review: ReviewMode = DEFAULT_BUILD_SETTINGS.review): SessionSummary {
   const plan = s.plan;
   return {
     sessionId: s.sessionId,
@@ -766,8 +774,8 @@ export function summarize(s: SessionState): SessionSummary {
     updatedAt: s.updatedAt,
     tasks: countTasks(plan),
     phase: planPhase(plan),
-    planStatus: planStatus(plan),
-    awaitingReview: awaitingUserReview(plan).length,
+    planStatus: planStatus(plan, review),
+    awaitingReview: awaitingUserReview(plan, review).length,
     current: currentTask(plan)?.title ?? null,
     waiting: s.waiting,
     surface: s.surface,
