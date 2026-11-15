@@ -1,9 +1,11 @@
 # Installing Coplan
 
 Coplan is not listed in Anthropic's, OpenAI's or Cursor's plugin
-directories. You install it from a clone of this repository with
-`./setup.sh`. The [README](../README.md#install) has the short version; this
-page has the rest.
+directories. Install it with `npx coplan@latest setup`, which runs the
+published build and keeps what runs in `~/.claude/cc-harness/plugin`, or
+from a clone of this repository with `./setup.sh`, described below. The
+options below are the same for both. The [README](../README.md#install) has
+the short version; this page has the rest.
 
 ## What you need
 

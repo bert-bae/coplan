@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, rmSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -158,7 +158,24 @@ test('with its output failing (a full disk), setup asks nothing it cannot be see
 test('setup refuses to run from the staged copy, naming the clone', () => {
   const r = spawnSync(process.execPath, [path.join(staged(), 'dist', 'cli', 'main.js'), 'setup', '--yes'], { encoding: 'utf8' });
   assert.equal(r.status, 1);
-  assert.match(r.stderr, new RegExp(`Run ./setup.sh in your clone: ${ROOT.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.ok(r.stderr.includes(`Run: cd "${ROOT}" && git pull && ./setup.sh`), r.stderr);
+});
+
+test('setup from the npm package stages in Coplan home, and says to update with npx', () => {
+  // The staged copy without its note is what the npm package holds: no setup.sh, no clone.
+  const pkg = path.join(tmp('npm'), 'coplan');
+  cpSync(staged(), pkg, { recursive: true });
+  rmSync(path.join(pkg, INSTALL_FILE));
+  const home = tmp('npm-home');
+  const r = spawnSync(process.execPath, [path.join(pkg, 'dist', 'cli', 'main.js'), 'setup', '--agents', 'none'], {
+    encoding: 'utf8',
+    env: { ...process.env, HOME: home, CC_HARNESS_HOME: path.join(home, 'harness') },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /Update: npx coplan@latest setup/);
+  assert.equal(existsSync(path.join(pkg, '.plugin')), false);
+  const note = JSON.parse(readFileSync(path.join(home, 'harness', 'plugin', INSTALL_FILE), 'utf8')) as Record<string, unknown>;
+  assert.deepEqual([note['clone'], note['update']], [undefined, 'npx coplan@latest setup']);
 });
 
 test('setup says what it takes, and refuses an agent it does not know', () => {

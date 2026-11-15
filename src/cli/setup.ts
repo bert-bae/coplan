@@ -31,6 +31,14 @@ import { stdoutFailure } from './output.ts';
 /** The clone this CLI was built in: `dist/cli/main.js` is two levels down. */
 const CLONE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
+/** Run from the npm package (`npx coplan setup`) rather than a clone: the package ships no setup.sh. */
+export function fromNpm(root: string): boolean {
+  return !existsSync(path.join(root, 'setup.sh'));
+}
+
+/** What to run to set Coplan up again, from where this copy came from. */
+const RERUN = fromNpm(CLONE) ? 'npx coplan@latest setup' : './setup.sh';
+
 /** The plugin and its marketplace are both named `coplan`. */
 const PLUGIN_ID = 'coplan@coplan';
 
@@ -164,7 +172,11 @@ export function stagePlugin(root: string, stage: string): void {
   const keep = ['name', 'version', 'description', 'license', 'author', 'homepage', 'repository', 'type', 'engines'];
   const slim = Object.fromEntries(keep.filter((k) => k in pkg).map((k) => [k, pkg[k]]));
   writeFileSync(path.join(tmp, 'package.json'), `${JSON.stringify({ ...slim, private: true }, null, 2)}\n`);
-  writeFileSync(path.join(tmp, INSTALL_FILE), `${JSON.stringify({ clone: root, version: pkg['version'] }, null, 2)}\n`);
+  // An npx cache folder is no clone to name; `update` says what to run either way.
+  const note = fromNpm(root)
+    ? { version: pkg['version'], update: 'npx coplan@latest setup' }
+    : { clone: root, version: pkg['version'], update: `cd "${root}" && git pull && ./setup.sh` };
+  writeFileSync(path.join(tmp, INSTALL_FILE), `${JSON.stringify(note, null, 2)}\n`);
 
   rmSync(old, { recursive: true, force: true });
   if (existsSync(stage)) renameSync(stage, old);
@@ -287,7 +299,7 @@ function install(io: SetupIo, kinds: readonly AgentKind[], opts: SetupOptions): 
  *  ones they pick when they do not want them all. */
 export async function chooseAgents(io: SetupIo, found: AgentKind[]): Promise<AgentKind[]> {
   if (!found.length) {
-    io.say('No coding agent found. Install Claude Code, Codex or Cursor, then run ./setup.sh again.');
+    io.say(`No coding agent found. Install Claude Code, Codex or Cursor, then run ${RERUN} again.`);
     return [];
   }
   io.say(`Found ${names(found)}.`);
@@ -544,7 +556,7 @@ function parseArgs(args: string[]): Args | string {
   return out;
 }
 
-const USAGE = `usage: ./setup.sh [--yes] [--agents claude,codex,cursor|none] [--uninstall]
+const USAGE = `usage: ${RERUN} [--yes] [--agents claude,codex,cursor|none] [--uninstall]
 
 Builds Coplan and installs it in your agents.
   --yes          ask nothing: install in every agent found
@@ -607,13 +619,14 @@ export async function runSetup(args: string[]): Promise<number> {
   // The staged copy is not a clone: it has nothing to build or stage.
   const note = path.join(CLONE, INSTALL_FILE);
   if (existsSync(note)) {
-    let clone = '';
+    let update = '';
     try {
-      clone = String((JSON.parse(readFileSync(note, 'utf8')) as { clone?: unknown }).clone ?? '');
+      const n = JSON.parse(readFileSync(note, 'utf8')) as { clone?: unknown; update?: unknown };
+      update = String(n.update ?? (n.clone ? `cd "${String(n.clone)}" && ./setup.sh` : ''));
     } catch {
       /* said below without it */
     }
-    console.error(`This is the copy of Coplan that setup installed. Run ./setup.sh in your clone${clone ? `: ${clone}` : ''}.`);
+    console.error(`This is the copy of Coplan that setup installed. ${update ? `Run: ${update}` : 'Run ./setup.sh in your clone.'}`);
     return 1;
   }
 
@@ -626,7 +639,8 @@ export async function runSetup(args: string[]): Promise<number> {
   };
   const opts: SetupOptions = {
     root: CLONE,
-    stage: path.join(CLONE, STAGE_DIR),
+    // npx's cache can be cleared, and Claude Code reads the stage in place: keep it in Coplan's home.
+    stage: fromNpm(CLONE) ? path.join(paths.configDir(), 'plugin') : path.join(CLONE, STAGE_DIR),
     home: homedir(),
     coplanHome: paths.configDir(),
     ...(parsed.agents ? { agents: parsed.agents } : {}),
@@ -635,7 +649,7 @@ export async function runSetup(args: string[]): Promise<number> {
     if (!(err instanceof Stopped)) throw err;
     // Its output failed: a failure (main says so), not the user stopping it.
     if (stdoutFailure()) return 1;
-    console.log('\n\nStopped. What was done so far stays; run ./setup.sh again to finish.');
+    console.log(`\n\nStopped. What was done so far stays; run ${RERUN} again to finish.`);
     return 130;
   };
 
@@ -652,7 +666,7 @@ export async function runSetup(args: string[]): Promise<number> {
       console.log(`\nNot removed from ${names(failed)}: see above.`);
       return 1;
     }
-    console.log(`\nCoplan is uninstalled. Delete this clone (${CLONE}) whenever you like.`);
+    console.log(fromNpm(CLONE) ? '\nCoplan is uninstalled.' : `\nCoplan is uninstalled. Delete this clone (${CLONE}) whenever you like.`);
     return 0;
   }
 
@@ -677,10 +691,10 @@ export async function runSetup(args: string[]): Promise<number> {
 
   const next = nextSteps(result.installed);
   if (next.length) console.log(['', 'Done. Now:', ...next].join('\n'));
-  else if (!result.failed.length) console.log('\nNothing installed. Run ./setup.sh again to install Coplan in an agent.');
-  console.log('\nUpdate: git pull && ./setup.sh    Remove: ./setup.sh --uninstall');
+  else if (!result.failed.length) console.log(`\nNothing installed. Run ${RERUN} again to install Coplan in an agent.`);
+  console.log(fromNpm(CLONE) ? `\nUpdate: ${RERUN}    Remove: npx coplan setup --uninstall` : '\nUpdate: git pull && ./setup.sh    Remove: ./setup.sh --uninstall');
   if (result.failed.length) {
-    console.log(`\nNot installed in ${names(result.failed)}: see above, then run ./setup.sh again.`);
+    console.log(`\nNot installed in ${names(result.failed)}: see above, then run ${RERUN} again.`);
     return 1;
   }
   return 0;

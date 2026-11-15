@@ -238,15 +238,15 @@ before you start, so the plan locks and the board follows the build.
 
 ## Setting up, and opening Coplan
 
-Coplan is installed from a clone of its repository: `./setup.sh` there
-builds it and installs it in the user's agents.
+Coplan is installed with `npx coplan@latest setup`, or from a clone of its
+repository with `./setup.sh`.
 The plugin's folder is two levels up from this file (`../..`). If the user
 wants you to set Coplan up, update it, or change its settings:
 
-- If that folder holds `install.json`, `./setup.sh` installed it, already
-  built. Tell the user to run `./setup.sh` in the clone `install.json` names
-  (`clone`), in a terminal, after a `git pull` to update: it is interactive,
-  so do not run it for them.
+- If that folder holds `install.json`, the setup installed it, already
+  built. Tell the user to run the command `install.json` names in `update`
+  (older copies: `./setup.sh` in the `clone` it names, after a `git pull`),
+  in a terminal: it is interactive, so do not run it for them.
 - Otherwise it is a checkout loaded directly. If it has no `dist/`, Coplan's
   tools are missing because it was never built: run `pnpm install` there,
   which builds it (`corepack pnpm install` if `pnpm` is not installed).
