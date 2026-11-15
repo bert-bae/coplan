@@ -191,30 +191,28 @@ signs the plan off for you with `harness_plan_advance`, quoting you.
 
 ## Install
 
-Coplan isn't in any plugin marketplace: you install it from this repository.
 You need Node.js 20.11 or later, git, and Claude Code, Codex or Cursor, on
 Linux or macOS (on Windows, in WSL).
 
 ```bash
-git clone https://github.com/bert-bae/coplan.git
+npx coplan@latest setup
 ```
 
-```bash
-cd coplan && ./setup.sh
-```
-
-The setup builds Coplan and installs it in the agents it finds. Restart your
-agent, then plan something:
+The setup installs Coplan in the agents it finds (it keeps what runs in
+`~/.claude/cc-harness/plugin`). Restart your agent, then plan something:
 
 ```
 /coplan add a cache to the orders API
 ```
 
-In Codex, trust Coplan's hooks in `/hooks` first, then use `$coplan`. Keep
-the clone where it is: Claude Code runs Coplan from it.
+In Codex, trust Coplan's hooks in `/hooks` first, then use `$coplan`.
 
-- **Update:** `git pull && ./setup.sh`
-- **Remove:** `./setup.sh --uninstall`
+- **Update:** `npx coplan@latest setup`
+- **Remove:** `npx coplan setup --uninstall`
+
+To run your own build instead, clone this repository and run `./setup.sh`
+in it (update: `git pull && ./setup.sh`). Keep the clone where it is:
+Claude Code runs Coplan from it.
 
 [docs/INSTALL.md](docs/INSTALL.md) has the rest: what the setup does, its
 options and settings, and what to do when something is wrong.

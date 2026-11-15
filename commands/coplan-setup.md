@@ -3,15 +3,16 @@ name: coplan-setup
 description: Say how to update Coplan or change its settings, or build a checkout loaded directly
 ---
 
-Coplan is installed from a clone of its repository: `./setup.sh` there
-builds it and installs it in the user's agents.
+Coplan is installed with `npx coplan@latest setup`, or from a clone of its
+repository, where `./setup.sh` builds it and installs it in the user's agents.
 Which case this is depends on the plugin's folder, `${CLAUDE_PLUGIN_ROOT}`.
 If the path comes out empty (not every agent fills it in), use
 `${CURSOR_PLUGIN_ROOT}` in Cursor; failing that, the plugin's folder is the
 one that holds this command's `commands/` folder.
 
-**The folder holds `install.json`:** this is the copy `./setup.sh` installed,
-and it is built. Read `install.json` — `clone` names the clone — and run:
+**The folder holds `install.json`:** this is the copy the setup installed,
+and it is built. Read `install.json` — `update` is the command that updates
+it (older copies name only the `clone`) — and run:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/coplan" version
@@ -22,7 +23,7 @@ update Coplan, add it to another agent, or change its settings, they run this
 in a terminal (it is interactive, so do not run it for them):
 
 ```bash
-cd "<clone>" && git pull && ./setup.sh
+<update, from install.json; or: cd "<clone>" && git pull && ./setup.sh>
 ```
 
 **No `install.json`:** a checkout loaded directly (for example with

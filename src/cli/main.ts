@@ -412,7 +412,7 @@ usage: coplan <command>
              write a starting .coplan/config.json from the repository's scripts
   setup [--yes] [--agents claude,codex,cursor|none]
              install in your agents and walk through the settings
-             (./setup.sh in the clone builds first, then runs this)
+             (npx coplan@latest setup; in a clone, ./setup.sh builds first, then runs this)
   version    print the version
 `);
 }
