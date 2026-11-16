@@ -13,7 +13,7 @@ If the path comes out empty (not every agent fills it in), use
 `${CURSOR_PLUGIN_ROOT}` in Cursor; failing that, the plugin's folder is the
 one that holds this command's `commands/` folder, and `bin/coplan` is in it.
 
-This checks what the hooks need from the machine (Node 20.11+ on the PATH,
+This checks what the hooks need from the machine (Node 22.12+ on the PATH,
 curl), reads both Coplan configs and the repository's `.coplan/config.json`
 and lists anything wrong in them, and checks that the running daemon is the
 one its lock names and the same version as the plugin. Then it sends one hook

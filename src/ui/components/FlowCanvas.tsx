@@ -7,13 +7,11 @@ import {
   Panel,
   ReactFlow,
   ReactFlowProvider,
-  applyEdgeChanges,
-  applyNodeChanges,
   useReactFlow,
   type Connection,
-  type EdgeChange,
+  EdgeChangeset,
   type FinalConnectionState,
-  type NodeChange,
+  NodeChangeset,
 } from '@xyflow/react';
 import { store, useStore } from '../store.ts';
 import { autoLayout, findFreeSpot, type Point } from '../lib/layout.ts';
@@ -507,11 +505,13 @@ function Editor({
   /* ---------------------------- editing ---------------------------- */
 
   const onNodesChange = useCallback(
-    (all: NodeChange<FlowNode>[]) => {
+    (set: NodeChangeset<FlowNode>) => {
       // Read-only: selecting and measuring, never moving or removing.
+      const all = set.toArray();
       const changes = readOnlyRef.current ? all.filter((c) => c.type !== 'position' && c.type !== 'remove') : all;
       if (changes.length === 0) return;
-      setNodes((ns) => applyNodeChanges(changes, ns));
+      const apply = new NodeChangeset(changes);
+      setNodes((ns) => apply.applyTo(ns));
       // Arrow keys move selected boxes through here rather than as a drag,
       // so nothing else would save them. Save once the keys stop; a drag's
       // own moves are saved when it ends.
@@ -543,9 +543,9 @@ function Editor({
     [],
   );
   const onEdgesChange = useCallback(
-    (all: EdgeChange<FlowEdge>[]) => {
-      const changes = readOnlyRef.current ? all.filter((c) => c.type !== 'remove') : all;
-      if (changes.length) setEdges((es) => applyEdgeChanges(changes, es));
+    (set: EdgeChangeset<FlowEdge>) => {
+      const changes = readOnlyRef.current ? set.toArray().filter((c) => c.type !== 'remove') : set.toArray();
+      if (changes.length) setEdges((es) => new EdgeChangeset(changes).applyTo(es));
     },
     [],
   );
@@ -718,9 +718,10 @@ function Editor({
 
   /** While one unconnected box is dragged, the arrow it is over — where it
    *  would be put if dropped. */
-  const onNodeDrag = useCallback((event: { clientX: number; clientY: number }, node: FlowNode, moving: FlowNode[]) => {
+  const onNodeDrag = useCallback((event: MouseEvent | TouchEvent, node: FlowNode, moving: FlowNode[]) => {
     const free = moving.length === 1 && !edgesRef.current.some((e) => e.source === node.id || e.target === node.id);
-    const under = free ? (document.elementsFromPoint?.(event.clientX, event.clientY) ?? []) : [];
+    const at = 'touches' in event ? event.touches[0] : event;
+    const under = free && at ? (document.elementsFromPoint?.(at.clientX, at.clientY) ?? []) : [];
     const hit = under.map((el) => el.closest('.react-flow__edge')?.getAttribute('data-id')).find(Boolean) ?? null;
     setDropEdge((was) => (was === hit ? was : hit));
   }, []);
@@ -1505,7 +1506,7 @@ function Editor({
             connectionMode={ConnectionMode.Loose}
             deleteKeyCode={readOnly ? null : ['Backspace', 'Delete']}
             zoomOnDoubleClick={false}
-            colorMode={theme}
+            forceColorMode={theme}
             fitView
             fitViewOptions={FIT}
             minZoom={0.2}

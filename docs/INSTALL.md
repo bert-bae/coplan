@@ -9,7 +9,7 @@ the short version; this page has the rest.
 
 ## What you need
 
-- **Node.js 20.11 or later.** The build uses pnpm. If you don't have it, the
+- **Node.js 22.12 or later.** The build uses pnpm. If you don't have it, the
   setup uses the pnpm Node's corepack provides, or npx's.
 - **git**, **sh** and **curl**. The hooks reach Coplan with curl.
 - **Claude Code, Codex or Cursor.** Install Coplan in each agent you use:

@@ -22,17 +22,17 @@ jobs:
         include:
           # The oldest Node the plugin supports (package.json `engines`): the
           # plugin's own tests. The browser tests' jsdom needs a newer Node.
-          - { os: ubuntu-latest, node: 20.11.0, suite: runtime }
-          - { os: ubuntu-latest, node: 22 }
+          - { os: ubuntu-latest, node: 22.12.0, suite: runtime }
+          - { os: ubuntu-latest, node: 26 }
           # The relay's BSD sed, sleep and missing setsid live here.
-          - { os: macos-latest, node: 22 }
+          - { os: macos-latest, node: 26 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The pnpm version comes from package.json's packageManager field.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
@@ -77,7 +77,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # shellcheck is on the runner image. The relay and setup run under
       # /bin/sh on every machine, so they are checked as POSIX sh.
       - name: shellcheck
@@ -87,10 +87,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 26
       # Claude Code's own validator; Codex and Cursor manifests are checked
       # by the packaging tests (src/test/agents.test.ts).
       - name: claude plugin validate
