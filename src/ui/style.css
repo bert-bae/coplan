@@ -8,6 +8,9 @@
  * `bg-surface-raised` in a component follows the theme for free.
  */
 
+/* React Flow's styles come in `@layer xyflow`: above Tailwind's reset, below
+ * utilities. style.css loads first so this order is the one that holds. */
+@layer theme, base, xyflow, components, utilities;
 @import 'tailwindcss';
 
 /* The templates live beside this file; Tailwind scans them for class names. */

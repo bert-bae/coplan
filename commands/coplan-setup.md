@@ -35,7 +35,7 @@ provides the pinned pnpm) if not:
 cd "${CLAUDE_PLUGIN_ROOT}" && if command -v pnpm >/dev/null 2>&1; then pnpm install --frozen-lockfile; else COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack pnpm install --frozen-lockfile; fi && ./bin/coplan version
 ```
 
-It needs Node.js 20.11 or later. If neither pnpm nor corepack is available
+It needs Node.js 24 or later. If neither pnpm nor corepack is available
 (corepack is not bundled with every Node.js release), run it with
 `npx --yes pnpm@10 install --frozen-lockfile` instead. If it fails, quote the
 failing lines and say what they mean (a missing or old Node.js is the usual
