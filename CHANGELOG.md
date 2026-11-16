@@ -4,8 +4,8 @@
 
 ### Changes
 
-- **Node.js 22.12 or later is needed.** Node 20 reached end of life in April 2026. CI now runs on Node 26 (the
-  current LTS) and checks the plugin's own tests on 22.12.0, the oldest it supports.
+- **Node.js 24 or later is needed.** Node 20 reached end of life in April 2026. CI now runs on Node 26 (the
+  current LTS) and checks the plugin's own tests on 24.0.0, the oldest it supports.
 - **Dependencies are on their latest versions**, among them React 19.3, React Flow 13, dagre 3, TypeScript 7,
   esbuild 0.28 and jsdom 31; the diagram canvas moves to React Flow 13's change API, and its styles (now in a CSS layer) are kept above Tailwind's reset. `pnpm audit` finds no
   known vulnerabilities.

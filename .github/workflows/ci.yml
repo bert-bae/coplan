@@ -22,7 +22,7 @@ jobs:
         include:
           # The oldest Node the plugin supports (package.json `engines`): the
           # plugin's own tests. The browser tests' jsdom needs a newer Node.
-          - { os: ubuntu-latest, node: 22.12.0, suite: runtime }
+          - { os: ubuntu-latest, node: 24.0.0, suite: runtime }
           - { os: ubuntu-latest, node: 26 }
           # The relay's BSD sed, sleep and missing setsid live here.
           - { os: macos-latest, node: 26 }

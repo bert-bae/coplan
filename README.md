@@ -8,7 +8,7 @@
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
   <a href="https://github.com/bert-bae/coplan/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/bert-bae/coplan/actions/workflows/ci.yml/badge.svg" /></a>
-  <img alt="Node.js 22.12 or later" src="https://img.shields.io/badge/node-%E2%89%A522.12-339933.svg" />
+  <img alt="Node.js 24 or later" src="https://img.shields.io/badge/node-%E2%89%A524-339933.svg" />
   <img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-d97757.svg" />
   <img alt="Codex plugin" src="https://img.shields.io/badge/Codex-plugin-10a37f.svg" />
   <img alt="Cursor plugin" src="https://img.shields.io/badge/Cursor-plugin-000000.svg" />
@@ -191,7 +191,7 @@ signs the plan off for you with `harness_plan_advance`, quoting you.
 
 ## Install
 
-You need Node.js 22.12 or later, git, and Claude Code, Codex or Cursor, on
+You need Node.js 24 or later, git, and Claude Code, Codex or Cursor, on
 Linux or macOS (on Windows, in WSL).
 
 ```bash

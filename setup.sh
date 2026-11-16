@@ -4,7 +4,7 @@
 #
 #   ./setup.sh [--yes] [--agents claude,codex,cursor|none] [--uninstall]
 #
-# The build needs Node.js 22.12 or later and pnpm (or Node's corepack, or
+# The build needs Node.js 24 or later and pnpm (or Node's corepack, or
 # npx, to provide it). Everything after the build is `coplan setup`.
 set -eu
 
@@ -34,9 +34,9 @@ EOF
     ;;
 esac
 
-command -v node >/dev/null 2>&1 || die "Node.js 22.12 or later is needed, and there is no node on your PATH: https://nodejs.org"
-node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 12) ? 0 : 1)' \
-  || die "Node.js 22.12 or later is needed; this is $(node --version)."
+command -v node >/dev/null 2>&1 || die "Node.js 24 or later is needed, and there is no node on your PATH: https://nodejs.org"
+node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0 : 1)' \
+  || die "Node.js 24 or later is needed; this is $(node --version)."
 
 # pnpm: the one on the PATH, else corepack's, else npx's. Corepack is tried
 # first and checked, since one bundled with an older Node can fail to fetch

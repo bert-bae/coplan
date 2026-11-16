@@ -15,7 +15,7 @@ Open an [issue](https://github.com/bert-bae/coplan/issues). For a bug, include:
 
 ## Setting up a checkout
 
-You need Node.js 22.12 or later, [pnpm](https://pnpm.io) 10 (`corepack enable
+You need Node.js 24 or later, [pnpm](https://pnpm.io) 10 (`corepack enable
 pnpm` provides the version this repository pins) and at least one of Claude
 Code, Codex or Cursor.
 
@@ -52,7 +52,7 @@ pnpm check             # all three
 ```
 
 CI runs the same checks on Linux and macOS with Node 26, and on Node
-22.12.0 (the oldest the plugin supports) runs every test that needs no
+24.0.0 (the oldest the plugin supports) runs every test that needs no
 browser (`pnpm test:runtime`: jsdom needs a newer Node), plus
 `./bin/coplan doctor` and
 `pnpm audit`; it also runs `shellcheck` on the shell scripts and
