@@ -2789,8 +2789,9 @@ export function submitPlan(
   // they must (#65): a plan goes from planning straight to building when
   // they say so, and the lock holds from there.
   // Except architecture first: there the task list is made from the
-  // confirmed design, and the build from the task list.
-  if (plan.mode === 'architect' && !plan.design) throw new PlanError(ARCHITECTURE_FIRST);
+  // confirmed design, and the build from the task list. Handing it off
+  // to be built elsewhere (Export) builds nothing here.
+  if (plan.mode === 'architect' && !plan.design && input.target === 'session') throw new PlanError(ARCHITECTURE_FIRST);
   if (!input.prompt.trim()) throw new PlanError('There is no prompt to submit.');
   // What is submitted gets built: a plan that cannot be is refused here,
   // not discovered by the agent halfway through.

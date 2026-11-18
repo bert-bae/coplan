@@ -1699,6 +1699,7 @@ test('an architecture-first plan gets its task list, and its build, only from th
   assert.equal(plan.mode, 'architect');
   assert.throws(() => publishTasks(plan, { tasks: [{ title: 'Too early' }] }), /architecture first/);
   assert.throws(() => submitPlan(plan, { target: 'session', prompt: 'build' }), /architecture first/);
+  assert.ok(submitPlan(plan, { target: 'elsewhere', prompt: 'export' }).submission, 'handed off to build elsewhere, it builds nothing here');
   const confirmed = confirmDesign(plan, { prompt: 'make the task list' });
   const listed = publishTasks(confirmed, { tasks: [{ title: 'Cache client', detail: 'Get and set.', builds: ['cache'] }] }).plan;
   assert.ok(submitPlan(listed, { target: 'session', prompt: 'build' }).submission, 'then it builds');

@@ -11,6 +11,7 @@ import { KIND_NOUN } from '../../shared/architecture.ts';
 import { boxUnbuilt } from '../../shared/check.ts';
 import { Markdown } from '../components/Markdown.tsx';
 import { SkippedChecks } from '../components/TaskChecks.tsx';
+import { partsByTask } from '../lib/tasks.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
 import type { Plan, Section, TaskStatus } from '../../shared/types.ts';
 
@@ -215,11 +216,7 @@ function TaskPlan({ plan }: { plan: Plan }) {
   const ideas = !hasTaskList(plan);
   const top = childrenOf(plan, null);
   const counts = countTasks(plan);
-  const boxes = useMemo(() => {
-    const map = new Map<string, string[]>();
-    for (const d of plan.diagrams) for (const n of d.nodes) for (const t of n.taskIds ?? []) map.set(t, [...(map.get(t) ?? []), n.label]);
-    return map;
-  }, [plan.diagrams]);
+  const parts = useMemo(() => partsByTask(plan.diagrams), [plan.diagrams]);
   return (
     <section className="doc-block" aria-labelledby="taskplan-head">
       <h2 id="taskplan-head" className="doc-label">
@@ -235,7 +232,7 @@ function TaskPlan({ plan }: { plan: Plan }) {
         <ol className="ov-tasks">
           {top.map((t) => {
             const subtasks = childrenOf(plan, t.id).length;
-            const builds = boxes.get(t.id) ?? [];
+            const builds = (parts.get(t.id) ?? []).map((p) => p.n.label);
             return (
               <li key={t.id} className={classNames('ov-task', `is-${t.status}`)}>
                 <span className="ov-task-mark" title={STATUS_WORD[t.status]} aria-label={STATUS_WORD[t.status]}>

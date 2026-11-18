@@ -2312,7 +2312,7 @@ test('a headless session keeps its plan as Markdown in its working directory, as
       call<Record<string, unknown>>(`/mcp/${tool}`, { method: 'POST', headers: { 'x-harness-session': id }, body: JSON.stringify({ cwd: dir, ...body }) });
     await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: dir, start_reason: 'startup' }) });
     const res = await at('publish', { title: 'Fix the race', mode: 'tasklist', headless: true, summary: 'One area.', tasks: [{ id: 'a', title: 'Find it' }] });
-    const file = path.join(dir, '.coplan', 'plans', 'headless.md');
+    const file = path.join(dir, '.coplan', 'plans', `${id}.md`);
     assert.equal(res['ok'], true, String(res['text']));
     assert.match(String(res['text']), new RegExp(`reviews it in ${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
     assert.match(readFileSync(file, 'utf8'), /^# Fix the race\n\n> \*\*Coplan plan\*\* · \*\*Task list\*\* → Build/);
@@ -2324,6 +2324,10 @@ test('a headless session keeps its plan as Markdown in its working directory, as
     // No page to accept a proposal on.
     const proposed = await at('propose', { title: 'x', reason: 'y', ops: [{ op: 'upsert_task', id: 'a', title: 'z' }] });
     assert.match(String(proposed['text']), /headless: the user has no page to accept a proposal on/);
+    // Nor a page to submit on: chat is the way to build it.
+    const listed = await at('tasks', { tasks: [{ id: 'a', title: 'Find the race', detail: 'Reproduce it.' }] });
+    assert.match(String(listed['text']), /headless, there is no page to submit it on, so chat is the only way/);
+    assert.doesNotMatch(String(listed['text']), /submit it in Coplan/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

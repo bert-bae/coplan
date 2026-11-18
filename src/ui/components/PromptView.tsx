@@ -276,6 +276,9 @@ function PromptViewer({ viewer }: { viewer: ViewerState }) {
   const [error, setError] = useState<string | null>(null);
   const body = useRef<HTMLDivElement>(null);
   const phase = planPhase(plan);
+  // Confirm design is the next sign-off while planning — unless the plan
+  // went straight to its task list, which has only Submit.
+  const confirmNext = phase === 'planning' && plan?.mode !== 'tasklist';
   const sessionId = session?.sessionId ?? '';
   // What the text is made from: the plan, and the agent reading it.
   const stamp = `${plan?.seq ?? 0}:${plan?.version ?? 0}:${plan?.claudeReadAt ?? 0}`;
@@ -308,7 +311,7 @@ function PromptViewer({ viewer }: { viewer: ViewerState }) {
       if (tab === 'readback') return { key, ...(await api.readback(sessionId)) };
       if (tab === 'brief') return { key, ...(await api.brief(sessionId, taskId)) };
       if (sent) return { key, text: sent.prompt };
-      const preview = phase === 'planning' ? await api.designPreview(sessionId, '') : await api.promptPreview(sessionId, null, '');
+      const preview = confirmNext ? await api.designPreview(sessionId, '') : await api.promptPreview(sessionId, null, '');
       return { key, text: preview.prompt, ...(preview.blocks ? { blocks: preview.blocks } : {}) };
     };
     if (tab === 'brief' && !taskId) {
@@ -338,7 +341,7 @@ function PromptViewer({ viewer }: { viewer: ViewerState }) {
         ? `What harness_task_brief gives the agent that builds this task — and the subagent it hands the task to.`
         : sent
           ? `${sent.title}, exactly as it was sent${sent.meta ? ` · ${sent.meta}` : ''}. Each part's source was shown before you signed it off.`
-          : phase === 'planning'
+          : confirmNext
             ? `What Confirm design would send ${agent.name} now, without a note.`
             : `What Submit would send ${agent.name} now, with the repository's defaults and no note.`;
 
