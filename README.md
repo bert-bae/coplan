@@ -110,9 +110,20 @@ seeds into a throwaway daemon, the way real hooks and tool calls would.
   without leaving the canvas, and read each one's brief. A box no task builds
   says so, as the plan check would. The Tasks view lists them *By box* too,
   with the tasks that build no box apart.
-- **Design first, then tasks — or straight to building.** Confirm the
+- **Architecture first, or straight to tasks.** For multi-system work, a
+  product flow or a user journey (`/coplan --architect`), confirm the
   architecture before the task list is made from it, so the tasks build the
-  design you agreed to; or skip that checkpoint and build from the design.
+  design you agreed to. For work in one area (`/coplan --tasklist`), skip the
+  diagram and go straight to a task list. Without a flag, Claude picks and
+  says why.
+- **The overview comes first.** A plan opens on Claude's understanding of the
+  problem and its approach, the architecture broken into the parts each task
+  builds, and the task ideas — with the step the plan is on and what moves it
+  on.
+- **Headless, when no browser can reach it.** `/coplan --headless` on a
+  virtual machine or a cloud agent keeps the plan as a Markdown file in your
+  working directory, its diagrams and task list drawn as Mermaid graphs, for
+  you to read in your agent's app and sign off in chat.
 - **Tasks that know what blocks them.** Each task says what it waits on and
   which branch it lands on. Coplan works out what can start now, what can run
   side by side, and how branches stack into pull requests.
@@ -431,12 +442,12 @@ into its bundle at build time.
 ### Skills
 
 Plain Markdown in [`skills/`](skills/). The agent always sees each skill's
-one-paragraph description (400–530 characters) and loads the body only when
+one-paragraph description (400–545 characters) and loads the body only when
 it uses the skill.
 
 | Skill | The agent uses it when | It tells the agent to | So the agent may |
 | --- | --- | --- | --- |
-| [`coplan`](skills/coplan/SKILL.md) (16 KB) | you type `/coplan` or `$coplan`, ask to plan something in Coplan or to set Coplan up, tell it to go ahead with a plan, or a confirmed design or a revision request arrives | investigate the code, publish the design, read your edits back and answer your comments (one by one, or all at once when you request revisions), propose changes that are yours to decide rather than make them, then break the confirmed design into a task list — and build when you say so, in chat or by submitting | call Coplan's tools; ask you in chat, only what it must; propose edits for you to accept or reject; sign the plan off for you when you tell it in chat to go ahead, quoting you; tell you to run `./setup.sh` in your clone when you ask it to set Coplan up or update it (or, in a checkout that was never built, run `pnpm install` there) |
+| [`coplan`](skills/coplan/SKILL.md) (19 KB) | you type `/coplan` or `$coplan`, ask to plan something in Coplan or to set Coplan up, tell it to go ahead with a plan, or a confirmed design or a revision request arrives | investigate the code, publish the design, read your edits back and answer your comments (one by one, or all at once when you request revisions), propose changes that are yours to decide rather than make them, then break the confirmed design into a task list — and build when you say so, in chat or by submitting | call Coplan's tools; ask you in chat, only what it must; propose edits for you to accept or reject; sign the plan off for you when you tell it in chat to go ahead, quoting you; tell you to run `./setup.sh` in your clone when you ask it to set Coplan up or update it (or, in a checkout that was never built, run `pnpm install` there) |
 | [`coplan-build`](skills/coplan-build/SKILL.md) (9 KB) | a submitted plan's build prompt arrives, or you ask it to build a Coplan plan | submit it for you first if you said to build one you have not submitted; start only tasks that are ready, build independent ones side by side where it can, land each on its branch, keep the board true, then run the final checks and write the report | use subagents and git worktrees when it has them and they help (up to `parallel` tasks at once in a Managed build); create branches; commit in the granularity the repository's history uses; rebase stacked branches; run the repository's checks; push the branches; open pull requests with `gh` or Graphite, as the repository's [`pullRequests`](docs/CONFIG.md#pullrequests) says — by default only once you say so — written from its pull request template if it has one |
 | [`iric`](skills/iric/SKILL.md) (7 KB) | building each task of a Managed build, or when you ask to run a task through iric | implement inside the task's scope, run the checks, have it reviewed the way you chose, refine until it passes or the round limit, and report each step | run the `implement` and `review` checks; start a reviewer subagent where it has them (review `subagent`), on the model [`review.model`](docs/CONFIG.md#review) names if one is set; ask you only where a Managed build keeps the decision for you (review `user`, past `maxRounds`, a check that fails) |
 
@@ -565,7 +576,7 @@ plugin's folder:
 | Your clone | `node_modules/` and `dist/` (the build), and `.plugin/` (what runs, staged for your agents) | `./setup.sh` |
 | Your agents' plugins | Claude Code reads `.plugin/` in place; Codex keeps a copy in its plugin cache, Cursor in `~/.cursor/plugins/local/coplan` | `./setup.sh`, through each agent's own plugin commands |
 | Coplan's settings | `config.json` and `coplan.json` in Coplan's home, and a repository's `.coplan/config.json`, only if you choose to adjust settings | `./setup.sh` |
-| Your repository | Nothing. Coplan reads `.coplan/config.json`, `.claude/harness.json`, and the instruction files and pull request template the config names — only files inside the repository, a link that leads outside it is refused. `coplan init` and `./setup.sh` write `.coplan/config.json` when you ask them to | — |
+| Your repository | Nothing, unless you plan headless. Coplan reads `.coplan/config.json`, `.claude/harness.json`, and the instruction files and pull request template the config names — only files inside the repository, a link that leads outside it is refused. `coplan init` and `./setup.sh` write `.coplan/config.json` when you ask them to. A `/coplan --headless` session's plan is kept at `.coplan/plans/<session>.md` in its working directory | The daemon (headless); you |
 
 The agent changes your repository as it builds, of course — with its own
 permissions, as it would without Coplan.

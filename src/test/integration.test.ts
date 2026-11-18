@@ -2303,3 +2303,28 @@ test("a session first seen through a tool call with no folder (Codex, its hooks 
     await call(`/api/session/${id}`, { method: 'DELETE' });
   }
 });
+
+test('a headless session keeps its plan as Markdown in its working directory, as the plan changes', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-headless-'));
+  try {
+    const id = 'headless-session-1';
+    const at = (tool: string, body: Record<string, unknown>) =>
+      call<Record<string, unknown>>(`/mcp/${tool}`, { method: 'POST', headers: { 'x-harness-session': id }, body: JSON.stringify({ cwd: dir, ...body }) });
+    await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: dir, start_reason: 'startup' }) });
+    const res = await at('publish', { title: 'Fix the race', mode: 'tasklist', headless: true, summary: 'One area.', tasks: [{ id: 'a', title: 'Find it' }] });
+    const file = path.join(dir, '.coplan', 'plans', 'headless.md');
+    assert.equal(res['ok'], true, String(res['text']));
+    assert.match(String(res['text']), new RegExp(`reviews it in ${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.match(readFileSync(file, 'utf8'), /^# Fix the race\n\n> \*\*Coplan plan\*\* · \*\*Task list\*\* → Build/);
+    assert.equal((await sessionFor(id)).headless, true);
+    // Kept up to date, and headless for good once said.
+    await at('read', {});
+    await at('edit', { ops: [{ op: 'upsert_task', id: 'a', title: 'Find the race' }] });
+    assert.match(readFileSync(file, 'utf8'), /```mermaid\nflowchart LR\n {2}t0\["a · Find the race"\]/);
+    // No page to accept a proposal on.
+    const proposed = await at('propose', { title: 'x', reason: 'y', ops: [{ op: 'upsert_task', id: 'a', title: 'z' }] });
+    assert.match(String(proposed['text']), /headless: the user has no page to accept a proposal on/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -233,9 +233,11 @@ export const TOOLS: ToolDef[] = [
     endpoint: 'publish',
     description:
       'Publish the whole plan to the Coplan UI, where the user reads it visually, reorganizes it and ' +
-      'comments on it. Include: a summary; sections for context, architecture and risks; diagrams of the ' +
-      'design as nodes and edges (the UI lays them out and the user can rearrange them); and a task tree ' +
-      'broken into subtasks. Replaces the plan; items keep their comments and statuses when you keep their ' +
+      'comments on it. Choose its mode: "architect" (architecture first — diagrams of the systems, flow or journey, ' +
+      'with the task ideas linked to the boxes they build; the task list is made once the user confirms the design) or ' +
+      '"tasklist" (straight to the task list, with dependsOn, branch and files, for work in one contained area). ' +
+      'Include: a summary — your understanding of the problem, how you approach it and why this mode; sections for ' +
+      'context and risks; for architect, diagrams as nodes and edges (the UI lays them out); and the tasks. Replaces the plan; items keep their comments and statuses when you keep their ' +
       'ids, a box keeps its position, detail, description and notes and an arrow between the same two boxes its ' +
       'label and style unless you restate them ("" clears a label). Refused if the user has changed the plan since you last read it, ' +
       'once they confirm the design (then harness_tasks_publish makes the task list), and while it is being built. ' +
@@ -247,7 +249,26 @@ export const TOOLS: ToolDef[] = [
       type: 'object',
       properties: {
         title: { type: 'string', description: 'What is being built, as a short title.' },
-        summary: { type: 'string', description: 'One paragraph: the approach and why. Markdown.' },
+        mode: {
+          type: 'string',
+          enum: ['architect', 'tasklist'],
+          description:
+            '"architect": architecture first, for multi-system work, product flows and user journeys. "tasklist": straight ' +
+            'to tasks, for targeted work where a diagram adds nothing. Kept when left out.',
+        },
+        headless: {
+          type: 'boolean',
+          description:
+            'true when the user asked for --headless (no browser can reach the page: a cloud agent, a VM). Coplan keeps ' +
+            'the plan as Markdown with Mermaid graphs in the working directory instead; the user reviews that file and ' +
+            'signs off in chat. Kept for the session once given.',
+        },
+        summary: {
+          type: 'string',
+          description:
+            'Shown first: your understanding of the problem, how you are approaching it, and why architecture first or ' +
+            'straight to tasks. A short paragraph or two. Markdown.',
+        },
         sections: {
           type: 'array',
           description: 'Ordered prose sections, e.g. Context, Architecture, Data model, Risks, Out of scope.',
@@ -258,9 +279,13 @@ export const TOOLS: ToolDef[] = [
           },
         },
         diagrams: { type: 'array', description: 'Architecture diagrams as boxes and arrows.', items: DIAGRAM },
-        tasks: { type: 'array', description: 'The task tree, in execution order.', items: taskSchema(3) },
+        tasks: {
+          type: 'array',
+          description: 'architect: the task ideas, coarse, each with an id the boxes link to. tasklist: the task list itself, in build order.',
+          items: taskSchema(3, true),
+        },
       },
-      required: ['title'],
+      required: ['title', 'mode'],
       additionalProperties: false,
     },
   },

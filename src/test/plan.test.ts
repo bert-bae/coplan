@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, descendants, MAX_CHANGES, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, passedAndClosed, PlanError, proposalTouches, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, confirmDesign, countTasks, descendants, hasTaskList, MAX_CHANGES, planFlow, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, passedAndClosed, PlanError, proposalTouches, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import { roundVerdict } from '../shared/build.ts';
+import { planGaps } from '../shared/check.ts';
 import { previewProposal } from '../shared/proposals.ts';
 import type { DiagramNodeInput, Plan, PlanInput, PlanOp, Task } from '../shared/types.ts';
 
@@ -1687,4 +1688,41 @@ test("a proposal that restates a diagram's boxes is out of date once the user li
   plan = applyOps(plan, [{ op: 'upsert_node', diagramId: 'd1', id: 'api', taskIds: ['t4'] }], 'user').plan;
   // Accepting would put back the boxes as restated, without that link.
   assert.throws(() => applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user'), /p1 is out of date: the task links in diagram "Components"/);
+});
+
+/* ------------------------------------------------------------------ *
+ * Modes: architecture first, or straight to the task list
+ * ------------------------------------------------------------------ */
+
+test('an architecture-first plan gets its task list, and its build, only from the confirmed design', () => {
+  const plan = publishPlan(null, { ...INPUT, mode: 'architect' }, 1000).plan;
+  assert.equal(plan.mode, 'architect');
+  assert.throws(() => publishTasks(plan, { tasks: [{ title: 'Too early' }] }), /architecture first/);
+  assert.throws(() => submitPlan(plan, { target: 'session', prompt: 'build' }), /architecture first/);
+  const confirmed = confirmDesign(plan, { prompt: 'make the task list' });
+  const listed = publishTasks(confirmed, { tasks: [{ title: 'Cache client', detail: 'Get and set.', builds: ['cache'] }] }).plan;
+  assert.ok(submitPlan(listed, { target: 'session', prompt: 'build' }).submission, 'then it builds');
+});
+
+test('a plan straight to its task list has no design to confirm, and is a task list from the start', () => {
+  const plan = publishPlan(null, { title: 'Fix the flaky test', mode: 'tasklist', tasks: [{ id: 'a', title: 'Find the race' }, { id: 'b', title: 'Fix it', dependsOn: ['a'] }] }, 1000).plan;
+  assert.deepEqual(plan.tasks.find((t) => t.id === 'b')!.dependsOn, ['a'], 'publish takes the build fields');
+  assert.throws(() => confirmDesign(plan, { prompt: 'p' }), /no design to confirm/);
+  assert.equal(hasTaskList(plan), true);
+  assert.ok(planGaps(plan).some((g) => g.rule === 'task-undetailed'), 'its tasks are held to the task list\'s checks');
+  assert.deepEqual(planFlow(plan), { steps: ['tasklist', 'build'], at: 'tasklist' });
+  assert.ok(submitPlan(plan, { target: 'session', prompt: 'build' }).submission);
+});
+
+test('a mode is kept when a publish leaves it out, refused when unknown, and dropped from disk when damaged', () => {
+  const plan = publishPlan(null, { ...INPUT, mode: 'architect' }, 1000).plan;
+  assert.equal(publishPlan(plan, INPUT, 2000).plan.mode, 'architect');
+  assert.equal(publishPlan(plan, { ...INPUT, mode: 'tasklist' }, 2000).plan.mode, 'tasklist');
+  assert.throws(() => publishPlan(plan, { ...INPUT, mode: 'sketch' as never }, 2000), /`mode` is "architect"/);
+  assert.equal(normalizePlan({ ...plan, mode: 'sketch' } as never, 'x').mode, undefined);
+  // From before modes: either path, and its flow read off its diagrams.
+  const old = fresh();
+  assert.equal(old.mode, undefined);
+  assert.deepEqual(planFlow(old).steps, ['architecture', 'tasklist', 'build']);
+  assert.ok(submitPlan(old, { target: 'session', prompt: 'build' }).submission, 'straight from the design, as before');
 });

@@ -103,18 +103,41 @@ export function SubmitControl() {
     trigger.current?.focus();
   };
 
+  // Straight to a task list: nothing to confirm before it is submitted.
+  if (phase === 'tasking' || (phase === 'planning' && plan.mode === 'tasklist')) {
+    return (
+      <span className="lock-control">
+        <StatusChip plan={plan} agent={agent} note={phase === 'tasking' ? 'The design is locked; the tasks can still change.' : 'No architecture step: this task list is what gets built.'} />
+        <button
+          ref={trigger}
+          type="button"
+          className="btn btn-sm btn-primary"
+          title={`Choose how the build runs, read the prompt ${agent.name} will be given, then lock the plan and hand it over`}
+          onClick={() => setOpen(true)}
+        >
+          Review &amp; submit plan
+        </button>
+        {open && <SubmitDialog onClose={close} />}
+      </span>
+    );
+  }
+
   if (phase === 'planning') {
     return (
       <span className="lock-control">
         <StatusChip plan={plan} agent={agent} />
-        <button
-          type="button"
-          className="btn btn-sm"
-          title={`Confirming the design is optional: choose how the build runs, read the prompt ${agent.name} will be given, then lock the plan and hand it over`}
-          onClick={() => setSkipping(true)}
-        >
-          Submit plan
-        </button>
+        {/* Architecture first: the task list is made from the confirmed
+            design, and built from there. */}
+        {plan.mode !== 'architect' && (
+          <button
+            type="button"
+            className="btn btn-sm"
+            title={`Confirming the design is optional: choose how the build runs, read the prompt ${agent.name} will be given, then lock the plan and hand it over`}
+            onClick={() => setSkipping(true)}
+          >
+            Submit plan
+          </button>
+        )}
         <button
           ref={trigger}
           type="button"
@@ -126,24 +149,6 @@ export function SubmitControl() {
         </button>
         {open && <ConfirmDesignDialog onClose={close} />}
         {skipping && <SubmitDialog onClose={() => setSkipping(false)} />}
-      </span>
-    );
-  }
-
-  if (phase === 'tasking') {
-    return (
-      <span className="lock-control">
-        <StatusChip plan={plan} agent={agent} note="The design is locked; the tasks can still change." />
-        <button
-          ref={trigger}
-          type="button"
-          className="btn btn-sm btn-primary"
-          title={`Choose how the build runs, read the prompt ${agent.name} will be given, then lock the plan and hand it over`}
-          onClick={() => setOpen(true)}
-        >
-          Review &amp; submit plan
-        </button>
-        {open && <SubmitDialog onClose={close} />}
       </span>
     );
   }

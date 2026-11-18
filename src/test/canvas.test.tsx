@@ -306,7 +306,7 @@ test('typing on a selected box renames it, from the key typed — even a digit t
 
 test('with nothing selected, the app keeps its own keys', async () => {
   await boot();
-  await press('2');
+  await press('3');
   assert.equal(store.getState().tab, 'tasks');
 });
 

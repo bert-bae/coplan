@@ -144,10 +144,10 @@ after(() => cleanup());
 
 /* ------------------------------------------------------------------ */
 
-test('three views, architecture first, and no way to answer Claude here', async () => {
+test('three views, the overview first, and no way to answer Claude here', async () => {
   await boot();
   const tabs = screen.getAllByRole('tab').map((t) => t.textContent?.replace(/\d.*$/, ''));
-  assert.deepEqual(tabs, ['Architecture', 'Tasks', 'Overview']);
+  assert.deepEqual(tabs, ['Overview', 'Architecture', 'Tasks']);
   assert.equal(screen.getByRole('tab', { selected: true }).textContent?.startsWith('Architecture'), true);
   assert.equal(screen.queryByText(/questions/i), null);
   assert.equal(screen.queryByText(/activity/i), null);
@@ -910,6 +910,34 @@ test('the overview says what Claude is on', async () => {
   assert.match(tiles.textContent ?? '', /1\/3/);
 });
 
+test('the overview leads with how the plan gets built, the agent\'s understanding, the architecture by part and the task ideas', async () => {
+  await boot(makeSession(publishPlan(null, { ...INPUT, mode: 'architect' }, Date.now()).plan));
+  await openTab('Overview');
+  const steps = document.querySelector('.pflow-steps')!;
+  assert.deepEqual([...steps.querySelectorAll('.pflow-title')].map((e) => e.textContent), ['Architecture', 'Task list', 'Build']);
+  assert.equal(steps.querySelector('[aria-current="step"] .pflow-title')?.textContent, 'Architecture');
+  const headings = [...document.querySelectorAll('.doc-label')].map((h) => h.textContent);
+  assert.deepEqual(headings.slice(0, 4), ['How this plan gets built', "Claude's understanding and approach", 'Architecture breakdown', 'Task ideas · 3 planned']);
+  // Each part names the tasks that build it, and says so where none does.
+  const parts = [...document.querySelectorAll('.ov-part')].map((p) => p.textContent);
+  assert.deepEqual(parts, ['APIserviceno task', 'Postgresdata storestorage']);
+  // Architecture first: the design is confirmed before anything is built.
+  assert.ok(screen.getByRole('button', { name: 'Confirm design' }));
+  assert.equal(screen.queryByRole('button', { name: 'Submit plan' }), null);
+});
+
+test('a plan straight to its task list has no architecture tab and nothing to confirm', async () => {
+  const plan = publishPlan(null, { title: 'Fix the race', mode: 'tasklist', summary: 'One area.', tasks: [{ id: 'a', title: 'Find it' }] }, Date.now()).plan;
+  await boot(makeSession(plan));
+  const tabs = screen.getAllByRole('tab').map((t) => t.textContent?.replace(/\d.*$/, ''));
+  assert.deepEqual(tabs, ['Overview', 'Tasks'], 'a tab it does not have opens on the overview');
+  assert.equal(screen.getByRole('tab', { selected: true }).textContent, 'Overview');
+  assert.deepEqual([...document.querySelectorAll('.pflow-title')].map((e) => e.textContent), ['Task list', 'Build']);
+  assert.equal(document.getElementById('taskplan-head')?.textContent, 'Task list · 0/1 done', 'the task list itself, not ideas');
+  assert.equal(screen.queryByRole('button', { name: 'Confirm design' }), null);
+  assert.ok(screen.getByRole('button', { name: 'Review & submit plan' }));
+});
+
 test('a section is edited in place and saved as an op', async () => {
   await boot();
   await openTab('Overview');
@@ -1633,11 +1661,15 @@ test('the header hides and shows the session list', async () => {
 test('the tab strip is one tab stop, and arrow keys move along it', async () => {
   await boot();
   const tabs = screen.getAllByRole('tab');
-  assert.deepEqual(tabs.map((t) => t.tabIndex), [0, -1, -1]);
+  assert.deepEqual(tabs.map((t) => t.tabIndex), [-1, 0, -1]);
   await act(async () => {
-    fireEvent.keyDown(tabs[0]!, { key: 'ArrowLeft' });
+    fireEvent.keyDown(tabs[1]!, { key: 'ArrowLeft' });
   });
-  assert.equal(store.getState().tab, 'overview', 'wraps at the ends');
+  assert.equal(store.getState().tab, 'overview');
+  await act(async () => {
+    fireEvent.keyDown(screen.getAllByRole('tab')[0]!, { key: 'ArrowLeft' });
+  });
+  assert.equal(store.getState().tab, 'tasks', 'wraps at the ends');
 });
 
 test('choosing a theme sets an explicit attribute', async () => {
