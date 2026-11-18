@@ -133,7 +133,7 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
   if (phase === 'planning' || phase === 'tasking') {
     out.push(
       '',
-      `> The plan is not submitted yet (${phase === 'planning' ? 'the design is still open' : 'the task list is being shaped'}). This is how the build would ` +
+      `> The plan is not submitted yet (${phase === 'tasking' ? 'the task list is being shaped' : plan.mode === 'tasklist' ? 'the task list is still open' : 'the design is still open'}). This is how the build would ` +
         'start. Start it when the user says so: told in chat, call harness_plan_advance {to: "build", user_said} first; ' +
         'submitted in Coplan, the build prompt reaches you.',
     );

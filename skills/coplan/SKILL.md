@@ -1,24 +1,61 @@
 ---
 name: coplan
-description: Plan a task visually in the Coplan UI — architecture diagrams the user reshapes and confirms, then a linked task list (what blocks what, which branch each piece lands on) that is built when the user says so, in chat or by submitting it. Use when the user types /coplan or $coplan, asks to "plan this in Coplan" or to set Coplan up, wants to see and shape the plan before work starts, tells you to go ahead with a Coplan plan, or when a "[cc-harness] The design is confirmed" or "[cc-harness] Revise the plan" prompt arrives.
+description: Plan a task visually in Coplan — architecture diagrams the user confirms, then a linked task list, or straight to the task list — built when the user says so. Takes --architect, --tasklist and --headless (no browser: a Markdown plan with Mermaid graphs). Use when the user types /coplan or $coplan, asks to "plan this in Coplan" or to set Coplan up, wants to see and shape the plan before work starts, tells you to go ahead with a Coplan plan, or when a "[cc-harness] The design is confirmed" or "[cc-harness] Revise the plan" prompt arrives.
 ---
 
 # Planning in Coplan
 
-Coplan is a planning workspace in the user's browser. A plan goes through
-two sign-offs, and the first is optional:
+Coplan is a planning workspace in the user's browser. Every plan ends in a
+task list, and the task list in the build. It takes one of two modes:
 
-1. **The design.** You publish the architecture — diagrams, sections, and
-   the tasks you plan, linked to the boxes they build. The user reshapes
-   it and **confirms the design**. That locks it.
-2. **The task list.** You break the confirmed design into the task list
-   the build follows: focused tasks, linked by what blocks what, landing
-   on the branches the change needs. The user shapes it and **submits the
-   plan**. That starts the build — see the `coplan-build` skill.
+- **Architecture first** (`mode: "architect"`) — two sign-offs:
+  1. **The design.** You publish the architecture — diagrams, sections,
+     and the task ideas, linked to the boxes they build. The user reshapes
+     it and **confirms the design**. That locks it.
+  2. **The task list.** You break the confirmed design into the task list
+     the build follows: focused tasks, linked by what blocks what, landing
+     on the branches the change needs. The user shapes it and **submits
+     the plan**. That starts the build — see the `coplan-build` skill.
+
+  The task list is never made before the design is confirmed, and the plan
+  is not built before there is a task list: Coplan refuses both.
+- **Straight to the task list** (`mode: "tasklist"`) — one sign-off: you
+  publish the task list itself, the user shapes it and **submits the plan**.
 
 The user signs off either way: **in Coplan**, with *Confirm design* or
-*Submit*, or **here in chat**, by telling you to go ahead. They may skip
-confirming the design and go straight to building.
+*Submit*, or **here in chat**, by telling you to go ahead.
+
+## Choosing the mode
+
+The user may say: `/coplan --architect …` or `/coplan --tasklist …`. If
+they do not, choose:
+
+- **Architect** when the change spans several systems, services or
+  repositories, reshapes a product flow, a workflow or a user journey, or
+  when the user (a system architect, a product owner) needs to see how the
+  parts fit before the work is split up. A picture of it is how they check
+  you understood.
+- **Tasklist** when the work is targeted: one area of the code, a bug, a
+  refactor, a feature inside one component — where a diagram would only
+  restate the file list. It is the faster path: use it whenever an
+  architecture adds nothing.
+
+Say which you chose, and why, in the summary. If the user asks for the
+other, publish again with that mode.
+
+## Headless: `--headless`
+
+When the user passes `--headless`, no browser can reach the page — you run
+on a virtual machine or as a cloud agent. Pass `headless: true` on your first
+`harness_plan_publish`. Coplan then never opens the page; it keeps the plan
+as Markdown in the working directory — the publish reply names the file —
+with each diagram and the task list drawn as Mermaid graphs, and rewrites
+it whenever the plan changes, through the build. Give the user that path
+in chat, so they open it in their agent's app. Everything else is said in
+chat: they tell you what to change, and you make it with `harness_plan_edit`
+(there is no page to accept a proposal on, so `harness_plan_propose` is
+refused); they sign off in chat, and you record it with
+`harness_plan_advance`.
 
 - **In Coplan**, the sign-off reaches you as a `[cc-harness]` prompt with
   their next message in chat — or, in Cursor, they paste it. If they tell
@@ -70,12 +107,22 @@ talks to you and cannot carry an answer: it shows the question and links the
 user back to this session to answer it. When the user has worked over the
 plan, they tell you so here, and you read it back.
 
-## 1. Investigate, then publish the design
+## 1. Investigate, then publish the plan
 
 Read the code first. Then call `harness_plan_publish` with:
 
-- **title** and **summary** — what is being built, and the approach in one
-  paragraph.
+- **mode** — `architect` or `tasklist` (see *Choosing the mode*).
+- **title** and **summary** — the summary is the first thing the user
+  reads: your understanding of the problem (what is asked, what you found
+  in the code that bears on it), how you are approaching it, and why
+  architecture first or straight to tasks. A short paragraph or two.
+
+For a **tasklist** plan, give `tasks` as the task list itself, made as
+*step 3* says — focused tasks with `detail`, `files`, `dependsOn` and
+`branch` — and no diagrams; skip to *step 3*'s last paragraph for the
+checks, and tell the user the task list is ready to review. For an
+**architect** plan:
+
 - **diagrams** — the architecture, which is where most design decisions are
   made. Each diagram is `nodes` and `edges`:
   - a node has `id`, `label`, `kind` (`component`, `service`, `datastore`,
@@ -94,18 +141,19 @@ Read the code first. Then call `harness_plan_publish` with:
   Do not give coordinates or a direction unless you mean it — the UI lays
   diagrams out to fit. One diagram per idea (components, a request's path,
   data flow).
-- **tasks** — the *planned* tasks: the main pieces of work, roughly in
-  order, each with an `id` the boxes link to. Keep them coarse here; the
-  detailed, linked task list comes after the design is confirmed.
+- **tasks** — the *task ideas*: the main pieces of work, roughly in
+  order, each with an `id` the boxes link to, so the diagram shows how the
+  task list will follow from it. Keep them coarse here; the detailed,
+  linked task list comes after the design is confirmed — never before.
 - **sections** — supporting prose: Context, Risks, Out of scope. Markdown.
 
 Run `harness_plan_check` and fix what it finds — a box with no
 description, a planned task that builds no box — or say in chat why a gap
 stays. Where the code and the request leave a choice open, make it and write
 it on the box it is about (see *When to ask*). Tell the user the design is
-ready, with the UI link the publish returned, and that when it is right they
-confirm it — in Coplan, or by telling you here — or tell you to go straight
-to building.
+ready, with the UI link the publish returned (the file, when headless), and
+that when it is right they confirm it — in Coplan, or by telling you here —
+and you make the task list from it.
 
 ## 2. Read it back when they say so
 
@@ -208,7 +256,8 @@ side by side) and the **branches** (how they stack), and the reply lists
 the **gaps** the list leaves open (`harness_plan_check` lists them any
 time): tasks with no detail, boxes no task builds, branches a stack of pull
 requests cannot follow. Check they say what you meant, and fix or explain
-each gap. Tell the user the task list is ready to review. **Start building
+each gap. Tell the user the task list is ready to review. In a tasklist plan
+this is the first thing the user sees. **Start building
 when they say so**: told here in chat, call
 `harness_plan_advance {to: "build", user_said: "…"}` and build from the
 prompt it returns; submitted in Coplan, the build prompt reaches you.
@@ -234,7 +283,10 @@ If the design has to change, stop that work and tell the user why in chat:
 only they can reopen it.
 
 When the user tells you to build, record it with `harness_plan_advance`
-before you start, so the plan locks and the board follows the build.
+before you start, so the plan locks and the board follows the build. In an
+architect plan whose design is not confirmed yet, "build it" confirms the
+design: advance `to: "tasks"` with their words, make the task list, and
+build once they have seen it.
 
 ## Setting up, and opening Coplan
 

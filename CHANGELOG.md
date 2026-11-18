@@ -4,6 +4,18 @@
 
 ### Changes
 
+- **Architecture first, or straight to tasks.** `/coplan --architect` plans with diagrams first: the task list is
+  made from the confirmed design, never before it, and built from there. `/coplan --tasklist` skips the
+  architecture for contained work and goes straight to a task list you submit. Without a flag, the agent chooses
+  and says why.
+- **Headless planning.** `/coplan --headless`, for an agent on a virtual machine or in the cloud, never opens the
+  page: the plan is kept as Markdown in the working directory (`.coplan/plans/<session>.md`), with each diagram and
+  the task list drawn as Mermaid graphs, rewritten as the plan changes. Review it in your agent's app and sign off
+  in chat.
+- **The Overview comes first.** It is the first tab, and a plan opens on it: how the plan gets built and the step
+  it is on, with the sign-off that moves it on; the agent's understanding of the problem and its approach; the
+  architecture broken into its parts and the tasks that build each; and the task ideas or task list.
+
 - **Node.js 24 or later is needed.** Node 20 reached end of life in April 2026. CI now runs on Node 26 (the
   current LTS) and checks the plugin's own tests on 24.0.0, the oldest it supports.
 - **Dependencies are on their latest versions**, among them React 19.3, React Flow 13, dagre 3, TypeScript 7,

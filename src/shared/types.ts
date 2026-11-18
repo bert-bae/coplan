@@ -503,9 +503,32 @@ export type PlanPhase = (typeof PLAN_PHASES)[number];
 export const PLAN_STATUSES = ['planning', 'in_progress', 'review', 'done'] as const;
 export type PlanStatus = (typeof PLAN_STATUSES)[number];
 
+/**
+ * How a plan is shaped before it is built. Every plan ends in a task list,
+ * and the task list in the build; the mode says whether an architecture
+ * comes first.
+ *
+ * - `architect` — architecture first: diagrams of the systems, flow or user
+ *   journey, with the task ideas linked to the boxes they build. The user
+ *   reshapes the design and confirms it, and the task list is made from the
+ *   confirmed design — never before it — then built.
+ * - `tasklist` — straight to the task list: for work in one contained area,
+ *   where a diagram would add nothing. The user shapes the tasks and submits
+ *   them; there is no design to confirm.
+ *
+ * Absent on plans published before modes existed: those take either path.
+ */
+export const PLAN_MODES = ['architect', 'tasklist'] as const;
+export type PlanMode = (typeof PLAN_MODES)[number];
+
 export interface Plan {
   title: string;
-  /** Markdown: the one-paragraph version of the whole plan. */
+  /** Architecture first, or straight to the task list (see `PlanMode`).
+   *  Set by the agent when it publishes. */
+  mode?: PlanMode;
+  /** Markdown: the agent's understanding of the problem and how it is
+   *  approaching it — and why architecture first or straight to tasks.
+   *  The overview leads with it. */
   summary: string;
   sections: Section[];
   diagrams: Diagram[];
@@ -591,6 +614,8 @@ export interface TaskListInput {
  *  keeping comments and statuses on every item whose id survives. */
 export interface PlanInput {
   title: string;
+  /** Architecture first, or straight to the task list. Kept when left out. */
+  mode?: PlanMode;
   summary?: string;
   sections?: { id?: string; title: string; body: string }[];
   diagrams?: DiagramInput[];
@@ -846,6 +871,11 @@ export interface SessionState {
   engagedAt?: number;
   /** How the user last chose to have a plan built here (the Submit dialog). */
   buildChoice?: BuildChoice;
+  /** Planned where no browser can reach the page — a cloud agent, a
+   *  virtual machine (`/coplan --headless`). The page is never opened: the
+   *  plan is kept as Markdown, with its diagrams as Mermaid graphs, in the
+   *  session's working directory, and signed off in chat. */
+  headless?: boolean;
   /** When the first of its hooks reached Coplan; null while none has — a
    *  session known only from its tool calls, whose agent is not running
    *  Coplan's hooks (in Codex: not trusted, or changed by an update and not

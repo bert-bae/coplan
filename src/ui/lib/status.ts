@@ -76,7 +76,7 @@ export function statusTitle(facts: StatusFacts, agent: string): string {
   }
   switch (facts.phase) {
     case 'planning':
-      return 'Planning: the design is open';
+      return 'Planning: the design, or the task list, is open';
     case 'tasking':
       return 'Planning: the design is confirmed, and the task list is being made and shaped';
     case 'submitted':

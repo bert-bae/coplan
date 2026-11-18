@@ -1168,7 +1168,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .section-title { margin: 0; font-size: var(--fs-lg); font-weight: 650; letter-spacing: -0.01em; min-width: 0; }
 .doc-add .add-field { margin-top: 0; }
 
-.glance { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-3); }
+.glance { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-3); }
 .glance-tile {
   display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0;
   padding: var(--sp-3) var(--sp-4); text-align: left;
@@ -1183,6 +1183,65 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .glance-of { font-size: var(--fs-lg); color: var(--text-tertiary); font-weight: 600; }
 .glance-now { font-size: var(--fs-lg); font-weight: 650; line-height: 22px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .glance-sub { font-size: var(--fs-sm); color: var(--text-secondary); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* How the plan gets built: its steps, the one it is on, and the sign-off
+   that moves it on. */
+.pflow-head { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; margin-bottom: var(--sp-3); }
+.pflow-head .doc-label { margin: 0; }
+.pflow-steps { display: flex; gap: var(--sp-2); margin: 0; padding: 0; list-style: none; flex-wrap: wrap; }
+.pflow-step { flex: 1 1 180px; min-width: 0; position: relative; }
+.pflow-btn {
+  display: flex; align-items: flex-start; gap: var(--sp-2); width: 100%; height: 100%;
+  padding: var(--sp-2) var(--sp-3); text-align: left; color: var(--text-primary);
+  border: 1px solid var(--border-default); border-radius: var(--r-lg); background: var(--surface-raised);
+  transition: border-color var(--t-fast) linear;
+}
+.pflow-btn:hover { border-color: var(--accent-border); }
+.pflow-num {
+  flex: none; display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: var(--r-full);
+  font-size: var(--fs-sm); font-weight: 700; background: var(--surface-sunken); color: var(--text-secondary);
+}
+.pflow-text { display: flex; flex-direction: column; min-width: 0; }
+.pflow-title { font-weight: 650; }
+.pflow-hint { font-size: var(--fs-sm); color: var(--text-secondary); }
+.pflow-step.is-current .pflow-btn { border-color: var(--accent-border); background: var(--accent-subtle); }
+.pflow-step.is-current .pflow-num { background: var(--accent-solid); color: var(--accent-on-solid); }
+.pflow-step.is-done .pflow-num { background: var(--success-bg); color: var(--success-fg); }
+.pflow-step.is-next .pflow-title { color: var(--text-secondary); }
+.pflow-why { margin: var(--sp-3) 0 0; font-size: var(--fs-sm); color: var(--text-secondary); }
+
+.understanding { border-left: 3px solid var(--accent-solid); }
+.ov-lead { margin: 0 0 var(--sp-3); font-size: var(--fs-sm); color: var(--text-secondary); }
+
+.ov-diagram + .ov-diagram { margin-top: var(--sp-4); padding-top: var(--sp-3); border-top: 1px solid var(--border-subtle); }
+.ov-diagram-head { display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap; }
+.ov-diagram-title { font-size: var(--fs-md); font-weight: 650; }
+.ov-caption { margin: var(--sp-1) 0 0; color: var(--text-secondary); }
+.ov-parts { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin: var(--sp-2) 0 0; padding: 0; list-style: none; }
+.ov-part {
+  display: inline-flex; align-items: baseline; gap: 6px; max-width: 100%;
+  padding: 4px var(--sp-2); border: 1px solid var(--border-default); border-radius: var(--r-md);
+  background: var(--surface-raised); color: var(--text-primary); text-align: left;
+}
+.ov-part:hover { border-color: var(--accent-border); }
+.ov-part-label { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-part-kind { font-size: var(--fs-micro); color: var(--text-tertiary); }
+.ov-part-tasks { font-size: var(--fs-sm); color: var(--accent-fg); font-variant-numeric: tabular-nums; }
+.ov-part-tasks.is-none { color: var(--attention-fg); }
+
+.ov-tasks { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; }
+.ov-task {
+  display: grid; grid-template-columns: 18px minmax(0, 1fr); column-gap: var(--sp-2); align-items: baseline;
+  padding: 6px 0; border-top: 1px solid var(--border-subtle);
+}
+.ov-task:first-child { border-top: 0; }
+.ov-task-mark { color: var(--text-tertiary); text-align: center; }
+.ov-task.is-done .ov-task-mark { color: var(--success-fg); }
+.ov-task.is-in_progress .ov-task-mark { color: var(--accent-fg); }
+.ov-task.is-blocked .ov-task-mark { color: var(--attention-fg); font-weight: 700; }
+.ov-task-title { justify-self: start; font-weight: 600; text-align: left; color: var(--text-primary); }
+.ov-task-title:hover { color: var(--text-link); text-decoration: underline; }
+.ov-task-meta { grid-column: 2; display: flex; flex-wrap: wrap; gap: var(--sp-3); font-size: var(--fs-sm); color: var(--text-secondary); }
 
 /* -------------------------------------------------------- architecture */
 

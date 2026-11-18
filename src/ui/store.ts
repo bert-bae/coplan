@@ -12,8 +12,9 @@ import type { BuildSettings, BuildTarget, CleanupGroupId, ExecutionMode, Plan, P
 import { PLAN_STATUSES } from '../shared/types.ts';
 
 export type Tab = 'diagrams' | 'tasks' | 'overview';
-/** The architecture comes first: it is where most of the plan is decided. */
-export const TAB_IDS: Tab[] = ['diagrams', 'tasks', 'overview'];
+/** The overview comes first: the agent's understanding of the problem, and why
+ *  the plan is shaped as it is, before the architecture and the tasks. */
+export const TAB_IDS: Tab[] = ['overview', 'diagrams', 'tasks'];
 
 /** How the Tasks view lays out the tree: an editable outline, status
  *  columns, or grouped under the boxes each task builds. */
@@ -104,7 +105,7 @@ const initial: UiState = {
   planCheck: {},
   projectChecks: { implement: [], review: [] },
   projectReview: NO_REVIEW,
-  tab: 'diagrams',
+  tab: 'overview',
   diagramId: null,
   connection: 'connecting',
   taskMode: 'outline',

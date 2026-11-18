@@ -10,11 +10,11 @@ import { EmptyState } from '../components/primitives.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { TaskCheckChips, TaskChecksField } from '../components/TaskChecks.tsx';
 import { classNames } from '../lib/format.ts';
-import { boxRows, numbered, shownStatus } from '../lib/tasks.ts';
+import { boxRows, numbered, partsByTask, shownStatus } from '../lib/tasks.ts';
 import { isTyping } from '../lib/keys.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
 import { boxUnbuilt } from '../../shared/check.ts';
-import { canTakeSubtasks, childrenOf, countTasks, descendants, isLocked, outline, planPhase } from '../../shared/plan.ts';
+import { canTakeSubtasks, childrenOf, countTasks, descendants, hasTaskList, isLocked, outline, planPhase } from '../../shared/plan.ts';
 import { SESSION_BRANCH, roundVerdict, stackStatus, type StackEntry, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
 import { REVIEW_MODES, TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type ReviewMode, type Task, type TaskStatus } from '../../shared/types.ts';
 import type { TaskMode } from '../store.ts';
@@ -111,7 +111,7 @@ export function TasksView() {
             {counts.done}/{counts.total} done
           </span>
         </span>
-        {tasking && <SubmitControl />}
+        {(tasking || plan.mode === 'tasklist') && <SubmitControl />}
       </div>
 
       {plan.tasks.length === 0 ? (
@@ -433,18 +433,10 @@ function Outline({ plan, hideDone }: { plan: Plan; hideDone: boolean }) {
   const [addingUnder, setAddingUnder] = useState<string | null>(null);
 
   // Which boxes each task builds, worked out once for the whole outline.
-  const partsByTask = useMemo(() => {
-    const map = new Map<string, Part[]>();
-    for (const d of plan.diagrams) {
-      for (const n of d.nodes) {
-        for (const t of n.taskIds ?? []) map.set(t, [...(map.get(t) ?? []), { d, n }]);
-      }
-    }
-    return map;
-  }, [plan.diagrams]);
+  const partsOf = useMemo(() => partsByTask(plan.diagrams), [plan.diagrams]);
 
   const numbers = useMemo(() => new Map(outline(plan).map((r) => [r.task.id, r.number])), [plan]);
-  const tracking = planPhase(plan) !== 'planning';
+  const tracking = hasTaskList(plan);
   const rows = useMemo(() => {
     const hidden = new Set<string>();
     for (const id of collapsed) for (const d of descendants(plan, id)) hidden.add(d.id);
@@ -518,7 +510,7 @@ function Outline({ plan, hideDone }: { plan: Plan; hideDone: boolean }) {
             addingSubtask={addingUnder === task.id}
             onAddSubtask={() => setAddingUnder(task.id)}
             onCloseAdd={() => setAddingUnder(null)}
-            parts={partsByTask.get(task.id) ?? NO_PARTS}
+            parts={partsOf.get(task.id) ?? NO_PARTS}
             numbers={numbers}
             tracking={tracking}
           />
@@ -1318,7 +1310,7 @@ function BoardCard({ plan, task }: { plan: Plan; task: Task }) {
         {task.title}
       </button>
       {task.note && <p className="board-note">{task.note}</p>}
-      {planPhase(plan) !== 'planning' && task.status === 'todo' && (
+      {hasTaskList(plan) && task.status === 'todo' && (
         <p className="board-chips">
           <ReadinessChip plan={plan} task={task} />
         </p>

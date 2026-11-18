@@ -10,7 +10,7 @@
  */
 
 import { SESSION_BRANCH, ancestorsOf, branchPlan, hasSubtasks } from './build.ts';
-import { planPhase, threadsForRevision } from './plan.ts';
+import { hasTaskList, threadsForRevision } from './plan.ts';
 import type { DiagramNode, Plan, Target, Task } from './types.ts';
 
 export const GAP_RULES = [
@@ -59,7 +59,7 @@ export function planGaps(plan: Plan, severities: GapSeverities = {}): Gap[] {
   const gaps: Omit<Gap, 'severity'>[] = [];
   const add = (rule: GapRule, target: Target, message: string) => gaps.push({ rule, target, message });
   const leaves = plan.tasks.filter((t) => !hasSubtasks(plan, t.id));
-  const tasked = planPhase(plan) !== 'planning';
+  const tasked = hasTaskList(plan);
 
   // Boxes and tasks that do not meet: the diagram and the task list are
   // the same plan, and each should account for the other.

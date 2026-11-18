@@ -11,6 +11,8 @@ and Cursor except where the README's
 [Codex and Cursor](../README.md#codex-and-cursor) table says otherwise.
 
 - [The loop](#the-loop)
+- [Architecture first, or straight to tasks](#architecture-first-or-straight-to-tasks)
+- [Headless: no browser](#headless-no-browser)
 - [Confirming the design](#confirming-the-design)
 - [Submitting the plan](#submitting-the-plan)
 - [Going ahead from chat](#going-ahead-from-chat)
@@ -26,8 +28,10 @@ and Cursor except where the README's
 ## The loop
 
 1. **Claude publishes the design.** `/coplan add a cache to the orders API`
-   — Claude reads the code and calls `harness_plan_publish` with the
-   architecture and the tasks it plans. It decides what the code and your
+   — Claude reads the code and calls `harness_plan_publish` with its
+   understanding of the problem, the architecture and the task ideas on it
+   (or, for contained work, the task list itself: see
+   [Architecture first, or straight to tasks](#architecture-first-or-straight-to-tasks)). It decides what the code and your
    request leave open and writes each decision on the box it is about, for
    you to change; it asks you, with `AskUserQuestion` in chat, only what it
    must (see [When Claude asks](#when-claude-asks)).
@@ -49,9 +53,7 @@ and Cursor except where the README's
 5. **You confirm the design.** *Confirm design* shows exactly what Claude
    will be asked, and confirming locks the architecture, sections and
    summary. Or tell Claude in chat — "make the task list" — and it confirms
-   it for you ([Going ahead from chat](#going-ahead-from-chat)). Confirming
-   is optional: *Submit plan*, or "build it" in chat, goes straight to step 8
-   and builds the tasks planned on the diagram.
+   it for you ([Going ahead from chat](#going-ahead-from-chat)).
 6. **Claude makes the task list.** Your next message carries the design.
    Claude breaks the planned tasks into focused ones, links them by what
    blocks what, names the boxes each builds and the branch each lands on,
@@ -75,6 +77,53 @@ and Cursor except where the README's
    opens the pull requests in stack order if you want them, and writes a
    build report that appears on the Overview.
 
+## Architecture first, or straight to tasks
+
+Every plan ends in a task list, and the task list in the build. What comes
+before it depends on the work, and Claude chooses — or you do, with a flag:
+
+- **`/coplan --architect …`: architecture first.** For work across several
+  systems, a product flow, a workflow or a user journey: anything you want
+  to see as a picture before it is split up. Claude publishes diagrams with
+  its task ideas linked to the boxes they build, so you can see how the task
+  list will follow from the design. You confirm the design; Claude makes the
+  task list from it; you submit that. Coplan refuses a task list before the
+  design is confirmed, and a build before there is a task list.
+- **`/coplan --tasklist …`: straight to the task list.** For targeted work in
+  one area — a bug, a refactor, a feature inside one component — where a
+  diagram would only restate the file list. Claude publishes the task list
+  itself, with what blocks what and where each lands; you shape it and submit
+  it. There is no design to confirm, and the Architecture tab is hidden
+  unless diagrams are added.
+
+Without a flag Claude picks the mode that fits and says why in its
+understanding, at the top of the Overview. Ask for the other one in chat and
+it publishes the plan again that way.
+
+## Headless: no browser
+
+`/coplan --headless …` is for an agent the browser cannot reach — one on a
+virtual machine, or a cloud agent. Coplan never opens the page. It keeps the
+plan as Markdown in the session's working directory, at
+`.coplan/plans/<session>.md`, and writes it again whenever the plan changes,
+through the build:
+
+- a note at the top on where the plan is (*Architecture → Task list →
+  Build*) and what to say in chat next;
+- Claude's understanding of the problem, then the sections;
+- each diagram drawn as a [Mermaid](https://mermaid.js.org) graph, a shape
+  for each kind of box and the tasks that build it named on it, followed by
+  its parts and connections in words;
+- the task list drawn as a graph of what waits on what, coloured by status,
+  then the list, its build order and a brief for every task.
+
+Open it in your agent's app, which renders the graphs. You answer and sign
+off in chat: tell Claude what to change, "confirm the design" for the task
+list, "build it" to build. Proposals need the page to accept them, so a
+headless Claude asks in chat and makes the change instead. The file is
+yours: commit it, or add `.coplan/plans/` to `.gitignore`. Combine the flags
+as you like: `/coplan --headless --tasklist fix the flaky login test`.
+
 ## Confirming the design
 
 When the architecture is right, **Confirm design** (top right of the
@@ -91,9 +140,11 @@ next message in Claude carries it, once — in Cursor, confirming copies it for
 you to paste, or the agent's next `harness_plan_read` picks it up. *Reopen
 design* unlocks it again.
 
-Confirming is a checkpoint you may skip. *Submit plan*, beside *Confirm
-design*, opens the Submit dialog straight from the design, and the build
-then follows the tasks planned on the diagram.
+In an architecture-first plan, confirming is the way on: the task list is
+made from the confirmed design. A plan published before modes existed may
+still skip it — *Submit plan*, beside *Confirm design*, opens the Submit
+dialog straight from the design, and the build then follows the tasks
+planned on the diagram.
 
 Claude answers with the task list. Each task can say:
 
@@ -413,8 +464,16 @@ Rate limiter — service*, *Connected API gateway → Rate limiter: check*,
   the plan check lists as `task-builds-nothing`. Once the plan is submitted it
   sits beside the board.
 
-**Overview.** The summary, supporting sections, and tiles for progress, what
-Claude is on right now, diagrams and open comments.
+**Overview.** The first tab, and the one a plan opens on. At the top, how the
+plan gets built — *Architecture → Task list → Build*, or *Task list → Build*
+— with the step it is on and the sign-off that moves it on (*Confirm design*,
+*Review & submit plan*). Then Claude's understanding of the problem and how
+it is approaching it, and why it chose an architecture or went straight to
+tasks; the **architecture breakdown**, every part of each diagram with the
+tasks that build it (*no task* where none does); and the **task ideas** —
+or, once there is one, the task list — with what each builds and comes after.
+Once work has started, tiles show progress, what Claude is on and the open
+comments. The build report, then the supporting sections, follow.
 
 **The session list** holds the sessions you have planned in: the ones where
 you typed `/coplan` (`$coplan` in Codex), the agent loaded the skill, or a

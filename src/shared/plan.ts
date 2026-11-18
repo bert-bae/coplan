@@ -29,6 +29,7 @@ import type {
   Plan,
   PlanBaseline,
   PlanInput,
+  PlanMode,
   PlanOp,
   PlanOpName,
   PlanPhase,
@@ -50,7 +51,7 @@ import type {
   TaskStatus,
   Thread,
 } from './types.ts';
-import { BUILD_TARGETS, EDGE_ARROWS, EXECUTION_MODES, IRIC_STAGES, TASK_CHECK_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
+import { BUILD_TARGETS, EDGE_ARROWS, EXECUTION_MODES, IRIC_STAGES, PLAN_MODES, TASK_CHECK_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
 import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, isSettled, planMode, roundVerdict, validReview } from './build.ts';
 import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from './proposal-ops.ts';
 
@@ -431,6 +432,11 @@ export function publishPlan(prev: Plan | null, input: PlanInput, now = Date.now(
   // Ids are minted against everything the plan has ever held, so build into
   // a working copy that still remembers the old items until the end.
   const next: Plan = { ...base, title, summary: clean(input.summary, MAX_TEXT) ?? base.summary };
+  if (input.mode !== undefined) {
+    const mode = validMode(input.mode);
+    if (!mode) throw new PlanError('`mode` is "architect" (architecture first, then the task list) or "tasklist" (straight to the task list).');
+    next.mode = mode;
+  }
 
   if ((input.sections?.length ?? 0) > MAX_SECTIONS) throw new PlanError(`A plan holds at most ${MAX_SECTIONS} sections.`);
   if ((input.diagrams?.length ?? 0) > MAX_DIAGRAMS) throw new PlanError(`A plan holds at most ${MAX_DIAGRAMS} diagrams.`);
@@ -511,6 +517,7 @@ export function publishTasks(prev: Plan | null, input: TaskListInput, now = Date
     throw new PlanError('This plan is built. Start the next one with harness_plan_publish; its tasks are confirmed and submitted afresh.');
   }
   if (prev.submission) throw new PlanError(LOCKED_FOR_CLAUDE);
+  if (prev.mode === 'architect' && !prev.design) throw new PlanError(ARCHITECTURE_FIRST);
   refuseUnread(prev, 'publish the task list again');
   if (!Array.isArray(input?.tasks) || input.tasks.length === 0) throw new PlanError('The task list needs at least one task.');
 
@@ -898,6 +905,7 @@ export function normalizePlan(raw: Partial<Plan> & Record<string, unknown>, fall
     claudeReadAt: typeof raw.claudeReadAt === 'number' ? raw.claudeReadAt : null,
     revision: typeof raw.revision === 'number' ? raw.revision : 0,
   };
+  if (!validMode(raw.mode)) delete plan.mode;
   const baseline = validBaseline(raw.claudeBaseline);
   if (baseline) plan.claudeBaseline = baseline;
   else delete plan.claudeBaseline;
@@ -2664,6 +2672,39 @@ function proposalTarget(plan: Plan, ops: PlanOp[]): Target {
   return { kind: 'plan', id: '' };
 }
 
+export function validMode(value: unknown): PlanMode | undefined {
+  return (PLAN_MODES as readonly string[]).includes(value as string) ? (value as PlanMode) : undefined;
+}
+
+/** Refused to an architecture-first plan before its design is confirmed. */
+export const ARCHITECTURE_FIRST =
+  'This plan is architecture first: the task list is made from the confirmed design, and the build from the task list. ' +
+  'Confirm the design first — in Coplan, or in chat (harness_plan_advance {to: "tasks", user_said}) — then make the task list.';
+/** Refused to a plan that went straight to its task list. */
+export const NO_DESIGN = 'This plan went straight to a task list: there is no design to confirm. Submit it to build it.';
+
+/** Whether the plan has a task list to build — the design confirmed, or a
+ *  plan that went straight to one — rather than task ideas on a design. */
+export function hasTaskList(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> & Partial<Pick<Plan, 'mode'>>) | null): boolean {
+  return planPhase(plan) !== 'planning' || plan?.mode === 'tasklist';
+}
+
+/** A step every plan of its mode goes through on its way to being built. */
+export type FlowStep = 'architecture' | 'tasklist' | 'build';
+export const FLOW_LABEL: Record<FlowStep, string> = { architecture: 'Architecture', tasklist: 'Task list', build: 'Build' };
+
+/**
+ * The steps the plan goes through — the architecture (when it has one),
+ * the task list made from it, the build — and the one it is on. A plan
+ * from before modes reads as architecture first when it has diagrams.
+ */
+export function planFlow(plan: Pick<Plan, 'submission' | 'tasks' | 'design' | 'diagrams'> & Partial<Pick<Plan, 'mode' | 'report'>>): { steps: FlowStep[]; at: FlowStep } {
+  const architecture = plan.mode ? plan.mode === 'architect' : plan.diagrams.length > 0;
+  const steps: FlowStep[] = architecture ? ['architecture', 'tasklist', 'build'] : ['tasklist', 'build'];
+  const phase = planPhase(plan);
+  return { steps, at: phase === 'planning' ? steps[0]! : phase === 'tasking' ? 'tasklist' : 'build' };
+}
+
 /** Whether the design — diagrams, sections, summary — is locked: confirmed,
  *  or submitted. */
 export function isDesignLocked(plan: Pick<Plan, 'submission' | 'design'> | null): boolean {
@@ -2747,6 +2788,10 @@ export function submitPlan(
   // Confirming the design is a checkpoint the user may take, not a step
   // they must (#65): a plan goes from planning straight to building when
   // they say so, and the lock holds from there.
+  // Except architecture first: there the task list is made from the
+  // confirmed design, and the build from the task list. Handing it off
+  // to be built elsewhere (Export) builds nothing here.
+  if (plan.mode === 'architect' && !plan.design && input.target === 'session') throw new PlanError(ARCHITECTURE_FIRST);
   if (!input.prompt.trim()) throw new PlanError('There is no prompt to submit.');
   // What is submitted gets built: a plan that cannot be is refused here,
   // not discovered by the agent halfway through.
@@ -2794,6 +2839,7 @@ export function reopenPlan(plan: Plan, now = Date.now()): Plan {
 export function confirmDesign(plan: Plan, input: { prompt: string; note?: string; trimmed?: boolean; userSaid?: string }, now = Date.now()): Plan {
   if (plan.submission) throw new PlanError('The plan has already been submitted.');
   if (plan.design) throw new PlanError('The design is already confirmed.');
+  if (plan.mode === 'tasklist') throw new PlanError(NO_DESIGN);
   if (!input.prompt.trim()) throw new PlanError('There is no prompt to send.');
   const next = structuredClone(plan);
   const note = cleanNote(input.note);

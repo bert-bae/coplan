@@ -1,6 +1,13 @@
 import { descendants, outline } from '../../shared/plan.ts';
 import { ancestorsOf, droppedWhole, hasSubtasks, readinessOf } from '../../shared/build.ts';
-import type { Plan, Task, TaskStatus } from '../../shared/types.ts';
+import type { Diagram, DiagramNode, Plan, Task, TaskStatus } from '../../shared/types.ts';
+
+/** The boxes each task builds, by task id: those that link it themselves. */
+export function partsByTask(diagrams: readonly Diagram[]): Map<string, { d: Diagram; n: DiagramNode }[]> {
+  const map = new Map<string, { d: Diagram; n: DiagramNode }[]>();
+  for (const d of diagrams) for (const n of d.nodes) for (const t of n.taskIds ?? []) map.set(t, [...(map.get(t) ?? []), { d, n }]);
+  return map;
+}
 
 /**
  * The tasks that build a box, as a box's list shows them — on the canvas and

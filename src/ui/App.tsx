@@ -31,6 +31,12 @@ const TAB_LABEL: Record<Tab, string> = {
 const tabId = (id: Tab) => `tab-${id}`;
 const panelId = (id: Tab) => `panel-${id}`;
 
+/** The tabs a plan has: one that went straight to a task list has no
+ *  architecture to show, unless diagrams were added to it all the same. */
+function tabsOf(plan: Plan | null | undefined): Tab[] {
+  return plan?.mode === 'tasklist' && !plan.diagrams.length ? TAB_IDS.filter((t) => t !== 'diagrams') : TAB_IDS;
+}
+
 /**
  * The planning workspace: one plan per Claude session, laid out to be read and
  * reorganized, and to follow Claude's progress through it. There is
@@ -40,12 +46,15 @@ const panelId = (id: Tab) => `panel-${id}`;
 export function App() {
   const session = useSession();
   const sessionId = useStore((s) => s.sessionId);
-  const tab = useStore((s) => s.tab);
+  const chosen = useStore((s) => s.tab);
   const error = useStore((s) => s.error);
   const sidebarCollapsed = useStore((s) => s.collapsedSidebar);
   const drawerOpen = useStore((s) => s.drawerOpen);
   const tabs = useRef<HTMLElement>(null);
   const plan = session?.plan ?? null;
+  const shown = tabsOf(plan);
+  // A tab the plan does not have opens on the overview.
+  const tab = shown.includes(chosen) ? chosen : 'overview';
 
   useDocumentTitle(session);
   useShortcuts();
@@ -55,15 +64,15 @@ export function App() {
     (event: React.KeyboardEvent) => {
       const delta = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
       let next: Tab | undefined;
-      if (delta !== 0) next = TAB_IDS[(TAB_IDS.indexOf(tab) + delta + TAB_IDS.length) % TAB_IDS.length];
-      else if (event.key === 'Home') next = TAB_IDS[0];
-      else if (event.key === 'End') next = TAB_IDS[TAB_IDS.length - 1];
+      if (delta !== 0) next = shown[(shown.indexOf(tab) + delta + shown.length) % shown.length];
+      else if (event.key === 'Home') next = shown[0];
+      else if (event.key === 'End') next = shown[shown.length - 1];
       if (!next) return;
       event.preventDefault();
       store.setTab(next);
       tabs.current?.querySelector<HTMLElement>(`#${tabId(next)}`)?.focus();
     },
-    [tab],
+    [tab, shown],
   );
 
   return (
@@ -92,7 +101,7 @@ export function App() {
               ) : (
                 <>
                   <nav className="tabs" role="tablist" aria-label="Plan views" ref={tabs} onKeyDown={onTabKeyDown}>
-                    {TAB_IDS.map((t) => (
+                    {shown.map((t) => (
                       <TabButton key={t} id={t} active={tab === t} plan={plan} />
                     ))}
                   </nav>
@@ -383,8 +392,9 @@ function useShortcuts(): void {
         return;
       }
       const index = Number(event.key) - 1;
-      const tab = TAB_IDS[index];
-      if (tab && store.getState().session?.plan) {
+      const plan = store.getState().session?.plan;
+      const tab = tabsOf(plan)[index];
+      if (tab && plan) {
         event.preventDefault();
         store.setTab(tab);
       }

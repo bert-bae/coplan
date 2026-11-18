@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { unlinkSync, appendFileSync, existsSync, linkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { unlinkSync, appendFileSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +21,7 @@ import {
   configRows,
   designPrompt,
   exportBlocks,
+  headlessText,
   planBlocks,
   promptHash,
   renderGaps,
@@ -54,7 +55,7 @@ import { HOOK_STAGES, filesInScope, hookScope, taskHooks, type ProjectConfig } f
 import { changedFiles, changedSince, committedOn, headCommit, unreadWords, worktreeOf, type ChangedFiles } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
 import { ConfigCache, globalConfigFile, projectHarnessFile, type HarnessConfig } from '../shared/config.ts';
-import { ensureHome, paths, readLiveLock, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
+import { ensureHome, paths, readLiveLock, sanitizeId, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
 import type { BuildChoice, BuildSettings, CleanupGroupId, DaemonLock, ExecutionMode, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, Task, TaskListInput, TaskStatus } from '../shared/types.ts';
@@ -502,6 +503,8 @@ function buildRouter(deps: Deps): Router {
 
   const opened = new Set<string>();
   const revealUi = (session: SessionState) => {
+    // Headless: no browser can reach the page; the plan is in its file.
+    if (store.get(session.sessionId)?.headless) return;
     if (!configFor(session).autoOpen || opened.has(session.sessionId)) return;
     opened.add(session.sessionId);
     if (opened.size > MAX_TRACKED_OPENS) opened.delete(opened.values().next().value!);
@@ -519,6 +522,38 @@ function buildRouter(deps: Deps): Router {
   reviewChanges.add(() => store.broadcastSessionList());
   const projectAt = (root: string): ProjectConfig => projects.at(root);
   const projectFor = (session: SessionState): ProjectConfig => projectAt(session.repoRoot ?? session.cwd);
+
+  /**
+   * A headless session's plan, kept as Markdown in its working directory —
+   * where the agent's app can open it — and written again whenever the
+   * plan changes, by either side, so the file is never behind.
+   */
+  const headlessFile = (session: SessionState) => path.join(session.cwd, '.coplan', 'plans', `${sanitizeId(session.sessionId)}.md`);
+  // What the file was last written for: the change log's position and the
+  // phase (a sign-off or its delivery moves only the phase). Layout moves
+  // neither, so dragging boxes writes nothing.
+  const headlessWritten = new Map<string, string>();
+  const writeHeadless = (session: SessionState): void => {
+    const plan = session.plan;
+    if (!session.headless || !plan) return;
+    const at = `${plan.seq}:${planPhase(plan)}`;
+    if (headlessWritten.get(session.sessionId) === at) return;
+    const file = headlessFile(session);
+    try {
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, headlessText(plan, { agent: session.agent, project: projectFor(session) }));
+      headlessWritten.set(session.sessionId, at);
+    } catch (err) {
+      log(`could not write the headless plan ${file}: ${(err as Error).message}`);
+    }
+  };
+  store.on('event', (event: ServerEvent) => {
+    if (event.type === 'snapshot') writeHeadless(event.session);
+  });
+  /** Where the user reviews the plan — on its page, or in a headless plan's
+   *  file — as the end of "The user reviews it …". */
+  const reviewedAt = (session: SessionState) =>
+    store.get(session.sessionId)?.headless ? `in ${headlessFile(session)}` : `at ${uiUrl(session.sessionId)}`;
 
   /** How a brief is rendered for a session: the same for the agent's tool
    *  and the page, so both read the same text. */
@@ -1652,10 +1687,22 @@ function buildRouter(deps: Deps): Router {
       switch (ctx.params['tool']) {
         case 'publish': {
           const { plan } = store.publishPlan(id, body as unknown as PlanInput);
+          // Sticky: said once, on the first publish, it holds for the session.
+          if (typeof body['headless'] === 'boolean') {
+            store.mutate(id, (s) => {
+              if (body['headless']) s.headless = true;
+              else delete s.headless;
+            });
+          }
           revealUi(session);
+          const headless = Boolean(store.get(id)?.headless);
           reply(
             true,
-            `[cc-harness] Published "${plan.title}" (revision ${plan.revision}). The user reviews it at ${url}\n` +
+            `[cc-harness] Published "${plan.title}" (revision ${plan.revision}). The user reviews it ${reviewedAt(session)}\n` +
+              (headless
+                ? 'Headless: there is no page, so give them that file\'s path in chat — it is the plan, with its diagrams and ' +
+                  'task list as Mermaid graphs, kept up to date as the plan changes. They answer and sign off in chat. '
+                : '') +
               'Tell them in chat that the plan is ready. Nothing in Coplan waits for them: when they say they ' +
               `have reviewed it, call harness_plan_read. ${askRule(agentInfo(session.agent), 'plan')}\n\n` +
               renderPlan(plan, { url, planCheck: projectFor(session).planCheck }),
@@ -1723,6 +1770,12 @@ function buildRouter(deps: Deps): Router {
         }
 
         case 'propose': {
+          if (session.headless) {
+            throw new PlanError(
+              'This plan is headless: the user has no page to accept a proposal on. Say in chat what you would change and ' +
+                'why, and make it with harness_plan_edit once they agree there — or leave it as a comment ({op: "comment"}) in the plan.',
+            );
+          }
           const proposal = { op: 'propose', title: body['title'], reason: body['reason'], ops: body['ops'] } as unknown as PlanOp;
           const { plan } = store.applyOps(id, [proposal], 'claude');
           const p = plan.proposals!.at(-1)!;
@@ -1743,14 +1796,17 @@ function buildRouter(deps: Deps): Router {
           const phase = planPhase(plan);
           reply(
             true,
-            `[cc-harness] Published the task list for "${plan.title}". The user reviews it at ${url}\n` +
-              (phase === 'tasking'
+            `[cc-harness] Published the task list for "${plan.title}". The user reviews it ${reviewedAt(session)}\n` +
+              (phase === 'tasking' || (phase === 'planning' && plan.mode === 'tasklist')
                 ? 'Tell them in chat that the task list is ready to review. Start building when they say so: when they ' +
                   'tell you here to go ahead, call harness_plan_advance {to: "build", user_said: "<their words>"}, which ' +
-                  'submits the plan and gives you the build prompt; when they submit it in Coplan instead, ' +
-                  (agentInfo(session.agent).promptContext
-                    ? 'the build prompt comes with their next message.\n\n'
-                    : 'they paste the build prompt here, or harness_plan_read hands it to you.\n\n')
+                  'submits the plan and gives you the build prompt' +
+                  (store.get(id)?.headless
+                    ? ' — headless, there is no page to submit it on, so chat is the only way.\n\n'
+                    : '; when they submit it in Coplan instead, ' +
+                      (agentInfo(session.agent).promptContext
+                        ? 'the build prompt comes with their next message.\n\n'
+                        : 'they paste the build prompt here, or harness_plan_read hands it to you.\n\n'))
                 : 'Tell them in chat that the tasks are updated.\n\n') +
               renderTaskList(plan, projectFor(session).branches.base) +
               // What the list leaves open, while it is still cheap to fix.

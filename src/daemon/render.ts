@@ -14,7 +14,10 @@ import {
   baselineOf,
   countTasks,
   describeTarget,
+  hasTaskList,
   outline,
+  FLOW_LABEL,
+  planFlow,
   planPhase,
   REOPENED_DESIGN,
   REOPENED_PLAN,
@@ -27,6 +30,7 @@ import {
   threadWaitsOn,
 } from '../shared/plan.ts';
 import { KIND_NOUN, contentOf, diagramBlocks, diagramChanges, diagramToMarkdown, edgePhrase, hang, indent, nestHeadings } from '../shared/architecture.ts';
+import { diagramMermaid, tasksMermaid } from '../shared/mermaid.ts';
 import { BlockList, CHANGES, NOTE, TEMPLATE, blockLines, blocksText, derived, dropAll, field, joinBlocks, setting, type Block, type BlockSource, type ConfigRow } from '../shared/blocks.ts';
 import {
   DEFAULT_BUILD_SETTINGS,
@@ -182,6 +186,9 @@ interface DocumentOptions {
    *  what it comes after and where it lands, not how it is reviewed or
    *  how far it got, and nothing names a Coplan tool. */
   plain?: boolean;
+  /** Each diagram, and the task list, drawn as a Mermaid graph too: for a
+   *  reader with no page to see them on (a headless plan). */
+  mermaid?: boolean;
 }
 
 /** The plan as a document — summary, sections, architecture, tasks and
@@ -205,7 +212,7 @@ const REV = derived('its revision');
 const WHO = derived('who last edited it');
 
 function documentParts(plan: Plan, opts: DocumentOptions = {}): DocumentParts {
-  const { attribution = true, details = true, reader = 'claude', revs = false, plain = false } = opts;
+  const { attribution = true, details = true, reader = 'claude', revs = false, plain = false, mermaid = false } = opts;
   const summary = new BlockList();
   if (plan.summary.trim()) summary.gap().add('summary', field('plan'), ['## Summary', nestHeadings(plan.summary.trim(), 2)]);
 
@@ -227,11 +234,21 @@ function documentParts(plan: Plan, opts: DocumentOptions = {}): DocumentParts {
     for (const d of plan.diagrams) {
       const edited = attribution && d.updatedBy === 'user' ? 'last edited by the user' : '';
       const note = [revs ? `rev ${d.rev}` : '', edited].filter(Boolean).join(' · ') || undefined;
-      architecture.gap().push(...diagramBlocks(d, { tasks: plan.tasks, note }));
+      const blocks = diagramBlocks(d, { tasks: plan.tasks, note });
+      if (mermaid && d.nodes.length) {
+        // Under the title and caption, before the parts it draws.
+        const at = blocks.findIndex((x) => x.id === `diagram:${d.id}:caption`) + 1 || 1;
+        blocks.splice(at, 0, { id: `diagram:${d.id}:mermaid`, source: derived('its boxes and arrows'), text: ['', ...diagramMermaid(d)].join('\n') });
+      }
+      architecture.gap().push(...blocks);
     }
   }
 
-  const tasks = new BlockList().gap().push(...taskBlocks(plan, { attribution, details, revs, plain }));
+  const [taskHead, ...taskRest] = taskBlocks(plan, { attribution, details, revs, plain });
+  const tasks = new BlockList().gap().push(taskHead!);
+  const graph = mermaid ? tasksMermaid(plan) : [];
+  if (graph.length) tasks.gap().add('tasks:mermaid', derived('the tasks and what each waits on'), graph).gap();
+  tasks.push(...taskRest);
   const order = new BlockList();
   const steps = buildOrderBlocks(plan, opts.base, { plain });
   if (steps.length) order.gap().push(...steps);
@@ -278,7 +295,7 @@ function taskBlocks(plan: Plan, opts: { attribution?: boolean; details?: boolean
   const rows = outline(plan);
   if (rows.length === 0) b.add('tasks:none', derived('the tasks'), '_(no tasks yet)_');
   // Ready or waiting means something once there is a task list to build.
-  const tracking = planPhase(plan) !== 'planning';
+  const tracking = hasTaskList(plan);
   for (const { task, depth } of rows) {
     const pad = '  '.repeat(depth);
     const me = field('task', task.id);
@@ -395,7 +412,15 @@ export function renderBuildOrder(plan: Plan, base?: string): string[] {
 function lockLine(plan: Plan): string | null {
   switch (planPhase(plan)) {
     case 'planning':
-      return null;
+      return plan.mode === 'tasklist'
+        ? '> **Task list first.** This plan has no architecture step: the task list here is the one that gets built. ' +
+            'Shape it with the user, then start building when they say so — here in chat (harness_plan_advance {to: ' +
+            '"build", user_said}) or by submitting the plan in Coplan.'
+        : plan.mode === 'architect'
+          ? '> **Architecture first.** The tasks here are the ideas on the design, linked to the boxes they build. The ' +
+            'task list is made once the user confirms the design — in Coplan, or here in chat (harness_plan_advance ' +
+            '{to: "tasks", user_said}) — and the build starts from that task list.'
+          : null;
     case 'tasking':
       return (
         '> **Design confirmed.** The user confirmed the architecture, sections and summary, and they are locked. ' +
@@ -915,6 +940,8 @@ export interface ExportOptions {
   project?: ProjectConfig;
   /** What the user wrote when submitting it as an Export. */
   note?: string;
+  /** Diagrams and the task list as Mermaid graphs too. */
+  mermaid?: boolean;
 }
 
 /**
@@ -928,7 +955,7 @@ export interface ExportOptions {
  */
 export function exportBlocks(plan: Plan, opts: ExportOptions = {}): Block[] {
   const base = opts.project?.branches.base;
-  const doc = documentParts(plan, { attribution: false, reader: 'outside', base, plain: true, details: false });
+  const doc = documentParts(plan, { attribution: false, reader: 'outside', base, plain: true, details: false, mermaid: Boolean(opts.mermaid) });
   const b = new BlockList();
   b.add('heading', field('plan'), `# ${plan.title}`);
   b.push(...fromUser(opts.note), ...doc.summary, ...doc.sections, ...doc.architecture, ...doc.tasks, ...doc.order);
@@ -943,6 +970,47 @@ export function exportBlocks(plan: Plan, opts: ExportOptions = {}): Block[] {
 
 export function exportText(plan: Plan, opts: ExportOptions = {}): string {
   return blocksText(exportBlocks(plan, opts));
+}
+
+/**
+ * A headless plan's file (`/coplan --headless`): the export, with each
+ * diagram and the task list drawn as Mermaid graphs, under a note on where
+ * the plan is and what to tell the agent in chat to move it on — there is
+ * no page to click, so every sign-off is said in chat.
+ */
+export function headlessText(plan: Plan, opts: { agent: AgentKind; project?: ProjectConfig }): string {
+  const { steps, at } = planFlow(plan);
+  const flow = steps.map((s) => (s === at ? `**${FLOW_LABEL[s]}**` : FLOW_LABEL[s])).join(' → ');
+  const [heading, ...rest] = exportBlocks(plan, { ...(opts.project ? { project: opts.project } : {}), mermaid: true });
+  const b = new BlockList().push(heading!);
+  b.gap().add('headless', TEMPLATE, [
+    `> **Coplan plan** · ${flow} · updated ${new Date(plan.updatedAt).toISOString().slice(0, 16).replace('T', ' ')} UTC`,
+    '>',
+    `> ${headlessNext(plan, agentInfo(opts.agent).name)}`,
+  ]);
+  return `${blocksText(b.push(...rest).blocks)}\n`;
+}
+
+/** What the user does next, in a headless plan: what to say in chat. */
+function headlessNext(plan: Plan, agent: string): string {
+  switch (planPhase(plan)) {
+    case 'planning':
+      return plan.mode === 'tasklist'
+        ? `Review the task list below. Tell ${agent} in chat what to change; when it is right, tell it to build it.`
+        : `Review the overview and the architecture below. Tell ${agent} in chat what to change; when the design is right, ` +
+            'tell it to confirm the design, and it makes the task list from it.';
+    case 'tasking':
+      return `The design is confirmed. Review the task list made from it below; tell ${agent} in chat what to change, or to build it.`;
+    case 'submitted':
+    case 'building':
+      return `Being built: the task statuses below follow ${agent}'s progress.`;
+    case 'finalizing':
+      return `Every task is done: ${agent} is running the final checks and writing the report.`;
+    case 'built':
+      return 'Built: the report is below.';
+    default:
+      return 'Exported, to be built somewhere else.';
+  }
 }
 
 /** One task's brief in an export: the task's own words and its parents',
