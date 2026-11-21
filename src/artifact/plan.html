@@ -1,0 +1,143 @@
+<title>Coplan Plan</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<!--
+  Coplan's headless plan page (#headless). Publish it as an Artifact; it
+  draws the plan held in the #plan block below, so to change the plan,
+  change that JSON and publish again. Do not edit anything else.
+-->
+<script type="application/json" id="plan">null</script>
+<style>
+  /* Layout: one reading column, like a design doc; diagrams and the task
+     graph take the full width; a sticky bar jumps between the three parts.
+     Colours are Coplan's own tokens (src/ui/style.css). */
+  :root {
+    --bg: #ffffff; --raised: #f7f9fb; --sunken: #eff2f6;
+    --line: #d6dde6; --line-soft: #e5eaf1;
+    --fg: #0f141a; --fg-2: #525c6a; --fg-3: #6b7785;
+    --accent: #0a58ca; --accent-solid: #1f6feb; --accent-soft: #e2ecfd;
+    --ok: #16743a; --ok-bg: #dcfce9; --warn: #7a5600; --warn-bg: #fff5cc;
+    --bad: #c1121f;
+    --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Inter, Roboto, sans-serif;
+    --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e131a; --raised: #151c25; --sunken: #0b1016;
+      --line: #2a3644; --line-soft: #1b2430;
+      --fg: #f0f4f9; --fg-2: #a7b2c0; --fg-3: #8a95a3;
+      --accent: #85b8ff; --accent-solid: #2b7cf0; --accent-soft: #15263c;
+      --ok: #56d364; --ok-bg: #0d2a17; --warn: #e3b341; --warn-bg: #2a2000;
+      --bad: #ff8781;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e131a; --raised: #151c25; --sunken: #0b1016;
+    --line: #2a3644; --line-soft: #1b2430;
+    --fg: #f0f4f9; --fg-2: #a7b2c0; --fg-3: #8a95a3;
+    --accent: #85b8ff; --accent-solid: #2b7cf0; --accent-soft: #15263c;
+    --ok: #56d364; --ok-bg: #0d2a17; --warn: #e3b341; --warn-bg: #2a2000;
+    --bad: #ff8781;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--fg); font: 15px/1.6 var(--sans); }
+  body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); }
+  #app > *, .bar-in { max-width: 920px; margin-inline: auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  #app > .bar { max-width: none; padding-inline: 0; }
+  a { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent-solid); outline-offset: 2px; border-radius: 3px; }
+  h1, h2, h3, h4 { text-wrap: balance; line-height: 1.25; margin: 0; }
+  h1 { font-size: 1.9rem; font-weight: 700; letter-spacing: -0.02em; }
+  h2 { font-size: 1.35rem; font-weight: 700; letter-spacing: -0.01em; padding-block: 2.25rem 0.5rem; border-bottom: 1px solid var(--line); margin-bottom: 1rem; }
+  h3 { font-size: 1.05rem; font-weight: 650; margin-top: 1.75rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  h4 { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-3); margin-top: 1.5rem; }
+  p { margin: 0.5rem 0; }
+  code { font: 0.85em var(--mono); }
+  .muted { color: var(--fg-2); }
+  .ref { font-size: 0.75rem; color: var(--fg-2); background: var(--sunken); border: 1px solid var(--line-soft); border-radius: 4px; padding: 0 0.3em; white-space: nowrap; }
+
+  /* The head: what the plan is and where it stands. */
+  .head { padding-block: 2rem 1rem; }
+  .eyebrow { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-3); margin: 0 0 0.4rem; }
+  .flow { display: flex; flex-wrap: wrap; gap: 0.25rem 0.5rem; list-style: none; padding: 0; margin: 0.9rem 0 0; font-size: 0.85rem; color: var(--fg-3); }
+  .flow li { display: flex; align-items: center; gap: 0.5rem; }
+  .flow li + li::before { content: "→"; color: var(--fg-3); }
+  .flow .done { color: var(--ok); }
+  .flow .done::after { content: " ✓"; }
+  .flow .now { color: var(--fg); font-weight: 700; }
+  .glance { font-size: 0.85rem; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+
+  .bar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line); }
+  .bar-in { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 1.25rem; padding-block: 0.6rem; }
+  .bar a { font-size: 0.875rem; font-weight: 600; color: var(--fg-2); text-decoration: none; white-space: nowrap; }
+  .bar a:hover { color: var(--fg); }
+  .pill { margin-left: auto; font-size: 0.75rem; font-weight: 700; padding: 0.15rem 0.6rem; border-radius: 999px; white-space: nowrap; background: var(--accent-soft); color: var(--accent); }
+  .phase-tasking, .phase-built, .phase-handed-off { background: var(--ok-bg); color: var(--ok); }
+  .phase-finalizing { background: var(--warn-bg); color: var(--warn); }
+
+  /* What to say in chat next: the one thing the reader acts on. */
+  .next { margin-top: 1.25rem; border-left: 3px solid var(--accent-solid); background: var(--raised); padding-block: 0.75rem; }
+  .next > * { max-width: 68ch; }
+  .said { font-size: 0.875rem; color: var(--ok); }
+  .hint { font-size: 0.85rem; color: var(--fg-2); }
+
+  section { scroll-margin-top: 3.5rem; }
+  section > p, .md, .parts, .links, .steps { max-width: 68ch; }
+
+  /* Markdown, as Coplan renders it. */
+  .md > :first-child { margin-top: 0.25rem; }
+  .md ul, .md ol { padding-left: 1.4rem; margin: 0.5rem 0; }
+  .md pre, .md-code { background: var(--sunken); border: 1px solid var(--line-soft); border-radius: 6px; padding: 0.6rem 0.8rem; overflow-x: auto; font: 0.8rem/1.5 var(--mono); }
+  .md blockquote { margin: 0.5rem 0; padding-left: 0.8rem; border-left: 3px solid var(--line); color: var(--fg-2); }
+  .md-table-wrap { overflow-x: auto; }
+  .md-table { border-collapse: collapse; font-size: 0.875rem; }
+  .md-table th, .md-table td { border: 1px solid var(--line); padding: 0.3rem 0.6rem; text-align: left; }
+  .md h1, .md h2, .md h3, .md h4 { font-size: 1rem; border: 0; padding: 0; margin: 1rem 0 0.25rem; text-transform: none; letter-spacing: 0; color: var(--fg); }
+
+  /* Diagrams: drawn by Mermaid, read-only. */
+  .graph { margin-top: 0.75rem; padding: 1rem; background: var(--raised); border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; }
+  .graph pre.mermaid { margin: 0; text-align: center; background: none; font: 0.8rem/1.4 var(--mono); color: var(--fg-2); }
+  .graph svg { max-width: 100%; height: auto; }
+  .parts, .links, .steps { padding-left: 0; list-style: none; margin: 0.5rem 0; display: grid; gap: 0.75rem; }
+  .links, .steps { gap: 0.25rem; font-size: 0.9rem; }
+  .steps { counter-reset: step; }
+  .steps li { counter-increment: step; }
+  .steps li::before { content: "Step " counter(step) "  "; font-weight: 650; color: var(--fg-2); white-space: pre; }
+  .part { border-top: 1px solid var(--line-soft); padding-top: 0.6rem; }
+  .part-head, .task-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.4rem; }
+  .kind { font-size: 0.75rem; color: var(--fg-3); }
+  .built-by { font-size: 0.85rem; color: var(--fg-2); }
+  details summary { cursor: pointer; font-size: 0.85rem; color: var(--fg-2); }
+
+  /* Tasks. */
+  .progress { height: 6px; background: var(--sunken); border-radius: 999px; overflow: hidden; max-width: 68ch; margin-top: 0.5rem; }
+  .progress span { display: block; height: 100%; background: var(--ok); }
+  .tasks { list-style: none; padding: 0; margin: 0.5rem 0 0; display: grid; gap: 0.6rem; }
+  .tasks .tasks { padding-left: 1.1rem; border-left: 2px solid var(--line-soft); margin-top: 0.6rem; }
+  .tasks.top > .task { border: 1px solid var(--line); border-radius: 8px; padding: 0.75rem 0.9rem; background: var(--bg); }
+  .task { min-width: 0; }
+  .task-meta { font-size: 0.85rem; color: var(--fg-2); }
+  .status { font-size: 0.75rem; font-weight: 700; padding: 0.05rem 0.45rem; border-radius: 4px; background: var(--sunken); color: var(--fg-2); white-space: nowrap; }
+  .s-in_progress > .task-head .status { background: var(--accent-soft); color: var(--accent); }
+  .s-blocked > .task-head .status { background: var(--warn-bg); color: var(--warn); }
+  .s-done > .task-head .status { background: var(--ok-bg); color: var(--ok); }
+  .s-dropped > .task-head strong { text-decoration: line-through; color: var(--fg-3); }
+  .branch { font: 0.75rem var(--mono); color: var(--accent); border: 1px solid var(--line); border-radius: 4px; padding: 0 0.35em; }
+  .note { font-size: 0.85rem; color: var(--fg-2); font-style: italic; }
+
+  .empty, .error { padding-block: 3rem; color: var(--fg-2); }
+  .error { color: var(--bad); }
+  .foot { padding-block: 3rem 2rem; font-size: 0.8rem; color: var(--fg-3); }
+  /* A phone keeps the graph legible and scrolls it sideways in its frame. */
+  @media (max-width: 640px) { h1 { font-size: 1.5rem; } .bar-in { column-gap: 0.9rem; } .graph svg { min-width: 520px; } }
+  @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+</style>
+<div id="app">
+  <div class="empty">
+    <h1>No plan yet</h1>
+    <p>This is Coplan's plan page. The agent writes the plan into its <code>#plan</code> block and publishes it.</p>
+  </div>
+</div>
+<script>/*APP*/</script>

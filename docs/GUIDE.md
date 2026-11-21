@@ -103,26 +103,37 @@ it publishes the plan again that way.
 ## Headless: no browser
 
 `/coplan --headless …` is for an agent the browser cannot reach — one on a
-virtual machine, or a cloud agent. Coplan never opens the page. It keeps the
-plan as Markdown in the session's working directory, at
-`.coplan/plans/<session>.md`, and writes it again whenever the plan changes,
-through the build:
+virtual machine, or a cloud agent. Coplan never opens its page. Instead the
+plan comes to you as a **page the agent publishes as an Artifact**, and as a
+Markdown file in the session's working directory.
 
-- a note at the top on where the plan is (*Architecture → Task list →
-  Build*) and what to say in chat next;
-- Claude's understanding of the problem, then the sections;
-- each diagram drawn as a [Mermaid](https://mermaid.js.org) graph, a shape
-  for each kind of box and the tasks that build it named on it, followed by
-  its parts and connections in words;
-- the task list drawn as a graph of what waits on what, coloured by status,
-  then the list, its build order and a brief for every task.
+The page is the plan, read-only, top to bottom:
 
-Open it in your agent's app, which renders the graphs. You answer and sign
-off in chat: tell Claude what to change, "confirm the design" for the task
-list, "build it" to build. Proposals need the page to accept them, so a
-headless Claude asks in chat and makes the change instead. The file is
-yours: commit it, or add `.coplan/plans/` to `.gitignore`. Combine the flags
-as you like: `/coplan --headless --tasklist fix the flaky login test`.
+- **Where it stands** — *Architecture → Task list → Build*, a status, and
+  what to say in chat next; once you go ahead, your words, quoted.
+- **Overview** — the agent's understanding of the problem and its approach,
+  then the sections (context, risks, out of scope).
+- **Architecture** — each diagram drawn as a picture, then its parts (what
+  each does, the decisions taken, the tasks that build it) and connections.
+- **Tasks** — what waits on what, drawn, with the build order and branches,
+  then every task: its status, detail, files and what it waits on.
+
+Every item shows its id (`t3`, `d1/cache`), so you can name it in chat: "split
+`t3`", "make `d1/cache` write-through". The agent changes the plan and
+publishes the page again at the same link. When the design is right, tell it
+to confirm the design and it makes the task list; when the task list is
+right, tell it to build. Proposals need Coplan's page to accept them, so a
+headless agent asks in chat and makes the change instead.
+
+Where Coplan's tools run, Coplan writes both files, `.coplan/plans/<session>.html`
+and `.md`, and rewrites them whenever the plan changes, through the build. The
+Markdown has the same content, with each diagram and the task list as a
+[Mermaid](https://mermaid.js.org) graph, for an agent that cannot publish an
+Artifact: open it in your agent's app. Where Coplan's tools cannot run, the
+agent fills the same page (`dist/artifact/plan.html` in the plugin) itself
+and keeps the plan in it. The files are yours: commit them, or add
+`.coplan/plans/` to `.gitignore`. Combine the flags as you like:
+`/coplan --headless --tasklist fix the flaky login test`.
 
 ## Confirming the design
 

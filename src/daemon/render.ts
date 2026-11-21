@@ -17,6 +17,7 @@ import {
   hasTaskList,
   outline,
   FLOW_LABEL,
+  nextInChat,
   planFlow,
   planPhase,
   REOPENED_DESIGN,
@@ -986,31 +987,24 @@ export function headlessText(plan: Plan, opts: { agent: AgentKind; project?: Pro
   b.gap().add('headless', TEMPLATE, [
     `> **Coplan plan** · ${flow} · updated ${new Date(plan.updatedAt).toISOString().slice(0, 16).replace('T', ' ')} UTC`,
     '>',
-    `> ${headlessNext(plan, agentInfo(opts.agent).name)}`,
+    `> ${nextInChat(plan, agentInfo(opts.agent).name)}`,
   ]);
   return `${blocksText(b.push(...rest).blocks)}\n`;
 }
 
-/** What the user does next, in a headless plan: what to say in chat. */
-function headlessNext(plan: Plan, agent: string): string {
-  switch (planPhase(plan)) {
-    case 'planning':
-      return plan.mode === 'tasklist'
-        ? `Review the task list below. Tell ${agent} in chat what to change; when it is right, tell it to build it.`
-        : `Review the overview and the architecture below. Tell ${agent} in chat what to change; when the design is right, ` +
-            'tell it to confirm the design, and it makes the task list from it.';
-    case 'tasking':
-      return `The design is confirmed. Review the task list made from it below; tell ${agent} in chat what to change, or to build it.`;
-    case 'submitted':
-    case 'building':
-      return `Being built: the task statuses below follow ${agent}'s progress.`;
-    case 'finalizing':
-      return `Every task is done: ${agent} is running the final checks and writing the report.`;
-    case 'built':
-      return 'Built: the report is below.';
-    default:
-      return 'Exported, to be built somewhere else.';
-  }
+/**
+ * A headless plan as a page to publish as an Artifact (#headless): the page
+ * built from src/artifact, with the plan in its `#plan` block. Only what the
+ * page draws goes in — not the change log, comments or proposals — and `<`
+ * is escaped so nothing in the plan can close the block.
+ */
+export function headlessPage(template: string, plan: Plan, agent: AgentKind): string {
+  const { changes: _c, claudeBaseline: _b, threads: _t, proposals: _p, revisions: _r, ...shown } = plan;
+  const json = JSON.stringify({ ...shown, agent: agentInfo(agent).name }).replace(/</g, '\\u003c');
+  const title = plan.title.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  return template
+    .replace(/<title>[^<]*<\/title>/, () => `<title>${title}</title>`)
+    .replace('<script type="application/json" id="plan">null</script>', () => `<script type="application/json" id="plan">${json}</script>`);
 }
 
 /** One task's brief in an export: the task's own words and its parents',

@@ -43,6 +43,7 @@
     "dist/daemon",
     "dist/mcp",
     "dist/ui",
+    "dist/artifact",
     "dist/version.json"
   ],
   "engines": {

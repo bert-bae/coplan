@@ -21,6 +21,7 @@ import {
   configRows,
   designPrompt,
   exportBlocks,
+  headlessPage,
   headlessText,
   planBlocks,
   promptHash,
@@ -65,6 +66,8 @@ declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
 
 const UI_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'ui');
+/** The headless plan page, built beside the daemon (scripts/build.mjs). */
+const PLAN_PAGE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'artifact', 'plan.html');
 /** The coplan CLI beside this build, for `coplan check` in what Claude is
  *  told. Absent from a bundle run outside the plugin. */
 const COPLAN_BIN = (() => {
@@ -524,11 +527,14 @@ function buildRouter(deps: Deps): Router {
   const projectFor = (session: SessionState): ProjectConfig => projectAt(session.repoRoot ?? session.cwd);
 
   /**
-   * A headless session's plan, kept as Markdown in its working directory —
-   * where the agent's app can open it — and written again whenever the
-   * plan changes, by either side, so the file is never behind.
+   * A headless session's plan, kept in its working directory — where the
+   * agent's app can open it — and written again whenever the plan changes,
+   * by either side, so the file is never behind: as Markdown, and as a page
+   * the agent publishes as an Artifact where it can.
    */
-  const headlessFile = (session: SessionState) => path.join(session.cwd, '.coplan', 'plans', `${sanitizeId(session.sessionId)}.md`);
+  const headlessFile = (session: SessionState, ext: 'md' | 'html' = 'md') =>
+    path.join(session.cwd, '.coplan', 'plans', `${sanitizeId(session.sessionId)}.${ext}`);
+  let planPage: string | undefined;
   // What the file was last written for: the change log's position and the
   // phase (a sign-off or its delivery moves only the phase). Layout moves
   // neither, so dragging boxes writes nothing.
@@ -542,6 +548,8 @@ function buildRouter(deps: Deps): Router {
     try {
       mkdirSync(path.dirname(file), { recursive: true });
       writeFileSync(file, headlessText(plan, { agent: session.agent, project: projectFor(session) }));
+      planPage ??= readFileSync(PLAN_PAGE, 'utf8');
+      writeFileSync(headlessFile(session, 'html'), headlessPage(planPage, plan, session.agent));
       headlessWritten.set(session.sessionId, at);
     } catch (err) {
       log(`could not write the headless plan ${file}: ${(err as Error).message}`);
@@ -553,7 +561,9 @@ function buildRouter(deps: Deps): Router {
   /** Where the user reviews the plan — on its page, or in a headless plan's
    *  file — as the end of "The user reviews it …". */
   const reviewedAt = (session: SessionState) =>
-    store.get(session.sessionId)?.headless ? `in ${headlessFile(session)}` : `at ${uiUrl(session.sessionId)}`;
+    store.get(session.sessionId)?.headless
+      ? `in ${headlessFile(session)}, and as a page in ${headlessFile(session, 'html')}`
+      : `at ${uiUrl(session.sessionId)}`;
 
   /** How a brief is rendered for a session: the same for the agent's tool
    *  and the page, so both read the same text. */
@@ -1700,8 +1710,10 @@ function buildRouter(deps: Deps): Router {
             true,
             `[cc-harness] Published "${plan.title}" (revision ${plan.revision}). The user reviews it ${reviewedAt(session)}\n` +
               (headless
-                ? 'Headless: there is no page, so give them that file\'s path in chat — it is the plan, with its diagrams and ' +
-                  'task list as Mermaid graphs, kept up to date as the plan changes. They answer and sign off in chat. '
+                ? 'Headless: they cannot reach Coplan\'s page. Both files are the plan, with its diagrams and task list drawn, ' +
+                  'rewritten whenever it changes. If you can publish an Artifact, publish the .html file and give them ' +
+                  'its link; publish the same file again after every change, so the link stays current. Otherwise give ' +
+                  'them the .md file\'s path. They answer and sign off in chat. '
                 : '') +
               'Tell them in chat that the plan is ready. Nothing in Coplan waits for them: when they say they ' +
               `have reviewed it, call harness_plan_read. ${askRule(agentInfo(session.agent), 'plan')}\n\n` +

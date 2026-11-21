@@ -260,8 +260,8 @@ export const TOOLS: ToolDef[] = [
           type: 'boolean',
           description:
             'true when the user asked for --headless (no browser can reach the page: a cloud agent, a VM). Coplan keeps ' +
-            'the plan as Markdown with Mermaid graphs in the working directory instead; the user reviews that file and ' +
-            'signs off in chat. Kept for the session once given.',
+            'the plan in the working directory instead, as a page to publish as an Artifact and as Markdown; the user ' +
+            'reviews it there and signs off in chat. Kept for the session once given.',
         },
         summary: {
           type: 'string',

@@ -110,12 +110,37 @@ async function scanCandidates(dir) {
   return [...found];
 }
 
+/**
+ * The headless plan page (#headless): one HTML file an agent publishes as an
+ * Artifact, its script inlined. Minified: an agent reads the whole page
+ * before it publishes it, and every byte is read.
+ */
+async function buildArtifact() {
+  const result = await esbuild.build({
+    ...common,
+    entryPoints: [path.join(root, 'src/artifact/main.ts')],
+    platform: 'browser',
+    target: 'es2022',
+    format: 'iife',
+    sourcemap: false,
+    minify: true,
+    write: false,
+    logLevel: 'warning',
+  });
+  const page = await readFile(path.join(root, 'src/artifact/plan.html'), 'utf8');
+  // A function, so `$` in the script is not read as a replacement pattern.
+  const html = page.replace('/*APP*/', () => result.outputFiles[0].text.trim());
+  await mkdir(path.join(outRoot, 'artifact'), { recursive: true });
+  await writeFile(path.join(outRoot, 'artifact/plan.html'), html);
+}
+
 async function copyStatic() {
   await mkdir(path.join(outRoot, 'ui'), { recursive: true });
   await cp(path.join(root, 'src/ui/index.html'), path.join(outRoot, 'ui/index.html'));
   // React Flow's own stylesheet, loaded before ours so the app's theme wins.
   await cp(path.join(root, 'node_modules/@xyflow/react/dist/style.css'), path.join(outRoot, 'ui/flow.css'));
   await writeFile(path.join(outRoot, 'ui/style.css'), await buildCss());
+  await buildArtifact();
   await writeFile(path.join(outRoot, 'version.json'), JSON.stringify({ version: pkg.version }, null, 2));
 }
 

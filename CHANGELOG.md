@@ -12,6 +12,12 @@
   page: the plan is kept as Markdown in the working directory (`.coplan/plans/<session>.md`), with each diagram and
   the task list drawn as Mermaid graphs, rewritten as the plan changes. Review it in your agent's app and sign off
   in chat.
+- **The headless plan as an Artifact.** Beside the Markdown file, Coplan keeps the plan as a page
+  (`.coplan/plans/<session>.html`) that a cloud agent publishes as an Artifact and publishes again after every
+  change: the step the plan is on and what to say in chat next, the overview, each diagram drawn as a picture, and
+  the task list with its build order and branches, each item with the id you name in chat. Read-only; you revise it
+  and sign off in chat. When Coplan's tools cannot run where the agent is, the agent fills the same page
+  (`dist/artifact/plan.html`) itself.
 - **The Overview comes first.** It is the first tab, and a plan opens on it: how the plan gets built and the step
   it is on, with the sign-off that moves it on; the agent's understanding of the problem and its approach; the
   architecture broken into its parts and the tasks that build each; and the task ideas or task list.

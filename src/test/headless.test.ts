@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { confirmDesign, publishPlan, publishTasks } from '../shared/plan.ts';
+import { readFileSync } from 'node:fs';
+import { confirmDesign, planPhase, publishPlan, publishTasks } from '../shared/plan.ts';
 import { diagramMermaid, mermaidText, tasksMermaid } from '../shared/mermaid.ts';
-import { headlessText } from '../daemon/render.ts';
-import type { Diagram, PlanInput } from '../shared/types.ts';
+import { headlessPage, headlessText } from '../daemon/render.ts';
+import { planOf, planPage, type WrittenPlan } from '../artifact/render.ts';
+import type { Diagram, Plan, PlanInput } from '../shared/types.ts';
 
 /**
  * A headless plan (`/coplan --headless`): the plan as Markdown, its diagrams
@@ -88,4 +90,54 @@ test('the headless file leads with where the plan is and what to say in chat, th
   // Once the design is confirmed and the task list made, it says so.
   const listed = publishTasks(confirmDesign(plan, { prompt: 'p' }), { tasks: [{ id: 'client', title: 'Cache client', detail: 'd' }] }).plan;
   assert.match(headlessText(listed, { agent: 'codex' }), /Architecture → \*\*Task list\*\* → Build[^\n]*\n>\n> The design is confirmed\. Review the task list made from it below; tell Codex/);
+});
+
+test('a plan the agent writes into the page is laid out as Coplan stores one', () => {
+  const written: WrittenPlan = {
+    ...INPUT,
+    tasks: [
+      { id: 'client', title: 'Cache client', builds: ['d1/cache'], subtasks: [{ id: 'conn', title: 'Connect', status: 'done' }, { title: 'Evict' }] },
+      { id: 'wire', title: 'Wire into API', dependsOn: ['client'] },
+    ],
+  };
+  const plan = planOf(written);
+  assert.deepEqual(
+    plan.tasks.map((t) => [t.id, t.parentId, t.status]),
+    [['client', null, 'todo'], ['conn', 'client', 'done'], ['client.2', 'client', 'todo'], ['wire', null, 'todo']],
+  );
+  assert.deepEqual(plan.diagrams[0]!.nodes.find((n) => n.id === 'cache')!.taskIds, ['client'], 'builds links the task to its box once');
+  assert.equal(planPhase(plan), 'planning');
+  // The user's word in chat, recorded by the agent, moves it on.
+  const confirmed = planOf({ ...written, design: { userSaid: 'looks right', at: '2026-11-21T10:00:00Z' } });
+  assert.equal(planPhase(confirmed), 'tasking');
+  assert.match(planPage(confirmed, 'Claude'), /Design confirmed in chat on 2026-11-21: “looks right”/);
+  assert.equal(planPhase(planOf({ ...written, submission: { userSaid: 'build it' } })), 'building');
+});
+
+test('the page shows the overview, each diagram as a graph, and the task list, with ids to name in chat', () => {
+  const html = planPage(planOf({ ...INPUT, title: 'A <b>bold</b> plan', sections: [{ title: 'Risks', body: '- **TTL** lag' }] }), 'Claude');
+  assert.match(html, /<h1>A &lt;b&gt;bold&lt;\/b&gt; plan<\/h1>/, 'text is escaped');
+  assert.match(html, /<li class="now">Architecture<\/li><li class="">Task list<\/li><li class="">Build<\/li>/);
+  assert.match(html, /Tell Claude in chat what to change; when the design is right, tell it to confirm the design/);
+  assert.match(html, /<h3>Risks<\/h3><div class="md"><ul>\s*<li><strong>TTL<\/strong> lag/);
+  assert.match(html, /<pre class="mermaid">flowchart LR\n {2}n0\(&quot;API #quot;v2#quot;&lt;br\/&gt;/, 'the diagram, its fence left off');
+  assert.match(html, /<code class="ref">d1\/cache<\/code>/);
+  assert.match(html, /<h2>Task ideas<\/h2>/, 'coarse until the design is confirmed');
+  assert.match(html, /Waits on <code class="ref">client<\/code>/);
+  assert.match(html, /<h4>Build order<\/h4>/);
+});
+
+test('the daemon writes its plan into the built page, where nothing in it can close the block', () => {
+  const template = readFileSync(new URL('../artifact/plan.html', import.meta.url), 'utf8');
+  assert.equal(template.split('<script type="application/json" id="plan">null</script>').length, 2, 'one block to fill');
+  assert.doesNotMatch(template, /\/\*APP\*\//, 'the script is inlined');
+  const plan = publishPlan(null, { ...INPUT, title: 'Stop </script><script>alert(1)</script>' }, 1000).plan;
+  const page = headlessPage(template, plan, 'claude');
+  assert.match(page, /<title>Stop &lt;\/script>&lt;script>alert\(1\)&lt;\/script><\/title>/);
+  const block = page.match(/<script type="application\/json" id="plan">(.*?)<\/script>/s)![1]!;
+  const data = JSON.parse(block) as Plan & { agent: string };
+  assert.equal(data.title, plan.title, 'the title survives, escaped');
+  assert.equal(data.agent, 'Claude');
+  assert.equal(data.changes, undefined, 'the change log stays out');
+  assert.equal(planOf(data), data, 'a stored plan is drawn as it is');
 });
