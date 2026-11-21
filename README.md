@@ -121,9 +121,11 @@ seeds into a throwaway daemon, the way real hooks and tool calls would.
   builds, and the task ideas — with the step the plan is on and what moves it
   on.
 - **Headless, when no browser can reach it.** `/coplan --headless` on a
-  virtual machine or a cloud agent keeps the plan as a Markdown file in your
-  working directory, its diagrams and task list drawn as Mermaid graphs, for
-  you to read in your agent's app and sign off in chat.
+  virtual machine or a cloud agent gives you the plan as a page the agent
+  publishes as an Artifact — the overview, each diagram drawn, the task
+  list — and as a Markdown file in your working directory. You ask for
+  changes and sign off in chat; it works even when Coplan's own tools cannot
+  run there.
 - **Tasks that know what blocks them.** Each task says what it waits on and
   which branch it lands on. Coplan works out what can start now, what can run
   side by side, and how branches stack into pull requests.
@@ -576,7 +578,7 @@ plugin's folder:
 | Your clone | `node_modules/` and `dist/` (the build), and `.plugin/` (what runs, staged for your agents) | `./setup.sh` |
 | Your agents' plugins | Claude Code reads `.plugin/` in place; Codex keeps a copy in its plugin cache, Cursor in `~/.cursor/plugins/local/coplan` | `./setup.sh`, through each agent's own plugin commands |
 | Coplan's settings | `config.json` and `coplan.json` in Coplan's home, and a repository's `.coplan/config.json`, only if you choose to adjust settings | `./setup.sh` |
-| Your repository | Nothing, unless you plan headless. Coplan reads `.coplan/config.json`, `.claude/harness.json`, and the instruction files and pull request template the config names — only files inside the repository, a link that leads outside it is refused. `coplan init` and `./setup.sh` write `.coplan/config.json` when you ask them to. A `/coplan --headless` session's plan is kept at `.coplan/plans/<session>.md` in its working directory | The daemon (headless); you |
+| Your repository | Nothing, unless you plan headless. Coplan reads `.coplan/config.json`, `.claude/harness.json`, and the instruction files and pull request template the config names — only files inside the repository, a link that leads outside it is refused. `coplan init` and `./setup.sh` write `.coplan/config.json` when you ask them to. A `/coplan --headless` session's plan is kept at `.coplan/plans/<session>.md` and `.html` in its working directory | The daemon (headless); you |
 
 The agent changes your repository as it builds, of course — with its own
 permissions, as it would without Coplan.

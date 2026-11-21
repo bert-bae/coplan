@@ -1,6 +1,6 @@
 ---
 name: coplan
-description: Plan a task visually in Coplan — architecture diagrams the user confirms, then a linked task list, or straight to the task list — built when the user says so. Takes --architect, --tasklist and --headless (no browser: a Markdown plan with Mermaid graphs). Use when the user types /coplan or $coplan, asks to "plan this in Coplan" or to set Coplan up, wants to see and shape the plan before work starts, tells you to go ahead with a Coplan plan, or when a "[cc-harness] The design is confirmed" or "[cc-harness] Revise the plan" prompt arrives.
+description: Plan a task visually in Coplan — architecture diagrams the user confirms, then a linked task list, or straight to the task list — built when the user says so. Takes --architect, --tasklist and --headless (no browser: the plan as a page published as an Artifact, or a Markdown file). Use when the user types /coplan or $coplan, asks to "plan this in Coplan" or to set Coplan up, wants to see and shape the plan before work starts, tells you to go ahead with a Coplan plan, or when a "[cc-harness] The design is confirmed" or "[cc-harness] Revise the plan" prompt arrives.
 ---
 
 # Planning in Coplan
@@ -45,17 +45,50 @@ other, publish again with that mode.
 
 ## Headless: `--headless`
 
-When the user passes `--headless`, no browser can reach the page — you run
-on a virtual machine or as a cloud agent. Pass `headless: true` on your first
-`harness_plan_publish`. Coplan then never opens the page; it keeps the plan
-as Markdown in the working directory — the publish reply names the file —
-with each diagram and the task list drawn as Mermaid graphs, and rewrites
-it whenever the plan changes, through the build. Give the user that path
-in chat, so they open it in their agent's app. Everything else is said in
-chat: they tell you what to change, and you make it with `harness_plan_edit`
-(there is no page to accept a proposal on, so `harness_plan_propose` is
-refused); they sign off in chat, and you record it with
-`harness_plan_advance`.
+When the user passes `--headless`, they cannot reach Coplan's page — you run
+as a cloud agent or on a virtual machine. The plan reaches them as a **page
+you publish as an Artifact**, if you have an Artifact tool (Claude Code on
+the web does), or else as a Markdown file. The page is read-only: an
+Overview, each diagram drawn as a picture, and the task list, with the ids
+the user names in chat. Everything is said in chat: they tell you what to
+change, and they sign off by telling you to go ahead.
+
+**With Coplan's tools.** Pass `headless: true` on your first
+`harness_plan_publish`. Coplan never opens the page; it keeps the plan in the
+working directory as `.coplan/plans/<session>.md` and `.html` (the publish
+reply names them) and rewrites both whenever the plan changes, through the
+build. Publish the `.html` with your Artifact tool and give the user its link;
+publish the same file again after every change — an edit, a sign-off, the
+task list, a task done in the build — so the link stays current. With no
+Artifact tool, give them the `.md` path. Make their changes with
+`harness_plan_edit` (`harness_plan_propose` is refused: there is no page to
+accept it on) and record their sign-off with `harness_plan_advance`.
+
+**Without Coplan's tools** — its MCP server did not connect, or its tools
+return a daemon error — make the page yourself from the template, and keep
+the plan in it:
+
+1. Copy `dist/artifact/plan.html` from the plugin's folder (`../..` from this
+   file) to `.coplan/plans/<short-name>.html`, and read it once.
+2. Replace `null` in `<script type="application/json" id="plan">null</script>`
+   with the plan as JSON: what `harness_plan_publish` takes (`title`, `mode`,
+   `summary`, `sections`, `diagrams`, `tasks`, an `id` on every task and box),
+   plus `"agent": "Claude"`. Write `<` as `\u003c` inside it. Put the plan's
+   title in `<title>`. Change nothing else in the file.
+3. Publish it with your Artifact tool and give the user the link. To revise,
+   edit the JSON and publish the same file again.
+4. When they go ahead, add their sign-off, quoting them —
+   `"design": {"userSaid": "…", "at": "<ISO time>"}` for the design (then
+   replace `tasks` with the task list made from it, as *step 3* says), or
+   `"submission": {…}` to build — and publish again before you act on it.
+5. While you build, keep each task's `status` (`todo`, `in_progress`,
+   `blocked`, `done`, `dropped`) and `note` current and publish as tasks
+   finish; end with `"report": {"text": "…"}`. Build in the order the page
+   shows, each task on its branch, and check each as the repository's
+   checks allow.
+
+If the user comments on the Artifact and sends the comment to you, it is
+their word like a chat message: act on it, answer it, publish again.
 
 - **In Coplan**, the sign-off reaches you as a `[cc-harness]` prompt with
   their next message in chat — or, in Cursor, they paste it. If they tell
@@ -151,7 +184,7 @@ Run `harness_plan_check` and fix what it finds — a box with no
 description, a planned task that builds no box — or say in chat why a gap
 stays. Where the code and the request leave a choice open, make it and write
 it on the box it is about (see *When to ask*). Tell the user the design is
-ready, with the UI link the publish returned (the file, when headless), and
+ready, with the UI link the publish returned (the Artifact link, when headless), and
 that when it is right they confirm it — in Coplan, or by telling you here —
 and you make the task list from it.
 
@@ -329,4 +362,5 @@ In Claude Code and Cursor these are also `/coplan-setup`, `/coplan-open`,
   chat, and quote it.
 - Keep ids stable; quote them exactly (`t4`, `d1`, `c3`, node ids).
 - If the Coplan tools return a daemon error, tell the user once and carry on
-  in chat. The UI is an aid, not a dependency.
+  in chat — headless, with the page you make yourself. The UI is an aid, not
+  a dependency.

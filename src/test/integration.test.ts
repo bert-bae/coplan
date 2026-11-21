@@ -2304,7 +2304,7 @@ test("a session first seen through a tool call with no folder (Codex, its hooks 
   }
 });
 
-test('a headless session keeps its plan as Markdown in its working directory, as the plan changes', async () => {
+test('a headless session keeps its plan as Markdown and as a page in its working directory, as the plan changes', async () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-headless-'));
   try {
     const id = 'headless-session-1';
@@ -2321,6 +2321,10 @@ test('a headless session keeps its plan as Markdown in its working directory, as
     await at('read', {});
     await at('edit', { ops: [{ op: 'upsert_task', id: 'a', title: 'Find the race' }] });
     assert.match(readFileSync(file, 'utf8'), /```mermaid\nflowchart LR\n {2}t0\["a · Find the race"\]/);
+    // And as a page to publish as an Artifact, holding the same plan.
+    const page = readFileSync(file.replace(/\.md$/, '.html'), 'utf8');
+    assert.match(page, /<title>Fix the race<\/title>/);
+    assert.match(page, /"title":"Find the race"/);
     // No page to accept a proposal on.
     const proposed = await at('propose', { title: 'x', reason: 'y', ops: [{ op: 'upsert_task', id: 'a', title: 'z' }] });
     assert.match(String(proposed['text']), /headless: the user has no page to accept a proposal on/);

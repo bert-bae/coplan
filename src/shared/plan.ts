@@ -2705,6 +2705,29 @@ export function planFlow(plan: Pick<Plan, 'submission' | 'tasks' | 'design' | 'd
   return { steps, at: phase === 'planning' ? steps[0]! : phase === 'tasking' ? 'tasklist' : 'build' };
 }
 
+/** What the user does next in a headless plan, which has no page to click:
+ *  what to say in chat. */
+export function nextInChat(plan: Plan, agent: string): string {
+  switch (planPhase(plan)) {
+    case 'planning':
+      return plan.mode === 'tasklist'
+        ? `Review the task list below. Tell ${agent} in chat what to change; when it is right, tell it to build it.`
+        : `Review the overview and the architecture below. Tell ${agent} in chat what to change; when the design is right, ` +
+            'tell it to confirm the design, and it makes the task list from it.';
+    case 'tasking':
+      return `The design is confirmed. Review the task list made from it below; tell ${agent} in chat what to change, or to build it.`;
+    case 'submitted':
+    case 'building':
+      return `Being built: the task statuses below follow ${agent}'s progress.`;
+    case 'finalizing':
+      return `Every task is done: ${agent} is running the final checks and writing the report.`;
+    case 'built':
+      return 'Built: the report is below.';
+    default:
+      return 'Exported, to be built somewhere else.';
+  }
+}
+
 /** Whether the design — diagrams, sections, summary — is locked: confirmed,
  *  or submitted. */
 export function isDesignLocked(plan: Pick<Plan, 'submission' | 'design'> | null): boolean {
