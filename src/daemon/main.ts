@@ -1716,8 +1716,11 @@ function buildRouter(deps: Deps): Router {
                   'them the .md file\'s path. They answer and sign off in chat. '
                 : '') +
               'Tell them in chat that the plan is ready. Nothing in Coplan waits for them: when they say they ' +
-              `have reviewed it, call harness_plan_read. ${askRule(agentInfo(session.agent), 'plan')}\n\n` +
-              renderPlan(plan, { url, planCheck: projectFor(session).planCheck }),
+              `have reviewed it, call harness_plan_read. ${askRule(agentInfo(session.agent), 'plan')}` +
+              // Not the plan itself: the agent just wrote it. Only what it leaves open.
+              ((gaps) => (gaps.length ? `\n\n${gaps.join('\n')}\n\nFix these, or say why in chat, before they review it.` : ''))(
+                renderGaps(plan, 20, projectFor(session).planCheck),
+              ),
           );
           return;
         }

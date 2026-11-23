@@ -192,7 +192,10 @@ and you make the task list from it.
 
 When the user says they have reviewed or changed the plan — or a prompt
 arrives with a `[cc-harness]` note that it changed — call `harness_plan_read`.
-It leads with the net effect of their edits, then the plan.
+It leads with the net effect of their edits, then the plan. Once the whole
+plan is in your context, read with `{changes_only: true}`: only what changed
+and what waits on you, a fraction of the size. Read it whole again only if
+the plan has left your context.
 
 - **Their edits** — their structure wins. Work from their diagram and tasks.
 - **Comments** — act on each, then reply in its thread with

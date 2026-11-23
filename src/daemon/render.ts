@@ -544,7 +544,7 @@ export function buildPrompt(plan: Plan, opts: PromptOptions & { target: BuildTar
     .push(...instructionBlocks(project, 'build', undefined, PROMPT_INSTRUCTIONS))
     .gap()
     .push(...checksBlocks(project, opts.bin)).blocks;
-  const doc = documentParts(plan, { attribution: true, reader: 'claude', base: project.branches.base });
+  const doc = withoutDesign(documentParts(plan, { attribution: true, reader: 'claude', base: project.branches.base }), BUILD_DESIGN_POINTER);
   return fit(plan, head, fromUser(opts.note), changesSinceRead(plan), doc, project.branches.base);
 }
 
@@ -568,7 +568,7 @@ export function designPrompt(plan: Plan, opts: PromptOptions = {}): BuildPrompt 
   b.gap().add(
     'lead',
     TEMPLATE,
-    'The user has reviewed the design in Coplan and confirmed it: the architecture, sections and summary below are ' +
+    'The user has reviewed the design in Coplan and confirmed it: the architecture, sections and summary are ' +
       'locked. What you make now is the task list the build will follow. The user reviews it, then starts the build — ' +
       'by telling you to in chat, or by submitting the plan in Coplan. Follow the coplan skill\'s guidance on the task list:',
   );
@@ -606,8 +606,27 @@ export function designPrompt(plan: Plan, opts: PromptOptions = {}): BuildPrompt 
   b.push(...askRuleBlocks(agentInfo(opts.agent), 'tasks'));
   b.push(...instructionBlocks(project, 'design', undefined, PROMPT_INSTRUCTIONS));
   b.gap().push(...checksBlocks(project, opts.bin, true));
-  const doc = documentParts(plan, { base: project.branches.base });
+  const doc = withoutDesign(documentParts(plan, { base: project.branches.base }), DESIGN_POINTER);
   return fit(plan, b.blocks, fromUser(opts.note), changesSinceRead(plan), doc, project.branches.base);
+}
+
+const DESIGN_POINTER =
+  '_The design — its sections and architecture — is the one you published and read back; anything the user changed since ' +
+  'is listed above. It is not quoted again: call harness_plan_read if it is no longer in your context._';
+const BUILD_DESIGN_POINTER =
+  "_The design — its sections and architecture — is not quoted here: each task's harness_task_brief carries the parts " +
+  'it builds, with their decisions and connections. Call harness_plan_read only if you need the whole plan._';
+
+/**
+ * The prompts leave the design out: the agent published it and read it
+ * back, and what the user changed since comes with the prompt. Kept among
+ * the blocks, marked dropped, so the page still shows what it holds.
+ */
+function withoutDesign(doc: DocumentParts, pointer: string): DocumentParts {
+  if (!doc.sections.length && !doc.architecture.length) return doc;
+  const note = new BlockList().gap().add('design:pointer', TEMPLATE, pointer).blocks;
+  const known = (blocks: Block[]): Block[] => blocks.map((x) => ({ ...x, dropped: true, known: true }));
+  return { ...doc, sections: [...known(doc.sections), ...note], architecture: known(doc.architecture) };
 }
 
 /** Where each build setting a prompt names comes from: the Submit dialog,
@@ -636,8 +655,7 @@ function fit(plan: Plan, head: Block[], said: Block[], changes: Block[], doc: Do
   if (text.length <= PROMPT_BUDGET) return { prompt: text, trimmed: false, blocks: whole };
 
   const pointer =
-    `_The architecture (${plan.diagrams.length} diagram(s)), the sections and each task's detail are too long to quote ` +
-    'here: call harness_plan_read for them before you start._';
+    "_Each task's detail is too long to quote here: harness_task_brief gives one task's, harness_plan_read the whole plan._";
   // The instructions and what the user wrote are kept whole. What is left
   // goes to what they changed first — it is what Claude must act on — then
   // the summary, then the task list, each cut to the room that is left.
@@ -660,7 +678,8 @@ function fit(plan: Plan, head: Block[], said: Block[], changes: Block[], doc: Do
     fixed.gap().add('summary', field('plan'), ['## Summary', ...kept, ...(cut ? ['…'] : [])], cut ? { cut: true } : {});
   } else fixed.push(...dropAll(doc.summary));
   // The design is what harness_plan_read is for.
-  fixed.push(...dropAll(doc.sections), ...dropAll(doc.architecture));
+  // Unless the prompt already left it out, and points to it (withoutDesign).
+  fixed.push(...doc.sections.map((x) => (x.known || x.id === 'design:pointer' ? x : { ...x, dropped: true as const })), ...dropAll(doc.architecture));
 
   const order = buildOrderBlocks(plan, base);
   const orderText = joinBlocks(order);

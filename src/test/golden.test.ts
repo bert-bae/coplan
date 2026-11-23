@@ -47,7 +47,7 @@ const CASES: Record<string, () => Case> = {
   'design-under': () => asCase(designPrompt(richPlan(), { agent: 'claude', project: fullProject(), bin: FIXTURE_BIN, note: NOTE })),
   'design-under-no-config': () => asCase(designPrompt(plainPlan(false), {})),
   'design-under-codex': () => asCase(designPrompt(richPlan(), { agent: 'codex', project: fullProject() })),
-  'design-over-with-order': () => asCase(designPrompt(longPlan(), { agent: 'claude', project: fullProject() })),
+  'design-long-section': () => asCase(designPrompt(longPlan(), { agent: 'claude', project: fullProject() })),
   'design-over': () => asCase(designPrompt(bigPlan(), { agent: 'claude', project: fullProject(true), bin: FIXTURE_BIN, note: NOTE })),
 
   // The build prompt for this session (cut to fit): Managed — the config
@@ -57,7 +57,7 @@ const CASES: Record<string, () => Case> = {
   'build-session-under-settings': () =>
     asCase(buildPrompt(richConfirmed(), { target: 'session', agent: 'cursor', project: fullProject(), settings: { review: 'self', parallel: 1, maxRounds: 1 } })),
   'build-session-over': () => asCase(buildPrompt(bigPlan(), { target: 'session', agent: 'claude', project: fullProject(true), bin: FIXTURE_BIN, note: NOTE })),
-  'build-session-over-with-order': () => asCase(buildPrompt(longPlan(), { target: 'session', agent: 'claude', project: fullProject(), bin: FIXTURE_BIN })),
+  'build-session-long-section': () => asCase(buildPrompt(longPlan(), { target: 'session', agent: 'claude', project: fullProject(), bin: FIXTURE_BIN })),
   'build-tracked-under': () => asCase(buildPrompt(richConfirmed(), { target: 'session', mode: 'tracked', agent: 'claude', project: fullProject(), bin: FIXTURE_BIN, note: NOTE })),
   'build-tracked-under-no-config': () => asCase(buildPrompt(plainPlan(), { target: 'session' })),
   'build-tracked-over': () => asCase(buildPrompt(bigPlan(), { target: 'session', mode: 'tracked', agent: 'codex', project: fullProject(true), note: NOTE })),
@@ -93,7 +93,8 @@ function brief(plan: Plan, id: string, opts: BriefOptions): string {
 }
 
 /** Which cases are meant to be over the budget, and so cut. */
-const OVER = new Set(['design-over', 'design-over-with-order', 'build-session-over', 'build-session-over-with-order', 'build-tracked-over', 'revision-over']);
+// A long section no longer pushes a prompt over: the design is not quoted in it.
+const OVER = new Set(['design-over', 'build-session-over', 'build-tracked-over', 'revision-over']);
 
 const hashesFile = path.join(DIR, 'hashes.json');
 

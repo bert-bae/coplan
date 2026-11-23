@@ -309,7 +309,7 @@ test("from any task, one click shows its brief exactly as harness_task_brief giv
   await waitFor(() => assert.ok(document.getElementById(`task-${wire.id}`)?.classList.contains('is-flash')));
 });
 
-test('the next prompt is the one the next sign-off sends; what it leaves out to fit is struck through', async () => {
+test('the next prompt is the one the next sign-off sends; the design the agent already has is struck through', async () => {
   const long = 'A long paragraph of detail that goes on and on about the work. '.repeat(20);
   let plan = makePlan();
   plan = applyOps(plan, [{ op: 'upsert_section', id: plan.sections[0]!.id, body: long.repeat(8) }], 'claude').plan;
@@ -323,8 +323,8 @@ test('the next prompt is the one the next sign-off sends; what it leaves out to 
   await waitFor(() => assert.match(within(viewer).getByTestId('viewer-text').textContent ?? '', /The design is confirmed for "Add a cache"/));
   const dropped = viewer.querySelectorAll('.pv-row.is-dropped');
   assert.ok(dropped.length > 0);
-  assert.match(viewer.querySelector('.pv-left')?.textContent ?? '', /Left out to fit — the agent reads this with harness_plan_read/);
-  assert.match(viewer.textContent ?? '', /Left out to fit: 1 section, the architecture \(1 diagram\)/);
+  assert.match(viewer.querySelector('.pv-left')?.textContent ?? '', /Not sent again — the agent already has the design/);
+  assert.doesNotMatch(viewer.textContent ?? '', /Left out to fit:/, 'nothing was left out to fit');
   assert.ok([...dropped].some((r) => r.getAttribute('data-block') === `section:${plan.sections[0]!.id}`));
   // The settings and config chips say where the words come from.
   assert.ok(within(viewer).getAllByRole('link', { name: /\.coplan\/config\.json#/ }).length);
@@ -1857,7 +1857,7 @@ test('a prompt cut to fit says what it leaves out, and that the agent reads it w
   const project = parseProjectConfig({ review: { model: 'opus' } });
   const long = 'A long paragraph of detail that goes on and on about the work. '.repeat(20);
   let plan = makePlan();
-  plan = confirmedPlan(applyOps(plan, [{ op: 'upsert_section', id: plan.sections[0]!.id, body: long.repeat(8) }], 'claude').plan);
+  plan = confirmedPlan(applyOps(plan, [{ op: 'upsert_task', id: plan.tasks[0]!.id, detail: long.repeat(8) }], 'claude').plan);
   const session = makeSession(plan);
   await boot(session, (route) => {
     if (route.endsWith('/plan/prompt')) {
@@ -1870,7 +1870,7 @@ test('a prompt cut to fit says what it leaves out, and that the agent reads it w
     fireEvent.click(screen.getByRole('button', { name: 'Review & submit plan' }));
   });
   const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
-  await waitFor(() => assert.match(dialog.textContent ?? '', /The plan is longer than fits in one message: it leaves out 1 section and the architecture \(1 diagram\), so Claude reads it with harness_plan_read\./));
+  await waitFor(() => assert.match(dialog.textContent ?? '', /The plan is longer than fits in one message: it leaves out the detail of 1 task, so Claude reads it with harness_plan_read\./));
   const list = within(dialog).getByRole('region', { name: 'Set in config' });
   assert.equal(list.querySelector('[data-key="review.model"]')?.textContent, 'Reviewer model#review.modelopus');
   assert.equal(list.querySelector('[data-key="pullRequests"]')?.textContent, 'Pull requests.coplan/config.json#pullRequestsgh pr create, once you say');

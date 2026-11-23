@@ -25,13 +25,13 @@ const PROMPTS: Record<string, () => { plan: Plan; built: BuildPrompt }> = {
   'design, under the budget': () => withPlan(richPlan(), (p) => designPrompt(p, { project: fullProject(), bin: FIXTURE_BIN, note: NOTE })),
   'design, without config': () => withPlan(plainPlan(false), (p) => designPrompt(p)),
   'design, over the budget': () => withPlan(bigPlan(), (p) => designPrompt(p, { project: fullProject(true), note: NOTE })),
-  'design, over the budget with the order': () => withPlan(longPlan(), (p) => designPrompt(p, { project: fullProject() })),
+  'design, with a long section': () => withPlan(longPlan(), (p) => designPrompt(p, { project: fullProject() })),
   'build for this session, under the budget': () => withPlan(richConfirmed(), (p) => buildPrompt(p, { target: 'session', project: fullProject(), bin: FIXTURE_BIN, note: NOTE })),
   'build for this session, settings chosen': () =>
     withPlan(richConfirmed(), (p) => buildPrompt(p, { target: 'session', project: fullProject(), settings: { review: 'subagent', parallel: 1, maxRounds: 1 } })),
   'build for this session, without config': () => withPlan(plainPlan(), (p) => buildPrompt(p, { target: 'session' })),
   'build for this session, over the budget': () => withPlan(bigPlan(), (p) => buildPrompt(p, { target: 'session', project: fullProject(true), note: NOTE })),
-  'build for this session, over the budget with the order': () => withPlan(longPlan(), (p) => buildPrompt(p, { target: 'session', project: fullProject() })),
+  'build for this session, with a long section': () => withPlan(longPlan(), (p) => buildPrompt(p, { target: 'session', project: fullProject() })),
   'build for somewhere else': () => withPlan(richConfirmed(), (p) => buildPrompt(p, { target: 'elsewhere', project: fullProject(), note: NOTE })),
   'build for somewhere else, over the budget': () => withPlan(bigPlan(), (p) => buildPrompt(p, { target: 'elsewhere', project: fullProject(true) })),
 };
@@ -223,7 +223,8 @@ test('a prompt over the budget reports which blocks were left out to fit, and no
   const past = built.blocks.filter((b) => b.dropped && /^task:[^:]+$/.test(b.id)).length;
   assert.ok(past > 10);
   // Every task with a detail: three of the plan's, and the sixty bulk ones.
-  assert.deepEqual(droppedParts(built.blocks), ['3 sections', 'the architecture (3 diagrams)', 'the detail of 63 tasks', `${past} tasks past the cut`, 'the build order']);
+  // The design is not counted: it was never sent, to fit or otherwise (the agent already has it).
+  assert.deepEqual(droppedParts(built.blocks), ['the detail of 63 tasks', `${past} tasks past the cut`, 'the build order']);
   // Cut, not dropped: kept in part, and marked.
   assert.equal(built.blocks.find((b) => b.id === 'changes')?.cut, true);
   assert.equal(built.blocks.find((b) => b.id === 'instructions:build')?.cut, true);
@@ -233,15 +234,16 @@ test('a prompt that fits leaves nothing out', () => {
   const { built } = PROMPTS['build for this session, under the budget']!();
   assert.equal(built.trimmed, false);
   assert.deepEqual(droppedParts(built.blocks), []);
-  assert.ok(!built.blocks.some((b) => b.dropped || b.cut));
+  assert.ok(!built.blocks.some((b) => (b.dropped && !b.known) || b.cut), 'only the design it already has');
 });
 
-test('the design prompt over the budget keeps the build order when it fits, and says what it left out', () => {
-  const { built } = PROMPTS['design, over the budget with the order']!();
-  assert.equal(built.trimmed, true);
+test('the design prompt leaves out the design the agent already has, so a long design no longer has to be cut', () => {
+  const { built } = PROMPTS['design, with a long section']!();
+  assert.equal(built.trimmed, false);
   assert.ok(!built.blocks.find((b) => b.id === 'build-order')?.dropped);
-  assert.deepEqual(droppedParts(built.blocks), ['3 sections', 'the architecture (2 diagrams)', 'the detail of 3 tasks', '4 open comments']);
-  for (const id of ['thread:c1', 'thread:c3:reply', 'comments']) assert.equal(built.blocks.find((b) => b.id === id)?.dropped, true, `${id} is left out`);
+  assert.deepEqual(droppedParts(built.blocks), []);
+  for (const id of ['section:context', 'diagram:d1']) assert.equal(built.blocks.find((b) => b.id === id)?.known, true, `${id} is not sent again`);
+  assert.match(built.prompt, /It is not quoted again: call harness_plan_read/);
 });
 
 test("the agent's bookkeeping is marked: revisions, who edited what, how to reply, the legend", () => {

@@ -1,6 +1,6 @@
 [cc-harness] The design is confirmed for "Add a read-through cache" — now break it into the task list.
 
-The user has reviewed the design in Coplan and confirmed it: the architecture, sections and summary below are locked. What you make now is the task list the build will follow. The user reviews it, then starts the build — by telling you to in chat, or by submitting the plan in Coplan. Follow the coplan skill's guidance on the task list:
+The user has reviewed the design in Coplan and confirmed it: the architecture, sections and summary are locked. What you make now is the task list the build will follow. The user reviews it, then starts the build — by telling you to in chat, or by submitting the plan in Coplan. Follow the coplan skill's guidance on the task list:
 
 1. Start from the tasks planned on the diagram. Break each into focused tasks: one objective, one area of the architecture, small enough to implement and review on its own. In `detail` put the objective, the acceptance criteria and what is out of scope; in `files` the files you expect to touch.
 2. Link them: `dependsOn` lists the tasks that must be done first (by id). Leave a task free of dependencies whenever it could be built alongside others — that is what lets the build run in parallel. A parent's dependencies hold for all its subtasks.
@@ -56,13 +56,15 @@ _The net effect of their edits — not each step, and not where boxes were moved
 - Changed bulk22 "Bulk task number 22 with a descriptive title": note "user note on bulk task 22".
 - …and more than fits here: harness_plan_read {changes_only: true} lists every change the user made.
 
-_The architecture (3 diagram(s)), the sections and each task's detail are too long to quote here: call harness_plan_read for them before you start._
+_Each task's detail is too long to quote here: harness_task_brief gives one task's, harness_plan_read the whole plan._
 
 ## Summary
 Put a read-through cache in front of the orders database.
 
 ### Why
 Reads are slow at peak.
+
+_The design — its sections and architecture — is the one you published and read back; anything the user changed since is listed above. It is not quoted again: call harness_plan_read if it is no longer in your context._
 
 ## Tasks (1/64 done)
 - [ ] storage Storage layer
@@ -98,8 +100,6 @@ Reads are slow at peak.
 - [ ] bulk23 Bulk task number 23 with a descriptive title · after bulk22 — user note on bulk task 23
 - [ ] bulk24 Bulk task number 24 with a descriptive title · after bulk23 — user note on bulk task 24
 - [ ] bulk25 Bulk task number 25 with a descriptive title · after bulk24 — user note on bulk task 25
-- [ ] bulk26 Bulk task number 26 with a descriptive title · after bulk25 — user note on bulk task 26
-- [ ] bulk27 Bulk task number 27 with a descriptive title · after bulk26 — user note on bulk task 27
-- …and 32 more line(s): harness_plan_read lists every task.
+- …and 34 more line(s): harness_plan_read lists every task.
 
 _Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_

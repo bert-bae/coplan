@@ -328,7 +328,9 @@ test('the design prompt asks for a linked task list, and not for the build', () 
   assert.doesNotMatch(prompt, /Do not start building/);
   assert.match(prompt, /> Land the client first\./);
   assert.match(prompt, /suggest \/coplan-init|Suggest \/coplan-init/i, 'no checks configured');
-  assert.match(prompt, /Read-through, 10m TTL\./, 'the design itself follows');
+  // The agent published the design and read it back: it is pointed to, not quoted again.
+  assert.doesNotMatch(prompt, /Read-through, 10m TTL\./);
+  assert.match(prompt, /It is not quoted again: call harness_plan_read if it is no longer in your context/);
 });
 
 test('edits made after confirming are not in the design prompt, so they stay unread', () => {
@@ -393,9 +395,10 @@ test('the prompt for this session says how to report progress, then gives the pl
   assert.match(prompt, /upsert_task with a parentId/);
   assert.match(prompt, /op: "report"/);
   assert.match(prompt, /## From the user\n> Start with the client\.\n> Leave billing alone\./);
-  // The plan itself: architecture, decisions, tasks with their ids, files and detail.
-  assert.match(prompt, /## Architecture/);
-  assert.match(prompt, /Read-through, 10m TTL\./);
+  // The tasks with their ids, files and detail; the design is in each task's brief, not here.
+  assert.doesNotMatch(prompt, /## Architecture/);
+  assert.doesNotMatch(prompt, /Read-through, 10m TTL\./);
+  assert.match(prompt, /each task's harness_task_brief carries the parts it builds/);
   assert.match(prompt, /- \[ \] client Cache client\n  files: src\/cache\.ts\n  Wrap ioredis\./);
   assert.doesNotMatch(prompt, /Since you last read/, 'nothing unread, nothing to say');
 });
@@ -404,7 +407,7 @@ test("the prompt leads with what the user changed that Claude has not read", () 
   const plan = applyOps(published(), [{ op: 'upsert_task', title: 'Load test' }], 'user').plan;
   const { prompt } = buildPrompt(plan, { target: 'session' });
   assert.match(prompt, /## Since you last read — what the user changed[\s\S]*Added t\d+ "Load test" at the top level/);
-  assert.ok(prompt.indexOf('Since you last read') < prompt.indexOf('## Architecture'));
+  assert.ok(prompt.indexOf('Since you last read') < prompt.indexOf('## Tasks'));
 });
 
 test('the prompt carries the settings the user chose and the repository\'s checks', () => {
@@ -450,7 +453,7 @@ test('a plan too long for one message is trimmed for this session, never for som
   assert.equal(here.trimmed, true);
   assert.ok(here.prompt.length <= PROMPT_BUDGET, `${here.prompt.length} > ${PROMPT_BUDGET}`);
   assert.ok(here.prompt.startsWith(BUILD_MARKER), 'still recognisably the build prompt');
-  assert.match(here.prompt, /call harness_plan_read for them before you start/);
+  assert.match(here.prompt, /Each task's detail is too long to quote here: harness_task_brief gives one task's/);
   assert.match(here.prompt, /Task number 0/);
   assert.match(here.prompt, /more line\(s\): harness_plan_read lists every task/);
 
