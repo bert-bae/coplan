@@ -39,8 +39,9 @@ async function setup(state: PrState = 'open') {
   store.mutate('s1', (s) => {
     // Each test starts unwatched: the home, and so s1's saved state, is shared.
     delete s.prWatch;
+    delete s.prInbox;
     s.repoRoot = '/repo';
-    s.plan = { ...store.publishPlan('s1', { title: 'P', tasks: [{ title: 'one' }] }).plan, branches: { 'coplan/a': { pr: { url: 'https://github.com/o/r/pull/7', number: 7, state }, updatedAt: 1 } } };
+    s.plan = { ...store.publishPlan('s1', { title: 'P', tasks: [{ title: 'one', branch: 'coplan/a' }] }).plan, branches: { 'coplan/a': { pr: { url: 'https://github.com/o/r/pull/7', number: 7, state }, updatedAt: 1 } } };
   });
   return store;
 }
@@ -75,8 +76,53 @@ test('a recorded open pull request is watched; each poll queues what is new, and
   snap = snapshot({ state: 'closed', merged: true }, failing);
   now += 60_000;
   await w.tick();
-  assert.deepEqual(store.get('s1')!.prWatch!['coplan/a']!.queue.map((q) => q.event.kind), ['ci_failed', 'merged']);
-  assert.equal(w.watched().length, 0, 'a poll that finds it merged stops the watch before the plan records it');
+  assert.equal(w.watched().length, 0, 'a poll that finds it merged stops the watch');
+  const after = store.get('s1')!;
+  assert.deepEqual(after.prWatch!['coplan/a']!.queue, [], 'the merge sent the batch at once, the failure with it');
+  assert.equal(after.plan!.branches!['coplan/a']!.pr!.state, 'merged', 'and recorded it on the plan');
+  assert.equal(after.prWatch!['coplan/a']!.fixRounds, 1);
+  assert.match(after.prInbox!.join('\n'), /Pull request #7 \(`coplan\/a`\) needs you[\s\S]*ci_failed \(tests\)[\s\S]*merged\. Every pull request of this plan is merged or closed/);
+});
+
+test('a burst is held until the pull request is quiet, then goes as one prompt', async () => {
+  const store = await setup();
+  let now = 2_000_000;
+  const { w } = await watcher(store, async () => ({ snapshot: snapshot({}, failing) }), { now: () => now });
+  await w.tick();
+  assert.equal(store.get('s1')!.prInbox, undefined, 'inside the quiet period');
+  now += 90_000;
+  w.flush();
+  assert.equal(store.get('s1')!.prInbox!.length, 1);
+  assert.deepEqual(store.get('s1')!.prWatch!['coplan/a']!.timeline!.map((t) => t.note), ['ci_failed → fix']);
+});
+
+test('the inbox: taken once, oldest first within a budget; a waiter is woken by the next prompt', async () => {
+  const store = await setup();
+  const { w } = await watcher(store, async () => ({ snapshot: snapshot() }));
+  w.push('s1', 'a'.repeat(10));
+  w.push('s1', 'b'.repeat(10));
+  assert.equal(w.take('s1', 15), 'a'.repeat(10), 'the second does not fit');
+  assert.equal(w.take('s1'), 'b'.repeat(10));
+  assert.equal(w.take('s1'), null);
+  const waiting = w.wait('s1', 5_000);
+  setTimeout(() => w.push('s1', 'work'), 10);
+  assert.equal(await waiting, 'work');
+  assert.equal(await w.wait('s1', 20), null, 'nothing within the time');
+  const gone = new AbortController();
+  const aborted = w.wait('s1', 5_000, gone.signal);
+  gone.abort();
+  assert.equal(await aborted, null);
+});
+
+test('an event the agent reports goes out at once; unwatch stops the watch', async () => {
+  const store = await setup();
+  const { w } = await watcher(store, async () => ({ snapshot: snapshot() }));
+  w.report('s1', 'coplan/a', { kind: 'review_comment', author: 'bob', association: 'MEMBER', body: 'Rename it.', path: 'src/a.ts', line: 4 });
+  assert.match(w.take('s1')!, /review_comment by bob on src\/a\.ts:4[\s\S]*Rename it\./);
+  assert.throws(() => w.report('s1', 'nope', { kind: 'comment' }), /has no pull request recorded/);
+  assert.throws(() => w.report('s1', 'coplan/a', { kind: 'deployed' }), /kind must be one of/);
+  assert.equal(w.unwatch('s1'), 1);
+  assert.equal(w.watched().length, 0);
 });
 
 test('watching stops when the plan records it merged, and never starts where it is off', async () => {
@@ -97,7 +143,9 @@ test('a restarted daemon picks up from the saved cursor: the same poll is nothin
   const again = new SessionStore();
   const { w: w2 } = await watcher(again, async () => ({ snapshot: snapshot({}, failing) }), { now: () => Date.now() + 120_000 });
   await w2.tick();
-  assert.deepEqual(again.get('s1')!.prWatch!['coplan/a']!.queue.map((q) => q.event.id), ['ci:aaa:failed'], 'not queued twice');
+  const st = again.get('s1')!.prWatch!['coplan/a']!;
+  assert.deepEqual(st.timeline!.map((t) => t.note), ['ci_failed → fix'], 'the failure the first daemon queued is sent once, not queued twice');
+  assert.equal(again.get('s1')!.prInbox!.length, 1);
 });
 
 test('a failing poll is said once and backs off; the next good one clears it', async () => {

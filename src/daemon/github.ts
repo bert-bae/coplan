@@ -53,15 +53,15 @@ export const PR_QUERY = `query($owner: String!, $repo: String!, $number: Int!) {
   viewer { login }
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
-      number state url mergeStateStatus headRefOid
+      number state url mergeStateStatus headRefOid author { login }
       commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
         __typename
         ... on CheckRun { databaseId name status conclusion detailsUrl }
         ... on StatusContext { context state targetUrl }
       } } } } } }
-      reviews(last: 50) { nodes { databaseId author { login } state body submittedAt url } }
-      reviewThreads(last: 50) { nodes { comments(last: 20) { nodes { databaseId author { login } body path line url createdAt } } } }
-      comments(last: 50) { nodes { databaseId author { login } body url createdAt } }
+      reviews(last: 50) { nodes { databaseId author { login } authorAssociation state body submittedAt url } }
+      reviewThreads(last: 50) { nodes { comments(last: 20) { nodes { databaseId author { login } authorAssociation body path line url createdAt } } } }
+      comments(last: 50) { nodes { databaseId author { login } authorAssociation body url createdAt } }
     }
   }
 }`;
@@ -70,6 +70,7 @@ type Node = Record<string, unknown>;
 const nodes = (v: unknown): Node[] => ((v as { nodes?: unknown } | null)?.nodes as Node[] | undefined)?.filter(Boolean) ?? [];
 const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
 const user = (v: unknown) => ({ login: str((v as Node | null)?.['login']) });
+const assoc = (n: Node) => (str(n['authorAssociation']) ? { author_association: str(n['authorAssociation'])! } : {});
 
 /** A commit status as a check run: SUCCESS/FAILURE/ERROR/PENDING/EXPECTED. */
 function fromStatus(n: Node, i: number): NonNullable<GhSnapshot['checkRuns']>[number] {
@@ -95,6 +96,7 @@ export function snapshotFrom(data: unknown): { snapshot: GhSnapshot; viewer?: st
       ...(str(pr['url']) ? { html_url: str(pr['url'])! } : {}),
       mergeable_state: String(pr['mergeStateStatus'] ?? 'unknown').toLowerCase(),
       head: { sha: String(pr['headRefOid'] ?? '') },
+      user: user(pr['author']),
     },
     checkRuns: contexts.map((n, i) =>
       n['__typename'] === 'StatusContext'
@@ -107,11 +109,11 @@ export function snapshotFrom(data: unknown): { snapshot: GhSnapshot; viewer?: st
             ...(str(n['detailsUrl']) ? { html_url: str(n['detailsUrl'])! } : {}),
           },
     ),
-    reviews: nodes(pr['reviews']).map((n) => ({ id: Number(n['databaseId']), user: user(n['author']), state: String(n['state'] ?? ''), body: str(n['body']) ?? null, submitted_at: str(n['submittedAt']), html_url: str(n['url']) })),
+    reviews: nodes(pr['reviews']).map((n) => ({ id: Number(n['databaseId']), user: user(n['author']), ...assoc(n), state: String(n['state'] ?? ''), body: str(n['body']) ?? null, submitted_at: str(n['submittedAt']), html_url: str(n['url']) })),
     reviewComments: nodes(pr['reviewThreads']).flatMap((t) =>
-      nodes(t['comments']).map((n) => ({ id: Number(n['databaseId']), user: user(n['author']), body: str(n['body']), path: str(n['path']), line: typeof n['line'] === 'number' ? n['line'] : null, html_url: str(n['url']), created_at: str(n['createdAt']) })),
+      nodes(t['comments']).map((n) => ({ id: Number(n['databaseId']), user: user(n['author']), ...assoc(n), body: str(n['body']), path: str(n['path']), line: typeof n['line'] === 'number' ? n['line'] : null, html_url: str(n['url']), created_at: str(n['createdAt']) })),
     ),
-    issueComments: nodes(pr['comments']).map((n) => ({ id: Number(n['databaseId']), user: user(n['author']), body: str(n['body']), html_url: str(n['url']), created_at: str(n['createdAt']) })),
+    issueComments: nodes(pr['comments']).map((n) => ({ id: Number(n['databaseId']), user: user(n['author']), ...assoc(n), body: str(n['body']), html_url: str(n['url']), created_at: str(n['createdAt']) })),
   };
   const viewer = str((d?.['viewer'] as Node | null)?.['login']);
   return { snapshot, ...(viewer ? { viewer } : {}) };

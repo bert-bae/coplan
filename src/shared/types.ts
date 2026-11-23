@@ -885,6 +885,9 @@ export interface SessionState {
   plan: Plan | null;
   /** Following the pull requests the plan recorded, by branch (prWatch.ts). */
   prWatch?: Record<string, PrWatchState>;
+  /** Prompts about pull requests waiting to reach the agent, oldest first:
+   *  taken by `coplan pr wait`, harness_pr_events or the next message. */
+  prInbox?: string[];
 }
 
 /** One watched pull request: where the last poll left off, and what it found. */
@@ -900,6 +903,12 @@ export interface PrWatchState {
   /** The last poll's failure, and how many in a row, while polls fail. */
   error?: string;
   failures?: number;
+  /** Fix rounds spent on it (`watch.maxFixRounds`). */
+  fixRounds?: number;
+  /** What each batch came to, newest last; bounded. */
+  timeline?: { at: number; note: string }[];
+  /** Watching stopped by hand (`coplan pr unwatch`). */
+  stopped?: boolean;
 }
 
 export interface TaskCounts {

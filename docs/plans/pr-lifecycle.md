@@ -184,19 +184,19 @@ merged stops it, a restart resumes from the stored cursor.
 
 ### Branch `coplan/pr-3-dispatch` (stacks on pr-2)
 
-**T5 — Dispatcher** (depends T4). Event batch → actions per `on`; trust
+**T5 — Dispatcher** ✅ (depends T4, `src/shared/prDispatch.ts`). Trust uses GitHub's `authorAssociation`. The daemon records merges/closes itself; it does **not** create fix tasks — the prompt tells the agent to add one, since a submitted plan's tasks are the agent's to add. Event batch → actions per `on`; trust
 filter; `fix` creates the fix task; `advance` reuses the restack; round limit;
 every decision written to the PR timeline.
 *Done when:* table-driven tests for each action, the trust filter, and the
 round limit.
 
-**T6 — Delivery** (depends T5). Daemon endpoint the CLI long-polls;
+**T6 — Delivery** ✅ (depends T5). Inbox on `SessionState.prInbox`; taken by `coplan pr wait`, `harness_pr_events`, or the next `UserPromptSubmit` (within the hook's 9,000-character budget, put back if the answer never reaches the agent) — whatever `wake` says, so a wait that was never started loses nothing. Daemon endpoint the CLI long-polls;
 `coplan pr wait|status|unwatch`; `queue` reuses the pending-prompt path in
 `hookIngest.ts`; the prompt text (untrusted block, what to do per action).
 *Done when:* `coplan pr wait` exits with the prompt when a batch is
 dispatched, and exits cleanly on unwatch / daemon stop.
 
-**T7 — MCP tools** (depends T5). `harness_pr_event` (agent-reported events
+**T7 — MCP tools** ✅ (depends T5). `harness_branch_update` tells the agent how it hears of changes (start `coplan pr wait`, or the cloud subscription); `fix_round` reporting dropped — the dispatcher counts rounds. `harness_pr_event` (agent-reported events
 for cloud sessions, same dispatcher), `harness_pr_events` (read/ack the
 timeline); `harness_task_next` returns PR work in `landing`;
 `harness_branch_update` gains `fix_round` reporting. Update

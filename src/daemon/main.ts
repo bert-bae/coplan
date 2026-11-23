@@ -58,7 +58,8 @@ import { changedFiles, changedSince, committedOn, headCommit, unreadWords, workt
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
 import { ConfigCache, globalConfigFile, projectHarnessFile, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, sanitizeId, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
-import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
+import { HOOK_NOOP, additionalContext, type HookOutput } from '../shared/hooks.ts';
+import { MAX_BODY } from '../shared/prEvents.ts';
 import { openInBrowser } from './browser.ts';
 import type { BuildChoice, BuildSettings, CleanupGroupId, DaemonLock, ExecutionMode, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, Task, TaskListInput, TaskStatus } from '../shared/types.ts';
 import { CLEANUP_GROUPS } from '../shared/types.ts';
@@ -116,7 +117,8 @@ async function main(): Promise<void> {
   const clients = { count: 0 };
   const server = http.createServer();
   const lifecycle = { restart: (_entry?: string): boolean => false };
-  const router = buildRouter({ store, config, token, clients, lifecycle });
+  const prWatch = startPrWatch(store);
+  const router = buildRouter({ store, config, token, clients, lifecycle, prs: prWatch.watcher });
 
   server.on('request', (req, res) => {
     void handle(req, res, router, token).catch((thrown: unknown) => {
@@ -189,7 +191,6 @@ async function main(): Promise<void> {
 
   const reaper = startReaper(store);
   const lockWatch = watchLock(() => shutdown(LOST_LOCK));
-  const prWatch = startPrWatch(store);
   startIdleWatch(store, config, clients, () => shutdown('idle'), () => prWatch.watcher.watched().length);
 
   process.on('SIGINT', () => shutdown('SIGINT'));
@@ -490,10 +491,12 @@ interface Deps {
   /** Live SSE connections, so an open browser counts as "in use". */
   clients: { count: number };
   lifecycle: { restart(entry?: string): boolean };
+  /** The pull requests builds recorded, watched (prWatch.ts). */
+  prs: PrWatcher;
 }
 
 function buildRouter(deps: Deps): Router {
-  const { store, config, token, clients, lifecycle } = deps;
+  const { store, config, token, clients, lifecycle, prs } = deps;
   const router = new Router();
 
   /** For the browser and the CLI: carries the token, which the page keeps
@@ -682,6 +685,43 @@ function buildRouter(deps: Deps): Router {
       // Managed build): the board asks the user where the daemon waits on them.
       projectReview: project.settings.review,
     });
+  });
+
+  /** `coplan pr wait`: what waits for the agent about its pull requests, or the next thing within `ms`. */
+  router.get('/api/session/:id/pr/wait', async (ctx) => {
+    const session = sessionOr404(ctx);
+    const ms = Math.min(Math.max(Number(ctx.url.searchParams.get('ms')) || PR_WAIT_MS, 1_000), PR_WAIT_MS);
+    const watchingNow = () => prs.watched().filter((w) => w.session.sessionId === session.sessionId).length;
+    // Nothing watched and nothing waiting: nothing will come, so say so at once.
+    if (!watchingNow() && !session.prInbox?.length) {
+      json(ctx.res, 200, { prompt: null, watching: 0 });
+      return;
+    }
+    const gone = new AbortController();
+    ctx.res.once('close', () => gone.abort());
+    const prompt = await prs.wait(session.sessionId, ms, gone.signal);
+    const watching = watchingNow();
+    if (!ctx.res.writableEnded && !ctx.res.destroyed) json(ctx.res, 200, { prompt, watching });
+    // Taken, but the answer never got out: back in the inbox for the next taker.
+    else if (prompt) prs.push(session.sessionId, prompt);
+  });
+
+  /** `coplan pr status`: each pull request followed for the session. */
+  router.get('/api/session/:id/pr', (ctx) => {
+    const session = sessionOr404(ctx);
+    const watched = new Set(prs.watched().filter((w) => w.session.sessionId === session.sessionId).map((w) => w.branch));
+    json(ctx.res, 200, {
+      prs: Object.entries(session.plan?.branches ?? {})
+        .filter(([, b]) => b.pr)
+        .map(([branch, b]) => ({ branch, pr: b.pr, watched: watched.has(branch), ...(session.prWatch?.[branch] ? { watch: session.prWatch[branch] } : {}) })),
+      inbox: session.prInbox?.length ?? 0,
+    });
+  });
+
+  router.post('/api/session/:id/pr/unwatch', async (ctx) => {
+    const session = sessionOr404(ctx);
+    const body = await readJson<{ branch?: unknown }>(ctx.req);
+    json(ctx.res, 200, { stopped: prs.unwatch(session.sessionId, typeof body.branch === 'string' && body.branch ? body.branch : undefined) });
   });
 
   router.delete('/api/session/:id', (ctx) => {
@@ -1140,7 +1180,13 @@ function buildRouter(deps: Deps): Router {
     let handed: { id: string; prior: Plan; version: number } | null = null;
     // Listened for from the start: the relay may give up while the hook is
     // still being handled, and a 'close' already past cannot be heard later.
+    let prHanded: { id: string; prompt: string } | null = null;
     const takeBack = (): boolean => {
+      if (prHanded && !ctx.res.writableFinished) {
+        prs.push(prHanded.id, prHanded.prompt);
+        prHanded = null;
+        if (!handed) return true;
+      }
       if (!handed || ctx.res.writableFinished) return false;
       const { id, prior, version } = handed;
       handed = null;
@@ -1170,6 +1216,15 @@ function buildRouter(deps: Deps): Router {
           },
           onWaiting: openClaude,
         });
+      }
+      // What waits about its pull requests rides along too, in the room the prompt leaves.
+      if (session && event === 'UserPromptSubmit' && agentInfo(agent).promptContext) {
+        const carried = output.hookSpecificOutput?.additionalContext ?? '';
+        const pr = prs.take(session.sessionId, PROMPT_BUDGET - carried.length);
+        if (pr && carried.length + pr.length <= PROMPT_BUDGET) {
+          prHanded = { id: session.sessionId, prompt: pr };
+          output = additionalContext('UserPromptSubmit', [carried, pr].filter(Boolean).join('\n\n'));
+        } else if (pr) prs.push(session.sessionId, pr);
       }
       const after = session ? store.get(session.sessionId)?.plan : undefined;
       // Only when this answer is what carries the prompt. One the user pasted
@@ -1679,6 +1734,19 @@ function buildRouter(deps: Deps): Router {
     return [lead, prompt, notice ?? ''].filter(Boolean).join('\n\n');
   };
 
+  /** What harness_branch_update says once a pull request is watched: how the agent hears of it. */
+  const watchWords = (session: SessionState, branch: string): string => {
+    if (!prs.watched().some((w) => w.session.sessionId === session.sessionId && w.branch === branch)) return '';
+    const { wake } = projectFor(session).pullRequests.watch;
+    const how =
+      session.surface === 'cloud'
+        ? 'This session runs in the cloud, where Coplan cannot read it: subscribe to the pull request\'s activity, and pass each event to harness_pr_event {branch, kind, author, association, body, url}.'
+        : wake === 'wait' && agentInfo(session.agent).promptContext && session.agent === 'claude'
+          ? `Start \`${COPLAN_BIN ? `"${COPLAN_BIN}"` : 'coplan'} pr wait\` as a background command now, once for the session: it ends with what needs doing when one of its pull requests changes. Handle that, then start it again.`
+          : 'What needs doing when it changes comes with the user\'s next message; harness_pr_events hands it over sooner.';
+    return `\n\nCoplan watches it now: failing CI, reviews and comments come back to you as work, until it merges. ${how}`;
+  };
+
   router.post('/mcp/:tool', async (ctx) => {
     const body = await readJson<Record<string, unknown>>(ctx.req);
     const session = resolveSession(ctx, body as { sessionId?: string; cwd?: string; pid?: number });
@@ -1870,8 +1938,36 @@ function buildRouter(deps: Deps): Router {
           reply(
             true,
             `[cc-harness] Recorded \`${now?.branch ?? body['branch']}\`${now?.state?.pr ? `: pull request${now.state.pr.number ? ` #${now.state.pr.number}` : ''} ${now.state.pr.state}` : ''}${now?.state?.base ? `, onto \`${now.state.base}\`` : ''}.` +
-              (restacks.length ? `\n\nThe stack moved:\n${restacks.join('\n')}` : ''),
+              (restacks.length ? `\n\nThe stack moved:\n${restacks.join('\n')}` : '') +
+              watchWords(session, String(body['branch'] ?? '')),
           );
+          return;
+        }
+
+        case 'pr_events': {
+          const waiting = prs.take(id);
+          if (waiting) {
+            reply(true, waiting);
+            return;
+          }
+          const watched = prs.watched().filter((w) => w.session.sessionId === id);
+          reply(true, `[cc-harness] Nothing about your pull requests is waiting.${watched.length ? ` Watching: ${watched.map((w) => `#${w.ref.number} (\`${w.branch}\`)`).join(', ')}.` : ' No pull request is watched.'}`);
+          return;
+        }
+
+        case 'pr_event': {
+          const branch = String(body['branch'] ?? '');
+          const str = (k: string) => (typeof body[k] === 'string' && body[k] ? { [k]: String(body[k]).slice(0, MAX_BODY) } : {});
+          prs.report(id, branch, {
+            kind: String(body['kind'] ?? ''),
+            ...str('author'),
+            ...str('association'),
+            ...str('body'),
+            ...str('url'),
+            ...str('path'),
+            ...(typeof body['line'] === 'number' ? { line: body['line'] } : {}),
+          });
+          reply(true, prs.take(id) ?? `[cc-harness] Recorded on \`${branch}\`. Nothing for you to do about it.`);
           return;
         }
 
@@ -1895,7 +1991,8 @@ function buildRouter(deps: Deps): Router {
             reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
             return;
           }
-          reply(true, renderNext(session.plan, { agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) }));
+          const waiting = session.prInbox?.length ? `\n\nYour pull requests need you (${session.prInbox.length} waiting): call harness_pr_events for the work.` : '';
+          reply(true, renderNext(session.plan, { agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) }) + waiting);
           return;
         }
 
@@ -1967,6 +2064,9 @@ function startIdleWatch(store: SessionStore, config: ConfigCache, clients: { cou
   }, 60_000);
   timer.unref?.();
 }
+
+/** The longest one `coplan pr wait` request is held open; the CLI asks again. */
+const PR_WAIT_MS = 10 * 60_000;
 
 /** How often due pull requests are looked for; each has its own interval (prWatch.ts). */
 const PR_TICK_MS = 15_000;

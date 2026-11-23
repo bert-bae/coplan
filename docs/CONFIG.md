@@ -234,8 +234,17 @@ older commit statuses both count as CI. While a pull request is watched the
 daemon stays up; after a day with nothing new it looks every five minutes,
 and after a failed look it waits longer each time, up to half an hour.
 
-> **In progress.** What happens on a pull request is followed and kept now;
-> acting on it (`on`) comes next (`coplan/pr-3-dispatch` in the plan).
+What needs the agent waits in the session until it is taken: by
+`coplan pr wait` (the agent runs it in the background; it ends with the
+work), by `harness_pr_events`, or with your next message. A merge or close
+Coplan sees is recorded on the plan by itself. `coplan pr status` lists a
+session's pull requests and what each change came to; `coplan pr unwatch
+[branch]` stops following one, or all.
+
+> **In progress.** The board does not show pull requests' timelines yet, and
+> the build skill does not yet walk the agent through the loop
+> (`coplan/pr-4-land` in the plan); the agent is told how when it records a
+> pull request.
 
 | Key | Default | Meaning |
 | --- | --- | --- |

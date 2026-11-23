@@ -470,7 +470,7 @@ they are named `mcp__plugin_coplan_harness__<tool>`.
 | Codex | [`mcp/codex.json`](mcp/codex.json) | `node ./dist/mcp/main.js`, from the plugin's folder | `COPLAN_AGENT=codex`; passes `CC_HARNESS_HOME` on | 20 s to start, 60 s per call |
 | Cursor | [`mcp/cursor.json`](mcp/cursor.json) | `node ${CURSOR_PLUGIN_ROOT}/dist/mcp/main.js` | `COPLAN_AGENT=cursor`, `COPLAN_WORKSPACE=${workspaceFolder}` | Cursor's defaults |
 
-The eleven tools:
+The thirteen tools:
 
 | Tool | Changes the plan? | What it does |
 | --- | --- | --- |
@@ -485,6 +485,8 @@ The eleven tools:
 | `harness_task_brief` | No | One task's focused brief, written to hand to a subagent as is: objective, the boxes it builds and their connections, what it comes after and before, its scope, branch, and its implement → review → refine cycle with the exact checks. |
 | `harness_task_update` | Yes — progress only | Mark a task in progress, done, blocked or dropped, with a one-line note, and report its step of the cycle, the checks run and the review's verdict. Refuses to start a task that still waits on another, or to finish one without a passing verdict (yours, for a task you review) or whose checks failed. |
 | `harness_branch_update` | Yes — branch records only | Record a branch's pull request and where it stands, so the board shows the stack — and says what to restack when a branch below merges. |
+| `harness_pr_events` | No — takes what waits | What needs doing about the pull requests Coplan watches — failing CI, reviews, comments, conflicts, merges — as the work to do, handed over once. Usually it comes by itself (`coplan pr wait`, or with your next message). |
+| `harness_pr_event` | Records the event | An event the agent saw itself on one of the build's pull requests (a cloud session's own subscription), done with as the repository's `pullRequests.on` says. |
 
 ### Hooks
 

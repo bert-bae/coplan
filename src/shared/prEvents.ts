@@ -32,6 +32,9 @@ export interface PrEvent {
   id: string;
   pr: number;
   author?: string;
+  /** The author's standing on the repository, as GitHub says it:
+   *  `OWNER`, `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, `NONE`, … */
+  association?: string;
   /** The comment or review text, cut to MAX_BODY. Untrusted. */
   body?: string;
   url?: string;
@@ -57,12 +60,15 @@ export interface PrCursor {
   ci?: { sha: string; state: CiState };
   mergeable?: string;
   state?: 'open' | 'merged' | 'closed';
+  /** Who opened the pull request: what `watch.trust: "author"` trusts. */
+  author?: string;
 }
 
 /* GitHub REST shapes, the fields read. */
 interface GhUser {
   login?: string;
 }
+type Assoc = { author_association?: string };
 export interface GhSnapshot {
   pr: {
     number: number;
@@ -73,12 +79,14 @@ export interface GhSnapshot {
     /** `clean`, `dirty` (conflict), `behind`, `blocked`, `unknown`, … */
     mergeable_state?: string;
     head: { sha: string };
+    /** Who opened it. */
+    user?: GhUser | null;
   };
   /** `GET /repos/{o}/{r}/commits/{sha}/check-runs` → `.check_runs`. */
   checkRuns?: { id: number; name: string; status: string; conclusion: string | null; html_url?: string; head_sha?: string }[];
-  reviews?: { id: number; user?: GhUser | null; state: string; body?: string | null; submitted_at?: string; html_url?: string }[];
-  reviewComments?: { id: number; user?: GhUser | null; body?: string; path?: string; line?: number | null; html_url?: string; created_at?: string }[];
-  issueComments?: { id: number; user?: GhUser | null; body?: string; html_url?: string; created_at?: string }[];
+  reviews?: ({ id: number; user?: GhUser | null; state: string; body?: string | null; submitted_at?: string; html_url?: string } & Assoc)[];
+  reviewComments?: ({ id: number; user?: GhUser | null; body?: string; path?: string; line?: number | null; html_url?: string; created_at?: string } & Assoc)[];
+  issueComments?: ({ id: number; user?: GhUser | null; body?: string; html_url?: string; created_at?: string } & Assoc)[];
 }
 
 export const MAX_BODY = 4_000;
@@ -122,7 +130,7 @@ export function prEvents(snap: GhSnapshot, cursor: PrCursor | undefined, opts: {
     if (!foreign(r.user)) continue;
     const kind: PrEventKind | null =
       r.state === 'APPROVED' ? 'approved' : r.state === 'CHANGES_REQUESTED' ? 'changes_requested' : r.state === 'COMMENTED' && r.body?.trim() ? 'comment' : null;
-    if (kind) events.push(clean({ kind, id: `review:${r.id}`, pr, author: r.user?.login, body: body(r.body), url: r.html_url, at: r.submitted_at }));
+    if (kind) events.push(clean({ kind, id: `review:${r.id}`, pr, author: r.user?.login, association: r.author_association, body: body(r.body), url: r.html_url, at: r.submitted_at }));
   }
 
   const inline = fresh(snap.reviewComments, was.lastReviewComment);
@@ -130,7 +138,7 @@ export function prEvents(snap: GhSnapshot, cursor: PrCursor | undefined, opts: {
   for (const c of inline.items) {
     if (!foreign(c.user)) continue;
     events.push(
-      clean({ kind: 'review_comment' as const, id: `rc:${c.id}`, pr, author: c.user?.login, body: body(c.body), url: c.html_url, at: c.created_at, path: c.path, line: c.line ?? undefined }),
+      clean({ kind: 'review_comment' as const, id: `rc:${c.id}`, pr, author: c.user?.login, association: c.author_association, body: body(c.body), url: c.html_url, at: c.created_at, path: c.path, line: c.line ?? undefined }),
     );
   }
 
@@ -138,7 +146,7 @@ export function prEvents(snap: GhSnapshot, cursor: PrCursor | undefined, opts: {
   next.lastIssueComment = talk.max;
   for (const c of talk.items) {
     if (!foreign(c.user)) continue;
-    events.push(clean({ kind: 'comment' as const, id: `ic:${c.id}`, pr, author: c.user?.login, body: body(c.body), url: c.html_url, at: c.created_at }));
+    events.push(clean({ kind: 'comment' as const, id: `ic:${c.id}`, pr, author: c.user?.login, association: c.author_association, body: body(c.body), url: c.html_url, at: c.created_at }));
   }
 
   // CI: per head commit, so a new push that fails again is a new failure.
@@ -174,6 +182,7 @@ export function prEvents(snap: GhSnapshot, cursor: PrCursor | undefined, opts: {
     events.push(clean({ kind: state === 'open' ? ('reopened' as const) : state, id: `state:${state}:${sha}`, pr, url: snap.pr.html_url }));
   }
   next.state = state;
+  if (snap.pr.user?.login) next.author = snap.pr.user.login;
 
   return { events, cursor: next };
 }
