@@ -4,6 +4,7 @@ import { api } from '../lib/api.ts';
 import { classNames } from '../lib/format.ts';
 import { isComposing } from '../lib/keys.ts';
 import { PromptView } from './PromptView.tsx';
+import { PdfExport } from './PdfExport.tsx';
 import type { Block } from '../../shared/blocks.ts';
 import type { Target } from '../../shared/types.ts';
 
@@ -39,6 +40,7 @@ function ExportDialog({ sessionId }: { sessionId: string }) {
   const plan = usePlan();
   const [shown, setShown] = useState<Shown | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pdf, setPdf] = useState(false);
   const body = useRef<HTMLDivElement>(null);
   const version = plan?.version ?? 0;
 
@@ -87,6 +89,9 @@ function ExportDialog({ sessionId }: { sessionId: string }) {
           <button type="button" className="btn btn-sm" disabled={!shown} onClick={() => shown && download(plan.title, shown.text)}>
             Download .md
           </button>
+          <button type="button" className="btn btn-sm" disabled={pdf} title="The overview and architecture, with each diagram as a picture" onClick={() => setPdf(true)}>
+            {pdf ? 'Preparing PDF…' : 'Save PDF'}
+          </button>
           <button type="button" className="icon-btn" aria-label="Close" onClick={() => store.closeExport()}>
             ×
           </button>
@@ -106,6 +111,7 @@ function ExportDialog({ sessionId }: { sessionId: string }) {
           </div>
         )}
       </div>
+      {pdf && <PdfExport plan={plan} onDone={() => setPdf(false)} />}
     </div>
   );
 }

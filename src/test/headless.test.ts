@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { confirmDesign, planPhase, publishPlan, publishTasks } from '../shared/plan.ts';
 import { diagramMermaid, mermaidText, tasksMermaid } from '../shared/mermaid.ts';
 import { headlessPage, headlessText } from '../daemon/render.ts';
-import { planOf, planPage, type WrittenPlan } from '../artifact/render.ts';
+import { planDocument, planOf, planPage, type WrittenPlan } from '../artifact/render.ts';
 import type { Diagram, Plan, PlanInput } from '../shared/types.ts';
 
 /**
@@ -125,6 +125,16 @@ test('the page shows the overview, each diagram as a graph, and the task list, w
   assert.match(html, /<h2>Task ideas<\/h2>/, 'coarse until the design is confirmed');
   assert.match(html, /Waits on <code class="ref">client<\/code>/);
   assert.match(html, /<h4>Build order<\/h4>/);
+});
+
+test('the PDF document has the overview and each diagram as its PNG, without the tasks', () => {
+  const plan = planOf(INPUT);
+  const html = planDocument(plan, new Map([[plan.diagrams[0]!.id, 'data:image/png;base64,AAA']]));
+  assert.match(html, /<title>Add a cache<\/title>/);
+  assert.match(html, /read-through cache/);
+  assert.match(html, /<img src="data:image\/png;base64,AAA" alt="Components">/);
+  assert.doesNotMatch(html, /mermaid|Wire into API<\/li>|id="tasks"/);
+  assert.match(html, /API &quot;v2&quot;/);
 });
 
 test('the daemon writes its plan into the built page, where nothing in it can close the block', () => {
