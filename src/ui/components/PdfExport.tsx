@@ -20,19 +20,51 @@ const noop = () => {};
  * browser's print dialog, where "Save as PDF" writes the file.
  */
 export function PdfExport({ plan, onDone }: { plan: Plan; onDone: () => void }) {
+  return (
+    <Snapshots
+      plan={plan}
+      diagrams={plan.diagrams}
+      onDone={(pictures) => {
+        printHtml(planDocument(plan, pictures));
+        onDone();
+      }}
+    />
+  );
+}
+
+/** Saves one diagram as a `.png` file, named after it. */
+export function PngExport({ plan, diagram, onDone }: { plan: Plan; diagram: Diagram; onDone: () => void }) {
+  return (
+    <Snapshots
+      plan={plan}
+      diagrams={[diagram]}
+      onDone={(pictures) => {
+        const png = pictures.get(diagram.id);
+        if (png) {
+          const a = document.createElement('a');
+          a.href = png;
+          a.download = `${diagram.title.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'diagram'}.png`;
+          a.click();
+        } else store.toast('error', 'Could not draw the diagram as a picture.');
+        onDone();
+      }}
+    />
+  );
+}
+
+/** Draws each diagram off screen, one at a time, and hands over their PNGs by diagram id. */
+function Snapshots({ plan, diagrams, onDone }: { plan: Plan; diagrams: Diagram[]; onDone: (pictures: Map<string, string>) => void }) {
   const [pictures] = useState(() => new Map<string, string>());
   const [at, setAt] = useState(0);
-  const diagram = plan.diagrams[at];
-
-  const printed = useRef(false);
+  const diagram = diagrams[at];
+  const done = useRef(false);
 
   useEffect(() => {
     // Once: the plan or onDone can change while the parent re-renders.
-    if (diagram || printed.current) return;
-    printed.current = true;
-    printHtml(planDocument(plan, pictures));
-    onDone();
-  }, [diagram, plan, pictures, onDone]);
+    if (diagram || done.current) return;
+    done.current = true;
+    onDone(pictures);
+  }, [diagram, pictures, onDone]);
 
   if (!diagram) return null;
   return (

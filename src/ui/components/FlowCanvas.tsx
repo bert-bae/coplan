@@ -28,6 +28,7 @@ import { PlanNode } from './flow/PlanNode.tsx';
 import { PlanEdge } from './flow/PlanEdge.tsx';
 import { EdgePanel, NodePanel, ReadOnlyPanel, SelectionPanel } from './flow/Panels.tsx';
 import { ContextMenu, type MenuEntry } from './flow/ContextMenu.tsx';
+import { PngExport } from './PdfExport.tsx';
 import { ALT, MOD, ShortcutsOverlay } from './flow/Shortcuts.tsx';
 import {
   contentOf,
@@ -191,6 +192,7 @@ function Editor({
   const [twoHops, setTwoHops] = useState(false);
   const [menu, setMenu] = useState<{ at: Point; flow: Point; target: MenuTarget } | null>(null);
   const [shortcuts, setShortcuts] = useState(false);
+  const [png, setPng] = useState(false);
   const [reconnect, setReconnect] = useState<Reconnect | null>(null);
   const [dropEdge, setDropEdge] = useState<string | null>(null);
   /** The box whose task list is open. */
@@ -1521,6 +1523,9 @@ function Editor({
                 <span className="flow-locked" title={lockNote ?? 'The plan is submitted; reopen it to change the design'}>
                   <span aria-hidden="true">🔒</span> {onLinkTasks ? 'Design confirmed' : 'Final design'}
                 </span>
+                <button type="button" className="btn btn-sm" disabled={png} title="Save this diagram as a picture" onClick={() => setPng(true)}>
+                  {png ? 'Saving…' : 'Save PNG'}
+                </button>
               </Panel>
             ) : (
             <Panel position="top-left" className="flow-toolbar">
@@ -1544,6 +1549,9 @@ function Editor({
                   ↷
                 </button>
               </span>
+              <button type="button" className="btn btn-sm" disabled={png} title="Save this diagram as a picture" onClick={() => setPng(true)}>
+                {png ? 'Saving…' : 'Save PNG'}
+              </button>
               <button type="button" className="btn btn-sm btn-icon" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" onClick={() => setShortcuts(true)}>
                 ?
               </button>
@@ -1568,6 +1576,7 @@ function Editor({
           {reconnect && <ReconnectLine reconnect={reconnect} edges={edges} wrapper={wrapper.current} />}
           {menu && shownMenu && <ContextMenu at={menu.at} title={shownMenu.title} entries={shownMenu.entries} onClose={closeMenu} />}
           {shortcuts && <ShortcutsOverlay onClose={() => setShortcuts(false)} />}
+          {png && <PngExport plan={plan} diagram={diagram} onDone={() => setPng(false)} />}
         </div>
         <aside ref={details} className="arch-panel" aria-label="Details" tabIndex={-1}>
           {panel}
