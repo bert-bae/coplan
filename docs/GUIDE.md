@@ -223,10 +223,13 @@ repository's file is committed and shared with your team: change them in
 the file, and the preview follows at once. Each key links to what it does in
 [CONFIG.md](CONFIG.md).
 
-A prompt too long for one message (about 9,000 characters) keeps the
-instructions, what you wrote and changed, the summary and the task list, and
-the dialog says what it leaves out — the sections, the architecture, each
-task's detail — which Claude reads with `harness_plan_read` before it starts.
+The prompts don't quote the design again: Claude published it and read it
+back, and what you changed since is quoted in full. Each task's brief carries
+the parts of the design it builds. The preview shows the design struck through,
+as *Not sent again*. A prompt that is still too long for one message (about
+9,000 characters) keeps the instructions, what you wrote and changed, the
+summary and the task list, and the dialog says what it leaves out (each task's
+detail, say), which Claude reads with `harness_plan_read`.
 
 Submitting **locks the plan**. The canvas becomes the final design — boxes
 still fill up as the tasks that build them get done, and each box's task list
@@ -351,10 +354,11 @@ change did not touch. `--json` gives the results the agent reports, and
 or Cursor, writes a starting point from the repository's scripts. See
 [CONFIG.md](CONFIG.md#the-repository-coplanconfigjson).
 
-A plan too long to hand over in one message — a hook adds about 10,000
-characters at most — is sent as the instructions, the summary and the task
-list, with Claude told to read the rest with `harness_plan_read`. The review
-says when that happens.
+The design itself isn't sent again in a prompt: Claude already has it. A
+plan whose tasks are too long to hand over in one message (a hook adds about
+10,000 characters at most) is sent as the instructions, the summary and the
+task list, with Claude told to read the rest with `harness_plan_read`. The
+review says when that happens.
 
 ## Questions are answered in Claude
 
@@ -539,7 +543,8 @@ prompt the same way.
 revision numbers, who last edited what, how to reply to a comment, its
 proposals, the gaps list and the status legend. When a prompt is too long
 for one message, what it leaves out is shown struck through: the agent
-reads it with `harness_plan_read`. *Copy* copies the text whole.
+reads it with `harness_plan_read`. The design is struck through too, as *Not
+sent again*: the agent already has it. *Copy* copies the text whole.
 
 Looking at any tab does not count as Claude reading the plan: your changes
 stay unread, and a confirmed design or submitted plan is still handed over
