@@ -15,6 +15,7 @@
  */
 
 import type { AgentKind } from './agents.ts';
+import type { PrCursor, QueuedEvent } from './prEvents.ts';
 
 /** Who made a change. The plan is co-authored, and the change log is how each
  *  side finds out what the other did. */
@@ -882,6 +883,23 @@ export interface SessionState {
    *  trusted again). Absent on sessions saved before it was recorded. */
   hookedAt?: number | null;
   plan: Plan | null;
+  /** Following the pull requests the plan recorded, by branch (prWatch.ts). */
+  prWatch?: Record<string, PrWatchState>;
+}
+
+/** One watched pull request: where the last poll left off, and what it found. */
+export interface PrWatchState {
+  pr: number;
+  /** When watching it began. */
+  since: number;
+  cursor?: PrCursor;
+  /** Events waiting to be dispatched, oldest first; bounded. */
+  queue: QueuedEvent[];
+  checkedAt?: number;
+  lastEventAt?: number;
+  /** The last poll's failure, and how many in a row, while polls fail. */
+  error?: string;
+  failures?: number;
 }
 
 export interface TaskCounts {

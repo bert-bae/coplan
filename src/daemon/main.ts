@@ -9,6 +9,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { SessionStore } from './store.ts';
 import { ProjectConfigs } from './projectConfigs.ts';
 import { isIdle } from './idle.ts';
+import { PrWatcher } from './prWatch.ts';
 import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from './http.ts';
 import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
@@ -162,6 +163,7 @@ async function main(): Promise<void> {
     log(`shutting down (${signal})`);
     reaper.stop();
     lockWatch.stop();
+    prWatch.stop();
     // A daemon that lost the lock leaves the sessions to the one that has
     // it: saving its own copies now would write over newer ones.
     if (signal !== LOST_LOCK) store.persistAll();
@@ -187,7 +189,8 @@ async function main(): Promise<void> {
 
   const reaper = startReaper(store);
   const lockWatch = watchLock(() => shutdown(LOST_LOCK));
-  startIdleWatch(store, config, clients, () => shutdown('idle'));
+  const prWatch = startPrWatch(store);
+  startIdleWatch(store, config, clients, () => shutdown('idle'), () => prWatch.watcher.watched().length);
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -1953,16 +1956,30 @@ function refuseUnfinishedFinal(checks: unknown, project: ProjectConfig): void {
  * a fresh one. The setting is read each minute, so changing
  * `idleShutdownMinutes` needs no restart.
  */
-function startIdleWatch(store: SessionStore, config: ConfigCache, clients: { count: number }, stop: () => void): void {
+function startIdleWatch(store: SessionStore, config: ConfigCache, clients: { count: number }, stop: () => void, watching: () => number): void {
   const startedAt = Date.now();
   const timer = setInterval(() => {
     const minutes = config.get().idleShutdownMinutes;
     if (!minutes || minutes <= 0) return;
-    if (!isIdle(Date.now(), { startedAt, clients: clients.count, sessions: () => store.all() }, minutes * 60_000)) return;
-    log(`nothing has used it for ${minutes}m (no page open, no session active); exiting`);
+    if (!isIdle(Date.now(), { startedAt, clients: clients.count, sessions: () => store.all(), watching }, minutes * 60_000)) return;
+    log(`nothing has used it for ${minutes}m (no page open, no session active, no pull request watched); exiting`);
     stop();
   }, 60_000);
   timer.unref?.();
+}
+
+/** How often due pull requests are looked for; each has its own interval (prWatch.ts). */
+const PR_TICK_MS = 15_000;
+
+/** Polls the pull requests builds recorded, with a config cache of its own. */
+function startPrWatch(store: SessionStore): { watcher: PrWatcher; stop(): void } {
+  const projects = new ProjectConfigs(MAX_PROJECT_CONFIGS);
+  projects.logError = log;
+  const watcher = new PrWatcher({ store, project: (root) => projects.at(root), log });
+  const tick = () => void watcher.tick().catch((err: unknown) => log(`pull request watch failed: ${(err as Error)?.message}`));
+  const timer = setInterval(tick, PR_TICK_MS);
+  timer.unref?.();
+  return { watcher, stop: () => clearInterval(timer) };
 }
 
 /**

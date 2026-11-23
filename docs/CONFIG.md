@@ -227,8 +227,15 @@ work for the agent, the same implement → review → refine cycle, until the
 pull request is merged or closed. See
 [the plan](plans/pr-lifecycle.md) for the whole loop.
 
-> **In progress.** These settings are read and checked now; the watcher that
-> acts on them is being built (`coplan/pr-2-watch` onward in the plan).
+Coplan looks at each pull request with your own `gh` (one GraphQL query a
+look; GitHub and GitHub Enterprise), so `gh auth login` is all it needs;
+`coplan doctor` says when `gh` is missing or logged out. Check runs and
+older commit statuses both count as CI. While a pull request is watched the
+daemon stays up; after a day with nothing new it looks every five minutes,
+and after a failed look it waits longer each time, up to half an hour.
+
+> **In progress.** What happens on a pull request is followed and kept now;
+> acting on it (`on`) comes next (`coplan/pr-3-dispatch` in the plan).
 
 | Key | Default | Meaning |
 | --- | --- | --- |

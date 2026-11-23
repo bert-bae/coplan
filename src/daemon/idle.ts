@@ -5,13 +5,15 @@ import type { SessionState } from '../shared/types.ts';
  * neither it nor any live session active within `idleMs`. Its own start
  * counts: one started for a link (`coplan start`, `coplan url`) with
  * nothing active gives the page the idle time to be opened. `sessions` is
- * asked for only when nothing else has answered.
+ * asked for only when nothing else has answered. A pull request being
+ * watched keeps it up too: nothing else would notice what happens on it.
  */
 export function isIdle(
   now: number,
-  daemon: { startedAt: number; clients: number; sessions: () => readonly Pick<SessionState, 'status' | 'updatedAt'>[] },
+  daemon: { startedAt: number; clients: number; sessions: () => readonly Pick<SessionState, 'status' | 'updatedAt'>[]; watching?: () => number },
   idleMs: number,
 ): boolean {
   if (daemon.clients > 0 || now - daemon.startedAt < idleMs) return false;
+  if (daemon.watching?.()) return false;
   return !daemon.sessions().some((s) => s.status !== 'ended' && now - s.updatedAt < idleMs);
 }

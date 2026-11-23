@@ -169,13 +169,13 @@ poll yields nothing, a 12-comment review yields one batch.
 
 ### Branch `coplan/pr-2-watch` (stacks on pr-1)
 
-**T3 — GitHub provider** (depends T2). `gh api` calls with ETag caching,
+**T3 — GitHub provider** ✅ (depends T2, `src/daemon/github.ts`). One GraphQL query per poll instead of REST + ETags; `statusCheckRollup` also covers legacy commit statuses. `gh api` calls with ETag caching,
 rate-limit aware; failing-check log tail via `gh run view --log-failed`
 (truncated). Provider picked from `pullRequests.tool` + remote host.
 *Done when:* tested against a fake `gh` on `PATH`; no `gh` / not authed is
 reported by `coplan doctor`, not crashed on.
 
-**T4 — Watcher loop in the daemon** (depends T3). Watches every
+**T4 — Watcher loop in the daemon** ✅ (depends T3, `src/daemon/prWatch.ts`; state in `SessionState.prWatch`, not the plan, so polls don't bump the plan's version). Watches every
 `branches[*].pr` in state open/draft for sessions with watching on; persists
 cursors in `state.json`; stop conditions; `isIdle` counts watched PRs;
 backoff.

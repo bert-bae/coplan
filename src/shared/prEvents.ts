@@ -87,7 +87,7 @@ const FAILED = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 
 /** CI on `sha`: failed once any run failed, passed once all finished well,
  *  pending while any runs; undefined with no runs at all. */
 export function ciState(runs: GhSnapshot['checkRuns'], sha: string): CiState | undefined {
-  // shortcut: check runs only, not the legacy commit-status API; add it if a repo's CI posts statuses.
+  // github.ts maps legacy commit statuses onto check runs, so both count here.
   const mine = (runs ?? []).filter((r) => !r.head_sha || r.head_sha === sha);
   if (!mine.length) return undefined;
   if (mine.some((r) => r.status === 'completed' && FAILED.has(r.conclusion ?? ''))) return 'failed';
