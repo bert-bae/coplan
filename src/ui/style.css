@@ -2222,6 +2222,9 @@ span.board-title:hover { color: inherit; text-decoration: none; }
 .chip.is-pr { text-decoration: none; }
 .chip.is-pr.is-merged { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
 .chip.is-pr.is-closed { opacity: 0.7; text-decoration: line-through; }
+.chip.is-ci-passed { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
+.pr-timeline { flex-basis: 100%; font-size: 0.85em; }
+.pr-timeline ol { margin: 0.25rem 0 0; padding-left: 1.25rem; }
 .chip.is-ready { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
 .chip.is-waiting { background: var(--surface-sunken); color: var(--text-tertiary); }
 .chip.stage-chip { background: var(--accent-subtle); color: var(--accent-fg); border-color: var(--accent-border); }

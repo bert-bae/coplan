@@ -241,10 +241,6 @@ Coplan sees is recorded on the plan by itself. `coplan pr status` lists a
 session's pull requests and what each change came to; `coplan pr unwatch
 [branch]` stops following one, or all.
 
-> **In progress.** The board does not show pull requests' timelines yet, and
-> the build skill does not yet walk the agent through the loop
-> (`coplan/pr-4-land` in the plan); the agent is told how when it records a
-> pull request.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -253,7 +249,7 @@ session's pull requests and what each change came to; `coplan pr unwatch
 | `watch.debounce` | `90` | Seconds a pull request must be quiet before what happened on it goes to the agent as one batch, 0 to 3600: a 12-comment review is one fix, not twelve. |
 | `watch.trust` | `collaborators` | Whose comments and reviews may start work: `collaborators` (anyone with write access), `author` (whoever opened the pull request), or a list of logins. Others are shown, never acted on. |
 | `watch.maxFixRounds` | `3` | Fix rounds per pull request, 1 to 10; past them, Coplan tells you and does no more on it. |
-| `watch.wake` | `wait` | How an agent whose turn has ended is reached. `wait`: it leaves `coplan pr wait` running in the background, which ends with the work when there is some and brings the agent back (Claude Code). `queue`: the work goes with your next message (agents without background commands — Codex, Cursor — always work this way). `headless`: Coplan resumes the agent itself. |
+| `watch.wake` | `wait` | How an agent whose turn has ended is reached. `wait`: it leaves `coplan pr wait` running in the background, which ends with the work when there is some and brings the agent back (Claude Code). `queue`: the work goes with your next message (agents without background commands — Codex, Cursor — always work this way). `headless`: when nothing is waiting and the agent is not mid-turn, Coplan resumes the session itself with the work (`claude -p --resume`, `codex exec resume`), one run at a time, under your permission settings — an agent working unattended on what reviewers wrote; Cursor has no way to be resumed, so it is `queue` there. |
 
 `on` maps each event to what it does — one action, or a list run in order:
 

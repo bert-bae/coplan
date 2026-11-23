@@ -1641,7 +1641,7 @@ function buildRouter(deps: Deps): Router {
       );
     }
     if ((status === 'done' || status === 'dropped') && changes.length) {
-      if (planPhase(plan) === 'finalizing' || planPhase(plan) === 'built') {
+      if (['finalizing', 'landing', 'built'].includes(planPhase(plan))) {
         out.push('That was the last task. Finish the build — final checks, pull requests, then the report; harness_task_next says how.');
       } else {
         const fresh = readyTasks(plan).filter((t) => !readyBefore.has(t.id));

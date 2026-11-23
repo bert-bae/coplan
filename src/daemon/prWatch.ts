@@ -6,6 +6,7 @@ import { PlanError } from '../shared/plan.ts';
 import type { PrWatchState, SessionState } from '../shared/types.ts';
 import { fetchPr, prRef, type PrRef } from './github.ts';
 import type { SessionStore } from './store.ts';
+import { spawn } from 'node:child_process';
 
 /**
  * Following the pull requests a build recorded until they merge.
@@ -47,6 +48,25 @@ export interface WatchDeps {
   fetch?: (ref: PrRef, cwd: string) => Promise<{ snapshot: GhSnapshot; viewer?: string }>;
   log: (message: string) => void;
   now?: () => number;
+  /** Runs an agent's resume command for `watch.wake: "headless"`; resolves with its exit code. */
+  run?: (command: string, args: string[], cwd: string) => Promise<number>;
+}
+
+/** How long a headless run may take before it is stopped. */
+const HEADLESS_TIMEOUT_MS = 30 * 60_000;
+
+const runAgent = (command: string, args: string[], cwd: string): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd, stdio: 'ignore', timeout: HEADLESS_TIMEOUT_MS });
+    child.once('error', reject);
+    child.once('exit', (code) => resolve(code ?? 1));
+  });
+
+/** The command that resumes a session with a prompt, unattended; null where the agent has none (Cursor). */
+export function resumeCommand(session: Pick<SessionState, 'agent' | 'sessionId'>, prompt: string): [string, string[]] | null {
+  if (session.agent === 'claude') return ['claude', ['-p', '--resume', session.sessionId, prompt]];
+  if (session.agent === 'codex') return ['codex', ['exec', 'resume', session.sessionId, prompt]];
+  return null;
 }
 
 /** Every pull request that should be watched now. */
@@ -81,6 +101,8 @@ export class PrWatcher {
   private running = false;
   /** Who is waiting on each session's inbox (`coplan pr wait`). */
   private readonly waiters = new Map<string, Set<() => void>>();
+  /** Sessions with a headless run going: one at a time each. */
+  private readonly resuming = new Set<string>();
 
   constructor(private readonly deps: WatchDeps) {}
 
@@ -154,12 +176,47 @@ export class PrWatcher {
   }
 
   /** Puts a prompt in the session's inbox and wakes whoever waits on it. */
-  push(id: string, prompt: string): void {
+  push(id: string, prompt: string, resume = true): void {
     this.deps.store.mutate(id, (s) => {
       s.prInbox = [...(s.prInbox ?? []), prompt].slice(-MAX_INBOX);
     });
     this.deps.store.persistNow(id);
-    for (const wake of [...(this.waiters.get(id) ?? [])]) wake();
+    const waiting = [...(this.waiters.get(id) ?? [])];
+    for (const wake of waiting) wake();
+    if (resume && !waiting.length) this.resume(id);
+  }
+
+  /**
+   * `watch.wake: "headless"`: with nobody waiting and the agent not mid-turn,
+   * Coplan resumes the session itself with what waits (`claude -p --resume`,
+   * `codex exec resume`), under the user's own permission settings. One run
+   * a session at a time; what arrives meanwhile goes with the next.
+   */
+  private resume(id: string): void {
+    const session = this.deps.store.get(id);
+    if (!session?.repoRoot || session.status === 'active' || this.resuming.has(id)) return;
+    if (this.deps.project(session.repoRoot).pullRequests.watch.wake !== 'headless') return;
+    const peek = session.prInbox?.[0];
+    if (!peek || !resumeCommand(session, peek)) return;
+    const prompt = this.take(id)!;
+    const [command, args] = resumeCommand(session, prompt)!;
+    this.resuming.add(id);
+    this.deps.log(`resuming ${id} headless for its pull requests`);
+    (this.deps.run ?? runAgent)(command, args, session.repoRoot)
+      .then((code) => {
+        if (code !== 0) this.deps.log(`the headless run for ${id} exited ${code}`);
+        return true;
+      })
+      .catch((err: unknown) => {
+        // Not run at all (not installed): kept for the next taker, not retried in a loop.
+        this.deps.log(`could not resume ${id} headless: ${(err as Error).message}`);
+        this.push(id, prompt, false);
+        return false;
+      })
+      .then((ran) => {
+        this.resuming.delete(id);
+        if (ran && this.deps.store.get(id)?.prInbox?.length) this.resume(id);
+      });
   }
 
   /** Takes what waits in the inbox, oldest first, up to `max` characters (always at least one). */

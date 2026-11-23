@@ -191,3 +191,45 @@ test('a watched pull request keeps the daemon up', async () => {
   assert.equal(isIdle(10 * 60_000, none, 60_000), true);
   assert.equal(isIdle(10 * 60_000, { ...none, watching: () => 1 }, 60_000), false);
 });
+
+test('headless: an idle session is resumed with what waits, one run at a time; a failed start keeps it for later', async () => {
+  const { resumeCommand } = await import('../daemon/prWatch.ts');
+  assert.deepEqual(resumeCommand({ agent: 'codex', sessionId: 't1' }, 'go'), ['codex', ['exec', 'resume', 't1', 'go']]);
+  assert.equal(resumeCommand({ agent: 'cursor', sessionId: 'c1' }, 'go'), null, 'Cursor has no way to resume a chat');
+  const store = await setup();
+  const config = project({ watch: { ...DEFAULT_PR_WATCH, wake: 'headless' } });
+  const runs: { command: string; args: string[]; cwd: string }[] = [];
+  let finish: (code: number) => void = () => {};
+  let fail = false;
+  const { PrWatcher } = await import('../daemon/prWatch.ts');
+  const w = new PrWatcher({
+    store,
+    project: () => config,
+    fetch: async () => ({ snapshot: snapshot() }),
+    log: () => {},
+    run: (command, args, cwd) => {
+      runs.push({ command, args, cwd });
+      return fail ? Promise.reject(new Error('spawn claude ENOENT')) : new Promise((resolve) => (finish = resolve));
+    },
+  });
+  store.update('s1', { status: 'active' });
+  w.push('s1', 'first');
+  assert.equal(runs.length, 0, 'mid-turn: the live agent takes it');
+  store.update('s1', { status: 'idle' });
+  w.push('s1', 'second');
+  assert.deepEqual(runs, [{ command: 'claude', args: ['-p', '--resume', 's1', 'first\n\nsecond'], cwd: '/repo' }]);
+  w.push('s1', 'third');
+  assert.equal(runs.length, 1, 'one run at a time');
+  finish(0);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(runs.length, 2, 'what arrived meanwhile goes with the next run');
+  assert.equal(runs[1]!.args[3], 'third');
+  fail = true;
+  finish(0);
+  await new Promise((r) => setImmediate(r));
+  w.push('s1', 'fourth');
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(runs.length, 3);
+  assert.deepEqual(store.get('s1')!.prInbox, ['fourth'], 'not run: kept, and not retried in a loop');
+});

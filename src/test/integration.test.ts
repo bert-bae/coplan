@@ -818,8 +818,11 @@ test('finishing the last task finishes the build, and a new plan may follow', as
   const report = await mcpFor(built, 'edit', { ops: [{ op: 'report', text: '## Built\n- Storage, Wire up' }] });
   assert.equal(report['ok'], true, String(report['text']));
   assert.match(String((await mcpFor(built, 'read'))['text']), /## Build report\n## Built/);
-  const { sessions } = await call<{ sessions: { sessionId: string; phase: string }[] }>('/api/sessions');
-  assert.equal(sessions.find((x) => x.sessionId === built)?.phase, 'built');
+  const phase = async () => (await call<{ sessions: { sessionId: string; phase: string }[] }>('/api/sessions')).sessions.find((x) => x.sessionId === built)?.phase;
+  assert.equal(await phase(), 'landing', 'the report is in, but a pull request is still open');
+  assert.equal((await mcpFor(built, 'publish', { ...PLAN, title: 'Too soon' }))['ok'], false, 'a landing plan is not replaced');
+  await pr({ branch: 'cache/api', pr_state: 'merged' });
+  assert.equal(await phase(), 'built');
   const next = await mcpFor(built, 'publish', { ...PLAN, title: 'Next feature' });
   assert.equal(next['ok'], true, String(next['text']));
   assert.equal((await sessionFor(built)).plan!.submission, undefined);

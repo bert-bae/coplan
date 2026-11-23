@@ -487,7 +487,7 @@ export interface BranchState {
  * confirmed, handed over and waiting for Claude to pick it up, being built,
  * built, or handed to something outside the harness.
  */
-export const PLAN_PHASES = ['planning', 'tasking', 'submitted', 'building', 'finalizing', 'built', 'handed-off'] as const;
+export const PLAN_PHASES = ['planning', 'tasking', 'submitted', 'building', 'finalizing', 'landing', 'built', 'handed-off'] as const;
 export type PlanPhase = (typeof PLAN_PHASES)[number];
 
 /**
@@ -497,7 +497,8 @@ export type PlanPhase = (typeof PLAN_PHASES)[number];
  *
  * - `planning` — `planning`, `tasking`: the design and the task list.
  * - `in_progress` — `submitted`, `building`: handed over, being built.
- * - `review` — `finalizing`, and a Managed build with a task waiting on the
+ * - `review` — `finalizing`, `landing` (the report is in, its pull requests
+ *   still open), and a Managed build with a task waiting on the
  *   user's own review: what was built waits on the user.
  * - `done` — `built`, `handed-off`.
  */

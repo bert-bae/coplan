@@ -205,23 +205,23 @@ timeline); `harness_task_next` returns PR work in `landing`;
 
 ### Branch `coplan/pr-4-land` (stacks on pr-3)
 
-**T8 — `landing` phase and board** (depends T7). `planPhase` /
+**T8 — `landing` phase and board** ✅ (depends T7). A landing plan is still locked: a new plan cannot replace it until its pull requests merge or close. `planPhase` /
 `PLAN_STATUSES` mapping, render prompts, branch rows with PR/CI/review state
 and the event timeline in the Tasks view.
 *Done when:* status and UI tests; golden prompts updated.
 
-**T9 — Skills and docs** (depends T7). `skills/coplan-build`: a *Landing*
+**T9 — Skills and docs** ✅ (depends T7). `skills/coplan-build`: a *Landing*
 section after the report (arm `coplan pr wait`, handle a batch, re-arm; cloud:
 `subscribe_pr_activity` + `harness_pr_event`). `skills/iric`: fix tasks
 from PR events (reply on threads, push, never skip tests). `docs/GUIDE.md`
 walkthrough.
 
-**T10 — End-to-end test** (depends T8). Fake `gh` scripted through:
+**T10 — End-to-end test** ✅ (depends T8, `src/test/prLoop.test.ts`; in-process watcher and store with a fake `gh` runner rather than a spawned daemon). Fake `gh` scripted through:
 PR opened → `ci_failed` → fix task through iric → `ci_passed` →
 `changes_requested` → fix → `approved` → lower PR `merged` → restack →
 upper `merged` → plan `built`.
 
-**T11 — `headless` wake** (depends T6; optional, last). Daemon spawns the
+**T11 — `headless` wake** ✅ (depends T6). Only while the session is not mid-turn; a run that cannot start keeps the work for the next taker rather than retrying. Daemon spawns the
 agent's resume command with the prompt; one at a time per session; off unless
 configured.
 
@@ -235,4 +235,4 @@ watching PRs Coplan didn't record.
 1. Default `wake` is `wait` (background `coplan pr wait`); agents without
    background commands fall back to `queue`.
 2. `run` actions are always run by the agent, never by the daemon.
-3. `headless` (T11) stays optional and last; not yet confirmed as wanted.
+3. `headless` (T11) built, off unless `watch.wake` is set to it.

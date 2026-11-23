@@ -1121,6 +1121,10 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
       head = `${label} · final checks and report`;
       text = `Every task is done (${counts.total}). ${agent.name} is running the final checks, opening the pull requests and writing the build report.`;
       break;
+    case 'landing':
+      head = `${label} · pull requests open`;
+      text = `Every task is done (${counts.total}) and the report is in. ${agent.name} follows the pull requests — failing checks, reviews, comments — until they merge.`;
+      break;
     case 'built':
       head = `${label} · built`;
       text = plan.report ? `Every task is done (${counts.total}), and ${agent.name} wrote the build report.` : `Every task is done (${counts.total}).`;
@@ -1191,12 +1195,12 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
                 {phase === 'handed-off' ? 'Copy export' : 'Copy prompt'}
               </button>
             )}
-            {(phase === 'building' || phase === 'finalizing' || phase === 'built') && tab !== 'tasks' && (
+            {(phase === 'building' || phase === 'finalizing' || phase === 'landing' || phase === 'built') && tab !== 'tasks' && (
               <button type="button" className="btn btn-sm" onClick={() => store.set({ tab: 'tasks', taskMode: 'board' })}>
                 Follow on the board
               </button>
             )}
-            {phase === 'built' && plan.report && tab !== 'overview' && (
+            {(phase === 'built' || phase === 'landing') && plan.report && tab !== 'overview' && (
               <button type="button" className="btn btn-sm" onClick={() => store.set({ tab: 'overview' })}>
                 Read the report
               </button>

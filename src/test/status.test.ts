@@ -16,6 +16,7 @@ const EXPECTED: Record<PlanPhase, PlanStatus> = {
   submitted: 'in_progress',
   building: 'in_progress',
   finalizing: 'review',
+  landing: 'review',
   built: 'done',
   'handed-off': 'done',
 };

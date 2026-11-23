@@ -4,6 +4,15 @@
 
 ### Changes
 
+- **Landing: from the build report to merged.** Once Claude records a pull request, Coplan follows it with your
+  `gh` login (GitHub and Enterprise; check runs and commit statuses) and the plan shows **Review · pull requests
+  open** until every one is merged or closed. Failing CI, reviews and comments from people the repository trusts
+  come back to Claude as work — a fix task through implement → review → refine — up to a fix-round limit; merges
+  are recorded and the stack restacked. What each event does is yours to set (`pullRequests.watch`,
+  `pullRequests.on`, including commands such as auto-merge, which the agent runs). Claude hears of it through
+  `coplan pr wait` in the background, `harness_pr_events`, your next message, `harness_pr_event` in the cloud,
+  or — if you choose `wake: "headless"` — by Coplan resuming the session. `coplan pr status|unwatch`, and each
+  branch's CI, fix rounds and timeline on the board.
 - **Architecture first, or straight to tasks.** `/coplan --architect` plans with diagrams first: the task list is
   made from the confirmed design, never before it, and built from there. `/coplan --tasklist` skips the
   architecture for contained work and goes straight to a task list you submit. Without a flag, the agent chooses
