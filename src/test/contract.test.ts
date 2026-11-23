@@ -266,7 +266,7 @@ const ALLOWED_ASKS: { file: string; text: string; why: Why }[] = [
   { file: 'src/daemon/render.ts', text: '`Ask the user, with ${agent.askWith}, only when', why: 'the rule' },
   { file: 'src/mcp/tools.ts', text: "'Tasks here are the planned tasks, shown on the boxes that link them. Ask the user, with AskUserQuestion", why: 'the rule' },
   // Cannot be undone: replacing a config the user may have written.
-  { file: 'commands/coplan-init.md', text: 'and ask before replacing it', why: 'cannot be undone' },
+  { file: 'skills/coplan-config/SKILL.md', text: 'and ask before', why: 'cannot be undone' },
   // Reaches outside the session: pull requests, by default (pullRequests.open "ask").
   { file: 'src/daemon/render.ts', text: "'once the user says to: ask them first'", why: 'reaches outside the session' },
   // The user's by right, in a Managed build: what its gates keep for them.
