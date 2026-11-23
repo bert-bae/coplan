@@ -87,6 +87,35 @@ subagent needs nothing else from Coplan.
 7. **Load headless and setup text only when needed.** Move those sections of
    the `coplan` skill into reference files. ~1k per planning session.
 
+## After the plan-resend fix
+
+Items 1–3 above, as built:
+
+- `harness_plan_publish` answers with the URL, the revision and the gaps
+  only. `harness_tasks_publish` still returns the task list: it shows the
+  build order and the branches Coplan works out from it, which the agent didn't
+  write.
+- The "design confirmed" and build prompts leave the sections and the
+  architecture out and point to `harness_plan_read`, or to each task's
+  `harness_task_brief`. What the user changed since the agent's last read is
+  still quoted in full. The page shows the left-out blocks struck through, as
+  *Not sent again*, and doesn't count them as *Left out to fit*.
+- The `coplan` skill reads with `{changes_only: true}` once the plan is in
+  context.
+
+| Reply | Before | After |
+| --- | ---: | ---: |
+| `harness_plan_publish` (max) | 1,557 | 273 |
+| "design confirmed" prompt | 1,877 | 897 |
+| build prompt (max) | 1,462 | 1,663 |
+| the full read the build prompt asked for | 2,169 | — |
+
+The build prompt grew because, with the design out, it now has room for each
+task's detail instead of cutting it and sending the agent to read the whole
+plan. Across one plan, publish to build start: about 11.7k → 6.3k (an estimate:
+the first full read is kept, later reads are `changes_only` as the skill now says),
+plus the ~2.2k full read the old build prompt asked for. The demo's scripted reads in `seed.mjs` still read the whole plan, so its `read` row does not move.
+
 Model routing (which model plans, implements and reviews) changes the cost
 per token, not the count. It's covered by `models` in the config work, not
 here.

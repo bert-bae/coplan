@@ -20,20 +20,7 @@ No checks are configured (.coplan/config.json). Work out what to run from the re
 ## Summary
 Put a cache in front of the database.
 
-## Sections
-
-### [s1] Context
-Reads are slow.
-
-## Architecture
-
-### [d1] Components
-
-**Parts**
-- **API** `api` — service
-  Built by: [ ] client Cache client
-
-_Not connected to anything yet: API._
+_The design — its sections and architecture — is not quoted here: each task's harness_task_brief carries the parts it builds, with their decisions and connections. Call harness_plan_read only if you need the whole plan._
 
 ## Tasks (0/2 done)
 - [ ] client Cache client · ready

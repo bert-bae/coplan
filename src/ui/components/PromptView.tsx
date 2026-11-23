@@ -180,7 +180,7 @@ export function PromptView({
   const hidden = blocks.filter((b) => b.bookkeeping && !b.dropped).length;
   const left = droppedParts(blocks);
   let previous: BlockSource | null = null;
-  let droppedRun = false;
+  let droppedRun: 'fit' | 'known' | null = null;
   const shown: ReactNode[] = [];
   for (const row of rows) {
     const parts = [row.head, ...row.rest].filter((b) => showAll || !b.bookkeeping);
@@ -192,8 +192,9 @@ export function PromptView({
     const others = parts.slice(1).filter((b, i, all) => b.source.kind !== 'template' && !sameSource(b.source, first.source) && all.findIndex((x) => sameSource(x.source, b.source)) === i);
     previous = first.source;
     const dropped = Boolean(row.head.dropped);
-    const startsRun = dropped && !droppedRun;
-    droppedRun = dropped;
+    const run = dropped ? (row.head.known ? 'known' : 'fit') : null;
+    const startsRun = run !== null && run !== droppedRun;
+    droppedRun = run;
     shown.push(
       <div
         key={row.head.id}
@@ -207,7 +208,13 @@ export function PromptView({
           ))}
         </div>
         <div className="pv-text">
-          {startsRun && <span className="pv-left">Left out to fit — the agent reads this with harness_plan_read</span>}
+          {startsRun && (
+            <span className="pv-left">
+              {run === 'known'
+                ? 'Not sent again — the agent already has the design'
+                : 'Left out to fit — the agent reads this with harness_plan_read'}
+            </span>
+          )}
           {parts.map((b, i) => (
             <span
               key={b.id}

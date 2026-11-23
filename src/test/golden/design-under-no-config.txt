@@ -1,6 +1,6 @@
 [cc-harness] The design is confirmed for "Add a cache" — now break it into the task list.
 
-The user has reviewed the design in Coplan and confirmed it: the architecture, sections and summary below are locked. What you make now is the task list the build will follow. The user reviews it, then starts the build — by telling you to in chat, or by submitting the plan in Coplan. Follow the coplan skill's guidance on the task list:
+The user has reviewed the design in Coplan and confirmed it: the architecture, sections and summary are locked. What you make now is the task list the build will follow. The user reviews it, then starts the build — by telling you to in chat, or by submitting the plan in Coplan. Follow the coplan skill's guidance on the task list:
 
 1. Start from the tasks planned on the diagram. Break each into focused tasks: one objective, one area of the architecture, small enough to implement and review on its own. In `detail` put the objective, the acceptance criteria and what is out of scope; in `files` the files you expect to touch.
 2. Link them: `dependsOn` lists the tasks that must be done first (by id). Leave a task free of dependencies whenever it could be built alongside others — that is what lets the build run in parallel. A parent's dependencies hold for all its subtasks.
@@ -17,20 +17,7 @@ This repository has no .coplan/config.json with checks. Suggest /coplan-init to 
 ## Summary
 Put a cache in front of the database.
 
-## Sections
-
-### [s1] Context
-Reads are slow.
-
-## Architecture
-
-### [d1] Components
-
-**Parts**
-- **API** `api` — service
-  Built by: [ ] client Cache client
-
-_Not connected to anything yet: API._
+_The design — its sections and architecture — is the one you published and read back; anything the user changed since is listed above. It is not quoted again: call harness_plan_read if it is no longer in your context._
 
 ## Tasks (0/2 done)
 - [ ] client Cache client

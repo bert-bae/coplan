@@ -57,13 +57,15 @@ _The net effect of their edits — not each step, and not where boxes were moved
 - Changed bulk22 "Bulk task number 22 with a descriptive title": note "user note on bulk task 22".
 - …and more than fits here: harness_plan_read {changes_only: true} lists every change the user made.
 
-_The architecture (3 diagram(s)), the sections and each task's detail are too long to quote here: call harness_plan_read for them before you start._
+_Each task's detail is too long to quote here: harness_task_brief gives one task's, harness_plan_read the whole plan._
 
 ## Summary
 Put a read-through cache in front of the orders database.
 
 ### Why
 Reads are slow at peak.
+
+_The design — its sections and architecture — is not quoted here: each task's harness_task_brief carries the parts it builds, with their decisions and connections. Call harness_plan_read only if you need the whole plan._
 
 ## Tasks (1/64 done)
 - [ ] storage Storage layer
@@ -85,8 +87,6 @@ Reads are slow at peak.
 - [ ] bulk9 Bulk task number 9 with a descriptive title · after bulk8 — user note on bulk task 9
 - [ ] bulk10 Bulk task number 10 with a descriptive title · after bulk9 — user note on bulk task 10
 - [ ] bulk11 Bulk task number 11 with a descriptive title · after bulk10 — user note on bulk task 11
-- [ ] bulk12 Bulk task number 12 with a descriptive title · after bulk11 — user note on bulk task 12
-- [ ] bulk13 Bulk task number 13 with a descriptive title · after bulk12 — user note on bulk task 13
-- …and 46 more line(s): harness_plan_read lists every task.
+- …and 48 more line(s): harness_plan_read lists every task.
 
 _Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_

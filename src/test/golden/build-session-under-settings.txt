@@ -45,58 +45,7 @@ Put a read-through cache in front of the orders database.
 ### Why
 Reads are slow at peak.
 
-## Sections
-
-### [context] Context
-p95 read latency is 900ms at peak.
-
-##### Numbers
-- 40k reads/min
-
-### [risks] Risks _(edited by the user)_
-Stale reads after a write.
-A cold cache after deploys.
-
-### [empty] Open questions
-_(empty)_
-
-## Architecture
-
-### [d1] Components
-
-The read path.
-
-Entry points: Orders API. Data stores: Redis, Postgres.
-
-**Parts**
-- **Orders API** `api` — service
-  Serves orders.
-  Built by: [~] wire Wire into API
-- **Redis** `cache` — data store: managed
-  Hot orders.
-  Decisions:
-    Read-through, 10m TTL.
-  Built by: [x] client Cache client
-- **Postgres** `db` — data store
-  Source of truth.
-
-**Connections**
-- Orders API → Redis: get `api → cache`
-- Redis → Postgres: miss (dashed: optional, async or future) `cache → db`
-
-**Notes on the diagram**
-- Keep it simple (`n1`)
-  No write-behind.
-
-### [d2] Invalidation
-
-Queues: Event bus.
-
-**Parts**
-- **Event bus** `bus` — queue
-  Built by: [ ] inval Invalidation
-
-_Not connected to anything yet: Event bus._
+_The design — its sections and architecture — is not quoted here: each task's harness_task_brief carries the parts it builds, with their decisions and connections. Call harness_plan_read only if you need the whole plan._
 
 ## Tasks (1/4 done)
 - [ ] storage Storage layer

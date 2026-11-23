@@ -159,8 +159,8 @@ export function crowdedPlan(): Plan {
   ).plan;
 }
 
-/** The rich plan with one section too long to quote: cut to fit, with
- *  room left for every task line and the build order. */
+/** The rich plan with one section too long to quote: the read-back and
+ *  the export carry it whole; the prompts leave the design out anyway. */
 export function longPlan(): Plan {
   const plan = richConfirmed();
   plan.sections[0]!.body = 'Measured over a week of peak traffic. '.repeat(240);

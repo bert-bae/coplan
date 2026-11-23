@@ -52,6 +52,9 @@ export interface Block {
   /** Left out to fit the prompt into one message: not part of the text.
    *  The agent reads it with harness_plan_read instead. */
   dropped?: true;
+  /** Dropped because the agent already has it — the design it published
+   *  and read back — not to fit. Always with `dropped`. */
+  known?: true;
   /** Shortened to fit: `text` is what is sent. */
   cut?: true;
   /** The agent's bookkeeping — revisions, who edited what, how to reply,
@@ -185,7 +188,7 @@ export const setting = (key: SettingKey): BlockSource => ({ kind: 'setting', key
  * architecture (2 diagrams)". Empty when nothing was.
  */
 export function droppedParts(blocks: readonly Block[]): string[] {
-  const dropped = blocks.filter((b) => b.dropped);
+  const dropped = blocks.filter((b) => b.dropped && !b.known);
   if (!dropped.length) return [];
   // An item's own block is named after it: `section:risks`, `task:t3`.
   const items = (kind: Target['kind']) =>

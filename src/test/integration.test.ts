@@ -155,14 +155,14 @@ test('SessionStart records the repo and branch', async () => {
   assert.equal(s.plan, null);
 });
 
-test('publishing returns the plan as Claude will read it, with its ids', async () => {
+test('publishing confirms it without echoing back the plan Claude just wrote', async () => {
   const res = await mcp('publish', PLAN);
   assert.equal(res['ok'], true);
   const text = String(res['text']);
   assert.match(text, /Published "Add a cache"/);
   assert.match(text, /Tell them in chat/);
-  assert.match(text, /t2 Client/);
-  assert.match(text, /- API → Postgres `api → db`/);
+  assert.doesNotMatch(text, /t2 Client/);
+  assert.doesNotMatch(text, /- API → Postgres `api → db`/);
   assert.doesNotMatch(text, /token=/, 'the auth token never reaches the transcript');
   const s = await session();
   assert.equal(s.plan?.tasks.length, 4);

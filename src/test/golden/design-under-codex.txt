@@ -1,6 +1,6 @@
 [cc-harness] The design is confirmed for "Add a read-through cache" — now break it into the task list.
 
-The user has reviewed the design in Coplan and confirmed it: the architecture, sections and summary below are locked. What you make now is the task list the build will follow. The user reviews it, then starts the build — by telling you to in chat, or by submitting the plan in Coplan. Follow the coplan skill's guidance on the task list:
+The user has reviewed the design in Coplan and confirmed it: the architecture, sections and summary are locked. What you make now is the task list the build will follow. The user reviews it, then starts the build — by telling you to in chat, or by submitting the plan in Coplan. Follow the coplan skill's guidance on the task list:
 
 1. Start from the tasks planned on the diagram. Break each into focused tasks: one objective, one area of the architecture, small enough to implement and review on its own. In `detail` put the objective, the acceptance criteria and what is out of scope; in `files` the files you expect to touch.
 2. Link them: `dependsOn` lists the tasks that must be done first (by id). Leave a task free of dependencies whenever it could be built alongside others — that is what lets the build run in parallel. A parent's dependencies hold for all its subtasks.
@@ -42,58 +42,7 @@ Put a read-through cache in front of the orders database.
 ### Why
 Reads are slow at peak.
 
-## Sections
-
-### [context] Context
-p95 read latency is 900ms at peak.
-
-##### Numbers
-- 40k reads/min
-
-### [risks] Risks _(edited by the user)_
-Stale reads after a write.
-A cold cache after deploys.
-
-### [empty] Open questions
-_(empty)_
-
-## Architecture
-
-### [d1] Components
-
-The read path.
-
-Entry points: Orders API. Data stores: Redis, Postgres.
-
-**Parts**
-- **Orders API** `api` — service
-  Serves orders.
-  Built by: [~] wire Wire into API
-- **Redis** `cache` — data store: managed
-  Hot orders.
-  Decisions:
-    Read-through, 10m TTL.
-  Built by: [x] client Cache client
-- **Postgres** `db` — data store
-  Source of truth.
-
-**Connections**
-- Orders API → Redis: get `api → cache`
-- Redis → Postgres: miss (dashed: optional, async or future) `cache → db`
-
-**Notes on the diagram**
-- Keep it simple (`n1`)
-  No write-behind.
-
-### [d2] Invalidation
-
-Queues: Event bus.
-
-**Parts**
-- **Event bus** `bus` — queue
-  Built by: [ ] inval Invalidation
-
-_Not connected to anything yet: Event bus._
+_The design — its sections and architecture — is the one you published and read back; anything the user changed since is listed above. It is not quoted again: call harness_plan_read if it is no longer in your context._
 
 ## Tasks (1/4 done)
 - [ ] storage Storage layer
