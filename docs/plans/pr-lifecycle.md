@@ -155,14 +155,14 @@ existing checks (`pnpm run typecheck`, tests).
 
 ### Branch `coplan/pr-1-model` (base: `main`)
 
-**T1 — Config and types.** `pullRequests.watch` / `pullRequests.on` in
-`src/shared/config.ts` with validation (unknown keys/out-of-range reported
-like the rest), `PrEvent`, `PrCursor`, `PrAction` types, `Task.source`,
-`BranchState.watch {cursor, fixRounds, lastEventAt, checks, review}`.
-Docs in `docs/CONFIG.md`.
+**T1 — Config and types.** ✅ `pullRequests.watch` / `pullRequests.on` in
+`src/shared/project.ts` with validation (unknown keys/out-of-range reported
+like the rest), `PrEvent`, `PrCursor`, `PrAction` types. Docs in
+`docs/CONFIG.md`. (`BranchState.watch` moves to T4 and `Task.source` to T5,
+where they are first used.)
 *Done when:* config tests cover defaults, a full block, and each bad value.
 
-**T2 — Event normalization and dedup** (depends T1). Pure function: raw
+**T2 — Event normalization and dedup** ✅ (depends T1, `src/shared/prEvents.ts`). Pure function: raw
 GitHub API responses + cursor → events + new cursor; debounce batching.
 *Done when:* fixture tests (`src/test/golden`) for each event kind, a replayed
 poll yields nothing, a 12-comment review yields one batch.
@@ -230,11 +230,9 @@ configured.
 Webhook receiver, GitLab/Bitbucket providers, auto-merge by default,
 watching PRs Coplan didn't record.
 
-## Open questions
+## Decisions
 
-1. Default `wake` for Claude Code: `wait` (background command) or `queue`
-   (needs the user to type)? Proposed: `wait`.
-2. Should `run` actions ever run in the daemon when no agent is reachable
-   (e.g. an automerge command), or always through the agent? Proposed: always
-   the agent.
-3. Is `headless` (T11) wanted at all, given it runs an agent unattended?
+1. Default `wake` is `wait` (background `coplan pr wait`); agents without
+   background commands fall back to `queue`.
+2. `run` actions are always run by the agent, never by the daemon.
+3. `headless` (T11) stays optional and last; not yet confirmed as wanted.

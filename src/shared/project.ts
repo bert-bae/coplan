@@ -8,6 +8,7 @@ import { parseJsonc } from './jsonc.ts';
 import { GAP_RULES, GAP_SEVERITIES, type GapRule, type GapSeverity } from './check.ts';
 import { paths } from './paths.ts';
 import type { BlockSource } from './blocks.ts';
+import { PR_EVENT_KINDS, type PrEventKind } from './prEvents.ts';
 
 /**
  * A repository's own Coplan settings: `.coplan/config.json`, committed with
@@ -56,6 +57,48 @@ export type PrTool = (typeof PR_TOOLS)[number];
 /** When they are opened: as each branch is ready, once the user says, or never. */
 export const PR_OPEN = ['auto', 'ask', 'never'] as const;
 export type PrOpen = (typeof PR_OPEN)[number];
+
+/** What an event on a watched pull request can do, besides run a command. */
+export const PR_ACTIONS = ['fix', 'triage', 'rebase', 'advance', 'notify', 'ignore'] as const;
+export type PrBuiltinAction = (typeof PR_ACTIONS)[number];
+/** A built-in action, or a command the agent runs (the shape of a hook). */
+export type PrAction = PrBuiltinAction | CheckHook;
+/** How an agent whose turn has ended is reached when a batch is due. */
+export const PR_WAKE = ['wait', 'queue', 'headless'] as const;
+export type PrWake = (typeof PR_WAKE)[number];
+/** Whose comments and reviews may start work. */
+export const PR_TRUST = ['collaborators', 'author'] as const;
+
+/** Watching the pull requests a build recorded, until they merge. */
+export interface PrWatch {
+  enabled: boolean;
+  /** Seconds between polls. */
+  interval: number;
+  /** Seconds a pull request must be quiet before its events go as one batch. */
+  debounce: number;
+  /** `collaborators`, `author` (who opened it), or a list of logins. */
+  trust: (typeof PR_TRUST)[number] | string[];
+  /** Fix rounds per pull request before the user decides. */
+  maxFixRounds: number;
+  wake: PrWake;
+}
+
+export const DEFAULT_PR_WATCH: PrWatch = { enabled: true, interval: 60, debounce: 90, trust: 'collaborators', maxFixRounds: 3, wake: 'wait' };
+export const DEFAULT_PR_ON: Record<PrEventKind, PrAction[]> = {
+  ci_failed: ['fix'],
+  ci_passed: ['ignore'],
+  changes_requested: ['fix'],
+  approved: ['notify'],
+  review_comment: ['fix'],
+  comment: ['triage'],
+  merge_conflict: ['rebase'],
+  behind_base: ['ignore'],
+  merged: ['advance'],
+  closed: ['notify'],
+  reopened: ['notify'],
+};
+const PR_WATCH_KEYS = Object.keys(DEFAULT_PR_WATCH);
+const MAX_FIX_ROUNDS = 10;
 /** Where a repository or a user may add words to what the agent is told. */
 export const INSTRUCTION_POINTS = ['design', 'build', 'brief', 'review'] as const;
 export type InstructionPoint = (typeof INSTRUCTION_POINTS)[number];
@@ -86,6 +129,10 @@ export interface ProjectConfig {
     template?: string;
     /** That file, as the config names it. */
     templateFile?: string;
+    /** Watching each recorded pull request once it is open. */
+    watch: PrWatch;
+    /** What each event on a watched pull request does, in order. */
+    on: Record<PrEventKind, PrAction[]>;
   };
   /** The reviewer subagent: which model reviews, when not the agent's own. */
   review: { model?: string };
@@ -137,7 +184,7 @@ const MAX_ENV = 20;
 export const PROJECT_KEYS = ['mode', 'hooks', 'iric', 'branches', 'pullRequests', 'review', 'final', 'instructions', 'planCheck'];
 const IRIC_KEYS = ['review', 'parallel', 'maxRounds'];
 const BRANCH_KEYS = ['base', 'prefix'];
-const PR_KEYS = ['tool', 'open', 'template'];
+const PR_KEYS = ['tool', 'open', 'template', 'watch', 'on'];
 export const HOOK_KEYS = ['name', 'run', 'timeout', 'paths', 'optional', 'cwd', 'env'];
 
 /** A key the file sets that nothing reads is most often a typo of one that
@@ -155,7 +202,7 @@ export function emptyProjectConfig(): ProjectConfig {
     mode: 'tracked',
     settings: { ...DEFAULT_BUILD_SETTINGS },
     branches: {},
-    pullRequests: { tool: 'gh', open: 'ask' },
+    pullRequests: { tool: 'gh', open: 'ask', watch: { ...DEFAULT_PR_WATCH }, on: { ...DEFAULT_PR_ON } },
     review: {},
     final: { blocking: false },
     instructions: {},
@@ -259,7 +306,10 @@ interface Layer {
   hooks?: Partial<Record<HookStage, CheckHook[]>>;
   iric?: Record<string, unknown>;
   branches?: ProjectConfig['branches'];
-  pullRequests?: Partial<ProjectConfig['pullRequests']>;
+  pullRequests?: Partial<Omit<ProjectConfig['pullRequests'], 'watch' | 'on'>> & {
+    watch?: Partial<PrWatch>;
+    on?: Partial<Record<PrEventKind, PrAction[]>>;
+  };
   review?: ProjectConfig['review'];
   final?: Partial<ProjectConfig['final']>;
   instructions?: ProjectConfig['instructions'];
@@ -310,8 +360,14 @@ function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors' | 'warn
     from('iric', l.iric);
     Object.assign(out.branches, l.branches);
     from('branches', l.branches);
-    Object.assign(out.pullRequests, l.pullRequests);
-    from('pullRequests', l.pullRequests, ['tool', 'open', 'template']);
+    const { watch, on, ...prs } = l.pullRequests ?? {};
+    Object.assign(out.pullRequests, prs);
+    from('pullRequests', prs, ['tool', 'open', 'template']);
+    // Key by key here too: a repository setting one event keeps the user's others.
+    Object.assign(out.pullRequests.watch, watch);
+    from('pullRequests.watch', watch);
+    Object.assign(out.pullRequests.on, on);
+    from('pullRequests.on', on);
     Object.assign(out.review, l.review);
     from('review', l.review);
     Object.assign(out.final, l.final);
@@ -412,7 +468,7 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
     }
   }
 
-  const prs = section('pullRequests', '{ "tool", "open", "template" }');
+  const prs = section('pullRequests', '{ "tool", "open", "template", "watch", "on" }');
   if (prs) {
     unknownKeys(prs, PR_KEYS, 'pullRequests.', local);
     layer.pullRequests = {};
@@ -428,6 +484,14 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
         // The repository's by its path in it; the user's own by where it is.
         layer.pullRequests.templateFile = ctx.global ? path.join(ctx.base!, (prs['template'] as string).trim()) : (prs['template'] as string).trim();
       }
+    }
+    if (prs['watch'] !== undefined) {
+      if (isRecord(prs['watch'])) layer.pullRequests.watch = parseWatch(prs['watch'], local);
+      else local.push(`"pullRequests.watch" must be an object: { ${PR_WATCH_KEYS.map((k) => `"${k}"`).join(', ')} }.`);
+    }
+    if (prs['on'] !== undefined) {
+      if (isRecord(prs['on'])) layer.pullRequests.on = parseOn(prs['on'], local, ctx.base, notes);
+      else local.push('"pullRequests.on" must map an event (ci_failed, review_comment, …) to an action or a list of them.');
     }
   }
 
@@ -569,64 +633,120 @@ function parseHooks(list: unknown, stage: string, errors: string[], root: string
   const items = Array.isArray(list) ? list : [list];
   const out: CheckHook[] = [];
   items.slice(0, MAX_HOOKS).forEach((item, i) => {
-    const where = `hooks.${stage}[${i}]`;
-    const rec = typeof item === 'string' ? { run: item } : item && typeof item === 'object' ? (item as Record<string, unknown>) : null;
-    const run = typeof rec?.['run'] === 'string' ? rec['run'].trim() : '';
-    if (!rec || !run) {
-      errors.push(`"${where}" needs a command: a string, or { "name", "run" }.`);
-      return;
-    }
-    if (typeof item !== 'string') unknownKeys(rec, HOOK_KEYS, `${where}.`, errors);
-    let name = typeof rec['name'] === 'string' && rec['name'].trim() ? rec['name'].trim().slice(0, MAX_HOOK_NAME) : nameFor(run);
-    for (let n = 2; out.some((h) => h.name === name); n++) name = `${name.replace(/ #\d+$/, '')} #${n}`;
-    const hook: CheckHook = { name, run };
-    const timeout = rec['timeout'];
-    if (typeof timeout === 'number' && Number.isFinite(timeout) && timeout >= 1) {
-      // Too long is still long: the most allowed, said — not the default,
-      // which would stop a long suite early.
-      hook.timeout = Math.min(MAX_HOOK_TIMEOUT, Math.round(timeout));
-      if (timeout > MAX_HOOK_TIMEOUT) warnings.push(`"${where}.timeout" is at most ${MAX_HOOK_TIMEOUT} seconds; ${MAX_HOOK_TIMEOUT} is used.`);
-    } else if (timeout !== undefined) {
-      errors.push(`"${where}.timeout" must be seconds, from 1 to ${MAX_HOOK_TIMEOUT}; the default ${DEFAULT_HOOK_TIMEOUT} is used.`);
-    }
-    const rawPaths = rec['paths'];
-    const paths = Array.isArray(rawPaths) ? rawPaths.filter((p): p is string => typeof p === 'string' && p.trim() !== '') : [];
-    if (rawPaths !== undefined && (!Array.isArray(rawPaths) || paths.length !== rawPaths.length)) {
-      // A hook whose limit was lost would run for every task — or, worse, a
-      // limit read wrong would skip it: either way, say so.
-      errors.push(`"${where}.paths" must be a list of globs, e.g. ["src/**", "*.py"].`);
-    }
-    if (paths.length) hook.paths = paths.map((p) => p.trim());
-    if (rec['optional'] === true) hook.optional = true;
-    else if (rec['optional'] !== undefined && rec['optional'] !== false) errors.push(`"${where}.optional" must be true or false.`);
-    const cwd = rec['cwd'];
-    if (cwd !== undefined) {
-      let at: ReturnType<typeof folderAt> | undefined;
-      const rel = typeof cwd === 'string' ? cwd.trim().replace(/\\/g, '/').replace(/\/+$/, '') : '';
-      // Inside the repository: a check runs where its code is, nowhere else.
-      if (!rel || rel.startsWith('/') || /^[A-Za-z]:/.test(rel) || rel.split('/').includes('..')) {
-        errors.push(`"${where}.cwd" must be a folder inside the repository, e.g. "packages/api".`);
-      } else if (root && (at = folderAt(path.join(root, rel))) !== 'folder') {
-        // Kept: run anywhere else, it would pass without checking what it is for.
-        warnings.push(
-          at === 'file'
-            ? `"${where}.cwd" names ${rel}, which is a file, not a folder: the hook fails until it is one.`
-            : `"${where}.cwd" names ${rel}, which does not exist yet: the hook checks changes under it, so it runs once there are some — and fails while the folder is missing.`,
-        );
-        hook.cwd = rel;
-      } else if (rel !== '.') hook.cwd = rel;
-    }
-    const env = rec['env'];
-    if (env !== undefined) {
-      const entries = env && typeof env === 'object' && !Array.isArray(env) ? Object.entries(env as Record<string, unknown>) : null;
-      const good = entries?.filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && typeof v === 'string') ?? [];
-      if (!entries || good.length !== entries.length) errors.push(`"${where}.env" must map variable names to text, e.g. { "NODE_ENV": "test" }.`);
-      if (good.length > MAX_ENV) warnings.push(`"${where}.env" sets more than ${MAX_ENV} variables; the rest are ignored.`);
-      if (good.length) hook.env = Object.fromEntries(good.slice(0, MAX_ENV)) as Record<string, string>;
-    }
+    const hook = parseHook(item, `hooks.${stage}[${i}]`, errors, root, warnings);
+    if (!hook) return;
+    for (let n = 2; out.some((h) => h.name === hook.name); n++) hook.name = `${hook.name.replace(/ #\d+$/, '')} #${n}`;
     out.push(hook);
   });
   if (items.length > MAX_HOOKS) warnings.push(`"hooks.${stage}" has more than ${MAX_HOOKS} commands; the rest are ignored.`);
+  return out;
+}
+
+/** One hook: a command, or `{ name, run, … }`; null, said, when it has no command. */
+function parseHook(item: unknown, where: string, errors: string[], root: string | null, warnings: string[]): CheckHook | null {
+  const rec = typeof item === 'string' ? { run: item } : item && typeof item === 'object' ? (item as Record<string, unknown>) : null;
+  const run = typeof rec?.['run'] === 'string' ? rec['run'].trim() : '';
+  if (!rec || !run) {
+    errors.push(`"${where}" needs a command: a string, or { "name", "run" }.`);
+    return null;
+  }
+  if (typeof item !== 'string') unknownKeys(rec, HOOK_KEYS, `${where}.`, errors);
+  const name = typeof rec['name'] === 'string' && rec['name'].trim() ? rec['name'].trim().slice(0, MAX_HOOK_NAME) : nameFor(run);
+  const hook: CheckHook = { name, run };
+  const timeout = rec['timeout'];
+  if (typeof timeout === 'number' && Number.isFinite(timeout) && timeout >= 1) {
+    // Too long is still long: the most allowed, said — not the default,
+    // which would stop a long suite early.
+    hook.timeout = Math.min(MAX_HOOK_TIMEOUT, Math.round(timeout));
+    if (timeout > MAX_HOOK_TIMEOUT) warnings.push(`"${where}.timeout" is at most ${MAX_HOOK_TIMEOUT} seconds; ${MAX_HOOK_TIMEOUT} is used.`);
+  } else if (timeout !== undefined) {
+    errors.push(`"${where}.timeout" must be seconds, from 1 to ${MAX_HOOK_TIMEOUT}; the default ${DEFAULT_HOOK_TIMEOUT} is used.`);
+  }
+  const rawPaths = rec['paths'];
+  const paths = Array.isArray(rawPaths) ? rawPaths.filter((p): p is string => typeof p === 'string' && p.trim() !== '') : [];
+  if (rawPaths !== undefined && (!Array.isArray(rawPaths) || paths.length !== rawPaths.length)) {
+    // A hook whose limit was lost would run for every task — or, worse, a
+    // limit read wrong would skip it: either way, say so.
+    errors.push(`"${where}.paths" must be a list of globs, e.g. ["src/**", "*.py"].`);
+  }
+  if (paths.length) hook.paths = paths.map((p) => p.trim());
+  if (rec['optional'] === true) hook.optional = true;
+  else if (rec['optional'] !== undefined && rec['optional'] !== false) errors.push(`"${where}.optional" must be true or false.`);
+  const cwd = rec['cwd'];
+  if (cwd !== undefined) {
+    let at: ReturnType<typeof folderAt> | undefined;
+    const rel = typeof cwd === 'string' ? cwd.trim().replace(/\\/g, '/').replace(/\/+$/, '') : '';
+    // Inside the repository: a check runs where its code is, nowhere else.
+    if (!rel || rel.startsWith('/') || /^[A-Za-z]:/.test(rel) || rel.split('/').includes('..')) {
+      errors.push(`"${where}.cwd" must be a folder inside the repository, e.g. "packages/api".`);
+    } else if (root && (at = folderAt(path.join(root, rel))) !== 'folder') {
+      // Kept: run anywhere else, it would pass without checking what it is for.
+      warnings.push(
+        at === 'file'
+          ? `"${where}.cwd" names ${rel}, which is a file, not a folder: the hook fails until it is one.`
+          : `"${where}.cwd" names ${rel}, which does not exist yet: the hook checks changes under it, so it runs once there are some — and fails while the folder is missing.`,
+      );
+      hook.cwd = rel;
+    } else if (rel !== '.') hook.cwd = rel;
+  }
+  const env = rec['env'];
+  if (env !== undefined) {
+    const entries = env && typeof env === 'object' && !Array.isArray(env) ? Object.entries(env as Record<string, unknown>) : null;
+    const good = entries?.filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && typeof v === 'string') ?? [];
+    if (!entries || good.length !== entries.length) errors.push(`"${where}.env" must map variable names to text, e.g. { "NODE_ENV": "test" }.`);
+    if (good.length > MAX_ENV) warnings.push(`"${where}.env" sets more than ${MAX_ENV} variables; the rest are ignored.`);
+    if (good.length) hook.env = Object.fromEntries(good.slice(0, MAX_ENV)) as Record<string, string>;
+  }
+  return hook;
+}
+
+function parseWatch(rec: Record<string, unknown>, errors: string[]): Partial<PrWatch> {
+  unknownKeys(rec, PR_WATCH_KEYS, 'pullRequests.watch.', errors);
+  const out: Partial<PrWatch> = {};
+  if (typeof rec['enabled'] === 'boolean') out.enabled = rec['enabled'];
+  else if (rec['enabled'] !== undefined) errors.push('"pullRequests.watch.enabled" must be true or false.');
+  const whole = (key: 'interval' | 'debounce' | 'maxFixRounds', lo: number, hi: number) => {
+    const v = rec[key];
+    if (v === undefined) return;
+    if (typeof v === 'number' && Number.isInteger(v) && v >= lo && v <= hi) out[key] = v;
+    else errors.push(`"pullRequests.watch.${key}" must be a whole number from ${lo} to ${hi}; ${JSON.stringify(v)} is not, so it is ignored.`);
+  };
+  whole('interval', 30, 3600);
+  whole('debounce', 0, 3600);
+  whole('maxFixRounds', 1, MAX_FIX_ROUNDS);
+  const wake = oneOf(rec['wake'], PR_WAKE, 'pullRequests.watch.wake', errors);
+  if (wake) out.wake = wake;
+  const trust = rec['trust'];
+  if (typeof trust === 'string' && (PR_TRUST as readonly string[]).includes(trust)) out.trust = trust as PrWatch['trust'];
+  else if (Array.isArray(trust) && trust.length && trust.every((t) => typeof t === 'string' && /^[A-Za-z0-9-]{1,39}(\[bot\])?$/.test(t))) out.trust = trust as string[];
+  else if (trust !== undefined) errors.push(`"pullRequests.watch.trust" must be ${PR_TRUST.join(' or ')}, or a list of logins.`);
+  return out;
+}
+
+function parseOn(rec: Record<string, unknown>, errors: string[], root: string | null, warnings: string[]): Partial<Record<PrEventKind, PrAction[]>> {
+  const out: Partial<Record<PrEventKind, PrAction[]>> = {};
+  for (const [event, value] of Object.entries(rec)) {
+    if (!(PR_EVENT_KINDS as readonly string[]).includes(event)) {
+      errors.push(`"pullRequests.on.${event}" is not an event: use ${PR_EVENT_KINDS.join(', ')}.`);
+      continue;
+    }
+    const items = Array.isArray(value) ? value : [value];
+    const actions: PrAction[] = [];
+    items.slice(0, MAX_HOOKS).forEach((item, i) => {
+      const where = `pullRequests.on.${event}${Array.isArray(value) ? `[${i}]` : ''}`;
+      if (typeof item === 'string') {
+        // A bare string is an action; a command is spelt { "run" }, so a typo is not run as one.
+        const action = oneOf(item, PR_ACTIONS, where, errors);
+        if (action) actions.push(action);
+      } else if (isRecord(item)) {
+        const hook = parseHook(item, where, errors, root, warnings);
+        if (hook) actions.push(hook);
+      } else {
+        errors.push(`"${where}" must be an action (${PR_ACTIONS.join(', ')}) or a command { "run" }.`);
+      }
+    });
+    out[event as PrEventKind] = actions;
+  }
   return out;
 }
 
