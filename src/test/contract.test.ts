@@ -156,15 +156,21 @@ test('every harness_plan_edit example passes a list of ops, each with only its o
   }
 });
 
-test('the harness_plan_edit schema offers exactly the fields the daemon accepts', () => {
+const opItem = () => {
   const tool = toolOf('harness_plan_edit')!;
-  const item = (tool.inputSchema['properties'] as Record<string, { items: Record<string, unknown> }>)['ops']!.items;
+  assert.deepEqual((tool.inputSchema['properties'] as Record<string, { items: unknown }>)['ops']!.items, { $ref: '#/$defs/op' });
+  return (tool.inputSchema['$defs'] as Record<string, Record<string, unknown>>)['op']!;
+};
+
+test('the harness_plan_edit schema offers exactly the fields the daemon accepts', () => {
+  const item = opItem();
   const props = item['properties'] as Record<string, { enum?: string[] }>;
-  assert.deepEqual(props['op']!.enum, [...AGENT_OPS]);
-  for (const op of AGENT_OPS) assert.ok(op in OP_FIELDS, `${op} is offered but the daemon has no field list for it`);
+  // What an agent makes directly, and what a proposal carries (inside `propose`).
+  assert.deepEqual(props['op']!.enum, [...new Set([...AGENT_OPS, ...PROPOSAL_EDIT_OPS])]);
+  for (const op of props['op']!.enum!) assert.ok(op in OP_FIELDS, `${op} is offered but the daemon has no field list for it`);
   // Progress (status, stage, checks) is reported through harness_task_update only.
   const union = new Set(
-    AGENT_OPS.flatMap((op) => (OP_FIELDS[op] as readonly string[]).filter((f) => op !== 'upsert_task' || !(PROGRESS_FIELDS as readonly string[]).includes(f))),
+    props['op']!.enum!.flatMap((op) => (OP_FIELDS[op as keyof typeof OP_FIELDS] as readonly string[]).filter((f) => op !== 'upsert_task' || !(PROGRESS_FIELDS as readonly string[]).includes(f))),
   );
   assert.deepEqual(
     Object.keys(props)
@@ -175,29 +181,20 @@ test('the harness_plan_edit schema offers exactly the fields the daemon accepts'
   assert.equal(item['additionalProperties'], false);
 });
 
-test('harness_plan_propose offers the edits a proposal may carry, and the daemon takes them', () => {
-  const tool = toolOf('harness_plan_propose')!;
-  const item = (tool.inputSchema['properties'] as Record<string, { items: Record<string, unknown> }>)['ops']!.items;
-  const props = item['properties'] as Record<string, { enum?: string[] }>;
-  assert.deepEqual(props['op']!.enum, [...PROPOSAL_EDIT_OPS]);
+test('a proposal carries what the daemon says it may, and set_checks is only ever proposed (#54)', () => {
+  assert.ok(AGENT_OPS.includes('propose' as never));
+  assert.ok(!(AGENT_OPS as readonly string[]).includes('set_checks'), 'never an edit the agent makes');
   assert.deepEqual([...PROPOSAL_EDIT_OPS].sort(), [...PROPOSABLE_OPS].sort(), 'the tool and the daemon agree on what a proposal carries');
   assert.deepEqual(OP_FIELDS.propose, ['title', 'reason', 'ops']);
-  assert.deepEqual((tool.inputSchema['required'] as string[]).sort(), ['ops', 'reason', 'title']);
-});
-
-test("a task's checks are only ever proposed: set_checks is in harness_plan_propose, with its fields, and not in harness_plan_edit (#54)", () => {
-  const item = (name: string) => ((toolOf(name)!.inputSchema['properties'] as Record<string, { items: Record<string, unknown> }>)['ops']!.items['properties'] as Record<string, { enum?: string[] }>);
-  assert.ok(item('harness_plan_propose')['op']!.enum!.includes('set_checks'));
-  assert.ok(item('harness_plan_propose')['add'] && item('harness_plan_propose')['skip'], 'its fields are offered');
   assert.deepEqual(OP_FIELDS.set_checks, ['id', 'add', 'skip']);
-  assert.ok(!item('harness_plan_edit')['op']!.enum!.includes('set_checks'), 'never offered as an edit the agent makes');
-  assert.ok(!('add' in item('harness_plan_edit')) && !('skip' in item('harness_plan_edit')));
-  assert.match(toolOf('harness_plan_propose')!.description, /set_checks \{id, add\?, skip\?\}/);
+  const props = opItem()['properties'] as Record<string, unknown>;
+  assert.ok(props['add'] && props['skip'] && props['reason'], 'its fields are offered');
+  assert.match(toolOf('harness_plan_edit')!.description, /set_checks/);
 });
 
 test('the harness_plan_edit description names every op it offers', () => {
   const description = toolOf('harness_plan_edit')!.description;
-  for (const op of AGENT_OPS) assert.match(description, new RegExp(`\\b${op} \\{`), `${op} is not described`);
+  for (const op of AGENT_OPS) assert.match(description, new RegExp(`\\b${op}\\b`), `${op} is not described`);
 });
 
 test('every tool is named in the coplan skill\'s tool list and in the README\'s table', () => {

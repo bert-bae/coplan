@@ -119,6 +119,7 @@ export const AGENT_OPS = [
   'remove',
   'report',
   'withdraw_proposal',
+  'propose',
 ] as const;
 
 /** The edits a proposal may carry: the daemon's own list, so the two cannot drift. */
@@ -173,6 +174,29 @@ const OP_PROPERTIES: Record<string, unknown> = {
     description: 'report: the final checks, as they came out.',
     items: { type: 'object', properties: { name: { type: 'string' }, ok: { type: 'boolean' }, note: { type: 'string' } }, required: ['name', 'ok'] },
   },
+  reason: { type: 'string', description: 'propose: why the plan is better with it. Markdown.' },
+  ops: {
+    type: 'array',
+    minItems: 1,
+    maxItems: MAX_PROPOSAL_OPS,
+    items: { $ref: '#/$defs/op' },
+    description: 'propose: the edits proposed (content ops and set_checks).',
+  },
+  add: {
+    type: 'array',
+    description: 'set_checks: checks of the task\'s own, replacing those it had ([] clears them).',
+    items: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        run: { type: 'string', description: 'The command, run from the repository root.' },
+        stage: { type: 'string', enum: ['implement', 'review'], description: 'Default "review": done waits on it.' },
+        optional: { type: 'boolean' },
+      },
+      required: ['run'],
+    },
+  },
+  skip: { ...STR_LIST, description: 'set_checks: names of the repository\'s checks the task does not run ([] clears it).' },
   resolved: { type: 'boolean' },
   kind: {
     type: 'string',
@@ -192,33 +216,6 @@ const OP_PROPERTIES: Record<string, unknown> = {
   },
 };
 
-/**
- * What a proposal's edits can carry besides harness_plan_edit's: the
- * fields of set_checks, which only the user applies — so the agent only
- * ever proposes it (#54).
- */
-const PROPOSE_PROPERTIES: Record<string, unknown> = {
-  ...OP_PROPERTIES,
-  add: {
-    type: 'array',
-    description: 'set_checks: checks of the task\'s own, replacing those it had ([] clears them).',
-    items: {
-      type: 'object',
-      properties: {
-        name: { type: 'string' },
-        run: { type: 'string', description: 'The command, run from the repository root.' },
-        stage: { type: 'string', enum: ['implement', 'review'], description: 'Default "review": done waits on it.' },
-        optional: { type: 'boolean' },
-      },
-      required: ['run'],
-    },
-  },
-  skip: {
-    ...STR_LIST,
-    description: 'set_checks: names of the repository\'s checks the task does not run, replacing the list ([] clears it).',
-  },
-};
-
 export const TOOLS: ToolDef[] = [
   {
     name: 'harness_plan_publish',
@@ -228,8 +225,11 @@ export const TOOLS: ToolDef[] = [
       'task ideas linked to the boxes they build (the task list comes after the user confirms the design). mode "tasklist": ' +
       'straight to tasks, for work in one contained area. Replaces the plan; items keep comments, statuses and layout ' +
       'when you keep their ids. Refused if the user changed the plan since you last read it, once the design is confirmed ' +
-      '(use harness_tasks_publish), and during a build. Does not wait: tell the user in chat it is ready. Ask with ' +
-      'AskUserQuestion only for what cannot be undone; decide the rest and write it into the plan.',
+      '(use harness_tasks_publish), and during a build. ' +
+      'Tasks here are the planned tasks, shown on the boxes that link them. Ask the user, with AskUserQuestion in ' +
+      'chat (never in the plan), only when a decision cannot be undone or reaches outside this session; decide the ' +
+      "rest and write it into the plan (a box's notes, a section), where they can change it. Does not wait for the " +
+      'user: afterwards, tell them in chat that the plan is ready.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -317,67 +317,37 @@ export const TOOLS: ToolDef[] = [
     endpoint: 'edit',
     description:
       'Make targeted changes to the plan, all or nothing: {ops: [{op, ...fields}]}. Each field names the op(s) it ' +
-      'belongs to in its own description. Ops: set_meta, upsert_section|diagram|task|node|edge (omit id to add; nodes/edges ' +
-      'on a diagram replace the current ones, kept items keep their layout and text unless restated), move_task|section|diagram, ' +
-      'remove_node|edge, remove {kind, id}, comment {target, text} (comment rather than overwrite when unsure), reply, resolve, ' +
-      'report, withdraw_proposal. upsert_section|diagram|task take expect: the rev you read. To suggest rather than ' +
-      'change, use harness_plan_propose. Example: {ops: [{op: "reply", threadId: "c2", text: "Done."}]}. After the design ' +
-      'is confirmed only tasks, task links and comments change; after submit only upsert_task, comment, reply, resolve, report.',
+      'belongs to in its own description. Ops: set_meta, upsert_section, upsert_diagram, upsert_task, upsert_node, upsert_edge (omit id to add; nodes/edges ' +
+      'on a diagram replace the current ones, kept items keep their layout and text unless restated), move_task, move_section, move_diagram, ' +
+      'remove_node, remove_edge, remove {kind, id}, comment {target, text} (comment rather than overwrite when unsure), reply, resolve, ' +
+      'report, withdraw_proposal. upsert_section, upsert_diagram and upsert_task take expect: the rev you read. ' +
+      'propose {title, reason, ops} (alone in the call) suggests a change instead of making it: the user accepts ' +
+      '(applied as theirs) or rejects it, and you hear the answer on your next read. Use it to flag a flaw you found, and ' +
+      'for what a confirmed or submitted plan no longer lets you change. Refused if it would not apply now. A task\'s ' +
+      'checks are the user\'s call, so only proposed: ops [{op: "set_checks", id, add?, skip?}]. ' +
+      'Examples: {ops: [{op: "reply", threadId: "c2", text: "Done."}]}; {ops: [{op: "propose", title: "Write-through cache", ' +
+      'reason: "Reads go stale.", ops: [{op: "upsert_node", diagramId: "d1", id: "cache", description: "Every write updates it."}]}]}. ' +
+      'After the design is confirmed only tasks, task links and comments change; after submit only upsert_task, comment, ' +
+      'reply, resolve, report.',
     inputSchema: {
       type: 'object',
       properties: {
-        ops: {
-          type: 'array',
-          minItems: 1,
-          items: {
-            type: 'object',
-            description: 'One edit: "op" plus the fields that op takes (see the tool description).',
-            properties: {
-              op: { type: 'string', enum: [...AGENT_OPS] },
-              ...OP_PROPERTIES,
-            },
-            required: ['op'],
-            additionalProperties: false,
-          },
-        },
+        ops: { type: 'array', minItems: 1, items: { $ref: '#/$defs/op' } },
       },
       required: ['ops'],
       additionalProperties: false,
-    },
-  },
-  {
-    name: 'harness_plan_propose',
-    endpoint: 'propose',
-    description:
-      'Suggest a change instead of making it: a batch of harness_plan_edit ops that waits for the user, who accepts ' +
-      '(applied as theirs) or rejects it with your reason beside it. Use it to flag a flaw you found, and for changes ' +
-      'a confirmed or submitted plan no longer lets you make. You hear the answer on your next read. Refused if it ' +
-      'would not apply now. A task\'s checks are the user\'s call, so only proposed: set_checks {id, add?, skip?}. ' +
-      'Example: {title: "Write-through cache", reason: "Reads go stale for the TTL.", ops: [{op: "upsert_node", ' +
-      'diagramId: "d1", id: "cache", description: "Every write updates it."}]}.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        title: { type: 'string', description: 'What it changes, in a few words.' },
-        reason: { type: 'string', description: 'Why the plan is better with it. Markdown.' },
-        ops: {
-          type: 'array',
-          minItems: 1,
-          maxItems: MAX_PROPOSAL_OPS,
-          items: {
-            type: 'object',
-            description: 'One edit, as in harness_plan_edit.',
-            properties: {
-              op: { type: 'string', enum: [...PROPOSAL_EDIT_OPS] },
-              ...PROPOSE_PROPERTIES,
-            },
-            required: ['op'],
-            additionalProperties: false,
+      $defs: {
+        op: {
+          type: 'object',
+          description: 'One edit: "op" plus the fields that op takes (see the tool description).',
+          properties: {
+            op: { type: 'string', enum: [...new Set([...AGENT_OPS, ...PROPOSAL_EDIT_OPS])] },
+            ...OP_PROPERTIES,
           },
+          required: ['op'],
+          additionalProperties: false,
         },
       },
-      required: ['title', 'reason', 'ops'],
-      additionalProperties: false,
     },
   },
   {

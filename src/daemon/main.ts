@@ -1748,7 +1748,18 @@ function buildRouter(deps: Deps): Router {
   };
 
   router.post('/mcp/:tool', async (ctx) => {
-    const body = await readJson<Record<string, unknown>>(ctx.req);
+    let body = await readJson<Record<string, unknown>>(ctx.req);
+    // A proposal rides harness_plan_edit as {op: "propose", title, reason, ops}: it is answered as the proposal it is.
+    let tool = ctx.params['tool'];
+    const sent = Array.isArray(body['ops']) ? (body['ops'] as PlanOp[]) : [];
+    if (tool === 'edit' && sent.some((o) => o?.op === 'propose')) {
+      if (sent.length !== 1) {
+        json(ctx.res, 200, { ok: false, text: '[cc-harness] Send a proposal on its own: {ops: [{op: "propose", title, reason, ops: […]}]}.' });
+        return;
+      }
+      body = { ...(sent[0] as unknown as Record<string, unknown>), sessionId: body['sessionId'], cwd: body['cwd'], pid: body['pid'] };
+      tool = 'propose';
+    }
     const session = resolveSession(ctx, body as { sessionId?: string; cwd?: string; pid?: number });
     if (!session) {
       const agentHeader = ctx.req.headers['x-harness-agent'];
@@ -1765,7 +1776,7 @@ function buildRouter(deps: Deps): Router {
     const reply = (ok: boolean, message: string) => json(ctx.res, 200, { ok, text: message });
 
     try {
-      switch (ctx.params['tool']) {
+      switch (tool) {
         case 'publish': {
           const { plan } = store.publishPlan(id, body as unknown as PlanInput);
           // Sticky: said once, on the first publish, it holds for the session.
