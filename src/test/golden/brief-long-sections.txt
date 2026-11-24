@@ -42,7 +42,7 @@ Review: checks only, no review (set on this task). At most 1 review round; anoth
 
 **Refine.** Fix what the review found, run the implement checks again, and go back to review.
 
-Report each step with harness_task_update {task_id: "docs", stage: "implement" | "review" | "refine", checks: [{name, ok, note}]}, and status "done" with a one-line note once the review passed. A subagent without the Coplan tools reports back to the agent that gave it this brief instead: what it changed, the checks and how they came out, and anything left.
+Report each step with harness_task_update {task_id: "docs", stage: "implement" | "review" | "refine", checks: [{name, ok, note}]}, and status "done" with a one-line note once the review passed. Handed this brief as a subagent or a child session, report back to the session that started you instead, never to Coplan or the user: what you changed, the checks and how they came out, any question, and anything left.
 
 ## Open comments on it and its design
 - planner _(on the plan)_: Proposal p1: Split the docs task

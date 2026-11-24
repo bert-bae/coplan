@@ -4,6 +4,17 @@
 
 ### Changes
 
+- **Runners: where a build's sessions start.** Set up your own places to build — `local`, `cloud`, `ssh` — as
+  `runners` in `coplan.json`, each with what it is for, how much it can take (`max`, `maxLarge`) and how a
+  session starts there. A task can ask for a runner; otherwise the parent picks by what each is for. The parent
+  records where each task runs with `harness_task_update {runner, session, size}`, which refuses an unknown or
+  full runner; `harness_task_next` shows each runner's load and the session on each task, and the board shows
+  it on the card.
+- **One parent session per build.** The session that runs a build is the only driver; every task built side by
+  side, reviewer, refine round and pull request fix runs in a subagent or child session started from it, so in
+  the Claude desktop app they all show under it, to expand and collapse. Each is handed the task's brief plus
+  what it cannot know (start commit, neighbouring work, decisions taken), reports back only to the parent, and
+  follow-on work goes back to the same child so its context carries over.
 - **Landing: from the build report to merged.** Once Claude records a pull request, Coplan follows it with your
   `gh` login (GitHub and Enterprise; check runs and commit statuses) and the plan shows **Review · pull requests
   open** until every one is merged or closed. Failing CI, reviews and comments from people the repository trusts

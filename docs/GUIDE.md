@@ -545,7 +545,9 @@ one viewer with three tabs:
   while you design, the build prompt once the design is confirmed. Once
   you submit, the prompt as it was sent; *View prompt* opens it there too.
 - **Task brief** — one task's brief, exactly as `harness_task_brief` gives
-  it to the agent that builds it, and to the subagent it hands the task to.
+  it to the agent that builds it, and to the subagent or child session it
+  hands the task to. That session is started from the build's own, shows
+  under it in the Claude desktop app, and reports back only to it.
   *Brief*, on every task in the outline and *By box*, in each box's task
   list on the canvas, and on every card on the board, opens it for that
   task.

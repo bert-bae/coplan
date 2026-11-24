@@ -67,18 +67,84 @@ Repeat until `harness_task_next` says every task is done:
    `harness_task_update {task_id, status: "done", note: "<one line: what changed>"}`.
    The reply says what became ready. Go to 1.
 
-## Working in parallel
+## Working in parallel: one parent session
 
-Use subagents, worktrees and parallel work when your agent has them and
-they help: a large plan of independent tasks goes faster side by side, and a
-large task kept out of your own context leaves room for the rest. Without
-them, build ready tasks one after another — the order is the same.
+The session running the build is the **parent**, and the only driver: it
+picks tasks, briefs them, reports to Coplan and talks to the user. Every
+other piece of work — a task built side by side, a reviewer, a refine
+round, a pull request fix, a follow-up — runs in a session started *from*
+the parent, never in one the user has to open, so it all stays linked to it:
 
-If you hand a task to a subagent, give it the task's brief as it is; the
-brief says where its job ends. Ask it to stay inside that scope, run the
-implement checks, and report back to you rather than to Coplan: the files
-it changed, the commands it ran and how they came out, and anything left
-open. You report its status.
+- **Claude Code** — a subagent (the Agent tool), in the background
+  (`run_in_background: true`) for tasks built side by side. In the Claude
+  desktop app each shows under the parent session, where it expands and
+  collapses.
+- **Claude Code in the cloud** — the same subagents. Where a task needs a
+  machine of its own (a long task, its own branch checked out apart),
+  start a child with `create_session` from the parent: it is listed under
+  the parent (`list_sessions {children: true}`) and in the desktop app.
+- **Codex, Cursor** — their own subagents where they have them.
+
+Without any, build ready tasks one after another in the parent — the order
+is the same. Keep the tree one level deep: a child does not start children
+of its own; it asks the parent, which starts them. So the parent starts the
+reviewer of a task, not the task's implementer.
+
+**Handing off.** A new session knows only what you give it. Give it:
+
+- the task's `harness_task_brief`, as it is — it says where its job ends;
+- what the brief cannot know: the branch and commit to start from, what
+  tasks in progress beside it are touching, decisions already taken (from
+  task notes), and for a cloud child, the parent's session id to report to
+  (`send_message`);
+- what to send back: the files it changed, the commands it ran and how they
+  came out, any question for the user, and anything left open — short.
+
+A child reports to the parent, never to Coplan, and puts its questions in
+that report: the parent reports its status, and takes any question on. Work that follows on
+from a child's — its refine round, a fix to the branch it built — goes back
+to that child (SendMessage, or `send_message` for a cloud child) so its
+context carries over, rather than to a fresh session. A fresh session is for
+new work, or a reviewer, which must not have written the change.
+
+### Runners: where each session starts
+
+When the user has set up runners (`runners` in their `coplan.json` or the
+repository's config), `harness_task_next` lists them under **Runners**, each
+with what it is for (`use`), how it starts sessions (`via`) and its load.
+Choose where each task goes:
+
+1. **Asked for** — a task that names a runner, or one the user names in
+   chat, goes there. Starting it elsewhere is refused unless the user said
+   so (`user_approved`).
+2. **By profile** — otherwise, match the task to what each runner is for:
+   long, heavy work that needs no watching to one meant for that; tests and
+   verification the user wants to reach quickly to one meant for that. Say
+   which you chose, and why, in the task's note.
+3. **By room** — a runner at its `max`, or its `maxLarge` for a large
+   task, refuses another; the refusal names the runners with room. Wait for
+   one to finish rather than overload it. The `default` runner takes what
+   fits nowhere else.
+
+Start the session by the runner's `via` — or its `start` command, when it
+has one, which wins:
+
+- **local** — a background subagent of the parent (above).
+- **cloud** — from a cloud parent, `create_session` with the runner's
+  `environment`, so the child is listed under the parent. From a local
+  parent, the runner's `start` command; without one, say so to the user
+  and pick another runner.
+- **ssh** — a background command: `ssh <host> 'cd <dir> && claude -p'`,
+  with the handoff on its stdin; its output is the child's report. Pull
+  the task's branch there first if it is not checked out. An ssh session is
+  not linked to the parent in the desktop app: the board is where it shows.
+
+Then record it, with the id you will reach it by (the subagent's, the
+session's, or the background command's) and whether it is large:
+`harness_task_update {task_id, status: "in_progress", stage: "implement", runner, session, size}`.
+The board shows it on the task's card, and `harness_task_next` shows each
+runner's load and which session runs what — read it there rather than keep
+it in your head.
 
 Where parallel tasks work:
 
