@@ -61,7 +61,7 @@ build. Publish the `.html` with your Artifact tool and give the user its link;
 publish the same file again after every change — an edit, a sign-off, the
 task list, a task done in the build — so the link stays current. With no
 Artifact tool, give them the `.md` path. Make their changes with
-`harness_plan_edit` (`harness_plan_propose` is refused: there is no page to
+`harness_plan_edit` (its `propose` op is refused: there is no page to
 accept it on) and record their sign-off with `harness_plan_advance`.
 
 **Without Coplan's tools** — its MCP server did not connect, or its tools
@@ -105,7 +105,7 @@ their word like a chat message: act on it, answer it, publish again.
   Their word is enough; there is no need to send them to Coplan to click.
 
 Coplan's tools are the MCP server `harness`: `harness_plan_publish`,
-`harness_plan_read`, `harness_plan_check`, `harness_plan_edit`, `harness_plan_propose`, `harness_plan_advance`, `harness_tasks_publish`,
+`harness_plan_read`, `harness_plan_check`, `harness_plan_edit`, `harness_plan_advance`, `harness_tasks_publish`,
 `harness_task_next`, `harness_task_brief`, `harness_task_update`, `harness_branch_update`, `harness_pr_events` and
 `harness_pr_event`. Your
 agent may show them with a prefix that names the server (in Claude Code,
@@ -236,8 +236,8 @@ arrow (`edge`, `"diagramId/edgeId"`). The user answers in the thread.
 
 When you know the change you would make and it is the user's to decide —
 a design flaw your audit found, a part the plan is missing, a task to
-split — **propose it** instead of making it: `harness_plan_propose {title,
-reason, ops}`, with the same edits as `harness_plan_edit`. The user sees it
+split — **propose it** instead of making it: `harness_plan_edit {ops: [{op: "propose",
+title, reason, ops}]}`, alone in the call, with the same edits as a normal call. The user sees it
 in Coplan beside what it changes, with your reason, and accepts it (the
 edits apply, as theirs) or rejects it. Nothing changes until they answer;
 `harness_plan_read` tells you how they did, once. Propose too once the
@@ -302,7 +302,7 @@ tree and nothing else):
 - **Its checks** are the repository's. Which checks a task runs is the
   user's alone: when one should skip a check (a docs-only task, the test
   suite) or needs one of its own (a migration, `pnpm db:check`), propose it —
-  `harness_plan_propose {title, reason, ops: [{op: "set_checks", id, skip: ["tests"]}]}`
+  `harness_plan_edit {ops: [{op: "propose", title, reason, ops: [{op: "set_checks", id, skip: ["tests"]}]}]}`
   (or `add: [{name, run, stage}]`) — and the user accepts it in Coplan.
 
 The read-back then shows the **build order** (steps of tasks that can run

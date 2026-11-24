@@ -35,7 +35,7 @@ test('the user sets a task\'s checks; the agent cannot — it proposes, and the 
   assert.deepEqual(p.tasks.find((t) => t.id === 'docs')?.skipChecks, ['tests']);
   assert.match(p.changes.at(-1)!.summary, /set the checks of "Document it": skips tests/);
 
-  assert.throws(() => set(p, { id: 'docs', skip: [] }, 'claude'), /Which checks a task runs is the user's to set[\s\S]*harness_plan_propose/);
+  assert.throws(() => set(p, { id: 'docs', skip: [] }, 'claude'), /Which checks a task runs is the user's to set[\s\S]*harness_plan_edit/);
   // Proposed, it waits for the user; accepted, it is theirs.
   p = applyOps(p, [{ op: 'propose', title: 'Check the migration', reason: 'It can lose data.', ops: [{ op: 'set_checks', id: 'migrate', add: [{ name: 'db:check', run: 'pnpm db:check' }] }] }], 'claude').plan;
   assert.equal(p.tasks.find((t) => t.id === 'migrate')?.addChecks, undefined, 'nothing changes until the user answers');

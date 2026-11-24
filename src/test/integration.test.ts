@@ -989,6 +989,13 @@ test('an audit proposes instead of overwriting: the user answers in Coplan, and 
   assert.ok(!(await sessionFor(id)).plan!.diagrams[0]!.nodes.some((n) => n.id === 'cache'), 'nothing changed');
   assert.match(String((await mcpFor(id, 'read', { changes_only: true }))['text']), /p1 "Add a cache in front of Postgres" — waiting on the user \(2 edits\)/);
 
+  // The same proposal rides harness_plan_edit, alone in its call.
+  const viaEdit = await mcpFor(id, 'edit', { ops: [{ op: 'propose', title: 'Via edit', reason: 'Same door.', ops: [{ op: 'remove_node', diagramId: 'd1', id: 'db' }] }] });
+  assert.match(String(viaEdit['text']), /Proposed p2 "Via edit" \(1 edit\)/);
+  const mixed = await mcpFor(id, 'edit', { ops: [{ op: 'propose', title: 'x', reason: 'y', ops: [{ op: 'remove_node', diagramId: 'd1', id: 'db' }] }, { op: 'set_meta', title: 'Z' }] });
+  assert.equal(mixed['ok'], false);
+  await mcpFor(id, 'edit', { ops: [{ op: 'withdraw_proposal', id: 'p2' }] });
+
   // Only the user answers it.
   const self = await mcpFor(id, 'edit', { ops: [{ op: 'accept_proposal', id: 'p1' }] });
   assert.equal(self['ok'], false);
@@ -1002,8 +1009,8 @@ test('an audit proposes instead of overwriting: the user answers in Coplan, and 
 
   // A second one, rejected with a reason.
   await mcpFor(id, 'propose', { title: 'Drop Postgres', reason: 'Simpler.', ops: [{ op: 'remove_node', diagramId: 'd1', id: 'db' }] });
-  await opsOn(id, [{ op: 'reject_proposal', id: 'p2', note: 'We need durability.' }]);
-  assert.match(String((await mcpFor(id, 'read', { changes_only: true }))['text']), /p2 "Drop Postgres" — \*\*rejected\*\* by the user: We need durability\./);
+  await opsOn(id, [{ op: 'reject_proposal', id: 'p3', note: 'We need durability.' }]);
+  assert.match(String((await mcpFor(id, 'read', { changes_only: true }))['text']), /p3 "Drop Postgres" — \*\*rejected\*\* by the user: We need durability\./);
 });
 
 test('the build gates hold however the agent reports progress, and only the user lifts them', async () => {
@@ -1740,7 +1747,7 @@ test('a revision request is queued in the page, carried by the next message once
 
   const preview = await post<RevisionPreview>(`/api/session/${id}/plan/revisions/prompt`, { note: 'Keep it small.' });
   assert.match(preview.prompt, /^\[cc-harness\] Revise the plan "Add a cache" — the user wants you to act on their open comments\./);
-  assert.match(preview.prompt, /harness_plan_propose/);
+  assert.match(preview.prompt, /propose op/);
   assert.match(preview.prompt, /> Keep it small\./);
   assert.match(preview.prompt, /## Open comments \(2\)/);
   // Each comment on what it is about, named as the read-back names it.

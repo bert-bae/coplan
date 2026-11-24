@@ -2190,7 +2190,7 @@ function stageOrThrow(value: unknown): IricStage {
 /** Why the agent cannot set a task's checks, and what it does instead. */
 const AGENT_SET_CHECKS =
   "Which checks a task runs is the user's to set: skipping one takes away part of the gate the task is held to. " +
-  'Propose it instead — harness_plan_propose {title, reason, ops: [{op: "set_checks", id, skip: ["tests"]}]} — ' +
+  'Propose it instead — harness_plan_edit {ops: [{op: "propose", title, reason, ops: [{op: "set_checks", id, skip: ["tests"]}]}]} — ' +
   'and the user accepts it in Coplan.';
 
 /** At most this many checks of its own per task, and skips. */

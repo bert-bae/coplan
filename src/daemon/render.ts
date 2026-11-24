@@ -928,7 +928,7 @@ export function revisionPrompt(plan: Plan, opts: { note?: string } = {}): Revisi
   b.add(
     'step-2',
     TEMPLATE,
-    "2. Where the change is the user's to decide, or the plan is locked against it, propose it with harness_plan_propose " +
+    "2. Where the change is the user's to decide, or the plan is locked against it, propose it with harness_plan_edit's propose op " +
       'instead of making it.',
   );
   b.add(

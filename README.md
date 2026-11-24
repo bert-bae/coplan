@@ -429,7 +429,7 @@ agent you choose. Nothing is downloaded at run time.
 
 | Part | What it is | Runs as | Lifetime |
 | --- | --- | --- | --- |
-| [MCP server](#the-mcp-server-harness) `harness` | Eleven tools the agent calls to publish, read, propose changes to, sign off and track the plan | `node dist/mcp/main.js`, over stdio | One per agent session, started by the agent |
+| [MCP server](#the-mcp-server-harness) `harness` | Twelve tools the agent calls to publish, read, propose changes to, sign off and track the plan | `node dist/mcp/main.js`, over stdio | One per agent session, started by the agent |
 | [Hooks](#hooks) | Seven lifecycle hooks in Claude Code and Codex, five in Cursor | `bin/coplan-hook-relay.sh` — `sh` and `curl` | About 20 ms per event |
 | [Daemon](#what-it-reads-writes-and-connects-to) | Local server: keeps the plans, serves the page | `node dist/daemon/main.js` | One per user. The first hook starts it; it exits after two idle hours |
 | [Skills](#skills) | `coplan`, `coplan-build`, `iric` | Instructions the agent loads | When the agent uses one |
@@ -470,15 +470,14 @@ they are named `mcp__plugin_coplan_harness__<tool>`.
 | Codex | [`mcp/codex.json`](mcp/codex.json) | `node ./dist/mcp/main.js`, from the plugin's folder | `COPLAN_AGENT=codex`; passes `CC_HARNESS_HOME` on | 20 s to start, 60 s per call |
 | Cursor | [`mcp/cursor.json`](mcp/cursor.json) | `node ${CURSOR_PLUGIN_ROOT}/dist/mcp/main.js` | `COPLAN_AGENT=cursor`, `COPLAN_WORKSPACE=${workspaceFolder}` | Cursor's defaults |
 
-The thirteen tools:
+The twelve tools:
 
 | Tool | Changes the plan? | What it does |
 | --- | --- | --- |
 | `harness_plan_publish` | Yes | Publish the whole plan. Items keep their comments, positions and statuses when their ids survive; refused while you have changes Claude hasn't read, so it can never overwrite your edits blind, and once you confirm the design (the task list then comes from `harness_tasks_publish`). |
 | `harness_plan_read` | No — marks your edits as read | The plan as text, leading with the net effect of your changes since the last read, with every id Claude needs. Diagrams read as an architecture: the system's shape, each part in flow order with its description, decisions and tasks, then every connection. `changes_only` skips the document and quotes edited text instead. |
 | `harness_plan_check` | No | What the plan leaves open: boxes no task builds, tasks that build no box, undescribed boxes, tasks with no detail, box ids two diagrams share, branch layouts a stack of pull requests cannot follow, and your comments nobody answered. The same list shows in the sign-off dialogs. |
-| `harness_plan_edit` | Yes | A batch of targeted edits — sections, diagrams, one box or arrow at a time, tasks, moves, comments (on the plan, an item, or one box or arrow) and replies, the build report — applied all or nothing. Once the design is confirmed, only tasks, task links and comments; once the plan is submitted, only task edits, comments and the report. |
-| `harness_plan_propose` | Not until you accept it | Suggest a change instead of making it: a batch of edits, with Claude's reason, that waits for you. You see it beside what it changes — and on the canvas, what it adds, changes and removes — and accept it (the edits apply, as yours) or reject it, saying why if you like. Claude hears your answer the next time it reads. A proposal you have moved past goes out of date and cannot be accepted. Which checks a task runs (`set_checks`: skip one of the repository's, add one of its own) is yours alone, so Claude only ever proposes it. |
+| `harness_plan_edit` | Yes | A batch of targeted edits — sections, diagrams, one box or arrow at a time, tasks, moves, comments (on the plan, an item, or one box or arrow) and replies, the build report — applied all or nothing. Once the design is confirmed, only tasks, task links and comments; once the plan is submitted, only task edits, comments and the report. The `propose` op suggests a change instead of making it: a batch of edits, with Claude's reason, that waits for you. You see it beside what it changes — and on the canvas, what it adds, changes and removes — and accept it (the edits apply, as yours) or reject it, saying why if you like. Claude hears your answer the next time it reads. A proposal you have moved past goes out of date and cannot be accepted. Which checks a task runs (`set_checks`: skip one of the repository's, add one of its own) is yours alone, so Claude only ever proposes it. |
 | `harness_plan_advance` | Yes — signs it off | When you tell Claude in chat to go ahead: confirms the design (`to: "tasks"`) or submits the plan (`to: "build"`) as the page would, with the build settings you last chose in *Submit* or the repository's defaults, and locks it. Only with your words (`user_said`), which the page shows beside the sign-off; returns the prompt the page would have sent. |
 | `harness_tasks_publish` | Yes | Publish the task list for the confirmed design: replaces the task tree and nothing else, with dependencies, branches, review modes and the boxes each task builds. |
 | `harness_task_next` | No | What can be built now: ready tasks, how many to run at once, what is in progress and at which step, what the rest wait on, the branches — and, once every task is done, how to finish. |
@@ -686,7 +685,7 @@ counts against the model's tokens.
 
 | What | Size | When |
 | --- | --- | --- |
-| The eleven tool definitions | About 34 KB of JSON schema — on the order of 8,000–10,000 tokens | Whenever the agent loads the server's tools |
+| The twelve tool definitions | About 24 KB of JSON schema — on the order of 6,000 tokens | Whenever the agent loads the server's tools |
 | The three skill descriptions | About 1.4 KB | Always listed |
 | A skill's body | 16.0 KB (`coplan`), 8.5 KB (`coplan-build`), 6.7 KB (`iric`) | When the agent uses that skill |
 | The plan, read back | About 9,000 characters for two diagrams and ten tasks; about 140,000 for 150 boxes and 150 tasks | Each `harness_plan_read` (`changes_only` is shorter), and each publish's reply |
