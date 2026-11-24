@@ -314,6 +314,18 @@ test('a build field the file was damaged in is dropped on load', () => {
   assert.deepEqual(loaded.tasks[1]!.checks, [{ name: 'tests', ok: true }]);
 });
 
+test('a plan saved with runners loads: where a task ran is dropped, the task kept', () => {
+  const plan = tasked();
+  const raw = JSON.parse(JSON.stringify(plan));
+  raw.tasks[0].runner = 'vm';
+  raw.tasks[0].status = 'in_progress';
+  raw.tasks[0].dispatch = { runner: 'vm', session: 'ssh-1', size: 'large', at: 1 };
+  const loaded = normalizePlan(raw, 'x');
+  assert.equal(loaded.tasks.length, plan.tasks.length);
+  assert.equal(loaded.tasks[0]!.status, 'in_progress');
+  assert.ok(!('runner' in loaded.tasks[0]!) && !('dispatch' in loaded.tasks[0]!));
+});
+
 /* ------------------------------------------------------------------ *
  * implement → review → refine
  * ------------------------------------------------------------------ */

@@ -439,9 +439,9 @@ function lockLine(plan: Plan): string | null {
       );
     case 'landing':
       return (
-        '> **Landing.** The report is in; its pull requests are still open. What CI, reviewers and merges ask of them ' +
-        'comes to you as work (`coplan pr wait`, harness_pr_events): add a fix task under the branch with upsert_task ' +
-        'and take it through the cycle. The plan is built once every pull request is merged or closed.'
+        '> **Landing.** The report is in; its pull requests are still open. Record each one\'s state with ' +
+        'harness_branch_update as it merges or closes; work it still needs is a new task under its branch (upsert_task). ' +
+        'The plan is built once every pull request is merged or closed.'
       );
     case 'built':
       return '> **Built.** The user submitted this plan and every task is done. Publishing a new plan replaces it.';
@@ -732,14 +732,6 @@ function fit(plan: Plan, head: Block[], said: Block[], changes: Block[], doc: Do
   return { prompt: blocksText(blocks), trimmed: true, blocks };
 }
 
-function runnerWords(project: ProjectConfig): string {
-  if (!project.runners.length) return '';
-  return (
-    ` Hand tasks to the user's runners (${project.runners.map((r) => r.name).join(', ')}): a task that asks for one goes there, the rest by what each is for and its room. ` +
-    'Record each with harness_task_update {runner, session, size}; harness_task_next shows the load.'
-  );
-}
-
 function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: ProjectConfig, chosen: SettingSources): Block[] {
   const together =
     s.parallel > 1
@@ -759,8 +751,7 @@ function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: P
   );
   b.gap().add('step-1', TEMPLATE, '1. Start only tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that are ready together do not depend on each other — ')
     .inline('step-1:parallel', chosen('parallel'), together)
-    .inline('step-1:end', TEMPLATE, ". harness_task_brief gives one task's focused brief: its objective, where it fits, its branch and its checks.")
-    .inline('step-1:runners', configSource(project, 'runners'), runnerWords(project));
+    .inline('step-1:end', TEMPLATE, ". harness_task_brief gives one task's focused brief: its objective, where it fits, its branch and its checks.");
   b.add(
     'step-2',
     TEMPLATE,
@@ -830,7 +821,7 @@ function trackedBrief(plan: Plan, agent: AgentInfo, project: ProjectConfig, mode
     '1. Start with tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that ' +
       "are ready together do not depend on each other. harness_task_brief gives one task's focused brief: its objective, " +
       'where it fits, its branch and its checks.',
-  ).inline('step-1:runners', configSource(project, 'runners'), runnerWords(project));
+  );
   b.add(
     'step-2',
     TEMPLATE,

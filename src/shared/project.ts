@@ -3,12 +3,11 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import type { BuildSettings, ExecutionMode, TaskCheck } from './types.ts';
 import { DEFAULT_BUILD_SETTINGS, MAX_PARALLEL, MAX_ROUNDS, cleanSettings } from './build.ts';
-import { EXECUTION_MODES, REVIEW_MODES, RUNNER_NAME } from './types.ts';
+import { EXECUTION_MODES, REVIEW_MODES } from './types.ts';
 import { parseJsonc } from './jsonc.ts';
 import { GAP_RULES, GAP_SEVERITIES, type GapRule, type GapSeverity } from './check.ts';
 import { paths } from './paths.ts';
 import type { BlockSource } from './blocks.ts';
-import { PR_EVENT_KINDS, type PrEventKind } from './prEvents.ts';
 
 /**
  * A repository's own Coplan settings: `.coplan/config.json`, committed with
@@ -58,75 +57,6 @@ export type PrTool = (typeof PR_TOOLS)[number];
 export const PR_OPEN = ['auto', 'ask', 'never'] as const;
 export type PrOpen = (typeof PR_OPEN)[number];
 
-/** What an event on a watched pull request can do, besides run a command. */
-export const PR_ACTIONS = ['fix', 'triage', 'rebase', 'advance', 'notify', 'ignore'] as const;
-export type PrBuiltinAction = (typeof PR_ACTIONS)[number];
-/** A built-in action, or a command the agent runs (the shape of a hook). */
-export type PrAction = PrBuiltinAction | CheckHook;
-/** How an agent whose turn has ended is reached when a batch is due. */
-export const PR_WAKE = ['wait', 'queue', 'headless'] as const;
-export type PrWake = (typeof PR_WAKE)[number];
-/** Whose comments and reviews may start work. */
-export const PR_TRUST = ['collaborators', 'author'] as const;
-
-/** Watching the pull requests a build recorded, until they merge. */
-export interface PrWatch {
-  enabled: boolean;
-  /** Seconds between polls. */
-  interval: number;
-  /** Seconds a pull request must be quiet before its events go as one batch. */
-  debounce: number;
-  /** `collaborators`, `author` (who opened it), or a list of logins. */
-  trust: (typeof PR_TRUST)[number] | string[];
-  /** Fix rounds per pull request before the user decides. */
-  maxFixRounds: number;
-  wake: PrWake;
-}
-
-export const DEFAULT_PR_WATCH: PrWatch = { enabled: true, interval: 60, debounce: 90, trust: 'collaborators', maxFixRounds: 3, wake: 'wait' };
-export const DEFAULT_PR_ON: Record<PrEventKind, PrAction[]> = {
-  ci_failed: ['fix'],
-  ci_passed: ['ignore'],
-  changes_requested: ['fix'],
-  approved: ['notify'],
-  review_comment: ['fix'],
-  comment: ['triage'],
-  merge_conflict: ['rebase'],
-  behind_base: ['ignore'],
-  merged: ['advance'],
-  closed: ['notify'],
-  reopened: ['notify'],
-};
-const PR_WATCH_KEYS = Object.keys(DEFAULT_PR_WATCH);
-const MAX_FIX_ROUNDS = 10;
-/** How the parent session starts a session on a runner. */
-export const RUNNER_VIA = ['local', 'cloud', 'ssh'] as const;
-export type RunnerVia = (typeof RUNNER_VIA)[number];
-
-/** A place the build's parent session can hand a task to. */
-export interface Runner {
-  name: string;
-  via: RunnerVia;
-  /** What it is for, which the parent weighs when no task names a runner. */
-  use?: string;
-  /** Tasks in progress on it at once. */
-  max?: number;
-  /** Large tasks in progress on it at once. */
-  maxLarge?: number;
-  /** The runner a task goes to when nothing else fits. */
-  default?: boolean;
-  /** ssh: the host, as `ssh` takes it. */
-  host?: string;
-  /** ssh: the checkout to work in there. */
-  dir?: string;
-  /** cloud: the environment new sessions start in. */
-  environment?: string;
-  /** The command that starts a session there, with the handoff on stdin. */
-  start?: string;
-}
-const RUNNER_KEYS = ['via', 'use', 'max', 'maxLarge', 'default', 'host', 'dir', 'environment', 'start'];
-const MAX_RUNNERS = 12;
-
 /** Where a repository or a user may add words to what the agent is told. */
 export const INSTRUCTION_POINTS = ['design', 'build', 'brief', 'review'] as const;
 export type InstructionPoint = (typeof INSTRUCTION_POINTS)[number];
@@ -157,10 +87,6 @@ export interface ProjectConfig {
     template?: string;
     /** That file, as the config names it. */
     templateFile?: string;
-    /** Watching each recorded pull request once it is open. */
-    watch: PrWatch;
-    /** What each event on a watched pull request does, in order. */
-    on: Record<PrEventKind, PrAction[]>;
   };
   /** The reviewer subagent: which model reviews, when not the agent's own. */
   review: { model?: string };
@@ -171,9 +97,6 @@ export interface ProjectConfig {
   instructions: Partial<Record<InstructionPoint, string>>;
   /** Plan-check rules counted other than the default (`warn`). */
   planCheck: Partial<Record<GapRule, GapSeverity>>;
-  /** Where the build's parent can start sessions, by name: the user's own,
-   *  then any the repository adds under a name of its own. */
-  runners: Runner[];
   /** The user-wide layer (`coplan.json` in Coplan's home), when there is one. */
   globalFile?: string | null;
   /** What could not be read, said rather than silently ignored: a hook
@@ -212,17 +135,22 @@ export const MAX_INSTRUCTIONS = 4_000;
 export const MAX_TEMPLATE = 8_000;
 const MAX_ENV = 20;
 
-export const PROJECT_KEYS = ['mode', 'hooks', 'iric', 'branches', 'pullRequests', 'review', 'final', 'instructions', 'planCheck', 'runners'];
+export const PROJECT_KEYS = ['mode', 'hooks', 'iric', 'branches', 'pullRequests', 'review', 'final', 'instructions', 'planCheck'];
+/** Keys older versions read, by where they sit: an old file still holding
+ *  them loads, with a warning that they do nothing now. */
+const RETIRED_KEYS = ['runners'];
+const RETIRED_PR_KEYS = ['watch', 'on'];
 const IRIC_KEYS = ['review', 'parallel', 'maxRounds'];
 const BRANCH_KEYS = ['base', 'prefix'];
-const PR_KEYS = ['tool', 'open', 'template', 'watch', 'on'];
+const PR_KEYS = ['tool', 'open', 'template'];
 export const HOOK_KEYS = ['name', 'run', 'timeout', 'paths', 'optional', 'cwd', 'env'];
 
 /** A key the file sets that nothing reads is most often a typo of one that
  *  is: said, so the setting the user meant is not silently lost. */
-function unknownKeys(rec: Record<string, unknown>, known: string[], where: string, errors: string[]): void {
+function unknownKeys(rec: Record<string, unknown>, known: string[], where: string, errors: string[], retired: string[] = [], warnings: string[] = []): void {
   for (const key of Object.keys(rec)) {
-    if (!known.includes(key)) errors.push(`${where}"${key}" is not a setting Coplan reads: use ${known.join(', ')}.`);
+    if (retired.includes(key)) warnings.push(`${where}"${key}" is no longer read: Coplan plans and tracks, and the harness that builds decides this. Remove it.`);
+    else if (!known.includes(key)) errors.push(`${where}"${key}" is not a setting Coplan reads: use ${known.join(', ')}.`);
   }
 }
 
@@ -233,12 +161,11 @@ export function emptyProjectConfig(): ProjectConfig {
     mode: 'tracked',
     settings: { ...DEFAULT_BUILD_SETTINGS },
     branches: {},
-    pullRequests: { tool: 'gh', open: 'ask', watch: { ...DEFAULT_PR_WATCH }, on: { ...DEFAULT_PR_ON } },
+    pullRequests: { tool: 'gh', open: 'ask' },
     review: {},
     final: { blocking: false },
     instructions: {},
     planCheck: {},
-    runners: [],
     errors: [],
     warnings: [],
     origins: {},
@@ -338,15 +265,11 @@ interface Layer {
   hooks?: Partial<Record<HookStage, CheckHook[]>>;
   iric?: Record<string, unknown>;
   branches?: ProjectConfig['branches'];
-  pullRequests?: Partial<Omit<ProjectConfig['pullRequests'], 'watch' | 'on'>> & {
-    watch?: Partial<PrWatch>;
-    on?: Partial<Record<PrEventKind, PrAction[]>>;
-  };
+  pullRequests?: Partial<ProjectConfig['pullRequests']>;
   review?: ProjectConfig['review'];
   final?: Partial<ProjectConfig['final']>;
   instructions?: ProjectConfig['instructions'];
   planCheck?: ProjectConfig['planCheck'];
-  runners?: Runner[];
   /** See ProjectConfig.checksBroken. */
   checksBroken?: boolean;
   /** The file it was read from, as origins name it. */
@@ -393,26 +316,14 @@ function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors' | 'warn
     from('iric', l.iric);
     Object.assign(out.branches, l.branches);
     from('branches', l.branches);
-    const { watch, on, ...prs } = l.pullRequests ?? {};
-    Object.assign(out.pullRequests, prs);
-    from('pullRequests', prs, ['tool', 'open', 'template']);
-    // Key by key here too: a repository setting one event keeps the user's others.
-    Object.assign(out.pullRequests.watch, watch);
-    from('pullRequests.watch', watch);
-    Object.assign(out.pullRequests.on, on);
-    from('pullRequests.on', on);
+    Object.assign(out.pullRequests, l.pullRequests);
+    from('pullRequests', l.pullRequests, ['tool', 'open', 'template']);
     Object.assign(out.review, l.review);
     from('review', l.review);
     Object.assign(out.final, l.final);
     from('final', l.final);
     Object.assign(out.planCheck, l.planCheck);
     from('planCheck', l.planCheck);
-    for (const r of l.runners ?? []) {
-      // A runner is the user's machine: a repository may add runners, never redefine one of theirs.
-      if (out.runners.some((x) => x.name === r.name)) continue;
-      out.runners.push(r);
-      if (l.from) origins[`runners.${r.name}`] = [l.from];
-    }
     for (const point of INSTRUCTION_POINTS) {
       const words = l.instructions?.[point];
       if (words) out.instructions[point] = out.instructions[point] ? `${out.instructions[point]}\n\n${words}` : words;
@@ -456,7 +367,7 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
   }
   const local: string[] = [];
   const notes: string[] = [];
-  unknownKeys(raw, PROJECT_KEYS, '', local);
+  unknownKeys(raw, PROJECT_KEYS, '', local, RETIRED_KEYS, notes);
 
   const mode = oneOf(raw['mode'], EXECUTION_MODES, 'mode', local);
   if (mode) layer.mode = mode;
@@ -507,9 +418,9 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
     }
   }
 
-  const prs = section('pullRequests', '{ "tool", "open", "template", "watch", "on" }');
+  const prs = section('pullRequests', '{ "tool", "open", "template" }');
   if (prs) {
-    unknownKeys(prs, PR_KEYS, 'pullRequests.', local);
+    unknownKeys(prs, PR_KEYS, 'pullRequests.', local, RETIRED_PR_KEYS, notes);
     layer.pullRequests = {};
     const tool = oneOf(prs['tool'], PR_TOOLS, 'pullRequests.tool', local);
     if (tool) layer.pullRequests.tool = tool;
@@ -523,14 +434,6 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
         // The repository's by its path in it; the user's own by where it is.
         layer.pullRequests.templateFile = ctx.global ? path.join(ctx.base!, (prs['template'] as string).trim()) : (prs['template'] as string).trim();
       }
-    }
-    if (prs['watch'] !== undefined) {
-      if (isRecord(prs['watch'])) layer.pullRequests.watch = parseWatch(prs['watch'], local);
-      else local.push(`"pullRequests.watch" must be an object: { ${PR_WATCH_KEYS.map((k) => `"${k}"`).join(', ')} }.`);
-    }
-    if (prs['on'] !== undefined) {
-      if (isRecord(prs['on'])) layer.pullRequests.on = parseOn(prs['on'], local, ctx.base, notes);
-      else local.push('"pullRequests.on" must map an event (ci_failed, review_comment, …) to an action or a list of them.');
     }
   }
 
@@ -582,66 +485,9 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
     }
   }
 
-  const runners = section('runners', '{ "<name>": { "via": "local" | "cloud" | "ssh", "use", "max", "maxLarge", … } }');
-  if (runners) layer.runners = parseRunners(runners, local);
-
   for (const message of local) say(message);
   for (const message of notes) warnings.push(ctx.global ? `${ctx.label}: ${message}` : message);
   return layer;
-}
-
-function parseRunners(rec: Record<string, unknown>, errors: string[]): Runner[] {
-  const out: Runner[] = [];
-  for (const [name, raw] of Object.entries(rec).slice(0, MAX_RUNNERS)) {
-    const where = `runners.${name}`;
-    if (!RUNNER_NAME.test(name)) {
-      errors.push(`"${where}": a runner's name is letters, digits, . _ - (at most 40).`);
-      continue;
-    }
-    if (!isRecord(raw)) {
-      errors.push(`"${where}" must be an object: { "via", "use", "max", … }.`);
-      continue;
-    }
-    unknownKeys(raw, RUNNER_KEYS, `${where}.`, errors);
-    const via = oneOf(raw['via'], RUNNER_VIA, `${where}.via`, errors);
-    if (!via) {
-      if (raw['via'] === undefined) errors.push(`"${where}.via" is missing: ${RUNNER_VIA.join(', ')}.`);
-      continue;
-    }
-    const r: Runner = { name, via };
-    for (const key of ['use', 'host', 'dir', 'environment', 'start'] as const) {
-      const v = raw[key];
-      if (typeof v === 'string' && v.trim()) r[key] = v.trim().slice(0, 1_000);
-      else if (v !== undefined) errors.push(`"${where}.${key}" must be text.`);
-    }
-    for (const key of ['max', 'maxLarge'] as const) {
-      const v = raw[key];
-      if (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 64) r[key] = v;
-      else if (v !== undefined) errors.push(`"${where}.${key}" must be a whole number from 1 to 64.`);
-    }
-    if (raw['default'] === true) r.default = true;
-    else if (raw['default'] !== undefined && raw['default'] !== false) errors.push(`"${where}.default" must be true or false.`);
-    if (via === 'ssh' && !r.host && !r.start) errors.push(`"${where}" runs over ssh: give it a "host" (or a "start" command).`);
-    out.push(r);
-  }
-  if (Object.keys(rec).length > MAX_RUNNERS) errors.push(`"runners" holds at most ${MAX_RUNNERS}; the rest are left out.`);
-  return out;
-}
-
-/** Tasks in progress on each runner, all and large. */
-export function runnerLoad(runners: readonly Runner[], tasks: readonly { status: string; dispatch?: { runner: string; size: string } }[]) {
-  return runners.map((r) => {
-    const on = tasks.filter((t) => t.status === 'in_progress' && t.dispatch?.runner === r.name);
-    return { runner: r, all: on.length, large: on.filter((t) => t.dispatch!.size === 'large').length };
-  });
-}
-
-/** Why `runner` cannot take one more task of `size`, or null when it can. */
-export function runnerFull(load: { runner: Runner; all: number; large: number }, size: string): string | null {
-  const { runner: r, all, large } = load;
-  if (r.max !== undefined && all >= r.max) return `${r.name} already runs ${all} task(s), its max (${r.max})`;
-  if (size === 'large' && r.maxLarge !== undefined && large >= r.maxLarge) return `${r.name} already runs ${large} large task(s), its maxLarge (${r.maxLarge})`;
-  return null;
 }
 
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], where: string, errors: string[]): T | undefined {
@@ -794,56 +640,6 @@ function parseHook(item: unknown, where: string, errors: string[], root: string 
     if (good.length) hook.env = Object.fromEntries(good.slice(0, MAX_ENV)) as Record<string, string>;
   }
   return hook;
-}
-
-function parseWatch(rec: Record<string, unknown>, errors: string[]): Partial<PrWatch> {
-  unknownKeys(rec, PR_WATCH_KEYS, 'pullRequests.watch.', errors);
-  const out: Partial<PrWatch> = {};
-  if (typeof rec['enabled'] === 'boolean') out.enabled = rec['enabled'];
-  else if (rec['enabled'] !== undefined) errors.push('"pullRequests.watch.enabled" must be true or false.');
-  const whole = (key: 'interval' | 'debounce' | 'maxFixRounds', lo: number, hi: number) => {
-    const v = rec[key];
-    if (v === undefined) return;
-    if (typeof v === 'number' && Number.isInteger(v) && v >= lo && v <= hi) out[key] = v;
-    else errors.push(`"pullRequests.watch.${key}" must be a whole number from ${lo} to ${hi}; ${JSON.stringify(v)} is not, so it is ignored.`);
-  };
-  whole('interval', 30, 3600);
-  whole('debounce', 0, 3600);
-  whole('maxFixRounds', 1, MAX_FIX_ROUNDS);
-  const wake = oneOf(rec['wake'], PR_WAKE, 'pullRequests.watch.wake', errors);
-  if (wake) out.wake = wake;
-  const trust = rec['trust'];
-  if (typeof trust === 'string' && (PR_TRUST as readonly string[]).includes(trust)) out.trust = trust as PrWatch['trust'];
-  else if (Array.isArray(trust) && trust.length && trust.every((t) => typeof t === 'string' && /^[A-Za-z0-9-]{1,39}(\[bot\])?$/.test(t))) out.trust = trust as string[];
-  else if (trust !== undefined) errors.push(`"pullRequests.watch.trust" must be ${PR_TRUST.join(' or ')}, or a list of logins.`);
-  return out;
-}
-
-function parseOn(rec: Record<string, unknown>, errors: string[], root: string | null, warnings: string[]): Partial<Record<PrEventKind, PrAction[]>> {
-  const out: Partial<Record<PrEventKind, PrAction[]>> = {};
-  for (const [event, value] of Object.entries(rec)) {
-    if (!(PR_EVENT_KINDS as readonly string[]).includes(event)) {
-      errors.push(`"pullRequests.on.${event}" is not an event: use ${PR_EVENT_KINDS.join(', ')}.`);
-      continue;
-    }
-    const items = Array.isArray(value) ? value : [value];
-    const actions: PrAction[] = [];
-    items.slice(0, MAX_HOOKS).forEach((item, i) => {
-      const where = `pullRequests.on.${event}${Array.isArray(value) ? `[${i}]` : ''}`;
-      if (typeof item === 'string') {
-        // A bare string is an action; a command is spelt { "run" }, so a typo is not run as one.
-        const action = oneOf(item, PR_ACTIONS, where, errors);
-        if (action) actions.push(action);
-      } else if (isRecord(item)) {
-        const hook = parseHook(item, where, errors, root, warnings);
-        if (hook) actions.push(hook);
-      } else {
-        errors.push(`"${where}" must be an action (${PR_ACTIONS.join(', ')}) or a command { "run" }.`);
-      }
-    });
-    out[event as PrEventKind] = actions;
-  }
-  return out;
 }
 
 /**

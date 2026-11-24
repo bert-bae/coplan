@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
 import { filesText, useKeptDraft } from '../lib/drafts.ts';
-import { store, useCollapsedTasks, useEdit, useAgent, usePlan, useSession, useSessionId, useStillShown, useStore } from '../store.ts';
-import { relativeTime } from '../lib/format.ts';
+import { store, useCollapsedTasks, useEdit, useAgent, usePlan, useSessionId, useStillShown, useStore } from '../store.ts';
 import { AddField, InlineText, MarkdownField } from '../components/Editable.tsx';
 import { CommentToggle, ThreadPanel, useThreads } from '../components/Threads.tsx';
 import { Focusable } from '../components/Item.tsx';
@@ -16,7 +15,7 @@ import { isTyping } from '../lib/keys.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
 import { boxUnbuilt } from '../../shared/check.ts';
 import { canTakeSubtasks, childrenOf, countTasks, descendants, hasTaskList, isLocked, outline, planPhase } from '../../shared/plan.ts';
-import { SESSION_BRANCH, roundVerdict, stackStatus, type StackEntry, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, effectiveRunner, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
+import { SESSION_BRANCH, roundVerdict, stackStatus, type StackEntry, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
 import { REVIEW_MODES, TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type ReviewMode, type Task, type TaskStatus } from '../../shared/types.ts';
 import type { TaskMode } from '../store.ts';
 
@@ -284,11 +283,8 @@ function ByBoxRow({ plan, task, status, number, depth, readOnly }: { plan: Plan;
 /** A branch's pull request as the agent last reported it, and the restack
  *  it needs when the branch below it merged. */
 function PullRequest({ entry }: { entry: StackEntry | undefined }) {
-  const watch = useSession()?.prWatch?.[entry?.branch ?? ''];
   const pr = entry?.state?.pr;
   if (!pr && !entry?.restack) return null;
-  const following = watch && watch.pr === pr?.number && !watch.stopped && (pr?.state === 'open' || pr?.state === 'draft');
-  const ci = watch?.cursor?.ci?.state;
   const label = `PR${pr?.number ? ` #${pr.number}` : ''} ${pr?.state ?? ''}`.trim();
   return (
     <>
@@ -300,34 +296,11 @@ function PullRequest({ entry }: { entry: StackEntry | undefined }) {
         ) : (
           <span className={classNames('chip', 'is-pr', `is-${pr.state}`)}>{label}</span>
         ))}
-      {following && ci && ci !== 'pending' && <span className={classNames('chip', ci === 'failed' ? 'is-warning' : 'is-ci-passed')}>CI {ci}</span>}
-      {following && watch.fixRounds ? <span className="chip">fix round {watch.fixRounds}</span> : null}
-      {following && watch.error && (
-        <span className="chip is-warning" title={watch.error}>
-          not readable
-        </span>
-      )}
-      {following && <span className="muted"> watched</span>}
       {entry?.restack && (
         <span className="chip is-warning" title={entry.restack}>
           needs a restack
         </span>
       )}
-      {watch?.timeline?.length ? (
-        <details className="pr-timeline">
-          <summary>What happened ({watch.timeline.length})</summary>
-          <ol>
-            {watch.timeline
-              .slice(-10)
-              .reverse()
-              .map((t) => (
-                <li key={t.at}>
-                  <span className="muted">{relativeTime(t.at)}</span> {t.note}
-                </li>
-              ))}
-          </ol>
-        </details>
-      ) : null}
     </>
   );
 }
@@ -1206,12 +1179,6 @@ function TrackedCard({ plan, task, arrived, opened, toggle }: { plan: Plan; task
         <IricBadges task={task} />
         {task.status === 'todo' && <ReadinessChip plan={plan} task={task} />}
         {effectiveBranch(plan, task) && <span className="chip is-branch">⎇ {effectiveBranch(plan, task)}</span>}
-        {(task.dispatch || effectiveRunner(plan, task)) && (
-          <span className="chip" title={task.dispatch?.session ? `Session ${task.dispatch.session}` : task.dispatch ? undefined : 'The runner this task asks for'}>
-            ▸ {task.dispatch?.runner ?? effectiveRunner(plan, task)}
-            {task.dispatch?.size === 'large' ? ' · large' : ''}
-          </span>
-        )}
         <TaskCheckChips plan={plan} task={task} />
       </p>
       {open && (

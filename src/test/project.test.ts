@@ -5,10 +5,9 @@ import { chmodSync, closeSync, existsSync, mkdtempSync, mkdirSync, openSync, rea
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_PR_ON, DEFAULT_PR_WATCH, HOOK_KEYS, INSTRUCTION_POINTS, PROJECT_KEYS, PR_ACTIONS, PR_OPEN, PR_TOOLS, PR_TRUST, PR_WAKE, RUNNER_VIA, expandBraces, globMatch, hookCommand, hooksFor, loadProjectConfig, nameFor, parseProjectConfig, pathsMatch } from '../shared/project.ts';
+import { HOOK_KEYS, INSTRUCTION_POINTS, PROJECT_KEYS, PR_OPEN, PR_TOOLS, expandBraces, globMatch, hookCommand, hooksFor, loadProjectConfig, nameFor, parseProjectConfig, pathsMatch } from '../shared/project.ts';
 import { GAP_RULES, GAP_SEVERITIES } from '../shared/check.ts';
 import { EXECUTION_MODES } from '../shared/types.ts';
-import { PR_EVENT_KINDS } from '../shared/prEvents.ts';
 import { detectHooks, renderConfig } from '../cli/init.ts';
 import { parseJsonc } from '../shared/jsonc.ts';
 
@@ -575,44 +574,28 @@ test('coplan init writes a commented starting point from the scripts it finds, a
 
 /* ---------------------------------------------------- customization (#45) */
 
-test('runners are read and checked, and a repository cannot redefine the user\'s', () => {
+test('runners and pull request watching are retired: an old file still loads, with a warning, and its checks still run', () => {
   const config = parseProjectConfig({
-    runners: {
-      local: { via: 'local', default: true },
-      vm: { via: 'ssh', host: 'tao-vm', maxLarge: 2, use: 'Balanced' },
-      nohost: { via: 'ssh' },
-      bad: { via: 'moon', max: 0 },
-      'no spaces': { via: 'local' },
-    },
+    hooks: { review: ['pnpm test'] },
+    runners: { vm: { via: 'ssh', host: 'tao-vm' } },
+    pullRequests: { tool: 'graphite', watch: { interval: 120 }, on: { comment: 'ignore' } },
   });
-  assert.deepEqual(
-    config.runners.map((r) => r.name),
-    ['local', 'vm', 'nohost'],
-  );
-  assert.deepEqual(config.runners[1], { name: 'vm', via: 'ssh', host: 'tao-vm', maxLarge: 2, use: 'Balanced' });
-  assert.ok(config.errors.some((e) => /runners.nohost" runs over ssh: give it a "host"/.test(e)));
-  assert.ok(config.errors.some((e) => /runners.bad.via" must be one of local, cloud, ssh/.test(e)));
-  assert.ok(config.errors.some((e) => /runners.no spaces": a runner's name/.test(e)));
-
-  const home = mkdtempSync(path.join(tmpdir(), 'coplan-runners-'));
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ runners: { vm: { via: 'ssh', host: 'other' } } }) });
-  try {
-    writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ runners: { cloud: { via: 'cloud' }, vm: { via: 'ssh', host: 'tao-vm' } } }));
-    const merged = loadProjectConfig(dir, { globalDir: home });
-    assert.deepEqual(merged.runners.map((r) => `${r.name}:${r.host ?? ''}`), ['cloud:', 'vm:tao-vm'], "the user's machine is never redefined by a repository");
-    assert.ok(!merged.origins?.['runners.vm']?.includes('.coplan/config.json'));
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
-  }
+  assert.deepEqual(config.errors, []);
+  assert.equal(config.checksBroken, undefined);
+  assert.equal(config.hooks.review.length, 1);
+  assert.deepEqual(config.pullRequests, { tool: 'graphite', open: 'ask' });
+  assert.ok(!('runners' in config));
+  const said = config.warnings.join('\n');
+  assert.match(said, /"runners" is no longer read/);
+  assert.match(said, /pullRequests\."watch" is no longer read/);
+  assert.match(said, /pullRequests\."on" is no longer read/);
 });
 
 test('every key the config reads is documented, with every value it takes', () => {
   const doc = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'docs', 'CONFIG.md'), 'utf8');
   for (const key of PROJECT_KEYS) assert.match(doc, new RegExp(`^### \`${key}\`$`, 'm'), `a section for ${key}`);
   for (const key of HOOK_KEYS) assert.match(doc, new RegExp(`^\\| \`${key}\` \\|`, 'm'), `hook key ${key}`);
-  for (const key of Object.keys(DEFAULT_PR_WATCH)) assert.match(doc, new RegExp(`^\\| \`watch\\.${key}\` \\|`, 'm'), `watch key ${key}`);
-  for (const value of [...EXECUTION_MODES, ...PR_TOOLS, ...PR_OPEN, ...PR_ACTIONS, ...PR_WAKE, ...PR_TRUST, ...PR_EVENT_KINDS, ...INSTRUCTION_POINTS, ...GAP_RULES, ...GAP_SEVERITIES, ...RUNNER_VIA]) {
+  for (const value of [...EXECUTION_MODES, ...PR_TOOLS, ...PR_OPEN, ...INSTRUCTION_POINTS, ...GAP_RULES, ...GAP_SEVERITIES]) {
     assert.ok(doc.includes(`\`${value}\``), `${value} is named`);
   }
 });
@@ -653,8 +636,7 @@ test('pull requests, the reviewer, the final gate, instructions and plan-check s
 
 test('the defaults: gh, once the user says, no reviewer model, the report never held', () => {
   const config = parseProjectConfig({});
-  assert.deepEqual(config.pullRequests, { tool: 'gh', open: 'ask', watch: DEFAULT_PR_WATCH, on: DEFAULT_PR_ON });
-  assert.equal(config.pullRequests.watch.wake, 'wait', 'Claude Code re-arms a background wait by default');
+  assert.deepEqual(config.pullRequests, { tool: 'gh', open: 'ask' });
   assert.deepEqual(config.review, {});
   assert.deepEqual(config.final, { blocking: false });
   assert.deepEqual(config.instructions, {});
@@ -811,7 +793,7 @@ test("the user's own layer sits under every repository's: key by key, instructio
     const config = loadProjectConfig(dir, { globalDir: home });
     assert.deepEqual(config.settings, { review: 'self', parallel: 4, maxRounds: 3 }, 'the repository wins where both say');
     assert.equal(config.branches.prefix, 'me/');
-    assert.deepEqual(config.pullRequests, { tool: 'graphite', open: 'never', watch: DEFAULT_PR_WATCH, on: DEFAULT_PR_ON });
+    assert.deepEqual(config.pullRequests, { tool: 'graphite', open: 'never' });
     assert.equal(config.instructions.build, 'My words.\n\nRepository words.');
     assert.equal(config.instructions.brief, 'Write tests first.');
     assert.deepEqual(config.hooks.review, [], 'checks belong to the repository');
@@ -1203,66 +1185,5 @@ test('a second Ctrl+C ends `coplan check` at once, even with a check that ignore
       /* gone */
     }
     rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('pull request watching: settings key by key, actions and commands per event, each checked', () => {
-  const config = parseProjectConfig({
-    pullRequests: {
-      watch: { interval: 120, trust: ['alice', 'renovate[bot]'], maxFixRounds: 5 },
-      on: {
-        comment: 'ignore',
-        approved: ['notify', { name: 'automerge', run: 'gh pr merge {pr} --auto --squash', optional: true }],
-        behind_base: [],
-      },
-    },
-  });
-  assert.deepEqual(config.errors, []);
-  assert.deepEqual(config.pullRequests.watch, { ...DEFAULT_PR_WATCH, interval: 120, trust: ['alice', 'renovate[bot]'], maxFixRounds: 5 });
-  assert.deepEqual(config.pullRequests.on.comment, ['ignore']);
-  assert.deepEqual(config.pullRequests.on.approved, ['notify', { name: 'automerge', run: 'gh pr merge {pr} --auto --squash', optional: true }]);
-  assert.deepEqual(config.pullRequests.on.behind_base, [], 'an empty list does nothing');
-  assert.deepEqual(config.pullRequests.on.ci_failed, ['fix'], 'events not named keep their default');
-  assert.deepEqual(DEFAULT_PR_ON.comment, ['triage'], 'the defaults are not changed by a config');
-});
-
-test('pull request watching: what cannot be used is said, and a bare string is never run as a command', () => {
-  const config = parseProjectConfig({
-    pullRequests: {
-      watch: { interval: 5, debounce: -1, maxFixRounds: 2.5, wake: 'poke', trust: 'everyone', enabled: 'yes', poll: 1 },
-      on: { ci_failed: 'gh pr merge', deployed: 'fix', comment: [{ name: 'x' }, 3] },
-    },
-  });
-  const said = config.errors.join('\n');
-  assert.match(said, /"pullRequests\.watch\.interval" must be a whole number from 30 to 3600; 5 is not/);
-  assert.match(said, /"pullRequests\.watch\.debounce" must be a whole number from 0 to 3600/);
-  assert.match(said, /"pullRequests\.watch\.maxFixRounds" must be a whole number from 1 to 10/);
-  assert.match(said, /"pullRequests\.watch\.wake" must be one of wait, queue, headless/);
-  assert.match(said, /"pullRequests\.watch\.trust" must be collaborators or author, or a list of logins/);
-  assert.match(said, /"pullRequests\.watch\.enabled" must be true or false/);
-  assert.match(said, /pullRequests\.watch\."poll" is not a setting/);
-  assert.match(said, /"pullRequests\.on\.ci_failed" must be one of fix, triage/);
-  assert.match(said, /"pullRequests\.on\.deployed" is not an event/);
-  assert.match(said, /"pullRequests\.on\.comment\[0\]" needs a command/);
-  assert.match(said, /"pullRequests\.on\.comment\[1\]" must be an action/);
-  assert.deepEqual(config.pullRequests.watch, DEFAULT_PR_WATCH, 'nothing bad is used');
-  assert.deepEqual(config.pullRequests.on.ci_failed, [], 'the typo is dropped, not run');
-});
-
-test("pull request watching: the repository's file overrides the user's key by key, and says where each came from", () => {
-  const home = mkdtempSync(path.join(tmpdir(), 'coplan-pr-home-'));
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ pullRequests: { watch: { interval: 300 }, on: { comment: 'ignore' } } }) });
-  try {
-    writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ pullRequests: { watch: { wake: 'queue', interval: 90 }, on: { approved: 'ignore' } } }));
-    const config = loadProjectConfig(dir, { globalDir: home });
-    assert.equal(config.pullRequests.watch.wake, 'queue');
-    assert.equal(config.pullRequests.watch.interval, 300);
-    assert.deepEqual(config.pullRequests.on.approved, ['ignore']);
-    assert.deepEqual(config.pullRequests.on.comment, ['ignore']);
-    assert.deepEqual(config.origins?.['pullRequests.watch.interval'], ['.coplan/config.json']);
-    assert.deepEqual(config.origins?.['pullRequests.on.approved'], [path.join(home, 'coplan.json')]);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(home, { recursive: true, force: true });
   }
 });

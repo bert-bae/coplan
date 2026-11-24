@@ -30,7 +30,6 @@ import {
   droppedWhole,
   effectiveBranch,
   effectiveReview,
-  effectiveRunner,
   hasSubtasks,
   inheritedDeps,
   isComplete,
@@ -43,7 +42,7 @@ import {
   sharedFiles,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, configSource, emptyProjectConfig, hasHooks, hookCommand, hookScope, hooksFor, runnerFull, runnerLoad, shellQuote, taskHooks, type ProjectConfig } from '../shared/project.ts';
+import { HOOK_STAGES, configSource, emptyProjectConfig, hasHooks, hookCommand, hookScope, hooksFor, shellQuote, taskHooks, type ProjectConfig } from '../shared/project.ts';
 import { hang, indent, nestHeadings } from '../shared/architecture.ts';
 import { agentInfo, type AgentKind } from '../shared/agents.ts';
 import {
@@ -152,8 +151,6 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
     if (branch) facts.push(`branch \`${branch}\``);
     const review = effectiveReview(plan, t, settings.review);
     if (review !== settings.review) facts.push(`review: ${review}`);
-    const runner = effectiveRunner(plan, t);
-    if (runner) facts.push(`runs on ${runner} (asked)`);
     if (t.files?.length) facts.push(`${t.files.length} file${t.files.length === 1 ? '' : 's'}`);
     return facts.length ? ` · ${facts.join(' · ')}` : '';
   };
@@ -162,8 +159,7 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
     out.push('', `## In progress (${active.length})`);
     for (const t of active) {
       const state = [t.stage ? stageWords(t) : '', t.checks?.length ? `checks ${checkWords(t)}` : ''].filter(Boolean).join(' · ');
-      const on = t.dispatch ? ` · on ${t.dispatch.runner}${t.dispatch.session ? ` (${t.dispatch.session})` : ''}${t.dispatch.size === 'large' ? ', large' : ''}` : '';
-      out.push(`- ${line(t)}${on}${state ? ` — ${state}` : ''}${t.note ? ` — ${t.note}` : ''}`);
+      out.push(`- ${line(t)}${state ? ` — ${state}` : ''}${t.note ? ` — ${t.note}` : ''}`);
       if (!managed) continue;
       // The verdict on its current round, if one is in: what to do next.
       const mode = effectiveReview(plan, t, settings.review);
@@ -211,8 +207,6 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
     out.push('', '## Nothing can start', blocked.length ? 'Every remaining task is blocked or waits on a blocked one: resolve the blocks with the user.' : 'Every remaining task waits on another.');
   }
 
-  if (project.runners.length) out.push('', ...renderRunners(project, plan));
-
   if (waiting.length) {
     out.push('', `## Waiting (${waiting.length})`);
     for (const t of waiting) out.push(`- ${line(t)} — waits on ${waitingOn(plan, t).map((d) => d.id).join(', ')}`);
@@ -255,23 +249,6 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
           'once it is finished. Starting a task that still waits on another is refused.',
   );
   return out.join('\n');
-}
-
-/** The user's runners, each with its load: where the parent hands tasks. */
-function renderRunners(project: ProjectConfig, plan: Plan): string[] {
-  const out = ['## Runners'];
-  for (const { runner: r, all, large } of runnerLoad(project.runners, plan.tasks)) {
-    const where = r.via === 'ssh' ? `ssh ${r.host ?? ''}${r.dir ? `:${r.dir}` : ''}`.trim() : r.via;
-    const cap = [`${all}${r.max ? `/${r.max}` : ''} running`, r.maxLarge ? `${large}/${r.maxLarge} large` : ''].filter(Boolean).join(', ');
-    out.push(`- ${r.name} (${where}${r.default ? ', default' : ''}) — ${cap}${runnerFull({ runner: r, all, large }, 'small') ? ', full' : ''}${r.use ? ` — ${r.use}` : ''}`);
-    if (r.start) out.push(`  start: \`${r.start}\``);
-    else if (r.environment) out.push(`  environment: ${r.environment}`);
-  }
-  out.push(
-    '_A task that asks for a runner goes there. Pick the others by what each runner is for and its room, and record it as you hand ' +
-      'the task off: harness_task_update {task_id, status: "in_progress", runner, session, size}. How each starts a session: the coplan-build skill._',
-  );
-  return out;
 }
 
 /** The stack as it stands — each branch, what it is cut from, its pull

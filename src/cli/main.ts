@@ -326,58 +326,6 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
     console.log(VERSION);
     return 0;
   },
-
-  /** The pull requests this session's build recorded: wait for work on them, see them, stop watching. */
-  async pr(args) {
-    const [sub = 'status', ...rest] = args;
-    const flag = rest.indexOf('--session');
-    const named = flag >= 0 ? rest.splice(flag, 2)[1] : undefined;
-    let lock = await ensureDaemon();
-    if (!lock) return 1;
-    const id = named ?? (await currentSession(lock));
-    if (!id) throw new Said('no session here: run it from the agent\'s session, or name one with --session <id>.');
-    const at = `/api/session/${encodeURIComponent(id)}/pr`;
-    if (sub === 'wait') {
-      // Held open by the daemon up to 10 minutes at a time; asked again until there is work.
-      for (let failures = 0; ; ) {
-        try {
-          const { prompt, watching } = await api<{ prompt: string | null; watching: number }>(lock, `${at}/wait?ms=600000`, undefined, 610_000);
-          failures = 0;
-          if (prompt) {
-            console.log(prompt);
-            return 0;
-          }
-          if (!watching) {
-            console.log('[cc-harness] No pull request of this session is watched any more: nothing to wait for.');
-            return 0;
-          }
-        } catch (err) {
-          // A restarted daemon: find the new one, a few times, then say why.
-          if (++failures > 5) throw err;
-          await sleep(5_000);
-          lock = (await ensureDaemon()) ?? lock;
-        }
-      }
-    }
-    if (sub === 'unwatch') {
-      const { stopped } = await api<{ stopped: number }>(lock, `${at}/unwatch`, { method: 'POST', body: JSON.stringify({ branch: rest[0] }) });
-      console.log(stopped ? `stopped watching ${stopped} pull request${stopped === 1 ? '' : 's'}` : 'no pull request recorded for that');
-      return 0;
-    }
-    if (sub !== 'status') {
-      usage();
-      return 2;
-    }
-    const { prs, inbox } = await api<{ prs: { branch: string; pr: { url?: string; number?: number; state: string }; watched: boolean; watch?: { fixRounds?: number; error?: string; timeline?: { at: number; note: string }[] } }[]; inbox: number }>(lock, at);
-    if (!prs.length) console.log('no pull requests recorded for this session');
-    for (const p of prs) {
-      console.log(`${p.branch}  #${p.pr.number ?? '?'} ${p.pr.state}  ${p.watched ? 'watched' : 'not watched'}${p.watch?.fixRounds ? `  fix rounds ${p.watch.fixRounds}` : ''}${p.pr.url ? `  ${p.pr.url}` : ''}`);
-      if (p.watch?.error) console.log(`  ! ${p.watch.error}`);
-      for (const t of p.watch?.timeline?.slice(-5) ?? []) console.log(`  ${new Date(t.at).toISOString()}  ${t.note}`);
-    }
-    if (inbox) console.log(`${inbox} prompt${inbox === 1 ? '' : 's'} waiting for the agent`);
-    return 0;
-  },
 };
 
 function pad(value: string, width: number): string {
@@ -465,10 +413,6 @@ usage: coplan <command>
   setup [--yes] [--agents claude,codex,cursor|none]
              install in your agents and walk through the settings
              (npx coplan@latest setup; in a clone, ./setup.sh builds first, then runs this)
-  pr [status|wait|unwatch [branch]] [--session id]
-             the pull requests this session's build recorded: status lists
-             them; wait ends with what needs doing when one changes (run it
-             in the background); unwatch stops following one, or all
   version    print the version
 `);
 }

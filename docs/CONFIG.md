@@ -213,13 +213,8 @@ to the harness:
 | --- | --- |
 | `tool` | Was `gh`, `graphite` or `none`. The harness opens pull requests its own way. |
 | `open` | Was `auto`, `ask` or `never`. The harness decides when. |
-| `watch.enabled` | Pull request watching is removed; CI follow-up belongs to the harness. |
-| `watch.interval` | As above. |
-| `watch.debounce` | As above. |
-| `watch.trust` | As above (was `collaborators`, `author` or a list of logins). |
-| `watch.maxFixRounds` | As above. |
-| `watch.wake` | As above (was `wait`, `queue` or `headless`). |
-| `on` | As above. It mapped events (`ci_failed`, `ci_passed`, `changes_requested`, `approved`, `review_comment`, `comment`, `merge_conflict`, `behind_base`, `merged`, `closed`, `reopened`) to actions (`fix`, `triage`, `rebase`, `advance`, `notify`, `ignore`). |
+| `watch` | Removed: pull request watching and CI follow-up belong to the harness. Ignored, with a `coplan doctor` warning. |
+| `on` | Removed with `watch`. Ignored, with a `coplan doctor` warning. |
 
 ### `final`
 
@@ -265,9 +260,8 @@ a stack of pull requests cannot follow), `comment-unanswered`.
 
 ### `runners`
 
-Deprecated, ignored from 0.4. Runners (`via` of `local`, `cloud` or `ssh`)
-said where a build's sessions started; where and how tasks run belongs to
-the harness.
+Removed in 0.4: where and how tasks run belongs to the harness. Ignored,
+with a `coplan doctor` warning.
 
 ## Your own defaults: `coplan.json`
 

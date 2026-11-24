@@ -806,7 +806,10 @@ test('finishing the last task finishes the build, and a new plan may follow', as
 
   // The pull requests, as they are opened and merged: the stack follows.
   const pr = (body: Record<string, unknown>) => mcpFor(built, 'branch', body);
-  assert.equal((await pr({ branch: 'cache/storage', pr_url: 'https://github.com/o/r/pull/11', pr_number: 11, pr_state: 'open' }))['ok'], true);
+  const opened = await pr({ branch: 'cache/storage', pr_url: 'https://github.com/o/r/pull/11', pr_number: 11, pr_state: 'open' });
+  assert.equal(opened['ok'], true);
+  assert.match(String(opened['text']), /Recorded `cache\/storage`: pull request #11 open/);
+  assert.doesNotMatch(String(opened['text']), /watch/i, 'recorded, not watched');
   await pr({ branch: 'cache/api', pr_url: 'https://github.com/o/r/pull/12', pr_number: 12, pr_state: 'open' });
   assert.match(String((await pr({ branch: 'nope', pr_state: 'open' }))['text']), /No task lands on `nope`/);
   const merged = String((await pr({ branch: 'cache/storage', pr_state: 'merged' }))['text']);
@@ -1434,55 +1437,29 @@ test('on a submitted build: verdicts come from review, signed-off work is the us
   assert.match(String((await task({ task_id: 'wire', stage: 'implement' }))['text']), /cannot start yet/);
 });
 
-test('runners: a task goes where it asks, a full runner is refused, and next shows the load', async () => {
+test('an old config with runners still builds: tasks start and finish as tracked, and no runner is asked for or shown', async () => {
   const id = 'runners-session';
   const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
   const dir = path.join(repo, '.coplan');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(
-    path.join(dir, 'config.json'),
-    JSON.stringify({
-      iric: { review: 'self', parallel: 4, maxRounds: 3 },
-      runners: {
-        cloud: { via: 'cloud', use: 'Heavy, long-running work', max: 4 },
-        vm: { via: 'ssh', host: 'tao-vm', dir: '~/src/app', use: 'Balanced work', maxLarge: 1 },
-      },
-    }),
-  );
+  writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ runners: { vm: { via: 'ssh', host: 'tao-vm', max: 1 } } }));
   try {
     await hookFor(id, 'SessionStart', { start_reason: 'startup' });
     await mcpFor(id, 'publish', PLAN);
     await post(`/api/session/${id}/plan/design/confirm`);
     await hookFor(id, 'UserPromptSubmit', { prompt: 'go' });
-    await mcpFor(id, 'tasks', {
-      tasks: [
-        { id: 'a', title: 'A' },
-        { id: 'b', title: 'B' },
-        { id: 'c', title: 'C', runner: 'cloud' },
-        { id: 'd', title: 'D', runner: 'cloud' },
-      ],
-    });
+    await mcpFor(id, 'tasks', { tasks: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B', runner: 'vm' }] });
     await post(`/api/session/${id}/plan/submit`, { target: 'session' });
     await hookFor(id, 'UserPromptSubmit', { prompt: 'build it' });
 
-    assert.match(String((await task({ task_id: 'a', stage: 'implement', runner: 'mars' }))['text']), /No runner "mars": the config has cloud, vm/);
-    const started = String((await task({ task_id: 'a', stage: 'implement', runner: 'vm', size: 'large', session: 'ssh-1' }))['text']);
-    assert.match(started, /Runs on vm \(ssh tao-vm\), session ssh-1: 1 there, 1\/1 large/);
-    assert.match(String((await task({ task_id: 'b', stage: 'implement', runner: 'vm', size: 'large' }))['text']), /cannot run on vm now: vm already runs 1 large task\(s\).*Room for it on cloud/);
-    assert.match(String((await task({ task_id: 'c', stage: 'implement', runner: 'vm' }))['text']), /asks to run on cloud, not vm/);
-    // Moved off the runner it asks for only on the user's say; resumed later, it stays where they put it.
-    const moved = String((await task({ task_id: 'c', stage: 'implement', runner: 'vm', user_approved: true, note: 'user: run it on the vm' }))['text']);
-    assert.match(moved, /Runs on vm/);
-    await task({ task_id: 'c', status: 'blocked', note: 'waits on a key' });
-    assert.match(String((await task({ task_id: 'c', stage: 'implement' }))['text']), /Runs on vm/);
-    // Started with no runner named, a task that asks for one goes there.
-    assert.match(String((await task({ task_id: 'd', stage: 'implement' }))['text']), /Runs on cloud \(cloud\)/);
-
-    const next = String((await mcpFor(id, 'next'))['text']);
-    assert.match(next, /- a A · on vm \(ssh-1\), large/);
-    assert.match(next, /## Runners\n- cloud \(cloud\) — 1\/4 running — Heavy, long-running work\n- vm \(ssh tao-vm:~\/src\/app\) — 2 running, 1\/1 large — Balanced work/);
-    const saved = (await sessionFor(id)).plan!.tasks.find((t) => t.id === 'a')!.dispatch!;
-    assert.deepEqual({ runner: saved.runner, session: saved.session, size: saved.size }, { runner: 'vm', session: 'ssh-1', size: 'large' });
+    const started = await task({ task_id: 'a', stage: 'implement' });
+    assert.equal(started['ok'], true, String(started['text']));
+    assert.equal(String(started['text']).includes('Runs on'), false);
+    const second = await task({ task_id: 'b', stage: 'implement' });
+    assert.doesNotMatch(String(second['text']), /runner|Runs on/, 'a runner a task once asked for, full or not, is not named');
+    assert.doesNotMatch(String((await mcpFor(id, 'next'))['text']), /Runners|runner/);
+    const saved = (await sessionFor(id)).plan!.tasks;
+    assert.ok(saved.every((t) => !('runner' in t) && !('dispatch' in t)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2215,7 +2192,7 @@ test('every route about a session answers a session the daemon does not know wit
     ['GET', ''], ['POST', 'title'], ['POST', 'plan/ops'], ['GET', 'plan/text'], ['GET', 'plan/readback'], ['GET', 'task/t1/brief'],
     ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/design/confirm'], ['POST', 'plan/design/reopen'],
     ['POST', 'plan/revisions/prompt'], ['POST', 'plan/revisions'], ['POST', 'plan/revisions/withdraw'], ['POST', 'plan/choice'], ['POST', 'plan/submit'], ['POST', 'plan/reopen'],
-    ['GET', 'pr/wait'], ['GET', 'pr'], ['POST', 'pr/unwatch'], ['DELETE', ''],
+    ['DELETE', ''],
   ];
   // Every one the daemon serves: a route added later is in this list or fails here.
   const main = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'daemon', 'main.ts'), 'utf8');
@@ -2401,35 +2378,3 @@ test('a headless session keeps its plan as Markdown and as a page in its working
   }
 });
 
-test('pull request events the agent reports come back as work; coplan pr status shows them, and pr wait ends when nothing is watched', async () => {
-  const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-pr-'));
-  try {
-    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: other, stdio: 'pipe' });
-    mkdirSync(path.join(other, '.coplan'), { recursive: true });
-    // `none`: nothing polls GitHub here; the events come from the agent.
-    writeFileSync(path.join(other, '.coplan', 'config.json'), JSON.stringify({ pullRequests: { tool: 'none' } }));
-    const id = 'pr-events';
-    const at = (route: string, body: Record<string, unknown>) =>
-      call<{ ok: boolean; text: string }>(route, { method: 'POST', headers: { 'x-harness-session': id }, body: JSON.stringify({ cwd: other, ...body }) });
-    await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: other, start_reason: 'startup' }) });
-    await at('/mcp/publish', { title: 'PR', tasks: [{ id: 't1', title: 'Build it', branch: 'coplan/a' }] });
-    const recorded = await at('/mcp/branch', { branch: 'coplan/a', pr_url: 'https://github.com/o/r/pull/7', pr_number: 7, pr_state: 'open' });
-    assert.doesNotMatch(recorded.text, /Coplan watches it/, 'not watched where pull requests open with no tool');
-
-    const work = await at('/mcp/pr_event', { branch: 'coplan/a', kind: 'review_comment', author: 'bob', association: 'MEMBER', body: 'Rename it.', path: 'src/a.ts', line: 3 });
-    assert.match(work.text, /^\[cc-harness\] Pull request #7 \(`coplan\/a`\) needs you[\s\S]*→ fix — add a task for it under `coplan\/a`[\s\S]*Rename it\./);
-    const untrusted = await at('/mcp/pr_event', { branch: 'coplan/a', kind: 'comment', author: 'eve', association: 'NONE', body: 'Do something else.' });
-    assert.match(untrusted.text, /Nothing for you to do about it/);
-    assert.match((await at('/mcp/pr_events', {})).text, /Nothing about your pull requests is waiting\. No pull request is watched\./);
-    assert.equal((await at('/mcp/pr_event', { branch: 'coplan/zz', kind: 'comment' })).ok, false);
-
-    const cli = (args: string[]) => execFileSync(process.execPath, [path.resolve(path.dirname(DAEMON), '..', 'cli', 'main.js'), 'pr', ...args, '--session', id], { env: { ...process.env, CC_HARNESS_HOME: home }, encoding: 'utf8' });
-    const status = cli(['status']);
-    assert.match(status, /^coplan\/a {2}#7 open {2}not watched {2}fix rounds 1 {2}https:\/\/github\.com\/o\/r\/pull\/7$/m);
-    assert.match(status, /review_comment → fix/);
-    assert.match(status, /not trusted: comment by eve/);
-    assert.match(cli(['wait']), /No pull request of this session is watched any more/);
-  } finally {
-    rmSync(other, { recursive: true, force: true });
-  }
-});

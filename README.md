@@ -432,7 +432,7 @@ agent you choose. Nothing is downloaded at run time.
 
 | Part | What it is | Runs as | Lifetime |
 | --- | --- | --- | --- |
-| [MCP server](#the-mcp-server-harness) `harness` | Twelve tools the agent calls to publish, read, propose changes to, sign off and track the plan | `node dist/mcp/main.js`, over stdio | One per agent session, started by the agent |
+| [MCP server](#the-mcp-server-harness) `harness` | Ten tools the agent calls to publish, read, propose changes to, sign off and track the plan | `node dist/mcp/main.js`, over stdio | One per agent session, started by the agent |
 | [Hooks](#hooks) | Seven lifecycle hooks in Claude Code and Codex, five in Cursor | `bin/coplan-hook-relay.sh` — `sh` and `curl` | About 20 ms per event |
 | [Daemon](#what-it-reads-writes-and-connects-to) | Local server: keeps the plans, serves the page | `node dist/daemon/main.js` | One per user. The first hook starts it; it exits after two idle hours |
 | [Skills](#skills) | `coplan`, `coplan-handoff` | Instructions the agent loads | When the agent uses one |
@@ -472,7 +472,7 @@ they are named `mcp__plugin_coplan_harness__<tool>`.
 | Codex | [`mcp/codex.json`](mcp/codex.json) | `node ./dist/mcp/main.js`, from the plugin's folder | `COPLAN_AGENT=codex`; passes `CC_HARNESS_HOME` on | 20 s to start, 60 s per call |
 | Cursor | [`mcp/cursor.json`](mcp/cursor.json) | `node ${CURSOR_PLUGIN_ROOT}/dist/mcp/main.js` | `COPLAN_AGENT=cursor`, `COPLAN_WORKSPACE=${workspaceFolder}` | Cursor's defaults |
 
-The twelve tools:
+The ten tools:
 
 | Tool | Changes the plan? | What it does |
 | --- | --- | --- |
@@ -486,8 +486,6 @@ The twelve tools:
 | `harness_task_brief` | No | One task's focused brief, written to hand to any harness as is: objective, acceptance criteria, the boxes it builds and their connections, what it comes after and before, its scope, branch, the exact checks that define done, and the review requested. |
 | `harness_task_update` | Yes — progress only | Mark a task in progress, done, blocked or dropped, with a one-line note, and report its stage, the checks run and the review's verdict. Each is recorded and shown as reported; nothing is refused. |
 | `harness_branch_update` | Yes — branch records only | Record a branch's pull request and where it stands, so the board shows the stack. |
-| `harness_pr_events` | No | Deprecated, removed in 0.4 with pull request watching: CI and review follow-up belong to the harness. |
-| `harness_pr_event` | No | Deprecated, removed in 0.4 with pull request watching. |
 
 ### Hooks
 
@@ -686,7 +684,7 @@ counts against the model's tokens.
 
 | What | Size | When |
 | --- | --- | --- |
-| The twelve tool definitions | About 24 KB of JSON schema — on the order of 6,000 tokens | Whenever the agent loads the server's tools |
+| The ten tool definitions | About 22 KB of JSON schema — on the order of 5,500 tokens | Whenever the agent loads the server's tools |
 | The skill descriptions | About 1 KB | Always listed |
 | A skill's body | 16.0 KB (`coplan`); `coplan-handoff` is short | When the agent uses that skill |
 | The plan, read back | About 9,000 characters for two diagrams and ten tasks; about 140,000 for 150 boxes and 150 tasks | Each `harness_plan_read` (`changes_only` is shorter), and each publish's reply |

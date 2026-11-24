@@ -8,7 +8,6 @@
  * question goes through AskUserQuestion in Claude's own chat.
  */
 import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from '../shared/proposal-ops.ts';
-import { PR_EVENT_KINDS } from '../shared/prEvents.ts';
 
 export interface ToolDef {
   name: string;
@@ -78,7 +77,6 @@ const BUILD_FIELDS: Record<string, unknown> = {
   },
   branch: { type: 'string', description: 'Git branch the work lands on; subtasks inherit it. Omit for one PR on the current branch.' },
   review: { ...REVIEW, description: 'Only when not the build default: "user" for risky work, "skip" for trivial.' },
-  runner: { type: 'string', description: 'Only when the user asked for one: the runner (from the config) it must be built on. Subtasks inherit it.' },
   builds: {
     type: 'array',
     items: { type: 'string' },
@@ -167,7 +165,6 @@ const OP_PROPERTIES: Record<string, unknown> = {
   dependsOn: { ...STR_LIST, description: 'upsert_task: replaces its dependencies; [] clears them.' },
   branch: { type: 'string', description: 'upsert_task: "" clears it.' },
   review: { type: 'string', enum: [...REVIEW.enum, ''], description: 'upsert_task: "" clears it.' },
-  runner: { type: 'string', description: 'upsert_task: the runner it must be built on; "" clears it.' },
   builds: { ...STR_LIST, description: 'upsert_task: the boxes it builds now, as node ids or "diagramId/nodeId" (replaces its links; [] unlinks it).' },
   threadId: { type: 'string', description: 'reply / resolve: the comment thread.' },
   text: { type: 'string', description: 'reply: your reply. report: the build report. Markdown.' },
@@ -438,8 +435,7 @@ export const TOOLS: ToolDef[] = [
       'blocked with a note. Always refused: starting or finishing a task that waits on another, progress on a task ' +
       'with subtasks. Refused when Managed (noted when Tracked): too many at once, review rounds past the limit, done ' +
       'without a passing verdict for the last round (the user\'s, if they review) or with a failing or unreported check, ' +
-      'dropping signed-off work. When the user has runners, record where each task runs (runner, session, size) ' +
-      'as you hand it off.',
+      'dropping signed-off work.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -462,13 +458,6 @@ export const TOOLS: ToolDef[] = [
           description: "The review's outcome, once it is in: pass, or changes (then refine). Recorded for the task's current review round.",
         },
         summary: { type: 'string', description: 'With verdict: one line on what the review found.' },
-        runner: {
-          type: 'string',
-          description:
-            'Where you hand it: one of the runners harness_task_next lists. Refused when it is full, or the task asks for another.',
-        },
-        session: { type: 'string', description: 'With runner: the id of the session or subagent you started there, to reach it again.' },
-        size: { type: 'string', enum: ['small', 'large'], description: 'With runner: large counts against its maxLarge. Default small.' },
         user_approved: {
           type: 'boolean',
           description:
@@ -498,41 +487,6 @@ export const TOOLS: ToolDef[] = [
         base: { type: 'string', description: 'The branch its pull request targets now, when that changed (after a restack).' },
       },
       required: ['branch'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'harness_pr_events',
-    endpoint: 'pr_events',
-    description:
-      'What needs doing about the pull requests Coplan watches for this plan — failing CI, reviews, comments, ' +
-      'conflicts, merges — handed over once, as the work to do. Usually it reaches you by itself (`coplan pr wait`, or ' +
-      'with the user\'s next message); call this when you want it sooner.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-  },
-  {
-    name: 'harness_pr_event',
-    endpoint: 'pr_event',
-    description:
-      'Pass on an event you saw yourself on one of the build\'s pull requests (a cloud session\'s own pull request ' +
-      'subscription), so Coplan does with it what the repository configured. Copy what the event says; the text ' +
-      'stays untrusted. The answer is the work to do, if any.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        branch: { type: 'string', description: 'The plan\'s branch the pull request is for.' },
-        kind: {
-          type: 'string',
-          enum: [...PR_EVENT_KINDS],
-        },
-        author: { type: 'string', description: 'Login of who wrote it, for a review or comment.' },
-        association: { type: 'string', description: 'Their standing as GitHub gives it: OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, NONE.' },
-        body: { type: 'string', description: 'What they wrote, or which checks failed.' },
-        url: { type: 'string' },
-        path: { type: 'string', description: 'For a comment on a line: the file.' },
-        line: { type: 'integer' },
-      },
-      required: ['branch', 'kind'],
       additionalProperties: false,
     },
   },

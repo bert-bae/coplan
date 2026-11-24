@@ -928,7 +928,7 @@ function migrate(state: SessionState, savedAt: () => number): void {
   for (const key of [
     'worktree', 'transcriptPath', 'stage', 'stageNote', 'baseRef', 'startCommit', 'reviewRound',
     'roundHistory', 'tasks', 'usage', 'todos', 'files', 'commands', 'timeline', 'gates',
-    'activeGateId', 'threads', 'checks', 'ship', 'pendingFeedback', 'stats',
+    'activeGateId', 'threads', 'checks', 'ship', 'pendingFeedback', 'stats', 'prWatch', 'prInbox',
   ]) {
     delete raw[key];
   }
