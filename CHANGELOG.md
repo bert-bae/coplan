@@ -13,6 +13,9 @@
   `coplan pr wait` in the background, `harness_pr_events`, your next message, `harness_pr_event` in the cloud,
   or — if you choose `wake: "headless"` — by Coplan resuming the session. `coplan pr status|unwatch`, and each
   branch's CI, fix rounds and timeline on the board.
+- **Save the plan as a PDF.** Export plan → Save PDF prints the overview and architecture, each diagram drawn
+  as a picture of its canvas, through the browser's print dialog (choose "Save as PDF"). Save PNG on a diagram's
+  toolbar saves just that diagram as a picture.
 - **Architecture first, or straight to tasks.** `/coplan --architect` plans with diagrams first: the task list is
   made from the confirmed design, never before it, and built from there. `/coplan --tasklist` skips the
   architecture for contained work and goes straight to a task list you submit. Without a flag, the agent chooses

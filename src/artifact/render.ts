@@ -181,9 +181,39 @@ export function planPage(plan: Plan, agent = 'the agent'): string {
 <footer class="foot">Made with Coplan. Read-only: every change goes through chat.</footer>`;
 }
 
+/**
+ * The overview and architecture as a standalone document to print as a PDF,
+ * each diagram the PNG in `pictures` (by diagram id). Notes are opened:
+ * paper cannot.
+ */
+export function planDocument(plan: Plan, pictures: ReadonlyMap<string, string>): string {
+  const picture = (d: Diagram) => {
+    const src = pictures.get(d.id);
+    return src ? `<div class="graph"><img src="${esc(src)}" alt="${esc(d.title)}"></div>` : '';
+  };
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(plan.title)}</title><style>${PRINT_CSS}</style></head><body>
+<h1>${esc(plan.title)}</h1>
+${overview(plan)}
+${plan.diagrams.length ? architecture(plan, picture) : ''}
+</body></html>`.replace(/<details>/g, '<details open>');
+}
+
+const PRINT_CSS = `
+body { font: 11pt/1.5 system-ui, sans-serif; color: #1a1a1a; margin: 0; }
+h1 { font-size: 20pt; } h2 { font-size: 15pt; border-bottom: 1px solid #ccc; padding-bottom: 4pt; }
+h2, h3, h4 { break-after: avoid; }
+.muted, .kind { color: #666; } code { font-size: 0.9em; }
+.graph { break-inside: avoid; margin: 8pt 0; text-align: center; }
+.graph img { max-width: 100%; max-height: 9in; }
+.parts, .links { padding-left: 0; list-style: none; }
+.part { break-inside: avoid; margin-bottom: 6pt; }
+#architecture, .diagram + .diagram { break-before: page; }
+pre { white-space: pre-wrap; }
+@page { margin: 0.6in; }`;
+
 const when = (at: number) => (at ? ` on ${new Date(at).toISOString().slice(0, 10)}` : '');
 
-function overview(plan: Plan): string {
+export function overview(plan: Plan): string {
   return `<section id="overview">
   <h2>Overview</h2>
   ${plan.report ? `<h3>Build report</h3>${md(plan.report.text)}` : ''}
@@ -193,7 +223,8 @@ function overview(plan: Plan): string {
 </section>`;
 }
 
-function architecture(plan: Plan): string {
+/** `picture` draws a diagram; the page's default is Mermaid. */
+export function architecture(plan: Plan, picture: (d: Diagram) => string = (d) => graph(diagramMermaid(d))): string {
   const title = (taskId: string) => plan.tasks.find((t) => t.id === taskId)?.title;
   const diagrams = plan.diagrams.map((d) => {
     const label = new Map(d.nodes.map((n) => [n.id, n.label]));
@@ -215,7 +246,7 @@ function architecture(plan: Plan): string {
     return `<article class="diagram" id="diagram-${esc(d.id)}">
       <h3>${esc(d.title)} ${id(d.id)}</h3>
       ${d.caption ? `<p class="muted">${esc(d.caption)}</p>` : ''}
-      ${graph(diagramMermaid(d))}
+      ${picture(d)}
       <h4>Parts</h4><ul class="parts">${parts.join('')}</ul>
       ${links.length ? `<h4>Connections</h4><ul class="links">${links.join('')}</ul>` : ''}
     </article>`;
