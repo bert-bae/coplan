@@ -661,7 +661,7 @@ function TaskRow(props: {
               <span aria-hidden="true">⎇</span> {task.branch}
             </span>
           )}
-          {task.review && <span className="chip" title="How this task is reviewed">review: {REVIEW_LABEL[task.review].toLowerCase()}</span>}
+          {task.review && <span className="chip" title="The review this task asks for">review: {REVIEW_LABEL[task.review].toLowerCase()}</span>}
           <TaskCheckChips plan={plan} task={task} />
           {props.tracking && !kids.length && <ReadinessChip plan={plan} task={task} />}
           {parts.map(({ d, n }) => (
@@ -886,7 +886,7 @@ function ReviewPicker({ task }: { task: Task }) {
           role="radio"
           aria-checked={(task.review ?? '') === mode}
           className={classNames('seg', (task.review ?? '') === mode && 'is-active')}
-          title={mode ? undefined : "The build's default, or its parent's"}
+          title={mode ? undefined : "The repository's default, or its parent's"}
           onClick={() => void edit({ op: 'upsert_task', id: task.id, review: mode, expect: revOf(task) })}
         >
           {mode ? REVIEW_LABEL[mode] : 'Default'}
@@ -1252,7 +1252,7 @@ function UserReview({ plan, task }: { plan: Plan; task: Task }) {
   // in another column, and closing the page asks first.
   const { editing: asking, draft: why, setDraft: setWhy, begin, close, save, saving } = useKeptDraft(useSessionId(), `review:${task.id}:${task.round}`, '', undefined);
   const projectReview = useStore((s) => s.projectReview);
-  const mode = effectiveReview(plan, task, plan.submission?.settings?.review ?? projectReview);
+  const mode = effectiveReview(plan, task, projectReview);
   if (mode !== 'user' || task.stage !== 'review') return null;
   const decided = roundVerdict(task, 'user');
   if (decided) return null;

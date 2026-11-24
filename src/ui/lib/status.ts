@@ -20,7 +20,7 @@ export interface StatusFacts {
   phase: PlanPhase;
   /** The task the agent is on. */
   current: string | null;
-  /** Tasks a Managed build holds for the user's own review. */
+  /** Tasks in review waiting on the user's own verdict. */
   awaitingReview: number;
 }
 

@@ -165,20 +165,21 @@ trusted: the file cannot be read, `checks` is wrong, or a top-level key is
 unknown (often a misspelt `checks`). Anything else — a template that is
 missing, a problem in your own `coplan.json` — is said, and the checks run.
 
-### `review` (on a task)
+### `review`
 
 The review a task asks the harness for, passed on in its brief: `agent` (an
 agent that did not write the change reviews it, where the harness has one),
 `user` (the harness stops and asks you), or `none` (the checks are the
-review). Set it for the repository, in your own `coplan.json`, or on one
-task in Coplan. How the review runs, and how many rounds, is the harness's
-call; Coplan does not run or gate review rounds. The old `iric.review`
-values read as: `subagent` and `self` → `agent`, `skip` → `none`.
+review). Default `agent`. Set it for the repository, in your own
+`coplan.json`, or on one task in Coplan (subtasks inherit it). How the
+review runs, and how many rounds, is the harness's call; Coplan does not
+run or gate review rounds. The old values read as: `subagent` and `self` →
+`agent`, `skip` → `none`; for one release `iric.review` is read as
+`review` when `review` is not set, with a warning.
 
-### `review`
-
-Before 0.4, an object: `review.model`, the model a reviewer subagent ran on.
-Deprecated, ignored from 0.4: models and accounts belong to the harness.
+Before 0.4, `review` was an object: `review.model`, the model a reviewer
+subagent ran on. That form is ignored from 0.4, with a warning: models and
+accounts belong to the harness.
 
 ### `mode`
 
@@ -189,8 +190,8 @@ point.
 
 ### `iric`
 
-Deprecated, ignored from 0.4. `iric.review` is now the task
-[`review`](#review-on-a-task); `iric.parallel` and `iric.maxRounds` are
+Deprecated, ignored from 0.4. `iric.review` is now
+[`review`](#review), read as it for one release; `iric.parallel` and `iric.maxRounds` are
 gone — parallelism and review rounds belong to the harness.
 
 ### `branches`

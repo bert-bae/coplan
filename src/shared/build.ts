@@ -1,7 +1,7 @@
 /**
  * The build, as a graph: which tasks wait on which, what can start now, what
  * can run side by side, which branch each piece of work lands on and how
- * those branches stack — and the settings the user chose for running it.
+ * those branches stack, and the review each task asks for.
  *
  * Everything here is pure over the task list, so the daemon, the browser
  * and the tests all derive the same answers from the same plan. Nothing is
@@ -16,20 +16,13 @@
  *   each of its ancestors depends on, so "the API work waits for the cache"
  *   is said once, on the parent.
  */
-import type { BranchState, BuildSettings, BuildTarget, ExecutionMode, Plan, ReviewMode, ReviewRecord, Task, TaskCheck } from './types.ts';
-import { EXECUTION_MODES, REVIEW_MODES } from './types.ts';
+import type { BranchState, Plan, ReviewMode, ReviewRecord, Task, TaskCheck } from './types.ts';
+import { REVIEW_MODES } from './types.ts';
 
 type Tasks = Pick<Plan, 'tasks'>;
 
-/**
- * How a Managed build runs when neither the repository nor the user said:
- * no assumptions about the agent (#63). The agent reviews its own change,
- * one task at a time; a repository that wants subagents, or more at once,
- * says so in `iric`, and the user can choose either per plan.
- */
-export const DEFAULT_BUILD_SETTINGS: BuildSettings = { review: 'self', parallel: 1, maxRounds: 3 };
-export const MAX_PARALLEL = 8;
-export const MAX_ROUNDS = 10;
+/** The review a task asks for when neither it nor the repository says. */
+export const DEFAULT_REVIEW: ReviewMode = 'agent';
 
 /* ------------------------------------------------------------------ *
  * The tree
@@ -425,7 +418,7 @@ export function branchPlan(plan: Tasks): { branches: BranchPlan[]; unbranched: T
 /**
  * The verdict that stands for a task's current review round: the latest
  * one given in it — and for a task the user reviews, the latest the user
- * gave. Done needs this to be a pass.
+ * gave. Shown on the board; nothing waits on it.
  */
 export function roundVerdict(task: Task, mode: ReviewMode): ReviewRecord | undefined {
   return [...(task.reviews ?? [])].reverse().find((r) => r.round === task.round && (mode !== 'user' || r.by === 'user'));
@@ -476,12 +469,16 @@ export function stackStatus(plan: Pick<Plan, 'tasks' | 'branches' | 'submission'
  * Review
  * ------------------------------------------------------------------ */
 
+/** Names older versions used, read as the review they meant. */
+const OLD_REVIEW: Record<string, ReviewMode> = { subagent: 'agent', self: 'agent', skip: 'none' };
+
+/** A review as written anywhere — a task, a config, an old plan — or
+ *  undefined when it is none Coplan knows. */
 export function validReview(value: unknown): ReviewMode | undefined {
-  return (REVIEW_MODES as readonly string[]).includes(value as string) ? (value as ReviewMode) : undefined;
+  if ((REVIEW_MODES as readonly string[]).includes(value as string)) return value as ReviewMode;
+  return typeof value === 'string' ? OLD_REVIEW[value] : undefined;
 }
 
-/** How a task is reviewed: its own setting, the nearest ancestor's, or the
- *  build's default. */
 /**
  * The checks a task sets for itself, its parents' included (#54): every
  * repository check any of them skips, and every check any of them adds —
@@ -494,74 +491,16 @@ export function effectiveChecks(plan: Tasks, task: Task): { add: TaskCheck[]; sk
   return { add, skip: [...new Set(chain.flatMap((t) => t.skipChecks ?? []))] };
 }
 
+/** The review a task asks for: its own, the nearest ancestor's, or the
+ *  repository's default. */
 export function effectiveReview(plan: Tasks, task: Task, fallback: ReviewMode): ReviewMode {
   for (const t of [task, ...ancestorsOf(plan, task)]) if (t.review) return t.review;
   return fallback;
 }
 
-/** Settings as sent by a page or read from a config file, made whole. */
-export function cleanSettings(raw: unknown, fallback: BuildSettings = DEFAULT_BUILD_SETTINGS): BuildSettings {
-  const rec = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-  const int = (v: unknown, lo: number, hi: number, d: number) =>
-    typeof v === 'number' && Number.isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v))) : d;
-  return {
-    review: validReview(rec['review']) ?? fallback.review,
-    parallel: int(rec['parallel'], 1, MAX_PARALLEL, fallback.parallel),
-    maxRounds: int(rec['maxRounds'], 1, MAX_ROUNDS, fallback.maxRounds),
-  };
-}
-
-/* ------------------------------------------------------------------ *
- * Execution modes
- * ------------------------------------------------------------------ */
-
-export function validMode(value: unknown): ExecutionMode | undefined {
-  return (EXECUTION_MODES as readonly string[]).includes(value as string) ? (value as ExecutionMode) : undefined;
-}
-
-/**
- * The mode a plan is built in: the one it was submitted with — a plan
- * submitted before modes existed was Managed here, or Export elsewhere —
- * and before it is submitted, the repository's default.
- */
-export function planMode(plan: Pick<Plan, 'submission'> | null | undefined, fallback: ExecutionMode): ExecutionMode {
-  const submission = plan?.submission;
-  if (!submission) return fallback;
-  return submission.mode ?? (submission.target === 'elsewhere' ? 'export' : 'managed');
-}
-
-/** Whether the build prompt and brief describe the implement → review →
- *  refine cycle: only in Managed mode. Nothing is enforced either way. */
-export function isManaged(mode: ExecutionMode): boolean {
-  return mode === 'managed';
-}
-
-/**
- * Where a mode builds, and the mode a target builds in. Export is the
- * plan taken elsewhere; the other two build in this session — and a
- * session build asked for with no mode takes the repository's default,
- * or Tracked where that default is Export.
- */
-export function targetOf(mode: ExecutionMode): BuildTarget {
-  return mode === 'export' ? 'elsewhere' : 'session';
-}
-
-export function modeFor(target: BuildTarget | undefined, mode: ExecutionMode | undefined, fallback: ExecutionMode): ExecutionMode {
-  if (target === 'elsewhere') return 'export';
-  if (mode && !(target === 'session' && mode === 'export')) return mode;
-  if (target === 'session') return fallback === 'export' ? 'tracked' : fallback;
-  return fallback;
-}
-
-export const MODE_LABEL: Record<ExecutionMode, string> = {
-  export: 'Export',
-  tracked: 'Tracked',
-  managed: 'Managed',
-};
-
+/** The review requested, in words, as a brief or prompt says it. */
 export const REVIEW_WORDS: Record<ReviewMode, string> = {
-  subagent: 'an independent reviewer (a fresh subagent)',
-  self: 'self-review',
+  agent: 'an agent that did not write the change',
   user: 'the user, before it is marked done',
-  skip: 'checks only, no review',
+  none: 'none beyond the checks',
 };

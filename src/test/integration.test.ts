@@ -46,9 +46,6 @@ before(async () => {
   git(['checkout', '-qb', 'feature/change']);
 
   writeFileSync(path.join(home, 'config.json'), JSON.stringify({ idleShutdownMinutes: 0 }));
-  // The lifecycle tests below hold a Managed build to its gates (#62): the
-  // user's own default, under every repository these tests write a config for.
-  writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ mode: 'managed' }));
 
   daemon = spawn(process.execPath, [DAEMON], {
     env: { ...process.env, CC_HARNESS_HOME: home },
@@ -723,20 +720,17 @@ test('a sign-off the hook did not hand over comes with the next harness_plan_rea
   assert.doesNotMatch(String((await mcpFor(id, 'read', {}))['text']), /^\[cc-harness\] The design is confirmed/);
 });
 
-test('submitting locks the plan with exactly the previewed prompt', async () => {
-  const settings = { review: 'self', parallel: 3, maxRounds: 2 };
-  const preview = await post<Preview & { settings: unknown }>(`/api/session/${built}/plan/prompt`, { target: 'session', note: 'Go.', settings });
-  assert.deepEqual(preview.settings, settings);
-  assert.match(preview.prompt, /Review: self-review/);
+test('submitting locks the plan with exactly the previewed handoff', async () => {
+  const preview = await post<Preview>(`/api/session/${built}/plan/prompt`, { note: 'Go.' });
+  assert.match(preview.prompt, /Review: each task asks for an agent that did not write the change/);
   const res = await post<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${built}/plan/submit`, {
-    target: 'session',
     note: 'Go.',
     expect: preview.version,
-    settings,
   });
   assert.ok(res.plan, res.error);
   assert.equal(res.plan!.submission?.prompt, preview.prompt);
-  assert.deepEqual(res.plan!.submission?.settings, settings);
+  assert.equal(res.plan!.submission?.target, 'session');
+  assert.deepEqual(Object.keys(res.plan!.submission!).filter((k) => k === 'mode' || k === 'settings'), [], 'no build mode, no settings');
   assert.equal(res.plan!.submission?.deliveredAt, null);
 
   const { sessions } = await call<{ sessions: { sessionId: string; phase: string }[] }>('/api/sessions');
@@ -744,7 +738,7 @@ test('submitting locks the plan with exactly the previewed prompt', async () => 
 
   const edit = await opsOn(built, [{ op: 'upsert_task', title: 'sneak in' }]);
   assert.match(edit.error ?? '', /locked/);
-  const again = await post<{ error?: string }>(`/api/session/${built}/plan/submit`, { target: 'session' });
+  const again = await post<{ error?: string }>(`/api/session/${built}/plan/submit`, {});
   assert.match(again.error ?? '', /already been submitted/);
 });
 
@@ -773,7 +767,8 @@ test('while building, Claude tracks tasks but cannot redesign', async () => {
   const discovered = await mcpFor(built, 'edit', { ops: [{ op: 'upsert_task', parentId: 't1', title: 'Handle timeouts' }] });
   assert.equal(discovered['ok'], true, String(discovered['text']));
   const next = String((await mcpFor(built, 'next'))['text']);
-  assert.match(next, /up to 3 at once · review: self · at most 2 review rounds/, 'the settings the user chose');
+  assert.match(next, /review: agent, unless a task asks for another/);
+  assert.doesNotMatch(next, /at once|review rounds?/);
 });
 
 test('finishing the last task finishes the build, and a new plan may follow', async () => {
@@ -797,7 +792,7 @@ test('finishing the last task finishes the build, and a new plan may follow', as
   const finish = String((await mcpFor(built, 'next'))['text']);
   assert.match(finish, /Every task in "Add a cache" is done/);
   assert.match(finish, /Push each branch, in stack order: `cache\/storage` → `cache\/api` \(onto `cache\/storage`\)/);
-  assert.match(finish, /Open the pull requests with `gh pr create`, each against the branch below it .*, once the user says to: ask them first/, 'by default, gh, once the user says');
+  assert.match(finish, /Open the pull requests your own way, each against the branch below it, and record each with harness_branch_update/);
   assert.match(finish, /op: "report"/);
 
   // The pull requests, as they are opened and merged: the stack follows.
@@ -839,17 +834,17 @@ test('a prompt the user pasted themselves is not delivered a second time', async
   assert.ok((await sessionFor(id)).plan!.submission!.deliveredAt, 'but it is counted as delivered');
 });
 
-test('a plan handed off elsewhere is locked but never delivered here, and can be reopened', async () => {
+test('the plan exports as Markdown in any phase, and a submitted plan can be reopened, its design too', async () => {
   const id = 'elsewhere-session';
   await hookFor(id, 'SessionStart', { start_reason: 'startup' });
   await mcpFor(id, 'publish', PLAN);
+  const exported = await call<{ text: string }>(`/api/session/${id}/plan/export`);
+  assert.match(exported.text, /^# Add a cache/);
+  assert.doesNotMatch(exported.text, /harness_|cc-harness/);
   await post(`/api/session/${id}/plan/design/confirm`);
-  const preview = await post<Preview>(`/api/session/${id}/plan/prompt`, { target: 'elsewhere' });
-  assert.doesNotMatch(preview.prompt, /harness_/);
-  await post(`/api/session/${id}/plan/submit`, { target: 'elsewhere', expect: preview.version });
-  const out = await hookFor(id, 'UserPromptSubmit', { prompt: 'hello' });
-  assert.equal(out.hookSpecificOutput?.additionalContext, undefined);
-  assert.equal((await sessionFor(id)).plan!.submission!.deliveredAt, null);
+  const preview = await post<Preview>(`/api/session/${id}/plan/prompt`, {});
+  await post(`/api/session/${id}/plan/submit`, { expect: preview.version });
+  assert.match((await call<{ text: string }>(`/api/session/${id}/plan/export`)).text, /^# Add a cache/, 'and once it is locked');
 
   const reopened = await post<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${id}/plan/reopen`);
   assert.ok(reopened.plan, reopened.error);
@@ -875,11 +870,11 @@ test("the repository's .coplan/config.json reaches the prompts, the briefs and t
     [
       '{',
       '  // what the build runs',
-      '  "hooks": {',
+      '  "checks": {',
       '    "implement": ["npm run typecheck"],',
       '    "review": [{ "name": "tests", "run": "npm test" }, { "name": "lint", "run": "npm run lint", "optional": true }]',
       '  },',
-      '  "iric": { "review": "self", "parallel": 1, "maxRounds": 2 },',
+      '  "review": "user",',
       '  "branches": { "base": "main" }',
       '}',
     ].join('\n'),
@@ -891,21 +886,22 @@ test("the repository's .coplan/config.json reaches the prompts, the briefs and t
     assert.deepEqual(design.project.checks['review'], ['tests', 'lint']);
     // Read-only in the dialog, with where each is set.
     const row = (key: string) => design.project.config.find((r) => r.key === key);
-    assert.deepEqual(row('hooks.review'), { key: 'hooks.review', label: 'Review checks', value: 'tests, lint', files: ['.coplan/config.json'] });
-    assert.deepEqual(row('iric.review'), { key: 'iric.review', label: 'Review, by default', value: 'self-review', files: ['.coplan/config.json'] });
-    assert.equal(row('hooks.final')?.files.length, 0, 'set nowhere');
+    assert.deepEqual(row('checks.review'), { key: 'checks.review', label: 'Review checks', value: 'tests, lint', files: ['.coplan/config.json'] });
+    assert.deepEqual(row('review'), { key: 'review', label: 'Review, by default', value: 'the user, before it is marked done', files: ['.coplan/config.json'] });
+    assert.equal(row('checks.final')?.files.length, 0, 'set nowhere');
     assert.deepEqual(
       design.blocks.find((b) => b.id === 'checks:review')?.source,
-      { kind: 'config', key: 'hooks.review', files: ['.coplan/config.json'] },
+      { kind: 'config', key: 'checks.review', files: ['.coplan/config.json'] },
     );
     assert.match(design.prompt, /- review: tests `npm test`; lint `npm run lint` \(optional\)/);
-    const build = await post<Preview & { settings: unknown }>(`/api/session/${id}/plan/prompt`, { target: 'session' });
-    assert.deepEqual(build.settings, { review: 'self', parallel: 1, maxRounds: 2 }, "the repository's defaults");
+    const build = await post<Preview & { project: { review: string } }>(`/api/session/${id}/plan/prompt`, {});
+    assert.equal(build.project.review, 'user', "the repository's default review");
+    assert.match(build.prompt, /Review: each task asks for the user, before it is marked done/);
 
     const brief = String((await mcpFor(id, 'brief', { task_id: 't2' }))['text']);
-    assert.match(brief, /- typecheck: `npm run typecheck`/);
-    assert.match(brief, /- tests: `npm test`/);
-    assert.match(brief, /Review: self-review/);
+    assert.match(brief, /- implement: typecheck `npm run typecheck`/);
+    assert.match(brief, /- review: tests `npm test`/);
+    assert.match(brief, /Review requested: the user, before it is marked done/);
 
     // An optional check failing does not hold a task back; a required one does.
     await mcpFor(id, 'task', { task_id: 't2', stage: 'review', checks: [{ name: 'tests', ok: true }, { name: 'lint', ok: false }] });
@@ -924,10 +920,10 @@ test("the repository's customizations reach the agent, its errors hold what they
   writeFileSync(
     path.join(dir, 'config.json'),
     JSON.stringify({
-      hooks: { final: [{ name: 'suite', run: 'npm test' }, { name: 'audit', run: 'npm audit', optional: true }] },
-      pullRequests: { tool: 'graphite', open: 'auto', template: 'PR_TEMPLATE.md' },
-      iric: { review: 'subagent' },
-      instructions: { design: 'Name every box after its service.', brief: 'Write the test first.', review: 'Look for unparameterised SQL.' },
+      checks: { final: [{ name: 'suite', run: 'npm test' }, { name: 'audit', run: 'npm audit', optional: true }] },
+      pullRequests: { template: 'PR_TEMPLATE.md' },
+      review: 'none',
+      instructions: { design: 'Name every box after its service.', brief: 'Write the test first. Look for unparameterised SQL.' },
       planCheck: { 'box-undescribed': 'error', 'comment-unanswered': 'off' },
     }),
   );
@@ -941,10 +937,12 @@ test("the repository's customizations reach the agent, its errors hold what they
     assert.deepEqual(design.project.planCheck, { 'box-undescribed': 'error', 'comment-unanswered': 'off' }, 'the page is told how gaps count');
     const opened = await call<{ planCheck?: Record<string, string>; projectReview?: string }>(`/api/session/${id}`);
     assert.deepEqual(opened.planCheck, { 'box-undescribed': 'error', 'comment-unanswered': 'off' }, 'and so is the canvas, which marks the boxes the check lists');
-    assert.equal(opened.projectReview, 'subagent', "and the board, who reviews where the plan does not say");
+    assert.equal(opened.projectReview, 'none', 'and the board, the review a task asks for where it does not say');
     const brief = String((await mcpFor(id, 'brief', { task_id: 't2' }))['text']);
-    assert.match(brief, /Write the test first\./);
-    assert.match(brief, /### What the review checks here[\s\S]*Look for unparameterised SQL\./);
+    assert.match(brief, /## Done when[\s\S]*### Standing instructions[\s\S]*Write the test first\. Look for unparameterised SQL\./);
+    const handoff = (await post<Preview>(`/api/session/${id}/plan/prompt`, {})).prompt;
+    assert.match(handoff, /Write each description from the pull request template, PR_TEMPLATE\.md\./);
+    assert.doesNotMatch(handoff, /## How it was tested/, 'the template goes as a path: Coplan writes no pull request bodies');
 
     // A gap the repository counts as an error holds the sign-off, and says so.
     const check = String((await mcpFor(id, 'check'))['text']);
@@ -1003,17 +1001,13 @@ test('an audit proposes instead of overwriting: the user answers in Coplan, and 
   assert.match(String((await mcpFor(id, 'read', { changes_only: true }))['text']), /p3 "Drop Postgres" — \*\*rejected\*\* by the user: We need durability\./);
 });
 
-test('progress is recorded as reported in a Managed build: no gate holds it, failures show, only a contradictory board is refused', async () => {
+test('progress is recorded as reported: no gate holds it, failures show, only a contradictory board is refused', async () => {
   const id = 'gates-session';
   const dir = path.join(repo, '.coplan');
   mkdirSync(dir, { recursive: true });
   writeFileSync(
     path.join(dir, 'config.json'),
-    JSON.stringify({
-      mode: 'managed',
-      hooks: { review: [{ name: 'tests', run: 'npm test' }] },
-      iric: { review: 'self', parallel: 1, maxRounds: 1 },
-    }),
+    JSON.stringify({ checks: { review: [{ name: 'tests', run: 'npm test' }] } }),
   );
   const GATED = {
     title: 'Gates',
@@ -1039,11 +1033,7 @@ test('progress is recorded as reported in a Managed build: no gate holds it, fai
     await post(`/api/session/${id}/plan/design/confirm`);
     await hookFor(id, 'UserPromptSubmit', { prompt: 'go' });
     const preview = await post<Preview>(`/api/session/${id}/plan/prompt`, {});
-    const submitted = await post<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${id}/plan/submit`, {
-      mode: 'managed',
-      expect: preview.version,
-      settings: { review: 'self', parallel: 1, maxRounds: 1 },
-    });
+    const submitted = await post<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${id}/plan/submit`, { expect: preview.version });
     assert.ok(submitted.plan, submitted.error);
     await hookFor(id, 'UserPromptSubmit', { prompt: 'build it' });
 
@@ -1088,7 +1078,7 @@ test('progress is recorded as reported in a Managed build: no gate holds it, fai
     await accepted({ task_id: 'f', stage: 'refine' });
     await accepted({ task_id: 'f', stage: 'review' });
     assert.equal((await taskNow('f')).round, 2);
-    // Started past the parallel limit (d and f are in progress already).
+    // Started alongside d and f: how many run at once is the harness's.
     await accepted({ task_id: 'g', stage: 'implement' });
     // Dropping work the user signed off: a reason is still needed, a go-ahead is not.
     await refused({ task_id: 'h', status: 'dropped' }, /needs a `note`/);
@@ -1108,7 +1098,7 @@ test('Export plan: the whole plan as Markdown, in every phase, signing nothing o
     assert.match(res.text, /## Summary\nA read-through cache in front of Postgres\./);
     assert.match(res.text, /## Architecture[\s\S]*\*\*Postgres\*\* `db`/);
     assert.match(res.text, /## Task briefs\n/);
-    for (const banned of [/harness_/, /cc-harness/, /implement → review → refine/, /review round/i, /subagent/, /\breview: (user|self|skip|subagent)\b/]) {
+    for (const banned of [/harness_/, /cc-harness/, /implement → review → refine/, /review round/i, /subagent/, /\breview: (user|agent|none)\b/]) {
       assert.doesNotMatch(res.text, banned);
     }
     return res;
@@ -1127,15 +1117,10 @@ test('Export plan: the whole plan as Markdown, in every phase, signing nothing o
   // Tasking, and once submitted.
   await post(`/api/session/${id}/plan/design/confirm`);
   assert.match((await exported()).text, /- \[ \] t2 Client/);
-  const preview = await post<Preview>(`/api/session/${id}/plan/prompt`, { mode: 'export' });
-  assert.equal(preview.prompt, (await exported()).text, 'Submit as an Export locks exactly what Export plan copies');
-  await post(`/api/session/${id}/plan/submit`, { mode: 'export', expect: preview.version });
-  const locked = await sessionFor(id);
-  assert.equal(locked.plan!.submission?.target, 'elsewhere');
-  assert.equal(locked.plan!.submission?.mode, 'export');
-  const next = String((await hookFor(id, 'UserPromptSubmit', { prompt: 'hello' })).hookSpecificOutput?.additionalContext ?? '');
-  assert.doesNotMatch(next, /# Add a cache|\[cc-harness\] Build/, 'an export is never handed to this agent');
-  assert.equal((await sessionFor(id)).plan!.submission?.deliveredAt, null);
+  const preview = await post<Preview>(`/api/session/${id}/plan/prompt`, {});
+  assert.notEqual(preview.prompt, (await exported()).text, 'the handoff is not the export');
+  await post(`/api/session/${id}/plan/submit`, { expect: preview.version });
+  assert.equal((await sessionFor(id)).plan!.submission?.target, 'session');
   assert.equal((await exported()).text, planning.text, 'the plan reads the same in every phase');
 });
 
@@ -1240,7 +1225,7 @@ test("each round's verdict is recorded as given, by whoever gave it — done nev
   // The user's review: the agent's pass is recorded as the agent's, and the board still waits on theirs.
   await task({ task_id: 't2', stage: 'review' });
   assert.equal((await task({ task_id: 't2', verdict: 'pass' }))['ok'], true);
-  assert.match(String((await mcpFor(id, 'next'))['text']), /waiting on the user's review/);
+  assert.match(String((await mcpFor(id, 'next'))['text']), /it asks for the user's review/);
   await opsOn(id, [{ op: 'review_task', id: 't2', verdict: 'changes', summary: 'rename the client' }]);
   assert.match(String((await mcpFor(id, 'read', { changes_only: true }))['text']), /\*\*Reviews\*\*\n- The user asked for changes to "Client" in review round 1: rename the client\./);
   await task({ task_id: 't2', stage: 'refine' });
@@ -1264,7 +1249,7 @@ test('on a submitted build: verdicts come from review, signed-off work drops wit
       { id: 'wire', title: 'Wire up', dependsOn: ['storage'] },
     ],
   });
-  await post(`/api/session/${id}/plan/submit`, { target: 'session', settings: { review: 'self', parallel: 1, maxRounds: 3 } });
+  await post(`/api/session/${id}/plan/submit`, {});
   await hookFor(id, 'UserPromptSubmit', { prompt: 'build it' });
 
   // A verdict comes from a review: not from refine, to close a round that asked for changes.
@@ -1278,7 +1263,7 @@ test('on a submitted build: verdicts come from review, signed-off work drops wit
   // The agent's own pass on the user's task does not count, and next says it waits on them.
   await task({ task_id: 'cache', stage: 'review' });
   await task({ task_id: 'cache', verdict: 'pass' });
-  assert.match(String((await mcpFor(id, 'next'))['text']), /Cache.*\n.*waiting on the user's review/);
+  assert.match(String((await mcpFor(id, 'next'))['text']), /Cache.*\n.*it asks for the user's review/);
 
   // Dropping signed-off work needs a reason, not a go-ahead.
   assert.equal((await task({ task_id: 'wire', status: 'dropped', note: 'not needed' }))['ok'], true);
@@ -1314,8 +1299,8 @@ test('an old config with runners still builds: tasks start and finish as tracked
   }
 });
 
-test('a submission needs to say who builds it', async () => {
-  const res = await raw(`/api/session/${built}/plan/submit`, { method: 'POST', body: JSON.stringify({ target: 'mars' }) });
+test('a submission that names a target other than this session is refused', async () => {
+  const res = await raw(`/api/session/${built}/plan/submit`, { method: 'POST', body: JSON.stringify({ target: 'elsewhere' }) });
   assert.equal(res.status, 400);
 });
 
@@ -1330,8 +1315,8 @@ test("the page shows each task's brief exactly as harness_task_brief returns it,
   writeFileSync(
     path.join(dir, 'config.json'),
     JSON.stringify({
-      hooks: { implement: ['npm run typecheck'], review: [{ name: 'tests', run: 'npm test' }] },
-      iric: { review: 'subagent' },
+      checks: { implement: ['npm run typecheck'], review: [{ name: 'tests', run: 'npm test' }] },
+      review: 'agent',
       instructions: { brief: 'Write the test first.', review: 'Look for unparameterised SQL.' },
     }),
   );
@@ -1410,11 +1395,7 @@ test('"build it" in chat: the agent advances the plan, and it is building — lo
   await hookFor(id, 'UserPromptSubmit', { prompt: '/coplan add a cache' });
   await mcpFor(id, 'publish', PLAN);
   await mcpFor(id, 'read');
-  // The user once chose Tracked in the Submit dialog, and closed it.
-  await post(`/api/session/${id}/plan/choice`, { mode: 'tracked' });
-  assert.equal((await sessionFor(id)).buildChoice?.mode, 'tracked');
-  const preview = await post<Preview & { mode: string }>(`/api/session/${id}/plan/prompt`, {});
-  assert.equal(preview.mode, 'tracked', 'the dialog opens on what the user last chose');
+  const preview = await post<Preview>(`/api/session/${id}/plan/prompt`, {});
 
   // The user, in chat. The hook reads nothing into it: deciding what it
   // means is the agent's, which reads the chat.
@@ -1425,7 +1406,7 @@ test('"build it" in chat: the agent advances the plan, and it is building — lo
   const res = await mcpFor(id, 'advance', { to: 'build', user_said: 'looks good, build it' });
   assert.equal(res['ok'], true, String(res['text']));
   const text = String(res['text']);
-  assert.match(text, /^\[cc-harness\] Submitted the plan from chat, on the user's word \("looks good, build it"\): Tracked, as they last chose in Coplan\./);
+  assert.match(text, /^\[cc-harness\] Submitted the plan from chat, on the user's word \("looks good, build it"\)\. It is locked now/);
   assert.ok(text.includes(preview.prompt), 'the reply carries the prompt the page would have sent');
 
   // Building: straight from the design, which was never confirmed.
@@ -1433,7 +1414,6 @@ test('"build it" in chat: the agent advances the plan, and it is building — lo
   assert.equal(s.plan!.design, undefined);
   assert.equal(s.plan!.submission?.via, 'chat');
   assert.equal(s.plan!.submission?.userSaid, 'looks good, build it');
-  assert.equal(s.plan!.submission?.mode, 'tracked');
   assert.equal(s.plan!.submission?.prompt, preview.prompt);
   assert.ok(s.plan!.submission?.deliveredAt, 'handed over as the reply');
   const { sessions } = await call<{ sessions: { sessionId: string; phase: string; planStatus: string }[] }>('/api/sessions');
@@ -1463,7 +1443,7 @@ test('"build it" in chat: the agent advances the plan, and it is building — lo
   assert.match(String(again['text']), /already submitted: build it/);
 });
 
-test('"make the task list" in chat confirms the design; with no choice made, a build takes the repository default (#65)', async () => {
+test('"make the task list" in chat confirms the design, and "ship it" then hands off the task list (#65)', async () => {
   const id = 'chat-tasks';
   await hookFor(id, 'SessionStart', { start_reason: 'startup' });
   await mcpFor(id, 'publish', PLAN);
@@ -1491,17 +1471,14 @@ test('"make the task list" in chat confirms the design; with no choice made, a b
   const twice = await mcpFor(id, 'advance', { to: 'tasks', user_said: 'again' });
   assert.match(String(twice['text']), /already confirmed: make the task list/);
 
-  // The task list, then "build it" — with no choice made in the page, the
-  // repository's default (Managed in these tests).
+  // The task list, then "build it".
   await mcpFor(id, 'tasks', { tasks: [{ id: 't1', title: 'Client', detail: 'Wrap the driver.' }, { id: 't2', title: 'Wire up', dependsOn: ['t1'], detail: 'Use it.' }] });
   const build = await mcpFor(id, 'advance', { to: 'build', user_said: 'ship it' });
   assert.equal(build['ok'], true, String(build['text']));
-  assert.match(String(build['text']), /: Managed, this repository's default\./);
   assert.match(String(build['text']), /\[cc-harness\] Build the plan "Add a cache"/);
   s = await sessionFor(id);
-  assert.equal(s.plan!.submission?.mode, 'managed');
   assert.equal(s.plan!.submission?.userSaid, 'ship it');
-  assert.ok(s.plan!.submission?.settings, "a Managed build records the settings it runs with");
+  assert.equal(s.plan!.submission?.target, 'session');
 });
 
 /* ------------------------------------------------------------------ *
@@ -1706,7 +1683,7 @@ test("a task records the commit its change begins at, and is done when it says s
     writeFileSync(
       path.join(other, '.coplan', 'config.json'),
       JSON.stringify({
-        hooks: {
+        checks: {
           review: [
             { name: 'ts tests', run: 'true', paths: ['*.ts'] },
             { name: 'py tests', run: 'true', paths: ['*.py'] },
@@ -1846,7 +1823,7 @@ test("a mistake in the harness config reaches the page: when it opens, and as so
     assert.match(first.join('\n'), /harness\.json: "idleShutdownMinutes" can only be set in the global config/);
     assert.ok(page.files[0]!.some((f) => f.endsWith(path.join('.claude', 'harness.json'))), 'it says which files it speaks for');
     // Its plan comes with who reviews where the plan does not say.
-    assert.ok(page.reviews.length > 0 && page.reviews.every((r) => r === 'self'), JSON.stringify(page.reviews));
+    assert.ok(page.reviews.length > 0 && page.reviews.every((r) => r === 'agent'), JSON.stringify(page.reviews));
 
     // A page that asked for a session the daemon did not hold yet watches
     // its repository once the session arrives.
@@ -1884,7 +1861,7 @@ test("a mistake in the harness config reaches the page: when it opens, and as so
   }
 });
 
-test("the user's own edits are judged by the repository's review mode, as the daemon's gates are (#150)", async () => {
+test("the user's own edits fall back to the repository's review, read from the old iric.review too (#150)", async () => {
   const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-skip-'));
   try {
     execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: other, stdio: 'pipe' });
@@ -1896,14 +1873,12 @@ test("the user's own edits are judged by the repository's review mode, as the da
     await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: other, start_reason: 'startup' }) });
     await at('/mcp/publish', { title: 'One task', tasks: [{ id: 't1', title: 'Build it' }] });
     await at('/mcp/read', {});
-    for (const body of [{ stage: 'review' }, { status: 'done', note: 'passes its checks' }]) {
-      const res = await at('/mcp/task', { task_id: 't1', ...body });
-      assert.equal(res['ok'], true, String(res['text']));
-    }
-    // Taken up again by the user on the board: under `skip`, closed done is passed, so its next round is its own.
-    const { plan, error } = await opsOn(id, [{ op: 'upsert_task', id: 't1', status: 'in_progress' }]);
+    const res = await at('/mcp/task', { task_id: 't1', stage: 'review' });
+    assert.equal(res['ok'], true, String(res['text']));
+    // The user's verdict on the board records the review the task asked for: the repository's (`skip`, read as `none`).
+    const { plan, error } = await opsOn(id, [{ op: 'review_task', id: 't1', verdict: 'pass' }]);
     assert.ok(plan, error);
-    assert.equal(plan.tasks.find((t) => t.id === 't1')!.reopened, true, "the repository's mode, not the default (self, with no verdict: not passed)");
+    assert.equal(plan.tasks.find((t) => t.id === 't1')!.reviews!.at(-1)!.mode, 'none', "the repository's review, not the default (agent)");
   } finally {
     rmSync(other, { recursive: true, force: true });
   }
@@ -1915,7 +1890,7 @@ test("a change to the repository's review mode reaches its open page, with no ed
   try {
     execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: other, stdio: 'pipe' });
     mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, JSON.stringify({ iric: { review: 'user' } }));
+    writeFileSync(file, JSON.stringify({ review: 'user' }));
     const id = 'review-mode-change';
     await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: other, start_reason: 'startup' }) });
     const page = await settingsStream(id);
@@ -1925,11 +1900,11 @@ test("a change to the repository's review mode reaches its open page, with no ed
       // Changed: the next time the daemon reads it (its timer, or any call that needs it), the page hears.
       // (Dated a moment back: a read that finds it settled keeps it.)
       const listsBefore = page.lists.n;
-      writeFileSync(file, JSON.stringify({ iric: { review: 'subagent' } }));
+      writeFileSync(file, JSON.stringify({ review: 'none' }));
       utimesSync(file, new Date(), new Date(Date.now() - 1000));
       await call(`/api/session/${id}`);
-      for (let i = 0; i < 50 && page.reviews.at(-1) !== 'subagent'; i++) await sleep(50);
-      assert.equal(page.reviews.at(-1), 'subagent', JSON.stringify(page.reviews));
+      for (let i = 0; i < 50 && page.reviews.at(-1) !== 'none'; i++) await sleep(50);
+      assert.equal(page.reviews.at(-1), 'none', JSON.stringify(page.reviews));
       // The session list too, which says what waits on the user by it.
       for (let i = 0; i < 50 && page.lists.n === listsBefore; i++) await sleep(50);
       assert.ok(page.lists.n > listsBefore, 'the list is sent again');
@@ -1939,14 +1914,14 @@ test("a change to the repository's review mode reaches its open page, with no ed
       await sleep(200);
       assert.equal(page.reviews.length, sent);
       // Dated ahead (clock skew): never kept, so read on each call, but told once, and the daemon answers at once.
-      writeFileSync(file, JSON.stringify({ iric: { review: 'self' } }));
+      writeFileSync(file, JSON.stringify({ review: 'agent' }));
       utimesSync(file, new Date(), new Date(Date.now() + 60_000));
       const started = Date.now();
       await call(`/api/session/${id}`);
       await call(`/api/session/${id}`);
-      for (let i = 0; i < 50 && page.reviews.at(-1) !== 'self'; i++) await sleep(50);
+      for (let i = 0; i < 50 && page.reviews.at(-1) !== 'agent'; i++) await sleep(50);
       assert.ok(Date.now() - started < 2000, `answered in ${Date.now() - started} ms`);
-      assert.deepEqual(page.reviews.slice(sent), ['self'], 'told once');
+      assert.deepEqual(page.reviews.slice(sent), ['agent'], 'told once');
     } finally {
       page.close();
     }
@@ -1965,7 +1940,7 @@ test('a task\'s own checks: the agent proposes, the user sets, and the brief and
   try {
     g('init', '-q', '-b', 'main');
     mkdirSync(path.join(other, '.coplan'), { recursive: true });
-    writeFileSync(path.join(other, '.coplan', 'config.json'), JSON.stringify({ hooks: { review: [{ name: 'tests', run: 'pnpm test' }] } }));
+    writeFileSync(path.join(other, '.coplan', 'config.json'), JSON.stringify({ checks: { review: [{ name: 'tests', run: 'pnpm test' }] } }));
     const id = 'own-checks';
     const at = (route: string, body: Record<string, unknown>) =>
       call<Record<string, unknown>>(route, { method: 'POST', headers: { 'x-harness-session': id }, body: JSON.stringify({ cwd: other, ...body }) });
@@ -2009,7 +1984,7 @@ test('every route about a session answers a session the daemon does not know wit
   const routes: [string, string][] = [
     ['GET', ''], ['POST', 'title'], ['POST', 'plan/ops'], ['GET', 'plan/text'], ['GET', 'plan/readback'], ['GET', 'task/t1/brief'],
     ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/design/confirm'], ['POST', 'plan/design/reopen'],
-    ['POST', 'plan/revisions/prompt'], ['POST', 'plan/revisions'], ['POST', 'plan/revisions/withdraw'], ['POST', 'plan/choice'], ['POST', 'plan/submit'], ['POST', 'plan/reopen'],
+    ['POST', 'plan/revisions/prompt'], ['POST', 'plan/revisions'], ['POST', 'plan/revisions/withdraw'], ['POST', 'plan/submit'], ['POST', 'plan/reopen'],
     ['DELETE', ''],
   ];
   // Every one the daemon serves: a route added later is in this list or fails here.

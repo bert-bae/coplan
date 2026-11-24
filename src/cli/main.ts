@@ -306,7 +306,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
     return runDoctor();
   },
 
-  /** Run a stage's hooks from the repository's .coplan/config.json. */
+  /** Run a stage's checks from the repository's .coplan/config.json. */
   async check(args) {
     return runCheck(args);
   },
@@ -404,10 +404,10 @@ usage: coplan <command>
   logs       tail the daemon log
   doctor     verify the plugin wiring end to end
   check [implement|review|final] [--since commit] [--files a,b] [--base ref] [--all] [--skip name]... [--list] [--json]
-             run that stage's hooks from .coplan/config.json (default: review),
+             run that stage's checks from .coplan/config.json (default: review),
              only those for what changed: since --since, else since the last
              commit; at final, since --base. --files names the files instead,
-             --all runs every hook, --skip leaves one out (once per check)
+             --all runs every check, --skip leaves one out (once per check)
   init [--print] [--force]
              write a starting .coplan/config.json from the repository's scripts
   setup [--yes] [--agents claude,codex,cursor|none]

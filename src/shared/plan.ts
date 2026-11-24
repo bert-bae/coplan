@@ -9,7 +9,6 @@
  */
 import type {
   Author,
-  BuildSettings,
   BranchState,
   BuildTarget,
   Change,
@@ -21,7 +20,6 @@ import type {
   DiagramEdge,
   EdgeArrows,
   DiagramEdgeInput,
-  ExecutionMode,
   DiagramNode,
   DiagramNodeInput,
   IricStage,
@@ -51,8 +49,8 @@ import type {
   TaskStatus,
   Thread,
 } from './types.ts';
-import { BUILD_TARGETS, EDGE_ARROWS, EXECUTION_MODES, IRIC_STAGES, PLAN_MODES, TASK_CHECK_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
-import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, isSettled, planMode, roundVerdict, validReview } from './build.ts';
+import { BUILD_TARGETS, EDGE_ARROWS, IRIC_STAGES, PLAN_MODES, TASK_CHECK_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
+import { DEFAULT_REVIEW, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, isSettled, roundVerdict, validReview } from './build.ts';
 import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from './proposal-ops.ts';
 
 /** How many review verdicts a task keeps. */
@@ -564,22 +562,6 @@ function keepsStage(status: TaskStatus): boolean {
   return status === 'in_progress' || status === 'blocked';
 }
 
-/** Finished (done, or dropped while done) on a passing last round: taken up
- *  again, its next review round is not held to the round limit, as that
- *  round never failed (`reopened`). `fallback`: the review mode where the
- *  plan holds none — the project's, as the daemon judges by (required: the
- *  default alone would differ from it). */
-export function passedAndClosed(plan: Plan, task: Task, fallback: ReviewMode): boolean {
-  if (!wasFinished(task) || !task.round) return false;
-  // Closed over failing checks, the work was accepted as it was: its round
-  // did not pass, and accepting it allowed no further round (D4).
-  if (task.acceptedFailing) return false;
-  // The round's verdict that stands, by whoever reviews it (the user's own,
-  // for a task they review); with no review, closing it done passed it.
-  const mode = effectiveReview(plan, task, fallback);
-  return mode === 'skip' || roundVerdict(task, mode)?.verdict === 'pass';
-}
-
 /** Finished: done, or dropped while it was done (wasDone). */
 export function wasFinished(task: Task): boolean {
   return task.status === 'done' || (task.status === 'dropped' && task.wasDone === true);
@@ -662,8 +644,6 @@ function buildTaskTree(
         ...(old?.checks?.length ? { checks: old.checks } : {}),
         ...(old?.reviews?.length ? { reviews: old.reviews } : {}),
         ...(old?.wasDone && status === 'dropped' ? { wasDone: true } : {}),
-        ...(old?.reopened ? { reopened: true } : {}),
-        ...(old?.acceptedFailing && (status === 'done' || (status === 'dropped' && old.wasDone)) ? { acceptedFailing: true } : {}),
         createdAt: old?.createdAt ?? now,
         updatedAt: now,
         createdBy: old?.createdBy ?? 'claude',
@@ -852,7 +832,7 @@ function cleanBranch(value: unknown): string | undefined {
 function reviewOrThrow(value: unknown, title: string) {
   if (value === undefined || value === '' || value === null) return undefined;
   const review = validReview(value);
-  if (!review) throw new PlanError(`"${title}": review must be one of subagent, self, user or skip.`);
+  if (!review) throw new PlanError(`"${title}": review must be one of agent, user or none.`);
   return review;
 }
 
@@ -947,7 +927,11 @@ function normalizeTask(task: Task): Task {
   if (deps.length) t.dependsOn = deps;
   else delete t.dependsOn;
   if (typeof t.branch !== 'string' || !t.branch) delete t.branch;
-  if (!validReview(t.review)) delete t.review;
+  // Older names (subagent, self, skip) read as the review they meant.
+  const review = validReview(t.review);
+  if (review) t.review = review;
+  else delete t.review;
+  if (Array.isArray(t.reviews)) t.reviews = t.reviews.map((r) => ({ ...r, mode: validReview(r?.mode) ?? DEFAULT_REVIEW }));
   // Where older versions said a task was built (runners): not plan data.
   delete t['runner'];
   delete t['dispatch'];
@@ -968,11 +952,9 @@ function normalizeTask(task: Task): Task {
   else delete t.checks;
   if (typeof t.startCommit !== 'string' || !/^[0-9a-f]{7,64}$/.test(t.startCommit)) delete t.startCommit;
   if (t.wasDone !== true || t.status !== 'dropped') delete t.wasDone;
-  // Its next round not yet begun: gone once done, or once in review (an
-  // older build may have sent it there without clearing it).
-  if (t.reopened !== true || t.status === 'done' || t.stage === 'review') delete t.reopened;
-  // How it was closed, while it stays finished.
-  if (t.acceptedFailing !== true || !wasFinished(t)) delete t.acceptedFailing;
+  // What older versions kept to enforce review rounds: not plan data.
+  delete t['reopened'];
+  delete t['acceptedFailing'];
   // What a task's own checks say, from disk: anything malformed is dropped,
   // never allowed to break a brief.
   const added = Array.isArray(t.addChecks) ? t.addChecks.map(validTaskCheck).filter((c): c is TaskCheck => Boolean(c)) : [];
@@ -1026,7 +1008,6 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
     'stage',
     'checks',
     'startCommit',
-    'acceptedFailing',
     'builds',
     'expect',
   ],
@@ -1396,7 +1377,7 @@ function withoutExpect(op: PlanOp): PlanOp {
 
 /** The fields of upsert_task that report progress rather than say what
  *  the task is. Claude reports them only through harness_task_update. */
-export const PROGRESS_FIELDS = ['status', 'stage', 'checks', 'startCommit', 'acceptedFailing'] as const;
+export const PROGRESS_FIELDS = ['status', 'stage', 'checks', 'startCommit'] as const;
 
 /**
  * Claude's progress goes through harness_task_update, which records it and
@@ -1426,8 +1407,8 @@ export function applyOps(
   author: Author,
   now = Date.now(),
   /** `tracking`: Claude's progress report, already through harness_task_update.
-   *  `review`: the project's review mode, for a plan that holds none of its
-   *  own — any plan but a submitted Managed build. The session store fills it in for every edit. */
+   *  `review`: the repository's default review, for a task that asks for none
+   *  of its own. The session store fills it in for every edit. */
   opts: { tracking?: boolean; review?: ReviewMode } = {},
 ): { plan: Plan; changes: Change[] } {
   if (!Array.isArray(ops) || ops.length === 0) {
@@ -1489,8 +1470,8 @@ export function applyOps(
  *  before the batch began (expectAtStart): every caller goes through it.
  *  `guard`: Claude's unread-edit guard, for the edits a proposal carries. */
 function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (plan: Plan, op: PlanOp) => void, review?: ReviewMode): Change[] {
-  // The review mode a task falls back to: the build's.
-  const reviewFallback = plan.submission?.settings?.review ?? review ?? DEFAULT_BUILD_SETTINGS.review;
+  // The review a task falls back to: the repository's.
+  const reviewFallback = review ?? DEFAULT_REVIEW;
   const log = (kind: ChangeKind, target: Target, summary: string) => record(plan, author, kind, target, summary, now);
 
   switch (op?.op) {
@@ -2057,18 +2038,6 @@ function editTask(
       // verdicts go when it leaves done for work, straight or by way of
       // dropped (wasDone). Dropped, or a drop undone (back to done), it keeps
       // them; one dropped before it was done keeps its own.
-      // `reopened` (its next round past the limit, as the last one passed)
-      // is kept through a drop, and goes once it is done again (or on entering
-      // review, or the user's reset).
-      if (isWorking(status) && passedAndClosed(plan, task, reviewFallback)) {
-        task.reopened = true;
-      } else if (status === 'done') delete task.reopened;
-      // How it was closed: read while it stays finished (dropped too), and
-      // gone once it is work again, or closed anew.
-      // A drop undone (back to done) keeps it, as it keeps the verdicts.
-      const undropped = status === 'done' && task.status === 'dropped' && task.wasDone === true;
-      if (status === 'done' && op.acceptedFailing === true) task.acceptedFailing = true;
-      else if ((status === 'done' && !undropped) || isWorking(status)) delete task.acceptedFailing;
       if (isWorking(status) && wasFinished(task) && task.reviews) {
         task.reviews = task.reviews.filter((r) => r.round !== task.round);
         if (!task.reviews.length) delete task.reviews;
@@ -2083,14 +2052,11 @@ function editTask(
     // Finished, or back in the pile: no longer anywhere in the cycle.
     if (!keepsStage(status)) delete task.stage;
     // Put back in the pile by the user, it starts its cycle over: the rounds
-    // and checks of the work it had are not this work's. Claude cannot do
-    // that to itself — it would be a way round the round limit.
+    // and checks of the work it had are not this work's.
     if (status === 'todo' && author === 'user') {
       delete task.round;
       delete task.checks;
       delete task.reviews;
-      delete task.reopened;
-      delete task.acceptedFailing;
     }
   }
   const progress: string[] = [];
@@ -2098,10 +2064,7 @@ function editTask(
   // with the review checks, say — is the same round.
   if (stage && keepsStage(task.status) && stage !== task.stage) {
     task.stage = stage;
-    if (stage === 'review') {
-      task.round = (task.round ?? 0) + 1;
-      delete task.reopened;
-    }
+    if (stage === 'review') task.round = (task.round ?? 0) + 1;
     progress.push(stage === 'review' ? `in review (round ${task.round})` : STAGE_WORDS[stage]);
   }
   const checks = op.checks === undefined ? undefined : cleanChecks(op.checks);
@@ -2337,21 +2300,15 @@ export function planPhase(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> &
   return Object.values(plan.branches ?? {}).some((b) => b.pr?.state === 'open' || b.pr?.state === 'draft') ? 'landing' : 'built';
 }
 
-/** A build that can hold work for the user's review: a submitted Managed one. */
-export function holdsForReview<P extends Pick<Plan, 'submission'>>(plan: P | null | undefined): plan is P & { submission: NonNullable<P['submission']> } {
-  return Boolean(plan?.submission) && planMode(plan, 'managed') === 'managed';
-}
-
 /**
- * The tasks a Managed build is holding for the user's own review: in
- * review, reviewed by the user (the task's own mode, or the build's), with
- * no verdict from them for this round yet. A Tracked build holds nothing
- * for anyone, so it has none. `review`: the project's review mode, for a
- * build submitted on the repository's defaults (no settings of its own).
+ * The tasks of a build waiting on the user: in review, asking for the
+ * user's review (their own request, or the repository's default), with no
+ * verdict from the user for this round yet. Shown, never enforced.
+ * `review`: the repository's default review.
  */
 export function awaitingUserReview(plan: Pick<Plan, 'submission' | 'tasks'> | null, review: ReviewMode): Task[] {
-  if (!holdsForReview(plan)) return [];
-  const fallback = plan.submission.settings?.review ?? review;
+  if (!plan?.submission) return [];
+  const fallback = review;
   return plan.tasks.filter(
     (t) =>
       t.status === 'in_progress' &&
@@ -2365,8 +2322,8 @@ export function awaitingUserReview(plan: Pick<Plan, 'submission' | 'tasks'> | nu
 /**
  * What the user sees of where the plan is: one of four statuses (#66).
  * Review is what was built waiting on the user — the final checks and the
- * report once every task is done, or a task a Managed build holds for
- * their review — not the plan before the build: that is Planning.
+ * report once every task is done, or a task that asks for their review —
+ * not the plan before the build: that is Planning.
  * `review`: the project's review mode (awaitingUserReview).
  */
 export function planStatus(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> & Partial<Pick<Plan, 'report' | 'branches'>>) | null, review: ReviewMode): PlanStatus {
@@ -2814,7 +2771,7 @@ export function cleanUserSaid(value: unknown): string | undefined {
  */
 export function submitPlan(
   plan: Plan,
-  input: { target: BuildTarget; mode?: ExecutionMode; prompt: string; note?: string; trimmed?: boolean; settings?: BuildSettings; base?: string; userSaid?: string },
+  input: { target: BuildTarget; prompt: string; note?: string; trimmed?: boolean; base?: string; userSaid?: string },
   now = Date.now(),
 ): Plan {
   if (plan.submission) throw new PlanError('The plan has already been submitted.');
@@ -2822,8 +2779,7 @@ export function submitPlan(
   // they must (#65): a plan goes from planning straight to building when
   // they say so, and the lock holds from there.
   // Except architecture first: there the task list is made from the
-  // confirmed design, and the build from the task list. Handing it off
-  // to be built elsewhere (Export) builds nothing here.
+  // confirmed design, and the build from the task list.
   if (plan.mode === 'architect' && !plan.design && input.target === 'session') throw new PlanError(ARCHITECTURE_FIRST);
   if (!input.prompt.trim()) throw new PlanError('There is no prompt to submit.');
   // What is submitted gets built: a plan that cannot be is refused here,
@@ -2838,11 +2794,9 @@ export function submitPlan(
     at: now,
     seq: plan.seq,
     target: input.target,
-    ...(input.mode ? { mode: input.mode } : {}),
     ...(note ? { note } : {}),
     prompt: input.prompt,
     ...(input.trimmed ? { trimmed: true } : {}),
-    ...(input.settings ? { settings: cleanSettings(input.settings) } : {}),
     ...(input.base ? { base: input.base } : {}),
     ...(said ? { via: 'chat' as const, userSaid: said } : {}),
     deliveredAt: null,
@@ -3087,19 +3041,15 @@ function validSubmission(raw: unknown): Submission | undefined {
   if (!s || typeof s !== 'object') return undefined;
   const target = validTarget(s.target);
   if (!target || typeof s.at !== 'number' || typeof s.prompt !== 'string' || !s.prompt) return undefined;
-  const mode = (EXECUTION_MODES as readonly string[]).includes(s.mode as string) ? s.mode : undefined;
+  // Its build mode and settings, from before 0.4, are not read.
   const said = s.via === 'chat' ? cleanUserSaid(s.userSaid) : undefined;
   return {
     ...(Number.isInteger(s.seq) && s.seq! >= 0 ? { seq: s.seq } : {}),
     at: s.at,
     target,
-    // Kept across a restart: without it a Tracked build would read back as
-    // Managed, and its prompts would describe a cycle it never chose.
-    ...(mode ? { mode } : {}),
     ...(typeof s.note === 'string' && s.note ? { note: s.note } : {}),
     prompt: s.prompt,
     ...(s.trimmed === true ? { trimmed: true } : {}),
-    ...(s.settings && typeof s.settings === 'object' ? { settings: cleanSettings(s.settings) } : {}),
     ...(typeof s.base === 'string' && s.base ? { base: s.base } : {}),
     ...(said ? { via: 'chat' as const, userSaid: said } : {}),
     deliveredAt: typeof s.deliveredAt === 'number' ? s.deliveredAt : null,

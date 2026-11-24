@@ -3,12 +3,12 @@ import { api, eventsUrl, Unauthorized, type ProjectChecks } from './lib/api.ts';
 import { onDroppedAfterSend, pruneDrafts, unsavedDrafts, type DroppedDraft } from './lib/drafts.ts';
 
 const NO_CHECKS: ProjectChecks = { implement: [], review: [] };
-const NO_REVIEW: ReviewMode = DEFAULT_BUILD_SETTINGS.review;
+const NO_REVIEW: ReviewMode = DEFAULT_REVIEW;
 import { isLocked } from '../shared/plan.ts';
-import { DEFAULT_BUILD_SETTINGS } from '../shared/build.ts';
+import { DEFAULT_REVIEW } from '../shared/build.ts';
 import { agentInfo, type AgentInfo } from '../shared/agents.ts';
 import type { GapSeverities } from '../shared/check.ts';
-import type { BuildSettings, BuildTarget, CleanupGroupId, ExecutionMode, Plan, PlanOp, PlanStatus, ReviewMode, ServerEvent, SessionState, SessionSummary, StorageReport, Target } from '../shared/types.ts';
+import type { CleanupGroupId, Plan, PlanOp, PlanStatus, ReviewMode, ServerEvent, SessionState, SessionSummary, StorageReport, Target } from '../shared/types.ts';
 import { PLAN_STATUSES } from '../shared/types.ts';
 
 export type Tab = 'diagrams' | 'tasks' | 'overview';
@@ -52,8 +52,8 @@ export interface UiState {
   planCheck: GapSeverities;
   /** The open session's repository checks by stage, which a task can skip. */
   projectChecks: ProjectChecks;
-  /** The open session's repository review mode: who reviews a task where
-   *  the plan does not say (any plan but a submitted Managed build). */
+  /** The open session's repository default review: what a task asks for
+   *  where it does not say. */
   projectReview: ReviewMode;
   tab: Tab;
   /** The diagram open on the Architecture tab; the first one when unset. */
@@ -512,18 +512,16 @@ class Store {
    * on the board. Resolves false when the daemon refused — most often
    * because the plan moved on since the preview was made.
    */
-  async submitPlan(to: SignOffFor, input: { target: BuildTarget; mode?: ExecutionMode; note: string; expect: number; hash?: string; settings?: BuildSettings }): Promise<boolean> {
+  async submitPlan(to: SignOffFor, input: { note: string; expect: number; hash?: string }): Promise<boolean> {
     const done = await this.signOff(to, (id) => api.submitPlan(id, input));
     if (!done) return false;
     const { agent } = done;
     if (done.shown()) this.set({ tab: 'tasks', taskMode: 'board' });
     done.say(
       'success',
-      input.target !== 'session'
-        ? 'Plan submitted and locked. Paste the prompt where it will be built.'
-        : agent.promptContext
-          ? `Plan submitted and locked. Send any message in ${agent.name} to hand it the prompt.`
-          : `Plan submitted and locked. Paste the prompt into ${agent.name}'s chat.`,
+      agent.promptContext
+        ? `Plan submitted and locked. Send any message in ${agent.name} to hand it the handoff.`
+        : `Plan submitted and locked. Paste the handoff into ${agent.name}'s chat.`,
     );
     return true;
   }

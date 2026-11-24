@@ -60,7 +60,7 @@ export class ProjectConfigs {
     const hit = this.projects.get(root);
     if (hit && hit.config.sources && this.files.stamp(hit.config.sources) === hit.stamp) {
       // A cached read keeps the repository among those known.
-      this.reviews.saw(root, hit.config.settings.review);
+      this.reviews.saw(root, hit.config.review);
       return hit.config;
     }
     const started = this.files.now();
@@ -73,7 +73,7 @@ export class ProjectConfigs {
     const settled = !sources.some((f) => (this.files.mtime(f) ?? -Infinity) >= started - 1);
     if (settled) this.projects.set(root, { stamp: this.files.stamp(sources), config });
     else this.projects.delete(root);
-    const review = config.settings.review;
+    const review = config.review;
     if (this.reviews.saw(root, review)) {
       queueMicrotask(() => {
         // Each on its own: one that fails is logged and stops none of the others.

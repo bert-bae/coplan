@@ -1,9 +1,9 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import type { BuildSettings, ExecutionMode, TaskCheck } from './types.ts';
-import { DEFAULT_BUILD_SETTINGS, MAX_PARALLEL, MAX_ROUNDS, cleanSettings } from './build.ts';
-import { EXECUTION_MODES, REVIEW_MODES } from './types.ts';
+import type { ReviewMode, TaskCheck } from './types.ts';
+import { DEFAULT_REVIEW, validReview } from './build.ts';
+import { REVIEW_MODES } from './types.ts';
 import { parseJsonc } from './jsonc.ts';
 import { GAP_RULES, GAP_SEVERITIES, type GapRule, type GapSeverity } from './check.ts';
 import { paths } from './paths.ts';
@@ -15,18 +15,17 @@ import type { BlockSource } from './blocks.ts';
  * hands tasks to — runs the same checks.
  *
  * It answers the question every agent otherwise guesses at: *what do I run
- * to know this change is good?* The answer is a list of hooks for each step
- * of a task's implement → review → refine cycle:
+ * to know this change is good?* The answer is `checks`, each task's
+ * definition of done, by stage:
  *
- * - `implement` — quick checks after each implementation or refinement
- *   pass, before a task goes to review: typecheck, lint, format.
- * - `review` — the gate a task must pass before it is done: the tests.
+ * - `implement` — quick checks after each change: typecheck, lint, format.
+ * - `review` — what a task must pass to be done: the tests.
  * - `final` — once every task is done, before the final report: the full
  *   suite, the build.
  *
- * Coplan never runs these itself. They are handed to Claude, which runs them
- * as any other command — under the user's own permission settings — or runs
- * them all at once with `coplan check <stage>`.
+ * Coplan never runs these itself. They are handed to the harness in the
+ * handoff and each brief, which runs them as any other command — under the
+ * user's own permission settings — or all at once with `coplan check <stage>`.
  */
 
 export const HOOK_STAGES = ['implement', 'review', 'final'] as const;
@@ -50,39 +49,28 @@ export interface CheckHook {
   env?: Record<string, string>;
 }
 
-/** Which tool opens the pull requests of a stacked build. */
-export const PR_TOOLS = ['gh', 'graphite', 'none'] as const;
-export type PrTool = (typeof PR_TOOLS)[number];
-/** When they are opened: as each branch is ready, once the user says, or never. */
-export const PR_OPEN = ['auto', 'ask', 'never'] as const;
-export type PrOpen = (typeof PR_OPEN)[number];
-
 /** Where a repository or a user may add words to what the agent is told. */
-export const INSTRUCTION_POINTS = ['design', 'build', 'brief', 'review'] as const;
+export const INSTRUCTION_POINTS = ['design', 'handoff', 'brief'] as const;
 export type InstructionPoint = (typeof INSTRUCTION_POINTS)[number];
+/** Points older versions read, and where their words go now: for one
+ *  release, said with a warning. */
+const OLD_POINTS: Record<string, InstructionPoint> = { build: 'handoff', review: 'brief' };
 
 export interface ProjectConfig {
   /** Where it was read from; null when the repository has none. */
   file: string | null;
+  /** The checks (`checks`, or `hooks` before 0.4), by stage. */
   hooks: Record<HookStage, CheckHook[]>;
-  /** The execution mode Submit starts from: `mode`, or Managed where the
-   *  repository's file sets `iric`, or else Tracked. */
-  mode: ExecutionMode;
-  /** The mode is Managed because the repository's file sets `iric`, not
-   *  `mode`. */
-  modeByIric?: true;
-  /** Defaults for how a Managed build runs; the user can change them per plan. */
-  settings: BuildSettings;
+  /** The review a task asks for when it does not say. */
+  review: ReviewMode;
   branches: {
     /** The branch work is cut from and merged back into. */
     base?: string;
     /** Put in front of every branch a plan names, e.g. `coplan/`. */
     prefix?: string;
   };
-  /** How the pull requests of a build are opened, and what they say. */
+  /** What the build's pull requests say: the harness opens them. */
   pullRequests: {
-    tool: PrTool;
-    open: PrOpen;
     /** The body to fill in for each pull request, read from its file. */
     template?: string;
     /** That file, as the config names it. */
@@ -105,14 +93,14 @@ export interface ProjectConfig {
   /** Every file the config was read from or looked for: while none of them
    *  changes, neither does the config. */
   sources?: string[];
-  /** Which file set each setting, by key (`pullRequests.tool`,
-   *  `instructions.build`): the one that won, or — for instructions, which
+  /** Which file set each setting, by key (`review`,
+   *  `instructions.handoff`): the one that won, or — for instructions, which
    *  add up — each that added to it, the user's first. A key no file sets
    *  is not here: Coplan's default is used. Files in the user's home are
    *  named from `~`, the repository's from its root. */
   origins?: Record<string, string[]>;
   /** The checks themselves cannot be trusted: the file is unreadable, or
-   *  `hooks` (or a top-level key, often a misspelt `hooks`) is wrong. Only
+   *  `checks` (or a top-level key, often a misspelt `checks`) is wrong. Only
    *  this stops `coplan check`; an error elsewhere is said, and the checks
    *  still run. */
   checksBroken?: boolean;
@@ -131,14 +119,15 @@ export const MAX_INSTRUCTIONS = 4_000;
 export const MAX_TEMPLATE = 8_000;
 const MAX_ENV = 20;
 
-export const PROJECT_KEYS = ['mode', 'hooks', 'iric', 'branches', 'pullRequests', 'instructions', 'planCheck'];
+export const PROJECT_KEYS = ['checks', 'review', 'branches', 'pullRequests', 'instructions', 'planCheck'];
 /** Keys older versions read, by where they sit: an old file still holding
- *  them loads, with a warning that they do nothing now. */
-const RETIRED_KEYS = ['runners', 'review', 'final'];
-const RETIRED_PR_KEYS = ['watch', 'on'];
-const IRIC_KEYS = ['review', 'parallel', 'maxRounds'];
+ *  them loads, with a warning that they do nothing now. `hooks` is read as
+ *  `checks`, and `iric.review` as `review`, for one release. */
+const RETIRED_KEYS = ['runners', 'final', 'mode', 'iric'];
+const ALIAS_KEYS = ['hooks'];
+const RETIRED_PR_KEYS = ['watch', 'on', 'tool', 'open'];
 const BRANCH_KEYS = ['base', 'prefix'];
-const PR_KEYS = ['tool', 'open', 'template'];
+const PR_KEYS = ['template'];
 export const HOOK_KEYS = ['name', 'run', 'timeout', 'paths', 'optional', 'cwd', 'env'];
 
 /** A key the file sets that nothing reads is most often a typo of one that
@@ -154,10 +143,9 @@ export function emptyProjectConfig(): ProjectConfig {
   return {
     file: null,
     hooks: { implement: [], review: [], final: [] },
-    mode: 'tracked',
-    settings: { ...DEFAULT_BUILD_SETTINGS },
+    review: DEFAULT_REVIEW,
     branches: {},
-    pullRequests: { tool: 'gh', open: 'ask' },
+    pullRequests: {},
     instructions: {},
     planCheck: {},
     errors: [],
@@ -195,7 +183,7 @@ export function loadProjectConfig(root: string | null | undefined, opts: { globa
     let globalFile: string | null = null;
     if (globalDir) {
       const file = path.join(globalDir, GLOBAL_PROJECT_FILE);
-      sources.push(file, ...INSTRUCTION_POINTS.map((p) => path.join(globalDir, INSTRUCTIONS_DIR, `${p}.md`)));
+      sources.push(file, ...[...INSTRUCTION_POINTS, ...Object.keys(OLD_POINTS)].map((p) => path.join(globalDir, INSTRUCTIONS_DIR, `${p}.md`)));
       if (existsSync(file)) globalFile = file;
       // What is wrong with the user's own layer is said, but holds back no
       // repository's checks: they are the repository's, and run as it says.
@@ -255,9 +243,8 @@ export function parseProjectConfig(raw: unknown, file: string | null = null): Pr
 
 /** One file's settings, each checked, before the layers are put together. */
 interface Layer {
-  mode?: ExecutionMode;
   hooks?: Partial<Record<HookStage, CheckHook[]>>;
-  iric?: Record<string, unknown>;
+  review?: ReviewMode;
   branches?: ProjectConfig['branches'];
   pullRequests?: Partial<ProjectConfig['pullRequests']>;
   instructions?: ProjectConfig['instructions'];
@@ -282,20 +269,11 @@ interface LayerContext {
 /** Later layers win key by key; instructions add up, the user's first. */
 function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors' | 'warnings'> {
   const out = emptyProjectConfig();
-  const iric: Record<string, unknown> = {};
   const origins: Record<string, string[]> = {};
   for (const l of layers) {
-    // The mode: the most specific file that says, by `mode` — or, in the
-    // repository's own file, by setting `iric`, which is opting in to the
-    // harness. The user's own `iric` only sets how a Managed build runs.
-    if (l.mode) {
-      out.mode = l.mode;
-      delete out.modeByIric;
-      if (l.from) origins['mode'] = [l.from];
-    } else if (l.iric && l.from === PROJECT_CONFIG_PATH) {
-      out.mode = 'managed';
-      out.modeByIric = true;
-      origins['mode'] = [l.from];
+    if (l.review) {
+      out.review = l.review;
+      if (l.from) origins['review'] = [l.from];
     }
     // Which file set each key: the last to set it wins, as its value does.
     const from = (section: string, rec: object | undefined, keys: readonly string[] = Object.keys(rec ?? {})) => {
@@ -303,13 +281,11 @@ function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors' | 'warn
       for (const key of keys) if ((rec as Record<string, unknown>)[key] !== undefined) origins[`${section}.${key}`] = [l.from];
     };
     for (const stage of HOOK_STAGES) if (l.hooks?.[stage]) out.hooks[stage] = l.hooks[stage]!;
-    from('hooks', l.hooks);
-    Object.assign(iric, l.iric);
-    from('iric', l.iric);
+    from('checks', l.hooks);
     Object.assign(out.branches, l.branches);
     from('branches', l.branches);
     Object.assign(out.pullRequests, l.pullRequests);
-    from('pullRequests', l.pullRequests, ['tool', 'open', 'template']);
+    from('pullRequests', l.pullRequests, ['template']);
     Object.assign(out.planCheck, l.planCheck);
     from('planCheck', l.planCheck);
     for (const point of INSTRUCTION_POINTS) {
@@ -320,14 +296,13 @@ function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors' | 'warn
     }
   }
   out.origins = origins;
-  out.settings = cleanSettings(iric, DEFAULT_BUILD_SETTINGS);
   const { file: _f, errors: _e, warnings: _w, ...rest } = out;
   return rest;
 }
 
 /**
  * Where a setting a prompt names comes from: the files that set `key` —
- * or, for a group (`pullRequests`, `hooks`), any key under it. No files:
+ * or, for a group (`pullRequests`, `checks`), any key under it. No files:
  * nothing sets it, and Coplan's default is used.
  */
 export function configSource(project: ProjectConfig, key: string): BlockSource {
@@ -355,25 +330,34 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
   }
   const local: string[] = [];
   const notes: string[] = [];
-  unknownKeys(raw, PROJECT_KEYS, '', local, RETIRED_KEYS, notes);
+  // `iric.review` stands in for `review` this release: said once, below.
+  const iricReview = isRecord(raw['iric']) && raw['review'] === undefined ? validReview(raw['iric']['review']) : undefined;
+  const aliased = iricReview ? [...ALIAS_KEYS, 'iric'] : ALIAS_KEYS;
+  unknownKeys(Object.fromEntries(Object.entries(raw).filter(([k]) => !aliased.includes(k))), PROJECT_KEYS, '', local, RETIRED_KEYS, notes);
 
-  const mode = oneOf(raw['mode'], EXECUTION_MODES, 'mode', local);
-  if (mode) layer.mode = mode;
-
-  const hooks = raw['hooks'];
-  if (hooks !== undefined) {
+  // `hooks` is the name `checks` had before 0.4: read for one release.
+  const named = raw['checks'] !== undefined ? 'checks' : raw['hooks'] !== undefined ? 'hooks' : null;
+  if (raw['hooks'] !== undefined) {
+    notes.push(
+      named === 'checks'
+        ? '"hooks" and "checks" are both set: "checks" is used. "hooks" is the old name; remove it.'
+        : '"hooks" is now "checks": it is read for this release. Rename it.',
+    );
+  }
+  const hooks = named ? raw[named] : undefined;
+  if (named && hooks !== undefined) {
     if (ctx.global) {
-      notes.push('"hooks" belong to each repository (.coplan/config.json), not to every one: they are ignored here.');
+      notes.push(`"${named}" belong to each repository (.coplan/config.json), not to every one: they are ignored here.`);
     } else if (!isRecord(hooks)) {
-      local.push('"hooks" must map a stage (implement, review, final) to a list of commands.');
+      local.push(`"${named}" must map a stage (implement, review, final) to a list of commands.`);
     } else {
       layer.hooks = {};
       for (const [stage, list] of Object.entries(hooks)) {
         if (!(HOOK_STAGES as readonly string[]).includes(stage)) {
-          local.push(`"hooks.${stage}" is not a stage: use ${HOOK_STAGES.join(', ')}.`);
+          local.push(`"${named}.${stage}" is not a stage: use ${HOOK_STAGES.join(', ')}.`);
           continue;
         }
-        layer.hooks[stage as HookStage] = parseHooks(list, stage, local, ctx.base, notes);
+        layer.hooks[stage as HookStage] = parseHooks(list, stage, local, ctx.base, notes, named);
       }
     }
   }
@@ -389,10 +373,21 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
     return v;
   };
 
-  const iric = section('iric', '{ "review", "parallel", "maxRounds" }');
-  if (iric) {
-    checkSettings(iric, local);
-    layer.iric = Object.fromEntries(IRIC_KEYS.filter((k) => iric[k] !== undefined).map((k) => [k, iric[k]]));
+  // The review a task asks for by default: `review`, or — for one release —
+  // the old `iric.review`. Before 0.4 `review` was an object (`review.model`).
+  const review = raw['review'];
+  if (typeof review === 'string') {
+    const value = validReview(review);
+    if (value) layer.review = value;
+    else local.push(`"review" must be one of ${REVIEW_MODES.join(', ')}; ${JSON.stringify(review)} is not, so ${DEFAULT_REVIEW} is used.`);
+  } else if (isRecord(review)) {
+    notes.push('"review" as an object (review.model) is no longer read: the harness picks its models. Set "review" to agent, user or none, or remove it.');
+  } else if (review !== undefined) {
+    local.push(`"review" must be one of ${REVIEW_MODES.join(', ')}.`);
+  }
+  if (iricReview) {
+    layer.review = iricReview;
+    notes.push(`"iric.review" is read as "review": "${iricReview}" for this release, and the rest of "iric" is no longer read. Set "review" instead, and remove "iric".`);
   }
 
   const branches = section('branches', '{ "base", "prefix" }');
@@ -410,10 +405,6 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
   if (prs) {
     unknownKeys(prs, PR_KEYS, 'pullRequests.', local, RETIRED_PR_KEYS, notes);
     layer.pullRequests = {};
-    const tool = oneOf(prs['tool'], PR_TOOLS, 'pullRequests.tool', local);
-    if (tool) layer.pullRequests.tool = tool;
-    const open = oneOf(prs['open'], PR_OPEN, 'pullRequests.open', local);
-    if (open) layer.pullRequests.open = open;
     if (prs['template'] !== undefined) {
       const text = typeof prs['template'] === 'string' ? readNamedFile(prs['template'], ctx.base, 'pullRequests.template', MAX_TEMPLATE, local, notes) : null;
       if (typeof prs['template'] !== 'string') local.push('"pullRequests.template" must name a file, e.g. ".github/pull_request_template.md".');
@@ -428,12 +419,15 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
 
   const instructions = section('instructions', `{ ${INSTRUCTION_POINTS.map((p) => `"${p}"`).join(', ')} }, each text or { "file" }`);
   if (instructions) {
-    unknownKeys(instructions, [...INSTRUCTION_POINTS], 'instructions.', local);
+    unknownKeys(instructions, [...INSTRUCTION_POINTS, ...Object.keys(OLD_POINTS)], 'instructions.', local);
     layer.instructions = {};
-    for (const point of INSTRUCTION_POINTS) {
-      const v = instructions[point];
+    // The current points first, so an old one's words come after them.
+    for (const name of [...INSTRUCTION_POINTS, ...Object.keys(OLD_POINTS)]) {
+      const v = instructions[name];
       if (v === undefined) continue;
-      const where = `instructions.${point}`;
+      const point = OLD_POINTS[name] ?? (name as InstructionPoint);
+      if (OLD_POINTS[name]) notes.push(`"instructions.${name}" is now "instructions.${point}": it is read there for this release. Rename it.`);
+      const where = `instructions.${name}`;
       let text: string | null = null;
       if (typeof v === 'string') text = v.trim();
       else if (isRecord(v) && typeof v['file'] === 'string' && Object.keys(v).length === 1) text = readNamedFile(v['file'], ctx.base, where, MAX_INSTRUCTIONS, local, notes);
@@ -442,7 +436,7 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
         notes.push(`"${where}" is longer than ${MAX_INSTRUCTIONS} characters; the rest is cut.`);
         text = text.slice(0, MAX_INSTRUCTIONS);
       }
-      if (text) layer.instructions[point] = text;
+      if (text) layer.instructions[point] = layer.instructions[point] ? `${layer.instructions[point]}\n\n${text}` : text;
     }
   }
 
@@ -515,46 +509,27 @@ function readNamedFile(name: string, base: string | null, where: string, max: nu
 /** `instructions/<point>.md` in Coplan's home: the user's own words. */
 function instructionFiles(dir: string, errors: string[], warnings: string[]): ProjectConfig['instructions'] {
   const out: ProjectConfig['instructions'] = {};
-  for (const point of INSTRUCTION_POINTS) {
-    const file = path.join(dir, `${point}.md`);
+  for (const name of [...INSTRUCTION_POINTS, ...Object.keys(OLD_POINTS)]) {
+    const file = path.join(dir, `${name}.md`);
     if (!existsSync(file)) continue;
-    const text = readNamedFile(`${point}.md`, dir, `${file}`, MAX_INSTRUCTIONS, errors, warnings);
-    if (text) out[point] = text;
+    const point = OLD_POINTS[name] ?? (name as InstructionPoint);
+    if (OLD_POINTS[name]) warnings.push(`${file}: ${name}.md is now ${point}.md; it is read as that for this release. Rename it.`);
+    const text = readNamedFile(`${name}.md`, dir, `${file}`, MAX_INSTRUCTIONS, errors, warnings);
+    if (text) out[point] = out[point] ? `${out[point]}\n\n${text}` : text;
   }
   return out;
 }
 
-/** What `cleanSettings` would quietly correct, said instead: a value it
- *  clamps or drops is not the build the file asked for. */
-function checkSettings(rec: Record<string, unknown>, errors: string[]): void {
-  unknownKeys(rec, IRIC_KEYS, 'iric.', errors);
-  // What the build will actually use, so each error can say so.
-  const used = cleanSettings(rec, DEFAULT_BUILD_SETTINGS);
-  const review = rec['review'];
-  if (review !== undefined && review !== used.review) {
-    errors.push(`"iric.review" must be one of ${REVIEW_MODES.join(', ')}; ${JSON.stringify(review)} is not, so ${used.review} is used.`);
-  }
-  const whole = (key: 'parallel' | 'maxRounds', hi: number) => {
-    const v = rec[key];
-    if (v === undefined) return;
-    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > hi) {
-      errors.push(`"iric.${key}" must be a whole number from 1 to ${hi}; ${JSON.stringify(v)} is not, so ${used[key]} is used.`);
-    }
-  };
-  whole('parallel', MAX_PARALLEL);
-  whole('maxRounds', MAX_ROUNDS);
-}
-
-function parseHooks(list: unknown, stage: string, errors: string[], root: string | null = null, warnings: string[] = errors): CheckHook[] {
+function parseHooks(list: unknown, stage: string, errors: string[], root: string | null = null, warnings: string[] = errors, key = 'checks'): CheckHook[] {
   const items = Array.isArray(list) ? list : [list];
   const out: CheckHook[] = [];
   items.slice(0, MAX_HOOKS).forEach((item, i) => {
-    const hook = parseHook(item, `hooks.${stage}[${i}]`, errors, root, warnings);
+    const hook = parseHook(item, `${key}.${stage}[${i}]`, errors, root, warnings);
     if (!hook) return;
     for (let n = 2; out.some((h) => h.name === hook.name); n++) hook.name = `${hook.name.replace(/ #\d+$/, '')} #${n}`;
     out.push(hook);
   });
-  if (items.length > MAX_HOOKS) warnings.push(`"hooks.${stage}" has more than ${MAX_HOOKS} commands; the rest are ignored.`);
+  if (items.length > MAX_HOOKS) warnings.push(`"${key}.${stage}" has more than ${MAX_HOOKS} commands; the rest are ignored.`);
   return out;
 }
 

@@ -227,8 +227,8 @@ async function viewerRoutes(session: SessionState): Promise<(route: string) => u
       return { prompt, trimmed, blocks, version: plan.version, budget: 9000, maxNote: 4000 };
     }
     if (route.endsWith('/plan/prompt')) {
-      const { prompt, trimmed, blocks } = buildPrompt(plan, { target: 'session', settings: { review: 'subagent', parallel: 2, maxRounds: 3 } });
-      return { prompt, trimmed, blocks, version: plan.version, budget: 9000, maxNote: 4000, settings: { review: 'subagent', parallel: 2, maxRounds: 3 } };
+      const { prompt, trimmed, blocks } = buildPrompt(plan);
+      return { prompt, trimmed, blocks, version: plan.version, budget: 9000, maxNote: 4000 };
     }
     return undefined;
   };
@@ -326,7 +326,7 @@ test('the next prompt is the one the next sign-off sends; the design the agent a
   assert.match(viewer.querySelector('.pv-left')?.textContent ?? '', /Not sent again — the agent already has the design/);
   assert.doesNotMatch(viewer.textContent ?? '', /Left out to fit:/, 'nothing was left out to fit');
   assert.ok([...dropped].some((r) => r.getAttribute('data-block') === `section:${plan.sections[0]!.id}`));
-  // The settings and config chips say where the words come from.
+  // The config chips say where the words come from.
   assert.ok(within(viewer).getAllByRole('link', { name: /\.coplan\/config\.json#/ }).length);
 });
 
@@ -1702,7 +1702,6 @@ function lockedPlan(delivered = false): Plan {
   return delivered ? markDelivered(plan) : plan;
 }
 
-const DEFAULTS = { review: 'subagent', parallel: 2, maxRounds: 3 };
 
 test('the design is confirmed from the architecture view, after reading what Claude will be asked', async () => {
   const session = makeSession();
@@ -1792,13 +1791,13 @@ test('a sign-off goes to the session its dialog was opened on, though the user m
 test('the sign-off dialogs list each setting from config, read-only, with the file and key that set it', async () => {
   const { designPrompt, configRows, promptHash } = await import('../daemon/render.ts');
   const { parseProjectConfig } = await import('../shared/project.ts');
-  const project = parseProjectConfig({ hooks: { review: [{ name: 'tests', run: 'npm test' }] }, iric: { review: 'self' }, review: { model: 'opus' } });
+  const project = parseProjectConfig({ checks: { review: [{ name: 'tests', run: 'npm test' }] }, review: 'user' });
   const session = makeSession();
   const version = session.plan!.version;
   await boot(session, (route) => {
     if (route.endsWith('/plan/design/prompt')) {
       const { prompt, trimmed, blocks } = designPrompt(session.plan!, { project });
-      return { prompt, hash: promptHash(prompt), trimmed, blocks, version, budget: 9000, maxNote: 4000, project: { file: '/repo/.coplan/config.json', defaults: DEFAULTS, checks: { implement: [], review: ['tests'], final: [] }, errors: [], config: configRows(project, 'design') } };
+      return { prompt, hash: promptHash(prompt), trimmed, blocks, version, budget: 9000, maxNote: 4000, project: { file: '/repo/.coplan/config.json', review: 'user', checks: { implement: [], review: ['tests'], final: [] }, errors: [], config: configRows(project, 'design') } };
     }
     return undefined;
   });
@@ -1809,18 +1808,17 @@ test('the sign-off dialogs list each setting from config, read-only, with the fi
   const list = await waitFor(() => within(dialog).getByRole('region', { name: 'Set in config' }));
   const row = (key: string) => list.querySelector(`[data-key="${key}"]`) as HTMLElement;
   const file = (key: string) => row(key).closest('.config-group')?.querySelector('.config-file')?.textContent;
-  assert.match(row('hooks.review').textContent ?? '', /^Review checks#hooks\.reviewtests$/);
-  assert.equal(file('hooks.review'), '.coplan/config.json');
-  // The design prompt's review mode is the config's default: shown, since no control here sets it.
-  assert.match(row('iric.review').textContent ?? '', /Review, by default#iric\.reviewself-review/);
-  assert.equal(file('iric.review'), '.coplan/config.json');
-  assert.match(row('hooks.final').textContent ?? '', /Final checks\.coplan\/config\.json#hooks\.finalnone/);
-  assert.equal(file('hooks.final'), "Not set: Coplan's defaults");
+  assert.match(row('checks.review').textContent ?? '', /^Review checks#checks\.reviewtests$/);
+  assert.equal(file('checks.review'), '.coplan/config.json');
+  assert.match(row('review').textContent ?? '', /Review, by default#reviewthe user, before it is marked done/);
+  assert.equal(file('review'), '.coplan/config.json');
+  assert.match(row('checks.final').textContent ?? '', /Final checks\.coplan\/config\.json#checks\.finalnone/);
+  assert.equal(file('checks.final'), "Not set: Coplan's defaults");
   assert.equal(within(list).queryAllByRole('textbox').length + within(list).queryAllByRole('checkbox').length, 0, 'read-only');
-  assert.equal(within(row('hooks.review')).getByRole('link').getAttribute('href'), 'https://github.com/bert-bae/coplan/blob/main/docs/CONFIG.md#hooks');
+  assert.equal(within(row('checks.review')).getByRole('link').getAttribute('href'), 'https://github.com/bert-bae/coplan/blob/main/docs/CONFIG.md#checks');
   assert.equal(within(list).getByRole('link', { name: 'Where to change these' }).getAttribute('href'), 'https://github.com/bert-bae/coplan/blob/main/docs/CONFIG.md');
-  // Pull requests and the reviewer model shape the build, not the design: they are in Submit.
-  assert.equal(within(list).queryByText('Reviewer model'), null);
+  // Pull requests shape the handoff, not the design: they are in Submit.
+  assert.equal(within(list).queryByText('Pull requests'), null);
 });
 
 test("a chip in the sign-off dialog shows the field it quotes, and the dialog keeps the note for when it opens again", async () => {
@@ -1861,8 +1859,8 @@ test('a prompt cut to fit says what it leaves out, and that the agent reads it w
   const session = makeSession(plan);
   await boot(session, (route) => {
     if (route.endsWith('/plan/prompt')) {
-      const { prompt, trimmed, blocks } = buildPrompt(plan, { target: 'session', project, settings: { review: 'subagent', parallel: 2, maxRounds: 3 } });
-      return { prompt, hash: promptHash(prompt), trimmed, blocks, version: plan.version, budget: 9000, maxNote: 4000, settings: DEFAULTS, project: { file: null, defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [], config: configRows(project, 'build') } };
+      const { prompt, trimmed, blocks } = buildPrompt(plan, { project });
+      return { prompt, hash: promptHash(prompt), trimmed, blocks, version: plan.version, budget: 9000, maxNote: 4000, project: { file: null, review: 'agent', checks: { implement: [], review: [], final: [] }, errors: [], config: configRows(project, 'handoff') } };
     }
     return undefined;
   });
@@ -1872,8 +1870,8 @@ test('a prompt cut to fit says what it leaves out, and that the agent reads it w
   const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
   await waitFor(() => assert.match(dialog.textContent ?? '', /The plan is longer than fits in one message: it leaves out the detail of 1 task, so Claude reads it with harness_plan_read\./));
   const list = within(dialog).getByRole('region', { name: 'Set in config' });
-  assert.equal(list.querySelector('[data-key="pullRequests"]')?.textContent, 'Pull requests.coplan/config.json#pullRequestsgh pr create, once you say');
-  assert.match(list.querySelector('[data-key="instructions.build"]')?.textContent ?? '', /none$/);
+  assert.equal(list.querySelector('[data-key="pullRequests"]')?.textContent, 'Pull requests.coplan/config.json#pullRequestsopened by the harness');
+  assert.match(list.querySelector('[data-key="instructions.handoff"]')?.textContent ?? '', /none$/);
 });
 
 /** The status a list on the canvas gives Storage layer, the parent of t1 and t2. */
@@ -1955,9 +1953,9 @@ test('the task list says what waits on what, and the order the build takes', asy
   // Made against the revision on screen (Claude's edit above made it 2), so a newer change is not undone.
   assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 't3', dependsOn: [], expect: 2 });
   await act(async () => {
-    fireEvent.click(screen.getByRole('radio', { name: 'Self-review' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Checks only' }));
   });
-  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 't3', review: 'self', expect: 2 });
+  assert.deepEqual(opsSent().at(-1), { op: 'upsert_task', id: 't3', review: 'none', expect: 2 });
 });
 
 test('a gap the repository counts as an error holds Submit, and is shown first', async () => {
@@ -1973,8 +1971,7 @@ test('a gap the repository counts as an error holds Submit, and is shown first',
         version: plan.version,
         budget: 9000,
         maxNote: 4000,
-        settings: DEFAULTS,
-        project: { file: '/repo/.coplan/config.json', defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [], planCheck: { [rule]: 'error' } },
+        project: { file: '/repo/.coplan/config.json', review: 'agent', checks: { implement: [], review: [], final: [] }, errors: [], planCheck: { [rule]: 'error' } },
       };
     }
     return undefined;
@@ -2030,7 +2027,7 @@ test("submitting waits for a task's detail left open, which the lock would drop"
   const session = makeSession(confirmedPlan());
   await boot(session, (route) =>
     route.endsWith('/plan/prompt')
-      ? { prompt: 'PROMPT', trimmed: false, version: session.plan!.version, budget: 9000, maxNote: 4000, mode: 'managed', settings: DEFAULTS, project: { file: null, mode: 'managed', defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [] } }
+      ? { prompt: 'PROMPT', trimmed: false, version: session.plan!.version, budget: 9000, maxNote: 4000, project: { file: null, review: 'agent', checks: { implement: [], review: [], final: [] }, errors: [] } }
       : undefined,
   );
   await openTab('Tasks');
@@ -2051,23 +2048,13 @@ test("submitting waits for a task's detail left open, which the lock would drop"
   assert.equal(submit.title, 'Save or cancel the text open in the detail of task "Invalidation" first');
 });
 
-test('the plan is submitted after reading the prompt it sends, with how the build runs', async () => {
+test('the plan is submitted after reading the handoff it sends: no mode, reviewer, parallel or round controls', async () => {
   const session = makeSession(confirmedPlan());
   const version = session.plan!.version;
   await boot(session, (route, init) => {
     if (route.endsWith('/plan/prompt')) {
-      const { mode, note, settings } = JSON.parse(String(init?.body)) as { mode?: string; note: string; settings?: typeof DEFAULTS };
-      const used = settings ?? DEFAULTS;
-      return {
-        prompt: `PROMPT for ${mode ?? 'the default'}${note ? ` with "${note}"` : ''}${settings ? ` reviewed by ${settings.review}` : ''}`,
-        trimmed: false,
-        version,
-        budget: 9000,
-        maxNote: 4000,
-        mode: mode ?? 'managed',
-        settings: used,
-        project: { file: null, mode: 'managed', defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [] },
-      };
+      const { note } = JSON.parse(String(init?.body)) as { note: string };
+      return { prompt: `HANDOFF${note ? ` with "${note}"` : ''}`, trimmed: false, version, budget: 9000, maxNote: 4000, project: { file: null, review: 'agent', checks: { implement: [], review: [], final: [] }, errors: [] } };
     }
     if (route.endsWith('/plan/submit')) return { plan: lockedPlan() };
     return undefined;
@@ -2077,13 +2064,15 @@ test('the plan is submitted after reading the prompt it sends, with how the buil
   });
   const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
   const preview = () => within(dialog).getByTestId('prompt-preview').textContent;
-  // The repository's defaults — its mode, its settings — come with the
-  // first preview, and are then what the prompt is built from.
-  await waitFor(() => assert.equal(preview(), 'PROMPT for managed reviewed by subagent'));
-  assert.equal((within(dialog).getByLabelText(/^Managed/) as HTMLInputElement).checked, true);
-  assert.match(within(dialog).getByLabelText(/^Managed/).closest('label')?.textContent ?? '', /this repository's default/);
+  await waitFor(() => assert.equal(preview(), 'HANDOFF'));
+  assert.match(dialog.textContent ?? '', /The handoff Claude will get/);
   assert.match(dialog.textContent ?? '', /1 diagram · 2 boxes · 3 tasks \(1 already done\)/);
   assert.match(dialog.textContent ?? '', /No checks are set up/);
+  assert.match(dialog.textContent ?? '', /Export plan, in the header, copies the plan as Markdown without locking anything/);
+  // How the build runs is the harness's: nothing here chooses it.
+  assert.equal(within(dialog).queryAllByRole('radio').length, 0);
+  assert.equal(within(dialog).queryAllByRole('spinbutton').length, 0);
+  assert.doesNotMatch(dialog.textContent ?? '', /Managed|Tracked|review rounds?|at once/);
 
   // What is on screen is what is sent: the button waits for the preview.
   await act(async () => {
@@ -2091,7 +2080,7 @@ test('the plan is submitted after reading the prompt it sends, with how the buil
   });
   const submit = within(dialog).getByRole('button', { name: 'Submit and lock' }) as HTMLButtonElement;
   assert.equal(submit.disabled, true, 'not while the preview is out of date');
-  await waitFor(() => assert.equal(preview(), 'PROMPT for managed with "tests first" reviewed by subagent'));
+  await waitFor(() => assert.equal(preview(), 'HANDOFF with "tests first"'));
   await waitFor(() => assert.equal(submit.disabled, false));
   // A canvas edit still on its way to the daemon would be missing from the plan that locks.
   act(() => store.set({ canvasSaving: true }));
@@ -2099,75 +2088,14 @@ test('the plan is submitted after reading the prompt it sends, with how the buil
   act(() => store.set({ canvasSaving: false }));
   assert.equal(submit.disabled, false);
 
-  // The user's control over each task's cycle: who reviews it.
-  await act(async () => {
-    fireEvent.click(within(dialog).getByRole('radio', { name: 'You review' }));
-  });
-  await waitFor(() => assert.equal(preview(), 'PROMPT for managed with "tests first" reviewed by user'));
-
-  // Tracked leaves the cycle to the agent: no review, round or parallel settings.
-  await act(async () => {
-    fireEvent.click(within(dialog).getByLabelText(/^Tracked/));
-  });
-  await waitFor(() => assert.equal(preview(), 'PROMPT for tracked with "tests first" reviewed by user'));
-  assert.equal(within(dialog).queryByRole('radio', { name: 'You review' }), null);
-  // Export rebuilds it as the plan alone, copied rather than sent.
-  await act(async () => {
-    fireEvent.click(within(dialog).getByLabelText(/^Export/));
-  });
-  await waitFor(() => assert.equal(preview(), 'PROMPT for export with "tests first" reviewed by user'));
-  assert.ok(within(dialog).getByRole('button', { name: 'Copy and lock' }));
-  assert.match(dialog.textContent ?? '', /The plan, as Markdown/);
-  await act(async () => {
-    fireEvent.click(within(dialog).getByLabelText(/^Managed/));
-  });
-  await waitFor(() => assert.equal(preview(), 'PROMPT for managed with "tests first" reviewed by user'));
-  await waitFor(() => assert.equal(submit.disabled, false));
-
   await act(async () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Submit and lock' }));
   });
   const sent = posts.find((p) => p.route.endsWith('/plan/submit'));
-  assert.deepEqual(sent?.body, { target: 'session', mode: 'managed', note: 'tests first', expect: version, settings: { ...DEFAULTS, review: 'user' } });
+  assert.deepEqual(sent?.body, { note: 'tests first', expect: version });
   assert.equal(screen.queryByRole('dialog'), null);
   assert.equal(store.getState().tab, 'tasks', 'the board is where the build is followed');
   assert.ok(screen.getByRole('region', { name: 'To do' }));
-});
-
-test('a repository with no iric submits Tracked by default, with no review settings to choose (#62)', async () => {
-  const session = makeSession(confirmedPlan());
-  const version = session.plan!.version;
-  await boot(session, (route, init) => {
-    if (route.endsWith('/plan/prompt')) {
-      const { mode } = JSON.parse(String(init?.body)) as { mode?: string };
-      return {
-        prompt: `PROMPT for ${mode ?? 'the default'}`,
-        trimmed: false,
-        version,
-        budget: 9000,
-        maxNote: 4000,
-        mode: mode ?? 'tracked',
-        settings: DEFAULTS,
-        project: { file: null, mode: 'tracked', defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [] },
-      };
-    }
-    if (route.endsWith('/plan/submit')) return { plan: lockedPlan() };
-    return undefined;
-  });
-  await act(async () => {
-    fireEvent.click(screen.getByRole('button', { name: 'Review & submit plan' }));
-  });
-  const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
-  await waitFor(() => assert.equal(within(dialog).getByTestId('prompt-preview').textContent, 'PROMPT for tracked'));
-  assert.equal((within(dialog).getByLabelText(/^Tracked/) as HTMLInputElement).checked, true);
-  assert.equal(within(dialog).queryByRole('radiogroup', { name: 'Who reviews each task' }), null);
-  const submit = within(dialog).getByRole('button', { name: 'Submit and lock' }) as HTMLButtonElement;
-  await waitFor(() => assert.equal(submit.disabled, false));
-  await act(async () => {
-    fireEvent.click(submit);
-  });
-  const sent = posts.find((p) => p.route.endsWith('/plan/submit'));
-  assert.deepEqual(sent?.body, { target: 'session', mode: 'tracked', note: '', expect: version }, "a Tracked build carries no cycle settings");
 });
 
 test('Export plan opens from every view and phase, and copies the plan with no sign-off (#62)', async () => {
@@ -2237,7 +2165,7 @@ test('a plan signed off in chat says so, with the words the user said there (#65
   assert.match(within(tasking).getByTestId('said-in-chat').textContent ?? '', /^You told Claude in chat: the design is right$/);
 
   cleanup();
-  const built = markDelivered(submitPlan(makePlan(), { target: 'session', mode: 'tracked', prompt: '[cc-harness] Build the plan\n\nTHE PROMPT', userSaid: 'looks good, build it' }));
+  const built = markDelivered(submitPlan(makePlan(), { target: 'session', prompt: '[cc-harness] Build the plan\n\nTHE PROMPT', userSaid: 'looks good, build it' }));
   await boot(makeSession(built));
   const strip = screen.getByRole('region', { name: 'The build' });
   assert.match(strip.textContent ?? '', /submitted from chat/);
@@ -2252,45 +2180,21 @@ test('a plan signed off in chat says so, with the words the user said there (#65
   assert.doesNotMatch(screen.getByRole('region', { name: 'The build' }).textContent ?? '', /from chat/);
 });
 
-test('confirming the design is optional: Submit is offered while designing, and what is chosen there is kept for chat (#65)', async () => {
+test('confirming the design is optional: Submit is offered while designing (#65)', async () => {
   const session = makeSession();
   const version = session.plan!.version;
-  await boot(session, (route, init) => {
-    if (route.endsWith('/plan/prompt')) {
-      const { mode } = JSON.parse(String(init?.body)) as { mode?: string };
-      return {
-        prompt: `PROMPT for ${mode ?? 'the default'}`,
-        trimmed: false,
-        version,
-        budget: 9000,
-        maxNote: 4000,
-        mode: mode ?? 'tracked',
-        settings: DEFAULTS,
-        project: { file: null, mode: 'tracked', defaults: DEFAULTS, checks: { implement: [], review: [], final: [] }, errors: [] },
-      };
-    }
-    return undefined;
-  });
+  await boot(session, (route) =>
+    route.endsWith('/plan/prompt') ? { prompt: 'HANDOFF', trimmed: false, version, budget: 9000, maxNote: 4000, project: { file: null, review: 'agent', checks: { implement: [], review: [], final: [] }, errors: [] } } : undefined,
+  );
   assert.ok(screen.getByRole('button', { name: 'Confirm design' }), 'the checkpoint is still offered');
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: 'Submit plan' }));
   });
   const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
-  // The repository's default (Tracked here) until the user picks another.
-  await waitFor(() => assert.equal(within(dialog).getByTestId('prompt-preview').textContent, 'PROMPT for tracked'));
+  await waitFor(() => assert.equal(within(dialog).getByTestId('prompt-preview').textContent, 'HANDOFF'));
   assert.match(dialog.textContent ?? '', /The design is not confirmed: the build follows the tasks planned on the diagram/);
-  assert.match(dialog.textContent ?? '', /Or skip this dialog: tell Claude in chat — build it — and it signs this off for you, built the way you last chose here/);
-  // Choosing how it is built is remembered, for a go-ahead given in chat.
-  await act(async () => {
-    fireEvent.click(within(dialog).getByLabelText(/^Managed/));
-  });
-  await waitFor(() => assert.ok(posts.some((p) => p.route.endsWith('/plan/choice'))));
-  assert.deepEqual(posts.filter((p) => p.route.endsWith('/plan/choice')).at(-1)?.body, { mode: 'managed', settings: DEFAULTS });
-  await act(async () => {
-    fireEvent.click(within(dialog).getByRole('radio', { name: 'Self-review' }));
-  });
-  assert.deepEqual(posts.filter((p) => p.route.endsWith('/plan/choice')).at(-1)?.body, { mode: 'managed', settings: { ...DEFAULTS, review: 'self' } });
-  assert.equal(posts.filter((p) => p.route.endsWith('/plan/submit')).length, 0, 'choosing submits nothing');
+  assert.match(dialog.textContent ?? '', /Or skip this dialog: tell Claude in chat — build it — and it signs this off for you\. The page shows/);
+  assert.equal(posts.filter((p) => p.route.endsWith('/plan/submit')).length, 0, 'opening it submits nothing');
 });
 
 test('withdrawing a submission Claude has not picked up unlocks the plan', async () => {
@@ -2312,12 +2216,12 @@ test('withdrawing a submission Claude has not picked up unlocks the plan', async
 test('the submitted prompt can be read back from the architecture view', async () => {
   await boot(makeSession(lockedPlan(true)));
   await act(async () => {
-    fireEvent.click(screen.getByRole('button', { name: 'View prompt' }));
+    fireEvent.click(screen.getByRole('button', { name: 'View handoff' }));
   });
   const dialog = screen.getByRole('dialog', { name: 'What Claude reads' });
   assert.equal(within(dialog).getByRole('tab', { name: 'Sent prompt' }).getAttribute('aria-selected'), 'true');
   await waitFor(() => assert.match(within(dialog).getByTestId('viewer-text').textContent ?? '', /THE PROMPT/));
-  assert.match(dialog.textContent ?? '', /The submitted prompt, exactly as it was sent · submitted .* · Claude got it/);
+  assert.match(dialog.textContent ?? '', /The submitted handoff, exactly as it was sent · submitted .* · Claude got it/);
 });
 
 test('while building, the board follows Claude and a card that moves stands out', async () => {
@@ -2506,10 +2410,9 @@ test('a change request being typed is offered to copy when the task no longer wa
   assert.equal(offered().length, 2, 'its own request is not offered');
 });
 
-test("the board asks for the user's verdict where the project has them review and the plan does not say (a Managed build on the repository's defaults)", async () => {
+test("the board asks for the user's verdict where the repository's default review is theirs and the task does not say", async () => {
   const claude = (from: Plan, op: PlanOp) => applyOps(from, [op], 'claude', undefined, { tracking: true }).plan;
   const plan = claude(lockedPlan(true), { op: 'upsert_task', id: 't3', stage: 'review' });
-  assert.equal(plan.submission?.settings === undefined, true, 'the plan holds no review mode');
   const session = makeSession(plan);
   await boot(session, (route, init) => (/^\/api\/session\/[^/]+$/.test(route) && !init?.method ? { session, projectReview: 'user' } : undefined));
   await openTab('Tasks');
@@ -2525,7 +2428,7 @@ test("the board asks for the user's verdict where the project has them review an
   openDrafts.set(key, { draft: 'Add a timeout', value: '', version: undefined });
   assert.deepEqual(pruneDrafts(session.sessionId, plan, 'user'), []);
   assert.equal(openDrafts.has(key), true, 'kept');
-  assert.equal(pruneDrafts(session.sessionId, plan).length, 1, 'under the default (self) it no longer waits on the user: offered');
+  assert.equal(pruneDrafts(session.sessionId, plan).length, 1, 'under the default (agent) it no longer waits on the user: offered');
   openDrafts.clear();
 });
 
@@ -2542,13 +2445,13 @@ test("who reviews follows the session open, and is fetched again on a resync", a
   await act(async () => {
     await store.selectSession('s2');
   });
-  assert.equal(store.getState().projectReview, 'self', "the default, not the other session's");
+  assert.equal(store.getState().projectReview, 'agent', "the default, not the other session's");
   // Changed while the stream was down: the resync brings it.
-  review = 'skip';
+  review = 'none';
   await act(async () => {
     await (store as unknown as { resync: () => Promise<void> }).resync();
   });
-  assert.equal(store.getState().projectReview, 'skip');
+  assert.equal(store.getState().projectReview, 'none');
 });
 
 test("a plan streamed in brings who reviews with it, so a change request kept for the user's review is not let go first", async () => {
@@ -2956,15 +2859,14 @@ test('in Cursor, submitting copies the prompt to paste, since no hook can hand i
     fireEvent.click(screen.getByRole('button', { name: 'Review & submit plan' }));
   });
   const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
-  assert.ok(within(dialog).getByLabelText(/^Tracked — Cursor builds it here/));
-  assert.match(dialog.textContent ?? '', /copied for you to paste into this Cursor chat/);
+  assert.match(dialog.textContent ?? '', /The handoff Cursor will get/);
   const submit = within(dialog).getByRole('button', { name: 'Copy, submit and lock' }) as HTMLButtonElement;
   await waitFor(() => assert.equal(submit.disabled, false));
   await act(async () => {
     fireEvent.click(submit);
   });
   assert.equal(copied, 'THE CURSOR PROMPT');
-  assert.ok(store.getState().toasts.some((t) => /Paste the prompt into Cursor's chat/.test(t.text)));
+  assert.ok(store.getState().toasts.some((t) => /Paste the handoff into Cursor's chat/.test(t.text)));
 });
 
 test('in Cursor, confirming the design copies its prompt to paste, and the strip says so', async () => {
@@ -4006,7 +3908,7 @@ test('a kept draft goes once it is saved, or its field is gone or locked: closin
 
 test('a recorded pull request shows on the board, without CI or fix rounds; landing is in review', async () => {
   const branched = applyOps(makePlan(), [{ op: 'upsert_task', id: 'storage', branch: 'cache/storage' }], 'claude').plan;
-  const built = markDelivered(submitPlan(branched, { target: 'session', mode: 'tracked', prompt: 'build' }));
+  const built = markDelivered(submitPlan(branched, { target: 'session', prompt: 'build' }));
   const plan = {
     ...built,
     tasks: built.tasks.map((t) => ({ ...t, status: 'done' as const })),

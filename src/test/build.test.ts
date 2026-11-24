@@ -6,17 +6,14 @@ import {
   stackStatus,
   branchPlan,
   buildSteps,
-  cleanSettings,
   dependencyProblem,
   dependents,
   effectiveBranch,
   effectiveReview,
   isComplete,
-  modeFor,
-  planMode,
   readinessOf,
   readyTasks,
-  targetOf,
+  validReview,
   waitingOn,
 } from '../shared/build.ts';
 import { renderBrief, renderNext } from '../daemon/brief.ts';
@@ -63,7 +60,7 @@ const TASKS: TaskInput[] = [
     ],
   },
   { id: 'wire', title: 'Wire up', dependsOn: ['storage'], builds: ['api'], branch: 'cache/api', review: 'user' },
-  { id: 'docs', title: 'Docs', review: 'skip' },
+  { id: 'docs', title: 'Docs', review: 'none' },
 ];
 
 function tasked(): Plan {
@@ -388,19 +385,47 @@ test("Claude's upsert_task does not report progress: that is harness_task_update
   assert.equal(republished.tasks.find((t) => t.id === 'wire')!.status, 'todo');
 });
 
-test('review modes are inherited, with the build default last', () => {
-  const plan = applyOps(tasked(), [{ op: 'upsert_task', id: 'storage', review: 'self' }], 'user').plan;
-  const of = (id: string) => effectiveReview(plan, plan.tasks.find((t) => t.id === id)!, 'subagent');
-  assert.equal(of('client'), 'self');
+test('the review a task asks for is inherited, with the repository default last', () => {
+  const plan = applyOps(tasked(), [{ op: 'upsert_task', id: 'storage', review: 'user' }], 'user').plan;
+  const of = (id: string) => effectiveReview(plan, plan.tasks.find((t) => t.id === id)!, 'agent');
+  assert.equal(of('client'), 'user');
   assert.equal(of('wire'), 'user');
-  assert.equal(of('docs'), 'skip');
+  assert.equal(of('docs'), 'none');
+  assert.equal(of('invalidate'), 'user');
   const reset = applyOps(plan, [{ op: 'upsert_task', id: 'storage', review: '' }], 'user').plan;
-  assert.equal(effectiveReview(reset, reset.tasks.find((t) => t.id === 'client')!, 'subagent'), 'subagent');
+  assert.equal(effectiveReview(reset, reset.tasks.find((t) => t.id === 'client')!, 'agent'), 'agent');
 });
 
-test('settings are bounded and filled in', () => {
-  assert.deepEqual(cleanSettings({ review: 'user', parallel: 50, maxRounds: -2 }), { review: 'user', parallel: 8, maxRounds: 1 });
-  assert.deepEqual(cleanSettings(null), { review: 'self', parallel: 1, maxRounds: 3 }, 'no assumptions about the agent (#63)');
+test('the old review names read as the review they meant, as written and as stored', () => {
+  assert.equal(validReview('subagent'), 'agent');
+  assert.equal(validReview('self'), 'agent');
+  assert.equal(validReview('skip'), 'none');
+  assert.equal(validReview('user'), 'user');
+  assert.equal(validReview('nobody'), undefined);
+  // Written by an older agent: taken as the new name.
+  const plan = applyOps(tasked(), [{ op: 'upsert_task', id: 'config', review: 'skip' as never }], 'claude').plan;
+  assert.equal(plan.tasks.find((t) => t.id === 'config')!.review, 'none');
+  assert.throws(() => applyOps(tasked(), [{ op: 'upsert_task', id: 'config', review: 'nobody' as never }], 'claude'), /review must be one of agent, user or none/);
+});
+
+test('a plan stored before 0.4 loads: its build mode, settings and round bookkeeping are not read', () => {
+  const stored = submitPlan(tasked(), { target: 'session', prompt: 'build it' }, 1_300) as Plan & Record<string, unknown>;
+  const raw = JSON.parse(JSON.stringify(stored)) as Record<string, any>;
+  raw.submission.mode = 'managed';
+  raw.submission.settings = { review: 'self', parallel: 3, maxRounds: 2 };
+  const client = raw.tasks.find((t: { id: string }) => t.id === 'client');
+  Object.assign(client, { review: 'subagent', status: 'done', round: 2, reopened: true, acceptedFailing: true, reviews: [{ round: 2, verdict: 'pass', by: 'claude', mode: 'self', at: 1 }] });
+  raw.tasks.find((t: { id: string }) => t.id === 'docs').review = 'skip';
+  const plan = normalizePlan(raw as Plan & Record<string, unknown>, 'x');
+  assert.deepEqual(Object.keys(plan.submission!).sort(), ['at', 'deliveredAt', 'prompt', 'seq', 'target']);
+  const loaded = plan.tasks.find((t) => t.id === 'client')! as unknown as Record<string, unknown>;
+  assert.equal(loaded['review'], 'agent');
+  assert.equal(loaded['reopened'], undefined);
+  assert.equal(loaded['acceptedFailing'], undefined);
+  assert.equal((loaded['reviews'] as { mode: string }[])[0]!.mode, 'agent');
+  assert.equal(plan.tasks.find((t) => t.id === 'docs')!.review, 'none');
+  // And it builds as any plan does: what waits still waits.
+  assert.deepEqual(ids(readyTasks(plan)), ['config', 'invalidate', 'docs']);
 });
 
 /* ------------------------------------------------------------------ *
@@ -425,26 +450,27 @@ test('the read-back marks what is ready and what waits, once the design is confi
   assert.match(text, /Design confirmed/);
 });
 
-test('what is next says what to start, how many at once, and what the rest wait on', () => {
+test('what is next says what can start and what the rest wait on, and nothing of how many at once', () => {
   let plan = tasked();
   plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', stage: 'implement' }], 'claude', undefined, { tracking: true }).plan;
-  const next = renderNext(plan, { project: PROJECT, mode: 'managed', settings: { review: 'subagent', parallel: 3, maxRounds: 3 } });
+  const next = renderNext(plan, { project: PROJECT });
+  assert.match(next, /_tasks 0\/5 done · review: agent, unless a task asks for another_/);
   assert.match(next, /## In progress \(1\)\n- client Cache client — implementing/);
-  assert.match(next, /## Ready to start \(2\)\n- config Config · branch `cache\/storage`[^\n]*\n- docs Docs · review: skip/);
-  assert.match(next, /Start up to 2 now, side by side — with subagents started from this session where your agent has them/);
+  assert.match(next, /## Ready to start \(2\)\n- config Config · branch `cache\/storage`[^\n]*\n- docs Docs · review: none/);
+  assert.match(next, /None of these waits on another: they can start in any order/);
   assert.match(next, /- invalidate Invalidation — waits on client/);
   assert.match(next, /- `cache\/api` from `cache\/storage` \(stacked\)/);
-
-  const one = renderNext(plan, { mode: 'managed', settings: { review: 'self', parallel: 1, maxRounds: 3 } });
-  assert.match(one, /already in progress, the most this build runs at once \(1\)/);
+  assert.match(next, /harness_task_update \{task_id, status: "in_progress"\}, and "done" with a one-line note/);
+  for (const banned of [/iric/, /review rounds?/, /subagent/, /worktree/, /at once/, /go-ahead/]) assert.doesNotMatch(next, banned);
 });
 
-test('next shows the round count but never asks for a go-ahead past the limit: the limit is not enforced', () => {
+test('next shows a task in review that asks for the user, and a verdict once given', () => {
   let plan = tasked();
-  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', stage: 'implement' }], 'claude', undefined, { tracking: true }).plan;
-  plan.tasks.find((t) => t.id === 'client')!.round = 3;
-  const next = renderNext(plan, { mode: 'managed' as const, settings: { review: 'self' as const, parallel: 3, maxRounds: 3 } });
-  assert.doesNotMatch(next, /review rounds used|go-ahead|user_approved/);
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'config', review: 'user' }], 'user').plan;
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'config', stage: 'review' }], 'claude', undefined, { tracking: true }).plan;
+  assert.match(renderNext(plan, { project: PROJECT }), /- config Config — in review, round 1\n  ⏸ it asks for the user's review/);
+  plan = applyOps(plan, [{ op: 'review_task', id: 'config', verdict: 'pass' }], 'user').plan;
+  assert.match(renderNext(plan, { project: PROJECT }), /✓ passed by the user\./);
 });
 
 test('when every task is done, next says how to finish', () => {
@@ -458,7 +484,7 @@ test('when every task is done, next says how to finish', () => {
 
 test("a task's brief is self-contained: objective, where it fits, scope, branch and checks", () => {
   const plan = tasked();
-  const brief = renderBrief(plan, plan.tasks.find((t) => t.id === 'invalidate')!, { project: PROJECT, mode: 'managed', bin: '/x/coplan' });
+  const brief = renderBrief(plan, plan.tasks.find((t) => t.id === 'invalidate')!, { project: PROJECT, bin: '/x/coplan' });
   assert.match(brief, /^# Task invalidate: Invalidation/);
   assert.match(brief, /under "Storage"/);
   assert.match(brief, /## The plan, in short\nA read-through cache/);
@@ -467,20 +493,24 @@ test("a task's brief is self-contained: objective, where it fits, scope, branch 
   assert.match(brief, /cannot start yet: it waits on client Cache client/);
   assert.match(brief, /- client Cache client — also touches src\/cache\.ts/, 'shared files are a scope edge');
   assert.match(brief, /Commit this task's work on `cache\/storage`\. Cut it from `main` if it does not exist yet\./);
-  assert.match(brief, /- typecheck: `npm run typecheck`/);
+  assert.match(brief, /- implement: typecheck `npm run typecheck`/);
   assert.doesNotMatch(brief, /ruff/, 'a hook for other files does not apply');
-  assert.match(brief, /- tests: `npm test`/);
+  assert.match(brief, /- review: tests `npm test`/);
   // Targeted by git, not by the files it planned: no --files, and how it picks.
   assert.match(brief, /"\/x\/coplan" check implement` \(or `review`\); add `--json` for the `checks` to report\. Only the checks for what the task changes run: since it began with `--since`/);
   assert.doesNotMatch(brief, /--files/);
+  assert.match(brief, /## Done when\nIts checks pass/);
+  assert.match(brief, /Review requested: an agent that did not write the change\. Report stage "review"/);
+  for (const banned of [/## The cycle/, /review rounds?/, /At most/, /iric/, /each through its own cycle/]) assert.doesNotMatch(brief, banned);
 
-  const wire = renderBrief(plan, plan.tasks.find((t) => t.id === 'wire')!, { project: PROJECT, mode: 'managed' });
+  const wire = renderBrief(plan, plan.tasks.find((t) => t.id === 'wire')!, { project: PROJECT });
   assert.match(wire, /\*\*API\*\* `api` in "Components" — service\n  Serves orders\.\n  Connections: API → Redis: get\/set; API → Postgres: SQL/);
   assert.match(wire, /Cut it from `cache\/storage` \(a stacked branch/);
-  assert.match(wire, /Review: the user, before it is marked done \(set on this task\)/);
-  assert.match(wire, /show the user the change and ask them, with AskUserQuestion/);
+  assert.match(wire, /Review requested: the user, before it is marked done \(set on this task\)/);
+  assert.match(wire, /Show the user the change and ask them, with AskUserQuestion/);
+  assert.match(renderBrief(plan, plan.tasks.find((t) => t.id === 'docs')!, { project: PROJECT }), /Review requested: none beyond the checks \(set on this task\)\. The checks are the review\./);
 
-  const parent = renderBrief(plan, plan.tasks.find((t) => t.id === 'storage')!, { mode: 'managed' });
+  const parent = renderBrief(plan, plan.tasks.find((t) => t.id === 'storage')!, {});
   assert.match(parent, /Its subtasks — build them in this order/);
   assert.match(parent, /\*\*Redis\*\* `cache`[\s\S]*Decisions:\n    TTL 10m\./, 'a parent builds what its subtasks build');
   assert.match(parent, /No checks are configured/);
@@ -594,99 +624,45 @@ test('a restack goes down the stack to the first branch still open', () => {
 });
 
 /* ------------------------------------------------------------------ *
- * How the repository opens pull requests (#45)
+ * The handoff
  * ------------------------------------------------------------------ */
 
-test('long standing instructions are cut to fit the prompt, saying where the rest is; the brief carries them whole', () => {
+test('long standing instructions are cut to fit the handoff, saying where the rest is; the brief carries them whole', () => {
   const long = 'Keep every commit small and say why. '.repeat(100);
-  const custom = { ...parseProjectConfig({}), instructions: { build: long, brief: long } };
+  const custom = { ...parseProjectConfig({}), instructions: { handoff: long, brief: long } };
   const submitted = submitPlan(tasked(), { target: 'session', prompt: 'build it' }, 1_300);
-  const prompt = buildPrompt(submitted, { target: 'session', project: custom }).prompt;
+  const prompt = buildPrompt(submitted, { project: custom }).prompt;
   assert.ok(prompt.length < long.length + 4_000, 'not the whole text');
-  assert.match(prompt, /Cut to fit here: the whole text is `instructions\.build`/);
+  assert.match(prompt, /Cut to fit here: the whole text is `instructions\.handoff`/);
   const brief = renderBrief(submitted, submitted.tasks.find((t) => t.id === 'client')!, { project: custom });
   assert.ok(brief.includes(long.trim()), 'the brief has it all');
 });
 
-test('the build is told how pull requests are opened, and each is due with the template when its branch is done', () => {
-  const base = parseProjectConfig({ pullRequests: { tool: 'graphite', open: 'auto' } });
-  const custom = { ...base, pullRequests: { ...base.pullRequests, template: '## Summary', templateFile: 'PR.md' } };
-  const submitted = submitPlan(tasked(), { target: 'session', prompt: 'build it', settings: { review: 'subagent', parallel: 2, maxRounds: 3 } }, 1_300);
-  const prompt = buildPrompt(submitted, { target: 'session', project: custom }).prompt;
-  assert.match(prompt, /Open the pull requests with Graphite: track each branch on the one below it \(`gt track`\), and open the stack with `gt submit --stack`, as soon as a branch's tasks are done\./);
-  assert.match(prompt, /template \(PR\.md\), which harness_task_next shows when one is due/);
-
-  // cache/storage is done: its pull request is due, with the template.
-  let plan = done(markDelivered(submitted, 1_400), 'client', 'config', 'invalidate');
-  let next = renderNext(plan, { project: custom });
-  assert.match(next, /## Ready for a pull request \(1\)\n- `cache\/storage`: every task on it is done\./);
-  assert.match(next, /~~~~markdown\n## Summary\n~~~~/);
-  // Once it is recorded, it is no longer due.
-  plan = applyOps(plan, [{ op: 'set_branch', branch: 'cache/storage', pr: { state: 'open', number: 1 } }], 'claude', undefined, { tracking: true }).plan;
-  next = renderNext(plan, { project: custom });
-  assert.doesNotMatch(next, /Ready for a pull request/);
-
-  // Elsewhere is an export (#62): the plan alone, with no instructions on
-  // how pull requests are opened and no template to fill in.
-  const dotted = { ...custom, pullRequests: { ...custom.pullRequests, templateFile: '.github/pull_request_template.md' } };
-  const outside = buildPrompt(submitted, { target: 'elsewhere', project: dotted }).prompt;
-  assert.doesNotMatch(outside, /harness_|pull request template|gt submit|## Summary\n~~~~/);
-
-  // A stacked branch is not due before the one it stacks on has its pull request.
-  const stacked = done(markDelivered(submitted, 1_400), 'wire');
-  assert.doesNotMatch(renderNext(stacked, { project: custom }), /Ready for a pull request/, 'cache/api waits for cache/storage');
-
-  // Never: no pull requests at all, said where the build ends.
-  const never = parseProjectConfig({ pullRequests: { open: 'never' } });
-  assert.match(buildPrompt(submitted, { target: 'session', project: never }).prompt, /Do not open pull requests: push the branches/);
-  assert.doesNotMatch(renderNext(done(plan, 'wire', 'docs'), { project: never }), /gh pr create/);
+test('the handoff says what to build, what done means, the review asked for, the branches and how to report — not how to run it', () => {
+  const { prompt } = buildPrompt(tasked(), { project: PROJECT });
+  assert.match(prompt, /^\[cc-harness\] Build the plan "Add a cache"/);
+  assert.match(prompt, /harness_task_next lists the tasks that are ready/);
+  assert.match(prompt, /harness_task_brief gives one task's brief/);
+  assert.match(prompt, /a task is done when its checks pass/);
+  assert.match(prompt, /- review: tests `npm test`/, "the repository's checks are the definition of done");
+  assert.match(prompt, /Review: each task asks for an agent that did not write the change, unless its brief says otherwise/);
+  assert.match(prompt, /land each task on its branch \(see Branches below\)/);
+  assert.match(prompt, /Open the pull requests your own way, each against the branch below it, and record each with harness_branch_update/);
+  assert.match(prompt, /harness_task_update \{task_id, status, checks, note\}/);
+  assert.match(prompt, /op: "report"/);
+  for (const banned of [/iric/, /Managed|Tracked/, /review rounds?/, /at once/, /subagents? started/, /worktree/, /gh pr create|gt submit/, /user's call/]) assert.doesNotMatch(prompt, banned);
 });
 
-/* ------------------------------------------------------------------ *
- * Execution modes (#62)
- * ------------------------------------------------------------------ */
-
-test('a plan is built in the mode it was submitted with; one submitted before modes was Managed here, Export elsewhere', () => {
-  const plan = tasked();
-  assert.equal(planMode(plan, 'tracked'), 'tracked', "before it is submitted: the repository's default");
-  assert.equal(planMode(submitPlan(plan, { target: 'session', prompt: 'p' }, 1_300), 'tracked'), 'managed');
-  assert.equal(planMode(submitPlan(plan, { target: 'elsewhere', prompt: 'p' }, 1_300), 'managed'), 'export');
-  assert.equal(planMode(submitPlan(plan, { target: 'session', mode: 'tracked', prompt: 'p' }, 1_300), 'managed'), 'tracked');
-  // A target and a mode say the same thing two ways: Export is elsewhere.
-  assert.equal(modeFor('elsewhere', 'managed', 'tracked'), 'export');
-  assert.equal(modeFor('session', 'export', 'managed'), 'managed', 'this session is never an export');
-  assert.equal(modeFor('session', undefined, 'export'), 'tracked');
-  assert.equal(modeFor(undefined, undefined, 'export'), 'export');
-  assert.equal(targetOf('export'), 'elsewhere');
-  assert.equal(targetOf('tracked'), 'session');
-});
-
-test('a Tracked build prompt has no implement → review → refine: no review mode, no rounds, no parallel limit, no subagents', () => {
-  const { prompt } = buildPrompt(tasked(), { target: 'session', project: PROJECT });
-  assert.equal(PROJECT.mode, 'tracked', 'no iric, no mode: Tracked');
-  assert.match(prompt, /The build is Tracked: how you build and check each task is yours to decide/);
-  assert.match(prompt, /harness_task_update as you go: status "in_progress" when you start it, "done"/);
-  assert.match(prompt, /- review: tests `npm test`/, "the repository's checks are still there to run");
-  for (const banned of [/implement → review → refine/, /iric/, /Review: /, /review rounds?/, /at once/, /subagent/, /worktree/]) assert.doesNotMatch(prompt, banned);
-  // Managed, the same plan and config: today's prompt.
-  const managed = buildPrompt(tasked(), { target: 'session', project: PROJECT, mode: 'managed' }).prompt;
-  assert.match(managed, /take each task through the iric skill — implement → review → refine/);
-});
-
-test("in a Tracked build, what is next and a task's brief carry no cycle, no limit and no subagent", () => {
-  let plan = tasked();
-  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', status: 'in_progress' }], 'claude', undefined, { tracking: true }).plan;
-  const next = renderNext(plan, { project: PROJECT });
-  assert.match(next, /Tracked: how each task is built and checked is yours to decide/);
-  assert.match(next, /## Ready to start \(2\)/);
-  assert.match(next, /start them in whatever order, and as many at once, as suits you/);
-  assert.match(next, /harness_task_update \{task_id, status: "in_progress"\}, and mark it "done"/);
-  for (const banned of [/iric/, /review round/, /subagent/, /worktree/, /up to \d+ at once/]) assert.doesNotMatch(next, banned);
-
-  const brief = renderBrief(plan, plan.tasks.find((t) => t.id === 'wire')!, { project: PROJECT });
-  assert.match(brief, /## Checks\nThe repository's checks for the files this task expects to touch — they run only for what it really changes:\n- implement: typecheck `npm run typecheck`/);
-  assert.match(brief, /status: "in_progress" \| "done" \| "blocked"/);
-  for (const banned of [/## The cycle/, /Review: /, /review round/, /subagent that did not write/, /each through its own cycle/]) assert.doesNotMatch(brief, banned);
+test('the pull request template goes to the harness as a path; Coplan writes no pull request bodies', () => {
+  const custom = { ...PROJECT, pullRequests: { template: '## How it was tested', templateFile: 'PR.md' } };
+  const submitted = submitPlan(tasked(), { target: 'session', prompt: 'build it' }, 1_300);
+  assert.match(buildPrompt(submitted, { project: custom }).prompt, /Write each description from the pull request template, PR\.md\./);
+  const plan = done(markDelivered(submitted, 1_400), 'client', 'config', 'invalidate', 'wire', 'docs');
+  const next = renderNext(plan, { project: custom });
+  assert.match(next, /pull request template, PR\.md/);
+  assert.doesNotMatch(next, /## How it was tested|Ready for a pull request/);
+  // The export is the plan alone: no tools, no template.
+  assert.doesNotMatch(exportText(submitted, { project: custom }), /harness_|pull request template|## How it was tested/);
 });
 
 test('a dependency whose work was dropped is settled in both briefs, as the board says', () => {

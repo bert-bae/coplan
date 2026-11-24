@@ -261,12 +261,9 @@ async function liveProbes(
   });
 
   await probe('harness_task_update tracks progress', async () => {
-    // Through the cycle, as the build does: done is refused before a review.
-    // The probe runs none of the repository's checks, so it finishes the way
-    // a task the user accepted as it is does — which works whatever this
-    // repository's .coplan/config.json requires.
+    // To review and done, as a harness reports it: recorded as reported.
     const reviewed = await mcp('task', { task_id: childId, stage: 'review' });
-    const tracked = await mcp('task', { task_id: childId, status: 'done', user_approved: true, note: 'doctor probe' });
+    const tracked = await mcp('task', { task_id: childId, status: 'done', note: 'doctor probe' });
     const afterTrack = await getSession();
     record(
       'harness_task_update tracks progress',

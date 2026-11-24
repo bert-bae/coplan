@@ -883,36 +883,33 @@ test('a save that fails is said — once — instead of being dropped', { skip: 
   assert.ok(existsSync(path.join(dir, 'state.json')));
 });
 
-test("every edit falls back to the project's review mode the daemon gives the store", async () => {
+test("every edit falls back to the repository's review the daemon gives the store", async () => {
   const store = await freshStore();
   store.ensure('rv', process.cwd());
   store.publishPlan('rv', PLAN);
-  store.reviewFor = () => 'skip';
-  const plan = store.applyOps('rv', [{ op: 'upsert_task', id: 't1', status: 'done' }], 'user').plan;
-  Object.assign(plan.tasks.find((t) => t.id === 't1')!, { round: 1 });
-  // Closed done under a project that skips review counts as passed: taken up again, it is reopened.
-  const again = store.applyOps('rv', [{ op: 'upsert_task', id: 't1', status: 'in_progress' }], 'user').plan;
-  assert.equal(again.tasks.find((t) => t.id === 't1')!.reopened, true);
+  store.reviewFor = () => 'none';
+  store.applyOps('rv', [{ op: 'upsert_task', id: 't1', stage: 'review' }], 'claude', { tracking: true });
+  const plan = store.applyOps('rv', [{ op: 'review_task', id: 't1', verdict: 'pass' }], 'user').plan;
+  assert.equal(plan.tasks.find((t) => t.id === 't1')!.reviews!.at(-1)!.mode, 'none');
 });
 
-test("the session list counts a task held for the user's review by the project's review mode (#162)", async () => {
+test("the session list counts a task waiting on the user's review by the repository's review (#162)", async () => {
   const store = await freshStore();
   const { confirmDesign, markDelivered, submitPlan } = await import('../shared/plan.ts');
   store.ensure('rl', process.cwd());
   store.publishPlan('rl', PLAN);
-  // A Managed build submitted on the repository's defaults: no settings of its own.
   store.mutate('rl', (s) => {
-    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { target: 'session', mode: 'managed', prompt: 'p' }));
+    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { target: 'session', prompt: 'p' }));
   });
   store.applyOps('rl', [{ op: 'upsert_task', id: 't1', stage: 'review' }], 'claude', { tracking: true });
   const row = () => store.summaries().find((s) => s.sessionId === 'rl')!;
-  assert.equal(row().awaitingReview, 0, 'the default: self-review');
+  assert.equal(row().awaitingReview, 0, 'the default: an agent reviews');
   store.reviewFor = () => 'user';
   assert.equal(row().awaitingReview, 1);
   assert.equal(row().planStatus, 'review');
 });
 
-test("the session list reads the project's review mode only where it counts, and once a repository (#165)", async () => {
+test("the session list reads the repository's review only where it counts, and once a repository (#165)", async () => {
   const store = await freshStore();
   const { confirmDesign, markDelivered, submitPlan } = await import('../shared/plan.ts');
   type Submit = Parameters<typeof submitPlan>[1];
@@ -925,13 +922,10 @@ test("the session list reads the project's review mode only where it counts, and
     mkdirSync(dir, { recursive: true });
     return dir;
   };
-  const shared = folder('managed');
+  const shared = folder('submitted');
   for (const [id, dir, how] of [
-    ['m1', shared, submitted({ mode: 'managed' })],
-    ['m2', shared, submitted({ mode: 'managed' })],
-    ['own', folder('own'), submitted({ mode: 'managed', settings: { review: 'self', parallel: 1, maxRounds: 3 } })],
-    ['tracked', folder('tracked'), submitted({ mode: 'tracked' })],
-    ['export', folder('export'), submitted({ target: 'elsewhere' })],
+    ['m1', shared, submitted({})],
+    ['m2', shared, submitted({})],
   ] as const) {
     store.ensure(id, dir);
     store.publishPlan(id, PLAN);
@@ -944,7 +938,7 @@ test("the session list reads the project's review mode only where it counts, and
     return 'user';
   };
   store.summaries();
-  // Only builds on the repository's defaults that hold work for review (Managed): the two in one folder, once.
-  assert.equal(asked.length, 1, JSON.stringify(asked));
-  assert.ok(['m1', 'm2'].includes(asked[0]!), JSON.stringify(asked));
+  // Only submitted plans, which can have a task in review: the two in one folder, once; nothing unpublished.
+  assert.equal(asked.filter((id) => id === 'm1' || id === 'm2').length, 1, JSON.stringify(asked));
+  assert.ok(!asked.includes('unpublished'), JSON.stringify(asked));
 });

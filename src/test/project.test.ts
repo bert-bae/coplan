@@ -5,9 +5,9 @@ import { chmodSync, closeSync, existsSync, mkdtempSync, mkdirSync, openSync, rea
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HOOK_KEYS, INSTRUCTION_POINTS, PROJECT_KEYS, PR_OPEN, PR_TOOLS, expandBraces, globMatch, hookCommand, hooksFor, loadProjectConfig, nameFor, parseProjectConfig, pathsMatch } from '../shared/project.ts';
+import { HOOK_KEYS, INSTRUCTION_POINTS, PROJECT_KEYS, expandBraces, globMatch, hookCommand, hooksFor, loadProjectConfig, nameFor, parseProjectConfig, pathsMatch } from '../shared/project.ts';
 import { GAP_RULES, GAP_SEVERITIES } from '../shared/check.ts';
-import { EXECUTION_MODES } from '../shared/types.ts';
+import { REVIEW_MODES } from '../shared/types.ts';
 import { detectHooks, renderConfig } from '../cli/init.ts';
 import { parseJsonc } from '../shared/jsonc.ts';
 
@@ -36,29 +36,30 @@ function repo(files: Record<string, string>): string {
 
 test('hooks are commands or objects, per stage, with names worked out', () => {
   const config = parseProjectConfig({
-    hooks: {
+    checks: {
       implement: ['npm run typecheck', 'make lint', { run: 'cargo clippy', optional: true }],
       review: { name: 'tests', run: 'npm test', timeout: 900, paths: ['src/**'] },
     },
-    iric: { review: 'self', parallel: 4 },
+    review: 'user',
     branches: { base: 'main', prefix: 'coplan/' },
   });
   assert.deepEqual(config.errors, []);
+  assert.deepEqual(config.warnings, []);
   assert.deepEqual(config.hooks.implement.map((h) => h.name), ['typecheck', 'lint', 'cargo clippy']);
   assert.equal(config.hooks.implement[2]!.optional, true);
   assert.deepEqual(config.hooks.review, [{ name: 'tests', run: 'npm test', timeout: 900, paths: ['src/**'] }]);
   assert.deepEqual(config.hooks.final, []);
-  assert.deepEqual(config.settings, { review: 'self', parallel: 4, maxRounds: 3 });
+  assert.equal(config.review, 'user');
   assert.deepEqual(config.branches, { base: 'main', prefix: 'coplan/' });
 });
 
 test('what cannot be read is said, never silently dropped', () => {
-  const config = parseProjectConfig({ hooks: { lint: ['x'], review: [{ name: 'no command' }, 'npm test'] } });
-  assert.match(config.errors.join('\n'), /"hooks\.lint" is not a stage/);
-  assert.match(config.errors.join('\n'), /"hooks\.review\[0\]" needs a command/);
+  const config = parseProjectConfig({ checks: { lint: ['x'], review: [{ name: 'no command' }, 'npm test'] } });
+  assert.match(config.errors.join('\n'), /"checks\.lint" is not a stage/);
+  assert.match(config.errors.join('\n'), /"checks\.review\[0\]" needs a command/);
   assert.deepEqual(config.hooks.review.map((h) => h.run), ['npm test']);
 
-  const dir = repo({ '.coplan/config.json': '{ "hooks": ' });
+  const dir = repo({ '.coplan/config.json': '{ "checks": ' });
   try {
     const broken = loadProjectConfig(dir);
     assert.match(broken.errors[0] ?? '', /could not be read/);
@@ -69,7 +70,7 @@ test('what cannot be read is said, never silently dropped', () => {
 });
 
 test('the file may explain itself with line comments', () => {
-  const dir = repo({ '.coplan/config.json': '{\n  // the gate\n  "hooks": { "review": ["npm test"] }\n}\n' });
+  const dir = repo({ '.coplan/config.json': '{\n  // the gate\n  "checks": { "review": ["npm test"] }\n}\n' });
   try {
     assert.deepEqual(loadProjectConfig(dir).hooks.review.map((h) => h.name), ['test']);
     assert.equal(loadProjectConfig(path.join(dir, 'nowhere')).file, null);
@@ -79,7 +80,7 @@ test('the file may explain itself with line comments', () => {
 });
 
 test('a hook limited to some files applies to tasks that touch them, and to tasks that do not say', () => {
-  const config = parseProjectConfig({ hooks: { implement: ['npm run typecheck', { name: 'ruff', run: 'ruff check .', paths: ['*.py', 'tools/'] }] } });
+  const config = parseProjectConfig({ checks: { implement: ['npm run typecheck', { name: 'ruff', run: 'ruff check .', paths: ['*.py', 'tools/'] }] } });
   const names = (files?: string[]) => hooksFor(config, 'implement', files).map((h) => h.name);
   assert.deepEqual(names(['src/app.ts']), ['typecheck']);
   assert.deepEqual(names(['lib/deep/thing.py']), ['typecheck', 'ruff']);
@@ -112,7 +113,7 @@ test('globs: {a,b} is either, nested too; an unclosed brace is literal', () => {
 });
 
 test('a hook limited by a brace glob runs for the files it names — the gate is not silently skipped', () => {
-  const config = parseProjectConfig({ hooks: { review: [{ name: 'tests', run: 'npm test', paths: ['src/**/*.{ts,tsx}'] }] } });
+  const config = parseProjectConfig({ checks: { review: [{ name: 'tests', run: 'npm test', paths: ['src/**/*.{ts,tsx}'] }] } });
   assert.deepEqual(hooksFor(config, 'review', ['src/ui/App.tsx']).map((h) => h.name), ['tests']);
 });
 
@@ -126,9 +127,9 @@ test('a !glob takes files back out of a hook', () => {
 test('unknown keys and values out of range are errors, each saying what is used instead', () => {
   const config = parseProjectConfig({
     hook: {},
-    iric: { review: 'Subagent', parallel: 20, maxRounds: '4', rounds: 2 },
+    review: 'Subagent',
     branches: { base: 'main', perfix: 'x/', prefix: 3 },
-    hooks: {
+    checks: {
       review: [
         { run: 'npm test', timeout: 99999, paths: 'src/**', optional: 'yes', timout: 5 },
         { run: 'npm run e2e', timeout: 0.3 },
@@ -137,26 +138,23 @@ test('unknown keys and values out of range are errors, each saying what is used 
   });
   const said = [...config.errors, ...config.warnings].join('\n');
   assert.match(said, /"hook" is not a setting Coplan reads/);
-  assert.match(said, /"iric\.review" must be one of subagent, self, user, skip; "Subagent" is not, so self is used/);
-  assert.match(said, /"iric\.parallel" must be a whole number from 1 to 8; 20 is not, so 8 is used/);
-  assert.match(said, /"iric\.maxRounds" must be a whole number from 1 to 10; "4" is not, so 3 is used/);
-  assert.deepEqual(config.settings, { review: 'self', parallel: 8, maxRounds: 3 }, 'what the errors say is what is used');
-  assert.match(said, /iric\."rounds" is not a setting/);
+  assert.match(said, /"review" must be one of agent, user, none; "Subagent" is not, so agent is used/);
+  assert.equal(config.review, 'agent', 'what the error says is what is used');
   assert.match(said, /branches\."perfix" is not a setting/);
   assert.match(said, /"branches\.prefix" must be a branch name/);
-  assert.match(said, /"hooks\.review\[0\]\.timeout" is at most 3600 seconds; 3600 is used/);
+  assert.match(said, /"checks\.review\[0\]\.timeout" is at most 3600 seconds; 3600 is used/);
   assert.equal(config.hooks.review[0]!.timeout, 3600, 'too long is cut to the longest, not the default');
-  assert.match(said, /"hooks\.review\[1\]\.timeout" must be seconds, from 1 to 3600; the default 600 is used/);
+  assert.match(said, /"checks\.review\[1\]\.timeout" must be seconds, from 1 to 3600; the default 600 is used/);
   assert.equal(config.hooks.review[1]!.timeout, undefined, 'never a 0-second timeout');
-  assert.match(said, /"hooks\.review\[0\]\.paths" must be a list of globs/);
-  assert.match(said, /"hooks\.review\[0\]\.optional" must be true or false/);
-  assert.match(said, /hooks\.review\[0\]\."timout" is not a setting/);
+  assert.match(said, /"checks\.review\[0\]\.paths" must be a list of globs/);
+  assert.match(said, /"checks\.review\[0\]\.optional" must be true or false/);
+  assert.match(said, /checks\.review\[0\]\."timout" is not a setting/);
   assert.deepEqual(config.branches, { base: 'main' });
 });
 
 test('comments anywhere outside strings, and trailing commas, are allowed', () => {
   const dir = repo({
-    '.coplan/config.json': '{\n  "hooks": { "review": ["curl http://x/health", /* inline */ "npm test",], }, // the gate\n}\n',
+    '.coplan/config.json': '{\n  "checks": { "review": ["curl http://x/health", /* inline */ "npm test",], }, // the gate\n}\n',
   });
   try {
     const config = loadProjectConfig(dir);
@@ -181,7 +179,7 @@ test('hook names come from the command', () => {
 test('coplan check runs a stage, shows only what failed, and exits by the required checks', () => {
   const dir = repo({
     '.coplan/config.json': JSON.stringify({
-      hooks: {
+      checks: {
         review: [
           { name: 'passes', run: 'echo all good' },
           { name: 'fails', run: 'echo first line; echo the real error; exit 3' },
@@ -220,7 +218,7 @@ test('coplan check runs a stage, shows only what failed, and exits by the requir
 test('coplan check runs only the checks for what changed: since the last commit, since the task began, or at the end since the base', () => {
   const dir = repo({
     '.coplan/config.json': JSON.stringify({
-      hooks: {
+      checks: {
         implement: [{ name: 'py lint', run: 'echo linted {files}', paths: ['*.py'] }],
         review: [
           { name: 'ts tests', run: 'echo ts', paths: ['*.ts'] },
@@ -328,7 +326,7 @@ test('coplan check without a config says so, and how to make one', () => {
 });
 
 test('a config coplan check cannot read fails, rather than passing with nothing run', () => {
-  const dir = repo({ '.coplan/config.json': '{ "hooks": { "review": ["npm test"' });
+  const dir = repo({ '.coplan/config.json': '{ "checks": { "review": ["npm test"' });
   try {
     const out = spawnSync(process.execPath, [CLI, 'check', 'review', '--json'], { cwd: dir, encoding: 'utf8' });
     assert.equal(out.status, 2);
@@ -342,7 +340,7 @@ test('a config coplan check cannot read fails, rather than passing with nothing 
 // Root enters any folder: the case is one only another user meets.
 test("a hook whose folder cannot be entered fails, saying so, not as a shell that is missing", { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {
   const hooks = [{ name: 'api', run: 'true', cwd: 'shut' }];
-  const dir = repo({ 'shut/README.md': 'x\n', '.coplan/config.json': JSON.stringify({ hooks: { review: hooks } }) });
+  const dir = repo({ 'shut/README.md': 'x\n', '.coplan/config.json': JSON.stringify({ checks: { review: hooks } }) });
   chmodSync(path.join(dir, 'shut'), 0o600);
   try {
     const run = spawnSync(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
@@ -357,9 +355,9 @@ test("a hook whose folder cannot be entered fails, saying so, not as a shell tha
 test("a hook whose folder is a file, or that cannot start, fails, saying so, and the checks after it still run", () => {
   // And one the shell cannot be started for at all (a NUL in its command).
   const hooks = [{ name: 'api', run: 'true', cwd: 'notes.md' }, { name: 'nul', run: 'true\u0000' }, { name: 'after', run: 'true' }];
-  const dir = repo({ 'notes.md': '# not a folder\n', '.coplan/config.json': JSON.stringify({ hooks: { review: hooks } }) });
+  const dir = repo({ 'notes.md': '# not a folder\n', '.coplan/config.json': JSON.stringify({ checks: { review: hooks } }) });
   try {
-    assert.match(loadProjectConfig(dir, { globalDir: null }).warnings.join('\n'), /"hooks\.review\[0\]\.cwd" names notes\.md, which is a file, not a folder/);
+    assert.match(loadProjectConfig(dir, { globalDir: null }).warnings.join('\n'), /"checks\.review\[0\]\.cwd" names notes\.md, which is a file, not a folder/);
     const run = spawnSync(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
     assert.match(run.stdout, /✗ api[\s\S]*its folder notes\.md is not a folder/, run.stdout + run.stderr);
     assert.match(run.stdout, /✗ nul/);
@@ -372,7 +370,7 @@ test("a hook whose folder is a file, or that cannot start, fails, saying so, and
 });
 
 test('a timed-out hook is stopped with everything it started', () => {
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'hangs', run: 'sleep 20; echo done', timeout: 1 }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'hangs', run: 'sleep 20; echo done', timeout: 1 }] } }) });
   try {
     const started = Date.now();
     const out = spawnSync(process.execPath, [CLI, 'check', 'review'], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
@@ -389,7 +387,7 @@ test('a timed-out hook is over only once what it started has gone, even what ign
   const hangs = "(trap '' TERM; sleep 20) >/dev/null 2>&1 & echo $! > worker; echo $$ > group; wait";
   // The next check says whether the worker is still running (a zombie has gone).
   const next = 'state=$(ps -o stat= -p "$(cat worker)"); case "$state" in ""|Z*) echo gone ;; *) echo running ;; esac > next';
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'hangs', run: hangs, timeout: 1 }, { name: 'next', run: next }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'hangs', run: hangs, timeout: 1 }, { name: 'next', run: next }] } }) });
   try {
     const out = spawnSync(process.execPath, [CLI, 'check', 'review'], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
     assert.match(out.stdout, /✗ hangs {2}\(timed out after 1s/);
@@ -406,7 +404,7 @@ test('a timed-out hook is over only once what it started has gone, even what ign
 
 test('a hook that ends in time is not taken as timed out while its output is let go', { skip: process.platform !== 'linux' }, () => {
   // Ended 200 ms before its timeout, its output held open from outside its group: the let-go runs past the timeout.
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'quick', run: 'setsid sleep 5 & echo $! > holder; sleep 0.8; echo done', timeout: 1 }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'quick', run: 'setsid sleep 5 & echo $! > holder; sleep 0.8; echo done', timeout: 1 }] } }) });
   try {
     const out = spawnSync(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
     assert.match(out.stdout, /✓ quick/, out.stdout);
@@ -424,7 +422,7 @@ test('a hook that ends in time is not taken as timed out while its output is let
 test('a timed-out hook whose output is held open from outside its group still ends', { skip: process.platform === 'win32' }, () => {
   // A helper in a group of its own, holding the hook's output open.
   const helper = `node -e "const c = require('child_process').spawn('sleep', ['20'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }); require('fs').writeFileSync('helper', String(c.pid)); c.unref()"`;
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'serve', run: `${helper}; echo last words; sleep 20`, timeout: 1 }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'serve', run: `${helper}; echo last words; sleep 20`, timeout: 1 }] } }) });
   try {
     const started = Date.now();
     const out = spawnSync(process.execPath, [CLI, 'check', 'review'], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
@@ -446,7 +444,7 @@ test('a hook that ends with its output held open from outside its group is over 
   const helper = `node -e "const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => console.log(1), 50)'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }); require('fs').writeFileSync('helper', String(c.pid)); c.unref()"`;
   // The check after it finds the server still up: its output is not cut off under it.
   const after = 'sleep 0.5; case "$(ps -o stat= -p "$(cat helper)")" in ""|Z*) ;; *) echo up > alive ;; esac';
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'serve', run: `${helper}; echo served`, timeout: 8 }, { name: 'after', run: after }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'serve', run: `${helper}; echo served`, timeout: 8 }, { name: 'after', run: after }] } }) });
   try {
     const started = Date.now();
     const out = spawnSync(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
@@ -471,7 +469,7 @@ test('a hook that exits leaving something running in its group has that stopped,
   const up = (file: string) => `case "$(ps -o stat= -p "$(cat ${file})")" in ""|Z*) echo gone ;; *) echo up ;; esac`;
   const dir = repo({
     '.coplan/config.json': JSON.stringify({
-      hooks: {
+      checks: {
         review: [
           { name: 'fails', run: `${stray} ${kept}sleep 0.3; exit 3`, timeout: 20 },
           { name: 'after', run: `sleep 0.3; ${up('stray')} > stray-after; ${kept ? `${up('kept')} > kept-after` : 'true'}` },
@@ -558,7 +556,7 @@ test('coplan init writes a commented starting point from the scripts it finds, a
     const first = spawnSync(process.execPath, [CLI, 'init'], { cwd: dir, encoding: 'utf8' });
     assert.equal(first.status, 0, first.stderr);
     const text = readFileSync(path.join(dir, '.coplan', 'config.json'), 'utf8');
-    assert.match(text, /\/\/ Coplan — what the build runs/);
+    assert.match(text, /\/\/ Coplan — each task's definition of done/);
     const config = loadProjectConfig(dir);
     assert.deepEqual(config.errors, [], 'what init writes reads back');
     assert.deepEqual(config.hooks.review.map((h) => h.name), ['tests', 'pytest']);
@@ -574,34 +572,83 @@ test('coplan init writes a commented starting point from the scripts it finds, a
 
 /* ---------------------------------------------------- customization (#45) */
 
-test('runners, pull request watching, the reviewer model and the final gate are retired: an old file still loads, with a warning, and its checks still run', () => {
+test('runners, pull request watching and opening, the reviewer model, the final gate, mode and iric are retired: an old file still loads, with a warning, and its checks still run', () => {
   const config = parseProjectConfig({
-    hooks: { review: ['pnpm test'] },
+    checks: { review: ['pnpm test'] },
     runners: { vm: { via: 'ssh', host: 'tao-vm' } },
     review: { model: 'opus' },
     final: { blocking: true },
-    pullRequests: { tool: 'graphite', watch: { interval: 120 }, on: { comment: 'ignore' } },
+    mode: 'managed',
+    iric: { parallel: 3, maxRounds: 2 },
+    pullRequests: { tool: 'graphite', open: 'auto', watch: { interval: 120 }, on: { comment: 'ignore' } },
   });
   assert.deepEqual(config.errors, []);
   assert.equal(config.checksBroken, undefined);
   assert.equal(config.hooks.review.length, 1);
-  assert.deepEqual(config.pullRequests, { tool: 'graphite', open: 'ask' });
-  assert.ok(!('runners' in config));
-  assert.ok(!('review' in config));
-  assert.ok(!('final' in config));
+  assert.deepEqual(config.pullRequests, {});
+  assert.equal(config.review, 'agent', 'the old object form sets no review');
+  for (const key of ['runners', 'final', 'mode', 'iric', 'settings']) assert.ok(!(key in config), key);
   const said = config.warnings.join('\n');
   assert.match(said, /"runners" is no longer read/);
-  assert.match(said, /"review" is no longer read/);
+  assert.match(said, /"review" as an object \(review\.model\) is no longer read/);
   assert.match(said, /"final" is no longer read/);
-  assert.match(said, /pullRequests\."watch" is no longer read/);
-  assert.match(said, /pullRequests\."on" is no longer read/);
+  assert.match(said, /"mode" is no longer read/);
+  assert.match(said, /"iric" is no longer read/);
+  for (const key of ['watch', 'on', 'tool', 'open']) assert.match(said, new RegExp(`pullRequests\\."${key}" is no longer read`));
+});
+
+test('the old names are read for one release, each with a warning: hooks as checks, iric.review as review, instructions build and review as handoff and brief', () => {
+  const old = parseProjectConfig({
+    hooks: { review: ['npm test'] },
+    iric: { review: 'subagent', parallel: 2 },
+    instructions: { build: 'Small commits.', brief: 'Match the style.', review: 'Check error handling.' },
+  });
+  assert.deepEqual(old.errors, []);
+  assert.equal(old.checksBroken, undefined);
+  assert.deepEqual(old.hooks.review.map((h) => h.run), ['npm test']);
+  assert.equal(old.review, 'agent');
+  assert.equal(old.instructions.handoff, 'Small commits.');
+  assert.equal(old.instructions.brief, 'Match the style.\n\nCheck error handling.', 'the current point first, the old one after it');
+  const said = old.warnings.join('\n');
+  assert.match(said, /"hooks" is now "checks": it is read for this release/);
+  assert.match(said, /"iric\.review" is read as "review": "agent" for this release/);
+  assert.doesNotMatch(said, /^"iric" is no longer read/m, "said once, by the alias");
+  assert.match(said, /"instructions\.build" is now "instructions\.handoff"/);
+  assert.match(said, /"instructions\.review" is now "instructions\.brief"/);
+  // The old name for a check is said in its own errors.
+  assert.match(parseProjectConfig({ hooks: { lint: ['x'] } }).errors.join('\n'), /"hooks\.lint" is not a stage/);
+  assert.equal(parseProjectConfig({ iric: { review: 'skip' } }).review, 'none');
+
+  // Both set: the new names win, and the old ones are said.
+  const both = parseProjectConfig({ checks: { review: ['pnpm test'] }, hooks: { review: ['npm test'] }, review: 'user', iric: { review: 'skip' } });
+  assert.deepEqual(both.hooks.review.map((h) => h.run), ['pnpm test']);
+  assert.equal(both.review, 'user');
+  assert.match(both.warnings.join('\n'), /"hooks" and "checks" are both set: "checks" is used/);
+  assert.doesNotMatch(both.warnings.join('\n'), /iric\.review" is read/);
+  // The old review names in `review` itself.
+  assert.equal(parseProjectConfig({ review: 'self' }).review, 'agent');
+});
+
+test("the user's own instruction files under their old names are read as the new points", () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'coplan-home-'));
+  try {
+    mkdirSync(path.join(home, 'instructions'));
+    writeFileSync(path.join(home, 'instructions', 'build.md'), 'Mine.');
+    writeFileSync(path.join(home, 'instructions', 'review.md'), 'Look for leaks.');
+    const config = loadProjectConfig(null, { globalDir: home });
+    assert.equal(config.instructions.handoff, 'Mine.');
+    assert.equal(config.instructions.brief, 'Look for leaks.');
+    assert.match(config.warnings.join('\n'), /build\.md is now handoff\.md/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('every key the config reads is documented, with every value it takes', () => {
   const doc = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'docs', 'CONFIG.md'), 'utf8');
   for (const key of PROJECT_KEYS) assert.match(doc, new RegExp(`^### \`${key}\`$`, 'm'), `a section for ${key}`);
   for (const key of HOOK_KEYS) assert.match(doc, new RegExp(`^\\| \`${key}\` \\|`, 'm'), `hook key ${key}`);
-  for (const value of [...EXECUTION_MODES, ...PR_TOOLS, ...PR_OPEN, ...INSTRUCTION_POINTS, ...GAP_RULES, ...GAP_SEVERITIES]) {
+  for (const value of [...REVIEW_MODES, ...INSTRUCTION_POINTS, ...GAP_RULES, ...GAP_SEVERITIES]) {
     assert.ok(doc.includes(`\`${value}\``), `${value} is named`);
   }
 });
@@ -615,19 +662,18 @@ test('pull requests, instructions and plan-check severities are read, each check
   try {
     const config = parseProjectConfig(
       {
-        pullRequests: { tool: 'graphite', open: 'auto', template: '.github/pull_request_template.md' },
-        instructions: { build: 'Keep commits small.', review: { file: 'docs/review.md' } },
+        pullRequests: { template: '.github/pull_request_template.md' },
+        instructions: { handoff: 'Keep commits small.', brief: { file: 'docs/review.md' } },
         planCheck: { 'box-unbuilt': 'error', 'box-undescribed': 'off' },
-        hooks: { review: [{ name: 'api tests', run: 'pnpm test', cwd: 'packages/api', env: { NODE_ENV: 'test' } }] },
+        checks: { review: [{ name: 'api tests', run: 'pnpm test', cwd: 'packages/api', env: { NODE_ENV: 'test' } }] },
       },
       path.join(dir, '.coplan', 'config.json'),
     );
     assert.deepEqual(config.errors, []);
-    assert.equal(config.pullRequests.tool, 'graphite');
-    assert.equal(config.pullRequests.open, 'auto');
     assert.match(config.pullRequests.template ?? '', /## Checks/);
-    assert.equal(config.instructions.build, 'Keep commits small.');
-    assert.equal(config.instructions.review, 'Check every query is parameterised.');
+    assert.equal(config.pullRequests.templateFile, '.github/pull_request_template.md');
+    assert.equal(config.instructions.handoff, 'Keep commits small.');
+    assert.equal(config.instructions.brief, 'Check every query is parameterised.');
     assert.deepEqual(config.planCheck, { 'box-unbuilt': 'error', 'box-undescribed': 'off' });
     assert.deepEqual(config.hooks.review[0], { name: 'api tests', run: 'pnpm test', cwd: 'packages/api', env: { NODE_ENV: 'test' } });
     assert.equal(hookCommand(config.hooks.review[0]!), "(cd packages/api && env NODE_ENV=test sh -c 'pnpm test')");
@@ -636,9 +682,10 @@ test('pull requests, instructions and plan-check severities are read, each check
   }
 });
 
-test('the defaults: gh, once the user says', () => {
+test('the defaults: an agent reviews, no template, no instructions', () => {
   const config = parseProjectConfig({});
-  assert.deepEqual(config.pullRequests, { tool: 'gh', open: 'ask' });
+  assert.equal(config.review, 'agent');
+  assert.deepEqual(config.pullRequests, {});
   assert.deepEqual(config.instructions, {});
   assert.deepEqual(config.planCheck, {});
 });
@@ -648,25 +695,23 @@ test('what a customization cannot use is said — and a file outside the reposit
   try {
     const config = parseProjectConfig(
       {
-        pullRequests: { tool: 'gitlab', open: 'later', template: '../../etc/passwd' },
-        instructions: { build: 3, deploy: 'x', brief: { file: 'missing.md' } },
+        pullRequests: { template: '../../etc/passwd' },
+        instructions: { handoff: 3, deploy: 'x', brief: { file: 'missing.md' } },
         planCheck: { 'box-unbuilt': 'fatal', 'no-such-rule': 'error' },
-        hooks: { review: [{ run: 'pnpm test', cwd: '../elsewhere', env: { 'BAD NAME': 'x', OK: 1 } }] },
+        checks: { review: [{ run: 'pnpm test', cwd: '../elsewhere', env: { 'BAD NAME': 'x', OK: 1 } }] },
       },
       path.join(dir, '.coplan', 'config.json'),
     );
     const said = config.errors.join('\n');
-    assert.match(said, /"pullRequests\.tool" must be one of gh, graphite, none; "gitlab" is not/);
-    assert.match(said, /"pullRequests\.open" must be one of auto, ask, never/);
     assert.match(said, /"pullRequests\.template" must name a file inside/);
     assert.equal(config.pullRequests.template, undefined);
-    assert.match(said, /"instructions\.build" must be text/);
+    assert.match(said, /"instructions\.handoff" must be text/);
     assert.match(said, /instructions\."deploy" is not a setting/);
     assert.match(said, /"instructions\.brief" names missing\.md, which could not be read/);
     assert.match(said, /"planCheck\.box-unbuilt" must be one of error, warn, off/);
     assert.match(said, /"planCheck\.no-such-rule" is not a plan-check rule/);
-    assert.match(said, /"hooks\.review\[0\]\.cwd" must be a folder inside the repository/);
-    assert.match(said, /"hooks\.review\[0\]\.env" must map variable names to text/);
+    assert.match(said, /"checks\.review\[0\]\.cwd" must be a folder inside the repository/);
+    assert.match(said, /"checks\.review\[0\]\.env" must map variable names to text/);
     assert.equal(config.hooks.review[0]!.cwd, undefined, 'it runs from the root instead');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -677,13 +722,13 @@ test('what is only taken differently than written is a warning, and the checks s
   const dir = repo({ 'long.md': 'x'.repeat(5000) });
   try {
     const config = parseProjectConfig(
-      { instructions: { build: { file: 'long.md' } }, hooks: { review: [{ run: 'npm test', cwd: 'packages/not-yet' }] } },
+      { instructions: { handoff: { file: 'long.md' } }, checks: { review: [{ run: 'npm test', cwd: 'packages/not-yet' }] } },
       path.join(dir, '.coplan', 'config.json'),
     );
     assert.deepEqual(config.errors, [], 'nothing that stops coplan check');
-    assert.match(config.warnings.join('\n'), /"instructions\.build" \(long\.md\) is longer than 4000 characters; the rest is cut/);
-    assert.match(config.warnings.join('\n'), /"hooks\.review\[0\]\.cwd" names packages\/not-yet, which does not exist yet/);
-    assert.equal(config.instructions.build?.length, 4000);
+    assert.match(config.warnings.join('\n'), /"instructions\.handoff" \(long\.md\) is longer than 4000 characters; the rest is cut/);
+    assert.match(config.warnings.join('\n'), /"checks\.review\[0\]\.cwd" names packages\/not-yet, which does not exist yet/);
+    assert.equal(config.instructions.handoff?.length, 4000);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -692,13 +737,14 @@ test('what is only taken differently than written is a warning, and the checks s
 test('only what breaks the checks stops coplan check; a hook whose folder is missing fails, saying so', () => {
   const dir = repo({
     '.coplan/config.json': JSON.stringify({
-      pullRequests: { template: 'missing.md', tool: 'gitlab' },
-      hooks: { review: ['true', { name: 'api', run: 'true', cwd: 'packages/api' }] },
+      pullRequests: { template: 'missing.md' },
+      branches: { prefix: 3 },
+      checks: { review: ['true', { name: 'api', run: 'true', cwd: 'packages/api' }] },
     }),
   });
   try {
     const config = loadProjectConfig(dir);
-    assert.ok(config.errors.length >= 2, 'the template and the tool are errors');
+    assert.ok(config.errors.length >= 2, 'the template and the prefix are errors');
     assert.equal(config.checksBroken, undefined, 'but not of the checks');
     assert.equal(config.hooks.review[1]!.cwd, 'packages/api', 'kept, so the hook cannot pass somewhere else');
     // Its folder is missing, so no change can be in it: --all runs it anyway.
@@ -710,7 +756,7 @@ test('only what breaks the checks stops coplan check; a hook whose folder is mis
 
     writeFileSync(path.join(dir, '.coplan', 'config.json'), JSON.stringify({ hook: { review: ['true'] } }));
     const typo = spawnSync(process.execPath, [CLI, 'check', 'review'], { cwd: dir, encoding: 'utf8' });
-    assert.equal(typo.status, 2, 'a misspelt "hooks" is the checks themselves');
+    assert.equal(typo.status, 2, 'a misspelt "checks" is the checks themselves');
     assert.match(typo.stderr, /fix the checks in \.coplan\/config\.json first/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -719,7 +765,7 @@ test('only what breaks the checks stops coplan check; a hook whose folder is mis
 
 test("a template from the user's own layer is named by where it is, and a hook's folder is watched", () => {
   const home = mkdtempSync(path.join(tmpdir(), 'coplan-home-'));
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ run: 'true', cwd: 'packages/api' }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ run: 'true', cwd: 'packages/api' }] } }) });
   try {
     writeFileSync(path.join(home, 'pr.md'), '## Mine');
     writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ pullRequests: { template: 'pr.md' } }));
@@ -735,9 +781,9 @@ test("a template from the user's own layer is named by where it is, and a hook's
 
 test("a user's own layer that cannot be read is said, and holds back no repository's checks", () => {
   const home = mkdtempSync(path.join(tmpdir(), 'coplan-home-'));
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: ['true'] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: ['true'] } }) });
   try {
-    writeFileSync(path.join(home, 'coplan.json'), '{ "iric": { "review": "self" }, oops }');
+    writeFileSync(path.join(home, 'coplan.json'), '{ "review": "user", oops }');
     const config = loadProjectConfig(dir, { globalDir: home });
     assert.deepEqual(config.errors, []);
     assert.match(config.warnings.join('\n'), /coplan\.json could not be read/);
@@ -770,101 +816,55 @@ test('a file a config names is read only if it really is inside: a link out is r
 test("the user's own layer sits under every repository's: key by key, instructions adding up, checks never", () => {
   const home = mkdtempSync(path.join(tmpdir(), 'coplan-home-'));
   const dir = repo({
-    '.coplan/config.json': JSON.stringify({ iric: { parallel: 4 }, pullRequests: { open: 'never' }, instructions: { build: 'Repository words.' } }),
+    '.coplan/config.json': JSON.stringify({ branches: { base: 'trunk' }, pullRequests: { template: 'pr.md' }, instructions: { handoff: 'Repository words.' } }),
+    'pr.md': '## Theirs',
   });
   try {
     writeFileSync(
       path.join(home, 'coplan.json'),
       JSON.stringify({
-        iric: { review: 'self', parallel: 2 },
-        branches: { prefix: 'me/' },
-        pullRequests: { tool: 'graphite', open: 'auto' },
-        instructions: { build: 'My words.' },
-        hooks: { review: ['make test'] },
+        review: 'user',
+        branches: { prefix: 'me/', base: 'main' },
+        pullRequests: { template: 'pr.md' },
+        instructions: { handoff: 'My words.' },
+        checks: { review: ['make test'] },
       }),
     );
+    writeFileSync(path.join(home, 'pr.md'), '## Mine');
     mkdirSync(path.join(home, 'instructions'));
     writeFileSync(path.join(home, 'instructions', 'brief.md'), 'Write tests first.');
     const config = loadProjectConfig(dir, { globalDir: home });
-    assert.deepEqual(config.settings, { review: 'self', parallel: 4, maxRounds: 3 }, 'the repository wins where both say');
-    assert.equal(config.branches.prefix, 'me/');
-    assert.deepEqual(config.pullRequests, { tool: 'graphite', open: 'never' });
-    assert.equal(config.instructions.build, 'My words.\n\nRepository words.');
+    assert.equal(config.review, 'user', "the user's review holds where the repository does not say");
+    assert.deepEqual(config.branches, { prefix: 'me/', base: 'trunk' }, 'the repository wins where both say');
+    assert.deepEqual(config.pullRequests, { template: '## Theirs', templateFile: 'pr.md' });
+    assert.equal(config.instructions.handoff, 'My words.\n\nRepository words.');
     assert.equal(config.instructions.brief, 'Write tests first.');
     assert.deepEqual(config.hooks.review, [], 'checks belong to the repository');
-    assert.match(config.warnings.join('\n'), /coplan\.json: "hooks" belong to each repository/);
+    assert.match(config.warnings.join('\n'), /coplan\.json: "checks" belong to each repository/);
     assert.equal(config.globalFile, path.join(home, 'coplan.json'));
     // Without a repository config, the user's layer still counts.
-    assert.equal(loadProjectConfig(path.join(dir, 'nowhere'), { globalDir: home }).pullRequests.open, 'auto');
+    assert.equal(loadProjectConfig(path.join(dir, 'nowhere'), { globalDir: home }).pullRequests.template, '## Mine');
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-/* ---------------------------------------------------- execution modes (#62) */
-
-test('the mode defaults to Tracked, to Managed where the repository sets iric, and `mode` says otherwise', () => {
-  const none = loadProjectConfig(null, { globalDir: null });
-  assert.equal(none.mode, 'tracked', 'neither: Tracked');
-  assert.equal(none.origins?.['mode'], undefined, "Coplan's default");
-
-  const iric = parseProjectConfig({ iric: { review: 'self' } }, '/r/.coplan/config.json');
-  assert.equal(iric.mode, 'managed', 'iric opts in to the harness');
-  assert.equal(iric.modeByIric, true);
-  assert.deepEqual(iric.origins?.['mode'], ['.coplan/config.json']);
-  assert.equal(parseProjectConfig({ iric: { review: 'self' }, mode: 'tracked' }).mode, 'tracked', 'mode wins over iric');
-  for (const mode of ['export', 'tracked', 'managed'] as const) assert.equal(parseProjectConfig({ mode }).mode, mode);
-
-  const wrong = parseProjectConfig({ mode: 'harness' });
-  assert.equal(wrong.mode, 'tracked');
-  assert.match(wrong.errors.join('\n'), /"mode" must be one of export, tracked, managed; "harness" is not/);
-});
-
-test("this repository's own config sets iric, so its builds are Managed by default", () => {
+test("this repository's own config reads clean: checks, no retired keys", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
   const own = loadProjectConfig(root, { globalDir: null });
   assert.deepEqual(own.errors, []);
-  assert.equal(own.mode, 'managed');
-  assert.equal(own.modeByIric, true);
+  assert.deepEqual(own.warnings, []);
+  assert.ok(own.hooks.review.length > 0);
 });
 
-test("the user's own mode holds under every repository, a repository's iric or mode wins over it, and the user's own iric alone does not choose", () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'coplan-mode-'));
-  const home = path.join(dir, 'home');
-  const repoDir = (name: string, config?: unknown) => {
-    const root = path.join(dir, name);
-    mkdirSync(path.join(root, '.coplan'), { recursive: true });
-    if (config !== undefined) writeFileSync(path.join(root, '.coplan', 'config.json'), JSON.stringify(config));
-    return root;
-  };
-  try {
-    mkdirSync(home, { recursive: true });
-    writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ mode: 'managed' }));
-    const mine = loadProjectConfig(repoDir('plain'), { globalDir: home });
-    assert.equal(mine.mode, 'managed');
-    assert.deepEqual(mine.origins?.['mode'], [path.join(home, 'coplan.json')]);
-    assert.equal(loadProjectConfig(repoDir('tracked', { mode: 'tracked' }), { globalDir: home }).mode, 'tracked');
-
-    writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ mode: 'tracked', iric: { review: 'self' } }));
-    const opted = loadProjectConfig(repoDir('opted', { iric: { parallel: 3 } }), { globalDir: home });
-    assert.equal(opted.mode, 'managed', "the repository's iric is more specific than the user's mode");
-    assert.deepEqual(opted.settings, { review: 'self', parallel: 3, maxRounds: 3 });
-
-    writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ iric: { review: 'self' } }));
-    assert.equal(loadProjectConfig(repoDir('other'), { globalDir: home }).mode, 'tracked', 'the user\'s iric says how a Managed build runs, not that every build is Managed');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('coplan init opts the repository in to Managed builds, with or without iric of its own', () => {
-  for (const settings of [true, false]) {
-    const text = renderConfig({ implement: [], review: [], final: [] }, 'main', { settings });
-    const config = parseProjectConfig(parseJsonc(text), '/r/.coplan/config.json');
-    assert.deepEqual(config.errors, []);
-    assert.equal(config.mode, 'managed', settings ? 'iric' : 'mode');
-  }
+test('coplan init writes checks, and nothing of how a build runs', () => {
+  const text = renderConfig({ implement: [{ name: 'lint', run: 'pnpm lint' }], review: [], final: [] }, 'main');
+  const config = parseProjectConfig(parseJsonc(text), '/r/.coplan/config.json');
+  assert.deepEqual(config.errors, []);
+  assert.deepEqual(config.warnings, []);
+  assert.deepEqual(config.hooks.implement.map((h) => h.run), ['pnpm lint']);
+  assert.deepEqual(Object.keys(parseJsonc(text) as object), ['checks', 'branches']);
 });
 
 test("coplan init reads a package.json saved with a byte order mark, as npm does", () => {
@@ -877,7 +877,7 @@ test("coplan init reads a package.json saved with a byte order mark, as npm does
 });
 
 test("a repository's checks saved with a byte order mark still run", () => {
-  const dir = repo({ '.coplan/config.json': '\uFEFF{\n  // saved by a Windows editor\n  "hooks": { "review": ["npm run test"] }\n}\n' });
+  const dir = repo({ '.coplan/config.json': '\uFEFF{\n  // saved by a Windows editor\n  "checks": { "review": ["npm run test"] }\n}\n' });
   try {
     const config = loadProjectConfig(dir, { globalDir: null });
     assert.deepEqual(config.errors, []);
@@ -890,7 +890,7 @@ test("a repository's checks saved with a byte order mark still run", () => {
 
 test('Ctrl+C on `coplan check` stops the check it is running, not only itself', { skip: process.platform === 'win32' }, async () => {
   // The check says when it has started, and which process group it is.
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'slow', run: 'echo $$ > group; touch started; sleep 4; touch marker' }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'slow', run: 'echo $$ > group; touch started; sleep 4; touch marker' }] } }) });
   const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: ['ignore', 'ignore', 'pipe'] });
   let said = '';
   cli.stderr!.on('data', (c: Buffer) => (said += c.toString()));
@@ -920,7 +920,7 @@ test('Ctrl+C on `coplan check` stops the check it is running, not only itself', 
 test('Ctrl+C on `coplan check` stops what the check started that ignores SIGTERM, not only the check', { skip: process.platform === 'win32' }, async () => {
   // The shell goes at SIGTERM; a test runner's worker in its group ignores it.
   const run = "(trap '' TERM; sleep 4; touch marker) & echo $$ > group; touch started; wait";
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'workers', run }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'workers', run }] } }) });
   const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
   try {
     for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 100));
@@ -947,7 +947,7 @@ test('Ctrl+C on `coplan check` stops what the check started that ignores SIGTERM
 test('Ctrl+C on `coplan check` stops the check even when nothing reads its errors any more', { skip: process.platform === 'win32' }, async () => {
   // `2>&1 | head`, or an agent that closed the pipe: saying it is stopping must not end it before it has.
   const run = "(trap '' TERM; sleep 20) & echo $! > worker; echo $$ > group; touch started; wait";
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'workers', run }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'workers', run }] } }) });
   const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: ['ignore', 'ignore', 'pipe'] });
   try {
     for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 50));
@@ -974,7 +974,7 @@ test('Ctrl+C on `coplan check` stops the check even when nothing reads its error
 /** A check whose worker ignores SIGTERM, run by `coplan check` with `preload` (a file's text) loaded first. */
 async function checkWithWorker(preload: string, during: (cli: ReturnType<typeof spawn>) => void): Promise<{ code: number | null; worker: string }> {
   const run = "(trap '' TERM; sleep 20) & echo $! > worker; echo $$ > group; touch started; wait";
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'workers', run }] } }), 'preload.cjs': preload });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'workers', run }] } }), 'preload.cjs': preload });
   const cli = spawn(process.execPath, ['-r', path.join(dir, 'preload.cjs'), CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
   try {
     for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 50));
@@ -1015,7 +1015,7 @@ process.stderr.write = (chunk, ...rest) => {
 test('`coplan check` waits for a slow reader: a report past a pipe\'s buffer reaches it whole, the summary last', { skip: process.platform === 'win32', timeout: 30_000 }, async () => {
   // A failing check whose output is far more than a pipe holds.
   const big = "head -c 400000 /dev/zero | tr '\\0' x; echo; exit 1";
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'big', run: big }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'big', run: big }] } }) });
   try {
     const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] });
     // Once its output is read through, and its stdout closed.
@@ -1048,7 +1048,7 @@ test('`coplan check` waits for a slow reader: a report past a pipe\'s buffer rea
 });
 
 test('`coplan check` whose output fails stops before the next check, rather than start it and kill it', { skip: !existsSync('/dev/full') }, () => {
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'skipped', run: 'true' }, { name: 'one', run: 'true' }, { name: 'two', run: 'echo started > two.log; sleep 2' }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'skipped', run: 'true' }, { name: 'one', run: 'true' }, { name: 'two', run: 'echo started > two.log; sleep 2' }] } }) });
   try {
     const full = openSync('/dev/full', 'w');
     try {
@@ -1068,7 +1068,7 @@ test('`coplan check` whose output fails stops before the next check, rather than
 });
 
 test('`coplan check --json` with its report to a full disk fails, not passes with nothing written', { skip: !existsSync('/dev/full') }, () => {
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'ok', run: 'true' }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'ok', run: 'true' }] } }) });
   try {
     const full = openSync('/dev/full', 'w');
     try {
@@ -1095,7 +1095,7 @@ t.unref();`;
 test('while an interrupted check winds down, the checks after it do not start', { skip: process.platform === 'win32' }, async () => {
   // A worker that takes a moment to stop: the check is over before it is.
   const slow = "(trap 'sleep 0.3; exit 0' TERM; while :; do sleep 0.1; done) & echo $$ > group; touch started; wait";
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'slow', run: slow }, { name: 'next', run: 'touch next' }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'slow', run: slow }, { name: 'next', run: 'touch next' }] } }) });
   const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
   try {
     for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 100));
@@ -1117,7 +1117,7 @@ test('while an interrupted check winds down, the checks after it do not start', 
 test('an interrupted check that left something running out of its group cannot hold `coplan check` open', { skip: process.platform === 'win32' }, async () => {
   // A helper the check starts in a group of its own, holding the check's output open.
   const helper = `node -e "const c = require('child_process').spawn('sleep', ['20'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }); require('fs').writeFileSync('helper', String(c.pid)); c.unref()"`;
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'serve', run: `${helper}; touch started; sleep 10` }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'serve', run: `${helper}; touch started; sleep 10` }] } }) });
   const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
   try {
     for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 100));
@@ -1139,7 +1139,7 @@ test('an interrupted check that left something running out of its group cannot h
 
 test('Ctrl+C while a timed-out check is being stopped ends with that stop, not three seconds after', { skip: process.platform === 'win32' }, async () => {
   const run = "(trap '' TERM; sleep 20) & echo $$ > group; touch started; wait";
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'stubborn', run, timeout: 1 }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'stubborn', run, timeout: 1 }] } }) });
   const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
   try {
     for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 50));
@@ -1161,7 +1161,7 @@ test('Ctrl+C while a timed-out check is being stopped ends with that stop, not t
 });
 
 test('a second Ctrl+C ends `coplan check` at once, even with a check that ignores the first', { skip: process.platform === 'win32' }, async () => {
-  const dir = repo({ '.coplan/config.json': JSON.stringify({ hooks: { review: [{ name: 'stubborn', run: "trap '' TERM; echo $$ > group; touch started; sleep 10" }] } }) });
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ checks: { review: [{ name: 'stubborn', run: "trap '' TERM; echo $$ > group; touch started; sleep 10" }] } }) });
   const cli = spawn(process.execPath, [CLI, 'check', 'review', '--all'], { cwd: dir, stdio: 'ignore' });
   try {
     for (let i = 0; i < 100 && !existsSync(path.join(dir, 'started')); i++) await new Promise((r) => setTimeout(r, 100));

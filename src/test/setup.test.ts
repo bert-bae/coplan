@@ -314,10 +314,10 @@ test('settings are asked only when the user wants to adjust them, which is not t
   assert.deepEqual(skip.asked.slice(-1), ['Adjust settings now? The defaults are fine to start. [y/N] ']);
   assert.deepEqual(readdirSync(coplanHome), []);
 
-  const adjust = scripted(['', 'y', 'subagent', '', '', '', '', ''], { 'codex --version': missing, 'cursor-agent --version': missing });
+  const adjust = scripted(['', 'y', 'user', '', ''], { 'codex --version': missing, 'cursor-agent --version': missing });
   await setup({ root: ROOT, stage: path.join(tmp('clone'), '.plugin'), home: tmp('home'), coplanHome }, adjust.io);
   assert.equal(adjust.left(), 0);
-  assert.deepEqual(parseJsonc(readFileSync(path.join(coplanHome, 'coplan.json'), 'utf8')), { iric: { review: 'subagent' } });
+  assert.deepEqual(parseJsonc(readFileSync(path.join(coplanHome, 'coplan.json'), 'utf8')), { review: 'user' });
   assert.ok(adjust.said.includes('  More settings: docs/CONFIG.md'));
 });
 
@@ -330,45 +330,34 @@ test('a failed agent is said, and the others still go in', async () => {
 
 /* ---------------- settings ---------------- */
 
-test('settings: the five that matter, written only where they differ from the default', async () => {
+test('settings: the two that matter, the review each task asks for and opening the plan, written only where they differ from the default', async () => {
   const home = tmp('settings');
-  const { io, said, left } = scripted(['subagent', '9', '4', 'graphite', 'auto', 'y']);
+  const { io, asked, left } = scripted(['none', 'y']);
   assert.deepEqual(await askSettings(io, home), [path.join(home, 'coplan.json'), path.join(home, 'config.json')]);
   assert.equal(left(), 0);
-  assert.ok(said.includes('  Answer a whole number from 1 to 8.'));
-  assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'coplan.json'), 'utf8')), {
-    iric: { review: 'subagent', parallel: 4 },
-    pullRequests: { tool: 'graphite', open: 'auto' },
-  });
+  assert.equal(asked.length, 2, 'nothing about how many at once or how pull requests are opened');
+  assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'coplan.json'), 'utf8')), { review: 'none' });
   assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'config.json'), 'utf8')), { autoOpen: true });
   const read = loadProjectConfig(null, { globalDir: home });
   assert.deepEqual(read.warnings, []);
-  assert.deepEqual(read.settings, { review: 'subagent', parallel: 4, maxRounds: 3 });
+  assert.equal(read.review, 'none');
 });
 
 test('settings: taking every default writes nothing', async () => {
   const home = tmp('settings-same');
-  const { io, said } = scripted(['', '', '', '', '']);
+  const { io, said } = scripted(['', '']);
   assert.deepEqual(await askSettings(io, home), []);
   assert.deepEqual(readdirSync(home), []);
   assert.ok(said.includes('  Nothing changed.'));
-});
-
-test('settings: with no pull requests, when to open them is not asked', async () => {
-  const home = tmp('settings-none');
-  const { io, asked } = scripted(['', '', 'none', '']);
-  await askSettings(io, home);
-  assert.equal(asked.length, 4);
-  assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'coplan.json'), 'utf8')), { pullRequests: { tool: 'none' } });
 });
 
 test('settings: the current values are the defaults, keys set before are kept, and a file with comments is kept as .bak', async () => {
   const home = tmp('settings-old');
   const before = '{\n  // mine\n  "promptNotice": false,\n  "autoOpen": true,\n}\n';
   writeFileSync(path.join(home, 'config.json'), before);
-  const { io, asked, said } = scripted(['', '', '', '', 'n']);
+  const { io, asked, said } = scripted(['', 'n']);
   await askSettings(io, home);
-  assert.match(asked[4]!, /\[Y\/n\]/, 'autoOpen, set to true, defaults to yes');
+  assert.match(asked[1]!, /\[Y\/n\]/, 'autoOpen, set to true, defaults to yes');
   assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'config.json'), 'utf8')), { promptNotice: false, autoOpen: false });
   assert.equal(readFileSync(path.join(home, 'config.json.bak'), 'utf8'), before);
   assert.ok(said.some((l) => /had comments, which this rewrite drops: the file as it was is .*config\.json\.bak/.test(l)));
@@ -378,10 +367,10 @@ test("settings: a second run keeps the .bak of the user's comments, not one of t
   const home = tmp('settings-twice');
   const before = '{\n  // mine, and the reason for it\n  "autoOpen": true,\n}\n';
   writeFileSync(path.join(home, 'config.json'), before);
-  await askSettings(scripted(['', '', '', '', 'n']).io, home);
+  await askSettings(scripted(['', 'n']).io, home);
   assert.equal(readFileSync(path.join(home, 'config.json.bak'), 'utf8'), before);
   // Changed again: the file holds only setup's own header now, which is not the user's to keep.
-  const again = scripted(['', '', '', '', 'y']);
+  const again = scripted(['', 'y']);
   await askSettings(again.io, home);
   assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'config.json'), 'utf8')), { autoOpen: true });
   assert.equal(readFileSync(path.join(home, 'config.json.bak'), 'utf8'), before, 'the original is still there');
@@ -390,7 +379,7 @@ test("settings: a second run keeps the .bak of the user's comments, not one of t
   // then, beside the first copy and not over it.
   const edited = readFileSync(path.join(home, 'config.json'), 'utf8').replace('"autoOpen"', '// new note\n  "autoOpen"');
   writeFileSync(path.join(home, 'config.json'), edited);
-  const third = scripted(['', '', '', '', 'n']);
+  const third = scripted(['', 'n']);
   await askSettings(third.io, home);
   assert.equal(readFileSync(path.join(home, 'config.json.bak'), 'utf8'), before);
   assert.equal(readFileSync(path.join(home, 'config.json.bak.1'), 'utf8'), edited);
@@ -399,13 +388,13 @@ test("settings: a second run keeps the .bak of the user's comments, not one of t
 
 test("settings: setup's header is its own however the file was saved since, in either settings file", async () => {
   const home = tmp('settings-resaved');
-  await askSettings(scripted(['', '2', '', '', 'y']).io, home);
+  await askSettings(scripted(['user', 'y']).io, home);
   // Opened and saved again in an editor that writes CRLF, a BOM, its own indent.
   for (const name of ['coplan.json', 'config.json']) {
     const file = path.join(home, name);
     writeFileSync(file, `\uFEFF${readFileSync(file, 'utf8').replace(/\n {2}/g, '\n\t').replace(/\n/g, '\r\n')}`);
   }
-  const { io, said } = scripted(['', '3', '', '', 'n']);
+  const { io, said } = scripted(['none', 'n']);
   await askSettings(io, home);
   assert.equal(said.some((l) => /had comments/.test(l)), false);
   assert.equal(existsSync(path.join(home, 'coplan.json.bak')), false);
@@ -415,7 +404,7 @@ test("settings: setup's header is its own however the file was saved since, in e
 test('settings: a trailing comma is not a comment, so no copy is kept for it', async () => {
   const home = tmp('settings-comma');
   writeFileSync(path.join(home, 'config.json'), '{\n  "autoOpen": true,\n}\n');
-  const { io, said } = scripted(['', '', '', '', 'n']);
+  const { io, said } = scripted(['', 'n']);
   await askSettings(io, home);
   assert.equal(said.some((l) => /had comments/.test(l)), false);
   assert.equal(existsSync(path.join(home, 'config.json.bak')), false);
@@ -424,16 +413,16 @@ test('settings: a trailing comma is not a comment, so no copy is kept for it', a
 test('settings: a file without comments is rewritten with no copy left behind', async () => {
   const home = tmp('settings-plain');
   writeFileSync(path.join(home, 'config.json'), '{ "autoOpen": true }');
-  await askSettings(scripted(['', '', '', '', 'n']).io, home);
+  await askSettings(scripted(['', 'n']).io, home);
   assert.equal(existsSync(path.join(home, 'config.json.bak')), false);
 });
 
 test('settings: a file that cannot be read is left as it is, and not asked about', async () => {
   const home = tmp('settings-bad');
   writeFileSync(path.join(home, 'config.json'), '{ "autoOpen": ');
-  const { io, said, asked } = scripted(['', '', '', '']);
+  const { io, said, asked } = scripted(['']);
   await askSettings(io, home);
-  assert.equal(asked.length, 4, 'the build defaults only');
+  assert.equal(asked.length, 1, 'the review only');
   assert.equal(readFileSync(path.join(home, 'config.json'), 'utf8'), '{ "autoOpen": ');
   assert.ok(said.some((l) => /cannot be read/.test(l)));
 });
@@ -501,16 +490,7 @@ test("a repository's checks are written from its scripts; a folder that is not t
   assert.deepEqual(config.errors, []);
   assert.deepEqual(config.hooks.implement.map((h) => h.run), ['npm run lint']);
   assert.deepEqual(config.hooks.review.map((h) => h.run), ['npm run test']);
-  assert.ok('iric' in (parseJsonc(readFileSync(written[0]!, 'utf8')) as object), 'the built-in build settings, with no defaults of your own');
-});
-
-test("a repository's file leaves the build settings to yours when you have set them", async () => {
-  const coplanHome = tmp('coplan-home');
-  writeFileSync(path.join(coplanHome, 'coplan.json'), '{ "iric": { "review": "self" } }');
-  const dir = repo({ 'package.json': JSON.stringify({ scripts: { test: 'vitest run' } }) });
-  const written = await askRepositories(scripted([dir, 'y', '']).io, tmp('home'), coplanHome);
-  assert.ok(!('iric' in (parseJsonc(readFileSync(written[0]!, 'utf8')) as object)));
-  assert.equal(loadProjectConfig(dir, { globalDir: coplanHome }).settings.review, 'self');
+  assert.ok(!('review' in (parseJsonc(readFileSync(written[0]!, 'utf8')) as object)), 'your own review default holds there');
 });
 
 test("a relative repository path is read from where the setup was run", async () => {

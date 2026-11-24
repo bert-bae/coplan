@@ -13,7 +13,7 @@ import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from '
 import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
-import { MAX_NOTE, MAX_USER_SAID, PlanError, cleanChecks, cleanNote, cleanUserSaid, planPhase, wasFinished, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
+import { MAX_NOTE, MAX_USER_SAID, PlanError, cleanChecks, cleanNote, cleanUserSaid, planPhase, wasFinished, unreadAreas, validStage } from '../shared/plan.ts';
 import {
   PROMPT_BUDGET,
   askRule,
@@ -34,20 +34,7 @@ import {
 } from './render.ts';
 import { briefBlocks, renderBrief, renderNext, skipArg } from './brief.ts';
 import { blocksText, joinBlocks } from '../shared/blocks.ts';
-import {
-  MODE_LABEL,
-  cleanSettings,
-  dependents,
-  effectiveBranch,
-  effectiveChecks,
-  hasSubtasks,
-  modeFor,
-  readyTasks,
-  stackStatus,
-  targetOf,
-  validMode,
-  waitingOn,
-} from '../shared/build.ts';
+import { dependents, effectiveBranch, effectiveChecks, hasSubtasks, readyTasks, stackStatus, waitingOn } from '../shared/build.ts';
 import { HOOK_STAGES, type ProjectConfig } from '../shared/project.ts';
 import { headCommit, worktreeOf } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
@@ -55,7 +42,7 @@ import { ConfigCache, globalConfigFile, projectHarnessFile, type HarnessConfig }
 import { ensureHome, paths, readLiveLock, sanitizeId, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
 import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
-import type { BuildChoice, BuildSettings, CleanupGroupId, DaemonLock, ExecutionMode, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, Task, TaskListInput, TaskStatus } from '../shared/types.ts';
+import type { CleanupGroupId, DaemonLock, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, Task, TaskListInput, TaskStatus } from '../shared/types.ts';
 import { CLEANUP_GROUPS } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
@@ -563,41 +550,15 @@ function buildRouter(deps: Deps): Router {
 
   /** How a brief is rendered for a session: the same for the agent's tool
    *  and the page, so both read the same text. */
-  store.reviewFor = (session) => projectFor(session).settings.review;
+  store.reviewFor = (session) => projectFor(session).review;
   const briefOptions = (session: SessionState) => ({ agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) });
-
-  /** Settings as the page sent them, over the repository's defaults. */
-  const settingsFrom = (raw: unknown, project: ProjectConfig): BuildSettings =>
-    raw && typeof raw === 'object' ? cleanSettings(raw, project.settings) : project.settings;
-
-  /**
-   * How the user last chose to have this session's plan built, in the
-   * Submit dialog — the mode, and a Managed build's settings — or nothing
-   * when they never chose: then the repository's defaults hold. A go-ahead
-   * given in chat builds it this way, and the dialog opens on it (#65).
-   */
-  const lastChoice = (session: SessionState): BuildChoice | undefined => {
-    const choice = store.get(session.sessionId)?.buildChoice ?? session.buildChoice;
-    const mode = validMode(choice?.mode);
-    return choice && mode ? { mode, ...(choice.settings ? { settings: cleanSettings(choice.settings) } : {}), at: choice.at } : undefined;
-  };
-
-  /** Remember what the user chose in the Submit dialog. Session state, not
-   *  the plan's: it moves no version, and nothing is sent to the agent. */
-  const rememberChoice = (session: SessionState, mode: ExecutionMode, settings: BuildSettings | undefined) => {
-    const choice: BuildChoice = { mode, ...(settings ? { settings: cleanSettings(settings) } : {}), at: Date.now() };
-    const was = session.buildChoice;
-    if (was && was.mode === choice.mode && JSON.stringify(was.settings ?? null) === JSON.stringify(choice.settings ?? null)) return;
-    store.update(session.sessionId, { buildChoice: choice });
-  };
 
   /** What the review dialogs show beside the prompt: the defaults and the
    *  checks this repository has, so the user sees what the build will run. */
-  const projectSummary = (project: ProjectConfig, point: 'design' | 'build') => ({
+  const projectSummary = (project: ProjectConfig, point: 'design' | 'handoff') => ({
     file: project.file,
     config: configRows(project, point),
-    mode: project.mode,
-    defaults: project.settings,
+    review: project.review,
     checks: Object.fromEntries(HOOK_STAGES.map((stage) => [stage, project.hooks[stage].map((h) => h.name)])),
     errors: [...project.errors, ...project.warnings],
     planCheck: project.planCheck,
@@ -671,9 +632,9 @@ function buildRouter(deps: Deps): Router {
       planCheck: project.planCheck,
       // The repository's checks a task can skip, by stage (#54).
       projectChecks: { implement: project.hooks.implement.map((h) => h.name), review: project.hooks.review.map((h) => h.name) },
-      // Who reviews a task, where the plan does not say (any but a submitted
-      // Managed build): the board asks the user where the daemon waits on them.
-      projectReview: project.settings.review,
+      // The review a task asks for where it does not say: the board shows
+      // the tasks that wait on the user's.
+      projectReview: project.review,
     });
   });
 
@@ -750,23 +711,13 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/prompt', async (ctx) => {
     const session = sessionOr404(ctx);
-    const body = await readJson<{ note?: unknown; target?: unknown; settings?: unknown; mode?: unknown }>(ctx.req);
+    const body = await readJson<{ note?: unknown }>(ctx.req);
     const plan = planOr404(session);
     const note = cleanNote(body.note);
     const project = projectFor(session);
-    // The mode asked for; else the target's; else the one the user last
-    // chose here; else the repository's default.
-    const last = lastChoice(session);
-    const asked = validTarget(body.target);
-    const chosen = validMode(body.mode) ?? last?.mode;
-    const mode = modeFor(asked, chosen, project.mode);
-    const settings = body.settings ? settingsFrom(body.settings, project) : (last?.settings ?? project.settings);
     const { prompt, trimmed, blocks } = buildPrompt(plan, {
-      target: targetOf(mode),
       agent: session.agent,
-      settings,
       project,
-      ...(chosen ? { mode } : {}),
       ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
       ...(note ? { note } : {}),
     });
@@ -778,9 +729,7 @@ function buildRouter(deps: Deps): Router {
       version: plan.version,
       budget: PROMPT_BUDGET,
       maxNote: MAX_NOTE,
-      mode,
-      settings,
-      project: projectSummary(project, 'build'),
+      project: projectSummary(project, 'handoff'),
     });
   });
 
@@ -881,50 +830,26 @@ function buildRouter(deps: Deps): Router {
   });
 
   /**
-   * The user changed how the plan is built in the Submit dialog. Kept, so
-   * telling the agent to build it in chat builds it that way too. Changes
-   * nothing about the plan.
-   */
-  router.post('/api/session/:id/plan/choice', async (ctx) => {
-    const session = sessionOr404(ctx);
-    const body = await readJson<{ mode?: unknown; settings?: unknown }>(ctx.req);
-    const mode = validMode(body.mode);
-    if (!mode) throw new HttpError(400, 'Say how it is built: mode "tracked", "managed" or "export".');
-    const project = projectFor(session);
-    rememberChoice(session, mode, mode === 'managed' ? settingsFrom(body.settings, project) : undefined);
-    json(ctx.res, 200, { buildChoice: store.get(session.sessionId)?.buildChoice ?? null });
-  });
-
-  /**
    * The user signs the plan off. It is locked from here: Claude gets the
    * prompt they previewed with their next message in its chat, and the page
    * follows the build on the task board.
    */
   router.post('/api/session/:id/plan/submit', async (ctx) => {
     const session = sessionOr404(ctx);
-    const body = await readJson<{ note?: unknown; target?: unknown; mode?: unknown; expect?: unknown; settings?: unknown; hash?: unknown }>(ctx.req);
-    const asked = validTarget(body.target);
-    const chosen = validMode(body.mode);
-    if ((body.target !== undefined && !asked) || (!asked && !chosen)) {
-      throw new HttpError(400, 'Say how it is built: mode "tracked", "managed" or "export" (or target "session" or "elsewhere").');
-    }
+    const body = await readJson<{ note?: unknown; target?: unknown; expect?: unknown; hash?: unknown }>(ctx.req);
+    // A plan is built by the harness this session hands it to: exporting it is Export plan, not a submit.
+    if (body.target !== undefined && body.target !== 'session') throw new HttpError(400, 'A plan is submitted to this session: leave `target` out.');
     const note = cleanNote(body.note);
     const project = projectFor(session);
-    const mode = modeFor(asked, chosen, project.mode);
-    const target = targetOf(mode);
-    const settings = settingsFrom(body.settings, project);
     const plan = store.submit(session.sessionId, {
-      target,
+      target: 'session',
       project,
-      settings,
-      ...(chosen ? { mode } : {}),
       ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
       ...(note ? { note } : {}),
       ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
       ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
     });
-    log(`plan submitted for ${session.sessionId} (${mode})`);
-    if (chosen) rememberChoice(session, mode, mode === 'managed' ? settings : undefined);
+    log(`plan submitted for ${session.sessionId}`);
     json(ctx.res, 200, { plan: forBrowser(plan) });
   });
 
@@ -1004,7 +929,7 @@ function buildRouter(deps: Deps): Router {
       // the moment it lands (the agent's report that puts a task in review
       // is a snapshot too).
       if (event.type === 'snapshot') {
-        reviewSent = projectFor(event.session).settings.review;
+        reviewSent = projectFor(event.session).review;
         event = { ...event, projectReview: reviewSent };
       }
       res.write(`data: ${JSON.stringify(forBrowser(event))}\n\n`);
@@ -1227,7 +1152,7 @@ function buildRouter(deps: Deps): Router {
   };
 
   /**
-   * `harness_task_update`: a status, a step of the iric cycle, the checks
+   * `harness_task_update`: a status, a stage (implement, review, refine), the checks
    * run, a verdict — recorded as reported, for the board to show, and
    * answered with what it means for the build. Only what would make the
    * board contradict itself is refused: a task done or started while it
@@ -1300,7 +1225,6 @@ function buildRouter(deps: Deps): Router {
     if (status === 'dropped' && !note?.trim()) {
       throw new PlanError(`Dropping "${task.title}" needs a \`note\`: why it is no longer needed (and who said so).`);
     }
-    const settings = before.submission?.settings ?? projectFor(session).settings;
 
     // A parent's progress is its subtasks': a status set on it would say
     // something the board never shows.
@@ -1340,7 +1264,7 @@ function buildRouter(deps: Deps): Router {
     // into review, after it; otherwise before the rest (done ends the review).
     const { plan, changes } = store.applyOps(session.sessionId, stage ? [progress, ...review] : [...review, progress], 'claude', {
       tracking: true,
-      review: settings.review,
+      review: projectFor(session).review,
     });
     const now = plan.tasks.find((t) => t.id === taskId)!;
     const out: string[] = [];
@@ -1454,27 +1378,11 @@ function buildRouter(deps: Deps): Router {
             : 'The plan is already submitted: build it — harness_task_next says what is ready.',
         );
       }
-      // The way the user last chose in the Submit dialog; else the
-      // repository's default. "Build it" in chat builds it in this session,
-      // so a last choice of Export falls back to that default too.
-      const last = lastChoice(session);
-      const mode = modeFor('session', last?.mode, project.mode);
-      const chosen = last?.mode === mode;
-      const settings = (chosen && last?.settings) || project.settings;
-      store.submit(id, {
-        target: 'session',
-        project,
-        settings,
-        agent: session.agent,
-        userSaid: said,
-        ...(chosen ? { mode } : {}),
-        ...bin,
-      });
-      log(`plan submitted from chat for ${id} (${mode})`);
+      store.submit(id, { target: 'session', project, agent: session.agent, userSaid: said, ...bin });
+      log(`plan submitted from chat for ${id}`);
       lead =
-        `[cc-harness] Submitted the plan from chat, on the user's word ("${quote}"): ${MODE_LABEL[mode]}` +
-        `${chosen ? ', as they last chose in Coplan' : ", this repository's default"}. It is locked now, as a submit in ` +
-        "Coplan locks it, and the page says it was submitted in chat. Build it now, as the prompt below says — it is the one Coplan's Submit would have sent:";
+        `[cc-harness] Submitted the plan from chat, on the user's word ("${quote}"). It is locked now, as a submit in ` +
+        "Coplan locks it, and the page says it was submitted in chat. Build it now, as the handoff below says — it is the one Coplan's Submit would have sent:";
     }
     const handed = store.deliver(id);
     const later = store.get(id)?.plan;

@@ -65,7 +65,7 @@ const DIAGRAM = {
   required: ['title', 'nodes'],
 };
 
-const REVIEW = { type: 'string', enum: ['subagent', 'self', 'user', 'skip'] };
+const REVIEW = { type: 'string', enum: ['agent', 'user', 'none'] };
 
 /** What a task says about how it is built: what it waits on, where it lands,
  *  how it is reviewed, which boxes it builds. */
@@ -76,7 +76,7 @@ const BUILD_FIELDS: Record<string, unknown> = {
     description: 'Ids of tasks that must be done first. Leave out whatever could run in parallel. Subtasks inherit it.',
   },
   branch: { type: 'string', description: 'Git branch the work lands on; subtasks inherit it. Omit for one PR on the current branch.' },
-  review: { ...REVIEW, description: 'Only when not the build default: "user" for risky work, "skip" for trivial.' },
+  review: { ...REVIEW, description: 'The review it asks for, only when not the default: "user" for risky work, "none" for trivial.' },
   builds: {
     type: 'array',
     items: { type: 'string' },
@@ -442,7 +442,7 @@ export const TOOLS: ToolDef[] = [
         stage: { type: 'string', enum: ['implement', 'review', 'refine'], description: 'Step of the cycle; implies in_progress.' },
         checks: {
           type: 'array',
-          description: 'The checks just run: the hooks from .coplan/config.json (`coplan check <stage> --json` prints these).',
+          description: 'The checks just run: from .coplan/config.json (`coplan check <stage> --json` prints these).',
           items: {
             type: 'object',
             properties: { name: { type: 'string' }, ok: { type: 'boolean' }, note: { type: 'string', description: 'One line: what failed.' } },

@@ -9,7 +9,6 @@ import { parseJsonc } from '../shared/jsonc.ts';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { repoRoot } from '../shared/changes.ts';
-import { DEFAULT_BUILD_SETTINGS } from '../shared/build.ts';
 import { PROJECT_CONFIG_PATH, type CheckHook, type HookStage } from '../shared/project.ts';
 
 type Detected = Record<HookStage, CheckHook[]>;
@@ -134,50 +133,31 @@ export function baseBranch(root: string): string | undefined {
   }
 }
 
-const SETTINGS = `  // How a Managed build runs. Setting it makes builds here Managed by default
-  // (implement → review → refine, held to the checks); Submit can change it.
-  //   review:    subagent | self | user | skip
-  //   parallel:  how many ready tasks are built at once
-  //   maxRounds: review rounds before Claude stops and asks you
-  "iric": ${JSON.stringify(DEFAULT_BUILD_SETTINGS).replace(/,"/g, ', "').replace(/":/g, '": ')},
-`;
-
-/** Without `iric`, the file still opts the repository in to Managed builds,
- *  as `iric` does — with the user's own settings for them. */
-const MANAGED = `  // Builds here are Managed by default: implement → review → refine, held
-  // to the checks above. "tracked" leaves how to the agent; Submit can change it.
-  "mode": "managed",
-`;
-
-/**
- * The file as written: commented, so it explains itself to whoever opens it.
- * `settings: false` leaves `iric` out, so the user's own defaults
- * (`coplan.json`) hold here rather than being overridden by the built-in ones.
- */
-export function renderConfig(hooks: Detected, base: string | undefined, opts: { settings?: boolean } = {}): string {
+/** The file as written: commented, so it explains itself to whoever opens it. */
+export function renderConfig(hooks: Detected, base: string | undefined): string {
   const hook = (h: CheckHook) => {
     const rest = { ...(h.timeout ? { timeout: h.timeout } : {}), ...(h.paths ? { paths: h.paths } : {}), ...(h.optional ? { optional: true } : {}) };
     return `      ${JSON.stringify({ name: h.name, run: h.run, ...rest }).replace(/,"/g, ', "').replace(/":/g, '": ')}`;
   };
   const stage = (s: HookStage) => (hooks[s].length ? `[\n${hooks[s].map(hook).join(',\n')}\n    ]` : '[]');
   return `{
-  // Coplan — what the build runs, so no agent has to guess.
-  // Each task goes through implement → review → refine:
-  //   implement: quick checks after every implementation or refinement pass
-  //   review:    the gate a task must pass before it is done
+  // Coplan — each task's definition of done, handed to the harness that
+  // builds it, so no agent has to guess:
+  //   implement: quick checks after each change
+  //   review:    what a task must pass to be done
   //   final:     once every task is done, before the final report
-  // A hook is a command (run from the repository root), or
+  // A check is a command (run from the repository root), or
   //   { "name", "run", "timeout" (seconds), "paths" (globs), "optional" }.
   // Checks are targeted: each runs only when the change touches its area —
   // its "paths", or the folder in "cwd" — and "{files}" in a command is the
   // changed files in that area. One with neither runs on any change.
   // Run a stage yourself with:  coplan check review
-  "hooks": {
+  "checks": {
     "implement": ${stage('implement')},
     "review": ${stage('review')},
     "final": ${stage('final')}
   },
-${opts.settings === false ? MANAGED : SETTINGS}  "branches": ${JSON.stringify({ ...(base ? { base } : {}), prefix: 'coplan/' }).replace(/,"/g, ', "').replace(/":/g, '": ')}
+  "branches": ${JSON.stringify({ ...(base ? { base } : {}), prefix: 'coplan/' }).replace(/,"/g, ', "').replace(/":/g, '": ')}
 }
 `;
 }
@@ -199,7 +179,7 @@ export async function runInit(args: string[], cwd = process.cwd()): Promise<numb
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, text);
   console.log(`wrote ${path.relative(cwd, file) || file}`);
-  console.log(found.length ? `from: ${found.join(', ')}` : 'found nothing to run — fill in the hooks by hand');
+  console.log(found.length ? `from: ${found.join(', ')}` : 'found nothing to run — fill in the checks by hand');
   console.log('read it over: these are guesses from file names, and CI may run more.');
   return 0;
 }

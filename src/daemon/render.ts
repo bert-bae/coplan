@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { paths } from '../shared/paths.ts';
 import { planGaps, type GapSeverities } from '../shared/check.ts';
-import type { BuildSettings, BuildTarget, Change, ExecutionMode, Plan, PlanBaseline, Task, Thread } from '../shared/types.ts';
+import type { Change, Plan, PlanBaseline, Task, Thread } from '../shared/types.ts';
 import {
   baselineOf,
   countTasks,
@@ -32,10 +32,8 @@ import {
 } from '../shared/plan.ts';
 import { KIND_NOUN, contentOf, diagramBlocks, diagramChanges, diagramToMarkdown, edgePhrase, hang, indent, nestHeadings } from '../shared/architecture.ts';
 import { diagramMermaid, tasksMermaid } from '../shared/mermaid.ts';
-import { BlockList, CHANGES, NOTE, TEMPLATE, blockLines, blocksText, derived, dropAll, field, joinBlocks, setting, type Block, type BlockSource, type ConfigRow } from '../shared/blocks.ts';
+import { BlockList, CHANGES, NOTE, TEMPLATE, blockLines, blocksText, derived, dropAll, field, joinBlocks, type Block, type ConfigRow } from '../shared/blocks.ts';
 import {
-  DEFAULT_BUILD_SETTINGS,
-  MODE_LABEL,
   REVIEW_WORDS,
   SESSION_BRANCH,
   ancestorsOf,
@@ -51,7 +49,6 @@ import {
   isComplete,
   leafTasks,
   leavesUnder,
-  modeFor,
   readinessOf,
   waitingOn,
 } from '../shared/build.ts';
@@ -433,9 +430,9 @@ function lockLine(plan: Plan): string | null {
       return '> **Locked.** The user submitted this plan to be built outside this session; it no longer changes here.';
     case 'finalizing':
       return (
-        '> **Every task is done — finish the build.** Run the final checks, push the branches and open the pull ' +
-        'requests (record each with harness_branch_update), then write the build report; harness_task_next says how. ' +
-        'The plan is built once the report is in.'
+        '> **Every task is done — finish the build.** Run the final checks; the harness pushes the branches, opens ' +
+        'the pull requests its own way and records each with harness_branch_update; then write the build report. ' +
+        'harness_task_next says how. The plan is built once the report is in.'
       );
     case 'landing':
       return (
@@ -504,50 +501,28 @@ export interface PromptOptions {
   agent?: AgentKind;
   /** Anything the user added for the agent. */
   note?: string;
-  /** How the build runs, as the user chose it. */
-  settings?: BuildSettings;
-  /** The execution mode, as the user chose it; the repository's default
-   *  (`mode` in its config) without. */
-  mode?: ExecutionMode;
-  /** The repository's `.coplan/config.json`: its hooks and branch base. */
+  /** The repository's `.coplan/config.json`: its checks and branch base. */
   project?: ProjectConfig;
   /** The coplan CLI on this machine, for `coplan check`. */
   bin?: string;
 }
 
 /**
- * What Claude is told when the user submits the plan, by the mode it is
- * built in.
+ * The handoff: what the harness is told when the user submits the plan —
+ * what to build (harness_task_next, harness_task_brief), what done means
+ * (the checks), the review each task asks for, how the work lands on
+ * branches and how to report back; then the plan itself. How the work runs
+ * is the harness's to decide.
  *
- * - **Managed**: build it, and how — the order, the parallelism, each
- *   task's implement → review → refine cycle, the checks — and how to
- *   report progress; then the plan itself.
- * - **Tracked**: build it your own way, keeping the board true; then the
- *   plan. No cycle, no review mode, no round or parallel limit.
- * - **Export**: no instructions at all — the plan as Markdown, for the
- *   user to take wherever it is built (see `exportBlocks`).
- *
- * For this session the prompt reaches Claude with the user's next message,
- * so it is kept within what a hook can hand over; Claude can always read the
- * rest with `harness_plan_read`. An export is pasted by the user wherever
- * they like, so it never mentions Coplan's tools and is never trimmed.
+ * It reaches the session with the user's next message, so it is kept within
+ * what a hook can hand over; the rest is one harness_plan_read away. The
+ * plan as Markdown, with no instructions, is the export (`exportBlocks`).
  */
-export function buildPrompt(plan: Plan, opts: PromptOptions & { target: BuildTarget }): BuildPrompt {
-  const settings = opts.settings ?? opts.project?.settings ?? DEFAULT_BUILD_SETTINGS;
+export function buildPrompt(plan: Plan, opts: PromptOptions = {}): BuildPrompt {
   const project = opts.project ?? emptyProjectConfig();
-  const mode = modeFor(opts.target, opts.mode, project.mode);
-  if (mode === 'export') {
-    const blocks = exportBlocks(plan, { project, ...(opts.note ? { note: opts.note } : {}) });
-    return { prompt: blocksText(blocks), trimmed: false, blocks };
-  }
-  const chosen = settingSources(opts.settings !== undefined, project);
-  const brief =
-    mode === 'managed'
-      ? sessionBrief(plan, settings, agentInfo(opts.agent), project, chosen)
-      : trackedBrief(plan, agentInfo(opts.agent), project, opts.mode !== undefined ? setting('mode') : configSource(project, 'mode'));
   const head = new BlockList()
-    .push(...brief)
-    .push(...instructionBlocks(project, 'build', undefined, PROMPT_INSTRUCTIONS))
+    .push(...handoffBlocks(plan, agentInfo(opts.agent), project))
+    .push(...instructionBlocks(project, 'handoff', undefined, PROMPT_INSTRUCTIONS))
     .gap()
     .push(...checksBlocks(project, opts.bin)).blocks;
   const doc = withoutDesign(documentParts(plan, { attribution: true, reader: 'claude', base: project.branches.base }), BUILD_DESIGN_POINTER);
@@ -561,9 +536,7 @@ export function buildPrompt(plan: Plan, opts: PromptOptions & { target: BuildTar
  * and stop there, for the user to review and submit.
  */
 export function designPrompt(plan: Plan, opts: PromptOptions = {}): BuildPrompt {
-  const settings = opts.settings ?? opts.project?.settings ?? DEFAULT_BUILD_SETTINGS;
   const project = opts.project ?? emptyProjectConfig();
-  const chosen = settingSources(opts.settings !== undefined, project);
   const branches = project.branches.base || project.branches.prefix
     ? ` Branches are cut from \`${project.branches.base ?? 'the base branch'}\`${project.branches.prefix ? ` and named \`${project.branches.prefix}…\`` : ''}.`
     : '';
@@ -599,15 +572,15 @@ export function designPrompt(plan: Plan, opts: PromptOptions = {}): BuildPrompt 
     '4. Decide how it lands. A change that is one pull request needs no `branch`. Otherwise give each group of tasks a ' +
       '`branch`: a branch whose tasks depend on another branch\'s is cut from it, as a stacked pull request.',
   ).inline('step-4:branches', configSource(project, 'branches'), branches);
-  b.add('step-5', TEMPLATE, '5. Each task is built implement → review → refine. Review is ')
-    .inline('step-5:review', chosen('review'), REVIEW_WORDS[settings.review])
-    .inline('step-5:end', TEMPLATE, ' by default; set `review: "user"` on risky or user-facing tasks, `"skip"` on trivial ones.');
+  b.add('step-5', TEMPLATE, '5. Each task asks the harness for a review: ')
+    .inline('step-5:review', configSource(project, 'review'), REVIEW_WORDS[project.review])
+    .inline('step-5:end', TEMPLATE, ' by default; set `review: "user"` on risky or user-facing tasks, `"none"` on trivial ones.');
   b.add(
     'step-6',
     TEMPLATE,
     '6. Publish it with harness_tasks_publish — keep the ids of planned tasks you keep, so the boxes stay linked — ' +
       'then tell the user in chat that the task list is ready to review. Start building when they say so: told here, ' +
-      'call harness_plan_advance {to: "build", user_said} and build; submitted in Coplan, the build prompt reaches you.',
+      'call harness_plan_advance {to: "build", user_said} and build; submitted in Coplan, the handoff reaches you.',
   );
   b.push(...askRuleBlocks(agentInfo(opts.agent), 'tasks'));
   b.push(...instructionBlocks(project, 'design', undefined, PROMPT_INSTRUCTIONS));
@@ -633,14 +606,6 @@ function withoutDesign(doc: DocumentParts, pointer: string): DocumentParts {
   const note = new BlockList().gap().add('design:pointer', TEMPLATE, pointer).blocks;
   const known = (blocks: Block[]): Block[] => blocks.map((x) => ({ ...x, dropped: true, known: true }));
   return { ...doc, sections: [...known(doc.sections), ...note], architecture: known(doc.architecture) };
-}
-
-/** Where each build setting a prompt names comes from: the Submit dialog,
- *  when the user chose it there, or else the config's defaults (`iric`). */
-type SettingSources = (key: 'review' | 'parallel' | 'maxRounds') => BlockSource;
-
-function settingSources(chosen: boolean, project: ProjectConfig): SettingSources {
-  return (key) => (chosen ? setting(key) : configSource(project, `iric.${key}`));
 }
 
 function fromUser(note: string | undefined): Block[] {
@@ -732,11 +697,12 @@ function fit(plan: Plan, head: Block[], said: Block[], changes: Block[], doc: Do
   return { prompt: blocksText(blocks), trimmed: true, blocks };
 }
 
-function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: ProjectConfig, chosen: SettingSources): Block[] {
-  const together =
-    s.parallel > 1
-      ? `build them side by side, up to ${s.parallel} at once — with subagents (or child sessions) started from this session where your agent has them, each given that task's harness_task_brief; this session stays the one that reports`
-      : 'build them one at a time';
+/**
+ * The handoff's instructions: what to build, what done means, the review
+ * each task asks for, the branches, and how to report. Nothing about how
+ * the work runs — how many at once, in what sessions, how many rounds.
+ */
+function handoffBlocks(plan: Plan, agent: AgentInfo, project: ProjectConfig): Block[] {
   const { branches } = branchPlan(plan);
   const b = new BlockList();
   b.add('intro', TEMPLATE, `${BUILD_MARKER} "`)
@@ -745,109 +711,52 @@ function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: P
   b.gap().add(
     'lead',
     TEMPLATE,
-    'The plan is final. Its architecture is locked, and from here Coplan follows your progress on its task board, ' +
-      "so keep every task's status true as you go. Run the build with the coplan-build skill, and take each task " +
-      'through the iric skill — implement → review → refine:',
+    'The plan is final and locked. Build it the way your harness works — here, with subagents, or with another tool — ' +
+      "and report back: Coplan follows the build on its task board, so keep every task's status true as you go.",
   );
-  b.gap().add('step-1', TEMPLATE, '1. Start only tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that are ready together do not depend on each other — ')
-    .inline('step-1:parallel', chosen('parallel'), together)
-    .inline('step-1:end', TEMPLATE, ". harness_task_brief gives one task's focused brief: its objective, where it fits, its branch and its checks.");
-  b.add(
-    'step-2',
-    TEMPLATE,
-    '2. When you start a task, mark it in_progress with stage "implement" (harness_task_update) and run the implement ' +
-      'checks. Set stage "review" when it goes to review, and "refine" when the review asks for changes. Report the ' +
-      'checks you ran with `checks`.',
-  );
-  b.add('step-3', TEMPLATE, '3. Review: ')
-    .inline('step-3:review', chosen('review'), REVIEW_WORDS[s.review])
-    .inline('step-3:end', TEMPLATE, ', unless a task says otherwise.')
-    .inline('step-3:rounds', chosen('maxRounds'), ` After ${s.maxRounds} review round${s.maxRounds === 1 ? '' : 's'} without passing, another round is the user's call.`);
-  b.add('step-4', TEMPLATE, '4. Mark a task done only once its review passed and its review checks are green, with a one-line note of what you did.');
-  b.add('step-5', TEMPLATE, '5. If you are stuck, mark the task blocked with a note saying on what, and go on with what else is ready.');
-  b.add('step-6', TEMPLATE, '6. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.');
-  b.add(
-    'step-7',
-    TEMPLATE,
-    branches.length
-      ? '7. Land each task on its branch (see Branches below): cut a stacked branch from the one it builds on. '
-      : '7. Everything lands on the current branch: no task names a branch of its own. ',
-  ).inline('step-7:pull-requests', configSource(project, 'pullRequests'), pullRequestWords(project, { pointer: true }));
-  b.add(
-    'step-8',
-    TEMPLATE,
-    '8. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, ' +
-      'stop that work and tell the user why in chat: only they can reopen the plan in Coplan.',
-  );
-  b.add(
-    'step-9',
-    TEMPLATE,
-    '9. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) ' +
-      'and give the user the final summary: what was built, the branches and pull requests, and how it was checked.',
-  );
-  b.push(...askRuleBlocks(agent, 'managed'));
-  return b.blocks;
-}
-
-/**
- * The build prompt's instructions for a Tracked build: the board's tools
- * and the plan's order, and nothing about how each task is built — no
- * cycle, no review mode, no round or parallel limit. Coplan refuses none
- * of what Managed would; its replies say what it would have checked.
- */
-function trackedBrief(plan: Plan, agent: AgentInfo, project: ProjectConfig, modeSource: BlockSource): Block[] {
-  const { branches } = branchPlan(plan);
-  const b = new BlockList();
-  b.add('intro', TEMPLATE, `${BUILD_MARKER} "`)
-    .inline('title', field('plan'), plan.title)
-    .inline('intro:end', TEMPLATE, '" — the user has reviewed it in Coplan and submitted it.');
-  b.gap()
-    .add(
-      'lead',
-      TEMPLATE,
-      'The plan is final. Its architecture is locked, and from here Coplan follows your progress on its task board, ' +
-        "so keep every task's status true as you go.",
-    )
-    .inline(
-      'lead:mode',
-      modeSource,
-      ` The build is ${MODE_LABEL.tracked}: how you build and check each task is yours to decide. Coplan holds no task back; ` +
-        'where it would have checked something, its reply says so.',
-    );
   b.gap().add(
     'step-1',
     TEMPLATE,
-    '1. Start with tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that ' +
-      "are ready together do not depend on each other. harness_task_brief gives one task's focused brief: its objective, " +
-      'where it fits, its branch and its checks.',
+    '1. What to build: harness_task_next lists the tasks that are ready — everything they wait on is done — and what every ' +
+      "other task waits on. harness_task_brief gives one task's brief, written to hand to whoever builds it: its objective, " +
+      'where it fits, its branch, its checks and the review it asks for. Starting a task that still waits on another is refused.',
   );
-  b.add(
-    'step-2',
-    TEMPLATE,
-    '2. Report each task with harness_task_update as you go: status "in_progress" when you start it, "done" with a ' +
-      'one-line note of what you did, "blocked" with a note saying on what. Report the checks you ran with `checks`.',
-  );
-  b.add('step-3', TEMPLATE, '3. For work that is not on the plan, add a task first (harness_plan_edit, upsert_task with a parentId), then do it.');
+  b.add('step-2', TEMPLATE, "2. Done: a task is done when its checks pass — the repository's checks below, as its brief lists them for that task.");
+  b.add('step-3', TEMPLATE, '3. Review: each task asks for ')
+    .inline('step-3:review', configSource(project, 'review'), REVIEW_WORDS[project.review])
+    .inline(
+      'step-3:end',
+      TEMPLATE,
+      ', unless its brief says otherwise. Run it your own way; report stage "review" when a task goes to review, and the ' +
+        'verdict with harness_task_update {task_id, verdict, summary}.',
+    );
   b.add(
     'step-4',
     TEMPLATE,
     branches.length
-      ? '4. Land each task on its branch (see Branches below): cut a stacked branch from the one it builds on. '
-      : '4. Everything lands on the current branch: no task names a branch of its own. ',
-  ).inline('step-4:pull-requests', configSource(project, 'pullRequests'), pullRequestWords(project, { pointer: true }));
+      ? '4. Branches: land each task on its branch (see Branches below), and cut a stacked branch from the one it builds on. '
+      : '4. Branches: everything lands on the current branch; no task names a branch of its own. ',
+  ).inline('step-4:pull-requests', configSource(project, 'pullRequests'), pullRequestWords(project));
   b.add(
     'step-5',
     TEMPLATE,
-    '5. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, ' +
-      'stop that work and tell the user why in chat: only they can reopen the plan in Coplan.',
+    '5. Report as you go with harness_task_update {task_id, status, checks, note}: "in_progress" when a task starts, ' +
+      '"done" with a one-line note of what was done, "blocked" with what it waits on. Work that is not on the plan ' +
+      'becomes a task first (harness_plan_edit, upsert_task with a parentId).',
   );
   b.add(
     'step-6',
     TEMPLATE,
-    '6. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) ' +
+    '6. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, ' +
+      'stop that work and tell the user why in chat: only they can reopen the plan in Coplan.',
+  );
+  b.add(
+    'step-7',
+    TEMPLATE,
+    '7. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) ' +
       'and give the user the final summary: what was built, the branches and pull requests, and how it was checked.',
   );
-  b.push(...askRuleBlocks(agent, 'tracked'));
+  b.push(...askRuleBlocks(agent, 'handoff'));
   return b.blocks;
 }
 
@@ -864,15 +773,10 @@ export function askRuleBlocks(agent: AgentInfo, scope: AskScope): Block[] {
 }
 
 /** Where the rule is stated: publishing the design, making the task list
- *  from it, or building — Managed or Tracked. */
-export type AskScope = 'plan' | 'tasks' | 'managed' | 'tracked';
+ *  from it, or the handoff. */
+export type AskScope = 'plan' | 'tasks' | 'handoff';
 
 export function askRule(agent: AgentInfo, scope: AskScope): string {
-  const right =
-    scope === 'managed'
-      ? ', or is theirs by right — in this Managed build: dropping work they signed off, a task they review, a review ' +
-        'round past their limit, or taking a task whose checks fail'
-      : '';
   const otherwise =
     scope === 'plan'
       ? " Anything else, decide, and write the decision into the plan — a box's notes, a section — where the user sees it and can change it."
@@ -880,8 +784,8 @@ export function askRule(agent: AgentInfo, scope: AskScope): string {
         ? " Anything else in the task list, decide, and say what you decided in the task's detail: the user reviews the list before anything is built."
         : " Anything else, decide: say what you decided in the task's note, and carry on.";
   return (
-    `Ask the user, with ${agent.askWith}, only when a decision cannot be undone${right ? ',' : ' or'} reaches outside this ` +
-    `session (pushing, opening a pull request)${right}.${otherwise}`
+    `Ask the user, with ${agent.askWith}, only when a decision cannot be undone or reaches outside this ` +
+    `session (pushing, opening a pull request).${otherwise}`
   );
 }
 
@@ -971,7 +875,7 @@ export interface ExportOptions {
    *  each brief name. Nothing else of it — no checks, no instructions —
    *  is part of the plan. */
   project?: ProjectConfig;
-  /** What the user wrote when submitting it as an Export. */
+  /** Anything the user wrote to go with it. */
   note?: string;
   /** Diagrams and the task list as Mermaid graphs too. */
   mermaid?: boolean;
@@ -1119,14 +1023,14 @@ export function checksBlocks(project: ProjectConfig, bin?: string, planning = fa
         ? `This repository has no ${PROJECT_CONFIG_PATH} with checks. Suggest /coplan-init to the user, so the build runs the right checks instead of guessing.`
         : `No checks are configured (${PROJECT_CONFIG_PATH}). Work out what to run from the repository's scripts and CI, use the same commands for every task, and say which in each task's done note.`,
     );
-    return b.add('checks', configSource(project, 'hooks'), head).blocks;
+    return b.add('checks', configSource(project, 'checks'), head).blocks;
   }
-  b.add('checks', configSource(project, 'hooks'), [...head, `_From ${PROJECT_CONFIG_PATH}, run from the repository root:_`]);
+  b.add('checks', configSource(project, 'checks'), [...head, `_Each task's definition of done, from ${PROJECT_CONFIG_PATH}, run from the repository root:_`]);
   for (const stage of HOOK_STAGES) {
     const hooks = project.hooks[stage];
     if (!hooks.length) continue;
     const list = hooks.map((h) => `${h.name} \`${hookCommand(h)}\`${h.paths ? ` (for ${h.paths.join(', ')})` : ''}${h.optional ? ' (optional)' : ''}`);
-    b.add(`checks:${stage}`, configSource(project, `hooks.${stage}`), `- ${stage}: ${list.join('; ')}`);
+    b.add(`checks:${stage}`, configSource(project, `checks.${stage}`), `- ${stage}: ${list.join('; ')}`);
   }
   if (bin) {
     b.add(
@@ -1142,38 +1046,14 @@ export function checksBlocks(project: ProjectConfig, bin?: string, planning = fa
   return b.blocks;
 }
 
-/** How the build's pull requests are opened, as the repository says
- *  (`pullRequests` in .coplan/config.json). */
-export function pullRequestWords(project: ProjectConfig, opts: { pointer?: boolean } = {}): string {
-  const { tool, open } = project.pullRequests;
-  if (open === 'never') return 'Do not open pull requests: push the branches, and list each in the report with what it carries.';
-  if (tool === 'none') return 'Push the branches, and leave opening the pull requests to the user: list each in the report with what it carries and what it stacks on.';
-  const how =
-    tool === 'graphite'
-      ? 'with Graphite: track each branch on the one below it (`gt track`), and open the stack with `gt submit --stack`'
-      : 'with `gh pr create`, each against the branch below it (the base branch for the bottom one)';
-  const when = open === 'auto' ? 'as soon as a branch\'s tasks are done' : 'once the user says to: ask them first';
-  return `Open the pull requests ${how}, ${when}.${opts.pointer && project.pullRequests.template ? ` Write each description from the pull request template (${project.pullRequests.templateFile}), which harness_task_next shows when one is due.` : ''}`;
-}
-
-/** The pull request template (the repository's, or the user's own), to fill in for each one. */
-export function templateBlocks(project: ProjectConfig): Block[] {
-  const { template, templateFile } = project.pullRequests;
-  if (!template) return [];
-  return new BlockList()
-    .gap()
-    .add('pull-request-template', configSource(project, 'pullRequests.template'), [
-      `### Each pull request's description`,
-      `Fill in the pull request template (${templateFile}) from the tasks the pull request carries, their checks and their review:`,
-      '',
-      '~~~~markdown',
-      template,
-      '~~~~',
-    ]).blocks;
-}
-
-export function templateLines(project: ProjectConfig): string[] {
-  return blockLines(templateBlocks(project));
+/** The build's pull requests: the harness opens them its own way and
+ *  records each; the repository's template, if it has one, by its path. */
+export function pullRequestWords(project: ProjectConfig): string {
+  const file = project.pullRequests.templateFile;
+  return (
+    'Open the pull requests your own way, each against the branch below it, and record each with harness_branch_update ' +
+    `{branch, pr_url, pr_number, pr_state}${file ? `. Write each description from the pull request template, ${file}` : ''}.`
+  );
 }
 
 /** The standing words the user and the repository add at one point. */
@@ -1201,26 +1081,22 @@ export function instructionBlocks(project: ProjectConfig, point: InstructionPoin
 /**
  * The config settings a prompt is made with, for the sign-off dialog to
  * list beside it: every `config` source its blocks can name, set or not,
- * with the files that set it. The design prompt's review mode is the
- * config's default, since the Confirm dialog has no settings of its own;
- * the build prompt's comes from the Submit dialog.
+ * with the files that set it.
  */
-export function configRows(project: ProjectConfig, point: 'design' | 'build'): ConfigRow[] {
+export function configRows(project: ProjectConfig, point: 'design' | 'handoff'): ConfigRow[] {
   const row = (key: string, label: string, value: string): ConfigRow => {
     const source = configSource(project, key);
     return { key, label, value, files: source.kind === 'config' ? source.files : [] };
   };
   const rows = HOOK_STAGES.map((stage) =>
-    row(`hooks.${stage}`, `${stage[0]!.toUpperCase()}${stage.slice(1)} checks`, project.hooks[stage].map((h) => h.name).join(', ') || 'none'),
+    row(`checks.${stage}`, `${stage[0]!.toUpperCase()}${stage.slice(1)} checks`, project.hooks[stage].map((h) => h.name).join(', ') || 'none'),
   );
-  if (point === 'design') rows.push(row('iric.review', 'Review, by default', REVIEW_WORDS[project.settings.review]));
+  rows.push(row('review', 'Review, by default', REVIEW_WORDS[project.review]));
   const { base, prefix } = project.branches;
   rows.push(row('branches', 'Branches', [base ? `cut from ${base}` : 'cut from the base branch', prefix ? `named ${prefix}…` : ''].filter(Boolean).join(', ')));
-  if (point === 'build') {
-    rows.unshift(row('mode', 'Mode, by default', `${MODE_LABEL[project.mode]}${project.modeByIric ? ' (iric is set)' : ''}`));
-    const { tool, open, templateFile } = project.pullRequests;
-    const how = open === 'never' ? 'none opened: the branches are pushed' : tool === 'none' ? 'you open them' : `${tool === 'graphite' ? 'Graphite' : 'gh pr create'}, ${open === 'auto' ? 'as each branch is done' : 'once you say'}`;
-    rows.push(row('pullRequests', 'Pull requests', `${how}${templateFile ? ` · template ${templateFile}` : ''}`));
+  if (point === 'handoff') {
+    const file = project.pullRequests.templateFile;
+    rows.push(row('pullRequests', 'Pull requests', `opened by the harness${file ? ` · template ${file}` : ''}`));
   }
   const words = project.instructions[point]?.trim();
   rows.push(row(`instructions.${point}`, 'Standing instructions', words ? (words.length > 120 ? `${words.slice(0, 119).trimEnd()}…` : words) : 'none'));

@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyOps, awaitingUserReview, confirmDesign, markDelivered, planPhase, planStatus, publishPlan, statusOfPhase, submitPlan } from '../shared/plan.ts';
-import { PLAN_PHASES, PLAN_STATUSES, type BuildSettings, type ExecutionMode, type Plan, type PlanPhase, type PlanStatus } from '../shared/types.ts';
+import { PLAN_PHASES, PLAN_STATUSES, type BuildTarget, type Plan, type PlanPhase, type PlanStatus } from '../shared/types.ts';
 import { PLAN_STATUS, statusDetail, statusFacts, statusWords } from '../ui/lib/status.ts';
 
 /**
  * The four statuses a user sees (#66): every phase maps to exactly one,
  * and Review is what was built waiting on the user — the final checks and
- * report, or a task a Managed build holds for the user's own review.
+ * report, or a task in review that asks for the user's own review.
  */
 
 const EXPECTED: Record<PlanPhase, PlanStatus> = {
@@ -50,28 +50,26 @@ const INPUT = {
   ],
 };
 
-const SETTINGS: BuildSettings = { review: 'self', parallel: 1, maxRounds: 3 };
-
 function plan(): Plan {
   return publishPlan(null, INPUT).plan;
 }
 
-function building(mode: ExecutionMode = 'managed', settings: BuildSettings = SETTINGS): Plan {
-  return markDelivered(submitPlan(confirmDesign(plan(), { prompt: 'd' }), { target: mode === 'export' ? 'elsewhere' : 'session', mode, prompt: 'p', settings }));
+function building(target: BuildTarget = 'session'): Plan {
+  return markDelivered(submitPlan(confirmDesign(plan(), { prompt: 'd' }), { target, prompt: 'p' }));
 }
 
 const progress = (p: Plan, id: string, fields: Record<string, unknown>) =>
   applyOps(p, [{ op: 'upsert_task', id, ...fields } as never], 'claude', undefined, { tracking: true }).plan;
 
 test('each phase of a real plan shows its status, with its detail', () => {
-  const said = (p: Plan) => statusWords(statusFacts(p, 'self'), 'Claude');
+  const said = (p: Plan) => statusWords(statusFacts(p, 'agent'), 'Claude');
   const designing = plan();
-  assert.equal(planStatus(designing, 'self'), 'planning');
+  assert.equal(planStatus(designing, 'agent'), 'planning');
   assert.equal(said(designing), 'Planning', 'nothing to add while designing');
   const confirmed = confirmDesign(designing, { prompt: 'd' });
   assert.equal(planPhase(confirmed), 'tasking');
   assert.equal(said(confirmed), 'Planning · design confirmed');
-  const submitted = submitPlan(confirmed, { target: 'session', mode: 'managed', prompt: 'p', settings: SETTINGS });
+  const submitted = submitPlan(confirmed, { target: 'session', prompt: 'p' });
   assert.equal(said(submitted), 'In progress · waiting for Claude');
   let built = markDelivered(submitted);
   assert.equal(said(built), 'In progress · building');
@@ -82,49 +80,38 @@ test('each phase of a real plan shows its status, with its detail', () => {
   assert.equal(said(built), 'Review · final checks and report');
   built = applyOps(built, [{ op: 'report', text: 'Built.' }], 'claude').plan;
   assert.equal(said(built), 'Done · built');
-  assert.equal(said(building('export')), 'Done · exported');
-  assert.equal(planStatus(null, 'self'), 'planning', 'a session with no plan yet is planning');
+  assert.equal(said(building('elsewhere')), 'Done · exported', 'a plan exported before 0.4 still reads as it was');
+  assert.equal(planStatus(null, 'agent'), 'planning', 'a session with no plan yet is planning');
 });
 
-test('a task a Managed build holds for the user\'s review is Review, until they answer it', () => {
-  // `wire` is the user's to review; `client` the build's default (self).
+test('a task in review that asks for the user\'s review is Review, until they answer it', () => {
+  // `wire` asks for the user's review; `client` the repository's default.
   let p = building();
   p = progress(p, 'client', { stage: 'review' });
-  assert.equal(planStatus(p, 'self'), 'in_progress', 'a review the agent runs is not the user\'s');
+  assert.equal(planStatus(p, 'agent'), 'in_progress', 'a review the agent runs is not the user\'s');
   p = progress(p, 'client', { status: 'done' });
   p = progress(p, 'wire', { stage: 'implement' });
-  assert.equal(planStatus(p, 'self'), 'in_progress');
+  assert.equal(planStatus(p, 'agent'), 'in_progress');
   p = progress(p, 'wire', { stage: 'review' });
-  assert.deepEqual(awaitingUserReview(p, 'self').map((t) => t.id), ['wire']);
-  assert.equal(planStatus(p, 'self'), 'review');
-  assert.equal(statusDetail(statusFacts(p, 'self'), 'Claude'), '1 task waits on your review');
+  assert.deepEqual(awaitingUserReview(p, 'agent').map((t) => t.id), ['wire']);
+  assert.equal(planStatus(p, 'agent'), 'review');
+  assert.equal(statusDetail(statusFacts(p, 'agent'), 'Claude'), '1 task waits on your review');
   // The user's verdict, given: back to In progress, whichever it was.
   const passed = applyOps(p, [{ op: 'review_task', id: 'wire', verdict: 'pass' }], 'user').plan;
-  assert.equal(planStatus(passed, 'self'), 'in_progress');
+  assert.equal(planStatus(passed, 'agent'), 'in_progress');
   const changes = applyOps(p, [{ op: 'review_task', id: 'wire', verdict: 'changes' }], 'user').plan;
-  assert.equal(planStatus(changes, 'self'), 'in_progress');
+  assert.equal(planStatus(changes, 'agent'), 'in_progress');
   // A new round waits on them again.
-  assert.equal(planStatus(progress(progress(changes, 'wire', { stage: 'refine' }), 'wire', { stage: 'review' }), 'self'), 'review');
+  assert.equal(planStatus(progress(progress(changes, 'wire', { stage: 'refine' }), 'wire', { stage: 'review' }), 'agent'), 'review');
 });
 
-test('the build\'s own default reviewer counts, and a Tracked build holds nothing for anyone', () => {
-  let p = building('managed', { ...SETTINGS, review: 'user' });
+test("the repository's default review counts, and nothing waits on a review before the plan is submitted (#162)", () => {
+  let p = building();
   p = progress(p, 'client', { stage: 'review' });
-  assert.equal(planStatus(p, 'self'), 'review', 'the user reviews every task by default');
-  let tracked = building('tracked');
-  tracked = progress(tracked, 'wire', { stage: 'review' });
-  assert.deepEqual(awaitingUserReview(tracked, 'self'), []);
-  assert.equal(planStatus(tracked, 'self'), 'in_progress');
-  // Not submitted: nothing is being built, so nothing waits on a review.
-  assert.deepEqual(awaitingUserReview(plan(), 'self'), []);
-});
-
-test("a Managed build submitted on the repository's defaults holds a task for the user where the repository has them review (#162)", () => {
-  let p = markDelivered(submitPlan(confirmDesign(plan(), { prompt: 'd' }), { target: 'session', mode: 'managed', prompt: 'p' }));
-  assert.equal(p.submission?.settings === undefined, true, 'no settings of its own');
-  p = progress(p, 'client', { stage: 'review' });
-  assert.deepEqual(awaitingUserReview(p, 'user').map((t) => t.id), ['client'], "the repository's mode, as the daemon's gates judge by");
+  assert.deepEqual(awaitingUserReview(p, 'user').map((t) => t.id), ['client'], "the repository's default review");
   assert.equal(planStatus(p, 'user'), 'review');
   assert.equal(statusFacts(p, 'user').awaitingReview, 1);
-  assert.equal(planStatus(p, 'self'), 'in_progress');
+  assert.equal(planStatus(p, 'agent'), 'in_progress');
+  // Not submitted: nothing is being built, so nothing waits on a review.
+  assert.deepEqual(awaitingUserReview(plan(), 'user'), []);
 });

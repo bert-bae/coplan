@@ -55,7 +55,7 @@ function confirmed(plan = published(), note?: string): Plan {
 }
 
 function submitted(target: BuildTarget = 'session', plan = confirmed(), note?: string): Plan {
-  const { prompt, trimmed } = buildPrompt(plan, { target, ...(note ? { note } : {}) });
+  const { prompt, trimmed } = buildPrompt(plan, note ? { note } : {});
   return submitPlan(plan, { target, prompt, trimmed, ...(note ? { note } : {}) }, 2_000);
 }
 
@@ -100,7 +100,7 @@ test('a plan handed off to be built elsewhere is locked, and never waits for del
 test('confirming the design is optional: a plan goes from planning straight to building (#65)', () => {
   const plan = published();
   assert.equal(planPhase(plan), 'planning');
-  const next = submitPlan(plan, { target: 'session', mode: 'tracked', prompt: 'p' });
+  const next = submitPlan(plan, { target: 'session', prompt: 'p' });
   assert.equal(next.design, undefined, 'no design sign-off was made');
   assert.equal(planPhase(next), 'submitted');
   assert.equal(isLocked(next), true);
@@ -110,18 +110,16 @@ test('confirming the design is optional: a plan goes from planning straight to b
   assert.equal(planPhase(reopenPlan(next)), 'planning');
 });
 
-test('a sign-off given in chat keeps the user\'s words, and a restart keeps them and the mode (#65)', () => {
+test('a sign-off given in chat keeps the user\'s words, and a restart keeps them (#65)', () => {
   const plan = published();
   const design = confirmDesign(plan, { prompt: 'd', userSaid: '  looks right, make the tasks  ' });
   assert.deepEqual([design.design?.via, design.design?.userSaid], ['chat', 'looks right, make the tasks']);
-  const sub = submitPlan(design, { target: 'session', mode: 'tracked', prompt: 'p', userSaid: 'build it' });
+  const sub = submitPlan(design, { target: 'session', prompt: 'p', userSaid: 'build it' });
   assert.deepEqual([sub.submission?.via, sub.submission?.userSaid], ['chat', 'build it']);
   // From the page: no via, no words.
   assert.equal(submitPlan(design, { target: 'session', prompt: 'p' }).submission?.via, undefined);
   const back = normalizePlan(JSON.parse(JSON.stringify(sub)) as Plan & Record<string, unknown>, 'x');
   assert.deepEqual([back.submission?.via, back.submission?.userSaid, back.design?.via, back.design?.userSaid], ['chat', 'build it', 'chat', 'looks right, make the tasks']);
-  // A Tracked build stays Tracked across a restart: it used to read back as Managed.
-  assert.equal(back.submission?.mode, 'tracked');
   // A damaged quote is dropped, not kept half: the sign-off stands as the page's.
   const odd = normalizePlan({ ...JSON.parse(JSON.stringify(sub)), submission: { ...sub.submission, via: 'fax' } } as Plan & Record<string, unknown>, 'x');
   assert.equal(odd.submission?.via, undefined);
@@ -355,17 +353,13 @@ test('the design prompt reaching Claude is a read, and the build prompt supersed
   assert.equal(skipped.design?.deliveredAt, 5_000);
 });
 
-test('the build settings are kept with the submission, and survive a reload', () => {
-  const plan = confirmed();
-  const settings = { review: 'user' as const, parallel: 3, maxRounds: 2 };
-  const { prompt } = buildPrompt(plan, { target: 'session', settings });
-  const done = submitPlan(plan, { target: 'session', prompt, settings });
-  assert.deepEqual(done.submission?.settings, settings);
-  const reloaded = normalizePlan(JSON.parse(JSON.stringify(done)), 'x');
-  assert.deepEqual(reloaded.submission?.settings, settings);
+test('a submission from before 0.4, with a build mode and settings, loads without them', () => {
+  const plan = submitted();
+  const raw = JSON.parse(JSON.stringify(plan));
+  raw.submission = { ...raw.submission, mode: 'managed', settings: { review: 'self', parallel: 3, maxRounds: 2 } };
+  const reloaded = normalizePlan(raw, 'x');
+  assert.deepEqual(reloaded.submission, plan.submission);
   assert.ok(reloaded.design, 'the design sign-off too');
-  const wild = submitPlan(plan, { target: 'session', prompt, settings: { review: 'nobody' as never, parallel: 99, maxRounds: 0 } });
-  assert.deepEqual(wild.submission?.settings, { review: 'self', parallel: 8, maxRounds: 1 });
 });
 
 test('a submission survives a reload, and a damaged one unlocks rather than locks for good', () => {
@@ -380,18 +374,16 @@ test('a submission survives a reload, and a damaged one unlocks rather than lock
  * The prompt
  * ------------------------------------------------------------------ */
 
-test('the prompt for this session says how to report progress, then gives the plan', () => {
-  const { prompt, trimmed } = buildPrompt(published(), { target: 'session', mode: 'managed', note: 'Start with the client.\nLeave billing alone.' });
+test('the handoff says how to report progress, then gives the plan', () => {
+  const { prompt, trimmed } = buildPrompt(published(), { note: 'Start with the client.\nLeave billing alone.' });
   assert.equal(trimmed, false);
   assert.ok(prompt.startsWith(`${BUILD_MARKER} "Add a cache"`));
-  assert.match(prompt, /mark it in_progress with stage "implement" \(harness_task_update\)/);
-  assert.match(prompt, /coplan-build skill/);
-  assert.match(prompt, /iric skill/);
+  assert.match(prompt, /harness_task_update \{task_id, status, checks, note\}: "in_progress" when a task starts/);
   assert.match(prompt, /harness_task_next/);
   assert.match(prompt, /harness_task_brief/);
-  assert.match(prompt, /Review: self-review/, 'no config: the neutral defaults (#63)');
-  assert.match(prompt, /build them one at a time/);
-  assert.match(prompt, /mark the task blocked with a note/);
+  assert.match(prompt, /Review: each task asks for an agent that did not write the change/, 'no config: the default');
+  assert.doesNotMatch(prompt, /iric|coplan-build skill|one at a time|at once/);
+  assert.match(prompt, /"blocked" with what it waits on/);
   assert.match(prompt, /upsert_task with a parentId/);
   assert.match(prompt, /op: "report"/);
   assert.match(prompt, /## From the user\n> Start with the client\.\n> Leave billing alone\./);
@@ -405,36 +397,35 @@ test('the prompt for this session says how to report progress, then gives the pl
 
 test("the prompt leads with what the user changed that Claude has not read", () => {
   const plan = applyOps(published(), [{ op: 'upsert_task', title: 'Load test' }], 'user').plan;
-  const { prompt } = buildPrompt(plan, { target: 'session' });
+  const { prompt } = buildPrompt(plan);
   assert.match(prompt, /## Since you last read — what the user changed[\s\S]*Added t\d+ "Load test" at the top level/);
   assert.ok(prompt.indexOf('Since you last read') < prompt.indexOf('## Tasks'));
 });
 
-test('the prompt carries the settings the user chose and the repository\'s checks', () => {
+test('the handoff carries the repository\'s default review and its checks, as the definition of done', () => {
   const project = parseProjectConfig({
-    hooks: { implement: ['npm run typecheck'], review: [{ name: 'tests', run: 'npm test', optional: false }], final: ['npm run check'] },
+    checks: { implement: ['npm run typecheck'], review: [{ name: 'tests', run: 'npm test', optional: false }], final: ['npm run check'] },
+    review: 'user',
   });
-  const { prompt } = buildPrompt(published(), { target: 'session', mode: 'managed', settings: { review: 'user', parallel: 1, maxRounds: 4 }, project, bin: '/opt/coplan/bin/coplan' });
-  assert.match(prompt, /Review: the user, before it is marked done/);
-  assert.match(prompt, /build them one at a time/);
-  assert.match(prompt, /After 4 review rounds without passing, another round is the user's call/);
+  const { prompt } = buildPrompt(published(), { project, bin: '/opt/coplan/bin/coplan' });
+  assert.match(prompt, /Review: each task asks for the user, before it is marked done/);
+  assert.doesNotMatch(prompt, /review rounds?|user's call/);
+  assert.match(prompt, /Each task's definition of done, from \.coplan\/config\.json/);
   assert.match(prompt, /- implement: typecheck `npm run typecheck`/);
   assert.match(prompt, /- review: tests `npm test`/);
   assert.match(prompt, /"\/opt\/coplan\/bin\/coplan" check <stage>/);
 });
 
-test('the prompt for somewhere else is the export: the plan, never harness tools', () => {
+test('the export is the plan, never harness tools', () => {
   const plan = applyOps(published(), [{ op: 'upsert_task', title: 'Load test' }], 'user').plan;
-  const { prompt, trimmed } = buildPrompt(plan, { target: 'elsewhere' });
-  assert.equal(trimmed, false);
+  const prompt = exportText(plan);
   assert.doesNotMatch(prompt, /harness_|cc-harness/);
   assert.doesNotMatch(prompt, /added by the user|edited by the user/);
   assert.match(prompt, /^# Add a cache/);
   assert.match(prompt, /- \[ \] client Cache client/);
-  assert.equal(prompt, exportText(plan), 'what Export plan copies');
 });
 
-test('a plan too long for one message is trimmed for this session, never for somewhere else', () => {
+test('a plan too long for one message is trimmed in the handoff, never in the export', () => {
   const long = 'A long paragraph of detail that goes on. '.repeat(30);
   const big: PlanInput = {
     ...INPUT,
@@ -449,7 +440,7 @@ test('a plan too long for one message is trimmed for this session, never for som
     tasks: Array.from({ length: 300 }, (_, i) => ({ title: `Task number ${i}`, detail: long })),
   };
   const plan = publishPlan(null, big).plan;
-  const here = buildPrompt(plan, { target: 'session' });
+  const here = buildPrompt(plan);
   assert.equal(here.trimmed, true);
   assert.ok(here.prompt.length <= PROMPT_BUDGET, `${here.prompt.length} > ${PROMPT_BUDGET}`);
   assert.ok(here.prompt.startsWith(BUILD_MARKER), 'still recognisably the build prompt');
@@ -457,9 +448,7 @@ test('a plan too long for one message is trimmed for this session, never for som
   assert.match(here.prompt, /Task number 0/);
   assert.match(here.prompt, /more line\(s\): harness_plan_read lists every task/);
 
-  const there = buildPrompt(plan, { target: 'elsewhere' });
-  assert.equal(there.trimmed, false);
-  assert.match(there.prompt, /Task number 299/);
+  assert.match(exportText(plan), /Task number 299/);
 });
 
 test('a trimmed prompt cuts what the user changed between changes, stays in budget with the longest note, and is not the read', () => {
@@ -473,7 +462,7 @@ test('a trimmed prompt cuts what the user changed between changes, stays in budg
   plan = applyOps(plan, Array.from({ length: 120 }, (_, i) => ({ op: 'upsert_task' as const, id: `t${i}`, note: `user note on task ${i}` })), 'user').plan;
   plan = confirmDesign(plan, { prompt: 'p' }, 1_500);
   const note = 'n'.repeat(4_000);
-  const built = buildPrompt(plan, { target: 'session', note });
+  const built = buildPrompt(plan, { note });
   assert.equal(built.trimmed, true);
   assert.ok(built.prompt.length <= PROMPT_BUDGET, `${built.prompt.length} > ${PROMPT_BUDGET}`);
   assert.ok(built.prompt.includes(note), "the user's note is kept whole");

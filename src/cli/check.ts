@@ -1,5 +1,5 @@
 /**
- * `coplan check <stage>` — run a stage's hooks from `.coplan/config.json`,
+ * `coplan check <stage>` — run a stage's checks from `.coplan/config.json`,
  * targeted to what changed.
  *
  * One command for an agent to run, with output it can act on: a line per
@@ -185,7 +185,7 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   }
   if (!hooks.length) {
     if (opts.json) console.log('[]');
-    else if (!stageHooks.length) console.log(`No ${opts.stage} hooks${opts.skip.length ? ' left to run' : ''} in ${PROJECT_CONFIG_PATH}.`);
+    else if (!stageHooks.length) console.log(`No ${opts.stage} checks${opts.skip.length ? ' left to run' : ''} in ${PROJECT_CONFIG_PATH}.`);
     return 0;
   }
   // Each check's command, with `{files}` as the changed files in its area —
