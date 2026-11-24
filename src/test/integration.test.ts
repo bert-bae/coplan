@@ -1009,8 +1009,8 @@ test('an audit proposes instead of overwriting: the user answers in Coplan, and 
 
   // A second one, rejected with a reason.
   await mcpFor(id, 'propose', { title: 'Drop Postgres', reason: 'Simpler.', ops: [{ op: 'remove_node', diagramId: 'd1', id: 'db' }] });
-  await opsOn(id, [{ op: 'reject_proposal', id: 'p2', note: 'We need durability.' }]);
-  assert.match(String((await mcpFor(id, 'read', { changes_only: true }))['text']), /p2 "Drop Postgres" — \*\*rejected\*\* by the user: We need durability\./);
+  await opsOn(id, [{ op: 'reject_proposal', id: 'p3', note: 'We need durability.' }]);
+  assert.match(String((await mcpFor(id, 'read', { changes_only: true }))['text']), /p3 "Drop Postgres" — \*\*rejected\*\* by the user: We need durability\./);
 });
 
 test('the build gates hold however the agent reports progress, and only the user lifts them', async () => {

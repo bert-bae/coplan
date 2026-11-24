@@ -429,7 +429,7 @@ agent you choose. Nothing is downloaded at run time.
 
 | Part | What it is | Runs as | Lifetime |
 | --- | --- | --- | --- |
-| [MCP server](#the-mcp-server-harness) `harness` | Eleven tools the agent calls to publish, read, propose changes to, sign off and track the plan | `node dist/mcp/main.js`, over stdio | One per agent session, started by the agent |
+| [MCP server](#the-mcp-server-harness) `harness` | Twelve tools the agent calls to publish, read, propose changes to, sign off and track the plan | `node dist/mcp/main.js`, over stdio | One per agent session, started by the agent |
 | [Hooks](#hooks) | Seven lifecycle hooks in Claude Code and Codex, five in Cursor | `bin/coplan-hook-relay.sh` — `sh` and `curl` | About 20 ms per event |
 | [Daemon](#what-it-reads-writes-and-connects-to) | Local server: keeps the plans, serves the page | `node dist/daemon/main.js` | One per user. The first hook starts it; it exits after two idle hours |
 | [Skills](#skills) | `coplan`, `coplan-build`, `iric` | Instructions the agent loads | When the agent uses one |
@@ -685,7 +685,7 @@ counts against the model's tokens.
 
 | What | Size | When |
 | --- | --- | --- |
-| The eleven tool definitions | About 34 KB of JSON schema — on the order of 8,000–10,000 tokens | Whenever the agent loads the server's tools |
+| The twelve tool definitions | About 24 KB of JSON schema — on the order of 6,000 tokens | Whenever the agent loads the server's tools |
 | The three skill descriptions | About 1.4 KB | Always listed |
 | A skill's body | 16.0 KB (`coplan`), 8.5 KB (`coplan-build`), 6.7 KB (`iric`) | When the agent uses that skill |
 | The plan, read back | About 9,000 characters for two diagrams and ten tasks; about 140,000 for 150 boxes and 150 tasks | Each `harness_plan_read` (`changes_only` is shorter), and each publish's reply |
