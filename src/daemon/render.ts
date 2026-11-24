@@ -762,7 +762,6 @@ function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: P
   b.add('step-3', TEMPLATE, '3. Review: ')
     .inline('step-3:review', chosen('review'), REVIEW_WORDS[s.review])
     .inline('step-3:end', TEMPLATE, ', unless a task says otherwise.')
-    .inline('step-3:model', configSource(project, 'review.model'), s.review === 'subagent' ? reviewerWords(project) : '')
     .inline('step-3:rounds', chosen('maxRounds'), ` After ${s.maxRounds} review round${s.maxRounds === 1 ? '' : 's'} without passing, another round is the user's call.`);
   b.add('step-4', TEMPLATE, '4. Mark a task done only once its review passed and its review checks are green, with a one-line note of what you did.');
   b.add('step-5', TEMPLATE, '5. If you are stuck, mark the task blocked with a note saying on what, and go on with what else is ready.');
@@ -785,7 +784,7 @@ function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: P
     TEMPLATE,
     '9. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) ' +
       'and give the user the final summary: what was built, the branches and pull requests, and how it was checked.',
-  ).inline('step-9:final', configSource(project, 'final.blocking'), finalWords(project));
+  );
   b.push(...askRuleBlocks(agent, 'managed'));
   return b.blocks;
 }
@@ -847,7 +846,7 @@ function trackedBrief(plan: Plan, agent: AgentInfo, project: ProjectConfig, mode
     TEMPLATE,
     '6. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) ' +
       'and give the user the final summary: what was built, the branches and pull requests, and how it was checked.',
-  ).inline('step-6:final', configSource(project, 'final.blocking'), finalWords(project));
+  );
   b.push(...askRuleBlocks(agent, 'tracked'));
   return b.blocks;
 }
@@ -855,7 +854,7 @@ function trackedBrief(plan: Plan, agent: AgentInfo, project: ProjectConfig, mode
 /**
  * The one rule for asking the user (#63), as each prompt states it: only
  * a decision that cannot be undone, that reaches outside the session, or
- * that is the user's by right — which, in a Managed build, its gates name.
+ * that is the user's by right.
  * Anything else the agent decides, says so in the task's note, and carries
  * on. The coplan skill states the same rule; nothing else tells the agent
  * to ask, and src/test/contract.test.ts holds it to that.
@@ -1222,8 +1221,6 @@ export function configRows(project: ProjectConfig, point: 'design' | 'build'): C
     const { tool, open, templateFile } = project.pullRequests;
     const how = open === 'never' ? 'none opened: the branches are pushed' : tool === 'none' ? 'you open them' : `${tool === 'graphite' ? 'Graphite' : 'gh pr create'}, ${open === 'auto' ? 'as each branch is done' : 'once you say'}`;
     rows.push(row('pullRequests', 'Pull requests', `${how}${templateFile ? ` · template ${templateFile}` : ''}`));
-    rows.push(row('review.model', 'Reviewer model', project.review.model ?? "the agent's own"));
-    rows.push(row('final.blocking', 'Failing final checks', project.final.blocking ? 'hold the build report' : 'are reported; the report is not held'));
   }
   const words = project.instructions[point]?.trim();
   rows.push(row(`instructions.${point}`, 'Standing instructions', words ? (words.length > 120 ? `${words.slice(0, 119).trimEnd()}…` : words) : 'none'));
@@ -1232,18 +1229,6 @@ export function configRows(project: ProjectConfig, point: 'design' | 'build'): C
 
 /** How much of the standing instructions a prompt carries, within its budget. */
 const PROMPT_INSTRUCTIONS = 1_500;
-
-/** Who reviews, with the model the repository names for it. */
-export function reviewerWords(project: ProjectConfig): string {
-  return project.review.model ? ` Run the reviewer on the \`${project.review.model}\` model.` : '';
-}
-
-/** What a failing final check does to the report. */
-export function finalWords(project: ProjectConfig): string {
-  const held = project.hooks.final.filter((h) => !h.optional);
-  if (!project.final.blocking || !held.length) return '';
-  return ` The report is refused until it carries every final check (${held.map((h) => h.name).join(', ')}) passing, in \`checks\`.`;
-}
 
 /** What the user changed since Claude last read, when Claude has read before. */
 function changesSinceRead(plan: Plan): Block[] {

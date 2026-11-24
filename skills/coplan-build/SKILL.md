@@ -22,15 +22,13 @@ prompt.
 The build prompt says how the plan is built:
 
 - **Tracked** — there is no prescribed cycle. Build and check each task as
-  you see fit, keep the board true with `harness_task_update`, and read the
-  notes in its replies: they say what a Managed build would have held back.
+  you see fit, and keep the board true with `harness_task_update`.
 - **Managed** — every task goes implement → review → refine through the
   `iric` skill, and the prompt carries the user's settings:
   - **review** — who reviews a task by default (`subagent`, `self`,
     `user`, `skip`). A task may override it.
   - **parallel** — how many tasks may be in progress at once.
-  - **maxRounds** — review rounds a task may take; another past them is
-    the user's to allow.
+  - **maxRounds** — review rounds a task should take.
 
 It also lists the repository's **checks** from `.coplan/config.json`, per
 stage (`implement`, `review`, `final`). Run those — do not invent others —
@@ -49,9 +47,8 @@ waits on what, and the branches.
 
 Repeat until `harness_task_next` says every task is done:
 
-1. **Pick.** Take ready tasks — in a Managed build, up to `parallel` minus
-   those in progress. Ready means everything it depends on is done;
-   starting anything else is refused. Do not build two tasks at once in the
+1. **Pick.** Take ready tasks. Ready means everything it depends on is
+   done; starting anything else is refused. Do not build two tasks at once in the
    same working tree if they touch the same files (`harness_task_next`
    warns you).
 2. **Brief.** Call `harness_task_brief` for each. The brief is
@@ -135,9 +132,8 @@ Otherwise:
   description from it. Each pull request goes against the branch below it
   (the base branch for the bottom one); say in each which tasks it carries
   and what it stacks on, and record it with `harness_branch_update`.
-- Where the repository holds the report on its final checks
-  (`final.blocking`), the report is refused until it carries each of them,
-  passing, in `checks`.
+- Report the final checks as they came out, in `checks`: the report is
+  never refused, and a failing check shows as failing.
 
 ## When things go sideways
 
@@ -193,7 +189,7 @@ reviews and merges yourself, and record each pull request's state with
 `harness_branch_update` as it changes.
 
 - **A fix** is a task like any other: add it under the pull request's
-  branch (`upsert_task` with that `branch`), take it through the iric cycle,
+  branch (`upsert_task` with that `branch`), build and check it,
   push, and reply on each thread it answers. Never skip, disable or weaken a
   test to turn CI green, and force-push (with lease) only the build's own
   branches.

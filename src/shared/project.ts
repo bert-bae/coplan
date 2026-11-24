@@ -88,10 +88,6 @@ export interface ProjectConfig {
     /** That file, as the config names it. */
     templateFile?: string;
   };
-  /** The reviewer subagent: which model reviews, when not the agent's own. */
-  review: { model?: string };
-  /** Whether failing final checks hold back the build report. */
-  final: { blocking: boolean };
   /** Words added to what the agent is told, per point: the user's global
    *  ones first, then the repository's. */
   instructions: Partial<Record<InstructionPoint, string>>;
@@ -135,10 +131,10 @@ export const MAX_INSTRUCTIONS = 4_000;
 export const MAX_TEMPLATE = 8_000;
 const MAX_ENV = 20;
 
-export const PROJECT_KEYS = ['mode', 'hooks', 'iric', 'branches', 'pullRequests', 'review', 'final', 'instructions', 'planCheck'];
+export const PROJECT_KEYS = ['mode', 'hooks', 'iric', 'branches', 'pullRequests', 'instructions', 'planCheck'];
 /** Keys older versions read, by where they sit: an old file still holding
  *  them loads, with a warning that they do nothing now. */
-const RETIRED_KEYS = ['runners'];
+const RETIRED_KEYS = ['runners', 'review', 'final'];
 const RETIRED_PR_KEYS = ['watch', 'on'];
 const IRIC_KEYS = ['review', 'parallel', 'maxRounds'];
 const BRANCH_KEYS = ['base', 'prefix'];
@@ -162,8 +158,6 @@ export function emptyProjectConfig(): ProjectConfig {
     settings: { ...DEFAULT_BUILD_SETTINGS },
     branches: {},
     pullRequests: { tool: 'gh', open: 'ask' },
-    review: {},
-    final: { blocking: false },
     instructions: {},
     planCheck: {},
     errors: [],
@@ -266,8 +260,6 @@ interface Layer {
   iric?: Record<string, unknown>;
   branches?: ProjectConfig['branches'];
   pullRequests?: Partial<ProjectConfig['pullRequests']>;
-  review?: ProjectConfig['review'];
-  final?: Partial<ProjectConfig['final']>;
   instructions?: ProjectConfig['instructions'];
   planCheck?: ProjectConfig['planCheck'];
   /** See ProjectConfig.checksBroken. */
@@ -318,10 +310,6 @@ function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors' | 'warn
     from('branches', l.branches);
     Object.assign(out.pullRequests, l.pullRequests);
     from('pullRequests', l.pullRequests, ['tool', 'open', 'template']);
-    Object.assign(out.review, l.review);
-    from('review', l.review);
-    Object.assign(out.final, l.final);
-    from('final', l.final);
     Object.assign(out.planCheck, l.planCheck);
     from('planCheck', l.planCheck);
     for (const point of INSTRUCTION_POINTS) {
@@ -437,20 +425,6 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
     }
   }
 
-  const review = section('review', '{ "model" }');
-  if (review) {
-    unknownKeys(review, ['model'], 'review.', local);
-    const model = review['model'];
-    if (typeof model === 'string' && /^[\w.:/[\]-]{1,80}$/.test(model.trim())) layer.review = { model: model.trim() };
-    else if (model !== undefined) local.push('"review.model" must be a model name, e.g. "opus" or "sonnet".');
-  }
-
-  const final = section('final', '{ "blocking" }');
-  if (final) {
-    unknownKeys(final, ['blocking'], 'final.', local);
-    if (typeof final['blocking'] === 'boolean') layer.final = { blocking: final['blocking'] };
-    else if (final['blocking'] !== undefined) local.push('"final.blocking" must be true or false.');
-  }
 
   const instructions = section('instructions', `{ ${INSTRUCTION_POINTS.map((p) => `"${p}"`).join(', ')} }, each text or { "file" }`);
   if (instructions) {

@@ -13,7 +13,7 @@ import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from '
 import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
-import { MAX_NOTE, MAX_USER_SAID, PlanError, cleanChecks, cleanNote, cleanUserSaid, mergeChecks, passedAndClosed, planPhase, wasFinished, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
+import { MAX_NOTE, MAX_USER_SAID, PlanError, cleanChecks, cleanNote, cleanUserSaid, planPhase, wasFinished, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
 import {
   PROMPT_BUDGET,
   askRule,
@@ -40,20 +40,16 @@ import {
   dependents,
   effectiveBranch,
   effectiveChecks,
-  effectiveReview,
   hasSubtasks,
-  isManaged,
   modeFor,
-  planMode,
   readyTasks,
-  roundVerdict,
   stackStatus,
   targetOf,
   validMode,
   waitingOn,
 } from '../shared/build.ts';
-import { HOOK_STAGES, filesInScope, hookScope, taskHooks, type ProjectConfig } from '../shared/project.ts';
-import { changedFiles, changedSince, committedOn, headCommit, unreadWords, worktreeOf, type ChangedFiles } from '../shared/changes.ts';
+import { HOOK_STAGES, type ProjectConfig } from '../shared/project.ts';
+import { headCommit, worktreeOf } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
 import { ConfigCache, globalConfigFile, projectHarnessFile, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, sanitizeId, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
@@ -1232,13 +1228,10 @@ function buildRouter(deps: Deps): Router {
 
   /**
    * `harness_task_update`: a status, a step of the iric cycle, the checks
-   * run — answered with what it means for the build. Starting or finishing
-   * a task that still waits on another is refused in every mode: the board
-   * would say something untrue, and the agent can change the dependency.
-   * A Managed build is also held to its cycle — review before done, a
-   * passing verdict, green checks, the parallel and round limits, the
-   * user's say over dropping signed-off work. Any other mode gets each of
-   * those as a note in the reply instead (#62).
+   * run, a verdict — recorded as reported, for the board to show, and
+   * answered with what it means for the build. Only what would make the
+   * board contradict itself is refused: a task done or started while it
+   * still waits on another, progress set on a parent (#62).
    */
   const updateTask = async (session: SessionState, body: Record<string, unknown>): Promise<string> => {
     const git = await taskGit(session, body);
@@ -1254,46 +1247,23 @@ function buildRouter(deps: Deps): Router {
   };
 
   /**
-   * What git says about a task, read before its update is weighed: the
+   * What git says about a task, read before its update is recorded: the
    * commit it begins at, when it is starting — its change is everything
-   * since — and, when it is going done, that change, which the done gate
-   * holds its checks to. Every check is targeted: to the areas the task
-   * really touched, not the ones it planned to, nor the rest of the build's.
+   * since, which its targeted checks run over.
    */
-  const taskGit = async (session: SessionState, body: Record<string, unknown>): Promise<{ startCommit?: string; change?: ChangedFiles | null }> => {
+  const taskGit = async (session: SessionState, body: Record<string, unknown>): Promise<{ startCommit?: string }> => {
     const plan = session.plan;
     const task = plan?.tasks.find((t) => t.id === String(body['task_id'] ?? ''));
     if (!plan || !task) return {};
-    const out: { startCommit?: string; change?: ChangedFiles | null } = {};
     const status = body['status'];
     if (!task.startCommit && (status === 'in_progress' || (typeof body['stage'] === 'string' && status !== 'done' && status !== 'blocked'))) {
       const head = await headCommit(await builtIn(session, plan, task));
-      if (head) out.startCommit = head;
+      if (head) return { startCommit: head };
     }
-    if (status === 'done' && body['user_approved'] !== true) out.change = await taskChange(session, plan, task);
-    return out;
+    return {};
   };
 
-  /**
-   * One task's change: everything since the commit it began at, where it is
-   * built — or, on a branch no working tree has checked out any more, what
-   * was committed on it. A task started before that was recorded is held
-   * to the build's change since its base, as before. Null outside git.
-   */
-  const taskChange = async (session: SessionState, plan: Plan, task: Task): Promise<ChangedFiles | null> => {
-    const root = session.repoRoot ?? session.cwd;
-    if (!task.startCommit) return changedFiles(root, plan.submission?.base ?? projectFor(session).branches.base);
-    const branch = effectiveBranch(plan, task);
-    const tree = branch ? await worktreeOf(root, branch) : null;
-    if (branch && !tree) {
-      const committed = await committedOn(root, task.startCommit, branch);
-      if (committed) return committed;
-    }
-    return changedSince(tree ?? root, task.startCommit);
-  };
-
-  const updateTaskNow = (session: SessionState, body: Record<string, unknown>, git: { startCommit?: string; change?: ChangedFiles | null }): string => {
-    const changed = git.change ?? null;
+  const updateTaskNow = (session: SessionState, body: Record<string, unknown>, git: { startCommit?: string }): string => {
     const before = session.plan;
     const taskId = String(body['task_id'] ?? '');
     if (!before) throw new PlanError(`No task "${taskId}": there is no plan yet. Publish one with harness_plan_publish.`);
@@ -1330,25 +1300,7 @@ function buildRouter(deps: Deps): Router {
     if (status === 'dropped' && !note?.trim()) {
       throw new PlanError(`Dropping "${task.title}" needs a \`note\`: why it is no longer needed (and who said so).`);
     }
-    const project = projectFor(session);
-    const settings = before.submission?.settings ?? project.settings;
-    // The gates below hold a Managed build to its cycle. In any other mode
-    // each is a note in the reply instead: what was skipped, and why it
-    // matters, for the agent to weigh — nothing is refused.
-    const managed = isManaged(planMode(before, project.mode));
-    const skipped: string[] = [];
-    const gate = (refusal: string, note: string) => {
-      if (managed) throw new PlanError(refusal);
-      skipped.push(note);
-    };
-    // Work the user signed off is theirs to drop: the agent asks.
-    if (status === 'dropped' && before.submission && !task.addedInBuild && !approved) {
-      gate(
-        `"${task.title}" is part of the plan the user submitted, so dropping it is theirs to decide: ask them with ` +
-          `${agentInfo(session.agent).askWith}. If they agree, call again with user_approved: true and their words in the note.`,
-        'it was part of the plan the user submitted: tell them you dropped it, and why',
-      );
-    }
+    const settings = before.submission?.settings ?? projectFor(session).settings;
 
     // A parent's progress is its subtasks': a status set on it would say
     // something the board never shows.
@@ -1371,139 +1323,6 @@ function buildRouter(deps: Deps): Router {
           'harness_plan_edit {ops: [{op: "upsert_task", id, dependsOn: [...]}]} and tell the user why.',
       );
     }
-    if (starting && !approved) {
-      const busy = before.tasks.filter((t) => t.status === 'in_progress' && t.id !== task.id && !hasSubtasks(before, t.id));
-      if (busy.length >= settings.parallel) {
-        gate(
-          `"${task.title}" cannot start yet: ${busy.length} task(s) are in progress (${busy.map((t) => t.id).join(', ')}), ` +
-            `and the user allowed ${settings.parallel} at once. Finish one first.`,
-          `${busy.length} other task${busy.length === 1 ? ' is' : 's are'} in progress too (${busy.map((t) => t.id).join(', ')}): keep them off each other's files`,
-        );
-      }
-    }
-
-    // The round limit is the user's: past it, stop and ask them.
-    // (A finished task taken up again has its next round: the last one passed.
-    // Taken up and sent to review in this one call, too.)
-    const takenUpAgain = task.reopened || passedAndClosed(before, task, settings.review);
-    // Said the same wherever the limit stops it (here, and done below), with
-    // the call for each choice the user may make.
-    const roundLimit = (where: string) =>
-      `"${task.title}" ${where}has had ${task.round} review round(s), the most the user allowed (${settings.maxRounds}). Stop: mark it ` +
-      'blocked with a note on what still fails, and ask the user — another round, accept it as it is, or take it over. Then call ' +
-      'again with user_approved: true and their answer in the note: stage "review" for another round, status "done" to accept it; ' +
-      'for them to take it over, leave it blocked.';
-    if (stage === 'review' && task.stage !== 'review' && (task.round ?? 0) >= settings.maxRounds && !takenUpAgain && !approved) {
-      gate(
-        roundLimit(''),
-        `this is review round ${(task.round ?? 0) + 1}, past the ${settings.maxRounds} the user set: say in the task's note why another round is worth it`,
-      );
-    }
-
-    // The required checks failing as it is closed: the checks the user set
-    // for it (#54) count — one they skipped does not, nor an optional one.
-    const set = effectiveChecks(before, task);
-    const optional = new Set([
-      ...HOOK_STAGES.flatMap((st) => project.hooks[st].filter((h) => h.optional).map((h) => h.name)),
-      ...set.add.filter((c) => c.optional).map((c) => c.name),
-      ...set.skip,
-    ]);
-    const latest = mergeChecks(task.checks, checks ?? []);
-    const failing = status === 'done' ? latest.filter((c) => !c.ok && !optional.has(c.name)) : [];
-
-    if (status === 'done' && !approved) {
-      // Done means the cycle ran: it went to review at least once, …
-      if (!task.round) {
-        gate(
-          `"${task.title}" has not been reviewed: take it through its cycle first — stage "review" (every review mode, ` +
-            '"skip" included, reports one), then done once it passes.',
-          'it was never reviewed (no review round was reported)',
-        );
-      }
-      // … and every check that gates it passed when it was last run.
-      // The checks the user set for it (#54): one they skipped neither holds
-      // it back nor is waited on; one they added does both, unless optional.
-      // Targeted: the checks for what the task's change touched — none for
-      // an area it did not touch, however it was planned. Outside git, the
-      // checks for the files it planned to touch, as before. Where git
-      // could not read the change, or it is too large to list, every review
-      // check: an unread change is never taken for one that touched nothing.
-      const unread = changed?.unread;
-      const missingHooks = (
-        unread
-          ? taskHooks(project, 'review', undefined, set)
-          : changed
-            ? taskHooks(project, 'review', changed.files, set, { changed: true })
-            : taskHooks(project, 'review', task.files, set)
-      ).filter((h) => !h.optional && !latest.some((c) => c.name === h.name));
-      const missing = missingHooks.map((h) => {
-        const touched = changed && hookScope(h) ? filesInScope(h, changed.files) : [];
-        return touched.length ? `${h.name} (for ${touched.slice(0, 3).join(', ')}${touched.length > 3 ? ', …' : ''})` : h.name;
-      });
-      // With the task's skips, so it runs exactly what the gate waits on.
-      const rerun = missing.length && task.startCommit ? ` — \`${COPLAN_BIN ? `"${COPLAN_BIN}"` : 'coplan'} check review --since ${task.startCommit.slice(0, 12)}${skipArg(set)}\` runs exactly these, where it is built` : '';
-      if (failing.length || missing.length) {
-        const why = [
-          failing.length ? `its last checks failed (${failing.map((c) => `${c.name}${c.note ? `: ${c.note}` : ''}`).join('; ')})` : '',
-          missing.length
-            ? unread && changed
-              ? `what it changed cannot be told — ${unreadWords(changed)} — so every review check applies, and ${missing.join(', ')} ${missing.length === 1 ? 'was' : 'were'} never reported`
-              : `the review checks ${missing.join(', ')} were never reported${rerun}`
-            : '',
-        ].filter(Boolean);
-        gate(
-          `"${task.title}" is not done: ` +
-            why.join(', and ') +
-            '. Run them, refine until they pass, and report them with `checks`. If a failure has nothing to do with this ' +
-            'task, mark it blocked with a note saying so and ask the user; if they accept it as it is, call again with ' +
-            'user_approved: true and their answer in the note.',
-          why.join('; '),
-        );
-      }
-      // … and its last review round passed — by whoever the user said reviews it.
-      const mode = effectiveReview(before, task, settings.review);
-      if (mode !== 'skip') {
-        // The verdict in this call, if any, is the round's latest — and only
-        // counts for a task the user reviews when it is theirs, which on
-        // this path (not user_approved) it is not.
-        const last = verdict ? (mode === 'user' ? roundVerdict(task, mode) : { verdict }) : roundVerdict(task, mode);
-        const passed = last?.verdict === 'pass';
-        // Without a round there is no verdict to miss: that note is above.
-        // Not in review, its rounds used, and no new one its own: another
-        // round, or done as it is, is the user's to allow in a Managed build;
-        // in a Tracked one the agent has decided, and says why (the note).
-        if (!passed && task.round && task.stage !== 'review' && task.round >= settings.maxRounds && !takenUpAgain) {
-          gate(
-            roundLimit('is not in review, and '),
-            `marked done out of review after ${task.round} review round(s), the most the user set: say in the task's note why it is right as it is`,
-          );
-        } else if (!passed && task.round && task.stage !== 'review') {
-          // Not in review: the verdict is given in a review round, so that is
-          // where to go (a finished task taken up again lost its pass).
-          const why = task.reopened ? ': its last pass went when it was taken up again' : '';
-          gate(
-            mode === 'user'
-              ? `"${task.title}" is not in review${why}. Report stage "review" (a new round): the user's verdict is given there, ` +
-                  'on the board in Coplan, or in chat (then call again with verdict "pass", user_approved: true and their words in the note).'
-              : `"${task.title}" is not in review${why}. Report stage "review" (a new round) and give its verdict there.`,
-            `not in review${why}: report stage "review" for a new round`,
-          );
-        } else if (!passed && task.round) {
-          gate(
-            mode === 'user'
-              ? `"${task.title}" is the user's to review, and they have not passed it: show them the change and ask with ` +
-                  `${agentInfo(session.agent).askWith}. They can approve it on the board in Coplan; if they approve it in chat, call ` +
-                  'again with verdict "pass", user_approved: true and their words in the note.'
-              : `"${task.title}" has no passing verdict for review round ${task.round}: report the review's outcome — ` +
-                  'verdict "pass" (with this call is fine), or "changes" and refine.',
-            mode === 'user'
-              ? "it is the user's to review, and they have not passed it: show them the change"
-              : `no passing verdict for review round ${task.round}`,
-          );
-        }
-      }
-    }
-
     const readyBefore = new Set(readyTasks(before).map((t) => t.id));
     const progress: PlanOp = {
       op: 'upsert_task',
@@ -1512,9 +1331,6 @@ function buildRouter(deps: Deps): Router {
       ...(stage ? { stage: stage as NonNullable<ReturnType<typeof validStage>> } : {}),
       ...(checks ? { checks } : {}),
       ...(git.startCommit ? { startCommit: git.startCommit } : {}),
-      // Done over failing checks (accepted by the user, or the agent's call
-      // outside a Managed build) is not a round that passed (D4).
-      ...(failing.length ? { acceptedFailing: true } : {}),
       ...(note !== undefined ? { note: approved ? `${note} (approved by the user)` : note } : {}),
     };
     const review: PlanOp[] = verdict
@@ -1524,14 +1340,12 @@ function buildRouter(deps: Deps): Router {
     // into review, after it; otherwise before the rest (done ends the review).
     const { plan, changes } = store.applyOps(session.sessionId, stage ? [progress, ...review] : [...review, progress], 'claude', {
       tracking: true,
-      // Judged by the same review mode as the gates above.
       review: settings.review,
     });
     const now = plan.tasks.find((t) => t.id === taskId)!;
     const out: string[] = [];
     const state = now.status === 'in_progress' && now.stage ? stageWords(now) : now.status.replace('_', ' ');
     out.push(`[cc-harness] "${now.title}" is ${state}.${changes.length ? '' : ' (It already was.)'}`);
-    if (skipped.length) out.push(`Noted, not refused (this build is ${MODE_LABEL[planMode(plan, project.mode)]}): ${skipped.join('; ')}.`);
     // Its checks are targeted to its change from here: say how to run them.
     if (starting && now.startCommit) {
       out.push(
@@ -1549,17 +1363,9 @@ function buildRouter(deps: Deps): Router {
       const failed = checks.filter((c) => !c.ok);
       out.push(
         failed.length
-          ? `Checks: ${failed.length} failed (${failed.map((c) => c.name).join(', ')})${managed ? ' — refine before review passes' : ''}.`
+          ? `Checks: ${failed.length} failed (${failed.map((c) => c.name).join(', ')}).`
           : `Checks: all ${checks.length} passed.`,
       );
-    }
-    if (managed && now.stage === 'review' && stage === 'review') {
-      if ((now.round ?? 0) >= settings.maxRounds) {
-        out.push(`This is review round ${now.round} of the ${settings.maxRounds} the user allowed: if it does not pass, another round is theirs to allow.`);
-      }
-      if (effectiveReview(plan, now, settings.review) === 'user') {
-        out.push(`This task's review is the user's: show them the change and ask with ${agentInfo(session.agent).askWith} before marking it done.`);
-      }
     }
     // The tasks that wait on this one: what dropping or reopening it means
     // for them is worth saying out loud.
@@ -1784,8 +1590,6 @@ function buildRouter(deps: Deps): Router {
           const ops = Array.isArray(body['ops']) ? (body['ops'] as PlanOp[]) : [];
           // All or nothing: a batch that cannot be applied whole is refused.
           if (ops.length > MAX_OPS) throw new PlanError(`At most ${MAX_OPS} edits per call; split the change.`);
-          const project = projectFor(session);
-          for (const op of ops) if (op && op.op === 'report') refuseUnfinishedFinal(op.checks, project);
           const { plan, changes } = store.applyOps(id, ops, 'claude');
           const notice = unreadNotice(plan);
           reply(
@@ -1934,30 +1738,6 @@ function buildRouter(deps: Deps): Router {
   });
 
   return router;
-}
-
-/**
- * Where the repository says the final checks hold the report
- * (`final.blocking`), a report must carry each required one, passing: the
- * plan is not built while the checks that say so fail.
- */
-function refuseUnfinishedFinal(checks: unknown, project: ProjectConfig): void {
-  if (!project.final.blocking) return;
-  const required = project.hooks.final.filter((h) => !h.optional).map((h) => h.name);
-  if (!required.length) return;
-  const reported = new Map(
-    (Array.isArray(checks) ? checks : [])
-      .filter((c): c is { name: string; ok: unknown } => Boolean(c) && typeof (c as { name?: unknown }).name === 'string')
-      .map((c) => [c.name, c.ok === true]),
-  );
-  const missing = required.filter((n) => !reported.has(n));
-  const failing = required.filter((n) => reported.get(n) === false);
-  if (!missing.length && !failing.length) return;
-  throw new PlanError(
-    'This repository holds the build report until its final checks pass (final.blocking in .coplan/config.json). ' +
-      [failing.length ? `Failing: ${failing.join(', ')}.` : '', missing.length ? `Not reported in \`checks\`: ${missing.join(', ')}.` : ''].filter(Boolean).join(' ') +
-      ' Fix what fails and run them again; if a failure is not this build\'s to fix, tell the user why in chat.',
-  );
 }
 
 /**

@@ -635,7 +635,7 @@ function buildTaskTree(
       const id = old && !tasks.some((t) => t.id === old.id) ? old.id : claimIdAmong(next, 'task', raw.id, tasks);
       if (typeof raw.id === 'string' && raw.id.trim()) written.set(raw.id.trim(), id);
       // A task that survives keeps its status: progress is reported through
-      // harness_task_update and its gates, never by publishing over it. Only
+      // harness_task_update, never by publishing over it. Only
       // a new task says where it starts.
       const status = old ? old.status : (validStatus(raw.status) ?? 'todo');
       // Left out, a task's detail is kept — as a box's prose is — so a
@@ -974,7 +974,7 @@ function normalizeTask(task: Task): Task {
   // How it was closed, while it stays finished.
   if (t.acceptedFailing !== true || !wasFinished(t)) delete t.acceptedFailing;
   // What a task's own checks say, from disk: anything malformed is dropped,
-  // never allowed to break a gate.
+  // never allowed to break a brief.
   const added = Array.isArray(t.addChecks) ? t.addChecks.map(validTaskCheck).filter((c): c is TaskCheck => Boolean(c)) : [];
   if (added.length) t.addChecks = added;
   else delete t.addChecks;
@@ -1399,10 +1399,10 @@ function withoutExpect(op: PlanOp): PlanOp {
 export const PROGRESS_FIELDS = ['status', 'stage', 'checks', 'startCommit', 'acceptedFailing'] as const;
 
 /**
- * Claude's progress goes through harness_task_update, which refuses what
- * would make the board untrue — starting a task that still waits, finishing
- * one whose checks fail or that was never reviewed. An upsert_task carrying
- * a status would walk straight past those gates.
+ * Claude's progress goes through harness_task_update, which records it and
+ * refuses only what would make the board contradict itself — starting or
+ * finishing a task that still waits. An upsert_task carrying a status would
+ * walk straight past that.
  */
 function refuseProgress(op: PlanOp): void {
   if (op.op === 'set_branch') {
@@ -1425,10 +1425,9 @@ export function applyOps(
   ops: PlanOp[],
   author: Author,
   now = Date.now(),
-  /** `tracking`: Claude's progress report, already through harness_task_update's gates.
+  /** `tracking`: Claude's progress report, already through harness_task_update.
    *  `review`: the project's review mode, for a plan that holds none of its
-   *  own — any plan but a submitted Managed build — as the daemon's gates
-   *  judge by. The session store fills it in for every edit. */
+   *  own — any plan but a submitted Managed build. The session store fills it in for every edit. */
   opts: { tracking?: boolean; review?: ReviewMode } = {},
 ): { plan: Plan; changes: Change[] } {
   if (!Array.isArray(ops) || ops.length === 0) {
@@ -2152,7 +2151,7 @@ function stageOrThrow(value: unknown): IricStage {
 /** Check results as reported: each with a name, at most a few dozen. */
 /** Why the agent cannot set a task's checks, and what it does instead. */
 const AGENT_SET_CHECKS =
-  "Which checks a task runs is the user's to set: skipping one takes away part of the gate the task is held to. " +
+  "Which checks a task runs is the user's to set: skipping one changes what done means for the task. " +
   'Propose it instead — harness_plan_edit {ops: [{op: "propose", title, reason, ops: [{op: "set_checks", id, skip: ["tests"]}]}]} — ' +
   'and the user accepts it in Coplan.';
 
@@ -2348,8 +2347,7 @@ export function holdsForReview<P extends Pick<Plan, 'submission'>>(plan: P | nul
  * review, reviewed by the user (the task's own mode, or the build's), with
  * no verdict from them for this round yet. A Tracked build holds nothing
  * for anyone, so it has none. `review`: the project's review mode, for a
- * build submitted on the repository's defaults (no settings of its own), as
- * the daemon's gates judge by.
+ * build submitted on the repository's defaults (no settings of its own).
  */
 export function awaitingUserReview(plan: Pick<Plan, 'submission' | 'tasks'> | null, review: ReviewMode): Task[] {
   if (!holdsForReview(plan)) return [];
@@ -3096,7 +3094,7 @@ function validSubmission(raw: unknown): Submission | undefined {
     at: s.at,
     target,
     // Kept across a restart: without it a Tracked build would read back as
-    // Managed, and its gates would start refusing.
+    // Managed, and its prompts would describe a cycle it never chose.
     ...(mode ? { mode } : {}),
     ...(typeof s.note === 'string' && s.note ? { note: s.note } : {}),
     prompt: s.prompt,

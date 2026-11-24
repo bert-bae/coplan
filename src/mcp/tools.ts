@@ -431,11 +431,9 @@ export const TOOLS: ToolDef[] = [
     endpoint: 'task',
     description:
       'Track progress while you build; the user follows it on the board. in_progress (stage "implement") on start, ' +
-      'stage "review"/"refine" through the cycle, report checks, done with a one-line note once review passed, or ' +
-      'blocked with a note. Always refused: starting or finishing a task that waits on another, progress on a task ' +
-      'with subtasks. Refused when Managed (noted when Tracked): too many at once, review rounds past the limit, done ' +
-      'without a passing verdict for the last round (the user\'s, if they review) or with a failing or unreported check, ' +
-      'dropping signed-off work.',
+      'stage "review"/"refine" through the cycle, report checks (failures show on the board), done with a one-line ' +
+      'note, or blocked with a note. Recorded as reported. Refused only: starting or finishing a task that waits on ' +
+      'another, progress on a task with subtasks.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -461,8 +459,7 @@ export const TOOLS: ToolDef[] = [
         user_approved: {
           type: 'boolean',
           description:
-            'Only when the user told you in chat: their verdict on a task they review, another review round past ' +
-            'their maximum, more tasks at once, or done although a check fails. Put what they said in `note`.',
+            'With verdict, when the user gave it in chat: the verdict is recorded as theirs. Put what they said in `note`.',
         },
       },
       required: ['task_id'],

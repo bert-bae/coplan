@@ -48,13 +48,11 @@ import { agentInfo, type AgentKind } from '../shared/agents.ts';
 import {
   checkWords,
   checksBlocks,
-  finalWords,
   instructionBlocks,
   partBlocks,
   pullRequestWords,
   relatedTasks,
   renderBuildOrder,
-  reviewerWords,
   stageWords,
   templateLines,
 } from './render.ts';
@@ -114,7 +112,7 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
             .join(' → ')}. ${pullRequestWords(project)} Record each pull request with harness_branch_update {branch, pr_url, pr_number, pr_state}, so the board ` +
           'shows the stack.'
         : `2. Commit and push the work on the current branch. ${pullRequestWords(project)}`,
-      `3. Write the build report with harness_plan_edit {ops: [{op: "report", text, checks}]}: what each task did, the branches and pull requests, anything that differs from the plan, and follow-ups — with the final checks as they came out in \`checks\`. The plan is built once it is in.${finalWords(project)}${skippedWords(plan)}`,
+      `3. Write the build report with harness_plan_edit {ops: [{op: "report", text, checks}]}: what each task did, the branches and pull requests, anything that differs from the plan, and follow-ups — with the final checks as they came out in \`checks\`. The plan is built once it is in.${skippedWords(plan)}`,
       '4. Give the user the final summary in chat, with the links.',
     );
     out.push(...templateLines(project));
@@ -169,9 +167,6 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
         out.push(`  ${verdict.verdict === 'pass' ? `✓ passed by ${who}: mark it done` : `✗ ${who} asked for changes: refine`}${verdict.summary ? ` — ${verdict.summary}` : ''}.`);
       } else if (t.stage === 'review' && mode === 'user') {
         out.push('  ⏸ waiting on the user\'s review: show them the change; they approve it in chat or in Coplan.');
-      }
-      if (t.round && t.round >= settings.maxRounds && t.stage !== 'review' && !t.reopened) {
-        out.push(`  ⚠ ${t.round} of ${settings.maxRounds} review rounds used: another needs the user's go-ahead (user_approved).`);
       }
     }
   }
@@ -422,8 +417,8 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
     b.add('cycle:mode', TEMPLATE, 'Review: ')
       .inline('cycle:mode:review', reviewFrom ? field('task', reviewFrom.id) : settingSource('review'), `${REVIEW_WORDS[review]}${review !== settings.review ? ' (set on this task)' : ''}`)
       .inline('cycle:mode:rounds', settingSource('maxRounds'), `. At most ${settings.maxRounds} review round${settings.maxRounds === 1 ? '' : 's'}; another is the user's call.`);
-    const stage = (key: 'implement' | 'review', name: string, what: string, hooks: ReturnType<typeof hooksFor>, model = '') => {
-      b.gap().add(`cycle:${key}`, TEMPLATE, `**${name}.** ${what}`).inline(`cycle:${key}:model`, configSource(project, 'review.model'), model);
+    const stage = (key: 'implement' | 'review', name: string, what: string, hooks: ReturnType<typeof hooksFor>) => {
+      b.gap().add(`cycle:${key}`, TEMPLATE, `**${name}.** ${what}`);
       if (hooks.length) b.add(`cycle:${key}:checks`, configSource(project, `hooks.${key}`), hooks.map((h) => `- ${h.name}: \`${hookCommand(h)}\`${h.optional ? ' (optional)' : ''}`));
     };
     const filesArg = `${sinceArg(task)}${skipArg(own)}`;
@@ -439,7 +434,6 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
             ? 'Read your own diff against the objective and the acceptance criteria, as a reviewer would, and run the review checks:'
             : 'A fresh subagent that did not write the change reads the diff against this brief and runs the review checks.',
       taskHooks(project, 'review', files, own),
-      review === 'subagent' ? reviewerWords(project) : '',
     );
     b.push(...outsideChecks(project, files, own, 'cycle:review:outside'));
     // What a reviewer looks for here, whoever reviews.

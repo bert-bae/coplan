@@ -269,11 +269,6 @@ const ALLOWED_ASKS: { file: string; text: string; why: Why }[] = [
   // The user's by right, in a Managed build: what its gates keep for them.
   { file: 'skills/iric/SKILL.md', text: 'does, files, checks) and ask with your question tool', why: "the user's by right, in a Managed build" },
   { file: 'src/daemon/brief.ts', text: 'show the user the change and ask them, with', why: "the user's by right, in a Managed build" },
-  { file: 'src/daemon/main.ts', text: 'so dropping it is theirs to decide: ask them with', why: "the user's by right, in a Managed build" },
-  { file: 'src/daemon/main.ts', text: 'and ask the user — another round, accept it as it is', why: "the user's by right, in a Managed build" },
-  { file: 'src/daemon/main.ts', text: 'mark it blocked with a note saying so and ask the user;', why: "the user's by right, in a Managed build" },
-  { file: 'src/daemon/main.ts', text: 'and they have not passed it: show them the change and ask with', why: "the user's by right, in a Managed build" },
-  { file: 'src/daemon/main.ts', text: "This task's review is the user's: show them the change and ask with", why: "the user's by right, in a Managed build" },
 ];
 
 /** Each line of a source that tells the agent to ask, with where it is. */

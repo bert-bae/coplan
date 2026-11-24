@@ -530,8 +530,8 @@ export function planMode(plan: Pick<Plan, 'submission'> | null | undefined, fall
   return submission.mode ?? (submission.target === 'elsewhere' ? 'export' : 'managed');
 }
 
-/** Whether the daemon holds tasks to the implement → review → refine
- *  cycle: only in Managed mode. Anywhere else its gates are notes. */
+/** Whether the build prompt and brief describe the implement → review →
+ *  refine cycle: only in Managed mode. Nothing is enforced either way. */
 export function isManaged(mode: ExecutionMode): boolean {
   return mode === 'managed';
 }

@@ -162,8 +162,6 @@ test('settings in a prompt name where they are set: config, or the Submit dialog
   const at = (id: string) => build.blocks.find((b) => b.id === id);
   assert.deepEqual(at('step-3:review')?.source, { kind: 'setting', key: 'review' });
   assert.deepEqual(at('step-1:parallel')?.source, { kind: 'setting', key: 'parallel' });
-  assert.equal(at('step-3:model')?.source.kind, 'config');
-  assert.equal(at('step-3:model')?.text, ' Run the reviewer on the `opus` model.');
   assert.deepEqual(at('step-7:pull-requests')?.source, { kind: 'config', key: 'pullRequests', files: ['.coplan/config.json'] });
   assert.deepEqual(at('checks:review')?.source, { kind: 'config', key: 'hooks.review', files: ['.coplan/config.json'] });
   assert.deepEqual(at('instructions:build')?.source, { kind: 'config', key: 'instructions.build', files: ['.coplan/config.json'] });
@@ -182,13 +180,12 @@ test("a config source names each file that set it: the user's own, then the repo
   const repo = path.join(dir, 'repo');
   mkdirSync(path.join(home, 'instructions'), { recursive: true });
   mkdirSync(path.join(repo, '.coplan'), { recursive: true });
-  writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ pullRequests: { tool: 'graphite', open: 'auto' }, review: { model: 'opus' } }));
+  writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ pullRequests: { tool: 'graphite', open: 'auto' } }));
   writeFileSync(path.join(home, 'instructions', 'build.md'), 'Mine first.');
   writeFileSync(path.join(repo, '.coplan', 'config.json'), JSON.stringify({ pullRequests: { open: 'ask' }, instructions: { build: 'Then the repository.' }, hooks: { review: ['npm test'] } }));
   const project = loadProjectConfig(repo, { globalDir: home });
   assert.deepEqual(project.origins?.['pullRequests.tool'], [path.join(home, 'coplan.json')]);
   assert.deepEqual(project.origins?.['pullRequests.open'], ['.coplan/config.json'], 'the repository overrides it');
-  assert.deepEqual(project.origins?.['review.model'], [path.join(home, 'coplan.json')]);
   assert.deepEqual(project.origins?.['instructions.build'], [path.join(home, 'instructions', 'build.md'), '.coplan/config.json']);
   assert.deepEqual(project.origins?.['hooks.review'], ['.coplan/config.json']);
   assert.equal(project.origins?.['hooks.final'], undefined, 'not set anywhere: Coplan has no default checks');
@@ -281,7 +278,6 @@ test('each config row says what it is set to and where: the file, or none for a 
   const at = (key: string) => rows.find((r) => r.key === key);
   assert.deepEqual(at('hooks.review'), { key: 'hooks.review', label: 'Review checks', value: 'tests', files: ['.coplan/config.json'] });
   assert.deepEqual(at('pullRequests'), { key: 'pullRequests', label: 'Pull requests', value: 'Graphite, as each branch is done · template .github/pull_request_template.md', files: ['.coplan/config.json'] });
-  assert.deepEqual(at('review.model'), { key: 'review.model', label: 'Reviewer model', value: 'opus', files: ['.coplan/config.json'] });
   assert.equal(at('instructions.build')?.value, 'Small commits, each with a message that says why.');
   const bare = configRows(loadProjectConfig(null, { globalDir: null }), 'design');
   assert.deepEqual(

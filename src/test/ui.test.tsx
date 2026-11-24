@@ -1854,7 +1854,7 @@ test("a chip in the sign-off dialog shows the field it quotes, and the dialog ke
 test('a prompt cut to fit says what it leaves out, and that the agent reads it with harness_plan_read', async () => {
   const { buildPrompt, configRows, promptHash } = await import('../daemon/render.ts');
   const { parseProjectConfig } = await import('../shared/project.ts');
-  const project = parseProjectConfig({ review: { model: 'opus' } });
+  const project = parseProjectConfig({});
   const long = 'A long paragraph of detail that goes on and on about the work. '.repeat(20);
   let plan = makePlan();
   plan = confirmedPlan(applyOps(plan, [{ op: 'upsert_task', id: plan.tasks[0]!.id, detail: long.repeat(8) }], 'claude').plan);
@@ -1872,7 +1872,6 @@ test('a prompt cut to fit says what it leaves out, and that the agent reads it w
   const dialog = screen.getByRole('dialog', { name: 'Submit the plan' });
   await waitFor(() => assert.match(dialog.textContent ?? '', /The plan is longer than fits in one message: it leaves out the detail of 1 task, so Claude reads it with harness_plan_read\./));
   const list = within(dialog).getByRole('region', { name: 'Set in config' });
-  assert.equal(list.querySelector('[data-key="review.model"]')?.textContent, 'Reviewer model#review.modelopus');
   assert.equal(list.querySelector('[data-key="pullRequests"]')?.textContent, 'Pull requests.coplan/config.json#pullRequestsgh pr create, once you say');
   assert.match(list.querySelector('[data-key="instructions.build"]')?.textContent ?? '', /none$/);
 });

@@ -574,10 +574,12 @@ test('coplan init writes a commented starting point from the scripts it finds, a
 
 /* ---------------------------------------------------- customization (#45) */
 
-test('runners and pull request watching are retired: an old file still loads, with a warning, and its checks still run', () => {
+test('runners, pull request watching, the reviewer model and the final gate are retired: an old file still loads, with a warning, and its checks still run', () => {
   const config = parseProjectConfig({
     hooks: { review: ['pnpm test'] },
     runners: { vm: { via: 'ssh', host: 'tao-vm' } },
+    review: { model: 'opus' },
+    final: { blocking: true },
     pullRequests: { tool: 'graphite', watch: { interval: 120 }, on: { comment: 'ignore' } },
   });
   assert.deepEqual(config.errors, []);
@@ -585,8 +587,12 @@ test('runners and pull request watching are retired: an old file still loads, wi
   assert.equal(config.hooks.review.length, 1);
   assert.deepEqual(config.pullRequests, { tool: 'graphite', open: 'ask' });
   assert.ok(!('runners' in config));
+  assert.ok(!('review' in config));
+  assert.ok(!('final' in config));
   const said = config.warnings.join('\n');
   assert.match(said, /"runners" is no longer read/);
+  assert.match(said, /"review" is no longer read/);
+  assert.match(said, /"final" is no longer read/);
   assert.match(said, /pullRequests\."watch" is no longer read/);
   assert.match(said, /pullRequests\."on" is no longer read/);
 });
@@ -600,7 +606,7 @@ test('every key the config reads is documented, with every value it takes', () =
   }
 });
 
-test('pull requests, the reviewer, the final gate, instructions and plan-check severities are read, each checked', () => {
+test('pull requests, instructions and plan-check severities are read, each checked', () => {
   const dir = repo({
     '.github/pull_request_template.md': '## What\n\n## Checks\n',
     'packages/api/.keep': '',
@@ -610,8 +616,6 @@ test('pull requests, the reviewer, the final gate, instructions and plan-check s
     const config = parseProjectConfig(
       {
         pullRequests: { tool: 'graphite', open: 'auto', template: '.github/pull_request_template.md' },
-        review: { model: 'opus' },
-        final: { blocking: true },
         instructions: { build: 'Keep commits small.', review: { file: 'docs/review.md' } },
         planCheck: { 'box-unbuilt': 'error', 'box-undescribed': 'off' },
         hooks: { review: [{ name: 'api tests', run: 'pnpm test', cwd: 'packages/api', env: { NODE_ENV: 'test' } }] },
@@ -622,8 +626,6 @@ test('pull requests, the reviewer, the final gate, instructions and plan-check s
     assert.equal(config.pullRequests.tool, 'graphite');
     assert.equal(config.pullRequests.open, 'auto');
     assert.match(config.pullRequests.template ?? '', /## Checks/);
-    assert.equal(config.review.model, 'opus');
-    assert.equal(config.final.blocking, true);
     assert.equal(config.instructions.build, 'Keep commits small.');
     assert.equal(config.instructions.review, 'Check every query is parameterised.');
     assert.deepEqual(config.planCheck, { 'box-unbuilt': 'error', 'box-undescribed': 'off' });
@@ -634,11 +636,9 @@ test('pull requests, the reviewer, the final gate, instructions and plan-check s
   }
 });
 
-test('the defaults: gh, once the user says, no reviewer model, the report never held', () => {
+test('the defaults: gh, once the user says', () => {
   const config = parseProjectConfig({});
   assert.deepEqual(config.pullRequests, { tool: 'gh', open: 'ask' });
-  assert.deepEqual(config.review, {});
-  assert.deepEqual(config.final, { blocking: false });
   assert.deepEqual(config.instructions, {});
   assert.deepEqual(config.planCheck, {});
 });
@@ -649,8 +649,6 @@ test('what a customization cannot use is said — and a file outside the reposit
     const config = parseProjectConfig(
       {
         pullRequests: { tool: 'gitlab', open: 'later', template: '../../etc/passwd' },
-        review: { model: 'opus; rm -rf /' },
-        final: { blocking: 'yes' },
         instructions: { build: 3, deploy: 'x', brief: { file: 'missing.md' } },
         planCheck: { 'box-unbuilt': 'fatal', 'no-such-rule': 'error' },
         hooks: { review: [{ run: 'pnpm test', cwd: '../elsewhere', env: { 'BAD NAME': 'x', OK: 1 } }] },
@@ -662,8 +660,6 @@ test('what a customization cannot use is said — and a file outside the reposit
     assert.match(said, /"pullRequests\.open" must be one of auto, ask, never/);
     assert.match(said, /"pullRequests\.template" must name a file inside/);
     assert.equal(config.pullRequests.template, undefined);
-    assert.match(said, /"review\.model" must be a model name/);
-    assert.match(said, /"final\.blocking" must be true or false/);
     assert.match(said, /"instructions\.build" must be text/);
     assert.match(said, /instructions\."deploy" is not a setting/);
     assert.match(said, /"instructions\.brief" names missing\.md, which could not be read/);
@@ -696,14 +692,13 @@ test('what is only taken differently than written is a warning, and the checks s
 test('only what breaks the checks stops coplan check; a hook whose folder is missing fails, saying so', () => {
   const dir = repo({
     '.coplan/config.json': JSON.stringify({
-      pullRequests: { template: 'missing.md' },
-      review: { model: 'not a model!' },
+      pullRequests: { template: 'missing.md', tool: 'gitlab' },
       hooks: { review: ['true', { name: 'api', run: 'true', cwd: 'packages/api' }] },
     }),
   });
   try {
     const config = loadProjectConfig(dir);
-    assert.ok(config.errors.length >= 2, 'the template and the model are errors');
+    assert.ok(config.errors.length >= 2, 'the template and the tool are errors');
     assert.equal(config.checksBroken, undefined, 'but not of the checks');
     assert.equal(config.hooks.review[1]!.cwd, 'packages/api', 'kept, so the hook cannot pass somewhere else');
     // Its folder is missing, so no change can be in it: --all runs it anyway.

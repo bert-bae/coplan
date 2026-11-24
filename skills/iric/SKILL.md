@@ -96,13 +96,6 @@ If the review found anything, or a review check failed:
 - If you disagree with a finding, say why in one line; do not just skip it.
 - Run the implement checks again, then go back to **2. Review**.
 
-**Round limit.** After `maxRounds` reviews without a pass, another review
-is refused: another round is the user's call. Mark the task blocked with a
-note on what is still failing, and put it to them — another round, accept
-it as it is, or take it over. If they say another round, or accept it,
-call `harness_task_update` again with `user_approved: true` and their
-answer in the `note`.
-
 ## 4. Done
 
 When the review passed and every review check is green (optional checks
@@ -112,12 +105,9 @@ aside):
 
 Progress is reported only through `harness_task_update`; an
 `upsert_task` carrying a status, stage or checks is refused. Checks you
-report are merged by name, so the latest result of each counts. Done is
-refused before the task has been to review, without a passing verdict for
-its last review round (the user's, when they review it), while a check it last
-reported fails, or while a required review check was never reported —
-refine it. If a failure is unrelated to this task, taking it as it is is
-the user's call: mark it blocked with a note saying so.
+report are merged by name, so the latest result of each counts. Coplan
+records what you report and does not refuse done: a failing check shows
+as failing on the board.
 
 ## Fixes from a pull request
 

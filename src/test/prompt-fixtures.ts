@@ -182,8 +182,6 @@ export function fullProject(longInstructions = false): ProjectConfig {
       iric: { review: 'subagent', parallel: 3, maxRounds: 2 },
       branches: { base: 'main', prefix: 'coplan/' },
       pullRequests: { tool: 'graphite', open: 'auto' },
-      review: { model: 'opus' },
-      final: { blocking: true },
       instructions: {
         design: 'Split by layer.',
         build,
