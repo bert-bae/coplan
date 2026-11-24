@@ -40,34 +40,24 @@ Waiting on it: wire Wire into API. Leave their work to them, but do not make it 
 Build what this task describes and nothing more — the plan gives other parts to other tasks. If you find work outside it, say so in your report instead of doing it; it becomes a task of its own.
 - wire Wire into API is being built right now.
 
-## Standing instructions
-_From the user's and the repository's Coplan config; they hold for all of this._
-
-Match the code style around you.
-
 ## Branch
 Commit this task's work on `cache/client`. Cut it from `main` if it does not exist yet.
 
-## The cycle: implement → review → refine
-Review: the user, before it is marked done (set on this task). At most 2 review rounds; another is the user's call.
-
-**Implement.** Make the change, then run the implement checks and fix what they find:
-- typecheck: `pnpm typecheck`
-- lint: `pnpm lint`
-
-**Review.** Run the review checks, then show the user the change and ask them, with AskUserQuestion, whether it is right:
-- tests: `env NODE_ENV=test sh -c 'pnpm test'`
-
-### What the review checks here
-_From the user's and the repository's Coplan config; they hold for all of this._
-
-Check error handling.
-
-**Refine.** Fix what the review found, run the implement checks again, and go back to review.
+## Done when
+Its checks pass — the repository's checks for the files this task expects to touch; they run only for what it really changes:
+- implement: typecheck `pnpm typecheck`; lint `pnpm lint`
+- review: tests `env NODE_ENV=test sh -c 'pnpm test'`
 
 Run a stage at once: `"/opt/coplan/bin/coplan" check implement` (or `review`); add `--json` for the `checks` to report. Only the checks for what the task changes run: since it began with `--since` (given when it starts), else since the last commit.
 
-Report each step with harness_task_update {task_id: "inval", stage: "implement" | "review" | "refine", checks: [{name, ok, note}]}, and status "done" with a one-line note once the review passed. Handed this brief as a subagent or a child session, report back to the session that started you instead, never to Coplan or the user: what you changed, the checks and how they came out, any question, and anything left.
+Review requested: the user, before it is marked done (set on this task). Show the user the change and ask them, with AskUserQuestion, whether it is right; report stage "review" and their verdict.
+
+### Standing instructions
+_From the user's and the repository's Coplan config; they hold for all of this._
+
+Match the code style around you. Check error handling.
+
+Report it with harness_task_update {task_id: "inval", status: "in_progress" | "done" | "blocked", stage, verdict, checks: [{name, ok, note}], note}: "done" with a one-line note of what you did, "blocked" with what it waits on. Handed this brief by a harness that reports for you, report back to it instead, never to Coplan or the user: what you changed, the checks and how they came out, any question, and anything left.
 
 ## Open comments on it and its design
 - planner _(on the plan)_: Proposal p1: Split the docs task

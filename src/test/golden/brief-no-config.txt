@@ -24,15 +24,10 @@ Build what this task describes and nothing more — the plan gives other parts t
 ## Branch
 No branch is named for it: work on the current branch.
 
-## The cycle: implement → review → refine
-Review: self-review. At most 3 review rounds; another is the user's call.
-
-**Implement.** Make the change, then run the implement checks and fix what they find:
-
-**Review.** Read your own diff against the objective and the acceptance criteria, as a reviewer would, and run the review checks:
-
-**Refine.** Fix what the review found, run the implement checks again, and go back to review.
+## Done when
 
 No checks are configured (.coplan/config.json). Work out what to run from the repository's scripts and CI, use the same commands for every task, and say which in each task's done note.
 
-Report each step with harness_task_update {task_id: "client", stage: "implement" | "review" | "refine", checks: [{name, ok, note}]}, and status "done" with a one-line note once the review passed. Handed this brief as a subagent or a child session, report back to the session that started you instead, never to Coplan or the user: what you changed, the checks and how they came out, any question, and anything left.
+Review requested: an agent that did not write the change. Report stage "review" when it goes to review, and the verdict.
+
+Report it with harness_task_update {task_id: "client", status: "in_progress" | "done" | "blocked", stage, verdict, checks: [{name, ok, note}], note}: "done" with a one-line note of what you did, "blocked" with what it waits on. Handed this brief by a harness that reports for you, report back to it instead, never to Coplan or the user: what you changed, the checks and how they came out, any question, and anything left.

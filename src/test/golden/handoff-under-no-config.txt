@@ -1,0 +1,28 @@
+[cc-harness] Build the plan "Add a cache" — the user has reviewed it in Coplan and submitted it.
+
+The plan is final and locked. Build it the way your harness works — here, with subagents, or with another tool — and report back: Coplan follows the build on its task board, so keep every task's status true as you go.
+
+1. What to build: harness_task_next lists the tasks that are ready — everything they wait on is done — and what every other task waits on. harness_task_brief gives one task's brief, written to hand to whoever builds it: its objective, where it fits, its branch, its checks and the review it asks for. Starting a task that still waits on another is refused.
+2. Done: a task is done when its checks pass — the repository's checks below, as its brief lists them for that task.
+3. Review: each task asks for an agent that did not write the change, unless its brief says otherwise. Run it your own way; report stage "review" when a task goes to review, and the verdict with harness_task_update {task_id, verdict, summary}.
+4. Branches: everything lands on the current branch; no task names a branch of its own. Open the pull requests your own way, each against the branch below it, and record each with harness_branch_update {branch, pr_url, pr_number, pr_state}.
+5. Report as you go with harness_task_update {task_id, status, checks, note}: "in_progress" when a task starts, "done" with a one-line note of what was done, "blocked" with what it waits on. Work that is not on the plan becomes a task first (harness_plan_edit, upsert_task with a parentId).
+6. Do not redesign as you go: the diagrams and sections can no longer be edited. If the design has to change, stop that work and tell the user why in chat: only they can reopen the plan in Coplan.
+7. When every task is done, run the final checks, write the build report (harness_plan_edit {ops: [{op: "report", text, checks}]}) and give the user the final summary: what was built, the branches and pull requests, and how it was checked.
+
+**When to ask.** Ask the user, with AskUserQuestion, only when a decision cannot be undone or reaches outside this session (pushing, opening a pull request). Anything else, decide: say what you decided in the task's note, and carry on.
+
+## Checks
+No checks are configured (.coplan/config.json). Work out what to run from the repository's scripts and CI, use the same commands for every task, and say which in each task's done note.
+
+## Summary
+Put a cache in front of the database.
+
+_The design — its sections and architecture — is not quoted here: each task's harness_task_brief carries the parts it builds, with their decisions and connections. Call harness_plan_read only if you need the whole plan._
+
+## Tasks (0/2 done)
+- [ ] client Cache client · ready
+  Wrap ioredis.
+- [ ] t1 Wire into API · ready
+
+_Statuses: [ ] todo, [~] in_progress, [!] blocked, [x] done, [-] dropped_

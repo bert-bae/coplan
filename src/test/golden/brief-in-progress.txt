@@ -38,32 +38,22 @@ It comes after — build on what these did:
 ## Stay in scope
 Build what this task describes and nothing more — the plan gives other parts to other tasks. If you find work outside it, say so in your report instead of doing it; it becomes a task of its own.
 
-## Standing instructions
-_From the user's and the repository's Coplan config; they hold for all of this._
-
-Match the code style around you.
-
 ## Branch
 Commit this task's work on `cache/api`. Cut it from `cache/client` (a stacked branch: it builds on that work), not from `main`.
 
-## The cycle: implement → review → refine
-Review: an independent reviewer (a fresh subagent). At most 2 review rounds; another is the user's call.
+## Done when
+Its checks pass — the repository's checks for the files this task expects to touch; they run only for what it really changes:
+- implement: typecheck `pnpm typecheck`; lint `pnpm lint`
+- review: tests `env NODE_ENV=test sh -c 'pnpm test'`
 
-**Implement.** Make the change, then run the implement checks and fix what they find:
-- typecheck: `pnpm typecheck`
-- lint: `pnpm lint`
+Review requested: an agent that did not write the change. Report stage "review" when it goes to review, and the verdict.
 
-**Review.** A fresh subagent that did not write the change reads the diff against this brief and runs the review checks.
-- tests: `env NODE_ENV=test sh -c 'pnpm test'`
-
-### What the review checks here
+### Standing instructions
 _From the user's and the repository's Coplan config; they hold for all of this._
 
-Check error handling.
+Match the code style around you. Check error handling.
 
-**Refine.** Fix what the review found, run the implement checks again, and go back to review.
-
-Report each step with harness_task_update {task_id: "wire", stage: "implement" | "review" | "refine", checks: [{name, ok, note}]}, and status "done" with a one-line note once the review passed. Handed this brief as a subagent or a child session, report back to the session that started you instead, never to Coplan or the user: what you changed, the checks and how they came out, any question, and anything left.
+Report it with harness_task_update {task_id: "wire", status: "in_progress" | "done" | "blocked", stage, verdict, checks: [{name, ok, note}], note}: "done" with a one-line note of what you did, "blocked" with what it waits on. Handed this brief by a harness that reports for you, report back to it instead, never to Coplan or the user: what you changed, the checks and how they came out, any question, and anything left.
 
 ## Open comments on it and its design
 - planner _(on the plan)_: Proposal p1: Split the docs task
