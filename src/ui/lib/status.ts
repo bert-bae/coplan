@@ -60,6 +60,8 @@ export function statusDetail(facts: StatusFacts, agent: string): string {
       return facts.current ? `on ${facts.current}` : 'building';
     case 'finalizing':
       return 'final checks and report';
+    case 'landing':
+      return 'pull requests open';
     case 'built':
       return 'built';
     case 'handed-off':
@@ -85,6 +87,8 @@ export function statusTitle(facts: StatusFacts, agent: string): string {
       return `In progress: ${agent} is building it${facts.current ? ` — now ${facts.current}` : ''}`;
     case 'finalizing':
       return `Review: every task is done; ${agent} is running the final checks and writing the report for you`;
+    case 'landing':
+      return `Review: the report is in, and its pull requests are open; ${agent} follows them until they merge`;
     case 'built':
       return 'Done: every task is built, and the report is in';
     default:

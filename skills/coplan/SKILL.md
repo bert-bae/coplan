@@ -106,7 +106,8 @@ their word like a chat message: act on it, answer it, publish again.
 
 Coplan's tools are the MCP server `harness`: `harness_plan_publish`,
 `harness_plan_read`, `harness_plan_check`, `harness_plan_edit`, `harness_plan_propose`, `harness_plan_advance`, `harness_tasks_publish`,
-`harness_task_next`, `harness_task_brief`, `harness_task_update` and `harness_branch_update`. Your
+`harness_task_next`, `harness_task_brief`, `harness_task_update`, `harness_branch_update`, `harness_pr_events` and
+`harness_pr_event`. Your
 agent may show them with a prefix that names the server (in Claude Code,
 `mcp__plugin_coplan_harness__…`); they are the same tools.
 

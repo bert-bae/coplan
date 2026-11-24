@@ -2314,7 +2314,7 @@ const DESIGN_LOCKED_FOR_CLAUDE =
 const TASKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'move_task', 'upsert_diagram', 'upsert_node', 'review_task', 'set_checks', 'set_branch', 'comment', 'reply', 'resolve', 'report']);
 
 /** Where the plan is in its life. */
-export function planPhase(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> & Partial<Pick<Plan, 'report'>>) | null): PlanPhase {
+export function planPhase(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> & Partial<Pick<Plan, 'report' | 'branches'>>) | null): PlanPhase {
   const submission = plan?.submission;
   if (!submission) return plan?.design ? 'tasking' : 'planning';
   if (submission.target === 'elsewhere') return 'handed-off';
@@ -2325,8 +2325,10 @@ export function planPhase(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> &
   const leaves = tasks.filter((t) => !tasks.some((c) => c.parentId === t.id));
   if (!leaves.length || !leaves.every(isSettled)) return 'building';
   // Every task done is not the build done: the final checks, the pull
-  // requests and the report come after. The report closes it.
-  return plan?.report ? 'built' : 'finalizing';
+  // requests and the report come after. The report closes it — once every
+  // pull request it opened is merged or closed: until then it is landing.
+  if (!plan?.report) return 'finalizing';
+  return Object.values(plan.branches ?? {}).some((b) => b.pr?.state === 'open' || b.pr?.state === 'draft') ? 'landing' : 'built';
 }
 
 /** A build that can hold work for the user's review: a submitted Managed one. */
@@ -2362,7 +2364,7 @@ export function awaitingUserReview(plan: Pick<Plan, 'submission' | 'tasks'> | nu
  * their review — not the plan before the build: that is Planning.
  * `review`: the project's review mode (awaitingUserReview).
  */
-export function planStatus(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> & Partial<Pick<Plan, 'report'>>) | null, review: ReviewMode): PlanStatus {
+export function planStatus(plan: (Pick<Plan, 'submission' | 'tasks' | 'design'> & Partial<Pick<Plan, 'report' | 'branches'>>) | null, review: ReviewMode): PlanStatus {
   const phase = planPhase(plan);
   return statusOfPhase(phase, (phase === 'submitted' || phase === 'building') && awaitingUserReview(plan, review).length > 0);
 }
@@ -2378,6 +2380,7 @@ export function statusOfPhase(phase: PlanPhase, waitingOnUser = false): PlanStat
     case 'building':
       return waitingOnUser ? 'review' : 'in_progress';
     case 'finalizing':
+    case 'landing':
       return 'review';
     case 'built':
     case 'handed-off':
@@ -2698,7 +2701,7 @@ export const FLOW_LABEL: Record<FlowStep, string> = { architecture: 'Architectur
  * the task list made from it, the build — and the one it is on. A plan
  * from before modes reads as architecture first when it has diagrams.
  */
-export function planFlow(plan: Pick<Plan, 'submission' | 'tasks' | 'design' | 'diagrams'> & Partial<Pick<Plan, 'mode' | 'report'>>): { steps: FlowStep[]; at: FlowStep } {
+export function planFlow(plan: Pick<Plan, 'submission' | 'tasks' | 'design' | 'diagrams'> & Partial<Pick<Plan, 'mode' | 'report' | 'branches'>>): { steps: FlowStep[]; at: FlowStep } {
   const architecture = plan.mode ? plan.mode === 'architect' : plan.diagrams.length > 0;
   const steps: FlowStep[] = architecture ? ['architecture', 'tasklist', 'build'] : ['tasklist', 'build'];
   const phase = planPhase(plan);
@@ -2721,6 +2724,8 @@ export function nextInChat(plan: Plan, agent: string): string {
       return `Being built: the task statuses below follow ${agent}'s progress.`;
     case 'finalizing':
       return `Every task is done: ${agent} is running the final checks and writing the report.`;
+    case 'landing':
+      return `The report is in and the pull requests are open: ${agent} follows them, fixing what CI and reviewers ask, until they merge.`;
     case 'built':
       return 'Built: the report is below.';
     default:

@@ -115,6 +115,7 @@ const PHASE: Record<PlanPhase, string> = {
   submitted: 'Building',
   building: 'Building',
   finalizing: 'Final checks',
+  landing: 'Pull requests open',
   built: 'Built',
   'handed-off': 'Handed off',
 };

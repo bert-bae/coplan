@@ -15,6 +15,7 @@
  */
 
 import type { AgentKind } from './agents.ts';
+import type { PrCursor, QueuedEvent } from './prEvents.ts';
 
 /** Who made a change. The plan is co-authored, and the change log is how each
  *  side finds out what the other did. */
@@ -486,7 +487,7 @@ export interface BranchState {
  * confirmed, handed over and waiting for Claude to pick it up, being built,
  * built, or handed to something outside the harness.
  */
-export const PLAN_PHASES = ['planning', 'tasking', 'submitted', 'building', 'finalizing', 'built', 'handed-off'] as const;
+export const PLAN_PHASES = ['planning', 'tasking', 'submitted', 'building', 'finalizing', 'landing', 'built', 'handed-off'] as const;
 export type PlanPhase = (typeof PLAN_PHASES)[number];
 
 /**
@@ -496,7 +497,8 @@ export type PlanPhase = (typeof PLAN_PHASES)[number];
  *
  * - `planning` — `planning`, `tasking`: the design and the task list.
  * - `in_progress` — `submitted`, `building`: handed over, being built.
- * - `review` — `finalizing`, and a Managed build with a task waiting on the
+ * - `review` — `finalizing`, `landing` (the report is in, its pull requests
+ *   still open), and a Managed build with a task waiting on the
  *   user's own review: what was built waits on the user.
  * - `done` — `built`, `handed-off`.
  */
@@ -882,6 +884,32 @@ export interface SessionState {
    *  trusted again). Absent on sessions saved before it was recorded. */
   hookedAt?: number | null;
   plan: Plan | null;
+  /** Following the pull requests the plan recorded, by branch (prWatch.ts). */
+  prWatch?: Record<string, PrWatchState>;
+  /** Prompts about pull requests waiting to reach the agent, oldest first:
+   *  taken by `coplan pr wait`, harness_pr_events or the next message. */
+  prInbox?: string[];
+}
+
+/** One watched pull request: where the last poll left off, and what it found. */
+export interface PrWatchState {
+  pr: number;
+  /** When watching it began. */
+  since: number;
+  cursor?: PrCursor;
+  /** Events waiting to be dispatched, oldest first; bounded. */
+  queue: QueuedEvent[];
+  checkedAt?: number;
+  lastEventAt?: number;
+  /** The last poll's failure, and how many in a row, while polls fail. */
+  error?: string;
+  failures?: number;
+  /** Fix rounds spent on it (`watch.maxFixRounds`). */
+  fixRounds?: number;
+  /** What each batch came to, newest last; bounded. */
+  timeline?: { at: number; note: string }[];
+  /** Watching stopped by hand (`coplan pr unwatch`). */
+  stopped?: boolean;
 }
 
 export interface TaskCounts {

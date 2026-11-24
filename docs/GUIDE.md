@@ -288,13 +288,35 @@ detail after it:
 | --- | --- | --- |
 | **Planning** | You and Claude are shaping the design, then the task list | *design confirmed*, once it is |
 | **In progress** | Submitted, and Claude is picking it up or building it | *waiting for Claude*, or the task it is on |
-| **Review** | What was built waits on you: every task is done and Claude is running the final checks and writing the report — or, in a Managed build, a task you review is waiting for your verdict | what is waiting on you |
+| **Review** | What was built waits on you: every task is done and Claude is running the final checks and writing the report; or the report is in and its pull requests are still open; or, in a Managed build, a task you review is waiting for your verdict | what is waiting on you, or *pull requests open* |
 | **Done** | Built, with the report in — or exported to be built somewhere else | *built*, or *exported* |
 
 Review is about what was built, not the plan before the build: a plan you are
 still reading is Planning. The session list can show one status at a time:
 the row of buttons over it filters the list, with how many plans each holds,
 and remembers your choice.
+
+## Landing: until the pull requests merge
+
+A build does not end at its report. Once Claude records a pull request,
+Coplan follows it with your `gh` login, and the plan shows **Review · pull
+requests open** until every one is merged or closed:
+
+1. CI fails, or someone you trust asks for changes → Claude gets it as work:
+   a fix task under that branch, through implement → review → refine, pushed,
+   with a reply on the thread.
+2. A lower pull request merges → Coplan records it and Claude restacks the
+   branches above it.
+3. Every pull request merged or closed → the plan is **Done**.
+
+On the board, each branch shows its pull request, CI, the fix rounds used and
+*What happened*: each change and what it came to. In a terminal,
+`coplan pr status` lists the same, and `coplan pr unwatch [branch]` stops
+following one. What counts as trusted, how many fix rounds are allowed, and
+what each event does are set in `.coplan/config.json` (`pullRequests.watch`,
+`pullRequests.on`, in [CONFIG.md](CONFIG.md#watching-pull-requests-watch-and-on)).
+Comments from anyone else are shown, never acted on, and Coplan merges nothing
+unless you set a command that does.
 
 ## Requesting revisions
 

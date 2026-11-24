@@ -117,6 +117,15 @@ reported fails, or while a required review check was never reported —
 refine it. If a failure is unrelated to this task, taking it as it is is
 the user's call: mark it blocked with a note saying so.
 
+## Fixes from a pull request
+
+A task added for a pull request event (failing CI, a review, a comment) goes
+through the same cycle. Its brief is the event: reproduce the failure, or do
+what the reviewer asked, inside that branch. When done, push, and reply on
+each thread it answers saying what changed. Never skip, disable or weaken a
+test to turn CI green; if a failure is not this change's to fix, say so on
+the pull request and to the user instead.
+
 ## The user's control
 
 The user set the defaults when they submitted the plan — who reviews, how

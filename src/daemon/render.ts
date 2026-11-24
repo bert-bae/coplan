@@ -437,6 +437,12 @@ function lockLine(plan: Plan): string | null {
         'requests (record each with harness_branch_update), then write the build report; harness_task_next says how. ' +
         'The plan is built once the report is in.'
       );
+    case 'landing':
+      return (
+        '> **Landing.** The report is in; its pull requests are still open. What CI, reviewers and merges ask of them ' +
+        'comes to you as work (`coplan pr wait`, harness_pr_events): add a fix task under the branch with upsert_task ' +
+        'and take it through the cycle. The plan is built once every pull request is merged or closed.'
+      );
     case 'built':
       return '> **Built.** The user submitted this plan and every task is done. Publishing a new plan replaces it.';
     default:

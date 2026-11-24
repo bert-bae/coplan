@@ -8,6 +8,7 @@
  * question goes through AskUserQuestion in Claude's own chat.
  */
 import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from '../shared/proposal-ops.ts';
+import { PR_EVENT_KINDS } from '../shared/prEvents.ts';
 
 export interface ToolDef {
   name: string;
@@ -545,6 +546,41 @@ export const TOOLS: ToolDef[] = [
         base: { type: 'string', description: 'The branch its pull request targets now, when that changed (after a restack).' },
       },
       required: ['branch'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'harness_pr_events',
+    endpoint: 'pr_events',
+    description:
+      'What needs doing about the pull requests Coplan watches for this plan — failing CI, reviews, comments, ' +
+      'conflicts, merges — handed over once, as the work to do. Usually it reaches you by itself (`coplan pr wait`, or ' +
+      'with the user\'s next message); call this when you want it sooner.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'harness_pr_event',
+    endpoint: 'pr_event',
+    description:
+      'Pass on an event you saw yourself on one of the build\'s pull requests (a cloud session\'s own pull request ' +
+      'subscription), so Coplan does with it what the repository configured. Copy what the event says; the text ' +
+      'stays untrusted. The answer is the work to do, if any.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        branch: { type: 'string', description: 'The plan\'s branch the pull request is for.' },
+        kind: {
+          type: 'string',
+          enum: [...PR_EVENT_KINDS],
+        },
+        author: { type: 'string', description: 'Login of who wrote it, for a review or comment.' },
+        association: { type: 'string', description: 'Their standing as GitHub gives it: OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, NONE.' },
+        body: { type: 'string', description: 'What they wrote, or which checks failed.' },
+        url: { type: 'string' },
+        path: { type: 'string', description: 'For a comment on a line: the file.' },
+        line: { type: 'integer' },
+      },
+      required: ['branch', 'kind'],
       additionalProperties: false,
     },
   },

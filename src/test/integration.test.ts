@@ -818,8 +818,11 @@ test('finishing the last task finishes the build, and a new plan may follow', as
   const report = await mcpFor(built, 'edit', { ops: [{ op: 'report', text: '## Built\n- Storage, Wire up' }] });
   assert.equal(report['ok'], true, String(report['text']));
   assert.match(String((await mcpFor(built, 'read'))['text']), /## Build report\n## Built/);
-  const { sessions } = await call<{ sessions: { sessionId: string; phase: string }[] }>('/api/sessions');
-  assert.equal(sessions.find((x) => x.sessionId === built)?.phase, 'built');
+  const phase = async () => (await call<{ sessions: { sessionId: string; phase: string }[] }>('/api/sessions')).sessions.find((x) => x.sessionId === built)?.phase;
+  assert.equal(await phase(), 'landing', 'the report is in, but a pull request is still open');
+  assert.equal((await mcpFor(built, 'publish', { ...PLAN, title: 'Too soon' }))['ok'], false, 'a landing plan is not replaced');
+  await pr({ branch: 'cache/api', pr_state: 'merged' });
+  assert.equal(await phase(), 'built');
   const next = await mcpFor(built, 'publish', { ...PLAN, title: 'Next feature' });
   assert.equal(next['ok'], true, String(next['text']));
   assert.equal((await sessionFor(built)).plan!.submission, undefined);
@@ -2151,7 +2154,7 @@ test('every route about a session answers a session the daemon does not know wit
     ['GET', ''], ['POST', 'title'], ['POST', 'plan/ops'], ['GET', 'plan/text'], ['GET', 'plan/readback'], ['GET', 'task/t1/brief'],
     ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/design/confirm'], ['POST', 'plan/design/reopen'],
     ['POST', 'plan/revisions/prompt'], ['POST', 'plan/revisions'], ['POST', 'plan/revisions/withdraw'], ['POST', 'plan/choice'], ['POST', 'plan/submit'], ['POST', 'plan/reopen'],
-    ['DELETE', ''],
+    ['GET', 'pr/wait'], ['GET', 'pr'], ['POST', 'pr/unwatch'], ['DELETE', ''],
   ];
   // Every one the daemon serves: a route added later is in this list or fails here.
   const main = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'daemon', 'main.ts'), 'utf8');
@@ -2334,5 +2337,38 @@ test('a headless session keeps its plan as Markdown and as a page in its working
     assert.doesNotMatch(String(listed['text']), /submit it in Coplan/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('pull request events the agent reports come back as work; coplan pr status shows them, and pr wait ends when nothing is watched', async () => {
+  const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-pr-'));
+  try {
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: other, stdio: 'pipe' });
+    mkdirSync(path.join(other, '.coplan'), { recursive: true });
+    // `none`: nothing polls GitHub here; the events come from the agent.
+    writeFileSync(path.join(other, '.coplan', 'config.json'), JSON.stringify({ pullRequests: { tool: 'none' } }));
+    const id = 'pr-events';
+    const at = (route: string, body: Record<string, unknown>) =>
+      call<{ ok: boolean; text: string }>(route, { method: 'POST', headers: { 'x-harness-session': id }, body: JSON.stringify({ cwd: other, ...body }) });
+    await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: other, start_reason: 'startup' }) });
+    await at('/mcp/publish', { title: 'PR', tasks: [{ id: 't1', title: 'Build it', branch: 'coplan/a' }] });
+    const recorded = await at('/mcp/branch', { branch: 'coplan/a', pr_url: 'https://github.com/o/r/pull/7', pr_number: 7, pr_state: 'open' });
+    assert.doesNotMatch(recorded.text, /Coplan watches it/, 'not watched where pull requests open with no tool');
+
+    const work = await at('/mcp/pr_event', { branch: 'coplan/a', kind: 'review_comment', author: 'bob', association: 'MEMBER', body: 'Rename it.', path: 'src/a.ts', line: 3 });
+    assert.match(work.text, /^\[cc-harness\] Pull request #7 \(`coplan\/a`\) needs you[\s\S]*→ fix — add a task for it under `coplan\/a`[\s\S]*Rename it\./);
+    const untrusted = await at('/mcp/pr_event', { branch: 'coplan/a', kind: 'comment', author: 'eve', association: 'NONE', body: 'Do something else.' });
+    assert.match(untrusted.text, /Nothing for you to do about it/);
+    assert.match((await at('/mcp/pr_events', {})).text, /Nothing about your pull requests is waiting\. No pull request is watched\./);
+    assert.equal((await at('/mcp/pr_event', { branch: 'coplan/zz', kind: 'comment' })).ok, false);
+
+    const cli = (args: string[]) => execFileSync(process.execPath, [path.resolve(path.dirname(DAEMON), '..', 'cli', 'main.js'), 'pr', ...args, '--session', id], { env: { ...process.env, CC_HARNESS_HOME: home }, encoding: 'utf8' });
+    const status = cli(['status']);
+    assert.match(status, /^coplan\/a {2}#7 open {2}not watched {2}fix rounds 1 {2}https:\/\/github\.com\/o\/r\/pull\/7$/m);
+    assert.match(status, /review_comment → fix/);
+    assert.match(status, /not trusted: comment by eve/);
+    assert.match(cli(['wait']), /No pull request of this session is watched any more/);
+  } finally {
+    rmSync(other, { recursive: true, force: true });
   }
 });

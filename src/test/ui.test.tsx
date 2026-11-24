@@ -4004,3 +4004,35 @@ test('a kept draft goes once it is saved, or its field is gone or locked: closin
   await openTab('Overview');
   none(screen.queryByRole('textbox', { name: 'the plan summary' }), 'no editor reopens that cannot be closed');
 });
+
+test('a watched pull request shows its CI, fix rounds and what happened on the board; landing is in review', async () => {
+  const branched = applyOps(makePlan(), [{ op: 'upsert_task', id: 'storage', branch: 'cache/storage' }], 'claude').plan;
+  const built = markDelivered(submitPlan(branched, { target: 'session', mode: 'tracked', prompt: 'build' }));
+  const plan = {
+    ...built,
+    tasks: built.tasks.map((t) => ({ ...t, status: 'done' as const })),
+    report: { text: 'Built.', at: Date.now() },
+    branches: { 'cache/storage': { pr: { url: 'https://github.com/o/r/pull/11', number: 11, state: 'open' as const }, updatedAt: 1 } },
+  };
+  await boot(
+    makeSession(plan, {
+      prWatch: {
+        'cache/storage': {
+          pr: 11,
+          since: 1,
+          queue: [],
+          fixRounds: 2,
+          cursor: { ci: { sha: 'a', state: 'failed' }, state: 'open' },
+          timeline: [{ at: Date.now() - 60_000, note: 'ci_failed → fix' }],
+        },
+      },
+    }),
+  );
+  assert.match(screen.getByTestId('plan-status').textContent ?? '', /Review · pull requests open/);
+  await openTab('Tasks');
+  const branches = screen.getByRole('list', { name: 'Branches' });
+  assert.ok(within(branches).getByRole('link', { name: 'PR #11 open' }));
+  assert.ok(within(branches).getByText('CI failed'));
+  assert.ok(within(branches).getByText('fix round 2'));
+  assert.match(within(branches).getByText(/What happened \(1\)/).closest('details')?.textContent ?? '', /ci_failed → fix/);
+});

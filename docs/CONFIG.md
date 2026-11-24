@@ -219,6 +219,76 @@ How a build's pull requests are opened. The build prompt says so, and
 | `open` | `ask` | `auto`: as soon as a branch's tasks are done. `ask`: once you say to — opening a pull request reaches outside the session, so by default Claude asks first. `never`: no pull requests; the branches are pushed and listed in the report. |
 | `template` | — | A file in the repository (`.github/pull_request_template.md`) each description is written from, filled in from the tasks the pull request carries, their checks and their review. Up to 8,000 characters. |
 
+#### Watching pull requests: `watch` and `on`
+
+Once the agent records a pull request (`harness_branch_update`), Coplan can
+follow it until it merges: failing CI, review comments and conflicts become
+work for the agent, the same implement → review → refine cycle, until the
+pull request is merged or closed. See
+[the plan](plans/pr-lifecycle.md) for the whole loop.
+
+Coplan looks at each pull request with your own `gh` (one GraphQL query a
+look; GitHub and GitHub Enterprise), so `gh auth login` is all it needs;
+`coplan doctor` says when `gh` is missing or logged out. Check runs and
+older commit statuses both count as CI. While a pull request is watched the
+daemon stays up; after a day with nothing new it looks every five minutes,
+and after a failed look it waits longer each time, up to half an hour.
+
+What needs the agent waits in the session until it is taken: by
+`coplan pr wait` (the agent runs it in the background; it ends with the
+work), by `harness_pr_events`, or with your next message. A merge or close
+Coplan sees is recorded on the plan by itself. `coplan pr status` lists a
+session's pull requests and what each change came to; `coplan pr unwatch
+[branch]` stops following one, or all.
+
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `watch.enabled` | `true` | `false`: pull requests are recorded, never followed. |
+| `watch.interval` | `60` | Seconds between looks at each pull request, 30 to 3600. |
+| `watch.debounce` | `90` | Seconds a pull request must be quiet before what happened on it goes to the agent as one batch, 0 to 3600: a 12-comment review is one fix, not twelve. |
+| `watch.trust` | `collaborators` | Whose comments and reviews may start work: `collaborators` (anyone with write access), `author` (whoever opened the pull request), or a list of logins. Others are shown, never acted on. |
+| `watch.maxFixRounds` | `3` | Fix rounds per pull request, 1 to 10; past them, Coplan tells you and does no more on it. |
+| `watch.wake` | `wait` | How an agent whose turn has ended is reached. `wait`: it leaves `coplan pr wait` running in the background, which ends with the work when there is some and brings the agent back (Claude Code). `queue`: the work goes with your next message (agents without background commands — Codex, Cursor — always work this way). `headless`: when nothing is waiting and the agent is not mid-turn, Coplan resumes the session itself with the work (`claude -p --resume`, `codex exec resume`), one run at a time, under your permission settings — an agent working unattended on what reviewers wrote; Cursor has no way to be resumed, so it is `queue` there. |
+
+`on` maps each event to what it does — one action, or a list run in order:
+
+| Event | Default | When |
+| --- | --- | --- |
+| `ci_failed` | `fix` | A check run on the head commit failed. Again after each push that fails. |
+| `ci_passed` | `ignore` | Every check run on the head commit finished well. |
+| `changes_requested` | `fix` | A review asked for changes. |
+| `approved` | `notify` | A review approved it. |
+| `review_comment` | `fix` | A comment on a line of the diff. |
+| `comment` | `triage` | A comment on the conversation, or a review with only a comment. |
+| `merge_conflict` | `rebase` | It no longer merges cleanly. |
+| `behind_base` | `ignore` | Its base moved on. |
+| `merged` | `advance` | It merged. |
+| `closed` | `notify` | It was closed without merging. |
+| `reopened` | `notify` | It was opened again. |
+
+| Action | What happens |
+| --- | --- |
+| `fix` | A task is added under the branch, with the failure or the comments as its brief; it goes through the cycle, is pushed, and the threads it answers get a reply. |
+| `triage` | The agent reads it and replies, opens a fix, or leaves it — and says which. |
+| `rebase` | The branch is rebased onto its base, checked and pushed; a conflict it cannot settle becomes a fix. |
+| `advance` | The merge is recorded and the branches above it are restacked; the plan is built when every pull request is merged or closed. |
+| `notify` | You are told, on the board. |
+| `ignore` | Only noted on the pull request's timeline. |
+| `{ "run": … }` | A command, in the shape of a [hook](#hooks): `{pr}`, `{branch}`, `{event}` and `{sha}` in it are filled in. The agent runs it under your permission settings, as it does the checks. A bare string is always an action, never a command, so a typo is not run. |
+
+```jsonc
+"pullRequests": {
+  "watch": { "trust": ["alice", "bob"], "maxFixRounds": 2 },
+  "on": {
+    "comment": "ignore",
+    "approved": ["notify", { "name": "automerge", "run": "gh pr merge {pr} --auto --squash" }]
+  }
+}
+```
+
+Coplan never merges a pull request unless a command you set here does.
+
 ### `review`
 
 | Key | Meaning |

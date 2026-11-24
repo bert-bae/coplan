@@ -600,7 +600,8 @@ test('long standing instructions are cut to fit the prompt, saying where the res
 });
 
 test('the build is told how pull requests are opened, and each is due with the template when its branch is done', () => {
-  const custom = { ...parseProjectConfig({ pullRequests: { tool: 'graphite', open: 'auto' } }), pullRequests: { tool: 'graphite' as const, open: 'auto' as const, template: '## Summary', templateFile: 'PR.md' } };
+  const base = parseProjectConfig({ pullRequests: { tool: 'graphite', open: 'auto' } });
+  const custom = { ...base, pullRequests: { ...base.pullRequests, template: '## Summary', templateFile: 'PR.md' } };
   const submitted = submitPlan(tasked(), { target: 'session', prompt: 'build it', settings: { review: 'subagent', parallel: 2, maxRounds: 3 } }, 1_300);
   const prompt = buildPrompt(submitted, { target: 'session', project: custom }).prompt;
   assert.match(prompt, /Open the pull requests with Graphite: track each branch on the one below it \(`gt track`\), and open the stack with `gt submit --stack`, as soon as a branch's tasks are done\./);
