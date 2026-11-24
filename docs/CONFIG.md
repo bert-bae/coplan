@@ -334,6 +334,39 @@ The rules: `box-unbuilt` (no task builds a box), `task-builds-nothing`,
 `node-id-shared` (one box id in two diagrams), `branch-two-bases` (a branch
 a stack of pull requests cannot follow), `comment-unanswered`.
 
+### `runners`
+
+Where a build's parent session can start the sessions it hands tasks to —
+your profiles. Usually set in your own `coplan.json`, since they name your
+machines; a repository's runner of the same name wins over yours.
+
+```jsonc
+"runners": {
+  "cloud": { "via": "cloud", "use": "Heavy, async, long-running work: set up already, nothing to babysit", "max": 4 },
+  "local": { "via": "local", "use": "Testing and verification I want to reach quickly", "default": true },
+  "taovm": { "via": "ssh", "host": "tao-vm", "dir": "~/src/app", "use": "Balanced work, my own setup", "maxLarge": 2 }
+}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `via` | How a session starts there: `local` (a subagent of the parent, under it in the Claude desktop app), `cloud` (a cloud session: `create_session` from a cloud parent, else `start`), `ssh` (the agent run over ssh on `host`, in `dir`). Required. |
+| `use` | What it is for. When a task names no runner, the parent picks by this. |
+| `max` | Tasks in progress there at once. No limit when left out. |
+| `maxLarge` | Large tasks in progress there at once (the parent says a task is large when it hands it off). |
+| `default` | `true` for the runner a task goes to when no other fits. |
+| `host` | `ssh`: the host, as `ssh` takes it. |
+| `dir` | `ssh`: the checkout to work in there. |
+| `environment` | `cloud`: the environment new sessions start in (`env_…`). |
+| `start` | The command that starts a session there, the handoff on its stdin — e.g. `ssh tao-vm 'cd ~/src/app && claude -p'`. Overrides how `via` starts one. |
+
+A task names a runner (`runner` in the plan) when you ask for one; the parent
+must use it. Otherwise the parent picks by `use` and room. It records where
+each task runs with `harness_task_update {runner, session, size}`, which is
+refused for a runner the config does not name, one that is full, or one other
+than the task asks for — unless you said so in chat. `harness_task_next` shows
+each runner's load and the sessions on it.
+
 ## Your own defaults: `coplan.json`
 
 `~/.claude/cc-harness/coplan.json` sets your defaults for every repository:

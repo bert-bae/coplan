@@ -107,6 +107,45 @@ to that child (SendMessage, or `send_message` for a cloud child) so its
 context carries over, rather than to a fresh session. A fresh session is for
 new work, or a reviewer, which must not have written the change.
 
+### Runners: where each session starts
+
+When the user has set up runners (`runners` in their `coplan.json` or the
+repository's config), `harness_task_next` lists them under **Runners**, each
+with what it is for (`use`), how it starts sessions (`via`) and its load.
+Choose where each task goes:
+
+1. **Asked for** — a task that names a runner, or one the user names in
+   chat, goes there. Starting it elsewhere is refused unless the user said
+   so (`user_approved`).
+2. **By profile** — otherwise, match the task to what each runner is for:
+   long, heavy work that needs no watching to one meant for that; tests and
+   verification the user wants to reach quickly to one meant for that. Say
+   which you chose, and why, in the task's note.
+3. **By room** — a runner at its `max`, or its `maxLarge` for a large
+   task, refuses another; the refusal names the runners with room. Wait for
+   one to finish rather than overload it. The `default` runner takes what
+   fits nowhere else.
+
+Start the session by the runner's `via` — or its `start` command, when it
+has one, which wins:
+
+- **local** — a background subagent of the parent (above).
+- **cloud** — from a cloud parent, `create_session` with the runner's
+  `environment`, so the child is listed under the parent. From a local
+  parent, the runner's `start` command; without one, say so to the user
+  and pick another runner.
+- **ssh** — a background command: `ssh <host> 'cd <dir> && claude -p'`,
+  with the handoff on its stdin; its output is the child's report. Pull
+  the task's branch there first if it is not checked out. An ssh session is
+  not linked to the parent in the desktop app: the board is where it shows.
+
+Then record it, with the id you will reach it by (the subagent's, the
+session's, or the background command's) and whether it is large:
+`harness_task_update {task_id, status: "in_progress", stage: "implement", runner, session, size}`.
+The board shows it on the task's card, and `harness_task_next` shows each
+runner's load and which session runs what — read it there rather than keep
+it in your head.
+
 Where parallel tasks work:
 
 - **Different branches** — each in a working tree of its own (a git

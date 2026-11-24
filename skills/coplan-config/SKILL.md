@@ -1,6 +1,6 @@
 ---
 name: coplan-config
-description: Set Coplan up for a repository so builds are effective and cheap — the repository's checks in .coplan/config.json, and your own build profile (who reviews, on which model, how many tasks at once, how subagents report) in Coplan's coplan.json. Use when the user types /coplan-init or /coplan-config, asks to set up, tune or optimize Coplan, or asks to make Coplan builds cheaper, faster or more thorough.
+description: Set Coplan up for a repository so builds are effective and cheap — the repository's checks in .coplan/config.json, and your own build profile (who reviews, on which model, how many tasks at once, how subagents report, and the runners — local, cloud, ssh — a build hands tasks to) in Coplan's coplan.json. Use when the user types /coplan-init or /coplan-config, asks to set up, tune or optimize Coplan, asks to make Coplan builds cheaper, faster or more thorough, or wants to set up where build sessions run.
 ---
 
 # Setting Coplan up
@@ -94,6 +94,31 @@ Agent differences:
 - Without subagents, use `iric.review: "self"`, and drop the subagent
   sentence too.
 - Say which of these applied.
+
+### Runners (yours)
+
+If the user starts sessions in more than one place — on this machine, in
+the cloud, on a machine over ssh — set those up as `runners` in their
+`coplan.json` (a repository can add its own in `.coplan/config.json`). Ask
+what each is for and how much it can take; write one entry per place:
+
+```jsonc
+"runners": {
+  "cloud": { "via": "cloud", "use": "Heavy, async, long-running work: set up already", "max": 4 },
+  "local": { "via": "local", "use": "Testing and verification I need to reach quickly", "default": true },
+  "taovm": { "via": "ssh", "host": "tao-vm", "dir": "~/src/app", "use": "Balanced work on a setup I control", "maxLarge": 2 }
+}
+```
+
+- `use` is what the build's parent reads to choose a runner for a task the
+  user did not place: write it as the user would say it.
+- `max` and `maxLarge` are hard limits: the daemon refuses a task past them.
+- `start` replaces how `via` starts a session there, the handoff on its
+  stdin — needed for a cloud runner used from a local session.
+- The user asks for a runner on one task by saying so; you set it as the
+  task's `runner` in the plan.
+
+`docs/CONFIG.md` (`runners`) has every key.
 
 ## 3. Confirm
 

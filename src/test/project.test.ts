@@ -5,7 +5,7 @@ import { chmodSync, closeSync, existsSync, mkdtempSync, mkdirSync, openSync, rea
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_PR_ON, DEFAULT_PR_WATCH, HOOK_KEYS, INSTRUCTION_POINTS, PROJECT_KEYS, PR_ACTIONS, PR_OPEN, PR_TOOLS, PR_TRUST, PR_WAKE, expandBraces, globMatch, hookCommand, hooksFor, loadProjectConfig, nameFor, parseProjectConfig, pathsMatch } from '../shared/project.ts';
+import { DEFAULT_PR_ON, DEFAULT_PR_WATCH, HOOK_KEYS, INSTRUCTION_POINTS, PROJECT_KEYS, PR_ACTIONS, PR_OPEN, PR_TOOLS, PR_TRUST, PR_WAKE, RUNNER_VIA, expandBraces, globMatch, hookCommand, hooksFor, loadProjectConfig, nameFor, parseProjectConfig, pathsMatch } from '../shared/project.ts';
 import { GAP_RULES, GAP_SEVERITIES } from '../shared/check.ts';
 import { EXECUTION_MODES } from '../shared/types.ts';
 import { PR_EVENT_KINDS } from '../shared/prEvents.ts';
@@ -575,12 +575,44 @@ test('coplan init writes a commented starting point from the scripts it finds, a
 
 /* ---------------------------------------------------- customization (#45) */
 
+test('runners are read and checked, and the repository wins over the user for a name both set', () => {
+  const config = parseProjectConfig({
+    runners: {
+      local: { via: 'local', default: true },
+      vm: { via: 'ssh', host: 'tao-vm', maxLarge: 2, use: 'Balanced' },
+      nohost: { via: 'ssh' },
+      bad: { via: 'moon', max: 0 },
+      'no spaces': { via: 'local' },
+    },
+  });
+  assert.deepEqual(
+    config.runners.map((r) => r.name),
+    ['local', 'vm', 'nohost'],
+  );
+  assert.deepEqual(config.runners[1], { name: 'vm', via: 'ssh', host: 'tao-vm', maxLarge: 2, use: 'Balanced' });
+  assert.ok(config.errors.some((e) => /runners.nohost" runs over ssh: give it a "host"/.test(e)));
+  assert.ok(config.errors.some((e) => /runners.bad.via" must be one of local, cloud, ssh/.test(e)));
+  assert.ok(config.errors.some((e) => /runners.no spaces": a runner's name/.test(e)));
+
+  const home = mkdtempSync(path.join(tmpdir(), 'coplan-runners-'));
+  const dir = repo({ '.coplan/config.json': JSON.stringify({ runners: { vm: { via: 'ssh', host: 'other' } } }) });
+  try {
+    writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ runners: { cloud: { via: 'cloud' }, vm: { via: 'ssh', host: 'tao-vm' } } }));
+    const merged = loadProjectConfig(dir, { globalDir: home });
+    assert.deepEqual(merged.runners.map((r) => `${r.name}:${r.host ?? ''}`), ['cloud:', 'vm:other']);
+    assert.deepEqual(merged.origins?.['runners.vm'], ['.coplan/config.json']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('every key the config reads is documented, with every value it takes', () => {
   const doc = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'docs', 'CONFIG.md'), 'utf8');
   for (const key of PROJECT_KEYS) assert.match(doc, new RegExp(`^### \`${key}\`$`, 'm'), `a section for ${key}`);
   for (const key of HOOK_KEYS) assert.match(doc, new RegExp(`^\\| \`${key}\` \\|`, 'm'), `hook key ${key}`);
   for (const key of Object.keys(DEFAULT_PR_WATCH)) assert.match(doc, new RegExp(`^\\| \`watch\\.${key}\` \\|`, 'm'), `watch key ${key}`);
-  for (const value of [...EXECUTION_MODES, ...PR_TOOLS, ...PR_OPEN, ...PR_ACTIONS, ...PR_WAKE, ...PR_TRUST, ...PR_EVENT_KINDS, ...INSTRUCTION_POINTS, ...GAP_RULES, ...GAP_SEVERITIES]) {
+  for (const value of [...EXECUTION_MODES, ...PR_TOOLS, ...PR_OPEN, ...PR_ACTIONS, ...PR_WAKE, ...PR_TRUST, ...PR_EVENT_KINDS, ...INSTRUCTION_POINTS, ...GAP_RULES, ...GAP_SEVERITIES, ...RUNNER_VIA]) {
     assert.ok(doc.includes(`\`${value}\``), `${value} is named`);
   }
 });

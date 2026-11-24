@@ -88,6 +88,7 @@ const BUILD_FIELDS: Record<string, unknown> = {
   },
   branch: { type: 'string', description: 'Git branch the work lands on; subtasks inherit it. Omit for one PR on the current branch.' },
   review: { ...REVIEW, description: 'Only when not the build default: "user" for risky work, "skip" for trivial.' },
+  runner: { type: 'string', description: 'Only when the user asked for one: the runner (from the config) it must be built on. Subtasks inherit it.' },
   builds: {
     type: 'array',
     items: { type: 'string' },
@@ -174,6 +175,7 @@ const OP_PROPERTIES: Record<string, unknown> = {
   dependsOn: { ...STR_LIST, description: 'upsert_task: replaces its dependencies; [] clears them.' },
   branch: { type: 'string', description: 'upsert_task: "" clears it.' },
   review: { type: 'string', enum: [...REVIEW.enum, ''], description: 'upsert_task: "" clears it.' },
+  runner: { type: 'string', description: 'upsert_task: the runner it must be built on; "" clears it.' },
   builds: { ...STR_LIST, description: 'upsert_task: the boxes it builds now, as node ids or "diagramId/nodeId" (replaces its links; [] unlinks it).' },
   threadId: { type: 'string', description: 'reply / resolve: the comment thread.' },
   text: { type: 'string', description: 'reply: your reply. report: the build report. Markdown.' },
@@ -494,7 +496,8 @@ export const TOOLS: ToolDef[] = [
       'in a Managed build, and only noted in the reply in a Tracked one: starting more at once than the user allowed; ' +
       'a review round past their limit; done before any review, without a passing verdict for its last review round ' +
       '(the user\'s own, when the user reviews it), or while a check fails or a review check was never reported; ' +
-      'dropping work the user signed off.',
+      'dropping work the user signed off. When the user has runners, record where each task runs (runner, session, size) ' +
+      'as you hand it off.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -517,6 +520,13 @@ export const TOOLS: ToolDef[] = [
           description: "The review's outcome, once it is in: pass, or changes (then refine). Recorded for the task's current review round.",
         },
         summary: { type: 'string', description: 'With verdict: one line on what the review found.' },
+        runner: {
+          type: 'string',
+          description:
+            'Where you hand it: one of the runners harness_task_next lists. Refused when it is full, or the task asks for another.',
+        },
+        session: { type: 'string', description: 'With runner: the id of the session or subagent you started there, to reach it again.' },
+        size: { type: 'string', enum: ['small', 'large'], description: 'With runner: large counts against its maxLarge. Default small.' },
         user_approved: {
           type: 'boolean',
           description:

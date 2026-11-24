@@ -8,6 +8,7 @@
  * only when every op in a batch succeeded.
  */
 import type {
+  Dispatch,
   Author,
   BuildSettings,
   BranchState,
@@ -51,7 +52,7 @@ import type {
   TaskStatus,
   Thread,
 } from './types.ts';
-import { BUILD_TARGETS, EDGE_ARROWS, EXECUTION_MODES, IRIC_STAGES, PLAN_MODES, TASK_CHECK_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
+import { RUNNER_NAME, TASK_SIZES, BUILD_TARGETS, EDGE_ARROWS, EXECUTION_MODES, IRIC_STAGES, PLAN_MODES, TASK_CHECK_STAGES, NODE_KINDS, PROPOSAL_STATUSES, PR_STATES, TASK_STATUSES, VERDICTS } from './types.ts';
 import { DEFAULT_BUILD_SETTINGS, cleanSettings, dependencyProblem, dependencyProblems, effectiveBranch, effectiveReview, isSettled, planMode, roundVerdict, validReview } from './build.ts';
 import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from './proposal-ops.ts';
 
@@ -645,6 +646,7 @@ function buildTaskTree(
       const files = cleanList(raw.files) ?? old?.files;
       const branch = raw.branch === undefined ? old?.branch : cleanBranch(raw.branch);
       const review = raw.review === undefined ? old?.review : reviewOrThrow(raw.review, tTitle);
+      const runner = raw.runner === undefined ? old?.runner : runnerOrThrow(raw.runner, tTitle);
       const task: Task = {
         id,
         parentId,
@@ -656,6 +658,8 @@ function buildTaskTree(
         ...(note ? { note } : {}),
         ...(branch ? { branch } : {}),
         ...(review ? { review } : {}),
+        ...(runner ? { runner } : {}),
+        ...(old?.dispatch ? { dispatch: old.dispatch } : {}),
         ...(old?.stage && keepsStage(status) ? { stage: old.stage } : {}),
         // Its rounds' record goes with its round, as its status does.
         ...(old?.round ? { round: old.round } : {}),
@@ -856,6 +860,24 @@ function reviewOrThrow(value: unknown, title: string) {
   return review;
 }
 
+function runnerOrThrow(value: unknown, title: string): string | undefined {
+  if (value === undefined || value === '' || value === null) return undefined;
+  if (typeof value === 'string' && RUNNER_NAME.test(value.trim())) return value.trim();
+  throw new PlanError(`"${title}": runner must name one of the runners in the config (letters, digits, . _ -).`);
+}
+
+function cleanDispatch(raw: unknown): Dispatch | undefined {
+  const d = raw as Partial<Dispatch> | null;
+  if (!d || typeof d !== 'object' || typeof d.runner !== 'string' || !RUNNER_NAME.test(d.runner)) return undefined;
+  const session = typeof d.session === 'string' ? clean(d.session, 200) : undefined;
+  return {
+    runner: d.runner,
+    ...(session ? { session } : {}),
+    size: (TASK_SIZES as readonly unknown[]).includes(d.size) ? d.size! : 'small',
+    at: typeof d.at === 'number' ? d.at : Date.now(),
+  };
+}
+
 /** `claimId`, but also avoiding ids already handed out in this publish. */
 function claimIdAmong(
   plan: Plan,
@@ -948,6 +970,10 @@ function normalizeTask(task: Task): Task {
   else delete t.dependsOn;
   if (typeof t.branch !== 'string' || !t.branch) delete t.branch;
   if (!validReview(t.review)) delete t.review;
+  if (typeof t.runner !== 'string' || !RUNNER_NAME.test(t.runner)) delete t.runner;
+  const dispatch = cleanDispatch(t.dispatch);
+  if (dispatch) t.dispatch = dispatch;
+  else delete t.dispatch;
   if (!validStage(t.stage)) delete t.stage;
   if (typeof t.round !== 'number' || !(t.round > 0)) delete t.round;
   // A status it does not know is taken as not started.
@@ -1020,10 +1046,12 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
     'dependsOn',
     'branch',
     'review',
+    'runner',
     'stage',
     'checks',
     'startCommit',
     'acceptedFailing',
+    'dispatch',
     'builds',
     'expect',
   ],
@@ -1154,7 +1182,7 @@ function contentTargetsOf(plan: Plan, op: PlanOp): string[] {
     case 'upsert_task': {
       // A note with a status is a progress report (harness_task_update):
       // held only to a change of the note itself.
-      const own = op.id && (has('title', 'detail', 'files', 'dependsOn', 'branch', 'review') || (has('note') && !has('status', 'stage')));
+      const own = op.id && (has('title', 'detail', 'files', 'dependsOn', 'branch', 'review', 'runner') || (has('note') && !has('status', 'stage')));
       const progressNote =
         op.id && has('note') && has('status', 'stage') && clean(op.note, MAX_TITLE * 2) !== findTask(plan, op.id)?.note;
       return [...(own ? [`task:${op.id}`] : []), ...(progressNote ? [`note:${op.id}`] : []), ...(op.builds !== undefined ? relinked(plan, op.id, op.builds) : [])];
@@ -1393,7 +1421,7 @@ function withoutExpect(op: PlanOp): PlanOp {
 
 /** The fields of upsert_task that report progress rather than say what
  *  the task is. Claude reports them only through harness_task_update. */
-export const PROGRESS_FIELDS = ['status', 'stage', 'checks', 'startCommit', 'acceptedFailing'] as const;
+export const PROGRESS_FIELDS = ['status', 'stage', 'checks', 'startCommit', 'acceptedFailing', 'dispatch'] as const;
 
 /**
  * Claude's progress goes through harness_task_update, which refuses what
@@ -1620,6 +1648,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
       const dependsOn = cleanList(op.dependsOn);
       const branch = cleanBranch(op.branch);
       const review = reviewOrThrow(op.review, title);
+      const runner = runnerOrThrow(op.runner, title);
       const stage = op.stage === undefined ? undefined : stageOrThrow(op.stage);
       const checks = cleanChecks(op.checks);
       const status = validStatus(op.status) ?? (stage ? 'in_progress' : 'todo');
@@ -1635,6 +1664,7 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
         ...(dependsOn?.length ? { dependsOn: [...new Set(dependsOn)] } : {}),
         ...(branch ? { branch } : {}),
         ...(review ? { review } : {}),
+        ...(runner ? { runner } : {}),
         ...(stage && status === 'in_progress' ? { stage, ...(stage === 'review' ? { round: 1 } : {}) } : {}),
         ...(checks?.length ? { checks } : {}),
         // Work found once the plan was signed off: the user did not sign it.
@@ -1983,7 +2013,7 @@ function editTask(
   // found to be wrong) but does not re-scope it. Tasks it adds itself are
   // its own to shape.
   if (plan.submission && author === 'claude' && !task.addedInBuild) {
-    const scope = (['title', 'detail', 'branch', 'review', 'builds'] as const).filter((k) => op[k] !== undefined);
+    const scope = (['title', 'detail', 'branch', 'review', 'runner', 'builds'] as const).filter((k) => op[k] !== undefined);
     if (scope.length) {
       throw new PlanError(
         `"${task.title}" is part of the plan the user submitted, so its ${scope.join(', ')} cannot change now. Track the work with ` +
@@ -2038,6 +2068,15 @@ function editTask(
       edited.push('review');
     }
   }
+  if (op.runner !== undefined) {
+    const runner = runnerOrThrow(op.runner, task.title);
+    if (runner !== task.runner) {
+      setOptional(task, 'runner', runner);
+      edited.push('runner');
+    }
+  }
+  const dispatch = op.dispatch === undefined ? undefined : cleanDispatch(op.dispatch);
+  if (dispatch) task.dispatch = dispatch;
 
   // Moving to a stage of the cycle means the task is being worked on.
   const stage = op.stage === undefined ? undefined : stageOrThrow(op.stage);
@@ -2080,6 +2119,7 @@ function editTask(
     // and checks of the work it had are not this work's. Claude cannot do
     // that to itself — it would be a way round the round limit.
     if (status === 'todo' && author === 'user') {
+      delete task.dispatch;
       delete task.round;
       delete task.checks;
       delete task.reviews;

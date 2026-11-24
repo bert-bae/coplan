@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import type { BuildSettings, ExecutionMode, TaskCheck } from './types.ts';
 import { DEFAULT_BUILD_SETTINGS, MAX_PARALLEL, MAX_ROUNDS, cleanSettings } from './build.ts';
-import { EXECUTION_MODES, REVIEW_MODES } from './types.ts';
+import { EXECUTION_MODES, REVIEW_MODES, RUNNER_NAME } from './types.ts';
 import { parseJsonc } from './jsonc.ts';
 import { GAP_RULES, GAP_SEVERITIES, type GapRule, type GapSeverity } from './check.ts';
 import { paths } from './paths.ts';
@@ -99,6 +99,34 @@ export const DEFAULT_PR_ON: Record<PrEventKind, PrAction[]> = {
 };
 const PR_WATCH_KEYS = Object.keys(DEFAULT_PR_WATCH);
 const MAX_FIX_ROUNDS = 10;
+/** How the parent session starts a session on a runner. */
+export const RUNNER_VIA = ['local', 'cloud', 'ssh'] as const;
+export type RunnerVia = (typeof RUNNER_VIA)[number];
+
+/** A place the build's parent session can hand a task to. */
+export interface Runner {
+  name: string;
+  via: RunnerVia;
+  /** What it is for, which the parent weighs when no task names a runner. */
+  use?: string;
+  /** Tasks in progress on it at once. */
+  max?: number;
+  /** Large tasks in progress on it at once. */
+  maxLarge?: number;
+  /** The runner a task goes to when nothing else fits. */
+  default?: boolean;
+  /** ssh: the host, as `ssh` takes it. */
+  host?: string;
+  /** ssh: the checkout to work in there. */
+  dir?: string;
+  /** cloud: the environment new sessions start in. */
+  environment?: string;
+  /** The command that starts a session there, with the handoff on stdin. */
+  start?: string;
+}
+const RUNNER_KEYS = ['via', 'use', 'max', 'maxLarge', 'default', 'host', 'dir', 'environment', 'start'];
+const MAX_RUNNERS = 12;
+
 /** Where a repository or a user may add words to what the agent is told. */
 export const INSTRUCTION_POINTS = ['design', 'build', 'brief', 'review'] as const;
 export type InstructionPoint = (typeof INSTRUCTION_POINTS)[number];
@@ -143,6 +171,9 @@ export interface ProjectConfig {
   instructions: Partial<Record<InstructionPoint, string>>;
   /** Plan-check rules counted other than the default (`warn`). */
   planCheck: Partial<Record<GapRule, GapSeverity>>;
+  /** Where the build's parent can start sessions, by name: the user's own,
+   *  then the repository's, which wins for a name both set. */
+  runners: Runner[];
   /** The user-wide layer (`coplan.json` in Coplan's home), when there is one. */
   globalFile?: string | null;
   /** What could not be read, said rather than silently ignored: a hook
@@ -181,7 +212,7 @@ export const MAX_INSTRUCTIONS = 4_000;
 export const MAX_TEMPLATE = 8_000;
 const MAX_ENV = 20;
 
-export const PROJECT_KEYS = ['mode', 'hooks', 'iric', 'branches', 'pullRequests', 'review', 'final', 'instructions', 'planCheck'];
+export const PROJECT_KEYS = ['mode', 'hooks', 'iric', 'branches', 'pullRequests', 'review', 'final', 'instructions', 'planCheck', 'runners'];
 const IRIC_KEYS = ['review', 'parallel', 'maxRounds'];
 const BRANCH_KEYS = ['base', 'prefix'];
 const PR_KEYS = ['tool', 'open', 'template', 'watch', 'on'];
@@ -207,6 +238,7 @@ export function emptyProjectConfig(): ProjectConfig {
     final: { blocking: false },
     instructions: {},
     planCheck: {},
+    runners: [],
     errors: [],
     warnings: [],
     origins: {},
@@ -314,6 +346,7 @@ interface Layer {
   final?: Partial<ProjectConfig['final']>;
   instructions?: ProjectConfig['instructions'];
   planCheck?: ProjectConfig['planCheck'];
+  runners?: Runner[];
   /** See ProjectConfig.checksBroken. */
   checksBroken?: boolean;
   /** The file it was read from, as origins name it. */
@@ -374,6 +407,12 @@ function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors' | 'warn
     from('final', l.final);
     Object.assign(out.planCheck, l.planCheck);
     from('planCheck', l.planCheck);
+    for (const r of l.runners ?? []) {
+      const at = out.runners.findIndex((x) => x.name === r.name);
+      if (at >= 0) out.runners[at] = r;
+      else out.runners.push(r);
+      if (l.from) origins[`runners.${r.name}`] = [l.from];
+    }
     for (const point of INSTRUCTION_POINTS) {
       const words = l.instructions?.[point];
       if (words) out.instructions[point] = out.instructions[point] ? `${out.instructions[point]}\n\n${words}` : words;
@@ -543,9 +582,66 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
     }
   }
 
+  const runners = section('runners', '{ "<name>": { "via": "local" | "cloud" | "ssh", "use", "max", "maxLarge", … } }');
+  if (runners) layer.runners = parseRunners(runners, local);
+
   for (const message of local) say(message);
   for (const message of notes) warnings.push(ctx.global ? `${ctx.label}: ${message}` : message);
   return layer;
+}
+
+function parseRunners(rec: Record<string, unknown>, errors: string[]): Runner[] {
+  const out: Runner[] = [];
+  for (const [name, raw] of Object.entries(rec).slice(0, MAX_RUNNERS)) {
+    const where = `runners.${name}`;
+    if (!RUNNER_NAME.test(name)) {
+      errors.push(`"${where}": a runner's name is letters, digits, . _ - (at most 40).`);
+      continue;
+    }
+    if (!isRecord(raw)) {
+      errors.push(`"${where}" must be an object: { "via", "use", "max", … }.`);
+      continue;
+    }
+    unknownKeys(raw, RUNNER_KEYS, `${where}.`, errors);
+    const via = oneOf(raw['via'], RUNNER_VIA, `${where}.via`, errors);
+    if (!via) {
+      if (raw['via'] === undefined) errors.push(`"${where}.via" is missing: ${RUNNER_VIA.join(', ')}.`);
+      continue;
+    }
+    const r: Runner = { name, via };
+    for (const key of ['use', 'host', 'dir', 'environment', 'start'] as const) {
+      const v = raw[key];
+      if (typeof v === 'string' && v.trim()) r[key] = v.trim().slice(0, 1_000);
+      else if (v !== undefined) errors.push(`"${where}.${key}" must be text.`);
+    }
+    for (const key of ['max', 'maxLarge'] as const) {
+      const v = raw[key];
+      if (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 64) r[key] = v;
+      else if (v !== undefined) errors.push(`"${where}.${key}" must be a whole number from 1 to 64.`);
+    }
+    if (raw['default'] === true) r.default = true;
+    else if (raw['default'] !== undefined && raw['default'] !== false) errors.push(`"${where}.default" must be true or false.`);
+    if (via === 'ssh' && !r.host && !r.start) errors.push(`"${where}" runs over ssh: give it a "host" (or a "start" command).`);
+    out.push(r);
+  }
+  if (Object.keys(rec).length > MAX_RUNNERS) errors.push(`"runners" holds at most ${MAX_RUNNERS}; the rest are left out.`);
+  return out;
+}
+
+/** Tasks in progress on each runner, all and large. */
+export function runnerLoad(runners: readonly Runner[], tasks: readonly { status: string; dispatch?: { runner: string; size: string } }[]) {
+  return runners.map((r) => {
+    const on = tasks.filter((t) => t.status === 'in_progress' && t.dispatch?.runner === r.name);
+    return { runner: r, all: on.length, large: on.filter((t) => t.dispatch!.size === 'large').length };
+  });
+}
+
+/** Why `runner` cannot take one more task of `size`, or null when it can. */
+export function runnerFull(load: { runner: Runner; all: number; large: number }, size: string): string | null {
+  const { runner: r, all, large } = load;
+  if (r.max !== undefined && all >= r.max) return `${r.name} already runs ${all} task(s), its max (${r.max})`;
+  if (size === 'large' && r.maxLarge !== undefined && large >= r.maxLarge) return `${r.name} already runs ${large} large task(s), its maxLarge (${r.maxLarge})`;
+  return null;
 }
 
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], where: string, errors: string[]): T | undefined {

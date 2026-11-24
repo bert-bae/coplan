@@ -732,6 +732,14 @@ function fit(plan: Plan, head: Block[], said: Block[], changes: Block[], doc: Do
   return { prompt: blocksText(blocks), trimmed: true, blocks };
 }
 
+function runnerWords(project: ProjectConfig): string {
+  if (!project.runners.length) return '';
+  return (
+    ` Hand tasks to the user's runners (${project.runners.map((r) => r.name).join(', ')}): a task that asks for one goes there, the rest by what each is for and its room. ` +
+    'Record each with harness_task_update {runner, session, size}; harness_task_next shows the load.'
+  );
+}
+
 function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: ProjectConfig, chosen: SettingSources): Block[] {
   const together =
     s.parallel > 1
@@ -751,7 +759,8 @@ function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: P
   );
   b.gap().add('step-1', TEMPLATE, '1. Start only tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that are ready together do not depend on each other — ')
     .inline('step-1:parallel', chosen('parallel'), together)
-    .inline('step-1:end', TEMPLATE, ". harness_task_brief gives one task's focused brief: its objective, where it fits, its branch and its checks.");
+    .inline('step-1:end', TEMPLATE, ". harness_task_brief gives one task's focused brief: its objective, where it fits, its branch and its checks.")
+    .inline('step-1:runners', configSource(project, 'runners'), runnerWords(project));
   b.add(
     'step-2',
     TEMPLATE,
@@ -821,7 +830,7 @@ function trackedBrief(plan: Plan, agent: AgentInfo, project: ProjectConfig, mode
     '1. Start with tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that ' +
       "are ready together do not depend on each other. harness_task_brief gives one task's focused brief: its objective, " +
       'where it fits, its branch and its checks.',
-  );
+  ).inline('step-1:runners', configSource(project, 'runners'), runnerWords(project));
   b.add(
     'step-2',
     TEMPLATE,

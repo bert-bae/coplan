@@ -52,8 +52,9 @@ import {
   targetOf,
   validMode,
   waitingOn,
+  effectiveRunner,
 } from '../shared/build.ts';
-import { HOOK_STAGES, filesInScope, hookScope, taskHooks, type ProjectConfig } from '../shared/project.ts';
+import { HOOK_STAGES, filesInScope, hookScope, runnerFull, runnerLoad, taskHooks, type ProjectConfig } from '../shared/project.ts';
 import { changedFiles, changedSince, committedOn, headCommit, unreadWords, worktreeOf, type ChangedFiles } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
 import { ConfigCache, globalConfigFile, projectHarnessFile, type HarnessConfig } from '../shared/config.ts';
@@ -61,8 +62,8 @@ import { ensureHome, paths, readLiveLock, sanitizeId, readLock, readVerifiedLock
 import { HOOK_NOOP, additionalContext, type HookOutput } from '../shared/hooks.ts';
 import { MAX_BODY } from '../shared/prEvents.ts';
 import { openInBrowser } from './browser.ts';
-import type { BuildChoice, BuildSettings, CleanupGroupId, DaemonLock, ExecutionMode, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, Task, TaskListInput, TaskStatus } from '../shared/types.ts';
-import { CLEANUP_GROUPS } from '../shared/types.ts';
+import type { BuildChoice, BuildSettings, CleanupGroupId, DaemonLock, Dispatch, ExecutionMode, TaskSize, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, Task, TaskListInput, TaskStatus } from '../shared/types.ts';
+import { CLEANUP_GROUPS, TASK_SIZES } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
@@ -1377,7 +1378,15 @@ function buildRouter(deps: Deps): Router {
     if (verdict && !(task.status === 'in_progress' && task.stage === 'review') && stage !== 'review') {
       throw new PlanError(`A verdict is given in review: "${task.title}" is not in review now. Report stage "review" (a new round) and give the verdict there.`);
     }
-    if (!status && !stage && !checks && !verdict && note === undefined) throw new PlanError('Say what changed: a status, a stage, checks, a verdict or a note.');
+    const text = (k: string) => (typeof body[k] === 'string' && (body[k] as string).trim() ? (body[k] as string).trim() : undefined);
+    const runnerName = text('runner');
+    const sessionRef = text('session');
+    const size = body['size'];
+    if (size !== undefined && !(TASK_SIZES as readonly unknown[]).includes(size)) throw new PlanError('`size` is "small" or "large".');
+    const dispatching = Boolean(runnerName || sessionRef || size);
+    if (!status && !stage && !checks && !verdict && note === undefined && !dispatching) {
+      throw new PlanError('Say what changed: a status, a stage, checks, a verdict, a note, or where it runs (runner, session, size).');
+    }
     const approved = body['user_approved'] === true;
     if (approved && !note?.trim()) {
       throw new PlanError('`user_approved` needs a `note` saying what the user told you in chat.');
@@ -1435,6 +1444,50 @@ function buildRouter(deps: Deps): Router {
             `and the user allowed ${settings.parallel} at once. Finish one first.`,
           `${busy.length} other task${busy.length === 1 ? ' is' : 's are'} in progress too (${busy.map((t) => t.id).join(', ')}): keep them off each other's files`,
         );
+      }
+    }
+
+    // Where it runs: a runner the config names, the one the task asks for,
+    // and only while it has room — the runners are the user's machines.
+    const asked = effectiveRunner(before, task);
+    let dispatch: Dispatch | undefined;
+    let runnerNote = '';
+    if (dispatching || (starting && asked)) {
+      const name = runnerName ?? task.dispatch?.runner ?? (starting ? asked : undefined);
+      if (!name) throw new PlanError(`Say which runner "${task.title}" runs on: runner "<name>" (harness_task_next lists them).`);
+      const runner = project.runners.find((r) => r.name === name);
+      if (!runner) {
+        const names = project.runners.map((r) => r.name);
+        throw new PlanError(
+          `No runner "${name}": ${names.length ? `the config has ${names.join(', ')}` : 'the config sets none — the user adds them under "runners" in coplan.json'}.`,
+        );
+      }
+      if (asked && asked !== name && !approved) {
+        throw new PlanError(
+          `"${task.title}" asks to run on ${asked}, not ${name}. Run it there; if the user says otherwise, call again with user_approved: true and their words in the note.`,
+        );
+      }
+      const same = task.dispatch?.runner === name;
+      const taskSize = (size as TaskSize | undefined) ?? (same ? task.dispatch!.size : 'small');
+      const busy = (starting || task.status === 'in_progress') && status !== 'done' && status !== 'dropped' && status !== 'blocked';
+      const load = runnerLoad([runner], before.tasks.filter((t) => t.id !== task.id))[0]!;
+      const full = busy && !approved ? runnerFull(load, taskSize) : null;
+      if (full) {
+        const room = runnerLoad(project.runners, before.tasks)
+          .filter((l) => l.runner.name !== name && !runnerFull(l, taskSize))
+          .map((l) => l.runner.name);
+        throw new PlanError(
+          `"${task.title}" cannot run on ${name} now: ${full}. ${room.length ? `Room for it on ${room.join(', ')}` : 'No other runner has room'}` +
+            `${asked ? '' : ', or'} wait for one to finish${asked ? ' (the task asks for this runner)' : ''}.`,
+        );
+      }
+      dispatch = { runner: name, ...(sessionRef ? { session: sessionRef } : same && task.dispatch!.session ? { session: task.dispatch!.session } : {}), size: taskSize, at: Date.now() };
+      if (busy) {
+        const after = { all: load.all + 1, large: load.large + (taskSize === 'large' ? 1 : 0) };
+        runnerNote =
+          `Runs on ${name} (${runner.via}${runner.host ? ` ${runner.host}` : ''})${dispatch.session ? `, session ${dispatch.session}` : ''}: ` +
+          `${after.all}${runner.max ? `/${runner.max}` : ''} there${runner.maxLarge ? `, ${after.large}/${runner.maxLarge} large` : ''}.` +
+          (dispatch.session ? '' : ' Record the session you start with session "<id>", so the board can say where it is.');
       }
     }
 
@@ -1568,6 +1621,7 @@ function buildRouter(deps: Deps): Router {
       ...(stage ? { stage: stage as NonNullable<ReturnType<typeof validStage>> } : {}),
       ...(checks ? { checks } : {}),
       ...(git.startCommit ? { startCommit: git.startCommit } : {}),
+      ...(dispatch ? { dispatch } : {}),
       // Done over failing checks (accepted by the user, or the agent's call
       // outside a Managed build) is not a round that passed (D4).
       ...(failing.length ? { acceptedFailing: true } : {}),
@@ -1587,6 +1641,7 @@ function buildRouter(deps: Deps): Router {
     const out: string[] = [];
     const state = now.status === 'in_progress' && now.stage ? stageWords(now) : now.status.replace('_', ' ');
     out.push(`[cc-harness] "${now.title}" is ${state}.${changes.length ? '' : ' (It already was.)'}`);
+    if (runnerNote) out.push(runnerNote);
     if (skipped.length) out.push(`Noted, not refused (this build is ${MODE_LABEL[planMode(plan, project.mode)]}): ${skipped.join('; ')}.`);
     // Its checks are targeted to its change from here: say how to run them.
     if (starting && now.startCommit) {

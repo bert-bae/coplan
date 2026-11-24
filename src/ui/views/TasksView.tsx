@@ -16,7 +16,7 @@ import { isTyping } from '../lib/keys.ts';
 import { SubmitControl, REVIEW_LABEL } from '../components/Submit.tsx';
 import { boxUnbuilt } from '../../shared/check.ts';
 import { canTakeSubtasks, childrenOf, countTasks, descendants, hasTaskList, isLocked, outline, planPhase } from '../../shared/plan.ts';
-import { SESSION_BRANCH, roundVerdict, stackStatus, type StackEntry, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
+import { SESSION_BRANCH, roundVerdict, stackStatus, type StackEntry, ancestorsOf, branchPlan, buildSteps, effectiveBranch, effectiveReview, effectiveRunner, hasDependencies, hasSubtasks, readinessOf, waitingOn } from '../../shared/build.ts';
 import { REVIEW_MODES, TASK_STATUSES, type Diagram, type DiagramNode, type Plan, type PlanOp, type ReviewMode, type Task, type TaskStatus } from '../../shared/types.ts';
 import type { TaskMode } from '../store.ts';
 
@@ -1206,6 +1206,12 @@ function TrackedCard({ plan, task, arrived, opened, toggle }: { plan: Plan; task
         <IricBadges task={task} />
         {task.status === 'todo' && <ReadinessChip plan={plan} task={task} />}
         {effectiveBranch(plan, task) && <span className="chip is-branch">⎇ {effectiveBranch(plan, task)}</span>}
+        {(task.dispatch || effectiveRunner(plan, task)) && (
+          <span className="chip" title={task.dispatch?.session ? `Session ${task.dispatch.session}` : task.dispatch ? undefined : 'The runner this task asks for'}>
+            ▸ {task.dispatch?.runner ?? effectiveRunner(plan, task)}
+            {task.dispatch?.size === 'large' ? ' · large' : ''}
+          </span>
+        )}
         <TaskCheckChips plan={plan} task={task} />
       </p>
       {open && (

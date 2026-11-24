@@ -4,6 +4,12 @@
 
 ### Changes
 
+- **Runners: where a build's sessions start.** Set up your own places to build — `local`, `cloud`, `ssh` — as
+  `runners` in `coplan.json`, each with what it is for, how much it can take (`max`, `maxLarge`) and how a
+  session starts there. A task can ask for a runner; otherwise the parent picks by what each is for. The parent
+  records where each task runs with `harness_task_update {runner, session, size}`, which refuses an unknown or
+  full runner; `harness_task_next` shows each runner's load and the session on each task, and the board shows
+  it on the card.
 - **One parent session per build.** The session that runs a build is the only driver; every task built side by
   side, reviewer, refine round and pull request fix runs in a subagent or child session started from it, so in
   the Claude desktop app they all show under it, to expand and collapse. Each is handed the task's brief plus
