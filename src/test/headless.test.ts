@@ -132,7 +132,7 @@ test('the PDF document has the overview, each diagram as its PNG, and the tasks 
   const html = planDocument(plan, new Map([[plan.diagrams[0]!.id, 'data:image/png;base64,AAA']]));
   assert.match(html, /<title>Add a cache<\/title>/);
   assert.match(html, /read-through cache/);
-  assert.match(html, /<img src="data:image\/png;base64,AAA" alt="Components">/);
+  assert.match(html, /<img src="data:image\/png;base64,AAA" alt="Components: 3 parts, 2 connections">/);
   assert.doesNotMatch(html, /mermaid|class="ref"/);
   assert.match(html, /<strong>Wire into API<\/strong> <span class="muted">to do · after Cache client/);
   assert.match(html, /Built by Wire into API/);
