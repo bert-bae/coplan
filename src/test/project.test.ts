@@ -575,7 +575,7 @@ test('coplan init writes a commented starting point from the scripts it finds, a
 
 /* ---------------------------------------------------- customization (#45) */
 
-test('runners are read and checked, and the repository wins over the user for a name both set', () => {
+test('runners are read and checked, and a repository cannot redefine the user\'s', () => {
   const config = parseProjectConfig({
     runners: {
       local: { via: 'local', default: true },
@@ -599,8 +599,8 @@ test('runners are read and checked, and the repository wins over the user for a 
   try {
     writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ runners: { cloud: { via: 'cloud' }, vm: { via: 'ssh', host: 'tao-vm' } } }));
     const merged = loadProjectConfig(dir, { globalDir: home });
-    assert.deepEqual(merged.runners.map((r) => `${r.name}:${r.host ?? ''}`), ['cloud:', 'vm:other']);
-    assert.deepEqual(merged.origins?.['runners.vm'], ['.coplan/config.json']);
+    assert.deepEqual(merged.runners.map((r) => `${r.name}:${r.host ?? ''}`), ['cloud:', 'vm:tao-vm'], "the user's machine is never redefined by a repository");
+    assert.ok(!merged.origins?.['runners.vm']?.includes('.coplan/config.json'));
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });

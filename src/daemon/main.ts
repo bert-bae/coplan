@@ -1462,7 +1462,7 @@ function buildRouter(deps: Deps): Router {
           `No runner "${name}": ${names.length ? `the config has ${names.join(', ')}` : 'the config sets none — the user adds them under "runners" in coplan.json'}.`,
         );
       }
-      if (asked && asked !== name && !approved) {
+      if (asked && asked !== name && !approved && task.dispatch?.runner !== name) {
         throw new PlanError(
           `"${task.title}" asks to run on ${asked}, not ${name}. Run it there; if the user says otherwise, call again with user_approved: true and their words in the note.`,
         );
@@ -1481,7 +1481,7 @@ function buildRouter(deps: Deps): Router {
             `${asked ? '' : ', or'} wait for one to finish${asked ? ' (the task asks for this runner)' : ''}.`,
         );
       }
-      dispatch = { runner: name, ...(sessionRef ? { session: sessionRef } : same && task.dispatch!.session ? { session: task.dispatch!.session } : {}), size: taskSize, at: Date.now() };
+      dispatch = { runner: name, ...(sessionRef ? { session: sessionRef } : same && task.dispatch!.session ? { session: task.dispatch!.session } : {}), size: taskSize, at: same ? task.dispatch!.at : Date.now() };
       if (busy) {
         const after = { all: load.all + 1, large: load.large + (taskSize === 'large' ? 1 : 0) };
         runnerNote =
@@ -1640,7 +1640,7 @@ function buildRouter(deps: Deps): Router {
     const now = plan.tasks.find((t) => t.id === taskId)!;
     const out: string[] = [];
     const state = now.status === 'in_progress' && now.stage ? stageWords(now) : now.status.replace('_', ' ');
-    out.push(`[cc-harness] "${now.title}" is ${state}.${changes.length ? '' : ' (It already was.)'}`);
+    out.push(`[cc-harness] "${now.title}" is ${state}.${changes.length || dispatch ? '' : ' (It already was.)'}`);
     if (runnerNote) out.push(runnerNote);
     if (skipped.length) out.push(`Noted, not refused (this build is ${MODE_LABEL[planMode(plan, project.mode)]}): ${skipped.join('; ')}.`);
     // Its checks are targeted to its change from here: say how to run them.

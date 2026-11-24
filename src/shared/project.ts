@@ -172,7 +172,7 @@ export interface ProjectConfig {
   /** Plan-check rules counted other than the default (`warn`). */
   planCheck: Partial<Record<GapRule, GapSeverity>>;
   /** Where the build's parent can start sessions, by name: the user's own,
-   *  then the repository's, which wins for a name both set. */
+   *  then any the repository adds under a name of its own. */
   runners: Runner[];
   /** The user-wide layer (`coplan.json` in Coplan's home), when there is one. */
   globalFile?: string | null;
@@ -408,9 +408,9 @@ function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors' | 'warn
     Object.assign(out.planCheck, l.planCheck);
     from('planCheck', l.planCheck);
     for (const r of l.runners ?? []) {
-      const at = out.runners.findIndex((x) => x.name === r.name);
-      if (at >= 0) out.runners[at] = r;
-      else out.runners.push(r);
+      // A runner is the user's machine: a repository may add runners, never redefine one of theirs.
+      if (out.runners.some((x) => x.name === r.name)) continue;
+      out.runners.push(r);
       if (l.from) origins[`runners.${r.name}`] = [l.from];
     }
     for (const point of INSTRUCTION_POINTS) {

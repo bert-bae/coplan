@@ -1452,6 +1452,7 @@ test('runners: a task goes where it asks, a full runner is refused, and next sho
         { id: 'a', title: 'A' },
         { id: 'b', title: 'B' },
         { id: 'c', title: 'C', runner: 'cloud' },
+        { id: 'd', title: 'D', runner: 'cloud' },
       ],
     });
     await post(`/api/session/${id}/plan/submit`, { target: 'session' });
@@ -1462,12 +1463,17 @@ test('runners: a task goes where it asks, a full runner is refused, and next sho
     assert.match(started, /Runs on vm \(ssh tao-vm\), session ssh-1: 1 there, 1\/1 large/);
     assert.match(String((await task({ task_id: 'b', stage: 'implement', runner: 'vm', size: 'large' }))['text']), /cannot run on vm now: vm already runs 1 large task\(s\).*Room for it on cloud/);
     assert.match(String((await task({ task_id: 'c', stage: 'implement', runner: 'vm' }))['text']), /asks to run on cloud, not vm/);
-    // Starting a task that asks for a runner puts it there.
-    assert.match(String((await task({ task_id: 'c', stage: 'implement' }))['text']), /Runs on cloud \(cloud\)/);
+    // Moved off the runner it asks for only on the user's say; resumed later, it stays where they put it.
+    const moved = String((await task({ task_id: 'c', stage: 'implement', runner: 'vm', user_approved: true, note: 'user: run it on the vm' }))['text']);
+    assert.match(moved, /Runs on vm/);
+    await task({ task_id: 'c', status: 'blocked', note: 'waits on a key' });
+    assert.match(String((await task({ task_id: 'c', stage: 'implement' }))['text']), /Runs on vm/);
+    // Started with no runner named, a task that asks for one goes there.
+    assert.match(String((await task({ task_id: 'd', stage: 'implement' }))['text']), /Runs on cloud \(cloud\)/);
 
     const next = String((await mcpFor(id, 'next'))['text']);
     assert.match(next, /- a A · on vm \(ssh-1\), large/);
-    assert.match(next, /## Runners\n- cloud \(cloud\) — 1\/4 running — Heavy, long-running work\n- vm \(ssh tao-vm:~\/src\/app\) — 1 running, 1\/1 large — Balanced work/);
+    assert.match(next, /## Runners\n- cloud \(cloud\) — 1\/4 running — Heavy, long-running work\n- vm \(ssh tao-vm:~\/src\/app\) — 2 running, 1\/1 large — Balanced work/);
     const saved = (await sessionFor(id)).plan!.tasks.find((t) => t.id === 'a')!.dispatch!;
     assert.deepEqual({ runner: saved.runner, session: saved.session, size: saved.size }, { runner: 'vm', session: 'ssh-1', size: 'large' });
   } finally {

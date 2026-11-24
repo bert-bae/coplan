@@ -338,7 +338,8 @@ a stack of pull requests cannot follow), `comment-unanswered`.
 
 Where a build's parent session can start the sessions it hands tasks to —
 your profiles. Usually set in your own `coplan.json`, since they name your
-machines; a repository's runner of the same name wins over yours.
+machines. A repository can add runners of its own, but never redefines one of
+yours: for a name both set, yours is used.
 
 ```jsonc
 "runners": {
