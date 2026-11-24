@@ -928,6 +928,14 @@ export function revisionPrompt(plan: Plan, opts: { note?: string } = {}): Revisi
     '3. Reply in its thread — harness_plan_edit {ops: [{op: "reply", threadId, text}]} — with what you did or proposed, ' +
       'and resolve it ({op: "resolve", threadId, resolved: true}) if it is settled.',
   );
+  if (threads.some((t) => t.decision)) {
+    b.gap().add(
+      'step-decisions',
+      TEMPLATE,
+      'Comments marked [decision] are answers to questions you asked: revise the architecture and tasks to follow each answer, ' +
+        'reply with what changed and resolve the thread. If an answer raises a new open decision, ask it as a new decision comment.',
+    );
+  }
   b.gap().add('step-4', TEMPLATE, 'Then tell the user in chat what changed. Coplan marks the ask answered once every comment has a reply or a proposal.');
   const said = fromUser(opts.note);
   const head = [...b.blocks, ...said];
@@ -1458,7 +1466,7 @@ function capital(text: string): string {
  *  is the agent's bookkeeping. */
 function threadBlocks(plan: Plan, t: Thread, reader: 'claude' | 'outside' = 'claude', hint = true): Block[] {
   const who = (author: 'user' | 'claude') => (author === 'user' ? 'user' : reader === 'claude' ? 'you' : 'planner');
-  const lines = [`- [${t.id}] on ${describeTarget(plan, t.target)} — ${who(t.author)}: ${hang(t.text, 4)}`];
+  const lines = [`- [${t.id}]${t.decision ? ' [decision]' : ''} on ${describeTarget(plan, t.target)} — ${who(t.author)}: ${hang(t.text, 4)}`];
   for (const r of t.replies) lines.push(`  ↳ ${who(r.author)}: ${hang(r.text, 4)}`);
   const b = new BlockList().add(`thread:${t.id}`, { kind: 'field', target: t.target }, lines);
   if (hint && reader === 'claude' && threadWaitsOn(t) === 'claude') {

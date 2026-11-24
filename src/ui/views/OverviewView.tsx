@@ -10,6 +10,7 @@ import { FLOW_LABEL, childrenOf, countTasks, currentTask, hasTaskList, isDesignL
 import { KIND_NOUN } from '../../shared/architecture.ts';
 import { boxUnbuilt } from '../../shared/check.ts';
 import { Markdown } from '../components/Markdown.tsx';
+import { Decisions } from '../components/Decisions.tsx';
 import { SkippedChecks } from '../components/TaskChecks.tsx';
 import { partsByTask } from '../lib/tasks.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
@@ -34,6 +35,8 @@ export function OverviewView() {
   const progressing = isLocked(plan) || counts.done + counts.inProgress + counts.blocked > 0;
   return (
     <div className="view-pad doc">
+      <Decisions />
+
       <FlowStrip plan={plan} />
 
       {/* A confirmed or submitted design reads the same, but every control

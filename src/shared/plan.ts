@@ -1037,7 +1037,7 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
   remove: ['kind', 'id'],
   review_task: ['id', 'verdict', 'summary', 'userApproved'],
   set_checks: ['id', 'add', 'skip'],
-  comment: ['target', 'text'],
+  comment: ['target', 'text', 'decision'],
   reply: ['threadId', 'text'],
   resolve: ['threadId', 'resolved'],
   report: ['text', 'checks'],
@@ -1716,6 +1716,10 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
         ts: now,
         resolved: false,
         replies: [],
+        // Only the agent asks decisions; `options: []` is an open question.
+        ...(author === 'claude' && Array.isArray(op.decision)
+          ? { decision: { options: op.decision.map((o) => clean(o, 120)).filter((o): o is string => !!o).slice(0, 6) } }
+          : {}),
       };
       plan.threads.push(thread);
       return [log('commented', target, `commented on ${describeTarget(plan, target)}: ${short(text, 80)}`)];
