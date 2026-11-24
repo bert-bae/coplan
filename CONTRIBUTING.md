@@ -76,8 +76,8 @@ MCP config names one that is missing.
   rendering and the net difference between two versions of a diagram
 - `src/shared/build.ts`: the build as a graph — dependencies, readiness,
   build steps, branches and how they stack, review modes and settings
-- `src/shared/project.ts`: a repository's `.coplan/config.json` — the check
-  hooks per stage and the build's defaults
+- `src/shared/project.ts`: a repository's `.coplan/config.json` — the
+  checks per stage and the build's defaults
 - `src/shared/agents.ts`: what differs between Claude Code, Codex and
   Cursor — names, question tools, whether a hook can add to a prompt
 - `src/shared/link.ts`: how a session is linked back to in its agent
@@ -87,10 +87,11 @@ MCP config names one that is missing.
   rendering for Claude (`render.ts` for the read-back, the prompts and the
   plan's Markdown export,
   `brief.ts` for what is next and one task's brief), hooks and housekeeping
-- `src/cli`: the `coplan` CLI, including `check` (runs a stage's hooks) and
+- `src/cli`: the `coplan` CLI, including `check` (runs a stage's checks) and
   `init` (writes a starting `.coplan/config.json`)
 - `skills/`: what Claude is taught — `coplan` (the design and the task list),
-  `coplan-build` (running a build) and `iric` (one task's cycle)
+  `coplan-handoff` (what a harness does with a submitted plan) and
+  `coplan-config` (setting a repository up)
 - `src/mcp`: the stdio MCP server (hand-rolled JSON-RPC, no dependencies)
 - `src/ui`: the browser client (React, React Flow, dagre). The canvas is
   `components/FlowCanvas.tsx` with its boxes, arrows and panel in

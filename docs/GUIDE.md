@@ -174,7 +174,7 @@ the branches stack.
 When the tasks are right, **Review & submit plan** (on the Architecture and
 Tasks views) opens the review:
 
-<a href="images/submit.png"><img src="images/submit.png" alt="The Submit the plan dialog: how the plan is built — Tracked, Managed or Export — and, for a Managed build, who reviews each task, how many tasks at once and how many review rounds on the left; the full build prompt Claude will get on the right" width="100%" /></a>
+<a href="images/submit.png"><img src="images/submit.png" alt="The Submit the plan dialog: the plan's shape and the checks, review, branches and instructions set in config on the left; the full handoff Claude will get, each part marked with its source, on the right" width="100%" /></a>
 
 - **The handoff prompt**, exactly as your harness will get it: what to do, how to report
   progress, anything you add for Claude, what you changed that Claude has not

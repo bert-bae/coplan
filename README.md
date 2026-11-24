@@ -93,7 +93,7 @@ you something, the page says so and links you to its chat.
       <p><strong>2. Shape the task list.</strong> Once you confirm the design, Claude breaks it into focused tasks: what each waits on, which branch it lands on, which boxes it builds. Coplan works out the build order and how the branches stack.</p>
     </td>
     <td width="50%" valign="top">
-      <a href="docs/images/submit.png"><img src="docs/images/submit.png" alt="The Submit the plan dialog: how the plan is built — Tracked, Managed or Export — and, for a Managed build, who reviews each task, how many tasks at once and how many review rounds on the left; the full build prompt Claude will get on the right" /></a>
+      <a href="docs/images/submit.png"><img src="docs/images/submit.png" alt="The Submit the plan dialog: the plan's shape and the checks, review, branches and instructions set in config on the left; the full handoff Claude will get, each part marked with its source, on the right" /></a>
       <p><strong>3. Read the handoff, then submit.</strong> See every word your harness will be sent and choose who builds it. Submitting locks the plan and produces the handoff.</p>
     </td>
   </tr>
@@ -686,7 +686,7 @@ counts against the model's tokens.
 | --- | --- | --- |
 | The ten tool definitions | About 22 KB of JSON schema — on the order of 5,500 tokens | Whenever the agent loads the server's tools |
 | The skill descriptions | About 1 KB | Always listed |
-| A skill's body | 16.0 KB (`coplan`); `coplan-handoff` is short | When the agent uses that skill |
+| A skill's body | 21.8 KB (`coplan`), 3.4 KB (`coplan-handoff`) | When the agent uses that skill |
 | The plan, read back | About 9,000 characters for two diagrams and ten tasks; about 140,000 for 150 boxes and 150 tasks | Each `harness_plan_read` (`changes_only` is shorter), and each publish's reply |
 | A sign-off prompt | About 6,000 characters for a seven-task plan; a hook adds at most about 10,000, and a longer plan is handed over as its summary and task list | Once per sign-off |
 | "You changed the plan" | One line | Your next message after you edit |

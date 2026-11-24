@@ -258,15 +258,13 @@ const ALLOWED_ASKS: { file: string; text: string; why: Why }[] = [
   { file: 'skills/coplan/SKILL.md', text: 'Ask only when a decision:', why: 'the rule' },
   { file: 'skills/coplan/SKILL.md', text: 'When you do ask, ask here in chat', why: 'the rule' },
   { file: 'skills/coplan/SKILL.md', text: '- Ask only as *When to ask* says', why: 'the rule' },
-  { file: 'skills/coplan-build/SKILL.md', text: "Ask the user only as the `coplan` skill's *When to ask* says", why: 'the rule' },
-  { file: 'skills/iric/SKILL.md', text: "Ask the user only as the `coplan` skill's *When to ask* says", why: 'the rule' },
+  { file: 'skills/coplan-handoff/SKILL.md', text: "Ask the user only as the `coplan` skill's *When to ask* says", why: 'the rule' },
   { file: 'src/daemon/render.ts', text: '`Ask the user, with ${agent.askWith}, only when', why: 'the rule' },
   { file: 'src/mcp/tools.ts', text: "'Tasks here are the planned tasks, shown on the boxes that link them. Ask the user, with AskUserQuestion", why: 'the rule' },
   // Cannot be undone: replacing a config the user may have written.
   { file: 'skills/coplan-config/SKILL.md', text: 'and ask before', why: 'cannot be undone' },
   // Reaches outside the session: pull requests, by default (pullRequests.open "ask").
   // The user's by right: a task that asks for their review.
-  { file: 'skills/iric/SKILL.md', text: 'does, files, checks) and ask with your question tool', why: "the user's by right: a review they asked for" },
   { file: 'src/daemon/brief.ts', text: 'Show the user the change and ask them, with', why: "the user's by right: a review they asked for" },
 ];
 
@@ -309,9 +307,9 @@ test('the agent is told to ask the user only where the one rule allows it', () =
 });
 
 test('a new "ask the user" anywhere the agent reads fails the check', () => {
-  const skill = read('skills/coplan-build/SKILL.md');
+  const skill = read('skills/coplan-handoff/SKILL.md');
   const added = `${skill}\n- **A test is flaky** — mark the task blocked and ask the user what to do.\n`;
-  const problems = askProblems([{ rel: 'skills/coplan-build/SKILL.md', text: added }], ALLOWED_ASKS);
+  const problems = askProblems([{ rel: 'skills/coplan-handoff/SKILL.md', text: added }], ALLOWED_ASKS);
   assert.equal(problems.length, 1);
   assert.match(problems[0]!, /tells the agent to ask outside the allowed cases: - \*\*A test is flaky\*\*/);
   // In the daemon's prose too, but not in a comment.

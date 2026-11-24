@@ -1,7 +1,7 @@
 {
   "name": "coplan",
-  "version": "0.3.0",
-  "description": "Open-source visual planning workspace for coding agents: shape the plan as architecture diagrams and a task board in the browser, submit it, and follow the build.",
+  "version": "0.4.0",
+  "description": "Open-source visual planning workspace for Claude Code, Codex and Cursor: shape the agent's plan as architecture diagrams and a task list, hand it to your build harness, and follow progress on a board.",
   "author": {
     "name": "Elbert B."
   },
@@ -22,8 +22,8 @@
   "mcpServers": "./mcp/codex.json",
   "interface": {
     "displayName": "Coplan",
-    "shortDescription": "Plan on a canvas, then follow the build",
-    "longDescription": "Codex publishes its plan to a local browser workspace: the architecture as diagrams you can rewire and annotate, and a task tree you can reorganize. Review the exact build prompt, submit it, and follow each task across the board as Codex builds.",
+    "shortDescription": "Plan on a canvas, hand it off, follow progress",
+    "longDescription": "Codex publishes its plan to a local browser workspace: the architecture as diagrams you can rewire and annotate, and a task tree you can reorganize. Review the exact handoff, submit it to your build harness, and follow each task across the board as it reports.",
     "developerName": "Elbert B.",
     "category": "Productivity",
     "capabilities": [

@@ -1,29 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
+
+### Coplan plans and tracks; a harness builds
+
+- **One handoff.** Submitting locks the plan and produces one handoff: the prompt, `harness_task_next` and
+  `harness_task_brief`, whose new **Done when** section says what finishes a task. Any harness builds from it — a
+  plain agent session, firstmate, anything — and reports back with `harness_task_update`,
+  `harness_branch_update` and the build report. Coplan records what it reports and shows it on the board,
+  refusing only malformed input, a task started before what it depends on is done, and a verdict outside a
+  review.
+- **Removed:** `coplan pr`, `harness_pr_event`, `harness_pr_events` and pull request watching; runners; the
+  `iric` skill; the Tracked and Managed build modes, with their reviewer, parallel and round settings; every
+  build gate (review rounds, `maxRounds`, the blocking final check, refused reports).
+- **Renamed:** `hooks` → `checks`, `iric.review` → `review` (`agent`, `user`, `none`; default `agent`),
+  `instructions.build` → `instructions.handoff`, and the `coplan-build` skill → `coplan-handoff`, now a short
+  page on what a harness does with a submitted plan. `pullRequests.template` is passed to the harness as a path.
+- **Retired keys still load, with warnings, for one release:** the old names above are read as the new ones, and
+  `mode`, `iric`, `review.model`, `final`, `pullRequests.tool`, `pullRequests.open`, `pullRequests.watch`,
+  `pullRequests.on` and `runners` are ignored. `coplan doctor` lists each with what to use instead.
 
 ### Changes
 
-- **Runners: where a build's sessions start.** Set up your own places to build — `local`, `cloud`, `ssh` — as
-  `runners` in `coplan.json`, each with what it is for, how much it can take (`max`, `maxLarge`) and how a
-  session starts there. A task can ask for a runner; otherwise the parent picks by what each is for. The parent
-  records where each task runs with `harness_task_update {runner, session, size}`, which refuses an unknown or
-  full runner; `harness_task_next` shows each runner's load and the session on each task, and the board shows
-  it on the card.
-- **One parent session per build.** The session that runs a build is the only driver; every task built side by
-  side, reviewer, refine round and pull request fix runs in a subagent or child session started from it, so in
-  the Claude desktop app they all show under it, to expand and collapse. Each is handed the task's brief plus
-  what it cannot know (start commit, neighbouring work, decisions taken), reports back only to the parent, and
-  follow-on work goes back to the same child so its context carries over.
-- **Landing: from the build report to merged.** Once Claude records a pull request, Coplan follows it with your
-  `gh` login (GitHub and Enterprise; check runs and commit statuses) and the plan shows **Review · pull requests
-  open** until every one is merged or closed. Failing CI, reviews and comments from people the repository trusts
-  come back to Claude as work — a fix task through implement → review → refine — up to a fix-round limit; merges
-  are recorded and the stack restacked. What each event does is yours to set (`pullRequests.watch`,
-  `pullRequests.on`, including commands such as auto-merge, which the agent runs). Claude hears of it through
-  `coplan pr wait` in the background, `harness_pr_events`, your next message, `harness_pr_event` in the cloud,
-  or — if you choose `wake: "headless"` — by Coplan resuming the session. `coplan pr status|unwatch`, and each
-  branch's CI, fix rounds and timeline on the board.
 - **Save the plan as a PDF.** Export plan → Save PDF prints the overview and architecture, each diagram drawn
   as a picture of its canvas, through the browser's print dialog (choose "Save as PDF"). Save PNG on a diagram's
   toolbar saves just that diagram as a picture.

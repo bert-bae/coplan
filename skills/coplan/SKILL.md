@@ -15,7 +15,7 @@ task list, and the task list in the build. It takes one of two modes:
   2. **The task list.** You break the confirmed design into the task list
      the build follows: focused tasks, linked by what blocks what, landing
      on the branches the change needs. The user shapes it and **submits
-     the plan**. That starts the build — see the `coplan-build` skill.
+     the plan**. That hands it to the build — see the `coplan-handoff` skill.
 
   The task list is never made before the design is confirmed, and the plan
   is not built before there is a task list: Coplan refuses both.
@@ -99,8 +99,8 @@ their word like a chat message: act on it, answer it, publish again.
   good, build it", "make the task list" — and record it with
   `harness_plan_advance {to: "tasks", user_said: "…"}` to make the task
   list, or `harness_plan_advance {to: "build", user_said: "…"}` to build,
-  quoting their words. It signs the plan off as the page would, with the
-  build settings they last chose there, locks it, and returns the prompt
+  quoting their words. It signs the plan off as the page would, locks it,
+  and returns the prompt
   the page would have sent: act on it at once, with no further question.
   Their word is enough; there is no need to send them to Coplan to click.
 
@@ -122,9 +122,7 @@ Ask only when a decision:
 - **cannot be undone**,
 - **reaches outside this session** — pushing, opening a pull request,
   anything other people will see — or
-- **is the user's by right** — in a Managed build, what its gates keep for
-  them: dropping work they signed off, a task they review, a review round
-  past their limit, or taking a task whose checks fail.
+- **is the user's by right** — a task they asked to review themselves.
 
 Anything else, decide, write the decision where the user will see it — a
 box's notes or a section while you design, a task's detail while you make
@@ -296,7 +294,7 @@ tree and nothing else):
   the work on one branch or make one stack on the other. Use the
   repository's base branch and prefix when the prompt names them.
 - **`review`** — only when a task needs other than the build's default:
-  `"user"` for risky, security-sensitive or user-facing work, `"skip"` for
+  `"user"` for risky, security-sensitive or user-facing work, `"none"` for
   trivial mechanical changes.
 - **Its checks** are the repository's. Which checks a task runs is the
   user's alone: when one should skip a check (a docs-only task, the test
@@ -324,16 +322,13 @@ build runs the right checks instead of guessing.
 A `[cc-harness] Build the plan …` prompt means the plan is final and
 locked: it comes with the user's next message once they submit in Coplan,
 or as `harness_plan_advance {to: "build", user_said}`'s answer when they said so
-in chat — from the task list, or straight from the design. Run the build
-with the **`coplan-build`** skill. The prompt says how
-much of the harness the user chose: in a **Managed** build take each task
-through the **`iric`** skill (implement → review → refine); in a
-**Tracked** build how you build and check each task is yours to decide, and
-Coplan refuses nothing — its replies note what it would have checked. While
-it is locked only tracking applies: `harness_task_update`, `upsert_task` for
-work you discover, `reply`/`resolve` on comments, and the final `report`.
-If the design has to change, stop that work and tell the user why in chat:
-only they can reopen it.
+in chat — from the task list, or straight from the design. Coplan plans
+and tracks; a harness builds. If you are the harness, follow the
+**`coplan-handoff`** skill. While the plan is locked only tracking applies:
+`harness_task_update`, `harness_branch_update`, `upsert_task` for work you
+discover, `reply`/`resolve` on comments, and the final `report`. If the
+design has to change, stop that work and tell the user why in chat: only
+they can reopen it.
 
 When the user tells you to build, record it with `harness_plan_advance`
 before you start, so the plan locks and the board follows the build. In an
