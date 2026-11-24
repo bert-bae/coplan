@@ -307,6 +307,9 @@ export interface Thread {
   ts: number;
   resolved: boolean;
   replies: Reply[];
+  /** An open decision the agent needs from the user: this thread is the
+   *  question, the user's reply the answer. `options` are the choices offered. */
+  decision?: { options: string[] };
 }
 
 export type ChangeKind =
@@ -728,7 +731,7 @@ export type PlanOp =
    *  replaces the checks it adds, `skip` the repository checks it leaves
    *  out ([] clears either). The user's alone — the agent proposes it. */
   | { op: 'set_checks'; id: string; add?: (Partial<TaskCheck> & { run: string })[]; skip?: string[] }
-  | { op: 'comment'; target: Target; text: string }
+  | { op: 'comment'; target: Target; text: string; decision?: string[] }
   | { op: 'reply'; threadId: string; text: string }
   | { op: 'resolve'; threadId: string; resolved: boolean }
   /** The final report on the build. Markdown; replaces any earlier one.

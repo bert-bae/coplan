@@ -188,6 +188,12 @@ const OP_PROPERTIES: Record<string, unknown> = {
     enum: ['section', 'diagram', 'task', 'component', 'service', 'datastore', 'queue', 'external', 'actor', 'note'],
     description: 'remove: section, diagram or task. upsert_node: the kind of box.',
   },
+  decision: {
+    type: 'array',
+    items: { type: 'string' },
+    description:
+      'comment: makes it an open decision the user must answer — the comment is the question, these the choices ([] for an open question). Ask one per call; never decide what is the developers\' to decide.',
+  },
   target: {
     type: 'object',
     description:
