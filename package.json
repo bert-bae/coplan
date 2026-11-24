@@ -1,7 +1,7 @@
 {
   "name": "coplan",
   "version": "0.3.0",
-  "description": "Open-source visual planning workspace for Claude Code, Codex and Cursor: shape the agent's plan as architecture diagrams and a task board in the browser, submit it, and follow the build.",
+  "description": "Open-source visual planning workspace for Claude Code, Codex and Cursor: shape the agent's plan as architecture diagrams and a task list, hand it to your build harness, and follow progress on a board.",
   "license": "MIT",
   "author": "Elbert B.",
   "homepage": "https://github.com/bert-bae/coplan#readme",

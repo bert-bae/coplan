@@ -15,6 +15,7 @@ and Cursor except where the README's
 - [Headless: no browser](#headless-no-browser)
 - [Confirming the design](#confirming-the-design)
 - [Submitting the plan](#submitting-the-plan)
+- [Building with a harness](#building-with-a-harness)
 - [Going ahead from chat](#going-ahead-from-chat)
 - [Where a plan stands: four statuses](#where-a-plan-stands-four-statuses)
 - [Requesting revisions](#requesting-revisions)
@@ -58,24 +59,21 @@ and Cursor except where the README's
    Claude breaks the planned tasks into focused ones, links them by what
    blocks what, names the boxes each builds and the branch each lands on,
    and publishes them with `harness_tasks_publish`. You shape that list —
-   dependencies, branches and review modes are editable on each task — and
+   dependencies, branches and requested reviews are editable on each task — and
    the Tasks view shows the build order it implies.
 7. **You submit it** — in Coplan or in chat. *Review & submit plan* shows
-   the exact build prompt and asks how the plan is built — *Tracked*,
-   *Managed* (with who reviews each task, how many run at once, how many
-   review rounds before Claude asks you) or *Export* — and submitting locks
-   the plan. Or tell Claude in chat — "looks good, build it" — and it submits
-   it for you, the way you last chose in that dialog. To take the plan
-   elsewhere without submitting anything, *Export plan* in the header copies
-   it as Markdown at any point.
-8. **Claude builds against it.** Your next message in Claude carries the
-   prompt — or, submitted from chat, Claude has it already. Claude starts only tasks that are ready and reports each one;
-   in a Managed build it takes each through implement → review → refine,
-   running the repository's checks. Cards move across the board, showing
-   each task's step and checks; boxes fill up as their tasks finish.
-9. **Claude reports.** Once every task is done it runs the final checks,
-   opens the pull requests in stack order if you want them, and writes a
-   build report that appears on the Overview.
+   the exact handoff prompt, and submitting locks the plan and produces the
+   handoff. Or tell Claude in chat — "looks good, build it" — and it submits
+   it for you. To take the plan elsewhere without submitting anything,
+   *Export plan* in the header copies it as Markdown at any point.
+8. **Your harness builds against it.** The handoff goes to whatever builds
+   the plan — by default the session you planned in, whose next message
+   carries the prompt. It takes ready tasks, builds each from its brief, and
+   reports each one. Cards move across the board, showing what each task
+   reported; boxes fill up as their tasks finish.
+9. **Your harness reports.** Once every task is done it runs the final
+   checks, opens the pull requests in stack order if you want them, and
+   writes a build report that appears on the Overview.
 
 ## Architecture first, or straight to tasks
 
@@ -141,7 +139,7 @@ When the architecture is right, **Confirm design** (top right of the
 Architecture view) shows what Claude will be asked — break this design into
 a task list — with the design itself and anything you add. Beside it, *Set
 in config* lists what the ask takes from config: the checks for each stage,
-the review mode tasks get by default, how branches are cut and named, and
+the review tasks request by default, how branches are cut and named, and
 your standing instructions for this step, each with the file and key that
 set it (see [Where the settings come from](#where-the-settings-come-from)).
 Confirming locks the diagrams, sections and summary; the
@@ -163,8 +161,8 @@ Claude answers with the task list. Each task can say:
 | --- | --- |
 | Starts after (`dependsOn`) | Tasks that must be done first. A parent's apply to all its subtasks, and depending on a parent means waiting for all of it. Loops are refused. Anything without one can run alongside the rest. |
 | Branch | Where the work lands; subtasks inherit it. A branch whose tasks build on another branch's is *stacked* on it. No branch means the session's current branch. |
-| Review | `subagent`, `self`, `user` or `skip`, when a task needs other than the build's default. |
-| Checks | The repository's, unless you set them for the task: untick one to skip it (a docs-only task skipping the tests), or add one of its own (a migration adding `pnpm db:check`). Only you set them — Claude proposes — even mid-build, from the task's card. A skip shows on the task, in its brief and under the build report; an added check gates the task like the repository's, unless optional. |
+| Review | `agent`, `user` or `none`: the review the brief asks the harness for, when a task needs other than the repository's default. |
+| Checks | The repository's, unless you set them for the task: untick one to skip it (a docs-only task skipping the tests), or add one of its own (a migration adding `pnpm db:check`). Only you set them — Claude proposes — even mid-build, from the task's card. A skip shows on the task, in its brief and under the build report; an added check is part of the task's definition of done like the repository's, unless optional. |
 | Builds (`builds`) | The boxes it implements, so the diagram tracks it. |
 
 The Tasks view marks each task *ready* or what it *waits on*, and shows the
@@ -178,45 +176,21 @@ Tasks views) opens the review:
 
 <a href="images/submit.png"><img src="images/submit.png" alt="The Submit the plan dialog: how the plan is built — Tracked, Managed or Export — and, for a Managed build, who reviews each task, how many tasks at once and how many review rounds on the left; the full build prompt Claude will get on the right" width="100%" /></a>
 
-- **The prompt**, exactly as Claude will get it: what to do, how to report
+- **The handoff prompt**, exactly as your harness will get it: what to do, how to report
   progress, anything you add for Claude, what you changed that Claude has not
   read yet, then the whole plan — summary, sections, the architecture and
   the task tree. It is rebuilt as you type, and *Submit* waits until what is
   on screen is what will be sent; a plan that moved on since is refused.
-- **How it is built.** The mode starts from the repository's
-  [`mode`](CONFIG.md#mode): Managed where its `.coplan/config.json` sets
-  `iric`, else Tracked.
-  - *Tracked*: Claude builds it its own way. Your next message in its chat —
-    "go" will do — carries the prompt, once, and the board follows each task
-    as Claude reports it. The prompt has no implement → review → refine:
-    how each task is built and checked is Claude's call, and nothing it
-    reports is refused. Where a Managed build would have held a task back —
-    done before any review, a failing check, past the round or parallel
-    limit, dropping work you signed off — Claude's reply carries a note
-    saying so instead.
-  - *Managed*: the same hand-over, and every task goes implement → review →
-    refine. You choose who reviews — an *independent reviewer* (a fresh
-    subagent), *self-review*, *you* (Claude stops after each task and asks),
-    or *checks only* — how many ready tasks are built at once, and how many
-    review rounds a task gets before another is yours to allow. The defaults
-    come from the repository's `iric` — or, where it has none, self-review,
-    one task at a time and three rounds, which assume nothing about the
-    agent.
-  - *Export*: the whole plan as Markdown — summary, sections, diagrams, the
-    tasks and their briefs — with no build instructions, review modes or
-    Coplan tool names, copied for you to paste anywhere. This version is
-    locked here, but nothing reports back, so nothing moves.
-- **Set in config.** What the prompt takes from config, read-only: the mode
-  it starts from, the checks for each stage, branches, how pull requests are
-  opened, the reviewer model, whether failing final checks hold the report,
-  and your standing instructions for the build.
+- **Set in config.** What the handoff takes from config, read-only: the
+  checks for each stage, branches, the pull request template, the review
+  tasks request, and your standing instructions for the handoff.
 
 ### Where the settings come from
 
 Both dialogs group these settings by the file that sets them —
 `.coplan/config.json` in the repository, or your own `coplan.json` and
 `instructions/<point>.md` in Coplan's home — and give each its key
-(`#pullRequests`, `#review.model`); standing instructions name every file
+(`#pullRequests`, `#checks`); standing instructions name every file
 that adds to them, yours first. A setting no file sets is listed under
 *Not set: Coplan's defaults*. They are read-only here, because the
 repository's file is committed and shared with your team: change them in
@@ -239,21 +213,39 @@ tasks *By box*. A strip under the header says where the build stands, under
 its [status](#where-a-plan-stands-four-statuses): waiting for
 Claude (with *Copy prompt*, in case you would rather paste it), building and
 what Claude is on, a task waiting on your review, finishing, or built — and, when you said go ahead in chat, that it
-was submitted from chat, with your words. Claude can still report tasks, add work it
+was submitted from chat, with your words. The harness can still report tasks, add work it
 discovers and answer comments; anything that would redesign the plan is
 refused, and so is publishing over it until every task is done. *Withdraw*
 (before Claude has the prompt) or *Reopen for changes* (after) unlocks the
 tasks; the design stays confirmed, if you confirmed it, until you reopen that
 too.
 
-While it builds, starting a task that still waits on another is refused. In
-a Managed build so is marking one done before it went to review, without a
-passing verdict, or while its last checks failed; in a Tracked one Claude
-is told what it skipped instead. Each card shows where its task is —
-implementing, in review (and which round), refining — and how its checks
-came out.
+While it builds, nothing a harness reports is refused: each card shows
+where its task stands, its note, and the checks and review verdict the
+harness reported, as it reported them.
 
 <a href="images/board.png"><img src="images/board.png" alt="The task board during a build: To do, In progress, Blocked and Done columns; cards show each task's branch, its review round and whether its checks passed" width="100%" /></a>
+
+## Building with a harness
+
+Coplan stops at the handoff. Whatever builds the plan — the session you
+planned in (the default, with the `coplan-handoff` skill), firstmate, or
+any tool of your own — needs only the handoff prompt and Coplan's tracking
+tools:
+
+- `harness_task_next` says what is ready, what is in progress and what the
+  rest wait on, and how to finish once every task is done.
+- `harness_task_brief` gives one task's brief: objective, acceptance
+  criteria, scope, branch, the checks that define done, and the review
+  requested.
+- `harness_task_update` reports a task's status, note, stage, checks and
+  review verdict; `harness_branch_update` records a branch's pull request;
+  the build report goes in with `harness_plan_edit`.
+
+How tasks run — in order or side by side, in worktrees, on which model,
+with how many review rounds — and running the checks, opening pull
+requests, following CI and restacking are the harness's. Coplan shows what
+it reports.
 
 ## Going ahead from chat
 
@@ -265,11 +257,7 @@ said means go ahead (it reads the chat; Coplan does not) and records it with
 
 - `to: "tasks"` confirms the design, exactly as *Confirm design* would.
 - `to: "build"` submits the plan, from the task list or straight from the
-  design, exactly as *Submit* would — built the way you last chose in the
-  Submit dialog (picking a mode or a setting there is remembered, even if
-  you close it without submitting), or else the repository's defaults. A
-  last choice of *Export* builds here in the repository's default mode
-  instead: "build it" means build it in this session.
+  design, exactly as *Submit* would.
 
 The plan locks as it would from the page, the repository's `planCheck`
 errors still hold it, and Claude gets the prompt the page would have sent
@@ -287,36 +275,24 @@ detail after it:
 | Status | When | The detail says |
 | --- | --- | --- |
 | **Planning** | You and Claude are shaping the design, then the task list | *design confirmed*, once it is |
-| **In progress** | Submitted, and Claude is picking it up or building it | *waiting for Claude*, or the task it is on |
-| **Review** | What was built waits on you: every task is done and Claude is running the final checks and writing the report; or the report is in and its pull requests are still open; or, in a Managed build, a task you review is waiting for your verdict | what is waiting on you, or *pull requests open* |
-| **Done** | Built, with the report in — or exported to be built somewhere else | *built*, or *exported* |
+| **In progress** | Submitted, and the harness is picking it up or building it | *waiting for the harness*, or the task it is on |
+| **Review** | What was built waits on you: every task is done and the harness is writing the report; or the report is in and its pull requests are still open | what is waiting on you, or *pull requests open* |
+| **Done** | Built, with the report in | *built* |
 
 Review is about what was built, not the plan before the build: a plan you are
 still reading is Planning. The session list can show one status at a time:
 the row of buttons over it filters the list, with how many plans each holds,
 and remembers your choice.
 
-## Landing: until the pull requests merge
+## Pull requests
 
-A build does not end at its report. Once Claude records a pull request,
-Coplan follows it with your `gh` login, and the plan shows **Review · pull
-requests open** until every one is merged or closed:
-
-1. CI fails, or someone you trust asks for changes → Claude gets it as work:
-   a fix task under that branch, through implement → review → refine, pushed,
-   with a reply on the thread.
-2. A lower pull request merges → Coplan records it and Claude restacks the
-   branches above it.
-3. Every pull request merged or closed → the plan is **Done**.
-
-On the board, each branch shows its pull request, CI, the fix rounds used and
-*What happened*: each change and what it came to. In a terminal,
-`coplan pr status` lists the same, and `coplan pr unwatch [branch]` stops
-following one. What counts as trusted, how many fix rounds are allowed, and
-what each event does are set in `.coplan/config.json` (`pullRequests.watch`,
-`pullRequests.on`, in [CONFIG.md](CONFIG.md#watching-pull-requests-watch-and-on)).
-Comments from anyone else are shown, never acted on, and Coplan merges nothing
-unless you set a command that does.
+Opening pull requests, following CI and review comments, and restacking
+when a lower branch merges belong to the harness. It records each branch's
+pull request and where it stands with `harness_branch_update`, so the board
+shows the stack, and the plan shows **Review · pull requests open** until
+it reports every one merged or closed. Coplan no longer watches pull
+requests itself (`pullRequests.watch` and `pullRequests.on` are deprecated:
+see [CONFIG.md](CONFIG.md#pullrequests)).
 
 ## Requesting revisions
 
@@ -348,39 +324,42 @@ them into one explicit ask, with nothing more to type:
 
 ## Checks: `.coplan/config.json`
 
-A repository says what every task runs, so no agent has to guess, in a
-committed `.coplan/config.json` (`//` comments allowed):
+A repository says what done means for every task, so no agent has to guess,
+in a committed `.coplan/config.json` (`//` comments allowed):
 
 ```jsonc
 {
-  "hooks": {
-    // quick checks after every implementation or refinement pass
+  "checks": {
+    // quick checks after each change
     "implement": ["pnpm run typecheck", "pnpm run lint"],
-    // the gate a task must pass before it is done
+    // what a task must pass to be done
     "review": [{ "name": "tests", "run": "pnpm run test", "timeout": 900 }],
     // once every task is done
     "final": ["pnpm run check"]
   },
-  "iric": { "review": "subagent", "parallel": 2, "maxRounds": 3 },
+  "review": "agent",
   "branches": { "base": "main", "prefix": "coplan/" }
 }
 ```
 
-The hooks go to the agent in the build prompt and in each task's brief; it
-runs them like any other command, under your permission settings — Coplan
-never runs them itself. `coplan check <stage>` runs a whole stage and prints
-only what failed — and only the checks for what changed: since a task
-began (`--since`), at the end since the base branch, none for an area the
-change did not touch. `--json` gives the results the agent reports, and
-[Targeted checks](CONFIG.md#targeted-checks) has the rules. `coplan init`, or `/coplan-init` in Claude Code
-or Cursor, writes a starting point from the repository's scripts. See
+The checks go to the harness in the handoff and in each task's brief, as
+the task's definition of done; it runs them like any other command, under
+your permission settings — Coplan never runs them itself, and records what
+the harness reports. A harness can use `coplan check <stage>`, which runs a
+whole stage and prints only what failed — and only the checks for what
+changed: since a task began (`--since`), at the end since the base branch,
+none for an area the change did not touch. `--json` gives the results in
+the shape `harness_task_update` takes, and
+[Targeted checks](CONFIG.md#targeted-checks) has the rules. `coplan init`,
+or `/coplan-init` in Claude Code or Cursor, writes a starting point from the
+repository's scripts. See
 [CONFIG.md](CONFIG.md#the-repository-coplanconfigjson).
 
 The design itself isn't sent again in a prompt: Claude already has it. A
 plan whose tasks are too long to hand over in one message (a hook adds about
 10,000 characters at most) is sent as the instructions, the summary and the
-task list, with Claude told to read the rest with `harness_plan_read`. The
-review says when that happens.
+task list, with the harness told to read the rest with `harness_plan_read`.
+The review says when that happens.
 
 ## Questions are answered in Claude
 
@@ -390,19 +369,14 @@ Claude follows one rule, stated in the `coplan` skill and in every prompt:
 it asks you only when a decision
 
 - cannot be undone,
-- reaches outside the session — pushing, opening a pull request (by
-  default it asks before opening one: [`pullRequests.open`](CONFIG.md#pullrequests)
-  is `"ask"`), or
-- is yours by right — in a Managed build: dropping work you signed off, a
-  task you review, a review round past your limit, or taking a task whose
-  checks fail.
+- reaches outside the session — pushing, opening a pull request, or
+- is yours by right — dropping work you signed off, or a task whose
+  requested review is `user`.
 
 Anything else it decides, writes down where you will see it — a box's
 notes or a section while it designs, a task's detail or note while it makes
 the task list and builds — and carries on. You review the design and the
-task list before anything is built, and change what you disagree with. In a
-Tracked build Coplan's replies tell Claude what a Managed build would have
-held back, and Claude decides.
+task list before anything is built, and change what you disagree with.
 
 ### Answering
 
@@ -527,13 +501,12 @@ summary, the sections, each diagram written out as an architecture, the task
 list and its build order, a brief for every task — what it is for, the boxes
 it builds, what it comes after and where it lands — the build report if
 there is one, and the open comments. It carries no build instructions,
-review modes, round limits or Coplan tool names, so it reads the same in any
+requested reviews or Coplan tool names, so it reads the same in any
 tool. *Copy* puts it on the clipboard and *Download .md* saves it.
 
 It works from every view and in every phase, and signs nothing off: the plan
 stays as it is, and Claude's read of it does not move. Each part shows where
-it comes from, as in *What Claude reads*. To lock the version you take away,
-submit the plan as *Export* instead.
+it comes from, as in *What Claude reads*.
 
 ## What Claude reads
 
@@ -542,13 +515,11 @@ one viewer with three tabs:
 
 - **Read-back** — the plan exactly as `harness_plan_read` returns it.
 - **Next prompt** — what the next sign-off sends: the ask for a task list
-  while you design, the build prompt once the design is confirmed. Once
+  while you design, the handoff prompt once the design is confirmed. Once
   you submit, the prompt as it was sent; *View prompt* opens it there too.
 - **Task brief** — one task's brief, exactly as `harness_task_brief` gives
-  it to the agent that builds it, and to the subagent or child session it
-  hands the task to. That session is started from the build's own, shows
-  under it in the Claude desktop app, and reports back only to it.
-  *Brief*, on every task in the outline and *By box*, in each box's task
+  it to the harness that builds it, to hand on as is to whoever builds the
+  task. *Brief*, on every task in the outline and *By box*, in each box's task
   list on the canvas, and on every card on the board, opens it for that
   task.
 
@@ -559,8 +530,8 @@ section, a task or the summary goes to that item in the page when you click
 it; a config setting shows its file and key and links to what it does; what
 Coplan works out says from what (*Worked out: each task's branch*); Coplan's
 fixed instructions say *Coplan*. Words from somewhere else inside a sentence
-— the reviewer model, how pull requests are opened, the review mode you
-chose — are highlighted where they sit. The sign-off dialogs show their
+— the pull request template, the review a task requests — are highlighted
+where they sit. The sign-off dialogs show their
 prompt the same way.
 
 *Agent bookkeeping*, off until you tick it, shows what only the agent needs:
