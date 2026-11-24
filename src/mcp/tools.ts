@@ -30,22 +30,12 @@ const NODE = {
     label: { type: 'string' },
     kind: { type: 'string', enum: ['component', 'service', 'datastore', 'queue', 'external', 'actor', 'note'] },
     detail: { type: 'string', description: 'A few words shown on the box: its technology or role, e.g. "Redis, read-through".' },
-    description: {
-      type: 'string',
-      description:
-        'Two to four sentences: what this part does, what it owns, and how others talk to it. Shown when the ' +
-        'user hovers the box, and read back to you as the architecture. Give every box one.',
-    },
-    notes: {
-      type: 'string',
-      description: 'Markdown: the decisions about this part and why, the alternatives ruled out, open concerns.',
-    },
+    description: { type: 'string', description: 'Two to four sentences: what it does, owns, and how others talk to it. Give every box one.' },
+    notes: { type: 'string', description: 'Markdown: decisions and why, alternatives ruled out, open concerns.' },
     taskIds: {
       type: 'array',
       items: { type: 'string' },
-      description:
-        'Tasks that build this part; the box shows their progress. In a publish, give those tasks an `id` ' +
-        '(e.g. "cache-client") so you can refer to them here.',
+      description: 'Ids of the tasks that build this part.',
     },
   },
   required: ['id', 'label'],
@@ -95,8 +85,8 @@ const BUILD_FIELDS: Record<string, unknown> = {
   },
 };
 
-/** Nested task schema, a few levels deep — deep enough for any real breakdown. */
-function taskSchema(depth: number, build = false): Record<string, unknown> {
+/** The task schema, once, as a recursive $ref target (it was inlined four levels deep). */
+function taskDefs(build = false): Record<string, unknown> {
   const properties: Record<string, unknown> = {
     id: { type: 'string', description: 'Keep an existing id to keep its status and comments. Name it to refer to it in dependsOn.' },
     title: { type: 'string', description: 'One concrete piece of work.' },
@@ -104,10 +94,11 @@ function taskSchema(depth: number, build = false): Record<string, unknown> {
     status: STATUS,
     files: { type: 'array', items: { type: 'string' }, description: 'Files you expect to touch.' },
     ...(build ? BUILD_FIELDS : {}),
+    subtasks: { type: 'array', items: { $ref: '#/$defs/task' } },
   };
-  if (depth > 0) properties['subtasks'] = { type: 'array', items: taskSchema(depth - 1, build) };
-  return { type: 'object', properties, required: ['title'] };
+  return { task: { type: 'object', properties, required: ['title'] } };
 }
+const TASK_REF = { $ref: '#/$defs/task' };
 
 /** The edits Claude is offered through harness_plan_edit. */
 export const AGENT_OPS = [
@@ -233,19 +224,12 @@ export const TOOLS: ToolDef[] = [
     name: 'harness_plan_publish',
     endpoint: 'publish',
     description:
-      'Publish the whole plan to the Coplan UI, where the user reads it visually, reorganizes it and ' +
-      'comments on it. Choose its mode: "architect" (architecture first — diagrams of the systems, flow or journey, ' +
-      'with the task ideas linked to the boxes they build; the task list is made once the user confirms the design) or ' +
-      '"tasklist" (straight to the task list, with dependsOn, branch and files, for work in one contained area). ' +
-      'Include: a summary — your understanding of the problem, how you approach it and why this mode; sections for ' +
-      'context and risks; for architect, diagrams as nodes and edges (the UI lays them out); and the tasks. Replaces the plan; items keep their comments and statuses when you keep their ' +
-      'ids, a box keeps its position, detail, description and notes and an arrow between the same two boxes its ' +
-      'label and style unless you restate them ("" clears a label). Refused if the user has changed the plan since you last read it, ' +
-      'once they confirm the design (then harness_tasks_publish makes the task list), and while it is being built. ' +
-      'Tasks here are the planned tasks, shown on the boxes that link them. Ask the user, with AskUserQuestion in ' +
-      'chat (never in the plan), only when a decision cannot be undone or reaches outside this session; decide the ' +
-      "rest and write it into the plan (a box's notes, a section), where they can change it. Does not wait for the " +
-      'user: afterwards, tell them in chat that the plan is ready.',
+      'Publish the whole plan to the Coplan UI, where the user reads and reshapes it. mode "architect": diagrams first, ' +
+      'task ideas linked to the boxes they build (the task list comes after the user confirms the design). mode "tasklist": ' +
+      'straight to tasks, for work in one contained area. Replaces the plan; items keep comments, statuses and layout ' +
+      'when you keep their ids. Refused if the user changed the plan since you last read it, once the design is confirmed ' +
+      '(use harness_tasks_publish), and during a build. Does not wait: tell the user in chat it is ready. Ask with ' +
+      'AskUserQuestion only for what cannot be undone; decide the rest and write it into the plan.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -283,11 +267,12 @@ export const TOOLS: ToolDef[] = [
         tasks: {
           type: 'array',
           description: 'architect: the task ideas, coarse, each with an id the boxes link to. tasklist: the task list itself, in build order.',
-          items: taskSchema(3, true),
+          items: TASK_REF,
         },
       },
       required: ['title', 'mode'],
       additionalProperties: false,
+      $defs: taskDefs(true),
     },
   },
   {
@@ -331,25 +316,13 @@ export const TOOLS: ToolDef[] = [
     name: 'harness_plan_edit',
     endpoint: 'edit',
     description:
-      'Make targeted changes to the plan, applied together or not at all. Call it as {ops: [ … ]}, where each op ' +
-      'is an object with an "op" field and only that op\'s fields: set_meta {title?, summary?}; upsert_section ' +
-      '{id?, title?, body?, index?}; upsert_diagram {id?, title?, nodes?, edges?, direction?, caption?, index?} ' +
-      '(nodes/edges replace the current ones; a box you keep keeps its position, detail, description and notes, and an ' +
-      'arrow between the same two boxes keeps its label, dashed and arrows, unless you give them); upsert_task ' +
-      '{id?, parentId?, index?, title?, detail?, files?, note?, dependsOn?, branch?, review?, builds?} ' +
-      '(omit id to add; parentId makes it a subtask); move_task {id, parentId, index}; move_section {id, index}; ' +
-      'move_diagram {id, index}; one box or arrow without restating the rest — upsert_node {diagramId, id, label?, ' +
-      'kind?, detail?, description?, notes?, taskIds?} (only the fields you give change; a new box needs a label), ' +
-      'remove_node {diagramId, id} (and its arrows), upsert_edge {diagramId, id?, from?, to?, label?, dashed?, arrows?} ' +
-      '(by id to change one — an arrow\'s id is from->to unless the read shows another — or from and to to add one), ' +
-      'remove_edge {diagramId, id? | from, to}; comment {target: {kind, id}, text} (start a thread — on a box: kind "node", id ' +
-      '"diagramId/nodeId"; when you are unsure of a change, comment rather than overwrite); reply {threadId, text} ' +
-      '(reply to a comment); resolve {threadId, resolved}; remove {kind: section|diagram|task, id}; report {text, checks?} ' +
-      '(the final build report); withdraw_proposal {id} (take back a proposal of yours). upsert_section, upsert_diagram and upsert_task take expect: the rev you read. ' +
-      'To suggest a change rather than make it, use harness_plan_propose. ' +
-      'Example: {ops: [{op: "reply", threadId: "c2", text: "Done: split the cache."}]}. Once the user confirms the ' +
-      'design only tasks, task links and comments change; once they submit the plan only upsert_task, comment, ' +
-      'reply, resolve and report apply.',
+      'Make targeted changes to the plan, all or nothing: {ops: [{op, ...fields}]}. Each field names the op(s) it ' +
+      'belongs to in its own description. Ops: set_meta, upsert_section|diagram|task|node|edge (omit id to add; nodes/edges ' +
+      'on a diagram replace the current ones, kept items keep their layout and text unless restated), move_task|section|diagram, ' +
+      'remove_node|edge, remove {kind, id}, comment {target, text} (comment rather than overwrite when unsure), reply, resolve, ' +
+      'report, withdraw_proposal. upsert_section|diagram|task take expect: the rev you read. To suggest rather than ' +
+      'change, use harness_plan_propose. Example: {ops: [{op: "reply", threadId: "c2", text: "Done."}]}. After the design ' +
+      'is confirmed only tasks, task links and comments change; after submit only upsert_task, comment, reply, resolve, report.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -376,17 +349,12 @@ export const TOOLS: ToolDef[] = [
     name: 'harness_plan_propose',
     endpoint: 'propose',
     description:
-      'Suggest a change to the plan instead of making it: a batch of edits (the same ops as harness_plan_edit, for the ' +
-      "plan's content — sections, diagrams, boxes, arrows, tasks) that waits for the user. They see it in Coplan beside " +
-      'what it changes, with your reason, and accept it (the edits apply, as theirs) or reject it (saying why if they ' +
-      'like). Use it when you audit the plan and find something the user should decide — a design flaw, a missing ' +
-      'part, a task split — and when the plan is confirmed or submitted, for the changes it no longer lets you make. ' +
-      'Nothing changes until they answer; you hear it the next time you read the plan. It is refused if it would ' +
-      'not apply to the plan as it is, and goes out of date if what it changes moves first. Which checks a task runs ' +
-      'is the user\'s alone, so it is only ever proposed: set_checks {id, add?, skip?} — skip names repository checks the ' +
-      'task leaves out (a docs-only task skipping the tests), add gives it checks of its own ({name?, run, stage?, optional?}). ' +
-      'Example: {title: "Make the cache write-through", reason: "Reads after a write see stale data for up to the TTL.", ' +
-      'ops: [{op: "upsert_node", diagramId: "d1", id: "cache", description: "Write-through: every write updates it."}]}.',
+      'Suggest a change instead of making it: a batch of harness_plan_edit ops that waits for the user, who accepts ' +
+      '(applied as theirs) or rejects it with your reason beside it. Use it to flag a flaw you found, and for changes ' +
+      'a confirmed or submitted plan no longer lets you make. You hear the answer on your next read. Refused if it ' +
+      'would not apply now. A task\'s checks are the user\'s call, so only proposed: set_checks {id, add?, skip?}. ' +
+      'Example: {title: "Write-through cache", reason: "Reads go stale for the TTL.", ops: [{op: "upsert_node", ' +
+      'diagramId: "d1", id: "cache", description: "Every write updates it."}]}.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -425,10 +393,11 @@ export const TOOLS: ToolDef[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        tasks: { type: 'array', description: 'The task tree, in build order.', items: taskSchema(3, true) },
+        tasks: { type: 'array', description: 'The task tree, in build order.', items: TASK_REF },
       },
       required: ['tasks'],
       additionalProperties: false,
+      $defs: taskDefs(true),
     },
   },
   {
@@ -486,15 +455,12 @@ export const TOOLS: ToolDef[] = [
     name: 'harness_task_update',
     endpoint: 'task',
     description:
-      'Track progress while you build; the user follows it on the board. Mark a task in_progress (stage ' +
-      '"implement") when you start it, set stage "review" and "refine" as it goes round its implement → review → ' +
-      'refine cycle, report the checks you ran, and mark it done with a one-line note once review passed — or ' +
-      'blocked with a note on what it waits on. The only way to report progress. Refused in every ' +
-      'build: starting or finishing a task that still waits on another; progress on a task that has subtasks. Refused ' +
-      'in a Managed build, and only noted in the reply in a Tracked one: starting more at once than the user allowed; ' +
-      'a review round past their limit; done before any review, without a passing verdict for its last review round ' +
-      '(the user\'s own, when the user reviews it), or while a check fails or a review check was never reported; ' +
-      'dropping work the user signed off.',
+      'Track progress while you build; the user follows it on the board. in_progress (stage "implement") on start, ' +
+      'stage "review"/"refine" through the cycle, report checks, done with a one-line note once review passed, or ' +
+      'blocked with a note. Always refused: starting or finishing a task that waits on another, progress on a task ' +
+      'with subtasks. Refused when Managed (noted when Tracked): too many at once, review rounds past the limit, done ' +
+      'without a passing verdict for the last round (the user\'s, if they review) or with a failing or unreported check, ' +
+      'dropping signed-off work.',
     inputSchema: {
       type: 'object',
       properties: {
