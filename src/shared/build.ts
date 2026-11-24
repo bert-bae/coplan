@@ -499,6 +499,11 @@ export function effectiveReview(plan: Tasks, task: Task, fallback: ReviewMode): 
   return fallback;
 }
 
+export function effectiveRunner(plan: Tasks, task: Task): string | undefined {
+  for (const t of [task, ...ancestorsOf(plan, task)]) if (t.runner) return t.runner;
+  return undefined;
+}
+
 /** Settings as sent by a page or read from a config file, made whole. */
 export function cleanSettings(raw: unknown, fallback: BuildSettings = DEFAULT_BUILD_SETTINGS): BuildSettings {
   const rec = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;

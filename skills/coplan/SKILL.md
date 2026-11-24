@@ -209,6 +209,23 @@ its thread, propose what is theirs to decide, then tell them what changed.
 Coplan marks their ask answered once every comment has a reply or a
 proposal.
 
+**Open decisions.** Whatever is the developers' to decide — a trade-off, a
+product choice, a constraint you cannot see — is never yours to settle. Raise
+each as a decision, before you ask to confirm the design or the task list:
+`harness_plan_edit {ops: [{op: "comment", target: {kind: "plan", id: ""},
+text: "<the question, with what each choice costs>", decision: ["A", "B"]}]}`
+(`decision: []` for an open question). Coplan shows them in a section at the
+top of the Overview; the user answers and sends them, and a `[cc-harness]
+Revise the plan` prompt brings the answers back: revise the architecture and
+tasks to follow them, reply in each thread and resolve it. An answer can raise
+a new decision; ask it the same way.
+
+**Headless**, the user has no page: do not open decision threads. Interview
+them in chat instead, **one decision at a time** — give the context, the
+choices and your recommendation, then wait for the answer before asking the
+next. Then revise the architecture and tasks from the answers, and record
+each in a "Decisions" section of the plan.
+
 **Auditing the plan.** When you review the design — yours or the user's —
 and are not sure a change is wanted, say so where it applies instead of
 overwriting: `harness_plan_edit {ops: [{op: "comment", target: {kind: "node",

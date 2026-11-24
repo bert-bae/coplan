@@ -732,10 +732,18 @@ function fit(plan: Plan, head: Block[], said: Block[], changes: Block[], doc: Do
   return { prompt: blocksText(blocks), trimmed: true, blocks };
 }
 
+function runnerWords(project: ProjectConfig): string {
+  if (!project.runners.length) return '';
+  return (
+    ` Hand tasks to the user's runners (${project.runners.map((r) => r.name).join(', ')}): a task that asks for one goes there, the rest by what each is for and its room. ` +
+    'Record each with harness_task_update {runner, session, size}; harness_task_next shows the load.'
+  );
+}
+
 function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: ProjectConfig, chosen: SettingSources): Block[] {
   const together =
     s.parallel > 1
-      ? `build them side by side, up to ${s.parallel} at once — with subagents where your agent has them, each given that task's harness_task_brief`
+      ? `build them side by side, up to ${s.parallel} at once — with subagents (or child sessions) started from this session where your agent has them, each given that task's harness_task_brief; this session stays the one that reports`
       : 'build them one at a time';
   const { branches } = branchPlan(plan);
   const b = new BlockList();
@@ -751,7 +759,8 @@ function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: P
   );
   b.gap().add('step-1', TEMPLATE, '1. Start only tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that are ready together do not depend on each other — ')
     .inline('step-1:parallel', chosen('parallel'), together)
-    .inline('step-1:end', TEMPLATE, ". harness_task_brief gives one task's focused brief: its objective, where it fits, its branch and its checks.");
+    .inline('step-1:end', TEMPLATE, ". harness_task_brief gives one task's focused brief: its objective, where it fits, its branch and its checks.")
+    .inline('step-1:runners', configSource(project, 'runners'), runnerWords(project));
   b.add(
     'step-2',
     TEMPLATE,
@@ -821,7 +830,7 @@ function trackedBrief(plan: Plan, agent: AgentInfo, project: ProjectConfig, mode
     '1. Start with tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that ' +
       "are ready together do not depend on each other. harness_task_brief gives one task's focused brief: its objective, " +
       'where it fits, its branch and its checks.',
-  );
+  ).inline('step-1:runners', configSource(project, 'runners'), runnerWords(project));
   b.add(
     'step-2',
     TEMPLATE,
@@ -928,6 +937,14 @@ export function revisionPrompt(plan: Plan, opts: { note?: string } = {}): Revisi
     '3. Reply in its thread — harness_plan_edit {ops: [{op: "reply", threadId, text}]} — with what you did or proposed, ' +
       'and resolve it ({op: "resolve", threadId, resolved: true}) if it is settled.',
   );
+  if (threads.some((t) => t.decision)) {
+    b.gap().add(
+      'step-decisions',
+      TEMPLATE,
+      'Comments marked [decision] are answers to questions you asked: revise the architecture and tasks to follow each answer, ' +
+        'reply with what changed and resolve the thread. If an answer raises a new open decision, ask it as a new decision comment.',
+    );
+  }
   b.gap().add('step-4', TEMPLATE, 'Then tell the user in chat what changed. Coplan marks the ask answered once every comment has a reply or a proposal.');
   const said = fromUser(opts.note);
   const head = [...b.blocks, ...said];
@@ -1458,7 +1475,7 @@ function capital(text: string): string {
  *  is the agent's bookkeeping. */
 function threadBlocks(plan: Plan, t: Thread, reader: 'claude' | 'outside' = 'claude', hint = true): Block[] {
   const who = (author: 'user' | 'claude') => (author === 'user' ? 'user' : reader === 'claude' ? 'you' : 'planner');
-  const lines = [`- [${t.id}] on ${describeTarget(plan, t.target)} — ${who(t.author)}: ${hang(t.text, 4)}`];
+  const lines = [`- [${t.id}]${t.decision ? ' [decision]' : ''} on ${describeTarget(plan, t.target)} — ${who(t.author)}: ${hang(t.text, 4)}`];
   for (const r of t.replies) lines.push(`  ↳ ${who(r.author)}: ${hang(r.text, 4)}`);
   const b = new BlockList().add(`thread:${t.id}`, { kind: 'field', target: t.target }, lines);
   if (hint && reader === 'claude' && threadWaitsOn(t) === 'claude') {

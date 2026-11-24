@@ -216,6 +216,11 @@ export interface Task {
   branch?: string;
   /** How this task is reviewed, when not the build's default. Inherited. */
   review?: ReviewMode;
+  /** The runner (config `runners`) it must be built on: an explicit request,
+   *  over the parent's own pick. Inherited. */
+  runner?: string;
+  /** Where it is being built, as the parent session recorded it. */
+  dispatch?: Dispatch;
   /** Where the task is in its implement → review → refine cycle, while it is
    *  in progress. */
   stage?: IricStage;
@@ -263,6 +268,20 @@ export interface Task {
   createdBy: Author;
 }
 
+/** Large tasks count against a runner's `maxLarge` as well as its `max`. */
+export const TASK_SIZES = ['small', 'large'] as const;
+export type TaskSize = (typeof TASK_SIZES)[number];
+export const RUNNER_NAME = /^[A-Za-z0-9._-]{1,40}$/;
+
+/** A task handed to a session on one of the user's runners. */
+export interface Dispatch {
+  runner: string;
+  /** How the parent reaches it: a subagent or session id, a pid, an ssh job. */
+  session?: string;
+  size: TaskSize;
+  at: number;
+}
+
 /** The stages a task's own check can run at: the final checks are the
  *  whole build's, not one task's. */
 export const TASK_CHECK_STAGES = ['implement', 'review'] as const;
@@ -307,6 +326,9 @@ export interface Thread {
   ts: number;
   resolved: boolean;
   replies: Reply[];
+  /** An open decision the agent needs from the user: this thread is the
+   *  question, the user's reply the answer. `options` are the choices offered. */
+  decision?: { options: string[] };
 }
 
 export type ChangeKind =
@@ -601,6 +623,7 @@ export interface TaskInput {
   dependsOn?: string[];
   branch?: string;
   review?: ReviewMode;
+  runner?: string;
   /** Boxes this task builds: a node id, or `diagramId/nodeId` when the id
    *  is used in more than one diagram. Adds the task to each box. */
   builds?: string[];
@@ -671,6 +694,10 @@ export type PlanOp =
       branch?: string;
       /** `""` clears it, so the task inherits its parent's or the default. */
       review?: ReviewMode | '';
+      /** `""` clears it, so the task inherits its parent's. */
+      runner?: string;
+      /** Progress, set by harness_task_update: where it is being built. */
+      dispatch?: Dispatch;
       stage?: IricStage;
       checks?: CheckResult[];
       /** The commit the task's work began at, as the daemon read it when the
@@ -728,7 +755,7 @@ export type PlanOp =
    *  replaces the checks it adds, `skip` the repository checks it leaves
    *  out ([] clears either). The user's alone — the agent proposes it. */
   | { op: 'set_checks'; id: string; add?: (Partial<TaskCheck> & { run: string })[]; skip?: string[] }
-  | { op: 'comment'; target: Target; text: string }
+  | { op: 'comment'; target: Target; text: string; decision?: string[] }
   | { op: 'reply'; threadId: string; text: string }
   | { op: 'resolve'; threadId: string; resolved: boolean }
   /** The final report on the build. Markdown; replaces any earlier one.

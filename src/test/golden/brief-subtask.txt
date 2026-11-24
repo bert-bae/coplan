@@ -67,7 +67,7 @@ Check error handling.
 
 Run a stage at once: `"/opt/coplan/bin/coplan" check implement` (or `review`); add `--json` for the `checks` to report. Only the checks for what the task changes run: since it began with `--since` (given when it starts), else since the last commit.
 
-Report each step with harness_task_update {task_id: "inval", stage: "implement" | "review" | "refine", checks: [{name, ok, note}]}, and status "done" with a one-line note once the review passed. A subagent without the Coplan tools reports back to the agent that gave it this brief instead: what it changed, the checks and how they came out, and anything left.
+Report each step with harness_task_update {task_id: "inval", stage: "implement" | "review" | "refine", checks: [{name, ok, note}]}, and status "done" with a one-line note once the review passed. Handed this brief as a subagent or a child session, report back to the session that started you instead, never to Coplan or the user: what you changed, the checks and how they came out, any question, and anything left.
 
 ## Open comments on it and its design
 - planner _(on the plan)_: Proposal p1: Split the docs task

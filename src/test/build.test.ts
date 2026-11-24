@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PlanError, applyOps, confirmDesign, markDelivered, publishPlan, publishTasks, normalizePlan, submitPlan } from '../shared/plan.ts';
+import { PlanError, applyOps, confirmDesign, markDelivered, publishPlan, publishTasks, normalizePlan, submitPlan, threadsForRevision } from '../shared/plan.ts';
 import {
   SESSION_BRANCH,
   stackStatus,
@@ -20,7 +20,7 @@ import {
   waitingOn,
 } from '../shared/build.ts';
 import { renderBrief, renderNext } from '../daemon/brief.ts';
-import { buildPrompt, exportText, renderPlan } from '../daemon/render.ts';
+import { buildPrompt, exportText, renderPlan, revisionPrompt } from '../daemon/render.ts';
 import { parseProjectConfig } from '../shared/project.ts';
 import type { Plan, PlanInput, PlanOp, TaskInput } from '../shared/types.ts';
 
@@ -419,7 +419,7 @@ test('what is next says what to start, how many at once, and what the rest wait 
   const next = renderNext(plan, { project: PROJECT, mode: 'managed', settings: { review: 'subagent', parallel: 3, maxRounds: 3 } });
   assert.match(next, /## In progress \(1\)\n- client Cache client — implementing/);
   assert.match(next, /## Ready to start \(2\)\n- config Config · branch `cache\/storage`[^\n]*\n- docs Docs · review: skip/);
-  assert.match(next, /Start up to 2 now, side by side — with subagents where your agent has them/);
+  assert.match(next, /Start up to 2 now, side by side — with subagents started from this session where your agent has them/);
   assert.match(next, /- invalidate Invalidation — waits on client/);
   assert.match(next, /- `cache\/api` from `cache\/storage` \(stacked\)/);
 
@@ -709,4 +709,16 @@ test('a dependency whose work was dropped is settled in both briefs, as the boar
     assert.match(renderBrief(p2, t4, {}), /- \[-\] t1 Cache layer — dropped: there is nothing of it to build on/, what);
     assert.match(exportText(p2), /- \[-\] t1 Cache layer \(dropped: nothing of it to build on\)/, what);
   }
+});
+
+test('a decision is the agent\'s question; the user\'s answer puts it in the revision ask', () => {
+  const base = publishPlan(null, DESIGN, 1_000).plan;
+  const ask: PlanOp = { op: 'comment', target: { kind: 'plan', id: '' }, text: 'Cache or not?', decision: ['Cache', 'No cache', ' '] };
+  assert.equal(applyOps(base, [ask], 'user').plan.threads[0]!.decision, undefined, 'only the agent asks');
+  let plan = applyOps(base, [ask], 'claude').plan;
+  assert.deepEqual(plan.threads[0]!.decision, { options: ['Cache', 'No cache'] });
+  assert.equal(threadsForRevision(plan).length, 0, 'it waits on the user');
+  plan = applyOps(plan, [{ op: 'reply', threadId: plan.threads[0]!.id, text: 'Cache' }], 'user').plan;
+  assert.equal(threadsForRevision(plan).length, 1);
+  assert.match(revisionPrompt(plan).prompt, /\[decision\] on[\s\S]*Comments marked \[decision\]|Comments marked \[decision\][\s\S]*\[decision\] on/);
 });
