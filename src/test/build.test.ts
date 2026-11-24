@@ -419,7 +419,7 @@ test('what is next says what to start, how many at once, and what the rest wait 
   const next = renderNext(plan, { project: PROJECT, mode: 'managed', settings: { review: 'subagent', parallel: 3, maxRounds: 3 } });
   assert.match(next, /## In progress \(1\)\n- client Cache client — implementing/);
   assert.match(next, /## Ready to start \(2\)\n- config Config · branch `cache\/storage`[^\n]*\n- docs Docs · review: skip/);
-  assert.match(next, /Start up to 2 now, side by side — with subagents where your agent has them/);
+  assert.match(next, /Start up to 2 now, side by side — with subagents started from this session where your agent has them/);
   assert.match(next, /- invalidate Invalidation — waits on client/);
   assert.match(next, /- `cache\/api` from `cache\/storage` \(stacked\)/);
 

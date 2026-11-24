@@ -65,7 +65,7 @@ other keys:
   "iric": { "review": "subagent", "parallel": 2, "maxRounds": 3 },
   "review": { "model": "sonnet" },
   "instructions": {
-    "build": "Hand each task to a fresh subagent with its harness_task_brief as it is, even one at a time: your own context then holds only task status. Run implementing subagents on sonnet; on opus for tasks the user reviews.",
+    "build": "Hand each task to a fresh background subagent started from this session, with its harness_task_brief as it is, even one at a time: your own context then holds only task status, and every task shows under this session. Run implementing subagents on sonnet; on opus for tasks the user reviews.",
     "brief": "Report back in at most ten lines: the files changed, each check and how it came out, anything left open. No diff, no code."
   }
 }

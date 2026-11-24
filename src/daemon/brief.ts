@@ -197,8 +197,8 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
         : settings.parallel === 1
           ? '_Build one at a time: start the first, and come back here when it is done._'
           : ready.length === 1 || room === 1
-            ? `_Start ${ready.length === 1 ? 'it' : 'the first'} now${active.length ? ', alongside what is in progress' : ''} — yourself, or by a subagent given its harness_task_brief where your agent has them._`
-            : `_None of these waits on another. Start up to ${Math.min(room, ready.length)} now, side by side — with subagents where your agent has them, each given its harness_task_brief${
+            ? `_Start ${ready.length === 1 ? 'it' : 'the first'} now${active.length ? ', alongside what is in progress' : ''} — yourself, or by a subagent started from this session and given its harness_task_brief, where your agent has them._`
+            : `_None of these waits on another. Start up to ${Math.min(room, ready.length)} now, side by side — with subagents started from this session where your agent has them, each given its harness_task_brief${
                 branchPlan(plan).branches.length ? ', and a working tree of its own for a task on a different branch' : ''
               }._`;
     out.push(advice);
@@ -456,8 +456,7 @@ export function briefBlocks(plan: Plan, task: Task, opts: BriefOptions = {}): Bl
       'report',
       TEMPLATE,
       `Report each step with harness_task_update {task_id: "${task.id}", stage: "implement" | "review" | "refine", checks: [{name, ok, note}]}, ` +
-        'and status "done" with a one-line note once the review passed. A subagent without the Coplan tools reports ' +
-        'back to the agent that gave it this brief instead: what it changed, the checks and how they came out, and anything left.',
+        'and status "done" with a one-line note once the review passed. ' + HANDED_ON,
     );
   }
   if (task.stage || task.round || task.checks?.length) {
@@ -507,6 +506,9 @@ function skippedWords(plan: Plan): string {
 }
 
 /** How `coplan check` picks what to run, said where it is offered. */
+const HANDED_ON =
+  'Handed this brief as a subagent or a child session, report back to the session that started you instead, never to Coplan or the user: ' +
+  'what you changed, the checks and how they came out, any question, and anything left.';
 const TARGETED = 'Only the checks for what the task changes run: since it began with `--since` (given when it starts), else since the last commit.';
 
 /** What `{files}` is, where a listed check's command has it. */
@@ -600,8 +602,7 @@ function trackedChecks(plan: Plan, task: Task, project: ProjectConfig, files: st
     'report',
     TEMPLATE,
     `Report it with harness_task_update {task_id: "${task.id}", status: "in_progress" | "done" | "blocked", checks: [{name, ok, note}], note}: ` +
-      '"done" with a one-line note of what you did, "blocked" with what it waits on. A subagent without the Coplan tools ' +
-      'reports back to the agent that gave it this brief instead: what it changed, the checks and how they came out, and anything left.',
+      '"done" with a one-line note of what you did, "blocked" with what it waits on. ' + HANDED_ON,
   );
   return b.blocks;
 }

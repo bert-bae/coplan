@@ -735,7 +735,7 @@ function fit(plan: Plan, head: Block[], said: Block[], changes: Block[], doc: Do
 function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: ProjectConfig, chosen: SettingSources): Block[] {
   const together =
     s.parallel > 1
-      ? `build them side by side, up to ${s.parallel} at once — with subagents where your agent has them, each given that task's harness_task_brief`
+      ? `build them side by side, up to ${s.parallel} at once — with subagents (or child sessions) started from this session where your agent has them, each given that task's harness_task_brief; this session stays the one that reports`
       : 'build them one at a time';
   const { branches } = branchPlan(plan);
   const b = new BlockList();

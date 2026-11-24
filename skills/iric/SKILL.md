@@ -24,8 +24,10 @@ for the task you run as listed); add `--json` to get results in the shape
 `harness_task_update` takes.
 
 Report every step with `harness_task_update` so the board shows where the
-task is. If you are a subagent without the Coplan tools, report back to the
-agent that briefed you instead, and it reports.
+task is. If you are a subagent or child session the build handed this task
+to, report back to the session that started you instead, and it reports;
+the reviewer is started by that session too (`coplan-build`, *one parent
+session*).
 
 Ask the user only as the `coplan` skill's *When to ask* says; in this cycle
 that is a task they review, a review round past their limit, and taking a
