@@ -189,58 +189,79 @@ export function planPage(plan: Plan, agent = 'the agent'): string {
 export function planDocument(plan: Plan, pictures: ReadonlyMap<string, string>): string {
   const picture = (d: Diagram) => {
     const src = pictures.get(d.id);
-    return src ? `<div class="graph"><img src="${esc(src)}" alt="${esc(d.title)}"></div>` : '';
+    return src ? `<div class="graph"><img src="${esc(src)}" alt="${esc(`${d.title}: ${d.nodes.length} parts, ${d.edges.length} connections`)}"></div>` : '';
   };
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(plan.title)}</title><style>${PRINT_CSS}</style></head><body>
+  const counts = countTasks(plan);
+  const meta = [
+    PHASE[planPhase(plan)],
+    plan.diagrams.length && `${plan.diagrams.length} diagram${plan.diagrams.length === 1 ? '' : 's'}`,
+    counts.total && `${counts.total} task${counts.total === 1 ? '' : 's'}`,
+    plan.updatedAt && `Updated ${new Date(plan.updatedAt).toISOString().slice(0, 10)}`,
+  ].filter(Boolean);
+  const footer = plan.title.replace(/[\\"]/g, '').replace(/\s+/g, ' ');
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(plan.title)}</title><style>${PRINT_CSS}
+@page { @bottom-left { content: "${footer.replace(/[<>&]/g, '')}"; font-size: 8pt; color: #66707e; } }</style></head><body>
 <header class="cover">
 <p class="eyebrow">Coplan plan</p>
 <h1>${esc(plan.title)}</h1>
-<p class="meta">${plan.diagrams.length ? `${plan.diagrams.length} diagram${plan.diagrams.length === 1 ? '' : 's'} · ` : ''}${plan.updatedAt ? new Date(plan.updatedAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10)}</p>
+<p class="meta">${meta.join(' · ')}</p>
 </header>
 ${overview(plan)}
-${plan.diagrams.length ? architecture(plan, picture) : ''}
+${plan.diagrams.length ? architecture(plan, picture, true) : ''}
+${plan.tasks.length ? printTasks(plan) : ''}
 </body></html>`.replace(/<details>/g, '<details open>');
+}
+
+/** The task list for paper: nested, by title, with what each waits on and where it lands. */
+function printTasks(plan: Plan): string {
+  const title = (taskId: string) => plan.tasks.find((t) => t.id === taskId)?.title ?? taskId;
+  const item = (t: Task): string => {
+    const kids = childrenOf(plan, t.id);
+    const meta = [STATUS[t.status][1], t.dependsOn?.length && `after ${t.dependsOn.map((d) => esc(title(d))).join(', ')}`, t.branch && `branch <code>${esc(t.branch)}</code>`].filter(Boolean);
+    return `<li class="task"><strong>${esc(t.title)}</strong> <span class="muted">${meta.join(' · ')}</span>${md(t.detail)}${kids.length ? `<ol>${kids.map(item).join('')}</ol>` : ''}</li>`;
+  };
+  return `<section id="tasks"><h2>Tasks</h2><ol class="tasks">${childrenOf(plan, null).map(item).join('')}</ol></section>`;
 }
 
 const PRINT_CSS = `
 :root { --ink: #16202e; --body: #2b3544; --muted: #66707e; --rule: #e1e5ea; --accent: #2b59c3; --wash: #f4f6f9; --band: #14213d; }
 * { box-sizing: border-box; }
 body { font: 10pt/1.6 "Helvetica Neue", Helvetica, Arial, sans-serif; color: var(--body); margin: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-.cover { background: var(--band); color: #fff; margin: 0 0 22pt; padding: 26pt 26pt 24pt; border-radius: 8px; }
+.cover { background: var(--band); color: #fff; margin: 0 0 22pt; padding: 26pt 26pt 24pt; border-radius: 8pt; }
 .eyebrow { margin: 0 0 10pt; font-size: 8pt; letter-spacing: 0.18em; text-transform: uppercase; color: #8fb0ff; font-weight: 700; }
 h1 { font-size: 28pt; line-height: 1.12; margin: 0 0 12pt; letter-spacing: -0.02em; color: #fff; max-width: 5.5in; }
 .meta { margin: 0; color: #aeb9cc; font-size: 9pt; letter-spacing: 0.02em; }
-h2 { font-size: 8.5pt; letter-spacing: 0.16em; text-transform: uppercase; color: var(--accent); margin: 28pt 0 10pt; padding-bottom: 6pt; border-bottom: 1.5px solid var(--ink); }
+h2 { font-size: 9pt; letter-spacing: 0.16em; text-transform: uppercase; color: var(--accent); margin: 28pt 0 10pt; padding-bottom: 6pt; border-bottom: 1px solid var(--rule); }
 h3 { font-size: 13pt; margin: 18pt 0 4pt; color: var(--ink); letter-spacing: -0.01em; }
-h4 { font-size: 7.5pt; margin: 14pt 0 6pt; text-transform: uppercase; letter-spacing: 0.14em; color: var(--muted); }
+h4 { font-size: 8pt; margin: 14pt 0 6pt; text-transform: uppercase; letter-spacing: 0.14em; color: var(--muted); }
 h2, h3, h4 { break-after: avoid; }
 p { margin: 0 0 7pt; orphans: 3; widows: 3; }
 strong { color: var(--ink); }
 .muted, .kind { color: var(--muted); }
 code { font: 0.86em ui-monospace, "SF Mono", Menlo, Consolas, monospace; background: var(--wash); border-radius: 3px; padding: 1pt 3.5pt; color: var(--ink); }
-pre { white-space: pre-wrap; background: var(--wash); border-left: 3px solid var(--accent); padding: 8pt 10pt; break-inside: avoid; }
+pre { white-space: pre-wrap; background: var(--wash); border: 1px solid var(--rule); border-radius: 4px; padding: 8pt 10pt; break-inside: avoid; }
 pre code { background: none; padding: 0; }
 ul, ol { padding-left: 15pt; margin: 0 0 7pt; } li::marker { color: var(--accent); }
 table { border-collapse: collapse; width: 100%; margin: 8pt 0; break-inside: avoid; font-size: 9pt; }
 th, td { border-bottom: 1px solid var(--rule); padding: 4pt 6pt; text-align: left; vertical-align: top; }
 th { color: var(--muted); font-size: 7.5pt; letter-spacing: 0.1em; text-transform: uppercase; border-bottom: 1.5px solid var(--ink); }
-blockquote { margin: 8pt 0; padding: 2pt 0 2pt 12pt; border-left: 3px solid var(--accent); color: var(--ink); font-size: 11pt; }
-.graph { break-inside: avoid; margin: 8pt 0 14pt; padding: 14pt; text-align: center; background: var(--wash); border-radius: 8px; }
-.graph img { max-width: 100%; max-height: 7.5in; }
+blockquote { margin: 8pt 0; padding: 2pt 0 2pt 12pt; border-left: 3px solid var(--accent); color: var(--muted); font-style: italic; }
+.graph { break-inside: avoid; margin: 8pt 0 14pt; padding: 14pt; text-align: center; background: var(--wash); border-radius: 8pt; }
+.graph img { max-width: 100%; max-height: 5.5in; }
 .parts, .links { padding-left: 0; list-style: none; }
 .parts { display: grid; gap: 8pt; }
 .part { break-inside: avoid; padding: 9pt 11pt; border: 1px solid var(--rule); border-radius: 6px; }
 .part-head strong { font-size: 10.5pt; color: var(--ink); }
-.kind { margin-left: 4pt; font-size: 7pt; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700; color: var(--accent); }
+.kind { margin-left: 4pt; font-size: 8pt; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700; color: var(--accent); }
 .part p { margin: 3pt 0 0; font-size: 9.5pt; }
 .part .md > :last-child { margin-bottom: 0; }
 .built-by { padding-top: 5pt; margin-top: 6pt !important; border-top: 1px dashed var(--rule); font-size: 8.5pt !important; color: var(--muted); }
 .links li { padding: 2.5pt 0; border-bottom: 1px solid var(--rule); font-size: 9.5pt; }
 details { margin: 6pt 0 0; font-size: 9.5pt; }
-summary { list-style: none; font-weight: 700; font-size: 7.5pt; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+summary { list-style: none; font-weight: 700; font-size: 8pt; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
 summary::-webkit-details-marker { display: none; }
-.diagram + .diagram { break-before: page; }
 .diagram { margin-top: 6pt; }
+.tasks { list-style: none; padding-left: 0; } .tasks ol { list-style: none; padding-left: 14pt; } .task { margin: 5pt 0; break-inside: avoid; } .task .md { font-size: 9pt; }
 @page { margin: 0.7in 0.75in; @bottom-right { content: counter(page); font-size: 8pt; color: #66707e; } }`;
 
 const when = (at: number) => (at ? ` on ${new Date(at).toISOString().slice(0, 10)}` : '');
@@ -256,30 +277,32 @@ export function overview(plan: Plan): string {
 }
 
 /** `picture` draws a diagram; the page's default is Mermaid. */
-export function architecture(plan: Plan, picture: (d: Diagram) => string = (d) => graph(diagramMermaid(d))): string {
+export function architecture(plan: Plan, picture: (d: Diagram) => string = (d) => graph(diagramMermaid(d)), print = false): string {
+  // On paper the ids are chat handles nobody can type: names only.
+  const ref = (value: string) => (print ? '' : id(value));
   const title = (taskId: string) => plan.tasks.find((t) => t.id === taskId)?.title;
   const diagrams = plan.diagrams.map((d) => {
     const label = new Map(d.nodes.map((n) => [n.id, n.label]));
     const parts = d.nodes.map(
       (n) => `<li class="part">
-        <div class="part-head"><strong>${esc(n.label)}</strong> <span class="kind">${KIND_NOUN[n.kind] ?? n.kind}</span> ${id(`${d.id}/${n.id}`)}</div>
+        <div class="part-head"><strong>${esc(n.label)}</strong> <span class="kind">${KIND_NOUN[n.kind] ?? n.kind}</span> ${ref(`${d.id}/${n.id}`)}</div>
         ${n.detail ? `<p class="muted">${esc(n.detail)}</p>` : ''}
         ${md(n.description)}
         ${n.notes?.trim() ? `<details><summary>Decisions and notes</summary>${md(n.notes)}</details>` : ''}
-        ${n.taskIds?.length ? `<p class="built-by">Built by ${n.taskIds.map((t) => `${id(t)} ${esc(title(t) ?? '')}`).join(', ')}</p>` : ''}
+        ${n.taskIds?.length ? `<p class="built-by">${print ? 'Built by' : 'Built by'} ${n.taskIds.map((t) => `${ref(t)} ${esc(title(t) ?? '')}`.trim()).join(', ')}</p>` : ''}
       </li>`,
     );
     const links = d.edges
       .filter((e) => label.has(e.source) && label.has(e.target))
       .map((e) => {
         const arrow = e.arrows === 'both' ? '↔' : e.arrows === 'none' ? '—' : '→';
-        return `<li>${esc(label.get(e.source)!)} ${arrow} ${esc(label.get(e.target)!)}${e.label ? `: ${esc(e.label)}` : ''}${e.dashed ? ' <span class="muted">(async or optional)</span>' : ''}</li>`;
+        return `<li>${esc(label.get(e.source)!)} ${arrow} ${esc(label.get(e.target)!)}${e.label ? `: ${esc(e.label)}` : ''}${e.dashed ? ' <span class="muted">(dashed: async or optional)</span>' : ''}</li>`;
       });
     return `<article class="diagram" id="diagram-${esc(d.id)}">
-      <h3>${esc(d.title)} ${id(d.id)}</h3>
+      <h3>${esc(d.title)} ${ref(d.id)}</h3>
       ${d.caption ? `<p class="muted">${esc(d.caption)}</p>` : ''}
       ${picture(d)}
-      <h4>Parts</h4><ul class="parts">${parts.join('')}</ul>
+      <h4>Parts${print ? ` · ${esc(d.title)}` : ''}</h4><ul class="parts">${parts.join('')}</ul>
       ${links.length ? `<h4>Connections</h4><ul class="links">${links.join('')}</ul>` : ''}
     </article>`;
   });
