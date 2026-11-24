@@ -376,8 +376,9 @@ and its build.
 
 15. **Set how many tasks run at once** (`parallel`, default 1, up to 8) for
     your machine and your checks. With more than one, Claude builds ready
-    tasks side by side — with subagents and git worktrees where it has them —
-    each running its own checks. Raise it for a large plan of independent
+    tasks side by side — each in a session of its own started from the build
+    session, so you can talk to it directly or through that session — and git
+    worktrees where it has them, each running its own checks. Raise it for a large plan of independent
     tasks; keep 1 on a laptop or when the test suite is heavy.
 16. **Cap the review rounds** (`maxRounds`, default 3, up to 10). Past it,
     another round is yours to allow, rather than Claude spending more on a
@@ -706,7 +707,8 @@ exported plan costs nothing here. In a Managed build:
   agent that built it; you cost your time; checks only costs no model at all.
   `review.model` runs the independent reviewer on a model of your choosing.
 - **How many at once:** `parallel` (default 1, up to 8) tasks at a time,
-  each running its own checks — with subagents where the agent has them, and
+  each running its own checks in a session of its own, started from the build
+  session (you can talk to it directly, or through the parent), and
   a git worktree (a whole checkout on disk) for each task on a branch of its
   own.
 - **The checks** are your repository's: `implement` after every pass,

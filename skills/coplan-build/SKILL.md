@@ -1,6 +1,6 @@
 ---
 name: coplan-build
-description: Run the build of a submitted Coplan plan — start tasks only when what they depend on is done, build independent ones side by side where your agent can, land each on its branch (stacked pull requests when branches build on each other), keep the board true, and finish with the final checks and report. Use when a "[cc-harness] Build the plan" prompt arrives, or the user asks to build a Coplan plan.
+description: Run the build of a submitted Coplan plan — start tasks only when what they depend on is done, give each its own session started from this one (the user can talk to it directly, or through you), build independent ones side by side, land each on its branch (stacked pull requests when branches build on each other), keep the board true, and finish with the final checks and report. Use when a "[cc-harness] Build the plan" prompt arrives, or the user asks to build a Coplan plan.
 ---
 
 # Building a Coplan plan
@@ -8,6 +8,11 @@ description: Run the build of a submitted Coplan plan — start tasks only when 
 The plan is the map; your job is to get every task to done in an order
 the dependencies allow, and to keep the board true while you do. You decide
 what runs when, and you alone report status to Coplan.
+
+**You are the parent, and every task runs in a session of its own.** You do
+not build tasks yourself: each one is started in a session you launch (below),
+so your context holds only the plan, the board and what the sessions report,
+and the user can reach any task's session — directly, or through you.
 
 Ask the user only as the `coplan` skill's *When to ask* says. Anything else,
 decide, write what you decided in the task's note, and carry on.
@@ -60,20 +65,27 @@ Repeat until `harness_task_next` says every task is done:
    scope, the branch, and the exact checks.
 3. **Start.** `harness_task_update {task_id, status: "in_progress", stage: "implement"}`
    — in a Tracked build the stage is optional.
-4. **Build it.** In a Managed build, through the `iric` skill — implement →
-   review → refine. In a Tracked build, however suits the task.
+4. **Build it — in a session of its own.** Start it as *One parent
+   session* says, handing it the brief, and record its session on the board
+   (`harness_task_update … runner, session` — recording a session needs a
+   runner, so with none set up, tell the user in chat where it is). A Managed task goes round the `iric`
+   skill — implement → review → refine — in that session, with you starting
+   the reviewer. A Tracked task is built there as suits it. Do not build it
+   in this session unless you have no way to start another (below).
 5. **Done.** Commit the task's work in whatever granularity the
    repository's history uses, then
    `harness_task_update {task_id, status: "done", note: "<one line: what changed>"}`.
    The reply says what became ready. Go to 1.
 
-## Working in parallel: one parent session
+## One parent session, a session per task
 
 The session running the build is the **parent**, and the only driver: it
 picks tasks, briefs them, reports to Coplan and talks to the user. Every
-other piece of work — a task built side by side, a reviewer, a refine
+piece of work — each task, alone or side by side, a reviewer, a refine
 round, a pull request fix, a follow-up — runs in a session started *from*
-the parent, never in one the user has to open, so it all stays linked to it:
+the parent, never in one the user has to open, so it all stays linked to it.
+Starting one is the default, not an optimisation: do it even when tasks run
+one at a time.
 
 - **Claude Code** — a subagent (the Agent tool), in the background
   (`run_in_background: true`) for tasks built side by side. In the Claude
@@ -85,8 +97,10 @@ the parent, never in one the user has to open, so it all stays linked to it:
   the parent (`list_sessions {children: true}`) and in the desktop app.
 - **Codex, Cursor** — their own subagents where they have them.
 
-Without any, build ready tasks one after another in the parent — the order
-is the same. Keep the tree one level deep: a child does not start children
+Only where your agent cannot start another session at all, build the ready
+tasks one after another in the parent — the order is the same — and say so
+once, in the first task's note and to the user: then no task has a session
+of its own for them to talk to. Keep the tree one level deep: a child does not start children
 of its own; it asks the parent, which starts them. So the parent starts the
 reviewer of a task, not the task's implementer.
 
@@ -106,6 +120,26 @@ from a child's — its refine round, a fix to the branch it built — goes back
 to that child (SendMessage, or `send_message` for a cloud child) so its
 context carries over, rather than to a fresh session. A fresh session is for
 new work, or a reviewer, which must not have written the change.
+
+### Talking to a task's session
+
+The user may want to ask a task's session something, steer it, or watch it.
+Both ways must work, and neither changes who reports to Coplan:
+
+- **Directly.** The session is theirs to open: under the parent in the
+  Claude desktop app, by its id or link where it is a cloud session, and the
+  task's card on the board and `harness_task_next` say where each task runs.
+  Tell them where whenever you start one, and when they ask.
+- **Through you.** "How is the cache task going?", "tell the API task to use
+  the existing client": answer from the board and the child's last report;
+  forward what it must hear in the user's own words (SendMessage, or
+  `send_message` for a cloud child) and relay its answer back, naming the
+  task, so it is clear which session said what.
+
+A child the user spoke to directly says so in its next report — what they
+asked, what changed — and you record it. If their words contradict the plan
+(scope, order, a review), treat it as the user speaking to you in chat: it
+overrides the settings.
 
 ### Runners: where each session starts
 
@@ -129,7 +163,8 @@ Choose where each task goes:
 Start the session by the runner's `via` — or its `start` command, when it
 has one, which wins:
 
-- **local** — a background subagent of the parent (above).
+- **local** — a background subagent of the parent (above), or the agent's
+  other way to start a child session of its own.
 - **cloud** — from a cloud parent, `create_session` with the runner's
   `environment`, so the child is listed under the parent. From a local
   parent, the runner's `start` command; without one, say so to the user

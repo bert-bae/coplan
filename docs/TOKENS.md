@@ -73,8 +73,8 @@ subagent needs nothing else from Coplan.
 3. **Read changes only after the first read.** The `coplan` skill should use
    `harness_plan_read {changes_only: true}` once the agent has read the plan.
    ~1–2k per revision round.
-4. **One subagent per task, even at `parallel: 1`.** The main agent keeps only
-   task status. Without this, every file read for an early task is still in
+4. **One subagent per task, even at `parallel: 1` — now the build's rule, not
+   an option.** The main agent keeps only task status. Without this, every file read for an early task is still in
    context for every later one. This is the largest cost in a real build, but
    it depends on the code base, so the demo can't measure it.
 5. **Shrink the tool definitions.** Share the node/edge/task schemas and trim

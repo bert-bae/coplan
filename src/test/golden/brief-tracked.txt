@@ -60,7 +60,7 @@ _From the user's and the repository's Coplan config; they hold for all of this._
 
 Check error handling.
 
-Report it with harness_task_update {task_id: "inval", status: "in_progress" | "done" | "blocked", checks: [{name, ok, note}], note}: "done" with a one-line note of what you did, "blocked" with what it waits on. Handed this brief as a subagent or a child session, report back to the session that started you instead, never to Coplan or the user: what you changed, the checks and how they came out, any question, and anything left.
+Report it with harness_task_update {task_id: "inval", status: "in_progress" | "done" | "blocked", checks: [{name, ok, note}], note}: "done" with a one-line note of what you did, "blocked" with what it waits on. Handed this brief as a subagent or a child session, report back to the session that started you instead, never to Coplan or the user: what you changed, the checks and how they came out, any question, and anything left. If the user talks to you directly, follow them, and say in your next report what they asked and what you did.
 
 ## Open comments on it and its design
 - planner _(on the plan)_: Proposal p1: Split the docs task

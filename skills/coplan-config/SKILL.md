@@ -76,7 +76,8 @@ Why each choice:
 - **Plan on the strongest model.** The design and the task list decide
   everything after them, and a planning session is short. Tell the user to
   plan with the best model they have (`/model opus` in Claude Code).
-- **One subagent per task.** Without it, every file read for task 1 is
+- **One session per task.** Coplan builds already ask for it; this line
+  keeps it when the user's agent would drift to doing tasks itself. Without it, every file read for task 1 is
   still in the main agent's context at task 10, and every turn pays for
   it. The brief is self-contained by design.
 - **Implement on a mid model.** A brief with acceptance criteria and checks
@@ -91,8 +92,9 @@ Agent differences:
 
 - **Codex and Cursor** cannot pick a subagent's model. Leave out
   `review.model` and the model sentence from `instructions.build`.
-- Without subagents, use `iric.review: "self"`, and drop the subagent
-  sentence too.
+- Without subagents or child sessions, use `iric.review: "self"`, drop the
+  subagent sentence too, and tell the user: no task then has a session of its
+  own to talk to — the build runs in the one session.
 - Say which of these applied.
 
 ### Runners (yours)

@@ -4,6 +4,11 @@
 
 ### Changes
 
+- **Every task runs in its own session, and you can talk to it.** The build session is the parent; each task —
+  even one at a time — is started in a session of its own from it (a subagent, or a child session in the cloud),
+  not built in the parent unless the agent cannot start one. The build prompt, `coplan-build`, `iric` and every
+  brief say so, the task list flags an in-progress task with no session recorded, and you can open a task's
+  session directly or ask the parent to pass your words on and bring the answer back.
 - **Runners: where a build's sessions start.** Set up your own places to build — `local`, `cloud`, `ssh` — as
   `runners` in `coplan.json`, each with what it is for, how much it can take (`max`, `maxLarge`) and how a
   session starts there. A task can ask for a runner; otherwise the parent picks by what each is for. The parent

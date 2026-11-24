@@ -177,6 +177,7 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
       if (t.round && t.round >= settings.maxRounds && t.stage !== 'review' && !t.reopened) {
         out.push(`  ⚠ ${t.round} of ${settings.maxRounds} review rounds used: another needs the user's go-ahead (user_approved).`);
       }
+      if (project.runners.length && !t.dispatch?.session) out.push('  ⚠ no session of its own recorded: build it in one started from this session, and record it (harness_task_update {session}).');
     }
   }
 
@@ -199,10 +200,10 @@ export function renderNext(plan: Plan, opts: BriefOptions = {}): string {
       : room === 0
         ? `_${active.length} task${active.length === 1 ? ' is' : 's are'} already in progress, the most this build runs at once (${settings.parallel}). Start the next when one is done._`
         : settings.parallel === 1
-          ? '_Build one at a time: start the first, and come back here when it is done._'
+          ? '_Build one at a time: start the first in a session of its own started from this one, and come back here when it is done._'
           : ready.length === 1 || room === 1
-            ? `_Start ${ready.length === 1 ? 'it' : 'the first'} now${active.length ? ', alongside what is in progress' : ''} — yourself, or by a subagent started from this session and given its harness_task_brief, where your agent has them._`
-            : `_None of these waits on another. Start up to ${Math.min(room, ready.length)} now, side by side — with subagents started from this session where your agent has them, each given its harness_task_brief${
+            ? `_Start ${ready.length === 1 ? 'it' : 'the first'} now${active.length ? ', alongside what is in progress' : ''} — in a session of its own, started from this one and given its harness_task_brief._`
+            : `_None of these waits on another. Start up to ${Math.min(room, ready.length)} now, side by side — each in a session of its own, started from this one and given its harness_task_brief${
                 branchPlan(plan).branches.length ? ', and a working tree of its own for a task on a different branch' : ''
               }._`;
     out.push(advice);
@@ -531,7 +532,8 @@ function skippedWords(plan: Plan): string {
 /** How `coplan check` picks what to run, said where it is offered. */
 const HANDED_ON =
   'Handed this brief as a subagent or a child session, report back to the session that started you instead, never to Coplan or the user: ' +
-  'what you changed, the checks and how they came out, any question, and anything left.';
+  'what you changed, the checks and how they came out, any question, and anything left. ' +
+  'If the user talks to you directly, follow them, and say in your next report what they asked and what you did.';
 const TARGETED = 'Only the checks for what the task changes run: since it began with `--since` (given when it starts), else since the last commit.';
 
 /** What `{files}` is, where a listed check's command has it. */

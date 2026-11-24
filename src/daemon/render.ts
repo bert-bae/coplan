@@ -743,7 +743,7 @@ function runnerWords(project: ProjectConfig): string {
 function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: ProjectConfig, chosen: SettingSources): Block[] {
   const together =
     s.parallel > 1
-      ? `build them side by side, up to ${s.parallel} at once — with subagents (or child sessions) started from this session where your agent has them, each given that task's harness_task_brief; this session stays the one that reports`
+      ? `build them side by side, up to ${s.parallel} at once`
       : 'build them one at a time';
   const { branches } = branchPlan(plan);
   const b = new BlockList();
@@ -759,7 +759,7 @@ function sessionBrief(plan: Plan, s: BuildSettings, agent: AgentInfo, project: P
   );
   b.gap().add('step-1', TEMPLATE, '1. Start only tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that are ready together do not depend on each other — ')
     .inline('step-1:parallel', chosen('parallel'), together)
-    .inline('step-1:end', TEMPLATE, ". harness_task_brief gives one task's focused brief: its objective, where it fits, its branch and its checks.")
+    .inline('step-1:end', TEMPLATE, ". Run every task in a session of its own, started from this one (a subagent or child session; where your agent cannot start one, say so and build here) and given that task's harness_task_brief — its objective, where it fits, its branch and its checks. This session is the parent: it alone reports to Coplan, and the user can talk to a task's session directly or through it.")
     .inline('step-1:runners', configSource(project, 'runners'), runnerWords(project));
   b.add(
     'step-2',
@@ -828,8 +828,9 @@ function trackedBrief(plan: Plan, agent: AgentInfo, project: ProjectConfig, mode
     'step-1',
     TEMPLATE,
     '1. Start with tasks that are ready: harness_task_next lists them, and what every other task waits on. Tasks that ' +
-      "are ready together do not depend on each other. harness_task_brief gives one task's focused brief: its objective, " +
-      'where it fits, its branch and its checks.',
+      "are ready together do not depend on each other. Run each in a session of its own, started from this one " +
+      "(where your agent cannot start one, build here), and given that task's harness_task_brief — its objective, where it fits, its branch and its checks. This " +
+      'session is the parent: it alone reports to Coplan, and the user can talk to a task\'s session directly or through it.',
   ).inline('step-1:runners', configSource(project, 'runners'), runnerWords(project));
   b.add(
     'step-2',

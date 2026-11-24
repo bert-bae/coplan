@@ -29,6 +29,16 @@ to, report back to the session that started you instead, and it reports;
 the reviewer is started by that session too (`coplan-build`, *one parent
 session*).
 
+**A task runs in a session of its own.** The parent started you for this task
+and may have started a reviewer for it; you build it and answer to the
+parent alone. The user can open your session and talk to you directly, or ask
+the parent to pass something on: either way what they say about this task
+is theirs to say — follow it, and put it in your next report to the parent
+(what they asked, what you did) so the board stays true. Do not start
+sessions of your own: when the task is ready for review, report that to
+the parent, which starts the reviewer and sends its findings back to you, in
+this session, to refine.
+
 Ask the user only as the `coplan` skill's *When to ask* says; in this cycle
 that is a task they review, a review round past their limit, and taking a
 task whose checks fail.

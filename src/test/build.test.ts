@@ -419,12 +419,21 @@ test('what is next says what to start, how many at once, and what the rest wait 
   const next = renderNext(plan, { project: PROJECT, mode: 'managed', settings: { review: 'subagent', parallel: 3, maxRounds: 3 } });
   assert.match(next, /## In progress \(1\)\n- client Cache client — implementing/);
   assert.match(next, /## Ready to start \(2\)\n- config Config · branch `cache\/storage`[^\n]*\n- docs Docs · review: skip/);
-  assert.match(next, /Start up to 2 now, side by side — with subagents started from this session where your agent has them/);
+  assert.match(next, /Start up to 2 now, side by side — each in a session of its own, started from this one/);
   assert.match(next, /- invalidate Invalidation — waits on client/);
   assert.match(next, /- `cache\/api` from `cache\/storage` \(stacked\)/);
 
   const one = renderNext(plan, { mode: 'managed', settings: { review: 'self', parallel: 1, maxRounds: 3 } });
   assert.match(one, /already in progress, the most this build runs at once \(1\)/);
+});
+
+test('next flags an in-progress task with no session recorded, only where runners are set up', () => {
+  let plan = tasked();
+  plan = applyOps(plan, [{ op: 'upsert_task', id: 'client', stage: 'implement' }], 'claude', undefined, { tracking: true }).plan;
+  const settings = { review: 'self', parallel: 1, maxRounds: 3 } as const;
+  const withRunner = { ...PROJECT, runners: [{ name: 'here', via: 'local' as const }] } as typeof PROJECT;
+  assert.match(renderNext(plan, { project: withRunner, mode: 'managed', settings }), /no session of its own recorded/);
+  assert.doesNotMatch(renderNext(plan, { project: PROJECT, mode: 'managed', settings }), /no session of its own recorded/);
 });
 
 test("next warns of the round limit, but not for a finished task taken up again (its next round is its own)", () => {
