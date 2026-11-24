@@ -192,24 +192,49 @@ export function planDocument(plan: Plan, pictures: ReadonlyMap<string, string>):
     return src ? `<div class="graph"><img src="${esc(src)}" alt="${esc(d.title)}"></div>` : '';
   };
   return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(plan.title)}</title><style>${PRINT_CSS}</style></head><body>
+<header class="cover">
+<p class="eyebrow">Coplan plan</p>
 <h1>${esc(plan.title)}</h1>
+<p class="meta">${plan.diagrams.length ? `${plan.diagrams.length} diagram${plan.diagrams.length === 1 ? '' : 's'} · ` : ''}${plan.updatedAt ? new Date(plan.updatedAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10)}</p>
+</header>
 ${overview(plan)}
 ${plan.diagrams.length ? architecture(plan, picture) : ''}
 </body></html>`.replace(/<details>/g, '<details open>');
 }
 
 const PRINT_CSS = `
-body { font: 11pt/1.5 system-ui, sans-serif; color: #1a1a1a; margin: 0; }
-h1 { font-size: 20pt; } h2 { font-size: 15pt; border-bottom: 1px solid #ccc; padding-bottom: 4pt; }
+:root { --ink: #1c2330; --muted: #5f6b7a; --rule: #d9dee5; --accent: #2f5fd0; --wash: #f5f7fa; }
+* { box-sizing: border-box; }
+body { font: 10.5pt/1.55 "Helvetica Neue", Helvetica, Arial, sans-serif; color: var(--ink); margin: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.cover { border-bottom: 2px solid var(--accent); padding-bottom: 12pt; margin-bottom: 18pt; }
+.eyebrow { margin: 0 0 4pt; font-size: 8.5pt; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+h1 { font-size: 24pt; line-height: 1.2; margin: 0 0 6pt; letter-spacing: -0.01em; }
+.meta { margin: 0; color: var(--muted); font-size: 9.5pt; }
+h2 { font-size: 15pt; margin: 22pt 0 8pt; padding-bottom: 4pt; border-bottom: 1px solid var(--rule); }
+h3 { font-size: 12pt; margin: 16pt 0 4pt; }
+h4 { font-size: 9pt; margin: 12pt 0 4pt; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
 h2, h3, h4 { break-after: avoid; }
-.muted, .kind { color: #666; } code { font-size: 0.9em; }
-.graph { break-inside: avoid; margin: 8pt 0; text-align: center; }
-.graph img { max-width: 100%; max-height: 9in; }
+p { margin: 0 0 6pt; orphans: 3; widows: 3; }
+a { color: inherit; text-decoration: none; }
+.muted, .kind { color: var(--muted); }
+code { font: 0.88em ui-monospace, "SF Mono", Menlo, Consolas, monospace; background: var(--wash); border: 1px solid var(--rule); border-radius: 3px; padding: 0 3pt; }
+pre { white-space: pre-wrap; background: var(--wash); border: 1px solid var(--rule); border-radius: 4px; padding: 8pt; break-inside: avoid; }
+pre code { background: none; border: 0; padding: 0; }
+ul, ol { padding-left: 16pt; margin: 0 0 6pt; }
+table { border-collapse: collapse; width: 100%; margin: 6pt 0; break-inside: avoid; }
+th, td { border: 1px solid var(--rule); padding: 3pt 6pt; text-align: left; vertical-align: top; }
+th { background: var(--wash); }
+blockquote { margin: 6pt 0; padding-left: 10pt; border-left: 3px solid var(--rule); color: var(--muted); }
+.graph { break-inside: avoid; margin: 8pt 0 12pt; padding: 8pt; text-align: center; border: 1px solid var(--rule); border-radius: 6px; }
+.graph img { max-width: 100%; max-height: 8in; }
 .parts, .links { padding-left: 0; list-style: none; }
-.part { break-inside: avoid; margin-bottom: 6pt; }
+.part { break-inside: avoid; margin-bottom: 8pt; padding: 6pt 0 0 10pt; border-left: 3px solid var(--rule); }
+.part-head { margin-bottom: 2pt; }
+.built-by { font-size: 9pt; color: var(--muted); }
+.links li { padding: 1pt 0; }
+details { margin: 4pt 0; } summary { font-weight: 600; font-size: 9.5pt; }
 #architecture, .diagram + .diagram { break-before: page; }
-pre { white-space: pre-wrap; }
-@page { margin: 0.6in; }`;
+@page { margin: 0.7in 0.75in; @bottom-right { content: counter(page); font-size: 8.5pt; color: #5f6b7a; } }`;
 
 const when = (at: number) => (at ? ` on ${new Date(at).toISOString().slice(0, 10)}` : '');
 
