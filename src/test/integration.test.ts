@@ -11,6 +11,7 @@ import { readLiveLock, baseUrl, paths } from '../shared/paths.ts';
 import type { DaemonLock, SessionState } from '../shared/types.ts';
 import type { HookOutput } from '../shared/hooks.ts';
 import { asksForCoplan } from '../daemon/hookIngest.ts';
+import { isWsl } from '../daemon/browser.ts';
 import { blocksText, joinBlocks, type Block, type ConfigRow } from '../shared/blocks.ts';
 
 /**
@@ -462,6 +463,32 @@ test('the live stream opens on a single-use ticket', async () => {
   assert.equal(await open(ticket), 200);
   assert.equal(await open(ticket), 401, 'spent');
   assert.equal(await open('made-up'), 401);
+});
+
+// Only where xdg-open is the opener: elsewhere this would open a real window.
+test('`coplan open` prints no token, and opens the browser on a login ticket good once', { skip: process.platform !== 'linux' || isWsl() }, async () => {
+  const bin = mkdtempSync(path.join(tmpdir(), 'coplan-opener-'));
+  const said = path.join(bin, 'said');
+  writeFileSync(path.join(bin, 'xdg-open'), `#!/bin/sh\nprintf '%s' "$*" > "${said}"\n`, { mode: 0o755 });
+  try {
+    const cli = path.resolve(path.dirname(DAEMON), '..', 'cli', 'main.js');
+    const out = execFileSync(process.execPath, [cli, 'open', 's-open'], { env: { ...process.env, CC_HARNESS_HOME: home, PATH: `${bin}:${process.env['PATH'] ?? ''}` }, encoding: 'utf8' });
+    assert.ok(!out.includes(lock.token), out);
+    assert.match(out, new RegExp(`^${baseUrl(lock)}/#/session/s-open .*coplan url`));
+    for (let i = 0; i < 50 && !(existsSync(said) && readFileSync(said, 'utf8')); i++) await sleep(100);
+    const opened = readFileSync(said, 'utf8');
+    assert.ok(!opened.includes(lock.token), 'not on the command line either');
+    const ticket = /^http:\/\/127\.0\.0\.1:\d+\/\?login=([0-9a-f]+)#\/session\/s-open$/.exec(opened)?.[1];
+    assert.ok(ticket, opened);
+    const login = (t: string) => fetch(`${baseUrl(lock)}/api/login?ticket=${t}`, { method: 'POST' });
+    const res = await login(ticket);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { token: lock.token });
+    assert.equal((await login(ticket)).status, 401, 'spent');
+    assert.equal((await login('made-up')).status, 401);
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
+  }
 });
 
 test('a foreign Host, a path out of the UI folder and a clean with no groups are all refused', async () => {

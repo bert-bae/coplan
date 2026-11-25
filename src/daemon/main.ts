@@ -449,12 +449,14 @@ function sameOrigin(origin: string): boolean {
  * hooks, the MCP server, the CLI, and the page, which is handed it in its
  * link. Never a cookie: a cookie is not scoped to a port, so every other
  * server on 127.0.0.1 the browser visits would be sent it. The live stream,
- * which a browser cannot send headers on, takes a single-use ticket instead.
+ * which a browser cannot send headers on, takes a single-use ticket instead,
+ * and so does /api/login, which trades a browser-opened link's for the token.
  */
 function authorized(req: http.IncomingMessage, url: URL, token: string): boolean {
   const header = req.headers.authorization ?? '';
   if (header.startsWith('Bearer ') && sameSecret(header.slice(7), token)) return true;
-  if (req.method === 'GET' && url.pathname === '/api/events') return redeemTicket(url.searchParams.get('ticket'));
+  if (req.method === 'GET' && url.pathname === '/api/events') return redeemTicket(streamTickets, url.searchParams.get('ticket'));
+  if (req.method === 'POST' && url.pathname === '/api/login') return redeemTicket(loginTickets, url.searchParams.get('ticket'));
   return false;
 }
 
@@ -465,11 +467,13 @@ function sameSecret(given: string, token: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-/** Tickets for the live stream: short-lived, each good once. */
-const tickets = new Map<string, number>();
+/** Tickets for the live stream, and for a link opened in a browser (whose
+ *  command line other local users can read): short-lived, each good once. */
+const streamTickets = new Map<string, number>();
+const loginTickets = new Map<string, number>();
 const TICKET_MS = 60_000;
 
-function issueTicket(): string {
+function issueTicket(tickets: Map<string, number>): string {
   const now = Date.now();
   for (const [t, expires] of tickets) if (expires < now) tickets.delete(t);
   const ticket = randomBytes(18).toString('hex');
@@ -477,7 +481,7 @@ function issueTicket(): string {
   return ticket;
 }
 
-function redeemTicket(ticket: string | null): boolean {
+function redeemTicket(tickets: Map<string, number>, ticket: string | null): boolean {
   if (!ticket) return false;
   const expires = tickets.get(ticket);
   tickets.delete(ticket);
@@ -501,12 +505,10 @@ function buildRouter(deps: Deps): Router {
   const { store, config, token, clients, lifecycle } = deps;
   const router = new Router();
 
-  /** For the browser and the CLI: carries the token, which the page keeps
-   *  (`src/ui/lib/api.ts`) and takes out of the address bar. */
-  const authedUrl = (sessionId?: string) => {
-    const base = `http://127.0.0.1:${readLiveLock()?.port ?? 0}/?token=${token}`;
-    return sessionId ? `${base}#/session/${encodeURIComponent(sessionId)}` : base;
-  };
+  /** For the browser: a login ticket the page trades for the token
+   *  (`src/ui/lib/api.ts`). */
+  const loginUrl = (sessionId: string) =>
+    `http://127.0.0.1:${readLiveLock()?.port ?? 0}/?login=${issueTicket(loginTickets)}#/session/${encodeURIComponent(sessionId)}`;
 
   /** For Claude. Token-free: anything returned to the model is written to the
    *  transcript and carried in every later context window. */
@@ -519,7 +521,7 @@ function buildRouter(deps: Deps): Router {
     if (!configFor(session).autoOpen || opened.has(session.sessionId)) return;
     opened.add(session.sessionId);
     if (opened.size > MAX_TRACKED_OPENS) opened.delete(opened.values().next().value!);
-    openInBrowser(authedUrl(session.sessionId));
+    openInBrowser(loginUrl(session.sessionId));
   };
 
   const configFor = (session: SessionState): HarnessConfig => config.get(session.repoRoot ?? session.cwd);
@@ -640,7 +642,11 @@ function buildRouter(deps: Deps): Router {
   /* --------------------------- UI bootstrap ------------------------ */
 
   /** A ticket for the live stream, which a browser opens without headers. */
-  router.post('/api/events/ticket', (ctx) => json(ctx.res, 200, { ticket: issueTicket() }));
+  router.post('/api/events/ticket', (ctx) => json(ctx.res, 200, { ticket: issueTicket(streamTickets) }));
+  /** A ticket for a link the CLI opens in a browser, where the token would be on a command line. */
+  router.post('/api/login/ticket', (ctx) => json(ctx.res, 200, { ticket: issueTicket(loginTickets) }));
+  /** Reached only with a login ticket, or the token itself (see `authorized`). */
+  router.post('/api/login', (ctx) => json(ctx.res, 200, { token }));
 
   /* --------------------------- Sessions ---------------------------- */
 

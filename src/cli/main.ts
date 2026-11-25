@@ -83,10 +83,15 @@ async function currentSession(lock: DaemonLock): Promise<string | undefined> {
   }
 }
 
-function uiUrl(lock: DaemonLock, sessionId?: string): string {
-  const base = `${baseUrl(lock)}/?token=${lock.token}`;
+function uiUrl(lock: DaemonLock, sessionId?: string, query = ''): string {
+  const base = `${baseUrl(lock)}/${query}`;
   return sessionId ? `${base}#/session/${sessionId}` : base;
 }
+
+/** For whoever runs `coplan url` in their own terminal: the agent's runs end up in its transcript. */
+const signedInUrl = (lock: DaemonLock, sessionId?: string) => uiUrl(lock, sessionId, `?token=${lock.token}`);
+
+const SIGN_IN = "(if the page says it does not hold Coplan's key, run `coplan url` in your own terminal for a signed-in link)";
 
 const commands: Record<string, (args: string[]) => Promise<number>> = {
   async start() {
@@ -96,7 +101,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
       return 1;
     }
     console.log(`coplan running on ${baseUrl(lock)} (pid ${lock.pid})`);
-    console.log(`open: ${uiUrl(lock)}`);
+    console.log(`open: ${uiUrl(lock)} ${SIGN_IN}`);
     return 0;
   },
 
@@ -278,16 +283,18 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
   async open(args) {
     const lock = await ensureDaemon();
     if (!lock) return 1;
-    const url = uiUrl(lock, args[0] ?? (await currentSession(lock)));
-    openInBrowser(url);
-    console.log(url);
+    const id = args[0] ?? (await currentSession(lock));
+    // A browser's command line is readable by other local users: it gets a single-use ticket, not the token.
+    const ticket = await api<{ ticket: string }>(lock, '/api/login/ticket', { method: 'POST', body: '{}' }).then((r) => r.ticket, () => undefined);
+    openInBrowser(uiUrl(lock, id, ticket ? `?login=${ticket}` : ''));
+    console.log(`${uiUrl(lock, id)} ${SIGN_IN}`);
     return 0;
   },
 
   async url(args) {
     const lock = await ensureDaemon();
     if (!lock) return 1;
-    console.log(uiUrl(lock, args[0] ?? (await currentSession(lock))));
+    console.log(signedInUrl(lock, args[0] ?? (await currentSession(lock))));
     return 0;
   },
 

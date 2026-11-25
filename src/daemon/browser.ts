@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 /**
  * Open a URL in the user's browser, best-effort and never blocking.
  *
- * This is only ever called from an explicit user action (`harness open`, or
+ * This is only ever called from an explicit user action (`coplan open`, or
  * the `autoOpen` setting, which is off by default). Opening windows the user
  * did not ask for is worse than making them click a link.
  *

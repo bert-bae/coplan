@@ -15,7 +15,8 @@ import type { Block, ConfigRow } from '../../shared/blocks.ts';
 /**
  * Client for the daemon.
  *
- * The auth token arrives in the link `coplan open` hands out. It is taken out
+ * The auth token arrives in the link `coplan url` prints, or is traded for
+ * the single-use login ticket in the one `coplan open` opens. It is taken out
  * of the address bar, kept in localStorage, and sent as a header. Kept, so
  * the plain links the tools print — a new tab, a bookmark — work once the
  * page has been opened with the key, as they did with a cookie. Not a
@@ -25,18 +26,29 @@ import type { Block, ConfigRow } from '../../shared/blocks.ts';
  */
 const TOKEN_KEY = 'coplan.token';
 
+function takeFromLink(name: string): string | null {
+  const url = new URL(window.location.href);
+  const value = url.searchParams.get(name);
+  if (value) {
+    url.searchParams.delete(name);
+    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+  }
+  return value;
+}
+
+function keep(value: string): void {
+  try {
+    window.localStorage.setItem(TOKEN_KEY, value);
+  } catch {
+    /* private mode: kept in memory for this page */
+  }
+}
+
 function readToken(): string | null {
   try {
-    const url = new URL(window.location.href);
-    const fromLink = url.searchParams.get('token');
+    const fromLink = takeFromLink('token');
     if (fromLink) {
-      url.searchParams.delete('token');
-      window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
-      try {
-        window.localStorage.setItem(TOKEN_KEY, fromLink);
-      } catch {
-        /* private mode: kept in memory for this page */
-      }
+      keep(fromLink);
       return fromLink;
     }
     return window.localStorage.getItem(TOKEN_KEY);
@@ -46,7 +58,19 @@ function readToken(): string | null {
   }
 }
 
-const token: string | null = typeof window === 'undefined' ? null : readToken();
+let token: string | null = typeof window === 'undefined' ? null : readToken();
+
+async function logIn(): Promise<void> {
+  const ticket = takeFromLink('login');
+  if (!ticket) return;
+  const res = await fetch(`/api/login?${new URLSearchParams({ ticket }).toString()}`, { method: 'POST', credentials: 'omit' });
+  if (!res.ok) return;
+  token = ((await res.json()) as { token: string }).token;
+  keep(token);
+}
+
+/** Every call waits for a login ticket in the link to be traded. */
+const signedIn: Promise<void> = typeof window === 'undefined' ? Promise.resolve() : logIn().catch(() => undefined);
 
 const authHeaders = (): Record<string, string> => (token ? { authorization: `Bearer ${token}` } : {});
 
@@ -62,6 +86,7 @@ export async function eventsUrl(sessionId: string | null): Promise<string> {
 export class Unauthorized extends Error {}
 
 async function request<T>(route: string, init?: RequestInit): Promise<T> {
+  await signedIn;
   const res = await fetch(route, {
     credentials: 'omit',
     ...init,
