@@ -351,6 +351,23 @@ test('settings: taking every default writes nothing', async () => {
   assert.ok(said.includes('  Nothing changed.'));
 });
 
+test("settings: the default review replaces an old iric, whose review would still be read", async () => {
+  const home = tmp('settings-iric');
+  writeFileSync(path.join(home, 'coplan.json'), '{ "iric": { "review": "skip", "parallel": 3 } }');
+  assert.deepEqual(await askSettings(scripted(['agent', '']).io, home), [path.join(home, 'coplan.json')]);
+  assert.deepEqual(parseJsonc(readFileSync(path.join(home, 'coplan.json'), 'utf8')), { review: 'agent' });
+  assert.equal(loadProjectConfig(null, { globalDir: home }).review, 'agent');
+});
+
+test('settings: what is retired in the defaults is said even when nothing changes', async () => {
+  const home = tmp('settings-retired');
+  writeFileSync(path.join(home, 'coplan.json'), '{ "mode": "managed" }');
+  const { io, said } = scripted(['', '']);
+  assert.deepEqual(await askSettings(io, home), []);
+  assert.ok(said.some((l) => /! .*"mode" is no longer read/.test(l)));
+  assert.ok(said.includes('  Nothing changed.'));
+});
+
 test('settings: the current values are the defaults, keys set before are kept, and a file with comments is kept as .bak', async () => {
   const home = tmp('settings-old');
   const before = '{\n  // mine\n  "promptNotice": false,\n  "autoOpen": true,\n}\n';
@@ -481,7 +498,7 @@ function repo(files: Record<string, string>): string {
 test("a repository's checks are written from its scripts; a folder that is not there is asked again", async () => {
   const dir = repo({ 'package.json': JSON.stringify({ scripts: { lint: 'eslint .', test: 'vitest run' } }) });
   const { io, said } = scripted(['/no/such/folder', dir, 'y', '']);
-  const written = await askRepositories(io, tmp('home'), tmp('coplan-home'));
+  const written = await askRepositories(io, tmp('home'));
   // git names the repository by its real path: macOS's temporary folder is
   // behind a symlink.
   assert.deepEqual(written, [path.join(realpathSync(dir), '.coplan', 'config.json')]);
@@ -498,7 +515,7 @@ test("a relative repository path is read from where the setup was run", async ()
   const was = process.cwd();
   process.chdir(dir);
   try {
-    const written = await askRepositories(scripted(['.', 'y', '']).io, tmp('home'), tmp('coplan-home'));
+    const written = await askRepositories(scripted(['.', 'y', '']).io, tmp('home'));
     assert.deepEqual(written, [path.join(realpathSync(dir), '.coplan', 'config.json')]);
   } finally {
     process.chdir(was);
@@ -510,7 +527,7 @@ test("a repository's file that is already there is left alone", async () => {
   mkdirSync(path.join(dir, '.coplan'));
   writeFileSync(path.join(dir, '.coplan', 'config.json'), '{ "hooks": {} }');
   const { io, said } = scripted([dir, '']);
-  assert.deepEqual(await askRepositories(io, tmp('home'), tmp('coplan-home')), []);
+  assert.deepEqual(await askRepositories(io, tmp('home')), []);
   assert.equal(readFileSync(path.join(dir, '.coplan', 'config.json'), 'utf8'), '{ "hooks": {} }');
   assert.ok(said.some((l) => /already there: left as it is/.test(l)));
 });

@@ -135,17 +135,6 @@ export async function choose<T extends string>(io: SetupIo, question: string, op
   return dflt;
 }
 
-export async function whole(io: SetupIo, question: string, min: number, max: number, dflt: number): Promise<number> {
-  for (let i = 0; i < TRIES; i++) {
-    const a = await answer(io, `${question} [${dflt}] `);
-    if (a === null || a === '') return dflt;
-    const n = Number(a);
-    if (Number.isInteger(n) && n >= min && n <= max) return n;
-    io.say(`  Answer a whole number from ${min} to ${max}.`);
-  }
-  return dflt;
-}
-
 /** "Claude Code", "Claude Code and Codex", "Claude Code, Codex and Cursor". */
 function names(kinds: readonly AgentKind[]): string {
   const n = kinds.map((k) => AGENTS[k].product);
@@ -380,11 +369,13 @@ export async function askSettings(io: SetupIo, coplanHome: string): Promise<stri
     const now = loadProjectConfig(null, { globalDir: coplanHome });
     const review = await choose(io, '  The review each task asks your harness for: another agent (agent), you (user), or only the checks (none)?', REVIEW_MODES, now.review);
     const raw = { ...defaults.raw };
-    put(raw, 'review', review, DEFAULT_REVIEW);
-    if (save(defaultsFile, DEFAULTS_HEADER, defaults, raw, io)) {
-      saved.push(defaultsFile);
-      for (const w of loadProjectConfig(null, { globalDir: coplanHome }).warnings) io.say(`  ! ${w}`);
-    }
+    // The old `iric.review` would otherwise still be read over a default left unwritten.
+    if (isRecord(raw['iric'])) {
+      delete raw['iric'];
+      raw['review'] = review;
+    } else put(raw, 'review', review, DEFAULT_REVIEW);
+    if (save(defaultsFile, DEFAULTS_HEADER, defaults, raw, io)) saved.push(defaultsFile);
+    for (const w of loadProjectConfig(null, { globalDir: coplanHome }).warnings) io.say(`  ! ${w}`);
   }
 
   const machineFile = globalConfigFile(coplanHome);
@@ -402,7 +393,7 @@ export async function askSettings(io: SetupIo, coplanHome: string): Promise<stri
 }
 
 /** A repository's checks: `.coplan/config.json`, from what it already runs. */
-export async function askRepositories(io: SetupIo, home: string, coplanHome: string): Promise<string[]> {
+export async function askRepositories(io: SetupIo, home: string): Promise<string[]> {
   const written: string[] = [];
   let question = "  Set up a repository's checks (typecheck, lint, tests)? Its path, or Enter to skip:";
   for (;;) {
@@ -445,7 +436,7 @@ export async function setup(opts: SetupOptions, io: SetupIo): Promise<SetupResul
   try {
     if (io.ask && (await yesNo(io, 'Adjust settings now? The defaults are fine to start.', false))) {
       await askSettings(io, opts.coplanHome);
-      await askRepositories(io, opts.home, opts.coplanHome);
+      await askRepositories(io, opts.home);
       io.say('  More settings: docs/CONFIG.md');
     }
   } catch (err) {

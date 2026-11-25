@@ -123,8 +123,8 @@ export const PROJECT_KEYS = ['checks', 'review', 'branches', 'pullRequests', 'in
 /** Keys older versions read, by where they sit: an old file still holding
  *  them loads, with a warning that they do nothing now. `hooks` is read as
  *  `checks`, and `iric.review` as `review`, for one release. */
-const RETIRED_KEYS = ['runners', 'final', 'mode', 'iric'];
-const ALIAS_KEYS = ['hooks'];
+const RETIRED_KEYS = ['runners', 'final', 'mode'];
+const ALIAS_KEYS = ['hooks', 'iric'];
 const RETIRED_PR_KEYS = ['watch', 'on', 'tool', 'open'];
 const BRANCH_KEYS = ['base', 'prefix'];
 const PR_KEYS = ['template'];
@@ -190,11 +190,8 @@ export function loadProjectConfig(root: string | null | undefined, opts: { globa
       const raw = readConfigFile(file, file, warnings);
       if (raw !== undefined) layers.push({ ...parseLayer(raw, { label: file, base: globalDir, global: true }, warnings, warnings), from: displayPath(file) });
       const dir = path.join(globalDir, INSTRUCTIONS_DIR);
-      const words = instructionFiles(dir, warnings, warnings);
-      if (Object.keys(words).length) {
-        const from = Object.fromEntries(Object.keys(words).map((p) => [p, displayPath(path.join(dir, `${p}.md`))]));
-        layers.push({ instructions: words, instructionsFrom: from });
-      }
+      const { words, from } = instructionFiles(dir, warnings, warnings);
+      if (Object.keys(words).length) layers.push({ instructions: words, instructionsFrom: from });
     }
     let file: string | null = null;
     let broken = false;
@@ -254,7 +251,7 @@ interface Layer {
   /** The file it was read from, as origins name it. */
   from?: string;
   /** For the user's instruction files: the file each point was read from. */
-  instructionsFrom?: Partial<Record<InstructionPoint, string>>;
+  instructionsFrom?: Partial<Record<InstructionPoint, string[]>>;
 }
 
 interface LayerContext {
@@ -291,8 +288,8 @@ function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors' | 'warn
     for (const point of INSTRUCTION_POINTS) {
       const words = l.instructions?.[point];
       if (words) out.instructions[point] = out.instructions[point] ? `${out.instructions[point]}\n\n${words}` : words;
-      const file = l.instructionsFrom?.[point] ?? l.from;
-      if (words && file) origins[`instructions.${point}`] = [...(origins[`instructions.${point}`] ?? []), file];
+      const files = l.instructionsFrom?.[point] ?? (l.from ? [l.from] : []);
+      if (words && files.length) origins[`instructions.${point}`] = [...(origins[`instructions.${point}`] ?? []), ...files];
     }
   }
   out.origins = origins;
@@ -330,14 +327,14 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
   }
   const local: string[] = [];
   const notes: string[] = [];
-  // `iric.review` stands in for `review` this release: said once, below.
-  const iricReview = isRecord(raw['iric']) && raw['review'] === undefined ? validReview(raw['iric']['review']) : undefined;
-  const aliased = iricReview ? [...ALIAS_KEYS, 'iric'] : ALIAS_KEYS;
-  unknownKeys(Object.fromEntries(Object.entries(raw).filter(([k]) => !aliased.includes(k))), PROJECT_KEYS, '', local, RETIRED_KEYS, notes);
+  // `iric.review` stands in for a `review` that is not a mode this release: said once, below.
+  const iric = isRecord(raw['iric']) && typeof raw['review'] !== 'string' ? raw['iric']['review'] : undefined;
+  const iricReview = validReview(iric);
+  unknownKeys(Object.fromEntries(Object.entries(raw).filter(([k]) => !ALIAS_KEYS.includes(k))), PROJECT_KEYS, '', local, RETIRED_KEYS, notes);
 
   // `hooks` is the name `checks` had before 0.4: read for one release.
   const named = raw['checks'] !== undefined ? 'checks' : raw['hooks'] !== undefined ? 'hooks' : null;
-  if (raw['hooks'] !== undefined) {
+  if (raw['hooks'] !== undefined && !ctx.global) {
     notes.push(
       named === 'checks'
         ? '"hooks" and "checks" are both set: "checks" is used. "hooks" is the old name; remove it.'
@@ -385,9 +382,12 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
   } else if (review !== undefined) {
     local.push(`"review" must be one of ${REVIEW_MODES.join(', ')}.`);
   }
+  if (iric !== undefined && !iricReview) local.push(`"iric.review" must be one of ${REVIEW_MODES.join(', ')}; ${JSON.stringify(iric)} is not, so ${DEFAULT_REVIEW} is used.`);
   if (iricReview) {
     layer.review = iricReview;
     notes.push(`"iric.review" is read as "review": "${iricReview}" for this release, and the rest of "iric" is no longer read. Set "review" instead, and remove "iric".`);
+  } else if (raw['iric'] !== undefined) {
+    notes.push('"iric" is no longer read: Coplan plans and tracks, and the harness that builds decides this. Remove it. Only "iric.review" is still read this release, as "review" where that is not set to a mode.');
   }
 
   const branches = section('branches', '{ "base", "prefix" }');
@@ -401,7 +401,7 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
     }
   }
 
-  const prs = section('pullRequests', '{ "tool", "open", "template" }');
+  const prs = section('pullRequests', '{ "template" }');
   if (prs) {
     unknownKeys(prs, PR_KEYS, 'pullRequests.', local, RETIRED_PR_KEYS, notes);
     layer.pullRequests = {};
@@ -432,11 +432,8 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
       if (typeof v === 'string') text = v.trim();
       else if (isRecord(v) && typeof v['file'] === 'string' && Object.keys(v).length === 1) text = readNamedFile(v['file'], ctx.base, where, MAX_INSTRUCTIONS, local, notes);
       else local.push(`"${where}" must be text, or { "file": "path" }.`);
-      if (text && text.length > MAX_INSTRUCTIONS) {
-        notes.push(`"${where}" is longer than ${MAX_INSTRUCTIONS} characters; the rest is cut.`);
-        text = text.slice(0, MAX_INSTRUCTIONS);
-      }
-      if (text) layer.instructions[point] = layer.instructions[point] ? `${layer.instructions[point]}\n\n${text}` : text;
+      if (text) text = capped(text, `"${where}"`, notes);
+      if (text) layer.instructions[point] = layer.instructions[point] ? capped(`${layer.instructions[point]}\n\n${text}`, `"instructions.${point}" and "${where}" together`, notes) : text;
     }
   }
 
@@ -506,18 +503,28 @@ function readNamedFile(name: string, base: string | null, where: string, max: nu
   }
 }
 
-/** `instructions/<point>.md` in Coplan's home: the user's own words. */
-function instructionFiles(dir: string, errors: string[], warnings: string[]): ProjectConfig['instructions'] {
-  const out: ProjectConfig['instructions'] = {};
+/** Instructions joined past their limit are cut to it, said as one cut alone is. */
+function capped(text: string, where: string, warnings: string[]): string {
+  if (text.length <= MAX_INSTRUCTIONS) return text;
+  warnings.push(`${where} is longer than ${MAX_INSTRUCTIONS} characters; the rest is cut.`);
+  return text.slice(0, MAX_INSTRUCTIONS);
+}
+
+/** `instructions/<point>.md` in Coplan's home: the user's own words, and the files each point was read from. */
+function instructionFiles(dir: string, errors: string[], warnings: string[]): { words: ProjectConfig['instructions']; from: Partial<Record<InstructionPoint, string[]>> } {
+  const words: ProjectConfig['instructions'] = {};
+  const from: Partial<Record<InstructionPoint, string[]>> = {};
   for (const name of [...INSTRUCTION_POINTS, ...Object.keys(OLD_POINTS)]) {
     const file = path.join(dir, `${name}.md`);
     if (!existsSync(file)) continue;
     const point = OLD_POINTS[name] ?? (name as InstructionPoint);
     if (OLD_POINTS[name]) warnings.push(`${file}: ${name}.md is now ${point}.md; it is read as that for this release. Rename it.`);
     const text = readNamedFile(`${name}.md`, dir, `${file}`, MAX_INSTRUCTIONS, errors, warnings);
-    if (text) out[point] = out[point] ? `${out[point]}\n\n${text}` : text;
+    if (!text) continue;
+    words[point] = words[point] ? capped(`${words[point]}\n\n${text}`, `${[...from[point]!, displayPath(file)].join(' and ')} together`, warnings) : text;
+    from[point] = [...(from[point] ?? []), displayPath(file)];
   }
-  return out;
+  return { words, from };
 }
 
 function parseHooks(list: unknown, stage: string, errors: string[], root: string | null = null, warnings: string[] = errors, key = 'checks'): CheckHook[] {
@@ -670,7 +677,7 @@ export const MAX_FILES_ARG = 1_000;
  */
 export function withFiles(run: string, files: readonly string[] | null): string {
   if (!run.includes('{files}')) return run;
-  const list = files && files.length && files.length <= MAX_FILES_ARG ? files.map((f) => `'${f.replace(/'/g, `'\\''`)}'`).join(' ') : '.';
+  const list = files && files.length && files.length <= MAX_FILES_ARG ? files.map((f) => `'${(f.startsWith('-') ? `./${f}` : f).replace(/'/g, `'\\''`)}'`).join(' ') : '.';
   return run.split('{files}').join(list);
 }
 

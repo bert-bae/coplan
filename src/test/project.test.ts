@@ -5,7 +5,7 @@ import { chmodSync, closeSync, existsSync, mkdtempSync, mkdirSync, openSync, rea
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HOOK_KEYS, INSTRUCTION_POINTS, PROJECT_KEYS, expandBraces, globMatch, hookCommand, hooksFor, loadProjectConfig, nameFor, parseProjectConfig, pathsMatch } from '../shared/project.ts';
+import { HOOK_KEYS, INSTRUCTION_POINTS, MAX_INSTRUCTIONS, PROJECT_KEYS, expandBraces, globMatch, hookCommand, hooksFor, loadProjectConfig, nameFor, parseProjectConfig, pathsMatch, withFiles } from '../shared/project.ts';
 import { GAP_RULES, GAP_SEVERITIES } from '../shared/check.ts';
 import { REVIEW_MODES } from '../shared/types.ts';
 import { detectHooks, renderConfig } from '../cli/init.ts';
@@ -627,6 +627,65 @@ test('the old names are read for one release, each with a warning: hooks as chec
   assert.doesNotMatch(both.warnings.join('\n'), /iric\.review" is read/);
   // The old review names in `review` itself.
   assert.equal(parseProjectConfig({ review: 'self' }).review, 'agent');
+});
+
+test('iric.review stands in for a review that is not a mode, and one it cannot read is said', () => {
+  assert.equal(parseProjectConfig({ iric: { review: 'skip' }, review: { model: 'opus' } }).review, 'none', 'the 0.3 object form of review is no mode');
+  const typo = parseProjectConfig({ iric: { review: 'sefl' } });
+  assert.equal(typo.review, 'agent');
+  assert.match(typo.errors.join('\n'), /"iric\.review" must be one of agent, user, none; "sefl" is not, so agent is used/);
+  assert.equal(typo.checksBroken, undefined);
+  assert.match(parseProjectConfig({ iric: { parallel: 3 } }).warnings.join('\n'), /"iric" is no longer read.*Only "iric\.review" is still read this release, as "review"/);
+  assert.deepEqual(parseProjectConfig({ review: 'user', iric: { review: 'sefl' } }).errors, [], 'not read beside a review mode');
+});
+
+test('instructions joined from an old and a new name are cut to the limit, and said', () => {
+  const both = parseProjectConfig({ instructions: { brief: 'a'.repeat(3000), review: 'b'.repeat(3000) } });
+  assert.equal(both.instructions.brief?.length, MAX_INSTRUCTIONS);
+  assert.match(both.warnings.join('\n'), /"instructions\.brief" and "instructions\.review" together is longer than/);
+  const home = mkdtempSync(path.join(tmpdir(), 'coplan-home-'));
+  try {
+    mkdirSync(path.join(home, 'instructions'));
+    writeFileSync(path.join(home, 'instructions', 'handoff.md'), 'a'.repeat(3000));
+    writeFileSync(path.join(home, 'instructions', 'build.md'), 'b'.repeat(3000));
+    const config = loadProjectConfig(null, { globalDir: home });
+    assert.equal(config.instructions.handoff?.length, MAX_INSTRUCTIONS);
+    assert.match(config.warnings.join('\n'), /handoff\.md and .*build\.md together is longer than/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("the user's instructions are said to come from the files they were read from", () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'coplan-home-'));
+  try {
+    const dir = path.join(home, 'instructions');
+    mkdirSync(dir);
+    writeFileSync(path.join(dir, 'build.md'), 'Mine.');
+    writeFileSync(path.join(dir, 'brief.md'), 'Match the style.');
+    writeFileSync(path.join(dir, 'review.md'), 'Look for leaks.');
+    const { origins } = loadProjectConfig(null, { globalDir: home });
+    assert.deepEqual(origins?.['instructions.handoff'], [path.join(dir, 'build.md')]);
+    assert.deepEqual(origins?.['instructions.brief'], [path.join(dir, 'brief.md'), path.join(dir, 'review.md')]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("hooks in the user's own layer are said once: ignored there, not to be renamed", () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'coplan-home-'));
+  try {
+    writeFileSync(path.join(home, 'coplan.json'), '{ "hooks": { "review": ["npm test"] } }');
+    const said = loadProjectConfig(null, { globalDir: home }).warnings.join('\n');
+    assert.match(said, /"hooks" belong to each repository/);
+    assert.doesNotMatch(said, /Rename it/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('{files} never hands a tool a file named like an option', () => {
+  assert.equal(withFiles('prettier --check {files}', ['--write', 'src/a.ts']), "prettier --check './--write' 'src/a.ts'");
 });
 
 test("the user's own instruction files under their old names are read as the new points", () => {
