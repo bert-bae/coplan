@@ -1028,6 +1028,7 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
   set_checks: ['id', 'add', 'skip'],
   comment: ['target', 'text', 'decision'],
   reply: ['threadId', 'text'],
+  unreply: ['threadId'],
   resolve: ['threadId', 'resolved'],
   report: ['text', 'checks'],
   set_branch: ['branch', 'pr', 'base'],
@@ -1725,6 +1726,15 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
       return [log('replied', thread.target, `replied on ${describeTarget(plan, thread.target)}: ${short(text, 80)}`)];
     }
 
+    case 'unreply': {
+      const thread = plan.threads.find((c) => c.id === op.threadId);
+      if (!thread) throw new PlanError(`No comment thread "${op.threadId}".`);
+      const last = thread.replies.at(-1);
+      if (!last || last.author !== author || author !== 'user') throw new PlanError('Only your own last reply can be taken back.');
+      thread.replies.pop();
+      return [log('replied', thread.target, `took back a reply on ${describeTarget(plan, thread.target)}`)];
+    }
+
     case 'resolve': {
       const thread = plan.threads.find((c) => c.id === op.threadId);
       if (!thread) throw new PlanError(`No comment thread "${op.threadId}".`);
@@ -2254,6 +2264,9 @@ function removeItem(
 
 /** The longest note the user can hand Claude with a submission. */
 export const MAX_NOTE = 4_000;
+
+/** Whether a session's channel has asked lately: a queued request is pushed to it. */
+export const channelOn = (s: { channelAt?: number }, now = Date.now()): boolean => now - (s.channelAt ?? 0) < 60_000;
 
 /** What Claude may still do to a locked plan: track the work it is doing,
  *  and answer comments. Everything else is the design the user signed off. */

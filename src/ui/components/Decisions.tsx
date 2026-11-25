@@ -49,44 +49,65 @@ function Decision({ thread }: { thread: Thread }) {
   const edit = useEdit();
   const [text, setText] = useState('');
   const answer = (value: string) => edit({ op: 'reply', threadId: thread.id, text: value });
-  const mine = thread.replies.filter((r) => r.author === 'user').at(-1)?.text;
+  const last = thread.replies.at(-1);
+  // Answered while the user has the last word: shown as a tag in place of the composer.
+  const mine = last?.author === 'user' ? last.text : undefined;
+  const revert = async (editIt: boolean) => {
+    if (await edit({ op: 'unreply', threadId: thread.id }) && editIt && mine) setText(mine);
+  };
   return (
     <article className="thread">
       <Markdown source={thread.text} />
-      {thread.replies.map((r) => (
+      {thread.replies.slice(0, mine === undefined ? undefined : -1).map((r) => (
         <p key={r.id} className="muted">
           {r.author === 'user' ? 'You' : 'Agent'}: {r.text}
         </p>
       ))}
-      {!!thread.decision?.options.length && (
+      {mine !== undefined ? (
         <div className="thread-actions">
-          {thread.decision.options.map((o) => (
-            <button key={o} type="button" className={o === mine ? 'btn btn-sm is-active' : 'btn btn-sm'} onClick={() => void answer(o)}>
-              {o}
+          <span className="chip is-you decision-tag" data-testid="decision-tag">
+            <span aria-hidden="true">✓</span> {mine}
+            <button type="button" className="link" aria-label="Edit answer" onClick={() => void revert(true)}>
+              Edit
             </button>
-          ))}
+            <button type="button" className="icon-btn" aria-label="Remove answer" onClick={() => void revert(false)}>
+              ×
+            </button>
+          </span>
         </div>
+      ) : (
+        <>
+          {!!thread.decision?.options.length && (
+            <div className="thread-actions">
+              {thread.decision.options.map((o) => (
+                <button key={o} type="button" className="btn btn-sm" onClick={() => void answer(o)}>
+                  {o}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="thread-composer">
+            <textarea
+              className="input"
+              rows={2}
+              value={text}
+              aria-label="Your answer"
+              placeholder={thread.decision?.options.length ? 'Or answer in your own words…' : 'Your answer…'}
+              onChange={(e) => setText(e.target.value)}
+            />
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={!text.trim()}
+              onClick={async () => {
+                if (await answer(text.trim())) setText('');
+              }}
+            >
+              Answer
+            </button>
+          </div>
+        </>
       )}
-      <div className="thread-composer">
-        <textarea
-          className="input"
-          rows={2}
-          value={text}
-          aria-label="Your answer"
-          placeholder={thread.decision?.options.length ? 'Or answer in your own words…' : 'Your answer…'}
-          onChange={(e) => setText(e.target.value)}
-        />
-        <button
-          type="button"
-          className="btn btn-sm"
-          disabled={!text.trim()}
-          onClick={async () => {
-            if (await answer(text.trim())) setText('');
-          }}
-        >
-          Answer
-        </button>
-      </div>
     </article>
   );
 }

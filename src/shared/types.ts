@@ -674,6 +674,8 @@ export type PlanOp =
   | { op: 'set_checks'; id: string; add?: (Partial<TaskCheck> & { run: string })[]; skip?: string[] }
   | { op: 'comment'; target: Target; text: string; decision?: string[] }
   | { op: 'reply'; threadId: string; text: string }
+  /** The user takes back their last reply in a thread (their answer to a decision). */
+  | { op: 'unreply'; threadId: string }
   | { op: 'resolve'; threadId: string; resolved: boolean }
   /** The final report on the build. Markdown; replaces any earlier one.
    *  `checks`: the final checks, as they came out. */
@@ -825,6 +827,9 @@ export interface SessionState {
    *  Coplan's hooks (in Codex: not trusted, or changed by an update and not
    *  trusted again). Absent on sessions saved before it was recorded. */
   hookedAt?: number | null;
+  /** When the session's channel last asked for a queued revision request: a
+   *  recent time means a request queued now is pushed into the session. */
+  channelAt?: number;
   plan: Plan | null;
 }
 
