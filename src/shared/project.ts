@@ -1,14 +1,13 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import type { BuildSettings, ExecutionMode, TaskCheck } from './types.ts';
-import { DEFAULT_BUILD_SETTINGS, MAX_PARALLEL, MAX_ROUNDS, cleanSettings } from './build.ts';
-import { EXECUTION_MODES, REVIEW_MODES, RUNNER_NAME } from './types.ts';
+import type { ReviewMode, TaskCheck } from './types.ts';
+import { DEFAULT_REVIEW, validReview } from './build.ts';
+import { REVIEW_MODES } from './types.ts';
 import { parseJsonc } from './jsonc.ts';
 import { GAP_RULES, GAP_SEVERITIES, type GapRule, type GapSeverity } from './check.ts';
 import { paths } from './paths.ts';
 import type { BlockSource } from './blocks.ts';
-import { PR_EVENT_KINDS, type PrEventKind } from './prEvents.ts';
 
 /**
  * A repository's own Coplan settings: `.coplan/config.json`, committed with
@@ -16,18 +15,17 @@ import { PR_EVENT_KINDS, type PrEventKind } from './prEvents.ts';
  * hands tasks to — runs the same checks.
  *
  * It answers the question every agent otherwise guesses at: *what do I run
- * to know this change is good?* The answer is a list of hooks for each step
- * of a task's implement → review → refine cycle:
+ * to know this change is good?* The answer is `checks`, each task's
+ * definition of done, by stage:
  *
- * - `implement` — quick checks after each implementation or refinement
- *   pass, before a task goes to review: typecheck, lint, format.
- * - `review` — the gate a task must pass before it is done: the tests.
+ * - `implement` — quick checks after each change: typecheck, lint, format.
+ * - `review` — what a task must pass to be done: the tests.
  * - `final` — once every task is done, before the final report: the full
  *   suite, the build.
  *
- * Coplan never runs these itself. They are handed to Claude, which runs them
- * as any other command — under the user's own permission settings — or runs
- * them all at once with `coplan check <stage>`.
+ * Coplan never runs these itself. They are handed to the harness in the
+ * handoff and each brief, which runs them as any other command — under the
+ * user's own permission settings — or all at once with `coplan check <stage>`.
  */
 
 export const HOOK_STAGES = ['implement', 'review', 'final'] as const;
@@ -51,129 +49,38 @@ export interface CheckHook {
   env?: Record<string, string>;
 }
 
-/** Which tool opens the pull requests of a stacked build. */
-export const PR_TOOLS = ['gh', 'graphite', 'none'] as const;
-export type PrTool = (typeof PR_TOOLS)[number];
-/** When they are opened: as each branch is ready, once the user says, or never. */
-export const PR_OPEN = ['auto', 'ask', 'never'] as const;
-export type PrOpen = (typeof PR_OPEN)[number];
-
-/** What an event on a watched pull request can do, besides run a command. */
-export const PR_ACTIONS = ['fix', 'triage', 'rebase', 'advance', 'notify', 'ignore'] as const;
-export type PrBuiltinAction = (typeof PR_ACTIONS)[number];
-/** A built-in action, or a command the agent runs (the shape of a hook). */
-export type PrAction = PrBuiltinAction | CheckHook;
-/** How an agent whose turn has ended is reached when a batch is due. */
-export const PR_WAKE = ['wait', 'queue', 'headless'] as const;
-export type PrWake = (typeof PR_WAKE)[number];
-/** Whose comments and reviews may start work. */
-export const PR_TRUST = ['collaborators', 'author'] as const;
-
-/** Watching the pull requests a build recorded, until they merge. */
-export interface PrWatch {
-  enabled: boolean;
-  /** Seconds between polls. */
-  interval: number;
-  /** Seconds a pull request must be quiet before its events go as one batch. */
-  debounce: number;
-  /** `collaborators`, `author` (who opened it), or a list of logins. */
-  trust: (typeof PR_TRUST)[number] | string[];
-  /** Fix rounds per pull request before the user decides. */
-  maxFixRounds: number;
-  wake: PrWake;
-}
-
-export const DEFAULT_PR_WATCH: PrWatch = { enabled: true, interval: 60, debounce: 90, trust: 'collaborators', maxFixRounds: 3, wake: 'wait' };
-export const DEFAULT_PR_ON: Record<PrEventKind, PrAction[]> = {
-  ci_failed: ['fix'],
-  ci_passed: ['ignore'],
-  changes_requested: ['fix'],
-  approved: ['notify'],
-  review_comment: ['fix'],
-  comment: ['triage'],
-  merge_conflict: ['rebase'],
-  behind_base: ['ignore'],
-  merged: ['advance'],
-  closed: ['notify'],
-  reopened: ['notify'],
-};
-const PR_WATCH_KEYS = Object.keys(DEFAULT_PR_WATCH);
-const MAX_FIX_ROUNDS = 10;
-/** How the parent session starts a session on a runner. */
-export const RUNNER_VIA = ['local', 'cloud', 'ssh'] as const;
-export type RunnerVia = (typeof RUNNER_VIA)[number];
-
-/** A place the build's parent session can hand a task to. */
-export interface Runner {
-  name: string;
-  via: RunnerVia;
-  /** What it is for, which the parent weighs when no task names a runner. */
-  use?: string;
-  /** Tasks in progress on it at once. */
-  max?: number;
-  /** Large tasks in progress on it at once. */
-  maxLarge?: number;
-  /** The runner a task goes to when nothing else fits. */
-  default?: boolean;
-  /** ssh: the host, as `ssh` takes it. */
-  host?: string;
-  /** ssh: the checkout to work in there. */
-  dir?: string;
-  /** cloud: the environment new sessions start in. */
-  environment?: string;
-  /** The command that starts a session there, with the handoff on stdin. */
-  start?: string;
-}
-const RUNNER_KEYS = ['via', 'use', 'max', 'maxLarge', 'default', 'host', 'dir', 'environment', 'start'];
-const MAX_RUNNERS = 12;
-
 /** Where a repository or a user may add words to what the agent is told. */
-export const INSTRUCTION_POINTS = ['design', 'build', 'brief', 'review'] as const;
+export const INSTRUCTION_POINTS = ['design', 'handoff', 'brief'] as const;
 export type InstructionPoint = (typeof INSTRUCTION_POINTS)[number];
+/** Points older versions read, and where their words go now: for one
+ *  release, said with a warning. */
+const OLD_POINTS: Record<string, InstructionPoint> = { build: 'handoff', review: 'brief' };
 
 export interface ProjectConfig {
   /** Where it was read from; null when the repository has none. */
   file: string | null;
+  /** The checks (`checks`, or `hooks` before 0.4), by stage. */
   hooks: Record<HookStage, CheckHook[]>;
-  /** The execution mode Submit starts from: `mode`, or Managed where the
-   *  repository's file sets `iric`, or else Tracked. */
-  mode: ExecutionMode;
-  /** The mode is Managed because the repository's file sets `iric`, not
-   *  `mode`. */
-  modeByIric?: true;
-  /** Defaults for how a Managed build runs; the user can change them per plan. */
-  settings: BuildSettings;
+  /** The review a task asks for when it does not say. */
+  review: ReviewMode;
   branches: {
     /** The branch work is cut from and merged back into. */
     base?: string;
     /** Put in front of every branch a plan names, e.g. `coplan/`. */
     prefix?: string;
   };
-  /** How the pull requests of a build are opened, and what they say. */
+  /** What the build's pull requests say: the harness opens them. */
   pullRequests: {
-    tool: PrTool;
-    open: PrOpen;
     /** The body to fill in for each pull request, read from its file. */
     template?: string;
     /** That file, as the config names it. */
     templateFile?: string;
-    /** Watching each recorded pull request once it is open. */
-    watch: PrWatch;
-    /** What each event on a watched pull request does, in order. */
-    on: Record<PrEventKind, PrAction[]>;
   };
-  /** The reviewer subagent: which model reviews, when not the agent's own. */
-  review: { model?: string };
-  /** Whether failing final checks hold back the build report. */
-  final: { blocking: boolean };
   /** Words added to what the agent is told, per point: the user's global
    *  ones first, then the repository's. */
   instructions: Partial<Record<InstructionPoint, string>>;
   /** Plan-check rules counted other than the default (`warn`). */
   planCheck: Partial<Record<GapRule, GapSeverity>>;
-  /** Where the build's parent can start sessions, by name: the user's own,
-   *  then any the repository adds under a name of its own. */
-  runners: Runner[];
   /** The user-wide layer (`coplan.json` in Coplan's home), when there is one. */
   globalFile?: string | null;
   /** What could not be read, said rather than silently ignored: a hook
@@ -186,14 +93,14 @@ export interface ProjectConfig {
   /** Every file the config was read from or looked for: while none of them
    *  changes, neither does the config. */
   sources?: string[];
-  /** Which file set each setting, by key (`pullRequests.tool`,
-   *  `instructions.build`): the one that won, or — for instructions, which
+  /** Which file set each setting, by key (`review`,
+   *  `instructions.handoff`): the one that won, or — for instructions, which
    *  add up — each that added to it, the user's first. A key no file sets
    *  is not here: Coplan's default is used. Files in the user's home are
    *  named from `~`, the repository's from its root. */
   origins?: Record<string, string[]>;
   /** The checks themselves cannot be trusted: the file is unreadable, or
-   *  `hooks` (or a top-level key, often a misspelt `hooks`) is wrong. Only
+   *  `checks` (or a top-level key, often a misspelt `checks`) is wrong. Only
    *  this stops `coplan check`; an error elsewhere is said, and the checks
    *  still run. */
   checksBroken?: boolean;
@@ -212,17 +119,23 @@ export const MAX_INSTRUCTIONS = 4_000;
 export const MAX_TEMPLATE = 8_000;
 const MAX_ENV = 20;
 
-export const PROJECT_KEYS = ['mode', 'hooks', 'iric', 'branches', 'pullRequests', 'review', 'final', 'instructions', 'planCheck', 'runners'];
-const IRIC_KEYS = ['review', 'parallel', 'maxRounds'];
+export const PROJECT_KEYS = ['checks', 'review', 'branches', 'pullRequests', 'instructions', 'planCheck'];
+/** Keys older versions read, by where they sit: an old file still holding
+ *  them loads, with a warning that they do nothing now. `hooks` is read as
+ *  `checks`, and `iric.review` as `review`, for one release. */
+const RETIRED_KEYS = ['runners', 'final', 'mode'];
+const ALIAS_KEYS = ['hooks', 'iric'];
+const RETIRED_PR_KEYS = ['watch', 'on', 'tool', 'open'];
 const BRANCH_KEYS = ['base', 'prefix'];
-const PR_KEYS = ['tool', 'open', 'template', 'watch', 'on'];
+const PR_KEYS = ['template'];
 export const HOOK_KEYS = ['name', 'run', 'timeout', 'paths', 'optional', 'cwd', 'env'];
 
 /** A key the file sets that nothing reads is most often a typo of one that
  *  is: said, so the setting the user meant is not silently lost. */
-function unknownKeys(rec: Record<string, unknown>, known: string[], where: string, errors: string[]): void {
+function unknownKeys(rec: Record<string, unknown>, known: string[], where: string, errors: string[], retired: string[] = [], warnings: string[] = []): void {
   for (const key of Object.keys(rec)) {
-    if (!known.includes(key)) errors.push(`${where}"${key}" is not a setting Coplan reads: use ${known.join(', ')}.`);
+    if (retired.includes(key)) warnings.push(`${where}"${key}" is no longer read: Coplan plans and tracks, and the harness that builds decides this. Remove it.`);
+    else if (!known.includes(key)) errors.push(`${where}"${key}" is not a setting Coplan reads: use ${known.join(', ')}.`);
   }
 }
 
@@ -230,15 +143,11 @@ export function emptyProjectConfig(): ProjectConfig {
   return {
     file: null,
     hooks: { implement: [], review: [], final: [] },
-    mode: 'tracked',
-    settings: { ...DEFAULT_BUILD_SETTINGS },
+    review: DEFAULT_REVIEW,
     branches: {},
-    pullRequests: { tool: 'gh', open: 'ask', watch: { ...DEFAULT_PR_WATCH }, on: { ...DEFAULT_PR_ON } },
-    review: {},
-    final: { blocking: false },
+    pullRequests: {},
     instructions: {},
     planCheck: {},
-    runners: [],
     errors: [],
     warnings: [],
     origins: {},
@@ -274,18 +183,15 @@ export function loadProjectConfig(root: string | null | undefined, opts: { globa
     let globalFile: string | null = null;
     if (globalDir) {
       const file = path.join(globalDir, GLOBAL_PROJECT_FILE);
-      sources.push(file, ...INSTRUCTION_POINTS.map((p) => path.join(globalDir, INSTRUCTIONS_DIR, `${p}.md`)));
+      sources.push(file, ...[...INSTRUCTION_POINTS, ...Object.keys(OLD_POINTS)].map((p) => path.join(globalDir, INSTRUCTIONS_DIR, `${p}.md`)));
       if (existsSync(file)) globalFile = file;
       // What is wrong with the user's own layer is said, but holds back no
       // repository's checks: they are the repository's, and run as it says.
       const raw = readConfigFile(file, file, warnings);
       if (raw !== undefined) layers.push({ ...parseLayer(raw, { label: file, base: globalDir, global: true }, warnings, warnings), from: displayPath(file) });
       const dir = path.join(globalDir, INSTRUCTIONS_DIR);
-      const words = instructionFiles(dir, warnings, warnings);
-      if (Object.keys(words).length) {
-        const from = Object.fromEntries(Object.keys(words).map((p) => [p, displayPath(path.join(dir, `${p}.md`))]));
-        layers.push({ instructions: words, instructionsFrom: from });
-      }
+      const { words, from } = instructionFiles(dir, warnings, warnings);
+      if (Object.keys(words).length) layers.push({ instructions: words, instructionsFrom: from });
     }
     let file: string | null = null;
     let broken = false;
@@ -334,25 +240,18 @@ export function parseProjectConfig(raw: unknown, file: string | null = null): Pr
 
 /** One file's settings, each checked, before the layers are put together. */
 interface Layer {
-  mode?: ExecutionMode;
   hooks?: Partial<Record<HookStage, CheckHook[]>>;
-  iric?: Record<string, unknown>;
+  review?: ReviewMode;
   branches?: ProjectConfig['branches'];
-  pullRequests?: Partial<Omit<ProjectConfig['pullRequests'], 'watch' | 'on'>> & {
-    watch?: Partial<PrWatch>;
-    on?: Partial<Record<PrEventKind, PrAction[]>>;
-  };
-  review?: ProjectConfig['review'];
-  final?: Partial<ProjectConfig['final']>;
+  pullRequests?: Partial<ProjectConfig['pullRequests']>;
   instructions?: ProjectConfig['instructions'];
   planCheck?: ProjectConfig['planCheck'];
-  runners?: Runner[];
   /** See ProjectConfig.checksBroken. */
   checksBroken?: boolean;
   /** The file it was read from, as origins name it. */
   from?: string;
   /** For the user's instruction files: the file each point was read from. */
-  instructionsFrom?: Partial<Record<InstructionPoint, string>>;
+  instructionsFrom?: Partial<Record<InstructionPoint, string[]>>;
 }
 
 interface LayerContext {
@@ -367,20 +266,11 @@ interface LayerContext {
 /** Later layers win key by key; instructions add up, the user's first. */
 function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors' | 'warnings'> {
   const out = emptyProjectConfig();
-  const iric: Record<string, unknown> = {};
   const origins: Record<string, string[]> = {};
   for (const l of layers) {
-    // The mode: the most specific file that says, by `mode` — or, in the
-    // repository's own file, by setting `iric`, which is opting in to the
-    // harness. The user's own `iric` only sets how a Managed build runs.
-    if (l.mode) {
-      out.mode = l.mode;
-      delete out.modeByIric;
-      if (l.from) origins['mode'] = [l.from];
-    } else if (l.iric && l.from === PROJECT_CONFIG_PATH) {
-      out.mode = 'managed';
-      out.modeByIric = true;
-      origins['mode'] = [l.from];
+    if (l.review) {
+      out.review = l.review;
+      if (l.from) origins['review'] = [l.from];
     }
     // Which file set each key: the last to set it wins, as its value does.
     const from = (section: string, rec: object | undefined, keys: readonly string[] = Object.keys(rec ?? {})) => {
@@ -388,47 +278,28 @@ function combine(layers: Layer[]): Omit<ProjectConfig, 'file' | 'errors' | 'warn
       for (const key of keys) if ((rec as Record<string, unknown>)[key] !== undefined) origins[`${section}.${key}`] = [l.from];
     };
     for (const stage of HOOK_STAGES) if (l.hooks?.[stage]) out.hooks[stage] = l.hooks[stage]!;
-    from('hooks', l.hooks);
-    Object.assign(iric, l.iric);
-    from('iric', l.iric);
+    from('checks', l.hooks);
     Object.assign(out.branches, l.branches);
     from('branches', l.branches);
-    const { watch, on, ...prs } = l.pullRequests ?? {};
-    Object.assign(out.pullRequests, prs);
-    from('pullRequests', prs, ['tool', 'open', 'template']);
-    // Key by key here too: a repository setting one event keeps the user's others.
-    Object.assign(out.pullRequests.watch, watch);
-    from('pullRequests.watch', watch);
-    Object.assign(out.pullRequests.on, on);
-    from('pullRequests.on', on);
-    Object.assign(out.review, l.review);
-    from('review', l.review);
-    Object.assign(out.final, l.final);
-    from('final', l.final);
+    Object.assign(out.pullRequests, l.pullRequests);
+    from('pullRequests', l.pullRequests, ['template']);
     Object.assign(out.planCheck, l.planCheck);
     from('planCheck', l.planCheck);
-    for (const r of l.runners ?? []) {
-      // A runner is the user's machine: a repository may add runners, never redefine one of theirs.
-      if (out.runners.some((x) => x.name === r.name)) continue;
-      out.runners.push(r);
-      if (l.from) origins[`runners.${r.name}`] = [l.from];
-    }
     for (const point of INSTRUCTION_POINTS) {
       const words = l.instructions?.[point];
       if (words) out.instructions[point] = out.instructions[point] ? `${out.instructions[point]}\n\n${words}` : words;
-      const file = l.instructionsFrom?.[point] ?? l.from;
-      if (words && file) origins[`instructions.${point}`] = [...(origins[`instructions.${point}`] ?? []), file];
+      const files = l.instructionsFrom?.[point] ?? (l.from ? [l.from] : []);
+      if (words && files.length) origins[`instructions.${point}`] = [...(origins[`instructions.${point}`] ?? []), ...files];
     }
   }
   out.origins = origins;
-  out.settings = cleanSettings(iric, DEFAULT_BUILD_SETTINGS);
   const { file: _f, errors: _e, warnings: _w, ...rest } = out;
   return rest;
 }
 
 /**
  * Where a setting a prompt names comes from: the files that set `key` —
- * or, for a group (`pullRequests`, `hooks`), any key under it. No files:
+ * or, for a group (`pullRequests`, `checks`), any key under it. No files:
  * nothing sets it, and Coplan's default is used.
  */
 export function configSource(project: ProjectConfig, key: string): BlockSource {
@@ -456,25 +327,34 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
   }
   const local: string[] = [];
   const notes: string[] = [];
-  unknownKeys(raw, PROJECT_KEYS, '', local);
+  // `iric.review` stands in for a `review` that is not a mode this release: said once, below.
+  const iric = isRecord(raw['iric']) && typeof raw['review'] !== 'string' ? raw['iric']['review'] : undefined;
+  const iricReview = validReview(iric);
+  unknownKeys(Object.fromEntries(Object.entries(raw).filter(([k]) => !ALIAS_KEYS.includes(k))), PROJECT_KEYS, '', local, RETIRED_KEYS, notes);
 
-  const mode = oneOf(raw['mode'], EXECUTION_MODES, 'mode', local);
-  if (mode) layer.mode = mode;
-
-  const hooks = raw['hooks'];
-  if (hooks !== undefined) {
+  // `hooks` is the name `checks` had before 0.4: read for one release.
+  const named = raw['checks'] !== undefined ? 'checks' : raw['hooks'] !== undefined ? 'hooks' : null;
+  if (raw['hooks'] !== undefined && !ctx.global) {
+    notes.push(
+      named === 'checks'
+        ? '"hooks" and "checks" are both set: "checks" is used. "hooks" is the old name; remove it.'
+        : '"hooks" is now "checks": it is read for this release. Rename it.',
+    );
+  }
+  const hooks = named ? raw[named] : undefined;
+  if (named && hooks !== undefined) {
     if (ctx.global) {
-      notes.push('"hooks" belong to each repository (.coplan/config.json), not to every one: they are ignored here.');
+      notes.push(`"${named}" belong to each repository (.coplan/config.json), not to every one: they are ignored here.`);
     } else if (!isRecord(hooks)) {
-      local.push('"hooks" must map a stage (implement, review, final) to a list of commands.');
+      local.push(`"${named}" must map a stage (implement, review, final) to a list of commands.`);
     } else {
       layer.hooks = {};
       for (const [stage, list] of Object.entries(hooks)) {
         if (!(HOOK_STAGES as readonly string[]).includes(stage)) {
-          local.push(`"hooks.${stage}" is not a stage: use ${HOOK_STAGES.join(', ')}.`);
+          local.push(`"${named}.${stage}" is not a stage: use ${HOOK_STAGES.join(', ')}.`);
           continue;
         }
-        layer.hooks[stage as HookStage] = parseHooks(list, stage, local, ctx.base, notes);
+        layer.hooks[stage as HookStage] = parseHooks(list, stage, local, ctx.base, notes, named);
       }
     }
   }
@@ -490,10 +370,24 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
     return v;
   };
 
-  const iric = section('iric', '{ "review", "parallel", "maxRounds" }');
-  if (iric) {
-    checkSettings(iric, local);
-    layer.iric = Object.fromEntries(IRIC_KEYS.filter((k) => iric[k] !== undefined).map((k) => [k, iric[k]]));
+  // The review a task asks for by default: `review`, or — for one release —
+  // the old `iric.review`. Before 0.4 `review` was an object (`review.model`).
+  const review = raw['review'];
+  if (typeof review === 'string') {
+    const value = validReview(review);
+    if (value) layer.review = value;
+    else local.push(`"review" must be one of ${REVIEW_MODES.join(', ')}; ${JSON.stringify(review)} is not, so ${DEFAULT_REVIEW} is used.`);
+  } else if (isRecord(review)) {
+    notes.push('"review" as an object (review.model) is no longer read: the harness picks its models. Set "review" to agent, user or none, or remove it.');
+  } else if (review !== undefined) {
+    local.push(`"review" must be one of ${REVIEW_MODES.join(', ')}.`);
+  }
+  if (iric !== undefined && !iricReview) local.push(`"iric.review" must be one of ${REVIEW_MODES.join(', ')}; ${JSON.stringify(iric)} is not, so ${DEFAULT_REVIEW} is used.`);
+  if (iricReview) {
+    layer.review = iricReview;
+    notes.push(`"iric.review" is read as "review": "${iricReview}" for this release, and the rest of "iric" is no longer read. Set "review" instead, and remove "iric".`);
+  } else if (raw['iric'] !== undefined) {
+    notes.push('"iric" is no longer read: Coplan plans and tracks, and the harness that builds decides this. Remove it. Only "iric.review" is still read this release, as "review" where that is not set to a mode.');
   }
 
   const branches = section('branches', '{ "base", "prefix" }');
@@ -507,14 +401,10 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
     }
   }
 
-  const prs = section('pullRequests', '{ "tool", "open", "template", "watch", "on" }');
+  const prs = section('pullRequests', '{ "template" }');
   if (prs) {
-    unknownKeys(prs, PR_KEYS, 'pullRequests.', local);
+    unknownKeys(prs, PR_KEYS, 'pullRequests.', local, RETIRED_PR_KEYS, notes);
     layer.pullRequests = {};
-    const tool = oneOf(prs['tool'], PR_TOOLS, 'pullRequests.tool', local);
-    if (tool) layer.pullRequests.tool = tool;
-    const open = oneOf(prs['open'], PR_OPEN, 'pullRequests.open', local);
-    if (open) layer.pullRequests.open = open;
     if (prs['template'] !== undefined) {
       const text = typeof prs['template'] === 'string' ? readNamedFile(prs['template'], ctx.base, 'pullRequests.template', MAX_TEMPLATE, local, notes) : null;
       if (typeof prs['template'] !== 'string') local.push('"pullRequests.template" must name a file, e.g. ".github/pull_request_template.md".');
@@ -524,48 +414,26 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
         layer.pullRequests.templateFile = ctx.global ? path.join(ctx.base!, (prs['template'] as string).trim()) : (prs['template'] as string).trim();
       }
     }
-    if (prs['watch'] !== undefined) {
-      if (isRecord(prs['watch'])) layer.pullRequests.watch = parseWatch(prs['watch'], local);
-      else local.push(`"pullRequests.watch" must be an object: { ${PR_WATCH_KEYS.map((k) => `"${k}"`).join(', ')} }.`);
-    }
-    if (prs['on'] !== undefined) {
-      if (isRecord(prs['on'])) layer.pullRequests.on = parseOn(prs['on'], local, ctx.base, notes);
-      else local.push('"pullRequests.on" must map an event (ci_failed, review_comment, …) to an action or a list of them.');
-    }
   }
 
-  const review = section('review', '{ "model" }');
-  if (review) {
-    unknownKeys(review, ['model'], 'review.', local);
-    const model = review['model'];
-    if (typeof model === 'string' && /^[\w.:/[\]-]{1,80}$/.test(model.trim())) layer.review = { model: model.trim() };
-    else if (model !== undefined) local.push('"review.model" must be a model name, e.g. "opus" or "sonnet".');
-  }
-
-  const final = section('final', '{ "blocking" }');
-  if (final) {
-    unknownKeys(final, ['blocking'], 'final.', local);
-    if (typeof final['blocking'] === 'boolean') layer.final = { blocking: final['blocking'] };
-    else if (final['blocking'] !== undefined) local.push('"final.blocking" must be true or false.');
-  }
 
   const instructions = section('instructions', `{ ${INSTRUCTION_POINTS.map((p) => `"${p}"`).join(', ')} }, each text or { "file" }`);
   if (instructions) {
-    unknownKeys(instructions, [...INSTRUCTION_POINTS], 'instructions.', local);
+    unknownKeys(instructions, [...INSTRUCTION_POINTS, ...Object.keys(OLD_POINTS)], 'instructions.', local);
     layer.instructions = {};
-    for (const point of INSTRUCTION_POINTS) {
-      const v = instructions[point];
+    // The current points first, so an old one's words come after them.
+    for (const name of [...INSTRUCTION_POINTS, ...Object.keys(OLD_POINTS)]) {
+      const v = instructions[name];
       if (v === undefined) continue;
-      const where = `instructions.${point}`;
+      const point = OLD_POINTS[name] ?? (name as InstructionPoint);
+      if (OLD_POINTS[name]) notes.push(`"instructions.${name}" is now "instructions.${point}": it is read there for this release. Rename it.`);
+      const where = `instructions.${name}`;
       let text: string | null = null;
       if (typeof v === 'string') text = v.trim();
       else if (isRecord(v) && typeof v['file'] === 'string' && Object.keys(v).length === 1) text = readNamedFile(v['file'], ctx.base, where, MAX_INSTRUCTIONS, local, notes);
       else local.push(`"${where}" must be text, or { "file": "path" }.`);
-      if (text && text.length > MAX_INSTRUCTIONS) {
-        notes.push(`"${where}" is longer than ${MAX_INSTRUCTIONS} characters; the rest is cut.`);
-        text = text.slice(0, MAX_INSTRUCTIONS);
-      }
-      if (text) layer.instructions[point] = text;
+      if (text) text = capped(text, `"${where}"`, notes);
+      if (text) layer.instructions[point] = layer.instructions[point] ? capped(`${layer.instructions[point]}\n\n${text}`, `"instructions.${point}" and "${where}" together`, notes) : text;
     }
   }
 
@@ -582,66 +450,9 @@ function parseLayer(raw: unknown, ctx: LayerContext, errors: string[], warnings:
     }
   }
 
-  const runners = section('runners', '{ "<name>": { "via": "local" | "cloud" | "ssh", "use", "max", "maxLarge", … } }');
-  if (runners) layer.runners = parseRunners(runners, local);
-
   for (const message of local) say(message);
   for (const message of notes) warnings.push(ctx.global ? `${ctx.label}: ${message}` : message);
   return layer;
-}
-
-function parseRunners(rec: Record<string, unknown>, errors: string[]): Runner[] {
-  const out: Runner[] = [];
-  for (const [name, raw] of Object.entries(rec).slice(0, MAX_RUNNERS)) {
-    const where = `runners.${name}`;
-    if (!RUNNER_NAME.test(name)) {
-      errors.push(`"${where}": a runner's name is letters, digits, . _ - (at most 40).`);
-      continue;
-    }
-    if (!isRecord(raw)) {
-      errors.push(`"${where}" must be an object: { "via", "use", "max", … }.`);
-      continue;
-    }
-    unknownKeys(raw, RUNNER_KEYS, `${where}.`, errors);
-    const via = oneOf(raw['via'], RUNNER_VIA, `${where}.via`, errors);
-    if (!via) {
-      if (raw['via'] === undefined) errors.push(`"${where}.via" is missing: ${RUNNER_VIA.join(', ')}.`);
-      continue;
-    }
-    const r: Runner = { name, via };
-    for (const key of ['use', 'host', 'dir', 'environment', 'start'] as const) {
-      const v = raw[key];
-      if (typeof v === 'string' && v.trim()) r[key] = v.trim().slice(0, 1_000);
-      else if (v !== undefined) errors.push(`"${where}.${key}" must be text.`);
-    }
-    for (const key of ['max', 'maxLarge'] as const) {
-      const v = raw[key];
-      if (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 64) r[key] = v;
-      else if (v !== undefined) errors.push(`"${where}.${key}" must be a whole number from 1 to 64.`);
-    }
-    if (raw['default'] === true) r.default = true;
-    else if (raw['default'] !== undefined && raw['default'] !== false) errors.push(`"${where}.default" must be true or false.`);
-    if (via === 'ssh' && !r.host && !r.start) errors.push(`"${where}" runs over ssh: give it a "host" (or a "start" command).`);
-    out.push(r);
-  }
-  if (Object.keys(rec).length > MAX_RUNNERS) errors.push(`"runners" holds at most ${MAX_RUNNERS}; the rest are left out.`);
-  return out;
-}
-
-/** Tasks in progress on each runner, all and large. */
-export function runnerLoad(runners: readonly Runner[], tasks: readonly { status: string; dispatch?: { runner: string; size: string } }[]) {
-  return runners.map((r) => {
-    const on = tasks.filter((t) => t.status === 'in_progress' && t.dispatch?.runner === r.name);
-    return { runner: r, all: on.length, large: on.filter((t) => t.dispatch!.size === 'large').length };
-  });
-}
-
-/** Why `runner` cannot take one more task of `size`, or null when it can. */
-export function runnerFull(load: { runner: Runner; all: number; large: number }, size: string): string | null {
-  const { runner: r, all, large } = load;
-  if (r.max !== undefined && all >= r.max) return `${r.name} already runs ${all} task(s), its max (${r.max})`;
-  if (size === 'large' && r.maxLarge !== undefined && large >= r.maxLarge) return `${r.name} already runs ${large} large task(s), its maxLarge (${r.maxLarge})`;
-  return null;
 }
 
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], where: string, errors: string[]): T | undefined {
@@ -692,49 +503,40 @@ function readNamedFile(name: string, base: string | null, where: string, max: nu
   }
 }
 
-/** `instructions/<point>.md` in Coplan's home: the user's own words. */
-function instructionFiles(dir: string, errors: string[], warnings: string[]): ProjectConfig['instructions'] {
-  const out: ProjectConfig['instructions'] = {};
-  for (const point of INSTRUCTION_POINTS) {
-    const file = path.join(dir, `${point}.md`);
+/** Instructions joined past their limit are cut to it, said as one cut alone is. */
+function capped(text: string, where: string, warnings: string[]): string {
+  if (text.length <= MAX_INSTRUCTIONS) return text;
+  warnings.push(`${where} is longer than ${MAX_INSTRUCTIONS} characters; the rest is cut.`);
+  return text.slice(0, MAX_INSTRUCTIONS);
+}
+
+/** `instructions/<point>.md` in Coplan's home: the user's own words, and the files each point was read from. */
+function instructionFiles(dir: string, errors: string[], warnings: string[]): { words: ProjectConfig['instructions']; from: Partial<Record<InstructionPoint, string[]>> } {
+  const words: ProjectConfig['instructions'] = {};
+  const from: Partial<Record<InstructionPoint, string[]>> = {};
+  for (const name of [...INSTRUCTION_POINTS, ...Object.keys(OLD_POINTS)]) {
+    const file = path.join(dir, `${name}.md`);
     if (!existsSync(file)) continue;
-    const text = readNamedFile(`${point}.md`, dir, `${file}`, MAX_INSTRUCTIONS, errors, warnings);
-    if (text) out[point] = text;
+    const point = OLD_POINTS[name] ?? (name as InstructionPoint);
+    if (OLD_POINTS[name]) warnings.push(`${file}: ${name}.md is now ${point}.md; it is read as that for this release. Rename it.`);
+    const text = readNamedFile(`${name}.md`, dir, `${file}`, MAX_INSTRUCTIONS, errors, warnings);
+    if (!text) continue;
+    words[point] = words[point] ? capped(`${words[point]}\n\n${text}`, `${[...from[point]!, displayPath(file)].join(' and ')} together`, warnings) : text;
+    from[point] = [...(from[point] ?? []), displayPath(file)];
   }
-  return out;
+  return { words, from };
 }
 
-/** What `cleanSettings` would quietly correct, said instead: a value it
- *  clamps or drops is not the build the file asked for. */
-function checkSettings(rec: Record<string, unknown>, errors: string[]): void {
-  unknownKeys(rec, IRIC_KEYS, 'iric.', errors);
-  // What the build will actually use, so each error can say so.
-  const used = cleanSettings(rec, DEFAULT_BUILD_SETTINGS);
-  const review = rec['review'];
-  if (review !== undefined && review !== used.review) {
-    errors.push(`"iric.review" must be one of ${REVIEW_MODES.join(', ')}; ${JSON.stringify(review)} is not, so ${used.review} is used.`);
-  }
-  const whole = (key: 'parallel' | 'maxRounds', hi: number) => {
-    const v = rec[key];
-    if (v === undefined) return;
-    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > hi) {
-      errors.push(`"iric.${key}" must be a whole number from 1 to ${hi}; ${JSON.stringify(v)} is not, so ${used[key]} is used.`);
-    }
-  };
-  whole('parallel', MAX_PARALLEL);
-  whole('maxRounds', MAX_ROUNDS);
-}
-
-function parseHooks(list: unknown, stage: string, errors: string[], root: string | null = null, warnings: string[] = errors): CheckHook[] {
+function parseHooks(list: unknown, stage: string, errors: string[], root: string | null = null, warnings: string[] = errors, key = 'checks'): CheckHook[] {
   const items = Array.isArray(list) ? list : [list];
   const out: CheckHook[] = [];
   items.slice(0, MAX_HOOKS).forEach((item, i) => {
-    const hook = parseHook(item, `hooks.${stage}[${i}]`, errors, root, warnings);
+    const hook = parseHook(item, `${key}.${stage}[${i}]`, errors, root, warnings);
     if (!hook) return;
     for (let n = 2; out.some((h) => h.name === hook.name); n++) hook.name = `${hook.name.replace(/ #\d+$/, '')} #${n}`;
     out.push(hook);
   });
-  if (items.length > MAX_HOOKS) warnings.push(`"hooks.${stage}" has more than ${MAX_HOOKS} commands; the rest are ignored.`);
+  if (items.length > MAX_HOOKS) warnings.push(`"${key}.${stage}" has more than ${MAX_HOOKS} commands; the rest are ignored.`);
   return out;
 }
 
@@ -794,56 +596,6 @@ function parseHook(item: unknown, where: string, errors: string[], root: string 
     if (good.length) hook.env = Object.fromEntries(good.slice(0, MAX_ENV)) as Record<string, string>;
   }
   return hook;
-}
-
-function parseWatch(rec: Record<string, unknown>, errors: string[]): Partial<PrWatch> {
-  unknownKeys(rec, PR_WATCH_KEYS, 'pullRequests.watch.', errors);
-  const out: Partial<PrWatch> = {};
-  if (typeof rec['enabled'] === 'boolean') out.enabled = rec['enabled'];
-  else if (rec['enabled'] !== undefined) errors.push('"pullRequests.watch.enabled" must be true or false.');
-  const whole = (key: 'interval' | 'debounce' | 'maxFixRounds', lo: number, hi: number) => {
-    const v = rec[key];
-    if (v === undefined) return;
-    if (typeof v === 'number' && Number.isInteger(v) && v >= lo && v <= hi) out[key] = v;
-    else errors.push(`"pullRequests.watch.${key}" must be a whole number from ${lo} to ${hi}; ${JSON.stringify(v)} is not, so it is ignored.`);
-  };
-  whole('interval', 30, 3600);
-  whole('debounce', 0, 3600);
-  whole('maxFixRounds', 1, MAX_FIX_ROUNDS);
-  const wake = oneOf(rec['wake'], PR_WAKE, 'pullRequests.watch.wake', errors);
-  if (wake) out.wake = wake;
-  const trust = rec['trust'];
-  if (typeof trust === 'string' && (PR_TRUST as readonly string[]).includes(trust)) out.trust = trust as PrWatch['trust'];
-  else if (Array.isArray(trust) && trust.length && trust.every((t) => typeof t === 'string' && /^[A-Za-z0-9-]{1,39}(\[bot\])?$/.test(t))) out.trust = trust as string[];
-  else if (trust !== undefined) errors.push(`"pullRequests.watch.trust" must be ${PR_TRUST.join(' or ')}, or a list of logins.`);
-  return out;
-}
-
-function parseOn(rec: Record<string, unknown>, errors: string[], root: string | null, warnings: string[]): Partial<Record<PrEventKind, PrAction[]>> {
-  const out: Partial<Record<PrEventKind, PrAction[]>> = {};
-  for (const [event, value] of Object.entries(rec)) {
-    if (!(PR_EVENT_KINDS as readonly string[]).includes(event)) {
-      errors.push(`"pullRequests.on.${event}" is not an event: use ${PR_EVENT_KINDS.join(', ')}.`);
-      continue;
-    }
-    const items = Array.isArray(value) ? value : [value];
-    const actions: PrAction[] = [];
-    items.slice(0, MAX_HOOKS).forEach((item, i) => {
-      const where = `pullRequests.on.${event}${Array.isArray(value) ? `[${i}]` : ''}`;
-      if (typeof item === 'string') {
-        // A bare string is an action; a command is spelt { "run" }, so a typo is not run as one.
-        const action = oneOf(item, PR_ACTIONS, where, errors);
-        if (action) actions.push(action);
-      } else if (isRecord(item)) {
-        const hook = parseHook(item, where, errors, root, warnings);
-        if (hook) actions.push(hook);
-      } else {
-        errors.push(`"${where}" must be an action (${PR_ACTIONS.join(', ')}) or a command { "run" }.`);
-      }
-    });
-    out[event as PrEventKind] = actions;
-  }
-  return out;
 }
 
 /**
@@ -925,7 +677,7 @@ export const MAX_FILES_ARG = 1_000;
  */
 export function withFiles(run: string, files: readonly string[] | null): string {
   if (!run.includes('{files}')) return run;
-  const list = files && files.length && files.length <= MAX_FILES_ARG ? files.map((f) => `'${f.replace(/'/g, `'\\''`)}'`).join(' ') : '.';
+  const list = files && files.length && files.length <= MAX_FILES_ARG ? files.map((f) => `'${(f.startsWith('-') ? `./${f}` : f).replace(/'/g, `'\\''`)}'`).join(' ') : '.';
   return run.split('{files}').join(list);
 }
 

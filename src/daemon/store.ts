@@ -6,7 +6,6 @@ import {
   PlanError,
   applyOps,
   awaitingUserReview,
-  holdsForReview,
   confirmDesign,
   countTasks,
   currentTask,
@@ -33,9 +32,9 @@ import { BUILD_MARKER, DESIGN_MARKER, PROMPT_MOVED, REVISION_MARKER, buildPrompt
 const REVISION_MOVED =
   'The request changed since you read it (a comment was added, answered or resolved). It now shows what would be sent — read it, then send it again.';
 import { blockingGaps } from '../shared/check.ts';
-import { DEFAULT_BUILD_SETTINGS, modeFor } from '../shared/build.ts';
+import { DEFAULT_REVIEW } from '../shared/build.ts';
 import { DEFAULT_AGENT, isAgentKind, type AgentKind } from '../shared/agents.ts';
-import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, SessionSummary, TaskListInput } from '../shared/types.ts';
+import type { Author, Change, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, SessionSummary, Submission, TaskListInput } from '../shared/types.ts';
 
 const PERSIST_DEBOUNCE_MS = 400;
 
@@ -114,10 +113,11 @@ export class SessionStore extends EventEmitter {
   private persistFailed = new Map<string, string>();
   /** Save failures raised before anyone listened, for the first listener. */
   private unheard: ServerEvent[] = [];
-  /** The project's review mode for a session: what a plan with none of its
-   *  own (not a submitted Managed build) is judged by, as the daemon's gates
-   *  judge it. Set by the daemon; every edit falls back to it. */
+  /** The repository's default review for a session: what a task that asks
+   *  for none of its own falls back to. Set by the daemon; every edit uses it. */
   reviewFor?: (session: SessionState) => ReviewMode;
+  /** The repository's settings a build prompt is made with. Set by the daemon. */
+  promptFor?: (session: SessionState) => PromptOptions;
 
   constructor() {
     super();
@@ -381,12 +381,11 @@ export class SessionStore extends EventEmitter {
   /** The rail's rows, newest session first. Ordered on creation so rows
    *  never move out from under the cursor. */
   summaries(): SessionSummary[] {
-    // The project's review mode, read only where it can count — a Managed
-    // build (the only kind that holds work for a review) submitted on the
-    // repository's defaults — and once a repository.
+    // The repository's default review, read only where it can count — a
+    // submitted plan (the only kind with tasks in review) — and once a repository.
     const byRoot = new Map<string, ReviewMode | undefined>();
     const reviewOf = (s: SessionState): ReviewMode | undefined => {
-      if (!holdsForReview(s.plan) || s.plan.submission.settings || !this.reviewFor) return undefined;
+      if (!s.plan?.submission || !this.reviewFor) return undefined;
       const root = s.repoRoot ?? s.cwd;
       if (!byRoot.has(root)) byRoot.set(root, this.reviewFor(s));
       return byRoot.get(root);
@@ -476,7 +475,7 @@ export class SessionStore extends EventEmitter {
    * the plan as the daemon holds it, and only if that is still the version
    * the user previewed — what they read is what Claude gets.
    */
-  submit(id: string, input: PromptOptions & { target: BuildTarget; expect?: number; hash?: string; userSaid?: string }): Plan {
+  submit(id: string, input: PromptOptions & { expect?: number; hash?: string; userSaid?: string }): Plan {
     const session = this.sessions.get(id);
     if (!session) throw new Error('unknown session');
     const plan = session.plan;
@@ -487,15 +486,10 @@ export class SessionStore extends EventEmitter {
     refuseBlockingGaps(plan, input, 'submitted');
     const { prompt, trimmed } = buildPrompt(plan, { ...input, agent: session.agent });
     if (input.hash !== undefined && input.hash !== promptHash(prompt)) throw new PlanError(PROMPT_MOVED('submit'));
-    const mode = modeFor(input.target, input.mode, input.project?.mode ?? 'tracked');
     const next = submitPlan(plan, {
-      target: input.target,
-      mode,
       prompt,
       trimmed,
       ...(input.note ? { note: input.note } : {}),
-      // A Managed build's settings: what the other modes leave to the agent.
-      ...(input.settings && mode === 'managed' ? { settings: input.settings } : {}),
       ...(input.project?.branches.base ? { base: input.project.branches.base } : {}),
       ...(input.userSaid ? { userSaid: input.userSaid } : {}),
     });
@@ -563,12 +557,18 @@ export class SessionStore extends EventEmitter {
    */
   /** The prompt waiting to reach the agent, if any, without sending it. */
   pending(id: string): { prompt: string; marker: string } | null {
-    const plan = this.sessions.get(id)?.plan;
+    const session = this.sessions.get(id);
+    const plan = session?.plan;
     if (!plan) return null;
     if (plan.submission) {
-      return plan.submission.target === 'session' && !plan.submission.deliveredAt ? { prompt: plan.submission.prompt, marker: BUILD_MARKER } : null;
+      return plan.submission.target === 'session' && !plan.submission.deliveredAt ? { prompt: this.submissionPrompt(session!, plan.submission), marker: BUILD_MARKER } : null;
     }
     return plan.design && !plan.design.deliveredAt ? { prompt: plan.design.prompt, marker: DESIGN_MARKER } : null;
+  }
+
+  /** What a submission hands over: a prompt 0.3 wrote is built again, as a submit builds it now. */
+  private submissionPrompt(session: SessionState, submission: Submission): string {
+    return submission.stalePrompt ? buildPrompt(session.plan!, { ...this.promptFor?.(session), agent: session.agent }).prompt : submission.prompt;
   }
 
   /**
@@ -587,15 +587,19 @@ export class SessionStore extends EventEmitter {
   }
 
   deliver(id: string): { prompt: string; marker: string } | null {
-    const plan = this.sessions.get(id)?.plan;
+    const session = this.sessions.get(id);
+    const plan = session?.plan;
     if (!plan) return null;
     const submission = plan.submission;
     let next: Plan;
     let out: { prompt: string; marker: string };
     if (submission) {
       if (submission.target !== 'session' || submission.deliveredAt) return null;
+      const prompt = this.submissionPrompt(session!, submission);
       next = markDelivered(plan);
-      out = { prompt: submission.prompt, marker: BUILD_MARKER };
+      const { stalePrompt: _, ...kept } = next.submission!;
+      next.submission = { ...kept, prompt };
+      out = { prompt, marker: BUILD_MARKER };
     } else if (plan.design && !plan.design.deliveredAt) {
       next = markDesignDelivered(plan);
       out = { prompt: plan.design.prompt, marker: DESIGN_MARKER };
@@ -759,8 +763,8 @@ export class SessionStore extends EventEmitter {
   private listQueued = false;
 }
 
-/** `review`: the project's review mode (the daemon's `reviewFor`), else the default. */
-export function summarize(s: SessionState, review: ReviewMode = DEFAULT_BUILD_SETTINGS.review): SessionSummary {
+/** `review`: the repository's default review (the daemon's `reviewFor`), else Coplan's. */
+export function summarize(s: SessionState, review: ReviewMode = DEFAULT_REVIEW): SessionSummary {
   const plan = s.plan;
   return {
     sessionId: s.sessionId,
@@ -928,7 +932,8 @@ function migrate(state: SessionState, savedAt: () => number): void {
   for (const key of [
     'worktree', 'transcriptPath', 'stage', 'stageNote', 'baseRef', 'startCommit', 'reviewRound',
     'roundHistory', 'tasks', 'usage', 'todos', 'files', 'commands', 'timeline', 'gates',
-    'activeGateId', 'threads', 'checks', 'ship', 'pendingFeedback', 'stats',
+    'activeGateId', 'threads', 'checks', 'ship', 'pendingFeedback', 'stats', 'prWatch', 'prInbox',
+    'buildChoice',
   ]) {
     delete raw[key];
   }

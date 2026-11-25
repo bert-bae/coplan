@@ -8,7 +8,6 @@
  * question goes through AskUserQuestion in Claude's own chat.
  */
 import { MAX_PROPOSAL_OPS, PROPOSABLE_OPS } from '../shared/proposal-ops.ts';
-import { PR_EVENT_KINDS } from '../shared/prEvents.ts';
 
 export interface ToolDef {
   name: string;
@@ -20,6 +19,16 @@ export interface ToolDef {
 
 /** Every tool only reads or writes harness state, so one budget fits all. */
 export const DEFAULT_BUDGET_MS = 30_000;
+
+const READ_ENDPOINTS = new Set(['read', 'check', 'next', 'brief']);
+
+/** What a call that ran out of time says. A write may have been applied
+ *  before the answer was lost, so it is not simply sent again. */
+export function timeoutText(endpoint: string): string {
+  return READ_ENDPOINTS.has(endpoint)
+    ? '[cc-harness] The daemon did not respond in time. Call the tool again.'
+    : '[cc-harness] The daemon did not respond in time. It may have applied this call: read the plan (harness_plan_read) before trying it again.';
+}
 
 const STATUS = { type: 'string', enum: ['todo', 'in_progress', 'blocked', 'done', 'dropped'] };
 
@@ -66,7 +75,7 @@ const DIAGRAM = {
   required: ['title', 'nodes'],
 };
 
-const REVIEW = { type: 'string', enum: ['subagent', 'self', 'user', 'skip'] };
+const REVIEW = { type: 'string', enum: ['agent', 'user', 'none'] };
 
 /** What a task says about how it is built: what it waits on, where it lands,
  *  how it is reviewed, which boxes it builds. */
@@ -77,8 +86,7 @@ const BUILD_FIELDS: Record<string, unknown> = {
     description: 'Ids of tasks that must be done first. Leave out whatever could run in parallel. Subtasks inherit it.',
   },
   branch: { type: 'string', description: 'Git branch the work lands on; subtasks inherit it. Omit for one PR on the current branch.' },
-  review: { ...REVIEW, description: 'Only when not the build default: "user" for risky work, "skip" for trivial.' },
-  runner: { type: 'string', description: 'Only when the user asked for one: the runner (from the config) it must be built on. Subtasks inherit it.' },
+  review: { ...REVIEW, description: 'The review it asks for, only when not the default: "user" for risky work, "none" for trivial.' },
   builds: {
     type: 'array',
     items: { type: 'string' },
@@ -167,7 +175,6 @@ const OP_PROPERTIES: Record<string, unknown> = {
   dependsOn: { ...STR_LIST, description: 'upsert_task: replaces its dependencies; [] clears them.' },
   branch: { type: 'string', description: 'upsert_task: "" clears it.' },
   review: { type: 'string', enum: [...REVIEW.enum, ''], description: 'upsert_task: "" clears it.' },
-  runner: { type: 'string', description: 'upsert_task: the runner it must be built on; "" clears it.' },
   builds: { ...STR_LIST, description: 'upsert_task: the boxes it builds now, as node ids or "diagramId/nodeId" (replaces its links; [] unlinks it).' },
   threadId: { type: 'string', description: 'reply / resolve: the comment thread.' },
   text: { type: 'string', description: 'reply: your reply. report: the build report. Markdown.' },
@@ -434,12 +441,9 @@ export const TOOLS: ToolDef[] = [
     endpoint: 'task',
     description:
       'Track progress while you build; the user follows it on the board. in_progress (stage "implement") on start, ' +
-      'stage "review"/"refine" through the cycle, report checks, done with a one-line note once review passed, or ' +
-      'blocked with a note. Always refused: starting or finishing a task that waits on another, progress on a task ' +
-      'with subtasks. Refused when Managed (noted when Tracked): too many at once, review rounds past the limit, done ' +
-      'without a passing verdict for the last round (the user\'s, if they review) or with a failing or unreported check, ' +
-      'dropping signed-off work. When the user has runners, record where each task runs (runner, session, size) ' +
-      'as you hand it off.',
+      'stage "review"/"refine" through the cycle, report checks (failures show on the board), done with a one-line ' +
+      'note, or blocked with a note. Recorded as reported. Refused only: starting or finishing a task that waits on ' +
+      'another, progress on a task with subtasks.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -448,7 +452,7 @@ export const TOOLS: ToolDef[] = [
         stage: { type: 'string', enum: ['implement', 'review', 'refine'], description: 'Step of the cycle; implies in_progress.' },
         checks: {
           type: 'array',
-          description: 'The checks just run: the hooks from .coplan/config.json (`coplan check <stage> --json` prints these).',
+          description: 'The checks just run: from .coplan/config.json (`coplan check <stage> --json` prints these).',
           items: {
             type: 'object',
             properties: { name: { type: 'string' }, ok: { type: 'boolean' }, note: { type: 'string', description: 'One line: what failed.' } },
@@ -462,18 +466,10 @@ export const TOOLS: ToolDef[] = [
           description: "The review's outcome, once it is in: pass, or changes (then refine). Recorded for the task's current review round.",
         },
         summary: { type: 'string', description: 'With verdict: one line on what the review found.' },
-        runner: {
-          type: 'string',
-          description:
-            'Where you hand it: one of the runners harness_task_next lists. Refused when it is full, or the task asks for another.',
-        },
-        session: { type: 'string', description: 'With runner: the id of the session or subagent you started there, to reach it again.' },
-        size: { type: 'string', enum: ['small', 'large'], description: 'With runner: large counts against its maxLarge. Default small.' },
         user_approved: {
           type: 'boolean',
           description:
-            'Only when the user told you in chat: their verdict on a task they review, another review round past ' +
-            'their maximum, more tasks at once, or done although a check fails. Put what they said in `note`.',
+            'With verdict, when the user gave it in chat: the verdict is recorded as theirs. Put what they said in `note`.',
         },
       },
       required: ['task_id'],
@@ -498,41 +494,6 @@ export const TOOLS: ToolDef[] = [
         base: { type: 'string', description: 'The branch its pull request targets now, when that changed (after a restack).' },
       },
       required: ['branch'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'harness_pr_events',
-    endpoint: 'pr_events',
-    description:
-      'What needs doing about the pull requests Coplan watches for this plan — failing CI, reviews, comments, ' +
-      'conflicts, merges — handed over once, as the work to do. Usually it reaches you by itself (`coplan pr wait`, or ' +
-      'with the user\'s next message); call this when you want it sooner.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-  },
-  {
-    name: 'harness_pr_event',
-    endpoint: 'pr_event',
-    description:
-      'Pass on an event you saw yourself on one of the build\'s pull requests (a cloud session\'s own pull request ' +
-      'subscription), so Coplan does with it what the repository configured. Copy what the event says; the text ' +
-      'stays untrusted. The answer is the work to do, if any.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        branch: { type: 'string', description: 'The plan\'s branch the pull request is for.' },
-        kind: {
-          type: 'string',
-          enum: [...PR_EVENT_KINDS],
-        },
-        author: { type: 'string', description: 'Login of who wrote it, for a review or comment.' },
-        association: { type: 'string', description: 'Their standing as GitHub gives it: OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, NONE.' },
-        body: { type: 'string', description: 'What they wrote, or which checks failed.' },
-        url: { type: 'string' },
-        path: { type: 'string', description: 'For a comment on a line: the file.' },
-        line: { type: 'integer' },
-      },
-      required: ['branch', 'kind'],
       additionalProperties: false,
     },
   },

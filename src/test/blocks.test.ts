@@ -7,7 +7,7 @@ import { BLOCK_SOURCE_KINDS, blocksText, droppedParts, joinBlocks, type Block, t
 import { targetExists } from '../shared/plan.ts';
 import { loadProjectConfig } from '../shared/project.ts';
 import { TARGET_KINDS, type Plan } from '../shared/types.ts';
-import { PROMPT_BUDGET, buildPrompt, configRows, designPrompt, planBlocks, renderPlan, type BuildPrompt } from '../daemon/render.ts';
+import { PROMPT_BUDGET, buildPrompt, configRows, designPrompt, exportBlocks, planBlocks, renderPlan, type BuildPrompt } from '../daemon/render.ts';
 import { briefBlocks, renderBrief } from '../daemon/brief.ts';
 import { FIXTURE_BIN, bigPlan, fullProject, longPlan, plainPlan, richConfirmed, richPlan } from './prompt-fixtures.ts';
 
@@ -26,15 +26,16 @@ const PROMPTS: Record<string, () => { plan: Plan; built: BuildPrompt }> = {
   'design, without config': () => withPlan(plainPlan(false), (p) => designPrompt(p)),
   'design, over the budget': () => withPlan(bigPlan(), (p) => designPrompt(p, { project: fullProject(true), note: NOTE })),
   'design, with a long section': () => withPlan(longPlan(), (p) => designPrompt(p, { project: fullProject() })),
-  'build for this session, under the budget': () => withPlan(richConfirmed(), (p) => buildPrompt(p, { target: 'session', project: fullProject(), bin: FIXTURE_BIN, note: NOTE })),
-  'build for this session, settings chosen': () =>
-    withPlan(richConfirmed(), (p) => buildPrompt(p, { target: 'session', project: fullProject(), settings: { review: 'subagent', parallel: 1, maxRounds: 1 } })),
-  'build for this session, without config': () => withPlan(plainPlan(), (p) => buildPrompt(p, { target: 'session' })),
-  'build for this session, over the budget': () => withPlan(bigPlan(), (p) => buildPrompt(p, { target: 'session', project: fullProject(true), note: NOTE })),
-  'build for this session, with a long section': () => withPlan(longPlan(), (p) => buildPrompt(p, { target: 'session', project: fullProject() })),
-  'build for somewhere else': () => withPlan(richConfirmed(), (p) => buildPrompt(p, { target: 'elsewhere', project: fullProject(), note: NOTE })),
-  'build for somewhere else, over the budget': () => withPlan(bigPlan(), (p) => buildPrompt(p, { target: 'elsewhere', project: fullProject(true) })),
+  'handoff, under the budget': () => withPlan(richConfirmed(), (p) => buildPrompt(p, { project: fullProject(), bin: FIXTURE_BIN, note: NOTE })),
+  'handoff, without config': () => withPlan(plainPlan(), (p) => buildPrompt(p)),
+  'handoff, over the budget': () => withPlan(bigPlan(), (p) => buildPrompt(p, { project: fullProject(true), note: NOTE })),
+  'handoff, with a long section': () => withPlan(longPlan(), (p) => buildPrompt(p, { project: fullProject() })),
+  'export': () => withPlan(richConfirmed(), (p) => asPrompt(exportBlocks(p, { project: fullProject(), note: NOTE }))),
+  'export, of a big plan': () => withPlan(bigPlan(), (p) => asPrompt(exportBlocks(p, { project: fullProject(true) }))),
 };
+
+/** The export's blocks, as a prompt is checked. */
+const asPrompt = (blocks: Block[]): BuildPrompt => ({ prompt: blocksText(blocks), trimmed: false, blocks });
 
 function withPlan(plan: Plan, make: (plan: Plan) => BuildPrompt): { plan: Plan; built: BuildPrompt } {
   return { plan, built: make(plan) };
@@ -53,8 +54,6 @@ function badSource(block: Block, plan: Plan): string | null {
       return source.key && Array.isArray(source.files) ? null : 'names a config setting without its key';
     case 'derived':
       return source.from.length && source.from.every(Boolean) ? null : 'says it is worked out, but not from what';
-    case 'setting':
-      return ['mode', 'review', 'parallel', 'maxRounds'].includes(source.key) ? null : `names a build setting there is none of (${source.key})`;
     default:
       return null;
   }
@@ -140,7 +139,7 @@ test('contract: a block with no source fails the check', () => {
 });
 
 test('the fields a prompt quotes are tagged with the item they come from', () => {
-  const { built } = PROMPTS['build for this session, under the budget']!();
+  const { built } = PROMPTS['handoff, under the budget']!();
   const at = (id: string) => built.blocks.find((b) => b.id === id);
   assert.deepEqual(at('section:risks')?.source, { kind: 'field', target: { kind: 'section', id: 'risks' } });
   assert.deepEqual(at('node:d1/cache')?.source, { kind: 'field', target: { kind: 'node', id: 'd1/cache' } });
@@ -156,24 +155,20 @@ test('the fields a prompt quotes are tagged with the item they come from', () =>
   assert.deepEqual(at('branches')?.source, { kind: 'derived', from: ["each task's branch", 'the base branch (branches.base)'] });
 });
 
-test('settings in a prompt name where they are set: config, or the Submit dialog', () => {
+test('settings in a prompt name the config that sets them', () => {
   const project = fullProject();
-  const build = buildPrompt(richConfirmed(), { target: 'session', project, settings: { review: 'subagent', parallel: 3, maxRounds: 2 } });
+  const build = buildPrompt(richConfirmed(), { project });
   const at = (id: string) => build.blocks.find((b) => b.id === id);
-  assert.deepEqual(at('step-3:review')?.source, { kind: 'setting', key: 'review' });
-  assert.deepEqual(at('step-1:parallel')?.source, { kind: 'setting', key: 'parallel' });
-  assert.equal(at('step-3:model')?.source.kind, 'config');
-  assert.equal(at('step-3:model')?.text, ' Run the reviewer on the `opus` model.');
-  assert.deepEqual(at('step-7:pull-requests')?.source, { kind: 'config', key: 'pullRequests', files: ['.coplan/config.json'] });
-  assert.deepEqual(at('checks:review')?.source, { kind: 'config', key: 'hooks.review', files: ['.coplan/config.json'] });
-  assert.deepEqual(at('instructions:build')?.source, { kind: 'config', key: 'instructions.build', files: ['.coplan/config.json'] });
+  assert.deepEqual(at('step-3:review')?.source, { kind: 'config', key: 'review', files: ['.coplan/config.json'] });
+  assert.deepEqual(at('step-4:pull-requests')?.source, { kind: 'config', key: 'pullRequests', files: [] });
+  assert.deepEqual(at('checks:review')?.source, { kind: 'config', key: 'checks.review', files: ['.coplan/config.json'] });
+  assert.deepEqual(at('instructions:handoff')?.source, { kind: 'config', key: 'instructions.handoff', files: ['.coplan/config.json'] });
 
-  // The design prompt's review mode is the config's default: no dialog sets it.
   const design = designPrompt(richPlan(), { project });
-  assert.deepEqual(design.blocks.find((b) => b.id === 'step-5:review')?.source, { kind: 'config', key: 'iric.review', files: ['.coplan/config.json'] });
+  assert.deepEqual(design.blocks.find((b) => b.id === 'step-5:review')?.source, { kind: 'config', key: 'review', files: ['.coplan/config.json'] });
   // Without config, the default is Coplan's: no file sets it.
   const bare = designPrompt(richPlan());
-  assert.deepEqual(bare.blocks.find((b) => b.id === 'step-5:review')?.source, { kind: 'config', key: 'iric.review', files: [] });
+  assert.deepEqual(bare.blocks.find((b) => b.id === 'step-5:review')?.source, { kind: 'config', key: 'review', files: [] });
 });
 
 test("a config source names each file that set it: the user's own, then the repository's", () => {
@@ -182,25 +177,28 @@ test("a config source names each file that set it: the user's own, then the repo
   const repo = path.join(dir, 'repo');
   mkdirSync(path.join(home, 'instructions'), { recursive: true });
   mkdirSync(path.join(repo, '.coplan'), { recursive: true });
-  writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ pullRequests: { tool: 'graphite', open: 'auto' }, review: { model: 'opus' } }));
-  writeFileSync(path.join(home, 'instructions', 'build.md'), 'Mine first.');
-  writeFileSync(path.join(repo, '.coplan', 'config.json'), JSON.stringify({ pullRequests: { open: 'ask' }, instructions: { build: 'Then the repository.' }, hooks: { review: ['npm test'] } }));
+  mkdirSync(path.join(home, '.github'), { recursive: true });
+  mkdirSync(path.join(repo, '.github'), { recursive: true });
+  writeFileSync(path.join(home, '.github', 'pr.md'), '## Mine');
+  writeFileSync(path.join(repo, '.github', 'pr.md'), '## Theirs');
+  writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ review: 'user', pullRequests: { template: '.github/pr.md' } }));
+  writeFileSync(path.join(home, 'instructions', 'handoff.md'), 'Mine first.');
+  writeFileSync(path.join(repo, '.coplan', 'config.json'), JSON.stringify({ pullRequests: { template: '.github/pr.md' }, instructions: { handoff: 'Then the repository.' }, checks: { review: ['npm test'] } }));
   const project = loadProjectConfig(repo, { globalDir: home });
-  assert.deepEqual(project.origins?.['pullRequests.tool'], [path.join(home, 'coplan.json')]);
-  assert.deepEqual(project.origins?.['pullRequests.open'], ['.coplan/config.json'], 'the repository overrides it');
-  assert.deepEqual(project.origins?.['review.model'], [path.join(home, 'coplan.json')]);
-  assert.deepEqual(project.origins?.['instructions.build'], [path.join(home, 'instructions', 'build.md'), '.coplan/config.json']);
-  assert.deepEqual(project.origins?.['hooks.review'], ['.coplan/config.json']);
-  assert.equal(project.origins?.['hooks.final'], undefined, 'not set anywhere: Coplan has no default checks');
+  assert.deepEqual(project.origins?.['review'], [path.join(home, 'coplan.json')]);
+  assert.deepEqual(project.origins?.['pullRequests.template'], ['.coplan/config.json'], 'the repository overrides it');
+  assert.deepEqual(project.origins?.['instructions.handoff'], [path.join(home, 'instructions', 'handoff.md'), '.coplan/config.json']);
+  assert.deepEqual(project.origins?.['checks.review'], ['.coplan/config.json']);
+  assert.equal(project.origins?.['checks.final'], undefined, 'not set anywhere: Coplan has no default checks');
 
-  const built = buildPrompt(richConfirmed(), { target: 'session', mode: 'managed', project });
+  const built = buildPrompt(richConfirmed(), { project });
   const at = (id: string) => built.blocks.find((b) => b.id === id);
-  assert.deepEqual(at('step-7:pull-requests')?.source, { kind: 'config', key: 'pullRequests', files: [path.join(home, 'coplan.json'), '.coplan/config.json'] });
-  assert.deepEqual(at('instructions:build')?.source, { kind: 'config', key: 'instructions.build', files: [path.join(home, 'instructions', 'build.md'), '.coplan/config.json'] });
+  assert.deepEqual(at('step-3:review')?.source, { kind: 'config', key: 'review', files: [path.join(home, 'coplan.json')] });
+  assert.deepEqual(at('instructions:handoff')?.source, { kind: 'config', key: 'instructions.handoff', files: [path.join(home, 'instructions', 'handoff.md'), '.coplan/config.json'] });
 });
 
 test('a prompt over the budget reports which blocks were left out to fit, and none of them is in its text', () => {
-  const { built } = PROMPTS['build for this session, over the budget']!();
+  const { built } = PROMPTS['handoff, over the budget']!();
   assert.equal(built.trimmed, true);
   assert.ok(built.prompt.length <= PROMPT_BUDGET);
   const dropped = built.blocks.filter((b) => b.dropped);
@@ -227,11 +225,11 @@ test('a prompt over the budget reports which blocks were left out to fit, and no
   assert.deepEqual(droppedParts(built.blocks), ['the detail of 63 tasks', `${past} tasks past the cut`, 'the build order']);
   // Cut, not dropped: kept in part, and marked.
   assert.equal(built.blocks.find((b) => b.id === 'changes')?.cut, true);
-  assert.equal(built.blocks.find((b) => b.id === 'instructions:build')?.cut, true);
+  assert.equal(built.blocks.find((b) => b.id === "instructions:handoff")?.cut, true);
 });
 
 test('a prompt that fits leaves nothing out', () => {
-  const { built } = PROMPTS['build for this session, under the budget']!();
+  const { built } = PROMPTS['handoff, under the budget']!();
   assert.equal(built.trimmed, false);
   assert.deepEqual(droppedParts(built.blocks), []);
   assert.ok(!built.blocks.some((b) => (b.dropped && !b.known) || b.cut), 'only the design it already has');
@@ -247,7 +245,7 @@ test('the design prompt leaves out the design the agent already has, so a long d
 });
 
 test("the agent's bookkeeping is marked: revisions, who edited what, how to reply, the legend", () => {
-  const { built } = PROMPTS['build for this session, under the budget']!();
+  const { built } = PROMPTS['handoff, under the budget']!();
   const kept = built.blocks.filter((b) => b.bookkeeping).map((b) => b.id);
   assert.ok(kept.includes('section:risks:by'));
   assert.ok(kept.includes('thread:c3:reply'));
@@ -262,35 +260,31 @@ test('the Confirm dialog shows every config setting the design prompt depends on
     const rows = configRows(project, 'design');
     for (const b of design.blocks) {
       if (b.source.kind === 'config') assert.ok(covers(rows, b.source.key), `the design prompt's ${b.id} depends on ${b.source.key}, which the Confirm dialog does not show`);
-      // The Confirm dialog has no settings of its own: nothing in the prompt can come from one.
-      assert.notEqual(b.source.kind, 'setting', `${b.id} depends on a build setting the Confirm dialog does not have`);
     }
-    for (const settings of [undefined, { review: 'subagent' as const, parallel: 2, maxRounds: 3 }]) {
-      const build = buildPrompt(richConfirmed(), { target: 'session', project, ...(settings ? { settings } : {}) });
-      const there = buildPrompt(richConfirmed(), { target: 'elsewhere', project, ...(settings ? { settings } : {}) });
-      const rows = configRows(project, 'build');
-      for (const b of [...build.blocks, ...there.blocks]) {
-        if (b.source.kind === 'config' && !b.source.key.startsWith('iric.')) assert.ok(covers(rows, b.source.key), `the build prompt's ${b.id} depends on ${b.source.key}, which the Submit dialog does not show`);
-      }
+    const build = buildPrompt(richConfirmed(), { project });
+    const handoffRows = configRows(project, 'handoff');
+    for (const b of build.blocks) {
+      if (b.source.kind === 'config') assert.ok(covers(handoffRows, b.source.key), `the handoff's ${b.id} depends on ${b.source.key}, which the Submit dialog does not show`);
     }
   }
 });
 
 test('each config row says what it is set to and where: the file, or none for a default', () => {
-  const rows = configRows(fullProject(), 'build');
+  const rows = configRows(fullProject(), 'handoff');
   const at = (key: string) => rows.find((r) => r.key === key);
-  assert.deepEqual(at('hooks.review'), { key: 'hooks.review', label: 'Review checks', value: 'tests', files: ['.coplan/config.json'] });
-  assert.deepEqual(at('pullRequests'), { key: 'pullRequests', label: 'Pull requests', value: 'Graphite, as each branch is done · template .github/pull_request_template.md', files: ['.coplan/config.json'] });
-  assert.deepEqual(at('review.model'), { key: 'review.model', label: 'Reviewer model', value: 'opus', files: ['.coplan/config.json'] });
-  assert.equal(at('instructions.build')?.value, 'Small commits, each with a message that says why.');
+  assert.deepEqual(at('checks.review'), { key: 'checks.review', label: 'Review checks', value: 'tests', files: ['.coplan/config.json'] });
+  // The template is set as read (fullProject), not by a file key.
+  assert.deepEqual(at('pullRequests'), { key: 'pullRequests', label: 'Pull requests', value: 'opened by the harness · template .github/pull_request_template.md', files: [] });
+  assert.deepEqual(at('review'), { key: 'review', label: 'Review, by default', value: 'an agent that did not write the change', files: ['.coplan/config.json'] });
+  assert.equal(at('instructions.handoff')?.value, 'Small commits, each with a message that says why.');
   const bare = configRows(loadProjectConfig(null, { globalDir: null }), 'design');
   assert.deepEqual(
     bare.map((r) => [r.key, r.value, r.files.length]),
     [
-      ['hooks.implement', 'none', 0],
-      ['hooks.review', 'none', 0],
-      ['hooks.final', 'none', 0],
-      ['iric.review', 'self-review', 0],
+      ['checks.implement', 'none', 0],
+      ['checks.review', 'none', 0],
+      ['checks.final', 'none', 0],
+      ['review', 'an agent that did not write the change', 0],
       ['branches', 'cut from the base branch', 0],
       ['instructions.design', 'none', 0],
     ],

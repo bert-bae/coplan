@@ -59,7 +59,7 @@ const RICH: PlanInput = {
       ],
     },
     { id: 'wire', title: 'Wire into API', detail: 'Use the client in the orders handler.', dependsOn: ['storage'], branch: 'cache/api', status: 'in_progress', note: 'halfway' },
-    { id: 'docs', title: 'Document the cache', review: 'skip' },
+    { id: 'docs', title: 'Document the cache', review: 'none' },
   ],
 };
 
@@ -171,24 +171,20 @@ const TEMPLATE = '## What\n\n## Why\n\n## Checks';
 
 /** A repository config that sets everything a prompt can say. */
 export function fullProject(longInstructions = false): ProjectConfig {
-  const build = longInstructions ? `Small commits, each with a message that says why. ${'Keep the diff focused. '.repeat(90)}` : 'Small commits, each with a message that says why.';
+  const handoff = longInstructions ? `Small commits, each with a message that says why. ${'Keep the diff focused. '.repeat(90)}` : 'Small commits, each with a message that says why.';
   const project = parseProjectConfig(
     {
-      hooks: {
+      checks: {
         implement: ['pnpm typecheck', { name: 'lint', run: 'pnpm lint', paths: ['src/**'] }],
         review: [{ name: 'tests', run: 'pnpm test', env: { NODE_ENV: 'test' } }],
         final: ['pnpm check', { name: 'audit', run: 'pnpm audit', optional: true }],
       },
-      iric: { review: 'subagent', parallel: 3, maxRounds: 2 },
+      review: 'agent',
       branches: { base: 'main', prefix: 'coplan/' },
-      pullRequests: { tool: 'graphite', open: 'auto' },
-      review: { model: 'opus' },
-      final: { blocking: true },
       instructions: {
         design: 'Split by layer.',
-        build,
-        brief: 'Match the code style around you.',
-        review: 'Check error handling.',
+        handoff,
+        brief: 'Match the code style around you. Check error handling.',
       },
     },
     null,

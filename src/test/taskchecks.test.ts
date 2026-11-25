@@ -14,7 +14,7 @@ import type { Plan } from '../shared/types.ts';
  */
 
 const project = parseProjectConfig(
-  { hooks: { implement: ['pnpm typecheck'], review: [{ name: 'tests', run: 'pnpm test' }, { name: 'lint', run: 'pnpm lint', optional: true }] } },
+  { checks: { implement: ['pnpm typecheck'], review: [{ name: 'tests', run: 'pnpm test' }, { name: 'lint', run: 'pnpm lint', optional: true }] } },
   null,
 );
 
@@ -59,7 +59,7 @@ test('what a task adds is whole, named and each once', () => {
 });
 
 test('on a submitted plan the user still sets them, and accepts a proposal to; the agent is told why not', () => {
-  let p = markDelivered(submitPlan(confirmDesign(plan(), { prompt: 'd' }), { target: 'session', mode: 'managed', prompt: 'p' }));
+  let p = markDelivered(submitPlan(confirmDesign(plan(), { prompt: 'd' }), { prompt: 'p' }));
   p = set(p, { id: 'docs', skip: ['tests'] });
   assert.deepEqual(p.tasks.find((t) => t.id === 'docs')?.skipChecks, ['tests']);
   assert.throws(() => set(p, { id: 'docs', skip: [] }, 'claude'), /Which checks a task runs is the user's to set/, 'not the lock message: the reason');
@@ -83,18 +83,17 @@ test('a subtask holds its parent\'s checks; a task\'s checks are the repository\
 test('a skip is never silent: the brief, the read-back, the changes and the report say it', () => {
   let p = set(plan(), { id: 'docs', skip: ['tests'], add: [{ name: 'links', run: 'pnpm check-links' }] });
   const docs = p.tasks.find((t) => t.id === 'docs')!;
-  const brief = renderBrief(p, docs, { project, mode: 'managed', bin: '/coplan' });
+  const brief = renderBrief(p, docs, { project, bin: '/coplan' });
   assert.match(brief, /## Checks set for this task\nThe user set these; they hold for this task over the repository's:\n- It skips tests: do not run it for this task — done does not wait on it\.\n- It adds links: `pnpm check-links` at review — done waits on it/);
-  assert.match(brief, /\*\*Review\.\*\*[^\n]*\n- lint: `pnpm lint` \(optional\)\n- links: `pnpm check-links`/, 'the review list leaves tests out and has links');
+  assert.match(brief, /- review: lint `pnpm lint` \(optional\); links `pnpm check-links`/, 'the review list leaves tests out and has links');
   assert.match(brief, /check implement --skip=tests`.*It does not know the checks added for this task \(links\): run those as listed\./);
   // A name with a space is one --skip, quoted, so the command runs as written.
-  const spaced = parseProjectConfig({ hooks: { review: [{ name: 'ts tests', run: 'pnpm test' }, { name: 'e2e, slow', run: 'pnpm e2e' }, { name: 'lint', run: 'pnpm lint' }] } }, null);
+  const spaced = parseProjectConfig({ checks: { review: [{ name: 'ts tests', run: 'pnpm test' }, { name: 'e2e, slow', run: 'pnpm e2e' }, { name: 'lint', run: 'pnpm lint' }] } }, null);
   const both = set(plan(), { id: 'docs', skip: ['ts tests', 'e2e, slow'] });
   assert.match(
-    renderBrief(both, both.tasks.find((t) => t.id === 'docs')!, { project: spaced, mode: 'managed', bin: '/coplan' }),
+    renderBrief(both, both.tasks.find((t) => t.id === 'docs')!, { project: spaced, bin: '/coplan' }),
     /check implement '--skip=ts tests' '--skip=e2e, slow'`/,
   );
-  assert.match(renderBrief(p, docs, { project, mode: 'tracked' }), /- review: lint `pnpm lint` \(optional\); links `pnpm check-links`/);
   assert.match(renderPlan(p), /t?docs Document it · skips tests; adds links \(review\)/);
 
   // Kept on disk.

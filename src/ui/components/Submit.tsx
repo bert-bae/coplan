@@ -6,9 +6,9 @@ import { ProgressBar } from './Progress.tsx';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { isComposing } from '../lib/keys.ts';
 import { MAX_NOTE, awaitingUserReview, countTasks, currentTask, planPhase, unreadAreas } from '../../shared/plan.ts';
-import { MAX_PARALLEL, MAX_ROUNDS, MODE_LABEL, branchPlan, buildSteps, hasDependencies, planMode, readyTasks, targetOf } from '../../shared/build.ts';
+import { branchPlan, buildSteps, hasDependencies, readyTasks } from '../../shared/build.ts';
 import { blockingGaps, planGaps, type GapSeverities } from '../../shared/check.ts';
-import { REVIEW_MODES, type BuildSettings, type BuildTarget, type ExecutionMode, type Plan, type PlanPhase, type ReviewMode, type SessionState } from '../../shared/types.ts';
+import type { Plan, PlanPhase, ReviewMode, SessionState } from '../../shared/types.ts';
 import { agentInfo, type AgentInfo } from '../../shared/agents.ts';
 import { droppedParts, type ConfigRow } from '../../shared/blocks.ts';
 import { PLAN_STATUS, statusDetail, statusFacts, statusTitle } from '../lib/status.ts';
@@ -26,63 +26,20 @@ import type { Target } from '../../shared/types.ts';
  * locks the architecture, sections and summary.
  *
  * **Submit the plan.** Once the agent has made the task list and the user has
- * shaped it, they choose how the build runs — who reviews each task, how
- * many run at once, how many review rounds before the agent asks — read the
- * exact build prompt, and submit. From then on the page only follows the
- * build as tasks move across the board.
+ * shaped it, they read the exact handoff — what to build, what done means,
+ * the review each task asks for — and submit. From then on the page only
+ * follows the build as the harness reports tasks across the board.
  *
  * In both, the daemon builds the prompt, so the preview is the prompt, not
  * an imitation of it. Where the agent's hooks cannot hand a prompt over
  * with the user's next message (Cursor), signing off copies it to paste.
  */
 
-/** The three ways a plan is built, in the order a user meets them. */
-function modes(agent: AgentInfo): { id: ExecutionMode; label: string; hint: string }[] {
-  const paste = agent.promptContext ? '' : ` The prompt is copied for you to paste into this ${agent.name} chat.`;
-  return [
-    {
-      id: 'tracked',
-      label: `Tracked — ${agent.name} builds it here, its own way`,
-      hint:
-        `${agent.name} decides how to build and check each task, and reports each one, so the board follows the build. ` +
-        `Nothing is held back: where Managed would refuse a step, ${agent.name} gets a note instead.${paste}`,
-    },
-    {
-      id: 'managed',
-      label: `Managed — ${agent.name} builds it here, through implement → review → refine`,
-      hint:
-        "Each task is checked and reviewed the way you choose below, and is not done until it passes the repository's " +
-        `checks and its review. The board follows each step.${paste}`,
-    },
-    {
-      id: 'export',
-      label: 'Export — take the plan somewhere else',
-      hint:
-        'Copies the whole plan as Markdown, with no build instructions, and locks this version of it here. Nothing reports ' +
-        'back. Export plan, in the header, copies it without locking anything.',
-    },
-  ];
-}
-
 export const REVIEW_LABEL: Record<ReviewMode, string> = {
-  subagent: 'Independent reviewer',
-  self: 'Self-review',
+  agent: 'Another agent reviews',
   user: 'You review',
-  skip: 'Checks only',
+  none: 'Checks only',
 };
-
-function reviewHint(mode: ReviewMode, agent: string): string {
-  switch (mode) {
-    case 'subagent':
-      return 'A fresh subagent that did not write the change reviews each task and runs the checks.';
-    case 'self':
-      return `${agent} reviews its own change against the task, and runs the checks.`;
-    case 'user':
-      return `${agent} stops after each task and asks you to approve it in chat.`;
-    default:
-      return "The repository's checks are the only review. For small, low-risk plans.";
-  }
-}
 
 /** How long typing in the note waits before the preview is rebuilt. */
 const NOTE_SETTLE_MS = 300;
@@ -112,7 +69,7 @@ export function SubmitControl() {
           ref={trigger}
           type="button"
           className="btn btn-sm btn-primary"
-          title={`Choose how the build runs, read the prompt ${agent.name} will be given, then lock the plan and hand it over`}
+          title={`Read the handoff ${agent.name} will be given, then lock the plan and hand it over`}
           onClick={() => setOpen(true)}
         >
           Review &amp; submit plan
@@ -132,7 +89,7 @@ export function SubmitControl() {
           <button
             type="button"
             className="btn btn-sm"
-            title={`Confirming the design is optional: choose how the build runs, read the prompt ${agent.name} will be given, then lock the plan and hand it over`}
+            title={`Confirming the design is optional: read the handoff ${agent.name} will be given, then lock the plan and hand it over`}
             onClick={() => setSkipping(true)}
           >
             Submit plan
@@ -169,7 +126,7 @@ export function SubmitControl() {
           store.openViewer({
             tab: 'prompt',
             sent: {
-              title: 'The submitted prompt',
+              title: 'The submitted handoff',
               prompt: plan.submission.prompt,
               meta: `submitted ${plan.submission.via === 'chat' ? 'from chat ' : ''}${relativeTime(plan.submission.at)} · ${
                 plan.submission.deliveredAt
@@ -184,7 +141,7 @@ export function SubmitControl() {
           })
         }
       >
-        View prompt
+        View handoff
       </button>
     </span>
   );
@@ -485,25 +442,16 @@ export function ConfirmDesignDialog({ onClose }: { onClose: () => void }) {
 
 interface Shown {
   preview: PromptPreview;
-  /** The mode it was asked for; null for the repository's default. */
-  mode: ExecutionMode | null;
   note: string;
-  /** The settings it was asked for with; '' for the repository's defaults. */
-  key: string;
 }
-
-const settingsKey = (s: BuildSettings | null) => (s ? `${s.review}:${s.parallel}:${s.maxRounds}` : '');
 
 export function SubmitDialog({ onClose }: { onClose: () => void }) {
   const session = useSession();
   const plan = usePlan();
   const agent = useAgent();
   const sessionId = useSessionId();
-  // Both null until the first preview says what the repository's defaults are.
-  const [mode, setMode] = useState<ExecutionMode | null>(null);
   const [note, setNote, clearDraft] = useDraft(`${sessionId}:submit`);
   const settled = useSettled(note);
-  const [settings, setSettings] = useState<BuildSettings | null>(null);
   const [shown, setShown] = useState<Shown | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -515,64 +463,39 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
   // a new version, and a refused submit fetches it again.
   const readAt = plan?.claudeReadAt ?? 0;
   const [refresh, setRefresh] = useState(0);
-  const key = settingsKey(settings);
   useEscape(onClose, submitting);
 
-  /** What the user picks here is kept: "build it" in chat builds it so. */
-  const choose = (next: { mode?: ExecutionMode; settings?: BuildSettings }) => {
-    const m = next.mode ?? mode;
-    const s = next.settings ?? settings;
-    if (next.mode) setMode(next.mode);
-    if (next.settings) setSettings(next.settings);
-    if (sessionId && m) void api.saveChoice(sessionId, { mode: m, ...(s && m === 'managed' ? { settings: s } : {}) }).catch(() => undefined);
-  };
-
-  // Rebuilt whenever what it is built from changes: the choices, the note,
-  // or the plan itself (the agent can still move it while this is open).
+  // Rebuilt whenever what it is built from changes: the note, or the plan
+  // itself (the agent can still move it while this is open).
   useEffect(() => {
     if (!sessionId) return;
     let live = true;
     api
-      .promptPreview(sessionId, mode ? targetOf(mode) : null, settled, settings ?? undefined, mode ?? undefined)
+      .promptPreview(sessionId, settled)
       .then((preview) => {
         if (!live) return;
-        setShown({ preview, mode, note: settled, key });
-        if (!settings && preview.settings) setSettings(preview.settings);
-        if (!mode) setMode(preview.mode ?? preview.project?.mode ?? 'tracked');
+        setShown({ preview, note: settled });
         setError(null);
       })
       .catch((err: unknown) => live && setError((err as Error).message));
     return () => {
       live = false;
     };
-    // `settings` is read through `key`, which says when it changed.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, mode, settled, version, key, readAt, refresh]);
+  }, [sessionId, settled, version, readAt, refresh]);
 
   if (!session || !plan) return null;
 
   // What is on screen is what is sent: the button waits until the preview
-  // matches the choices, the note and the plan.
-  const current = Boolean(mode && shown && shown.mode === mode && shown.note === note && shown.key === key && shown.preview.version >= version);
+  // matches the note and the plan.
+  const current = Boolean(shown && shown.note === note && shown.preview.version >= version);
   const preview = shown?.preview ?? null;
-  const target = mode ? targetOf(mode) : 'session';
-  const fallback = preview?.project?.mode;
 
   const submit = async () => {
-    if (!preview || !current || !mode) return;
+    if (!preview || !current) return;
     setSubmitting(true);
     // Where no hook can hand the prompt over (Cursor), the user pastes it.
-    if (target === 'elsewhere' || !agent.promptContext) {
-      await copyText(preview.prompt, target === 'session' ? `Copied — paste it into ${agent.name}'s chat.` : 'Copied the plan as Markdown.');
-    }
-    const ok = await store.submitPlan({ sessionId, agent }, {
-      target,
-      mode,
-      note,
-      expect: preview.version,
-      ...(preview.hash ? { hash: preview.hash } : {}),
-      ...(settings && mode === 'managed' ? { settings } : {}),
-    });
+    if (!agent.promptContext) await copyText(preview.prompt, `Copied — paste it into ${agent.name}'s chat.`);
+    const ok = await store.submitPlan({ sessionId, agent }, { note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}) });
     setSubmitting(false);
     if (ok) {
       clearDraft();
@@ -589,36 +512,14 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
       plan={plan}
       busy={submitting}
       onClose={onClose}
-      previewLabel={target === 'session' ? `The prompt ${agent.name} will get` : 'The plan, as Markdown'}
+      previewLabel={`The handoff ${agent.name} will get`}
       preview={preview}
       current={current}
       error={error}
       onField={followField(onClose)}
       side={
         <>
-          <Checklist
-            session={session}
-            plan={plan}
-            target={target}
-            project={preview?.project}
-            left={preview?.trimmed && shown?.mode !== 'export' ? leftOut(preview) : null}
-          />
-
-          <fieldset className="submit-targets">
-            <legend className="field-label">How is it built?</legend>
-            {modes(agent).map((m) => (
-              <label key={m.id} className={classNames('submit-target', mode === m.id && 'is-active')}>
-                <input type="radio" name="build-mode" value={m.id} checked={mode === m.id} disabled={!mode} onChange={() => choose({ mode: m.id })} />
-                <span>
-                  <strong>{m.label}</strong>
-                  {fallback === m.id && <span className="submit-target-default"> · this repository's default</span>}
-                  <span className="submit-target-hint">{m.hint}</span>
-                </span>
-              </label>
-            ))}
-          </fieldset>
-
-          {settings && mode === 'managed' && <SettingsFields settings={settings} onChange={(next) => choose({ settings: next })} />}
+          <Checklist session={session} plan={plan} project={preview?.project} left={preview?.trimmed ? leftOut(preview) : null} />
 
           <ConfigList rows={preview?.project?.config} />
 
@@ -635,26 +536,18 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
           </label>
 
           <p className="explain">
-            {mode === 'export' ? (
-              <>
-                Submitting <strong>locks this version of the plan</strong>: the tasks can no longer be edited here, and nothing
-                follows the build. You can reopen it if something has to change.
-              </>
-            ) : (
-              <>
-                Submitting <strong>locks the plan</strong>: the tasks can no longer be edited, and the page follows the build on
-                the task board. You can reopen it if something has to change.
-              </>
-            )}
+            Submitting <strong>locks the plan</strong>: the tasks can no longer be edited, and the page follows the build on the
+            task board as the harness reports it. You can reopen it if something has to change. <strong>Export plan</strong>, in
+            the header, copies the plan as Markdown without locking anything.
           </p>
-          {mode !== 'export' && <ChatHint agent={agent} words="build it" build />}
+          <ChatHint agent={agent} words="build it" />
 
           <div className="submit-actions">
             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={submitting}>
               Cancel
             </button>
             <button type="button" className="btn btn-primary" disabled={!current || submitting || Boolean(waitTitle(unsaved, open, held))} title={waitTitle(unsaved, open, held)} onClick={() => void submit()}>
-              {submitting ? 'Submitting…' : mode === 'export' ? 'Copy and lock' : target === 'session' && agent.promptContext ? 'Submit and lock' : 'Copy, submit and lock'}
+              {submitting ? 'Submitting…' : agent.promptContext ? 'Submit and lock' : 'Copy, submit and lock'}
             </button>
           </div>
         </>
@@ -668,68 +561,12 @@ export function SubmitDialog({ onClose }: { onClose: () => void }) {
  * sign-off with harness_plan_advance, quoting the user, and the page says
  * it was given there (#65).
  */
-function ChatHint({ agent, words, build = false }: { agent: AgentInfo; words: string; build?: boolean }) {
+function ChatHint({ agent, words }: { agent: AgentInfo; words: string }) {
   return (
     <p className="explain chat-hint">
-      Or skip this dialog: tell {agent.name} in chat — <q>{words}</q> — and it signs this off for you
-      {build ? ', built the way you last chose here' : ''}. The page shows it was given in chat, with your words.
+      Or skip this dialog: tell {agent.name} in chat — <q>{words}</q> — and it signs this off for you. The page shows it was
+      given in chat, with your words.
     </p>
-  );
-}
-
-/** The user's control over the build: each task's implement → review →
- *  refine cycle, and how much runs at once. */
-function SettingsFields({ settings, onChange }: { settings: BuildSettings; onChange: (s: BuildSettings) => void }) {
-  const agent = useAgent();
-  const number = (value: string, lo: number, hi: number, fallback: number) => {
-    const n = Math.round(Number(value));
-    return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : fallback;
-  };
-  return (
-    <fieldset className="submit-settings">
-      <legend className="field-label">How each task is built</legend>
-      <p className="submit-target-hint">In a Managed build every task goes implement → review → refine before it is done.</p>
-      <div className="segmented is-small" role="radiogroup" aria-label="Who reviews each task">
-        {REVIEW_MODES.map((mode) => (
-          <button
-            key={mode}
-            type="button"
-            role="radio"
-            aria-checked={settings.review === mode}
-            className={classNames('seg', settings.review === mode && 'is-active')}
-            title={reviewHint(mode, agent.name)}
-            onClick={() => onChange({ ...settings, review: mode })}
-          >
-            {REVIEW_LABEL[mode]}
-          </button>
-        ))}
-      </div>
-      <p className="submit-target-hint">{reviewHint(settings.review, agent.name)}</p>
-      <div className="settings-numbers">
-        <label className="field-inline">
-          <input
-            className="input input-number"
-            type="number"
-            min={1}
-            max={MAX_PARALLEL}
-            value={settings.parallel}
-            onChange={(e) => onChange({ ...settings, parallel: number(e.target.value, 1, MAX_PARALLEL, settings.parallel) })}
-          />
-          <span>{settings.parallel === 1 ? 'task at a time' : `tasks at once — with subagents, where ${agent.name} has them`}</span>
-        </label>
-        <label className="field-inline">
-          <input
-            className="input input-number"
-            type="number"
-            min={1}
-            max={MAX_ROUNDS}
-            value={settings.maxRounds}
-            onChange={(e) => onChange({ ...settings, maxRounds: number(e.target.value, 1, MAX_ROUNDS, settings.maxRounds) })}
-          />
-          <span>review round{settings.maxRounds === 1 ? '' : 's'}; another is yours to allow</span>
-        </label>
-      </div>
-    </fieldset>
   );
 }
 
@@ -813,13 +650,11 @@ function DesignChecklist({ session, plan, project, left }: { session: SessionSta
 function Checklist({
   session,
   plan,
-  target,
   project,
   left,
 }: {
   session: SessionState;
   plan: Plan;
-  target: BuildTarget;
   project: ProjectSummary | undefined;
   /** What the prompt leaves out to fit, in words; null when it fits. */
   left: string | null;
@@ -830,7 +665,7 @@ function Checklist({
   const ready = readyTasks(plan).length;
   const open = plan.threads.filter((t) => !t.resolved).length;
   const notes: Note[] = [];
-  if (!plan.design && target === 'session') {
+  if (!plan.design) {
     notes.push({ tone: 'info', text: 'The design is not confirmed: the build follows the tasks planned on the diagram, and the design locks with the plan.' });
   }
   if (counts.total === 0) notes.push({ tone: 'warn', text: 'There are no tasks, so there will be nothing to follow on the board.' });
@@ -843,7 +678,7 @@ function Checklist({
     const stacked = branches.filter((b) => b.base).length;
     notes.push({ tone: 'info', text: `Lands on ${branches.length} branch${branches.length === 1 ? '' : 'es'}${stacked ? `, ${stacked} stacked on another` : ''}: ${branches.map((b) => b.branch).join(', ')}.` });
   }
-  if (target === 'session') sessionNotes(session, plan, notes);
+  sessionNotes(session, plan, notes);
   checksNote(project, notes, agentInfo(session.agent));
   if (open) notes.push({ tone: 'info', text: `${open} open comment${open === 1 ? '' : 's'} go${open === 1 ? 'es' : ''} with the plan.` });
   if (left !== null) {
@@ -1123,7 +958,7 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
       break;
     case 'landing':
       head = `${label} · pull requests open`;
-      text = `Every task is done (${counts.total}) and the report is in. ${agent.name} follows the pull requests — failing checks, reviews, comments — until they merge.`;
+      text = `Every task is done (${counts.total}) and the report is in. Its pull requests are still open; the harness records each as it merges or closes.`;
       break;
     case 'built':
       head = `${label} · built`;
@@ -1133,8 +968,6 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
       head = `${label} · exported`;
       text = 'The plan was copied out as Markdown to build somewhere else. This version is locked here, and progress is not followed.';
   }
-  // How it is being built, beside when it was submitted: Tracked or Managed.
-  const mode = planMode(plan, 'managed');
 
   return (
     // A region, not a live one: the board announces each move as it happens.
@@ -1146,7 +979,6 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
             {' '}
             · submitted {submission.via === 'chat' ? 'from chat ' : ''}
             {relativeTime(submission.at)}
-            {mode !== 'export' && ` · ${MODE_LABEL[mode]}`}
           </span>
         </p>
         <p className="phase-text">{text}</p>
@@ -1192,7 +1024,7 @@ function BuildStrip({ session, plan, phase }: { session: SessionState; plan: Pla
                   void copyText(submission.prompt, phase === 'submitted' ? `Copied — paste it into ${agent.name}'s chat.` : 'Copied the plan as Markdown.')
                 }
               >
-                {phase === 'handed-off' ? 'Copy export' : 'Copy prompt'}
+                {phase === 'handed-off' ? 'Copy export' : 'Copy handoff'}
               </button>
             )}
             {(phase === 'building' || phase === 'finalizing' || phase === 'landing' || phase === 'built') && tab !== 'tasks' && (

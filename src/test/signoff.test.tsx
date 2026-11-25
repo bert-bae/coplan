@@ -61,7 +61,7 @@ interface SignOff {
   said: RegExp;
 }
 const SIGN_OFFS: SignOff[] = [
-  { name: 'submitPlan', route: 'plan/submit', run: () => store.submitPlan(shown(), { target: 'session', note: 'go', expect: 1 }), body: { target: 'session', note: 'go', expect: 1 }, kind: 'success', said: /^Plan submitted and locked\. Send any message in Claude to hand it the prompt\.$/ },
+  { name: 'submitPlan', route: 'plan/submit', run: () => store.submitPlan(shown(), { note: 'go', expect: 1 }), body: { note: 'go', expect: 1 }, kind: 'success', said: /^Plan submitted and locked\. Send any message in Claude to hand it the handoff\.$/ },
   { name: 'reopenPlan', route: 'plan/reopen', run: () => store.reopenPlan(shown()), body: {}, kind: 'info', said: /^The plan is open for changes again\. Tell Claude in chat once you have changed it\.$/ },
   { name: 'confirmDesign', route: 'plan/design/confirm', run: () => store.confirmDesign(shown(), { note: '', expect: 1 }), body: { note: '', expect: 1 }, kind: 'success', said: /^Design confirmed\. Send any message in Claude to have it make the task list\.$/ },
   { name: 'reopenDesign', route: 'plan/design/reopen', run: () => store.reopenDesign(shown()), body: {}, kind: 'info', said: /^The design is open for changes again\. Tell Claude in chat once you have changed it\.$/ },
@@ -172,7 +172,7 @@ test('a submit moves the page to the task board', async () => {
   await show('s4', 'claude');
   store.setTab('overview');
   answer = () => ({ plan: { ...shownPlan()!, version: shownPlan()!.version + 1 } });
-  assert.equal(await store.submitPlan(shown(), { target: 'session', note: '', expect: 1 }), true);
+  assert.equal(await store.submitPlan(shown(), { note: '', expect: 1 }), true);
   assert.deepEqual({ tab: store.getState().tab, taskMode: store.getState().taskMode }, { tab: 'tasks', taskMode: 'board' });
 });
 
@@ -180,10 +180,8 @@ test('what a sign-off says fits the agent and where the plan is built', async ()
   await show('s5', 'cursor');
   const next = () => ({ plan: { ...shownPlan()!, version: shownPlan()!.version + 1 } });
   answer = next;
-  await store.submitPlan(shown(), { target: 'session', note: '', expect: 1 });
-  assert.equal(lastToast()?.text, "Plan submitted and locked. Paste the prompt into Cursor's chat.");
-  await store.submitPlan(shown(), { target: 'elsewhere', note: '', expect: 1 });
-  assert.equal(lastToast()?.text, 'Plan submitted and locked. Paste the prompt where it will be built.');
+  await store.submitPlan(shown(), { note: '', expect: 1 });
+  assert.equal(lastToast()?.text, "Plan submitted and locked. Paste the handoff into Cursor's chat.");
   await store.confirmDesign(shown(), { note: '', expect: 1 });
   assert.equal(lastToast()?.text, "Design confirmed. Paste the prompt into Cursor's chat to have it make the task list.");
   await store.queueRevision(shown(), { note: '', expect: 1 });

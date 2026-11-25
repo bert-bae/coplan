@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { describeTarget, isDesignLocked, isLocked, targetExists } from '../../shared/plan.ts';
-import { DEFAULT_BUILD_SETTINGS, effectiveReview, roundVerdict } from '../../shared/build.ts';
+import { DEFAULT_REVIEW, effectiveReview, roundVerdict } from '../../shared/build.ts';
 import type { Plan, ReviewMode, TargetKind } from '../../shared/types.ts';
 
 /**
@@ -95,7 +95,7 @@ export function unsavedDrafts(): boolean {
  * chat, say), or a change request whose round no longer waits on the user,
  * named, for the user to be told, and to copy.
  */
-export function pruneDrafts(sessionId: string, plan: Plan | null, projectReview: ReviewMode = DEFAULT_BUILD_SETTINGS.review): DroppedDraft[] {
+export function pruneDrafts(sessionId: string, plan: Plan | null, projectReview: ReviewMode = DEFAULT_REVIEW): DroppedDraft[] {
   const prefix = `${sessionId}:`;
   const locked: DroppedDraft[] = [];
   const locks = plan ? { design: isDesignLocked(plan), plan: isLocked(plan) } : null;
@@ -160,7 +160,7 @@ function fieldText(
   field: string,
   locks: Locks = { design: isDesignLocked(plan), plan: isLocked(plan) },
   /** The project's review mode, where the plan holds none. */
-  review: ReviewMode = DEFAULT_BUILD_SETTINGS.review,
+  review: ReviewMode = DEFAULT_REVIEW,
 ): string | undefined {
   const design = locks.design;
   if (field === 'summary') return design ? undefined : plan.summary;
@@ -185,7 +185,7 @@ function fieldText(
   m = /^review:(.+):(\d+)$/.exec(field);
   if (m) {
     const task = plan.tasks.find((t) => t.id === m![1]);
-    const mode = task && effectiveReview(plan, task, plan.submission?.settings?.review ?? review);
+    const mode = task && effectiveReview(plan, task, review);
     return task?.stage === 'review' && String(task.round) === m[2] && mode === 'user' && !roundVerdict(task, 'user') ? '' : undefined;
   }
   m = /^caption:(.+)$/.exec(field);

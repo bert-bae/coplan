@@ -1,10 +1,10 @@
 ---
 name: coplan-init
-description: Set up Coplan for this repository — the checks each task runs, and your build profile (who reviews, on which model, how many tasks at once)
+description: Set up Coplan for this repository — the checks each task runs, and your own defaults (who reviews, standing instructions)
 ---
 
 Follow the `coplan-config` skill: the repository's checks in
-`.coplan/config.json`, then the user's build profile in Coplan's
+`.coplan/config.json`, then the user's own defaults in Coplan's
 `coplan.json`. If the user only asked for the checks, stop after the
 checks.
 

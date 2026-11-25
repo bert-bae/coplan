@@ -7,7 +7,7 @@ Three layers, merged in order:
 3. project — `<repo>/.claude/harness.json`
 
 `./setup.sh` can set the main ones for you — answer yes to *Adjust settings
-now?* — along with [your build defaults](#your-own-defaults-coplanjson) and a
+now?* — along with [your plan defaults](#your-own-defaults-coplanjson) and a
 [repository's checks](#the-repository-coplanconfigjson). Everything else is
 set here, by hand.
 
@@ -29,7 +29,7 @@ still ignored without a word, so an old config file does no harm.
 | Key | Default | What it does |
 | --- | --- | --- |
 | `autoOpen` | `false` | Open the plan in a browser the first time Claude publishes one in a session. Off by default: the plugin is installed globally, and a tool should not open windows you did not ask for. Use `/coplan-open`, `coplan open`, or the URL the tools print. |
-| `promptNotice` | `true` | When you type in Claude's chat after changing the plan in the browser, add one line to the prompt telling Claude to call `harness_plan_read`. Turn it off if you would rather always say so yourself. It does not affect the build prompt: submitting a plan for this session is itself the request to send it. |
+| `promptNotice` | `true` | When you type in Claude's chat after changing the plan in the browser, add one line to the prompt telling Claude to call `harness_plan_read`. Turn it off if you would rather always say so yourself. It does not affect the handoff prompt: submitting a plan for this session is itself the request to send it. |
 | `openClaudeOnQuestion` | `false` | When the agent asks you something (`AskUserQuestion` or `request_user_input`, or a permission prompt), open that session in its desktop app straight away instead of waiting for you to click *Answer in …*. Works for a local Claude Code session with Remote Control on and for a Codex thread (in the Codex app): those are the only local sessions with a documented link, and a cloud session's daemon has no screen to open anything on. Cursor has no link to a chat, so it is never opened. |
 | `idleShutdownMinutes` | `120` | Exit after this long with no active session and no browser attached. The next hook starts a fresh daemon. `0` disables it. A whole number, 0 or more; global file only. |
 
@@ -45,161 +45,159 @@ directory: leave `CC_HARNESS_HOME` unset when you use Cursor.
 | --- | --- |
 | `daemon.json` | The running daemon's address and token. |
 | `daemon.log` | The daemon's log; trimmed by `coplan clean`. |
-| `sessions/<id>/state.json` | One session's plan, change log, comments and — once signed off — the prompts it was confirmed and submitted with, and the build settings. Kept 30 days after its last change. |
+| `sessions/<id>/state.json` | One session's plan, change log, comments and — once signed off — the prompts it was confirmed and submitted with. Kept 30 days after its last change. |
 | `config.json` | Your global configuration. |
-| `coplan.json` | Your own defaults for every repository's build: the keys of `.coplan/config.json` below, except `hooks`. See [Your own defaults](#your-own-defaults-coplanjson). |
-| `instructions/<point>.md` | Your own standing instructions, for `design`, `build`, `brief` or `review`: the same as `instructions` in `coplan.json`. |
+| `coplan.json` | Your own defaults for every repository's plans: the keys of `.coplan/config.json` below, except `checks`. See [Your own defaults](#your-own-defaults-coplanjson). |
+| `instructions/<point>.md` | Your own standing instructions, for `design`, `handoff` or `brief`: the same as `instructions` in `coplan.json`. |
 
 ## The repository: `.coplan/config.json`
 
-The settings above are about Coplan on your machine. What a *build* runs
-belongs to the repository, so it lives with the code — committed, so every
-build there runs the same checks: `<repo>/.coplan/config.json`. Comments
+The settings above are about Coplan on your machine. What a task must pass
+to be done belongs to the repository, so it lives with the code — committed,
+so every plan there hands over the same checks: `<repo>/.coplan/config.json`. Comments
 and trailing commas are allowed, as above. `coplan init` (or `/coplan-init`
 in Claude) writes a starting point from the repository's scripts, and so does
 `./setup.sh` when you give it the repository's path.
 
 ```jsonc
 {
-  "mode": "managed",
-  "hooks": {
+  "checks": {
     "implement": ["pnpm run typecheck", { "name": "ruff", "run": "ruff check .", "paths": ["*.py"] }],
     "review": [{ "name": "tests", "run": "pnpm run test", "timeout": 900 }],
     "final": ["pnpm run check", { "name": "audit", "run": "pnpm audit", "optional": true }]
   },
-  "iric": { "review": "subagent", "parallel": 2, "maxRounds": 3 },
+  "review": "agent",
   "branches": { "base": "main", "prefix": "coplan/" }
 }
 ```
 
-### `mode`
+Coplan plans and tracks; a harness builds. Every key here describes *what*
+to build or *what done means*, and goes to the harness as plan data in the
+handoff and each task's brief. Keys that decided *how*, *where* or *when*
+work runs, or enforced that it ran, are deprecated: from 0.4 they are
+ignored, with a `coplan doctor` warning, for one release, like
+`gateHoldSeconds`, `stages` and `ship` before them.
 
-How much of the build harness a plan takes by default. *Submit* starts from
-it, and you can choose another mode for each plan there:
+### `checks`
 
-| Mode | What the agent is told | The board | What the daemon holds back |
-| --- | --- | --- | --- |
-| `export` | Nothing: you copy the plan out as Markdown, to build anywhere. Submitting locks a snapshot | Not followed | Nothing |
-| `tracked` | Build it your own way, and report each task | Follows each task | Nothing: what Managed would refuse comes back as a note in the reply |
-| `managed` | Take each task through implement → review → refine, with the checks below | Follows each task and its cycle | Done before a task went to review, without a passing verdict, or while a check fails or was never reported; more tasks at once than `iric.parallel`; a review round past `iric.maxRounds`; dropping work you signed off. Each needs your go-ahead |
+Each task's definition of done: the checks the harness runs, by stage. Every
+brief lists them; the harness reports what it ran with
+`harness_task_update`, and the board and the build report show what it
+reported. Coplan does not refuse `done` over them.
 
-Without `mode`, a repository whose `.coplan/config.json` sets [`iric`](#iric)
-is Managed, as setting it has always meant; any other repository is
-Tracked. `mode` wins where both are set. Your own
-[`coplan.json`](#your-own-defaults-coplanjson) can set `mode` for every
-repository, and a repository's file overrides it; your own `iric` only sets
-how a Managed build runs, not the mode.
-
-**Export plan**, in the page's header, copies the whole plan as Markdown in
-any phase without submitting anything: the summary, sections, diagrams, the
-tasks with their briefs, the build order and the open comments — and no
-build instructions, review modes, round limits or Coplan tool names.
-
-### `hooks`
-
-The checks for each step of a task's implement → review → refine cycle:
-
-| Stage | When it runs |
+| Stage | What it means |
 | --- | --- |
-| `implement` | After every implementation or refinement pass, before a task goes to review. Keep it fast: typecheck, lint, format. |
-| `review` | The gate: a task is done only once these pass. The tests, and anything CI would fail on. |
+| `implement` | Quick checks after each change: typecheck, lint, format. Keep them to seconds. |
+| `review` | What a task must pass to be done: the tests, and anything CI would fail on. |
 | `final` | Once every task is done, before the build report: the full suite, the build, repository-wide checks. |
 
-A hook is a command, run from the repository root, or an object:
+A check is a command, run from the repository root, or an object:
 
 | Key | Meaning |
 | --- | --- |
-| `run` | The shell command. Required. `{files}` in it is the changed files in the hook's area, each quoted (`ruff check {files}`, `eslint {files}`), so the tool looks at nothing else; from the hook's `cwd` when it has one. Where the change is not known, or runs past 1,000 files, it is `.`, the whole repository. |
+| `run` | The shell command. Required. `{files}` in it is the changed files in the check's area, each quoted (`ruff check {files}`, `eslint {files}`), so the tool looks at nothing else; from the check's `cwd` when it has one. Where the change is not known, or runs past 1,000 files, it is `.`, the whole repository. |
 | `name` | What it is called in reports and on the board, up to 60 characters. Defaults to the script name (`pnpm run lint` → `lint`). |
 | `timeout` | Seconds before `coplan check` stops it: 1 to 3600. Default 600. |
-| `paths` | Globs (`src/**`, `*.py`, `docs/`, `src/**/*.{ts,tsx}`): the hook's area. It runs only when the change touches a file in it (see [Targeted checks](#targeted-checks)). Without `paths`, a hook with a `cwd` checks that folder, and one with neither checks the whole repository: it runs on any change. `**` crosses directories, `*` and `?` do not, `{a,b}` is either; a glob without a slash matches a file name anywhere, and one ending in `/` everything under it. A `!glob` takes files back out: `["src/**", "!src/gen/**"]`. |
-| `cwd` | The folder it runs in, inside the repository: a package of a monorepo (`"packages/api"`). Default the repository root. Without `paths`, it is also the hook's area: the hook runs only when something under it changes. While the folder does not exist the hook fails, saying so, rather than run somewhere it would check nothing. |
-| `env` | Variables set for it, up to 20: `{ "NODE_ENV": "test" }`. The prompts show the command with both, as one line the agent can run from the root. |
-| `optional` | `true`: a failure is reported but does not hold the task back. |
+| `paths` | Globs (`src/**`, `*.py`, `docs/`, `src/**/*.{ts,tsx}`): the check's area. It applies only when the change touches a file in it (see [Targeted checks](#targeted-checks)). Without `paths`, a check with a `cwd` covers that folder, and one with neither covers the whole repository: it applies to any change. `**` crosses directories, `*` and `?` do not, `{a,b}` is either; a glob without a slash matches a file name anywhere, and one ending in `/` everything under it. A `!glob` takes files back out: `["src/**", "!src/gen/**"]`. |
+| `cwd` | The folder it runs in, inside the repository: a package of a monorepo (`"packages/api"`). Default the repository root. Without `paths`, it is also the check's area. While the folder does not exist the check fails, saying so, rather than run somewhere it would check nothing. |
+| `env` | Variables set for it, up to 20: `{ "NODE_ENV": "test" }`. The brief shows the command with both, as one line the harness can run from the root. |
+| `optional` | `true`: a failure is reported, and the brief says it is not part of done. |
 
-A stage holds at most 20 hooks.
+A stage holds at most 20 checks.
 
-Each hook runs in a process group of its own. When it exits, anything it
-started that is still running in that group (a stray test worker, a server
-started with `&`) is stopped, so nothing outlives the check it belongs to.
-A server meant for the checks after it needs a group of its own:
-`setsid npm run dev &` (on macOS, which has no `setsid`, run the server and
-the checks that use it as one hook).
+`coplan check` runs each check in a process group of its own. When it exits,
+anything it started that is still running in that group (a stray test
+worker, a server started with `&`) is stopped, so nothing outlives the check
+it belongs to. A server meant for the checks after it needs a group of its
+own: `setsid npm run dev &` (on macOS, which has no `setsid`, run the server
+and the checks that use it as one check).
 
 **One task's checks.** A task can skip some of these checks, or add checks of
 its own — a docs-only task skipping the test suite, a migration adding
 `pnpm db:check`. Only the user sets them, in the task's details in Coplan
-(the agent proposes them, `set_checks`); subtasks inherit them. A skipped
-check is not run and `done` does not wait on it; an added one runs at the
-stage it names and gates `done` like the repository's, unless `optional`.
-They show in the task's brief, on the board, and under the build report.
+(the agent proposes them, `set_checks`); subtasks inherit them. They show in
+the task's brief, on the board, and under the build report.
 
-Coplan never runs these itself. They reach Claude in the build prompt and in
-each task's brief (`harness_task_brief`), and Claude runs them like any
-other command, under your permission settings. `coplan check <stage>` runs a
-stage's checks for what changed and prints only the tail of what failed:
-`--since <commit>` measures the change from where a task began,
-`--files a,b` names the files instead of git, `--all` runs every check
-whatever changed, `--list` prints them without running, and `--json` prints
-results in the shape `harness_task_update` takes.
+Coplan never runs these itself. They reach the harness in the handoff and in
+each task's brief (`harness_task_brief`), and the harness runs them like any
+other command, under your permission settings. A harness can use
+`coplan check <stage>`, which runs a stage's checks for what changed and
+prints only the tail of what failed: `--since <commit>` measures the change
+from where a task began, `--files a,b` names the files instead of git,
+`--all` runs every check whatever changed, `--list` prints them without
+running, and `--json` prints results in the shape `harness_task_update`
+takes.
+
+### `hooks`
+
+The name of [`checks`](#checks) before 0.4. Read as an alias for one
+release; `checks` wins where both are set.
 
 ### Targeted checks
 
-Every check the build runs is targeted to what changed, so a change pays
-only for the checks of the areas it touched:
+Every check applies only to what changed, so a change pays only for the
+checks of the areas it touched:
 
-- **A task's change** is everything since the commit it began at — Coplan
-  reads it when the task starts, where the task is built (its own worktree,
-  if its branch has one) — committed since, staged, unstaged and new. Not
-  the files the task planned to touch: a planned file it never edited calls
-  for no check, and one it edited outside the plan gets its check.
+- **A task's change** is everything since the commit it began at —
+  committed since, staged, unstaged and new. Not the files the task planned
+  to touch: a planned file it never edited calls for no check, and one it
+  edited outside the plan gets its check.
 - **The build's change**, for `final`, is everything since the base branch.
-- **A check runs only when its area changed**: its `paths`, else the folder
-  in its `cwd`, else the whole repository (any change). When nothing changed,
-  nothing runs.
+- **A check applies only when its area changed**: its `paths`, else the
+  folder in its `cwd`, else the whole repository (any change). When nothing
+  changed, nothing runs.
 - `{files}` in a command narrows the tool itself to the changed files.
 
-Claude reports the checks it ran with each task. A task whose last reported
-checks include a failure (not `optional`) cannot be marked done, and nor can
-one that never reported a required `review` check for what it changed;
-`harness_task_update` names the command that runs exactly those
-(`coplan check review --since <commit>`). Outside a git repository, the
-checks for the files the task planned to touch are held instead. Where git
-is there but cannot read the change (it fails or times out), the change is
+Where git cannot read the change (it fails or times out), the change is
 more than 5,000 files, or no base branch is found to measure the build
-from, every check applies, in the done gate and in `coplan check`, and both
-say why: a change nobody could read is never taken for one that touched
-nothing.
+from, every check applies, and `coplan check` says why: a change nobody
+could read is never taken for one that touched nothing.
 
-A file that cannot be read, a stage that does not exist, a hook without a
+A file that cannot be read, a stage that does not exist, a check without a
 command, a key Coplan does not read (often a typo of one it does), a value
-out of range: each is reported — in the prompts, the review dialogs, `coplan
-check` and `coplan doctor` — rather than silently skipped or clamped. Each
-says what is used instead: a number past its limit is cut to the limit, and
-anything else that cannot be used falls back to its default.
+out of range: each is reported — in the prompts, the sign-off dialogs,
+`coplan check` and `coplan doctor` — rather than silently skipped or
+clamped. Each says what is used instead: a number past its limit is cut to
+the limit, and anything else that cannot be used falls back to its default.
 
 `coplan check` refuses to run only when the checks themselves cannot be
-trusted: the file cannot be read, `hooks` is wrong, or a top-level key is
-unknown (often a misspelt `hooks`). Anything else — a template that is
-missing, a reviewer model misspelt, a problem in your own `coplan.json` — is
-said, and the checks run.
+trusted: the file cannot be read, `checks` is wrong, or a top-level key is
+unknown (often a misspelt `checks`). Anything else — a template that is
+missing, a problem in your own `coplan.json` — is said, and the checks run.
+
+### `review`
+
+The review a task asks the harness for, passed on in its brief: `agent` (an
+agent that did not write the change reviews it, where the harness has one),
+`user` (the harness stops and asks you), or `none` (the checks are the
+review). Default `agent`. Set it for the repository, in your own
+`coplan.json`, or on one task in Coplan (subtasks inherit it). How the
+review runs, and how many rounds, is the harness's call; Coplan does not
+run or gate review rounds. The old values read as: `subagent` and `self` →
+`agent`, `skip` → `none`; for one release `iric.review` is read as
+`review` when `review` is not set to one of these (missing, or the old
+object form below), with a warning. An `iric.review` it cannot read is an
+error, the same as a bad `review`, and `agent` is used.
+
+Before 0.4, `review` was an object: `review.model`, the model a reviewer
+subagent ran on. That form is ignored from 0.4, with a warning: models and
+accounts belong to the harness.
+
+### `mode`
+
+Deprecated, ignored from 0.4. It chose `export`, `tracked` or `managed`;
+now there is one way: submitting locks the plan and produces the handoff.
+**Export plan**, in the header, still copies the plan as Markdown at any
+point.
 
 ### `iric`
 
-How a Managed build runs, which the submit dialog starts from and the user
-can change for each plan. Setting it in the repository's file makes builds
-there Managed by default (see [`mode`](#mode)):
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `review` | `self` | Who reviews a task that does not say otherwise: `subagent` (a fresh agent that did not write the change, where the agent has subagents), `self`, `user` (Claude stops and asks you), or `skip` (the review checks only). |
-| `parallel` | `1` | How many ready tasks are built at once — with subagents started from the build session, where the agent has them, so each shows under it. 1 to 8. |
-| `maxRounds` | `3` | Review rounds a task may take; another past them is yours to allow. 1 to 10. A finished task taken up again on a passing last round gets one more. Under `skip` there is no verdict, so closing a task done with its checks passing counts as passing. One closed while a required check still failed (you accepted it as it was) gets none: another round is yours to allow. |
-
-The defaults assume nothing about the agent: it reviews its own change,
-one task at a time. Set `review: "subagent"` or a higher `parallel` where
-your agent and your machine make them worth it; `coplan init` writes the
-defaults out for you to change.
+Deprecated, ignored from 0.4. `iric.review` is now
+[`review`](#review), read as it for one release; `iric.parallel` and `iric.maxRounds` are
+gone — parallelism and review rounds belong to the harness. `coplan doctor`
+says which: that `iric.review` is read as `review` and the rest is not, or,
+where `review` is already set, that none of `iric` is read. `coplan setup`
+replaces an old `iric` in your own `coplan.json` with `review`.
 
 ### `branches`
 
@@ -210,109 +208,41 @@ defaults out for you to change.
 
 ### `pullRequests`
 
-How a build's pull requests are opened. The build prompt says so, and
-`harness_task_next` says when each one is due.
-
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `tool` | `gh` | `gh` (`gh pr create`, each against the branch below it), `graphite` (`gt track` each branch, `gt submit --stack`), or `none` (the agent pushes the branches and you open the pull requests). |
-| `open` | `ask` | `auto`: as soon as a branch's tasks are done. `ask`: once you say to — opening a pull request reaches outside the session, so by default Claude asks first. `never`: no pull requests; the branches are pushed and listed in the report. |
-| `template` | — | A file in the repository (`.github/pull_request_template.md`) each description is written from, filled in from the tasks the pull request carries, their checks and their review. Up to 8,000 characters. |
+| `template` | — | A file in the repository (`.github/pull_request_template.md`), passed to the harness as a path in the handoff so it writes each description from it. Up to 8,000 characters. Coplan writes no pull request bodies. |
 
-#### Watching pull requests: `watch` and `on`
+Deprecated, ignored from 0.4 — opening and following pull requests belongs
+to the harness:
 
-Once the agent records a pull request (`harness_branch_update`), Coplan can
-follow it until it merges: failing CI, review comments and conflicts become
-work for the agent, the same implement → review → refine cycle, until the
-pull request is merged or closed. See
-[the plan](plans/pr-lifecycle.md) for the whole loop.
-
-Coplan looks at each pull request with your own `gh` (one GraphQL query a
-look; GitHub and GitHub Enterprise), so `gh auth login` is all it needs;
-`coplan doctor` says when `gh` is missing or logged out. Check runs and
-older commit statuses both count as CI. While a pull request is watched the
-daemon stays up; after a day with nothing new it looks every five minutes,
-and after a failed look it waits longer each time, up to half an hour.
-
-What needs the agent waits in the session until it is taken: by
-`coplan pr wait` (the agent runs it in the background; it ends with the
-work), by `harness_pr_events`, or with your next message. A merge or close
-Coplan sees is recorded on the plan by itself. `coplan pr status` lists a
-session's pull requests and what each change came to; `coplan pr unwatch
-[branch]` stops following one, or all.
-
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `watch.enabled` | `true` | `false`: pull requests are recorded, never followed. |
-| `watch.interval` | `60` | Seconds between looks at each pull request, 30 to 3600. |
-| `watch.debounce` | `90` | Seconds a pull request must be quiet before what happened on it goes to the agent as one batch, 0 to 3600: a 12-comment review is one fix, not twelve. |
-| `watch.trust` | `collaborators` | Whose comments and reviews may start work: `collaborators` (anyone with write access), `author` (whoever opened the pull request), or a list of logins. Others are shown, never acted on. |
-| `watch.maxFixRounds` | `3` | Fix rounds per pull request, 1 to 10; past them, Coplan tells you and does no more on it. |
-| `watch.wake` | `wait` | How an agent whose turn has ended is reached. `wait`: it leaves `coplan pr wait` running in the background, which ends with the work when there is some and brings the agent back (Claude Code). `queue`: the work goes with your next message (agents without background commands — Codex, Cursor — always work this way). `headless`: when nothing is waiting and the agent is not mid-turn, Coplan resumes the session itself with the work (`claude -p --resume`, `codex exec resume`), one run at a time, under your permission settings — an agent working unattended on what reviewers wrote; Cursor has no way to be resumed, so it is `queue` there. |
-
-`on` maps each event to what it does — one action, or a list run in order:
-
-| Event | Default | When |
-| --- | --- | --- |
-| `ci_failed` | `fix` | A check run on the head commit failed. Again after each push that fails. |
-| `ci_passed` | `ignore` | Every check run on the head commit finished well. |
-| `changes_requested` | `fix` | A review asked for changes. |
-| `approved` | `notify` | A review approved it. |
-| `review_comment` | `fix` | A comment on a line of the diff. |
-| `comment` | `triage` | A comment on the conversation, or a review with only a comment. |
-| `merge_conflict` | `rebase` | It no longer merges cleanly. |
-| `behind_base` | `ignore` | Its base moved on. |
-| `merged` | `advance` | It merged. |
-| `closed` | `notify` | It was closed without merging. |
-| `reopened` | `notify` | It was opened again. |
-
-| Action | What happens |
+| Key | Deprecated |
 | --- | --- |
-| `fix` | A task is added under the branch, with the failure or the comments as its brief; it goes through the cycle, is pushed, and the threads it answers get a reply. |
-| `triage` | The agent reads it and replies, opens a fix, or leaves it — and says which. |
-| `rebase` | The branch is rebased onto its base, checked and pushed; a conflict it cannot settle becomes a fix. |
-| `advance` | The merge is recorded and the branches above it are restacked; the plan is built when every pull request is merged or closed. |
-| `notify` | You are told, on the board. |
-| `ignore` | Only noted on the pull request's timeline. |
-| `{ "run": … }` | A command, in the shape of a [hook](#hooks): `{pr}`, `{branch}`, `{event}` and `{sha}` in it are filled in. The agent runs it under your permission settings, as it does the checks. A bare string is always an action, never a command, so a typo is not run. |
-
-```jsonc
-"pullRequests": {
-  "watch": { "trust": ["alice", "bob"], "maxFixRounds": 2 },
-  "on": {
-    "comment": "ignore",
-    "approved": ["notify", { "name": "automerge", "run": "gh pr merge {pr} --auto --squash" }]
-  }
-}
-```
-
-Coplan never merges a pull request unless a command you set here does.
-
-### `review`
-
-| Key | Meaning |
-| --- | --- |
-| `model` | The model the reviewer subagent runs on (`"opus"`, `"sonnet"`), when it should not be the agent's own. Only for `iric.review: "subagent"`. |
+| `tool` | Was `gh`, `graphite` or `none`. The harness opens pull requests its own way. |
+| `open` | Was `auto`, `ask` or `never`. The harness decides when. |
+| `watch` | Removed: pull request watching and CI follow-up belong to the harness. Ignored, with a `coplan doctor` warning. |
+| `on` | Removed with `watch`. Ignored, with a `coplan doctor` warning. |
 
 ### `final`
 
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `blocking` | `false` | `true`: the build report is refused until it carries every final check that is not `optional`, passing, in its `checks`. The plan is not built while those fail. |
+Deprecated, ignored from 0.4. `final.blocking` refused the build report
+while a final check failed; now the report is never refused, and shows the
+final checks the harness reported.
 
 ### `instructions`
 
 Your words, added to what the agent is told at one point. Each is text, or
-`{ "file": "docs/agents/build.md" }` (a file in the repository), up to
+`{ "file": "docs/agents/handoff.md" }` (a file in the repository), up to
 4,000 characters:
 
 | Point | Where it goes |
 | --- | --- |
 | `design` | The prompt that asks for the task list, once the design is confirmed. |
-| `build` | The build prompt, under *Standing instructions*. |
-| `brief` | Every task's brief (`harness_task_brief`), which subagents are given. |
-| `review` | Each brief's review step: what a reviewer checks here. |
+| `handoff` | The handoff prompt, under *Standing instructions*. |
+| `brief` | Every task's brief (`harness_task_brief`), which the harness hands to whoever builds the task. |
+
+`build` and `review` are deprecated, ignored from 0.4: `build` is now
+`handoff`, and what a reviewer checks goes into `brief`, which lands in each
+brief's acceptance section.
 
 Your own (`coplan.json`, or `instructions/<point>.md` in Coplan's home)
 come first, then the repository's.
@@ -336,51 +266,22 @@ a stack of pull requests cannot follow), `comment-unanswered`.
 
 ### `runners`
 
-Where a build's parent session can start the sessions it hands tasks to —
-your profiles. Usually set in your own `coplan.json`, since they name your
-machines. A repository can add runners of its own, but never redefines one of
-yours: for a name both set, yours is used.
-
-```jsonc
-"runners": {
-  "cloud": { "via": "cloud", "use": "Heavy, async, long-running work: set up already, nothing to babysit", "max": 4 },
-  "local": { "via": "local", "use": "Testing and verification I want to reach quickly", "default": true },
-  "taovm": { "via": "ssh", "host": "tao-vm", "dir": "~/src/app", "use": "Balanced work, my own setup", "maxLarge": 2 }
-}
-```
-
-| Key | Meaning |
-| --- | --- |
-| `via` | How a session starts there: `local` (a subagent of the parent, under it in the Claude desktop app), `cloud` (a cloud session: `create_session` from a cloud parent, else `start`), `ssh` (the agent run over ssh on `host`, in `dir`). Required. |
-| `use` | What it is for. When a task names no runner, the parent picks by this. |
-| `max` | Tasks in progress there at once. No limit when left out. |
-| `maxLarge` | Large tasks in progress there at once (the parent says a task is large when it hands it off). |
-| `default` | `true` for the runner a task goes to when no other fits. |
-| `host` | `ssh`: the host, as `ssh` takes it. |
-| `dir` | `ssh`: the checkout to work in there. |
-| `environment` | `cloud`: the environment new sessions start in (`env_…`). |
-| `start` | The command that starts a session there, the handoff on its stdin — e.g. `ssh tao-vm 'cd ~/src/app && claude -p'`. Overrides how `via` starts one. |
-
-A task names a runner (`runner` in the plan) when you ask for one; the parent
-must use it. Otherwise the parent picks by `use` and room. It records where
-each task runs with `harness_task_update {runner, session, size}`, which is
-refused for a runner the config does not name, one that is full, or one other
-than the task asks for — unless you said so in chat. `harness_task_next` shows
-each runner's load and the sessions on it.
+Removed in 0.4: where and how tasks run belongs to the harness. Ignored,
+with a `coplan doctor` warning.
 
 ## Your own defaults: `coplan.json`
 
 `~/.claude/cc-harness/coplan.json` sets your defaults for every repository:
-any key above except `hooks`, which belong to each repository. A
-repository's `.coplan/config.json` overrides it key by key — its
-`iric.parallel` wins over yours, and your `iric.review` still holds if it
-does not say — and instructions add up, yours first. Files it names are
+any key above except `checks`, which belong to each repository. A
+repository's `.coplan/config.json` overrides it key by key — its `branches`
+win over yours, and your `review` still holds if it does not say — and
+instructions add up, yours first. Files it names are
 read from Coplan's home.
 
 ```jsonc
 {
-  "iric": { "review": "self" },
-  "pullRequests": { "tool": "graphite", "open": "auto" },
-  "instructions": { "build": "Small commits, each with a message that says why." }
+  "review": "agent",
+  "pullRequests": { "template": ".github/pull_request_template.md" },
+  "instructions": { "handoff": "Small commits, each with a message that says why." }
 }
 ```

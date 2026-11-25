@@ -68,12 +68,12 @@ async function toolList() {
 /* --------------------------------- Daemon -------------------------------- */
 
 const CHECKS = `{
-  "hooks": {
+  "checks": {
     "implement": ["pnpm typecheck", "pnpm lint"],
     "review": [{ "name": "tests", "run": "pnpm test", "timeout": 900 }],
     "final": ["pnpm check"]
   },
-  "iric": { "review": "subagent", "parallel": 2, "maxRounds": 3 },
+  "review": "agent",
   "branches": { "base": "main", "prefix": "coplan/" }
 }
 `;

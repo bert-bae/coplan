@@ -78,8 +78,7 @@ export async function runDoctor(): Promise<number> {
     'bin/coplan',
     'bin/coplan-hook-relay.sh',
     'skills/coplan/SKILL.md',
-    'skills/coplan-build/SKILL.md',
-    'skills/iric/SKILL.md',
+    'skills/coplan-handoff/SKILL.md',
   ]) {
     const full = path.join(PLUGIN_ROOT, file);
     record(`present: ${file}`, existsSync(full), existsSync(full) ? undefined : full, true);
@@ -261,12 +260,9 @@ async function liveProbes(
   });
 
   await probe('harness_task_update tracks progress', async () => {
-    // Through the cycle, as the build does: done is refused before a review.
-    // The probe runs none of the repository's checks, so it finishes the way
-    // a task the user accepted as it is does — which works whatever this
-    // repository's .coplan/config.json requires.
+    // To review and done, as a harness reports it: recorded as reported.
     const reviewed = await mcp('task', { task_id: childId, stage: 'review' });
-    const tracked = await mcp('task', { task_id: childId, status: 'done', user_approved: true, note: 'doctor probe' });
+    const tracked = await mcp('task', { task_id: childId, status: 'done', note: 'doctor probe' });
     const afterTrack = await getSession();
     record(
       'harness_task_update tracks progress',
@@ -397,13 +393,6 @@ function checkEnvironment(record: Record_): void {
     !curl.error && curl.status === 0,
     curl.error ? 'missing: every hook would do nothing, silently' : curl.stdout.split('\n')[0]?.split(' ').slice(0, 2).join(' '),
     true,
-  );
-  // Not fatal: only watching pull requests (pullRequests.watch) needs it.
-  const gh = spawnSync('gh', ['auth', 'status'], { encoding: 'utf8', timeout: 10_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
-  record(
-    'gh is installed and logged in, to watch pull requests',
-    !gh.error && gh.status === 0,
-    gh.error ? 'gh is not installed: pull requests are recorded but not watched' : gh.status === 0 ? undefined : 'not logged in: run `gh auth login`, or pull requests are not watched',
   );
   const home = process.env['CC_HARNESS_HOME'];
   record(

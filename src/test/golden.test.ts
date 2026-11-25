@@ -50,22 +50,17 @@ const CASES: Record<string, () => Case> = {
   'design-long-section': () => asCase(designPrompt(longPlan(), { agent: 'claude', project: fullProject() })),
   'design-over': () => asCase(designPrompt(bigPlan(), { agent: 'claude', project: fullProject(true), bin: FIXTURE_BIN, note: NOTE })),
 
-  // The build prompt for this session (cut to fit): Managed — the config
-  // sets `iric`, or the mode is chosen — and Tracked.
-  'build-session-under': () => asCase(buildPrompt(richConfirmed(), { target: 'session', agent: 'claude', project: fullProject(), bin: FIXTURE_BIN, note: NOTE })),
-  'build-session-under-no-config': () => asCase(buildPrompt(plainPlan(), { target: 'session', mode: 'managed' })),
-  'build-session-under-settings': () =>
-    asCase(buildPrompt(richConfirmed(), { target: 'session', agent: 'cursor', project: fullProject(), settings: { review: 'self', parallel: 1, maxRounds: 1 } })),
-  'build-session-over': () => asCase(buildPrompt(bigPlan(), { target: 'session', agent: 'claude', project: fullProject(true), bin: FIXTURE_BIN, note: NOTE })),
-  'build-session-long-section': () => asCase(buildPrompt(longPlan(), { target: 'session', agent: 'claude', project: fullProject(), bin: FIXTURE_BIN })),
-  'build-tracked-under': () => asCase(buildPrompt(richConfirmed(), { target: 'session', mode: 'tracked', agent: 'claude', project: fullProject(), bin: FIXTURE_BIN, note: NOTE })),
-  'build-tracked-under-no-config': () => asCase(buildPrompt(plainPlan(), { target: 'session' })),
-  'build-tracked-over': () => asCase(buildPrompt(bigPlan(), { target: 'session', mode: 'tracked', agent: 'codex', project: fullProject(true), note: NOTE })),
+  // The handoff, once the plan is submitted (cut to fit).
+  'handoff-under': () => asCase(buildPrompt(richConfirmed(), { agent: 'claude', project: fullProject(), bin: FIXTURE_BIN, note: NOTE })),
+  'handoff-under-no-config': () => asCase(buildPrompt(plainPlan(), {})),
+  'handoff-under-cursor': () => asCase(buildPrompt(richConfirmed(), { agent: 'cursor', project: fullProject() })),
+  'handoff-over': () => asCase(buildPrompt(bigPlan(), { agent: 'codex', project: fullProject(true), bin: FIXTURE_BIN, note: NOTE })),
+  'handoff-long-section': () => asCase(buildPrompt(longPlan(), { agent: 'claude', project: fullProject(), bin: FIXTURE_BIN })),
 
-  // The plan exported (somewhere else): never cut, no instructions.
-  'export-under': () => asCase(buildPrompt(richConfirmed(), { target: 'elsewhere', project: fullProject(), bin: FIXTURE_BIN, note: NOTE })),
-  'export-under-no-config': () => asCase(buildPrompt(plainPlan(), { target: 'elsewhere' })),
-  'export-over': () => asCase(buildPrompt(bigPlan(), { target: 'elsewhere', project: fullProject(true), note: NOTE })),
+  // The plan exported (Export plan, in the header): never cut, no instructions.
+  'export-under': () => ({ text: exportText(richConfirmed(), { project: fullProject(), note: NOTE }) }),
+  'export-under-no-config': () => ({ text: exportText(plainPlan()) }),
+  'export-over': () => ({ text: exportText(bigPlan(), { project: fullProject(true), note: NOTE }) }),
   'export-planning': () => ({ text: exportText(richPlan(), { project: fullProject() }) }),
 
   // A request to revise the plan per the open comments (#67).
@@ -78,14 +73,12 @@ const CASES: Record<string, () => Case> = {
   'readback-confirmed': () => ({ text: renderPlan(richConfirmed()) }),
   'readback-first': () => ({ text: renderPlan(plainPlan(false)) }),
 
-  // What harness_task_brief returns: what each implementer subagent is given.
+  // What harness_task_brief returns: what whoever builds a task is given.
   'brief-subtask': () => ({ text: brief(richConfirmed(), 'inval', { agent: 'claude', project: fullProject(), bin: FIXTURE_BIN }) }),
   'brief-parent': () => ({ text: brief(richConfirmed(), 'storage', { agent: 'claude', project: fullProject(), bin: FIXTURE_BIN }) }),
   'brief-in-progress': () => ({ text: brief(richConfirmed(), 'wire', { agent: 'codex', project: fullProject() }) }),
-  'brief-no-config': () => ({ text: brief(plainPlan(), 'client', { mode: 'managed' }) }),
-  'brief-tracked': () => ({ text: brief(richConfirmed(), 'inval', { agent: 'claude', project: fullProject(), mode: 'tracked', bin: FIXTURE_BIN }) }),
-  'brief-tracked-no-config': () => ({ text: brief(plainPlan(), 'client', {}) }),
-  'brief-long-sections': () => ({ text: brief(longPlan(), 'docs', { project: fullProject(), settings: { review: 'self', parallel: 1, maxRounds: 1 } }) }),
+  'brief-no-config': () => ({ text: brief(plainPlan(), 'client', {}) }),
+  'brief-long-sections': () => ({ text: brief(longPlan(), 'docs', { project: fullProject() }) }),
 };
 
 function brief(plan: Plan, id: string, opts: BriefOptions): string {
@@ -94,7 +87,7 @@ function brief(plan: Plan, id: string, opts: BriefOptions): string {
 
 /** Which cases are meant to be over the budget, and so cut. */
 // A long section no longer pushes a prompt over: the design is not quoted in it.
-const OVER = new Set(['design-over', 'build-session-over', 'build-tracked-over', 'revision-over']);
+const OVER = new Set(['design-over', 'handoff-over', 'revision-over']);
 
 const hashesFile = path.join(DIR, 'hashes.json');
 
@@ -121,7 +114,7 @@ for (const [name, make] of Object.entries(CASES)) {
     assert.equal(promptHash(text), recorded[name], `the prompt hash of ${name} moved`);
     if (trimmed !== undefined) {
       assert.equal(trimmed, OVER.has(name), `${name} is ${OVER.has(name) ? '' : 'not '}meant to be cut to fit`);
-      if (name.includes('session') || name.includes('tracked') || name.startsWith('design') || name.startsWith('revision')) {
+      if (name.startsWith('handoff') || name.startsWith('design') || name.startsWith('revision')) {
         assert.equal(text.length <= PROMPT_BUDGET, true, `${name} is ${text.length} characters, over the budget`);
       }
     }

@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { unlinkSync, appendFileSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { unlinkSync, appendFileSync, existsSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -9,12 +9,11 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { SessionStore } from './store.ts';
 import { ProjectConfigs } from './projectConfigs.ts';
 import { isIdle } from './idle.ts';
-import { PrWatcher } from './prWatch.ts';
 import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from './http.ts';
 import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
-import { MAX_NOTE, MAX_USER_SAID, PlanError, cleanChecks, cleanNote, cleanUserSaid, mergeChecks, passedAndClosed, planPhase, wasFinished, unreadAreas, validStage, validTarget } from '../shared/plan.ts';
+import { MAX_NOTE, MAX_USER_SAID, PlanError, cleanChecks, cleanNote, cleanUserSaid, planPhase, wasFinished, unreadAreas, validStage } from '../shared/plan.ts';
 import {
   PROMPT_BUDGET,
   askRule,
@@ -35,35 +34,16 @@ import {
 } from './render.ts';
 import { briefBlocks, renderBrief, renderNext, skipArg } from './brief.ts';
 import { blocksText, joinBlocks } from '../shared/blocks.ts';
-import {
-  MODE_LABEL,
-  cleanSettings,
-  dependents,
-  effectiveBranch,
-  effectiveChecks,
-  effectiveReview,
-  hasSubtasks,
-  isManaged,
-  modeFor,
-  planMode,
-  readyTasks,
-  roundVerdict,
-  stackStatus,
-  targetOf,
-  validMode,
-  waitingOn,
-  effectiveRunner,
-} from '../shared/build.ts';
-import { HOOK_STAGES, filesInScope, hookScope, runnerFull, runnerLoad, taskHooks, type ProjectConfig } from '../shared/project.ts';
-import { changedFiles, changedSince, committedOn, headCommit, unreadWords, worktreeOf, type ChangedFiles } from '../shared/changes.ts';
+import { dependents, effectiveBranch, effectiveChecks, hasSubtasks, readyTasks, stackStatus, waitingOn } from '../shared/build.ts';
+import { HOOK_STAGES, type ProjectConfig } from '../shared/project.ts';
+import { headCommit, worktreeOf } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
 import { ConfigCache, globalConfigFile, projectHarnessFile, type HarnessConfig } from '../shared/config.ts';
 import { ensureHome, paths, readLiveLock, sanitizeId, readLock, readVerifiedLock, probeLock, isPidAlive, baseUrl } from '../shared/paths.ts';
-import { HOOK_NOOP, additionalContext, type HookOutput } from '../shared/hooks.ts';
-import { MAX_BODY } from '../shared/prEvents.ts';
+import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
-import type { BuildChoice, BuildSettings, CleanupGroupId, DaemonLock, Dispatch, ExecutionMode, TaskSize, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, Task, TaskListInput, TaskStatus } from '../shared/types.ts';
-import { CLEANUP_GROUPS, TASK_SIZES } from '../shared/types.ts';
+import type { CleanupGroupId, DaemonLock, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, Task, TaskListInput, TaskStatus } from '../shared/types.ts';
+import { CLEANUP_GROUPS } from '../shared/types.ts';
 
 declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
@@ -118,8 +98,7 @@ async function main(): Promise<void> {
   const clients = { count: 0 };
   const server = http.createServer();
   const lifecycle = { restart: (_entry?: string): boolean => false };
-  const prWatch = startPrWatch(store);
-  const router = buildRouter({ store, config, token, clients, lifecycle, prs: prWatch.watcher });
+  const router = buildRouter({ store, config, token, clients, lifecycle });
 
   server.on('request', (req, res) => {
     void handle(req, res, router, token).catch((thrown: unknown) => {
@@ -150,9 +129,10 @@ async function main(): Promise<void> {
   const port = await listen(server, inheritedPort);
   boundPort = port;
   const lock: DaemonLock = { pid: process.pid, port, token, version: VERSION, startedAt: Date.now(), host: '127.0.0.1' };
+  // Before the lock: a relay that reads the new token from it must find the
+  // header file matching, or it puts the token on curl's command line.
+  writeAuthHeader(token);
   await claimLock(lock);
-  // For the hook relay: the header as a file only this user can read.
-  writeFileSync(paths.authHeader(), `Authorization: Bearer ${token}\n`, { mode: 0o600 });
   log(`listening on ${baseUrl(lock)} (pid ${process.pid}, v${VERSION})`);
   process.stdout.write(`${JSON.stringify({ started: true, ...lock })}\n`);
 
@@ -166,10 +146,10 @@ async function main(): Promise<void> {
     log(`shutting down (${signal})`);
     reaper.stop();
     lockWatch.stop();
-    prWatch.stop();
     // A daemon that lost the lock leaves the sessions to the one that has
     // it: saving its own copies now would write over newer ones.
     if (signal !== LOST_LOCK) store.persistAll();
+    else handBackAuthHeader();
     server.close();
     server.closeAllConnections?.();
     try {
@@ -192,7 +172,7 @@ async function main(): Promise<void> {
 
   const reaper = startReaper(store);
   const lockWatch = watchLock(() => shutdown(LOST_LOCK));
-  startIdleWatch(store, config, clients, () => shutdown('idle'), () => prWatch.watcher.watched().length);
+  startIdleWatch(store, config, clients, () => shutdown('idle'));
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -322,6 +302,7 @@ async function claimLock(lock: DaemonLock): Promise<void> {
   // removed before any exit as well.
   const lose = (why: string): never => {
     rmSync(tmp, { force: true });
+    handBackAuthHeader();
     log(why);
     process.exit(0);
   };
@@ -347,6 +328,28 @@ async function claimLock(lock: DaemonLock): Promise<void> {
   } finally {
     rmSync(tmp, { force: true });
   }
+}
+
+/** For the hook relay: the header as a file only this user can read. */
+function writeAuthHeader(token: string): void {
+  writeReplacing(paths.authHeader(), `Authorization: Bearer ${token}\n`, 0o600);
+}
+
+/** A daemon that lost the lock rewrites the header it wrote with the holder's token. */
+function handBackAuthHeader(): void {
+  try {
+    const holder = readLock();
+    if (holder && holder.pid !== process.pid) writeAuthHeader(holder.token);
+  } catch {
+    /* the holder's relays fall back as before */
+  }
+}
+
+/** Written beside the file and renamed over it, so no reader sees it half written. */
+function writeReplacing(file: string, text: string, mode = 0o666): void {
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, text, { mode });
+  renameSync(tmp, file);
 }
 
 /**
@@ -446,12 +449,14 @@ function sameOrigin(origin: string): boolean {
  * hooks, the MCP server, the CLI, and the page, which is handed it in its
  * link. Never a cookie: a cookie is not scoped to a port, so every other
  * server on 127.0.0.1 the browser visits would be sent it. The live stream,
- * which a browser cannot send headers on, takes a single-use ticket instead.
+ * which a browser cannot send headers on, takes a single-use ticket instead,
+ * and so does /api/login, which trades a browser-opened link's for the token.
  */
 function authorized(req: http.IncomingMessage, url: URL, token: string): boolean {
   const header = req.headers.authorization ?? '';
   if (header.startsWith('Bearer ') && sameSecret(header.slice(7), token)) return true;
-  if (req.method === 'GET' && url.pathname === '/api/events') return redeemTicket(url.searchParams.get('ticket'));
+  if (req.method === 'GET' && url.pathname === '/api/events') return redeemTicket(streamTickets, url.searchParams.get('ticket'));
+  if (req.method === 'POST' && url.pathname === '/api/login') return redeemTicket(loginTickets, url.searchParams.get('ticket'));
   return false;
 }
 
@@ -462,11 +467,13 @@ function sameSecret(given: string, token: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-/** Tickets for the live stream: short-lived, each good once. */
-const tickets = new Map<string, number>();
+/** Tickets for the live stream, and for a link opened in a browser (whose
+ *  command line other local users can read): short-lived, each good once. */
+const streamTickets = new Map<string, number>();
+const loginTickets = new Map<string, number>();
 const TICKET_MS = 60_000;
 
-function issueTicket(): string {
+function issueTicket(tickets: Map<string, number>): string {
   const now = Date.now();
   for (const [t, expires] of tickets) if (expires < now) tickets.delete(t);
   const ticket = randomBytes(18).toString('hex');
@@ -474,7 +481,7 @@ function issueTicket(): string {
   return ticket;
 }
 
-function redeemTicket(ticket: string | null): boolean {
+function redeemTicket(tickets: Map<string, number>, ticket: string | null): boolean {
   if (!ticket) return false;
   const expires = tickets.get(ticket);
   tickets.delete(ticket);
@@ -492,20 +499,16 @@ interface Deps {
   /** Live SSE connections, so an open browser counts as "in use". */
   clients: { count: number };
   lifecycle: { restart(entry?: string): boolean };
-  /** The pull requests builds recorded, watched (prWatch.ts). */
-  prs: PrWatcher;
 }
 
 function buildRouter(deps: Deps): Router {
-  const { store, config, token, clients, lifecycle, prs } = deps;
+  const { store, config, token, clients, lifecycle } = deps;
   const router = new Router();
 
-  /** For the browser and the CLI: carries the token, which the page keeps
-   *  (`src/ui/lib/api.ts`) and takes out of the address bar. */
-  const authedUrl = (sessionId?: string) => {
-    const base = `http://127.0.0.1:${readLiveLock()?.port ?? 0}/?token=${token}`;
-    return sessionId ? `${base}#/session/${encodeURIComponent(sessionId)}` : base;
-  };
+  /** For the browser: a login ticket the page trades for the token
+   *  (`src/ui/lib/api.ts`). */
+  const loginUrl = (sessionId: string) =>
+    `http://127.0.0.1:${readLiveLock()?.port ?? 0}/?login=${issueTicket(loginTickets)}#/session/${encodeURIComponent(sessionId)}`;
 
   /** For Claude. Token-free: anything returned to the model is written to the
    *  transcript and carried in every later context window. */
@@ -518,7 +521,7 @@ function buildRouter(deps: Deps): Router {
     if (!configFor(session).autoOpen || opened.has(session.sessionId)) return;
     opened.add(session.sessionId);
     if (opened.size > MAX_TRACKED_OPENS) opened.delete(opened.values().next().value!);
-    openInBrowser(authedUrl(session.sessionId));
+    openInBrowser(loginUrl(session.sessionId));
   };
 
   const configFor = (session: SessionState): HarnessConfig => config.get(session.repoRoot ?? session.cwd);
@@ -554,9 +557,9 @@ function buildRouter(deps: Deps): Router {
     const file = headlessFile(session);
     try {
       mkdirSync(path.dirname(file), { recursive: true });
-      writeFileSync(file, headlessText(plan, { agent: session.agent, project: projectFor(session) }));
+      writeReplacing(file, headlessText(plan, { agent: session.agent, project: projectFor(session) }));
       planPage ??= readFileSync(PLAN_PAGE, 'utf8');
-      writeFileSync(headlessFile(session, 'html'), headlessPage(planPage, plan, session.agent));
+      writeReplacing(headlessFile(session, 'html'), headlessPage(planPage, plan, session.agent));
       headlessWritten.set(session.sessionId, at);
     } catch (err) {
       log(`could not write the headless plan ${file}: ${(err as Error).message}`);
@@ -564,6 +567,8 @@ function buildRouter(deps: Deps): Router {
   };
   store.on('event', (event: ServerEvent) => {
     if (event.type === 'snapshot') writeHeadless(event.session);
+    // The list is sent again whenever a session is dropped or purged.
+    if (event.type === 'sessions') for (const id of headlessWritten.keys()) if (!store.get(id)) headlessWritten.delete(id);
   });
   /** Where the user reviews the plan — on its page, or in a headless plan's
    *  file — as the end of "The user reviews it …". */
@@ -574,41 +579,16 @@ function buildRouter(deps: Deps): Router {
 
   /** How a brief is rendered for a session: the same for the agent's tool
    *  and the page, so both read the same text. */
-  store.reviewFor = (session) => projectFor(session).settings.review;
+  store.reviewFor = (session) => projectFor(session).review;
+  store.promptFor = (session) => ({ project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) });
   const briefOptions = (session: SessionState) => ({ agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) });
-
-  /** Settings as the page sent them, over the repository's defaults. */
-  const settingsFrom = (raw: unknown, project: ProjectConfig): BuildSettings =>
-    raw && typeof raw === 'object' ? cleanSettings(raw, project.settings) : project.settings;
-
-  /**
-   * How the user last chose to have this session's plan built, in the
-   * Submit dialog — the mode, and a Managed build's settings — or nothing
-   * when they never chose: then the repository's defaults hold. A go-ahead
-   * given in chat builds it this way, and the dialog opens on it (#65).
-   */
-  const lastChoice = (session: SessionState): BuildChoice | undefined => {
-    const choice = store.get(session.sessionId)?.buildChoice ?? session.buildChoice;
-    const mode = validMode(choice?.mode);
-    return choice && mode ? { mode, ...(choice.settings ? { settings: cleanSettings(choice.settings) } : {}), at: choice.at } : undefined;
-  };
-
-  /** Remember what the user chose in the Submit dialog. Session state, not
-   *  the plan's: it moves no version, and nothing is sent to the agent. */
-  const rememberChoice = (session: SessionState, mode: ExecutionMode, settings: BuildSettings | undefined) => {
-    const choice: BuildChoice = { mode, ...(settings ? { settings: cleanSettings(settings) } : {}), at: Date.now() };
-    const was = session.buildChoice;
-    if (was && was.mode === choice.mode && JSON.stringify(was.settings ?? null) === JSON.stringify(choice.settings ?? null)) return;
-    store.update(session.sessionId, { buildChoice: choice });
-  };
 
   /** What the review dialogs show beside the prompt: the defaults and the
    *  checks this repository has, so the user sees what the build will run. */
-  const projectSummary = (project: ProjectConfig, point: 'design' | 'build') => ({
+  const projectSummary = (project: ProjectConfig, point: 'design' | 'handoff') => ({
     file: project.file,
     config: configRows(project, point),
-    mode: project.mode,
-    defaults: project.settings,
+    review: project.review,
     checks: Object.fromEntries(HOOK_STAGES.map((stage) => [stage, project.hooks[stage].map((h) => h.name)])),
     errors: [...project.errors, ...project.warnings],
     planCheck: project.planCheck,
@@ -663,7 +643,11 @@ function buildRouter(deps: Deps): Router {
   /* --------------------------- UI bootstrap ------------------------ */
 
   /** A ticket for the live stream, which a browser opens without headers. */
-  router.post('/api/events/ticket', (ctx) => json(ctx.res, 200, { ticket: issueTicket() }));
+  router.post('/api/events/ticket', (ctx) => json(ctx.res, 200, { ticket: issueTicket(streamTickets) }));
+  /** A ticket for a link the CLI opens in a browser, where the token would be on a command line. */
+  router.post('/api/login/ticket', (ctx) => json(ctx.res, 200, { ticket: issueTicket(loginTickets) }));
+  /** Reached only with a login ticket, or the token itself (see `authorized`). */
+  router.post('/api/login', (ctx) => json(ctx.res, 200, { token }));
 
   /* --------------------------- Sessions ---------------------------- */
 
@@ -682,47 +666,10 @@ function buildRouter(deps: Deps): Router {
       planCheck: project.planCheck,
       // The repository's checks a task can skip, by stage (#54).
       projectChecks: { implement: project.hooks.implement.map((h) => h.name), review: project.hooks.review.map((h) => h.name) },
-      // Who reviews a task, where the plan does not say (any but a submitted
-      // Managed build): the board asks the user where the daemon waits on them.
-      projectReview: project.settings.review,
+      // The review a task asks for where it does not say: the board shows
+      // the tasks that wait on the user's.
+      projectReview: project.review,
     });
-  });
-
-  /** `coplan pr wait`: what waits for the agent about its pull requests, or the next thing within `ms`. */
-  router.get('/api/session/:id/pr/wait', async (ctx) => {
-    const session = sessionOr404(ctx);
-    const ms = Math.min(Math.max(Number(ctx.url.searchParams.get('ms')) || PR_WAIT_MS, 1_000), PR_WAIT_MS);
-    const watchingNow = () => prs.watched().filter((w) => w.session.sessionId === session.sessionId).length;
-    // Nothing watched and nothing waiting: nothing will come, so say so at once.
-    if (!watchingNow() && !session.prInbox?.length) {
-      json(ctx.res, 200, { prompt: null, watching: 0 });
-      return;
-    }
-    const gone = new AbortController();
-    ctx.res.once('close', () => gone.abort());
-    const prompt = await prs.wait(session.sessionId, ms, gone.signal);
-    const watching = watchingNow();
-    if (!ctx.res.writableEnded && !ctx.res.destroyed) json(ctx.res, 200, { prompt, watching });
-    // Taken, but the answer never got out: back in the inbox for the next taker.
-    else if (prompt) prs.push(session.sessionId, prompt);
-  });
-
-  /** `coplan pr status`: each pull request followed for the session. */
-  router.get('/api/session/:id/pr', (ctx) => {
-    const session = sessionOr404(ctx);
-    const watched = new Set(prs.watched().filter((w) => w.session.sessionId === session.sessionId).map((w) => w.branch));
-    json(ctx.res, 200, {
-      prs: Object.entries(session.plan?.branches ?? {})
-        .filter(([, b]) => b.pr)
-        .map(([branch, b]) => ({ branch, pr: b.pr, watched: watched.has(branch), ...(session.prWatch?.[branch] ? { watch: session.prWatch[branch] } : {}) })),
-      inbox: session.prInbox?.length ?? 0,
-    });
-  });
-
-  router.post('/api/session/:id/pr/unwatch', async (ctx) => {
-    const session = sessionOr404(ctx);
-    const body = await readJson<{ branch?: unknown }>(ctx.req);
-    json(ctx.res, 200, { stopped: prs.unwatch(session.sessionId, typeof body.branch === 'string' && body.branch ? body.branch : undefined) });
   });
 
   router.delete('/api/session/:id', (ctx) => {
@@ -761,14 +708,6 @@ function buildRouter(deps: Deps): Router {
     }
   });
 
-  /** What Claude would see, for the "copy for Claude" affordance and for
-   *  debugging. Reading it here does not move Claude's read position. */
-  router.get('/api/session/:id/plan/text', (ctx) => {
-    const session = sessionOr404(ctx);
-    const plan = planOr404(session);
-    text(ctx.res, 200, renderPlan(plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck }));
-  });
-
   /** The read-back as blocks, each naming its source, for the page's
    *  prompt viewer. A look, not a read: Claude's read position stays. */
   router.get('/api/session/:id/plan/readback', (ctx) => {
@@ -798,23 +737,13 @@ function buildRouter(deps: Deps): Router {
    */
   router.post('/api/session/:id/plan/prompt', async (ctx) => {
     const session = sessionOr404(ctx);
-    const body = await readJson<{ note?: unknown; target?: unknown; settings?: unknown; mode?: unknown }>(ctx.req);
+    const body = await readJson<{ note?: unknown }>(ctx.req);
     const plan = planOr404(session);
     const note = cleanNote(body.note);
     const project = projectFor(session);
-    // The mode asked for; else the target's; else the one the user last
-    // chose here; else the repository's default.
-    const last = lastChoice(session);
-    const asked = validTarget(body.target);
-    const chosen = validMode(body.mode) ?? last?.mode;
-    const mode = modeFor(asked, chosen, project.mode);
-    const settings = body.settings ? settingsFrom(body.settings, project) : (last?.settings ?? project.settings);
     const { prompt, trimmed, blocks } = buildPrompt(plan, {
-      target: targetOf(mode),
       agent: session.agent,
-      settings,
       project,
-      ...(chosen ? { mode } : {}),
       ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
       ...(note ? { note } : {}),
     });
@@ -826,9 +755,7 @@ function buildRouter(deps: Deps): Router {
       version: plan.version,
       budget: PROMPT_BUDGET,
       maxNote: MAX_NOTE,
-      mode,
-      settings,
-      project: projectSummary(project, 'build'),
+      project: projectSummary(project, 'handoff'),
     });
   });
 
@@ -929,50 +856,25 @@ function buildRouter(deps: Deps): Router {
   });
 
   /**
-   * The user changed how the plan is built in the Submit dialog. Kept, so
-   * telling the agent to build it in chat builds it that way too. Changes
-   * nothing about the plan.
-   */
-  router.post('/api/session/:id/plan/choice', async (ctx) => {
-    const session = sessionOr404(ctx);
-    const body = await readJson<{ mode?: unknown; settings?: unknown }>(ctx.req);
-    const mode = validMode(body.mode);
-    if (!mode) throw new HttpError(400, 'Say how it is built: mode "tracked", "managed" or "export".');
-    const project = projectFor(session);
-    rememberChoice(session, mode, mode === 'managed' ? settingsFrom(body.settings, project) : undefined);
-    json(ctx.res, 200, { buildChoice: store.get(session.sessionId)?.buildChoice ?? null });
-  });
-
-  /**
    * The user signs the plan off. It is locked from here: Claude gets the
    * prompt they previewed with their next message in its chat, and the page
    * follows the build on the task board.
    */
   router.post('/api/session/:id/plan/submit', async (ctx) => {
     const session = sessionOr404(ctx);
-    const body = await readJson<{ note?: unknown; target?: unknown; mode?: unknown; expect?: unknown; settings?: unknown; hash?: unknown }>(ctx.req);
-    const asked = validTarget(body.target);
-    const chosen = validMode(body.mode);
-    if ((body.target !== undefined && !asked) || (!asked && !chosen)) {
-      throw new HttpError(400, 'Say how it is built: mode "tracked", "managed" or "export" (or target "session" or "elsewhere").');
-    }
+    const body = await readJson<{ note?: unknown; target?: unknown; expect?: unknown; hash?: unknown }>(ctx.req);
+    // A plan is built by the harness this session hands it to: exporting it is Export plan, not a submit.
+    if (body.target !== undefined && body.target !== 'session') throw new HttpError(400, 'A plan is submitted to this session: leave `target` out.');
     const note = cleanNote(body.note);
     const project = projectFor(session);
-    const mode = modeFor(asked, chosen, project.mode);
-    const target = targetOf(mode);
-    const settings = settingsFrom(body.settings, project);
     const plan = store.submit(session.sessionId, {
-      target,
       project,
-      settings,
-      ...(chosen ? { mode } : {}),
       ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
       ...(note ? { note } : {}),
       ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
       ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
     });
-    log(`plan submitted for ${session.sessionId} (${mode})`);
-    if (chosen) rememberChoice(session, mode, mode === 'managed' ? settings : undefined);
+    log(`plan submitted for ${session.sessionId}`);
     json(ctx.res, 200, { plan: forBrowser(plan) });
   });
 
@@ -1052,7 +954,7 @@ function buildRouter(deps: Deps): Router {
       // the moment it lands (the agent's report that puts a task in review
       // is a snapshot too).
       if (event.type === 'snapshot') {
-        reviewSent = projectFor(event.session).settings.review;
+        reviewSent = projectFor(event.session).review;
         event = { ...event, projectReview: reviewSent };
       }
       res.write(`data: ${JSON.stringify(forBrowser(event))}\n\n`);
@@ -1181,13 +1083,7 @@ function buildRouter(deps: Deps): Router {
     let handed: { id: string; prior: Plan; version: number } | null = null;
     // Listened for from the start: the relay may give up while the hook is
     // still being handled, and a 'close' already past cannot be heard later.
-    let prHanded: { id: string; prompt: string } | null = null;
     const takeBack = (): boolean => {
-      if (prHanded && !ctx.res.writableFinished) {
-        prs.push(prHanded.id, prHanded.prompt);
-        prHanded = null;
-        if (!handed) return true;
-      }
       if (!handed || ctx.res.writableFinished) return false;
       const { id, prior, version } = handed;
       handed = null;
@@ -1217,15 +1113,6 @@ function buildRouter(deps: Deps): Router {
           },
           onWaiting: openClaude,
         });
-      }
-      // What waits about its pull requests rides along too, in the room the prompt leaves.
-      if (session && event === 'UserPromptSubmit' && agentInfo(agent).promptContext) {
-        const carried = output.hookSpecificOutput?.additionalContext ?? '';
-        const pr = prs.take(session.sessionId, PROMPT_BUDGET - carried.length);
-        if (pr && carried.length + pr.length <= PROMPT_BUDGET) {
-          prHanded = { id: session.sessionId, prompt: pr };
-          output = additionalContext('UserPromptSubmit', [carried, pr].filter(Boolean).join('\n\n'));
-        } else if (pr) prs.push(session.sessionId, pr);
       }
       const after = session ? store.get(session.sessionId)?.plan : undefined;
       // Only when this answer is what carries the prompt. One the user pasted
@@ -1290,14 +1177,11 @@ function buildRouter(deps: Deps): Router {
   };
 
   /**
-   * `harness_task_update`: a status, a step of the iric cycle, the checks
-   * run — answered with what it means for the build. Starting or finishing
-   * a task that still waits on another is refused in every mode: the board
-   * would say something untrue, and the agent can change the dependency.
-   * A Managed build is also held to its cycle — review before done, a
-   * passing verdict, green checks, the parallel and round limits, the
-   * user's say over dropping signed-off work. Any other mode gets each of
-   * those as a note in the reply instead (#62).
+   * `harness_task_update`: a status, a stage (implement, review, refine), the checks
+   * run, a verdict — recorded as reported, for the board to show, and
+   * answered with what it means for the build. Only what would make the
+   * board contradict itself is refused: a task done or started while it
+   * still waits on another, progress set on a parent (#62).
    */
   const updateTask = async (session: SessionState, body: Record<string, unknown>): Promise<string> => {
     const git = await taskGit(session, body);
@@ -1313,46 +1197,23 @@ function buildRouter(deps: Deps): Router {
   };
 
   /**
-   * What git says about a task, read before its update is weighed: the
+   * What git says about a task, read before its update is recorded: the
    * commit it begins at, when it is starting — its change is everything
-   * since — and, when it is going done, that change, which the done gate
-   * holds its checks to. Every check is targeted: to the areas the task
-   * really touched, not the ones it planned to, nor the rest of the build's.
+   * since, which its targeted checks run over.
    */
-  const taskGit = async (session: SessionState, body: Record<string, unknown>): Promise<{ startCommit?: string; change?: ChangedFiles | null }> => {
+  const taskGit = async (session: SessionState, body: Record<string, unknown>): Promise<{ startCommit?: string }> => {
     const plan = session.plan;
     const task = plan?.tasks.find((t) => t.id === String(body['task_id'] ?? ''));
     if (!plan || !task) return {};
-    const out: { startCommit?: string; change?: ChangedFiles | null } = {};
     const status = body['status'];
     if (!task.startCommit && (status === 'in_progress' || (typeof body['stage'] === 'string' && status !== 'done' && status !== 'blocked'))) {
       const head = await headCommit(await builtIn(session, plan, task));
-      if (head) out.startCommit = head;
+      if (head) return { startCommit: head };
     }
-    if (status === 'done' && body['user_approved'] !== true) out.change = await taskChange(session, plan, task);
-    return out;
+    return {};
   };
 
-  /**
-   * One task's change: everything since the commit it began at, where it is
-   * built — or, on a branch no working tree has checked out any more, what
-   * was committed on it. A task started before that was recorded is held
-   * to the build's change since its base, as before. Null outside git.
-   */
-  const taskChange = async (session: SessionState, plan: Plan, task: Task): Promise<ChangedFiles | null> => {
-    const root = session.repoRoot ?? session.cwd;
-    if (!task.startCommit) return changedFiles(root, plan.submission?.base ?? projectFor(session).branches.base);
-    const branch = effectiveBranch(plan, task);
-    const tree = branch ? await worktreeOf(root, branch) : null;
-    if (branch && !tree) {
-      const committed = await committedOn(root, task.startCommit, branch);
-      if (committed) return committed;
-    }
-    return changedSince(tree ?? root, task.startCommit);
-  };
-
-  const updateTaskNow = (session: SessionState, body: Record<string, unknown>, git: { startCommit?: string; change?: ChangedFiles | null }): string => {
-    const changed = git.change ?? null;
+  const updateTaskNow = (session: SessionState, body: Record<string, unknown>, git: { startCommit?: string }): string => {
     const before = session.plan;
     const taskId = String(body['task_id'] ?? '');
     if (!before) throw new PlanError(`No task "${taskId}": there is no plan yet. Publish one with harness_plan_publish.`);
@@ -1378,14 +1239,8 @@ function buildRouter(deps: Deps): Router {
     if (verdict && !(task.status === 'in_progress' && task.stage === 'review') && stage !== 'review') {
       throw new PlanError(`A verdict is given in review: "${task.title}" is not in review now. Report stage "review" (a new round) and give the verdict there.`);
     }
-    const text = (k: string) => (typeof body[k] === 'string' && (body[k] as string).trim() ? (body[k] as string).trim() : undefined);
-    const runnerName = text('runner');
-    const sessionRef = text('session');
-    const size = body['size'];
-    if (size !== undefined && !(TASK_SIZES as readonly unknown[]).includes(size)) throw new PlanError('`size` is "small" or "large".');
-    const dispatching = Boolean(runnerName || sessionRef || size);
-    if (!status && !stage && !checks && !verdict && note === undefined && !dispatching) {
-      throw new PlanError('Say what changed: a status, a stage, checks, a verdict, a note, or where it runs (runner, session, size).');
+    if (!status && !stage && !checks && !verdict && note === undefined) {
+      throw new PlanError('Say what changed: a status, a stage, checks, a verdict or a note.');
     }
     const approved = body['user_approved'] === true;
     if (approved && !note?.trim()) {
@@ -1394,25 +1249,6 @@ function buildRouter(deps: Deps): Router {
     // Dropping work is a decision someone will want the reason for.
     if (status === 'dropped' && !note?.trim()) {
       throw new PlanError(`Dropping "${task.title}" needs a \`note\`: why it is no longer needed (and who said so).`);
-    }
-    const project = projectFor(session);
-    const settings = before.submission?.settings ?? project.settings;
-    // The gates below hold a Managed build to its cycle. In any other mode
-    // each is a note in the reply instead: what was skipped, and why it
-    // matters, for the agent to weigh — nothing is refused.
-    const managed = isManaged(planMode(before, project.mode));
-    const skipped: string[] = [];
-    const gate = (refusal: string, note: string) => {
-      if (managed) throw new PlanError(refusal);
-      skipped.push(note);
-    };
-    // Work the user signed off is theirs to drop: the agent asks.
-    if (status === 'dropped' && before.submission && !task.addedInBuild && !approved) {
-      gate(
-        `"${task.title}" is part of the plan the user submitted, so dropping it is theirs to decide: ask them with ` +
-          `${agentInfo(session.agent).askWith}. If they agree, call again with user_approved: true and their words in the note.`,
-        'it was part of the plan the user submitted: tell them you dropped it, and why',
-      );
     }
 
     // A parent's progress is its subtasks': a status set on it would say
@@ -1429,190 +1265,13 @@ function buildRouter(deps: Deps): Router {
     const starting = idle && (status === 'in_progress' || (stage !== undefined && status !== 'done' && status !== 'blocked'));
     const waits = waitingOn(before, task);
     const waitWords = () => waits.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ');
-    if ((starting || status === 'done') && waits.length) {
+    if ((starting || (status === 'done' && task.status !== 'done')) && waits.length) {
       throw new PlanError(
         `"${task.title}" cannot ${status === 'done' ? 'be done' : 'start'} yet: it waits on ${waitWords()}. ` +
           'Start a task that is ready instead — harness_task_next lists them. If the dependency is wrong, change it with ' +
           'harness_plan_edit {ops: [{op: "upsert_task", id, dependsOn: [...]}]} and tell the user why.',
       );
     }
-    if (starting && !approved) {
-      const busy = before.tasks.filter((t) => t.status === 'in_progress' && t.id !== task.id && !hasSubtasks(before, t.id));
-      if (busy.length >= settings.parallel) {
-        gate(
-          `"${task.title}" cannot start yet: ${busy.length} task(s) are in progress (${busy.map((t) => t.id).join(', ')}), ` +
-            `and the user allowed ${settings.parallel} at once. Finish one first.`,
-          `${busy.length} other task${busy.length === 1 ? ' is' : 's are'} in progress too (${busy.map((t) => t.id).join(', ')}): keep them off each other's files`,
-        );
-      }
-    }
-
-    // Where it runs: a runner the config names, the one the task asks for,
-    // and only while it has room — the runners are the user's machines.
-    const asked = effectiveRunner(before, task);
-    let dispatch: Dispatch | undefined;
-    let runnerNote = '';
-    if (dispatching || (starting && asked)) {
-      const name = runnerName ?? task.dispatch?.runner ?? (starting ? asked : undefined);
-      if (!name) throw new PlanError(`Say which runner "${task.title}" runs on: runner "<name>" (harness_task_next lists them).`);
-      const runner = project.runners.find((r) => r.name === name);
-      if (!runner) {
-        const names = project.runners.map((r) => r.name);
-        throw new PlanError(
-          `No runner "${name}": ${names.length ? `the config has ${names.join(', ')}` : 'the config sets none — the user adds them under "runners" in coplan.json'}.`,
-        );
-      }
-      if (asked && asked !== name && !approved && task.dispatch?.runner !== name) {
-        throw new PlanError(
-          `"${task.title}" asks to run on ${asked}, not ${name}. Run it there; if the user says otherwise, call again with user_approved: true and their words in the note.`,
-        );
-      }
-      const same = task.dispatch?.runner === name;
-      const taskSize = (size as TaskSize | undefined) ?? (same ? task.dispatch!.size : 'small');
-      const busy = (starting || task.status === 'in_progress') && status !== 'done' && status !== 'dropped' && status !== 'blocked';
-      const load = runnerLoad([runner], before.tasks.filter((t) => t.id !== task.id))[0]!;
-      const full = busy && !approved ? runnerFull(load, taskSize) : null;
-      if (full) {
-        const room = runnerLoad(project.runners, before.tasks)
-          .filter((l) => l.runner.name !== name && !runnerFull(l, taskSize))
-          .map((l) => l.runner.name);
-        throw new PlanError(
-          `"${task.title}" cannot run on ${name} now: ${full}. ${room.length ? `Room for it on ${room.join(', ')}` : 'No other runner has room'}` +
-            `${asked ? '' : ', or'} wait for one to finish${asked ? ' (the task asks for this runner)' : ''}.`,
-        );
-      }
-      dispatch = { runner: name, ...(sessionRef ? { session: sessionRef } : same && task.dispatch!.session ? { session: task.dispatch!.session } : {}), size: taskSize, at: same ? task.dispatch!.at : Date.now() };
-      if (busy) {
-        const after = { all: load.all + 1, large: load.large + (taskSize === 'large' ? 1 : 0) };
-        runnerNote =
-          `Runs on ${name} (${runner.via}${runner.host ? ` ${runner.host}` : ''})${dispatch.session ? `, session ${dispatch.session}` : ''}: ` +
-          `${after.all}${runner.max ? `/${runner.max}` : ''} there${runner.maxLarge ? `, ${after.large}/${runner.maxLarge} large` : ''}.` +
-          (dispatch.session ? '' : ' Record the session you start with session "<id>", so the board can say where it is.');
-      }
-    }
-
-    // The round limit is the user's: past it, stop and ask them.
-    // (A finished task taken up again has its next round: the last one passed.
-    // Taken up and sent to review in this one call, too.)
-    const takenUpAgain = task.reopened || passedAndClosed(before, task, settings.review);
-    // Said the same wherever the limit stops it (here, and done below), with
-    // the call for each choice the user may make.
-    const roundLimit = (where: string) =>
-      `"${task.title}" ${where}has had ${task.round} review round(s), the most the user allowed (${settings.maxRounds}). Stop: mark it ` +
-      'blocked with a note on what still fails, and ask the user — another round, accept it as it is, or take it over. Then call ' +
-      'again with user_approved: true and their answer in the note: stage "review" for another round, status "done" to accept it; ' +
-      'for them to take it over, leave it blocked.';
-    if (stage === 'review' && task.stage !== 'review' && (task.round ?? 0) >= settings.maxRounds && !takenUpAgain && !approved) {
-      gate(
-        roundLimit(''),
-        `this is review round ${(task.round ?? 0) + 1}, past the ${settings.maxRounds} the user set: say in the task's note why another round is worth it`,
-      );
-    }
-
-    // The required checks failing as it is closed: the checks the user set
-    // for it (#54) count — one they skipped does not, nor an optional one.
-    const set = effectiveChecks(before, task);
-    const optional = new Set([
-      ...HOOK_STAGES.flatMap((st) => project.hooks[st].filter((h) => h.optional).map((h) => h.name)),
-      ...set.add.filter((c) => c.optional).map((c) => c.name),
-      ...set.skip,
-    ]);
-    const latest = mergeChecks(task.checks, checks ?? []);
-    const failing = status === 'done' ? latest.filter((c) => !c.ok && !optional.has(c.name)) : [];
-
-    if (status === 'done' && !approved) {
-      // Done means the cycle ran: it went to review at least once, …
-      if (!task.round) {
-        gate(
-          `"${task.title}" has not been reviewed: take it through its cycle first — stage "review" (every review mode, ` +
-            '"skip" included, reports one), then done once it passes.',
-          'it was never reviewed (no review round was reported)',
-        );
-      }
-      // … and every check that gates it passed when it was last run.
-      // The checks the user set for it (#54): one they skipped neither holds
-      // it back nor is waited on; one they added does both, unless optional.
-      // Targeted: the checks for what the task's change touched — none for
-      // an area it did not touch, however it was planned. Outside git, the
-      // checks for the files it planned to touch, as before. Where git
-      // could not read the change, or it is too large to list, every review
-      // check: an unread change is never taken for one that touched nothing.
-      const unread = changed?.unread;
-      const missingHooks = (
-        unread
-          ? taskHooks(project, 'review', undefined, set)
-          : changed
-            ? taskHooks(project, 'review', changed.files, set, { changed: true })
-            : taskHooks(project, 'review', task.files, set)
-      ).filter((h) => !h.optional && !latest.some((c) => c.name === h.name));
-      const missing = missingHooks.map((h) => {
-        const touched = changed && hookScope(h) ? filesInScope(h, changed.files) : [];
-        return touched.length ? `${h.name} (for ${touched.slice(0, 3).join(', ')}${touched.length > 3 ? ', …' : ''})` : h.name;
-      });
-      // With the task's skips, so it runs exactly what the gate waits on.
-      const rerun = missing.length && task.startCommit ? ` — \`${COPLAN_BIN ? `"${COPLAN_BIN}"` : 'coplan'} check review --since ${task.startCommit.slice(0, 12)}${skipArg(set)}\` runs exactly these, where it is built` : '';
-      if (failing.length || missing.length) {
-        const why = [
-          failing.length ? `its last checks failed (${failing.map((c) => `${c.name}${c.note ? `: ${c.note}` : ''}`).join('; ')})` : '',
-          missing.length
-            ? unread && changed
-              ? `what it changed cannot be told — ${unreadWords(changed)} — so every review check applies, and ${missing.join(', ')} ${missing.length === 1 ? 'was' : 'were'} never reported`
-              : `the review checks ${missing.join(', ')} were never reported${rerun}`
-            : '',
-        ].filter(Boolean);
-        gate(
-          `"${task.title}" is not done: ` +
-            why.join(', and ') +
-            '. Run them, refine until they pass, and report them with `checks`. If a failure has nothing to do with this ' +
-            'task, mark it blocked with a note saying so and ask the user; if they accept it as it is, call again with ' +
-            'user_approved: true and their answer in the note.',
-          why.join('; '),
-        );
-      }
-      // … and its last review round passed — by whoever the user said reviews it.
-      const mode = effectiveReview(before, task, settings.review);
-      if (mode !== 'skip') {
-        // The verdict in this call, if any, is the round's latest — and only
-        // counts for a task the user reviews when it is theirs, which on
-        // this path (not user_approved) it is not.
-        const last = verdict ? (mode === 'user' ? roundVerdict(task, mode) : { verdict }) : roundVerdict(task, mode);
-        const passed = last?.verdict === 'pass';
-        // Without a round there is no verdict to miss: that note is above.
-        // Not in review, its rounds used, and no new one its own: another
-        // round, or done as it is, is the user's to allow in a Managed build;
-        // in a Tracked one the agent has decided, and says why (the note).
-        if (!passed && task.round && task.stage !== 'review' && task.round >= settings.maxRounds && !takenUpAgain) {
-          gate(
-            roundLimit('is not in review, and '),
-            `marked done out of review after ${task.round} review round(s), the most the user set: say in the task's note why it is right as it is`,
-          );
-        } else if (!passed && task.round && task.stage !== 'review') {
-          // Not in review: the verdict is given in a review round, so that is
-          // where to go (a finished task taken up again lost its pass).
-          const why = task.reopened ? ': its last pass went when it was taken up again' : '';
-          gate(
-            mode === 'user'
-              ? `"${task.title}" is not in review${why}. Report stage "review" (a new round): the user's verdict is given there, ` +
-                  'on the board in Coplan, or in chat (then call again with verdict "pass", user_approved: true and their words in the note).'
-              : `"${task.title}" is not in review${why}. Report stage "review" (a new round) and give its verdict there.`,
-            `not in review${why}: report stage "review" for a new round`,
-          );
-        } else if (!passed && task.round) {
-          gate(
-            mode === 'user'
-              ? `"${task.title}" is the user's to review, and they have not passed it: show them the change and ask with ` +
-                  `${agentInfo(session.agent).askWith}. They can approve it on the board in Coplan; if they approve it in chat, call ` +
-                  'again with verdict "pass", user_approved: true and their words in the note.'
-              : `"${task.title}" has no passing verdict for review round ${task.round}: report the review's outcome — ` +
-                  'verdict "pass" (with this call is fine), or "changes" and refine.',
-            mode === 'user'
-              ? "it is the user's to review, and they have not passed it: show them the change"
-              : `no passing verdict for review round ${task.round}`,
-          );
-        }
-      }
-    }
-
     const readyBefore = new Set(readyTasks(before).map((t) => t.id));
     const progress: PlanOp = {
       op: 'upsert_task',
@@ -1621,28 +1280,27 @@ function buildRouter(deps: Deps): Router {
       ...(stage ? { stage: stage as NonNullable<ReturnType<typeof validStage>> } : {}),
       ...(checks ? { checks } : {}),
       ...(git.startCommit ? { startCommit: git.startCommit } : {}),
-      ...(dispatch ? { dispatch } : {}),
-      // Done over failing checks (accepted by the user, or the agent's call
-      // outside a Managed build) is not a round that passed (D4).
-      ...(failing.length ? { acceptedFailing: true } : {}),
       ...(note !== undefined ? { note: approved ? `${note} (approved by the user)` : note } : {}),
     };
     const review: PlanOp[] = verdict
       ? [{ op: 'review_task', id: taskId, verdict, ...(summary ? { summary } : {}), ...(approved ? { userApproved: true } : {}) }]
       : [];
-    // The verdict belongs to the review the task is in: given with a move
-    // into review, after it; otherwise before the rest (done ends the review).
-    const { plan, changes } = store.applyOps(session.sessionId, stage ? [progress, ...review] : [...review, progress], 'claude', {
-      tracking: true,
-      // Judged by the same review mode as the gates above.
-      review: settings.review,
-    });
+    // The verdict belongs to the review the task is in: after a move into
+    // review, before anything that takes it out (another stage, done).
+    const { stage: _, ...rest } = progress;
+    const ops: PlanOp[] = !review.length ? [progress] : stage === 'review' ? [{ op: 'upsert_task', id: taskId, stage: 'review' }, ...review, rest] : [...review, progress];
+    let applied: ReturnType<typeof store.applyOps>;
+    try {
+      applied = store.applyOps(session.sessionId, ops, 'claude', { tracking: true, review: projectFor(session).review });
+    } catch (err) {
+      if (err instanceof PlanError) throw new PlanError(err.message.replace(/^Edit \d+ \([^)]*\): /, ''));
+      throw err;
+    }
+    const { plan, changes } = applied;
     const now = plan.tasks.find((t) => t.id === taskId)!;
     const out: string[] = [];
     const state = now.status === 'in_progress' && now.stage ? stageWords(now) : now.status.replace('_', ' ');
-    out.push(`[cc-harness] "${now.title}" is ${state}.${changes.length || dispatch ? '' : ' (It already was.)'}`);
-    if (runnerNote) out.push(runnerNote);
-    if (skipped.length) out.push(`Noted, not refused (this build is ${MODE_LABEL[planMode(plan, project.mode)]}): ${skipped.join('; ')}.`);
+    out.push(`[cc-harness] "${now.title}" is ${state}.${changes.length ? '' : ' (It already was.)'}`);
     // Its checks are targeted to its change from here: say how to run them.
     if (starting && now.startCommit) {
       out.push(
@@ -1660,17 +1318,9 @@ function buildRouter(deps: Deps): Router {
       const failed = checks.filter((c) => !c.ok);
       out.push(
         failed.length
-          ? `Checks: ${failed.length} failed (${failed.map((c) => c.name).join(', ')})${managed ? ' — refine before review passes' : ''}.`
+          ? `Checks: ${failed.length} failed (${failed.map((c) => c.name).join(', ')}).`
           : `Checks: all ${checks.length} passed.`,
       );
-    }
-    if (managed && now.stage === 'review' && stage === 'review') {
-      if ((now.round ?? 0) >= settings.maxRounds) {
-        out.push(`This is review round ${now.round} of the ${settings.maxRounds} the user allowed: if it does not pass, another round is theirs to allow.`);
-      }
-      if (effectiveReview(plan, now, settings.review) === 'user') {
-        out.push(`This task's review is the user's: show them the change and ask with ${agentInfo(session.agent).askWith} before marking it done.`);
-      }
     }
     // The tasks that wait on this one: what dropping or reopening it means
     // for them is worth saying out loud.
@@ -1759,27 +1409,11 @@ function buildRouter(deps: Deps): Router {
             : 'The plan is already submitted: build it — harness_task_next says what is ready.',
         );
       }
-      // The way the user last chose in the Submit dialog; else the
-      // repository's default. "Build it" in chat builds it in this session,
-      // so a last choice of Export falls back to that default too.
-      const last = lastChoice(session);
-      const mode = modeFor('session', last?.mode, project.mode);
-      const chosen = last?.mode === mode;
-      const settings = (chosen && last?.settings) || project.settings;
-      store.submit(id, {
-        target: 'session',
-        project,
-        settings,
-        agent: session.agent,
-        userSaid: said,
-        ...(chosen ? { mode } : {}),
-        ...bin,
-      });
-      log(`plan submitted from chat for ${id} (${mode})`);
+      store.submit(id, { project, agent: session.agent, userSaid: said, ...bin });
+      log(`plan submitted from chat for ${id}`);
       lead =
-        `[cc-harness] Submitted the plan from chat, on the user's word ("${quote}"): ${MODE_LABEL[mode]}` +
-        `${chosen ? ', as they last chose in Coplan' : ", this repository's default"}. It is locked now, as a submit in ` +
-        "Coplan locks it, and the page says it was submitted in chat. Build it now, as the prompt below says — it is the one Coplan's Submit would have sent:";
+        `[cc-harness] Submitted the plan from chat, on the user's word ("${quote}"). It is locked now, as a submit in ` +
+        "Coplan locks it, and the page says it was submitted in chat. Build it now, as the handoff below says — it is the one Coplan's Submit would have sent:";
     }
     const handed = store.deliver(id);
     const later = store.get(id)?.plan;
@@ -1787,19 +1421,6 @@ function buildRouter(deps: Deps): Router {
     const notice = later ? unreadNotice(later) : null;
     revealUi(session);
     return [lead, prompt, notice ?? ''].filter(Boolean).join('\n\n');
-  };
-
-  /** What harness_branch_update says once a pull request is watched: how the agent hears of it. */
-  const watchWords = (session: SessionState, branch: string): string => {
-    if (!prs.watched().some((w) => w.session.sessionId === session.sessionId && w.branch === branch)) return '';
-    const { wake } = projectFor(session).pullRequests.watch;
-    const how =
-      session.surface === 'cloud'
-        ? 'This session runs in the cloud, where Coplan cannot read it: subscribe to the pull request\'s activity, and pass each event to harness_pr_event {branch, kind, author, association, body, url}.'
-        : wake === 'wait' && agentInfo(session.agent).promptContext && session.agent === 'claude'
-          ? `Start \`${COPLAN_BIN ? `"${COPLAN_BIN}"` : 'coplan'} pr wait\` as a background command now, once for the session: it ends with what needs doing when one of its pull requests changes. Handle that, then start it again.`
-          : 'What needs doing when it changes comes with the user\'s next message; harness_pr_events hands it over sooner.';
-    return `\n\nCoplan watches it now: failing CI, reviews and comments come back to you as work, until it merges. ${how}`;
   };
 
   router.post('/mcp/:tool', async (ctx) => {
@@ -1908,8 +1529,6 @@ function buildRouter(deps: Deps): Router {
           const ops = Array.isArray(body['ops']) ? (body['ops'] as PlanOp[]) : [];
           // All or nothing: a batch that cannot be applied whole is refused.
           if (ops.length > MAX_OPS) throw new PlanError(`At most ${MAX_OPS} edits per call; split the change.`);
-          const project = projectFor(session);
-          for (const op of ops) if (op && op.op === 'report') refuseUnfinishedFinal(op.checks, project);
           const { plan, changes } = store.applyOps(id, ops, 'claude');
           const notice = unreadNotice(plan);
           reply(
@@ -1999,41 +1618,14 @@ function buildRouter(deps: Deps): Router {
             { tracking: true },
           );
           const stack = stackStatus(plan, projectFor(session).branches.base);
-          const now = stack.find((s) => s.branch === String(body['branch']));
+          const named = String(body['branch']);
+          const now = stack.find((s) => s.branch === named) ?? (plan.branches?.[named] ? { branch: named, state: plan.branches[named] } : undefined);
           const restacks = stack.filter((s) => s.restack).map((s) => `- ${s.restack}`);
           reply(
             true,
             `[cc-harness] Recorded \`${now?.branch ?? body['branch']}\`${now?.state?.pr ? `: pull request${now.state.pr.number ? ` #${now.state.pr.number}` : ''} ${now.state.pr.state}` : ''}${now?.state?.base ? `, onto \`${now.state.base}\`` : ''}.` +
-              (restacks.length ? `\n\nThe stack moved:\n${restacks.join('\n')}` : '') +
-              watchWords(session, String(body['branch'] ?? '')),
+              (restacks.length ? `\n\nThe stack moved:\n${restacks.join('\n')}` : ''),
           );
-          return;
-        }
-
-        case 'pr_events': {
-          const waiting = prs.take(id);
-          if (waiting) {
-            reply(true, waiting);
-            return;
-          }
-          const watched = prs.watched().filter((w) => w.session.sessionId === id);
-          reply(true, `[cc-harness] Nothing about your pull requests is waiting.${watched.length ? ` Watching: ${watched.map((w) => `#${w.ref.number} (\`${w.branch}\`)`).join(', ')}.` : ' No pull request is watched.'}`);
-          return;
-        }
-
-        case 'pr_event': {
-          const branch = String(body['branch'] ?? '');
-          const str = (k: string) => (typeof body[k] === 'string' && body[k] ? { [k]: String(body[k]).slice(0, MAX_BODY) } : {});
-          prs.report(id, branch, {
-            kind: String(body['kind'] ?? ''),
-            ...str('author'),
-            ...str('association'),
-            ...str('body'),
-            ...str('url'),
-            ...str('path'),
-            ...(typeof body['line'] === 'number' ? { line: body['line'] } : {}),
-          });
-          reply(true, prs.take(id) ?? `[cc-harness] Recorded on \`${branch}\`. Nothing for you to do about it.`);
           return;
         }
 
@@ -2057,8 +1649,7 @@ function buildRouter(deps: Deps): Router {
             reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
             return;
           }
-          const waiting = session.prInbox?.length ? `\n\nYour pull requests need you (${session.prInbox.length} waiting): call harness_pr_events for the work.` : '';
-          reply(true, renderNext(session.plan, { agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) }) + waiting);
+          reply(true, renderNext(session.plan, { agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) }));
           return;
         }
 
@@ -2090,62 +1681,21 @@ function buildRouter(deps: Deps): Router {
 }
 
 /**
- * Where the repository says the final checks hold the report
- * (`final.blocking`), a report must carry each required one, passing: the
- * plan is not built while the checks that say so fail.
- */
-function refuseUnfinishedFinal(checks: unknown, project: ProjectConfig): void {
-  if (!project.final.blocking) return;
-  const required = project.hooks.final.filter((h) => !h.optional).map((h) => h.name);
-  if (!required.length) return;
-  const reported = new Map(
-    (Array.isArray(checks) ? checks : [])
-      .filter((c): c is { name: string; ok: unknown } => Boolean(c) && typeof (c as { name?: unknown }).name === 'string')
-      .map((c) => [c.name, c.ok === true]),
-  );
-  const missing = required.filter((n) => !reported.has(n));
-  const failing = required.filter((n) => reported.get(n) === false);
-  if (!missing.length && !failing.length) return;
-  throw new PlanError(
-    'This repository holds the build report until its final checks pass (final.blocking in .coplan/config.json). ' +
-      [failing.length ? `Failing: ${failing.join(', ')}.` : '', missing.length ? `Not reported in \`checks\`: ${missing.join(', ')}.` : ''].filter(Boolean).join(' ') +
-      ' Fix what fails and run them again; if a failure is not this build\'s to fix, tell the user why in chat.',
-  );
-}
-
-/**
  * Exit once nothing is using the daemon: no browser open, and neither it
  * nor a session started or active recently (isIdle). The next hook starts
  * a fresh one. The setting is read each minute, so changing
  * `idleShutdownMinutes` needs no restart.
  */
-function startIdleWatch(store: SessionStore, config: ConfigCache, clients: { count: number }, stop: () => void, watching: () => number): void {
+function startIdleWatch(store: SessionStore, config: ConfigCache, clients: { count: number }, stop: () => void): void {
   const startedAt = Date.now();
   const timer = setInterval(() => {
     const minutes = config.get().idleShutdownMinutes;
     if (!minutes || minutes <= 0) return;
-    if (!isIdle(Date.now(), { startedAt, clients: clients.count, sessions: () => store.all(), watching }, minutes * 60_000)) return;
-    log(`nothing has used it for ${minutes}m (no page open, no session active, no pull request watched); exiting`);
+    if (!isIdle(Date.now(), { startedAt, clients: clients.count, sessions: () => store.all() }, minutes * 60_000)) return;
+    log(`nothing has used it for ${minutes}m (no page open, no session active); exiting`);
     stop();
   }, 60_000);
   timer.unref?.();
-}
-
-/** The longest one `coplan pr wait` request is held open; the CLI asks again. */
-const PR_WAIT_MS = 10 * 60_000;
-
-/** How often due pull requests are looked for; each has its own interval (prWatch.ts). */
-const PR_TICK_MS = 15_000;
-
-/** Polls the pull requests builds recorded, with a config cache of its own. */
-function startPrWatch(store: SessionStore): { watcher: PrWatcher; stop(): void } {
-  const projects = new ProjectConfigs(MAX_PROJECT_CONFIGS);
-  projects.logError = log;
-  const watcher = new PrWatcher({ store, project: (root) => projects.at(root), log });
-  const tick = () => void watcher.tick().catch((err: unknown) => log(`pull request watch failed: ${(err as Error)?.message}`));
-  const timer = setInterval(tick, PR_TICK_MS);
-  timer.unref?.();
-  return { watcher, stop: () => clearInterval(timer) };
 }
 
 /**

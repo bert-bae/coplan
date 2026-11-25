@@ -15,7 +15,6 @@
  */
 
 import type { AgentKind } from './agents.ts';
-import type { PrCursor, QueuedEvent } from './prEvents.ts';
 
 /** Who made a change. The plan is co-authored, and the change log is how each
  *  side finds out what the other did. */
@@ -146,15 +145,15 @@ export const TASK_STATUSES = ['todo', 'in_progress', 'blocked', 'done', 'dropped
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 /**
- * Who reviews a task in its implement → review → refine cycle (iric):
+ * The review a task asks the harness for, passed on in its brief. Coplan
+ * runs no review and gates nothing on it.
  *
- * - `subagent` — a fresh agent that did not write the change reads it, runs
- *   the review checks and says what to refine.
- * - `self` — the agent that built it reviews its own diff and runs the checks.
- * - `user` — Claude stops and asks the user to look before it is done.
- * - `skip` — no review beyond the checks: for trivial, mechanical work.
+ * - `agent` — an agent that did not write the change reviews it, where the
+ *   harness has one.
+ * - `user` — the harness stops and asks the user to look before it is done.
+ * - `none` — the checks are the review: for trivial, mechanical work.
  */
-export const REVIEW_MODES = ['subagent', 'self', 'user', 'skip'] as const;
+export const REVIEW_MODES = ['agent', 'user', 'none'] as const;
 export type ReviewMode = (typeof REVIEW_MODES)[number];
 
 /** A review's outcome: it passed, or it asked for changes. */
@@ -166,7 +165,7 @@ export interface ReviewRecord {
   verdict: Verdict;
   /** The user (in Coplan, or as the agent reports with their words), or the agent. */
   by: Author;
-  /** The review mode in force when it was given. */
+  /** The review requested when it was given. */
   mode: ReviewMode;
   /** One line: what the review found. */
   summary?: string;
@@ -214,13 +213,8 @@ export interface Task {
   /** The git branch this task's work lands on. Subtasks inherit it. A task
    *  whose dependencies are on another branch stacks on that branch. */
   branch?: string;
-  /** How this task is reviewed, when not the build's default. Inherited. */
+  /** The review this task asks for, when not the repository's default. Inherited. */
   review?: ReviewMode;
-  /** The runner (config `runners`) it must be built on: an explicit request,
-   *  over the parent's own pick. Inherited. */
-  runner?: string;
-  /** Where it is being built, as the parent session recorded it. */
-  dispatch?: Dispatch;
   /** Where the task is in its implement → review → refine cycle, while it is
    *  in progress. */
   stage?: IricStage;
@@ -248,14 +242,6 @@ export interface Task {
    *  verdicts go, as they do when it leaves done; set done again (the drop
    *  undone), they stay. */
   wasDone?: boolean;
-  /** Finished, and taken up again: its round's verdicts went, so its next
-   *  review round is not held to the round limit (that round never failed). */
-  reopened?: boolean;
-  /** Finished over required checks that still failed: the work accepted as
-   *  it was (by the user, or the agent's call outside a Managed build), not
-   *  a round that passed. Taken up again, its next review round is held to
-   *  the round limit (D4). Kept while it stays finished. */
-  acceptedFailing?: boolean;
   /** Checks of its own, on top of the repository's (#54): required unless
    *  `optional`. The user's to set (`set_checks`), or an accepted proposal's.
    *  Subtasks inherit them. */
@@ -266,20 +252,6 @@ export interface Task {
   createdAt: number;
   updatedAt: number;
   createdBy: Author;
-}
-
-/** Large tasks count against a runner's `maxLarge` as well as its `max`. */
-export const TASK_SIZES = ['small', 'large'] as const;
-export type TaskSize = (typeof TASK_SIZES)[number];
-export const RUNNER_NAME = /^[A-Za-z0-9._-]{1,40}$/;
-
-/** A task handed to a session on one of the user's runners. */
-export interface Dispatch {
-  runner: string;
-  /** How the parent reaches it: a subagent or session id, a pid, an ssh job. */
-  session?: string;
-  size: TaskSize;
-  at: number;
 }
 
 /** The stages a task's own check can run at: the final checks are the
@@ -363,45 +335,14 @@ export interface Change {
 /**
  * Who builds a submitted plan.
  *
- * - `session` — the Claude session the plan belongs to. The harness hands it
- *   the prompt with the user's next message in its chat, and follows its
- *   progress on the task board as it reports each task.
- * - `elsewhere` — the user took the prompt to run somewhere the harness
- *   cannot see. The plan is locked all the same, but nothing reports back.
+ * - `session` — the session the plan belongs to. Coplan hands it the handoff
+ *   prompt with the user's next message in its chat, and follows its progress
+ *   on the task board as the harness reports each task.
+ * - `elsewhere` — a plan submitted as an Export before 0.4: locked, and
+ *   nothing reports back. Submitting no longer makes one; old plans load.
  */
 export const BUILD_TARGETS = ['session', 'elsewhere'] as const;
 export type BuildTarget = (typeof BUILD_TARGETS)[number];
-
-/**
- * How much of the build harness a plan takes, chosen when it is submitted;
- * the repository's default is `mode` in `.coplan/config.json` (Managed
- * when it sets `iric`, else Tracked).
- *
- * - `export` — the user copies the plan out as Markdown, to build anywhere.
- *   Nothing is asked of an agent: no board, no gates. Submitting it locks
- *   a snapshot (the `elsewhere` target); exporting needs no sign-off.
- * - `tracked` — this session builds it its own way and reports each task.
- *   The board follows; what Managed would refuse comes back as a note.
- * - `managed` — each task goes implement → review → refine with the
- *   repository's checks, and the daemon holds a task back until it passes.
- */
-export const EXECUTION_MODES = ['export', 'tracked', 'managed'] as const;
-export type ExecutionMode = (typeof EXECUTION_MODES)[number];
-
-/**
- * How the build runs, chosen by the user when they submit — the control they
- * keep over each task's implement → review → refine cycle. Defaults come from
- * the repository's `.coplan/config.json`.
- */
-export interface BuildSettings {
-  /** Who reviews a task that does not say otherwise. */
-  review: ReviewMode;
-  /** How many ready tasks may be built at once, each by its own subagent.
-   *  1 builds one task at a time. */
-  parallel: number;
-  /** Review rounds a task may take before Claude stops and asks the user. */
-  maxRounds: number;
-}
 
 /**
  * The user's sign-off on the plan. From then on the design is final: the
@@ -421,12 +362,6 @@ export interface Submission {
   /** The plan was too long to quote whole in a prompt; it points Claude at
    *  `harness_plan_read` for the rest. */
   trimmed?: boolean;
-  /** How much of the harness the build takes. Absent on plans submitted
-   *  before modes existed: those were Managed (or, built elsewhere, Export). */
-  mode?: ExecutionMode;
-  /** How the build runs: a Managed build's review, parallel and round
-   *  settings. Absent on plans submitted before it existed. */
-  settings?: BuildSettings;
   /** The repository's base branch when it was submitted, if it says. */
   base?: string;
   /** Given in the agent's chat rather than in Coplan: the user told the
@@ -434,6 +369,8 @@ export interface Submission {
   via?: SignoffVia;
   /** What the user said in chat, as the agent quoted it. */
   userSaid?: string;
+  /** Submitted by 0.3 and not handed over yet: its prompt is rebuilt when it is. */
+  stalePrompt?: true;
   /** When the prompt reached Claude. Null until the user's next message in
    *  Claude's chat carries it — and always null for `elsewhere`. */
   deliveredAt: number | null;
@@ -445,18 +382,6 @@ export interface Submission {
  * `harness_plan_advance`, quoting them (#65).
  */
 export type SignoffVia = 'chat';
-
-/**
- * How the user last chose to have the plan built, in the Submit dialog —
- * kept on the session, so a go-ahead in chat builds it the way they last
- * chose, and the dialog opens on it.
- */
-export interface BuildChoice {
-  mode: ExecutionMode;
-  /** A Managed build's settings, when the user set them. */
-  settings?: BuildSettings;
-  at: number;
-}
 
 /**
  * The user's sign-off on the design — the architecture, the sections and the
@@ -520,8 +445,8 @@ export type PlanPhase = (typeof PLAN_PHASES)[number];
  * - `planning` — `planning`, `tasking`: the design and the task list.
  * - `in_progress` — `submitted`, `building`: handed over, being built.
  * - `review` — `finalizing`, `landing` (the report is in, its pull requests
- *   still open), and a Managed build with a task waiting on the
- *   user's own review: what was built waits on the user.
+ *   still open), and a build with a task waiting on the user's own
+ *   review: what was built waits on the user.
  * - `done` — `built`, `handed-off`.
  */
 export const PLAN_STATUSES = ['planning', 'in_progress', 'review', 'done'] as const;
@@ -623,7 +548,6 @@ export interface TaskInput {
   dependsOn?: string[];
   branch?: string;
   review?: ReviewMode;
-  runner?: string;
   /** Boxes this task builds: a node id, or `diagramId/nodeId` when the id
    *  is used in more than one diagram. Adds the task to each box. */
   builds?: string[];
@@ -694,18 +618,11 @@ export type PlanOp =
       branch?: string;
       /** `""` clears it, so the task inherits its parent's or the default. */
       review?: ReviewMode | '';
-      /** `""` clears it, so the task inherits its parent's. */
-      runner?: string;
-      /** Progress, set by harness_task_update: where it is being built. */
-      dispatch?: Dispatch;
       stage?: IricStage;
       checks?: CheckResult[];
       /** The commit the task's work began at, as the daemon read it when the
        *  task started: progress, never set by hand. */
       startCommit?: string;
-      /** With status done: closed over required checks that failed, as the
-       *  daemon judged them (Task.acceptedFailing). Progress, never set by hand. */
-      acceptedFailing?: boolean;
       /** The boxes this task builds now: replaces its links; [] unlinks it. */
       builds?: string[];
       /** The task's `rev` the edit was made against. Refused if the other
@@ -898,8 +815,6 @@ export interface SessionState {
    *  the skill loaded, or one of its tools called. Every session with the
    *  plugin registers, but only these are the user's plans. */
   engagedAt?: number;
-  /** How the user last chose to have a plan built here (the Submit dialog). */
-  buildChoice?: BuildChoice;
   /** Planned where no browser can reach the page — a cloud agent, a
    *  virtual machine (`/coplan --headless`). The page is never opened: the
    *  plan is kept as Markdown, with its diagrams as Mermaid graphs, in the
@@ -911,32 +826,6 @@ export interface SessionState {
    *  trusted again). Absent on sessions saved before it was recorded. */
   hookedAt?: number | null;
   plan: Plan | null;
-  /** Following the pull requests the plan recorded, by branch (prWatch.ts). */
-  prWatch?: Record<string, PrWatchState>;
-  /** Prompts about pull requests waiting to reach the agent, oldest first:
-   *  taken by `coplan pr wait`, harness_pr_events or the next message. */
-  prInbox?: string[];
-}
-
-/** One watched pull request: where the last poll left off, and what it found. */
-export interface PrWatchState {
-  pr: number;
-  /** When watching it began. */
-  since: number;
-  cursor?: PrCursor;
-  /** Events waiting to be dispatched, oldest first; bounded. */
-  queue: QueuedEvent[];
-  checkedAt?: number;
-  lastEventAt?: number;
-  /** The last poll's failure, and how many in a row, while polls fail. */
-  error?: string;
-  failures?: number;
-  /** Fix rounds spent on it (`watch.maxFixRounds`). */
-  fixRounds?: number;
-  /** What each batch came to, newest last; bounded. */
-  timeline?: { at: number; note: string }[];
-  /** Watching stopped by hand (`coplan pr unwatch`). */
-  stopped?: boolean;
 }
 
 export interface TaskCounts {
@@ -965,7 +854,7 @@ export interface SessionSummary {
   phase: PlanPhase;
   /** The status the session list shows and filters on (see `planStatus`). */
   planStatus: PlanStatus;
-  /** Tasks a Managed build holds for the user's own review. */
+  /** Tasks in review waiting on the user's own verdict. */
   awaitingReview: number;
   /** The task Claude is on, for the rail. */
   current: string | null;

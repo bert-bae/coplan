@@ -708,7 +708,7 @@ test('once the design is confirmed, tasks are still added from a box; once submi
   await waitFor(() => assert.equal(chipOf('Redis')?.getAttribute('aria-label'), 'Tasks for Redis: 0 of 1 done'));
 
   cleanup();
-  const locked = submitPlan(confirmDesign(taskedPlan(), { prompt: 'THE DESIGN' }), { target: 'session', prompt: 'THE PROMPT' });
+  const locked = submitPlan(confirmDesign(taskedPlan(), { prompt: 'THE DESIGN' }), { prompt: 'THE PROMPT' });
   await boot(makeSession(locked));
   assert.equal(chipOf('API')?.textContent, '☐0/1', 'counted during the build too');
   list = await openTasks('API');

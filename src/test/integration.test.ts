@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -11,6 +11,7 @@ import { readLiveLock, baseUrl, paths } from '../shared/paths.ts';
 import type { DaemonLock, SessionState } from '../shared/types.ts';
 import type { HookOutput } from '../shared/hooks.ts';
 import { asksForCoplan } from '../daemon/hookIngest.ts';
+import { isWsl } from '../daemon/browser.ts';
 import { blocksText, joinBlocks, type Block, type ConfigRow } from '../shared/blocks.ts';
 
 /**
@@ -46,9 +47,6 @@ before(async () => {
   git(['checkout', '-qb', 'feature/change']);
 
   writeFileSync(path.join(home, 'config.json'), JSON.stringify({ idleShutdownMinutes: 0 }));
-  // The lifecycle tests below hold a Managed build to its gates (#62): the
-  // user's own default, under every repository these tests write a config for.
-  writeFileSync(path.join(home, 'coplan.json'), JSON.stringify({ mode: 'managed' }));
 
   daemon = spawn(process.execPath, [DAEMON], {
     env: { ...process.env, CC_HARNESS_HOME: home },
@@ -317,13 +315,11 @@ test('the session environment decides the link back to Claude', async () => {
 
 test('task tracking moves statuses and reports them', async () => {
   await ops([{ op: 'upsert_task', title: 'Profile it' }]);
-  // Done means the cycle ran: straight from todo, it is refused.
-  const unreviewed = await mcp('task', { task_id: 't2', status: 'done', note: 'client added' });
-  assert.equal(unreviewed['ok'], false);
-  assert.match(String(unreviewed['text']), /has not been reviewed/);
-  await mcp('task', { task_id: 't2', stage: 'review' });
-  const res = await mcp('task', { task_id: 't2', status: 'done', verdict: 'pass', note: 'client added' });
+  // Recorded as reported: done straight from todo, never reviewed, is accepted.
+  const res = await mcp('task', { task_id: 't2', status: 'done', note: 'client added' });
+  assert.equal(res['ok'], true);
   assert.match(String(res['text']), /"Client" is done/);
+  assert.doesNotMatch(String(res['text']), /refused|reviewed/);
   // Where the user changed things, not how many saves it took.
   assert.match(String(res['text']), /The user has changed tasks since you last read the plan/);
   assert.doesNotMatch(String(res['text']), /time\(s\)/);
@@ -351,9 +347,9 @@ test('a peek shows the plan and leaves the user\'s changes unread for the real r
   assert.match(real, /renamed from "Client"/, 'the real read still reports the change');
 });
 
-test('the plan text endpoint shows exactly what Claude reads, without counting as a read', async () => {
+test('the read-back endpoint shows what Claude reads, without counting as a read', async () => {
   await ops([{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'peek' }]);
-  const res = await call<{ status: number; text: string }>(`/api/session/${sessionId}/plan/text`);
+  const res = await call<{ text: string }>(`/api/session/${sessionId}/plan/readback`);
   assert.match(res.text, /# Add a cache/);
   const s = await session();
   assert.ok(s.plan!.claudeReadSeq < s.plan!.seq, 'Claude still has the comment to read');
@@ -467,6 +463,32 @@ test('the live stream opens on a single-use ticket', async () => {
   assert.equal(await open(ticket), 200);
   assert.equal(await open(ticket), 401, 'spent');
   assert.equal(await open('made-up'), 401);
+});
+
+// Only where xdg-open is the opener: elsewhere this would open a real window.
+test('`coplan open` prints no token, and opens the browser on a login ticket good once', { skip: process.platform !== 'linux' || isWsl() }, async () => {
+  const bin = mkdtempSync(path.join(tmpdir(), 'coplan-opener-'));
+  const said = path.join(bin, 'said');
+  writeFileSync(path.join(bin, 'xdg-open'), `#!/bin/sh\nprintf '%s' "$*" > "${said}"\n`, { mode: 0o755 });
+  try {
+    const cli = path.resolve(path.dirname(DAEMON), '..', 'cli', 'main.js');
+    const out = execFileSync(process.execPath, [cli, 'open', 's-open'], { env: { ...process.env, CC_HARNESS_HOME: home, PATH: `${bin}:${process.env['PATH'] ?? ''}` }, encoding: 'utf8' });
+    assert.ok(!out.includes(lock.token), out);
+    assert.match(out, new RegExp(`^${baseUrl(lock)}/#/session/s-open .*coplan url`));
+    for (let i = 0; i < 50 && !(existsSync(said) && readFileSync(said, 'utf8')); i++) await sleep(100);
+    const opened = readFileSync(said, 'utf8');
+    assert.ok(!opened.includes(lock.token), 'not on the command line either');
+    const ticket = /^http:\/\/127\.0\.0\.1:\d+\/\?login=([0-9a-f]+)#\/session\/s-open$/.exec(opened)?.[1];
+    assert.ok(ticket, opened);
+    const login = (t: string) => fetch(`${baseUrl(lock)}/api/login?ticket=${t}`, { method: 'POST' });
+    const res = await login(ticket);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { token: lock.token });
+    assert.equal((await login(ticket)).status, 401, 'spent');
+    assert.equal((await login('made-up')).status, 401);
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
+  }
 });
 
 test('a foreign Host, a path out of the UI folder and a clean with no groups are all refused', async () => {
@@ -669,16 +691,14 @@ test('Claude publishes the task list: linked tasks, the boxes they build, and wh
   await mcpFor(built, 'task', { task_id: 't4', status: 'todo' });
 });
 
-test('a task goes round implement → review → refine, and is not done while its checks fail', async () => {
+test('a task goes round implement → review → refine, each failing check recorded as failing', async () => {
   const start = await mcpFor(built, 'task', { task_id: 't2', stage: 'implement' });
   assert.equal(start['ok'], true, String(start['text']));
   assert.match(String(start['text']), /"Client" is implementing/);
   const review = await mcpFor(built, 'task', { task_id: 't2', stage: 'review', checks: [{ name: 'tests', ok: false, note: '1 failing' }] });
   assert.match(String(review['text']), /in review, round 1/);
   assert.match(String(review['text']), /Checks: 1 failed \(tests\)/);
-  const early = await mcpFor(built, 'task', { task_id: 't2', status: 'done' });
-  assert.equal(early['ok'], false);
-  assert.match(String(early['text']), /not done: its last checks failed \(tests: 1 failing\)/);
+  assert.doesNotMatch(String(review['text']), /refine before review passes/);
   // A malformed report cannot wipe the failure out.
   const sloppy = await mcpFor(built, 'task', { task_id: 't2', status: 'done', checks: [{ name: 'tests', ok: 'false' }] });
   assert.equal(sloppy['ok'], false);
@@ -727,20 +747,17 @@ test('a sign-off the hook did not hand over comes with the next harness_plan_rea
   assert.doesNotMatch(String((await mcpFor(id, 'read', {}))['text']), /^\[cc-harness\] The design is confirmed/);
 });
 
-test('submitting locks the plan with exactly the previewed prompt', async () => {
-  const settings = { review: 'self', parallel: 3, maxRounds: 2 };
-  const preview = await post<Preview & { settings: unknown }>(`/api/session/${built}/plan/prompt`, { target: 'session', note: 'Go.', settings });
-  assert.deepEqual(preview.settings, settings);
-  assert.match(preview.prompt, /Review: self-review/);
+test('submitting locks the plan with exactly the previewed handoff', async () => {
+  const preview = await post<Preview>(`/api/session/${built}/plan/prompt`, { note: 'Go.' });
+  assert.match(preview.prompt, /Review: each task asks for an agent that did not write the change/);
   const res = await post<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${built}/plan/submit`, {
-    target: 'session',
     note: 'Go.',
     expect: preview.version,
-    settings,
   });
   assert.ok(res.plan, res.error);
   assert.equal(res.plan!.submission?.prompt, preview.prompt);
-  assert.deepEqual(res.plan!.submission?.settings, settings);
+  assert.equal(res.plan!.submission?.target, 'session');
+  assert.deepEqual(Object.keys(res.plan!.submission!).filter((k) => k === 'mode' || k === 'settings'), [], 'no build mode, no settings');
   assert.equal(res.plan!.submission?.deliveredAt, null);
 
   const { sessions } = await call<{ sessions: { sessionId: string; phase: string }[] }>('/api/sessions');
@@ -748,7 +765,7 @@ test('submitting locks the plan with exactly the previewed prompt', async () => 
 
   const edit = await opsOn(built, [{ op: 'upsert_task', title: 'sneak in' }]);
   assert.match(edit.error ?? '', /locked/);
-  const again = await post<{ error?: string }>(`/api/session/${built}/plan/submit`, { target: 'session' });
+  const again = await post<{ error?: string }>(`/api/session/${built}/plan/submit`, {});
   assert.match(again.error ?? '', /already been submitted/);
 });
 
@@ -777,7 +794,8 @@ test('while building, Claude tracks tasks but cannot redesign', async () => {
   const discovered = await mcpFor(built, 'edit', { ops: [{ op: 'upsert_task', parentId: 't1', title: 'Handle timeouts' }] });
   assert.equal(discovered['ok'], true, String(discovered['text']));
   const next = String((await mcpFor(built, 'next'))['text']);
-  assert.match(next, /up to 3 at once · review: self · at most 2 review rounds/, 'the settings the user chose');
+  assert.match(next, /review: agent, unless a task asks for another/);
+  assert.doesNotMatch(next, /at once|review rounds?/);
 });
 
 test('finishing the last task finishes the build, and a new plan may follow', async () => {
@@ -801,14 +819,16 @@ test('finishing the last task finishes the build, and a new plan may follow', as
   const finish = String((await mcpFor(built, 'next'))['text']);
   assert.match(finish, /Every task in "Add a cache" is done/);
   assert.match(finish, /Push each branch, in stack order: `cache\/storage` → `cache\/api` \(onto `cache\/storage`\)/);
-  assert.match(finish, /Open the pull requests with `gh pr create`, each against the branch below it .*, once the user says to: ask them first/, 'by default, gh, once the user says');
+  assert.match(finish, /Open the pull requests your own way, each against the branch below it, and record each with harness_branch_update/);
   assert.match(finish, /op: "report"/);
 
   // The pull requests, as they are opened and merged: the stack follows.
   const pr = (body: Record<string, unknown>) => mcpFor(built, 'branch', body);
-  assert.equal((await pr({ branch: 'cache/storage', pr_url: 'https://github.com/o/r/pull/11', pr_number: 11, pr_state: 'open' }))['ok'], true);
+  const opened = await pr({ branch: 'cache/storage', pr_url: 'https://github.com/o/r/pull/11', pr_number: 11, pr_state: 'open' });
+  assert.equal(opened['ok'], true);
+  assert.match(String(opened['text']), /Recorded `cache\/storage`: pull request #11 open/);
+  assert.doesNotMatch(String(opened['text']), /watch/i, 'recorded, not watched');
   await pr({ branch: 'cache/api', pr_url: 'https://github.com/o/r/pull/12', pr_number: 12, pr_state: 'open' });
-  assert.match(String((await pr({ branch: 'nope', pr_state: 'open' }))['text']), /No task lands on `nope`/);
   const merged = String((await pr({ branch: 'cache/storage', pr_state: 'merged' }))['text']);
   assert.match(merged, /`cache\/storage` is merged: rebase `cache\/api` onto the base branch/);
   assert.match(String((await mcpFor(built, 'next'))['text']), /`cache\/api` onto `cache\/storage` \(stacked\): pull request #12 open — https:\/\/github\.com\/o\/r\/pull\/12\n {2}⚠ `cache\/storage` is merged/);
@@ -840,17 +860,17 @@ test('a prompt the user pasted themselves is not delivered a second time', async
   assert.ok((await sessionFor(id)).plan!.submission!.deliveredAt, 'but it is counted as delivered');
 });
 
-test('a plan handed off elsewhere is locked but never delivered here, and can be reopened', async () => {
+test('the plan exports as Markdown in any phase, and a submitted plan can be reopened, its design too', async () => {
   const id = 'elsewhere-session';
   await hookFor(id, 'SessionStart', { start_reason: 'startup' });
   await mcpFor(id, 'publish', PLAN);
+  const exported = await call<{ text: string }>(`/api/session/${id}/plan/export`);
+  assert.match(exported.text, /^# Add a cache/);
+  assert.doesNotMatch(exported.text, /harness_|cc-harness/);
   await post(`/api/session/${id}/plan/design/confirm`);
-  const preview = await post<Preview>(`/api/session/${id}/plan/prompt`, { target: 'elsewhere' });
-  assert.doesNotMatch(preview.prompt, /harness_/);
-  await post(`/api/session/${id}/plan/submit`, { target: 'elsewhere', expect: preview.version });
-  const out = await hookFor(id, 'UserPromptSubmit', { prompt: 'hello' });
-  assert.equal(out.hookSpecificOutput?.additionalContext, undefined);
-  assert.equal((await sessionFor(id)).plan!.submission!.deliveredAt, null);
+  const preview = await post<Preview>(`/api/session/${id}/plan/prompt`, {});
+  await post(`/api/session/${id}/plan/submit`, { expect: preview.version });
+  assert.match((await call<{ text: string }>(`/api/session/${id}/plan/export`)).text, /^# Add a cache/, 'and once it is locked');
 
   const reopened = await post<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${id}/plan/reopen`);
   assert.ok(reopened.plan, reopened.error);
@@ -876,11 +896,11 @@ test("the repository's .coplan/config.json reaches the prompts, the briefs and t
     [
       '{',
       '  // what the build runs',
-      '  "hooks": {',
+      '  "checks": {',
       '    "implement": ["npm run typecheck"],',
       '    "review": [{ "name": "tests", "run": "npm test" }, { "name": "lint", "run": "npm run lint", "optional": true }]',
       '  },',
-      '  "iric": { "review": "self", "parallel": 1, "maxRounds": 2 },',
+      '  "review": "user",',
       '  "branches": { "base": "main" }',
       '}',
     ].join('\n'),
@@ -892,21 +912,22 @@ test("the repository's .coplan/config.json reaches the prompts, the briefs and t
     assert.deepEqual(design.project.checks['review'], ['tests', 'lint']);
     // Read-only in the dialog, with where each is set.
     const row = (key: string) => design.project.config.find((r) => r.key === key);
-    assert.deepEqual(row('hooks.review'), { key: 'hooks.review', label: 'Review checks', value: 'tests, lint', files: ['.coplan/config.json'] });
-    assert.deepEqual(row('iric.review'), { key: 'iric.review', label: 'Review, by default', value: 'self-review', files: ['.coplan/config.json'] });
-    assert.equal(row('hooks.final')?.files.length, 0, 'set nowhere');
+    assert.deepEqual(row('checks.review'), { key: 'checks.review', label: 'Review checks', value: 'tests, lint', files: ['.coplan/config.json'] });
+    assert.deepEqual(row('review'), { key: 'review', label: 'Review, by default', value: 'the user, before it is marked done', files: ['.coplan/config.json'] });
+    assert.equal(row('checks.final')?.files.length, 0, 'set nowhere');
     assert.deepEqual(
       design.blocks.find((b) => b.id === 'checks:review')?.source,
-      { kind: 'config', key: 'hooks.review', files: ['.coplan/config.json'] },
+      { kind: 'config', key: 'checks.review', files: ['.coplan/config.json'] },
     );
     assert.match(design.prompt, /- review: tests `npm test`; lint `npm run lint` \(optional\)/);
-    const build = await post<Preview & { settings: unknown }>(`/api/session/${id}/plan/prompt`, { target: 'session' });
-    assert.deepEqual(build.settings, { review: 'self', parallel: 1, maxRounds: 2 }, "the repository's defaults");
+    const build = await post<Preview & { project: { review: string } }>(`/api/session/${id}/plan/prompt`, {});
+    assert.equal(build.project.review, 'user', "the repository's default review");
+    assert.match(build.prompt, /Review: each task asks for the user, before it is marked done/);
 
     const brief = String((await mcpFor(id, 'brief', { task_id: 't2' }))['text']);
-    assert.match(brief, /- typecheck: `npm run typecheck`/);
-    assert.match(brief, /- tests: `npm test`/);
-    assert.match(brief, /Review: self-review/);
+    assert.match(brief, /- implement: typecheck `npm run typecheck`/);
+    assert.match(brief, /- review: tests `npm test`/);
+    assert.match(brief, /Review requested: the user, before it is marked done/);
 
     // An optional check failing does not hold a task back; a required one does.
     await mcpFor(id, 'task', { task_id: 't2', stage: 'review', checks: [{ name: 'tests', ok: true }, { name: 'lint', ok: false }] });
@@ -917,7 +938,7 @@ test("the repository's .coplan/config.json reaches the prompts, the briefs and t
   }
 });
 
-test("the repository's customizations reach the agent, and its errors and final checks hold what they say", async () => {
+test("the repository's customizations reach the agent, its errors hold what they say, and final checks are recorded as reported", async () => {
   const id = 'custom-session';
   const dir = path.join(repo, '.coplan');
   mkdirSync(dir, { recursive: true });
@@ -925,13 +946,10 @@ test("the repository's customizations reach the agent, and its errors and final 
   writeFileSync(
     path.join(dir, 'config.json'),
     JSON.stringify({
-      hooks: { final: [{ name: 'suite', run: 'npm test' }, { name: 'audit', run: 'npm audit', optional: true }] },
-      pullRequests: { tool: 'graphite', open: 'auto', template: 'PR_TEMPLATE.md' },
-      // The reviewer's model is for a subagent's review, which is no longer the default (#63).
-      iric: { review: 'subagent' },
-      review: { model: 'opus' },
-      final: { blocking: true },
-      instructions: { design: 'Name every box after its service.', brief: 'Write the test first.', review: 'Look for unparameterised SQL.' },
+      checks: { final: [{ name: 'suite', run: 'npm test' }, { name: 'audit', run: 'npm audit', optional: true }] },
+      pullRequests: { template: 'PR_TEMPLATE.md' },
+      review: 'none',
+      instructions: { design: 'Name every box after its service.', brief: 'Write the test first. Look for unparameterised SQL.' },
       planCheck: { 'box-undescribed': 'error', 'comment-unanswered': 'off' },
     }),
   );
@@ -945,11 +963,12 @@ test("the repository's customizations reach the agent, and its errors and final 
     assert.deepEqual(design.project.planCheck, { 'box-undescribed': 'error', 'comment-unanswered': 'off' }, 'the page is told how gaps count');
     const opened = await call<{ planCheck?: Record<string, string>; projectReview?: string }>(`/api/session/${id}`);
     assert.deepEqual(opened.planCheck, { 'box-undescribed': 'error', 'comment-unanswered': 'off' }, 'and so is the canvas, which marks the boxes the check lists');
-    assert.equal(opened.projectReview, 'subagent', "and the board, who reviews where the plan does not say");
+    assert.equal(opened.projectReview, 'none', 'and the board, the review a task asks for where it does not say');
     const brief = String((await mcpFor(id, 'brief', { task_id: 't2' }))['text']);
-    assert.match(brief, /Write the test first\./);
-    assert.match(brief, /Run the reviewer on the `opus` model\./);
-    assert.match(brief, /### What the review checks here[\s\S]*Look for unparameterised SQL\./);
+    assert.match(brief, /## Done when[\s\S]*### Standing instructions[\s\S]*Write the test first\. Look for unparameterised SQL\./);
+    const handoff = (await post<Preview>(`/api/session/${id}/plan/prompt`, {})).prompt;
+    assert.match(handoff, /Write each description from the pull request template, PR_TEMPLATE\.md\./);
+    assert.doesNotMatch(handoff, /## How it was tested/, 'the template goes as a path: Coplan writes no pull request bodies');
 
     // A gap the repository counts as an error holds the sign-off, and says so.
     const check = String((await mcpFor(id, 'check'))['text']);
@@ -957,15 +976,10 @@ test("the repository's customizations reach the agent, and its errors and final 
     const refused = await post<{ error?: string }>(`/api/session/${id}/plan/design/confirm`, {});
     assert.match(refused.error ?? '', /cannot be confirmed yet: this repository's plan check[\s\S]*Box "API"/);
 
-    // The final checks hold the report until the required ones pass.
-    const report = (checks?: unknown[]) => mcpFor(id, 'edit', { ops: [{ op: 'report', text: 'Built it.', ...(checks ? { checks } : {}) }] });
-    const missing = await report();
-    assert.equal(missing['ok'], false);
-    assert.match(String(missing['text']), /holds the build report until its final checks pass[\s\S]*Not reported in `checks`: suite/);
-    const failing = await report([{ name: 'suite', ok: false }]);
-    assert.match(String(failing['text']), /Failing: suite\./);
-    const passed = await report([{ name: 'suite', ok: true }, { name: 'audit', ok: false }]);
-    assert.equal(passed['ok'], true, `an optional check does not hold it: ${String(passed['text'])}`);
+    // The report is recorded as reported: a failing final check is kept, failing.
+    const failing = await mcpFor(id, 'edit', { ops: [{ op: 'report', text: 'Built it.', checks: [{ name: 'suite', ok: false }] }] });
+    assert.equal(failing['ok'], true, String(failing['text']));
+    assert.deepEqual((await sessionFor(id)).plan!.report?.checks, [{ name: 'suite', ok: false }]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(path.join(repo, 'PR_TEMPLATE.md'), { force: true });
@@ -1013,231 +1027,91 @@ test('an audit proposes instead of overwriting: the user answers in Coplan, and 
   assert.match(String((await mcpFor(id, 'read', { changes_only: true }))['text']), /p3 "Drop Postgres" — \*\*rejected\*\* by the user: We need durability\./);
 });
 
-test('the build gates hold however the agent reports progress, and only the user lifts them', async () => {
+test('progress is recorded as reported: no gate holds it, failures show, only a contradictory board is refused', async () => {
   const id = 'gates-session';
   const dir = path.join(repo, '.coplan');
   mkdirSync(dir, { recursive: true });
   writeFileSync(
     path.join(dir, 'config.json'),
-    JSON.stringify({
-      hooks: { review: [{ name: 'tests', run: 'npm test' }, { name: 'lint', run: 'npm run lint', optional: true }] },
-      iric: { review: 'self', parallel: 1, maxRounds: 2 },
-    }),
+    JSON.stringify({ checks: { review: [{ name: 'tests', run: 'npm test' }] } }),
   );
+  const GATED = {
+    title: 'Gates',
+    summary: 'One task per former gate.',
+    tasks: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'].map((t) => ({ id: t, title: t.toUpperCase(), ...(t === 'e' ? { review: 'user' as const } : {}) })),
+  };
   const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  const accepted = async (body: Record<string, unknown>) => {
+    const res = await task(body);
+    assert.equal(res['ok'], true, String(res['text']));
+    assert.doesNotMatch(String(res['text']), /refused|Noted|go-ahead|user_approved|the most the user allowed/);
+    return String(res['text']);
+  };
   const refused = async (body: Record<string, unknown>, why: RegExp) => {
     const res = await task(body);
     assert.equal(res['ok'], false, `expected a refusal: ${String(res['text'])}`);
     assert.match(String(res['text']), why);
   };
+  const taskNow = async (taskId: string) => (await sessionFor(id)).plan!.tasks.find((t) => t.id === taskId)!;
   try {
     await hookFor(id, 'SessionStart', { start_reason: 'startup' });
-    await mcpFor(id, 'publish', PLAN);
+    await mcpFor(id, 'publish', GATED);
+    await post(`/api/session/${id}/plan/design/confirm`);
+    await hookFor(id, 'UserPromptSubmit', { prompt: 'go' });
+    const preview = await post<Preview>(`/api/session/${id}/plan/prompt`, {});
+    const submitted = await post<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${id}/plan/submit`, { expect: preview.version });
+    assert.ok(submitted.plan, submitted.error);
+    await hookFor(id, 'UserPromptSubmit', { prompt: 'build it' });
 
-    // Progress cannot go round harness_task_update through an edit.
-    const sneak = await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't2', status: 'done' }] });
+    // Still refused: progress round harness_task_update, and what the board could not show.
+    const sneak = await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 'a', status: 'done' }] });
     assert.equal(sneak['ok'], false);
     assert.match(String(sneak['text']), /report progress with harness_task_update/);
+    await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 'i', dependsOn: ['h'] }] });
+    await refused({ task_id: 'i', status: 'done', note: 'x' }, /cannot be done yet: it waits on/);
+    await refused({ task_id: 'a', status: 'bogus' }, /not a task status/);
 
-    // A parent's progress is its subtasks'.
-    await refused({ task_id: 't1', stage: 'implement' }, /has subtasks/);
-
-    // Not done while it waits, not started past the parallel limit.
-    await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't4', dependsOn: ['t1'] }] });
-    await refused({ task_id: 't4', status: 'done', note: 'x' }, /cannot be done yet: it waits on/);
-    assert.equal((await task({ task_id: 't2', stage: 'implement' }))['ok'], true);
-    await refused({ task_id: 't3', stage: 'implement' }, /the user allowed 1 at once/);
-
+    // Done before any review round.
+    await accepted({ task_id: 'a', status: 'in_progress' });
+    await accepted({ task_id: 'a', status: 'done', note: 'x' });
+    assert.equal((await taskNow('a')).round, undefined);
+    // Done while a check fails: the failure is kept, and shown.
+    await accepted({ task_id: 'b', stage: 'implement' });
+    await accepted({ task_id: 'b', stage: 'review', checks: [{ name: 'tests', ok: false, note: '1 failing' }] });
     // A refine that re-runs only the typecheck does not erase the failing tests.
-    await task({ task_id: 't2', stage: 'review', checks: [{ name: 'tests', ok: false, note: '1 failing' }] });
-    await task({ task_id: 't2', stage: 'refine', checks: [{ name: 'typecheck', ok: true }] });
-    await refused({ task_id: 't2', status: 'done', note: 'x' }, /its last checks failed \(tests: 1 failing\)/);
-
-    // Round 2 of 2 is the last; a third needs the user, and says what they said.
-    await task({ task_id: 't2', stage: 'review' });
-    assert.equal((await task({ task_id: 't2', stage: 'review', checks: [{ name: 'tests', ok: false }] }))['ok'], true, 'reporting in review is the same round');
-    await task({ task_id: 't2', stage: 'refine' });
-    await refused({ task_id: 't2', stage: 'review' }, /the most the user allowed \(2\)/);
-    // Nor can the agent start it over to get its rounds back.
-    await task({ task_id: 't2', status: 'todo' });
-    await task({ task_id: 't2', stage: 'implement' });
-    await refused({ task_id: 't2', stage: 'review' }, /the most the user allowed \(2\)/);
-    await refused({ task_id: 't2', stage: 'review', user_approved: true }, /needs a `note`/);
-    const extra = await task({ task_id: 't2', stage: 'review', user_approved: true, note: 'user: one more round' });
-    assert.equal(extra['ok'], true, String(extra['text']));
-    // Accepting it as it is, too, is theirs to say.
-    const accepted = await task({ task_id: 't2', status: 'done', user_approved: true, note: 'user accepted the flaky test' });
-    assert.equal(accepted['ok'], true, String(accepted['text']));
-    assert.match((await sessionFor(id)).plan!.tasks.find((t) => t.id === 't2')!.note ?? '', /approved by the user/);
-
-    // A required review check that was never reported holds it back.
-    await task({ task_id: 't3', stage: 'implement' });
-    await task({ task_id: 't3', stage: 'review', checks: [{ name: 'lint', ok: true }] });
-    await refused({ task_id: 't3', status: 'done', note: 'x' }, /the review checks tests were never reported/);
-    await task({ task_id: 't3', checks: [{ name: 'tests', ok: true }] });
-    assert.equal((await task({ task_id: 't3', status: 'done', verdict: 'pass', note: 'done' }))['ok'], true);
+    await accepted({ task_id: 'b', stage: 'refine', checks: [{ name: 'typecheck', ok: true }] });
+    await accepted({ task_id: 'b', status: 'done', note: 'x' });
+    const b = await taskNow('b');
+    assert.equal(b.status, 'done');
+    assert.deepEqual(b.checks?.find((c) => c.name === 'tests'), { name: 'tests', ok: false, note: '1 failing' });
+    // Done with a required check never reported, and without a verdict.
+    await accepted({ task_id: 'c', stage: 'implement' });
+    await accepted({ task_id: 'c', stage: 'review' });
+    await accepted({ task_id: 'c', status: 'done', note: 'x' });
+    // Done on the agent's word when the user reviews it.
+    await accepted({ task_id: 'e', stage: 'implement' });
+    await accepted({ task_id: 'e', stage: 'review' });
+    await accepted({ task_id: 'e', status: 'done', verdict: 'pass', note: 'x' });
+    assert.equal((await taskNow('e')).reviews?.at(-1)?.by, 'claude');
+    // A user's verdict given in chat is recorded as theirs, with what they said.
+    await refused({ task_id: 'd', stage: 'review', user_approved: true }, /needs a `note`/);
+    await accepted({ task_id: 'd', stage: 'review' });
+    await accepted({ task_id: 'd', verdict: 'pass', user_approved: true, note: 'user: looks right' });
+    assert.equal((await taskNow('d')).reviews?.at(-1)?.by, 'user');
+    // Review rounds past the limit: counted, not held.
+    await accepted({ task_id: 'f', stage: 'implement' });
+    await accepted({ task_id: 'f', stage: 'review' });
+    await accepted({ task_id: 'f', stage: 'refine' });
+    await accepted({ task_id: 'f', stage: 'review' });
+    assert.equal((await taskNow('f')).round, 2);
+    // Started alongside d and f: how many run at once is the harness's.
+    await accepted({ task_id: 'g', stage: 'implement' });
+    // Dropping work the user signed off: a reason is still needed, a go-ahead is not.
+    await refused({ task_id: 'h', status: 'dropped' }, /needs a `note`/);
+    await accepted({ task_id: 'h', status: 'dropped', note: 'not needed' });
+    assert.equal((await taskNow('h')).status, 'dropped');
   } finally {
     rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('each build gate refuses in a Managed build, and in a Tracked one is a note that says what was skipped (#62)', async () => {
-  const dir = path.join(repo, '.coplan');
-  const GATED = {
-    title: 'Gates',
-    summary: 'One task per gate.',
-    tasks: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'].map((id) => ({ id, title: id.toUpperCase(), ...(id === 'e' ? { review: 'user' as const } : {}) })),
-  };
-  for (const mode of ['managed', 'tracked'] as const) {
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(
-      path.join(dir, 'config.json'),
-      JSON.stringify({ mode, hooks: { review: [{ name: 'tests', run: 'npm test' }] }, iric: { review: 'self', parallel: 1, maxRounds: 1 } }),
-    );
-    const id = `gate-${mode}-session`;
-    const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
-    /** A gate: refused when Managed, a note when Tracked — then settled the
-     *  way the user would settle it, so the next gate starts clean. */
-    const gate = async (body: Record<string, unknown>, refusal: RegExp, note: RegExp) => {
-      const res = await task(body);
-      const text = String(res['text']);
-      if (mode === 'managed') {
-        assert.equal(res['ok'], false, `Managed refuses: ${text}`);
-        assert.match(text, refusal);
-      } else {
-        assert.equal(res['ok'], true, `Tracked does not: ${text}`);
-        assert.match(text, /Noted, not refused \(this build is Tracked\): /);
-        assert.match(text, note);
-      }
-    };
-    const settle = async (taskId: string) => {
-      const res = await task({ task_id: taskId, status: 'done', user_approved: true, note: 'user: take it as it is' });
-      assert.equal(res['ok'], true, String(res['text']));
-    };
-    try {
-      await hookFor(id, 'SessionStart', { start_reason: 'startup' });
-      await mcpFor(id, 'publish', GATED);
-      await post(`/api/session/${id}/plan/design/confirm`);
-      await hookFor(id, 'UserPromptSubmit', { prompt: 'go' });
-      // Submit starts from the repository's mode, and the submission keeps it.
-      const preview = await post<Preview & { mode: string; project: { mode: string } }>(`/api/session/${id}/plan/prompt`, {});
-      assert.equal(preview.mode, mode);
-      assert.equal(preview.project.mode, mode);
-      assert[mode === 'tracked' ? 'doesNotMatch' : 'match'](preview.prompt, /implement → review → refine/);
-      const submitted = await post<{ plan?: SessionState['plan']; error?: string }>(`/api/session/${id}/plan/submit`, {
-        mode,
-        expect: preview.version,
-        settings: { review: 'self', parallel: 1, maxRounds: 1 },
-      });
-      assert.ok(submitted.plan, submitted.error);
-      assert.equal(submitted.plan!.submission?.mode, mode);
-      assert.equal(submitted.plan!.submission?.settings !== undefined, mode === 'managed', "only a Managed build keeps the cycle's settings");
-      await hookFor(id, 'UserPromptSubmit', { prompt: 'build it' });
-
-      // Done before any review round.
-      await task({ task_id: 'a', status: 'in_progress' });
-      await gate({ task_id: 'a', status: 'done', note: 'x' }, /"A" has not been reviewed/, /it was never reviewed \(no review round was reported\)/);
-      await settle('a');
-      // Done while a check fails.
-      await task({ task_id: 'b', stage: 'implement' });
-      await task({ task_id: 'b', stage: 'review', checks: [{ name: 'tests', ok: false, note: '1 failing' }] });
-      await gate({ task_id: 'b', status: 'done', verdict: 'pass', note: 'x' }, /its last checks failed \(tests: 1 failing\)/, /its last checks failed \(tests: 1 failing\)/);
-      if (mode === 'managed') await settle('b');
-      // Closed over a failing check, it is recorded as accepted as it was (D4); closed clean, it is not.
-      const closedHow = async (taskId: string) => (await sessionFor(id)).plan!.tasks.find((t) => t.id === taskId)!.acceptedFailing;
-      assert.equal(await closedHow('b'), true);
-      assert.equal(await closedHow('a'), undefined);
-      // Done with a required check never reported.
-      await task({ task_id: 'c', stage: 'implement' });
-      await task({ task_id: 'c', stage: 'review' });
-      await gate({ task_id: 'c', status: 'done', verdict: 'pass', note: 'x' }, /the review checks tests were never reported/, /the review checks tests were never reported/);
-      await settle('c');
-      // Done without a passing verdict.
-      await task({ task_id: 'd', stage: 'implement' });
-      await task({ task_id: 'd', stage: 'review', checks: [{ name: 'tests', ok: true }] });
-      await gate({ task_id: 'd', status: 'done', note: 'x' }, /no passing verdict for review round 1/, /no passing verdict for review round 1/);
-      await settle('d');
-      // Done on the agent's word when the user reviews it.
-      await task({ task_id: 'e', stage: 'implement' });
-      await task({ task_id: 'e', stage: 'review', checks: [{ name: 'tests', ok: true }] });
-      await gate({ task_id: 'e', status: 'done', verdict: 'pass', note: 'x' }, /the user's to review, and they have not passed it/, /it is the user's to review, and they have not passed it/);
-      await settle('e');
-      // Another review round past the limit.
-      await task({ task_id: 'f', stage: 'implement' });
-      await task({ task_id: 'f', stage: 'review' });
-      await task({ task_id: 'f', stage: 'refine' });
-      await gate(
-        { task_id: 'f', stage: 'review' },
-        /the most the user allowed \(1\)\. Stop: .*stage "review" for another round, status "done" to accept it/,
-        /this is review round 2, past the 1 the user set: say in the task's note why another round is worth it/,
-      );
-      await settle('f');
-      // A start past the parallel limit.
-      await task({ task_id: 'g', stage: 'implement' });
-      await gate({ task_id: 'h', stage: 'implement' }, /the user allowed 1 at once/, /1 other task is in progress too \(g\)/);
-      await settle('g');
-      await settle('h');
-      // Dropping work the user signed off.
-      await gate({ task_id: 'i', status: 'dropped', note: 'not needed' }, /dropping it is theirs to decide/, /it was part of the plan the user submitted: tell them you dropped it/);
-      // A finished task dropped and taken up again: its pass went, so done points to a new review round, which
-      // the round limit does not hold against it (the last round passed).
-      await task({ task_id: 'j', stage: 'implement' });
-      await task({ task_id: 'j', stage: 'review', checks: [{ name: 'tests', ok: true }] });
-      const passed = await task({ task_id: 'j', status: 'done', verdict: 'pass', note: 'passes' });
-      assert.equal(passed['ok'], true, String(passed['text']));
-      assert.equal((await task({ task_id: 'j', status: 'dropped', note: 'user: drop it', user_approved: true }))['ok'], true);
-      assert.equal((await task({ task_id: 'j', status: 'in_progress' }))['ok'], true);
-      await gate(
-        { task_id: 'j', status: 'done', note: 'x' },
-        /"J" is not in review: its last pass went when it was taken up again\. Report stage "review" \(a new round\)/,
-        /not in review: its last pass went when it was taken up again/,
-      );
-      if (mode === 'managed') {
-        const again = await task({ task_id: 'j', stage: 'review', checks: [{ name: 'tests', ok: true }] });
-        assert.equal(again['ok'], true, `a new round, past the limit: ${String(again['text'])}`);
-        const done = await task({ task_id: 'j', status: 'done', verdict: 'pass', note: 'passes again' });
-        assert.equal(done['ok'], true, String(done['text']));
-        // Dropped again and sent straight to review in one call: a new round too.
-        assert.equal((await task({ task_id: 'j', status: 'dropped', note: 'user: drop it', user_approved: true }))['ok'], true);
-        const oneCall = await task({ task_id: 'j', stage: 'review', checks: [{ name: 'tests', ok: true }] });
-        assert.equal(oneCall['ok'], true, `taken up and reviewed in one call: ${String(oneCall['text'])}`);
-        // One accepted past a failing last round (d: done on the user's word) is held to the limit taken up again,
-        // and done says so, rather than point to a review the limit refuses.
-        await task({ task_id: 'd', status: 'in_progress' });
-        await gate({ task_id: 'd', stage: 'review' }, /the most the user allowed \(1\)/, /past the 1 the user set/);
-        await gate(
-          { task_id: 'd', status: 'done', note: 'x' },
-          /"D" is not in review, and has had 1 review round\(s\), the most the user allowed \(1\)\. Stop: .*stage "review" for another round, status "done" to accept it/,
-          /not in review/,
-        );
-        // Each way it points goes: blocked, then another round as the user allowed, …
-        assert.equal((await task({ task_id: 'd', status: 'blocked', note: 'still fails: the retry test' }))['ok'], true);
-        const allowed = await task({ task_id: 'd', stage: 'review', note: 'user: one more round', user_approved: true });
-        assert.equal(allowed['ok'], true, `another round: ${String(allowed['text'])}`);
-        // … and, that round asking for changes too, done as it is.
-        await task({ task_id: 'd', stage: 'refine' });
-        assert.equal((await task({ task_id: 'd', status: 'blocked', note: 'still fails' }))['ok'], true);
-        const accepted = await task({ task_id: 'd', status: 'done', note: 'user: accept it as it is', user_approved: true });
-        assert.equal(accepted['ok'], true, `accepted as it is: ${String(accepted['text'])}`);
-      } else {
-        // In a Tracked build the limit is the agent's to weigh, on done as on a round past it: the done goes
-        // through, and the agent is asked why, not pointed to a new round.
-        await task({ task_id: 'd', status: 'in_progress' });
-        const noted = String((await task({ task_id: 'd', status: 'done', note: 'x' }))['text']);
-        assert.match(noted, /Noted, not refused \(this build is Tracked\): marked done out of review after 1 review round\(s\), the most the user set: say in the task's note why it is right as it is/);
-        assert.doesNotMatch(noted, /a new round/);
-        assert.equal((await sessionFor(id)).plan!.tasks.find((t) => t.id === 'd')!.status, 'done');
-      }
-
-      const plan = (await sessionFor(id)).plan!;
-      const statuses = Object.fromEntries(plan.tasks.map((t) => [t.id, t.status]));
-      assert.equal(statuses['i'], mode === 'managed' ? 'todo' : 'dropped', 'a refusal changes nothing; a note does not stop the move');
-      // What a Tracked build skipped stays out of the way: nothing is
-      // marked as approved by the user that they did not approve.
-      if (mode === 'tracked') assert.doesNotMatch(plan.tasks.find((t) => t.id === 'i')!.note ?? '', /approved by the user/);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
   }
 });
 
@@ -1250,7 +1124,7 @@ test('Export plan: the whole plan as Markdown, in every phase, signing nothing o
     assert.match(res.text, /## Summary\nA read-through cache in front of Postgres\./);
     assert.match(res.text, /## Architecture[\s\S]*\*\*Postgres\*\* `db`/);
     assert.match(res.text, /## Task briefs\n/);
-    for (const banned of [/harness_/, /cc-harness/, /implement → review → refine/, /review round/i, /subagent/, /\breview: (user|self|skip|subagent)\b/]) {
+    for (const banned of [/harness_/, /cc-harness/, /implement → review → refine/, /review round/i, /subagent/, /\breview: (user|agent|none)\b/]) {
       assert.doesNotMatch(res.text, banned);
     }
     return res;
@@ -1269,15 +1143,10 @@ test('Export plan: the whole plan as Markdown, in every phase, signing nothing o
   // Tasking, and once submitted.
   await post(`/api/session/${id}/plan/design/confirm`);
   assert.match((await exported()).text, /- \[ \] t2 Client/);
-  const preview = await post<Preview>(`/api/session/${id}/plan/prompt`, { mode: 'export' });
-  assert.equal(preview.prompt, (await exported()).text, 'Submit as an Export locks exactly what Export plan copies');
-  await post(`/api/session/${id}/plan/submit`, { mode: 'export', expect: preview.version });
-  const locked = await sessionFor(id);
-  assert.equal(locked.plan!.submission?.target, 'elsewhere');
-  assert.equal(locked.plan!.submission?.mode, 'export');
-  const next = String((await hookFor(id, 'UserPromptSubmit', { prompt: 'hello' })).hookSpecificOutput?.additionalContext ?? '');
-  assert.doesNotMatch(next, /# Add a cache|\[cc-harness\] Build/, 'an export is never handed to this agent');
-  assert.equal((await sessionFor(id)).plan!.submission?.deliveredAt, null);
+  const preview = await post<Preview>(`/api/session/${id}/plan/prompt`, {});
+  assert.notEqual(preview.prompt, (await exported()).text, 'the handoff is not the export');
+  await post(`/api/session/${id}/plan/submit`, { expect: preview.version });
+  assert.equal((await sessionFor(id)).plan!.submission?.target, 'session');
   assert.equal((await exported()).text, planning.text, 'the plan reads the same in every phase');
 });
 
@@ -1366,24 +1235,23 @@ test('a finished task taken up from a drop says who went ahead on its work, as o
   assert.match(String(reopened['text']), /t4 "Wire up" \(blocked\) already went ahead on this task's work: check they still hold once it changes/);
 });
 
-test("done needs the round's passing verdict — the user's own, when the user reviews it", async () => {
+test("each round's verdict is recorded as given, by whoever gave it — done never waits on one", async () => {
   const id = 'review-session';
   const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
   await hookFor(id, 'SessionStart', { start_reason: 'startup' });
   await mcpFor(id, 'publish', PLAN);
   await mcpFor(id, 'edit', { ops: [{ op: 'upsert_task', id: 't2', review: 'user' }] });
 
-  // The agent's own review: done without a verdict, or after "changes", is refused.
+  // The agent's own review: "changes" is recorded, and done without a pass is accepted.
   await task({ task_id: 't3', stage: 'review' });
-  assert.match(String((await task({ task_id: 't3', status: 'done', note: 'x' }))['text']), /no passing verdict for review round 1/);
   await task({ task_id: 't3', verdict: 'changes', summary: 'missing a test' });
-  assert.match(String((await task({ task_id: 't3', status: 'done', note: 'x' }))['text']), /no passing verdict/);
-  assert.equal((await task({ task_id: 't3', status: 'done', verdict: 'pass', note: 'done' }))['ok'], true);
+  assert.equal((await task({ task_id: 't3', status: 'done', note: 'x' }))['ok'], true);
+  assert.deepEqual((await sessionFor(id)).plan!.tasks.find((t) => t.id === 't3')!.reviews!.map((r) => `${r.round}:${r.verdict}:${r.by}`), ['1:changes:claude']);
 
-  // The user's review: the agent's pass does not count, theirs does.
+  // The user's review: the agent's pass is recorded as the agent's, and the board still waits on theirs.
   await task({ task_id: 't2', stage: 'review' });
-  assert.match(String((await task({ task_id: 't2', status: 'done', verdict: 'pass', note: 'x' }))['text']), /the user's to review, and they have not passed it/);
-  assert.match(String((await mcpFor(id, 'next'))['text']), /waiting on the user's review/);
+  assert.equal((await task({ task_id: 't2', verdict: 'pass' }))['ok'], true);
+  assert.match(String((await mcpFor(id, 'next'))['text']), /it asks for the user's review/);
   await opsOn(id, [{ op: 'review_task', id: 't2', verdict: 'changes', summary: 'rename the client' }]);
   assert.match(String((await mcpFor(id, 'read', { changes_only: true }))['text']), /\*\*Reviews\*\*\n- The user asked for changes to "Client" in review round 1: rename the client\./);
   await task({ task_id: 't2', stage: 'refine' });
@@ -1391,14 +1259,10 @@ test("done needs the round's passing verdict — the user's own, when the user r
   await opsOn(id, [{ op: 'review_task', id: 't2', verdict: 'pass' }]);
   assert.equal((await task({ task_id: 't2', status: 'done', note: 'renamed' }))['ok'], true);
   const reviews = (await sessionFor(id)).plan!.tasks.find((t) => t.id === 't2')!.reviews!;
-  assert.deepEqual(
-    reviews.map((r) => `${r.round}:${r.verdict}:${r.by}`),
-    ['1:changes:user', '2:pass:user'],
-    "a refused call records nothing: the agent's pass was never taken",
-  );
+  assert.deepEqual(reviews.map((r) => `${r.round}:${r.verdict}:${r.by}`), ['1:pass:claude', '1:changes:user', '2:pass:user']);
 });
 
-test('on a submitted build: verdicts come from review, signed-off work is the user\'s to drop, and a dropped task restarts like any other', async () => {
+test('on a submitted build: verdicts come from review, signed-off work drops with a reason, and a dropped task restarts like any other', async () => {
   const id = 'submitted-review-session';
   const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
   await hookFor(id, 'SessionStart', { start_reason: 'startup' });
@@ -1411,7 +1275,7 @@ test('on a submitted build: verdicts come from review, signed-off work is the us
       { id: 'wire', title: 'Wire up', dependsOn: ['storage'] },
     ],
   });
-  await post(`/api/session/${id}/plan/submit`, { target: 'session', settings: { review: 'self', parallel: 1, maxRounds: 3 } });
+  await post(`/api/session/${id}/plan/submit`, {});
   await hookFor(id, 'UserPromptSubmit', { prompt: 'build it' });
 
   // A verdict comes from a review: not from refine, to close a round that asked for changes.
@@ -1425,71 +1289,44 @@ test('on a submitted build: verdicts come from review, signed-off work is the us
   // The agent's own pass on the user's task does not count, and next says it waits on them.
   await task({ task_id: 'cache', stage: 'review' });
   await task({ task_id: 'cache', verdict: 'pass' });
-  assert.match(String((await mcpFor(id, 'next'))['text']), /Cache.*\n.*waiting on the user's review/);
+  assert.match(String((await mcpFor(id, 'next'))['text']), /Cache.*\n.*it asks for the user's review/);
 
-  // Dropping signed-off work is the user's call.
-  assert.match(String((await task({ task_id: 'wire', status: 'dropped', note: 'not needed' }))['text']), /dropping it is theirs to decide/);
-  assert.equal((await task({ task_id: 'wire', status: 'dropped', note: 'user: drop it', user_approved: true }))['ok'], true);
-  // Picked back up, it is a start: cache is in progress and the user allowed one at once.
-  assert.match(String((await task({ task_id: 'wire', stage: 'implement' }))['text']), /cannot start yet/);
+  // Dropping signed-off work needs a reason, not a go-ahead.
+  assert.equal((await task({ task_id: 'wire', status: 'dropped', note: 'not needed' }))['ok'], true);
+  // Picked back up, it is a start — still refused while what it waits on is unfinished.
+  assert.match(String((await task({ task_id: 'wire', stage: 'implement' }))['text']), /cannot start yet: it waits on/);
 });
 
-test('runners: a task goes where it asks, a full runner is refused, and next shows the load', async () => {
+test('an old config with runners still builds: tasks start and finish as tracked, and no runner is asked for or shown', async () => {
   const id = 'runners-session';
   const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
   const dir = path.join(repo, '.coplan');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(
-    path.join(dir, 'config.json'),
-    JSON.stringify({
-      iric: { review: 'self', parallel: 4, maxRounds: 3 },
-      runners: {
-        cloud: { via: 'cloud', use: 'Heavy, long-running work', max: 4 },
-        vm: { via: 'ssh', host: 'tao-vm', dir: '~/src/app', use: 'Balanced work', maxLarge: 1 },
-      },
-    }),
-  );
+  writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ runners: { vm: { via: 'ssh', host: 'tao-vm', max: 1 } } }));
   try {
     await hookFor(id, 'SessionStart', { start_reason: 'startup' });
     await mcpFor(id, 'publish', PLAN);
     await post(`/api/session/${id}/plan/design/confirm`);
     await hookFor(id, 'UserPromptSubmit', { prompt: 'go' });
-    await mcpFor(id, 'tasks', {
-      tasks: [
-        { id: 'a', title: 'A' },
-        { id: 'b', title: 'B' },
-        { id: 'c', title: 'C', runner: 'cloud' },
-        { id: 'd', title: 'D', runner: 'cloud' },
-      ],
-    });
+    await mcpFor(id, 'tasks', { tasks: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B', runner: 'vm' }] });
     await post(`/api/session/${id}/plan/submit`, { target: 'session' });
     await hookFor(id, 'UserPromptSubmit', { prompt: 'build it' });
 
-    assert.match(String((await task({ task_id: 'a', stage: 'implement', runner: 'mars' }))['text']), /No runner "mars": the config has cloud, vm/);
-    const started = String((await task({ task_id: 'a', stage: 'implement', runner: 'vm', size: 'large', session: 'ssh-1' }))['text']);
-    assert.match(started, /Runs on vm \(ssh tao-vm\), session ssh-1: 1 there, 1\/1 large/);
-    assert.match(String((await task({ task_id: 'b', stage: 'implement', runner: 'vm', size: 'large' }))['text']), /cannot run on vm now: vm already runs 1 large task\(s\).*Room for it on cloud/);
-    assert.match(String((await task({ task_id: 'c', stage: 'implement', runner: 'vm' }))['text']), /asks to run on cloud, not vm/);
-    // Moved off the runner it asks for only on the user's say; resumed later, it stays where they put it.
-    const moved = String((await task({ task_id: 'c', stage: 'implement', runner: 'vm', user_approved: true, note: 'user: run it on the vm' }))['text']);
-    assert.match(moved, /Runs on vm/);
-    await task({ task_id: 'c', status: 'blocked', note: 'waits on a key' });
-    assert.match(String((await task({ task_id: 'c', stage: 'implement' }))['text']), /Runs on vm/);
-    // Started with no runner named, a task that asks for one goes there.
-    assert.match(String((await task({ task_id: 'd', stage: 'implement' }))['text']), /Runs on cloud \(cloud\)/);
-
-    const next = String((await mcpFor(id, 'next'))['text']);
-    assert.match(next, /- a A · on vm \(ssh-1\), large/);
-    assert.match(next, /## Runners\n- cloud \(cloud\) — 1\/4 running — Heavy, long-running work\n- vm \(ssh tao-vm:~\/src\/app\) — 2 running, 1\/1 large — Balanced work/);
-    const saved = (await sessionFor(id)).plan!.tasks.find((t) => t.id === 'a')!.dispatch!;
-    assert.deepEqual({ runner: saved.runner, session: saved.session, size: saved.size }, { runner: 'vm', session: 'ssh-1', size: 'large' });
+    const started = await task({ task_id: 'a', stage: 'implement' });
+    assert.equal(started['ok'], true, String(started['text']));
+    assert.equal(String(started['text']).includes('Runs on'), false);
+    const second = await task({ task_id: 'b', stage: 'implement' });
+    assert.doesNotMatch(String(second['text']), /(?<!\/)\brunners?\b(?!\/)|Runs on|tao-vm/i, 'a runner a task once asked for, full or not, is not named');
+    assert.doesNotMatch(String((await mcpFor(id, 'next'))['text']), /(?<!\/)\brunners?\b(?!\/)|tao-vm/i);
+    const saved = (await sessionFor(id)).plan!.tasks;
+    assert.ok(saved.every((t) => !('runner' in t) && !('dispatch' in t)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('a submission needs to say who builds it', async () => {
-  const res = await raw(`/api/session/${built}/plan/submit`, { method: 'POST', body: JSON.stringify({ target: 'mars' }) });
+test('a submission that names a target other than this session is refused', async () => {
+  const res = await raw(`/api/session/${built}/plan/submit`, { method: 'POST', body: JSON.stringify({ target: 'elsewhere' }) });
   assert.equal(res.status, 400);
 });
 
@@ -1504,9 +1341,8 @@ test("the page shows each task's brief exactly as harness_task_brief returns it,
   writeFileSync(
     path.join(dir, 'config.json'),
     JSON.stringify({
-      hooks: { implement: ['npm run typecheck'], review: [{ name: 'tests', run: 'npm test' }] },
-      iric: { review: 'subagent' },
-      review: { model: 'opus' },
+      checks: { implement: ['npm run typecheck'], review: [{ name: 'tests', run: 'npm test' }] },
+      review: 'agent',
       instructions: { brief: 'Write the test first.', review: 'Look for unparameterised SQL.' },
     }),
   );
@@ -1524,7 +1360,6 @@ test("the page shows each task's brief exactly as harness_task_brief returns it,
       assert.ok(page.blocks.every((b) => b.source && b.id));
     }
     const brief = await call<{ blocks: Block[] }>(`/api/session/${id}/task/t2/brief`);
-    assert.deepEqual(brief.blocks.find((b) => b.id === 'cycle:review:model')?.source, { kind: 'config', key: 'review.model', files: ['.coplan/config.json'] });
     assert.deepEqual(brief.blocks.find((b) => b.id === 'instructions:brief')?.source, { kind: 'config', key: 'instructions.brief', files: ['.coplan/config.json'] });
     const missing = await raw(`/api/session/${id}/task/nope/brief`);
     assert.equal(missing.status, 404);
@@ -1552,7 +1387,6 @@ test('opening any tab of the prompt viewer does not count as the agent reading t
   assert.ok(before.seq > before.claudeReadSeq, 'the user has an edit the agent has not read');
 
   await call(`/api/session/${id}/plan/readback`);
-  await call(`/api/session/${id}/plan/text`);
   await call(`/api/session/${id}/task/t2/brief`);
   await post(`/api/session/${id}/plan/design/prompt`);
   const confirmed = await post<Preview>(`/api/session/${id}/plan/design/prompt`, {});
@@ -1586,11 +1420,7 @@ test('"build it" in chat: the agent advances the plan, and it is building — lo
   await hookFor(id, 'UserPromptSubmit', { prompt: '/coplan add a cache' });
   await mcpFor(id, 'publish', PLAN);
   await mcpFor(id, 'read');
-  // The user once chose Tracked in the Submit dialog, and closed it.
-  await post(`/api/session/${id}/plan/choice`, { mode: 'tracked' });
-  assert.equal((await sessionFor(id)).buildChoice?.mode, 'tracked');
-  const preview = await post<Preview & { mode: string }>(`/api/session/${id}/plan/prompt`, {});
-  assert.equal(preview.mode, 'tracked', 'the dialog opens on what the user last chose');
+  const preview = await post<Preview>(`/api/session/${id}/plan/prompt`, {});
 
   // The user, in chat. The hook reads nothing into it: deciding what it
   // means is the agent's, which reads the chat.
@@ -1601,7 +1431,7 @@ test('"build it" in chat: the agent advances the plan, and it is building — lo
   const res = await mcpFor(id, 'advance', { to: 'build', user_said: 'looks good, build it' });
   assert.equal(res['ok'], true, String(res['text']));
   const text = String(res['text']);
-  assert.match(text, /^\[cc-harness\] Submitted the plan from chat, on the user's word \("looks good, build it"\): Tracked, as they last chose in Coplan\./);
+  assert.match(text, /^\[cc-harness\] Submitted the plan from chat, on the user's word \("looks good, build it"\)\. It is locked now/);
   assert.ok(text.includes(preview.prompt), 'the reply carries the prompt the page would have sent');
 
   // Building: straight from the design, which was never confirmed.
@@ -1609,7 +1439,6 @@ test('"build it" in chat: the agent advances the plan, and it is building — lo
   assert.equal(s.plan!.design, undefined);
   assert.equal(s.plan!.submission?.via, 'chat');
   assert.equal(s.plan!.submission?.userSaid, 'looks good, build it');
-  assert.equal(s.plan!.submission?.mode, 'tracked');
   assert.equal(s.plan!.submission?.prompt, preview.prompt);
   assert.ok(s.plan!.submission?.deliveredAt, 'handed over as the reply');
   const { sessions } = await call<{ sessions: { sessionId: string; phase: string; planStatus: string }[] }>('/api/sessions');
@@ -1639,7 +1468,7 @@ test('"build it" in chat: the agent advances the plan, and it is building — lo
   assert.match(String(again['text']), /already submitted: build it/);
 });
 
-test('"make the task list" in chat confirms the design; with no choice made, a build takes the repository default (#65)', async () => {
+test('"make the task list" in chat confirms the design, and "ship it" then hands off the task list (#65)', async () => {
   const id = 'chat-tasks';
   await hookFor(id, 'SessionStart', { start_reason: 'startup' });
   await mcpFor(id, 'publish', PLAN);
@@ -1667,17 +1496,14 @@ test('"make the task list" in chat confirms the design; with no choice made, a b
   const twice = await mcpFor(id, 'advance', { to: 'tasks', user_said: 'again' });
   assert.match(String(twice['text']), /already confirmed: make the task list/);
 
-  // The task list, then "build it" — with no choice made in the page, the
-  // repository's default (Managed in these tests).
+  // The task list, then "build it".
   await mcpFor(id, 'tasks', { tasks: [{ id: 't1', title: 'Client', detail: 'Wrap the driver.' }, { id: 't2', title: 'Wire up', dependsOn: ['t1'], detail: 'Use it.' }] });
   const build = await mcpFor(id, 'advance', { to: 'build', user_said: 'ship it' });
   assert.equal(build['ok'], true, String(build['text']));
-  assert.match(String(build['text']), /: Managed, this repository's default\./);
   assert.match(String(build['text']), /\[cc-harness\] Build the plan "Add a cache"/);
   s = await sessionFor(id);
-  assert.equal(s.plan!.submission?.mode, 'managed');
   assert.equal(s.plan!.submission?.userSaid, 'ship it');
-  assert.ok(s.plan!.submission?.settings, "a Managed build records the settings it runs with");
+  assert.equal(s.plan!.submission?.target, 'session');
 });
 
 /* ------------------------------------------------------------------ *
@@ -1871,7 +1697,7 @@ test('in Cursor, the request is pasted or picked up by harness_plan_read — onc
  * Checks for what the change touched (#52)
  * ------------------------------------------------------------------ */
 
-test("done waits on the checks for what the task changed since it began — not for files it only planned to touch (#52, targeted checks)", async () => {
+test("a task records the commit its change begins at, and is done when it says so — unreported checks do not hold it (#52, targeted checks)", async () => {
   const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-diff-'));
   const g = (...args: string[]) => execFileSync('git', args, { cwd: other, stdio: 'pipe' });
   try {
@@ -1882,7 +1708,7 @@ test("done waits on the checks for what the task changed since it began — not 
     writeFileSync(
       path.join(other, '.coplan', 'config.json'),
       JSON.stringify({
-        hooks: {
+        checks: {
           review: [
             { name: 'ts tests', run: 'true', paths: ['*.ts'] },
             { name: 'py tests', run: 'true', paths: ['*.py'] },
@@ -1922,29 +1748,6 @@ test("done waits on the checks for what the task changed since it began — not 
     g('commit', '-qm', 'the task');
     await task({ stage: 'review' });
     await task({ verdict: 'pass', checks: [{ name: 'ts tests', ok: true }] });
-    const refused = await task({ status: 'done', note: 'wired' });
-    assert.equal(refused['ok'], false);
-    assert.match(String(refused['text']), new RegExp(`the review checks py tests \\(for helper\\.py\\) were never reported — \`.*check review --since ${began.slice(0, 12)}\` runs exactly these`));
-    assert.doesNotMatch(String(refused['text']), /md lint/, 'README.md was planned, and touched only before the task began: no check for it');
-    // The user skips a check for it: the command the gate gives skips it too,
-    // quoted, so it runs exactly what done waits on.
-    const skipped = await opsOn(id, [{ op: 'set_checks', id: 'app', skip: ['ts tests'] }]);
-    assert.ok(skipped.plan, skipped.error);
-    assert.match(String((await task({ status: 'done', note: 'wired' }))['text']), /check review --since [0-9a-f]{12} '--skip=ts tests'` runs exactly these/);
-
-    await task({ checks: [{ name: 'py tests', ok: true }] });
-    // Git cannot read the change (its index is broken): that is never
-    // "nothing changed", which would ask for no checks — every one applies.
-    const index = path.join(other, '.git', 'index');
-    const saved = readFileSync(index);
-    writeFileSync(index, 'not an index');
-    try {
-      const unread = await task({ status: 'done', note: 'wired' });
-      assert.equal(unread['ok'], false);
-      assert.match(String(unread['text']), /what it changed cannot be told — git could not read it \(it failed or took too long\) — so every review check applies, and md lint was never reported/);
-    } finally {
-      writeFileSync(index, saved);
-    }
     const done = await task({ status: 'done', note: 'wired' });
     assert.equal(done['ok'], true, String(done['text']));
   } finally {
@@ -2045,7 +1848,7 @@ test("a mistake in the harness config reaches the page: when it opens, and as so
     assert.match(first.join('\n'), /harness\.json: "idleShutdownMinutes" can only be set in the global config/);
     assert.ok(page.files[0]!.some((f) => f.endsWith(path.join('.claude', 'harness.json'))), 'it says which files it speaks for');
     // Its plan comes with who reviews where the plan does not say.
-    assert.ok(page.reviews.length > 0 && page.reviews.every((r) => r === 'self'), JSON.stringify(page.reviews));
+    assert.ok(page.reviews.length > 0 && page.reviews.every((r) => r === 'agent'), JSON.stringify(page.reviews));
 
     // A page that asked for a session the daemon did not hold yet watches
     // its repository once the session arrives.
@@ -2083,7 +1886,7 @@ test("a mistake in the harness config reaches the page: when it opens, and as so
   }
 });
 
-test("the user's own edits are judged by the repository's review mode, as the daemon's gates are (#150)", async () => {
+test("the user's own edits fall back to the repository's review, read from the old iric.review too (#150)", async () => {
   const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-skip-'));
   try {
     execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: other, stdio: 'pipe' });
@@ -2095,14 +1898,12 @@ test("the user's own edits are judged by the repository's review mode, as the da
     await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: other, start_reason: 'startup' }) });
     await at('/mcp/publish', { title: 'One task', tasks: [{ id: 't1', title: 'Build it' }] });
     await at('/mcp/read', {});
-    for (const body of [{ stage: 'review' }, { status: 'done', note: 'passes its checks' }]) {
-      const res = await at('/mcp/task', { task_id: 't1', ...body });
-      assert.equal(res['ok'], true, String(res['text']));
-    }
-    // Taken up again by the user on the board: under `skip`, closed done is passed, so its next round is its own.
-    const { plan, error } = await opsOn(id, [{ op: 'upsert_task', id: 't1', status: 'in_progress' }]);
+    const res = await at('/mcp/task', { task_id: 't1', stage: 'review' });
+    assert.equal(res['ok'], true, String(res['text']));
+    // The user's verdict on the board records the review the task asked for: the repository's (`skip`, read as `none`).
+    const { plan, error } = await opsOn(id, [{ op: 'review_task', id: 't1', verdict: 'pass' }]);
     assert.ok(plan, error);
-    assert.equal(plan.tasks.find((t) => t.id === 't1')!.reopened, true, "the repository's mode, not the default (self, with no verdict: not passed)");
+    assert.equal(plan.tasks.find((t) => t.id === 't1')!.reviews!.at(-1)!.mode, 'none', "the repository's review, not the default (agent)");
   } finally {
     rmSync(other, { recursive: true, force: true });
   }
@@ -2114,7 +1915,7 @@ test("a change to the repository's review mode reaches its open page, with no ed
   try {
     execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: other, stdio: 'pipe' });
     mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, JSON.stringify({ iric: { review: 'user' } }));
+    writeFileSync(file, JSON.stringify({ review: 'user' }));
     const id = 'review-mode-change';
     await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: other, start_reason: 'startup' }) });
     const page = await settingsStream(id);
@@ -2124,11 +1925,11 @@ test("a change to the repository's review mode reaches its open page, with no ed
       // Changed: the next time the daemon reads it (its timer, or any call that needs it), the page hears.
       // (Dated a moment back: a read that finds it settled keeps it.)
       const listsBefore = page.lists.n;
-      writeFileSync(file, JSON.stringify({ iric: { review: 'subagent' } }));
+      writeFileSync(file, JSON.stringify({ review: 'none' }));
       utimesSync(file, new Date(), new Date(Date.now() - 1000));
       await call(`/api/session/${id}`);
-      for (let i = 0; i < 50 && page.reviews.at(-1) !== 'subagent'; i++) await sleep(50);
-      assert.equal(page.reviews.at(-1), 'subagent', JSON.stringify(page.reviews));
+      for (let i = 0; i < 50 && page.reviews.at(-1) !== 'none'; i++) await sleep(50);
+      assert.equal(page.reviews.at(-1), 'none', JSON.stringify(page.reviews));
       // The session list too, which says what waits on the user by it.
       for (let i = 0; i < 50 && page.lists.n === listsBefore; i++) await sleep(50);
       assert.ok(page.lists.n > listsBefore, 'the list is sent again');
@@ -2138,14 +1939,14 @@ test("a change to the repository's review mode reaches its open page, with no ed
       await sleep(200);
       assert.equal(page.reviews.length, sent);
       // Dated ahead (clock skew): never kept, so read on each call, but told once, and the daemon answers at once.
-      writeFileSync(file, JSON.stringify({ iric: { review: 'self' } }));
+      writeFileSync(file, JSON.stringify({ review: 'agent' }));
       utimesSync(file, new Date(), new Date(Date.now() + 60_000));
       const started = Date.now();
       await call(`/api/session/${id}`);
       await call(`/api/session/${id}`);
-      for (let i = 0; i < 50 && page.reviews.at(-1) !== 'self'; i++) await sleep(50);
+      for (let i = 0; i < 50 && page.reviews.at(-1) !== 'agent'; i++) await sleep(50);
       assert.ok(Date.now() - started < 2000, `answered in ${Date.now() - started} ms`);
-      assert.deepEqual(page.reviews.slice(sent), ['self'], 'told once');
+      assert.deepEqual(page.reviews.slice(sent), ['agent'], 'told once');
     } finally {
       page.close();
     }
@@ -2158,13 +1959,13 @@ test("a change to the repository's review mode reaches its open page, with no ed
  * A task's own checks (#54)
  * ------------------------------------------------------------------ */
 
-test('a task\'s own checks: the agent proposes, the user sets, and done follows them — skips not waited on, additions waited on (#54)', async () => {
+test('a task\'s own checks: the agent proposes, the user sets, and the brief and read-back show them (#54)', async () => {
   const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-own-'));
   const g = (...args: string[]) => execFileSync('git', args, { cwd: other, stdio: 'pipe' });
   try {
     g('init', '-q', '-b', 'main');
     mkdirSync(path.join(other, '.coplan'), { recursive: true });
-    writeFileSync(path.join(other, '.coplan', 'config.json'), JSON.stringify({ hooks: { review: [{ name: 'tests', run: 'pnpm test' }] } }));
+    writeFileSync(path.join(other, '.coplan', 'config.json'), JSON.stringify({ checks: { review: [{ name: 'tests', run: 'pnpm test' }] } }));
     const id = 'own-checks';
     const at = (route: string, body: Record<string, unknown>) =>
       call<Record<string, unknown>>(route, { method: 'POST', headers: { 'x-harness-session': id }, body: JSON.stringify({ cwd: other, ...body }) });
@@ -2186,20 +1987,14 @@ test('a task\'s own checks: the agent proposes, the user sets, and done follows 
     assert.ok(added.plan, added.error);
 
     const task = (body: Record<string, unknown>) => at('/mcp/task', body);
-    // docs: its skipped check is neither waited on, nor held against it when it fails.
+    // Recorded as reported: a failing check is kept, and shown failing.
     await task({ task_id: 'docs', stage: 'review' });
     await task({ task_id: 'docs', verdict: 'pass', checks: [{ name: 'tests', ok: false, note: 'unrelated flake' }] });
     const docsDone = await task({ task_id: 'docs', status: 'done', note: 'documented' });
     assert.equal(docsDone['ok'], true, String(docsDone['text']));
 
-    // migrate: done waits on the check the user added.
-    await task({ task_id: 'migrate', stage: 'review' });
-    await task({ task_id: 'migrate', verdict: 'pass', checks: [{ name: 'tests', ok: true }] });
-    const early = await task({ task_id: 'migrate', status: 'done', note: 'migrated' });
-    assert.equal(early['ok'], false);
-    assert.match(String(early['text']), /the review checks db:check were never reported/);
-    await task({ task_id: 'migrate', checks: [{ name: 'db:check', ok: true }] });
-    assert.equal((await task({ task_id: 'migrate', status: 'done', note: 'migrated' }))['ok'], true);
+    // migrate: the check the user added reaches its brief.
+    assert.match(String((await at('/mcp/brief', { task_id: 'migrate' }))['text']), /db:check/);
 
     // The brief says it; the read-back shows it.
     const brief = String((await at('/mcp/brief', { task_id: 'docs' }))['text']);
@@ -2212,10 +2007,10 @@ test('a task\'s own checks: the agent proposes, the user sets, and done follows 
 
 test('every route about a session answers a session the daemon does not know with a 404', async () => {
   const routes: [string, string][] = [
-    ['GET', ''], ['POST', 'title'], ['POST', 'plan/ops'], ['GET', 'plan/text'], ['GET', 'plan/readback'], ['GET', 'task/t1/brief'],
+    ['GET', ''], ['POST', 'title'], ['POST', 'plan/ops'], ['GET', 'plan/readback'], ['GET', 'task/t1/brief'],
     ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/design/confirm'], ['POST', 'plan/design/reopen'],
-    ['POST', 'plan/revisions/prompt'], ['POST', 'plan/revisions'], ['POST', 'plan/revisions/withdraw'], ['POST', 'plan/choice'], ['POST', 'plan/submit'], ['POST', 'plan/reopen'],
-    ['GET', 'pr/wait'], ['GET', 'pr'], ['POST', 'pr/unwatch'], ['DELETE', ''],
+    ['POST', 'plan/revisions/prompt'], ['POST', 'plan/revisions'], ['POST', 'plan/revisions/withdraw'], ['POST', 'plan/submit'], ['POST', 'plan/reopen'],
+    ['DELETE', ''],
   ];
   // Every one the daemon serves: a route added later is in this list or fails here.
   const main = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'daemon', 'main.ts'), 'utf8');
@@ -2251,7 +2046,7 @@ test('a refused sign-off is a 409 with the reason, a look at no plan a 404, a re
     }
 
     // And every look at a plan that is not there is a 404.
-    const looks: [string, string][] = [['GET', 'plan/text'], ['GET', 'plan/readback'], ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/revisions/prompt'], ['GET', 'task/t1/brief']];
+    const looks: [string, string][] = [['GET', 'plan/readback'], ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/revisions/prompt'], ['GET', 'task/t1/brief']];
     for (const [method, route] of looks) {
       assert.deepEqual(await send(method, route, method === 'POST' ? {} : undefined), { status: 404, body: { error: 'no plan yet' } }, route);
     }
@@ -2381,6 +2176,12 @@ test('a headless session keeps its plan as Markdown and as a page in its working
     assert.match(String(res['text']), new RegExp(`reviews it in ${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
     assert.match(readFileSync(file, 'utf8'), /^# Fix the race\n\n> \*\*Coplan plan\*\* · \*\*Task list\*\* → Build/);
     assert.equal((await sessionFor(id)).headless, true);
+    // A session deleted and started afresh writes the same plan again.
+    await call(`/api/session/${id}`, { method: 'DELETE' });
+    rmSync(path.dirname(file), { recursive: true });
+    await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: dir, start_reason: 'startup' }) });
+    await at('publish', { title: 'Fix the race', mode: 'tasklist', headless: true, summary: 'One area.', tasks: [{ id: 'a', title: 'Find it' }] });
+    assert.ok(existsSync(file), 'written again for the new session');
     // Kept up to date, and headless for good once said.
     await at('read', {});
     await at('edit', { ops: [{ op: 'upsert_task', id: 'a', title: 'Find the race' }] });
@@ -2396,40 +2197,81 @@ test('a headless session keeps its plan as Markdown and as a page in its working
     const listed = await at('tasks', { tasks: [{ id: 'a', title: 'Find the race', detail: 'Reproduce it.' }] });
     assert.match(String(listed['text']), /headless, there is no page to submit it on, so chat is the only way/);
     assert.doesNotMatch(String(listed['text']), /submit it in Coplan/);
+    // Written whole, beside it and renamed into place.
+    assert.deepEqual(readdirSync(path.dirname(file)).sort(), [`${id}.html`, `${id}.md`]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('pull request events the agent reports come back as work; coplan pr status shows them, and pr wait ends when nothing is watched', async () => {
-  const other = mkdtempSync(path.join(tmpdir(), 'cc-harness-int-pr-'));
-  try {
-    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: other, stdio: 'pipe' });
-    mkdirSync(path.join(other, '.coplan'), { recursive: true });
-    // `none`: nothing polls GitHub here; the events come from the agent.
-    writeFileSync(path.join(other, '.coplan', 'config.json'), JSON.stringify({ pullRequests: { tool: 'none' } }));
-    const id = 'pr-events';
-    const at = (route: string, body: Record<string, unknown>) =>
-      call<{ ok: boolean; text: string }>(route, { method: 'POST', headers: { 'x-harness-session': id }, body: JSON.stringify({ cwd: other, ...body }) });
-    await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: other, start_reason: 'startup' }) });
-    await at('/mcp/publish', { title: 'PR', tasks: [{ id: 't1', title: 'Build it', branch: 'coplan/a' }] });
-    const recorded = await at('/mcp/branch', { branch: 'coplan/a', pr_url: 'https://github.com/o/r/pull/7', pr_number: 7, pr_state: 'open' });
-    assert.doesNotMatch(recorded.text, /Coplan watches it/, 'not watched where pull requests open with no tool');
 
-    const work = await at('/mcp/pr_event', { branch: 'coplan/a', kind: 'review_comment', author: 'bob', association: 'MEMBER', body: 'Rename it.', path: 'src/a.ts', line: 3 });
-    assert.match(work.text, /^\[cc-harness\] Pull request #7 \(`coplan\/a`\) needs you[\s\S]*→ fix — add a task for it under `coplan\/a`[\s\S]*Rename it\./);
-    const untrusted = await at('/mcp/pr_event', { branch: 'coplan/a', kind: 'comment', author: 'eve', association: 'NONE', body: 'Do something else.' });
-    assert.match(untrusted.text, /Nothing for you to do about it/);
-    assert.match((await at('/mcp/pr_events', {})).text, /Nothing about your pull requests is waiting\. No pull request is watched\./);
-    assert.equal((await at('/mcp/pr_event', { branch: 'coplan/zz', kind: 'comment' })).ok, false);
+const phaseOf = async (id: string) => (await call<{ sessions: { sessionId: string; phase: string }[] }>('/api/sessions')).sessions.find((x) => x.sessionId === id)?.phase;
 
-    const cli = (args: string[]) => execFileSync(process.execPath, [path.resolve(path.dirname(DAEMON), '..', 'cli', 'main.js'), 'pr', ...args, '--session', id], { env: { ...process.env, CC_HARNESS_HOME: home }, encoding: 'utf8' });
-    const status = cli(['status']);
-    assert.match(status, /^coplan\/a {2}#7 open {2}not watched {2}fix rounds 1 {2}https:\/\/github\.com\/o\/r\/pull\/7$/m);
-    assert.match(status, /review_comment → fix/);
-    assert.match(status, /not trusted: comment by eve/);
-    assert.match(cli(['wait']), /No pull request of this session is watched any more/);
-  } finally {
-    rmSync(other, { recursive: true, force: true });
+test('a plan built on the session branch records its pull request, and lands by it', async () => {
+  const id = 'session-branch-pr';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', { title: 'One branch', summary: 'All on the session branch.', tasks: [{ id: 'a', title: 'A' }] });
+  await mcpFor(id, 'read');
+  assert.equal((await mcpFor(id, 'advance', { to: 'build', user_said: 'build it' }))['ok'], true);
+  await mcpFor(id, 'task', { task_id: 'a', status: 'in_progress' });
+  await mcpFor(id, 'task', { task_id: 'a', status: 'done', note: 'x' });
+  const opened = await mcpFor(id, 'branch', { branch: 'feature/one', pr_url: 'https://github.com/o/r/pull/7', pr_number: 7, pr_state: 'open' });
+  assert.equal(opened['ok'], true, String(opened['text']));
+  assert.match(String(opened['text']), /Recorded `feature\/one`: pull request #7 open/);
+  assert.equal((await mcpFor(id, 'edit', { ops: [{ op: 'report', text: 'Built.' }] }))['ok'], true);
+  assert.equal(await phaseOf(id), 'landing');
+  await mcpFor(id, 'branch', { branch: 'feature/one', pr_state: 'merged' });
+  assert.equal(await phaseOf(id), 'built');
+});
+
+test('a verdict is given in review whichever way the update moves the task', async () => {
+  const id = 'verdict-order';
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  const reviews = async (taskId: string) => (await sessionFor(id)).plan!.tasks.find((t) => t.id === taskId)!;
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', { title: 'Verdicts', summary: 'Two tasks.', tasks: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }] });
+  await task({ task_id: 'a', stage: 'review' });
+  const refine = await task({ task_id: 'a', stage: 'refine', verdict: 'changes', summary: 'rename it' });
+  assert.equal(refine['ok'], true, String(refine['text']));
+  const a = await reviews('a');
+  assert.equal(a.stage, 'refine');
+  assert.deepEqual(a.reviews?.map((r) => `${r.round}:${r.verdict}`), ['1:changes']);
+  const closed = await task({ task_id: 'b', stage: 'review', status: 'done', verdict: 'pass', note: 'x' });
+  assert.equal(closed['ok'], true, String(closed['text']));
+  const b = await reviews('b');
+  assert.equal(b.status, 'done');
+  assert.deepEqual(b.reviews?.map((r) => `${r.round}:${r.verdict}`), ['1:pass']);
+});
+
+test('a finished task taken up again takes the build report with it', async () => {
+  const id = 'report-reopened';
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', { title: 'Report', summary: 'One task.', tasks: [{ id: 'a', title: 'A' }] });
+  await mcpFor(id, 'read');
+  await mcpFor(id, 'advance', { to: 'build', user_said: 'build it' });
+  await task({ task_id: 'a', status: 'in_progress' });
+  await task({ task_id: 'a', status: 'done', note: 'x' });
+  await mcpFor(id, 'edit', { ops: [{ op: 'report', text: 'Built.' }] });
+  assert.equal(await phaseOf(id), 'built');
+  await task({ task_id: 'a', status: 'in_progress' });
+  assert.equal((await sessionFor(id)).plan!.report, undefined);
+  const again = String((await task({ task_id: 'a', status: 'done', note: 'fixed' }))['text']);
+  assert.match(again, /Finish the build/);
+  assert.equal(await phaseOf(id), 'finalizing');
+});
+
+test('a done task whose dependency was reopened still takes a note', async () => {
+  const id = 'done-amended';
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', { title: 'Amend', summary: 'Two tasks.', tasks: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B', dependsOn: ['a'] }] });
+  for (const t of ['a', 'b']) {
+    await task({ task_id: t, status: 'in_progress' });
+    await task({ task_id: t, status: 'done', note: 'x' });
   }
+  await task({ task_id: 'a', status: 'in_progress' });
+  const amended = await task({ task_id: 'b', status: 'done', note: 'amended' });
+  assert.equal(amended['ok'], true, String(amended['text']));
+  assert.equal((await sessionFor(id)).plan!.tasks.find((t) => t.id === 'b')!.note, 'amended');
 });

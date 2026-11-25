@@ -1,5 +1,5 @@
 /**
- * `coplan check <stage>` — run a stage's hooks from `.coplan/config.json`,
+ * `coplan check <stage>` — run a stage's checks from `.coplan/config.json`,
  * targeted to what changed.
  *
  * One command for an agent to run, with output it can act on: a line per
@@ -113,8 +113,8 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   const root = (await repoRoot(cwd)) ?? cwd;
   const config = loadProjectConfig(root);
   // A config that cannot be read must not pass for one with nothing to run.
-  // Anything else that is wrong — a template that is missing, a reviewer
-  // model misspelt — is said, and the checks run: they do not depend on it.
+  // Anything else that is wrong — a template that is missing — is said,
+  // and the checks run: they do not depend on it.
   for (const w of [...config.errors, ...config.warnings]) console.error(`coplan: ${w}`);
   if (config.checksBroken) {
     console.error(`coplan: fix the checks in ${PROJECT_CONFIG_PATH} first; nothing was run.`);
@@ -185,7 +185,7 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   }
   if (!hooks.length) {
     if (opts.json) console.log('[]');
-    else if (!stageHooks.length) console.log(`No ${opts.stage} hooks${opts.skip.length ? ' left to run' : ''} in ${PROJECT_CONFIG_PATH}.`);
+    else if (!stageHooks.length) console.log(`No ${opts.stage} checks${opts.skip.length ? ' left to run' : ''} in ${PROJECT_CONFIG_PATH}.`);
     return 0;
   }
   // Each check's command, with `{files}` as the changed files in its area —

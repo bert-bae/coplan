@@ -22,27 +22,22 @@ _…more of the plan than fits here: harness_plan_read {peek: true} has all of i
 Build what this task describes and nothing more — the plan gives other parts to other tasks. If you find work outside it, say so in your report instead of doing it; it becomes a task of its own.
 - wire Wire into API is being built right now.
 
-## Standing instructions
-_From the user's and the repository's Coplan config; they hold for all of this._
-
-Match the code style around you.
-
 ## Branch
 No branch is named for it: work on the current branch.
 
-## The cycle: implement → review → refine
-Review: checks only, no review (set on this task). At most 1 review round; another is the user's call.
+## Done when
+Its checks pass — the repository's checks for the files this task expects to touch; they run only for what it really changes:
+- implement: typecheck `pnpm typecheck`; lint `pnpm lint`
+- review: tests `env NODE_ENV=test sh -c 'pnpm test'`
 
-**Implement.** Make the change, then run the implement checks and fix what they find:
-- typecheck: `pnpm typecheck`
-- lint: `pnpm lint`
+Review requested: none beyond the checks (set on this task). The checks are the review.
 
-**Review.** No reviewer: the review checks are the review. Run them:
-- tests: `env NODE_ENV=test sh -c 'pnpm test'`
+### Standing instructions
+_From the user's and the repository's Coplan config; they hold for all of this._
 
-**Refine.** Fix what the review found, run the implement checks again, and go back to review.
+Match the code style around you. Check error handling.
 
-Report each step with harness_task_update {task_id: "docs", stage: "implement" | "review" | "refine", checks: [{name, ok, note}]}, and status "done" with a one-line note once the review passed. Handed this brief as a subagent or a child session, report back to the session that started you instead, never to Coplan or the user: what you changed, the checks and how they came out, any question, and anything left.
+Report it with harness_task_update {task_id: "docs", status: "in_progress" | "done" | "blocked", stage, verdict, checks: [{name, ok, note}], note}: "done" with a one-line note of what you did, "blocked" with what it waits on. Handed this brief by a harness that reports for you, report back to it instead, never to Coplan or the user: what you changed, the checks and how they came out, any question, and anything left.
 
 ## Open comments on it and its design
 - planner _(on the plan)_: Proposal p1: Split the docs task

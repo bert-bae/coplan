@@ -19,8 +19,8 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_CONFIG, globalConfigFile, mergeConfig } from '../shared/config.ts';
 import { jsoncComments, parseJsonc } from '../shared/jsonc.ts';
-import { DEFAULT_BUILD_SETTINGS, MAX_PARALLEL } from '../shared/build.ts';
-import { GLOBAL_PROJECT_FILE, HOOK_STAGES, PROJECT_CONFIG_PATH, PR_OPEN, PR_TOOLS, loadProjectConfig } from '../shared/project.ts';
+import { DEFAULT_REVIEW } from '../shared/build.ts';
+import { GLOBAL_PROJECT_FILE, HOOK_STAGES, PROJECT_CONFIG_PATH, loadProjectConfig } from '../shared/project.ts';
 import { REVIEW_MODES } from '../shared/types.ts';
 import { AGENTS, AGENT_KINDS, type AgentKind } from '../shared/agents.ts';
 import { paths, readVerifiedLock } from '../shared/paths.ts';
@@ -131,17 +131,6 @@ export async function choose<T extends string>(io: SetupIo, question: string, op
     const hit = options.find((o) => o === a.toLowerCase());
     if (hit) return hit;
     io.say(`  Answer one of: ${options.join(', ')}.`);
-  }
-  return dflt;
-}
-
-export async function whole(io: SetupIo, question: string, min: number, max: number, dflt: number): Promise<number> {
-  for (let i = 0; i < TRIES; i++) {
-    const a = await answer(io, `${question} [${dflt}] `);
-    if (a === null || a === '') return dflt;
-    const n = Number(a);
-    if (Number.isInteger(n) && n >= min && n <= max) return n;
-    io.say(`  Answer a whole number from ${min} to ${max}.`);
   }
   return dflt;
 }
@@ -347,14 +336,6 @@ function put(obj: Record<string, unknown>, key: string, value: unknown, dflt: un
   obj[key] = value;
 }
 
-/** Set keys in the object under `key`, creating it only when it gets one. */
-function section(raw: Record<string, unknown>, key: string, set: (obj: Record<string, unknown>) => void): void {
-  const had = isRecord(raw[key]);
-  const obj = had ? { ...(raw[key] as Record<string, unknown>) } : {};
-  set(obj);
-  if (had || Object.keys(obj).length) raw[key] = obj;
-}
-
 /** Write the file if it changed, keeping a copy of one whose comments the
  *  rewrite drops. Whether it was written. */
 function save(file: string, header: string, before: { raw: Record<string, unknown>; comments: boolean }, raw: Record<string, unknown>, io: SetupIo): boolean {
@@ -374,8 +355,8 @@ function save(file: string, header: string, before: { raw: Record<string, unknow
 }
 
 /**
- * The settings most people change, each starting from what is set now: how
- * a build runs (`coplan.json`, for every repository) and whether the plan
+ * The settings most people change, each starting from what is set now: the
+ * review each task asks for (`coplan.json`, for every repository) and whether the plan
  * opens by itself (`config.json`). The rest are in docs/CONFIG.md. The files
  * written, if any.
  */
@@ -386,23 +367,15 @@ export async function askSettings(io: SetupIo, coplanHome: string): Promise<stri
   const defaults = readJsonc(defaultsFile, io);
   if (defaults) {
     const now = loadProjectConfig(null, { globalDir: coplanHome });
-    const review = await choose(io, '  Who reviews each task: a fresh subagent, the agent itself (self), you (user), or only the checks (skip)?', REVIEW_MODES, now.settings.review);
-    const parallel = await whole(io, `  How many tasks are built at once? (1-${MAX_PARALLEL})`, 1, MAX_PARALLEL, now.settings.parallel);
-    const tool = await choose(io, '  Open pull requests with', PR_TOOLS, now.pullRequests.tool);
-    const open = tool === 'none' ? now.pullRequests.open : await choose(io, '  Open them as each branch is done (auto), when you say (ask), or never?', PR_OPEN, now.pullRequests.open);
+    const review = await choose(io, '  The review each task asks your harness for: another agent (agent), you (user), or only the checks (none)?', REVIEW_MODES, now.review);
     const raw = { ...defaults.raw };
-    section(raw, 'iric', (o) => {
-      put(o, 'review', review, DEFAULT_BUILD_SETTINGS.review);
-      put(o, 'parallel', parallel, DEFAULT_BUILD_SETTINGS.parallel);
-    });
-    section(raw, 'pullRequests', (o) => {
-      put(o, 'tool', tool, 'gh');
-      put(o, 'open', open, 'ask');
-    });
-    if (save(defaultsFile, DEFAULTS_HEADER, defaults, raw, io)) {
-      saved.push(defaultsFile);
-      for (const w of loadProjectConfig(null, { globalDir: coplanHome }).warnings) io.say(`  ! ${w}`);
-    }
+    // The old `iric.review` would otherwise still be read over a default left unwritten.
+    if (isRecord(raw['iric'])) {
+      delete raw['iric'];
+      raw['review'] = review;
+    } else put(raw, 'review', review, DEFAULT_REVIEW);
+    if (save(defaultsFile, DEFAULTS_HEADER, defaults, raw, io)) saved.push(defaultsFile);
+    for (const w of loadProjectConfig(null, { globalDir: coplanHome }).warnings) io.say(`  ! ${w}`);
   }
 
   const machineFile = globalConfigFile(coplanHome);
@@ -420,12 +393,8 @@ export async function askSettings(io: SetupIo, coplanHome: string): Promise<stri
 }
 
 /** A repository's checks: `.coplan/config.json`, from what it already runs. */
-export async function askRepositories(io: SetupIo, home: string, coplanHome: string): Promise<string[]> {
+export async function askRepositories(io: SetupIo, home: string): Promise<string[]> {
   const written: string[] = [];
-  // Built-in defaults written into the repository would override the
-  // user's own, which a repository's file does key by key.
-  const own = readJsonc(path.join(coplanHome, GLOBAL_PROJECT_FILE), { ...io, say: () => {} })?.raw['iric'];
-  const settings = !(isRecord(own) && Object.keys(own).length > 0);
   let question = "  Set up a repository's checks (typecheck, lint, tests)? Its path, or Enter to skip:";
   for (;;) {
     const a = await answer(io, `${question} `);
@@ -449,7 +418,7 @@ export async function askRepositories(io: SetupIo, home: string, coplanHome: str
     }
     if (!(await yesNo(io, `  Write ${file}?`, true))) continue;
     mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, renderConfig(hooks, baseBranch(root), { settings }));
+    writeFileSync(file, renderConfig(hooks, baseBranch(root)));
     written.push(file);
     io.say('  Written. Commit it; /coplan-init in that repository checks it against your CI.');
   }
@@ -467,7 +436,7 @@ export async function setup(opts: SetupOptions, io: SetupIo): Promise<SetupResul
   try {
     if (io.ask && (await yesNo(io, 'Adjust settings now? The defaults are fine to start.', false))) {
       await askSettings(io, opts.coplanHome);
-      await askRepositories(io, opts.home, opts.coplanHome);
+      await askRepositories(io, opts.home);
       io.say('  More settings: docs/CONFIG.md');
     }
   } catch (err) {

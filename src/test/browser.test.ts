@@ -48,3 +48,27 @@ test('on Linux the link goes to xdg-open', { skip: process.platform !== 'linux' 
     rmSync(bin, { recursive: true, force: true });
   }
 });
+
+test('a page opened on a login ticket trades it for the token before its first call, and keeps it', async () => {
+  const { setupDom } = await import('./dom-env.ts');
+  setupDom('http://127.0.0.1:1234/?login=t1#/session/s1');
+  const calls: { url: string; auth?: string }[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    calls.push({ url: input, auth: (init?.headers as Record<string, string> | undefined)?.['authorization'] });
+    const body = input.startsWith('/api/login') ? { token: 'secret' } : { sessions: [], version: 'x' };
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    const { api } = await import('../ui/lib/api.ts');
+    await api.sessions();
+    assert.deepEqual(calls, [
+      { url: '/api/login?ticket=t1', auth: undefined },
+      { url: '/api/sessions', auth: 'Bearer secret' },
+    ]);
+    assert.equal(window.location.href, 'http://127.0.0.1:1234/#/session/s1', 'out of the address bar');
+    assert.equal(window.localStorage.getItem('coplan.token'), 'secret');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

@@ -83,10 +83,15 @@ async function currentSession(lock: DaemonLock): Promise<string | undefined> {
   }
 }
 
-function uiUrl(lock: DaemonLock, sessionId?: string): string {
-  const base = `${baseUrl(lock)}/?token=${lock.token}`;
+function uiUrl(lock: DaemonLock, sessionId?: string, query = ''): string {
+  const base = `${baseUrl(lock)}/${query}`;
   return sessionId ? `${base}#/session/${sessionId}` : base;
 }
+
+/** For whoever runs `coplan url` in their own terminal: the agent's runs end up in its transcript. */
+const signedInUrl = (lock: DaemonLock, sessionId?: string) => uiUrl(lock, sessionId, `?token=${lock.token}`);
+
+const SIGN_IN = "(if the page says it does not hold Coplan's key, run `coplan url` in your own terminal for a signed-in link)";
 
 const commands: Record<string, (args: string[]) => Promise<number>> = {
   async start() {
@@ -96,7 +101,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
       return 1;
     }
     console.log(`coplan running on ${baseUrl(lock)} (pid ${lock.pid})`);
-    console.log(`open: ${uiUrl(lock)}`);
+    console.log(`open: ${uiUrl(lock)} ${SIGN_IN}`);
     return 0;
   },
 
@@ -278,16 +283,18 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
   async open(args) {
     const lock = await ensureDaemon();
     if (!lock) return 1;
-    const url = uiUrl(lock, args[0] ?? (await currentSession(lock)));
-    openInBrowser(url);
-    console.log(url);
+    const id = args[0] ?? (await currentSession(lock));
+    // A browser's command line is readable by other local users: it gets a single-use ticket, not the token.
+    const ticket = await api<{ ticket: string }>(lock, '/api/login/ticket', { method: 'POST', body: '{}' }).then((r) => r.ticket, () => undefined);
+    openInBrowser(uiUrl(lock, id, ticket ? `?login=${ticket}` : ''));
+    console.log(`${uiUrl(lock, id)} ${SIGN_IN}`);
     return 0;
   },
 
   async url(args) {
     const lock = await ensureDaemon();
     if (!lock) return 1;
-    console.log(uiUrl(lock, args[0] ?? (await currentSession(lock))));
+    console.log(signedInUrl(lock, args[0] ?? (await currentSession(lock))));
     return 0;
   },
 
@@ -306,7 +313,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
     return runDoctor();
   },
 
-  /** Run a stage's hooks from the repository's .coplan/config.json. */
+  /** Run a stage's checks from the repository's .coplan/config.json. */
   async check(args) {
     return runCheck(args);
   },
@@ -324,58 +331,6 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
 
   async version() {
     console.log(VERSION);
-    return 0;
-  },
-
-  /** The pull requests this session's build recorded: wait for work on them, see them, stop watching. */
-  async pr(args) {
-    const [sub = 'status', ...rest] = args;
-    const flag = rest.indexOf('--session');
-    const named = flag >= 0 ? rest.splice(flag, 2)[1] : undefined;
-    let lock = await ensureDaemon();
-    if (!lock) return 1;
-    const id = named ?? (await currentSession(lock));
-    if (!id) throw new Said('no session here: run it from the agent\'s session, or name one with --session <id>.');
-    const at = `/api/session/${encodeURIComponent(id)}/pr`;
-    if (sub === 'wait') {
-      // Held open by the daemon up to 10 minutes at a time; asked again until there is work.
-      for (let failures = 0; ; ) {
-        try {
-          const { prompt, watching } = await api<{ prompt: string | null; watching: number }>(lock, `${at}/wait?ms=600000`, undefined, 610_000);
-          failures = 0;
-          if (prompt) {
-            console.log(prompt);
-            return 0;
-          }
-          if (!watching) {
-            console.log('[cc-harness] No pull request of this session is watched any more: nothing to wait for.');
-            return 0;
-          }
-        } catch (err) {
-          // A restarted daemon: find the new one, a few times, then say why.
-          if (++failures > 5) throw err;
-          await sleep(5_000);
-          lock = (await ensureDaemon()) ?? lock;
-        }
-      }
-    }
-    if (sub === 'unwatch') {
-      const { stopped } = await api<{ stopped: number }>(lock, `${at}/unwatch`, { method: 'POST', body: JSON.stringify({ branch: rest[0] }) });
-      console.log(stopped ? `stopped watching ${stopped} pull request${stopped === 1 ? '' : 's'}` : 'no pull request recorded for that');
-      return 0;
-    }
-    if (sub !== 'status') {
-      usage();
-      return 2;
-    }
-    const { prs, inbox } = await api<{ prs: { branch: string; pr: { url?: string; number?: number; state: string }; watched: boolean; watch?: { fixRounds?: number; error?: string; timeline?: { at: number; note: string }[] } }[]; inbox: number }>(lock, at);
-    if (!prs.length) console.log('no pull requests recorded for this session');
-    for (const p of prs) {
-      console.log(`${p.branch}  #${p.pr.number ?? '?'} ${p.pr.state}  ${p.watched ? 'watched' : 'not watched'}${p.watch?.fixRounds ? `  fix rounds ${p.watch.fixRounds}` : ''}${p.pr.url ? `  ${p.pr.url}` : ''}`);
-      if (p.watch?.error) console.log(`  ! ${p.watch.error}`);
-      for (const t of p.watch?.timeline?.slice(-5) ?? []) console.log(`  ${new Date(t.at).toISOString()}  ${t.note}`);
-    }
-    if (inbox) console.log(`${inbox} prompt${inbox === 1 ? '' : 's'} waiting for the agent`);
     return 0;
   },
 };
@@ -456,19 +411,15 @@ usage: coplan <command>
   logs       tail the daemon log
   doctor     verify the plugin wiring end to end
   check [implement|review|final] [--since commit] [--files a,b] [--base ref] [--all] [--skip name]... [--list] [--json]
-             run that stage's hooks from .coplan/config.json (default: review),
+             run that stage's checks from .coplan/config.json (default: review),
              only those for what changed: since --since, else since the last
              commit; at final, since --base. --files names the files instead,
-             --all runs every hook, --skip leaves one out (once per check)
+             --all runs every check, --skip leaves one out (once per check)
   init [--print] [--force]
              write a starting .coplan/config.json from the repository's scripts
   setup [--yes] [--agents claude,codex,cursor|none]
              install in your agents and walk through the settings
              (npx coplan@latest setup; in a clone, ./setup.sh builds first, then runs this)
-  pr [status|wait|unwatch [branch]] [--session id]
-             the pull requests this session's build recorded: status lists
-             them; wait ends with what needs doing when one changes (run it
-             in the background); unwatch stops following one, or all
   version    print the version
 `);
 }

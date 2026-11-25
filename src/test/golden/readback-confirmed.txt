@@ -90,7 +90,7 @@ _Not connected to anything yet: Event bus._
     files: src/cache.ts, src/events.ts
 - [~] wire Wire into API · after storage · branch `cache/api` — halfway · rev 1
   Use the client in the orders handler.
-- [ ] docs Document the cache in the README · review: skip · ready · rev 2
+- [ ] docs Document the cache in the README · review: none · ready · rev 2
 
 ## Build order
 _Each step needs only the steps before it; the tasks within a step can be built side by side._

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, descendants, hasTaskList, MAX_CHANGES, planFlow, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, passedAndClosed, PlanError, proposalTouches, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, awaitingUserReview, confirmDesign, countTasks, descendants, hasTaskList, MAX_CHANGES, planFlow, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, proposalTouches, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import { roundVerdict } from '../shared/build.ts';
 import { planGaps } from '../shared/check.ts';
@@ -852,7 +852,7 @@ test("a proposal's `expect` checks it when made, and does not refuse the accept 
 });
 
 test('mid-build, an accepted proposal may add a task, never re-scope one the user signed off', () => {
-  let plan = submitPlan(confirmDesign(fresh(), { prompt: 'tasks' }, 2_000), { target: 'session', prompt: 'build' }, 3_000);
+  let plan = submitPlan(confirmDesign(fresh(), { prompt: 'tasks' }, 2_000), { prompt: 'build' }, 3_000);
   plan = applyOps(plan, [{ op: 'propose', title: 'Rescope', reason: 'Bigger.', ops: [{ op: 'upsert_task', id: 't4', title: 'Rewrite the API', branch: 'other' }] }], 'claude').plan;
   assert.throws(() => applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user'), /takes only new tasks from a proposal\. Reopen the plan/);
   plan = applyOps(plan, [{ op: 'propose', title: 'Load test', reason: 'Prove it.', ops: [{ op: 'upsert_task', title: 'Load test' }] }], 'claude').plan;
@@ -926,27 +926,27 @@ test('a finished task taken up again, by way of dropped too, has no verdict for 
   plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'dropped' });
   // A drop undone, nothing changed: still done on its pass.
   const undone = claude(plan, { op: 'upsert_task', id: 't2', status: 'done' });
-  assert.equal(roundVerdict(undone.tasks.find((t) => t.id === 't2')!, 'self')?.verdict, 'pass', 'a drop undone keeps the pass');
+  assert.equal(roundVerdict(undone.tasks.find((t) => t.id === 't2')!, 'agent')?.verdict, 'pass', 'a drop undone keeps the pass');
   plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'in_progress' });
-  assert.equal(roundVerdict(plan.tasks.find((t) => t.id === 't2')!, 'self'), undefined, 'no pass for the work taken up again');
+  assert.equal(roundVerdict(plan.tasks.find((t) => t.id === 't2')!, 'agent'), undefined, 'no pass for the work taken up again');
   // One dropped mid-review, before it was done, keeps its verdict: the changes asked for still stand.
   let midway = fresh();
   Object.assign(midway.tasks.find((t) => t.id === 't2')!, { status: 'in_progress', stage: 'review', round: 2, reviews: [{ round: 2, by: 'claude', verdict: 'changes', summary: 'Add a timeout', at: 1 }] });
   midway = claude(midway, { op: 'upsert_task', id: 't2', status: 'dropped' });
   midway = claude(midway, { op: 'upsert_task', id: 't2', status: 'in_progress' });
-  assert.equal(roundVerdict(midway.tasks.find((t) => t.id === 't2')!, 'self')?.verdict, 'changes');
+  assert.equal(roundVerdict(midway.tasks.find((t) => t.id === 't2')!, 'agent')?.verdict, 'changes');
   // A pass given mid-review, then dropped before done and taken up again: kept, as it was never done.
   let passed = fresh();
   Object.assign(passed.tasks.find((t) => t.id === 't2')!, { status: 'in_progress', stage: 'review', round: 2, reviews: [{ round: 2, by: 'claude', verdict: 'pass', summary: 'ok', at: 1 }] });
   passed = claude(passed, { op: 'upsert_task', id: 't2', status: 'dropped' });
   passed = claude(passed, { op: 'upsert_task', id: 't2', status: 'in_progress' });
-  assert.equal(roundVerdict(passed.tasks.find((t) => t.id === 't2')!, 'self')?.verdict, 'pass');
+  assert.equal(roundVerdict(passed.tasks.find((t) => t.id === 't2')!, 'agent')?.verdict, 'pass');
   // Done after a "changes" then a pass, dropped and taken up again: no stale "changes" left either.
   let mixed = fresh();
   Object.assign(mixed.tasks.find((t) => t.id === 't2')!, { status: 'done', round: 1, reviews: [{ round: 1, by: 'claude', verdict: 'changes', summary: 'Add a timeout', at: 1 }, { round: 1, by: 'claude', verdict: 'pass', summary: 'ok', at: 2 }] });
   mixed = claude(mixed, { op: 'upsert_task', id: 't2', status: 'dropped' });
   mixed = claude(mixed, { op: 'upsert_task', id: 't2', status: 'in_progress' });
-  assert.equal(roundVerdict(mixed.tasks.find((t) => t.id === 't2')!, 'self'), undefined);
+  assert.equal(roundVerdict(mixed.tasks.find((t) => t.id === 't2')!, 'agent'), undefined);
   // Known across a republish too.
   let republished = fresh();
   Object.assign(republished.tasks.find((t) => t.id === 't2')!, { status: 'done', round: 1, reviews: [{ round: 1, by: 'claude', verdict: 'pass', summary: 'ok', at: 1 }] });
@@ -954,127 +954,35 @@ test('a finished task taken up again, by way of dropped too, has no verdict for 
   republished = publishTasks(republished, { tasks: SAME_TASKS.tasks! }, 2_000).plan;
   assert.equal(republished.tasks.find((t) => t.id === 't2')!.wasDone, true, 'kept by a republish');
   republished = claude(republished, { op: 'upsert_task', id: 't2', status: 'in_progress' });
-  assert.equal(roundVerdict(republished.tasks.find((t) => t.id === 't2')!, 'self'), undefined);
+  assert.equal(roundVerdict(republished.tasks.find((t) => t.id === 't2')!, 'agent'), undefined);
   // Known across a restart.
   let reload = fresh();
   Object.assign(reload.tasks.find((t) => t.id === 't2')!, { status: 'done', round: 1, reviews: [{ round: 1, by: 'claude', verdict: 'pass', summary: 'ok', at: 1 }] });
   reload = normalizePlan(JSON.parse(JSON.stringify(claude(reload, { op: 'upsert_task', id: 't2', status: 'dropped' }))) as Plan & Record<string, unknown>, 'x');
   reload = claude(reload, { op: 'upsert_task', id: 't2', status: 'in_progress' });
-  assert.equal(roundVerdict(reload.tasks.find((t) => t.id === 't2')!, 'self'), undefined);
+  assert.equal(roundVerdict(reload.tasks.find((t) => t.id === 't2')!, 'agent'), undefined);
 });
 
-test("a finished task's last round counts as passed only by the verdict that stands, under its review mode", () => {
-  const plan = fresh();
-  const t2 = plan.tasks.find((t) => t.id === 't2')!;
-  const closed = (reviews: unknown[], review?: string) => {
-    Object.assign(t2, { status: 'done', round: 1, reviews, ...(review ? { review } : {}) });
-    if (!review) delete t2.review;
-    return passedAndClosed(plan, t2, 'self');
-  };
-  assert.equal(closed([{ round: 1, by: 'claude', verdict: 'pass', at: 1 }]), true);
-  assert.equal(closed([{ round: 1, by: 'claude', verdict: 'pass', at: 1 }, { round: 1, by: 'claude', verdict: 'changes', at: 2 }]), false, 'a pass, then changes: not passed');
-  assert.equal(closed([{ round: 1, by: 'claude', verdict: 'pass', at: 1 }, { round: 1, by: 'user', verdict: 'changes', at: 2 }], 'user'), false, "the user's review: the agent's pass does not count");
-  assert.equal(closed([{ round: 1, by: 'user', verdict: 'pass', at: 1 }], 'user'), true);
-  assert.equal(closed([{ round: 1, by: 'user', verdict: 'changes', at: 1 }, { round: 1, by: 'claude', verdict: 'pass', at: 2 }], 'user'), false, "the user's changes stand over the agent's later pass");
-  assert.equal(closed([], 'skip'), true, 'no review: closed done is passed');
-});
-
-test('a task closed over failing checks gets no free round when taken up again, under any review mode (D4)', () => {
-  const claude = (plan: Plan, op: PlanOp) => applyOps(plan, [op], 'claude', undefined, { tracking: true }).plan;
-  const failing = [{ name: 'tests', ok: false, note: '1 failing' }];
-  const closed = (review: string) => {
-    let p = fresh();
-    Object.assign(p.tasks.find((t) => t.id === 't2')!, { status: 'in_progress', stage: 'review', round: 1, review, checks: failing, reviews: [{ round: 1, by: 'claude', verdict: 'pass', at: 1 }] });
-    p = claude(p, { op: 'upsert_task', id: 't2', status: 'done', acceptedFailing: true });
-    return p;
-  };
-  const t2 = (p: Plan) => p.tasks.find((t) => t.id === 't2')!;
-  for (const review of ['skip', 'self']) {
-    let plan = closed(review);
-    assert.equal(t2(plan).acceptedFailing, true, review);
-    assert.equal(passedAndClosed(plan, t2(plan), 'self'), false, `${review}: accepted as it was, not passed`);
-    // Through a drop, and a drop undone; known across a restart.
-    plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'dropped' });
-    assert.equal(t2(plan).acceptedFailing, true, 'kept through a drop');
-    plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'done' });
-    assert.equal(t2(plan).acceptedFailing, true, 'kept by a drop undone');
-    plan = normalizePlan(JSON.parse(JSON.stringify(plan)) as Plan & Record<string, unknown>, 'x');
-    assert.equal(t2(plan).acceptedFailing, true, 'kept across a restart');
-    // Taken up again: no `reopened`, so its next round is held to the limit; and the flag goes.
-    plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'in_progress' });
-    assert.equal(t2(plan).reopened, undefined, `${review}: no free round`);
-    assert.equal(t2(plan).acceptedFailing, undefined, 'work again: how it was closed no longer applies');
+test('the round bookkeeping older versions enforced with is dropped on load, and is no field an edit takes', () => {
+  const stale = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [
+    { id: 't1', title: 'API', status: 'done', order: 0, parentId: null, round: 2, reopened: true, acceptedFailing: true },
+    { id: 't2', title: 'UI', status: 'in_progress', stage: 'review', order: 1, parentId: null, round: 4, reopened: true },
+  ] } as unknown as Plan & Record<string, unknown>, 'x');
+  for (const t of stale.tasks) {
+    assert.equal((t as unknown as Record<string, unknown>)['reopened'], undefined);
+    assert.equal((t as unknown as Record<string, unknown>)['acceptedFailing'], undefined);
   }
-  // Without failing checks, skip's closed-done still counts as passed, as before.
-  let clean = fresh();
-  Object.assign(clean.tasks.find((t) => t.id === 't2')!, { status: 'in_progress', stage: 'review', round: 1, review: 'skip' });
-  clean = claude(clean, { op: 'upsert_task', id: 't2', status: 'done' });
-  assert.equal(passedAndClosed(clean, t2(clean), 'self'), true);
-  // Closed anew without it, it goes; set on a task not finished, a load drops it.
-  let again = closed('skip');
-  again = claude(again, { op: 'upsert_task', id: 't2', status: 'in_progress' });
-  again = claude(again, { op: 'upsert_task', id: 't2', status: 'done' });
-  assert.equal(t2(again).acceptedFailing, undefined);
-  const stray = fresh();
-  Object.assign(stray.tasks.find((t) => t.id === 't2')!, { status: 'in_progress', acceptedFailing: true });
-  assert.equal(t2(normalizePlan(JSON.parse(JSON.stringify(stray)) as Plan & Record<string, unknown>, 'x')).acceptedFailing, undefined);
-  // Progress, not the agent's to set through an edit.
-  assert.throws(() => applyOps(fresh(), [{ op: 'upsert_task', id: 't2', acceptedFailing: true }], 'claude'), /upsert_task does not set acceptedFailing/);
+  assert.equal(stale.tasks[0]!.round, 2, 'the round itself stays: a verdict is given in one');
+  assert.throws(() => applyOps(fresh(), [{ op: 'upsert_task', id: 't2', acceptedFailing: true } as unknown as PlanOp], 'claude'), /acceptedFailing/);
 });
 
-test('a finished task taken up again keeps its one round past the limit through a drop, and only that one', () => {
-  const claude = (plan: Plan, op: PlanOp) => applyOps(plan, [op], 'claude', undefined, { tracking: true }).plan;
-  let plan = fresh();
-  Object.assign(plan.tasks.find((t) => t.id === 't2')!, { status: 'done', round: 1, reviews: [{ round: 1, by: 'claude', verdict: 'pass', at: 1 }] });
-  const t2 = () => plan.tasks.find((t) => t.id === 't2')!;
-  plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'in_progress' });
-  assert.equal(t2().reopened, true, 'taken up again on a pass');
-  plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'dropped' });
-  assert.equal(t2().reopened, true, 'kept through a drop: its round never failed');
-  plan = claude(plan, { op: 'upsert_task', id: 't2', status: 'in_progress' });
-  assert.equal(t2().reopened, true);
-  plan = claude(plan, { op: 'upsert_task', id: 't2', stage: 'review' });
-  assert.equal(t2().reopened, undefined, 'its next round used: the rounds after it are held to the limit');
-  // Gone too when it is done again (a drop undone), and on the user's reset.
-  const reopen = () => {
-    let p = fresh();
-    Object.assign(p.tasks.find((t) => t.id === 't2')!, { status: 'done', round: 1, reviews: [{ round: 1, by: 'claude', verdict: 'pass', at: 1 }] });
-    p = claude(p, { op: 'upsert_task', id: 't2', status: 'in_progress' });
-    return claude(p, { op: 'upsert_task', id: 't2', status: 'dropped' });
-  };
-  assert.equal(claude(reopen(), { op: 'upsert_task', id: 't2', status: 'done' }).tasks.find((t) => t.id === 't2')!.reopened, undefined);
-  assert.equal(applyOps(reopen(), [{ op: 'upsert_task', id: 't2', status: 'todo' }], 'user').plan.tasks.find((t) => t.id === 't2')!.reopened, undefined);
-  // A stale one on a done task (an older build, a hand edit) is dropped on load.
-  const stale = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'done', order: 0, parentId: null, round: 2, reopened: true }] } as unknown as Plan & Record<string, unknown>, 'x');
-  assert.equal(stale.tasks[0]!.reopened, undefined);
-  // Nor on a task already in review (an older build sent it there without clearing it).
-  const inReview = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks: [{ id: 't1', title: 'API', status: 'in_progress', stage: 'review', order: 0, parentId: null, round: 4, reopened: true }] } as unknown as Plan & Record<string, unknown>, 'x');
-  assert.equal(inReview.tasks[0]!.reopened, undefined);
-});
-
-test("before submission, a task taken up again is judged under the project's review mode, as the build is", () => {
-  const claude = (plan: Plan, op: PlanOp, review?: 'user' | 'skip') => applyOps(plan, [op], 'claude', undefined, { tracking: true, ...(review ? { review } : {}) }).plan;
-  const start = (reviews: unknown[]) => {
-    const plan = fresh();
-    Object.assign(plan.tasks.find((t) => t.id === 't2')!, { status: 'done', round: 1, reviews });
-    return plan;
-  };
-  // The project reviews by the user: the agent's pass, closed on the user's word, is no pass of theirs.
-  const userReviewed = claude(start([{ round: 1, by: 'claude', verdict: 'pass', at: 1 }]), { op: 'upsert_task', id: 't2', status: 'in_progress' }, 'user');
-  assert.equal(userReviewed.tasks.find((t) => t.id === 't2')!.reopened, undefined);
-  // It skips review: closed done is passed.
-  const skipped = claude(start([]), { op: 'upsert_task', id: 't2', status: 'in_progress' }, 'skip');
-  assert.equal(skipped.tasks.find((t) => t.id === 't2')!.reopened, true);
-  // A submitted Managed build is judged by the settings the user submitted, not the project's.
-  const submitted = start([{ round: 1, by: 'claude', verdict: 'pass', at: 1 }]);
-  submitted.submission = { settings: { review: 'user' } } as unknown as Plan['submission'];
-  const held = claude(submitted, { op: 'upsert_task', id: 't2', status: 'in_progress' }, 'skip');
-  assert.equal(held.tasks.find((t) => t.id === 't2')!.reopened, undefined);
-  // A verdict records the mode it was given under.
-  const inReview = start([]);
-  Object.assign(inReview.tasks.find((t) => t.id === 't2')!, { status: 'in_progress', stage: 'review' });
+test('a verdict records the review the task asked for when it was given', () => {
+  const inReview = fresh();
+  Object.assign(inReview.tasks.find((t) => t.id === 't2')!, { status: 'in_progress', stage: 'review', round: 1 });
   const passed = applyOps(inReview, [{ op: 'review_task', id: 't2', verdict: 'pass' }], 'user', undefined, { review: 'user' }).plan;
   assert.equal(passed.tasks.find((t) => t.id === 't2')!.reviews!.at(-1)!.mode, 'user');
+  const byDefault = applyOps(inReview, [{ op: 'review_task', id: 't2', verdict: 'pass' }], 'user').plan;
+  assert.equal(byDefault.tasks.find((t) => t.id === 't2')!.reviews!.at(-1)!.mode, 'agent');
 });
 
 test('a task the agent puts back to todo keeps its round across a restart, as the edit kept it', () => {
@@ -1310,7 +1218,7 @@ test('handing over the build prompt is not a read of what the user did after sub
     { op: 'propose', title: 'Add cache', reason: 'faster', ops: [{ op: 'upsert_task', title: 'Cache' }] },
   ], 'claude').plan;
   for (const reload of [false, true]) {
-    let plan = submitPlan(proposed, { target: 'session', prompt: 'build it' }, 2_000);
+    let plan = submitPlan(proposed, { prompt: 'build it' }, 2_000);
     // The daemon may restart between the sign-off and its delivery.
     if (reload) plan = normalizePlan(JSON.parse(JSON.stringify(plan)) as Parameters<typeof normalizePlan>[0], 'x');
     plan = applyOps(plan, [{ op: 'reject_proposal', id: 'p1', note: 'No cache: we must stay stateless' }], 'user').plan;
@@ -1320,12 +1228,12 @@ test('handing over the build prompt is not a read of what the user did after sub
     assert.match(renderPlan(plan, { changesOnly: true }), /No cache: we must stay stateless/, 'the agent is shown the reason when it reads');
   }
   // A plan submitted before the sign-off's log position was recorded: by the clock.
-  const legacy = submitPlan(proposed, { target: 'session', prompt: 'build it' }, 2_000);
+  const legacy = submitPlan(proposed, { prompt: 'build it' }, 2_000);
   delete legacy.submission!.seq;
   const rejected = applyOps(legacy, [{ op: 'reject_proposal', id: 'p1', note: 'No' }], 'user', 2_500).plan;
   assert.equal(unreadByClaude(markDelivered(rejected, 3_000)).length, 1, 'a legacy submission too');
   // With nothing after the sign-off, the prompt it carried is the agent's read, as before.
-  const quiet = markDelivered(submitPlan(proposed, { target: 'session', prompt: 'build it' }, 2_000), 3_000);
+  const quiet = markDelivered(submitPlan(proposed, { prompt: 'build it' }, 2_000), 3_000);
   assert.deepEqual(unreadByClaude(quiet), []);
   // The design's hand-over works the same way.
   const design = applyOps(confirmDesign(proposed, { prompt: 'make tasks' }, 2_000), [{ op: 'reject_proposal', id: 'p1', note: 'No' }], 'user').plan;
@@ -1698,11 +1606,10 @@ test('an architecture-first plan gets its task list, and its build, only from th
   const plan = publishPlan(null, { ...INPUT, mode: 'architect' }, 1000).plan;
   assert.equal(plan.mode, 'architect');
   assert.throws(() => publishTasks(plan, { tasks: [{ title: 'Too early' }] }), /architecture first/);
-  assert.throws(() => submitPlan(plan, { target: 'session', prompt: 'build' }), /architecture first/);
-  assert.ok(submitPlan(plan, { target: 'elsewhere', prompt: 'export' }).submission, 'handed off to build elsewhere, it builds nothing here');
+  assert.throws(() => submitPlan(plan, { prompt: 'build' }), /architecture first/);
   const confirmed = confirmDesign(plan, { prompt: 'make the task list' });
   const listed = publishTasks(confirmed, { tasks: [{ title: 'Cache client', detail: 'Get and set.', builds: ['cache'] }] }).plan;
-  assert.ok(submitPlan(listed, { target: 'session', prompt: 'build' }).submission, 'then it builds');
+  assert.ok(submitPlan(listed, { prompt: 'build' }).submission, 'then it builds');
 });
 
 test('a plan straight to its task list has no design to confirm, and is a task list from the start', () => {
@@ -1712,7 +1619,7 @@ test('a plan straight to its task list has no design to confirm, and is a task l
   assert.equal(hasTaskList(plan), true);
   assert.ok(planGaps(plan).some((g) => g.rule === 'task-undetailed'), 'its tasks are held to the task list\'s checks');
   assert.deepEqual(planFlow(plan), { steps: ['tasklist', 'build'], at: 'tasklist' });
-  assert.ok(submitPlan(plan, { target: 'session', prompt: 'build' }).submission);
+  assert.ok(submitPlan(plan, { prompt: 'build' }).submission);
 });
 
 test('a mode is kept when a publish leaves it out, refused when unknown, and dropped from disk when damaged', () => {
@@ -1725,5 +1632,26 @@ test('a mode is kept when a publish leaves it out, refused when unknown, and dro
   const old = fresh();
   assert.equal(old.mode, undefined);
   assert.deepEqual(planFlow(old).steps, ['architecture', 'tasklist', 'build']);
-  assert.ok(submitPlan(old, { target: 'session', prompt: 'build' }).submission, 'straight from the design, as before');
+  assert.ok(submitPlan(old, { prompt: 'build' }).submission, 'straight from the design, as before');
+});
+
+test("a build report's final checks survive a restart", () => {
+  const checks = [{ name: 'tests', ok: false, note: '2 failing' }, { name: 'lint', ok: true }];
+  const raw = { title: 'x', sections: [], diagrams: [], threads: [], tasks: [], report: { text: 'Built.', at: 5, checks: [...checks, { name: 3 }] } };
+  assert.deepEqual(normalizePlan(raw as unknown as Plan & Record<string, unknown>, 'x').report, { text: 'Built.', at: 5, checks });
+  assert.deepEqual(normalizePlan({ ...raw, report: { text: 'Built.', at: 5, checks: [] } } as unknown as Plan & Record<string, unknown>, 'x').report, { text: 'Built.', at: 5 });
+});
+
+test("a 0.3 Managed build's review setting is kept on its top-level tasks that set none", () => {
+  const tasks = [
+    { id: 't1', title: 'API', status: 'in_progress', stage: 'review', round: 1, order: 0, parentId: null },
+    { id: 't2', title: 'Client', status: 'todo', order: 0, parentId: 't3' },
+    { id: 't3', title: 'UI', status: 'todo', order: 1, parentId: null, review: 'none' },
+  ];
+  const submission = { at: 1, target: 'session', prompt: 'old', mode: 'managed', settings: { review: 'user', parallel: 2, maxRounds: 3 }, deliveredAt: 2 };
+  const plan = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks, submission } as unknown as Plan & Record<string, unknown>, 'x');
+  assert.deepEqual(plan.tasks.map((t) => t.review), ['user', undefined, 'none']);
+  assert.deepEqual(awaitingUserReview(plan, 'agent').map((t) => t.id), ['t1']);
+  const subagent = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks, submission: { ...submission, settings: { review: 'subagent' } } } as unknown as Plan & Record<string, unknown>, 'x');
+  assert.equal(subagent.tasks[0]!.review, 'agent');
 });

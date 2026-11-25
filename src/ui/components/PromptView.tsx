@@ -3,7 +3,7 @@ import { store, useAgent, usePlan, useSession, useStore, type ViewerState, type 
 import { api } from '../lib/api.ts';
 import { classNames } from '../lib/format.ts';
 import { isComposing } from '../lib/keys.ts';
-import { droppedParts, type Block, type BlockSource, type SettingKey } from '../../shared/blocks.ts';
+import { droppedParts, type Block, type BlockSource } from '../../shared/blocks.ts';
 import { findPart, outline, planPhase } from '../../shared/plan.ts';
 import type { Plan, Target } from '../../shared/types.ts';
 
@@ -26,8 +26,6 @@ export const CONFIG_DOCS = 'https://github.com/bert-bae/coplan/blob/main/docs/CO
 export function configDocs(key: string): string {
   return `${CONFIG_DOCS}#${(key.split('.')[0] ?? '').toLowerCase()}`;
 }
-
-const SETTING_LABEL: Record<SettingKey, string> = { mode: 'mode', review: 'who reviews', parallel: 'tasks at once', maxRounds: 'review rounds' };
 
 function short(text: string, max = 28): string {
   return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
@@ -75,8 +73,6 @@ export function sourceLabel(source: BlockSource, plan: Plan | null): string {
       return 'Your changes';
     case 'note':
       return 'Your note';
-    case 'setting':
-      return `Your choice: ${SETTING_LABEL[source.key]}`;
     default:
       return '';
   }
@@ -99,8 +95,6 @@ export function sourceTitle(source: BlockSource, plan: Plan | null): string {
       return 'What you changed since the agent last read the plan';
     case 'note':
       return 'What you wrote for the agent in the sign-off dialog';
-    case 'setting':
-      return `How the build runs — ${SETTING_LABEL[source.key]} — as chosen when the plan was submitted`;
     default:
       return '';
   }
@@ -318,7 +312,7 @@ function PromptViewer({ viewer }: { viewer: ViewerState }) {
       if (tab === 'readback') return { key, ...(await api.readback(sessionId)) };
       if (tab === 'brief') return { key, ...(await api.brief(sessionId, taskId)) };
       if (sent) return { key, text: sent.prompt };
-      const preview = confirmNext ? await api.designPreview(sessionId, '') : await api.promptPreview(sessionId, null, '');
+      const preview = confirmNext ? await api.designPreview(sessionId, '') : await api.promptPreview(sessionId, '');
       return { key, text: preview.prompt, ...(preview.blocks ? { blocks: preview.blocks } : {}) };
     };
     if (tab === 'brief' && !taskId) {

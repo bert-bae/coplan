@@ -6,21 +6,24 @@ sessions (`scripts/demo/seed.mjs`) against a daemon of its own and records the
 text each hook and tool reply hands the model. Tokens are characters ÷ 4:
 compare runs, not absolute numbers.
 
-Baseline: v0.3.0, before the token work.
+Baseline: v0.3.0, before the token work. The 0.4.0 column is the same
+script after the handoff change.
 
 ## Fixed cost
 
-| What | When it loads | Tokens |
-| --- | --- | ---: |
-| Skill + command descriptions (8) | every session | ~490 |
-| MCP tool definitions (11) | every session where tools are not deferred (Codex, Cursor; Claude Code when tool search is off) | **9,509** |
-| `coplan` skill body | planning | 5,189 |
-| `coplan-build` + `iric` skill bodies | building | 3,770 |
+| What | When it loads | v0.3.0 | 0.4.0 |
+| --- | --- | ---: | ---: |
+| Skill + command descriptions (8) | every session | ~490 | 482 |
+| MCP tool definitions (11 in 0.3, 10 in 0.4) | every session where tools are not deferred (Codex, Cursor; Claude Code when tool search is off) | **9,509** | **5,506** |
+| `coplan` skill body | planning | 5,189 | 5,512 |
+| Building skill bodies (0.3: `coplan-build` + `iric`; 0.4: `coplan-handoff`) | building | 3,770 | 836 |
 
-The tool definitions are the largest fixed cost: `harness_plan_publish`
-(2,453), `harness_plan_edit` (1,971), `harness_plan_propose` (1,958) and
-`harness_tasks_publish` (1,424) each carry their own copy of the
-node/edge/task schemas.
+In v0.3.0 the tool definitions were the largest fixed cost:
+`harness_plan_publish` (2,453), `harness_plan_edit` (1,971),
+`harness_plan_propose` (1,958) and `harness_tasks_publish` (1,424) each
+carried their own copy of the node/edge/task schemas. In 0.4.0
+`harness_plan_edit` (2,061) and `harness_plan_publish` (1,363) are the
+largest.
 
 ## Per-call cost (demo sessions)
 
@@ -73,15 +76,16 @@ subagent needs nothing else from Coplan.
 3. **Read changes only after the first read.** The `coplan` skill should use
    `harness_plan_read {changes_only: true}` once the agent has read the plan.
    ~1–2k per revision round.
-4. **One subagent per task, even at `parallel: 1`.** The main agent keeps only
+4. **One subagent per task, even one at a time.** The main agent keeps only
    task status. Without this, every file read for an early task is still in
    context for every later one. This is the largest cost in a real build, but
    it depends on the code base, so the demo can't measure it.
 5. **Shrink the tool definitions.** Share the node/edge/task schemas and trim
    descriptions that repeat the skills. Possibly ~3–4k of the 9.5k, wherever
    tools load up front.
-6. **Don't repeat instructions three times.** The build prompt restates
-   `coplan-build`, and each brief restates `iric`. Keep the brief's cycle
+6. **Don't repeat instructions three times.** In v0.3.0 the build prompt
+   restated the build skill, and each brief restated the per-task cycle
+   skill (both replaced in 0.4 by the short `coplan-handoff`). Keep the brief's cycle
    (subagents get only the brief) and shorten the build prompt to settings and
    checks, pointing at the skills.
 7. **Load headless and setup text only when needed.** Move those sections of

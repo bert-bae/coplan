@@ -52,9 +52,9 @@ PAYLOAD=$(cat)
 field() {
   printf '%s' "$PAYLOAD" | grep -o "\"$1\"[[:space:]]*:[[:space:]]*\"[A-Za-z0-9._:-]*\"" | head -n 1 | sed 's/.*:[[:space:]]*"\(.*\)"$/\1/'
 }
-if [ "$EVENT" = PostToolUse ] && [ "${#PAYLOAD}" -gt 262144 ]; then
+slim() {
   SLIM=
-  for KEY in session_id conversation_id cursor_version; do
+  for KEY in session_id conversation_id cursor_version "$@"; do
     VALUE=$(field "$KEY")
     [ -n "$VALUE" ] && SLIM="$SLIM\"$KEY\":\"$VALUE\","
   done
@@ -63,6 +63,15 @@ if [ "$EVENT" = PostToolUse ] && [ "${#PAYLOAD}" -gt 262144 ]; then
     *) exit 0 ;;
   esac
   PAYLOAD=$(printf '{%s"hook_event_name":"%s"}' "$SLIM" "$EVENT")
+}
+if [ "$EVENT" = PostToolUse ] && [ "${#PAYLOAD}" -gt 262144 ]; then
+  slim
+elif [ "$EVENT" = PreToolUse ]; then
+  # Only an ask tool's input is read (its questions): any other goes as its name.
+  case "$(field tool_name)" in
+    '' | AskUserQuestion | AskQuestion | request_user_input | request_user_input_async) ;;
+    *) slim tool_name ;;
+  esac
 fi
 
 # An installed but unbuilt plugin (`dist/` is not in the repository) has no

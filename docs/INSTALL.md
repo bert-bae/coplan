@@ -75,13 +75,14 @@ Coplan doctor.
 Coplan works with its defaults. Answer yes to *Adjust settings now?* and the
 setup asks for the ones people most often change:
 
-- **Your build defaults**, for every repository: who reviews each task, how
-  many tasks are built at once, and how pull requests are opened. They go in
-  `~/.claude/cc-harness/coplan.json`.
+- **Your plan defaults**, for every repository: the review each task asks
+  your harness for. They go in `~/.claude/cc-harness/coplan.json`. How tasks
+  are built — how many at once, how pull requests are opened — is your
+  harness's to set, not Coplan's.
 - **Whether the plan opens in your browser by itself** when the agent
   publishes one. This goes in `~/.claude/cc-harness/config.json`.
 - **A repository's checks**, if you give it a repository's path: the
-  commands each task runs (typecheck, lint, tests), proposed from that
+  commands that define done for each task (typecheck, lint, tests), proposed from that
   repository's scripts. They go in `.coplan/config.json` in the repository.
   Commit the file; `/coplan-init` in that repository checks it against your
   CI.

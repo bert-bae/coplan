@@ -15,7 +15,7 @@ function disk() {
   const files: ProjectFiles = {
     load: (root) => {
       loads++;
-      return { sources: [root], settings: { review: repos.get(root)?.review ?? 'self' } } as unknown as ProjectConfig;
+      return { sources: [root], review: repos.get(root)?.review ?? 'agent' } as unknown as ProjectConfig;
     },
     stamp: (sources) => sources.map((f) => `${f}@${repos.get(f)?.stamp ?? 0}`).join(','),
     mtime: () => savedAt,
@@ -37,11 +37,11 @@ test("an edit to a repository's review mode is told once, after the read that fi
   edit('a', 'user');
   projects.at('a');
   projects.at('a');
-  edit('a', 'subagent');
+  edit('a', 'none');
   projects.at('a');
   projects.at('a');
   await Promise.resolve();
-  assert.deepEqual(out, ['a:subagent']);
+  assert.deepEqual(out, ['a:none']);
 });
 
 test("an open page's repository, read between many others, has its edit told whenever it comes (#163)", async () => {
@@ -55,13 +55,13 @@ test("an open page's repository, read between many others, has its edit told whe
     edit('page', 'user');
     projects.at('page');
     for (let i = 0; i < 40; i++) {
-      edit(`r${i}`, 'self');
+      edit(`r${i}`, 'agent');
       projects.at(`r${i}`);
-      if (i === at) edit('page', 'subagent');
+      if (i === at) edit('page', 'none');
       projects.at('page');
     }
     await Promise.resolve();
-    assert.deepEqual(out, ['page:subagent'], `edited after ${at} others`);
+    assert.deepEqual(out, ['page:none'], `edited after ${at} others`);
   }
 });
 
@@ -73,7 +73,7 @@ test('a read made while its file was being saved is not kept: the next one reads
   projects.at('a');
   assert.equal(loads(), 1, 'settled: kept, and read from the cache');
   saveDuringRead();
-  edit('a', 'subagent');
+  edit('a', 'none');
   projects.at('a');
   projects.at('a');
   assert.equal(loads(), 3, 'the read during the save was not kept');
@@ -88,10 +88,10 @@ test('a listener that fails stops none of the others (#163)', async () => {
   const out = told(projects);
   edit('a', 'user');
   projects.at('a');
-  edit('a', 'self');
+  edit('a', 'agent');
   projects.at('a');
   await Promise.resolve();
-  assert.deepEqual(out, ['a:self']);
+  assert.deepEqual(out, ['a:agent']);
 });
 
 test("one session-list pass over many repositories does not push out an open page's (#168)", async () => {
@@ -102,13 +102,13 @@ test("one session-list pass over many repositories does not push out an open pag
   projects.at('page');
   // The list reads 120 repositories in a row, the page's not among them.
   for (let i = 0; i < 120; i++) {
-    edit(`r${i}`, 'self');
+    edit(`r${i}`, 'agent');
     projects.at(`r${i}`);
   }
-  edit('page', 'subagent');
+  edit('page', 'none');
   projects.at('page');
   await Promise.resolve();
-  assert.deepEqual(out, ['page:subagent']);
+  assert.deepEqual(out, ['page:none']);
 });
 
 test('a source file that does not exist (a global instruction file never written) still lets the read be kept', () => {
@@ -117,7 +117,7 @@ test('a source file that does not exist (a global instruction file never written
   const files: ProjectFiles = {
     load: () => {
       loads++;
-      return { sources: ['present', 'missing'], settings: { review: 'self' } } as unknown as ProjectConfig;
+      return { sources: ['present', 'missing'], review: 'agent' } as unknown as ProjectConfig;
     },
     stamp: (sources) => sources.join(','),
     mtime: (file) => (file === 'present' ? 0 : undefined),
@@ -140,10 +140,10 @@ test("a listener that fails has its error logged, not swallowed (B83)", async ()
   const out = told(projects);
   edit('a', 'user');
   projects.at('a');
-  edit('a', 'self');
+  edit('a', 'agent');
   projects.at('a');
   await Promise.resolve();
   assert.equal(logged.length, 1);
   assert.match(logged[0]!, /a page gone/);
-  assert.deepEqual(out, ['a:self'], 'the next listener still told');
+  assert.deepEqual(out, ['a:agent'], 'the next listener still told');
 });

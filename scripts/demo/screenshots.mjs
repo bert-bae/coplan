@@ -53,12 +53,12 @@ if (!existsSync(path.join(ROOT, 'dist', 'daemon', 'main.js'))) {
 /* ------------------------------ Repositories ----------------------------- */
 
 const CHECKS = `{
-  "hooks": {
+  "checks": {
     "implement": ["pnpm typecheck", "pnpm lint"],
     "review": [{ "name": "tests", "run": "pnpm test", "timeout": 900 }],
     "final": ["pnpm check"]
   },
-  "iric": { "review": "subagent", "parallel": 2, "maxRounds": 3 },
+  "review": "agent",
   "branches": { "base": "main", "prefix": "coplan/" }
 }
 `;

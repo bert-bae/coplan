@@ -1,7 +1,7 @@
 <h1 align="center">Coplan</h1>
 
 <p align="center">
-  <strong>Plan with your coding agent on a canvas, then follow the build.</strong><br />
+  <strong>Plan with your coding agent on a canvas, then hand the build to any harness and follow it.</strong><br />
   An open-source visual planning workspace for Claude Code, Codex and Cursor.
 </p>
 
@@ -21,7 +21,9 @@
 
 <p align="center">
   <a href="#see-it">See it</a> ·
+  <a href="#what-coplan-does-and-what-it-hands-off">What it hands off</a> ·
   <a href="#install">Install</a> ·
+  <a href="#building-with-a-harness">Building with a harness</a> ·
   <a href="#recommended-usage">Recommended usage</a> ·
   <a href="#what-it-installs">What it installs</a> ·
   <a href="#resource-footprint">Resource footprint</a> ·
@@ -36,12 +38,12 @@ agent — Claude Code, Codex or Cursor — publishes its design: the architectur
 as diagrams, with the tasks it plans linked to the boxes they build. You
 reshape it in the browser and **confirm the design**. The agent then breaks it
 into a task list — focused tasks, what blocks what, which branch each lands
-on — and you shape that and **submit the plan**, choosing how much of the
-build harness you want: the agent builds it its own way while the board
-follows (*Tracked*), or takes each task through implement → review → refine
-with the checks and review you choose (*Managed*). The plan locks, and as the
-agent builds, the same page follows each task across the board. Or export the
-plan as Markdown, at any point, and build it wherever you like.
+on, what done means for each — and you shape that and **submit the plan**.
+The plan locks and becomes a handoff: a prompt and a brief per task that any
+build harness can follow — a plain agent session, firstmate, or your own
+tooling. Coplan does not build. As the harness reports each task, the same
+page follows it across the board. Or export the plan as Markdown, at any
+point, and build it wherever you like.
 
 Coplan is free and open source under the [MIT license](LICENSE). It runs
 entirely on your machine: a small local daemon, a browser UI, and one plugin
@@ -53,6 +55,28 @@ what it costs to run.
 The rest of this page says "Claude" for the agent; everything works the same
 in Codex and Cursor except where [Codex and Cursor](#codex-and-cursor) says
 otherwise.
+
+## What Coplan does, and what it hands off
+
+Coplan plans and tracks; your harness builds. If it says *what* to build or
+*what done means*, it is plan data and lives in Coplan. If it decides *how*,
+*where* or *when* work runs, or enforces that it ran, it belongs to the
+harness.
+
+| Coplan | Your harness |
+| --- | --- |
+| The design: architecture, decisions, comments | Running the tasks |
+| The task list and what blocks what | Parallelism |
+| The branch layout and how branches stack | Worktrees |
+| A brief for every task | Review rounds |
+| The definition of done: each task's checks and requested review | Models and accounts |
+| Your sign-off, and the plan locked against drift | Running the checks |
+| The board, following what the harness reports | Pull requests |
+| The build report | CI follow-up and restacking |
+
+The only traffic between them is the handoff (the prompt,
+`harness_task_next`, `harness_task_brief`) and progress reports
+(`harness_task_update`, `harness_branch_update`, the build report).
 
 ## See it
 
@@ -69,14 +93,14 @@ you something, the page says so and links you to its chat.
       <p><strong>2. Shape the task list.</strong> Once you confirm the design, Claude breaks it into focused tasks: what each waits on, which branch it lands on, which boxes it builds. Coplan works out the build order and how the branches stack.</p>
     </td>
     <td width="50%" valign="top">
-      <a href="docs/images/submit.png"><img src="docs/images/submit.png" alt="The Submit the plan dialog: how the plan is built — Tracked, Managed or Export — and, for a Managed build, who reviews each task, how many tasks at once and how many review rounds on the left; the full build prompt Claude will get on the right" /></a>
-      <p><strong>3. Read the exact prompt, then submit.</strong> See every word Claude will be sent and choose how it is built: Tracked, Managed — who reviews each task, how many run at once, how many review rounds — or Export. Submitting locks the plan.</p>
+      <a href="docs/images/submit.png"><img src="docs/images/submit.png" alt="The Submit the plan dialog: the plan's shape and the checks, review, branches and instructions set in config on the left; the full handoff Claude will get, each part marked with its source, on the right" /></a>
+      <p><strong>3. Read the handoff, then submit.</strong> See every word your harness will be sent and choose who builds it. Submitting locks the plan and produces the handoff.</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
       <a href="docs/images/board.png"><img src="docs/images/board.png" alt="The task board during a build: To do, In progress, Blocked and Done columns; cards show each task's branch, its review round and whether its checks passed" /></a>
-      <p><strong>4. Follow the build.</strong> Cards move across the board as Claude reports each task: which step of implement → review → refine it is on, the review round, and how its checks came out.</p>
+      <p><strong>4. Follow the build.</strong> Cards move across the board as your harness reports each task: where it stands, its note, and the checks it reported.</p>
     </td>
     <td width="50%" valign="top">
       <a href="docs/images/progress.png"><img src="docs/images/progress.png" alt="The locked architecture during a build: each box counts the tasks that build it and how many are done, with a progress bar, and boxes no task builds say so; the selected Redis cache box lists its description, decisions, the task building it and its connections" /></a>
@@ -86,7 +110,7 @@ you something, the page says so and links you to its chat.
   <tr>
     <td width="50%" valign="top">
       <a href="docs/images/report.png"><img src="docs/images/report.png" alt="The Overview of a finished plan: the build report listing what was built, the stacked pull requests, the final checks, what changed from the plan, and follow-ups" /></a>
-      <p><strong>6. Read the report.</strong> When every task is done, Claude runs the final checks and writes a build report: what was built, the pull requests in stack order, what changed from the plan.</p>
+      <p><strong>6. Read the report.</strong> When every task is done, your harness writes a build report: what was built, the pull requests in stack order, the final checks it ran, what changed from the plan.</p>
     </td>
     <td width="50%" valign="top">
       <a href="docs/images/board-dark.png"><img src="docs/images/board-dark.png" alt="The same task board in the dark theme" /></a>
@@ -129,12 +153,11 @@ seeds into a throwaway daemon, the way real hooks and tool calls would.
 - **Tasks that know what blocks them.** Each task says what it waits on and
   which branch it lands on. Coplan works out what can start now, what can run
   side by side, and how branches stack into pull requests.
-- **A build harness you opt into.** Submit a plan *Tracked* and Claude builds
-  it its own way while the board follows; *Managed*, and every task goes
-  implement → review → refine — reviewed by a fresh subagent, by Claude
-  itself, by you, or by the checks alone — and is not done until it passes.
-  The checks come from the repository's `.coplan/config.json`, so no agent
-  guesses what to run.
+- **A handoff any harness can follow.** Submitting turns the plan into a
+  prompt and a brief per task: objective, scope, branch, the checks that
+  define done and the review you asked for. Any harness that reads the brief
+  and calls `harness_task_update` keeps the board true. The checks come from
+  the repository's `.coplan/config.json`, so no agent guesses what to run.
 - **Export the plan.** The whole plan — summary, sections, diagrams, tasks and
   their briefs — as Markdown with no build instructions, to take into any
   tool, from any view and at any point.
@@ -153,8 +176,7 @@ seeds into a throwaway daemon, the way real hooks and tool calls would.
   before each sign-off is sent, with every setting it takes from config and
   the file that sets it, and submitting locks the plan so the design can't
   drift mid-build. Or tell Claude in chat — "looks good, build it" — and it
-  signs off for you, with the settings you last chose; the page shows it was
-  given in chat, in your words.
+  signs off for you; the page shows it was given in chat, in your words.
 - **Four statuses you recognise.** Every plan is *Planning*, *In progress*,
   *Review* (what was built waits on you) or *Done*, in the same words in the
   header, the session list and the strip under the header — and the session
@@ -166,9 +188,9 @@ seeds into a throwaway daemon, the way real hooks and tool calls would.
 - **Checks per task, set by you.** A docs-only task can skip the test suite,
   a migration can add its own check. Only you set them — Claude proposes —
   and a skipped check shows on the task, in its brief and under the report,
-  so a gate is never dropped quietly.
-- **Live progress.** Cards move across the board and boxes fill up as Claude
-  marks tasks in progress, done or blocked.
+  so a check is never dropped quietly.
+- **Live progress.** Cards move across the board and boxes fill up as your
+  harness marks tasks in progress, done or blocked.
 - **Your chat stays the chat.** Coplan never starts a turn or answers for you.
   When Claude asks a question, it links you straight back to that session.
 
@@ -177,7 +199,7 @@ seeds into a throwaway daemon, the way real hooks and tool calls would.
 Coplan does one thing. It never starts a turn and never answers for you. When
 Claude needs a decision it asks in its own chat. Coplan shows the question and
 takes you straight to that session, in the Claude desktop app, to answer it.
-What Coplan has to say to Claude (the confirmed design, the build prompt, a
+What Coplan has to say to Claude (the confirmed design, the handoff prompt, a
 request to revise the plan per your comments, or a note that you changed the
 plan) rides along with your next message there. When
 you would rather say "go ahead" than click it, say it in that chat: Claude
@@ -252,24 +274,18 @@ can do:
    gets it. Confirming is optional: you can go straight to step 5.
 4. **Claude makes the task list** — dependencies, branches, the boxes each
    task builds — and **you shape it**.
-5. **You start the build,** either way:
-   - **in Coplan:** *Submit* shows the exact prompt and asks how the plan is
-     built — *Tracked* (Claude builds it its own way and reports each task),
-     *Managed* (each task through implement → review → refine, with who
-     reviews, how many run at once and how many review rounds) or *Export*
-     (the plan as Markdown, to build somewhere else); or
-   - **in chat:** tell Claude "build it". It submits the plan for you, the
-     way you last chose in *Submit* (or the repository's defaults), and
-     starts; the page shows it was submitted from chat, with your words.
+5. **You submit it,** either way:
+   - **in Coplan:** *Submit* shows the exact handoff prompt; or
+   - **in chat:** tell Claude "build it". It submits the plan for you; the
+     page shows it was submitted from chat, with your words.
 
-   The plan locks. **Export plan**, in the header, copies the plan out at
-   any point without submitting anything.
-6. **Claude builds it,** ready tasks first, while the board follows along —
-   in a Managed build, each through implement → review → refine against
-   your repository's checks.
-7. **Claude reports:** final checks, the pull requests in stack order the way
-   the repository's `pullRequests` says (by default, once you say so), and a
-   build report on the Overview.
+   The plan locks and the handoff is ready. **Export plan**, in the header,
+   copies the plan out at any point without submitting anything.
+6. **Your harness builds it** from the handoff — ready tasks first, each
+   from its brief — and reports each task while the board follows along.
+   See [Building with a harness](#building-with-a-harness).
+7. **Your harness reports:** the final checks it ran, the pull requests in
+   stack order, and a build report on the Overview.
 
 The other commands, in Claude Code and Cursor (in Codex, ask for them by
 name):
@@ -279,6 +295,25 @@ name):
 - `/coplan-doctor`: check that everything is wired up
 - `/coplan-restart`: restart Coplan's daemon
 - `/coplan-setup`: say how to update Coplan
+
+## Building with a harness
+
+Coplan hands the plan over and follows it; something else does the
+building. Any of these works:
+
+- **A plain agent session** — the one you planned in, by default. Your next
+  message carries the handoff prompt, and the `coplan-handoff` skill tells
+  the agent to take ready tasks from `harness_task_next`, build each from its
+  brief, and report with `harness_task_update`. How it builds — one task at
+  a time or side by side, which model, how it reviews — is the agent's call.
+- **firstmate**, or another orchestrator: give it the handoff prompt; it
+  reads each brief with `harness_task_brief` and reports back through the
+  same tools.
+- **Any tool** that reads the brief and calls `harness_task_update` (and
+  `harness_branch_update` for its pull requests). Nothing else is required.
+
+Coplan does not refuse a report: what the harness says it ran, and how it
+came out, is what the board and the report show.
 
 ## Recommended usage
 
@@ -303,25 +338,22 @@ and its build.
 1. **Check the wiring once:** `/coplan-doctor` (in Codex, ask it to run
    the Coplan doctor).
 2. **Give each repository a `.coplan/config.json` and commit it**
-   (`/coplan-init` writes one from the repository's scripts and CI). Without
-   it the agent picks the checks itself, once per build, and says which.
-3. **Keep the `implement` checks to seconds** — typecheck, lint, format. They
-   run after every implementation and refinement pass of every task. Put the
-   tests in `review` and slow, repository-wide checks in `final`, and give
-   every check its area — `paths`, or a package's `cwd` — so it runs only
-   when a change touches it, and `{files}` where the tool takes files. See
-   [Targeted checks](docs/CONFIG.md#targeted-checks).
-4. **Say how pull requests are opened** in the same file
-   ([`pullRequests`](docs/CONFIG.md#pullrequests)): with `gh`, Graphite or
-   not at all, and whether as each branch is done, once you say (the
-   default), or never. Point `template` at the repository's pull request
-   template so every description follows it.
-5. **Decide what must hold the build.** [`planCheck`](docs/CONFIG.md#plancheck)
+   (`/coplan-init` writes one from the repository's scripts and CI). Its
+   [`checks`](docs/CONFIG.md#checks) are every task's definition of done.
+   Without it the harness picks the checks itself.
+3. **Keep the `implement` checks to seconds** — typecheck, lint, format. Put
+   the tests in `review` and slow, repository-wide checks in `final`, and
+   give every check its area — `paths`, or a package's `cwd` — so it applies
+   only when a change touches it, and `{files}` where the tool takes files.
+   See [Targeted checks](docs/CONFIG.md#targeted-checks).
+4. **Point the handoff at the repository's pull request template**
+   ([`pullRequests.template`](docs/CONFIG.md#pullrequests)), so the harness
+   writes every description from it.
+5. **Decide what must hold a sign-off.** [`planCheck`](docs/CONFIG.md#plancheck)
    turns a gap — an undescribed box, an unanswered comment — into one that
-   blocks *Confirm design* and *Submit*; [`final.blocking`](docs/CONFIG.md#final)
-   keeps the plan from being built while a final check fails.
-6. **Put your own defaults in `~/.claude/cc-harness/coplan.json`** — review
-   mode, pull requests, standing instructions — once, instead of in every
+   blocks *Confirm design* and *Submit*.
+6. **Put your own defaults in `~/.claude/cc-harness/coplan.json`** — the
+   review you request, standing instructions — once, instead of in every
    repository (`./setup.sh` sets the main ones if you answer yes to *Adjust
    settings now?*). A repository's own settings win key by key.
    See [Your own defaults](docs/CONFIG.md#your-own-defaults-coplanjson).
@@ -350,55 +382,27 @@ and its build.
 
 ### When you submit
 
-13. **Choose how much of the harness you want.** Submit asks how the plan is
-    built; the repository's [`mode`](docs/CONFIG.md#mode) sets the default
-    (Managed where its `.coplan/config.json` sets `iric`, else Tracked).
-
-    | Mode | When | What happens |
-    | --- | --- | --- |
-    | Tracked | You want the plan followed, not policed | Claude builds it its own way and reports each task; the board follows. Nothing is refused: where Managed would hold a task back, Claude gets a note |
-    | Managed | You want every task checked and reviewed | Each task goes implement → review → refine against the repository's checks, and is not done until it passes — the rest of this list |
-    | Export | It is built somewhere else | The whole plan as Markdown, with no build instructions, to paste anywhere; this version locks here |
-
-    To take the plan out without submitting anything, use **Export plan** in
-    the header, from any view and at any point.
-
-14. **In a Managed build, match the reviewer to the risk.** The submit
-    dialog sets the default — self-review, unless the repository's `iric`
-    says otherwise; a task can override it.
-
-    | Kind of task | Review | Why |
-    | --- | --- | --- |
-    | Most work | Independent reviewer (`subagent`) | A fresh context reads each diff against the brief. The most thorough, and the most model usage. |
-    | Security-sensitive, user-facing, migrations | You (`user`) | Claude stops and asks you before the task is done. |
-    | Small and low-risk | Self-review (`self`) | Claude rereads its own diff cold. |
-    | Mechanical: renames, generated files, docs | Checks only (`skip`) | The review checks are the review. |
-
-15. **Set how many tasks run at once** (`parallel`, default 1, up to 8) for
-    your machine and your checks. With more than one, Claude builds ready
-    tasks side by side — with subagents and git worktrees where it has them —
-    each running its own checks. Raise it for a large plan of independent
-    tasks; keep 1 on a laptop or when the test suite is heavy.
-16. **Cap the review rounds** (`maxRounds`, default 3, up to 10). Past it,
-    another round is yours to allow, rather than Claude spending more on a
-    task that keeps failing review.
-17. **Pick the reviewer's model** with [`review.model`](docs/CONFIG.md#review),
-    in the repository's config or your own `coplan.json`, if it should not be
-    the agent's own: a smaller one to spend less on review, a stronger one to
-    review harder.
-18. **Use branches only when the change should be several pull requests.**
+13. **Choose who builds it.** The handoff works for the session you planned
+    in, firstmate, or any harness (see
+    [Building with a harness](#building-with-a-harness)). Ask for the review
+    a task needs on the task itself — `agent`, `user` or `none` — and the
+    brief passes it on; how review runs is the harness's call. To take the
+    plan out without submitting anything, use **Export plan** in the header.
+14. **Use branches only when the change should be several pull requests.**
     Without them every task lands on the current branch.
 
 ### Day to day
 
-19. **Leave `autoOpen` off** on shared or remote machines; open the page with
+15. **Leave `autoOpen` off** on shared or remote machines; open the page with
     `/coplan-open` when you want it.
-20. **Don't share the page's link.** The link `coplan open` and `coplan url`
-    print carries the daemon's access token (`?token=…`); the page moves it
-    out of the address bar into its own storage.
-21. **To update:** `git pull && ./setup.sh` in the clone, then restart the
+16. **Don't share the page's link.** The link `coplan url` prints carries
+    the daemon's access token (`?token=…`); the page moves it out of the
+    address bar into its own storage. `coplan open` prints the address
+    without it (the agent reads what it prints) and opens the browser on a
+    single-use login ticket instead.
+17. **To update:** `git pull && ./setup.sh` in the clone, then restart the
     agent. Open tabs reconnect.
-22. **Now and then:** `coplan clean --dry-run` lists what could go — finished
+18. **Now and then:** `coplan clean --dry-run` lists what could go — finished
     sessions, interrupted writes, the older part of the log.
 
 ### Trust
@@ -406,14 +410,15 @@ and its build.
 - **Read a repository's `.coplan/config.json` like its `package.json`
   scripts.** The commands in it are handed to the agent to run as each task's
   checks, and its `instructions` — text, or files in the repository they
-  name — are added to what the agent is told when it plans, builds and
-  reviews. Coplan never runs the commands itself, and the agent runs them
+  name — are added to what the agent is told when it plans and to the
+  handoff and every brief. Coplan never runs the commands itself, and the
+  harness runs them
   under your permission settings — so in a repository you don't trust, read
   that file (and any instruction files it names) before you build, and keep
   permission prompts on.
 - **The skills direct the agent; they grant it nothing.** Everything a build
   does to your repository — branches, commits, pushes, pull requests — is the
-  agent acting under its normal permissions. See [Skills](#skills).
+  harness acting under its normal permissions. See [Skills](#skills).
 - **Everything stays on your machine.** See
   [What it reads, writes and connects to](#what-it-reads-writes-and-connects-to).
 
@@ -429,10 +434,10 @@ agent you choose. Nothing is downloaded at run time.
 
 | Part | What it is | Runs as | Lifetime |
 | --- | --- | --- | --- |
-| [MCP server](#the-mcp-server-harness) `harness` | Twelve tools the agent calls to publish, read, propose changes to, sign off and track the plan | `node dist/mcp/main.js`, over stdio | One per agent session, started by the agent |
+| [MCP server](#the-mcp-server-harness) `harness` | Ten tools the agent calls to publish, read, propose changes to, sign off and track the plan | `node dist/mcp/main.js`, over stdio | One per agent session, started by the agent |
 | [Hooks](#hooks) | Seven lifecycle hooks in Claude Code and Codex, five in Cursor | `bin/coplan-hook-relay.sh` — `sh` and `curl` | About 20 ms per event |
 | [Daemon](#what-it-reads-writes-and-connects-to) | Local server: keeps the plans, serves the page | `node dist/daemon/main.js` | One per user. The first hook starts it; it exits after two idle hours |
-| [Skills](#skills) | `coplan`, `coplan-build`, `iric` | Instructions the agent loads | When the agent uses one |
+| [Skills](#skills) | `coplan`, `coplan-handoff` | Instructions the agent loads | When the agent uses one |
 | [Slash commands](#slash-commands-and-the-cli) | `/coplan-setup`, `-open`, `-init`, `-doctor`, `-restart` | Each has the agent run `bin/coplan`, or say what to run | When you type one |
 | [CLI](#slash-commands-and-the-cli) | `coplan` | `bin/coplan` | When you run it |
 | Browser page | React and React Flow, served by the daemon | A tab | While you have it open |
@@ -450,8 +455,7 @@ it uses the skill.
 | Skill | The agent uses it when | It tells the agent to | So the agent may |
 | --- | --- | --- | --- |
 | [`coplan`](skills/coplan/SKILL.md) (19 KB) | you type `/coplan` or `$coplan`, ask to plan something in Coplan or to set Coplan up, tell it to go ahead with a plan, or a confirmed design or a revision request arrives | investigate the code, publish the design, read your edits back and answer your comments (one by one, or all at once when you request revisions), propose changes that are yours to decide rather than make them, then break the confirmed design into a task list — and build when you say so, in chat or by submitting | call Coplan's tools; ask you in chat, only what it must; propose edits for you to accept or reject; sign the plan off for you when you tell it in chat to go ahead, quoting you; tell you to run `./setup.sh` in your clone when you ask it to set Coplan up or update it (or, in a checkout that was never built, run `pnpm install` there) |
-| [`coplan-build`](skills/coplan-build/SKILL.md) (9 KB) | a submitted plan's build prompt arrives, or you ask it to build a Coplan plan | submit it for you first if you said to build one you have not submitted; start only tasks that are ready, build independent ones side by side where it can, land each on its branch, keep the board true, then run the final checks and write the report | use subagents and git worktrees when it has them and they help (up to `parallel` tasks at once in a Managed build); create branches; commit in the granularity the repository's history uses; rebase stacked branches; run the repository's checks; push the branches; open pull requests with `gh` or Graphite, as the repository's [`pullRequests`](docs/CONFIG.md#pullrequests) says — by default only once you say so — written from its pull request template if it has one |
-| [`iric`](skills/iric/SKILL.md) (7 KB) | building each task of a Managed build, or when you ask to run a task through iric | implement inside the task's scope, run the checks, have it reviewed the way you chose, refine until it passes or the round limit, and report each step | run the `implement` and `review` checks; start a reviewer subagent where it has them (review `subagent`), on the model [`review.model`](docs/CONFIG.md#review) names if one is set; ask you only where a Managed build keeps the decision for you (review `user`, past `maxRounds`, a check that fails) |
+| [`coplan-handoff`](skills/coplan-handoff/SKILL.md) | a submitted plan's handoff prompt arrives in a plain agent session, or you ask it to build a Coplan plan | take ready tasks from `harness_task_next`, build each from its brief, and report each task, branch and the build report | build the way it would anyway — its own pace, subagents, worktrees, review; run the checks each brief lists; push branches and open pull requests under its normal permissions |
 
 ### The MCP server: `harness`
 
@@ -470,7 +474,7 @@ they are named `mcp__plugin_coplan_harness__<tool>`.
 | Codex | [`mcp/codex.json`](mcp/codex.json) | `node ./dist/mcp/main.js`, from the plugin's folder | `COPLAN_AGENT=codex`; passes `CC_HARNESS_HOME` on | 20 s to start, 60 s per call |
 | Cursor | [`mcp/cursor.json`](mcp/cursor.json) | `node ${CURSOR_PLUGIN_ROOT}/dist/mcp/main.js` | `COPLAN_AGENT=cursor`, `COPLAN_WORKSPACE=${workspaceFolder}` | Cursor's defaults |
 
-The twelve tools:
+The ten tools:
 
 | Tool | Changes the plan? | What it does |
 | --- | --- | --- |
@@ -478,14 +482,12 @@ The twelve tools:
 | `harness_plan_read` | No — marks your edits as read | The plan as text, leading with the net effect of your changes since the last read, with every id Claude needs. Diagrams read as an architecture: the system's shape, each part in flow order with its description, decisions and tasks, then every connection. `changes_only` skips the document and quotes edited text instead. |
 | `harness_plan_check` | No | What the plan leaves open: boxes no task builds, tasks that build no box, undescribed boxes, tasks with no detail, box ids two diagrams share, branch layouts a stack of pull requests cannot follow, and your comments nobody answered. The same list shows in the sign-off dialogs. |
 | `harness_plan_edit` | Yes | A batch of targeted edits — sections, diagrams, one box or arrow at a time, tasks, moves, comments (on the plan, an item, or one box or arrow) and replies, the build report — applied all or nothing. Once the design is confirmed, only tasks, task links and comments; once the plan is submitted, only task edits, comments and the report. The `propose` op suggests a change instead of making it: a batch of edits, with Claude's reason, that waits for you. You see it beside what it changes — and on the canvas, what it adds, changes and removes — and accept it (the edits apply, as yours) or reject it, saying why if you like. Claude hears your answer the next time it reads. A proposal you have moved past goes out of date and cannot be accepted. Which checks a task runs (`set_checks`: skip one of the repository's, add one of its own) is yours alone, so Claude only ever proposes it. |
-| `harness_plan_advance` | Yes — signs it off | When you tell Claude in chat to go ahead: confirms the design (`to: "tasks"`) or submits the plan (`to: "build"`) as the page would, with the build settings you last chose in *Submit* or the repository's defaults, and locks it. Only with your words (`user_said`), which the page shows beside the sign-off; returns the prompt the page would have sent. |
-| `harness_tasks_publish` | Yes | Publish the task list for the confirmed design: replaces the task tree and nothing else, with dependencies, branches, review modes and the boxes each task builds. |
-| `harness_task_next` | No | What can be built now: ready tasks, how many to run at once, what is in progress and at which step, what the rest wait on, the branches — and, once every task is done, how to finish. |
-| `harness_task_brief` | No | One task's focused brief, written to hand to a subagent as is: objective, the boxes it builds and their connections, what it comes after and before, its scope, branch, and its implement → review → refine cycle with the exact checks. |
-| `harness_task_update` | Yes — progress only | Mark a task in progress, done, blocked or dropped, with a one-line note, and report its step of the cycle, the checks run and the review's verdict. Refuses to start a task that still waits on another, or to finish one without a passing verdict (yours, for a task you review) or whose checks failed. |
-| `harness_branch_update` | Yes — branch records only | Record a branch's pull request and where it stands, so the board shows the stack — and says what to restack when a branch below merges. |
-| `harness_pr_events` | No — takes what waits | What needs doing about the pull requests Coplan watches — failing CI, reviews, comments, conflicts, merges — as the work to do, handed over once. Usually it comes by itself (`coplan pr wait`, or with your next message). |
-| `harness_pr_event` | Records the event | An event the agent saw itself on one of the build's pull requests (a cloud session's own subscription), done with as the repository's `pullRequests.on` says. |
+| `harness_plan_advance` | Yes — signs it off | When you tell Claude in chat to go ahead: confirms the design (`to: "tasks"`) or submits the plan (`to: "build"`) as the page would, and locks it. Only with your words (`user_said`), which the page shows beside the sign-off; returns the prompt the page would have sent. |
+| `harness_tasks_publish` | Yes | Publish the task list for the confirmed design: replaces the task tree and nothing else, with dependencies, branches, requested reviews and the boxes each task builds. |
+| `harness_task_next` | No | What can be built now: ready tasks, what is in progress, what the rest wait on, the branches — and, once every task is done, how to finish. |
+| `harness_task_brief` | No | One task's focused brief, written to hand to any harness as is: objective, acceptance criteria, the boxes it builds and their connections, what it comes after and before, its scope, branch, the exact checks that define done, and the review requested. |
+| `harness_task_update` | Yes — progress only | Mark a task in progress, done, blocked or dropped, with a one-line note, and report its stage, the checks run and the review's verdict. Each is recorded and shown as reported; nothing is refused. |
+| `harness_branch_update` | Yes — branch records only | Record a branch's pull request and where it stands, so the board shows the stack. |
 
 ### Hooks
 
@@ -507,7 +509,7 @@ Claude Code's hooks ([`hooks/hooks.json`](hooks/hooks.json)):
 | Event | Matches | Timeout | What Coplan does with it |
 | --- | --- | --- | --- |
 | `SessionStart` | — | 20 s | Registers the session and labels it with its repository and branch (`git rev-parse`, read-only). If the plugin isn't built, says so once. |
-| `UserPromptSubmit` | — | 10 s | Clears a pending question, and lists the session on the page once your message starts with `/coplan`. Adds to your message the design or build prompt you signed off, or the request to revise the plan you queued with *Request revisions* (one to a message, the request after the sign-off), each once — not again if you pasted it; or, if you changed the plan since Claude last read it, one line saying so ([`promptNotice`](docs/CONFIG.md)). |
+| `UserPromptSubmit` | — | 10 s | Clears a pending question, and lists the session on the page once your message starts with `/coplan`. Adds to your message the design or handoff prompt you signed off, or the request to revise the plan you queued with *Request revisions* (one to a message, the request after the sign-off), each once — not again if you pasted it; or, if you changed the plan since Claude last read it, one line saying so ([`promptNotice`](docs/CONFIG.md)). |
 | `PreToolUse` | `AskUserQuestion` | 5 s | Shows the question on the page and moves the session to *Waiting on you*. |
 | `PostToolUse` | every tool | 5 s | Clears a question or permission prompt once a tool finishes, and lists the session once the agent loads a Coplan skill. A payload over 256 KB is cut to the session id before it is sent. |
 | `Notification` | — | 5 s | Notices permission and idle prompts. |
@@ -613,7 +615,7 @@ differs is what each agent lets a plugin see and do:
 | --- | --- | --- | --- |
 | Hooks | run once installed | run once you trust them in `/hooks`, and again after each update; `coplan doctor` says when a thread used Coplan without them | run once installed |
 | Start a plan | `/coplan <task>` | `$coplan <task>`, or ask | `/coplan <task>` |
-| The build prompt reaches the agent | with your next message ("go"), or as `harness_plan_advance`'s answer when you say "build it" in chat | with your next message ("go"), or as `harness_plan_advance`'s answer | you paste it — submitting copies it — or say "build it" and it submits the plan with `harness_plan_advance` (or, already submitted, reads it with `harness_plan_read`) |
+| The handoff prompt reaches the agent | with your next message ("go"), or as `harness_plan_advance`'s answer when you say "build it" in chat | with your next message ("go"), or as `harness_plan_advance`'s answer | you paste it — submitting copies it — or say "build it" and it submits the plan with `harness_plan_advance` (or, already submitted, reads it with `harness_plan_read`) |
 | A revision request (*Request revisions*) reaches the agent | with your next message | with your next message | you paste it — queuing copies it — or it comes with the agent's next `harness_plan_read` |
 | "You changed the plan" note on your next message | yes | yes | where Cursor passes it on |
 | A question is noticed | `AskUserQuestion`, permission prompts, idle prompts, a turn ending on a question | `request_user_input` (Plan mode), permission requests, a turn ending on a question; Codex has no hook for idle prompts | a turn ending on a question: Cursor's hooks see neither `AskQuestion` nor permission prompts |
@@ -632,7 +634,7 @@ How each one is wired:
   `hooks/cursor.json` (Cursor's own hook format) and `mcp/cursor.json`.
   Cursor starts one MCP server per window rather than per chat, so the tools
   act on the chat in that workspace that was active last. Cursor's hooks
-  cannot reliably add to a prompt, so the build prompt is pasted or read
+  cannot reliably add to a prompt, so the handoff prompt is pasted or read
   instead, and its hooks do not see `AskQuestion`. If Cursor's *third-party
   configs* setting imports the Claude Code plugin as well, Coplan recognises
   Cursor's payloads and files them under Cursor all the same.
@@ -640,9 +642,8 @@ How each one is wired:
 ## Resource footprint
 
 Coplan itself is small: one mostly idle Node process for every user, one
-for every agent session, and a `curl` per hook. The real cost of a Coplan
-build is the agent's — the model passes and the checks it runs — and the
-settings you choose when you submit decide how much. Both are below, measured
+for every agent session, and a `curl` per hook. A build costs Coplan
+nothing: the harness spends what it spends. The numbers are below, measured
 as described [at the end of this section](#how-these-were-measured).
 
 ### On your machine
@@ -685,39 +686,19 @@ counts against the model's tokens.
 
 | What | Size | When |
 | --- | --- | --- |
-| The twelve tool definitions | About 24 KB of JSON schema — on the order of 6,000 tokens | Whenever the agent loads the server's tools |
-| The three skill descriptions | About 1.4 KB | Always listed |
-| A skill's body | 16.0 KB (`coplan`), 8.5 KB (`coplan-build`), 6.7 KB (`iric`) | When the agent uses that skill |
+| The ten tool definitions | About 22 KB of JSON schema — on the order of 5,500 tokens | Whenever the agent loads the server's tools |
+| The skill descriptions | About 1 KB | Always listed |
+| A skill's body | 21.8 KB (`coplan`), 3.4 KB (`coplan-handoff`) | When the agent uses that skill |
 | The plan, read back | About 9,000 characters for two diagrams and ten tasks; about 140,000 for 150 boxes and 150 tasks | Each `harness_plan_read` (`changes_only` is shorter), and each publish's reply |
 | A sign-off prompt | About 6,000 characters for a seven-task plan; a hook adds at most about 10,000, and a longer plan is handed over as its summary and task list | Once per sign-off |
 | "You changed the plan" | One line | Your next message after you edit |
 
 ### The build
 
-Coplan never runs a model or a check; the agent does, and the submit dialog
-decides how much. A Tracked build costs what the agent chooses to spend; an
-exported plan costs nothing here. In a Managed build:
-
-- **Every task** gets one implementation pass, then review — and, until the
-  review passes, a refinement and another review — up to `maxRounds`
-  (default 3) reviews.
-- **Who reviews:** an independent reviewer is a fresh subagent for every
-  review round, reading the brief and the diff; self-review is a reread by the
-  agent that built it; you cost your time; checks only costs no model at all.
-  `review.model` runs the independent reviewer on a model of your choosing.
-- **How many at once:** `parallel` (default 1, up to 8) tasks at a time,
-  each running its own checks — with subagents where the agent has them, and
-  a git worktree (a whole checkout on disk) for each task on a branch of its
-  own.
-- **The checks** are your repository's: `implement` after every pass,
-  `review` every round, `final` once. Their CPU and time are whatever your
-  commands take.
-
-With subagent review, a plan of *n* tasks that each pass after *r* reviews
-takes about *n* × (2*r*) subagent passes — an implementation and, per round,
-a review and (after a failed one) a refinement — plus the orchestrating
-agent's own work. Ten tasks that all pass first time: about 20 passes. Ten
-that each use all three rounds: about 60.
+Coplan's build cost is zero model calls. It never runs a model or a check:
+it hands over the plan and records what the harness reports. What a build
+costs — passes, reviews, checks, parallel sessions — is the harness's to
+decide and yours to set there.
 
 ### How these were measured
 
@@ -734,7 +715,8 @@ your machine and your plans, but not by an order of magnitude.
 
 `~/.claude/cc-harness/config.json`, overridden per repo by
 `.claude/harness.json` — for every agent, Codex and Cursor included. The
-build's checks and defaults live in the repository's `.coplan/config.json`.
+plan data a handoff carries — checks, branches, requested review — lives in
+the repository's `.coplan/config.json`.
 `./setup.sh` can set the main ones; [docs/CONFIG.md](docs/CONFIG.md) has
 every setting.
 
