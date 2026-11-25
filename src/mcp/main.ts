@@ -9,7 +9,7 @@
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { readLiveLock, baseUrl, ensureDaemon } from '../shared/paths.ts';
-import { TOOLS, DEFAULT_BUDGET_MS } from './tools.ts';
+import { TOOLS, DEFAULT_BUDGET_MS, timeoutText } from './tools.ts';
 import { agentInfo, parseAgent, sessionFromEnv, workspaceFromEnv } from '../shared/agents.ts';
 import type { DaemonLock } from '../shared/types.ts';
 
@@ -286,7 +286,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
         tool.endpoint,
         args,
         DEFAULT_BUDGET_MS,
-        '[cc-harness] The daemon did not respond in time. Call the tool again.',
+        timeoutText(tool.endpoint),
         sessionFromCall(params) ?? SESSION_ID,
       );
       respond(req.id, {

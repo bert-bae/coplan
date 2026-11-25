@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TOOLS } from '../mcp/tools.ts';
+import { TOOLS, timeoutText } from '../mcp/tools.ts';
 
 /**
  * The MCP server's own contract, against a stub daemon: tools are listed,
@@ -147,6 +147,15 @@ test('a daemon that fails a call is an error to the agent, in the daemon\'s word
   const nothing = await callTool('harness_plan_read');
   assert.equal(nothing.isError, true);
   assert.equal(nothing.content[0]?.text, '[cc-harness] The daemon answered 200: null');
+});
+
+test('a write that timed out is read back before it is tried again; a read is simply tried again', () => {
+  for (const tool of TOOLS) {
+    const said = timeoutText(tool.endpoint);
+    const read = ['harness_plan_read', 'harness_plan_check', 'harness_task_next', 'harness_task_brief'].includes(tool.name);
+    assert.equal(/Call the tool again/.test(said), read, tool.name);
+    assert.equal(/read the plan \(harness_plan_read\) before trying it again/.test(said), !read, tool.name);
+  }
 });
 
 test('each tool forwards to its own endpoint', async () => {
