@@ -175,7 +175,9 @@ review). Default `agent`. Set it for the repository, in your own
 review runs, and how many rounds, is the harness's call; Coplan does not
 run or gate review rounds. The old values read as: `subagent` and `self` →
 `agent`, `skip` → `none`; for one release `iric.review` is read as
-`review` when `review` is not set, with a warning.
+`review` when `review` is not set to one of these (missing, or the old
+object form below), with a warning. An `iric.review` it cannot read is an
+error, the same as a bad `review`, and `agent` is used.
 
 Before 0.4, `review` was an object: `review.model`, the model a reviewer
 subagent ran on. That form is ignored from 0.4, with a warning: models and
@@ -192,7 +194,10 @@ point.
 
 Deprecated, ignored from 0.4. `iric.review` is now
 [`review`](#review), read as it for one release; `iric.parallel` and `iric.maxRounds` are
-gone — parallelism and review rounds belong to the harness.
+gone — parallelism and review rounds belong to the harness. `coplan doctor`
+says which: that `iric.review` is read as `review` and the rest is not, or,
+where `review` is already set, that none of `iric` is read. `coplan setup`
+replaces an old `iric` in your own `coplan.json` with `review`.
 
 ### `branches`
 
