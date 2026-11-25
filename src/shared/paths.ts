@@ -93,12 +93,33 @@ export function isPidAlive(pid: number): boolean {
 
 /** The lock file is only meaningful if the process behind it still exists. */
 export function readLiveLock(): DaemonLock | null {
+  const remote = remoteLock();
+  if (remote) return remote;
   const lock = readLock();
   if (!lock) return null;
   return isPidAlive(lock.pid) ? lock : null;
 }
 
+/**
+ * A daemon on another machine, named by COPLAN_REMOTE (its URL) and COPLAN_TOKEN
+ * (its key). Hooks, the MCP server and the CLI then call it instead of a local
+ * one and never start one. Its pid is not ours to check or signal.
+ */
+export function remoteLock(): DaemonLock | null {
+  const url = process.env['COPLAN_REMOTE']?.trim();
+  const token = process.env['COPLAN_TOKEN']?.trim();
+  if (!url || !token) return null;
+  try {
+    const { protocol, origin, port } = new URL(url);
+    if (protocol !== 'http:' && protocol !== 'https:') return null;
+    return { pid: 0, port: Number(port) || (protocol === 'https:' ? 443 : 80), token, version: '', startedAt: 0, host: new URL(url).hostname, origin };
+  } catch {
+    return null;
+  }
+}
+
 export function baseUrl(lock: DaemonLock): string {
+  if (lock.origin) return lock.origin;
   return `http://${lock.host || '127.0.0.1'}:${lock.port}`;
 }
 
@@ -118,7 +139,7 @@ export async function probeLock(lock: DaemonLock, timeoutMs = 1_500): Promise<'l
     const res = await fetch(`${baseUrl(lock)}/health`, { signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) return 'stale';
     const body = (await res.json().catch(() => null)) as { pid?: unknown } | null;
-    return body?.pid === lock.pid ? 'live' : 'stale';
+    return lock.origin || body?.pid === lock.pid ? 'live' : 'stale';
   } catch (err) {
     const name = (err as Error)?.name;
     return name === 'TimeoutError' || name === 'AbortError' ? 'busy' : 'stale';
@@ -150,6 +171,8 @@ export const DAEMON_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.
  * started it. Null when it did not come up in six seconds; its log says why.
  */
 export async function ensureDaemon(): Promise<DaemonLock | null> {
+  const remote = remoteLock();
+  if (remote) return (await probeLock(remote, 4_000)) === 'stale' ? null : remote;
   const existing = await readVerifiedLock();
   if (existing) return existing;
   ensureHome();

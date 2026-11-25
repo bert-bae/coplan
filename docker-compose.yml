@@ -1,0 +1,19 @@
+# Self-hosted Coplan: `COPLAN_TOKEN=$(openssl rand -hex 24) docker compose up -d --build`
+# (or put it in a .env file beside this one). docs/SELF-HOSTING.md has the rest.
+services:
+  coplan:
+    build: .
+    restart: unless-stopped
+    environment:
+      COPLAN_TOKEN: ${COPLAN_TOKEN:?set COPLAN_TOKEN: the key every client sends}
+      # Set to the address your browser and clients use if it is not
+      # http://127.0.0.1:4321 (a reverse proxy, a Tailscale name).
+      COPLAN_PUBLIC_URL: ${COPLAN_PUBLIC_URL:-}
+    ports:
+      # Loopback only: reach it through an SSH tunnel or a reverse proxy.
+      # Change to "4321:4321" only on a network you trust.
+      - "127.0.0.1:4321:4321"
+    volumes:
+      - coplan-data:/data
+volumes:
+  coplan-data:

@@ -1,0 +1,17 @@
+# Self-hosted Coplan without Docker (docs/SELF-HOSTING.md).
+#   sudo cp deploy/coplan.service /etc/systemd/system/ && sudo systemctl enable --now coplan
+# Edit User and the paths first. /etc/coplan.env holds COPLAN_TOKEN=... (chmod 600).
+[Unit]
+Description=Coplan daemon
+After=network.target
+
+[Service]
+User=coplan
+EnvironmentFile=/etc/coplan.env
+Environment=CC_HARNESS_HOME=/var/lib/coplan COPLAN_BIND=127.0.0.1 COPLAN_PORT=4321 COPLAN_SELF_HOSTED=1
+ExecStart=/usr/bin/node /opt/coplan/dist/daemon/main.js
+StateDirectory=coplan
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

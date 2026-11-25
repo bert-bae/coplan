@@ -200,7 +200,17 @@ start_daemon() {
   return 1
 }
 
-if ! read_lock; then
+# A daemon on another machine (COPLAN_REMOTE and COPLAN_TOKEN, see
+# docs/SELF-HOSTING.md): nothing to find or start here.
+BASE=
+case "${COPLAN_REMOTE:-}" in
+  http://*|https://*) [ -n "${COPLAN_TOKEN:-}" ] && BASE="${COPLAN_REMOTE%/}" ;;
+esac
+
+if [ -n "$BASE" ]; then
+  TOKEN="$COPLAN_TOKEN"
+  AUTH_ARG="Authorization: Bearer $TOKEN"
+elif ! read_lock; then
   start_daemon || exit 0
 fi
 
@@ -211,14 +221,17 @@ fi
 # The token goes to curl in a file the daemon wrote for this user alone: on
 # curl's command line, any local user could read it from /proc. A daemon
 # from before that file existed gets it on the command line, as it did.
-AUTH_FILE="$HOME_DIR/auth.header"
-AUTH_LINE=""
-# Read with the shell's own builtin, not grep: no other process sees it.
-[ -r "$AUTH_FILE" ] && IFS= read -r AUTH_LINE < "$AUTH_FILE" 2>/dev/null
-if [ "$AUTH_LINE" = "Authorization: Bearer $TOKEN" ]; then
-  AUTH_ARG="@$AUTH_FILE"
-else
-  AUTH_ARG="Authorization: Bearer $TOKEN"
+if [ -z "$BASE" ]; then
+  BASE="http://127.0.0.1:$PORT"
+  AUTH_FILE="$HOME_DIR/auth.header"
+  AUTH_LINE=""
+  # Read with the shell's own builtin, not grep: no other process sees it.
+  [ -r "$AUTH_FILE" ] && IFS= read -r AUTH_LINE < "$AUTH_FILE" 2>/dev/null
+  if [ "$AUTH_LINE" = "Authorization: Bearer $TOKEN" ]; then
+    AUTH_ARG="@$AUTH_FILE"
+  else
+    AUTH_ARG="Authorization: Bearer $TOKEN"
+  fi
 fi
 # When curl gives up, so a daemon too busy to answer in time knows no one
 # will read what it says: a prompt it would hand over is kept for the next.
@@ -236,7 +249,7 @@ RESPONSE=$(printf '%s' "$PAYLOAD" | curl -s -S \
   -H "X-Harness-Bridge-Session: ${CLAUDE_CODE_BRIDGE_SESSION_ID:-}" \
   -H "X-Harness-Entrypoint: ${CLAUDE_CODE_ENTRYPOINT:-}" \
   --data-binary @- \
-  "http://127.0.0.1:$PORT/hook/$EVENT" 2>/dev/null) || exit 0
+  "$BASE/hook/$EVENT" 2>/dev/null) || exit 0
 
 # Only emit something that actually looks like hook JSON. Anything else (an
 # error page, a truncated body) is safer left unsaid.

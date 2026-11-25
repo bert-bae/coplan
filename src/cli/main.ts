@@ -9,7 +9,7 @@
 import { readFileSync, existsSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { readLock, readLiveLock, readLockState, readVerifiedLock, probeLock, isPidAlive, baseUrl, paths, ensureDaemon, DAEMON_ENTRY } from '../shared/paths.ts';
+import { readLock, readLiveLock, readLockState, readVerifiedLock, probeLock, isPidAlive, baseUrl, remoteLock, paths, ensureDaemon, DAEMON_ENTRY } from '../shared/paths.ts';
 import { runDoctor } from './doctor.ts';
 import { runCheck } from './check.ts';
 import { runInit } from './init.ts';
@@ -93,6 +93,12 @@ const signedInUrl = (lock: DaemonLock, sessionId?: string) => uiUrl(lock, sessio
 
 const SIGN_IN = "(if the page says it does not hold Coplan's key, run `coplan url` in your own terminal for a signed-in link)";
 
+/** A daemon on another machine is stopped and restarted there (the container), not signalled from here. */
+function notHere(verb: string): number {
+  console.error(`COPLAN_REMOTE is set: the daemon runs elsewhere. Unset it to ${verb} a local one, or ${verb} the server's.`);
+  return 1;
+}
+
 const commands: Record<string, (args: string[]) => Promise<number>> = {
   async start() {
     const lock = await ensureDaemon();
@@ -106,6 +112,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
   },
 
   async stop() {
+    if (remoteLock()) return notHere('stop');
     const lock = readLiveLock();
     if (!lock) {
       console.log('not running');
@@ -161,6 +168,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
    * would move it to a fresh port and strand every tab that was watching.
    */
   async restart(args) {
+    if (remoteLock()) return notHere('restart');
     const lock = (await readVerifiedLock());
     if (!lock) return commands['start']!(args);
 
@@ -258,7 +266,9 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
       return 0;
     }
     const { lock } = found;
-    console.log(`coplan v${lock.version} on ${baseUrl(lock)} (pid ${lock.pid})`);
+    // A remote daemon's lock cannot know its build: ask it.
+    if (lock.origin) lock.version = (await api<{ version?: string }>(lock, '/health').catch(() => ({}) as { version?: string })).version ?? '';
+    console.log(`coplan v${lock.version} on ${baseUrl(lock)}${lock.origin ? '' : ` (pid ${lock.pid})`}`);
     if (found.state === 'busy') throw notAnswering(lock);
     if (lock.version !== VERSION) console.log(`  this plugin is v${VERSION}: run \`coplan restart\` so the daemon runs it`);
     const { sessions } = await api<{ sessions: SessionSummary[] }>(lock, '/api/sessions');

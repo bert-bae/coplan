@@ -901,6 +901,8 @@ export interface DaemonLock {
   version: string;
   startedAt: number;
   host: string;
+  /** A daemon on another machine (COPLAN_REMOTE): its base URL, which wins over host and port. */
+  origin?: string;
 }
 
 /* ------------------------------------------------------------------ *

@@ -90,9 +90,11 @@ async function main(): Promise<void> {
 
   // A restart hands its successor the token and the port, so the browser tab
   // that asked for it reconnects by itself. Out of the environment at once.
-  const inheritedToken = process.env['CC_HARNESS_TOKEN'];
-  const inheritedPort = Number(process.env['CC_HARNESS_PORT'] ?? 0);
+  // A self-hosted daemon (COPLAN_TOKEN, COPLAN_PORT) keeps the same ones across restarts.
+  const inheritedToken = process.env['CC_HARNESS_TOKEN'] || process.env['COPLAN_TOKEN']?.trim();
+  const inheritedPort = Number(process.env['CC_HARNESS_PORT'] || process.env['COPLAN_PORT'] || 0);
   delete process.env['CC_HARNESS_TOKEN'];
+  delete process.env['COPLAN_TOKEN'];
   const token = inheritedToken || randomBytes(24).toString('hex');
 
   const clients = { count: 0 };
@@ -164,7 +166,7 @@ async function main(): Promise<void> {
 
   /** Replace this daemon with one running the build on disk now. */
   lifecycle.restart = (entry?: string) => {
-    if (shuttingDown) return false;
+    if (shuttingDown || SELF_HOSTED) return false;
     log('restart requested; handing over to a fresh daemon');
     setTimeout(() => shutdown('restart', true, entry), RESTART_DELAY_MS).unref();
     return true;
@@ -172,7 +174,7 @@ async function main(): Promise<void> {
 
   const reaper = startReaper(store);
   const lockWatch = watchLock(() => shutdown(LOST_LOCK));
-  startIdleWatch(store, config, clients, () => shutdown('idle'));
+  if (!SELF_HOSTED) startIdleWatch(store, config, clients, () => shutdown('idle'));
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -181,6 +183,24 @@ async function main(): Promise<void> {
 
 /** The port this process listens on; the Origin check compares against it. */
 let boundPort = 0;
+
+/**
+ * Self-hosting (docs/SELF-HOSTING.md). The defaults are the local daemon's:
+ * loopback only, a random token, gone when idle. A server sets COPLAN_BIND
+ * (0.0.0.0 in a container), COPLAN_PUBLIC_URL (the address clients and the
+ * browser use, so its host passes the Host and Origin checks) and
+ * COPLAN_SELF_HOSTED=1 (stay up when idle; restart by restarting the
+ * container).
+ */
+const BIND_HOST = process.env['COPLAN_BIND']?.trim() || '127.0.0.1';
+const SELF_HOSTED = process.env['COPLAN_SELF_HOSTED'] === '1';
+const PUBLIC_ORIGIN = (() => {
+  try {
+    return process.env['COPLAN_PUBLIC_URL'] ? new URL(process.env['COPLAN_PUBLIC_URL']).origin : null;
+  } catch {
+    return null;
+  }
+})();
 
 /** Grace for the restart response to flush before the socket is torn down. */
 const RESTART_DELAY_MS = 120;
@@ -245,7 +265,7 @@ function bind(server: http.Server, port: number): Promise<number> {
     };
     server.once('error', onError);
     server.once('listening', onListening);
-    server.listen(port, '127.0.0.1');
+    server.listen(port, BIND_HOST);
   });
 }
 
@@ -390,7 +410,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, route
 
   // Loopback only; a foreign Host header is what DNS rebinding looks like.
   const host = (req.headers.host ?? '').split(':')[0];
-  if (host && host !== '127.0.0.1' && host !== 'localhost') {
+  if (host && host !== '127.0.0.1' && host !== 'localhost' && !(PUBLIC_ORIGIN && host === new URL(PUBLIC_ORIGIN).hostname)) {
     text(res, 403, 'forbidden');
     return;
   }
@@ -438,6 +458,7 @@ function sameOrigin(origin: string): boolean {
   try {
     const { protocol, hostname, port } = new URL(origin);
     const own = String(boundPort);
+    if (PUBLIC_ORIGIN && new URL(origin).origin === PUBLIC_ORIGIN) return true;
     return protocol === 'http:' && (hostname === '127.0.0.1' || hostname === 'localhost') && port === own;
   } catch {
     return false;
@@ -505,14 +526,16 @@ function buildRouter(deps: Deps): Router {
   const { store, config, token, clients, lifecycle } = deps;
   const router = new Router();
 
+  const selfUrl = () => PUBLIC_ORIGIN ?? `http://127.0.0.1:${readLiveLock()?.port ?? 0}`;
+
   /** For the browser: a login ticket the page trades for the token
    *  (`src/ui/lib/api.ts`). */
   const loginUrl = (sessionId: string) =>
-    `http://127.0.0.1:${readLiveLock()?.port ?? 0}/?login=${issueTicket(loginTickets)}#/session/${encodeURIComponent(sessionId)}`;
+    `${selfUrl()}/?login=${issueTicket(loginTickets)}#/session/${encodeURIComponent(sessionId)}`;
 
   /** For Claude. Token-free: anything returned to the model is written to the
    *  transcript and carried in every later context window. */
-  const uiUrl = (sessionId: string) => `http://127.0.0.1:${readLiveLock()?.port ?? 0}/#/session/${encodeURIComponent(sessionId)}`;
+  const uiUrl = (sessionId: string) => `${selfUrl()}/#/session/${encodeURIComponent(sessionId)}`;
 
   const opened = new Set<string>();
   const revealUi = (session: SessionState) => {
@@ -921,7 +944,7 @@ function buildRouter(deps: Deps): Router {
     json(ctx.res, started ? 200 : 409, {
       restarting: started,
       port: readLiveLock()?.port ?? null,
-      ...(started ? {} : { error: 'already shutting down' }),
+      ...(started ? {} : { error: SELF_HOSTED ? 'a self-hosted daemon restarts with its container' : 'already shutting down' }),
     });
   });
 
