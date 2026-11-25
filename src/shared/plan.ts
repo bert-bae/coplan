@@ -1725,6 +1725,15 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
       return [log('replied', thread.target, `replied on ${describeTarget(plan, thread.target)}: ${short(text, 80)}`)];
     }
 
+    case 'unreply': {
+      const thread = plan.threads.find((c) => c.id === op.threadId);
+      if (!thread) throw new PlanError(`No comment thread "${op.threadId}".`);
+      const last = thread.replies.at(-1);
+      if (!last || last.author !== author || author !== 'user') throw new PlanError('Only your own last reply can be taken back.');
+      thread.replies.pop();
+      return [log('replied', thread.target, `took back a reply on ${describeTarget(plan, thread.target)}`)];
+    }
+
     case 'resolve': {
       const thread = plan.threads.find((c) => c.id === op.threadId);
       if (!thread) throw new PlanError(`No comment thread "${op.threadId}".`);

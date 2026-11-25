@@ -674,6 +674,8 @@ export type PlanOp =
   | { op: 'set_checks'; id: string; add?: (Partial<TaskCheck> & { run: string })[]; skip?: string[] }
   | { op: 'comment'; target: Target; text: string; decision?: string[] }
   | { op: 'reply'; threadId: string; text: string }
+  /** The user takes back their last reply in a thread (their answer to a decision). */
+  | { op: 'unreply'; threadId: string }
   | { op: 'resolve'; threadId: string; resolved: boolean }
   /** The final report on the build. Markdown; replaces any earlier one.
    *  `checks`: the final checks, as they came out. */
