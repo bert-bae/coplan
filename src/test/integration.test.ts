@@ -1316,8 +1316,8 @@ test('an old config with runners still builds: tasks start and finish as tracked
     assert.equal(started['ok'], true, String(started['text']));
     assert.equal(String(started['text']).includes('Runs on'), false);
     const second = await task({ task_id: 'b', stage: 'implement' });
-    assert.doesNotMatch(String(second['text']), /runner|Runs on/, 'a runner a task once asked for, full or not, is not named');
-    assert.doesNotMatch(String((await mcpFor(id, 'next'))['text']), /Runners|runner/);
+    assert.doesNotMatch(String(second['text']), /(?<!\/)\brunners?\b(?!\/)|Runs on|tao-vm/i, 'a runner a task once asked for, full or not, is not named');
+    assert.doesNotMatch(String((await mcpFor(id, 'next'))['text']), /(?<!\/)\brunners?\b(?!\/)|tao-vm/i);
     const saved = (await sessionFor(id)).plan!.tasks;
     assert.ok(saved.every((t) => !('runner' in t) && !('dispatch' in t)));
   } finally {
