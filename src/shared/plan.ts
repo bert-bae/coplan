@@ -1028,6 +1028,7 @@ export const OP_FIELDS: { readonly [K in PlanOpName]: readonly Exclude<keyof Ext
   set_checks: ['id', 'add', 'skip'],
   comment: ['target', 'text', 'decision'],
   reply: ['threadId', 'text'],
+  unreply: ['threadId'],
   resolve: ['threadId', 'resolved'],
   report: ['text', 'checks'],
   set_branch: ['branch', 'pr', 'base'],

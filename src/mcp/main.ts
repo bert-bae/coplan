@@ -39,6 +39,16 @@ const AGENT = parseAgent(process.env['COPLAN_AGENT']);
 const SESSION_ID = sessionFromEnv(process.env, AGENT) ?? '';
 const CLAUDE_PID = Number(process.env['CLAUDE_PID'] ?? process.ppid);
 const WORKSPACE_ENV = workspaceFromEnv(process.env);
+/**
+ * Push a queued revision request into the session as a Claude Code channel
+ * message, instead of waiting for the user's next message. Opt-in: it needs
+ * Claude Code started with this server as a development channel
+ * (`--dangerously-load-development-channels`), and a message sent to a
+ * session not listening is lost — so without COPLAN_CHANNEL=1 the request
+ * is queued and copied as before.
+ */
+const CHANNEL = AGENT === 'claude' && process.env['COPLAN_CHANNEL'] === '1';
+const CHANNEL_POLL_MS = 2_000;
 let workspace = WORKSPACE_ENV ?? process.cwd();
 
 /* ------------------------------------------------------------------ *
@@ -213,6 +223,34 @@ function sessionFromCall(params: Record<string, unknown>): string | null {
 }
 
 /* ------------------------------------------------------------------ *
+ * Channel: queued revision requests, pushed
+ * ------------------------------------------------------------------ */
+
+let channelTimer: NodeJS.Timeout | null = null;
+let pulling = false;
+
+/** Ask the daemon, until the session ends, whether a revision request is
+ *  waiting; it hands it over once, and it goes to the session as a message. */
+function startChannel(): void {
+  if (channelTimer) return;
+  channelTimer = setInterval(() => {
+    // Never start the daemon for a poll: it is there when the user queued something.
+    if (pulling || !readLiveLock()) return;
+    pulling = true;
+    callDaemon('channel_pull', {}, 5_000, '')
+      .then((r) => {
+        if (r.ok && r.text.trim()) {
+          send({ jsonrpc: '2.0', method: 'notifications/claude/channel', params: { content: r.text, meta: { source: 'coplan' } } });
+        }
+      })
+      .finally(() => {
+        pulling = false;
+      });
+  }, CHANNEL_POLL_MS);
+  channelTimer.unref();
+}
+
+/* ------------------------------------------------------------------ *
  * JSON-RPC plumbing
  * ------------------------------------------------------------------ */
 
@@ -244,7 +282,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
       rootsWanted = AGENT !== 'claude' && !WORKSPACE_ENV && Boolean(capabilities['roots']);
       respond(req.id, {
         protocolVersion: PROTOCOL_VERSION,
-        capabilities: { tools: { listChanged: false } },
+        capabilities: { tools: { listChanged: false }, ...(CHANNEL ? { experimental: { 'claude/channel': {} } } : {}) },
         serverInfo: { name: 'coplan', version: VERSION },
       });
       return;
@@ -254,6 +292,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
     case 'initialized':
     case 'notifications/roots/list_changed':
       if (rootsWanted) askForRoots();
+      if (CHANNEL && req.method !== 'notifications/roots/list_changed') startChannel();
       return;
 
     case 'ping':

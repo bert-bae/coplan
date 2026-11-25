@@ -105,3 +105,14 @@ test('requests survive a restart, and a damaged one is dropped', () => {
   const damaged = { ...raw, revisions: [...plan.revisions!, { id: 'r9', at: 4, prompt: '', threadIds: [] }, { id: 'r8', at: 5, prompt: 'c', threadIds: ['c1'], deliveredAt: null }] };
   assert.deepEqual(normalizePlan(damaged as Plan & Record<string, unknown>, 'x').revisions!.map((r) => r.id), ['r1', 'r2'], 'one waiting at most');
 });
+
+test('a user takes back only their own last reply', () => {
+  const plan = commented();
+  const mine = plan.threads.find((t) => t.text === 'ioredis or node-redis?')!;
+  const back = applyOps(plan, [{ op: 'unreply', threadId: mine.id }], 'user').plan;
+  assert.equal(back.threads.find((t) => t.id === mine.id)!.replies.length, 0);
+  assert.equal(threadsForRevision(back).length, 2, 'the question waits on the user again');
+  const agents = plan.threads.find((t) => t.text === 'Rename it?')!;
+  assert.throws(() => applyOps(plan, [{ op: 'unreply', threadId: agents.id }], 'user'), /own last reply/);
+  assert.throws(() => applyOps(plan, [{ op: 'unreply', threadId: mine.id }], 'claude'), /own last reply/);
+});

@@ -1446,8 +1446,9 @@ function buildRouter(deps: Deps): Router {
       return;
     }
     const id = session.sessionId;
-    // An agent calling Coplan's tools is using Coplan, however it got there.
-    store.engage(id);
+    // An agent calling Coplan's tools is using Coplan, however it got there
+    // (a channel poll is the plugin asking, not the agent).
+    if (tool !== 'channel_pull') store.engage(id);
     const url = uiUrl(id);
     const reply = (ok: boolean, message: string) => json(ctx.res, 200, { ok, text: message });
 
@@ -1522,6 +1523,13 @@ function buildRouter(deps: Deps): Router {
           const textOut = renderPlan(now, { url, changesOnly: body['changes_only'] === true, planCheck: projectFor(session).planCheck });
           store.markRead(id);
           reply(true, revision ? `${revision.prompt}\n\n---\n\n${textOut}` : textOut);
+          return;
+        }
+
+        case 'channel_pull': {
+          // The plugin's channel asks: a queued revision request goes to the
+          // session as a message, once; an empty answer is "nothing waiting".
+          reply(true, store.deliverRevision(id)?.prompt ?? '');
           return;
         }
 
