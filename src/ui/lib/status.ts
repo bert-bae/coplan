@@ -88,7 +88,7 @@ export function statusTitle(facts: StatusFacts, agent: string): string {
     case 'finalizing':
       return `Review: every task is done; ${agent} is running the final checks and writing the report for you`;
     case 'landing':
-      return `Review: the report is in, and its pull requests are open; ${agent} follows them until they merge`;
+      return `Review: the report is in, and its pull requests are open; ${agent} records each as it merges or closes`;
     case 'built':
       return 'Done: every task is built, and the report is in';
     default:

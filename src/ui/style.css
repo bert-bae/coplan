@@ -1987,16 +1987,6 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .submit-notes { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--sp-1); font-size: var(--fs-sm); }
 .submit-notes li { padding: var(--sp-1) var(--sp-2); border-radius: var(--r-md); border: 1px solid var(--border-default); background: var(--surface-sunken); }
 .submit-notes li.is-warn { background: var(--attention-bg); border-color: var(--attention-border); color: var(--attention-fg); }
-.submit-targets { margin: 0; padding: 0; border: 0; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-1); }
-.submit-target {
-  display: flex; align-items: flex-start; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3); cursor: pointer;
-  border: 1px solid var(--border-default); border-radius: var(--r-lg); background: var(--surface-base);
-}
-.submit-target:hover { border-color: var(--border-strong); }
-.submit-target.is-active { border-color: var(--accent-border); background: var(--accent-subtle); }
-.submit-target input { margin-top: 3px; }
-.submit-target-hint { display: block; margin-top: 2px; font-size: var(--fs-sm); color: var(--text-secondary); }
-.submit-target-default { font-size: var(--fs-sm); color: var(--text-tertiary); }
 .submit-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); }
 /* What the prompt takes from config: read-only, grouped by the file that
    sets it, each with its key. */
@@ -2045,12 +2035,12 @@ button.pv-chip { cursor: pointer; }
 .pv-chip.is-field:hover, a.pv-chip:hover { text-decoration: underline; }
 .pv-chip.is-config { color: var(--attention-fg); border-color: var(--attention-border); background: var(--attention-bg); font-family: var(--font-mono); }
 .pv-chip.is-config.is-default { border-style: dashed; background: transparent; }
-.pv-chip.is-note, .pv-chip.is-setting, .pv-chip.is-changes { color: var(--success-fg); border-color: var(--success-border); background: var(--success-bg); }
+.pv-chip.is-note, .pv-chip.is-changes { color: var(--success-fg); border-color: var(--success-border); background: var(--success-bg); }
 .pv-chip.is-derived { border-style: dashed; }
 /* Words from somewhere else inside a line say so where they sit. */
 .pv-seg.is-field { text-decoration: underline; text-decoration-color: var(--accent-border); text-underline-offset: 3px; }
 .pv-seg.is-config { background: var(--attention-bg); border-radius: 3px; }
-.pv-seg.is-note, .pv-seg.is-setting { background: var(--success-bg); border-radius: 3px; }
+.pv-seg.is-note { background: var(--success-bg); border-radius: 3px; }
 .pv-seg.is-bookkeeping, .pv-row.is-bookkeeping .pv-seg { color: var(--text-tertiary); font-style: italic; }
 /* Left out to fit: struck through, and kept short. */
 .pv-row.is-dropped .pv-text { max-height: 7.5em; overflow: hidden; color: var(--text-tertiary); }
@@ -2205,16 +2195,7 @@ span.board-title:hover { color: inherit; text-decoration: none; }
 /* The design, confirmed: the tasks are shaped against it. */
 .phase.is-tasking { background: var(--success-bg); border-bottom-color: var(--success-border); box-shadow: inset 4px 0 0 var(--success-solid); }
 
-/* How the build runs: chosen when submitting. */
-.submit-settings { margin: 0; padding: 0; border: 0; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
-/* Four choices in a 2×2 grid, so none wraps on its own. */
-.submit-settings .segmented { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.submit-settings .seg + .seg { border-left: none; }
-.submit-settings .seg:nth-child(even) { border-left: 1px solid var(--border-default); }
-.submit-settings .seg:nth-child(n + 3) { border-top: 1px solid var(--border-default); }
-.settings-numbers { display: flex; flex-direction: column; gap: var(--sp-1); }
 .field-inline { display: inline-flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--text-secondary); }
-.input.input-number { width: 4.5em; height: 28px; padding: 0 var(--sp-2); font-variant-numeric: tabular-nums; }
 
 /* What blocks what, where it lands, where it is in its cycle. */
 .chip.is-dep { background: var(--surface-sunken); border-style: dashed; }

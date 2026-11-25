@@ -55,7 +55,8 @@ function plan(): Plan {
 }
 
 function building(target: BuildTarget = 'session'): Plan {
-  return markDelivered(submitPlan(confirmDesign(plan(), { prompt: 'd' }), { target, prompt: 'p' }));
+  const submitted = submitPlan(confirmDesign(plan(), { prompt: 'd' }), { prompt: 'p' });
+  return markDelivered({ ...submitted, submission: { ...submitted.submission!, target } });
 }
 
 const progress = (p: Plan, id: string, fields: Record<string, unknown>) =>
@@ -69,7 +70,7 @@ test('each phase of a real plan shows its status, with its detail', () => {
   const confirmed = confirmDesign(designing, { prompt: 'd' });
   assert.equal(planPhase(confirmed), 'tasking');
   assert.equal(said(confirmed), 'Planning · design confirmed');
-  const submitted = submitPlan(confirmed, { target: 'session', prompt: 'p' });
+  const submitted = submitPlan(confirmed, { prompt: 'p' });
   assert.equal(said(submitted), 'In progress · waiting for Claude');
   let built = markDelivered(submitted);
   assert.equal(said(built), 'In progress · building');

@@ -636,7 +636,7 @@ test('a prompt that never reached the agent is taken back and handed over again,
   const store = await freshStore();
   store.ensure('handover', process.cwd());
   store.publishPlan('handover', PLAN);
-  store.submit('handover', { target: 'session' });
+  store.submit('handover', {});
   const prior = store.get('handover')!.plan!;
   const sent = store.deliver('handover');
   assert.ok(sent, 'the build prompt is handed over');
@@ -899,7 +899,7 @@ test("the session list counts a task waiting on the user's review by the reposit
   store.ensure('rl', process.cwd());
   store.publishPlan('rl', PLAN);
   store.mutate('rl', (s) => {
-    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { target: 'session', prompt: 'p' }));
+    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { prompt: 'p' }));
   });
   store.applyOps('rl', [{ op: 'upsert_task', id: 't1', stage: 'review' }], 'claude', { tracking: true });
   const row = () => store.summaries().find((s) => s.sessionId === 'rl')!;
@@ -914,7 +914,7 @@ test("the session list reads the repository's review only where it counts, and o
   const { confirmDesign, markDelivered, submitPlan } = await import('../shared/plan.ts');
   type Submit = Parameters<typeof submitPlan>[1];
   const submitted = (input: Partial<Submit>) => (s: { plan: import('../shared/types.ts').Plan | null }) => {
-    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { target: 'session', prompt: 'p', ...input } as Submit));
+    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { prompt: 'p', ...input } as Submit));
   };
   // Each kind in a folder of its own, so reading one it should not shows as a read of its own folder.
   const folder = (name: string) => {
@@ -941,4 +941,42 @@ test("the session list reads the repository's review only where it counts, and o
   // Only submitted plans, which can have a task in review: the two in one folder, once; nothing unpublished.
   assert.equal(asked.filter((id) => id === 'm1' || id === 'm2').length, 1, JSON.stringify(asked));
   assert.ok(!asked.includes('unpublished'), JSON.stringify(asked));
+});
+
+test('a 0.3 submission not yet handed over is handed over with the current prompt, not its old one', async () => {
+  const dir = path.join(home, 'sessions', 'old-submission');
+  mkdirSync(dir, { recursive: true });
+  const old = '[cc-harness] Build the plan with the coplan-build skill; run each task through iric; follow harness_pr_events.';
+  writeFileSync(
+    path.join(dir, 'state.json'),
+    JSON.stringify({
+      sessionId: 'old-submission', cwd: process.cwd(), title: 't', status: 'idle', createdAt: Date.now(), updatedAt: Date.now(),
+      plan: {
+        title: 'Old build', tasks: [{ id: 't1', title: 'one', status: 'todo', order: 0, parentId: null }],
+        submission: { at: 1, target: 'session', prompt: old, mode: 'managed', settings: { review: 'agent', parallel: 1, maxRounds: 3 }, deliveredAt: null },
+      },
+    }),
+  );
+  const store = await freshStore();
+  const pending = store.pending('old-submission');
+  assert.ok(pending);
+  assert.doesNotMatch(pending!.prompt, /coplan-build|iric|harness_pr_events/);
+  assert.match(pending!.prompt, /harness_task_next/);
+  const sent = store.deliver('old-submission');
+  assert.equal(sent?.prompt, pending!.prompt);
+  assert.equal(store.get('old-submission')!.plan!.submission!.prompt, sent!.prompt, 'kept as what was handed over');
+});
+
+test('session fields of 0.3 builds are dropped on load', async () => {
+  const dir = path.join(home, 'sessions', 'old-fields');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, 'state.json'),
+    JSON.stringify({
+      sessionId: 'old-fields', cwd: process.cwd(), title: 't', status: 'idle', createdAt: Date.now(), updatedAt: Date.now(), plan: null,
+      buildChoice: { mode: 'managed', at: 1 }, prWatch: { 'feat/a': { number: 3 } }, prInbox: [{ kind: 'review' }],
+    }),
+  );
+  const s = (await freshStore()).get('old-fields') as unknown as Record<string, unknown>;
+  for (const key of ['buildChoice', 'prWatch', 'prInbox']) assert.equal(s[key], undefined, key);
 });

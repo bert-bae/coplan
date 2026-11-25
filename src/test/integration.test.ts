@@ -346,9 +346,9 @@ test('a peek shows the plan and leaves the user\'s changes unread for the real r
   assert.match(real, /renamed from "Client"/, 'the real read still reports the change');
 });
 
-test('the plan text endpoint shows exactly what Claude reads, without counting as a read', async () => {
+test('the read-back endpoint shows what Claude reads, without counting as a read', async () => {
   await ops([{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'peek' }]);
-  const res = await call<{ status: number; text: string }>(`/api/session/${sessionId}/plan/text`);
+  const res = await call<{ text: string }>(`/api/session/${sessionId}/plan/readback`);
   assert.match(res.text, /# Add a cache/);
   const s = await session();
   assert.ok(s.plan!.claudeReadSeq < s.plan!.seq, 'Claude still has the comment to read');
@@ -802,7 +802,6 @@ test('finishing the last task finishes the build, and a new plan may follow', as
   assert.match(String(opened['text']), /Recorded `cache\/storage`: pull request #11 open/);
   assert.doesNotMatch(String(opened['text']), /watch/i, 'recorded, not watched');
   await pr({ branch: 'cache/api', pr_url: 'https://github.com/o/r/pull/12', pr_number: 12, pr_state: 'open' });
-  assert.match(String((await pr({ branch: 'nope', pr_state: 'open' }))['text']), /No task lands on `nope`/);
   const merged = String((await pr({ branch: 'cache/storage', pr_state: 'merged' }))['text']);
   assert.match(merged, /`cache\/storage` is merged: rebase `cache\/api` onto the base branch/);
   assert.match(String((await mcpFor(built, 'next'))['text']), /`cache\/api` onto `cache\/storage` \(stacked\): pull request #12 open — https:\/\/github\.com\/o\/r\/pull\/12\n {2}⚠ `cache\/storage` is merged/);
@@ -1361,7 +1360,6 @@ test('opening any tab of the prompt viewer does not count as the agent reading t
   assert.ok(before.seq > before.claudeReadSeq, 'the user has an edit the agent has not read');
 
   await call(`/api/session/${id}/plan/readback`);
-  await call(`/api/session/${id}/plan/text`);
   await call(`/api/session/${id}/task/t2/brief`);
   await post(`/api/session/${id}/plan/design/prompt`);
   const confirmed = await post<Preview>(`/api/session/${id}/plan/design/prompt`, {});
@@ -1982,7 +1980,7 @@ test('a task\'s own checks: the agent proposes, the user sets, and the brief and
 
 test('every route about a session answers a session the daemon does not know with a 404', async () => {
   const routes: [string, string][] = [
-    ['GET', ''], ['POST', 'title'], ['POST', 'plan/ops'], ['GET', 'plan/text'], ['GET', 'plan/readback'], ['GET', 'task/t1/brief'],
+    ['GET', ''], ['POST', 'title'], ['POST', 'plan/ops'], ['GET', 'plan/readback'], ['GET', 'task/t1/brief'],
     ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/design/confirm'], ['POST', 'plan/design/reopen'],
     ['POST', 'plan/revisions/prompt'], ['POST', 'plan/revisions'], ['POST', 'plan/revisions/withdraw'], ['POST', 'plan/submit'], ['POST', 'plan/reopen'],
     ['DELETE', ''],
@@ -2021,7 +2019,7 @@ test('a refused sign-off is a 409 with the reason, a look at no plan a 404, a re
     }
 
     // And every look at a plan that is not there is a 404.
-    const looks: [string, string][] = [['GET', 'plan/text'], ['GET', 'plan/readback'], ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/revisions/prompt'], ['GET', 'task/t1/brief']];
+    const looks: [string, string][] = [['GET', 'plan/readback'], ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/revisions/prompt'], ['GET', 'task/t1/brief']];
     for (const [method, route] of looks) {
       assert.deepEqual(await send(method, route, method === 'POST' ? {} : undefined), { status: 404, body: { error: 'no plan yet' } }, route);
     }
@@ -2171,3 +2169,74 @@ test('a headless session keeps its plan as Markdown and as a page in its working
   }
 });
 
+
+const phaseOf = async (id: string) => (await call<{ sessions: { sessionId: string; phase: string }[] }>('/api/sessions')).sessions.find((x) => x.sessionId === id)?.phase;
+
+test('a plan built on the session branch records its pull request, and lands by it', async () => {
+  const id = 'session-branch-pr';
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', { title: 'One branch', summary: 'All on the session branch.', tasks: [{ id: 'a', title: 'A' }] });
+  await mcpFor(id, 'read');
+  assert.equal((await mcpFor(id, 'advance', { to: 'build', user_said: 'build it' }))['ok'], true);
+  await mcpFor(id, 'task', { task_id: 'a', status: 'in_progress' });
+  await mcpFor(id, 'task', { task_id: 'a', status: 'done', note: 'x' });
+  const opened = await mcpFor(id, 'branch', { branch: 'feature/one', pr_url: 'https://github.com/o/r/pull/7', pr_number: 7, pr_state: 'open' });
+  assert.equal(opened['ok'], true, String(opened['text']));
+  assert.match(String(opened['text']), /Recorded `feature\/one`: pull request #7 open/);
+  assert.equal((await mcpFor(id, 'edit', { ops: [{ op: 'report', text: 'Built.' }] }))['ok'], true);
+  assert.equal(await phaseOf(id), 'landing');
+  await mcpFor(id, 'branch', { branch: 'feature/one', pr_state: 'merged' });
+  assert.equal(await phaseOf(id), 'built');
+});
+
+test('a verdict is given in review whichever way the update moves the task', async () => {
+  const id = 'verdict-order';
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  const reviews = async (taskId: string) => (await sessionFor(id)).plan!.tasks.find((t) => t.id === taskId)!;
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', { title: 'Verdicts', summary: 'Two tasks.', tasks: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }] });
+  await task({ task_id: 'a', stage: 'review' });
+  const refine = await task({ task_id: 'a', stage: 'refine', verdict: 'changes', summary: 'rename it' });
+  assert.equal(refine['ok'], true, String(refine['text']));
+  const a = await reviews('a');
+  assert.equal(a.stage, 'refine');
+  assert.deepEqual(a.reviews?.map((r) => `${r.round}:${r.verdict}`), ['1:changes']);
+  const closed = await task({ task_id: 'b', stage: 'review', status: 'done', verdict: 'pass', note: 'x' });
+  assert.equal(closed['ok'], true, String(closed['text']));
+  const b = await reviews('b');
+  assert.equal(b.status, 'done');
+  assert.deepEqual(b.reviews?.map((r) => `${r.round}:${r.verdict}`), ['1:pass']);
+});
+
+test('a finished task taken up again takes the build report with it', async () => {
+  const id = 'report-reopened';
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', { title: 'Report', summary: 'One task.', tasks: [{ id: 'a', title: 'A' }] });
+  await mcpFor(id, 'read');
+  await mcpFor(id, 'advance', { to: 'build', user_said: 'build it' });
+  await task({ task_id: 'a', status: 'in_progress' });
+  await task({ task_id: 'a', status: 'done', note: 'x' });
+  await mcpFor(id, 'edit', { ops: [{ op: 'report', text: 'Built.' }] });
+  assert.equal(await phaseOf(id), 'built');
+  await task({ task_id: 'a', status: 'in_progress' });
+  assert.equal((await sessionFor(id)).plan!.report, undefined);
+  const again = String((await task({ task_id: 'a', status: 'done', note: 'fixed' }))['text']);
+  assert.match(again, /Finish the build/);
+  assert.equal(await phaseOf(id), 'finalizing');
+});
+
+test('a done task whose dependency was reopened still takes a note', async () => {
+  const id = 'done-amended';
+  const task = (body: Record<string, unknown>) => mcpFor(id, 'task', body);
+  await hookFor(id, 'SessionStart', { start_reason: 'startup' });
+  await mcpFor(id, 'publish', { title: 'Amend', summary: 'Two tasks.', tasks: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B', dependsOn: ['a'] }] });
+  for (const t of ['a', 'b']) {
+    await task({ task_id: t, status: 'in_progress' });
+    await task({ task_id: t, status: 'done', note: 'x' });
+  }
+  await task({ task_id: 'a', status: 'in_progress' });
+  const amended = await task({ task_id: 'b', status: 'done', note: 'amended' });
+  assert.equal(amended['ok'], true, String(amended['text']));
+  assert.equal((await sessionFor(id)).plan!.tasks.find((t) => t.id === 'b')!.note, 'amended');
+});

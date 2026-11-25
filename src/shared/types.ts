@@ -369,6 +369,8 @@ export interface Submission {
   via?: SignoffVia;
   /** What the user said in chat, as the agent quoted it. */
   userSaid?: string;
+  /** Submitted by 0.3 and not handed over yet: its prompt is rebuilt when it is. */
+  stalePrompt?: true;
   /** When the prompt reached Claude. Null until the user's next message in
    *  Claude's chat carries it — and always null for `elsewhere`. */
   deliveredAt: number | null;

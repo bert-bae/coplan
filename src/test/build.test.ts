@@ -192,10 +192,10 @@ test('branch names that are folders of each other are refused', () => {
 
 test('submitting a plan whose tasks cannot be built is refused', () => {
   const empty = confirmDesign(publishPlan(null, { ...DESIGN, tasks: [] }).plan, { prompt: 'p' });
-  assert.throws(() => submitPlan(empty, { target: 'session', prompt: 'build' }), /no tasks to build/);
+  assert.throws(() => submitPlan(empty, { prompt: 'build' }), /no tasks to build/);
   const broken = structuredClone(tasked());
   broken.tasks.find((t) => t.id === 'client')!.dependsOn = ['wire'];
-  assert.throws(() => submitPlan(broken, { target: 'session', prompt: 'build' }), /cannot be built as it is/);
+  assert.throws(() => submitPlan(broken, { prompt: 'build' }), /cannot be built as it is/);
 });
 
 test('branches that each need the other cannot stack, and are refused', () => {
@@ -228,7 +228,7 @@ test('a branch needing one already in its stack stacks on the top of it', () => 
 
 test('a finished build takes no new task list: the next plan starts afresh', () => {
   let plan = tasked();
-  plan = submitPlan(plan, { target: 'session', prompt: 'build' });
+  plan = submitPlan(plan, { prompt: 'build' });
   plan = markDelivered(plan);
   plan = done(plan, 'client', 'config', 'invalidate', 'wire', 'docs');
   // Every task done is not yet built: the build is finished by its report.
@@ -409,7 +409,7 @@ test('the old review names read as the review they meant, as written and as stor
 });
 
 test('a plan stored before 0.4 loads: its build mode, settings and round bookkeeping are not read', () => {
-  const stored = submitPlan(tasked(), { target: 'session', prompt: 'build it' }, 1_300) as Plan & Record<string, unknown>;
+  const stored = submitPlan(tasked(), { prompt: 'build it' }, 1_300) as Plan & Record<string, unknown>;
   const raw = JSON.parse(JSON.stringify(stored)) as Record<string, any>;
   raw.submission.mode = 'managed';
   raw.submission.settings = { review: 'self', parallel: 3, maxRounds: 2 };
@@ -417,7 +417,7 @@ test('a plan stored before 0.4 loads: its build mode, settings and round bookkee
   Object.assign(client, { review: 'subagent', status: 'done', round: 2, reopened: true, acceptedFailing: true, reviews: [{ round: 2, verdict: 'pass', by: 'claude', mode: 'self', at: 1 }] });
   raw.tasks.find((t: { id: string }) => t.id === 'docs').review = 'skip';
   const plan = normalizePlan(raw as Plan & Record<string, unknown>, 'x');
-  assert.deepEqual(Object.keys(plan.submission!).sort(), ['at', 'deliveredAt', 'prompt', 'seq', 'target']);
+  assert.deepEqual(Object.keys(plan.submission!).sort(), ['at', 'deliveredAt', 'prompt', 'seq', 'stalePrompt', 'target']);
   const loaded = plan.tasks.find((t) => t.id === 'client')! as unknown as Record<string, unknown>;
   assert.equal(loaded['review'], 'agent');
   assert.equal(loaded['reopened'], undefined);
@@ -630,7 +630,7 @@ test('a restack goes down the stack to the first branch still open', () => {
 test('long standing instructions are cut to fit the handoff, saying where the rest is; the brief carries them whole', () => {
   const long = 'Keep every commit small and say why. '.repeat(100);
   const custom = { ...parseProjectConfig({}), instructions: { handoff: long, brief: long } };
-  const submitted = submitPlan(tasked(), { target: 'session', prompt: 'build it' }, 1_300);
+  const submitted = submitPlan(tasked(), { prompt: 'build it' }, 1_300);
   const prompt = buildPrompt(submitted, { project: custom }).prompt;
   assert.ok(prompt.length < long.length + 4_000, 'not the whole text');
   assert.match(prompt, /Cut to fit here: the whole text is `instructions\.handoff`/);
@@ -655,7 +655,7 @@ test('the handoff says what to build, what done means, the review asked for, the
 
 test('the pull request template goes to the harness as a path; Coplan writes no pull request bodies', () => {
   const custom = { ...PROJECT, pullRequests: { template: '## How it was tested', templateFile: 'PR.md' } };
-  const submitted = submitPlan(tasked(), { target: 'session', prompt: 'build it' }, 1_300);
+  const submitted = submitPlan(tasked(), { prompt: 'build it' }, 1_300);
   assert.match(buildPrompt(submitted, { project: custom }).prompt, /Write each description from the pull request template, PR\.md\./);
   const plan = done(markDelivered(submitted, 1_400), 'client', 'config', 'invalidate', 'wire', 'docs');
   const next = renderNext(plan, { project: custom });

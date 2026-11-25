@@ -893,12 +893,17 @@ export function normalizePlan(raw: Partial<Plan> & Record<string, unknown>, fall
   const submission = validSubmission(raw.submission);
   if (submission) plan.submission = submission;
   else delete plan.submission;
+  // 0.3 kept the build's review on its submission; 0.4 reads it from the tasks.
+  const oldReview = submission && validReview((raw.submission as { settings?: { review?: unknown } }).settings?.review);
+  if (oldReview) plan.tasks = plan.tasks.map((t) => (t.parentId || t.review ? t : { ...t, review: oldReview }));
   const design = validDesign(raw.design);
   if (design) plan.design = design;
   else delete plan.design;
-  const report = raw.report as { text?: unknown; at?: unknown } | undefined;
-  if (report && typeof report.text === 'string' && report.text && typeof report.at === 'number') plan.report = { text: report.text, at: report.at };
-  else delete plan.report;
+  const report = raw.report as { text?: unknown; at?: unknown; checks?: unknown } | undefined;
+  if (report && typeof report.text === 'string' && report.text && typeof report.at === 'number') {
+    const checks = cleanChecks(report.checks);
+    plan.report = { text: report.text, at: report.at, ...(checks?.length ? { checks } : {}) };
+  } else delete plan.report;
   // A proposal from disk is kept only whole: one missing its edits could
   // never be accepted, nor shown.
   const proposals = list<Proposal>(raw.proposals).filter(
@@ -1397,7 +1402,7 @@ function refuseProgress(op: PlanOp): void {
   if (!given.length) return;
   throw new PlanError(
     `upsert_task does not set ${given.join(', ')}: report progress with harness_task_update {task_id, status, stage, checks, note}, ` +
-      'which checks what the task waits on and how its checks came out. A new task starts as todo.',
+      'which records what is reported and refuses only starting or finishing a task before what it waits on is done. A new task starts as todo.',
   );
 }
 
@@ -1931,7 +1936,8 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
     case 'set_branch': {
       const name = cleanBranch(op.branch);
       if (!name) throw new PlanError('Name the branch.');
-      if (!plan.tasks.some((t) => effectiveBranch(plan, t) === name)) {
+      // Claude reports what the harness opened, which may be the session's own branch that no task names.
+      if (author === 'user' && !plan.tasks.some((t) => effectiveBranch(plan, t) === name)) {
         throw new PlanError(`No task lands on \`${name}\`: the plan's branches are ${[...new Set(plan.tasks.map((t) => effectiveBranch(plan, t)).filter(Boolean))].map((b) => `\`${b}\``).join(', ') || 'none'}.`);
       }
       const was = plan.branches?.[name];
@@ -2038,9 +2044,13 @@ function editTask(
       // verdicts go when it leaves done for work, straight or by way of
       // dropped (wasDone). Dropped, or a drop undone (back to done), it keeps
       // them; one dropped before it was done keeps its own.
-      if (isWorking(status) && wasFinished(task) && task.reviews) {
-        task.reviews = task.reviews.filter((r) => r.round !== task.round);
-        if (!task.reviews.length) delete task.reviews;
+      // The build report spoke for the work as it was too.
+      if (isWorking(status) && wasFinished(task)) {
+        delete plan.report;
+        if (task.reviews) {
+          task.reviews = task.reviews.filter((r) => r.round !== task.round);
+          if (!task.reviews.length) delete task.reviews;
+        }
       }
       if (task.status === 'done' && status === 'dropped') task.wasDone = true;
       else delete task.wasDone;
@@ -2687,7 +2697,7 @@ export function nextInChat(plan: Plan, agent: string): string {
     case 'finalizing':
       return `Every task is done: ${agent} is running the final checks and writing the report.`;
     case 'landing':
-      return `The report is in and the pull requests are open: ${agent} follows them, fixing what CI and reviewers ask, until they merge.`;
+      return `The report is in and the pull requests are open: ${agent} records each one as it merges or closes.`;
     case 'built':
       return 'Built: the report is below.';
     default:
@@ -2747,7 +2757,7 @@ function fingerprint(text: string): string {
   return h.toString(36);
 }
 
-export function validTarget(value: unknown): BuildTarget | undefined {
+function validTarget(value: unknown): BuildTarget | undefined {
   return (BUILD_TARGETS as readonly string[]).includes(value as string) ? (value as BuildTarget) : undefined;
 }
 
@@ -2771,7 +2781,7 @@ export function cleanUserSaid(value: unknown): string | undefined {
  */
 export function submitPlan(
   plan: Plan,
-  input: { target: BuildTarget; prompt: string; note?: string; trimmed?: boolean; base?: string; userSaid?: string },
+  input: { prompt: string; note?: string; trimmed?: boolean; base?: string; userSaid?: string },
   now = Date.now(),
 ): Plan {
   if (plan.submission) throw new PlanError('The plan has already been submitted.');
@@ -2780,7 +2790,7 @@ export function submitPlan(
   // they say so, and the lock holds from there.
   // Except architecture first: there the task list is made from the
   // confirmed design, and the build from the task list.
-  if (plan.mode === 'architect' && !plan.design && input.target === 'session') throw new PlanError(ARCHITECTURE_FIRST);
+  if (plan.mode === 'architect' && !plan.design) throw new PlanError(ARCHITECTURE_FIRST);
   if (!input.prompt.trim()) throw new PlanError('There is no prompt to submit.');
   // What is submitted gets built: a plan that cannot be is refused here,
   // not discovered by the agent halfway through.
@@ -2793,7 +2803,7 @@ export function submitPlan(
   next.submission = {
     at: now,
     seq: plan.seq,
-    target: input.target,
+    target: 'session',
     ...(note ? { note } : {}),
     prompt: input.prompt,
     ...(input.trimmed ? { trimmed: true } : {}),
@@ -3041,8 +3051,10 @@ function validSubmission(raw: unknown): Submission | undefined {
   if (!s || typeof s !== 'object') return undefined;
   const target = validTarget(s.target);
   if (!target || typeof s.at !== 'number' || typeof s.prompt !== 'string' || !s.prompt) return undefined;
-  // Its build mode and settings, from before 0.4, are not read.
   const said = s.via === 'chat' ? cleanUserSaid(s.userSaid) : undefined;
+  const deliveredAt = typeof s.deliveredAt === 'number' ? s.deliveredAt : null;
+  // A build mode or settings mean 0.3 wrote its prompt, naming skills and tools that are gone.
+  const stale = deliveredAt === null && ('mode' in s || 'settings' in s);
   return {
     ...(Number.isInteger(s.seq) && s.seq! >= 0 ? { seq: s.seq } : {}),
     at: s.at,
@@ -3052,7 +3064,8 @@ function validSubmission(raw: unknown): Submission | undefined {
     ...(s.trimmed === true ? { trimmed: true } : {}),
     ...(typeof s.base === 'string' && s.base ? { base: s.base } : {}),
     ...(said ? { via: 'chat' as const, userSaid: said } : {}),
-    deliveredAt: typeof s.deliveredAt === 'number' ? s.deliveredAt : null,
+    ...(stale ? { stalePrompt: true } : {}),
+    deliveredAt,
   };
 }
 
@@ -3302,7 +3315,7 @@ function refuseUnreached(kind: string, title: string, rev: number, expect: numbe
 
 /** The latest result of each check: a new report replaces the one of the
  *  same name and leaves the others as they were. */
-export function mergeChecks(before: readonly CheckResult[] | undefined, reported: readonly CheckResult[]): CheckResult[] {
+function mergeChecks(before: readonly CheckResult[] | undefined, reported: readonly CheckResult[]): CheckResult[] {
   const out = [...(before ?? [])];
   for (const c of reported) {
     const at = out.findIndex((x) => x.name === c.name);
