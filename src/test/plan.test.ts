@@ -852,7 +852,7 @@ test("a proposal's `expect` checks it when made, and does not refuse the accept 
 });
 
 test('mid-build, an accepted proposal may add a task, never re-scope one the user signed off', () => {
-  let plan = submitPlan(confirmDesign(fresh(), { prompt: 'tasks' }, 2_000), { target: 'session', prompt: 'build' }, 3_000);
+  let plan = submitPlan(confirmDesign(fresh(), { prompt: 'tasks' }, 2_000), { prompt: 'build' }, 3_000);
   plan = applyOps(plan, [{ op: 'propose', title: 'Rescope', reason: 'Bigger.', ops: [{ op: 'upsert_task', id: 't4', title: 'Rewrite the API', branch: 'other' }] }], 'claude').plan;
   assert.throws(() => applyOps(plan, [{ op: 'accept_proposal', id: 'p1' }], 'user'), /takes only new tasks from a proposal\. Reopen the plan/);
   plan = applyOps(plan, [{ op: 'propose', title: 'Load test', reason: 'Prove it.', ops: [{ op: 'upsert_task', title: 'Load test' }] }], 'claude').plan;
@@ -1218,7 +1218,7 @@ test('handing over the build prompt is not a read of what the user did after sub
     { op: 'propose', title: 'Add cache', reason: 'faster', ops: [{ op: 'upsert_task', title: 'Cache' }] },
   ], 'claude').plan;
   for (const reload of [false, true]) {
-    let plan = submitPlan(proposed, { target: 'session', prompt: 'build it' }, 2_000);
+    let plan = submitPlan(proposed, { prompt: 'build it' }, 2_000);
     // The daemon may restart between the sign-off and its delivery.
     if (reload) plan = normalizePlan(JSON.parse(JSON.stringify(plan)) as Parameters<typeof normalizePlan>[0], 'x');
     plan = applyOps(plan, [{ op: 'reject_proposal', id: 'p1', note: 'No cache: we must stay stateless' }], 'user').plan;
@@ -1228,12 +1228,12 @@ test('handing over the build prompt is not a read of what the user did after sub
     assert.match(renderPlan(plan, { changesOnly: true }), /No cache: we must stay stateless/, 'the agent is shown the reason when it reads');
   }
   // A plan submitted before the sign-off's log position was recorded: by the clock.
-  const legacy = submitPlan(proposed, { target: 'session', prompt: 'build it' }, 2_000);
+  const legacy = submitPlan(proposed, { prompt: 'build it' }, 2_000);
   delete legacy.submission!.seq;
   const rejected = applyOps(legacy, [{ op: 'reject_proposal', id: 'p1', note: 'No' }], 'user', 2_500).plan;
   assert.equal(unreadByClaude(markDelivered(rejected, 3_000)).length, 1, 'a legacy submission too');
   // With nothing after the sign-off, the prompt it carried is the agent's read, as before.
-  const quiet = markDelivered(submitPlan(proposed, { target: 'session', prompt: 'build it' }, 2_000), 3_000);
+  const quiet = markDelivered(submitPlan(proposed, { prompt: 'build it' }, 2_000), 3_000);
   assert.deepEqual(unreadByClaude(quiet), []);
   // The design's hand-over works the same way.
   const design = applyOps(confirmDesign(proposed, { prompt: 'make tasks' }, 2_000), [{ op: 'reject_proposal', id: 'p1', note: 'No' }], 'user').plan;
@@ -1606,11 +1606,10 @@ test('an architecture-first plan gets its task list, and its build, only from th
   const plan = publishPlan(null, { ...INPUT, mode: 'architect' }, 1000).plan;
   assert.equal(plan.mode, 'architect');
   assert.throws(() => publishTasks(plan, { tasks: [{ title: 'Too early' }] }), /architecture first/);
-  assert.throws(() => submitPlan(plan, { target: 'session', prompt: 'build' }), /architecture first/);
-  assert.ok(submitPlan(plan, { target: 'elsewhere', prompt: 'export' }).submission, 'handed off to build elsewhere, it builds nothing here');
+  assert.throws(() => submitPlan(plan, { prompt: 'build' }), /architecture first/);
   const confirmed = confirmDesign(plan, { prompt: 'make the task list' });
   const listed = publishTasks(confirmed, { tasks: [{ title: 'Cache client', detail: 'Get and set.', builds: ['cache'] }] }).plan;
-  assert.ok(submitPlan(listed, { target: 'session', prompt: 'build' }).submission, 'then it builds');
+  assert.ok(submitPlan(listed, { prompt: 'build' }).submission, 'then it builds');
 });
 
 test('a plan straight to its task list has no design to confirm, and is a task list from the start', () => {
@@ -1620,7 +1619,7 @@ test('a plan straight to its task list has no design to confirm, and is a task l
   assert.equal(hasTaskList(plan), true);
   assert.ok(planGaps(plan).some((g) => g.rule === 'task-undetailed'), 'its tasks are held to the task list\'s checks');
   assert.deepEqual(planFlow(plan), { steps: ['tasklist', 'build'], at: 'tasklist' });
-  assert.ok(submitPlan(plan, { target: 'session', prompt: 'build' }).submission);
+  assert.ok(submitPlan(plan, { prompt: 'build' }).submission);
 });
 
 test('a mode is kept when a publish leaves it out, refused when unknown, and dropped from disk when damaged', () => {
@@ -1633,7 +1632,7 @@ test('a mode is kept when a publish leaves it out, refused when unknown, and dro
   const old = fresh();
   assert.equal(old.mode, undefined);
   assert.deepEqual(planFlow(old).steps, ['architecture', 'tasklist', 'build']);
-  assert.ok(submitPlan(old, { target: 'session', prompt: 'build' }).submission, 'straight from the design, as before');
+  assert.ok(submitPlan(old, { prompt: 'build' }).submission, 'straight from the design, as before');
 });
 
 test("a build report's final checks survive a restart", () => {

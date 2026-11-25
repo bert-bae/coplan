@@ -34,7 +34,7 @@ const REVISION_MOVED =
 import { blockingGaps } from '../shared/check.ts';
 import { DEFAULT_REVIEW } from '../shared/build.ts';
 import { DEFAULT_AGENT, isAgentKind, type AgentKind } from '../shared/agents.ts';
-import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, SessionSummary, Submission, TaskListInput } from '../shared/types.ts';
+import type { Author, Change, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, SessionSummary, Submission, TaskListInput } from '../shared/types.ts';
 
 const PERSIST_DEBOUNCE_MS = 400;
 
@@ -475,7 +475,7 @@ export class SessionStore extends EventEmitter {
    * the plan as the daemon holds it, and only if that is still the version
    * the user previewed — what they read is what Claude gets.
    */
-  submit(id: string, input: PromptOptions & { target: BuildTarget; expect?: number; hash?: string; userSaid?: string }): Plan {
+  submit(id: string, input: PromptOptions & { expect?: number; hash?: string; userSaid?: string }): Plan {
     const session = this.sessions.get(id);
     if (!session) throw new Error('unknown session');
     const plan = session.plan;
@@ -487,7 +487,6 @@ export class SessionStore extends EventEmitter {
     const { prompt, trimmed } = buildPrompt(plan, { ...input, agent: session.agent });
     if (input.hash !== undefined && input.hash !== promptHash(prompt)) throw new PlanError(PROMPT_MOVED('submit'));
     const next = submitPlan(plan, {
-      target: input.target,
       prompt,
       trimmed,
       ...(input.note ? { note: input.note } : {}),

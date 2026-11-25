@@ -1402,7 +1402,7 @@ function refuseProgress(op: PlanOp): void {
   if (!given.length) return;
   throw new PlanError(
     `upsert_task does not set ${given.join(', ')}: report progress with harness_task_update {task_id, status, stage, checks, note}, ` +
-      'which checks what the task waits on and how its checks came out. A new task starts as todo.',
+      'which records what is reported and refuses only starting or finishing a task before what it waits on is done. A new task starts as todo.',
   );
 }
 
@@ -2697,7 +2697,7 @@ export function nextInChat(plan: Plan, agent: string): string {
     case 'finalizing':
       return `Every task is done: ${agent} is running the final checks and writing the report.`;
     case 'landing':
-      return `The report is in and the pull requests are open: ${agent} follows them, fixing what CI and reviewers ask, until they merge.`;
+      return `The report is in and the pull requests are open: ${agent} records each one as it merges or closes.`;
     case 'built':
       return 'Built: the report is below.';
     default:
@@ -2757,7 +2757,7 @@ function fingerprint(text: string): string {
   return h.toString(36);
 }
 
-export function validTarget(value: unknown): BuildTarget | undefined {
+function validTarget(value: unknown): BuildTarget | undefined {
   return (BUILD_TARGETS as readonly string[]).includes(value as string) ? (value as BuildTarget) : undefined;
 }
 
@@ -2781,7 +2781,7 @@ export function cleanUserSaid(value: unknown): string | undefined {
  */
 export function submitPlan(
   plan: Plan,
-  input: { target: BuildTarget; prompt: string; note?: string; trimmed?: boolean; base?: string; userSaid?: string },
+  input: { prompt: string; note?: string; trimmed?: boolean; base?: string; userSaid?: string },
   now = Date.now(),
 ): Plan {
   if (plan.submission) throw new PlanError('The plan has already been submitted.');
@@ -2790,7 +2790,7 @@ export function submitPlan(
   // they say so, and the lock holds from there.
   // Except architecture first: there the task list is made from the
   // confirmed design, and the build from the task list.
-  if (plan.mode === 'architect' && !plan.design && input.target === 'session') throw new PlanError(ARCHITECTURE_FIRST);
+  if (plan.mode === 'architect' && !plan.design) throw new PlanError(ARCHITECTURE_FIRST);
   if (!input.prompt.trim()) throw new PlanError('There is no prompt to submit.');
   // What is submitted gets built: a plan that cannot be is refused here,
   // not discovered by the agent halfway through.
@@ -2803,7 +2803,7 @@ export function submitPlan(
   next.submission = {
     at: now,
     seq: plan.seq,
-    target: input.target,
+    target: 'session',
     ...(note ? { note } : {}),
     prompt: input.prompt,
     ...(input.trimmed ? { trimmed: true } : {}),
@@ -3315,7 +3315,7 @@ function refuseUnreached(kind: string, title: string, rev: number, expect: numbe
 
 /** The latest result of each check: a new report replaces the one of the
  *  same name and leaves the others as they were. */
-export function mergeChecks(before: readonly CheckResult[] | undefined, reported: readonly CheckResult[]): CheckResult[] {
+function mergeChecks(before: readonly CheckResult[] | undefined, reported: readonly CheckResult[]): CheckResult[] {
   const out = [...(before ?? [])];
   for (const c of reported) {
     const at = out.findIndex((x) => x.name === c.name);

@@ -59,7 +59,7 @@ test('what a task adds is whole, named and each once', () => {
 });
 
 test('on a submitted plan the user still sets them, and accepts a proposal to; the agent is told why not', () => {
-  let p = markDelivered(submitPlan(confirmDesign(plan(), { prompt: 'd' }), { target: 'session', prompt: 'p' }));
+  let p = markDelivered(submitPlan(confirmDesign(plan(), { prompt: 'd' }), { prompt: 'p' }));
   p = set(p, { id: 'docs', skip: ['tests'] });
   assert.deepEqual(p.tasks.find((t) => t.id === 'docs')?.skipChecks, ['tests']);
   assert.throws(() => set(p, { id: 'docs', skip: [] }, 'claude'), /Which checks a task runs is the user's to set/, 'not the lock message: the reason');

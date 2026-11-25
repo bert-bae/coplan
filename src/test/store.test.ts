@@ -636,7 +636,7 @@ test('a prompt that never reached the agent is taken back and handed over again,
   const store = await freshStore();
   store.ensure('handover', process.cwd());
   store.publishPlan('handover', PLAN);
-  store.submit('handover', { target: 'session' });
+  store.submit('handover', {});
   const prior = store.get('handover')!.plan!;
   const sent = store.deliver('handover');
   assert.ok(sent, 'the build prompt is handed over');
@@ -899,7 +899,7 @@ test("the session list counts a task waiting on the user's review by the reposit
   store.ensure('rl', process.cwd());
   store.publishPlan('rl', PLAN);
   store.mutate('rl', (s) => {
-    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { target: 'session', prompt: 'p' }));
+    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { prompt: 'p' }));
   });
   store.applyOps('rl', [{ op: 'upsert_task', id: 't1', stage: 'review' }], 'claude', { tracking: true });
   const row = () => store.summaries().find((s) => s.sessionId === 'rl')!;
@@ -914,7 +914,7 @@ test("the session list reads the repository's review only where it counts, and o
   const { confirmDesign, markDelivered, submitPlan } = await import('../shared/plan.ts');
   type Submit = Parameters<typeof submitPlan>[1];
   const submitted = (input: Partial<Submit>) => (s: { plan: import('../shared/types.ts').Plan | null }) => {
-    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { target: 'session', prompt: 'p', ...input } as Submit));
+    s.plan = markDelivered(submitPlan(confirmDesign(s.plan!, { prompt: 'd' }), { prompt: 'p', ...input } as Submit));
   };
   // Each kind in a folder of its own, so reading one it should not shows as a read of its own folder.
   const folder = (name: string) => {

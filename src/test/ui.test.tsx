@@ -72,7 +72,6 @@ async function boot(session: SessionState = makeSession(), extra?: (route: strin
     if (answer !== undefined) return answer;
     if (route.startsWith('/api/sessions')) return { sessions: [], version: 'test' };
     if (route.endsWith('/plan/ops')) return { plan: store.getState().session?.plan, changes: [] };
-    if (route.endsWith('/plan/text')) return '# Add a cache\n\nas Claude reads it';
     if (route.startsWith('/api/session/')) return { session };
     return { ok: true };
   }));
@@ -1503,7 +1502,7 @@ test('refused text held open is offered to copy when a lock takes its field, and
   await refusedTitle();
   // Submitted in chat: the title can no longer be saved.
   const s = store.getState().session!;
-  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(confirmDesign(s.plan!, { prompt: 'tasks' }), { target: 'session', prompt: 'build' }) } }));
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(confirmDesign(s.plan!, { prompt: 'tasks' }), { prompt: 'build' }) } }));
   const kept = store.getState().toasts.find((t) => t.copy !== undefined);
   assert.equal(kept?.copy, 'Mine');
   assert.equal(screen.queryByRole('textbox', { name: 'Plan title' }) === null, true);
@@ -1698,7 +1697,7 @@ function confirmedPlan(plan: Plan = makePlan()): Plan {
 
 /** The plan after the user submitted it — handed to Claude, if `delivered`. */
 function lockedPlan(delivered = false): Plan {
-  const plan = submitPlan(confirmedPlan(), { target: 'session', prompt: '[cc-harness] Build the plan "Add a cache"\n\nTHE PROMPT' });
+  const plan = submitPlan(confirmedPlan(), { prompt: '[cc-harness] Build the plan "Add a cache"\n\nTHE PROMPT' });
   return delivered ? markDelivered(plan) : plan;
 }
 
@@ -2165,7 +2164,7 @@ test('a plan signed off in chat says so, with the words the user said there (#65
   assert.match(within(tasking).getByTestId('said-in-chat').textContent ?? '', /^You told Claude in chat: the design is right$/);
 
   cleanup();
-  const built = markDelivered(submitPlan(makePlan(), { target: 'session', prompt: '[cc-harness] Build the plan\n\nTHE PROMPT', userSaid: 'looks good, build it' }));
+  const built = markDelivered(submitPlan(makePlan(), { prompt: '[cc-harness] Build the plan\n\nTHE PROMPT', userSaid: 'looks good, build it' }));
   await boot(makeSession(built));
   const strip = screen.getByRole('region', { name: 'The build' });
   assert.match(strip.textContent ?? '', /submitted from chat/);
@@ -3176,7 +3175,7 @@ test('a skipped check shows on the task, on its card mid-build — where the use
   assert.match(row.textContent ?? '', /＋ db:check/);
 
   cleanup();
-  plan = markDelivered(submitPlan(plan, { target: 'session', prompt: 'P' }));
+  plan = markDelivered(submitPlan(plan, { prompt: 'P' }));
   const session = makeSession(plan);
   await boot(session, (route) => (route === '/api/session/s1' ? { session, projectChecks: CHECKS } : undefined));
   await openTab('Tasks');
@@ -3557,7 +3556,7 @@ test('a section can be commented on once the design is confirmed, as until the p
   // Submitted, its comments are there to read, not to answer or resolve.
   const commented = applyOps(confirmedPlan(), [{ op: 'comment', target: { kind: 'section', id: 's1' }, text: 'Measured?' }], 'user').plan;
   const s = store.getState().session!;
-  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(commented, { target: 'session', prompt: 'build' }) } }));
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(commented, { prompt: 'build' }) } }));
   assert.ok(within(screen.getByLabelText('Comments on Context')).getByText('Measured?'));
   assert.equal(within(screen.getByLabelText('Comments on Context')).queryByRole('button', { name: 'Resolve' }) === null, true, 'no Resolve');
 });
@@ -3573,18 +3572,18 @@ test("a submitted plan offers comments only where there are some to read, as a d
   // One with a comment keeps it, to read.
   const commented = applyOps(confirmedPlan(), [{ op: 'comment', target: { kind: 'section', id: 's1' }, text: 'Measured?' }], 'user').plan;
   const s = store.getState().session!;
-  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(commented, { target: 'session', prompt: 'build' }) } }));
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(commented, { prompt: 'build' }) } }));
   await openTab('Overview');
   assert.ok(screen.getByRole('button', { name: '1 open comment(s) on Context' }));
   // Resolved, it is still there to read, and not offered as one to write.
   const resolved = applyOps(commented, [{ op: 'resolve', threadId: commented.threads[0]!.id, resolved: true }], 'user').plan;
-  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(resolved, { target: 'session', prompt: 'build' }) } }));
+  await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(resolved, { prompt: 'build' }) } }));
   assert.ok(screen.getByRole('button', { name: 'Comments on Context' }));
 });
 
 test("a submitted plan's task comments, and the agent's replies, are read on its board", async () => {
   const commented = applyOps(confirmedPlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
-  const submitted = submitPlan(commented, { target: 'session', prompt: 'build' });
+  const submitted = submitPlan(commented, { prompt: 'build' });
   const replied = applyOps(submitted, [{ op: 'reply', threadId: submitted.threads[0]!.id, text: 'The shared Redis client.' }], 'claude').plan;
   await boot(makeSession(replied));
   await openTab('Tasks');
@@ -3601,7 +3600,7 @@ test("a submitted plan's task comments, and the agent's replies, are read on its
 
 test("a board card's open comments and details stay open when the agent moves it", async () => {
   const commented = applyOps(confirmedPlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
-  const submitted = submitPlan(commented, { target: 'session', prompt: 'build' });
+  const submitted = submitPlan(commented, { prompt: 'build' });
   await boot(makeSession(submitted));
   await openTab('Tasks');
   await act(async () => {
@@ -3626,7 +3625,7 @@ test("a submitted plan's comments on a parent task are read on its board", async
   const plan = confirmedPlan();
   const parent = plan.tasks.find((t) => t.title === 'Storage layer')!.id;
   const commented = applyOps(plan, [{ op: 'comment', target: { kind: 'task', id: parent }, text: 'Which store?' }], 'user').plan;
-  const submitted = submitPlan(commented, { target: 'session', prompt: 'build' });
+  const submitted = submitPlan(commented, { prompt: 'build' });
   const replied = applyOps(submitted, [{ op: 'reply', threadId: submitted.threads[0]!.id, text: 'Redis, as the diagram says.' }], 'claude').plan;
   await boot(makeSession(replied));
   await openTab('Tasks');
@@ -3642,7 +3641,7 @@ test("a submitted plan's comments on a parent task are read on its board", async
 
 test("a submitted plan's task comments are read in By box too", async () => {
   const commented = applyOps(confirmedPlan(), [{ op: 'comment', target: { kind: 'task', id: 't2' }, text: 'Which client?' }], 'user').plan;
-  const submitted = submitPlan(commented, { target: 'session', prompt: 'build' });
+  const submitted = submitPlan(commented, { prompt: 'build' });
   const replied = applyOps(submitted, [{ op: 'reply', threadId: submitted.threads[0]!.id, text: 'The shared Redis client.' }], 'claude').plan;
   await boot(makeSession(replied));
   await openTab('Tasks');
@@ -3742,7 +3741,7 @@ test('a comment being written is held by the submit lock, as a field is: Submit 
   }
   // Submitted in chat: the comment can no longer be sent.
   await act(async () => {
-    store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(s.plan!, { target: 'session', prompt: 'build' }) } });
+    store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(s.plan!, { prompt: 'build' }) } });
   });
   const said = store.getState().toasts.find((t) => /comment on the plan/.test(t.text));
   assert.ok(said, 'said');
@@ -3755,7 +3754,7 @@ test('a comment being written is held by the submit lock, as a field is: Submit 
   const relock = async (lock: (plan: Plan) => Plan) => {
     await act(async () => store.apply({ type: 'snapshot', session: { ...s, plan: lock(store.getState().session!.plan!) } }));
   };
-  const submit = (plan: Plan) => submitPlan(plan, { target: 'session', prompt: 'build' });
+  const submit = (plan: Plan) => submitPlan(plan, { prompt: 'build' });
   await relock(reopenPlan);
   assert.equal((screen.getByRole('textbox', { name: /^New comment on the plan/ }) as HTMLTextAreaElement).value, '', 'comment box empty');
   // A reply, likewise.
@@ -3822,7 +3821,7 @@ test('a lock from elsewhere that drops text left open says so, with the text to 
   assert.equal(document.querySelector('.toast-copy'), null, 'copied: the message goes');
   // A draft already let go is not said again.
   await act(async () => {
-    store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(confirmDesign(s.plan!, { prompt: 'tasks' }), { target: 'session', prompt: 'build' }) } });
+    store.apply({ type: 'snapshot', session: { ...s, plan: submitPlan(confirmDesign(s.plan!, { prompt: 'tasks' }), { prompt: 'build' }) } });
   });
   assert.equal(store.getState().toasts.filter((t) => /could not be saved/.test(t.text)).length, 0, 'not said again');
 });
@@ -3908,7 +3907,7 @@ test('a kept draft goes once it is saved, or its field is gone or locked: closin
 
 test('a recorded pull request shows on the board, without CI or fix rounds; landing is in review', async () => {
   const branched = applyOps(makePlan(), [{ op: 'upsert_task', id: 'storage', branch: 'cache/storage' }], 'claude').plan;
-  const built = markDelivered(submitPlan(branched, { target: 'session', prompt: 'build' }));
+  const built = markDelivered(submitPlan(branched, { prompt: 'build' }));
   const plan = {
     ...built,
     tasks: built.tasks.map((t) => ({ ...t, status: 'done' as const })),

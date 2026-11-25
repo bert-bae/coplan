@@ -675,14 +675,6 @@ function buildRouter(deps: Deps): Router {
     }
   });
 
-  /** What Claude would see, for the "copy for Claude" affordance and for
-   *  debugging. Reading it here does not move Claude's read position. */
-  router.get('/api/session/:id/plan/text', (ctx) => {
-    const session = sessionOr404(ctx);
-    const plan = planOr404(session);
-    text(ctx.res, 200, renderPlan(plan, { url: uiUrl(session.sessionId), planCheck: projectFor(session).planCheck }));
-  });
-
   /** The read-back as blocks, each naming its source, for the page's
    *  prompt viewer. A look, not a read: Claude's read position stays. */
   router.get('/api/session/:id/plan/readback', (ctx) => {
@@ -843,7 +835,6 @@ function buildRouter(deps: Deps): Router {
     const note = cleanNote(body.note);
     const project = projectFor(session);
     const plan = store.submit(session.sessionId, {
-      target: 'session',
       project,
       ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
       ...(note ? { note } : {}),
@@ -1385,7 +1376,7 @@ function buildRouter(deps: Deps): Router {
             : 'The plan is already submitted: build it — harness_task_next says what is ready.',
         );
       }
-      store.submit(id, { target: 'session', project, agent: session.agent, userSaid: said, ...bin });
+      store.submit(id, { project, agent: session.agent, userSaid: said, ...bin });
       log(`plan submitted from chat for ${id}`);
       lead =
         `[cc-harness] Submitted the plan from chat, on the user's word ("${quote}"). It is locked now, as a submit in ` +
@@ -1668,7 +1659,7 @@ function startIdleWatch(store: SessionStore, config: ConfigCache, clients: { cou
     const minutes = config.get().idleShutdownMinutes;
     if (!minutes || minutes <= 0) return;
     if (!isIdle(Date.now(), { startedAt, clients: clients.count, sessions: () => store.all() }, minutes * 60_000)) return;
-    log(`nothing has used it for ${minutes}m (no page open, no session active, no pull request watched); exiting`);
+    log(`nothing has used it for ${minutes}m (no page open, no session active); exiting`);
     stop();
   }, 60_000);
   timer.unref?.();

@@ -346,9 +346,9 @@ test('a peek shows the plan and leaves the user\'s changes unread for the real r
   assert.match(real, /renamed from "Client"/, 'the real read still reports the change');
 });
 
-test('the plan text endpoint shows exactly what Claude reads, without counting as a read', async () => {
+test('the read-back endpoint shows what Claude reads, without counting as a read', async () => {
   await ops([{ op: 'comment', target: { kind: 'plan', id: '' }, text: 'peek' }]);
-  const res = await call<{ status: number; text: string }>(`/api/session/${sessionId}/plan/text`);
+  const res = await call<{ text: string }>(`/api/session/${sessionId}/plan/readback`);
   assert.match(res.text, /# Add a cache/);
   const s = await session();
   assert.ok(s.plan!.claudeReadSeq < s.plan!.seq, 'Claude still has the comment to read');
@@ -1360,7 +1360,6 @@ test('opening any tab of the prompt viewer does not count as the agent reading t
   assert.ok(before.seq > before.claudeReadSeq, 'the user has an edit the agent has not read');
 
   await call(`/api/session/${id}/plan/readback`);
-  await call(`/api/session/${id}/plan/text`);
   await call(`/api/session/${id}/task/t2/brief`);
   await post(`/api/session/${id}/plan/design/prompt`);
   const confirmed = await post<Preview>(`/api/session/${id}/plan/design/prompt`, {});
@@ -1981,7 +1980,7 @@ test('a task\'s own checks: the agent proposes, the user sets, and the brief and
 
 test('every route about a session answers a session the daemon does not know with a 404', async () => {
   const routes: [string, string][] = [
-    ['GET', ''], ['POST', 'title'], ['POST', 'plan/ops'], ['GET', 'plan/text'], ['GET', 'plan/readback'], ['GET', 'task/t1/brief'],
+    ['GET', ''], ['POST', 'title'], ['POST', 'plan/ops'], ['GET', 'plan/readback'], ['GET', 'task/t1/brief'],
     ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/design/confirm'], ['POST', 'plan/design/reopen'],
     ['POST', 'plan/revisions/prompt'], ['POST', 'plan/revisions'], ['POST', 'plan/revisions/withdraw'], ['POST', 'plan/submit'], ['POST', 'plan/reopen'],
     ['DELETE', ''],
@@ -2020,7 +2019,7 @@ test('a refused sign-off is a 409 with the reason, a look at no plan a 404, a re
     }
 
     // And every look at a plan that is not there is a 404.
-    const looks: [string, string][] = [['GET', 'plan/text'], ['GET', 'plan/readback'], ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/revisions/prompt'], ['GET', 'task/t1/brief']];
+    const looks: [string, string][] = [['GET', 'plan/readback'], ['POST', 'plan/prompt'], ['GET', 'plan/export'], ['POST', 'plan/design/prompt'], ['POST', 'plan/revisions/prompt'], ['GET', 'task/t1/brief']];
     for (const [method, route] of looks) {
       assert.deepEqual(await send(method, route, method === 'POST' ? {} : undefined), { status: 404, body: { error: 'no plan yet' } }, route);
     }

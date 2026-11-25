@@ -56,7 +56,8 @@ function confirmed(plan = published(), note?: string): Plan {
 
 function submitted(target: BuildTarget = 'session', plan = confirmed(), note?: string): Plan {
   const { prompt, trimmed } = buildPrompt(plan, note ? { note } : {});
-  return submitPlan(plan, { target, prompt, trimmed, ...(note ? { note } : {}) }, 2_000);
+  const next = submitPlan(plan, { prompt, trimmed, ...(note ? { note } : {}) }, 2_000);
+  return { ...next, submission: { ...next.submission!, target } };
 }
 
 /* ------------------------------------------------------------------ *
@@ -100,7 +101,7 @@ test('a plan handed off to be built elsewhere is locked, and never waits for del
 test('confirming the design is optional: a plan goes from planning straight to building (#65)', () => {
   const plan = published();
   assert.equal(planPhase(plan), 'planning');
-  const next = submitPlan(plan, { target: 'session', prompt: 'p' });
+  const next = submitPlan(plan, { prompt: 'p' });
   assert.equal(next.design, undefined, 'no design sign-off was made');
   assert.equal(planPhase(next), 'submitted');
   assert.equal(isLocked(next), true);
@@ -114,10 +115,10 @@ test('a sign-off given in chat keeps the user\'s words, and a restart keeps them
   const plan = published();
   const design = confirmDesign(plan, { prompt: 'd', userSaid: '  looks right, make the tasks  ' });
   assert.deepEqual([design.design?.via, design.design?.userSaid], ['chat', 'looks right, make the tasks']);
-  const sub = submitPlan(design, { target: 'session', prompt: 'p', userSaid: 'build it' });
+  const sub = submitPlan(design, { prompt: 'p', userSaid: 'build it' });
   assert.deepEqual([sub.submission?.via, sub.submission?.userSaid], ['chat', 'build it']);
   // From the page: no via, no words.
-  assert.equal(submitPlan(design, { target: 'session', prompt: 'p' }).submission?.via, undefined);
+  assert.equal(submitPlan(design, { prompt: 'p' }).submission?.via, undefined);
   const back = normalizePlan(JSON.parse(JSON.stringify(sub)) as Plan & Record<string, unknown>, 'x');
   assert.deepEqual([back.submission?.via, back.submission?.userSaid, back.design?.via, back.design?.userSaid], ['chat', 'build it', 'chat', 'looks right, make the tasks']);
   // A damaged quote is dropped, not kept half: the sign-off stands as the page's.
@@ -134,7 +135,7 @@ test('submitting moves the version, so a page never rolls back past it', () => {
 });
 
 test('a plan is submitted once', () => {
-  assert.throws(() => submitPlan(submitted(), { target: 'session', prompt: 'again' }), PlanError);
+  assert.throws(() => submitPlan(submitted(), { prompt: 'again' }), PlanError);
 });
 
 test('delivering the prompt is Claude reading the plan', () => {
@@ -472,7 +473,7 @@ test('a trimmed prompt cuts what the user changed between changes, stays in budg
   assert.match(built.prompt, /harness_plan_read \{changes_only: true\} lists every change the user made/);
 
   // Delivered, it is not Claude's read: the read it points at still has every change.
-  const delivered = markDelivered(submitPlan(plan, { target: 'session', prompt: built.prompt, trimmed: true }, 2_000));
+  const delivered = markDelivered(submitPlan(plan, { prompt: built.prompt, trimmed: true }, 2_000));
   assert.ok(unreadByClaude(delivered).length > 0);
   assert.match(renderPlan(delivered, { changesOnly: true }), /Changed t119 /);
 });
