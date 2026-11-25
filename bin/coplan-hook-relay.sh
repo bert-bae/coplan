@@ -207,7 +207,8 @@ case "${COPLAN_REMOTE:-}" in
   http://*|https://*) [ -n "${COPLAN_TOKEN:-}" ] && BASE="${COPLAN_REMOTE%/}" ;;
 esac
 
-MACHINE= BIN=
+MACHINE=""
+BIN=""
 if [ -n "$BASE" ]; then
   MACHINE=$(uname -n 2>/dev/null)
   [ -n "$PLUGIN_ROOT_DIR" ] && BIN="$PLUGIN_ROOT_DIR/bin/coplan"
