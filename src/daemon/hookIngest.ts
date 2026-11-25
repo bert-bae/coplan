@@ -35,6 +35,8 @@ export interface IngestContext {
   agent?: AgentKind;
   /** Where the session runs, read from its environment by the relay. */
   env?: SessionEnv;
+  /** A remote client's machine name and its coplan CLI path (relay headers); none for a local one. */
+  client?: { machine?: string; bin?: string };
   /** Called when a session starts waiting on the user. */
   onWaiting?: (session: SessionState) => void;
 }
@@ -59,6 +61,8 @@ export async function ingestHook(event: string, input: HookInput, ctx: IngestCon
   // Its hooks run: what `coplan doctor` checks a Codex thread for (#52).
   if (existing.hookedAt == null) ctx.store.update(sessionId, { hookedAt: Date.now() });
   applyEnv(sessionId, ctx);
+  const { machine, bin } = ctx.client ?? {};
+  if (machine && (existing.machine !== machine || existing.bin !== bin)) ctx.store.update(sessionId, { machine, bin });
 
   switch (event) {
     case 'SessionStart':

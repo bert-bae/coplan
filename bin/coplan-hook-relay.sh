@@ -207,7 +207,10 @@ case "${COPLAN_REMOTE:-}" in
   http://*|https://*) [ -n "${COPLAN_TOKEN:-}" ] && BASE="${COPLAN_REMOTE%/}" ;;
 esac
 
+MACHINE= BIN=
 if [ -n "$BASE" ]; then
+  MACHINE=$(uname -n 2>/dev/null)
+  [ -n "$PLUGIN_ROOT_DIR" ] && BIN="$PLUGIN_ROOT_DIR/bin/coplan"
   TOKEN="$COPLAN_TOKEN"
   AUTH_ARG="Authorization: Bearer $TOKEN"
 elif ! read_lock; then
@@ -247,6 +250,8 @@ RESPONSE=$(printf '%s' "$PAYLOAD" | curl -s -S \
   -H "X-Harness-Remote-Session: ${CLAUDE_CODE_REMOTE_SESSION_ID:-}" \
   -H "X-Harness-Remote-Sdk: ${CLAUDE_CODE_REMOTE_SDK_URL:-}" \
   -H "X-Harness-Bridge-Session: ${CLAUDE_CODE_BRIDGE_SESSION_ID:-}" \
+  -H "X-Harness-Machine: $MACHINE" \
+  -H "X-Harness-Bin: $BIN" \
   -H "X-Harness-Entrypoint: ${CLAUDE_CODE_ENTRYPOINT:-}" \
   --data-binary @- \
   "$BASE/hook/$EVENT" 2>/dev/null) || exit 0

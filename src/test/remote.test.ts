@@ -23,3 +23,24 @@ test('COPLAN_REMOTE and COPLAN_TOKEN name a remote daemon, and only both do', ()
   withEnv({ COPLAN_REMOTE: 'ftp://plan.lan', COPLAN_TOKEN: 't' }, () => assert.equal(remoteLock(), null));
   withEnv({ COPLAN_REMOTE: 'not a url', COPLAN_TOKEN: 't' }, () => assert.equal(remoteLock(), null));
 });
+
+test('sessions on two machines with the same folder and pid are told apart', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const home = mkdtempSync(join(tmpdir(), 'cc-harness-remote-'));
+  process.env['CC_HARNESS_HOME'] = home;
+  try {
+    const { SessionStore } = await import('../daemon/store.ts');
+    const store = new SessionStore();
+    store.ensure('a', '/code/app');
+    store.update('a', { machine: 'desktop', claudePid: 7 });
+    store.ensure('b', '/code/app');
+    store.update('b', { machine: 'laptop', claudePid: 7 });
+    assert.equal(store.findByCwd('/code/app', undefined, 'laptop')?.sessionId, 'b');
+    assert.equal(store.findByPid(7, undefined, 'desktop')?.sessionId, 'a');
+    assert.equal(store.findByCwd('/code/app'), undefined, 'a local call never lands on a remote session');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

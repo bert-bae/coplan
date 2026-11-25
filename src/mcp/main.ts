@@ -8,7 +8,8 @@
  */
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { readLiveLock, baseUrl, ensureDaemon } from '../shared/paths.ts';
+import { hostname } from 'node:os';
+import { readLiveLock, baseUrl, ensureDaemon, remoteLock } from '../shared/paths.ts';
 import { TOOLS, DEFAULT_BUDGET_MS, timeoutText } from './tools.ts';
 import { agentInfo, parseAgent, sessionFromEnv, workspaceFromEnv } from '../shared/agents.ts';
 import type { DaemonLock } from '../shared/types.ts';
@@ -157,6 +158,8 @@ async function callDaemon(
         sessionId: sessionId || undefined,
         cwd: AGENT === 'codex' && !WORKSPACE_ENV ? undefined : workspace,
         pid: CLAUDE_PID,
+        // A remote daemon cannot tell this machine's pids and folders from another's.
+        machine: remoteLock() ? hostname() : undefined,
       }),
       signal: controller.signal,
     });

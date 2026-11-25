@@ -58,6 +58,15 @@ const COPLAN_BIN = (() => {
   return existsSync(bin) ? bin : undefined;
 })();
 
+/** The CLI a session is told to run: its own machine's when a remote client said where (relay header), else this build's. */
+const binOf = (s: SessionState): { bin?: string } => {
+  const bin = s.bin ?? COPLAN_BIN;
+  return bin ? { bin } : {};
+};
+
+/** What a remote client says about itself in a header: one plain line, or nothing. */
+const cleanClient = (v: string | null): string | undefined => (v && v.length <= 300 && !/[\x00-\x1f"'`$\\]/.test(v) ? v : undefined);
+
 /** Session names the user types. */
 const MAX_TITLE_LENGTH = 120;
 /** Edits in one request. Generous; a real reorganization is a few dozen. */
@@ -603,8 +612,8 @@ function buildRouter(deps: Deps): Router {
   /** How a brief is rendered for a session: the same for the agent's tool
    *  and the page, so both read the same text. */
   store.reviewFor = (session) => projectFor(session).review;
-  store.promptFor = (session) => ({ project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) });
-  const briefOptions = (session: SessionState) => ({ agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) });
+  store.promptFor = (session) => ({ project: projectFor(session), ...binOf(session) });
+  const briefOptions = (session: SessionState) => ({ agent: session.agent, project: projectFor(session), ...binOf(session) });
 
   /** What the review dialogs show beside the prompt: the defaults and the
    *  checks this repository has, so the user sees what the build will run. */
@@ -767,7 +776,7 @@ function buildRouter(deps: Deps): Router {
     const { prompt, trimmed, blocks } = buildPrompt(plan, {
       agent: session.agent,
       project,
-      ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
+      ...binOf(session),
       ...(note ? { note } : {}),
     });
     json(ctx.res, 200, {
@@ -801,7 +810,7 @@ function buildRouter(deps: Deps): Router {
     const plan = planOr404(session);
     const note = cleanNote(body.note);
     const project = projectFor(session);
-    const { prompt, trimmed, blocks } = designPrompt(plan, { agent: session.agent, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
+    const { prompt, trimmed, blocks } = designPrompt(plan, { agent: session.agent, project, ...binOf(session), ...(note ? { note } : {}) });
     json(ctx.res, 200, {
       prompt,
       hash: promptHash(prompt),
@@ -825,7 +834,7 @@ function buildRouter(deps: Deps): Router {
     const note = cleanNote(body.note);
     const plan = store.confirmDesign(session.sessionId, {
       project: projectFor(session),
-      ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
+      ...binOf(session),
       ...(note ? { note } : {}),
       ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
       ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
@@ -892,7 +901,7 @@ function buildRouter(deps: Deps): Router {
     const project = projectFor(session);
     const plan = store.submit(session.sessionId, {
       project,
-      ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
+      ...binOf(session),
       ...(note ? { note } : {}),
       ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
       ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
@@ -1134,6 +1143,7 @@ function buildRouter(deps: Deps): Router {
             bridgeSessionId: header('x-harness-bridge-session'),
             entrypoint: header('x-harness-entrypoint'),
           },
+          client: { machine: cleanClient(header('x-harness-machine')), bin: cleanClient(header('x-harness-bin')) },
           onWaiting: openClaude,
         });
       }
@@ -1168,7 +1178,7 @@ function buildRouter(deps: Deps): Router {
 
   /* --------------------------- MCP bridge -------------------------- */
 
-  const resolveSession = (ctx: Ctx, body: { sessionId?: string; cwd?: string; pid?: number }) => {
+  const resolveSession = (ctx: Ctx, body: { sessionId?: string; cwd?: string; pid?: number; machine?: string }) => {
     const headerId = ctx.req.headers['x-harness-session'];
     const id = body.sessionId ?? (typeof headerId === 'string' && headerId ? headerId : undefined);
     const agentHeader = ctx.req.headers['x-harness-agent'];
@@ -1177,19 +1187,19 @@ function buildRouter(deps: Deps): Router {
     // the Claude Code plugin's config; it is never Codex, and its calls never
     // reach a Codex thread.
     const mayBe: AgentKind[] = agent === 'claude' ? ['claude', 'cursor'] : [agent];
-    const byPid = (pid: number) => mayBe.map((a) => store.findByPid(pid, a)).find(Boolean) ?? null;
+    const byPid = (pid: number) => mayBe.map((a) => store.findByPid(pid, a, body.machine)).find(Boolean) ?? null;
     let session: SessionState | null = null;
     if (id) session = store.ensure(id, body.cwd, agent);
     else if (agent === 'claude') {
       // One `claude` process is one session, so its pid names it; else its
       // folder, a Claude session first, then a Cursor chat.
       if (body.pid) session = byPid(body.pid);
-      for (const a of mayBe) if (!session && body.cwd) session = store.findByCwd(body.cwd, a) ?? null;
+      for (const a of mayBe) if (!session && body.cwd) session = store.findByCwd(body.cwd, a, body.machine) ?? null;
     } else {
       // One Cursor process serves every chat in every window, and one Codex
       // app every thread: the folder says more than the pid. In that folder,
       // the chat that was active last is the one calling.
-      if (body.cwd) session = store.findByCwd(body.cwd, agent) ?? null;
+      if (body.cwd) session = store.findByCwd(body.cwd, agent, body.machine) ?? null;
       if (!session && body.pid) session = byPid(body.pid);
     }
     if (!session) return null;
@@ -1327,7 +1337,7 @@ function buildRouter(deps: Deps): Router {
     // Its checks are targeted to its change from here: say how to run them.
     if (starting && now.startCommit) {
       out.push(
-        `Its checks run for what it changes, from this commit on: \`${COPLAN_BIN ? `"${COPLAN_BIN}"` : 'coplan'} check implement --since ${now.startCommit.slice(0, 12)}${skipArg(effectiveChecks(plan, now))}\` ` +
+        `Its checks run for what it changes, from this commit on: \`${binOf(session).bin ? `"${binOf(session).bin}"` : 'coplan'} check implement --since ${now.startCommit.slice(0, 12)}${skipArg(effectiveChecks(plan, now))}\` ` +
           '(then `review`), run where it is built.',
       );
     }
@@ -1413,7 +1423,7 @@ function buildRouter(deps: Deps): Router {
     const plan = session.plan;
     if (!plan) throw new PlanError('There is no plan yet. Publish one with harness_plan_publish.');
     const project = projectFor(session);
-    const bin = COPLAN_BIN ? { bin: COPLAN_BIN } : {};
+    const bin = binOf(session);
     const quote = said.length > 200 ? `${said.slice(0, 199).trimEnd()}…` : said;
     let lead: string;
     if (to === 'tasks') {
@@ -1459,7 +1469,7 @@ function buildRouter(deps: Deps): Router {
       body = { ...(sent[0] as unknown as Record<string, unknown>), sessionId: body['sessionId'], cwd: body['cwd'], pid: body['pid'] };
       tool = 'propose';
     }
-    const session = resolveSession(ctx, body as { sessionId?: string; cwd?: string; pid?: number });
+    const session = resolveSession(ctx, body as { sessionId?: string; cwd?: string; pid?: number; machine?: string });
     if (!session) {
       const agentHeader = ctx.req.headers['x-harness-agent'];
       json(ctx.res, 200, {
@@ -1672,7 +1682,7 @@ function buildRouter(deps: Deps): Router {
             reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
             return;
           }
-          reply(true, renderNext(session.plan, { agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) }));
+          reply(true, renderNext(session.plan, { agent: session.agent, project: projectFor(session), ...binOf(session) }));
           return;
         }
 
@@ -1732,7 +1742,8 @@ function startReaper(store: SessionStore): { stop(): void } {
   const timer = setInterval(() => {
     try {
       for (const s of store.all()) {
-        if (s.status !== 'ended' && typeof s.claudePid === 'number' && !isPidAlive(s.claudePid)) {
+        // A remote client's pid is on its own machine: only its SessionEnd ends it.
+        if (s.status !== 'ended' && !s.machine && typeof s.claudePid === 'number' && !isPidAlive(s.claudePid)) {
           store.update(s.sessionId, { status: 'ended', endedAt: Date.now() });
         }
       }

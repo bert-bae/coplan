@@ -396,14 +396,14 @@ export class SessionStore extends EventEmitter {
   /** Most recently updated session rooted at `cwd` — of `agent`, when one is
    *  named, so a Cursor window never picks up a Claude session in the same
    *  folder. */
-  findByCwd(cwd: string, agent?: AgentKind): SessionState | undefined {
+  findByCwd(cwd: string, agent?: AgentKind, machine?: string): SessionState | undefined {
     const normalized = path.resolve(cwd);
     const matches = (value: string | null | undefined) => !!value && path.resolve(value) === normalized;
-    return this.all().find((s) => (!agent || s.agent === agent) && (matches(s.cwd) || matches(s.repoRoot)));
+    return this.all().find((s) => (!agent || s.agent === agent) && s.machine === machine && (matches(s.cwd) || matches(s.repoRoot)));
   }
 
-  findByPid(pid: number, agent?: AgentKind): SessionState | undefined {
-    return this.all().find((s) => s.claudePid === pid && (!agent || s.agent === agent));
+  findByPid(pid: number, agent?: AgentKind, machine?: string): SessionState | undefined {
+    return this.all().find((s) => s.claudePid === pid && s.machine === machine && (!agent || s.agent === agent));
   }
 
   /* ---------------------------------------------------------------- *
