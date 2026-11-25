@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOps, confirmDesign, countTasks, descendants, hasTaskList, MAX_CHANGES, planFlow, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, proposalTouches, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
+import { applyOps, awaitingUserReview, confirmDesign, countTasks, descendants, hasTaskList, MAX_CHANGES, planFlow, markDelivered, markDesignDelivered, markReadByClaude, normalizePlan, outline, PlanError, proposalTouches, publishPlan, publishTasks, submitPlan, threadWaitsOn, unreadAreas, unreadByClaude } from '../shared/plan.ts';
 import { renderPlan, unreadNotice } from '../daemon/render.ts';
 import { roundVerdict } from '../shared/build.ts';
 import { planGaps } from '../shared/check.ts';
@@ -1634,4 +1634,25 @@ test('a mode is kept when a publish leaves it out, refused when unknown, and dro
   assert.equal(old.mode, undefined);
   assert.deepEqual(planFlow(old).steps, ['architecture', 'tasklist', 'build']);
   assert.ok(submitPlan(old, { target: 'session', prompt: 'build' }).submission, 'straight from the design, as before');
+});
+
+test("a build report's final checks survive a restart", () => {
+  const checks = [{ name: 'tests', ok: false, note: '2 failing' }, { name: 'lint', ok: true }];
+  const raw = { title: 'x', sections: [], diagrams: [], threads: [], tasks: [], report: { text: 'Built.', at: 5, checks: [...checks, { name: 3 }] } };
+  assert.deepEqual(normalizePlan(raw as unknown as Plan & Record<string, unknown>, 'x').report, { text: 'Built.', at: 5, checks });
+  assert.deepEqual(normalizePlan({ ...raw, report: { text: 'Built.', at: 5, checks: [] } } as unknown as Plan & Record<string, unknown>, 'x').report, { text: 'Built.', at: 5 });
+});
+
+test("a 0.3 Managed build's review setting is kept on its top-level tasks that set none", () => {
+  const tasks = [
+    { id: 't1', title: 'API', status: 'in_progress', stage: 'review', round: 1, order: 0, parentId: null },
+    { id: 't2', title: 'Client', status: 'todo', order: 0, parentId: 't3' },
+    { id: 't3', title: 'UI', status: 'todo', order: 1, parentId: null, review: 'none' },
+  ];
+  const submission = { at: 1, target: 'session', prompt: 'old', mode: 'managed', settings: { review: 'user', parallel: 2, maxRounds: 3 }, deliveredAt: 2 };
+  const plan = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks, submission } as unknown as Plan & Record<string, unknown>, 'x');
+  assert.deepEqual(plan.tasks.map((t) => t.review), ['user', undefined, 'none']);
+  assert.deepEqual(awaitingUserReview(plan, 'agent').map((t) => t.id), ['t1']);
+  const subagent = normalizePlan({ title: 'x', sections: [], diagrams: [], threads: [], tasks, submission: { ...submission, settings: { review: 'subagent' } } } as unknown as Plan & Record<string, unknown>, 'x');
+  assert.equal(subagent.tasks[0]!.review, 'agent');
 });

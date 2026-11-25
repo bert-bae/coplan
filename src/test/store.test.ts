@@ -942,3 +942,41 @@ test("the session list reads the repository's review only where it counts, and o
   assert.equal(asked.filter((id) => id === 'm1' || id === 'm2').length, 1, JSON.stringify(asked));
   assert.ok(!asked.includes('unpublished'), JSON.stringify(asked));
 });
+
+test('a 0.3 submission not yet handed over is handed over with the current prompt, not its old one', async () => {
+  const dir = path.join(home, 'sessions', 'old-submission');
+  mkdirSync(dir, { recursive: true });
+  const old = '[cc-harness] Build the plan with the coplan-build skill; run each task through iric; follow harness_pr_events.';
+  writeFileSync(
+    path.join(dir, 'state.json'),
+    JSON.stringify({
+      sessionId: 'old-submission', cwd: process.cwd(), title: 't', status: 'idle', createdAt: Date.now(), updatedAt: Date.now(),
+      plan: {
+        title: 'Old build', tasks: [{ id: 't1', title: 'one', status: 'todo', order: 0, parentId: null }],
+        submission: { at: 1, target: 'session', prompt: old, mode: 'managed', settings: { review: 'agent', parallel: 1, maxRounds: 3 }, deliveredAt: null },
+      },
+    }),
+  );
+  const store = await freshStore();
+  const pending = store.pending('old-submission');
+  assert.ok(pending);
+  assert.doesNotMatch(pending!.prompt, /coplan-build|iric|harness_pr_events/);
+  assert.match(pending!.prompt, /harness_task_next/);
+  const sent = store.deliver('old-submission');
+  assert.equal(sent?.prompt, pending!.prompt);
+  assert.equal(store.get('old-submission')!.plan!.submission!.prompt, sent!.prompt, 'kept as what was handed over');
+});
+
+test('session fields of 0.3 builds are dropped on load', async () => {
+  const dir = path.join(home, 'sessions', 'old-fields');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, 'state.json'),
+    JSON.stringify({
+      sessionId: 'old-fields', cwd: process.cwd(), title: 't', status: 'idle', createdAt: Date.now(), updatedAt: Date.now(), plan: null,
+      buildChoice: { mode: 'managed', at: 1 }, prWatch: { 'feat/a': { number: 3 } }, prInbox: [{ kind: 'review' }],
+    }),
+  );
+  const s = (await freshStore()).get('old-fields') as unknown as Record<string, unknown>;
+  for (const key of ['buildChoice', 'prWatch', 'prInbox']) assert.equal(s[key], undefined, key);
+});

@@ -551,6 +551,7 @@ function buildRouter(deps: Deps): Router {
   /** How a brief is rendered for a session: the same for the agent's tool
    *  and the page, so both read the same text. */
   store.reviewFor = (session) => projectFor(session).review;
+  store.promptFor = (session) => ({ project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) });
   const briefOptions = (session: SessionState) => ({ agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) });
 
   /** What the review dialogs show beside the prompt: the defaults and the
@@ -1240,7 +1241,7 @@ function buildRouter(deps: Deps): Router {
     const starting = idle && (status === 'in_progress' || (stage !== undefined && status !== 'done' && status !== 'blocked'));
     const waits = waitingOn(before, task);
     const waitWords = () => waits.map((t) => `${t.id} "${t.title}" (${t.status.replace('_', ' ')})`).join(', ');
-    if ((starting || status === 'done') && waits.length) {
+    if ((starting || (status === 'done' && task.status !== 'done')) && waits.length) {
       throw new PlanError(
         `"${task.title}" cannot ${status === 'done' ? 'be done' : 'start'} yet: it waits on ${waitWords()}. ` +
           'Start a task that is ready instead — harness_task_next lists them. If the dependency is wrong, change it with ' +
@@ -1260,12 +1261,18 @@ function buildRouter(deps: Deps): Router {
     const review: PlanOp[] = verdict
       ? [{ op: 'review_task', id: taskId, verdict, ...(summary ? { summary } : {}), ...(approved ? { userApproved: true } : {}) }]
       : [];
-    // The verdict belongs to the review the task is in: given with a move
-    // into review, after it; otherwise before the rest (done ends the review).
-    const { plan, changes } = store.applyOps(session.sessionId, stage ? [progress, ...review] : [...review, progress], 'claude', {
-      tracking: true,
-      review: projectFor(session).review,
-    });
+    // The verdict belongs to the review the task is in: after a move into
+    // review, before anything that takes it out (another stage, done).
+    const { stage: _, ...rest } = progress;
+    const ops: PlanOp[] = !review.length ? [progress] : stage === 'review' ? [{ op: 'upsert_task', id: taskId, stage: 'review' }, ...review, rest] : [...review, progress];
+    let applied: ReturnType<typeof store.applyOps>;
+    try {
+      applied = store.applyOps(session.sessionId, ops, 'claude', { tracking: true, review: projectFor(session).review });
+    } catch (err) {
+      if (err instanceof PlanError) throw new PlanError(err.message.replace(/^Edit \d+ \([^)]*\): /, ''));
+      throw err;
+    }
+    const { plan, changes } = applied;
     const now = plan.tasks.find((t) => t.id === taskId)!;
     const out: string[] = [];
     const state = now.status === 'in_progress' && now.stage ? stageWords(now) : now.status.replace('_', ' ');
@@ -1587,7 +1594,8 @@ function buildRouter(deps: Deps): Router {
             { tracking: true },
           );
           const stack = stackStatus(plan, projectFor(session).branches.base);
-          const now = stack.find((s) => s.branch === String(body['branch']));
+          const named = String(body['branch']);
+          const now = stack.find((s) => s.branch === named) ?? (plan.branches?.[named] ? { branch: named, state: plan.branches[named] } : undefined);
           const restacks = stack.filter((s) => s.restack).map((s) => `- ${s.restack}`);
           reply(
             true,

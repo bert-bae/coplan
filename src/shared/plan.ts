@@ -893,12 +893,17 @@ export function normalizePlan(raw: Partial<Plan> & Record<string, unknown>, fall
   const submission = validSubmission(raw.submission);
   if (submission) plan.submission = submission;
   else delete plan.submission;
+  // 0.3 kept the build's review on its submission; 0.4 reads it from the tasks.
+  const oldReview = submission && validReview((raw.submission as { settings?: { review?: unknown } }).settings?.review);
+  if (oldReview) plan.tasks = plan.tasks.map((t) => (t.parentId || t.review ? t : { ...t, review: oldReview }));
   const design = validDesign(raw.design);
   if (design) plan.design = design;
   else delete plan.design;
-  const report = raw.report as { text?: unknown; at?: unknown } | undefined;
-  if (report && typeof report.text === 'string' && report.text && typeof report.at === 'number') plan.report = { text: report.text, at: report.at };
-  else delete plan.report;
+  const report = raw.report as { text?: unknown; at?: unknown; checks?: unknown } | undefined;
+  if (report && typeof report.text === 'string' && report.text && typeof report.at === 'number') {
+    const checks = cleanChecks(report.checks);
+    plan.report = { text: report.text, at: report.at, ...(checks?.length ? { checks } : {}) };
+  } else delete plan.report;
   // A proposal from disk is kept only whole: one missing its edits could
   // never be accepted, nor shown.
   const proposals = list<Proposal>(raw.proposals).filter(
@@ -1931,7 +1936,8 @@ function applyOne(plan: Plan, op: PlanOp, author: Author, now: number, guard?: (
     case 'set_branch': {
       const name = cleanBranch(op.branch);
       if (!name) throw new PlanError('Name the branch.');
-      if (!plan.tasks.some((t) => effectiveBranch(plan, t) === name)) {
+      // Claude reports what the harness opened, which may be the session's own branch that no task names.
+      if (author === 'user' && !plan.tasks.some((t) => effectiveBranch(plan, t) === name)) {
         throw new PlanError(`No task lands on \`${name}\`: the plan's branches are ${[...new Set(plan.tasks.map((t) => effectiveBranch(plan, t)).filter(Boolean))].map((b) => `\`${b}\``).join(', ') || 'none'}.`);
       }
       const was = plan.branches?.[name];
@@ -2038,9 +2044,13 @@ function editTask(
       // verdicts go when it leaves done for work, straight or by way of
       // dropped (wasDone). Dropped, or a drop undone (back to done), it keeps
       // them; one dropped before it was done keeps its own.
-      if (isWorking(status) && wasFinished(task) && task.reviews) {
-        task.reviews = task.reviews.filter((r) => r.round !== task.round);
-        if (!task.reviews.length) delete task.reviews;
+      // The build report spoke for the work as it was too.
+      if (isWorking(status) && wasFinished(task)) {
+        delete plan.report;
+        if (task.reviews) {
+          task.reviews = task.reviews.filter((r) => r.round !== task.round);
+          if (!task.reviews.length) delete task.reviews;
+        }
       }
       if (task.status === 'done' && status === 'dropped') task.wasDone = true;
       else delete task.wasDone;
@@ -3041,8 +3051,10 @@ function validSubmission(raw: unknown): Submission | undefined {
   if (!s || typeof s !== 'object') return undefined;
   const target = validTarget(s.target);
   if (!target || typeof s.at !== 'number' || typeof s.prompt !== 'string' || !s.prompt) return undefined;
-  // Its build mode and settings, from before 0.4, are not read.
   const said = s.via === 'chat' ? cleanUserSaid(s.userSaid) : undefined;
+  const deliveredAt = typeof s.deliveredAt === 'number' ? s.deliveredAt : null;
+  // A build mode or settings mean 0.3 wrote its prompt, naming skills and tools that are gone.
+  const stale = deliveredAt === null && ('mode' in s || 'settings' in s);
   return {
     ...(Number.isInteger(s.seq) && s.seq! >= 0 ? { seq: s.seq } : {}),
     at: s.at,
@@ -3052,7 +3064,8 @@ function validSubmission(raw: unknown): Submission | undefined {
     ...(s.trimmed === true ? { trimmed: true } : {}),
     ...(typeof s.base === 'string' && s.base ? { base: s.base } : {}),
     ...(said ? { via: 'chat' as const, userSaid: said } : {}),
-    deliveredAt: typeof s.deliveredAt === 'number' ? s.deliveredAt : null,
+    ...(stale ? { stalePrompt: true } : {}),
+    deliveredAt,
   };
 }
 

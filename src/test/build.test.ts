@@ -417,7 +417,7 @@ test('a plan stored before 0.4 loads: its build mode, settings and round bookkee
   Object.assign(client, { review: 'subagent', status: 'done', round: 2, reopened: true, acceptedFailing: true, reviews: [{ round: 2, verdict: 'pass', by: 'claude', mode: 'self', at: 1 }] });
   raw.tasks.find((t: { id: string }) => t.id === 'docs').review = 'skip';
   const plan = normalizePlan(raw as Plan & Record<string, unknown>, 'x');
-  assert.deepEqual(Object.keys(plan.submission!).sort(), ['at', 'deliveredAt', 'prompt', 'seq', 'target']);
+  assert.deepEqual(Object.keys(plan.submission!).sort(), ['at', 'deliveredAt', 'prompt', 'seq', 'stalePrompt', 'target']);
   const loaded = plan.tasks.find((t) => t.id === 'client')! as unknown as Record<string, unknown>;
   assert.equal(loaded['review'], 'agent');
   assert.equal(loaded['reopened'], undefined);

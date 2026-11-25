@@ -34,7 +34,7 @@ const REVISION_MOVED =
 import { blockingGaps } from '../shared/check.ts';
 import { DEFAULT_REVIEW } from '../shared/build.ts';
 import { DEFAULT_AGENT, isAgentKind, type AgentKind } from '../shared/agents.ts';
-import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, SessionSummary, TaskListInput } from '../shared/types.ts';
+import type { Author, BuildTarget, Change, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, SessionSummary, Submission, TaskListInput } from '../shared/types.ts';
 
 const PERSIST_DEBOUNCE_MS = 400;
 
@@ -116,6 +116,8 @@ export class SessionStore extends EventEmitter {
   /** The repository's default review for a session: what a task that asks
    *  for none of its own falls back to. Set by the daemon; every edit uses it. */
   reviewFor?: (session: SessionState) => ReviewMode;
+  /** The repository's settings a build prompt is made with. Set by the daemon. */
+  promptFor?: (session: SessionState) => PromptOptions;
 
   constructor() {
     super();
@@ -556,12 +558,18 @@ export class SessionStore extends EventEmitter {
    */
   /** The prompt waiting to reach the agent, if any, without sending it. */
   pending(id: string): { prompt: string; marker: string } | null {
-    const plan = this.sessions.get(id)?.plan;
+    const session = this.sessions.get(id);
+    const plan = session?.plan;
     if (!plan) return null;
     if (plan.submission) {
-      return plan.submission.target === 'session' && !plan.submission.deliveredAt ? { prompt: plan.submission.prompt, marker: BUILD_MARKER } : null;
+      return plan.submission.target === 'session' && !plan.submission.deliveredAt ? { prompt: this.submissionPrompt(session!, plan.submission), marker: BUILD_MARKER } : null;
     }
     return plan.design && !plan.design.deliveredAt ? { prompt: plan.design.prompt, marker: DESIGN_MARKER } : null;
+  }
+
+  /** What a submission hands over: a prompt 0.3 wrote is built again, as a submit builds it now. */
+  private submissionPrompt(session: SessionState, submission: Submission): string {
+    return submission.stalePrompt ? buildPrompt(session.plan!, { ...this.promptFor?.(session), agent: session.agent }).prompt : submission.prompt;
   }
 
   /**
@@ -580,15 +588,19 @@ export class SessionStore extends EventEmitter {
   }
 
   deliver(id: string): { prompt: string; marker: string } | null {
-    const plan = this.sessions.get(id)?.plan;
+    const session = this.sessions.get(id);
+    const plan = session?.plan;
     if (!plan) return null;
     const submission = plan.submission;
     let next: Plan;
     let out: { prompt: string; marker: string };
     if (submission) {
       if (submission.target !== 'session' || submission.deliveredAt) return null;
+      const prompt = this.submissionPrompt(session!, submission);
       next = markDelivered(plan);
-      out = { prompt: submission.prompt, marker: BUILD_MARKER };
+      const { stalePrompt: _, ...kept } = next.submission!;
+      next.submission = { ...kept, prompt };
+      out = { prompt, marker: BUILD_MARKER };
     } else if (plan.design && !plan.design.deliveredAt) {
       next = markDesignDelivered(plan);
       out = { prompt: plan.design.prompt, marker: DESIGN_MARKER };

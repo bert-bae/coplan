@@ -358,8 +358,10 @@ test('a submission from before 0.4, with a build mode and settings, loads withou
   const raw = JSON.parse(JSON.stringify(plan));
   raw.submission = { ...raw.submission, mode: 'managed', settings: { review: 'self', parallel: 3, maxRounds: 2 } };
   const reloaded = normalizePlan(raw, 'x');
-  assert.deepEqual(reloaded.submission, plan.submission);
+  assert.deepEqual(reloaded.submission, { ...plan.submission, stalePrompt: true }, 'its prompt, not handed over yet, to be built again');
   assert.ok(reloaded.design, 'the design sign-off too');
+  const handed = normalizePlan({ ...raw, submission: { ...raw.submission, deliveredAt: 3_000 } }, 'x');
+  assert.equal(handed.submission?.stalePrompt, undefined, 'one already handed over stays as it was');
 });
 
 test('a submission survives a reload, and a damaged one unlocks rather than locks for good', () => {
