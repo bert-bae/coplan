@@ -562,14 +562,16 @@ class Store {
    * waits for the user's next message in the agent's chat: the page never
    * starts a turn.
    */
-  async queueRevision(to: SignOffFor, input: { note: string; expect: number; hash?: string }, opts: { quiet?: boolean } = {}): Promise<boolean> {
+  async queueRevision(to: SignOffFor, input: { note: string; expect: number; hash?: string }, opts: { quiet?: boolean; channel?: boolean } = {}): Promise<boolean> {
     const done = await this.signOff(to, (id) => api.queueRevision(id, input));
     if (!done) return false;
     if (opts.quiet) return true;
     const { agent } = done;
     done.say(
       'success',
-      agent.promptContext
+      opts.channel
+        ? `Sent to ${agent.name}'s session.`
+        : agent.promptContext
         ? `Request queued. Send any message in ${agent.name}'s chat — "go" will do — and it goes with it.`
         : `Request queued. Paste it into ${agent.name}'s chat, or ask ${agent.name} to read the plan.`,
     );

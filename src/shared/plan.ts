@@ -2265,6 +2265,9 @@ function removeItem(
 /** The longest note the user can hand Claude with a submission. */
 export const MAX_NOTE = 4_000;
 
+/** Whether a session's channel has asked lately: a queued request is pushed to it. */
+export const channelOn = (s: { channelAt?: number }, now = Date.now()): boolean => now - (s.channelAt ?? 0) < 60_000;
+
 /** What Claude may still do to a locked plan: track the work it is doing,
  *  and answer comments. Everything else is the design the user signed off. */
 const TRACKING_OPS: ReadonlySet<string> = new Set(['upsert_task', 'review_task', 'comment', 'reply', 'resolve', 'report', 'set_branch']);

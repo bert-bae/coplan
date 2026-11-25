@@ -827,6 +827,9 @@ export interface SessionState {
    *  Coplan's hooks (in Codex: not trusted, or changed by an update and not
    *  trusted again). Absent on sessions saved before it was recorded. */
   hookedAt?: number | null;
+  /** When the session's channel last asked for a queued revision request: a
+   *  recent time means a request queued now is pushed into the session. */
+  channelAt?: number;
   plan: Plan | null;
 }
 

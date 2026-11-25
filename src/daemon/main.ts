@@ -1529,6 +1529,8 @@ function buildRouter(deps: Deps): Router {
         case 'channel_pull': {
           // The plugin's channel asks: a queued revision request goes to the
           // session as a message, once; an empty answer is "nothing waiting".
+          // Refreshed every 30s, not every poll: each write is broadcast to the page.
+          if (Date.now() - (session.channelAt ?? 0) > 30_000) store.mutate(id, (s) => void (s.channelAt = Date.now()));
           reply(true, store.deliverRevision(id)?.prompt ?? '');
           return;
         }

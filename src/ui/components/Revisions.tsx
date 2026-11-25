@@ -3,7 +3,7 @@ import { store, useAgent, usePlan, useSession, useSessionId } from '../store.ts'
 import { api, type PromptPreview } from '../lib/api.ts';
 import { classNames, relativeTime } from '../lib/format.ts';
 import { isComposing } from '../lib/keys.ts';
-import { MAX_NOTE, describeTarget, latestRevision, pendingRevision, revisionProgress, revisionStatus, threadsForRevision } from '../../shared/plan.ts';
+import { MAX_NOTE, channelOn, describeTarget, latestRevision, pendingRevision, revisionProgress, revisionStatus, threadsForRevision } from '../../shared/plan.ts';
 import type { AgentInfo } from '../../shared/agents.ts';
 import type { Plan, RevisionRequest, SessionState, Target } from '../../shared/types.ts';
 import { PromptView } from './PromptView.tsx';
@@ -37,7 +37,7 @@ export function RevisionControl() {
 
   return (
     <span className="revision-control">
-      {latest && <RevisionState plan={plan} req={latest} agent={agent} />}
+      {latest && <RevisionState plan={plan} req={latest} agent={agent} channel={channelOn(session)} />}
       {pending ? (
         <>
           <button
@@ -74,12 +74,14 @@ const STATE_WORDS = { pending: 'pending', sent: 'sent', answered: 'answered' } a
 
 /** Where the latest request stands: pending until the agent gets it, sent
  *  until every comment it carried has a reply or a proposal, answered. */
-function RevisionState({ plan, req, agent }: { plan: Plan; req: RevisionRequest; agent: AgentInfo }) {
+function RevisionState({ plan, req, agent, channel }: { plan: Plan; req: RevisionRequest; agent: AgentInfo; channel: boolean }) {
   const status = revisionStatus(plan, req);
   const { answered, total } = revisionProgress(plan, req);
   const title =
     status === 'pending'
-      ? agent.promptContext
+      ? channel
+        ? `Queued ${relativeTime(req.at)}: it is going into ${agent.name}'s session`
+        : agent.promptContext
         ? `Queued ${relativeTime(req.at)}: it goes to ${agent.name} with your next message in its chat`
         : `Queued ${relativeTime(req.at)}: paste it into ${agent.name}'s chat, or ask ${agent.name} to read the plan`
       : status === 'sent'
@@ -147,7 +149,7 @@ function RevisionDialog({ session, plan, onClose }: { session: SessionState; pla
     if (!preview || !current) return false;
     setBusy(true);
     if (!agent.promptContext) await copyText(preview.prompt, `Copied — paste it into ${agent.name}'s chat.`);
-    const ok = await store.queueRevision({ sessionId, agent }, { note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}) }, { quiet: !agent.promptContext });
+    const ok = await store.queueRevision({ sessionId, agent }, { note, expect: preview.version, ...(preview.hash ? { hash: preview.hash } : {}) }, { quiet: !agent.promptContext, channel });
     setBusy(false);
     if (ok) onClose();
     else setRefresh((n) => n + 1);
@@ -155,7 +157,9 @@ function RevisionDialog({ session, plan, onClose }: { session: SessionState; pla
   };
 
   const disabled = !current || busy || !comments.length;
-  const label = busy ? 'Queuing…' : agent.promptContext ? (session.link ? `Queue and open in ${agent.name}` : 'Queue request') : 'Copy and queue request';
+  // A channel is listening: sending puts it straight into the session.
+  const channel = channelOn(session);
+  const label = busy ? (channel ? 'Sending…' : 'Queuing…') : channel ? `Send to ${agent.name}'s session` : agent.promptContext ? (session.link ? `Queue and open in ${agent.name}` : 'Queue request') : 'Copy and queue request';
   return (
     <div className="lightbox" role="dialog" aria-modal="true" aria-labelledby="revise-title">
       <button type="button" className="lightbox-scrim" aria-label="Close" onClick={onClose} disabled={busy} />
@@ -197,14 +201,14 @@ function RevisionDialog({ session, plan, onClose }: { session: SessionState; pla
             </label>
             <p className="explain">
               {agent.name} acts on each comment, replies in its thread, proposes what is yours to decide, then says what changed.
-              Coplan never starts a turn: {agent.promptContext ? <>the request goes with your next message in {agent.name}'s chat — <q>go</q> will do — once.</> : <>paste it into {agent.name}'s chat, or ask {agent.name} to read the plan, and it gets it once.</>}{' '}
+              {channel ? <>It goes straight into {agent.name}'s session when you send it.</> : <>Coplan never starts a turn: {agent.promptContext ? <>the request goes with your next message in {agent.name}'s chat — <q>go</q> will do — once.</> : <>paste it into {agent.name}'s chat, or ask {agent.name} to read the plan, and it gets it once.</>}</>}{' '}
               It shows here as pending, then sent, then answered once every comment has a reply or a proposal.
             </p>
             <div className="submit-actions">
               <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>
                 Cancel
               </button>
-              {agent.promptContext && session.link ? (
+              {!channel && agent.promptContext && session.link ? (
                 // The link "Answer in …" uses: queued as it opens the session.
                 <a
                   className={classNames('btn btn-primary', disabled && 'is-disabled')}
