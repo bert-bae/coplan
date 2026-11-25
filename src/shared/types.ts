@@ -827,6 +827,9 @@ export interface SessionState {
    *  Coplan's hooks (in Codex: not trusted, or changed by an update and not
    *  trusted again). Absent on sessions saved before it was recorded. */
   hookedAt?: number | null;
+  /** Set on an extra plan a session keeps beyond its own: this state holds only
+   *  that plan, and the id is the keeping session's. */
+  ownerId?: string;
   /** When the session's channel last asked for a queued revision request: a
    *  recent time means a request queued now is pushed into the session. */
   channelAt?: number;
@@ -874,6 +877,8 @@ export interface SessionSummary {
   engaged: boolean;
   /** At least one of its hooks has reached Coplan (see `hookedAt`). */
   hooked: boolean;
+  /** An extra plan a session keeps beyond its own: the session that keeps it. */
+  ownerId?: string;
   /** Saved by a newer Coplan (see `SessionState.savedByNewer`). */
   savedByNewer?: boolean;
 }

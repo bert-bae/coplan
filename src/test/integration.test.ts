@@ -2275,3 +2275,35 @@ test('a done task whose dependency was reopened still takes a note', async () =>
   assert.equal(amended['ok'], true, String(amended['text']));
   assert.equal((await sessionFor(id)).plan!.tasks.find((t) => t.id === 'b')!.note, 'amended');
 });
+
+test('one session keeps many plans, and progress on many of them is recorded in one call', async () => {
+  const id = 'multi-plan';
+  await hookFor(id, 'SessionStart');
+  const own = await mcpFor(id, 'publish', { title: 'Own', mode: 'tasklist', tasks: [{ id: 'o1', title: 'Own task' }] });
+  assert.equal(own['ok'], true, String(own['text']));
+  for (const plan of ['Auth', 'billing']) {
+    const r = await mcpFor(id, 'publish', { plan, title: `${plan} plan`, mode: 'tasklist', tasks: [{ id: 'a', title: 'First' }, { id: 'b', title: 'Second', dependsOn: ['a'] }] });
+    assert.equal(r['ok'], true, String(r['text']));
+  }
+  // A plan that was never published is not made by reading it.
+  assert.equal((await mcpFor(id, 'read', { plan: 'nope' }))['ok'], false);
+  // Each is its own plan: the session's is untouched.
+  assert.deepEqual((await sessionFor(id)).plan!.tasks.map((t) => t.id), ['o1']);
+
+  const overview = String((await mcpFor(id, 'plans'))['text']);
+  assert.match(overview, /3 plan\(s\)/);
+  assert.match(overview, /- auth: "Auth plan".*ready: a/);
+
+  const done = await mcpFor(id, 'report', {
+    reports: [
+      { plan: 'auth', task_id: 'a', status: 'in_progress' },
+      { plan: 'billing', task_id: 'b', status: 'in_progress' }, // waits on a: refused, the rest still go through
+      { task_id: 'o1', status: 'done', note: 'shipped' },
+    ],
+  });
+  const text = String(done['text']);
+  assert.match(text, /billing\/b: REFUSED/);
+  assert.doesNotMatch(text, /auth\/a: REFUSED|o1: REFUSED/);
+  assert.equal((await sessionFor(`${id}~auth`)).plan!.tasks[0]!.status, 'in_progress');
+  assert.equal((await sessionFor(id)).plan!.tasks[0]!.status, 'done');
+});

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- One session can keep many plans: every tool takes `plan: "<name>"` (a publish with a new name starts it).
+  `harness_plans` lists them with their progress, and `harness_task_report` records progress on many tasks across plans
+  in one call. Who delegates and who reports is left to the user's own setup.
+
 ## 0.4.0
 
 ### Coplan plans and tracks; a harness builds
