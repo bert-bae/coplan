@@ -113,8 +113,8 @@ export async function runCheck(args: string[], cwd = process.cwd()): Promise<num
   const root = (await repoRoot(cwd)) ?? cwd;
   const config = loadProjectConfig(root);
   // A config that cannot be read must not pass for one with nothing to run.
-  // Anything else that is wrong — a template that is missing, a reviewer
-  // model misspelt — is said, and the checks run: they do not depend on it.
+  // Anything else that is wrong — a template that is missing — is said,
+  // and the checks run: they do not depend on it.
   for (const w of [...config.errors, ...config.warnings]) console.error(`coplan: ${w}`);
   if (config.checksBroken) {
     console.error(`coplan: fix the checks in ${PROJECT_CONFIG_PATH} first; nothing was run.`);
