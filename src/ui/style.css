@@ -2261,3 +2261,6 @@ span.board-title:hover { color: inherit; text-decoration: none; }
 .task-checks-hint { margin: 0; font-size: var(--fs-sm); }
 .board-checks { display: flex; flex-direction: column; gap: 4px; margin-top: var(--sp-2); }
 .report-skipped { margin-top: var(--sp-3); font-size: var(--fs-sm); color: var(--attention-fg); }
+
+/* An answered decision: the answer as a tag, with edit and remove inside it. */
+.decision-tag { max-width: 100%; white-space: normal; padding-right: 4px; }

@@ -3090,6 +3090,18 @@ test('a request shows as sent, with how many comments are answered, then as answ
   assert.ok(screen.queryByRole('button', { name: /^Request revisions/ }) === null, 'nothing waits on the agent now');
 });
 
+test('with a channel listening, the request is sent into the session, not queued behind a link', async () => {
+  const plan = commentedPlan();
+  await boot(makeSession(plan, { link: LINK, channelAt: Date.now() }), revisionAnswers(plan));
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^Request revisions/ }));
+  });
+  const dialog = screen.getByRole('dialog', { name: 'Request revisions' });
+  await waitFor(() => assert.equal(within(dialog).getByTestId('revision-preview').textContent, REVISION));
+  assert.ok(within(dialog).getByRole('button', { name: "Send to Claude's session" }));
+  assert.equal(within(dialog).queryByText('Queue and open in Claude'), null);
+});
+
 test('with a link, queuing opens the session where "Answer in" does; in Cursor the request is copied to paste (#67)', async () => {
   const plan = commentedPlan();
   await boot(makeSession(plan, { link: LINK }), revisionAnswers(plan));

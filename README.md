@@ -201,7 +201,10 @@ Claude needs a decision it asks in its own chat. Coplan shows the question and
 takes you straight to that session, in the Claude desktop app, to answer it.
 What Coplan has to say to Claude (the confirmed design, the handoff prompt, a
 request to revise the plan per your comments, or a note that you changed the
-plan) rides along with your next message there. When
+plan) rides along with your next message there, unless you start Claude Code
+with `COPLAN_CHANNEL=1` and Coplan as a development channel
+(`--dangerously-load-development-channels`): then a queued revision request is
+pushed into the session as soon as you send it, and copying stays the fallback. When
 you would rather say "go ahead" than click it, say it in that chat: Claude
 signs the plan off for you with `harness_plan_advance`, quoting you.
 
