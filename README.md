@@ -395,9 +395,11 @@ and its build.
 
 15. **Leave `autoOpen` off** on shared or remote machines; open the page with
     `/coplan-open` when you want it.
-16. **Don't share the page's link.** The link `coplan open` and `coplan url`
-    print carries the daemon's access token (`?token=…`); the page moves it
-    out of the address bar into its own storage.
+16. **Don't share the page's link.** The link `coplan url` prints carries
+    the daemon's access token (`?token=…`); the page moves it out of the
+    address bar into its own storage. `coplan open` prints the address
+    without it (the agent reads what it prints) and opens the browser on a
+    single-use login ticket instead.
 17. **To update:** `git pull && ./setup.sh` in the clone, then restart the
     agent. Open tabs reconnect.
 18. **Now and then:** `coplan clean --dry-run` lists what could go — finished

@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { unlinkSync, appendFileSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { unlinkSync, appendFileSync, existsSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -129,9 +129,10 @@ async function main(): Promise<void> {
   const port = await listen(server, inheritedPort);
   boundPort = port;
   const lock: DaemonLock = { pid: process.pid, port, token, version: VERSION, startedAt: Date.now(), host: '127.0.0.1' };
+  // Before the lock: a relay that reads the new token from it must find the
+  // header file matching, or it puts the token on curl's command line.
+  writeAuthHeader(token);
   await claimLock(lock);
-  // For the hook relay: the header as a file only this user can read.
-  writeFileSync(paths.authHeader(), `Authorization: Bearer ${token}\n`, { mode: 0o600 });
   log(`listening on ${baseUrl(lock)} (pid ${process.pid}, v${VERSION})`);
   process.stdout.write(`${JSON.stringify({ started: true, ...lock })}\n`);
 
@@ -148,6 +149,7 @@ async function main(): Promise<void> {
     // A daemon that lost the lock leaves the sessions to the one that has
     // it: saving its own copies now would write over newer ones.
     if (signal !== LOST_LOCK) store.persistAll();
+    else handBackAuthHeader();
     server.close();
     server.closeAllConnections?.();
     try {
@@ -300,6 +302,7 @@ async function claimLock(lock: DaemonLock): Promise<void> {
   // removed before any exit as well.
   const lose = (why: string): never => {
     rmSync(tmp, { force: true });
+    handBackAuthHeader();
     log(why);
     process.exit(0);
   };
@@ -325,6 +328,28 @@ async function claimLock(lock: DaemonLock): Promise<void> {
   } finally {
     rmSync(tmp, { force: true });
   }
+}
+
+/** For the hook relay: the header as a file only this user can read. */
+function writeAuthHeader(token: string): void {
+  writeReplacing(paths.authHeader(), `Authorization: Bearer ${token}\n`, 0o600);
+}
+
+/** A daemon that lost the lock rewrites the header it wrote with the holder's token. */
+function handBackAuthHeader(): void {
+  try {
+    const holder = readLock();
+    if (holder && holder.pid !== process.pid) writeAuthHeader(holder.token);
+  } catch {
+    /* the holder's relays fall back as before */
+  }
+}
+
+/** Written beside the file and renamed over it, so no reader sees it half written. */
+function writeReplacing(file: string, text: string, mode = 0o666): void {
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, text, { mode });
+  renameSync(tmp, file);
 }
 
 /**
@@ -424,12 +449,14 @@ function sameOrigin(origin: string): boolean {
  * hooks, the MCP server, the CLI, and the page, which is handed it in its
  * link. Never a cookie: a cookie is not scoped to a port, so every other
  * server on 127.0.0.1 the browser visits would be sent it. The live stream,
- * which a browser cannot send headers on, takes a single-use ticket instead.
+ * which a browser cannot send headers on, takes a single-use ticket instead,
+ * and so does /api/login, which trades a browser-opened link's for the token.
  */
 function authorized(req: http.IncomingMessage, url: URL, token: string): boolean {
   const header = req.headers.authorization ?? '';
   if (header.startsWith('Bearer ') && sameSecret(header.slice(7), token)) return true;
-  if (req.method === 'GET' && url.pathname === '/api/events') return redeemTicket(url.searchParams.get('ticket'));
+  if (req.method === 'GET' && url.pathname === '/api/events') return redeemTicket(streamTickets, url.searchParams.get('ticket'));
+  if (req.method === 'POST' && url.pathname === '/api/login') return redeemTicket(loginTickets, url.searchParams.get('ticket'));
   return false;
 }
 
@@ -440,11 +467,13 @@ function sameSecret(given: string, token: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-/** Tickets for the live stream: short-lived, each good once. */
-const tickets = new Map<string, number>();
+/** Tickets for the live stream, and for a link opened in a browser (whose
+ *  command line other local users can read): short-lived, each good once. */
+const streamTickets = new Map<string, number>();
+const loginTickets = new Map<string, number>();
 const TICKET_MS = 60_000;
 
-function issueTicket(): string {
+function issueTicket(tickets: Map<string, number>): string {
   const now = Date.now();
   for (const [t, expires] of tickets) if (expires < now) tickets.delete(t);
   const ticket = randomBytes(18).toString('hex');
@@ -452,7 +481,7 @@ function issueTicket(): string {
   return ticket;
 }
 
-function redeemTicket(ticket: string | null): boolean {
+function redeemTicket(tickets: Map<string, number>, ticket: string | null): boolean {
   if (!ticket) return false;
   const expires = tickets.get(ticket);
   tickets.delete(ticket);
@@ -476,12 +505,10 @@ function buildRouter(deps: Deps): Router {
   const { store, config, token, clients, lifecycle } = deps;
   const router = new Router();
 
-  /** For the browser and the CLI: carries the token, which the page keeps
-   *  (`src/ui/lib/api.ts`) and takes out of the address bar. */
-  const authedUrl = (sessionId?: string) => {
-    const base = `http://127.0.0.1:${readLiveLock()?.port ?? 0}/?token=${token}`;
-    return sessionId ? `${base}#/session/${encodeURIComponent(sessionId)}` : base;
-  };
+  /** For the browser: a login ticket the page trades for the token
+   *  (`src/ui/lib/api.ts`). */
+  const loginUrl = (sessionId: string) =>
+    `http://127.0.0.1:${readLiveLock()?.port ?? 0}/?login=${issueTicket(loginTickets)}#/session/${encodeURIComponent(sessionId)}`;
 
   /** For Claude. Token-free: anything returned to the model is written to the
    *  transcript and carried in every later context window. */
@@ -494,7 +521,7 @@ function buildRouter(deps: Deps): Router {
     if (!configFor(session).autoOpen || opened.has(session.sessionId)) return;
     opened.add(session.sessionId);
     if (opened.size > MAX_TRACKED_OPENS) opened.delete(opened.values().next().value!);
-    openInBrowser(authedUrl(session.sessionId));
+    openInBrowser(loginUrl(session.sessionId));
   };
 
   const configFor = (session: SessionState): HarnessConfig => config.get(session.repoRoot ?? session.cwd);
@@ -530,9 +557,9 @@ function buildRouter(deps: Deps): Router {
     const file = headlessFile(session);
     try {
       mkdirSync(path.dirname(file), { recursive: true });
-      writeFileSync(file, headlessText(plan, { agent: session.agent, project: projectFor(session) }));
+      writeReplacing(file, headlessText(plan, { agent: session.agent, project: projectFor(session) }));
       planPage ??= readFileSync(PLAN_PAGE, 'utf8');
-      writeFileSync(headlessFile(session, 'html'), headlessPage(planPage, plan, session.agent));
+      writeReplacing(headlessFile(session, 'html'), headlessPage(planPage, plan, session.agent));
       headlessWritten.set(session.sessionId, at);
     } catch (err) {
       log(`could not write the headless plan ${file}: ${(err as Error).message}`);
@@ -540,6 +567,8 @@ function buildRouter(deps: Deps): Router {
   };
   store.on('event', (event: ServerEvent) => {
     if (event.type === 'snapshot') writeHeadless(event.session);
+    // The list is sent again whenever a session is dropped or purged.
+    if (event.type === 'sessions') for (const id of headlessWritten.keys()) if (!store.get(id)) headlessWritten.delete(id);
   });
   /** Where the user reviews the plan — on its page, or in a headless plan's
    *  file — as the end of "The user reviews it …". */
@@ -614,7 +643,11 @@ function buildRouter(deps: Deps): Router {
   /* --------------------------- UI bootstrap ------------------------ */
 
   /** A ticket for the live stream, which a browser opens without headers. */
-  router.post('/api/events/ticket', (ctx) => json(ctx.res, 200, { ticket: issueTicket() }));
+  router.post('/api/events/ticket', (ctx) => json(ctx.res, 200, { ticket: issueTicket(streamTickets) }));
+  /** A ticket for a link the CLI opens in a browser, where the token would be on a command line. */
+  router.post('/api/login/ticket', (ctx) => json(ctx.res, 200, { ticket: issueTicket(loginTickets) }));
+  /** Reached only with a login ticket, or the token itself (see `authorized`). */
+  router.post('/api/login', (ctx) => json(ctx.res, 200, { token }));
 
   /* --------------------------- Sessions ---------------------------- */
 

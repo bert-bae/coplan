@@ -3,7 +3,7 @@ name: coplan-open
 description: Open this session's plan in the Coplan UI
 ---
 
-Run the Coplan CLI to open this session's plan in a browser, then tell the user the URL in one line:
+Run the Coplan CLI to open this session's plan in a browser, then tell the user the line it prints, as it is:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/coplan" open

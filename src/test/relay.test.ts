@@ -194,6 +194,18 @@ test('a huge PostToolUse sends only its session: the daemon needs to hear a tool
   assert.equal(received[1]!.body, '{"session_id":"s1","tool_name":"Read"}', 'an ordinary one goes as it is');
 });
 
+test('a PreToolUse sends only its session and tool name, unless the tool asks the user', async () => {
+  received = [];
+  const big = JSON.stringify({ session_id: 's-1', tool_name: 'Write', tool_input: { content: 'x'.repeat(100_000) } });
+  await relay('PreToolUse', big);
+  assert.deepEqual(JSON.parse(received[0]!.body), { session_id: 's-1', tool_name: 'Write', hook_event_name: 'PreToolUse' });
+  for (const tool of ['AskUserQuestion', 'request_user_input', 'request_user_input_async']) {
+    const ask = JSON.stringify({ session_id: 's-1', tool_name: tool, tool_input: { questions: [{ question: 'Which?' }] } });
+    await relay('PreToolUse', ask);
+    assert.equal(received.at(-1)!.body, ask, `${tool}: its questions are what the daemon reads`);
+  }
+});
+
 test('says nothing when there is no daemon', async () => {
   const empty = mkdtempSync(path.join(tmpdir(), 'cc-harness-nodaemon-'));
   const result = await relay('SessionEnd', '{"session_id":"s1"}', { CC_HARNESS_HOME: empty });

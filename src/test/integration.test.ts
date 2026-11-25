@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -11,6 +11,7 @@ import { readLiveLock, baseUrl, paths } from '../shared/paths.ts';
 import type { DaemonLock, SessionState } from '../shared/types.ts';
 import type { HookOutput } from '../shared/hooks.ts';
 import { asksForCoplan } from '../daemon/hookIngest.ts';
+import { isWsl } from '../daemon/browser.ts';
 import { blocksText, joinBlocks, type Block, type ConfigRow } from '../shared/blocks.ts';
 
 /**
@@ -462,6 +463,32 @@ test('the live stream opens on a single-use ticket', async () => {
   assert.equal(await open(ticket), 200);
   assert.equal(await open(ticket), 401, 'spent');
   assert.equal(await open('made-up'), 401);
+});
+
+// Only where xdg-open is the opener: elsewhere this would open a real window.
+test('`coplan open` prints no token, and opens the browser on a login ticket good once', { skip: process.platform !== 'linux' || isWsl() }, async () => {
+  const bin = mkdtempSync(path.join(tmpdir(), 'coplan-opener-'));
+  const said = path.join(bin, 'said');
+  writeFileSync(path.join(bin, 'xdg-open'), `#!/bin/sh\nprintf '%s' "$*" > "${said}"\n`, { mode: 0o755 });
+  try {
+    const cli = path.resolve(path.dirname(DAEMON), '..', 'cli', 'main.js');
+    const out = execFileSync(process.execPath, [cli, 'open', 's-open'], { env: { ...process.env, CC_HARNESS_HOME: home, PATH: `${bin}:${process.env['PATH'] ?? ''}` }, encoding: 'utf8' });
+    assert.ok(!out.includes(lock.token), out);
+    assert.match(out, new RegExp(`^${baseUrl(lock)}/#/session/s-open .*coplan url`));
+    for (let i = 0; i < 50 && !(existsSync(said) && readFileSync(said, 'utf8')); i++) await sleep(100);
+    const opened = readFileSync(said, 'utf8');
+    assert.ok(!opened.includes(lock.token), 'not on the command line either');
+    const ticket = /^http:\/\/127\.0\.0\.1:\d+\/\?login=([0-9a-f]+)#\/session\/s-open$/.exec(opened)?.[1];
+    assert.ok(ticket, opened);
+    const login = (t: string) => fetch(`${baseUrl(lock)}/api/login?ticket=${t}`, { method: 'POST' });
+    const res = await login(ticket);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { token: lock.token });
+    assert.equal((await login(ticket)).status, 401, 'spent');
+    assert.equal((await login('made-up')).status, 401);
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
+  }
 });
 
 test('a foreign Host, a path out of the UI folder and a clean with no groups are all refused', async () => {
@@ -2149,6 +2176,12 @@ test('a headless session keeps its plan as Markdown and as a page in its working
     assert.match(String(res['text']), new RegExp(`reviews it in ${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
     assert.match(readFileSync(file, 'utf8'), /^# Fix the race\n\n> \*\*Coplan plan\*\* · \*\*Task list\*\* → Build/);
     assert.equal((await sessionFor(id)).headless, true);
+    // A session deleted and started afresh writes the same plan again.
+    await call(`/api/session/${id}`, { method: 'DELETE' });
+    rmSync(path.dirname(file), { recursive: true });
+    await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: dir, start_reason: 'startup' }) });
+    await at('publish', { title: 'Fix the race', mode: 'tasklist', headless: true, summary: 'One area.', tasks: [{ id: 'a', title: 'Find it' }] });
+    assert.ok(existsSync(file), 'written again for the new session');
     // Kept up to date, and headless for good once said.
     await at('read', {});
     await at('edit', { ops: [{ op: 'upsert_task', id: 'a', title: 'Find the race' }] });
@@ -2164,6 +2197,8 @@ test('a headless session keeps its plan as Markdown and as a page in its working
     const listed = await at('tasks', { tasks: [{ id: 'a', title: 'Find the race', detail: 'Reproduce it.' }] });
     assert.match(String(listed['text']), /headless, there is no page to submit it on, so chat is the only way/);
     assert.doesNotMatch(String(listed['text']), /submit it in Coplan/);
+    // Written whole, beside it and renamed into place.
+    assert.deepEqual(readdirSync(path.dirname(file)).sort(), [`${id}.html`, `${id}.md`]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

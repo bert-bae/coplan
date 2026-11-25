@@ -20,6 +20,16 @@ export interface ToolDef {
 /** Every tool only reads or writes harness state, so one budget fits all. */
 export const DEFAULT_BUDGET_MS = 30_000;
 
+const READ_ENDPOINTS = new Set(['read', 'check', 'next', 'brief']);
+
+/** What a call that ran out of time says. A write may have been applied
+ *  before the answer was lost, so it is not simply sent again. */
+export function timeoutText(endpoint: string): string {
+  return READ_ENDPOINTS.has(endpoint)
+    ? '[cc-harness] The daemon did not respond in time. Call the tool again.'
+    : '[cc-harness] The daemon did not respond in time. It may have applied this call: read the plan (harness_plan_read) before trying it again.';
+}
+
 const STATUS = { type: 'string', enum: ['todo', 'in_progress', 'blocked', 'done', 'dropped'] };
 
 const NODE = {
