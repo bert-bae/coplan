@@ -2276,8 +2276,8 @@ test('a done task whose dependency was reopened still takes a note', async () =>
   assert.equal((await sessionFor(id)).plan!.tasks.find((t) => t.id === 'b')!.note, 'amended');
 });
 
-test('one session keeps many plans, and a commander records its crew\'s reports across them', async () => {
-  const id = 'commander-multi-plan';
+test('one session keeps many plans, and progress on many of them is recorded in one call', async () => {
+  const id = 'multi-plan';
   await hookFor(id, 'SessionStart');
   const own = await mcpFor(id, 'publish', { title: 'Own', mode: 'tasklist', tasks: [{ id: 'o1', title: 'Own task' }] });
   assert.equal(own['ok'], true, String(own['text']));

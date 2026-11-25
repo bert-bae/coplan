@@ -511,19 +511,16 @@ const BASE_TOOLS: ToolDef[] = [
     name: 'harness_plans',
     endpoint: 'plans',
     description:
-      'A commander\'s dashboard: every plan this session tracks (its own, and each named one made with the `plan` argument ' +
-      'of the other tools), with phase, task counts, what is in progress or blocked, and what is ready to hand out. ' +
-      'Use it to see where the work stands across plans.',
+      'Every plan this session keeps (its own, and each named one made with the `plan` argument of the other tools): ' +
+      'phase, task counts, what is in progress or blocked, and what is ready to start.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'harness_task_report',
     endpoint: 'report',
     description:
-      'Record what subsessions reported, many tasks across plans in one call: {reports: [{plan?, task_id, status?, stage?, note?, checks?, ' +
-      'verdict?, summary?}]}, each as harness_task_update. Subsessions cannot reach Coplan: you hand a task out (its ' +
-      'harness_task_brief), they report back to you, you record it here. Reports are applied one by one; a refused one is ' +
-      'said and the rest still go through.',
+      'Record progress on many tasks, across plans, in one call: {reports: [{plan?, task_id, status?, stage?, note?, checks?, ' +
+      'verdict?, summary?}]}, each as harness_task_update. Applied one by one; a refused one is said and the rest still go through.',
     inputSchema: {
       type: 'object',
       properties: {

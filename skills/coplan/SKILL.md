@@ -111,8 +111,7 @@ agent may show them with a prefix that names the server (in Claude Code,
 `mcp__plugin_coplan_harness__…`); they are the same tools.
 
 One session can keep several plans: give any tool `plan: "<name>"` (a publish with a new name starts it; no name is the
-session's own plan). As a commander, `harness_plans` shows where every plan stands; hand a task's `harness_task_brief` to a
-subsession, which cannot reach Coplan and reports back to you; record its report with `harness_task_report`.
+session's own plan). `harness_plans` shows where each stands, and `harness_task_report` records progress on many tasks at once.
 
 `harness_plan_edit` takes a list of edits, even for one:
 `{ops: [{op: "reply", threadId: "c2", text: "…"}]}`. Each edit takes only
