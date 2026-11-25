@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- One session can keep many plans: every tool takes `plan: "<name>"` (a publish with a new name starts it). A commander
+  agent sees them all with `harness_plans`, and records what its subsessions report, across plans, with
+  `harness_task_report`.
+
 ## 0.4.0
 
 ### Coplan plans and tracks; a harness builds

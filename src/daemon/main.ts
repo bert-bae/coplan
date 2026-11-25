@@ -13,7 +13,7 @@ import { HttpError, Router, json, text, readJson, serveStatic, type Ctx } from '
 import { ingestHook } from './hookIngest.ts';
 import { hookAgent, readAgentHook, writeAgentOutput } from './agentHooks.ts';
 import { agentInfo, parseAgent, type AgentKind } from '../shared/agents.ts';
-import { MAX_NOTE, MAX_USER_SAID, PlanError, cleanChecks, cleanNote, cleanUserSaid, planPhase, wasFinished, unreadAreas, validStage } from '../shared/plan.ts';
+import { MAX_NOTE, MAX_USER_SAID, PlanError, countTasks, cleanChecks, cleanNote, cleanUserSaid, planPhase, wasFinished, unreadAreas, validStage } from '../shared/plan.ts';
 import {
   PROMPT_BUDGET,
   askRule,
@@ -1436,6 +1436,84 @@ function buildRouter(deps: Deps): Router {
     return [lead, prompt, notice ?? ''].filter(Boolean).join('\n\n');
   };
 
+  /**
+   * One session, many plans. The session's own plan is its own state; each
+   * named one is a plan-only state (`ownerId`) beside it, so everything that
+   * works on a plan works on it unchanged. Only a publish starts one.
+   */
+  const planId = (owner: SessionState, name: unknown): string | null => {
+    if (name === undefined || name === null || name === '') return null;
+    const slug = String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+    if (!slug) throw new PlanError('A plan name needs letters or digits, e.g. "auth".');
+    return `${owner.sessionId}~${slug}`;
+  };
+
+  const planOf = (owner: SessionState, name: unknown, create: boolean): SessionState => {
+    const id = planId(owner, name);
+    if (!id) return owner;
+    let found = store.get(id);
+    if (!found && create) {
+      found = store.ensure(id, owner.cwd, owner.agent);
+      store.update(id, { ownerId: owner.sessionId, hookedAt: Date.now(), ...(owner.headless ? { headless: true } : {}) });
+      found = store.get(id)!;
+    }
+    if (!found) throw new PlanError(`No plan named "${String(name)}". Start it with harness_plan_publish {plan: "${String(name)}", …}; harness_plans lists the plans.`);
+    return found;
+  };
+
+  /** Every plan the session keeps: its own first, then the named ones. */
+  const plansOf = (owner: SessionState): { name: string; state: SessionState }[] => [
+    ...(owner.plan ? [{ name: '(own)', state: owner }] : []),
+    ...store
+      .all()
+      .filter((s) => s.ownerId === owner.sessionId && s.plan)
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((state) => ({ name: state.sessionId.slice(owner.sessionId.length + 1), state })),
+  ];
+
+  const plansOverview = (owner: SessionState): string => {
+    const rows = plansOf(owner);
+    if (!rows.length) return '[cc-harness] No plans yet. Publish one with harness_plan_publish (add `plan: "<name>"` to keep several).';
+    return (
+      `[cc-harness] ${rows.length} plan(s). Pass \`plan\` to the tools to work on one; "(own)" is the one with no name.\n\n` +
+      rows
+        .map(({ name, state }) => {
+          const plan = state.plan!;
+          const c = countTasks(plan);
+          const ready = readyTasks(plan).map((t) => t.id);
+          const live = plan.tasks.filter((t) => t.status === 'in_progress').map((t) => `${t.id}${t.stage ? ` (${t.stage})` : ''}`);
+          const stuck = plan.tasks.filter((t) => t.status === 'blocked').map((t) => t.id);
+          return (
+            `- ${name}: "${plan.title}", ${planPhase(plan)}, ${c.done}/${c.total} done` +
+            (live.length ? `; in progress: ${live.join(', ')}` : '') +
+            (stuck.length ? `; blocked: ${stuck.join(', ')}` : '') +
+            (ready.length ? `; ready: ${ready.join(', ')}` : '') +
+            ` — ${uiUrl(state.sessionId)}`
+          );
+        })
+        .join('\n')
+    );
+  };
+
+  /** harness_task_report: each report as harness_task_update, one refused never stopping the rest. */
+  const reportTasks = async (owner: SessionState, body: Record<string, unknown>): Promise<string> => {
+    const reports = Array.isArray(body['reports']) ? (body['reports'] as Record<string, unknown>[]) : [];
+    if (!reports.length) throw new PlanError('`reports` is a list of {plan?, task_id, status?, stage?, note?, …}.');
+    if (reports.length > 50) throw new PlanError('At most 50 reports per call; split them.');
+    const lines: string[] = [];
+    for (const report of reports) {
+      const label = `${report?.['plan'] ? `${String(report['plan'])}/` : ''}${String(report?.['task_id'] ?? '?')}`;
+      try {
+        const target = planOf(owner, report?.['plan'], false);
+        lines.push(`- ${label}: ${(await updateTask(target, report)).replace(/^\[cc-harness\]\s*/, '').split('\n')[0]}`);
+      } catch (err) {
+        if (!(err instanceof PlanError)) throw err;
+        lines.push(`- ${label}: REFUSED — ${err.message.replace(/^\[cc-harness\]\s*/, '')}`);
+      }
+    }
+    return `[cc-harness] Recorded ${reports.length} report(s):\n${lines.join('\n')}\n\nharness_plans shows what is ready next.`;
+  };
+
   router.post('/mcp/:tool', async (ctx) => {
     let body = await readJson<Record<string, unknown>>(ctx.req);
     // A proposal rides harness_plan_edit as {op: "propose", title, reason, ops}: it is answered as the proposal it is.
@@ -1458,13 +1536,17 @@ function buildRouter(deps: Deps): Router {
       });
       return;
     }
-    const id = session.sessionId;
+    const owner = session;
     // An agent calling Coplan's tools is using Coplan, however it got there.
-    store.engage(id);
-    const url = uiUrl(id);
+    store.engage(owner.sessionId);
     const reply = (ok: boolean, message: string) => json(ctx.res, 200, { ok, text: message });
 
     try {
+      if (tool === 'plans') return reply(true, plansOverview(owner));
+      if (tool === 'report') return reply(true, await reportTasks(owner, body));
+      const session = planOf(owner, body['plan'], tool === 'publish');
+      const id = session.sessionId;
+      const url = uiUrl(id);
       switch (tool) {
         case 'publish': {
           const { plan } = store.publishPlan(id, body as unknown as PlanInput);

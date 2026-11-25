@@ -231,7 +231,42 @@ const OP_PROPERTIES: Record<string, unknown> = {
   },
 };
 
-export const TOOLS: ToolDef[] = [
+const PLAN_PROP = {
+  type: 'string',
+  description:
+    'Which plan, when this session keeps several: a short name ("auth", "billing"). Omit it for the session\'s own plan. ' +
+    'harness_plan_publish with a new name starts that plan; every other tool needs it to exist.',
+};
+
+/** What harness_task_update and each harness_task_report entry carry. */
+const UPDATE_PROPS: Record<string, unknown> = {
+  task_id: { type: 'string' },
+  status: STATUS,
+  stage: { type: 'string', enum: ['implement', 'review', 'refine'], description: 'Step of the cycle; implies in_progress.' },
+  checks: {
+    type: 'array',
+    description: 'The checks just run: from .coplan/config.json (`coplan check <stage> --json` prints these).',
+    items: {
+      type: 'object',
+      properties: { name: { type: 'string' }, ok: { type: 'boolean' }, note: { type: 'string', description: 'One line: what failed.' } },
+      required: ['name', 'ok'],
+    },
+  },
+  note: { type: 'string', description: 'One line: what was done, or what it is blocked on.' },
+  verdict: {
+    type: 'string',
+    enum: ['pass', 'changes'],
+    description: "The review's outcome, once it is in: pass, or changes (then refine). Recorded for the task's current review round.",
+  },
+  summary: { type: 'string', description: 'With verdict: one line on what the review found.' },
+  user_approved: {
+    type: 'boolean',
+    description:
+      'With verdict, when the user gave it in chat: the verdict is recorded as theirs. Put what they said in `note`.',
+  },
+};
+
+const BASE_TOOLS: ToolDef[] = [
   {
     name: 'harness_plan_publish',
     endpoint: 'publish',
@@ -446,32 +481,7 @@ export const TOOLS: ToolDef[] = [
       'another, progress on a task with subtasks.',
     inputSchema: {
       type: 'object',
-      properties: {
-        task_id: { type: 'string' },
-        status: STATUS,
-        stage: { type: 'string', enum: ['implement', 'review', 'refine'], description: 'Step of the cycle; implies in_progress.' },
-        checks: {
-          type: 'array',
-          description: 'The checks just run: from .coplan/config.json (`coplan check <stage> --json` prints these).',
-          items: {
-            type: 'object',
-            properties: { name: { type: 'string' }, ok: { type: 'boolean' }, note: { type: 'string', description: 'One line: what failed.' } },
-            required: ['name', 'ok'],
-          },
-        },
-        note: { type: 'string', description: 'One line: what was done, or what it is blocked on.' },
-        verdict: {
-          type: 'string',
-          enum: ['pass', 'changes'],
-          description: "The review's outcome, once it is in: pass, or changes (then refine). Recorded for the task's current review round.",
-        },
-        summary: { type: 'string', description: 'With verdict: one line on what the review found.' },
-        user_approved: {
-          type: 'boolean',
-          description:
-            'With verdict, when the user gave it in chat: the verdict is recorded as theirs. Put what they said in `note`.',
-        },
-      },
+      properties: UPDATE_PROPS,
       required: ['task_id'],
       additionalProperties: false,
     },
@@ -497,4 +507,49 @@ export const TOOLS: ToolDef[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'harness_plans',
+    endpoint: 'plans',
+    description:
+      'A commander\'s dashboard: every plan this session tracks (its own, and each named one made with the `plan` argument ' +
+      'of the other tools), with phase, task counts, what is in progress or blocked, and what is ready to hand out. ' +
+      'Use it to see where the work stands across plans.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'harness_task_report',
+    endpoint: 'report',
+    description:
+      'Record what subsessions reported, many tasks across plans in one call: {reports: [{plan?, task_id, status?, stage?, note?, checks?, ' +
+      'verdict?, summary?}]}, each as harness_task_update. Subsessions cannot reach Coplan: you hand a task out (its ' +
+      'harness_task_brief), they report back to you, you record it here. Reports are applied one by one; a refused one is ' +
+      'said and the rest still go through.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        reports: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 50,
+          items: {
+            type: 'object',
+            properties: {
+              plan: PLAN_PROP,
+              ...UPDATE_PROPS,
+            },
+            required: ['task_id'],
+          },
+        },
+      },
+      required: ['reports'],
+      additionalProperties: false,
+    },
+  },
 ];
+
+/** `plan` on every tool that works on one plan: a session may keep many. */
+export const TOOLS: ToolDef[] = BASE_TOOLS.map((t) =>
+  t.name === 'harness_plans' || t.name === 'harness_task_report'
+    ? t
+    : { ...t, inputSchema: { ...t.inputSchema, properties: { ...(t.inputSchema['properties'] as object), plan: PLAN_PROP } } },
+);

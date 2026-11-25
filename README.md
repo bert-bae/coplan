@@ -474,7 +474,7 @@ they are named `mcp__plugin_coplan_harness__<tool>`.
 | Codex | [`mcp/codex.json`](mcp/codex.json) | `node ./dist/mcp/main.js`, from the plugin's folder | `COPLAN_AGENT=codex`; passes `CC_HARNESS_HOME` on | 20 s to start, 60 s per call |
 | Cursor | [`mcp/cursor.json`](mcp/cursor.json) | `node ${CURSOR_PLUGIN_ROOT}/dist/mcp/main.js` | `COPLAN_AGENT=cursor`, `COPLAN_WORKSPACE=${workspaceFolder}` | Cursor's defaults |
 
-The ten tools:
+The twelve tools:
 
 | Tool | Changes the plan? | What it does |
 | --- | --- | --- |
@@ -487,6 +487,8 @@ The ten tools:
 | `harness_task_next` | No | What can be built now: ready tasks, what is in progress, what the rest wait on, the branches — and, once every task is done, how to finish. |
 | `harness_task_brief` | No | One task's focused brief, written to hand to any harness as is: objective, acceptance criteria, the boxes it builds and their connections, what it comes after and before, its scope, branch, the exact checks that define done, and the review requested. |
 | `harness_task_update` | Yes — progress only | Mark a task in progress, done, blocked or dropped, with a one-line note, and report its stage, the checks run and the review's verdict. Each is recorded and shown as reported; nothing is refused. |
+| `harness_plans` | No | A commander's dashboard: every plan the session keeps (its own, and each named one), with phase, task counts, what is in progress, blocked or ready to hand out. |
+| `harness_task_report` | Yes — progress only | Record what subsessions reported, many tasks across plans in one call. Subsessions cannot reach Coplan: the commander delegates a task from its brief, they report back, it records it. |
 | `harness_branch_update` | Yes — branch records only | Record a branch's pull request and where it stands, so the board shows the stack. |
 
 ### Hooks

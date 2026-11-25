@@ -825,6 +825,9 @@ export interface SessionState {
    *  Coplan's hooks (in Codex: not trusted, or changed by an update and not
    *  trusted again). Absent on sessions saved before it was recorded. */
   hookedAt?: number | null;
+  /** Set on an extra plan a commander session keeps: this state holds only
+   *  that plan, and the id is the commander's session. */
+  ownerId?: string;
   plan: Plan | null;
 }
 
@@ -869,6 +872,8 @@ export interface SessionSummary {
   engaged: boolean;
   /** At least one of its hooks has reached Coplan (see `hookedAt`). */
   hooked: boolean;
+  /** An extra plan of a commander session: the session that keeps it. */
+  ownerId?: string;
   /** Saved by a newer Coplan (see `SessionState.savedByNewer`). */
   savedByNewer?: boolean;
 }

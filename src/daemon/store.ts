@@ -792,6 +792,7 @@ export function summarize(s: SessionState, review: ReviewMode = DEFAULT_REVIEW):
     // a newer build's session: blank here, but one it kept.
     engaged: Boolean(s.engagedAt) || plan !== null || Boolean(s.savedByNewer),
     hooked: s.hookedAt !== null,
+    ...(s.ownerId ? { ownerId: s.ownerId } : {}),
     ...(s.savedByNewer ? { savedByNewer: true } : {}),
   };
 }
