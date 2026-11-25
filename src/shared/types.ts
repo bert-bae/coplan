@@ -794,6 +794,8 @@ export interface SessionState {
   machine?: string;
   /** That machine's coplan CLI, for the checks the session is told to run. */
   bin?: string;
+  /** That machine's `.coplan/config.json`, as text: the daemon cannot read the repository. */
+  projectConfig?: string;
   cwd: string;
   repoRoot: string | null;
   branch: string | null;

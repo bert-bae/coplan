@@ -212,7 +212,11 @@ if [ -n "$BASE" ]; then
   MACHINE=$(uname -n 2>/dev/null)
   [ -n "$PLUGIN_ROOT_DIR" ] && BIN="$PLUGIN_ROOT_DIR/bin/coplan"
   TOKEN="$COPLAN_TOKEN"
-  AUTH_ARG="Authorization: Bearer $TOKEN"
+  # In a file curl reads, not on its command line, where any local user could see it.
+  AUTH_TMP=$(umask 077; mktemp 2>/dev/null) || exit 0
+  trap 'rm -f "$AUTH_TMP"' EXIT
+  printf 'Authorization: Bearer %s\n' "$TOKEN" > "$AUTH_TMP"
+  AUTH_ARG="@$AUTH_TMP"
 elif ! read_lock; then
   start_daemon || exit 0
 fi
@@ -254,7 +258,13 @@ RESPONSE=$(printf '%s' "$PAYLOAD" | curl -s -S \
   -H "X-Harness-Bin: $BIN" \
   -H "X-Harness-Entrypoint: ${CLAUDE_CODE_ENTRYPOINT:-}" \
   --data-binary @- \
-  "$BASE/hook/$EVENT" 2>/dev/null) || exit 0
+  "$BASE/hook/$EVENT" 2>/dev/null) || {
+  # A server that cannot be reached is said once, as the session starts: otherwise the plan simply never appears.
+  if [ -n "$MACHINE" ] && [ "$AGENT" = claude ] && [ "$EVENT" = SessionStart ]; then
+    printf '{"systemMessage":"Coplan server unreachable at %s: plans and the board are off until it is back (is the SSH tunnel up?)."}' "$BASE"
+  fi
+  exit 0
+}
 
 # Only emit something that actually looks like hook JSON. Anything else (an
 # error page, a truncated body) is safer left unsaid.

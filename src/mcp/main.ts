@@ -6,7 +6,11 @@
  * daemon means the model's context only ever carries short status strings,
  * and it means one shared state machine across every concurrent session.
  */
+import { execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { hostname } from 'node:os';
 import { readLiveLock, baseUrl, ensureDaemon, remoteLock } from '../shared/paths.ts';
@@ -99,6 +103,29 @@ async function daemon(): Promise<DaemonLock | null> {
   return (cachedLock = await ensureDaemon());
 }
 
+/** The nearest `.coplan/config.json` at or above a folder, as text, for a remote daemon that cannot read it. */
+function readProjectConfig(from: string): string | undefined {
+  for (let dir = path.resolve(from); ; dir = path.dirname(dir)) {
+    try {
+      const text = readFileSync(path.join(dir, '.coplan', 'config.json'), 'utf8');
+      return text.length <= 64 * 1024 ? text : undefined;
+    } catch {
+      /* none here: try the parent */
+    }
+    if (path.dirname(dir) === dir) return undefined;
+  }
+}
+
+/** This repository's HEAD, for a remote daemon that cannot run git here. */
+async function headOf(cwd: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await promisify(execFile)('git', ['rev-parse', 'HEAD'], { cwd, timeout: 3_000 });
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** What the daemon answers a tool call: prose for the agent, or an error. */
 interface DaemonReply {
   text?: string;
@@ -135,11 +162,15 @@ async function callDaemon(
     return {
       ok: false,
       text:
-        '[cc-harness] Could not reach or start the Coplan daemon. ' +
-        'Run `coplan status` in a terminal to diagnose; the session can continue without the UI.',
+        remoteLock()
+          ? '[cc-harness] Could not reach the Coplan server at ' + remoteLock()!.origin + ' (is the SSH tunnel up, and the server running?). ' +
+            'Run `coplan status` in a terminal to diagnose; the session can continue without the UI.'
+          : '[cc-harness] Could not reach or start the Coplan daemon. ' +
+            'Run `coplan status` in a terminal to diagnose; the session can continue without the UI.',
     };
   }
 
+  const remote = remoteLock() !== null;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -159,7 +190,10 @@ async function callDaemon(
         cwd: AGENT === 'codex' && !WORKSPACE_ENV ? undefined : workspace,
         pid: CLAUDE_PID,
         // A remote daemon cannot tell this machine's pids and folders from another's.
-        machine: remoteLock() ? hostname() : undefined,
+        machine: remote ? hostname() : undefined,
+        // The daemon cannot read this repository: it is sent what it would have read.
+        projectConfig: remote ? readProjectConfig(workspace) : undefined,
+        head: remote && tool === 'harness_task_update' ? await headOf(workspace) : undefined,
       }),
       signal: controller.signal,
     });

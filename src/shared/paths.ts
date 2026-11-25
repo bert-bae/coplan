@@ -172,7 +172,12 @@ export const DAEMON_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.
  */
 export async function ensureDaemon(): Promise<DaemonLock | null> {
   const remote = remoteLock();
-  if (remote) return (await probeLock(remote, 4_000)) === 'stale' ? null : remote;
+  if (remote) {
+    if ((await probeLock(remote, 4_000)) === 'stale') return null;
+    // Its build, so a plugin that does not match it is told so (mcp/main.ts versionNotice).
+    const health = (await fetch(`${baseUrl(remote)}/health`, { signal: AbortSignal.timeout(2_000) }).then((r) => r.json(), () => null)) as { version?: string } | null;
+    return { ...remote, version: health?.version ?? '' };
+  }
   const existing = await readVerifiedLock();
   if (existing) return existing;
   ensureHome();
