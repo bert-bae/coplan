@@ -214,3 +214,22 @@ function age(target: string, ms: number): void {
   const when = (Date.now() - ms) / 1000;
   utimesSync(target, when, when);
 }
+
+/* ------------------------------------------------------------------ *
+ * Pins
+ * ------------------------------------------------------------------ */
+
+test('pinned sessions survive every session group, however old or new', () => {
+  const old = session('old', 3 * DAY);
+  const oldPinned = session('old-pinned', 3 * DAY);
+  const fresh = session('fresh', 1000);
+  const freshPinned = session('fresh-pinned', 1000);
+  writeFileSync(path.join(home, 'pinned.json'), JSON.stringify(['old-pinned', 'fresh-pinned']));
+
+  const out = cleanStorage({ ...opts(), groups: ['sessions', 'unpinned-sessions'] });
+
+  assert.equal(out.removed, 2);
+  assert.ok(!existsSync(old) && !existsSync(fresh));
+  assert.ok(existsSync(oldPinned) && existsSync(freshPinned));
+  rmSync(path.join(home, 'pinned.json'));
+});

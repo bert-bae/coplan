@@ -232,6 +232,11 @@ class Store {
     try {
       const { sessions } = await api.sessions();
       this.set({ sessions });
+      // The daemon's list wins; this browser's own (an older build kept pins
+      // only here) is handed up once, if the daemon has none.
+      const remote = (await api.pins().catch(() => null))?.pinned;
+      if (remote?.length) this.set({ pinned: remote });
+      else if (remote && this.state.pinned.length) void api.setPins(this.state.pinned).catch(() => {});
       const target = readHash() ?? listedSessions(sessions, null)[0]?.sessionId ?? null;
       if (target) await this.selectSession(target, false);
     } catch (err) {
@@ -720,6 +725,7 @@ class Store {
       : [...this.state.pinned, sessionId];
     this.set({ pinned });
     this.persistPrefs();
+    void api.setPins(pinned).catch(() => {});
   }
 
   toggleProject(key: string): void {
@@ -755,8 +761,10 @@ class Store {
     pruneDrafts(sessionId, null);
     const collapsedTasks = new Map(this.state.collapsedTasks);
     collapsedTasks.delete(sessionId);
-    this.set({ sessions, pinned: this.state.pinned.filter((id) => id !== sessionId), collapsedTasks });
+    const pinned = this.state.pinned.filter((id) => id !== sessionId);
+    this.set({ sessions, pinned, collapsedTasks });
     this.persistPrefs();
+    void api.setPins(pinned).catch(() => {});
     if (this.state.sessionId === sessionId) {
       this.set({ ...SESSION_RESET, sessionId: null, session: null });
       window.location.hash = '';

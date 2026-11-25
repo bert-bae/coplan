@@ -44,6 +44,7 @@ import { HOOK_NOOP, type HookOutput } from '../shared/hooks.ts';
 import { openInBrowser } from './browser.ts';
 import type { CleanupGroupId, DaemonLock, Plan, PlanInput, PlanOp, ReviewMode, ServerEvent, SessionState, Task, TaskListInput, TaskStatus } from '../shared/types.ts';
 import { CLEANUP_GROUPS } from '../shared/types.ts';
+import { readPins, writePins } from './pins.ts';
 
 declare const __HARNESS_VERSION__: string;
 const VERSION = typeof __HARNESS_VERSION__ === 'string' ? __HARNESS_VERSION__ : '0.0.0';
@@ -888,6 +889,18 @@ function buildRouter(deps: Deps): Router {
 
   router.get('/api/storage', (ctx) => {
     json(ctx.res, 200, { report: scanStorage({ liveSessionIds: residentIds() }) });
+  });
+
+  router.get('/api/pins', (ctx) => {
+    json(ctx.res, 200, { pinned: readPins() });
+  });
+
+  router.post('/api/pins', async (ctx) => {
+    const body = await readJson<{ pinned?: unknown }>(ctx.req);
+    if (!Array.isArray(body.pinned) || body.pinned.some((x) => typeof x !== 'string')) {
+      throw new HttpError(400, '`pinned` must be a list of session ids.');
+    }
+    json(ctx.res, 200, { pinned: writePins(body.pinned as string[]) });
   });
 
   router.post('/api/storage/clean', async (ctx) => {

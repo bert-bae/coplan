@@ -214,7 +214,7 @@ const commands: Record<string, (args: string[]) => Promise<number>> = {
       ? (named as CleanupGroupId[])
       : args.includes('--all')
         ? [...CLEANUP_GROUPS]
-        : CLEANUP_GROUPS.filter((id) => id !== 'sessions');
+        : CLEANUP_GROUPS.filter((id) => id !== 'sessions' && id !== 'unpinned-sessions');
     const found = await readLockState();
     if (found?.state === 'busy') throw notAnswering(found.lock);
     const lock = found?.lock ?? null;
