@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { unlinkSync, appendFileSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { unlinkSync, appendFileSync, existsSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -129,9 +129,10 @@ async function main(): Promise<void> {
   const port = await listen(server, inheritedPort);
   boundPort = port;
   const lock: DaemonLock = { pid: process.pid, port, token, version: VERSION, startedAt: Date.now(), host: '127.0.0.1' };
+  // Before the lock: a relay that reads the new token from it must find the
+  // header file matching, or it puts the token on curl's command line.
+  writeAuthHeader(token);
   await claimLock(lock);
-  // For the hook relay: the header as a file only this user can read.
-  writeFileSync(paths.authHeader(), `Authorization: Bearer ${token}\n`, { mode: 0o600 });
   log(`listening on ${baseUrl(lock)} (pid ${process.pid}, v${VERSION})`);
   process.stdout.write(`${JSON.stringify({ started: true, ...lock })}\n`);
 
@@ -148,6 +149,7 @@ async function main(): Promise<void> {
     // A daemon that lost the lock leaves the sessions to the one that has
     // it: saving its own copies now would write over newer ones.
     if (signal !== LOST_LOCK) store.persistAll();
+    else handBackAuthHeader();
     server.close();
     server.closeAllConnections?.();
     try {
@@ -300,6 +302,7 @@ async function claimLock(lock: DaemonLock): Promise<void> {
   // removed before any exit as well.
   const lose = (why: string): never => {
     rmSync(tmp, { force: true });
+    handBackAuthHeader();
     log(why);
     process.exit(0);
   };
@@ -325,6 +328,28 @@ async function claimLock(lock: DaemonLock): Promise<void> {
   } finally {
     rmSync(tmp, { force: true });
   }
+}
+
+/** For the hook relay: the header as a file only this user can read. */
+function writeAuthHeader(token: string): void {
+  writeReplacing(paths.authHeader(), `Authorization: Bearer ${token}\n`, 0o600);
+}
+
+/** A daemon that lost the lock rewrites the header it wrote with the holder's token. */
+function handBackAuthHeader(): void {
+  try {
+    const holder = readLock();
+    if (holder && holder.pid !== process.pid) writeAuthHeader(holder.token);
+  } catch {
+    /* the holder's relays fall back as before */
+  }
+}
+
+/** Written beside the file and renamed over it, so no reader sees it half written. */
+function writeReplacing(file: string, text: string, mode = 0o666): void {
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, text, { mode });
+  renameSync(tmp, file);
 }
 
 /**
@@ -530,9 +555,9 @@ function buildRouter(deps: Deps): Router {
     const file = headlessFile(session);
     try {
       mkdirSync(path.dirname(file), { recursive: true });
-      writeFileSync(file, headlessText(plan, { agent: session.agent, project: projectFor(session) }));
+      writeReplacing(file, headlessText(plan, { agent: session.agent, project: projectFor(session) }));
       planPage ??= readFileSync(PLAN_PAGE, 'utf8');
-      writeFileSync(headlessFile(session, 'html'), headlessPage(planPage, plan, session.agent));
+      writeReplacing(headlessFile(session, 'html'), headlessPage(planPage, plan, session.agent));
       headlessWritten.set(session.sessionId, at);
     } catch (err) {
       log(`could not write the headless plan ${file}: ${(err as Error).message}`);
@@ -540,6 +565,8 @@ function buildRouter(deps: Deps): Router {
   };
   store.on('event', (event: ServerEvent) => {
     if (event.type === 'snapshot') writeHeadless(event.session);
+    // The list is sent again whenever a session is dropped or purged.
+    if (event.type === 'sessions') for (const id of headlessWritten.keys()) if (!store.get(id)) headlessWritten.delete(id);
   });
   /** Where the user reviews the plan — on its page, or in a headless plan's
    *  file — as the end of "The user reviews it …". */

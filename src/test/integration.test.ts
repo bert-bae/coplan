@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -2151,6 +2151,12 @@ test('a headless session keeps its plan as Markdown and as a page in its working
     assert.match(String(res['text']), new RegExp(`reviews it in ${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
     assert.match(readFileSync(file, 'utf8'), /^# Fix the race\n\n> \*\*Coplan plan\*\* · \*\*Task list\*\* → Build/);
     assert.equal((await sessionFor(id)).headless, true);
+    // A session deleted and started afresh writes the same plan again.
+    await call(`/api/session/${id}`, { method: 'DELETE' });
+    rmSync(path.dirname(file), { recursive: true });
+    await call('/hook/SessionStart', { method: 'POST', body: JSON.stringify({ session_id: id, cwd: dir, start_reason: 'startup' }) });
+    await at('publish', { title: 'Fix the race', mode: 'tasklist', headless: true, summary: 'One area.', tasks: [{ id: 'a', title: 'Find it' }] });
+    assert.ok(existsSync(file), 'written again for the new session');
     // Kept up to date, and headless for good once said.
     await at('read', {});
     await at('edit', { ops: [{ op: 'upsert_task', id: 'a', title: 'Find the race' }] });
@@ -2166,6 +2172,8 @@ test('a headless session keeps its plan as Markdown and as a page in its working
     const listed = await at('tasks', { tasks: [{ id: 'a', title: 'Find the race', detail: 'Reproduce it.' }] });
     assert.match(String(listed['text']), /headless, there is no page to submit it on, so chat is the only way/);
     assert.doesNotMatch(String(listed['text']), /submit it in Coplan/);
+    // Written whole, beside it and renamed into place.
+    assert.deepEqual(readdirSync(path.dirname(file)).sort(), [`${id}.html`, `${id}.md`]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
