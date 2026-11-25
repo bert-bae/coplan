@@ -177,6 +177,10 @@ export const api = {
 
   /* ---------------------- daemon-wide actions ---------------------- */
 
+  pins: () => request<{ pinned: string[] }>('/api/pins'),
+
+  setPins: (pinned: string[]) => request<{ pinned: string[] }>('/api/pins', { method: 'POST', body: JSON.stringify({ pinned }) }),
+
   storage: () => request<{ report: StorageReport }>('/api/storage'),
 
   cleanStorage: (groups: CleanupGroupId[]) =>

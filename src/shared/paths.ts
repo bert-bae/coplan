@@ -19,6 +19,9 @@ export const paths = {
   home: harnessHome,
   lockFile: () => path.join(harnessHome(), 'daemon.json'),
   logFile: () => path.join(harnessHome(), 'daemon.log'),
+  /** Pinned session ids: kept here, not in the browser, so they outlive a
+   *  restart (a new port is a new origin, with empty localStorage). */
+  pinnedFile: () => path.join(harnessHome(), 'pinned.json'),
   sessionsDir: () => path.join(harnessHome(), 'sessions'),
   sessionDir: (id: string) => path.join(harnessHome(), 'sessions', sanitizeId(id)),
   sessionState: (id: string) => path.join(harnessHome(), 'sessions', sanitizeId(id), 'state.json'),

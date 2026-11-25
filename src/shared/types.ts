@@ -908,7 +908,7 @@ export interface DaemonLock {
  * ------------------------------------------------------------------ */
 
 /** The kinds of reclaimable file the harness knows how to describe. */
-export const CLEANUP_GROUPS = ['sessions', 'partial-writes', 'log', 'lock'] as const;
+export const CLEANUP_GROUPS = ['sessions', 'unpinned-sessions', 'partial-writes', 'log', 'lock'] as const;
 export type CleanupGroupId = (typeof CLEANUP_GROUPS)[number];
 
 export interface StorageGroup {

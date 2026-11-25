@@ -14,6 +14,7 @@
 import { readdirSync, statSync, existsSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { harnessHome, paths, readLock, isPidAlive, sanitizeId } from '../shared/paths.ts';
+import { pinnedDirs } from './pins.ts';
 import type { CleanupGroupId, CleanupOutcome, StorageGroup, StorageReport } from '../shared/types.ts';
 
 /**
@@ -146,6 +147,12 @@ function buildPlans(live: Set<string>, now: number): GroupPlan[] {
       candidates: staleSessionDirs(live, now),
     },
     {
+      id: 'unpinned-sessions',
+      label: 'Recent sessions, except pinned',
+      detail: 'Saved plans of every session Coplan does not hold open and that is not pinned, however recent. Tick both session groups to delete every unpinned plan.',
+      candidates: staleSessionDirs(live, now, true),
+    },
+    {
       id: 'partial-writes',
       label: 'Interrupted writes',
       detail: 'Half-written state files left behind when a daemon was killed mid-save.',
@@ -173,16 +180,20 @@ function buildPlans(live: Set<string>, now: number): GroupPlan[] {
  * excluded by age — including a session evicted an hour ago that the user is
  * about to resume.
  */
-function staleSessionDirs(live: Set<string>, now: number): Candidate[] {
+function staleSessionDirs(live: Set<string>, now: number, recent = false): Candidate[] {
   const root = paths.sessionsDir();
   if (!existsSync(root)) return [];
   const out: Candidate[] = [];
+  const pinned = pinnedDirs();
 
   for (const entry of safeReaddir(root)) {
     if (!entry.isDirectory()) continue;
-    if (live.has(sanitizeId(entry.name))) continue;
+    if (live.has(sanitizeId(entry.name)) || pinned.has(entry.name)) continue;
     const dir = path.join(root, entry.name);
-    if (now - touchedAt(dir) < STALE_SESSION_MS) continue;
+    // The two session groups split by age, so ticking both never counts a
+    // folder twice.
+    const stale = now - touchedAt(dir) >= STALE_SESSION_MS;
+    if (stale === recent) continue;
     out.push({ path: dir, bytes: sizeOf(dir) });
   }
   return out;
