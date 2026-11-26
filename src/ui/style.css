@@ -1240,7 +1240,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .ov-task.is-done .ov-task-mark { color: var(--success-fg); }
 .ov-task.is-in_progress .ov-task-mark { color: var(--accent-fg); }
 .ov-task.is-blocked .ov-task-mark { color: var(--attention-fg); font-weight: 700; }
-.ov-task-title { justify-self: start; font-weight: 600; text-align: left; color: var(--text-primary); }
+.ov-task-title { justify-self: start; max-width: 100%; overflow-wrap: anywhere; font-weight: 600; text-align: left; color: var(--text-primary); }
 .ov-task-title:hover { color: var(--text-link); text-decoration: underline; }
 .ov-task-meta { grid-column: 2; display: flex; flex-wrap: wrap; gap: var(--sp-3); font-size: var(--fs-sm); color: var(--text-secondary); }
 
@@ -1366,7 +1366,8 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .flow .react-flow__handle.connectingto { opacity: 1; }
 .flow .react-flow__minimap { border: 1px solid var(--border-default); border-radius: var(--r-md); overflow: hidden; box-shadow: var(--shadow-1); }
 .flow .react-flow__controls { box-shadow: var(--shadow-1); border-radius: var(--r-md); overflow: hidden; }
-.flow .react-flow__panel.react-flow__attribution { opacity: 0.55; }
+/* MIT-licensed, but xyflow asks non-Pro users to keep the link; keep it legible. */
+.flow .react-flow__panel.react-flow__attribution a { color: var(--text-secondary); }
 
 .flow-node {
   --kind: var(--accent-solid);
@@ -1591,7 +1592,9 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .task-num { color: var(--text-tertiary); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; min-width: 2.2em; }
 .task-title { font-weight: 550; min-width: 0; }
 .task.is-done > .task-line .task-title .inline-trigger { color: var(--text-tertiary); text-decoration: line-through; text-decoration-color: var(--border-strong); }
-.task-badges { display: inline-flex; gap: 4px; min-width: 0; overflow: hidden; }
+.task-badges { display: inline-flex; gap: 4px; min-width: 0; overflow: hidden; flex-shrink: 0; max-width: 60%; }
+/* A long title truncates first; chips keep their whole label ("ready", not "rea"). */
+.task-badges > * { flex: none; }
 .task-actions {
   display: inline-flex; gap: 1px; opacity: 0; transition: opacity var(--t-fast) linear;
 }
@@ -2240,6 +2243,8 @@ span.board-title:hover { color: inherit; text-decoration: none; }
 .order-step { flex: none; min-width: 4.5em; font-size: var(--fs-sm); font-weight: 600; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 .order-tasks { display: inline-flex; flex-wrap: wrap; gap: var(--sp-1); min-width: 0; }
 .chip.order-chip { max-width: 36ch; }
+/* A flex chip cannot ellipsize a bare text node: the title gets its own box. */
+.order-chip-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .chip.order-chip.is-done { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
 .chip.order-chip.is-in_progress { background: var(--accent-subtle); color: var(--accent-fg); border-color: var(--accent-border); }
 .chip.order-chip.is-blocked { background: var(--attention-bg); color: var(--attention-fg); border-color: var(--attention-border); }

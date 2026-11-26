@@ -129,8 +129,25 @@ function renderDetailsBlock(spec: XmlBlockSpec, tag: string, body: string): stri
  * Markdown
  * ------------------------------------------------------------------ */
 
+/**
+ * Rendered markdown always sits under an h2 (a section, panel or report
+ * title), so its headings start at h3 and step down without gaps: `###`
+ * followed by `#####` becomes h3 then h4, keeping the page outline sound.
+ */
+function headingLevels(lines: string[]): Map<number, number> {
+  const depths = new Set<number>();
+  let fenced = false;
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    const m = fenced ? null : /^(#{1,4})\s+/.exec(line);
+    if (m) depths.add(m[1]!.length);
+  }
+  return new Map([...depths].sort().map((depth, i) => [depth, i + 3]));
+}
+
 export function renderMarkdown(source: string): string {
   const lines = source.replace(/\r\n/g, '\n').split('\n');
+  const levels = headingLevels(lines);
   const out: string[] = [];
   let inCode = false;
   let codeLang = '';
@@ -259,7 +276,7 @@ export function renderMarkdown(source: string): string {
     const heading = /^(#{1,4})\s+(.*)$/.exec(line);
     if (heading) {
       flushBlocks();
-      const level = heading[1]!.length + 1;
+      const level = levels.get(heading[1]!.length) ?? 3;
       out.push(`<h${level}>${inline(heading[2] ?? '')}</h${level}>`);
       continue;
     }
