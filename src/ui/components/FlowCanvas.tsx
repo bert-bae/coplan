@@ -11,6 +11,7 @@ import {
   type Connection,
   EdgeChangeset,
   type FinalConnectionState,
+  type FitViewOptions,
   NodeChangeset,
 } from '@xyflow/react';
 import { store, useStore } from '../store.ts';
@@ -810,10 +811,10 @@ function Editor({
     const ns = nodesRef.current.map((n) => ({ ...n, position: at.positions.get(n.id) ?? n.position }));
     const es = edgesRef.current.map((e) => withRoute(e, at));
     commit(ns, es, direction);
-    window.requestAnimationFrame(() => void flow.fitView(FIT));
+    window.requestAnimationFrame(() => void flow.fitView(fitFor(direction)));
   };
 
-  const fitAll = useCallback(() => void flow.fitView({ ...FIT, duration: 200 }), [flow]);
+  const fitAll = useCallback(() => void flow.fitView({ ...fitFor(diagram.direction), duration: 200 }), [flow, diagram.direction]);
   const fitSelection = useCallback(() => {
     const picked = nodesRef.current.filter((n) => n.selected);
     if (!picked.length) return fitAll();
@@ -1510,13 +1511,13 @@ function Editor({
             zoomOnDoubleClick={false}
             forceColorMode={theme}
             fitView
-            fitViewOptions={FIT}
+            fitViewOptions={fitFor(diagram.direction)}
             minZoom={0.2}
             maxZoom={2}
             defaultEdgeOptions={{ type: 'plan' }}
           >
             <Background gap={18} size={1} />
-            <Controls showInteractive={false} position="bottom-left" fitViewOptions={FIT} />
+            <Controls showInteractive={false} position="bottom-left" fitViewOptions={fitFor(diagram.direction)} />
             <MiniMap pannable zoomable position="bottom-right" style={{ width: 150, height: 96 }} nodeBorderRadius={4} />
             {readOnly ? (
               <Panel position="top-left" className="flow-toolbar">
@@ -1587,8 +1588,18 @@ function Editor({
 }
 
 /** Fit the whole diagram, but never blow a small one up past its real size,
- *  and never shrink a large one past legibility. */
-const FIT = { padding: 0.14, maxZoom: 1, minZoom: 0.4, duration: 0 };
+ *  and never shrink a large one past legibility. The padding keeps boxes out
+ *  from under the canvas chrome: the toolbar (15px margin + 28px buttons)
+ *  along the top, the controls (15 + 26 wide) and minimap (15 + 150 wide,
+ *  96 tall) in the bottom corners. Those corners cost the least zoom reserved
+ *  as columns for a tall top-to-bottom diagram and as a band for a wide one.
+ *  A bare number would be pixels in @xyflow v13, not a ratio. */
+const fitFor = (direction: DiagramDirection): FitViewOptions => ({
+  padding: direction === 'TB' ? { top: '56px', bottom: '24px', left: '52px', right: '176px' } : { top: '56px', bottom: '120px', x: '24px' },
+  maxZoom: 1,
+  minZoom: 0.4,
+  duration: 0,
+});
 
 /** Which boxes and arrows a previewed proposal adds, changes or takes away. */
 export interface CanvasDiff {
