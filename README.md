@@ -28,7 +28,8 @@
   <a href="#what-it-installs">What it installs</a> ·
   <a href="#resource-footprint">Resource footprint</a> ·
   <a href="docs/GUIDE.md">Guide</a> ·
-  <a href="docs/CONFIG.md">Configuration</a>
+  <a href="docs/CONFIG.md">Configuration</a> ·
+  <a href="docs/SELF-HOSTING.md">Self-hosting</a>
 </p>
 
 ---

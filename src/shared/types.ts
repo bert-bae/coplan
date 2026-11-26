@@ -792,6 +792,12 @@ export interface SessionState {
   agent: AgentKind;
   /** pid of the owning agent process (`claude`, `codex`, …), when known. */
   claudePid?: number;
+  /** Set for a session on another machine (a remote client): its pid and paths are that machine's, not the daemon's. */
+  machine?: string;
+  /** That machine's coplan CLI, for the checks the session is told to run. */
+  bin?: string;
+  /** That machine's `.coplan/config.json`, as text: the daemon cannot read the repository. */
+  projectConfig?: string;
   cwd: string;
   repoRoot: string | null;
   branch: string | null;
@@ -911,6 +917,8 @@ export interface DaemonLock {
   version: string;
   startedAt: number;
   host: string;
+  /** A daemon on another machine (COPLAN_REMOTE): its base URL, which wins over host and port. */
+  origin?: string;
 }
 
 /* ------------------------------------------------------------------ *

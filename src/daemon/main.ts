@@ -35,7 +35,8 @@ import {
 import { briefBlocks, renderBrief, renderNext, skipArg } from './brief.ts';
 import { blocksText, joinBlocks } from '../shared/blocks.ts';
 import { dependents, effectiveBranch, effectiveChecks, hasSubtasks, readyTasks, stackStatus, waitingOn } from '../shared/build.ts';
-import { HOOK_STAGES, type ProjectConfig } from '../shared/project.ts';
+import { HOOK_STAGES, loadProjectConfig, parseProjectConfig, type ProjectConfig } from '../shared/project.ts';
+import { parseJsonc } from '../shared/jsonc.ts';
 import { headCommit, worktreeOf } from '../shared/changes.ts';
 import { cleanStorage, scanStorage, trimLog } from './housekeeping.ts';
 import { ConfigCache, globalConfigFile, projectHarnessFile, type HarnessConfig } from '../shared/config.ts';
@@ -58,6 +59,18 @@ const COPLAN_BIN = (() => {
   const bin = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'coplan');
   return existsSync(bin) ? bin : undefined;
 })();
+
+/** The CLI a session is told to run: its own machine's when a remote client said where (relay header), else this build's. */
+const binOf = (s: SessionState): { bin?: string } => {
+  const bin = s.bin ?? COPLAN_BIN;
+  return bin ? { bin } : {};
+};
+
+/** What a remote client says about itself in a header: one plain line, or nothing. */
+const cleanClient = (v: string | null): string | undefined => (v && v.length <= 300 && !/[\x00-\x1f"'`$\\]/.test(v) ? v : undefined);
+
+/** The most of a remote client's config file the daemon keeps. */
+const MAX_SENT_CONFIG = 64 * 1024;
 
 /** Session names the user types. */
 const MAX_TITLE_LENGTH = 120;
@@ -91,9 +104,14 @@ async function main(): Promise<void> {
 
   // A restart hands its successor the token and the port, so the browser tab
   // that asked for it reconnects by itself. Out of the environment at once.
-  const inheritedToken = process.env['CC_HARNESS_TOKEN'];
-  const inheritedPort = Number(process.env['CC_HARNESS_PORT'] ?? 0);
+  // A self-hosted daemon (COPLAN_TOKEN, COPLAN_PORT) keeps the same ones across restarts.
+  // COPLAN_TOKEN may list several, comma-separated: one per client, so one can be revoked or rotated alone.
+  const configured = (process.env['COPLAN_TOKEN'] ?? '').split(',').map((t) => t.trim()).filter(Boolean);
+  const inheritedToken = process.env['CC_HARNESS_TOKEN'] || configured[0];
+  for (const t of configured.slice(1)) extraTokens.add(t);
+  const inheritedPort = Number(process.env['CC_HARNESS_PORT'] || process.env['COPLAN_PORT'] || 0);
   delete process.env['CC_HARNESS_TOKEN'];
+  delete process.env['COPLAN_TOKEN'];
   const token = inheritedToken || randomBytes(24).toString('hex');
 
   const clients = { count: 0 };
@@ -135,6 +153,9 @@ async function main(): Promise<void> {
   writeAuthHeader(token);
   await claimLock(lock);
   log(`listening on ${baseUrl(lock)} (pid ${process.pid}, v${VERSION})`);
+  if (BIND_HOST !== '127.0.0.1' && BIND_HOST !== 'localhost' && !PUBLIC_ORIGIN?.startsWith('https:')) {
+    log(`warning: bound to ${BIND_HOST} without an https COPLAN_PUBLIC_URL: keys and plans cross the network in clear unless something in front of it adds TLS`);
+  }
   process.stdout.write(`${JSON.stringify({ started: true, ...lock })}\n`);
 
   let shuttingDown = false;
@@ -165,7 +186,7 @@ async function main(): Promise<void> {
 
   /** Replace this daemon with one running the build on disk now. */
   lifecycle.restart = (entry?: string) => {
-    if (shuttingDown) return false;
+    if (shuttingDown || SELF_HOSTED) return false;
     log('restart requested; handing over to a fresh daemon');
     setTimeout(() => shutdown('restart', true, entry), RESTART_DELAY_MS).unref();
     return true;
@@ -173,7 +194,7 @@ async function main(): Promise<void> {
 
   const reaper = startReaper(store);
   const lockWatch = watchLock(() => shutdown(LOST_LOCK));
-  startIdleWatch(store, config, clients, () => shutdown('idle'));
+  if (!SELF_HOSTED) startIdleWatch(store, config, clients, () => shutdown('idle'));
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -182,6 +203,26 @@ async function main(): Promise<void> {
 
 /** The port this process listens on; the Origin check compares against it. */
 let boundPort = 0;
+
+/**
+ * Self-hosting (docs/SELF-HOSTING.md). The defaults are the local daemon's:
+ * loopback only, a random token, gone when idle. A server sets COPLAN_BIND
+ * (0.0.0.0 in a container), COPLAN_PUBLIC_URL (the address clients and the
+ * browser use, so its host passes the Host and Origin checks) and
+ * COPLAN_SELF_HOSTED=1 (stay up when idle; restart by restarting the
+ * container).
+ */
+const BIND_HOST = process.env['COPLAN_BIND']?.trim() || '127.0.0.1';
+const SELF_HOSTED = process.env['COPLAN_SELF_HOSTED'] === '1';
+/** COPLAN_PUBLIC_URL, comma-separated if the page is reached at more than one address (a tunnel on another local port, a proxy). The first is the one links use. */
+const PUBLIC_ORIGINS = (process.env['COPLAN_PUBLIC_URL'] ?? '').split(',').flatMap((u) => {
+  try {
+    return u.trim() ? [new URL(u.trim()).origin] : [];
+  } catch {
+    return [];
+  }
+});
+const PUBLIC_ORIGIN = PUBLIC_ORIGINS[0] ?? null;
 
 /** Grace for the restart response to flush before the socket is torn down. */
 const RESTART_DELAY_MS = 120;
@@ -246,7 +287,7 @@ function bind(server: http.Server, port: number): Promise<number> {
     };
     server.once('error', onError);
     server.once('listening', onListening);
-    server.listen(port, '127.0.0.1');
+    server.listen(port, BIND_HOST);
   });
 }
 
@@ -391,7 +432,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, route
 
   // Loopback only; a foreign Host header is what DNS rebinding looks like.
   const host = (req.headers.host ?? '').split(':')[0];
-  if (host && host !== '127.0.0.1' && host !== 'localhost') {
+  if (host && host !== '127.0.0.1' && host !== 'localhost' && !PUBLIC_ORIGINS.some((o) => host === new URL(o).hostname)) {
     text(res, 403, 'forbidden');
     return;
   }
@@ -439,6 +480,7 @@ function sameOrigin(origin: string): boolean {
   try {
     const { protocol, hostname, port } = new URL(origin);
     const own = String(boundPort);
+    if (PUBLIC_ORIGINS.includes(new URL(origin).origin)) return true;
     return protocol === 'http:' && (hostname === '127.0.0.1' || hostname === 'localhost') && port === own;
   } catch {
     return false;
@@ -455,11 +497,14 @@ function sameOrigin(origin: string): boolean {
  */
 function authorized(req: http.IncomingMessage, url: URL, token: string): boolean {
   const header = req.headers.authorization ?? '';
-  if (header.startsWith('Bearer ') && sameSecret(header.slice(7), token)) return true;
+  if (header.startsWith('Bearer ') && [token, ...extraTokens].some((t) => sameSecret(header.slice(7), t))) return true;
   if (req.method === 'GET' && url.pathname === '/api/events') return redeemTicket(streamTickets, url.searchParams.get('ticket'));
   if (req.method === 'POST' && url.pathname === '/api/login') return redeemTicket(loginTickets, url.searchParams.get('ticket'));
   return false;
 }
+
+/** The other keys a self-hosted daemon accepts (COPLAN_TOKEN, after its first). */
+const extraTokens = new Set<string>();
 
 /** Compared in constant time, so the answer's timing says nothing of it. */
 function sameSecret(given: string, token: string): boolean {
@@ -506,14 +551,16 @@ function buildRouter(deps: Deps): Router {
   const { store, config, token, clients, lifecycle } = deps;
   const router = new Router();
 
+  const selfUrl = () => PUBLIC_ORIGIN ?? `http://127.0.0.1:${readLiveLock()?.port ?? 0}`;
+
   /** For the browser: a login ticket the page trades for the token
    *  (`src/ui/lib/api.ts`). */
   const loginUrl = (sessionId: string) =>
-    `http://127.0.0.1:${readLiveLock()?.port ?? 0}/?login=${issueTicket(loginTickets)}#/session/${encodeURIComponent(sessionId)}`;
+    `${selfUrl()}/?login=${issueTicket(loginTickets)}#/session/${encodeURIComponent(sessionId)}`;
 
   /** For Claude. Token-free: anything returned to the model is written to the
    *  transcript and carried in every later context window. */
-  const uiUrl = (sessionId: string) => `http://127.0.0.1:${readLiveLock()?.port ?? 0}/#/session/${encodeURIComponent(sessionId)}`;
+  const uiUrl = (sessionId: string) => `${selfUrl()}/#/session/${encodeURIComponent(sessionId)}`;
 
   const opened = new Set<string>();
   const revealUi = (session: SessionState) => {
@@ -535,7 +582,23 @@ function buildRouter(deps: Deps): Router {
   // The session list judges what waits on the user by it too.
   reviewChanges.add(() => store.broadcastSessionList());
   const projectAt = (root: string): ProjectConfig => projects.at(root);
-  const projectFor = (session: SessionState): ProjectConfig => projectAt(session.repoRoot ?? session.cwd);
+  // A remote client's repository is not on this disk: the config text it sent stands in for the file.
+  const sentConfigs = new Map<string, ProjectConfig>();
+  const projectFor = (session: SessionState): ProjectConfig => {
+    if (!session.machine) return projectAt(session.repoRoot ?? session.cwd);
+    const text = session.projectConfig ?? '';
+    let config = sentConfigs.get(text);
+    if (!config) {
+      try {
+        config = text ? parseProjectConfig(parseJsonc(text)) : loadProjectConfig(null);
+      } catch (err) {
+        config = { ...loadProjectConfig(null), errors: [`.coplan/config.json could not be read: ${(err as Error).message}`] };
+      }
+      if (sentConfigs.size >= MAX_PROJECT_CONFIGS) sentConfigs.clear();
+      sentConfigs.set(text, config);
+    }
+    return config;
+  };
 
   /**
    * A headless session's plan, kept in its working directory — where the
@@ -581,8 +644,8 @@ function buildRouter(deps: Deps): Router {
   /** How a brief is rendered for a session: the same for the agent's tool
    *  and the page, so both read the same text. */
   store.reviewFor = (session) => projectFor(session).review;
-  store.promptFor = (session) => ({ project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) });
-  const briefOptions = (session: SessionState) => ({ agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) });
+  store.promptFor = (session) => ({ project: projectFor(session), ...binOf(session) });
+  const briefOptions = (session: SessionState) => ({ agent: session.agent, project: projectFor(session), ...binOf(session) });
 
   /** What the review dialogs show beside the prompt: the defaults and the
    *  checks this repository has, so the user sees what the build will run. */
@@ -745,7 +808,7 @@ function buildRouter(deps: Deps): Router {
     const { prompt, trimmed, blocks } = buildPrompt(plan, {
       agent: session.agent,
       project,
-      ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
+      ...binOf(session),
       ...(note ? { note } : {}),
     });
     json(ctx.res, 200, {
@@ -779,7 +842,7 @@ function buildRouter(deps: Deps): Router {
     const plan = planOr404(session);
     const note = cleanNote(body.note);
     const project = projectFor(session);
-    const { prompt, trimmed, blocks } = designPrompt(plan, { agent: session.agent, project, ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}), ...(note ? { note } : {}) });
+    const { prompt, trimmed, blocks } = designPrompt(plan, { agent: session.agent, project, ...binOf(session), ...(note ? { note } : {}) });
     json(ctx.res, 200, {
       prompt,
       hash: promptHash(prompt),
@@ -803,7 +866,7 @@ function buildRouter(deps: Deps): Router {
     const note = cleanNote(body.note);
     const plan = store.confirmDesign(session.sessionId, {
       project: projectFor(session),
-      ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
+      ...binOf(session),
       ...(note ? { note } : {}),
       ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
       ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
@@ -870,7 +933,7 @@ function buildRouter(deps: Deps): Router {
     const project = projectFor(session);
     const plan = store.submit(session.sessionId, {
       project,
-      ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}),
+      ...binOf(session),
       ...(note ? { note } : {}),
       ...(typeof body.expect === 'number' ? { expect: body.expect } : {}),
       ...(typeof body.hash === 'string' ? { hash: body.hash } : {}),
@@ -934,7 +997,7 @@ function buildRouter(deps: Deps): Router {
     json(ctx.res, started ? 200 : 409, {
       restarting: started,
       port: readLiveLock()?.port ?? null,
-      ...(started ? {} : { error: 'already shutting down' }),
+      ...(started ? {} : { error: SELF_HOSTED ? 'a self-hosted daemon restarts with its container' : 'already shutting down' }),
     });
   });
 
@@ -1124,6 +1187,7 @@ function buildRouter(deps: Deps): Router {
             bridgeSessionId: header('x-harness-bridge-session'),
             entrypoint: header('x-harness-entrypoint'),
           },
+          client: { machine: cleanClient(header('x-harness-machine')), bin: cleanClient(header('x-harness-bin')) },
           onWaiting: openClaude,
         });
       }
@@ -1158,7 +1222,7 @@ function buildRouter(deps: Deps): Router {
 
   /* --------------------------- MCP bridge -------------------------- */
 
-  const resolveSession = (ctx: Ctx, body: { sessionId?: string; cwd?: string; pid?: number }) => {
+  const resolveSession = (ctx: Ctx, body: { sessionId?: string; cwd?: string; pid?: number; machine?: string; projectConfig?: unknown }) => {
     const headerId = ctx.req.headers['x-harness-session'];
     const id = body.sessionId ?? (typeof headerId === 'string' && headerId ? headerId : undefined);
     const agentHeader = ctx.req.headers['x-harness-agent'];
@@ -1167,26 +1231,30 @@ function buildRouter(deps: Deps): Router {
     // the Claude Code plugin's config; it is never Codex, and its calls never
     // reach a Codex thread.
     const mayBe: AgentKind[] = agent === 'claude' ? ['claude', 'cursor'] : [agent];
-    const byPid = (pid: number) => mayBe.map((a) => store.findByPid(pid, a)).find(Boolean) ?? null;
+    const byPid = (pid: number) => mayBe.map((a) => store.findByPid(pid, a, body.machine)).find(Boolean) ?? null;
     let session: SessionState | null = null;
     if (id) session = store.ensure(id, body.cwd, agent);
     else if (agent === 'claude') {
       // One `claude` process is one session, so its pid names it; else its
       // folder, a Claude session first, then a Cursor chat.
       if (body.pid) session = byPid(body.pid);
-      for (const a of mayBe) if (!session && body.cwd) session = store.findByCwd(body.cwd, a) ?? null;
+      for (const a of mayBe) if (!session && body.cwd) session = store.findByCwd(body.cwd, a, body.machine) ?? null;
     } else {
       // One Cursor process serves every chat in every window, and one Codex
       // app every thread: the folder says more than the pid. In that folder,
       // the chat that was active last is the one calling.
-      if (body.cwd) session = store.findByCwd(body.cwd, agent) ?? null;
+      if (body.cwd) session = store.findByCwd(body.cwd, agent, body.machine) ?? null;
       if (!session && body.pid) session = byPid(body.pid);
     }
     if (!session) return null;
     // The process stands for the session only where it may be that session's:
     // otherwise its exit would end a session it never was.
     if (body.pid && mayBe.includes(session.agent) && session.claudePid !== body.pid) store.update(session.sessionId, { claudePid: body.pid });
-    return session;
+    // A remote client's repository config, sent with its calls (src/mcp/main.ts).
+    if (session.machine && typeof body.projectConfig === 'string' && body.projectConfig.length <= MAX_SENT_CONFIG && body.projectConfig !== session.projectConfig) {
+      store.update(session.sessionId, { projectConfig: body.projectConfig });
+    }
+    return store.get(session.sessionId) ?? session;
   };
 
   /**
@@ -1220,7 +1288,9 @@ function buildRouter(deps: Deps): Router {
     if (!plan || !task) return {};
     const status = body['status'];
     if (!task.startCommit && (status === 'in_progress' || (typeof body['stage'] === 'string' && status !== 'done' && status !== 'blocked'))) {
-      const head = await headCommit(await builtIn(session, plan, task));
+      // A remote client's repository is on its machine: it reads its own HEAD and sends it.
+      const sent = typeof body['head'] === 'string' && /^[0-9a-f]{7,64}$/.test(body['head']) ? body['head'] : undefined;
+      const head = session.machine ? sent : await headCommit(await builtIn(session, plan, task));
       if (head) return { startCommit: head };
     }
     return {};
@@ -1317,7 +1387,7 @@ function buildRouter(deps: Deps): Router {
     // Its checks are targeted to its change from here: say how to run them.
     if (starting && now.startCommit) {
       out.push(
-        `Its checks run for what it changes, from this commit on: \`${COPLAN_BIN ? `"${COPLAN_BIN}"` : 'coplan'} check implement --since ${now.startCommit.slice(0, 12)}${skipArg(effectiveChecks(plan, now))}\` ` +
+        `Its checks run for what it changes, from this commit on: \`${binOf(session).bin ? `"${binOf(session).bin}"` : 'coplan'} check implement --since ${now.startCommit.slice(0, 12)}${skipArg(effectiveChecks(plan, now))}\` ` +
           '(then `review`), run where it is built.',
       );
     }
@@ -1403,7 +1473,7 @@ function buildRouter(deps: Deps): Router {
     const plan = session.plan;
     if (!plan) throw new PlanError('There is no plan yet. Publish one with harness_plan_publish.');
     const project = projectFor(session);
-    const bin = COPLAN_BIN ? { bin: COPLAN_BIN } : {};
+    const bin = binOf(session);
     const quote = said.length > 200 ? `${said.slice(0, 199).trimEnd()}…` : said;
     let lead: string;
     if (to === 'tasks') {
@@ -1527,7 +1597,7 @@ function buildRouter(deps: Deps): Router {
       body = { ...(sent[0] as unknown as Record<string, unknown>), sessionId: body['sessionId'], cwd: body['cwd'], pid: body['pid'] };
       tool = 'propose';
     }
-    const session = resolveSession(ctx, body as { sessionId?: string; cwd?: string; pid?: number });
+    const session = resolveSession(ctx, body as { sessionId?: string; cwd?: string; pid?: number; machine?: string; projectConfig?: unknown });
     if (!session) {
       const agentHeader = ctx.req.headers['x-harness-agent'];
       json(ctx.res, 200, {
@@ -1754,7 +1824,7 @@ function buildRouter(deps: Deps): Router {
             reply(true, `[cc-harness] No plan yet. Publish one with harness_plan_publish. UI: ${url}`);
             return;
           }
-          reply(true, renderNext(session.plan, { agent: session.agent, project: projectFor(session), ...(COPLAN_BIN ? { bin: COPLAN_BIN } : {}) }));
+          reply(true, renderNext(session.plan, { agent: session.agent, project: projectFor(session), ...binOf(session) }));
           return;
         }
 
@@ -1814,7 +1884,8 @@ function startReaper(store: SessionStore): { stop(): void } {
   const timer = setInterval(() => {
     try {
       for (const s of store.all()) {
-        if (s.status !== 'ended' && typeof s.claudePid === 'number' && !isPidAlive(s.claudePid)) {
+        // A remote client's pid is on its own machine: only its SessionEnd ends it.
+        if (s.status !== 'ended' && !s.machine && typeof s.claudePid === 'number' && !isPidAlive(s.claudePid)) {
           store.update(s.sessionId, { status: 'ended', endedAt: Date.now() });
         }
       }
