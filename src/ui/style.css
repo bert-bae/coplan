@@ -30,7 +30,7 @@
   color-scheme: light;
 
   --n-0: #ffffff;   --n-50: #f7f9fb;  --n-100: #eff2f6; --n-150: #e5eaf1;
-  --n-200: #d6dde6; --n-300: #bfc9d4; --n-400: #98a4b3; --n-500: #6b7785;
+  --n-200: #d6dde6; --n-300: #bfc9d4; --n-400: #98a4b3; --n-500: #5a6573;
   --n-600: #525c6a; --n-700: #39424e; --n-800: #222a34; --n-900: #0f141a;
 
   /* Four levels of ground, always in this order from back to front:
@@ -66,7 +66,7 @@
   --accent-veil: rgba(31, 111, 235, 0.1);
 
   --success-fg: #16743a; --success-bg: #dcfce9; --success-border: #4ac26b; --success-solid: #1a7f37;
-  --attention-fg: #7a5600; --attention-bg: #fff5cc; --attention-border: #d4a72c; --attention-solid: #bf8700;
+  --attention-fg: #7a5600; --attention-bg: #fff5cc; --attention-border: #d4a72c; --attention-solid: #9a6700;
   --danger-fg: #c1121f;   --danger-bg: #ffe9e7;   --danger-border: #ff8182; --danger-solid: #cf222e;
   --on-solid: #ffffff;
 
@@ -129,14 +129,14 @@
 
   --accent-fg: #85b8ff;
   --accent-border: #3b7ad4;
-  --accent-solid: #2b7cf0;
-  --accent-solid-hover: #4a92f7;
+  --accent-solid: #1f6feb;
+  --accent-solid-hover: #1a5fd0;
   --accent-on-solid: #ffffff;
   --accent-subtle: #15263c;
   --accent-veil: rgba(133, 184, 255, 0.14);
 
   --success-fg: #56d364; --success-bg: #0d2a17; --success-border: #2ea043; --success-solid: #238636;
-  --attention-fg: #e3b341; --attention-bg: #2a2000; --attention-border: #9e6a03; --attention-solid: #bb8009;
+  --attention-fg: #e3b341; --attention-bg: #2a2000; --attention-border: #9e6a03; --attention-solid: #9a6700;
   --danger-fg: #ff8781;   --danger-bg: #2c1416;   --danger-border: #da3633; --danger-solid: #da3633;
 
 
@@ -1178,6 +1178,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 }
 .glance-tile:hover { border-color: var(--accent-border); transform: translateY(-1px); box-shadow: var(--shadow-2); }
 .glance-tile.is-attention { border-color: var(--attention-border); background: var(--attention-bg); }
+.glance-tile.is-attention :is(.glance-label, .glance-of, .glance-sub) { color: var(--attention-fg); }
 .glance-label { font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-tertiary); }
 .glance-value { font-size: 26px; font-weight: 700; line-height: 32px; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
 .glance-of { font-size: var(--fs-lg); color: var(--text-tertiary); font-weight: 600; }
