@@ -1115,7 +1115,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
   padding: var(--sp-2) var(--sp-3); border-radius: var(--r-md);
   border: 1px solid var(--border-default); background: var(--surface-base);
 }
-.thread.is-resolved { opacity: 0.65; }
+.thread.is-resolved { background: var(--surface-raised); border-style: dashed; }
 .thread-entry .md { font-size: var(--fs-base); line-height: 20px; }
 .thread-entry.is-reply { margin-top: var(--sp-2); padding-left: var(--sp-3); border-left: 2px solid var(--border-default); }
 .thread-entry.is-reply.by-claude { border-left-color: #c084fc; }
@@ -1129,7 +1129,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 
 .head-saving { font-size: var(--fs-micro); animation: working-fade 1.2s ease-in-out infinite; }
 .head-progress { display: inline-flex; align-items: center; gap: var(--sp-2); }
-.head-status.is-ended { opacity: 0.7; }
+.head-status.is-ended { background: var(--surface-sunken); border-color: transparent; }
 
 .handoff { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
 .handoff-state {
@@ -1489,12 +1489,12 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 /* A box's foot: the chip that counts the tasks building it (and opens their
    list), their progress, and a quiet "no task" where the plan check would
    list the box. Its height is FOOT in lib/layout.ts, less the gap above. */
-.flow-node-foot { display: flex; align-items: center; gap: 6px; height: 18px; font-size: 10px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.flow-node-foot { display: flex; align-items: center; gap: 6px; height: 18px; font-size: var(--fs-micro); color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 .flow-node-foot .progress { flex: 1; width: auto; }
 .flow-task-chip {
   flex: none; display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 7px 0 5px;
   border: 1px solid var(--border-default); border-radius: var(--r-full); background: var(--surface-base);
-  color: var(--text-secondary); font: inherit; font-size: 10.5px; font-weight: 650; line-height: 1; cursor: pointer;
+  color: var(--text-secondary); font: inherit; font-size: var(--fs-micro); font-weight: 650; line-height: 1; cursor: pointer;
   transition: border-color var(--t-fast) linear, color var(--t-fast) linear, background var(--t-fast) linear;
 }
 .flow-task-chip:hover, .flow-task-chip.is-open { border-color: var(--accent-border); color: var(--accent-fg); background: var(--accent-subtle); }
@@ -1572,7 +1572,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .status-dot {
   display: inline-grid; place-items: center; width: 18px; height: 18px; flex: none;
   border: 1.5px solid var(--border-strong); border-radius: 50%;
-  background: var(--surface-base); color: var(--on-solid); font-size: 10px; font-weight: 800; line-height: 1;
+  background: var(--surface-base); color: var(--on-solid); font-size: var(--fs-micro); font-weight: 800; line-height: 1;
   transition: transform var(--t-fast) var(--ease-spring), background var(--t-fast) linear;
 }
 .status-dot:hover:not(.is-static) { transform: scale(1.15); border-color: var(--accent-solid); }
@@ -1584,7 +1584,9 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .status-dot.is-blocked { border-color: var(--attention-solid); background: var(--attention-solid); }
 .status-dot.is-done { border-color: var(--success-solid); background: var(--success-solid); }
 .status-dot.is-dropped { border-color: var(--border-strong); background: var(--surface-sunken); color: var(--text-tertiary); }
-.board-card.is-dropped, .task-row.is-dropped .task-title { opacity: 0.65; text-decoration: line-through; }
+/* Dropped work reads as struck and receded through tokens, not opacity: faded text falls under AA. */
+.board-card.is-dropped { background: var(--surface-sunken); box-shadow: none; }
+.board-card.is-dropped :is(.board-title, .board-note), .task-row.is-dropped .task-title { color: var(--text-tertiary); text-decoration: line-through; }
 
 .task-num { color: var(--text-tertiary); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; min-width: 2.2em; }
 .task-title { font-weight: 550; min-width: 0; }
@@ -1662,12 +1664,12 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 }
 .board-card.is-blocked { border-left: 3px solid var(--attention-solid); }
 .board-card.is-in_progress { border-left: 3px solid var(--accent-solid); }
-.board-card.is-done { opacity: 0.8; }
+.board-card.is-done { background: var(--surface-raised); box-shadow: none; }
 .board-path { margin: 0; font-size: var(--fs-micro); color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .board-title { padding: 0; border: none; background: none; text-align: left; font-weight: 600; color: var(--text-primary); }
 .board-title:hover { color: var(--accent-fg); text-decoration: underline; }
-.board-note { margin: 0; font-size: var(--fs-sm); color: var(--text-secondary); }
-.board-reviews { margin: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-sm); }
+.board-note { margin: 0; font-size: var(--fs-sm); color: var(--text-secondary); text-wrap: pretty; }
+.board-reviews { margin: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-sm); text-wrap: pretty; }
 .board-reviews .is-changes { color: var(--attention-fg); }
 .board-review { display: flex; flex-direction: column; gap: var(--sp-1); padding: var(--sp-2); border: 1px solid var(--accent-border, var(--border-default)); border-radius: var(--r-md); background: var(--accent-subtle); }
 .board-review-actions { display: flex; gap: var(--sp-1); flex-wrap: wrap; }
@@ -1838,7 +1840,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .flow-node-rel {
   position: absolute; top: -9px; left: 8px; z-index: 1;
   padding: 0 6px; height: 17px; line-height: 15px;
-  font-size: 10px; font-weight: 700; letter-spacing: 0.02em; white-space: nowrap;
+  font-size: var(--fs-micro); font-weight: 700; letter-spacing: 0.02em; white-space: nowrap;
   border: 1px solid currentColor; border-radius: var(--r-full);
   pointer-events: none;
 }
