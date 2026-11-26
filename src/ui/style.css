@@ -1367,7 +1367,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .flow .react-flow__minimap { border: 1px solid var(--border-default); border-radius: var(--r-md); overflow: hidden; box-shadow: var(--shadow-1); }
 .flow .react-flow__controls { box-shadow: var(--shadow-1); border-radius: var(--r-md); overflow: hidden; }
 /* MIT-licensed, but xyflow asks non-Pro users to keep the link; keep it legible. */
-.flow .react-flow__panel.react-flow__attribution a { color: var(--text-secondary); }
+.flow .react-flow__panel.react-flow__attribution a { color: var(--text-secondary); font-size: var(--fs-micro); }
 
 .flow-node {
   --kind: var(--accent-solid);
@@ -2087,7 +2087,7 @@ button.pv-chip { cursor: pointer; }
 .lock-chip.is-status-in_progress, .pill.is-status-in_progress { background: var(--accent-subtle); border-color: var(--accent-border); color: var(--accent-fg); }
 .lock-chip.is-status-review, .pill.is-status-review { background: var(--attention-bg); border-color: var(--attention-border); color: var(--attention-fg); }
 .lock-chip.is-status-done, .pill.is-status-done { background: var(--success-bg); border-color: var(--success-border); color: var(--success-fg); }
-.phase.is-status-review { background: var(--attention-bg); border-bottom-color: var(--attention-border); box-shadow: inset 4px 0 0 var(--attention-solid); }
+.phase.is-status-review { --phase-fg: var(--attention-fg); background: var(--attention-bg); border-bottom-color: var(--attention-border); box-shadow: inset 4px 0 0 var(--attention-solid); }
 
 /* A request to revise the plan per the open comments (#67). */
 .revision-control { display: inline-flex; align-items: center; gap: var(--sp-2); }
@@ -2111,12 +2111,13 @@ button.pv-chip { cursor: pointer; }
 .phase {
   display: flex; align-items: center; gap: var(--sp-4); flex: none; flex-wrap: wrap;
   padding: var(--sp-2) var(--inset);
+  --phase-fg: var(--accent-fg);
   background: var(--accent-subtle); color: var(--text-primary);
   border-bottom: 1px solid var(--accent-border);
   box-shadow: inset 4px 0 0 var(--accent-solid);
   animation: fade-up var(--dur) var(--ease-out-soft);
 }
-.phase.is-built { background: var(--success-bg); border-bottom-color: var(--success-border); box-shadow: inset 4px 0 0 var(--success-solid); }
+.phase.is-built { --phase-fg: var(--success-fg); background: var(--success-bg); border-bottom-color: var(--success-border); box-shadow: inset 4px 0 0 var(--success-solid); }
 
 /* What the agent proposes, waiting on the user. */
 .proposals {
@@ -2152,10 +2153,11 @@ button.pv-chip { cursor: pointer; }
 .diff-key-added { border-color: var(--success-solid); }
 .diff-key-changed { border-color: var(--accent-solid); border-style: dashed; }
 .diff-key-removed { border-color: var(--danger-solid); border-style: dashed; opacity: 0.7; }
-.phase.is-handed-off { background: var(--surface-raised); border-bottom-color: var(--border-default); box-shadow: inset 4px 0 0 var(--border-strong); }
+.phase.is-handed-off { --phase-fg: var(--text-secondary); background: var(--surface-raised); border-bottom-color: var(--border-default); box-shadow: inset 4px 0 0 var(--border-strong); }
 .phase-body { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 2px; }
 .phase-head { margin: 0; font-weight: 700; }
-.phase-text { margin: 0; font-size: var(--fs-sm); color: var(--text-secondary); overflow-wrap: anywhere; }
+/* Secondary text on a tinted banner takes the banner's hue, not neutral grey. */
+.phase-text { margin: 0; font-size: var(--fs-sm); color: color-mix(in oklab, var(--phase-fg) 45%, var(--text-primary)); overflow-wrap: anywhere; }
 .phase-text strong { color: var(--text-primary); }
 .phase-said { margin: 0; font-size: var(--fs-sm); color: var(--text-secondary); overflow-wrap: anywhere; }
 .phase-said q { color: var(--text-primary); font-style: italic; }
@@ -2203,7 +2205,7 @@ span.board-title:hover { color: inherit; text-decoration: none; }
 }
 
 /* The design, confirmed: the tasks are shaped against it. */
-.phase.is-tasking { background: var(--success-bg); border-bottom-color: var(--success-border); box-shadow: inset 4px 0 0 var(--success-solid); }
+.phase.is-tasking { --phase-fg: var(--success-fg); background: var(--success-bg); border-bottom-color: var(--success-border); box-shadow: inset 4px 0 0 var(--success-solid); }
 
 .field-inline { display: inline-flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--text-secondary); }
 
