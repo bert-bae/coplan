@@ -228,3 +228,11 @@ test('a bare url keeps a parenthesis of its own and an & it ends with', () => {
   assert.ok(renderMarkdown('Link: https://x.com/a?q=1&').includes('href="https://x.com/a?q=1&amp;"'));
   assert.ok(renderMarkdown('see https://x.com/q", he said').includes('href="https://x.com/q" target="_blank" rel="noreferrer">https://x.com/q</a>&quot;,'), 'a quote after it is not');
 });
+
+test('headings start at h3 and never skip a level', () => {
+  const html = renderMarkdown('### Built\n\ntext\n\n#### Detail\n\n### Checks');
+  assert.match(html, /<h3>Built<\/h3>/);
+  assert.match(html, /<h4>Detail<\/h4>/);
+  assert.match(html, /<h3>Checks<\/h3>/);
+  assert.doesNotMatch(renderMarkdown('# Top\n## Sub'), /<h2>|<h5>/);
+});

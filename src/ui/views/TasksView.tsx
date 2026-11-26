@@ -319,7 +319,7 @@ function BuildOrder({ plan, collapsible = false }: { plan: Plan; collapsible?: b
       title={`${t.title} — ${STATUS_LABEL[t.status].toLowerCase()}`}
       onClick={() => store.focus('task', t.id)}
     >
-      <span className="task-num">{numbers.get(t.id)}</span> {t.title}
+      <span className="task-num">{numbers.get(t.id)}</span> <span className="order-chip-title">{t.title}</span>
     </button>
   );
   const body = (
