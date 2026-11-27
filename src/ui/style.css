@@ -30,7 +30,7 @@
   color-scheme: light;
 
   --n-0: #ffffff;   --n-50: #f7f9fb;  --n-100: #eff2f6; --n-150: #e5eaf1;
-  --n-200: #d6dde6; --n-300: #bfc9d4; --n-400: #98a4b3; --n-500: #6b7785;
+  --n-200: #d6dde6; --n-300: #bfc9d4; --n-400: #98a4b3; --n-500: #5a6573;
   --n-600: #525c6a; --n-700: #39424e; --n-800: #222a34; --n-900: #0f141a;
 
   /* Four levels of ground, always in this order from back to front:
@@ -66,7 +66,7 @@
   --accent-veil: rgba(31, 111, 235, 0.1);
 
   --success-fg: #16743a; --success-bg: #dcfce9; --success-border: #4ac26b; --success-solid: #1a7f37;
-  --attention-fg: #7a5600; --attention-bg: #fff5cc; --attention-border: #d4a72c; --attention-solid: #bf8700;
+  --attention-fg: #7a5600; --attention-bg: #fff5cc; --attention-border: #d4a72c; --attention-solid: #9a6700;
   --danger-fg: #c1121f;   --danger-bg: #ffe9e7;   --danger-border: #ff8182; --danger-solid: #cf222e;
   --on-solid: #ffffff;
 
@@ -129,14 +129,14 @@
 
   --accent-fg: #85b8ff;
   --accent-border: #3b7ad4;
-  --accent-solid: #2b7cf0;
-  --accent-solid-hover: #4a92f7;
+  --accent-solid: #1f6feb;
+  --accent-solid-hover: #1a5fd0;
   --accent-on-solid: #ffffff;
   --accent-subtle: #15263c;
   --accent-veil: rgba(133, 184, 255, 0.14);
 
   --success-fg: #56d364; --success-bg: #0d2a17; --success-border: #2ea043; --success-solid: #238636;
-  --attention-fg: #e3b341; --attention-bg: #2a2000; --attention-border: #9e6a03; --attention-solid: #bb8009;
+  --attention-fg: #e3b341; --attention-bg: #2a2000; --attention-border: #9e6a03; --attention-solid: #9a6700;
   --danger-fg: #ff8781;   --danger-bg: #2c1416;   --danger-border: #da3633; --danger-solid: #da3633;
 
 
@@ -436,7 +436,7 @@
 
 .session-row {
   /* The hover actions: three tiny buttons and the gaps between them. */
-  --row-action: 22px;
+  --row-action: 24px;
   --row-actions-w: calc(3 * var(--row-action) + 2 * 2px);
   position: relative;
   display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left;
@@ -703,7 +703,7 @@
 .icon-btn:active { transform: scale(0.92); }
 .icon-btn.is-active { color: var(--accent-fg); border-color: var(--accent-border); background: var(--accent-subtle); }
 .icon-btn.is-danger:hover { color: var(--danger-fg); border-color: var(--danger-border); background: var(--danger-bg); }
-.icon-btn.is-tiny { width: 22px; height: 22px; padding: 0; font-size: var(--fs-sm); }
+.icon-btn.is-tiny { width: 24px; height: 24px; padding: 0; font-size: var(--fs-sm); }
 .icon-btn.is-muted { opacity: 0.5; }
 
 /* A text button still has to look pressable: it underlines on hover. */
@@ -1115,7 +1115,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
   padding: var(--sp-2) var(--sp-3); border-radius: var(--r-md);
   border: 1px solid var(--border-default); background: var(--surface-base);
 }
-.thread.is-resolved { opacity: 0.65; }
+.thread.is-resolved { background: var(--surface-raised); border-style: dashed; }
 .thread-entry .md { font-size: var(--fs-base); line-height: 20px; }
 .thread-entry.is-reply { margin-top: var(--sp-2); padding-left: var(--sp-3); border-left: 2px solid var(--border-default); }
 .thread-entry.is-reply.by-claude { border-left-color: #c084fc; }
@@ -1129,7 +1129,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 
 .head-saving { font-size: var(--fs-micro); animation: working-fade 1.2s ease-in-out infinite; }
 .head-progress { display: inline-flex; align-items: center; gap: var(--sp-2); }
-.head-status.is-ended { opacity: 0.7; }
+.head-status.is-ended { background: var(--surface-sunken); border-color: transparent; }
 
 .handoff { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
 .handoff-state {
@@ -1178,6 +1178,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 }
 .glance-tile:hover { border-color: var(--accent-border); transform: translateY(-1px); box-shadow: var(--shadow-2); }
 .glance-tile.is-attention { border-color: var(--attention-border); background: var(--attention-bg); }
+.glance-tile.is-attention :is(.glance-label, .glance-of, .glance-sub) { color: var(--attention-fg); }
 .glance-label { font-size: var(--fs-micro); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-tertiary); }
 .glance-value { font-size: 26px; font-weight: 700; line-height: 32px; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
 .glance-of { font-size: var(--fs-lg); color: var(--text-tertiary); font-weight: 600; }
@@ -1239,7 +1240,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .ov-task.is-done .ov-task-mark { color: var(--success-fg); }
 .ov-task.is-in_progress .ov-task-mark { color: var(--accent-fg); }
 .ov-task.is-blocked .ov-task-mark { color: var(--attention-fg); font-weight: 700; }
-.ov-task-title { justify-self: start; font-weight: 600; text-align: left; color: var(--text-primary); }
+.ov-task-title { justify-self: start; max-width: 100%; overflow-wrap: anywhere; font-weight: 600; text-align: left; color: var(--text-primary); }
 .ov-task-title:hover { color: var(--text-link); text-decoration: underline; }
 .ov-task-meta { grid-column: 2; display: flex; flex-wrap: wrap; gap: var(--sp-3); font-size: var(--fs-sm); color: var(--text-secondary); }
 
@@ -1365,7 +1366,8 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .flow .react-flow__handle.connectingto { opacity: 1; }
 .flow .react-flow__minimap { border: 1px solid var(--border-default); border-radius: var(--r-md); overflow: hidden; box-shadow: var(--shadow-1); }
 .flow .react-flow__controls { box-shadow: var(--shadow-1); border-radius: var(--r-md); overflow: hidden; }
-.flow .react-flow__panel.react-flow__attribution { opacity: 0.55; }
+/* MIT-licensed, but xyflow asks non-Pro users to keep the link; keep it legible. */
+.flow .react-flow__panel.react-flow__attribution a { color: var(--text-secondary); font-size: var(--fs-micro); }
 
 .flow-node {
   --kind: var(--accent-solid);
@@ -1488,12 +1490,12 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 /* A box's foot: the chip that counts the tasks building it (and opens their
    list), their progress, and a quiet "no task" where the plan check would
    list the box. Its height is FOOT in lib/layout.ts, less the gap above. */
-.flow-node-foot { display: flex; align-items: center; gap: 6px; height: 18px; font-size: 10px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.flow-node-foot { display: flex; align-items: center; gap: 6px; height: 18px; font-size: var(--fs-micro); color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 .flow-node-foot .progress { flex: 1; width: auto; }
 .flow-task-chip {
   flex: none; display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 7px 0 5px;
   border: 1px solid var(--border-default); border-radius: var(--r-full); background: var(--surface-base);
-  color: var(--text-secondary); font: inherit; font-size: 10.5px; font-weight: 650; line-height: 1; cursor: pointer;
+  color: var(--text-secondary); font: inherit; font-size: var(--fs-micro); font-weight: 650; line-height: 1; cursor: pointer;
   transition: border-color var(--t-fast) linear, color var(--t-fast) linear, background var(--t-fast) linear;
 }
 .flow-task-chip:hover, .flow-task-chip.is-open { border-color: var(--accent-border); color: var(--accent-fg); background: var(--accent-subtle); }
@@ -1571,7 +1573,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .status-dot {
   display: inline-grid; place-items: center; width: 18px; height: 18px; flex: none;
   border: 1.5px solid var(--border-strong); border-radius: 50%;
-  background: var(--surface-base); color: var(--on-solid); font-size: 10px; font-weight: 800; line-height: 1;
+  background: var(--surface-base); color: var(--on-solid); font-size: var(--fs-micro); font-weight: 800; line-height: 1;
   transition: transform var(--t-fast) var(--ease-spring), background var(--t-fast) linear;
 }
 .status-dot:hover:not(.is-static) { transform: scale(1.15); border-color: var(--accent-solid); }
@@ -1583,12 +1585,16 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .status-dot.is-blocked { border-color: var(--attention-solid); background: var(--attention-solid); }
 .status-dot.is-done { border-color: var(--success-solid); background: var(--success-solid); }
 .status-dot.is-dropped { border-color: var(--border-strong); background: var(--surface-sunken); color: var(--text-tertiary); }
-.board-card.is-dropped, .task-row.is-dropped .task-title { opacity: 0.65; text-decoration: line-through; }
+/* Dropped work reads as struck and receded through tokens, not opacity: faded text falls under AA. */
+.board-card.is-dropped { background: var(--surface-sunken); box-shadow: none; }
+.board-card.is-dropped :is(.board-title, .board-note), .task-row.is-dropped .task-title { color: var(--text-tertiary); text-decoration: line-through; }
 
 .task-num { color: var(--text-tertiary); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; min-width: 2.2em; }
 .task-title { font-weight: 550; min-width: 0; }
 .task.is-done > .task-line .task-title .inline-trigger { color: var(--text-tertiary); text-decoration: line-through; text-decoration-color: var(--border-strong); }
-.task-badges { display: inline-flex; gap: 4px; min-width: 0; overflow: hidden; }
+.task-badges { display: inline-flex; gap: 4px; min-width: 0; overflow: hidden; flex-shrink: 0; max-width: 60%; }
+/* A long title truncates first; chips keep their whole label ("ready", not "rea"). */
+.task-badges > * { flex: none; }
 .task-actions {
   display: inline-flex; gap: 1px; opacity: 0; transition: opacity var(--t-fast) linear;
 }
@@ -1661,12 +1667,12 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 }
 .board-card.is-blocked { border-left: 3px solid var(--attention-solid); }
 .board-card.is-in_progress { border-left: 3px solid var(--accent-solid); }
-.board-card.is-done { opacity: 0.8; }
+.board-card.is-done { background: var(--surface-raised); box-shadow: none; }
 .board-path { margin: 0; font-size: var(--fs-micro); color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .board-title { padding: 0; border: none; background: none; text-align: left; font-weight: 600; color: var(--text-primary); }
 .board-title:hover { color: var(--accent-fg); text-decoration: underline; }
-.board-note { margin: 0; font-size: var(--fs-sm); color: var(--text-secondary); }
-.board-reviews { margin: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-sm); }
+.board-note { margin: 0; font-size: var(--fs-sm); color: var(--text-secondary); text-wrap: pretty; }
+.board-reviews { margin: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-sm); text-wrap: pretty; }
 .board-reviews .is-changes { color: var(--attention-fg); }
 .board-review { display: flex; flex-direction: column; gap: var(--sp-1); padding: var(--sp-2); border: 1px solid var(--accent-border, var(--border-default)); border-radius: var(--r-md); background: var(--accent-subtle); }
 .board-review-actions { display: flex; gap: var(--sp-1); flex-wrap: wrap; }
@@ -1787,7 +1793,9 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
   .board { grid-auto-flow: column; grid-auto-columns: 82vw; grid-template-columns: none; overflow-x: auto; }
   .task-badges { display: none; }
   .task-line { --indent: calc(var(--depth, 0) * 14px); flex-wrap: wrap; }
+  /* With the row's controls kept beside it, one line holds ~15 characters: wrap instead of cutting. */
   .task-title { flex: 1 1 0; }
+  .task-title .inline-trigger { white-space: normal; overflow-wrap: anywhere; }
   .task-line > .spacer { display: none; }
   .drag-handle { display: none; }
   /* Row tools would crush the title at this width: they appear on their own
@@ -1799,6 +1807,8 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
   .doc-block { padding: var(--sp-3); }
   .toasts { left: var(--sp-2); right: var(--sp-2); bottom: var(--sp-2); }
   .toast { width: 100%; }
+  /* At phone width the overview map would sit on top of the diagram it maps. */
+  .flow .react-flow__minimap { display: none; }
 }
 
 /* Touch: hover-only affordances become permanently visible. */
@@ -1837,7 +1847,7 @@ button.chip:hover { border-color: var(--accent-border); color: var(--accent-fg);
 .flow-node-rel {
   position: absolute; top: -9px; left: 8px; z-index: 1;
   padding: 0 6px; height: 17px; line-height: 15px;
-  font-size: 10px; font-weight: 700; letter-spacing: 0.02em; white-space: nowrap;
+  font-size: var(--fs-micro); font-weight: 700; letter-spacing: 0.02em; white-space: nowrap;
   border: 1px solid currentColor; border-radius: var(--r-full);
   pointer-events: none;
 }
@@ -2077,7 +2087,7 @@ button.pv-chip { cursor: pointer; }
 .lock-chip.is-status-in_progress, .pill.is-status-in_progress { background: var(--accent-subtle); border-color: var(--accent-border); color: var(--accent-fg); }
 .lock-chip.is-status-review, .pill.is-status-review { background: var(--attention-bg); border-color: var(--attention-border); color: var(--attention-fg); }
 .lock-chip.is-status-done, .pill.is-status-done { background: var(--success-bg); border-color: var(--success-border); color: var(--success-fg); }
-.phase.is-status-review { background: var(--attention-bg); border-bottom-color: var(--attention-border); box-shadow: inset 4px 0 0 var(--attention-solid); }
+.phase.is-status-review { --phase-fg: var(--attention-fg); background: var(--attention-bg); border-bottom-color: var(--attention-border); box-shadow: inset 4px 0 0 var(--attention-solid); }
 
 /* A request to revise the plan per the open comments (#67). */
 .revision-control { display: inline-flex; align-items: center; gap: var(--sp-2); }
@@ -2101,12 +2111,13 @@ button.pv-chip { cursor: pointer; }
 .phase {
   display: flex; align-items: center; gap: var(--sp-4); flex: none; flex-wrap: wrap;
   padding: var(--sp-2) var(--inset);
+  --phase-fg: var(--accent-fg);
   background: var(--accent-subtle); color: var(--text-primary);
   border-bottom: 1px solid var(--accent-border);
   box-shadow: inset 4px 0 0 var(--accent-solid);
   animation: fade-up var(--dur) var(--ease-out-soft);
 }
-.phase.is-built { background: var(--success-bg); border-bottom-color: var(--success-border); box-shadow: inset 4px 0 0 var(--success-solid); }
+.phase.is-built { --phase-fg: var(--success-fg); background: var(--success-bg); border-bottom-color: var(--success-border); box-shadow: inset 4px 0 0 var(--success-solid); }
 
 /* What the agent proposes, waiting on the user. */
 .proposals {
@@ -2142,10 +2153,11 @@ button.pv-chip { cursor: pointer; }
 .diff-key-added { border-color: var(--success-solid); }
 .diff-key-changed { border-color: var(--accent-solid); border-style: dashed; }
 .diff-key-removed { border-color: var(--danger-solid); border-style: dashed; opacity: 0.7; }
-.phase.is-handed-off { background: var(--surface-raised); border-bottom-color: var(--border-default); box-shadow: inset 4px 0 0 var(--border-strong); }
+.phase.is-handed-off { --phase-fg: var(--text-secondary); background: var(--surface-raised); border-bottom-color: var(--border-default); box-shadow: inset 4px 0 0 var(--border-strong); }
 .phase-body { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 2px; }
 .phase-head { margin: 0; font-weight: 700; }
-.phase-text { margin: 0; font-size: var(--fs-sm); color: var(--text-secondary); overflow-wrap: anywhere; }
+/* Secondary text on a tinted banner takes the banner's hue, not neutral grey. */
+.phase-text { margin: 0; font-size: var(--fs-sm); color: color-mix(in oklab, var(--phase-fg) 45%, var(--text-primary)); overflow-wrap: anywhere; }
 .phase-text strong { color: var(--text-primary); }
 .phase-said { margin: 0; font-size: var(--fs-sm); color: var(--text-secondary); overflow-wrap: anywhere; }
 .phase-said q { color: var(--text-primary); font-style: italic; }
@@ -2193,7 +2205,7 @@ span.board-title:hover { color: inherit; text-decoration: none; }
 }
 
 /* The design, confirmed: the tasks are shaped against it. */
-.phase.is-tasking { background: var(--success-bg); border-bottom-color: var(--success-border); box-shadow: inset 4px 0 0 var(--success-solid); }
+.phase.is-tasking { --phase-fg: var(--success-fg); background: var(--success-bg); border-bottom-color: var(--success-border); box-shadow: inset 4px 0 0 var(--success-solid); }
 
 .field-inline { display: inline-flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--text-secondary); }
 
@@ -2233,6 +2245,8 @@ span.board-title:hover { color: inherit; text-decoration: none; }
 .order-step { flex: none; min-width: 4.5em; font-size: var(--fs-sm); font-weight: 600; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 .order-tasks { display: inline-flex; flex-wrap: wrap; gap: var(--sp-1); min-width: 0; }
 .chip.order-chip { max-width: 36ch; }
+/* A flex chip cannot ellipsize a bare text node: the title gets its own box. */
+.order-chip-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .chip.order-chip.is-done { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
 .chip.order-chip.is-in_progress { background: var(--accent-subtle); color: var(--accent-fg); border-color: var(--accent-border); }
 .chip.order-chip.is-blocked { background: var(--attention-bg); color: var(--attention-fg); border-color: var(--attention-border); }
